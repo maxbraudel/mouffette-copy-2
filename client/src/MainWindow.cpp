@@ -40,6 +40,13 @@
 #include <QtSvg/QSvgRenderer>
 #include <QPainterPathStroker>
 #include <QFileInfo>
+#include <QFile>
+#include <QDir>
+#include <QStandardPaths>
+#include <QUuid>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QByteArray>
 #include <climits>
 #ifdef Q_OS_MACOS
 #include "MacCursorHider.h"
@@ -93,6 +100,102 @@ constexpr qreal Z_MEDIA_BASE = 1.0;
 constexpr qreal Z_REMOTE_CURSOR = 10000.0;
 constexpr qreal Z_SCENE_OVERLAY = 12000.0; // above all scene content
 }
+
+void MainWindow::onUploadProgress(const QString& uploadId, int percent) {
+    if (uploadId != m_currentUploadId) return;
+    m_lastUploadPercent = percent;
+    if (m_uploadButton && m_uploadButton->isChecked()) {
+        m_uploadButton->setText(QString("Uploading… %1% ").arg(percent));
+    }
+}
+
+void MainWindow::onUploadFinished(const QString& uploadId) {
+    if (uploadId != m_currentUploadId) return;
+    // Switch to active state => Unload
+    m_uploadActive = true;
+    m_lastUploadPercent = 100;
+    if (m_uploadButton) {
+        m_uploadButton->setChecked(true);
+        m_uploadButton->setText("Unload medias");
+        m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #16a34a; color: white; border-radius: 5px; } QPushButton:checked { background-color: #15803d; }");
+    }
+}
+
+void MainWindow::onGenericMessageReceived(const QJsonObject& message) {
+    const QString type = message.value("type").toString();
+    if (type == "upload_start") {
+        // Initialize incoming upload session
+        m_incomingUpload = IncomingUpload();
+        m_incomingUpload.senderId = message.value("senderClientId").toString();
+        m_incomingUpload.uploadId = message.value("uploadId").toString();
+        // Create cache dir
+        QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+        if (base.isEmpty()) base = QDir::homePath() + "/.cache";
+        QDir dir(base);
+        dir.mkpath("Mouffette/Uploads");
+        QString cacheDir = base + "/Mouffette/Uploads/" + m_incomingUpload.uploadId;
+        QDir().mkpath(cacheDir);
+        m_incomingUpload.cacheDirPath = cacheDir;
+        // Prepare files
+        m_incomingUpload.totalSize = 0;
+        m_incomingUpload.received = 0;
+        QJsonArray files = message.value("files").toArray();
+        for (const QJsonValue& v : files) {
+            QJsonObject f = v.toObject();
+            const QString fileId = f.value("fileId").toString();
+            const QString name = f.value("name").toString();
+            const qint64 size = static_cast<qint64>(f.value("sizeBytes").toDouble());
+            m_incomingUpload.totalSize += qMax<qint64>(0, size);
+            QString safeName = name;
+            safeName.replace('/', '_');
+            QString fullPath = cacheDir + "/" + fileId + "_" + safeName;
+            QFile* qf = new QFile(fullPath);
+            if (!qf->open(QIODevice::WriteOnly)) { delete qf; continue; }
+            m_incomingUpload.openFiles.insert(fileId, qf);
+        }
+        // Optionally acknowledge start by sending 0%
+        if (!m_incomingUpload.senderId.isEmpty()) {
+            m_webSocketClient->notifyUploadProgressToSender(m_incomingUpload.senderId, m_incomingUpload.uploadId, 0);
+        }
+    } else if (type == "upload_chunk") {
+        if (message.value("uploadId").toString() != m_incomingUpload.uploadId) return;
+        const QString fid = message.value("fileId").toString();
+        QFile* qf = m_incomingUpload.openFiles.value(fid, nullptr);
+        if (!qf) return;
+        const QByteArray data = QByteArray::fromBase64(message.value("data").toString().toUtf8());
+        qf->write(data);
+        m_incomingUpload.received += data.size();
+        if (!m_incomingUpload.senderId.isEmpty() && m_incomingUpload.totalSize > 0) {
+            int percent = static_cast<int>(std::round(m_incomingUpload.received * 100.0 / m_incomingUpload.totalSize));
+            m_webSocketClient->notifyUploadProgressToSender(m_incomingUpload.senderId, m_incomingUpload.uploadId, percent);
+        }
+    } else if (type == "upload_complete") {
+        if (message.value("uploadId").toString() != m_incomingUpload.uploadId) return;
+        // Close files
+        for (auto it = m_incomingUpload.openFiles.begin(); it != m_incomingUpload.openFiles.end(); ++it) {
+            if (it.value()) { it.value()->flush(); it.value()->close(); delete it.value(); }
+        }
+        m_incomingUpload.openFiles.clear();
+        // Notify sender finished
+        if (!m_incomingUpload.senderId.isEmpty()) {
+            m_webSocketClient->notifyUploadFinishedToSender(m_incomingUpload.senderId, m_incomingUpload.uploadId);
+        }
+    } else if (type == "unload_media") {
+        // Delete cached files for last upload
+        if (!m_incomingUpload.cacheDirPath.isEmpty()) {
+            QDir dir(m_incomingUpload.cacheDirPath);
+            dir.removeRecursively();
+        }
+        // Confirm to sender
+        if (!m_incomingUpload.senderId.isEmpty()) {
+            m_webSocketClient->notifyUnloadedToSender(m_incomingUpload.senderId);
+        }
+        m_incomingUpload = IncomingUpload();
+    }
+}
+
+// Wire WebSocketClient signals after creation
+// Look for existing connects; add upload-related ones
 
 // Ensure all fade animations respect the configured duration
 void MainWindow::applyAnimationDurations() {
@@ -234,11 +337,11 @@ public:
         setZValue(1.0);
         // Filename label setup (zoom-independent via ItemIgnoresTransformations)
         m_filename = filename;
-    m_labelBg = new RoundedRectItem(this);
-    m_labelBg->setPen(Qt::NoPen);
-    // Unified translucent dark background used by label and video controls
-    m_labelBg->setBrush(QColor(0, 0, 0, 160));
-    m_labelBg->setZValue(Z_SCENE_OVERLAY); // keep overlays above media
+        m_labelBg = new RoundedRectItem(this);
+        m_labelBg->setPen(Qt::NoPen);
+        // Unified translucent dark background used by label and video controls
+        m_labelBg->setBrush(QColor(0, 0, 0, 160));
+        m_labelBg->setZValue(Z_SCENE_OVERLAY); // keep overlays above media
         m_labelBg->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
         m_labelBg->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
         m_labelBg->setAcceptedMouseButtons(Qt::NoButton);
@@ -250,6 +353,9 @@ public:
         m_labelText->setAcceptedMouseButtons(Qt::NoButton);
         updateLabelLayout();
     }
+    // Optional: absolute local source path for uploads; empty for pasted images
+    void setSourcePath(const QString& p) { m_sourcePath = p; }
+    QString sourcePath() const { return m_sourcePath; }
     // Global override (in pixels) for the height of media overlays (e.g., video controls).
     // -1 means "auto" (use filename label background height).
     static void setHeightOfMediaOverlaysPx(int px) { heightOfMediaOverlays = px; }
@@ -473,6 +579,7 @@ protected:
     Handle m_lastHoverHandle = None;
     // Filename label elements
     QString m_filename;
+    QString m_sourcePath; // absolute path to original local file if available
     RoundedRectItem* m_labelBg = nullptr;
     QGraphicsTextItem* m_labelText = nullptr;
     // Shared overlay height config
@@ -1866,6 +1973,23 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_webSocketClient, &WebSocketClient::registrationConfirmed, this, &MainWindow::onRegistrationConfirmed);
     connect(m_webSocketClient, &WebSocketClient::screensInfoReceived, this, &MainWindow::onScreensInfoReceived);
     connect(m_webSocketClient, &WebSocketClient::watchStatusChanged, this, &MainWindow::onWatchStatusChanged);
+    // Upload-related signals
+    connect(m_webSocketClient, &WebSocketClient::uploadProgressReceived, this, &MainWindow::onUploadProgress);
+    connect(m_webSocketClient, &WebSocketClient::uploadFinishedReceived, this, &MainWindow::onUploadFinished);
+    connect(m_webSocketClient, &WebSocketClient::unloadedReceived, this, [this]() {
+        // Target confirmed unload; reset UI state
+        m_uploadActive = false;
+        m_currentUploadId.clear();
+        m_lastUploadPercent = 0;
+        if (m_uploadButton) {
+            m_uploadButton->setCheckable(true);
+            m_uploadButton->setChecked(false);
+            m_uploadButton->setText("Upload to Client");
+            m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }");
+        }
+    });
+    // Generic message tap for target-side upload handling
+    connect(m_webSocketClient, &WebSocketClient::messageReceived, this, &MainWindow::onGenericMessageReceived);
     connect(m_webSocketClient, &WebSocketClient::dataRequestReceived, this, [this]() {
         // Server requested immediate state (on first watch or refresh)
         m_webSocketClient->sendStateSnapshot(getLocalScreenInfo(), getSystemVolumePercent());
@@ -2043,6 +2167,89 @@ void MainWindow::onSendMediaClicked() {
     QMessageBox::information(this, "Send Media", 
         QString("Sending media to %1's screens...\n\nThis feature will be implemented in the next phase.")
         .arg(m_selectedClient.getMachineName()));
+}
+
+// Upload/Unload button handler
+void MainWindow::onUploadButtonClicked() {
+    if (!m_webSocketClient || !m_webSocketClient->isConnected() || m_selectedClient.getId().isEmpty()) {
+        QMessageBox::warning(this, "Upload", "Not connected or no target selected");
+        return;
+    }
+    // If currently active, this acts as Unload
+    if (m_uploadActive) {
+        m_webSocketClient->sendUnloadMedia(m_selectedClient.getId());
+        // Reset local state; UI will finalize on unloadedReceived too
+        m_uploadActive = false;
+        m_currentUploadId.clear();
+        m_lastUploadPercent = 0;
+        m_uploadButton->setChecked(false);
+        m_uploadButton->setText("Upload to Client");
+        m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }");
+        return;
+    }
+
+    // Collect files from scene items that have a source path
+    if (!m_screenCanvas) return;
+    QGraphicsScene* scene = m_screenCanvas->scene();
+    if (!scene) return;
+    QList<QGraphicsItem*> items = scene->items();
+    QJsonArray manifest;
+    struct FileItem { QString fileId; QString path; QString name; qint64 size; };
+    QVector<FileItem> files;
+    for (QGraphicsItem* it : items) {
+        if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
+            const QString path = media->sourcePath();
+            if (!path.isEmpty()) {
+                QFileInfo info(path);
+                if (info.exists() && info.isFile()) {
+                    FileItem fi{ QUuid::createUuid().toString(QUuid::WithoutBraces), path, info.fileName(), info.size() };
+                    files.push_back(fi);
+                    QJsonObject f;
+                    f["fileId"] = fi.fileId;
+                    f["name"] = fi.name;
+                    f["sizeBytes"] = static_cast<double>(fi.size);
+                    manifest.append(f);
+                }
+            }
+        }
+    }
+    if (files.isEmpty()) {
+        QMessageBox::information(this, "Upload", "No local files to upload. Drag files onto the screens first.");
+        return;
+    }
+
+    // Begin upload
+    m_currentUploadId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_lastUploadPercent = 0;
+    m_uploadButton->setCheckable(true);
+    m_uploadButton->setChecked(true);
+    m_uploadButton->setText("Uploading… 0%");
+    m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #2d6cdf; color: white; border-radius: 5px; } QPushButton:checked { background-color: #1f4ea8; }");
+
+    // Send manifest
+    m_webSocketClient->sendUploadStart(m_selectedClient.getId(), manifest, m_currentUploadId);
+
+    // Send chunks sequentially (simple implementation). 128KB chunks.
+    const int chunkSize = 128 * 1024;
+    qint64 total = 0; for (const auto& f : files) total += f.size;
+    qint64 sent = 0;
+    for (const auto& f : files) {
+        QFile file(f.path);
+        if (!file.open(QIODevice::ReadOnly)) continue;
+        int idx = 0;
+        while (!file.atEnd()) {
+            QByteArray chunk = file.read(chunkSize);
+            m_webSocketClient->sendUploadChunk(m_selectedClient.getId(), m_currentUploadId, f.fileId, idx++, chunk.toBase64());
+            sent += chunk.size();
+            int percent = total > 0 ? static_cast<int>(std::round(sent * 100.0 / total)) : 0;
+            // Optimistically update local progress bar on button
+            m_lastUploadPercent = percent;
+            m_uploadButton->setText(QString("Uploading… %1% ").arg(percent));
+            qApp->processEvents(QEventLoop::AllEvents, 5);
+        }
+        file.close();
+    }
+    m_webSocketClient->sendUploadComplete(m_selectedClient.getId(), m_currentUploadId);
 }
 
 
@@ -2319,13 +2526,14 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
         const double w = image.width() * m_scaleFactor;
         const double h = image.height() * m_scaleFactor;
         auto* item = new ResizablePixmapItem(QPixmap::fromImage(image), m_mediaHandleVisualSizePx, m_mediaHandleSelectionSizePx, filename);
+        if (!droppedPath.isEmpty()) item->setSourcePath(droppedPath);
         item->setFlags(QGraphicsItem::ItemIsMovable | QGraphicsItem::ItemIsSelectable | QGraphicsItem::ItemSendsGeometryChanges);
         item->setPos(scenePos.x() - w/2.0, scenePos.y() - h/2.0);
         if (image.width() > 0) item->setScale(w / image.width());
-    m_scene->addItem(item);
-    // Auto-select the newly dropped item
-    if (m_scene) m_scene->clearSelection();
-    item->setSelected(true);
+        m_scene->addItem(item);
+        // Auto-select the newly dropped item
+        if (m_scene) m_scene->clearSelection();
+        item->setSelected(true);
     } else if (!droppedPath.isEmpty()) {
         // Decide if it's a video by extension
         const QString ext = QFileInfo(droppedPath).suffix().toLower();
@@ -2333,6 +2541,7 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
         if (kVideoExts.contains(ext)) {
             // Create with placeholder logical size; adopt real size on first frame
             auto* vitem = new ResizableVideoItem(droppedPath, m_mediaHandleVisualSizePx, m_mediaHandleSelectionSizePx, filename, m_videoControlsFadeMs);
+            vitem->setSourcePath(droppedPath);
             vitem->setInitialScaleFactor(m_scaleFactor);
             // Start with a neutral 1.0 scale on placeholder size and center approx.
             vitem->setScale(m_scaleFactor);
@@ -3575,13 +3784,24 @@ void MainWindow::createScreenViewPage() {
     m_screenCanvas->setFocusPolicy(Qt::StrongFocus);
     m_screenCanvas->installEventFilter(this);
     
+    // Bottom action bar with Upload and Send
+    QWidget* actionBar = new QWidget();
+    auto* actionLayout = new QHBoxLayout(actionBar);
+    actionLayout->setContentsMargins(0, 8, 0, 0);
+    actionLayout->setSpacing(12);
+    // Upload button
+    m_uploadButton = new QPushButton("Upload to Client");
+    m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }");
+    m_uploadButton->setEnabled(true);
+    connect(m_uploadButton, &QPushButton::clicked, this, &MainWindow::onUploadButtonClicked);
+    actionLayout->addWidget(m_uploadButton, 0, Qt::AlignRight);
     // Send button
     m_sendButton = new QPushButton("Send Media to All Screens");
     m_sendButton->setStyleSheet("QPushButton { padding: 12px 24px; font-weight: bold; background-color: #4a90e2; color: white; border-radius: 5px; }");
     m_sendButton->setEnabled(false); // Initially disabled until media is placed
     connect(m_sendButton, &QPushButton::clicked, this, &MainWindow::onSendMediaClicked);
-    // Keep button at bottom, centered
-    m_screenViewLayout->addWidget(m_sendButton, 0, Qt::AlignHCenter);
+    actionLayout->addWidget(m_sendButton, 0, Qt::AlignLeft);
+    m_screenViewLayout->addWidget(actionBar, 0, Qt::AlignHCenter);
     // Ensure header has no stretch, container expands, button fixed
     m_screenViewLayout->setStretch(0, 0); // header
     m_screenViewLayout->setStretch(1, 1); // container expands

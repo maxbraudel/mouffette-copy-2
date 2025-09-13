@@ -144,6 +144,32 @@ class MouffetteServer {
             case 'unwatch_screens':
                 this.handleUnwatchScreens(clientId, message);
                 break;
+            // Upload flow: pure relay between sender and target
+            case 'upload_start':
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
+            case 'upload_chunk':
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
+            case 'upload_complete':
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
+            case 'upload_abort':
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
+            case 'unload_media':
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
+            // Progress/status notifications from target back to sender
+            case 'upload_progress':
+                this.relayToSender(clientId, message.senderClientId, message);
+                break;
+            case 'upload_finished':
+                this.relayToSender(clientId, message.senderClientId, message);
+                break;
+            case 'unloaded':
+                this.relayToSender(clientId, message.senderClientId, message);
+                break;
             case 'media_share':
                 this.handleMediaShare(clientId, message);
                 break;
@@ -158,6 +184,40 @@ class MouffetteServer {
                 break;
             default:
                 console.log(`⚠️ Unknown message type: ${message.type}`);
+        }
+    }
+
+    // Helper to relay a message from sender -> target
+    relayToTarget(senderId, targetClientId, message) {
+        const targetClient = this.clients.get(targetClientId);
+        if (!targetClient || !targetClient.ws) {
+            const senderClient = this.clients.get(senderId);
+            if (senderClient && senderClient.ws) {
+                senderClient.ws.send(JSON.stringify({
+                    type: 'error',
+                    message: 'Target client not found',
+                }));
+            }
+            return;
+        }
+        // Include senderId for correlation if not present
+        if (!message.senderClientId) message.senderClientId = senderId;
+        try {
+            targetClient.ws.send(JSON.stringify(message));
+        } catch (e) {
+            console.error('❌ Relay to target failed:', e);
+        }
+    }
+
+    // Helper to relay a message from target -> sender
+    relayToSender(targetId, senderClientId, message) {
+        const senderClient = this.clients.get(senderClientId);
+        if (!senderClient || !senderClient.ws) return;
+        if (!message.targetClientId) message.targetClientId = targetId;
+        try {
+            senderClient.ws.send(JSON.stringify(message));
+        } catch (e) {
+            console.error('❌ Relay to sender failed:', e);
         }
     }
 

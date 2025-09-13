@@ -29,6 +29,17 @@ public:
     void sendStateSnapshot(const QList<ScreenInfo>& screens, int volumePercent);
         // Send current cursor position (global desktop coordinates) when this client is watched
         void sendCursorUpdate(int globalX, int globalY);
+
+    // Upload/unload protocol (JSON relayed by server)
+    void sendUploadStart(const QString& targetClientId, const QJsonArray& filesManifest, const QString& uploadId);
+    void sendUploadChunk(const QString& targetClientId, const QString& uploadId, const QString& fileId, int chunkIndex, const QByteArray& dataBase64);
+    void sendUploadComplete(const QString& targetClientId, const QString& uploadId);
+    void sendUploadAbort(const QString& targetClientId, const QString& uploadId, const QString& reason = QString());
+    void sendUnloadMedia(const QString& targetClientId);
+    // Target -> Sender notifications
+    void notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent);
+    void notifyUploadFinishedToSender(const QString& senderClientId, const QString& uploadId);
+    void notifyUnloadedToSender(const QString& senderClientId);
     
     // Getters
     QString getClientId() const { return m_clientId; }
@@ -46,6 +57,11 @@ signals:
     void dataRequestReceived();
         // Emitted to watchers with remote cursor position of the watched target
         void cursorPositionReceived(const QString& targetClientId, int x, int y);
+
+    // Upload progress signals (from target via server)
+    void uploadProgressReceived(const QString& uploadId, int percent);
+    void uploadFinishedReceived(const QString& uploadId);
+    void unloadedReceived();
 
 private slots:
     void onConnected();

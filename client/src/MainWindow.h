@@ -29,6 +29,7 @@
 #include <QScrollBar>
 #include <QStackedWidget>
 #include <QElapsedTimer>
+#include <QHash>
 #include "WebSocketClient.h"
 #include "ClientInfo.h"
 
@@ -40,6 +41,7 @@ class QMimeData; // fwd declare for drag preview helpers
 class QMediaPlayer;
 class QVideoSink;
 class QAudioOutput;
+class QFile;
 
 class SpinnerWidget; // forward declaration for custom loading spinner
 class QGraphicsOpacityEffect;
@@ -251,6 +253,7 @@ private:
     QLabel* m_volumeIndicator;
     SpinnerWidget* m_loadingSpinner;
     QPushButton* m_sendButton;
+    QPushButton* m_uploadButton;
     QPushButton* m_backButton;
     // Loader/content animations
     QTimer* m_loaderDelayTimer = nullptr;
@@ -304,6 +307,27 @@ private:
     QProcess* m_volProc = nullptr;       // reused for async osascript calls
     QTimer* m_volTimer = nullptr;        // polls in background
 #endif
+
+    // Upload feature state
+    bool m_uploadActive = false; // true after upload finished -> button shows "Unload medias"
+    QString m_currentUploadId;
+    int m_lastUploadPercent = 0;
+
+    // Incoming upload session (minimal, single active upload)
+    struct IncomingUpload {
+        QString senderId;
+        QString uploadId;
+        QString cacheDirPath;
+        QHash<QString, QFile*> openFiles; // fileId -> QFile*
+        qint64 totalSize = 0;
+        qint64 received = 0;
+    } m_incomingUpload;
+
+private slots:
+    void onUploadButtonClicked();
+    void onGenericMessageReceived(const QJsonObject& message);
+    void onUploadProgress(const QString& uploadId, int percent);
+    void onUploadFinished(const QString& uploadId);
 };
 
 #endif // MAINWINDOW_H

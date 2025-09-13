@@ -147,6 +147,88 @@ void WebSocketClient::sendCursorUpdate(int globalX, int globalY) {
     sendMessage(msg);
 }
 
+void WebSocketClient::sendUploadStart(const QString& targetClientId, const QJsonArray& filesManifest, const QString& uploadId) {
+    if (!isConnected()) return;
+    QJsonObject msg;
+    msg["type"] = "upload_start";
+    msg["targetClientId"] = targetClientId;
+    msg["uploadId"] = uploadId;
+    msg["files"] = filesManifest;
+    sendMessage(msg);
+}
+
+void WebSocketClient::sendUploadChunk(const QString& targetClientId, const QString& uploadId, const QString& fileId, int chunkIndex, const QByteArray& dataBase64) {
+    if (!isConnected()) return;
+    QJsonObject msg;
+    msg["type"] = "upload_chunk";
+    msg["targetClientId"] = targetClientId;
+    msg["uploadId"] = uploadId;
+    msg["fileId"] = fileId;
+    msg["chunkIndex"] = chunkIndex;
+    // Ensure Base64 encoded string (if caller passed raw bytes, encode here)
+    QByteArray payload = dataBase64;
+    // Heuristic: contains non-base64 characters? encode
+    if (!payload.isEmpty() && (payload.contains('\n') || payload.contains('{') || payload.contains('\0'))) {
+        payload = payload.toBase64();
+    }
+    msg["data"] = QString::fromUtf8(payload);
+    sendMessage(msg);
+}
+
+void WebSocketClient::sendUploadComplete(const QString& targetClientId, const QString& uploadId) {
+    if (!isConnected()) return;
+    QJsonObject msg;
+    msg["type"] = "upload_complete";
+    msg["targetClientId"] = targetClientId;
+    msg["uploadId"] = uploadId;
+    sendMessage(msg);
+}
+
+void WebSocketClient::sendUploadAbort(const QString& targetClientId, const QString& uploadId, const QString& reason) {
+    if (!isConnected()) return;
+    QJsonObject msg;
+    msg["type"] = "upload_abort";
+    msg["targetClientId"] = targetClientId;
+    msg["uploadId"] = uploadId;
+    if (!reason.isEmpty()) msg["reason"] = reason;
+    sendMessage(msg);
+}
+
+void WebSocketClient::sendUnloadMedia(const QString& targetClientId) {
+    if (!isConnected()) return;
+    QJsonObject msg;
+    msg["type"] = "unload_media";
+    msg["targetClientId"] = targetClientId;
+    sendMessage(msg);
+}
+
+void WebSocketClient::notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent) {
+    if (!isConnected()) return;
+    QJsonObject msg;
+    msg["type"] = "upload_progress";
+    msg["senderClientId"] = senderClientId;
+    msg["uploadId"] = uploadId;
+    msg["percent"] = percent;
+    sendMessage(msg);
+}
+
+void WebSocketClient::notifyUploadFinishedToSender(const QString& senderClientId, const QString& uploadId) {
+    if (!isConnected()) return;
+    QJsonObject msg;
+    msg["type"] = "upload_finished";
+    msg["senderClientId"] = senderClientId;
+    msg["uploadId"] = uploadId;
+    sendMessage(msg);
+}
+
+void WebSocketClient::notifyUnloadedToSender(const QString& senderClientId) {
+    if (!isConnected()) return;
+    QJsonObject msg;
+    msg["type"] = "unloaded";
+    msg["senderClientId"] = senderClientId;
+    sendMessage(msg);
+}
+
 void WebSocketClient::onConnected() {
     qDebug() << "Connected to server";
     setConnectionStatus("Connected");
@@ -266,6 +348,18 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         const int x = message.value("x").toInt();
         const int y = message.value("y").toInt();
         emit cursorPositionReceived(targetId, x, y);
+    }
+    else if (type == "upload_progress") {
+        const QString uploadId = message.value("uploadId").toString();
+        const int percent = message.value("percent").toInt();
+        emit uploadProgressReceived(uploadId, percent);
+    }
+    else if (type == "upload_finished") {
+        const QString uploadId = message.value("uploadId").toString();
+        emit uploadFinishedReceived(uploadId);
+    }
+    else if (type == "unloaded") {
+        emit unloadedReceived();
     }
     else {
         // Forward unknown messages
