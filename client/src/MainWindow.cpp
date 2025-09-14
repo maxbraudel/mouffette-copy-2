@@ -92,7 +92,6 @@
 #endif
 
 const QString MainWindow::DEFAULT_SERVER_URL = "ws://192.168.0.188:8080";
-
 // Z-ordering constants used throughout the scene
 namespace {
 constexpr qreal Z_SCREENS = -1000.0;
@@ -4423,6 +4422,7 @@ int MainWindow::getSystemVolumePercent() {
     return -1;
 }
 #endif
+}
 
 void MainWindow::setupVolumeMonitoring() {
 #ifdef Q_OS_MACOS
