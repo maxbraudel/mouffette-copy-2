@@ -31,6 +31,7 @@
 #include <QElapsedTimer>
 #include <QHash>
 #include <QSet>
+#include <QFont>
 #include "WebSocketClient.h"
 #include "ClientInfo.h"
 
@@ -256,6 +257,7 @@ private:
     QPushButton* m_sendButton;
     QPushButton* m_uploadButton;
     QPushButton* m_backButton;
+    QFont m_uploadButtonDefaultFont;
     // Loader/content animations
     QTimer* m_loaderDelayTimer = nullptr;
     int m_loaderDelayMs = 1000;       // show spinner after this delay

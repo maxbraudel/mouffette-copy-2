@@ -107,7 +107,7 @@ void MainWindow::onUploadProgress(const QString& uploadId, int percent, int file
     m_filesUploadedSoFar = filesCompleted;
     m_totalFilesToUpload = totalFiles;
     if (m_uploadButton && m_uploadButton->isChecked()) {
-        m_uploadButton->setText(QString("Download (%1/%2) %3%")
+        m_uploadButton->setText(QString("Downloading (%1/%2) %3%")
                                     .arg(filesCompleted)
                                     .arg(totalFiles)
                                     .arg(percent));
@@ -125,6 +125,8 @@ void MainWindow::onUploadFinished(const QString& uploadId) {
         m_uploadButton->setChecked(true);
         m_uploadButton->setText("Unload medias");
         m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #16a34a; color: white; border-radius: 5px; } QPushButton:checked { background-color: #15803d; }");
+        // Restore default proportional font after progress
+        m_uploadButton->setFont(m_uploadButtonDefaultFont);
     }
 }
 
@@ -2044,6 +2046,8 @@ MainWindow::MainWindow(QWidget *parent)
             m_uploadButton->setChecked(false);
             m_uploadButton->setText("Upload to Client");
             m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }");
+            // Restore default proportional font
+            m_uploadButton->setFont(m_uploadButtonDefaultFont);
             m_uploadButton->setEnabled(true);
         }
     });
@@ -2270,6 +2274,7 @@ void MainWindow::onUploadButtonClicked() {
                 m_uploadButton->setChecked(false);
                 m_uploadButton->setText("Upload to Client");
                 m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }");
+                m_uploadButton->setFont(m_uploadButtonDefaultFont);
             }
         });
         return;
@@ -2316,6 +2321,18 @@ void MainWindow::onUploadButtonClicked() {
     m_uploadButton->setChecked(true);
     // Rely on target-side progress; show preparing state immediately
     m_uploadButton->setText("Preparing download");
+    // Switch to monospace font during progress to avoid width jitter
+    {
+        QFont mono = m_uploadButtonDefaultFont;
+        mono.setStyleHint(QFont::Monospace);
+        mono.setFixedPitch(true);
+#if defined(Q_OS_MAC)
+        mono.setFamily("Menlo");
+#else
+        mono.setFamily("Courier New");
+#endif
+        m_uploadButton->setFont(mono);
+    }
     m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #2d6cdf; color: white; border-radius: 5px; } QPushButton:checked { background-color: #1f4ea8; }");
 
     // Send manifest
@@ -3890,6 +3907,7 @@ void MainWindow::createScreenViewPage() {
     // Upload button
     m_uploadButton = new QPushButton("Upload to Client");
     m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }");
+    m_uploadButtonDefaultFont = m_uploadButton->font();
     m_uploadButton->setFixedWidth(260);
     m_uploadButton->setEnabled(true);
     connect(m_uploadButton, &QPushButton::clicked, this, &MainWindow::onUploadButtonClicked);
@@ -4380,13 +4398,11 @@ QString MainWindow::getPlatformName() {
 #endif
 }
 
-#ifdef Q_OS_MACOS
 int MainWindow::getSystemVolumePercent() {
+#ifdef Q_OS_MACOS
     // Return cached value; updated asynchronously in setupVolumeMonitoring()
     return m_cachedSystemVolume;
-}
 #elif defined(Q_OS_WIN)
-int MainWindow::getSystemVolumePercent() {
     // Use Windows Core Audio APIs (MMDevice + IAudioEndpointVolume)
     // Headers are included only on Windows builds.
     HRESULT hr;
@@ -4415,12 +4431,9 @@ int MainWindow::getSystemVolumePercent() {
     if (coInit) CoUninitialize();
     return result;
 #elif defined(Q_OS_LINUX)
-int MainWindow::getSystemVolumePercent() {
     return -1; // TODO: Implement via PulseAudio/PipeWire if needed
 #else
-int MainWindow::getSystemVolumePercent() {
     return -1;
-}
 #endif
 }
 
