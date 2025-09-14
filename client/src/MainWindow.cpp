@@ -1,4 +1,6 @@
 #include "MainWindow.h"
+#include "OverlayPanels.h"
+#include "RoundedRectItem.h"
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QHostInfo>
@@ -48,6 +50,7 @@
 #include <QJsonArray>
 #include <QByteArray>
 #include <climits>
+#include <memory>
 #ifdef Q_OS_MACOS
 #include "MacCursorHider.h"
 #include "MacVideoThumbnailer.h"
@@ -348,41 +351,12 @@ private:
 };
 
 // Simple rounded-rectangle graphics item with a settable rect and radius
-class RoundedRectItem : public QGraphicsPathItem {
-public:
-    explicit RoundedRectItem(QGraphicsItem* parent = nullptr)
-        : QGraphicsPathItem(parent) {}
-    void setRect(const QRectF& r) { m_rect = r; updatePath(); }
-    void setRect(qreal x, qreal y, qreal w, qreal h) { setRect(QRectF(x, y, w, h)); }
-    QRectF rect() const { return m_rect; }
-    void setRadius(qreal radiusPx) { m_radius = std::max<qreal>(0.0, radiusPx); updatePath(); }
-    qreal radius() const { return m_radius; }
-private:
-    void updatePath() {
-        QPainterPath p;
-        if (m_rect.isNull()) { setPath(p); return; }
-        // Clamp radius so it never exceeds half of width/height
-        const qreal r = std::min({ m_radius, m_rect.width() * 0.5, m_rect.height() * 0.5 });
-        if (r > 0.0)
-            p.addRoundedRect(m_rect, r, r);
-        else
-            p.addRect(m_rect);
-        setPath(p);
-    }
-    QRectF m_rect;
-    qreal  m_radius = 0.0;
-};
 
 // Resizable, movable pixmap item with corner handles; keeps aspect ratio
 class ResizableMediaBase : public QGraphicsItem {
 public:
     virtual ~ResizableMediaBase() override {
-        // If label overlay was reparented to the scene, delete it explicitly
-        if (m_labelBg && m_labelBg->parentItem() == nullptr) {
-            delete m_labelBg; // also deletes m_labelText child
-            m_labelBg = nullptr;
-            m_labelText = nullptr;
-        }
+        // Overlay panels will be automatically cleaned up via unique_ptr
     }
     explicit ResizableMediaBase(const QSize& baseSizePx, int visualSizePx, int selectionSizePx, const QString& filename = QString())
     {
@@ -393,37 +367,25 @@ public:
         m_baseSize = baseSizePx;
         setScale(1.0);
         setZValue(1.0);
-        // Filename label setup (zoom-independent via ItemIgnoresTransformations)
+        // Initialize overlay system
         m_filename = filename;
-        m_labelBg = new RoundedRectItem(this);
-        m_labelBg->setPen(Qt::NoPen);
-        // Unified translucent dark background used by label and video controls
-        m_labelBg->setBrush(QColor(0, 0, 0, 160));
-        m_labelBg->setZValue(Z_SCENE_OVERLAY); // keep overlays above media
-        m_labelBg->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
-        m_labelBg->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-        m_labelBg->setAcceptedMouseButtons(Qt::NoButton);
-        m_labelText = new QGraphicsTextItem(m_filename, m_labelBg);
-        m_labelText->setDefaultTextColor(Qt::white);
-    m_labelText->setZValue(Z_SCENE_OVERLAY + 1);
-        m_labelText->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
-        m_labelText->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-        m_labelText->setAcceptedMouseButtons(Qt::NoButton);
-        updateLabelLayout();
+        initializeOverlays();
     }
     // Optional: absolute local source path for uploads; empty for pasted images
     void setSourcePath(const QString& p) { m_sourcePath = p; }
     QString sourcePath() const { return m_sourcePath; }
     // Global override (in pixels) for the height of media overlays (e.g., video controls).
-    // -1 means "auto" (use filename label background height).
     static void setHeightOfMediaOverlaysPx(int px) { heightOfMediaOverlays = px; }
     static int getHeightOfMediaOverlaysPx() { return heightOfMediaOverlays; }
-    // Global override for corner radius (in pixels) for overlay buttons and filename label background
-    // Applies to: filename background, play/stop/repeat/mute buttons. Excludes: progress & volume bars.
+    // Global override for corner radius (in pixels) for overlay buttons.
+    // Applies to: play/stop/repeat/mute buttons. Excludes: progress & volume bars.
     static void setCornerRadiusOfMediaOverlaysPx(int px) { cornerRadiusOfMediaOverlays = std::max(0, px); }
     static int getCornerRadiusOfMediaOverlaysPx() { return cornerRadiusOfMediaOverlays; }
-    // Public hook for view to relayout the filename label after pan/zoom
-    void requestLabelRelayout() { updateLabelLayout(); }
+    // Public hook for view to relayout overlays after pan/zoom
+    // Re-layout overlays that depend on view transform (e.g. zoom) to stay anchored.
+    // Previously a no-op which caused top filename panel (new overlay system) to drift
+    // horizontally when the view was zoomed because its scene position wasn't recomputed.
+    void requestLabelRelayout() { updateOverlayLayout(); }
     // Utility for view: tell if a given item-space pos is on a resize handle
     bool isOnHandleAtItemPos(const QPointF& itemPos) const {
         return hitTestHandle(itemPos) != None;
@@ -549,21 +511,15 @@ protected:
         if (change == ItemSelectedChange) {
             // Include/exclude handle zones (affects bounding/shape)
             prepareGeometryChange();
-            // Pre-toggle visibility to match new state
-            if (m_labelBg && m_labelText) {
-                const bool willBeSelected = value.toBool();
-                const bool show = willBeSelected && !m_filename.isEmpty();
-                m_labelBg->setVisible(show);
-                m_labelText->setVisible(show);
-            }
         }
         if (change == ItemSelectedHasChanged) {
-            // Keep label properly positioned after selection changes
-            updateLabelLayout();
+            // Keep overlays properly positioned and visible after selection changes
+            updateOverlayLayout();
+            updateOverlayVisibility();
         }
         if (change == ItemTransformHasChanged || change == ItemPositionHasChanged) {
-            // Keep the filename overlay glued during resize/move
-            updateLabelLayout();
+            // Keep the overlays glued during resize/move
+            updateOverlayLayout();
         }
     return QGraphicsItem::itemChange(change, value);
     }
@@ -635,11 +591,14 @@ protected:
     int m_visualSize = 8;
     int m_selectionSize = 12;
     Handle m_lastHoverHandle = None;
-    // Filename label elements
-    QString m_filename;
+    
     QString m_sourcePath; // absolute path to original local file if available
-    RoundedRectItem* m_labelBg = nullptr;
-    QGraphicsTextItem* m_labelText = nullptr;
+    QString m_filename;   // display name for the media
+    
+    // New overlay system
+    std::unique_ptr<OverlayPanel> m_topPanel = nullptr;
+    std::unique_ptr<OverlayPanel> m_bottomPanel = nullptr;
+    OverlayStyle m_overlayStyle;
     // Shared overlay height config
     static int heightOfMediaOverlays;
     static int cornerRadiusOfMediaOverlays;
@@ -687,62 +646,72 @@ protected:
         return px / sx;
     }
 
-    void updateLabelLayout() {
-        if (!m_labelBg || !m_labelText) return;
-        const bool show = !m_filename.isEmpty() && isSelected();
-        m_labelBg->setVisible(show);
-        m_labelText->setVisible(show);
-        if (!show) return;
 
-        // Padding and vertical gap in pixels
-        const int padXpx = 8;
-        const int padYpx = 4;
-        const int gapPx  = 8;
-        // Update text and background sizes (in px, unaffected by zoom)
-        m_labelText->setPlainText(m_filename);
-        QRectF tr = m_labelText->boundingRect();
-        const qreal bgW = tr.width() + 2*padXpx;
-        const qreal bgH = tr.height() + 2*padYpx;
-    m_labelBg->setRect(0, 0, bgW, bgH);
-    // Apply configured corner radius
-    m_labelBg->setRadius(ResizableMediaBase::getCornerRadiusOfMediaOverlaysPx());
-        m_labelText->setPos(padXpx, padYpx);
 
-    // Position: center above image top edge
-        if (!scene() || scene()->views().isEmpty()) {
-            // Fallback using item-units conversion
-            const qreal wItem = toItemLengthFromPixels(static_cast<int>(std::round(bgW)));
-            const qreal hItem = toItemLengthFromPixels(static_cast<int>(std::round(bgH)));
-            const qreal gapItem = toItemLengthFromPixels(gapPx);
-            const qreal xItem = (m_baseSize.width() - wItem) / 2.0;
-            const qreal yItem = - (hItem + gapItem);
-            m_labelBg->setPos(xItem, yItem);
-            return;
+    // New overlay system methods
+    void initializeOverlays() {
+        // Initialize overlay style with current global settings
+        m_overlayStyle.cornerRadius = getCornerRadiusOfMediaOverlaysPx();
+        if (getHeightOfMediaOverlaysPx() > 0) {
+            m_overlayStyle.defaultHeight = getHeightOfMediaOverlaysPx();
         }
-    QGraphicsView* v = scene()->views().first();
-        // Ensure the overlay is a top-level scene item so its Z-order is global
-        if (m_labelBg->parentItem() != nullptr) {
-            m_labelBg->setParentItem(nullptr);
-            if (scene() && !m_labelBg->scene()) scene()->addItem(m_labelBg);
+        
+        // Create top panel for filename (always visible for all media types)
+        m_topPanel = std::make_unique<OverlayPanel>(OverlayPanel::Top);
+        m_topPanel->setStyle(m_overlayStyle);
+        
+        // Add filename element if we have one
+        if (!m_filename.isEmpty()) {
+            auto filenameElement = std::make_shared<OverlayTextElement>(m_filename, "filename");
+            m_topPanel->addElement(filenameElement);
         }
-        // Raise above everything when visible
-    m_labelBg->setZValue(Z_SCENE_OVERLAY);
-        // Parent top-center in viewport coords
-        QPointF topCenterItem(m_baseSize.width()/2.0, 0.0);
-        QPointF topCenterScene = mapToScene(topCenterItem);
-    // Use high-precision mapping to avoid rounding drift when zoom changes
-    QPointF topCenterView = v->viewportTransform().map(topCenterScene);
-        // Desired top-left of label in viewport (pixels)
-        QPointF labelTopLeftView = topCenterView - QPointF(bgW/2.0, gapPx + bgH);
-        // Map back to item coords
-    // Map back to scene coords using inverse viewport transform to preserve precision
-    QTransform inv = v->viewportTransform().inverted();
-    QPointF labelTopLeftScene = inv.map(labelTopLeftView);
-        QPointF labelTopLeftItem = mapFromScene(labelTopLeftScene);
-    if (m_labelBg && m_labelBg->parentItem() == nullptr) {
-        m_labelBg->setPos(labelTopLeftScene);
-    } else {
-        m_labelBg->setPos(labelTopLeftItem);
+        
+        // Create bottom panel (for video controls, initially empty)
+        m_bottomPanel = std::make_unique<OverlayPanel>(OverlayPanel::Bottom);
+        m_bottomPanel->setStyle(m_overlayStyle);
+        
+        // Scene will be set later when the item is added to a scene
+    }
+    
+    void updateOverlayVisibility() {
+        bool shouldShowTop = !m_filename.isEmpty() && isSelected();
+        
+        if (m_topPanel) {
+            m_topPanel->setVisible(shouldShowTop);
+        }
+        
+        // Bottom panel visibility is managed separately by video controls
+        // For non-video media, bottom panel stays hidden
+    }
+    
+    void updateOverlayLayout() {
+        if (!scene() || scene()->views().isEmpty()) return;
+        QGraphicsView* view = scene()->views().first();
+        
+        // Ensure panels have the scene reference
+        if (m_topPanel && !m_topPanel->scene()) {
+            m_topPanel->setScene(scene());
+        }
+        if (m_bottomPanel && !m_bottomPanel->scene()) {
+            m_bottomPanel->setScene(scene());
+        }
+        
+    // Precise scene rect: map each corner explicitly to avoid boundingRect inflation
+    QRectF itemRect(0, 0, m_baseSize.width(), m_baseSize.height());
+    
+    // Use the same anchor calculation as the stable video controls:
+    // 1. Define anchor in local item coordinates.
+    // 2. Map to scene.
+    QPointF topAnchorScene = mapToScene(QPointF(itemRect.center().x(), itemRect.top()));
+    QPointF bottomAnchorScene = mapToScene(QPointF(itemRect.center().x(), itemRect.bottom()));
+
+    if (m_topPanel) {
+        // Unified layout method (stable approach). Former call to updateLayoutWithAnchorStable removed during refactor.
+        m_topPanel->updateLayoutWithAnchor(topAnchorScene, view);
+    }
+    if (m_bottomPanel) {
+        // Unified layout method (stable approach). Former call to updateLayoutWithAnchorStable removed during refactor.
+        m_bottomPanel->updateLayoutWithAnchor(bottomAnchorScene, view);
     }
     }
 };
@@ -899,8 +868,8 @@ public:
     m_playBtnRectItem = new RoundedRectItem(m_controlsBg);
     m_playBtnRectItem->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
     m_playBtnRectItem->setPen(Qt::NoPen);
-    // Square background for the play button, same as filename label
-    m_playBtnRectItem->setBrush(m_labelBg ? m_labelBg->brush() : QBrush(QColor(0,0,0,160)));
+    // Square background for the play button
+    m_playBtnRectItem->setBrush(m_overlayStyle.backgroundBrush());
     m_playBtnRectItem->setZValue(Z_SCENE_OVERLAY + 1);
     m_playBtnRectItem->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     m_playBtnRectItem->setAcceptedMouseButtons(Qt::NoButton);
@@ -921,7 +890,7 @@ public:
     m_stopBtnRectItem = new RoundedRectItem(m_controlsBg);
     m_stopBtnRectItem->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
     m_stopBtnRectItem->setPen(Qt::NoPen);
-    m_stopBtnRectItem->setBrush(m_labelBg ? m_labelBg->brush() : QBrush(QColor(0,0,0,160)));
+    m_stopBtnRectItem->setBrush(m_overlayStyle.backgroundBrush());
     m_stopBtnRectItem->setZValue(Z_SCENE_OVERLAY + 1);
     m_stopBtnRectItem->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     m_stopBtnRectItem->setAcceptedMouseButtons(Qt::NoButton);
@@ -935,7 +904,7 @@ public:
     m_repeatBtnRectItem = new RoundedRectItem(m_controlsBg);
     m_repeatBtnRectItem->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
     m_repeatBtnRectItem->setPen(Qt::NoPen);
-    m_repeatBtnRectItem->setBrush(m_labelBg ? m_labelBg->brush() : QBrush(QColor(0,0,0,160)));
+    m_repeatBtnRectItem->setBrush(m_overlayStyle.backgroundBrush());
     m_repeatBtnRectItem->setZValue(Z_SCENE_OVERLAY + 1);
     m_repeatBtnRectItem->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     m_repeatBtnRectItem->setAcceptedMouseButtons(Qt::NoButton);
@@ -949,7 +918,7 @@ public:
     m_muteBtnRectItem = new RoundedRectItem(m_controlsBg);
     m_muteBtnRectItem->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
     m_muteBtnRectItem->setPen(Qt::NoPen);
-    m_muteBtnRectItem->setBrush(m_labelBg ? m_labelBg->brush() : QBrush(QColor(0,0,0,160)));
+    m_muteBtnRectItem->setBrush(m_overlayStyle.backgroundBrush());
     m_muteBtnRectItem->setZValue(Z_SCENE_OVERLAY + 1);
     m_muteBtnRectItem->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     m_muteBtnRectItem->setAcceptedMouseButtons(Qt::NoButton);
@@ -969,7 +938,7 @@ public:
     m_volumeBgRectItem = new QGraphicsRectItem(m_controlsBg);
     m_volumeBgRectItem->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
     m_volumeBgRectItem->setPen(Qt::NoPen);
-    m_volumeBgRectItem->setBrush(m_labelBg ? m_labelBg->brush() : QBrush(QColor(0,0,0,160)));
+    m_volumeBgRectItem->setBrush(m_overlayStyle.backgroundBrush());
     m_volumeBgRectItem->setZValue(Z_SCENE_OVERLAY + 1);
     m_volumeBgRectItem->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     m_volumeBgRectItem->setAcceptedMouseButtons(Qt::NoButton);
@@ -984,7 +953,7 @@ public:
     m_progressBgRectItem->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
     m_progressBgRectItem->setPen(Qt::NoPen);
     // Full-width background for the progress row, same as filename label
-    m_progressBgRectItem->setBrush(m_labelBg ? m_labelBg->brush() : QBrush(QColor(0,0,0,160)));
+    m_progressBgRectItem->setBrush(m_overlayStyle.backgroundBrush());
     m_progressBgRectItem->setZValue(Z_SCENE_OVERLAY + 1);
     m_progressBgRectItem->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     m_progressBgRectItem->setAcceptedMouseButtons(Qt::NoButton);
@@ -1407,11 +1376,9 @@ public:
         // Only extend for controls when selected and unlocked
         if (isSelected() && !m_controlsLockedUntilReady) {
             const int overrideH = ResizableMediaBase::getHeightOfMediaOverlaysPx();
-            // Match label background height exactly when auto
-            const qreal labelBgH = (m_labelBg ? m_labelBg->rect().height() : 0.0);
-            const int padYpx = 4;
-            const int fallbackH = (m_labelText ? static_cast<int>(std::round(m_labelText->boundingRect().height())) + 2*padYpx : 24);
-            const int rowH = (overrideH > 0) ? overrideH : (labelBgH > 0 ? static_cast<int>(std::round(labelBgH)) : fallbackH);
+            // Use overlay style height or fallback to default
+            const int fallbackH = m_overlayStyle.defaultHeight > 0 ? m_overlayStyle.defaultHeight : 24;
+            const int rowH = (overrideH > 0) ? overrideH : fallbackH;
             const int gapPx = 8; // outer gap (media-to-controls) and inner gap (between rows)
             qreal extra = toItemLengthFromPixels(rowH * 2 + 2 * gapPx); // two rows + outer+inner gap
             br.setHeight(br.height() + extra);
@@ -1558,8 +1525,7 @@ protected:
         return ResizableMediaBase::itemChange(change, value);
     }
     void onInteractiveGeometryChanged() override {
-        // Keep both label and controls overlays glued during interactive resize
-        updateLabelLayout();
+        // Keep controls overlays glued during interactive resize  
         updateControlsLayout();
         update();
     }
@@ -1691,9 +1657,8 @@ private:
         const int padYpx = 4;
         const int gapPx = 8;
         const int overrideH = ResizableMediaBase::getHeightOfMediaOverlaysPx();
-        const qreal labelBgH = (m_labelBg ? m_labelBg->rect().height() : 0.0);
-        const int fallbackH = (m_labelText ? static_cast<int>(std::round(m_labelText->boundingRect().height())) + 2*padYpx : 24);
-        const int rowHpx = (overrideH > 0) ? overrideH : (labelBgH > 0 ? static_cast<int>(std::round(labelBgH)) : fallbackH);
+        const int fallbackH = m_overlayStyle.defaultHeight > 0 ? m_overlayStyle.defaultHeight : 24;
+        const int rowHpx = (overrideH > 0) ? overrideH : fallbackH;
         const int totalWpx = 260; // absolute width for controls overlay
         const int playWpx = rowHpx; // square button width equals height
         // Top row: play, stop, repeat, mute, then volume slider filling the rest, with gaps between buttons
@@ -1704,8 +1669,8 @@ private:
         const int volumeWpx = std::max(0, totalWpx - (playWpx + stopWpx + repeatWpx + muteWpx) - buttonGapPx * 4);
         const int progWpx = totalWpx; // progress spans full width on second row
 
-        // Active-state tinting: slightly blue-tinted version of label background
-        auto baseBrush = (m_labelBg ? m_labelBg->brush() : QBrush(QColor(0,0,0,160)));
+        // Active-state tinting: slightly blue-tinted version of overlay background
+        auto baseBrush = m_overlayStyle.backgroundBrush();
         auto blendColor = [](const QColor& a, const QColor& b, qreal t){
             auto clamp255 = [](int v){ return std::max(0, std::min(255, v)); };
             int r = clamp255(static_cast<int>(std::round(a.red()   * (1.0 - t) + b.red()   * t)));

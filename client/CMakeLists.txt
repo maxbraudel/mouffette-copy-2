@@ -26,6 +26,7 @@ set(SOURCES
     src/MainWindow.cpp
     src/WebSocketClient.cpp
     src/ClientInfo.cpp
+    src/OverlayPanels.cpp
 )
 
 # Platform-specific sources
@@ -43,6 +44,8 @@ set(HEADERS
     src/ClientInfo.h
     src/MacDockHider.h
     src/MacVideoThumbnailer.h
+    src/OverlayPanels.h
+    src/RoundedRectItem.h
 )
 
 # UI files
