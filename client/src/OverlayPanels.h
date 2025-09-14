@@ -432,6 +432,10 @@ public:
     // Layout and positioning (unified): anchorScenePoint is top-center (Top) or bottom-center (Bottom)
     void updateLayoutWithAnchor(const QPointF& anchorScenePoint, QGraphicsView* view);
     QSizeF calculateSize() const;
+
+    // Background visual toggle (keeps item for stable anchoring, can make it transparent)
+    void setBackgroundVisible(bool visible) { m_backgroundVisible = visible; updateBackground(); }
+    bool backgroundVisible() const { return m_backgroundVisible; }
     
     // Hit testing
     std::shared_ptr<OverlayLabel> labelAt(const QPointF& scenePos) const;
@@ -448,6 +452,7 @@ private:
     Layout m_layout;
     OverlayStyle m_style;
     bool m_visible = true;
+    bool m_backgroundVisible = true; // if false, background rect is transparent but still present for layout
     
     QList<std::shared_ptr<OverlayElement>> m_elements;  // New element system
     QList<std::shared_ptr<OverlayLabel>> m_labels;      // Legacy label system

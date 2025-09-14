@@ -678,6 +678,21 @@ void OverlayPanel::updateLayoutWithAnchor(const QPointF& anchorScenePoint, QGrap
     if (!m_background) {
         createBackground();
     }
+
+    // Decide visual background presence: if only a single text element on a top panel, hide visual fill
+    if (m_position == Top && m_labels.isEmpty()) {
+        int visibleElements = 0;
+        bool singleText = false;
+        for (const auto &e : m_elements) {
+            if (!e->isVisible()) continue;
+            ++visibleElements;
+            if (visibleElements == 1 && dynamic_cast<OverlayTextElement*>(e.get())) singleText = true;
+            if (visibleElements > 1) break;
+        }
+        m_backgroundVisible = !(visibleElements == 1 && singleText);
+    } else {
+        m_backgroundVisible = true;
+    }
     updateBackground();
     updateLabelsLayout();
 }
@@ -777,8 +792,13 @@ void OverlayPanel::createBackground() {
 
 void OverlayPanel::updateBackground() {
     if (!m_background) return;
-    
-    m_background->setBrush(m_style.backgroundBrush());
+
+    // Always keep background item for positioning; make it visually transparent if disabled
+    if (m_backgroundVisible) {
+        m_background->setBrush(m_style.backgroundBrush());
+    } else {
+        m_background->setBrush(Qt::NoBrush);
+    }
     m_background->setRect(0, 0, m_currentSize.width(), m_currentSize.height());
     m_background->setPos(m_currentPosition);
 }
