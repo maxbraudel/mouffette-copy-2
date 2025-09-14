@@ -1525,8 +1525,10 @@ protected:
         return ResizableMediaBase::itemChange(change, value);
     }
     void onInteractiveGeometryChanged() override {
-        // Keep controls overlays glued during interactive resize  
-        updateControlsLayout();
+        // Keep bottom overlay (video controls) glued during interactive resize  
+        updateControlsLayout();  // Updates bottom overlay (video controls)
+        // Also update the top overlay (filename) during resize
+        updateOverlayLayout();   // Updates top overlay (filename) 
         update();
     }
 
@@ -1648,18 +1650,20 @@ private:
             // Keep m_controlsDidInitialFade as-is so next selection show is instant
         }
     }
+    // Updates the bottom overlay (video controls: play, stop, progress, etc.)
+    // Note: This is separate from updateOverlayLayout() which handles the top overlay (filename)
     void updateControlsLayout() {
         if (!scene() || scene()->views().isEmpty()) return;
         if (!isSelected()) return; // layout only needed when visible
         if (m_controlsLockedUntilReady) return; // defer until video is ready
         QGraphicsView* v = scene()->views().first();
         // Heights based on filename label height, or explicit override
-        const int padYpx = 4;
+        const int padYpx = 8;  // Increased from 4 to match unified overlay padding
         const int gapPx = 8;
         const int overrideH = ResizableMediaBase::getHeightOfMediaOverlaysPx();
-        const int fallbackH = m_overlayStyle.defaultHeight > 0 ? m_overlayStyle.defaultHeight : 24;
+        const int fallbackH = m_overlayStyle.defaultHeight > 0 ? m_overlayStyle.defaultHeight : 36;  // Increased from 24 to 36
         const int rowHpx = (overrideH > 0) ? overrideH : fallbackH;
-        const int totalWpx = 260; // absolute width for controls overlay
+        const int totalWpx = 320; // Increased from 260 to 320 for larger buttons
         const int playWpx = rowHpx; // square button width equals height
         // Top row: play, stop, repeat, mute, then volume slider filling the rest, with gaps between buttons
         const int stopWpx = rowHpx;
@@ -3190,6 +3194,28 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
         }
         // Decide based on item type under cursor: media (or its overlays) -> scene, screens/empty -> pan
         const QList<QGraphicsItem*> hitItems = items(event->pos());
+        // If any hit item is an overlay panel/element (tagged with data(0) == "overlay"), swallow click without deselecting
+        bool clickedOverlayOnly = false;
+        if (!hitItems.isEmpty()) {
+            bool anyMedia = false;
+            for (QGraphicsItem* hi : hitItems) {
+                if (hi->data(0).toString() == QLatin1String("overlay")) {
+                    // keep flag but continue to see if there is also media underneath
+                    clickedOverlayOnly = true;
+                }
+                // Detect media by dynamic_cast; if found, treat as normal media click (handled below)
+                QGraphicsItem* scan = hi;
+                while (scan) {
+                    if (dynamic_cast<ResizableMediaBase*>(scan)) { anyMedia = true; break; }
+                    scan = scan->parentItem();
+                }
+            }
+            if (clickedOverlayOnly && !anyMedia) {
+                // Pure overlay (e.g., filename label) under cursor: keep current selection and do nothing
+                event->accept();
+                return;
+            }
+        }
         auto toMedia = [](QGraphicsItem* x)->ResizableMediaBase* {
             while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); }
             return nullptr;

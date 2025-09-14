@@ -1,10 +1,10 @@
+// Unified overlay implementation
 #include "OverlayPanels.h"
 #include "RoundedRectItem.h"
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QFont>
 #include <QFontMetrics>
-#include <QtSvg/QSvgRenderer>
 #include <cmath>
 
 // Global constants for overlay z-ordering (moved from MainWindow.cpp)
@@ -13,467 +13,104 @@ namespace {
     constexpr qreal Z_OVERLAY_CONTENT = 12001.0;
 }
 
-//=============================================================================
-// OverlayTextElement Implementation
-//=============================================================================
+// ============================================================================
+// OverlayTextElement Implementation (new system)
+// ============================================================================
+
+OverlayTextElement::OverlayTextElement(const QString& text, const QString& id)
+    : OverlayElement(Label, id), m_text(text) {}
+
+OverlayTextElement::~OverlayTextElement() {
+    delete m_background; // deletes text item as child
+}
 
 void OverlayTextElement::createGraphicsItems() {
-    if (m_background) return; // Already created
-    
-    // Create background with rounded corners
-    m_background = new RoundedRectItem();
+    if (m_background) return;
+    m_background = new MouseBlockingRoundedRectItem();
     m_background->setPen(Qt::NoPen);
     m_background->setZValue(Z_SCENE_OVERLAY);
     m_background->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
     m_background->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-    m_background->setAcceptedMouseButtons(Qt::NoButton);
-    
-    // Create text item as child of background
-    m_textItem = new QGraphicsTextItem(m_text, m_background);
+    // Mark as overlay so view can treat clicks as overlay (not canvas)
+    m_background->setData(0, QStringLiteral("overlay"));
+
+    m_textItem = new MouseBlockingTextItem(m_text, m_background);
     m_textItem->setZValue(Z_OVERLAY_CONTENT);
     m_textItem->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
     m_textItem->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-    m_textItem->setAcceptedMouseButtons(Qt::NoButton);
+    m_textItem->setData(0, QStringLiteral("overlay"));
+}
+
+static QBrush overlayStateBrush(const OverlayStyle& style) {
+    // Currently always normal background; extension point for states
+    return style.backgroundBrush();
 }
 
 void OverlayTextElement::applyStyle(const OverlayStyle& style) {
     m_currentStyle = style;
     createGraphicsItems();
-    
-    // Apply background styling
-    m_background->setBrush(getStateBrush(style));
-    m_background->setRadius(style.cornerRadius);
-    
-    // Apply text styling
-    QFont font = m_textItem->font();
-    font.setPixelSize(12); // Standard overlay text size
-    m_textItem->setFont(font);
-    m_textItem->setDefaultTextColor(style.textColor);
-    
-    updateAppearance();
+    if (m_background) {
+        m_background->setBrush(overlayStateBrush(style));
+        m_background->setRadius(style.cornerRadius);
+    }
+    if (m_textItem) {
+        QFont f = m_textItem->font();
+        f.setPixelSize(16);
+        m_textItem->setFont(f);
+        m_textItem->setDefaultTextColor(style.textColor);
+    }
 }
 
 QSizeF OverlayTextElement::preferredSize(const OverlayStyle& style) const {
-    // Calculate text bounds
-    QFont font;
-    font.setPixelSize(12);
-    QFontMetrics fm(font);
-    QRect textRect = fm.boundingRect(m_text);
-    
-    // Add padding
-    return QSizeF(textRect.width() + 2 * style.paddingX,
-                  textRect.height() + 2 * style.paddingY);
+    QFont f; f.setPixelSize(16);
+    QFontMetrics fm(f);
+    QRect r = fm.boundingRect(m_text);
+    return QSizeF(r.width() + 2*style.paddingX, r.height() + 2*style.paddingY);
 }
 
 void OverlayTextElement::setSize(const QSizeF& size) {
     createGraphicsItems();
-    
-    // Update background size
-    m_background->setRect(0, 0, size.width(), size.height());
-    
-    // Center text within background
+    if (m_background) {
+        m_background->setRect(0,0,size.width(), size.height());
+    }
     if (m_textItem) {
-        QRectF textBounds = m_textItem->boundingRect();
-        qreal x = (size.width() - textBounds.width()) / 2.0;
-        qreal y = (size.height() - textBounds.height()) / 2.0;
-        m_textItem->setPos(x, y);
+        QRectF tb = m_textItem->boundingRect();
+        m_textItem->setPos((size.width()-tb.width())/2.0, (size.height()-tb.height())/2.0);
     }
 }
 
 void OverlayTextElement::setPosition(const QPointF& pos) {
     createGraphicsItems();
-    m_background->setPos(pos);
+    if (m_background) m_background->setPos(pos);
 }
 
-bool OverlayTextElement::contains(const QPointF& point) const {
-    if (!m_background) return false;
-    return m_background->contains(m_background->mapFromScene(point));
+void OverlayTextElement::setVisible(bool v) {
+    m_visible = v;
+    if (m_background) m_background->setVisible(v);
 }
 
-QRectF OverlayTextElement::boundingRect() const {
-    if (!m_background) return QRectF();
-    return m_background->boundingRect();
-}
-
-void OverlayTextElement::updateVisibility() {
-    createGraphicsItems();
-    m_background->setVisible(isVisible());
-}
-
-void OverlayTextElement::updateAppearance() {
-    if (!m_background) return;
-    m_background->setBrush(getStateBrush(m_currentStyle));
-}
-
-void OverlayTextElement::updateText() {
+void OverlayTextElement::setText(const QString& text) {
+    if (m_text == text) return;
+    m_text = text;
     if (m_textItem) {
         m_textItem->setPlainText(m_text);
-        // Re-center text after text change
+        // re-center based on current background size
         if (m_background) {
-            QRectF bgRect = m_background->rect();
-            QRectF textBounds = m_textItem->boundingRect();
-            qreal x = (bgRect.width() - textBounds.width()) / 2.0;
-            qreal y = (bgRect.height() - textBounds.height()) / 2.0;
-            m_textItem->setPos(x, y);
+            QRectF bg = m_background->rect();
+            QRectF tb = m_textItem->boundingRect();
+            m_textItem->setPos((bg.width()-tb.width())/2.0, (bg.height()-tb.height())/2.0);
         }
     }
 }
 
-//=============================================================================
-// OverlayTextLabel Implementation (Legacy)
-//=============================================================================
-
-OverlayTextLabel::OverlayTextLabel(const QString& text, const QString& id)
-    : OverlayLabel(Text, id), m_text(text)
-{
-    // Create background and text items
-    m_background = new RoundedRectItem();
-    m_background->setPen(Qt::NoPen);
-    m_background->setZValue(Z_SCENE_OVERLAY);
-    m_background->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
-    m_background->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-    m_background->setAcceptedMouseButtons(Qt::NoButton);
-    
-    m_textItem = new QGraphicsTextItem(m_text, m_background);
-    m_textItem->setZValue(Z_OVERLAY_CONTENT);
-    m_textItem->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
-    m_textItem->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-    m_textItem->setAcceptedMouseButtons(Qt::NoButton);
-}
-
-OverlayTextLabel::~OverlayTextLabel() {
-    delete m_background; // Will also delete m_textItem as child
-}
-
-void OverlayTextLabel::setText(const QString& text) {
-    if (m_text != text) {
-        m_text = text;
-        if (m_textItem) {
-            m_textItem->setPlainText(m_text);
-        }
-        updateLayout();
-    }
-}
-
-QSizeF OverlayTextLabel::preferredSize(const OverlayStyle& style) const {
-    if (m_text.isEmpty()) return QSizeF(0, 0);
-    
-    QFontMetrics fm(m_textItem ? m_textItem->font() : QFont());
-    QRectF textRect = fm.boundingRect(m_text);
-    
-    return QSizeF(
-        textRect.width() + 2 * style.paddingX,
-        textRect.height() + 2 * style.paddingY
-    );
-}
-
-void OverlayTextLabel::setSize(const QSizeF& size) {
-    m_currentSize = size;
-    updateLayout();
-}
-
-QGraphicsItem* OverlayTextLabel::graphicsItem() {
-    return m_background;
-}
-
-void OverlayTextLabel::applyStyle(const OverlayStyle& style) {
-    if (m_background) {
-        m_background->setBrush(style.backgroundBrush());
-        m_background->setRadius(style.cornerRadius);
-    }
-    
-    if (m_textItem) {
-        m_textItem->setDefaultTextColor(style.textColor);
-    }
-    
-    updateLayout();
-}
-
-void OverlayTextLabel::setPosition(const QPointF& pos) {
-    if (m_background) {
-        m_background->setPos(pos);
-    }
-}
-
-bool OverlayTextLabel::contains(const QPointF& point) const {
-    if (!m_background || !isVisible()) return false;
-    return m_background->contains(m_background->mapFromScene(point));
-}
-
-void OverlayTextLabel::updateLayout() {
-    if (!m_background || !m_textItem) return;
-    
-    // Update background size
-    m_background->setRect(0, 0, m_currentSize.width(), m_currentSize.height());
-    
-    // Center text within background
-    QRectF textRect = m_textItem->boundingRect();
-    qreal textX = (m_currentSize.width() - textRect.width()) / 2.0;
-    qreal textY = (m_currentSize.height() - textRect.height()) / 2.0;
-    m_textItem->setPos(textX, textY);
-}
-
-//=============================================================================
-// OverlayButton Implementation
-//=============================================================================
-
-OverlayButton::OverlayButton(const QString& iconPath, const QString& id)
-    : OverlayLabel(Button, id), m_iconPath(iconPath)
-{
-    // Create background
-    m_background = new RoundedRectItem();
-    m_background->setPen(Qt::NoPen);
-    m_background->setZValue(Z_SCENE_OVERLAY);
-    m_background->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
-    m_background->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-    m_background->setAcceptedMouseButtons(Qt::NoButton);
-    
-    // Create icon if path provided
-    if (!m_iconPath.isEmpty()) {
-        m_icon = new QGraphicsSvgItem(m_iconPath, m_background);
-        m_icon->setZValue(Z_OVERLAY_CONTENT);
-        m_icon->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
-        m_icon->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-        m_icon->setAcceptedMouseButtons(Qt::NoButton);
-    }
-}
-
-OverlayButton::~OverlayButton() {
-    delete m_background; // Will also delete m_icon as child
-}
-
-void OverlayButton::setIconPath(const QString& path) {
-    if (m_iconPath != path) {
-        m_iconPath = path;
-        updateIcon();
-    }
-}
-
-void OverlayButton::setActive(bool active) {
-    if (m_active != active) {
-        m_active = active;
-        updateState();
-    }
-}
-
-QSizeF OverlayButton::preferredSize(const OverlayStyle& style) const {
-    // Buttons are typically square, using the default height
-    int size = (style.defaultHeight > 0) ? style.defaultHeight : 32;
-    return QSizeF(size, size);
-}
-
-void OverlayButton::setSize(const QSizeF& size) {
-    m_currentSize = size;
-    updateLayout();
-}
-
-QGraphicsItem* OverlayButton::graphicsItem() {
-    return m_background;
-}
-
-void OverlayButton::applyStyle(const OverlayStyle& style) {
-    m_currentStyle = style;
-    if (m_background) {
-        m_background->setBrush(m_active ? style.tintedBackgroundBrush() : style.backgroundBrush());
-        m_background->setRadius(style.cornerRadius);
-    }
-    updateLayout();
-}
-
-void OverlayButton::setPosition(const QPointF& pos) {
-    if (m_background) {
-        m_background->setPos(pos);
-    }
-}
-
-bool OverlayButton::contains(const QPointF& point) const {
-    if (!m_background || !isVisible() || !isEnabled()) return false;
-    return m_background->contains(m_background->mapFromScene(point));
-}
-
-void OverlayButton::handleClick(const QPointF& point) {
-    if (contains(point) && onClicked) {
-        onClicked();
-    }
-}
-
-void OverlayButton::updateState() {
-    applyStyle(m_currentStyle); // Re-apply style to update active state
-}
-
-void OverlayButton::updateIcon() {
-    if (m_icon) {
-        delete m_icon;
-        m_icon = nullptr;
-    }
-    
-    if (!m_iconPath.isEmpty() && m_background) {
-        m_icon = new QGraphicsSvgItem(m_iconPath, m_background);
-        m_icon->setZValue(Z_OVERLAY_CONTENT);
-        m_icon->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
-        m_icon->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-        m_icon->setAcceptedMouseButtons(Qt::NoButton);
-        updateLayout();
-    }
-}
-
-void OverlayButton::updateLayout() {
-    if (!m_background) return;
-    
-    // Update background size
-    m_background->setRect(0, 0, m_currentSize.width(), m_currentSize.height());
-    
-    // Center icon within background
-    if (m_icon) {
-        QSizeF iconNaturalSize = m_icon->renderer() ? 
-            m_icon->renderer()->defaultSize() : QSizeF(24, 24);
-        if (iconNaturalSize.width() <= 0 || iconNaturalSize.height() <= 0) {
-            iconNaturalSize = QSizeF(24, 24);
-        }
-        
-        // Scale icon to 60% of button size
-        qreal scale = std::min(
-            m_currentSize.width() / iconNaturalSize.width(),
-            m_currentSize.height() / iconNaturalSize.height()
-        ) * 0.6;
-        
-        m_icon->setScale(scale);
-        
-        // Center the scaled icon
-        qreal iconX = (m_currentSize.width() - iconNaturalSize.width() * scale) / 2.0;
-        qreal iconY = (m_currentSize.height() - iconNaturalSize.height() * scale) / 2.0;
-        m_icon->setPos(iconX, iconY);
-    }
-}
-
-//=============================================================================
-// OverlaySlider Implementation
-//=============================================================================
-
-OverlaySlider::OverlaySlider(const QString& id)
-    : OverlayLabel(Slider, id)
-{
-    // Create background
-    m_background = new QGraphicsRectItem();
-    m_background->setPen(Qt::NoPen);
-    m_background->setZValue(Z_SCENE_OVERLAY);
-    m_background->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
-    m_background->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-    m_background->setAcceptedMouseButtons(Qt::NoButton);
-    
-    // Create fill
-    m_fill = new QGraphicsRectItem(m_background);
-    m_fill->setPen(Qt::NoPen);
-    m_fill->setBrush(QColor(74, 144, 226)); // Primary accent color
-    m_fill->setZValue(Z_OVERLAY_CONTENT);
-    m_fill->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-    m_fill->setAcceptedMouseButtons(Qt::NoButton);
-}
-
-OverlaySlider::~OverlaySlider() {
-    delete m_background; // Will also delete m_fill as child
-}
-
-void OverlaySlider::setValue(qreal value) {
-    qreal clampedValue = std::clamp(value, m_minimum, m_maximum);
-    if (m_value != clampedValue) {
-        m_value = clampedValue;
-        updateFill();
-        if (onValueChanged) {
-            onValueChanged(m_value);
-        }
-    }
-}
-
-void OverlaySlider::setRange(qreal min, qreal max) {
-    m_minimum = min;
-    m_maximum = std::max(min, max);
-    setValue(m_value); // Re-clamp current value
-}
-
-QSizeF OverlaySlider::preferredSize(const OverlayStyle& style) const {
-    // Sliders typically have a minimum width and use the default height
-    int height = (style.defaultHeight > 0) ? style.defaultHeight : 24;
-    return QSizeF(80, height); // Minimum reasonable width
-}
-
-void OverlaySlider::setSize(const QSizeF& size) {
-    m_currentSize = size;
-    updateFill();
-}
-
-void OverlaySlider::applyStyle(const OverlayStyle& style) {
-    if (m_background) {
-        m_background->setBrush(style.backgroundBrush());
-    }
-    updateFill();
-}
-
-void OverlaySlider::setPosition(const QPointF& pos) {
-    if (m_background) {
-        m_background->setPos(pos);
-    }
-}
-
-bool OverlaySlider::contains(const QPointF& point) const {
-    if (!m_background || !isVisible() || !isEnabled()) return false;
-    return m_background->contains(m_background->mapFromScene(point));
-}
-
-void OverlaySlider::handleClick(const QPointF& point) {
-    if (!contains(point)) return;
-    
-    qreal newValue = pointToValue(m_background->mapFromScene(point));
-    setValue(newValue);
-    m_dragging = true;
-}
-
-void OverlaySlider::handleDrag(const QPointF& point, const QPointF& delta) {
-    Q_UNUSED(delta);
-    if (!m_dragging || !contains(point)) return;
-    
-    qreal newValue = pointToValue(m_background->mapFromScene(point));
-    setValue(newValue);
-}
-
-void OverlaySlider::updateFill() {
-    if (!m_background || !m_fill) return;
-    
-    // Update background size
-    m_background->setRect(0, 0, m_currentSize.width(), m_currentSize.height());
-    
-    // Update fill size based on current value
-    const qreal margin = 2.0;
-    qreal fillRatio = (m_maximum > m_minimum) ? 
-        (m_value - m_minimum) / (m_maximum - m_minimum) : 0.0;
-    
-    qreal fillWidth = std::max(0.0, m_currentSize.width() - 2 * margin) * fillRatio;
-    qreal fillHeight = std::max(0.0, m_currentSize.height() - 2 * margin);
-    
-    m_fill->setRect(margin, margin, fillWidth, fillHeight);
-}
-
-qreal OverlaySlider::pointToValue(const QPointF& point) const {
-    if (m_currentSize.width() <= 0 || m_maximum <= m_minimum) return m_value;
-    
-    qreal ratio = std::clamp(point.x() / m_currentSize.width(), 0.0, 1.0);
-    return m_minimum + ratio * (m_maximum - m_minimum);
-}
-
-//=============================================================================
+// ============================================================================
 // OverlayPanel Implementation
-//=============================================================================
+// ============================================================================
 
 OverlayPanel::OverlayPanel(Position position, Layout layout)
-    : m_position(position), m_layout(layout)
-{
-    // createBackground(); // Disabled - overlay elements handle their own backgrounds
-}
+    : m_position(position), m_layout(layout) {}
 
-OverlayPanel::~OverlayPanel() {
-    clear();
-    delete m_background;
-}
+OverlayPanel::~OverlayPanel() { delete m_background; }
 
 void OverlayPanel::setLayout(Layout layout) {
     if (m_layout != layout) {
@@ -485,11 +122,6 @@ void OverlayPanel::setLayout(Layout layout) {
 void OverlayPanel::setStyle(const OverlayStyle& style) {
     m_style = style;
     updateBackground();
-    
-    // Apply style to all labels
-    for (auto& label : m_labels) {
-        label->applyStyle(style);
-    }
     for (auto& element : m_elements) {
         element->applyStyle(style);
     }
@@ -561,81 +193,16 @@ std::shared_ptr<OverlayElement> OverlayPanel::findElement(const QString& id) con
     return (it != m_elements.end()) ? *it : nullptr;
 }
 
-//=============================================================================
-// OverlayPanel Label Management (Legacy System)
-//=============================================================================
-
-void OverlayPanel::addLabel(std::shared_ptr<OverlayLabel> label) {
-    if (!label) return;
-    
-    m_labels.append(label);
-
-    // Ensure background so positioning remains in local space
-    if (!m_background) {
-        createBackground();
-        if (m_scene && !m_background->scene() && !m_parentItem) {
-            m_scene->addItem(m_background);
-        }
-    }
-
-    // Parent label graphics item appropriately
-    if (auto* item = label->graphicsItem()) {
-        if (m_background) {
-            item->setParentItem(m_background);
-        } else if (m_parentItem) {
-            item->setParentItem(m_parentItem);
-        } else if (m_scene) {
-            m_scene->addItem(item);
-        }
-    }
-
-    label->applyStyle(m_style);
-    updateLabelsLayout();
-}
-
-void OverlayPanel::removeLabel(const QString& id) {
-    auto it = std::find_if(m_labels.begin(), m_labels.end(),
-        [&id](const std::shared_ptr<OverlayLabel>& label) {
-            return label->id() == id;
-        });
-    
-    if (it != m_labels.end()) {
-        m_labels.erase(it);
-        updateLabelsLayout();
-    }
-}
-
-void OverlayPanel::removeLabel(std::shared_ptr<OverlayLabel> label) {
-    auto it = std::find(m_labels.begin(), m_labels.end(), label);
-    if (it != m_labels.end()) {
-        m_labels.erase(it);
-        updateLabelsLayout();
-    }
-}
-
-void OverlayPanel::clear() {
-    m_labels.clear();
-    updateLabelsLayout();
-}
-
-std::shared_ptr<OverlayLabel> OverlayPanel::findLabel(const QString& id) const {
-    auto it = std::find_if(m_labels.begin(), m_labels.end(),
-        [&id](const std::shared_ptr<OverlayLabel>& label) {
-            return label->id() == id;
-        });
-    
-    return (it != m_labels.end()) ? *it : nullptr;
-}
+// (Legacy label management removed)
 
 void OverlayPanel::setVisible(bool visible) {
-    if (m_visible != visible) {
-        m_visible = visible;
-        if (m_background) {
-            m_background->setVisible(visible);
-        }
-        for (auto& label : m_labels) {
-            label->setVisible(visible);
-        }
+    if (m_visible == visible) return;
+    m_visible = visible;
+    if (m_background) m_background->setVisible(visible);
+    for (auto &e : m_elements) e->setVisible(visible);
+    // If we're becoming visible and we have a cached anchor + view, force a relayout to avoid initial offset
+    if (m_visible && m_hasLastAnchor && m_lastView) {
+        updateLayoutWithAnchor(m_lastAnchorScenePoint, m_lastView);
     }
 }
 
@@ -652,25 +219,27 @@ void OverlayPanel::setScene(QGraphicsScene* scene) {
         scene->addItem(m_background);
     }
     
-    // Add any existing elements to the scene
+    // Add any existing elements to the scene if they have no parent/scene
     if (scene) {
         for (auto& element : m_elements) {
-            QGraphicsItem* graphicsItem = element->graphicsItem();
-            if (graphicsItem && !graphicsItem->scene() && !graphicsItem->parentItem()) {
-                scene->addItem(graphicsItem);
-            }
+            QGraphicsItem* gi = element->graphicsItem();
+            if (gi && !gi->scene() && !gi->parentItem()) scene->addItem(gi);
         }
-        for (auto& label : m_labels) {
-            QGraphicsItem* graphicsItem = label->graphicsItem();
-            if (graphicsItem && !graphicsItem->scene() && !graphicsItem->parentItem()) {
-                scene->addItem(graphicsItem);
-            }
-        }
+    }
+    // If scene just set and we have cached anchor+view and visible, relayout now
+    if (m_scene && m_visible && m_hasLastAnchor && m_lastView) {
+        updateLayoutWithAnchor(m_lastAnchorScenePoint, m_lastView);
     }
 }
 
 void OverlayPanel::updateLayoutWithAnchor(const QPointF& anchorScenePoint, QGraphicsView* view) {
-    if (!view || (m_labels.isEmpty() && m_elements.isEmpty())) return;
+    if (!view || m_elements.isEmpty()) return;
+    // Cache parameters for potential deferred relayout when becoming visible
+    m_lastAnchorScenePoint = anchorScenePoint;
+    m_lastView = view;
+    m_hasLastAnchor = true;
+    // If currently not visible we still cache but skip heavy work to avoid flicker
+    if (!m_visible) return;
     m_currentSize = calculateSize();
     m_currentPosition = calculatePanelPositionFromAnchor(anchorScenePoint, view);
     
@@ -680,7 +249,7 @@ void OverlayPanel::updateLayoutWithAnchor(const QPointF& anchorScenePoint, QGrap
     }
 
     // Decide visual background presence: if only a single text element on a top panel, hide visual fill
-    if (m_position == Top && m_labels.isEmpty()) {
+    if (m_position == Top) {
         int visibleElements = 0;
         bool singleText = false;
         for (const auto &e : m_elements) {
@@ -699,7 +268,7 @@ void OverlayPanel::updateLayoutWithAnchor(const QPointF& anchorScenePoint, QGrap
 
 
 QSizeF OverlayPanel::calculateSize() const {
-    if (m_labels.isEmpty() && m_elements.isEmpty()) return QSizeF(0, 0);
+    if (m_elements.isEmpty()) return QSizeF(0, 0);
     
     qreal totalWidth = 0;
     qreal totalHeight = 0;
@@ -723,31 +292,9 @@ QSizeF OverlayPanel::calculateSize() const {
         }
     }
     
-    // Calculate size for labels (legacy system)
-    for (const auto& label : m_labels) {
-        if (!label->isVisible()) continue;
-        
-        QSizeF labelSize = label->preferredSize(m_style);
-        maxWidth = std::max(maxWidth, labelSize.width());
-        maxHeight = std::max(maxHeight, labelSize.height());
-        
-        if (m_layout == Horizontal) {
-            totalWidth += labelSize.width();
-            totalHeight = std::max(totalHeight, labelSize.height());
-        } else {
-            totalWidth = std::max(totalWidth, labelSize.width());
-            totalHeight += labelSize.height();
-        }
-    }
-    
-    // Add spacing between items
+    // Count visible elements for spacing
     int visibleCount = 0;
-    for (const auto& element : m_elements) {
-        if (element->isVisible()) visibleCount++;
-    }
-    for (const auto& label : m_labels) {
-        if (label->isVisible()) visibleCount++;
-    }
+    for (const auto& element : m_elements) if (element->isVisible()) ++visibleCount;
     
     if (visibleCount > 1) {
         if (m_layout == Horizontal) {
@@ -770,24 +317,20 @@ QSizeF OverlayPanel::calculateSize() const {
 }
 
 void OverlayPanel::createBackground() {
-    m_background = new QGraphicsRectItem();
+    m_background = new MouseBlockingRectItem();
     m_background->setPen(Qt::NoPen);
     m_background->setZValue(m_style.zOverlay);
     m_background->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
     m_background->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-    m_background->setAcceptedMouseButtons(Qt::NoButton);
+    m_background->setData(0, QStringLiteral("overlay"));
     updateBackground();
-    // Re-parent existing elements and labels so layout can be done in local coords
+    // Re-parent existing elements so layout can be done in local coords
     for (auto &element : m_elements) {
         if (auto *gi = element->graphicsItem()) {
             if (!gi->parentItem()) gi->setParentItem(m_background);
         }
     }
-    for (auto &label : m_labels) {
-        if (auto *gi = label->graphicsItem()) {
-            if (!gi->parentItem()) gi->setParentItem(m_background);
-        }
-    }
+    // elements parented already
 }
 
 void OverlayPanel::updateBackground() {
@@ -804,7 +347,7 @@ void OverlayPanel::updateBackground() {
 }
 
 void OverlayPanel::updateLabelsLayout() {
-    if (m_elements.isEmpty() && m_labels.isEmpty()) return;
+    if (m_elements.isEmpty()) return;
     
     QPointF currentPos(m_style.paddingX, m_style.paddingY);
     
@@ -844,37 +387,7 @@ void OverlayPanel::updateLabelsLayout() {
         }
     }
     
-    // Layout labels (legacy system)
-    for (auto& label : m_labels) {
-        if (!label->isVisible()) continue;
-        
-        QSizeF labelSize = label->preferredSize(m_style);
-        
-        // Adjust size if constrained by panel width
-        if (m_layout == Horizontal && m_style.maxWidth > 0) {
-            qreal availableWidth = m_currentSize.width() - 2 * m_style.paddingX;
-            if (labelSize.width() > availableWidth) {
-                labelSize.setWidth(availableWidth);
-            }
-        }
-        
-        label->setSize(labelSize);
-        if (haveContainer) {
-            if (auto *gi = label->graphicsItem()) {
-                if (gi->parentItem() != m_background) gi->setParentItem(m_background);
-            }
-            label->setPosition(currentPos);
-        } else {
-            label->setPosition(m_currentPosition + currentPos);
-        }
-        
-        // Move to next position
-        if (m_layout == Horizontal) {
-            currentPos.setX(currentPos.x() + labelSize.width() + m_style.itemSpacing);
-        } else {
-            currentPos.setY(currentPos.y() + labelSize.height() + m_style.itemSpacing);
-        }
-    }
+    // done
 }
 
 
@@ -901,23 +414,4 @@ QPointF OverlayPanel::calculatePanelPositionFromAnchor(const QPointF& anchorScen
 }
 
 
-std::shared_ptr<OverlayLabel> OverlayPanel::labelAt(const QPointF& scenePos) const {
-    for (const auto& label : m_labels) {
-        if (label->contains(scenePos)) {
-            return label;
-        }
-    }
-    return nullptr;
-}
-
-void OverlayPanel::handleClick(const QPointF& scenePos) {
-    if (auto label = labelAt(scenePos)) {
-        label->handleClick(scenePos);
-    }
-}
-
-void OverlayPanel::handleDrag(const QPointF& scenePos, const QPointF& delta) {
-    if (auto label = labelAt(scenePos)) {
-        label->handleDrag(scenePos, delta);
-    }
-}
+// (Legacy label hit-testing and interaction removed)
