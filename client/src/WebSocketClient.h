@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <QWebSocket>
+#include <QSet>
 #include <QJsonObject>
 #include <QJsonDocument>
 #include <QTimer>
@@ -37,9 +38,12 @@ public:
     void sendUploadAbort(const QString& targetClientId, const QString& uploadId, const QString& reason = QString());
     void sendUnloadMedia(const QString& targetClientId);
     // Target -> Sender notifications
-    void notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent);
+    void notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent, int filesCompleted, int totalFiles);
     void notifyUploadFinishedToSender(const QString& senderClientId, const QString& uploadId);
     void notifyUnloadedToSender(const QString& senderClientId);
+
+    // Client-side cancel safeguard: mark an uploadId as cancelled to ignore any further chunk sends
+    void cancelUploadId(const QString& uploadId) { m_canceledUploads.insert(uploadId); }
     
     // Getters
     QString getClientId() const { return m_clientId; }
@@ -59,7 +63,7 @@ signals:
         void cursorPositionReceived(const QString& targetClientId, int x, int y);
 
     // Upload progress signals (from target via server)
-    void uploadProgressReceived(const QString& uploadId, int percent);
+    void uploadProgressReceived(const QString& uploadId, int percent, int filesCompleted, int totalFiles);
     void uploadFinishedReceived(const QString& uploadId);
     void unloadedReceived();
 
@@ -74,6 +78,7 @@ private:
     void handleMessage(const QJsonObject& message);
     void sendMessage(const QJsonObject& message);
     void setConnectionStatus(const QString& status);
+    QSet<QString> m_canceledUploads; // uploadIds that should drop further chunk sends
     
     QWebSocket* m_webSocket;
     QString m_serverUrl;

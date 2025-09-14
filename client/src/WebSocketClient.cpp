@@ -159,6 +159,7 @@ void WebSocketClient::sendUploadStart(const QString& targetClientId, const QJson
 
 void WebSocketClient::sendUploadChunk(const QString& targetClientId, const QString& uploadId, const QString& fileId, int chunkIndex, const QByteArray& dataBase64) {
     if (!isConnected()) return;
+    if (m_canceledUploads.contains(uploadId)) return; // drop silently
     QJsonObject msg;
     msg["type"] = "upload_chunk";
     msg["targetClientId"] = targetClientId;
@@ -177,6 +178,7 @@ void WebSocketClient::sendUploadChunk(const QString& targetClientId, const QStri
 
 void WebSocketClient::sendUploadComplete(const QString& targetClientId, const QString& uploadId) {
     if (!isConnected()) return;
+    if (m_canceledUploads.contains(uploadId)) return; // already canceled
     QJsonObject msg;
     msg["type"] = "upload_complete";
     msg["targetClientId"] = targetClientId;
@@ -186,6 +188,7 @@ void WebSocketClient::sendUploadComplete(const QString& targetClientId, const QS
 
 void WebSocketClient::sendUploadAbort(const QString& targetClientId, const QString& uploadId, const QString& reason) {
     if (!isConnected()) return;
+    m_canceledUploads.insert(uploadId);
     QJsonObject msg;
     msg["type"] = "upload_abort";
     msg["targetClientId"] = targetClientId;
@@ -202,13 +205,15 @@ void WebSocketClient::sendUnloadMedia(const QString& targetClientId) {
     sendMessage(msg);
 }
 
-void WebSocketClient::notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent) {
+void WebSocketClient::notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent, int filesCompleted, int totalFiles) {
     if (!isConnected()) return;
     QJsonObject msg;
     msg["type"] = "upload_progress";
     msg["senderClientId"] = senderClientId;
     msg["uploadId"] = uploadId;
     msg["percent"] = percent;
+    msg["filesCompleted"] = filesCompleted;
+    msg["totalFiles"] = totalFiles;
     sendMessage(msg);
 }
 
@@ -308,7 +313,10 @@ void WebSocketClient::attemptReconnect() {
 
 void WebSocketClient::handleMessage(const QJsonObject& message) {
     QString type = message["type"].toString();
-    qDebug() << "Received message type:" << type;
+    // Suppress noisy logs for high-frequency message types
+    if (type != "upload_progress" && type != "cursor_update") {
+        qDebug() << "Received message type:" << type;
+    }
     
     if (type == "welcome") {
         m_clientId = message["clientId"].toString();
@@ -352,7 +360,9 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
     else if (type == "upload_progress") {
         const QString uploadId = message.value("uploadId").toString();
         const int percent = message.value("percent").toInt();
-        emit uploadProgressReceived(uploadId, percent);
+        const int filesCompleted = message.value("filesCompleted").toInt();
+        const int totalFiles = message.value("totalFiles").toInt();
+        emit uploadProgressReceived(uploadId, percent, filesCompleted, totalFiles);
     }
     else if (type == "upload_finished") {
         const QString uploadId = message.value("uploadId").toString();

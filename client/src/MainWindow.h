@@ -30,6 +30,7 @@
 #include <QStackedWidget>
 #include <QElapsedTimer>
 #include <QHash>
+#include <QSet>
 #include "WebSocketClient.h"
 #include "ClientInfo.h"
 
@@ -312,6 +313,10 @@ private:
     bool m_uploadActive = false; // true after upload finished -> button shows "Unload medias"
     QString m_currentUploadId;
     int m_lastUploadPercent = 0;
+    int m_totalFilesToUpload = 0;
+    int m_filesUploadedSoFar = 0;
+    bool m_uploadInProgress = false; // true while sending/receiving
+    bool m_cancelRequested = false;  // set when user cancels mid-upload
 
     // Incoming upload session (minimal, single active upload)
     struct IncomingUpload {
@@ -319,14 +324,18 @@ private:
         QString uploadId;
         QString cacheDirPath;
         QHash<QString, QFile*> openFiles; // fileId -> QFile*
+        QHash<QString, qint64> expectedSizes; // fileId -> total bytes
+        QHash<QString, qint64> receivedByFile; // fileId -> received bytes
         qint64 totalSize = 0;
         qint64 received = 0;
+        int totalFiles = 0;
     } m_incomingUpload;
+    QSet<QString> m_canceledIncomingUploads; // uploadIds canceled by sender
 
 private slots:
     void onUploadButtonClicked();
     void onGenericMessageReceived(const QJsonObject& message);
-    void onUploadProgress(const QString& uploadId, int percent);
+    void onUploadProgress(const QString& uploadId, int percent, int filesCompleted, int totalFiles);
     void onUploadFinished(const QString& uploadId);
 };
 

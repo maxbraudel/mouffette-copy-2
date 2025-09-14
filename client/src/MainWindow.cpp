@@ -101,19 +101,27 @@ constexpr qreal Z_REMOTE_CURSOR = 10000.0;
 constexpr qreal Z_SCENE_OVERLAY = 12000.0; // above all scene content
 }
 
-void MainWindow::onUploadProgress(const QString& uploadId, int percent) {
+void MainWindow::onUploadProgress(const QString& uploadId, int percent, int filesCompleted, int totalFiles) {
     if (uploadId != m_currentUploadId) return;
+    if (m_cancelRequested) return; // ignore late updates after cancel
     m_lastUploadPercent = percent;
+    m_filesUploadedSoFar = filesCompleted;
+    m_totalFilesToUpload = totalFiles;
     if (m_uploadButton && m_uploadButton->isChecked()) {
-        m_uploadButton->setText(QString("Uploading… %1% ").arg(percent));
+        m_uploadButton->setText(QString("Download (%1/%2) %3%")
+                                    .arg(filesCompleted)
+                                    .arg(totalFiles)
+                                    .arg(percent));
     }
 }
 
 void MainWindow::onUploadFinished(const QString& uploadId) {
     if (uploadId != m_currentUploadId) return;
+    if (m_cancelRequested) return; // ignore finish if user cancelled
     // Switch to active state => Unload
     m_uploadActive = true;
     m_lastUploadPercent = 100;
+    m_uploadInProgress = false;
     if (m_uploadButton) {
         m_uploadButton->setChecked(true);
         m_uploadButton->setText("Unload medias");
@@ -128,6 +136,8 @@ void MainWindow::onGenericMessageReceived(const QJsonObject& message) {
         m_incomingUpload = IncomingUpload();
         m_incomingUpload.senderId = message.value("senderClientId").toString();
         m_incomingUpload.uploadId = message.value("uploadId").toString();
+        // If previously canceled, allow this new uploadId to proceed
+        m_canceledIncomingUploads.remove(m_incomingUpload.uploadId);
         // Create cache dir
         QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
         if (base.isEmpty()) base = QDir::homePath() + "/.cache";
@@ -139,7 +149,10 @@ void MainWindow::onGenericMessageReceived(const QJsonObject& message) {
         // Prepare files
         m_incomingUpload.totalSize = 0;
         m_incomingUpload.received = 0;
+        m_incomingUpload.expectedSizes.clear();
+        m_incomingUpload.receivedByFile.clear();
         QJsonArray files = message.value("files").toArray();
+        m_incomingUpload.totalFiles = files.size();
         for (const QJsonValue& v : files) {
             QJsonObject f = v.toObject();
             const QString fileId = f.value("fileId").toString();
@@ -152,22 +165,50 @@ void MainWindow::onGenericMessageReceived(const QJsonObject& message) {
             QFile* qf = new QFile(fullPath);
             if (!qf->open(QIODevice::WriteOnly)) { delete qf; continue; }
             m_incomingUpload.openFiles.insert(fileId, qf);
+            m_incomingUpload.expectedSizes.insert(fileId, qMax<qint64>(0, size));
+            m_incomingUpload.receivedByFile.insert(fileId, 0);
         }
         // Optionally acknowledge start by sending 0%
         if (!m_incomingUpload.senderId.isEmpty()) {
-            m_webSocketClient->notifyUploadProgressToSender(m_incomingUpload.senderId, m_incomingUpload.uploadId, 0);
+            m_webSocketClient->notifyUploadProgressToSender(
+                m_incomingUpload.senderId,
+                m_incomingUpload.uploadId,
+                0,
+                0,
+                m_incomingUpload.totalFiles
+            );
         }
     } else if (type == "upload_chunk") {
-        if (message.value("uploadId").toString() != m_incomingUpload.uploadId) return;
+        const QString upId = message.value("uploadId").toString();
+        if (upId != m_incomingUpload.uploadId) return;
+        if (m_canceledIncomingUploads.contains(upId)) return; // ignore chunks after abort
         const QString fid = message.value("fileId").toString();
         QFile* qf = m_incomingUpload.openFiles.value(fid, nullptr);
         if (!qf) return;
         const QByteArray data = QByteArray::fromBase64(message.value("data").toString().toUtf8());
         qf->write(data);
         m_incomingUpload.received += data.size();
+        // Update per-file received and compute how many files are completed
+        if (m_incomingUpload.receivedByFile.contains(fid)) {
+            qint64 soFar = m_incomingUpload.receivedByFile.value(fid) + data.size();
+            m_incomingUpload.receivedByFile[fid] = soFar;
+        }
+        int filesCompleted = 0;
+        for (auto it = m_incomingUpload.expectedSizes.constBegin(); it != m_incomingUpload.expectedSizes.constEnd(); ++it) {
+            const QString& id = it.key();
+            qint64 expected = it.value();
+            qint64 got = m_incomingUpload.receivedByFile.value(id, 0);
+            if (expected > 0 && got >= expected) filesCompleted++;
+        }
         if (!m_incomingUpload.senderId.isEmpty() && m_incomingUpload.totalSize > 0) {
             int percent = static_cast<int>(std::round(m_incomingUpload.received * 100.0 / m_incomingUpload.totalSize));
-            m_webSocketClient->notifyUploadProgressToSender(m_incomingUpload.senderId, m_incomingUpload.uploadId, percent);
+            m_webSocketClient->notifyUploadProgressToSender(
+                m_incomingUpload.senderId,
+                m_incomingUpload.uploadId,
+                percent,
+                filesCompleted,
+                m_incomingUpload.totalFiles
+            );
         }
     } else if (type == "upload_complete") {
         if (message.value("uploadId").toString() != m_incomingUpload.uploadId) return;
@@ -180,6 +221,22 @@ void MainWindow::onGenericMessageReceived(const QJsonObject& message) {
         if (!m_incomingUpload.senderId.isEmpty()) {
             m_webSocketClient->notifyUploadFinishedToSender(m_incomingUpload.senderId, m_incomingUpload.uploadId);
         }
+    } else if (type == "upload_abort") {
+        // Abort current upload: close and delete partial files, then notify sender 'unloaded'
+        const QString abortedId = message.value("uploadId").toString();
+        if (!abortedId.isEmpty()) m_canceledIncomingUploads.insert(abortedId);
+        for (auto it = m_incomingUpload.openFiles.begin(); it != m_incomingUpload.openFiles.end(); ++it) {
+            if (it.value()) { it.value()->flush(); it.value()->close(); delete it.value(); }
+        }
+        m_incomingUpload.openFiles.clear();
+        if (!m_incomingUpload.cacheDirPath.isEmpty()) {
+            QDir dir(m_incomingUpload.cacheDirPath);
+            dir.removeRecursively();
+        }
+        if (!m_incomingUpload.senderId.isEmpty()) {
+            m_webSocketClient->notifyUnloadedToSender(m_incomingUpload.senderId);
+        }
+        m_incomingUpload = IncomingUpload();
     } else if (type == "unload_media") {
         // Delete cached files for last upload
         if (!m_incomingUpload.cacheDirPath.isEmpty()) {
@@ -1981,11 +2038,14 @@ MainWindow::MainWindow(QWidget *parent)
         m_uploadActive = false;
         m_currentUploadId.clear();
         m_lastUploadPercent = 0;
+        m_uploadInProgress = false;
+        m_cancelRequested = false;
         if (m_uploadButton) {
             m_uploadButton->setCheckable(true);
             m_uploadButton->setChecked(false);
             m_uploadButton->setText("Upload to Client");
             m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }");
+            m_uploadButton->setEnabled(true);
         }
     });
     // Generic message tap for target-side upload handling
@@ -2175,7 +2235,7 @@ void MainWindow::onUploadButtonClicked() {
         QMessageBox::warning(this, "Upload", "Not connected or no target selected");
         return;
     }
-    // If currently active, this acts as Unload
+    // If currently active (already uploaded), this acts as Unload
     if (m_uploadActive) {
         m_webSocketClient->sendUnloadMedia(m_selectedClient.getId());
         // Reset local state; UI will finalize on unloadedReceived too
@@ -2185,6 +2245,34 @@ void MainWindow::onUploadButtonClicked() {
         m_uploadButton->setChecked(false);
         m_uploadButton->setText("Upload to Client");
         m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }");
+        return;
+    }
+
+    // If an upload is currently in progress, treat second click as cancel: abort and unload
+    if (m_uploadInProgress) {
+        m_cancelRequested = true;
+        if (!m_currentUploadId.isEmpty()) {
+            m_webSocketClient->sendUploadAbort(m_selectedClient.getId(), m_currentUploadId, "User cancelled");
+        }
+        if (m_uploadButton) {
+            m_uploadButton->setText("Cancelling…");
+            m_uploadButton->setEnabled(false);
+        }
+        // Treat as no longer in-progress locally so UI can start fresh on next click if needed
+        m_uploadInProgress = false;
+        // Fallback: if unloaded doesn't arrive within a short time, reset UI
+        QTimer::singleShot(3000, this, [this]() {
+            if (!m_cancelRequested) return; // already resolved
+            m_cancelRequested = false;
+            m_currentUploadId.clear();
+            if (m_uploadButton) {
+                m_uploadButton->setEnabled(true);
+                m_uploadButton->setCheckable(true);
+                m_uploadButton->setChecked(false);
+                m_uploadButton->setText("Upload to Client");
+                m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }");
+            }
+        });
         return;
     }
 
@@ -2221,9 +2309,14 @@ void MainWindow::onUploadButtonClicked() {
     // Begin upload
     m_currentUploadId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     m_lastUploadPercent = 0;
+    m_totalFilesToUpload = files.size();
+    m_filesUploadedSoFar = 0;
+    m_cancelRequested = false;
+    m_uploadInProgress = true;
     m_uploadButton->setCheckable(true);
     m_uploadButton->setChecked(true);
-    m_uploadButton->setText("Uploading… 0%");
+    // Rely on target-side progress; show preparing state immediately
+    m_uploadButton->setText("Preparing download");
     m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #2d6cdf; color: white; border-radius: 5px; } QPushButton:checked { background-color: #1f4ea8; }");
 
     // Send manifest
@@ -2238,16 +2331,22 @@ void MainWindow::onUploadButtonClicked() {
         if (!file.open(QIODevice::ReadOnly)) continue;
         int idx = 0;
         while (!file.atEnd()) {
+            if (m_cancelRequested) break;
             QByteArray chunk = file.read(chunkSize);
             m_webSocketClient->sendUploadChunk(m_selectedClient.getId(), m_currentUploadId, f.fileId, idx++, chunk.toBase64());
             sent += chunk.size();
-            int percent = total > 0 ? static_cast<int>(std::round(sent * 100.0 / total)) : 0;
-            // Optimistically update local progress bar on button
-            m_lastUploadPercent = percent;
-            m_uploadButton->setText(QString("Uploading… %1% ").arg(percent));
-            qApp->processEvents(QEventLoop::AllEvents, 5);
+            // Do not update UI here; target reports authoritative progress
+            qApp->processEvents(QEventLoop::AllEvents, 2);
         }
         file.close();
+        if (m_cancelRequested) break;
+    }
+    if (m_cancelRequested) {
+        // Already sent abort above; also request remote unload and reset UI once we get unloaded
+        m_webSocketClient->sendUnloadMedia(m_selectedClient.getId());
+        // Keep waiting for unloadedReceived to reset button; re-enable now to avoid frozen UI
+        if (m_uploadButton) m_uploadButton->setEnabled(true);
+        return;
     }
     m_webSocketClient->sendUploadComplete(m_selectedClient.getId(), m_currentUploadId);
 }
@@ -3792,6 +3891,7 @@ void MainWindow::createScreenViewPage() {
     // Upload button
     m_uploadButton = new QPushButton("Upload to Client");
     m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }");
+    m_uploadButton->setFixedWidth(260);
     m_uploadButton->setEnabled(true);
     connect(m_uploadButton, &QPushButton::clicked, this, &MainWindow::onUploadButtonClicked);
     actionLayout->addWidget(m_uploadButton, 0, Qt::AlignRight);
