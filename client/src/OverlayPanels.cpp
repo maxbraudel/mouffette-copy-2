@@ -339,8 +339,12 @@ void OverlayPanel::updateBackground() {
     // Always keep background item for positioning; make it visually transparent if disabled
     if (m_backgroundVisible) {
         m_background->setBrush(m_style.backgroundBrush());
+        // Tag as active overlay so view swallows clicks anywhere in its rect
+        m_background->setData(0, QStringLiteral("overlay"));
     } else {
         m_background->setBrush(Qt::NoBrush);
+        // Remove overlay tag so clicks outside actual child elements are treated as empty space
+        m_background->setData(0, QVariant());
     }
     m_background->setRect(0, 0, m_currentSize.width(), m_currentSize.height());
     m_background->setPos(m_currentPosition);
@@ -386,8 +390,26 @@ void OverlayPanel::updateLabelsLayout() {
             currentPos.setY(currentPos.y() + elementSize.height() + m_style.itemSpacing);
         }
     }
-    
-    // done
+    // Special case: if top panel with a single visible text element and background hidden,
+    // shrink the background rect to match that element's bounding rect so the hit area is tight.
+    if (m_position == Top && !m_backgroundVisible) {
+        int visibleCount = 0;
+        OverlayTextElement* onlyText = nullptr;
+        for (auto &e : m_elements) {
+            if (!e->isVisible()) continue;
+            ++visibleCount;
+            if (visibleCount == 1) {
+                onlyText = dynamic_cast<OverlayTextElement*>(e.get());
+            } else {
+                onlyText = nullptr; break;
+            }
+        }
+        if (onlyText && m_background) {
+            // Use element size without extra padding (background already positioned at m_currentPosition)
+            QSizeF tightSize = onlyText->preferredSize(m_style);
+            m_background->setRect(0,0,tightSize.width(), tightSize.height());
+        }
+    }
 }
 
 
