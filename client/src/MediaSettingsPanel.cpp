@@ -11,6 +11,8 @@
 #include <QLineEdit>
 #include <QPalette>
 #include <QGuiApplication>
+#include "Theme.h"
+#include "RoundedRectItem.h"
 
 MediaSettingsPanel::MediaSettingsPanel(QObject* parent)
     : QObject(parent)
@@ -27,13 +29,10 @@ void MediaSettingsPanel::buildUi() {
     m_widget = new QWidget();
     m_widget->setObjectName("MediaSettingsPanelWidget");
 
-    // Styling: match overlay grey background (approx 160 alpha black over white -> ~#000000 with alpha)
-    // We'll use a semi-opaque dark background and white text, rounded corners handled by proxy bounds.
-    QPalette pal = m_widget->palette();
-    pal.setColor(QPalette::Window, QColor(0,0,0,160));
-    pal.setColor(QPalette::WindowText, Qt::white);
-    m_widget->setPalette(pal);
-    m_widget->setAutoFillBackground(true);
+    // Make the QWidget visually transparent; we'll draw an exact rounded background in the scene
+    m_widget->setAttribute(Qt::WA_StyledBackground, true);
+    m_widget->setStyleSheet("background-color: transparent; color: white;");
+    m_widget->setAutoFillBackground(false);
 
     m_layout = new QVBoxLayout(m_widget);
     m_layout->setContentsMargins(16, 16, 16, 16);
@@ -115,6 +114,16 @@ void MediaSettingsPanel::buildUi() {
         m_layout->addWidget(row);
     }
 
+    // Scene-drawn rounded background behind the widget, matching overlay style
+    m_bgRect = new RoundedRectItem();
+    m_bgRect->setRadius(gOverlayCornerRadiusPx);
+    m_bgRect->setPen(Qt::NoPen);
+    m_bgRect->setBrush(QBrush(gOverlayBackgroundColor));
+    m_bgRect->setZValue(12009.5); // just below proxy
+    m_bgRect->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    m_bgRect->setData(0, QStringLiteral("overlay"));
+    m_bgRect->setAcceptedMouseButtons(Qt::NoButton); // let the proxy receive clicks
+
     m_proxy = new QGraphicsProxyWidget();
     m_proxy->setWidget(m_widget);
     m_proxy->setZValue(12010.0); // above overlays
@@ -131,12 +140,14 @@ void MediaSettingsPanel::buildUi() {
 
 void MediaSettingsPanel::ensureInScene(QGraphicsScene* scene) {
     if (!scene || !m_proxy) return;
+    if (m_bgRect && !m_bgRect->scene()) scene->addItem(m_bgRect);
     if (!m_proxy->scene()) scene->addItem(m_proxy);
 }
 
 void MediaSettingsPanel::setVisible(bool visible) {
     if (!m_proxy) return;
     m_proxy->setVisible(visible);
+    if (m_bgRect) m_bgRect->setVisible(visible);
 }
 
 bool MediaSettingsPanel::isVisible() const {
@@ -150,4 +161,10 @@ void MediaSettingsPanel::updatePosition(QGraphicsView* view) {
     QPointF topLeftVp(margin, margin);
     QPointF topLeftScene = view->viewportTransform().inverted().map(topLeftVp);
     m_proxy->setPos(topLeftScene);
+    // Match background rect to proxy widget geometry
+    if (m_bgRect) {
+        m_bgRect->setPos(topLeftScene);
+        const QSizeF s = m_proxy->size();
+        m_bgRect->setRect(0, 0, s.width(), s.height());
+    }
 }

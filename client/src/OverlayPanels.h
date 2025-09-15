@@ -20,6 +20,7 @@
 class QGraphicsSvgItem;
 
 #include "RoundedRectItem.h"
+#include "Theme.h"
 
 // Forward declarations
 class QGraphicsSceneMouseEvent;
@@ -105,11 +106,11 @@ protected:
 
 // Style shared by all overlay elements
 struct OverlayStyle {
-    QColor backgroundColor = QColor(0,0,0,160);
-    QColor activeBackgroundColor = QColor(74,144,226,180);
+    QColor backgroundColor = gOverlayBackgroundColor;
+    QColor activeBackgroundColor = gOverlayActiveBackgroundColor;
     QColor textColor = Qt::white;
     QColor activeTextColor = Qt::white;
-    int cornerRadius = 8;
+    int cornerRadius = gOverlayCornerRadiusPx;
     int paddingX = 12;
     int paddingY = 8;
     int gap = 8;          // Distance panel <-> media edge (pixels, in viewport space)
@@ -118,7 +119,7 @@ struct OverlayStyle {
     int maxWidth = 300;
     qreal zOverlay = 12000.0;
     qreal zOverlayContent = 12001.0;
-    QBrush backgroundBrush() const { return QBrush(backgroundColor); }
+    QBrush backgroundBrush() const { return QBrush(gOverlayBackgroundColor); }
     QBrush tintedBackgroundBrush(qreal t = 0.33) const {
         const QColor accent(74,144,226,255);
         auto blend=[&](const QColor&a,const QColor&b){return QColor(
