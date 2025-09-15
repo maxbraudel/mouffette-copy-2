@@ -46,6 +46,26 @@ static QBrush overlayStateBrush(const OverlayStyle& style) {
     return style.backgroundBrush();
 }
 
+static QBrush buttonBrushForState(const OverlayStyle& style, OverlayElement::ElementState st) {
+    QColor base = style.backgroundColor;
+    const QColor accent(74,144,226,255);
+    auto blend=[&](const QColor&a,const QColor&b,qreal t){return QColor(
+        a.red()*(1-t)+b.red()*t,
+        a.green()*(1-t)+b.green()*t,
+        a.blue()*(1-t)+b.blue()*t,
+        a.alpha());};
+    switch(st) {
+        case OverlayElement::Hovered: return QBrush(blend(base, accent, 0.20));
+        case OverlayElement::Active: return QBrush(blend(base, accent, 0.35));
+        case OverlayElement::Toggled: return QBrush(blend(base, accent, 0.50));
+        case OverlayElement::Disabled: {
+            QColor dim = base; dim.setAlphaF(dim.alphaF()*0.35); return QBrush(dim);
+        }
+        case OverlayElement::Normal:
+        default: return QBrush(base);
+    }
+}
+
 void OverlayTextElement::applyStyle(const OverlayStyle& style) {
     m_currentStyle = style;
     createGraphicsItems();
@@ -65,7 +85,13 @@ QSizeF OverlayTextElement::preferredSize(const OverlayStyle& style) const {
     QFont f; f.setPixelSize(16);
     QFontMetrics fm(f);
     QRect r = fm.boundingRect(m_text);
-    return QSizeF(r.width() + 2*style.paddingX, r.height() + 2*style.paddingY);
+    qreal w = r.width() + 2*style.paddingX;
+    qreal h = r.height() + 2*style.paddingY;
+    if (style.defaultHeight > 0) {
+        // Enforce uniform element height but never shrink below natural content height
+        h = std::max(h, static_cast<qreal>(style.defaultHeight));
+    }
+    return QSizeF(w, h);
 }
 
 void OverlayTextElement::setSize(const QSizeF& size) {
@@ -75,7 +101,9 @@ void OverlayTextElement::setSize(const QSizeF& size) {
     }
     if (m_textItem) {
         QRectF tb = m_textItem->boundingRect();
-        m_textItem->setPos((size.width()-tb.width())/2.0, (size.height()-tb.height())/2.0);
+        // If a defaultHeight is enforced, we rely on m_currentStyle for vertical centering; otherwise natural center
+        qreal y = (size.height()-tb.height())/2.0;
+        m_textItem->setPos((size.width()-tb.width())/2.0, y);
     }
 }
 
@@ -101,6 +129,219 @@ void OverlayTextElement::setText(const QString& text) {
             m_textItem->setPos((bg.width()-tb.width())/2.0, (bg.height()-tb.height())/2.0);
         }
     }
+}
+
+// ============================================================================
+// OverlayButtonElement Implementation (stub for future states)
+// ============================================================================
+
+OverlayButtonElement::OverlayButtonElement(const QString& label, const QString& id)
+    : OverlayElement(Button, id), m_label(label) {}
+
+OverlayButtonElement::~OverlayButtonElement() { delete m_background; }
+
+void OverlayButtonElement::createGraphicsItems() {
+    if (m_background) return;
+    m_background = new MouseBlockingRoundedRectItem();
+    m_background->setPen(Qt::NoPen);
+    m_background->setZValue(Z_SCENE_OVERLAY);
+    m_background->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
+    m_background->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    m_background->setData(0, QStringLiteral("overlay"));
+    if (m_onClicked) m_background->setClickCallback(m_onClicked);
+
+    if (!m_label.isEmpty()) {
+        m_textItem = new MouseBlockingTextItem(m_label, m_background);
+        m_textItem->setZValue(Z_OVERLAY_CONTENT);
+        m_textItem->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
+        m_textItem->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+        m_textItem->setData(0, QStringLiteral("overlay"));
+    }
+}
+
+void OverlayButtonElement::applyStyle(const OverlayStyle& style) {
+    m_currentStyle = style;
+    createGraphicsItems();
+    if (m_background) {
+        m_background->setBrush(buttonBrushForState(style, state()));
+        m_background->setRadius(style.cornerRadius);
+    }
+    if (m_textItem) {
+        QFont f = m_textItem->font();
+        f.setPixelSize(16);
+        m_textItem->setFont(f);
+        m_textItem->setDefaultTextColor(style.textColor);
+    }
+}
+
+QSizeF OverlayButtonElement::preferredSize(const OverlayStyle& style) const {
+    // Square: side = defaultHeight if >0, else text metrics + padding (falling back to 24)
+    int base = style.defaultHeight > 0 ? style.defaultHeight : 24;
+    if (m_textItem || !m_label.isEmpty()) {
+        QFont f; f.setPixelSize(16);
+        QFontMetrics fm(f);
+        QRect r = fm.boundingRect(m_label);
+        int needed = r.height() + 2*style.paddingY;
+        base = std::max(base, needed);
+        int neededW = r.width() + 2*style.paddingX;
+        base = std::max(base, neededW); // ensure square fits text width too
+    }
+    return QSizeF(base, base);
+}
+
+void OverlayButtonElement::setSize(const QSizeF& size) {
+    createGraphicsItems();
+    if (m_background) m_background->setRect(0,0,size.width(), size.height());
+    updateLabelPosition();
+}
+
+void OverlayButtonElement::updateLabelPosition() {
+    if (!m_textItem || !m_background) return;
+    QRectF tb = m_textItem->boundingRect();
+    QRectF br = m_background->rect();
+    m_textItem->setPos((br.width()-tb.width())/2.0, (br.height()-tb.height())/2.0);
+}
+
+void OverlayButtonElement::setPosition(const QPointF& pos) {
+    createGraphicsItems();
+    if (m_background) m_background->setPos(pos);
+}
+
+void OverlayButtonElement::setVisible(bool v) {
+    m_visible = v;
+    if (m_background) m_background->setVisible(v);
+    if (m_textItem) m_textItem->setVisible(v);
+}
+
+void OverlayButtonElement::setLabel(const QString& l) {
+    if (m_label == l) return;
+    m_label = l;
+    if (!m_textItem && !m_label.isEmpty()) {
+        // Create text item lazily if label added after construction
+        m_textItem = new MouseBlockingTextItem(m_label, m_background);
+        m_textItem->setZValue(Z_OVERLAY_CONTENT);
+        m_textItem->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
+        m_textItem->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+        m_textItem->setData(0, QStringLiteral("overlay"));
+        // Reapply style to set font/color
+        applyStyle(m_currentStyle);
+    } else if (m_textItem) {
+        m_textItem->setPlainText(m_label);
+    }
+    updateLabelPosition();
+}
+
+// Override setState to update brush dynamically
+void OverlayButtonElement::setState(ElementState s) {
+    if (state() == s) return;
+    OverlayElement::setState(s);
+    if (m_background) m_background->setBrush(buttonBrushForState(m_currentStyle, s));
+}
+
+// ============================================================================
+// OverlaySliderElement Implementation (horizontal track/fill)
+// ============================================================================
+
+OverlaySliderElement::OverlaySliderElement(const QString& id)
+    : OverlayElement(Slider, id) {}
+
+OverlaySliderElement::~OverlaySliderElement() { delete m_container; }
+
+void OverlaySliderElement::createGraphicsItems() {
+    if (m_container) return;
+    m_container = new MouseBlockingRectItem();
+    m_container->setPen(Qt::NoPen);
+    m_container->setBrush(Qt::NoBrush); // transparent container
+    m_container->setZValue(Z_SCENE_OVERLAY);
+    m_container->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
+    m_container->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    m_container->setData(0, QStringLiteral("overlay"));
+
+    m_track = new MouseBlockingRoundedRectItem(m_container);
+    m_track->setPen(Qt::NoPen);
+    m_track->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
+    m_track->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    m_track->setData(0, QStringLiteral("overlay"));
+
+    m_fill = new MouseBlockingRoundedRectItem(m_container);
+    m_fill->setPen(Qt::NoPen);
+    m_fill->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
+    m_fill->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    m_fill->setData(0, QStringLiteral("overlay"));
+}
+
+void OverlaySliderElement::applyStyle(const OverlayStyle& style) {
+    m_currentStyle = style;
+    createGraphicsItems();
+    if (m_track) {
+        QColor trackColor = style.backgroundColor;
+        trackColor.setAlphaF(std::min(1.0, trackColor.alphaF() * 0.55)); // lighter track
+        m_track->setBrush(trackColor);
+        m_track->setRadius(style.cornerRadius);
+    }
+    if (m_fill) {
+        // Use stronger tint depending on state (e.g., Active brighter)
+        qreal t = 0.6;
+        if (state() == OverlayElement::Hovered) t = 0.7;
+        else if (state() == OverlayElement::Active) t = 0.85;
+        else if (state() == OverlayElement::Disabled) t = 0.25;
+        else if (state() == OverlayElement::Toggled) t = 0.9;
+        m_fill->setBrush(style.tintedBackgroundBrush(t));
+        m_fill->setRadius(style.cornerRadius);
+    }
+}
+
+QSizeF OverlaySliderElement::preferredSize(const OverlayStyle& style) const {
+    // Heuristic width: 8 * defaultHeight (or 8 * 24) to give a decent slider length
+    int h = style.defaultHeight > 0 ? style.defaultHeight : 24;
+    int w = h * 8;
+    return QSizeF(w, h);
+}
+
+void OverlaySliderElement::setSize(const QSizeF& size) {
+    createGraphicsItems();
+    if (!m_container) return;
+    m_container->setRect(0,0,size.width(), size.height());
+    // Track occupies full height minus vertical padding fraction (use paddingY to inset slightly)
+    qreal insetY = std::min<qreal>(m_currentStyle.paddingY, size.height()/4.0);
+    qreal trackH = size.height() - 2*insetY;
+    m_trackRect = QRectF(0, insetY, size.width(), trackH);
+    if (m_track) m_track->setRect(m_trackRect);
+    updateFill();
+}
+
+void OverlaySliderElement::updateFill() {
+    if (!m_fill) return;
+    qreal w = m_trackRect.width() * std::clamp<qreal>(m_value, 0.0, 1.0);
+    m_fillRect = QRectF(m_trackRect.left(), m_trackRect.top(), w, m_trackRect.height());
+    m_fill->setRect(m_fillRect);
+}
+
+void OverlaySliderElement::setPosition(const QPointF& pos) {
+    createGraphicsItems();
+    if (m_container) m_container->setPos(pos);
+}
+
+void OverlaySliderElement::setVisible(bool v) {
+    m_visible = v;
+    if (m_container) m_container->setVisible(v);
+}
+
+void OverlaySliderElement::setValue(qreal v) {
+    qreal clamped = std::clamp<qreal>(v, 0.0, 1.0);
+    if (std::abs(clamped - m_value) < 1e-6) return;
+    m_value = clamped;
+    updateFill();
+}
+
+// Provide state updates for slider (mainly affects fill tint)
+void OverlaySliderElement::setState(ElementState s) {
+    if (state() == s) return;
+    OverlayElement::setState(s);
+    // Reapply style to update tint intensities based on new state
+    applyStyle(m_currentStyle);
+    // Preserve geometry after style reapplication
+    updateFill();
 }
 
 // ============================================================================
@@ -161,6 +402,29 @@ void OverlayPanel::addElement(std::shared_ptr<OverlayElement> element) {
     
     // Recompute layout (size + child positions) if we already know view anchor later
     updateLabelsLayout();
+}
+
+// Convenience helpers -------------------------------------------------------
+std::shared_ptr<OverlayTextElement> OverlayPanel::addText(const QString& text, const QString& id) {
+    auto el = std::make_shared<OverlayTextElement>(text, id);
+    addElement(el);
+    return el;
+}
+
+std::shared_ptr<OverlayButtonElement> OverlayPanel::addButton(const QString& label, const QString& id) {
+    auto el = std::make_shared<OverlayButtonElement>(label, id);
+    addElement(el);
+    return el;
+}
+
+std::shared_ptr<OverlaySliderElement> OverlayPanel::addSlider(const QString& id) {
+    auto el = std::make_shared<OverlaySliderElement>(id);
+    addElement(el);
+    return el;
+}
+
+void OverlayPanel::newRow() {
+    addElement(std::make_shared<RowBreakElement>());
 }
 
 void OverlayPanel::removeElement(const QString& id) {
@@ -269,51 +533,49 @@ void OverlayPanel::updateLayoutWithAnchor(const QPointF& anchorScenePoint, QGrap
 
 QSizeF OverlayPanel::calculateSize() const {
     if (m_elements.isEmpty()) return QSizeF(0, 0);
-    
-    qreal totalWidth = 0;
-    qreal totalHeight = 0;
-    qreal maxWidth = 0;
-    qreal maxHeight = 0;
-    
-    // Calculate size for elements (new system)
-    for (const auto& element : m_elements) {
-        if (!element->isVisible()) continue;
-        
-        QSizeF elementSize = element->preferredSize(m_style);
-        maxWidth = std::max(maxWidth, elementSize.width());
-        maxHeight = std::max(maxHeight, elementSize.height());
-        
-        if (m_layout == Horizontal) {
-            totalWidth += elementSize.width();
-            totalHeight = std::max(totalHeight, elementSize.height());
-        } else {
-            totalWidth = std::max(totalWidth, elementSize.width());
-            totalHeight += elementSize.height();
+    if (m_layout == Vertical) {
+        // Vertical layout unchanged (single column stacking)
+        qreal totalW = 0, totalH = 0; int count = 0;
+        for (const auto &e : m_elements) if (e->isVisible()) {
+            QSizeF sz = e->preferredSize(m_style);
+            totalW = std::max(totalW, sz.width());
+            totalH += sz.height();
+            ++count;
         }
+        if (count > 1) totalH += (count-1)*m_style.itemSpacing;
+        totalW += 2*m_style.paddingX;
+        totalH += 2*m_style.paddingY;
+        return QSizeF(totalW, totalH);
     }
-    
-    // Count visible elements for spacing
-    int visibleCount = 0;
-    for (const auto& element : m_elements) if (element->isVisible()) ++visibleCount;
-    
-    if (visibleCount > 1) {
-        if (m_layout == Horizontal) {
-            totalWidth += (visibleCount - 1) * m_style.itemSpacing;
-        } else {
-            totalHeight += (visibleCount - 1) * m_style.itemSpacing;
+    // Horizontal layout with possible explicit row breaks
+    QList<qreal> rowWidths; rowWidths.append(0.0);
+    QList<qreal> rowHeights; rowHeights.append(0.0);
+    QList<int> rowCounts; rowCounts.append(0);
+    int r = 0;
+    for (const auto &e : m_elements) {
+        if (e->type() == OverlayElement::RowBreak) {
+            // Only start a new row if current row has elements (avoid empty duplicates)
+            if (rowCounts[r] == 0) continue;
+            rowWidths.append(0.0); rowHeights.append(0.0); rowCounts.append(0); ++r; continue;
         }
+        if (!e->isVisible()) continue;
+        QSizeF sz = e->preferredSize(m_style);
+        if (rowCounts[r] > 0) rowWidths[r] += m_style.itemSpacing;
+        rowWidths[r] += sz.width();
+        rowHeights[r] = std::max(rowHeights[r], sz.height());
+        rowCounts[r]++;
     }
-    
-    // Add padding
-    totalWidth += 2 * m_style.paddingX;
-    totalHeight += 2 * m_style.paddingY;
-    
-    // Constrain to maximum width
-    if (m_style.maxWidth > 0) {
-        totalWidth = std::min(totalWidth, static_cast<qreal>(m_style.maxWidth));
+    // Aggregate size
+    qreal panelW = 0, panelH = 0;
+    for (int i=0;i<rowWidths.size();++i) {
+        panelW = std::max(panelW, rowWidths[i]);
+        panelH += rowHeights[i];
+        if (i+1 < rowWidths.size()) panelH += m_style.itemSpacing; // gap between rows
     }
-    
-    return QSizeF(totalWidth, totalHeight);
+    panelW += 2*m_style.paddingX;
+    panelH += 2*m_style.paddingY;
+    if (m_style.maxWidth > 0) panelW = std::min(panelW, static_cast<qreal>(m_style.maxWidth));
+    return QSizeF(panelW, panelH);
 }
 
 void OverlayPanel::createBackground() {
@@ -352,42 +614,60 @@ void OverlayPanel::updateBackground() {
 
 void OverlayPanel::updateLabelsLayout() {
     if (m_elements.isEmpty()) return;
-    
-    QPointF currentPos(m_style.paddingX, m_style.paddingY);
-    
     const bool haveContainer = (m_background != nullptr);
-
-    // Layout elements (new system)
-    for (auto& element : m_elements) {
-        if (!element->isVisible()) continue;
-        
-        QSizeF elementSize = element->preferredSize(m_style);
-        
-        // Adjust size if constrained by panel width
-        if (m_layout == Horizontal && m_style.maxWidth > 0) {
-            qreal availableWidth = m_currentSize.width() - 2 * m_style.paddingX;
-            if (elementSize.width() > availableWidth) {
-                elementSize.setWidth(availableWidth);
+    if (m_layout == Vertical) {
+        QPointF currentPos(m_style.paddingX, m_style.paddingY);
+        for (auto &element : m_elements) {
+            if (!element->isVisible()) continue;
+            if (element->type() == OverlayElement::RowBreak) continue; // ignore row breaks in vertical mode
+            QSizeF elementSize = element->preferredSize(m_style);
+            element->setSize(elementSize);
+            if (haveContainer) {
+                if (auto *gi = element->graphicsItem()) {
+                    if (gi->parentItem() != m_background) gi->setParentItem(m_background);
+                }
+                element->setPosition(currentPos);
+            } else {
+                element->setPosition(m_currentPosition + currentPos);
             }
-        }
-        
-        element->setSize(elementSize);
-        if (haveContainer) {
-            if (auto *gi = element->graphicsItem()) {
-                if (gi->parentItem() != m_background) gi->setParentItem(m_background);
-            }
-            // Local position inside container
-            element->setPosition(currentPos);
-        } else {
-            // Absolute fallback
-            element->setPosition(m_currentPosition + currentPos);
-        }
-        
-        // Move to next position
-        if (m_layout == Horizontal) {
-            currentPos.setX(currentPos.x() + elementSize.width() + m_style.itemSpacing);
-        } else {
             currentPos.setY(currentPos.y() + elementSize.height() + m_style.itemSpacing);
+        }
+    } else {
+        // Horizontal with potential row breaks
+        qreal panelInnerW = m_currentSize.width() - 2*m_style.paddingX;
+        QPointF origin(m_style.paddingX, m_style.paddingY);
+        QPointF cursor = origin;
+        qreal currentRowMaxH = 0;
+        for (auto &element : m_elements) {
+            if (element->type() == OverlayElement::RowBreak) {
+                // New row only if something placed in current row
+                if (cursor.x() != origin.x()) {
+                    // advance to next row
+                    origin.setY(origin.y() + currentRowMaxH + m_style.itemSpacing);
+                    cursor = QPointF(m_style.paddingX, origin.y());
+                    currentRowMaxH = 0;
+                }
+                continue;
+            }
+            if (!element->isVisible()) continue;
+            QSizeF elementSize = element->preferredSize(m_style);
+            // Constrain width if exceeding panel width (rare)
+            if (m_style.maxWidth > 0) {
+                qreal maxInner = std::min(panelInnerW, static_cast<qreal>(m_style.maxWidth - 2*m_style.paddingX));
+                if (elementSize.width() > maxInner) elementSize.setWidth(maxInner);
+            }
+            element->setSize(elementSize);
+            if (haveContainer) {
+                if (auto *gi = element->graphicsItem()) {
+                    if (gi->parentItem() != m_background) gi->setParentItem(m_background);
+                }
+                element->setPosition(cursor);
+            } else {
+                element->setPosition(m_currentPosition + cursor);
+            }
+            cursor.setX(cursor.x() + elementSize.width() + m_style.itemSpacing);
+            currentRowMaxH = std::max(currentRowMaxH, elementSize.height());
+            // If next element is row break we'll wrap automatically on next iteration
         }
     }
     // Special case: if top panel with a single visible text element and background hidden,

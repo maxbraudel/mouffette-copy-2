@@ -675,13 +675,10 @@ protected:
     
     void updateOverlayVisibility() {
         bool shouldShowTop = !m_filename.isEmpty() && isSelected();
-        
         if (m_topPanel) {
             m_topPanel->setVisible(shouldShowTop);
         }
-        
-        // Bottom panel visibility is managed separately by video controls
-        // For non-video media, bottom panel stays hidden
+        // Bottom panel visibility for video items managed separately (video subclass may toggle)
     }
     
     void updateOverlayLayout() {
@@ -784,6 +781,27 @@ public:
         m_player->setAudioOutput(m_audio);
         m_player->setVideoSink(m_sink);
         m_player->setSource(QUrl::fromLocalFile(filePath));
+
+        // Video-specific: add overlay button controls into bottom panel (play, stop, repeat, mute)
+        if (m_bottomPanel) {
+            auto playBtn = m_bottomPanel->addButton("▶", "play");
+            if (playBtn) playBtn->setOnClicked([this]() { this->togglePlayPause(); });
+            auto stopBtn = m_bottomPanel->addButton("■", "stop");
+            if (stopBtn) stopBtn->setOnClicked([this]() { this->stopToBeginning(); });
+            auto repeatBtn = m_bottomPanel->addButton("R", "repeat");
+            if (repeatBtn) {
+                repeatBtn->setOnClicked([this]() { this->toggleRepeat(); });
+                repeatBtn->setState(m_repeatEnabled ? OverlayElement::Toggled : OverlayElement::Normal);
+            }
+            auto muteBtn = m_bottomPanel->addButton("M", "mute");
+            if (muteBtn) {
+                muteBtn->setOnClicked([this]() { this->toggleMute(); });
+                bool muted = m_audio && m_audio->isMuted();
+                muteBtn->setState(muted ? OverlayElement::Toggled : OverlayElement::Normal);
+            }
+            // Initially visible only when selected; updateOverlayVisibility handles top panel
+            if (m_bottomPanel) m_bottomPanel->setVisible(isSelected());
+        }
         
         // Connect signals directly (no worker needed)
         QObject::connect(m_sink, &QVideoSink::videoFrameChanged, m_player, [this](const QVideoFrame& f){
@@ -1139,6 +1157,27 @@ public:
         updateControlsLayout();
         update();
     }
+    void toggleRepeat() {
+        m_repeatEnabled = !m_repeatEnabled;
+        // Sync overlay button state if present
+        if (m_bottomPanel) {
+            auto btn = std::dynamic_pointer_cast<OverlayButtonElement>(m_bottomPanel->findElement("repeat"));
+            if (btn) btn->setState(m_repeatEnabled ? OverlayElement::Toggled : OverlayElement::Normal);
+        }
+        updateControlsLayout();
+        update();
+    }
+    void toggleMute() {
+        if (!m_audio) return;
+        m_audio->setMuted(!m_audio->isMuted());
+        bool muted = m_audio->isMuted();
+        if (m_bottomPanel) {
+            auto btn = std::dynamic_pointer_cast<OverlayButtonElement>(m_bottomPanel->findElement("mute"));
+            if (btn) btn->setState(muted ? OverlayElement::Toggled : OverlayElement::Normal);
+        }
+        updateControlsLayout();
+        update();
+    }
     void stopToBeginning() {
         if (!m_player) return;
     m_holdLastFrameAtEnd = false;
@@ -1149,19 +1188,6 @@ public:
     m_smoothProgressRatio = 0.0;
     updateProgressBar();
     if (m_progressTimer) m_progressTimer->stop();
-    updateControlsLayout();
-    update();
-    }
-    void toggleRepeat() {
-    m_repeatEnabled = !m_repeatEnabled;
-    // Refresh to update button background tint
-    updateControlsLayout();
-    update();
-    }
-    void toggleMute() {
-        if (!m_audio) return;
-    m_audio->setMuted(!m_audio->isMuted());
-    // Ensure the icon updates immediately
     updateControlsLayout();
     update();
     }
@@ -1713,24 +1739,25 @@ private:
         const qreal x3 = x2 + repeatWpx + buttonGapPx;
         const qreal x4 = x3 + muteWpx + buttonGapPx;
 
+        auto appliedCornerRadius = m_overlayStyle.cornerRadius; // unified corner radius source
         if (m_playBtnRectItem) {
             m_playBtnRectItem->setRect(0, 0, playWpx, rowHpx); m_playBtnRectItem->setPos(x0, 0);
-            m_playBtnRectItem->setRadius(ResizableMediaBase::getCornerRadiusOfMediaOverlaysPx());
+            m_playBtnRectItem->setRadius(appliedCornerRadius);
             m_playBtnRectItem->setBrush(baseBrush);
         }
         if (m_stopBtnRectItem) {
             m_stopBtnRectItem->setRect(0, 0, stopWpx, rowHpx); m_stopBtnRectItem->setPos(x1, 0);
-            m_stopBtnRectItem->setRadius(ResizableMediaBase::getCornerRadiusOfMediaOverlaysPx());
+            m_stopBtnRectItem->setRadius(appliedCornerRadius);
             m_stopBtnRectItem->setBrush(baseBrush);
         }
         if (m_repeatBtnRectItem) {
             m_repeatBtnRectItem->setRect(0, 0, repeatWpx, rowHpx); m_repeatBtnRectItem->setPos(x2, 0);
-            m_repeatBtnRectItem->setRadius(ResizableMediaBase::getCornerRadiusOfMediaOverlaysPx());
+            m_repeatBtnRectItem->setRadius(appliedCornerRadius);
             m_repeatBtnRectItem->setBrush(m_repeatEnabled ? activeBrush : baseBrush);
         }
         if (m_muteBtnRectItem) {
             m_muteBtnRectItem->setRect(0, 0, muteWpx, rowHpx); m_muteBtnRectItem->setPos(x3, 0);
-            m_muteBtnRectItem->setRadius(ResizableMediaBase::getCornerRadiusOfMediaOverlaysPx());
+            m_muteBtnRectItem->setRadius(appliedCornerRadius);
             bool muted = m_audio && m_audio->isMuted();
             m_muteBtnRectItem->setBrush(muted ? activeBrush : baseBrush);
         }

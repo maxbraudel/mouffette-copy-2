@@ -28,17 +28,21 @@ public:
         : RoundedRectItem(parent) {
         setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
     }
+    void setClickCallback(std::function<void()> cb) { m_clickCallback = std::move(cb); }
 
 protected:
     void mousePressEvent(QGraphicsSceneMouseEvent* event) override {
         // Accept the event to prevent it from propagating to items behind
         event->accept();
+        if (m_clickCallback) m_clickCallback();
     }
     
     void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override {
         // Accept the event to prevent it from propagating to items behind
         event->accept();
     }
+private:
+    std::function<void()> m_clickCallback;
 };
 
 // Custom QGraphicsTextItem that blocks mouse events from passing through
@@ -92,7 +96,7 @@ struct OverlayStyle {
     int paddingY = 8;
     int gap = 8;          // Distance panel <-> media edge (pixels, in viewport space)
     int itemSpacing = 8;  // Space between elements
-    int defaultHeight = -1; // -1 = auto
+    int defaultHeight = -1; // >0 forces uniform element height (text vertically centered)
     int maxWidth = 300;
     qreal zOverlay = 12000.0;
     qreal zOverlayContent = 12001.0;
@@ -110,7 +114,7 @@ struct OverlayStyle {
 
 class OverlayElement {
 public:
-    enum ElementType { Label, Button, ToggleButton, Slider };
+    enum ElementType { Label, Button, ToggleButton, Slider, RowBreak };
     enum ElementState { Normal, Hovered, Active, Disabled, Toggled };
     OverlayElement(ElementType type, const QString& id = QString()) : m_type(type), m_id(id) {}
     virtual ~OverlayElement() = default;
@@ -124,9 +128,13 @@ public:
     virtual QGraphicsItem* graphicsItem() = 0;
     virtual bool isVisible() const = 0;
     virtual void setVisible(bool v) = 0;
+    // State management (default no-op: subclasses override to update appearance)
+    virtual void setState(ElementState s) { m_state = s; }
+    ElementState state() const { return m_state; }
 protected:
     ElementType m_type;
     QString m_id;
+    ElementState m_state = Normal;
 };
 
 class OverlayTextElement : public OverlayElement {
@@ -154,6 +162,85 @@ private:
     OverlayStyle m_currentStyle; // last applied style snapshot
 };
 
+// Basic square button element (stub). Will gain richer state visuals in a later step.
+class OverlayButtonElement : public OverlayElement {
+public:
+    // If label empty, button renders blank square (icon-ready placeholder)
+    OverlayButtonElement(const QString& label = QString(), const QString& id = QString());
+    ~OverlayButtonElement() override;
+
+    QString label() const { return m_label; }
+    void setLabel(const QString& l);
+
+    // OverlayElement implementation
+    void applyStyle(const OverlayStyle& style) override;
+    QSizeF preferredSize(const OverlayStyle& style) const override; // square based on defaultHeight (or text if larger)
+    void setSize(const QSizeF& size) override;
+    void setPosition(const QPointF& pos) override;
+    QGraphicsItem* graphicsItem() override { return m_background; }
+    bool isVisible() const override { return m_visible; }
+    void setVisible(bool v) override;
+    void setState(ElementState s) override; // updates brush
+    void setOnClicked(std::function<void()> cb) { m_onClicked = std::move(cb); if (m_background) m_background->setClickCallback(m_onClicked); }
+private:
+    void createGraphicsItems();
+    void updateLabelPosition();
+    QString m_label;
+    bool m_visible = true;
+    MouseBlockingRoundedRectItem* m_background = nullptr;
+    MouseBlockingTextItem* m_textItem = nullptr; // optional text placeholder
+    OverlayStyle m_currentStyle;
+    std::function<void()> m_onClicked;
+};
+
+// Linear horizontal slider (track + fill). Value range [0,1].
+class OverlaySliderElement : public OverlayElement {
+public:
+    OverlaySliderElement(const QString& id = QString());
+    ~OverlaySliderElement() override;
+
+    qreal value() const { return m_value; }
+    void setValue(qreal v); // clamps and updates fill
+
+    // OverlayElement implementation
+    void applyStyle(const OverlayStyle& style) override;
+    QSizeF preferredSize(const OverlayStyle& style) const override; // width heuristic, height = max(defaultHeight, track)
+    void setSize(const QSizeF& size) override;
+    void setPosition(const QPointF& pos) override;
+    QGraphicsItem* graphicsItem() override { return m_container; }
+    bool isVisible() const override { return m_visible; }
+    void setVisible(bool v) override;
+    void setState(ElementState s) override; // updates tint
+
+    // Track/fill geometry accessors (for potential hit-testing in migration)
+    QRectF trackRect() const { return m_trackRect; }
+    QRectF fillRect() const { return m_fillRect; }
+private:
+    void createGraphicsItems();
+    void updateFill();
+    qreal m_value = 0.0; // 0..1
+    bool m_visible = true;
+    MouseBlockingRectItem* m_container = nullptr; // parent container (transparent, still blocks events)
+    MouseBlockingRoundedRectItem* m_track = nullptr; // full track
+    MouseBlockingRoundedRectItem* m_fill = nullptr;  // filled portion
+    OverlayStyle m_currentStyle;
+    QRectF m_trackRect;
+    QRectF m_fillRect;
+};
+
+// Sentinel element representing a row break (no graphics)
+class RowBreakElement : public OverlayElement {
+public:
+    RowBreakElement() : OverlayElement(RowBreak, QString()) {}
+    void applyStyle(const OverlayStyle&) override {}
+    QSizeF preferredSize(const OverlayStyle&) const override { return QSizeF(0,0); }
+    void setSize(const QSizeF&) override {}
+    void setPosition(const QPointF&) override {}
+    QGraphicsItem* graphicsItem() override { return nullptr; }
+    bool isVisible() const override { return true; }
+    void setVisible(bool) override {}
+};
+
 class OverlayPanel {
 public:
     enum Position { Top, Bottom };
@@ -171,6 +258,11 @@ public:
     void removeElement(std::shared_ptr<OverlayElement> element);
     void clearElements();
     std::shared_ptr<OverlayElement> findElement(const QString& id) const;
+    // Convenience factories (return the created shared_ptr for chaining)
+    std::shared_ptr<OverlayTextElement> addText(const QString& text, const QString& id = QString());
+    std::shared_ptr<OverlayButtonElement> addButton(const QString& label = QString(), const QString& id = QString());
+    std::shared_ptr<OverlaySliderElement> addSlider(const QString& id = QString());
+    void newRow(); // inserts a row break token
     const QList<std::shared_ptr<OverlayElement>>& elements() const { return m_elements; }
     // Visibility
     bool isVisible() const { return m_visible; }
