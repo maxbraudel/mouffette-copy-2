@@ -103,11 +103,7 @@ void ScreenCanvas::updateRemoteCursor(int globalX, int globalY) {
     QPointF scenePos = mapRemoteCursorToScene(globalX, globalY);
     if (scenePos.isNull()) return; // outside any screen
     if (!m_remoteCursorDot) {
-        m_remoteCursorDot = new QGraphicsEllipseItem(QRectF(-6,-6,12,12));
-        m_remoteCursorDot->setBrush(QBrush(QColor(255,64,64,200)));
-        m_remoteCursorDot->setPen(Qt::NoPen);
-        m_remoteCursorDot->setZValue(4000.0);
-        if (m_scene) m_scene->addItem(m_remoteCursorDot);
+        recreateRemoteCursorItem();
     }
     if (m_remoteCursorDot) { m_remoteCursorDot->setPos(scenePos); m_remoteCursorDot->show(); }
 }
@@ -397,6 +393,8 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                 if (isVideo) {
                     // Use default handle sizes similar to previous inline defaults (visual 12, selection 30)
                     auto* v = new ResizableVideoItem(localPath, 12, 30, fi.fileName(), m_videoControlsFadeMs);
+                    // Record original file path for later upload manifest collection
+                    v->setSourcePath(localPath);
                     // Preserve global canvas media scale (so video size matches screens & images 1:1)
                     v->setInitialScaleFactor(m_scaleFactor);
                     // Use current placeholder base size (constructor default 640x360) to center on drop point
@@ -415,6 +413,8 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                     QPixmap pm(localPath);
                     if (!pm.isNull()) {
                         auto* p = new ResizablePixmapItem(pm, 12, 30, fi.fileName());
+                        // Record original file path for later upload manifest collection
+                        p->setSourcePath(localPath);
                         p->setPos(scenePos - QPointF(pm.width()/2.0 * m_scaleFactor, pm.height()/2.0 * m_scaleFactor));
                         p->setScale(m_scaleFactor);
                         m_scene->addItem(p);
@@ -604,4 +604,32 @@ void ScreenCanvas::debugLogScreenSizes() const {
                  << "itemRect" << r.width() << "x" << r.height()
                  << "sceneBounding" << item->sceneBoundingRect().size();
     }
+}
+
+void ScreenCanvas::recreateRemoteCursorItem() {
+    if (!m_scene) return;
+    if (m_remoteCursorDot) {
+        m_scene->removeItem(m_remoteCursorDot);
+        delete m_remoteCursorDot;
+        m_remoteCursorDot = nullptr;
+    }
+    const int d = m_remoteCursorDiameterPx;
+    const qreal r = d / 2.0;
+    m_remoteCursorDot = new QGraphicsEllipseItem(QRectF(-r, -r, d, d));
+    m_remoteCursorDot->setBrush(QBrush(m_remoteCursorFill));
+    QPen pen(m_remoteCursorBorder);
+    pen.setWidthF(m_remoteCursorBorderWidth);
+    if (m_remoteCursorFixedSize) {
+        pen.setCosmetic(true); // constant width when fixed-size
+    } else {
+        pen.setCosmetic(false);
+    }
+    m_remoteCursorDot->setPen(pen);
+    m_remoteCursorDot->setZValue(4000.0);
+    if (m_remoteCursorFixedSize) {
+        m_remoteCursorDot->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    } else {
+        m_remoteCursorDot->setFlag(QGraphicsItem::ItemIgnoresTransformations, false);
+    }
+    m_scene->addItem(m_remoteCursorDot);
 }

@@ -174,6 +174,8 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_webSocketClient, &WebSocketClient::screensInfoReceived, this, &MainWindow::onScreensInfoReceived);
     connect(m_webSocketClient, &WebSocketClient::watchStatusChanged, this, &MainWindow::onWatchStatusChanged);
     connect(m_webSocketClient, &WebSocketClient::messageReceived, this, &MainWindow::onGenericMessageReceived);
+    // Forward all generic messages to UploadManager so it can handle incoming upload_* and unload_media when we are the target
+    connect(m_webSocketClient, &WebSocketClient::messageReceived, m_uploadManager, &UploadManager::handleIncomingMessage);
     // Upload progress forwards
     connect(m_webSocketClient, &WebSocketClient::uploadProgressReceived, m_uploadManager, &UploadManager::onUploadProgress);
     connect(m_webSocketClient, &WebSocketClient::uploadFinishedReceived, m_uploadManager, &UploadManager::onUploadFinished);
@@ -184,16 +186,68 @@ MainWindow::MainWindow(QWidget* parent)
     m_watchManager->setWebSocketClient(m_webSocketClient);
 
     // UI refresh when upload state changes
-    connect(m_uploadManager, &UploadManager::uiStateChanged, this, [this]() { if (m_uploadButton) {
-        if (m_uploadManager->isUploading()) m_uploadButton->setText("Cancel Upload");
-        else if (m_uploadManager->hasActiveUpload()) m_uploadButton->setText("Unload Media");
-        else m_uploadButton->setText("Upload to Client");
-    }});
-    connect(m_uploadManager, &UploadManager::uploadProgress, this, [this](int percent, int filesCompleted, int totalFiles){
-        if (m_uploadButton) m_uploadButton->setText(QString("Uploading %1% (%2/%3)").arg(percent).arg(filesCompleted).arg(totalFiles));
+    auto applyUploadButtonStyle = [this]() {
+        if (!m_uploadButton) return;
+        // Base style strings
+        const QString greyStyle = "QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }";
+        const QString blueStyle = "QPushButton { padding: 12px 18px; font-weight: bold; background-color: #2d6cdf; color: white; border-radius: 5px; } QPushButton:checked { background-color: #1f4ea8; }";
+        const QString greenStyle = "QPushButton { padding: 12px 18px; font-weight: bold; background-color: #16a34a; color: white; border-radius: 5px; } QPushButton:checked { background-color: #15803d; }";
+
+        if (m_uploadManager->isUploading()) {
+            // Upload in progress (preparing or actively streaming): show preparing or cancelling state handled elsewhere
+            if (m_uploadManager->isCancelling()) {
+                m_uploadButton->setText("Cancelling…");
+                m_uploadButton->setEnabled(false);
+            } else {
+                // Initial immediate state after click before first progress message
+                if (m_uploadButton->text() == "Upload to Client") {
+                    m_uploadButton->setText("Preparing download");
+                }
+                m_uploadButton->setEnabled(true);
+            }
+            m_uploadButton->setCheckable(true);
+            m_uploadButton->setChecked(true);
+            m_uploadButton->setStyleSheet(blueStyle);
+            // Monospace font for stability
+#ifdef Q_OS_MACOS
+            QFont mono("Menlo");
+#else
+            QFont mono("Courier New");
+#endif
+            mono.setPointSize(m_uploadButtonDefaultFont.pointSize());
+            mono.setBold(true);
+            m_uploadButton->setFont(mono);
+        } else if (m_uploadManager->hasActiveUpload()) {
+            // Uploaded & resident on target: allow unload
+            m_uploadButton->setCheckable(true);
+            m_uploadButton->setChecked(true);
+            m_uploadButton->setEnabled(true);
+            m_uploadButton->setText("Unload medias");
+            m_uploadButton->setStyleSheet(greenStyle);
+            m_uploadButton->setFont(m_uploadButtonDefaultFont);
+        } else {
+            // Idle state
+            m_uploadButton->setCheckable(false);
+            m_uploadButton->setChecked(false);
+            m_uploadButton->setEnabled(true);
+            m_uploadButton->setText("Upload to Client");
+            m_uploadButton->setStyleSheet(greyStyle);
+            m_uploadButton->setFont(m_uploadButtonDefaultFont);
+        }
+    };
+    connect(m_uploadManager, &UploadManager::uiStateChanged, this, applyUploadButtonStyle);
+    connect(m_uploadManager, &UploadManager::uploadProgress, this, [this, applyUploadButtonStyle](int percent, int filesCompleted, int totalFiles){
+        if (!m_uploadButton) return;
+        if (m_uploadManager->isUploading() && !m_uploadManager->isCancelling()) {
+            m_uploadButton->setText(QString("Downloading (%1/%2) %3%")
+                                    .arg(filesCompleted)
+                                    .arg(totalFiles)
+                                    .arg(percent));
+        }
+        applyUploadButtonStyle();
     });
-    connect(m_uploadManager, &UploadManager::uploadFinished, this, [this](){ if (m_uploadButton) m_uploadButton->setText("Unload Media"); });
-    connect(m_uploadManager, &UploadManager::unloaded, this, [this](){ if (m_uploadButton) m_uploadButton->setText("Upload to Client"); });
+    connect(m_uploadManager, &UploadManager::uploadFinished, this, [this, applyUploadButtonStyle](){ applyUploadButtonStyle(); });
+    connect(m_uploadManager, &UploadManager::unloaded, this, [this, applyUploadButtonStyle](){ applyUploadButtonStyle(); });
 
     // Periodic connection status refresh
     m_statusUpdateTimer->setInterval(1000);
@@ -259,21 +313,27 @@ void MainWindow::onUploadButtonClicked() {
     if (!m_uploadManager) return;
     if (m_uploadManager->isUploading()) { m_uploadManager->requestCancel(); return; }
     if (m_uploadManager->hasActiveUpload()) { m_uploadManager->requestUnload(); return; }
-    // For now open file dialog to choose files
+    // Gather media items present on the scene (restoring original behavior)
     QVector<UploadFileInfo> files;
-    QFileDialog dlg(this, "Select Media Files");
-    dlg.setFileMode(QFileDialog::ExistingFiles);
-    dlg.setNameFilters({"Media Files (*.png *.jpg *.jpeg *.gif *.bmp *.mp4 *.mov *.m4v *.webm *.avi *.mkv)", "All Files (*)"});
-    if (dlg.exec() == QDialog::Accepted) {
-        QStringList paths = dlg.selectedFiles();
-        for (const QString& p : paths) {
-            QFileInfo fi(p);
+    if (m_screenCanvas && m_screenCanvas->scene()) {
+        const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
+        for (QGraphicsItem* it : allItems) {
+            auto* media = dynamic_cast<ResizableMediaBase*>(it);
+            if (!media) continue;
+            if (media->isBeingDeleted()) continue;
+            QString path = media->sourcePath();
+            if (path.isEmpty()) continue; // skip items without a concrete file source
+            QFileInfo fi(path);
             if (!fi.exists() || !fi.isFile()) continue;
             UploadFileInfo info; info.fileId = QUuid::createUuid().toString(QUuid::WithoutBraces); info.path = fi.absoluteFilePath(); info.name = fi.fileName(); info.size = fi.size();
             files.push_back(info);
         }
-        if (!files.isEmpty()) m_uploadManager->toggleUpload(files);
     }
+    if (files.isEmpty()) {
+        QMessageBox::information(this, "Upload", "Aucun média local à uploader sur le canevas (les éléments doivent provenir de fichiers locaux)." );
+        return;
+    }
+    m_uploadManager->toggleUpload(files);
 }
 
 void MainWindow::onSendMediaClicked() {
@@ -631,6 +691,10 @@ void MainWindow::createScreenViewPage() {
     m_uploadButton->setFixedWidth(260);
     m_uploadButton->setEnabled(true);
     connect(m_uploadButton, &QPushButton::clicked, this, &MainWindow::onUploadButtonClicked);
+    // Apply initial style state machine
+    QTimer::singleShot(0, this, [this]() {
+        emit m_uploadManager->uiStateChanged();
+    });
     actionLayout->addWidget(m_uploadButton, 0, Qt::AlignRight);
     // Send button
     m_sendButton = new QPushButton("Send Media to All Screens");

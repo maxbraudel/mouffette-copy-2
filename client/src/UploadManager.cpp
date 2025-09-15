@@ -57,6 +57,19 @@ void UploadManager::requestCancel() {
     // Also request unloading to clean remote state
     m_ws->sendUnloadMedia(m_targetClientId);
     // We'll reset final state upon unloaded callback
+    emit uiStateChanged();
+    // Start fallback timer (3s) in case remote never responds
+    if (!m_cancelFallbackTimer) {
+        m_cancelFallbackTimer = new QTimer(this);
+        m_cancelFallbackTimer->setSingleShot(true);
+        connect(m_cancelFallbackTimer, &QTimer::timeout, this, [this]() {
+            if (m_cancelRequested) {
+                resetToInitial();
+                emit uiStateChanged();
+            }
+        });
+    }
+    m_cancelFallbackTimer->start(3000);
 }
 
 void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
@@ -66,6 +79,7 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
     m_lastPercent = 0;
     m_filesCompleted = 0;
     m_totalFiles = files.size();
+    emit uiStateChanged();
 
     // Build manifest
     QJsonArray manifest;
@@ -108,6 +122,7 @@ void UploadManager::resetToInitial() {
     m_lastPercent = 0;
     m_filesCompleted = 0;
     m_totalFiles = 0;
+    if (m_cancelFallbackTimer) m_cancelFallbackTimer->stop();
 }
 
 // Slots forwarded from WebSocketClient (sender side)

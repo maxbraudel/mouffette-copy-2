@@ -40,6 +40,17 @@ public:
     int screenLabelFontPointSize() const { return m_screenLabelFontPt; }
     void setScreenSpacingPx(int px) { m_screenSpacingPx = qMax(0, px); createScreenItems(); }
     int screenSpacingPx() const { return m_screenSpacingPx; }
+    // Remote cursor style setters
+    void setRemoteCursorDiameterPx(int d) { m_remoteCursorDiameterPx = qMax(2, d); if (m_remoteCursorDot) { recreateRemoteCursorItem(); } }
+    void setRemoteCursorFillColor(const QColor& c) { m_remoteCursorFill = c; if (m_remoteCursorDot) { m_remoteCursorDot->setBrush(m_remoteCursorFill); } }
+    void setRemoteCursorBorderColor(const QColor& c) { m_remoteCursorBorder = c; if (m_remoteCursorDot) { QPen p = m_remoteCursorDot->pen(); p.setColor(m_remoteCursorBorder); m_remoteCursorDot->setPen(p); } }
+    void setRemoteCursorBorderWidthPx(qreal w) { m_remoteCursorBorderWidth = std::max<qreal>(0.0, w); if (m_remoteCursorDot) { QPen p = m_remoteCursorDot->pen(); p.setWidthF(m_remoteCursorBorderWidth); m_remoteCursorDot->setPen(p); } }
+    int remoteCursorDiameterPx() const { return m_remoteCursorDiameterPx; }
+    QColor remoteCursorFillColor() const { return m_remoteCursorFill; }
+    QColor remoteCursorBorderColor() const { return m_remoteCursorBorder; }
+    qreal remoteCursorBorderWidthPx() const { return m_remoteCursorBorderWidth; }
+    void setRemoteCursorFixedSize(bool fixed) { m_remoteCursorFixedSize = fixed; if (m_remoteCursorDot) recreateRemoteCursorItem(); }
+    bool remoteCursorFixedSize() const { return m_remoteCursorFixedSize; }
 
 protected:
     bool event(QEvent* event) override;
@@ -77,6 +88,7 @@ private:
     void zoomAroundViewportPos(const QPointF& vpPos, qreal factor);
     void ensureZOrder();
     void debugLogScreenSizes() const; // helper to verify screen rect pixel parity
+    void recreateRemoteCursorItem();
 
     QGraphicsScene* m_scene = nullptr;
     QList<QGraphicsRectItem*> m_screenItems;
@@ -95,6 +107,12 @@ private:
     QPoint m_lastMomentumDelta;
     QElapsedTimer m_momentumTimer;
     QGraphicsEllipseItem* m_remoteCursorDot = nullptr;
+    // Remote cursor styling
+    int m_remoteCursorDiameterPx = 30;
+    QColor m_remoteCursorFill = Qt::white;
+    QColor m_remoteCursorBorder = QColor(0,0,0,230);
+    qreal m_remoteCursorBorderWidth = 2;
+    bool m_remoteCursorFixedSize = false; // when false, cursor scales with zoom
     // Global initial media scale: set to 1.0 for 1:1 pixel parity between screens and imported media
     double m_scaleFactor = 1.0;
     int m_mediaHandleSelectionSizePx = 30;

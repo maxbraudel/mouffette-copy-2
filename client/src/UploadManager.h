@@ -94,6 +94,7 @@ private:
     int m_lastPercent = 0;
     int m_filesCompleted = 0;
     int m_totalFiles = 0;
+    QTimer* m_cancelFallbackTimer = nullptr; // fires if remote never responds to abort/unload
 
     // Incoming session (target side)
     IncomingUploadSession m_incoming;
