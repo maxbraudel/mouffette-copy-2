@@ -244,12 +244,34 @@ void ResizableMediaBase::initializeOverlays() {
     if (!m_filename.isEmpty()) {
         auto filenameElement = std::make_shared<OverlayTextElement>(m_filename, "filename");
         m_topPanel->addElement(filenameElement);
+        // Add settings toggle button to the right of filename
+        auto settingsBtn = std::make_shared<OverlayButtonElement>(QString(), "settings_toggle");
+        // Resource path follows the same pattern as other media control icons (":/icons/icons/<name>.svg")
+        settingsBtn->setSvgIcon(":/icons/icons/settings.svg");
+    settingsBtn->setToggleOnly(true);
+        // Initial state normal
+        settingsBtn->setState(OverlayElement::Normal);
+        // Toggle logic: cycles Normal <-> Toggled
+        settingsBtn->setOnClicked([btnRef=settingsBtn]() {
+            if (!btnRef) return;
+            auto st = btnRef->state();
+            if (st == OverlayElement::Toggled) {
+                // Return to hovered if pointer still inside, else normal
+                btnRef->setState(OverlayElement::Normal);
+            } else {
+                btnRef->setState(OverlayElement::Toggled);
+            }
+        });
+        m_topPanel->addElement(settingsBtn);
     }
     m_bottomPanel = std::make_unique<OverlayPanel>(OverlayPanel::Bottom); m_bottomPanel->setStyle(m_overlayStyle);
 }
 
 void ResizableMediaBase::updateOverlayVisibility() {
-    bool shouldShowTop = !m_filename.isEmpty() && isSelected();
+    // Make top overlay (filename + settings button) always visible if filename exists,
+    // so the settings button can be toggled with a single click even when the item
+    // was not previously selected.
+    bool shouldShowTop = !m_filename.isEmpty();
     if (m_topPanel) m_topPanel->setVisible(shouldShowTop);
     // bottom panel managed by video subclass
 }

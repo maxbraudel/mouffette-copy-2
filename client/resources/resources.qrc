@@ -7,5 +7,6 @@
     <file>icons/stop.svg</file>
     <file>icons/volume-on.svg</file>
     <file>icons/volume-off.svg</file>
+    <file>icons/settings.svg</file>
     </qresource>
 </RCC>

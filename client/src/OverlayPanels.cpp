@@ -6,6 +6,7 @@
 #include <QFont>
 #include <QFontMetrics>
 #include <cmath>
+#include <QtSvgWidgets/QGraphicsSvgItem>
 
 // Global constants for overlay z-ordering (moved from MainWindow.cpp)
 namespace {
@@ -149,6 +150,17 @@ void OverlayButtonElement::createGraphicsItems() {
     m_background->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     m_background->setData(0, QStringLiteral("overlay"));
     if (m_onClicked) m_background->setClickCallback(m_onClicked);
+    // Hover / press visual feedback (skip overriding if toggled state to keep its stronger tint)
+        if (!m_toggleOnly) {
+            m_background->setHoverCallback([this](bool inside){
+                if (state() == OverlayElement::Toggled || state() == OverlayElement::Disabled) return;
+                setState(inside ? OverlayElement::Hovered : OverlayElement::Normal);
+            });
+            m_background->setPressCallback([this](bool down){
+                if (state() == OverlayElement::Toggled || state() == OverlayElement::Disabled) return;
+                if (down) setState(OverlayElement::Active); else setState(OverlayElement::Hovered);
+            });
+        }
 
     if (!m_label.isEmpty()) {
         m_textItem = new MouseBlockingTextItem(m_label, m_background);
@@ -175,8 +187,8 @@ void OverlayButtonElement::applyStyle(const OverlayStyle& style) {
 }
 
 QSizeF OverlayButtonElement::preferredSize(const OverlayStyle& style) const {
-    // Square: side = defaultHeight if >0, else text metrics + padding (falling back to 24)
-    int base = style.defaultHeight > 0 ? style.defaultHeight : 24;
+    // Square: side = defaultHeight if >0, else fixed 32 to match video control buttons.
+        int base = style.defaultHeight > 0 ? style.defaultHeight : 36;
     if (m_textItem || !m_label.isEmpty()) {
         QFont f; f.setPixelSize(16);
         QFontMetrics fm(f);
@@ -193,6 +205,21 @@ void OverlayButtonElement::setSize(const QSizeF& size) {
     createGraphicsItems();
     if (m_background) m_background->setRect(0,0,size.width(), size.height());
     updateLabelPosition();
+    if (m_svgIcon) {
+        // Scale icon to fit ~60% of button height preserving aspect ratio
+        QRectF br = m_background->rect();
+        QSizeF target(br.width()*0.6, br.height()*0.6);
+        QRectF viewBox = m_svgIcon->boundingRect();
+        if (viewBox.width() > 0 && viewBox.height() > 0) {
+            qreal sx = target.width() / viewBox.width();
+            qreal sy = target.height() / viewBox.height();
+            qreal s = std::min(sx, sy);
+            m_svgIcon->setScale(s);
+            // Center
+            QSizeF scaled(viewBox.width()*s, viewBox.height()*s);
+            m_svgIcon->setPos((br.width()-scaled.width())/2.0, (br.height()-scaled.height())/2.0);
+        }
+    }
 }
 
 void OverlayButtonElement::updateLabelPosition() {
@@ -211,6 +238,7 @@ void OverlayButtonElement::setVisible(bool v) {
     m_visible = v;
     if (m_background) m_background->setVisible(v);
     if (m_textItem) m_textItem->setVisible(v);
+    if (m_svgIcon) m_svgIcon->setVisible(v);
 }
 
 void OverlayButtonElement::setLabel(const QString& l) {
@@ -234,8 +262,30 @@ void OverlayButtonElement::setLabel(const QString& l) {
 // Override setState to update brush dynamically
 void OverlayButtonElement::setState(ElementState s) {
     if (state() == s) return;
+    // In toggleOnly mode, ignore transient hover/active states; only allow Normal/Toggled/Disabled
+    if (m_toggleOnly) {
+        if (s == OverlayElement::Hovered || s == OverlayElement::Active) return; // ignore
+    }
     OverlayElement::setState(s);
-    if (m_background) m_background->setBrush(buttonBrushForState(m_currentStyle, s));
+    if (m_background) m_background->setBrush(buttonBrushForState(m_currentStyle, state()));
+}
+
+void OverlayButtonElement::setSvgIcon(const QString& resourcePath) {
+    createGraphicsItems();
+    if (m_textItem) {
+        // If label and icon both requested, prefer icon only for now
+        m_textItem->setVisible(false);
+    }
+    if (!m_svgIcon) {
+        m_svgIcon = new QGraphicsSvgItem(resourcePath, m_background);
+        m_svgIcon->setZValue(Z_OVERLAY_CONTENT);
+        m_svgIcon->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+        m_svgIcon->setData(0, QStringLiteral("overlay"));
+    } else {
+        m_svgIcon->setElementId(QString());
+    }
+    // Trigger size/layout recompute using current background size
+    if (m_background) setSize(m_background->rect().size());
 }
 
 // ============================================================================
@@ -597,16 +647,23 @@ void OverlayPanel::createBackground() {
 
 void OverlayPanel::updateBackground() {
     if (!m_background) return;
-
-    // Always keep background item for positioning; make it visually transparent if disabled
-    if (m_backgroundVisible) {
-        m_background->setBrush(m_style.backgroundBrush());
-        // Tag as active overlay so view swallows clicks anywhere in its rect
-        m_background->setData(0, QStringLiteral("overlay"));
-    } else {
+    // For the top media overlay (filename + settings) we do NOT want any rectangular background.
+    // Only the individual elements (text/button) should be visible. So force a transparent brush
+    // and do not tag the whole rect as an overlay hit target. Bottom/other panels retain previous logic.
+    if (m_position == Top) {
         m_background->setBrush(Qt::NoBrush);
-        // Remove overlay tag so clicks outside actual child elements are treated as empty space
         m_background->setData(0, QVariant());
+        // Let child elements receive clicks (filename text, settings button)
+        m_background->setAcceptedMouseButtons(Qt::NoButton);
+    } else {
+        // Existing behavior for non-top panels (e.g. video controls)
+        if (m_backgroundVisible) {
+            m_background->setBrush(m_style.backgroundBrush());
+            m_background->setData(0, QStringLiteral("overlay"));
+        } else {
+            m_background->setBrush(Qt::NoBrush);
+            m_background->setData(0, QVariant());
+        }
     }
     m_background->setRect(0, 0, m_currentSize.width(), m_currentSize.height());
     m_background->setPos(m_currentPosition);

@@ -16,6 +16,9 @@
 #include <QList>
 #include <memory>
 
+// Forward declare SVG item to avoid requiring heavy include in header
+class QGraphicsSvgItem;
+
 #include "RoundedRectItem.h"
 
 // Forward declarations
@@ -27,22 +30,37 @@ public:
     MouseBlockingRoundedRectItem(QGraphicsItem* parent = nullptr) 
         : RoundedRectItem(parent) {
         setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
+        setAcceptHoverEvents(true);
     }
     void setClickCallback(std::function<void()> cb) { m_clickCallback = std::move(cb); }
+    void setHoverCallback(std::function<void(bool)> cb) { m_hoverCallback = std::move(cb); }
+    void setPressCallback(std::function<void(bool)> cb) { m_pressCallback = std::move(cb); }
 
 protected:
     void mousePressEvent(QGraphicsSceneMouseEvent* event) override {
         // Accept the event to prevent it from propagating to items behind
         event->accept();
         if (m_clickCallback) m_clickCallback();
+        if (m_pressCallback) m_pressCallback(true);
     }
     
     void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override {
         // Accept the event to prevent it from propagating to items behind
         event->accept();
+        if (m_pressCallback) m_pressCallback(false);
+    }
+    void hoverEnterEvent(QGraphicsSceneHoverEvent* event) override {
+        event->accept();
+        if (m_hoverCallback) m_hoverCallback(true);
+    }
+    void hoverLeaveEvent(QGraphicsSceneHoverEvent* event) override {
+        event->accept();
+        if (m_hoverCallback) m_hoverCallback(false);
     }
 private:
     std::function<void()> m_clickCallback;
+    std::function<void(bool)> m_hoverCallback;
+    std::function<void(bool)> m_pressCallback;
 };
 
 // Custom QGraphicsTextItem that blocks mouse events from passing through
@@ -182,6 +200,8 @@ public:
     void setVisible(bool v) override;
     void setState(ElementState s) override; // updates brush
     void setOnClicked(std::function<void()> cb) { m_onClicked = std::move(cb); if (m_background) m_background->setClickCallback(m_onClicked); }
+    void setSvgIcon(const QString& resourcePath); // new: attach an SVG icon when no label
+    void setToggleOnly(bool v) { m_toggleOnly = v; if (m_background && m_toggleOnly) { m_background->setHoverCallback(nullptr); m_background->setPressCallback(nullptr); } }
 private:
     void createGraphicsItems();
     void updateLabelPosition();
@@ -189,8 +209,10 @@ private:
     bool m_visible = true;
     MouseBlockingRoundedRectItem* m_background = nullptr;
     MouseBlockingTextItem* m_textItem = nullptr; // optional text placeholder
+    QGraphicsSvgItem* m_svgIcon = nullptr; // optional icon
     OverlayStyle m_currentStyle;
     std::function<void()> m_onClicked;
+    bool m_toggleOnly = false; // disables hover/press transient states if true
 };
 
 // Linear horizontal slider (track + fill). Value range [0,1].
