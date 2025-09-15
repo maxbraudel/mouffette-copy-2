@@ -386,8 +386,13 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                 if (isVideo) {
                     // Use default handle sizes similar to previous inline defaults (visual 12, selection 30)
                     auto* v = new ResizableVideoItem(localPath, 12, 30, fi.fileName(), m_videoControlsFadeMs);
-                    v->setPos(scenePos - QPointF(200, 120));
-                    v->setScale(m_scaleFactor);
+                    // Preserve global canvas media scale (so video size matches screens & images 1:1)
+                    v->setInitialScaleFactor(m_scaleFactor);
+                    // Use current placeholder base size (constructor default 640x360) to center on drop point
+                    const qreal phW = 640.0 * m_scaleFactor;
+                    const qreal phH = 360.0 * m_scaleFactor;
+                    v->setPos(scenePos - QPointF(phW/2.0, phH/2.0));
+                    v->setScale(m_scaleFactor); // adoptBaseSize will keep center when real size arrives
                     m_scene->addItem(v);
                     v->setSelected(true);
                 } else {
@@ -488,8 +493,8 @@ void ScreenCanvas::onFastVideoThumbnailReady(const QImage& img) {
 void ScreenCanvas::createScreenItems() {
     clearScreens();
     if (!m_scene) return;
-    const double spacing = 120.0 * m_scaleFactor;
-    QMap<int, QRectF> compactPositions = calculateCompactPositions(m_scaleFactor, spacing, spacing);
+    const double spacing = static_cast<double>(m_screenSpacingPx);
+    QMap<int, QRectF> compactPositions = calculateCompactPositions(1.0, spacing, spacing);
     for (int i = 0; i < m_screens.size(); ++i) {
         const ScreenInfo& s = m_screens[i]; QRectF pos = compactPositions.value(i); auto* rect = createScreenItem(s, i, pos); rect->setZValue(-1000.0); m_scene->addItem(rect); m_screenItems << rect; }
     ensureZOrder();
@@ -503,7 +508,9 @@ QGraphicsRectItem* ScreenCanvas::createScreenItem(const ScreenInfo& screen, int 
     else { item->setBrush(QBrush(QColor(80,80,80,180))); item->setPen(QPen(QColor(160,160,160), penWidth)); }
     item->setData(0, index);
     QGraphicsTextItem* label = new QGraphicsTextItem(QString("Screen %1\n%2×%3").arg(index+1).arg(screen.width).arg(screen.height));
-    label->setDefaultTextColor(Qt::white); label->setFont(QFont("Arial", 12, QFont::Bold));
+    label->setDefaultTextColor(Qt::white);
+    QFont f("Arial", m_screenLabelFontPt, QFont::Bold);
+    label->setFont(f);
     QRectF labelRect = label->boundingRect(); QRectF screenRect = item->rect(); label->setPos(screenRect.center() - labelRect.center()); label->setParentItem(item);
     return item;
 }
@@ -512,8 +519,19 @@ QMap<int, QRectF> ScreenCanvas::calculateCompactPositions(double scaleFactor, do
     QMap<int, QRectF> positions; if (m_screens.isEmpty()) return positions; QList<QPair<int, ScreenInfo>> screenPairs; for (int i=0;i<m_screens.size();++i) screenPairs.append(qMakePair(i, m_screens[i]));
     std::sort(screenPairs.begin(), screenPairs.end(), [](const QPair<int, ScreenInfo>& a, const QPair<int, ScreenInfo>& b){ if (qAbs(a.second.y - b.second.y) < 100) return a.second.x < b.second.x; return a.second.y < b.second.y; });
     double currentX = 0, currentY = 0, rowHeight = 0; int lastY = INT_MIN;
-    for (const auto& pair : screenPairs) { int index = pair.first; const ScreenInfo& screen = pair.second; double screenWidth = screen.width * scaleFactor; double screenHeight = screen.height * scaleFactor; if (lastY != INT_MIN && qAbs(screen.y - lastY) > 100) { currentX = 0; currentY += rowHeight + vSpacing; rowHeight = 0; }
-        QRectF rect(currentX, currentY, screenWidth, screenHeight); positions[index] = rect; currentX += screenWidth + hSpacing; rowHeight = qMax(rowHeight, screenHeight); lastY = screen.y; }
+    for (const auto& pair : screenPairs) {
+        int index = pair.first; const ScreenInfo& screen = pair.second;
+        double screenWidth = screen.width * scaleFactor;
+        double screenHeight = screen.height * scaleFactor;
+        if (lastY != INT_MIN && qAbs(screen.y - lastY) > 100) {
+            currentX = 0; currentY += rowHeight + vSpacing; rowHeight = 0;
+        }
+        QRectF rect(currentX, currentY, screenWidth, screenHeight);
+        positions[index] = rect;
+        currentX += screenWidth + hSpacing;
+        rowHeight = qMax(rowHeight, screenHeight);
+        lastY = screen.y;
+    }
     return positions; }
 
 QRectF ScreenCanvas::screensBoundingRect() const { QRectF bounds; bool first = true; for (auto* item : m_screenItems) { if (!item) continue; QRectF r = item->sceneBoundingRect(); if (first) { bounds = r; first = false; } else { bounds = bounds.united(r); } } return bounds; }
@@ -526,4 +544,19 @@ void ScreenCanvas::zoomAroundViewportPos(const QPointF& vpPosF, qreal factor) {
 
 void ScreenCanvas::ensureZOrder() {
     // Ensures overlays or future interactive layers can sit above screens; currently screens use -1000.
+}
+
+void ScreenCanvas::debugLogScreenSizes() const {
+    if (m_screenItems.size() != m_screens.size()) {
+        qDebug() << "Screen/item count mismatch" << m_screenItems.size() << m_screens.size();
+    }
+    for (int i = 0; i < m_screenItems.size() && i < m_screens.size(); ++i) {
+        auto* item = m_screenItems[i]; if (!item) continue;
+        const ScreenInfo& si = m_screens[i];
+        QRectF r = item->rect(); // local (inner) rect already adjusted for border
+        qDebug() << "Screen" << i << "expected" << si.width << "x" << si.height
+                 << "scaleFactor" << m_scaleFactor
+                 << "itemRect" << r.width() << "x" << r.height()
+                 << "sceneBounding" << item->sceneBoundingRect().size();
+    }
 }

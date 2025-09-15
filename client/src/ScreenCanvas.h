@@ -36,6 +36,10 @@ public:
     void setMediaHandleVisualSizePx(int px);    // drawn square
     void setMediaHandleSizePx(int px);          // convenience
     void setScreenBorderWidthPx(int px);
+    void setScreenLabelFontPointSize(int pt) { m_screenLabelFontPt = qMax(1, pt); createScreenItems(); }
+    int screenLabelFontPointSize() const { return m_screenLabelFontPt; }
+    void setScreenSpacingPx(int px) { m_screenSpacingPx = qMax(0, px); createScreenItems(); }
+    int screenSpacingPx() const { return m_screenSpacingPx; }
 
 protected:
     bool event(QEvent* event) override;
@@ -70,6 +74,7 @@ private:
     QRectF screensBoundingRect() const;
     void zoomAroundViewportPos(const QPointF& vpPos, qreal factor);
     void ensureZOrder();
+    void debugLogScreenSizes() const; // helper to verify screen rect pixel parity
 
     QGraphicsScene* m_scene = nullptr;
     QList<QGraphicsRectItem*> m_screenItems;
@@ -86,10 +91,13 @@ private:
     QPoint m_lastMomentumDelta;
     QElapsedTimer m_momentumTimer;
     QGraphicsEllipseItem* m_remoteCursorDot = nullptr;
-    double m_scaleFactor = 0.2;
+    // Global initial media scale: set to 1.0 for 1:1 pixel parity between screens and imported media
+    double m_scaleFactor = 1.0;
     int m_mediaHandleSelectionSizePx = 30;
     int m_mediaHandleVisualSizePx = 12;
     int m_screenBorderWidthPx = 1;
+    int m_screenLabelFontPt = 48;
+    int m_screenSpacingPx = 0; // horizontal & vertical spacing between screens
 
     QGraphicsItem* m_dragPreviewItem = nullptr;
     QSize m_dragPreviewBaseSize;
