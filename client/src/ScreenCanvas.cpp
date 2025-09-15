@@ -235,7 +235,11 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
             if (hi->data(0).toString() == QLatin1String("overlay")) clickedOverlayOnly = true;
             QGraphicsItem* scan = hi; while (scan) { if (dynamic_cast<ResizableMediaBase*>(scan)) { anyMedia = true; break; } scan = scan->parentItem(); }
         }
-        if (clickedOverlayOnly && !anyMedia) { event->accept(); return; }
+        bool hasOverlay = false;
+        for (QGraphicsItem* hi : hitItems) {
+            if (hi->data(0).toString() == QLatin1String("overlay")) hasOverlay = true;
+        }
+        if (hasOverlay) { QGraphicsView::mousePressEvent(event); return; }
         auto toMedia = [](QGraphicsItem* x)->ResizableMediaBase* { while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); } return nullptr; };
         ResizableMediaBase* mediaHit = nullptr; for (QGraphicsItem* it : hitItems) { if ((mediaHit = toMedia(it))) break; }
         if (mediaHit) {
