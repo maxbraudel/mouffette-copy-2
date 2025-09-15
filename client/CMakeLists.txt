@@ -32,6 +32,7 @@ set(SOURCES
     src/ScreenNavigationManager.cpp
     src/SpinnerWidget.cpp
     src/MediaItems.cpp
+    src/ScreenCanvas.cpp
 )
 
 # Platform-specific sources
@@ -55,6 +56,7 @@ set(HEADERS
     src/WatchManager.h
     src/ScreenNavigationManager.h
     src/SpinnerWidget.h
+    src/ScreenCanvas.h
 )
 
 # UI files

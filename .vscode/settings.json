@@ -1,3 +1,9 @@
 {
-    "cmake.sourceDirectory": "C:/Users/famillebraudel/Documents/Developpement/mouffette/client"
+    "cmake.sourceDirectory": "C:/Users/famillebraudel/Documents/Developpement/mouffette/client",
+    "files.associations": {
+        "*.page-template": "vue",
+        "*.layout-template": "vue",
+        "*.vue": "vue",
+        "ios": "cpp"
+    }
 }

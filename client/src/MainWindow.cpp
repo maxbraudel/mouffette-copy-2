@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "ScreenCanvas.h"
 #include "OverlayPanels.h"
 #include "UploadManager.h"
 #include "WatchManager.h"
@@ -54,6 +55,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QByteArray>
+#include <QFileDialog>
 #include <climits>
 #include <memory>
 #ifdef Q_OS_MACOS
@@ -108,1525 +110,187 @@ constexpr qreal Z_REMOTE_CURSOR = 10000.0;
 constexpr qreal Z_SCENE_OVERLAY = 12000.0; // above all scene content
 }
 
-// (Upload progress & finished handlers removed; handled by UploadManager)
-
-void MainWindow::onGenericMessageReceived(const QJsonObject& message) {
-    // Non-upload generic handling placeholder (upload handled by UploadManager now)
-    Q_UNUSED(message);
-}
-
-// Wire WebSocketClient signals after creation
-// Look for existing connects; add upload-related ones
-
-// Ensure all fade animations respect the configured duration
-void MainWindow::applyAnimationDurations() {
-    if (m_spinnerFade) m_spinnerFade->setDuration(m_loaderFadeDurationMs);
-    if (m_canvasFade) m_canvasFade->setDuration(m_fadeDurationMs);
-    if (m_volumeFade) m_volumeFade->setDuration(m_fadeDurationMs);
-}
-
-// SpinnerWidget now defined in SpinnerWidget.h
-
-// Simple rounded-rectangle graphics item with a settable rect and radius
-
-// Media item classes moved to MediaItems.h/.cpp
-
-MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent)
-    , m_centralWidget(nullptr)
-    , m_webSocketClient(new WebSocketClient(this)) // Initialize WebSocket client
-    , m_statusUpdateTimer(new QTimer(this))
-    , m_trayIcon(nullptr)
-    , m_screenViewWidget(nullptr)
-    , m_screenCanvas(nullptr)
-    , m_ignoreSelectionChange(false)
-    , m_displaySyncTimer(new QTimer(this))
-    , m_canvasStack(new QStackedWidget(this)) // Initialize m_canvasStack
-    , m_uploadManager(new UploadManager(this))
-    , m_watchManager(new WatchManager(this))
+MainWindow::MainWindow(QWidget* parent)
+    : QMainWindow(parent),
+      m_centralWidget(nullptr),
+      m_mainLayout(nullptr),
+      m_stackedWidget(nullptr),
+      m_clientListPage(nullptr),
+      m_connectionLayout(nullptr),
+      m_settingsButton(nullptr),
+      m_connectToggleButton(nullptr),
+      m_connectionStatusLabel(nullptr),
+      m_clientListLabel(nullptr),
+      m_clientListWidget(nullptr),
+      m_noClientsLabel(nullptr),
+      m_selectedClientLabel(nullptr),
+      m_screenViewWidget(nullptr),
+      m_screenViewLayout(nullptr),
+      m_clientNameLabel(nullptr),
+      m_canvasContainer(nullptr),
+      m_canvasStack(nullptr),
+      m_screenCanvas(nullptr),
+      m_volumeIndicator(nullptr),
+      m_loadingSpinner(nullptr),
+      m_sendButton(nullptr),
+      m_uploadButton(nullptr),
+      m_backButton(nullptr),
+      m_spinnerOpacity(nullptr),
+      m_spinnerFade(nullptr),
+      m_canvasOpacity(nullptr),
+      m_canvasFade(nullptr),
+      m_volumeOpacity(nullptr),
+      m_volumeFade(nullptr),
+      m_cursorTimer(nullptr),
+      m_fileMenu(nullptr),
+      m_helpMenu(nullptr),
+      m_exitAction(nullptr),
+      m_aboutAction(nullptr),
+      m_trayIcon(nullptr),
+      m_webSocketClient(new WebSocketClient(this)),
+      m_statusUpdateTimer(new QTimer(this)),
+      m_displaySyncTimer(new QTimer(this)),
+      m_reconnectTimer(new QTimer(this)),
+      m_reconnectAttempts(0),
+      m_maxReconnectDelay(15000),
+      m_ignoreSelectionChange(false),
+      m_uploadManager(new UploadManager(this)),
+      m_watchManager(new WatchManager(this)),
+      m_navigationManager(nullptr)
 {
-    // Check if system tray is available
-    if (!QSystemTrayIcon::isSystemTrayAvailable()) {
-        QMessageBox::critical(this, "System Tray",
-                             "System tray is not available on this system.");
-    }
-    
+    setWindowTitle("Mouffette");
+    resize(1280, 900);
     setupUI();
     setupMenuBar();
     setupSystemTray();
     setupVolumeMonitoring();
-    
-    // Connect WebSocket signals
+
+    // Connect WebSocketClient signals
     connect(m_webSocketClient, &WebSocketClient::connected, this, &MainWindow::onConnected);
     connect(m_webSocketClient, &WebSocketClient::disconnected, this, &MainWindow::onDisconnected);
+    connect(m_webSocketClient, &WebSocketClient::connectionError, this, &MainWindow::onConnectionError);
     connect(m_webSocketClient, &WebSocketClient::clientListReceived, this, &MainWindow::onClientListReceived);
     connect(m_webSocketClient, &WebSocketClient::registrationConfirmed, this, &MainWindow::onRegistrationConfirmed);
     connect(m_webSocketClient, &WebSocketClient::screensInfoReceived, this, &MainWindow::onScreensInfoReceived);
     connect(m_webSocketClient, &WebSocketClient::watchStatusChanged, this, &MainWindow::onWatchStatusChanged);
-    // Upload manager wiring
+    connect(m_webSocketClient, &WebSocketClient::messageReceived, this, &MainWindow::onGenericMessageReceived);
+    // Upload progress forwards
+    connect(m_webSocketClient, &WebSocketClient::uploadProgressReceived, m_uploadManager, &UploadManager::onUploadProgress);
+    connect(m_webSocketClient, &WebSocketClient::uploadFinishedReceived, m_uploadManager, &UploadManager::onUploadFinished);
+    connect(m_webSocketClient, &WebSocketClient::unloadedReceived, m_uploadManager, &UploadManager::onUnloadedRemote);
+
+    // Managers wiring
     m_uploadManager->setWebSocketClient(m_webSocketClient);
     m_watchManager->setWebSocketClient(m_webSocketClient);
-    connect(m_webSocketClient, &WebSocketClient::uploadProgressReceived,
-            m_uploadManager, &UploadManager::onUploadProgress);
-    connect(m_webSocketClient, &WebSocketClient::uploadFinishedReceived,
-            m_uploadManager, &UploadManager::onUploadFinished);
-    connect(m_webSocketClient, &WebSocketClient::unloadedReceived,
-            m_uploadManager, &UploadManager::onUnloadedRemote);
-    // Generic message tap for target-side upload handling now handled by manager
-    connect(m_webSocketClient, &WebSocketClient::messageReceived, this, [this](const QJsonObject& obj){
-        m_uploadManager->handleIncomingMessage(obj);
-        onGenericMessageReceived(obj); // preserve any other logic later
-    });
+
+    // UI refresh when upload state changes
+    connect(m_uploadManager, &UploadManager::uiStateChanged, this, [this]() { if (m_uploadButton) {
+        if (m_uploadManager->isUploading()) m_uploadButton->setText("Cancel Upload");
+        else if (m_uploadManager->hasActiveUpload()) m_uploadButton->setText("Unload Media");
+        else m_uploadButton->setText("Upload to Client");
+    }});
     connect(m_uploadManager, &UploadManager::uploadProgress, this, [this](int percent, int filesCompleted, int totalFiles){
-        Q_UNUSED(totalFiles);
-        if (!m_uploadButton) return;
-        // Show progress; keep monospace for stability
-        m_uploadButton->setText(QString("Downloading (%1/%2) %3%")
-                                    .arg(filesCompleted)
-                                    .arg(totalFiles)
-                                    .arg(percent));
+        if (m_uploadButton) m_uploadButton->setText(QString("Uploading %1% (%2/%3)").arg(percent).arg(filesCompleted).arg(totalFiles));
     });
-    connect(m_uploadManager, &UploadManager::uploadFinished, this, [this](){
-        if (!m_uploadButton) return;
-        m_uploadButton->setChecked(true);
-        m_uploadButton->setText("Unload medias");
-        m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #16a34a; color: white; border-radius: 5px; } QPushButton:checked { background-color: #15803d; }");
-        m_uploadButton->setFont(m_uploadButtonDefaultFont);
-    });
-    connect(m_uploadManager, &UploadManager::uiStateChanged, this, [this](){
-        if (!m_uploadButton) return;
-        if (m_uploadManager->hasActiveUpload()) {
-            m_uploadButton->setChecked(true);
-            m_uploadButton->setText("Unload medias");
-        } else if (m_uploadManager->isUploading()) {
-            // state already represented during progress
-        } else if (m_uploadManager->isCancelling()) {
-            m_uploadButton->setText("Cancelling…");
-        } else {
-            m_uploadButton->setChecked(false);
-            m_uploadButton->setText("Upload to Client");
-            m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }");
-            m_uploadButton->setFont(m_uploadButtonDefaultFont);
-            m_uploadButton->setEnabled(true);
-        }
-    });
-    connect(m_webSocketClient, &WebSocketClient::dataRequestReceived, this, [this]() {
-        // Server requested immediate state (on first watch or refresh)
-        m_webSocketClient->sendStateSnapshot(getLocalScreenInfo(), getSystemVolumePercent());
-    });
-    
-    // Setup status update timer
-    m_statusUpdateTimer->setInterval(1000); // Update every second
+    connect(m_uploadManager, &UploadManager::uploadFinished, this, [this](){ if (m_uploadButton) m_uploadButton->setText("Unload Media"); });
+    connect(m_uploadManager, &UploadManager::unloaded, this, [this](){ if (m_uploadButton) m_uploadButton->setText("Upload to Client"); });
+
+    // Periodic connection status refresh
+    m_statusUpdateTimer->setInterval(1000);
     connect(m_statusUpdateTimer, &QTimer::timeout, this, &MainWindow::updateConnectionStatus);
     m_statusUpdateTimer->start();
 
-    // Debounced display sync timer
-    m_displaySyncTimer->setSingleShot(true);
-    m_displaySyncTimer->setInterval(300); // debounce bursts of screen change signals
-    connect(m_displaySyncTimer, &QTimer::timeout, this, [this]() {
-        if (m_webSocketClient->isConnected() && m_isWatched) syncRegistration();
-    });
+    // Periodic display sync if watched
+    m_displaySyncTimer->setInterval(3000);
+    connect(m_displaySyncTimer, &QTimer::timeout, this, [this]() { if (m_isWatched && m_webSocketClient->isConnected()) syncRegistration(); });
+    m_displaySyncTimer->start();
 
-    // Listen to display changes to keep server-side screen info up-to-date
-    auto connectScreenSignals = [this](QScreen* s) {
-        connect(s, &QScreen::geometryChanged, this, [this]() { m_displaySyncTimer->start(); });
-        connect(s, &QScreen::availableGeometryChanged, this, [this]() { m_displaySyncTimer->start(); });
-        connect(s, &QScreen::physicalDotsPerInchChanged, this, [this]() { m_displaySyncTimer->start(); });
-        connect(s, &QScreen::primaryOrientationChanged, this, [this]() { m_displaySyncTimer->start(); });
-    };
-    for (QScreen* s : QGuiApplication::screens()) connectScreenSignals(s);
-    connect(qApp, &QGuiApplication::screenAdded, this, [this, connectScreenSignals](QScreen* s) {
-        connectScreenSignals(s);
-        m_displaySyncTimer->start();
-    });
-    connect(qApp, &QGuiApplication::screenRemoved, this, [this](QScreen*) {
-        m_displaySyncTimer->start();
-    });
-
-    // Smart reconnection system with exponential backoff
-    m_reconnectTimer = new QTimer(this);
+    // Smart reconnect timer
     m_reconnectTimer->setSingleShot(true);
-    m_reconnectAttempts = 0;
-    m_maxReconnectDelay = 60000; // Max 60 seconds between attempts
     connect(m_reconnectTimer, &QTimer::timeout, this, &MainWindow::attemptReconnect);
 
-        // (cleaned) avoid duplicate hookups
-#ifdef Q_OS_MACOS
-    // Use a normal window on macOS so the title bar and traffic lights have standard size.
-    // Avoid Qt::Tool/WA_MacAlwaysShowToolWindow which force a tiny utility-chrome window.
-#endif
-    
-    // Initially disable UI until connected
-    setUIEnabled(false);
-    
-    // Start minimized to tray and auto-connect
-    hide();
     connectToServer();
 }
 
-void MainWindow::showScreenView(const ClientInfo& client) {
-    if (m_clientNameLabel)
-        m_clientNameLabel->setText(QString("%1 (%2)").arg(client.getMachineName()).arg(client.getPlatform()));
-    if (m_navigationManager) m_navigationManager->showScreenView(client);
-}
-
-void MainWindow::showClientListView() {
-    if (m_navigationManager) m_navigationManager->showClientList();
-    m_ignoreSelectionChange = true;
-    m_clientListWidget->clearSelection();
-    m_ignoreSelectionChange = false;
-}
-
-void MainWindow::onClientItemClicked(QListWidgetItem* item) {
-    if (!item) return;
-    int index = m_clientListWidget->row(item);
-    if (index >= 0 && index < m_availableClients.size()) {
-        const ClientInfo& client = m_availableClients[index];
-        m_selectedClient = client;
-        // Switch to screen view first with any cached info for immediate feedback
-        showScreenView(client);
-        // Then request fresh screens info on-demand
-        if (m_webSocketClient && m_webSocketClient->isConnected()) {
-            m_webSocketClient->requestScreens(client.getId());
-        }
-    }
-}
-
-void MainWindow::updateVolumeIndicator() {
-    int vol = m_selectedClient.getVolumePercent();
-    QString text;
-    if (vol >= 0) {
-        QString icon = (vol == 0) ? "🔇" : (vol < 34 ? "🔈" : (vol < 67 ? "🔉" : "🔊"));
-        text = QString("%1 %2%").arg(icon).arg(vol);
-    } else {
-        text = QString("🔈 --");
-    }
-    m_volumeIndicator->setText(text);
-}
-
-void MainWindow::onBackToClientListClicked() {
-    showClientListView();
-}
-
-void MainWindow::onSendMediaClicked() {
-    // Placeholder implementation
-    QMessageBox::information(this, "Send Media", 
-        QString("Sending media to %1's screens...\n\nThis feature will be implemented in the next phase.")
-        .arg(m_selectedClient.getMachineName()));
-}
-
-// Upload/Unload button handler
-void MainWindow::onUploadButtonClicked() {
-    if (!m_webSocketClient || !m_webSocketClient->isConnected() || m_selectedClient.getId().isEmpty()) {
-        QMessageBox::warning(this, "Upload", "Not connected or no target selected");
-        return;
-    }
-    // Inform manager of target and trigger
-    m_uploadManager->setTargetClientId(m_selectedClient.getId());
-    QGraphicsScene* scene = m_screenCanvas ? m_screenCanvas->scene() : nullptr;
-    // Prepare button immediate visual state for starting upload if idle
-    if (!m_uploadManager->hasActiveUpload() && !m_uploadManager->isUploading()) {
-        m_uploadButton->setCheckable(true);
-        m_uploadButton->setChecked(true);
-        m_uploadButton->setText("Preparing download");
-        QFont mono = m_uploadButtonDefaultFont;
-        mono.setStyleHint(QFont::Monospace);
-        mono.setFixedPitch(true);
-#if defined(Q_OS_MAC)
-        mono.setFamily("Menlo");
-#else
-        mono.setFamily("Courier New");
-#endif
-        m_uploadButton->setFont(mono);
-        m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #2d6cdf; color: white; border-radius: 5px; } QPushButton:checked { background-color: #1f4ea8; }");
-    }
-    // Gather files explicitly from scene (local knowledge of ResizableMediaBase)
-    QVector<UploadFileInfo> files;
-    if (scene) {
-        for (QGraphicsItem* it : scene->items()) {
-            if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-                QString path = media->sourcePath();
-                if (path.isEmpty()) continue;
-                QFileInfo info(path);
-                if (!info.exists() || !info.isFile()) continue;
-                UploadFileInfo fi { QUuid::createUuid().toString(QUuid::WithoutBraces), path, info.fileName(), info.size() };
-                files.push_back(fi);
-            }
-        }
-    }
-    m_uploadManager->toggleUpload(files);
-}
-
-
-
 bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
-    // Swallow spacebar outside of the canvas to prevent accidental activations,
-    // but let it reach the canvas for the recenter shortcut.
-    if (event->type() == QEvent::KeyPress) {
-        auto* keyEvent = static_cast<QKeyEvent*>(event);
-        if (keyEvent->key() == Qt::Key_Space) {
-            QWidget* w = qobject_cast<QWidget*>(obj);
-            bool onCanvas = false;
-            if (m_screenCanvas) {
-                QWidget* canvasWidget = m_screenCanvas;
-                onCanvas = (w == canvasWidget) || (w && canvasWidget->isAncestorOf(w));
-            }
-            if (!onCanvas) {
-                return true; // consume outside the canvas
-            } else {
-                // Recenter shortcut on canvas regardless of exact focus widget
-                m_screenCanvas->recenterWithMargin(33);
-                return true; // consume
-            }
-        }
-    }
-    // Apply rounded clipping to canvas widgets so border radius is visible
-    if (obj == m_canvasContainer || obj == m_canvasStack || (m_screenCanvas && obj == m_screenCanvas->viewport())) {
-        if (event->type() == QEvent::Resize || event->type() == QEvent::Show) {
-            if (QWidget* w = qobject_cast<QWidget*>(obj)) {
-                const int r = 5; // match clients list radius
-                QPainterPath path;
-                path.addRoundedRect(w->rect(), r, r);
-                QRegion mask(path.toFillPolygon().toPolygon());
-                w->setMask(mask);
-            }
-        }
+    // Block space bar from triggering button presses when focus is on stack/canvas container
+    if ((obj == m_stackedWidget || obj == m_canvasStack || obj == m_screenViewWidget) && event->type() == QEvent::KeyPress) {
+        QKeyEvent* ke = static_cast<QKeyEvent*>(event);
+        if (ke->key() == Qt::Key_Space) { event->accept(); return true; }
     }
     return QMainWindow::eventFilter(obj, event);
 }
 
-// ScreenCanvas implementation
-ScreenCanvas::ScreenCanvas(QWidget* parent)
-    : QGraphicsView(parent)
-    , m_scene(new QGraphicsScene(this))
-    , m_panning(false)
-{
-    setScene(m_scene);
-    setDragMode(QGraphicsView::NoDrag);
-    setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    // Use the application palette for consistent theming with the client list container
-    const QBrush bgBrush = palette().brush(QPalette::Base);
-    setBackgroundBrush(bgBrush);        // outside the scene rect
-    if (m_scene) m_scene->setBackgroundBrush(bgBrush); // inside the scene rect
-    setFrameShape(QFrame::NoFrame);
-    setRenderHint(QPainter::Antialiasing);
-    // Use manual anchoring logic for consistent behavior across platforms
-    setTransformationAnchor(QGraphicsView::NoAnchor);
-    // When the view is resized, keep the view-centered anchor (we also recenter explicitly on window resize)
-    setResizeAnchor(QGraphicsView::AnchorViewCenter);
-    // Enable drag & drop
-    setAcceptDrops(true);
-    
-    // Enable mouse tracking for panning
-    setMouseTracking(true);
-    m_lastMousePos = QPoint(0, 0);
-    // Pinch guard timer prevents two-finger scroll handling during active pinch
-    m_nativePinchGuardTimer = new QTimer(this);
-    m_nativePinchGuardTimer->setSingleShot(true);
-    m_nativePinchGuardTimer->setInterval(60); // short grace period after last pinch delta
-    connect(m_nativePinchGuardTimer, &QTimer::timeout, this, [this]() {
-        m_nativePinchActive = false;
-    });
-    
-    // Enable pinch gesture (except on macOS where we'll rely on NativeGesture to avoid double handling)
-#ifndef Q_OS_MACOS
-    grabGesture(Qt::PinchGesture);
-#endif
-    // Remote cursor overlay (hidden by default)
-    m_remoteCursorDot = m_scene->addEllipse(0, 0, 10, 10, QPen(QColor(74, 144, 226)), QBrush(Qt::white));
-    if (m_remoteCursorDot) {
-        m_remoteCursorDot->setZValue(10000);
-        m_remoteCursorDot->setVisible(false);
-    }
+void MainWindow::showScreenView(const ClientInfo& client) {
+    if (!m_navigationManager) return;
+    m_navigationManager->showScreenView(client);
+    // Update upload target
+    m_uploadManager->setTargetClientId(client.getId());
 }
 
-void ScreenCanvas::setScreens(const QList<ScreenInfo>& screens) {
-    m_screens = screens;
-    clearScreens();
-    createScreenItems();
-    
-    // Keep a large scene for free movement and center on screens
-    const double LARGE_SCENE_SIZE = 100000.0;
-    QRectF sceneRect(-LARGE_SCENE_SIZE/2, -LARGE_SCENE_SIZE/2, LARGE_SCENE_SIZE, LARGE_SCENE_SIZE);
-    m_scene->setSceneRect(sceneRect);
-    if (!m_screens.isEmpty()) {
-        recenterWithMargin(53);
-    }
+void MainWindow::showClientListView() {
+    if (m_navigationManager) m_navigationManager->showClientList();
+    if (m_uploadButton) m_uploadButton->setText("Upload to Client");
+    m_uploadManager->setTargetClientId(QString());
 }
 
-void ScreenCanvas::clearScreens() {
-    // Clear existing screen items
-    for (QGraphicsRectItem* item : m_screenItems) {
-        m_scene->removeItem(item);
-        delete item;
-    }
-    m_screenItems.clear();
+QWidget* MainWindow::createScreenWidget(const ScreenInfo& screen, int index) {
+    // Legacy helper (may be simplified); currently ScreenCanvas draws screens itself; return nullptr
+    Q_UNUSED(screen); Q_UNUSED(index); return nullptr;
 }
 
-void ScreenCanvas::createScreenItems() {
-    const double SCALE_FACTOR = m_scaleFactor; // Use member scale factor so drops match
-    const double H_SPACING = 0.0;  // No horizontal gap between adjacent screens
-    const double V_SPACING = 5.0;  // Keep a small vertical gap between rows
-    
-    // Calculate compact positioning
-    QMap<int, QRectF> compactPositions = calculateCompactPositions(SCALE_FACTOR, H_SPACING, V_SPACING);
-    
-    for (int i = 0; i < m_screens.size(); ++i) {
-        const ScreenInfo& screen = m_screens[i];
-        QGraphicsRectItem* screenItem = createScreenItem(screen, i, compactPositions[i]);
-        m_screenItems.append(screenItem);
-        m_scene->addItem(screenItem);
-    }
-    ensureZOrder();
+void MainWindow::updateVolumeIndicator() {
+    if (!m_volumeIndicator) return;
+    int vol = getSystemVolumePercent();
+    if (vol < 0) { m_volumeIndicator->setText("🔈 --"); return; }
+    QString icon = (vol == 0) ? "🔇" : (vol < 50 ? "🔈" : "🔊");
+    m_volumeIndicator->setText(QString("%1 %2%" ).arg(icon).arg(vol));
 }
 
-void ScreenCanvas::updateRemoteCursor(int globalX, int globalY) {
-    if (!m_remoteCursorDot || m_screens.isEmpty() || m_screenItems.size() != m_screens.size()) {
-        if (m_remoteCursorDot) m_remoteCursorDot->setVisible(false);
-        return;
-    }
-    int idx = -1;
-    int localX = 0, localY = 0;
-    for (int i = 0; i < m_screens.size(); ++i) {
-        const auto& s = m_screens[i];
-        if (globalX >= s.x && globalX < s.x + s.width && globalY >= s.y && globalY < s.y + s.height) {
-            idx = i;
-            localX = globalX - s.x;
-            localY = globalY - s.y;
-            break;
+void MainWindow::onUploadButtonClicked() {
+    if (!m_uploadManager) return;
+    if (m_uploadManager->isUploading()) { m_uploadManager->requestCancel(); return; }
+    if (m_uploadManager->hasActiveUpload()) { m_uploadManager->requestUnload(); return; }
+    // For now open file dialog to choose files
+    QVector<UploadFileInfo> files;
+    QFileDialog dlg(this, "Select Media Files");
+    dlg.setFileMode(QFileDialog::ExistingFiles);
+    dlg.setNameFilters({"Media Files (*.png *.jpg *.jpeg *.gif *.bmp *.mp4 *.mov *.m4v *.webm *.avi *.mkv)", "All Files (*)"});
+    if (dlg.exec() == QDialog::Accepted) {
+        QStringList paths = dlg.selectedFiles();
+        for (const QString& p : paths) {
+            QFileInfo fi(p);
+            if (!fi.exists() || !fi.isFile()) continue;
+            UploadFileInfo info; info.fileId = QUuid::createUuid().toString(QUuid::WithoutBraces); info.path = fi.absoluteFilePath(); info.name = fi.fileName(); info.size = fi.size();
+            files.push_back(info);
         }
-    }
-    if (idx < 0) {
-        m_remoteCursorDot->setVisible(false);
-        return;
-    }
-    QGraphicsRectItem* item = m_screenItems[idx];
-    if (!item) { m_remoteCursorDot->setVisible(false); return; }
-    const QRectF r = item->rect();
-    if (m_screens[idx].width <= 0 || m_screens[idx].height <= 0 || r.width() <= 0 || r.height() <= 0) { m_remoteCursorDot->setVisible(false); return; }
-    const double fx = static_cast<double>(localX) / static_cast<double>(m_screens[idx].width);
-    const double fy = static_cast<double>(localY) / static_cast<double>(m_screens[idx].height);
-    const double sceneX = r.left() + fx * r.width();
-    const double sceneY = r.top() + fy * r.height();
-    const double dotSize = 10.0;
-    m_remoteCursorDot->setRect(sceneX - dotSize/2.0, sceneY - dotSize/2.0, dotSize, dotSize);
-    m_remoteCursorDot->setVisible(true);
-}
-
-void ScreenCanvas::hideRemoteCursor() {
-    if (m_remoteCursorDot) m_remoteCursorDot->setVisible(false);
-}
-
-void ScreenCanvas::ensureZOrder() {
-    // Put screens at a low Z, remote cursor very high, media in between
-    for (QGraphicsRectItem* r : m_screenItems) {
-        if (r) r->setZValue(Z_SCREENS);
-    }
-    if (m_remoteCursorDot) m_remoteCursorDot->setZValue(Z_REMOTE_CURSOR);
-    if (!m_scene) return;
-    // Normalize media base Z so overlays (set to ~9000) always win
-    for (QGraphicsItem* it : m_scene->items()) {
-        auto* media = dynamic_cast<ResizableMediaBase*>(it);
-    if (media) media->setZValue(Z_MEDIA_BASE);
+        if (!files.isEmpty()) m_uploadManager->toggleUpload(files);
     }
 }
 
-void ScreenCanvas::setMediaHandleSelectionSizePx(int px) {
-    m_mediaHandleSelectionSizePx = qMax(4, px);
-    if (!m_scene) return;
-    const QList<QGraphicsItem*> sel = m_scene->selectedItems();
-    for (QGraphicsItem* it : sel) {
-        if (auto* rp = dynamic_cast<ResizablePixmapItem*>(it)) {
-            rp->setHandleSelectionSize(m_mediaHandleSelectionSizePx);
-        } else if (auto* rv = dynamic_cast<ResizableMediaBase*>(it)) {
-            rv->setHandleSelectionSize(m_mediaHandleSelectionSizePx);
-        }
+void MainWindow::onSendMediaClicked() {
+    // Placeholder: would iterate scene media and send placement message
+    QMessageBox::information(this, "Send Media", "Send Media functionality not yet implemented.");
+}
+
+void MainWindow::onBackToClientListClicked() { showClientListView(); }
+
+void MainWindow::onClientItemClicked(QListWidgetItem* item) {
+    if (!item) return;
+    int index = m_clientListWidget->row(item);
+    if (index >=0 && index < m_availableClients.size()) {
+        const ClientInfo& client = m_availableClients[index];
+        m_selectedClient = client;
+        showScreenView(client);
+        if (m_webSocketClient && m_webSocketClient->isConnected()) m_webSocketClient->requestScreens(client.getId());
     }
 }
 
-void ScreenCanvas::setMediaHandleVisualSizePx(int px) {
-    m_mediaHandleVisualSizePx = qMax(4, px);
-    if (!m_scene) return;
-    const QList<QGraphicsItem*> sel = m_scene->selectedItems();
-    for (QGraphicsItem* it : sel) {
-        if (auto* rp = dynamic_cast<ResizablePixmapItem*>(it)) {
-            rp->setHandleVisualSize(m_mediaHandleVisualSizePx);
-        } else if (auto* rv = dynamic_cast<ResizableMediaBase*>(it)) {
-            rv->setHandleVisualSize(m_mediaHandleVisualSizePx);
-        }
-    }
+void MainWindow::onGenericMessageReceived(const QJsonObject& message) {
+    Q_UNUSED(message);
+    // Currently unused; placeholder for future protocol extensions
 }
 
-void ScreenCanvas::setMediaHandleSizePx(int px) {
-    setMediaHandleVisualSizePx(px);
-    setMediaHandleSelectionSizePx(px);
-}
-
-// Drag & drop handlers
-void ScreenCanvas::dragEnterEvent(QDragEnterEvent* event) {
-    if (event->mimeData()->hasUrls() || event->mimeData()->hasImage()) {
-    ensureDragPreview(event->mimeData());
-    m_dragPreviewLastScenePos = mapToScene(event->position().toPoint());
-    updateDragPreviewPos(m_dragPreviewLastScenePos);
-    if (!m_dragCursorHidden) {
-#ifdef Q_OS_MACOS
-        MacCursorHider::hide();
-#else
-        QApplication::setOverrideCursor(Qt::BlankCursor);
-#endif
-        m_dragCursorHidden = true;
-    }
-        event->acceptProposedAction();
-    } else {
-        QGraphicsView::dragEnterEvent(event);
-    }
-}
-
-void ScreenCanvas::dragMoveEvent(QDragMoveEvent* event) {
-    if (event->mimeData()->hasUrls() || event->mimeData()->hasImage()) {
-    ensureDragPreview(event->mimeData());
-    m_dragPreviewLastScenePos = mapToScene(event->position().toPoint());
-    updateDragPreviewPos(m_dragPreviewLastScenePos);
-        event->acceptProposedAction();
-    } else {
-        QGraphicsView::dragMoveEvent(event);
-    }
-}
-
-void ScreenCanvas::dragLeaveEvent(QDragLeaveEvent* event) {
-    Q_UNUSED(event);
-    clearDragPreview();
-    if (m_dragCursorHidden) {
-#ifdef Q_OS_MACOS
-    MacCursorHider::show();
-#else
-    QApplication::restoreOverrideCursor();
-#endif
-    m_dragCursorHidden = false;
-    }
-}
-
-void ScreenCanvas::dropEvent(QDropEvent* event) {
-    QImage image;
-    QString filename;
-    QString droppedPath;
-    if (event->mimeData()->hasImage()) {
-        image = qvariant_cast<QImage>(event->mimeData()->imageData());
-        filename = "pasted-image";
-    } else if (event->mimeData()->hasUrls()) {
-        const auto urls = event->mimeData()->urls();
-        if (!urls.isEmpty()) {
-            const QUrl& url = urls.first();
-            const QString path = url.toLocalFile();
-            if (!path.isEmpty()) {
-                droppedPath = path;
-                filename = QFileInfo(path).fileName();
-                image.load(path); // may fail if it's a video
-            }
-        }
-    }
-    const QPointF scenePos = mapToScene(event->position().toPoint());
-    if (!image.isNull()) {
-        const double w = image.width() * m_scaleFactor;
-        const double h = image.height() * m_scaleFactor;
-        auto* item = new ResizablePixmapItem(QPixmap::fromImage(image), m_mediaHandleVisualSizePx, m_mediaHandleSelectionSizePx, filename);
-        if (!droppedPath.isEmpty()) item->setSourcePath(droppedPath);
-        item->setFlags(QGraphicsItem::ItemIsMovable | QGraphicsItem::ItemIsSelectable | QGraphicsItem::ItemSendsGeometryChanges);
-        item->setPos(scenePos.x() - w/2.0, scenePos.y() - h/2.0);
-        if (image.width() > 0) item->setScale(w / image.width());
-        m_scene->addItem(item);
-        // Auto-select the newly dropped item
-        if (m_scene) m_scene->clearSelection();
-        item->setSelected(true);
-    } else if (!droppedPath.isEmpty()) {
-        // Decide if it's a video by extension
-        const QString ext = QFileInfo(droppedPath).suffix().toLower();
-        static const QSet<QString> kVideoExts = {"mp4","mov","m4v","avi","mkv","webm"};
-        if (kVideoExts.contains(ext)) {
-            // Create with placeholder logical size; adopt real size on first frame
-            auto* vitem = new ResizableVideoItem(droppedPath, m_mediaHandleVisualSizePx, m_mediaHandleSelectionSizePx, filename, m_videoControlsFadeMs);
-            vitem->setSourcePath(droppedPath);
-            vitem->setInitialScaleFactor(m_scaleFactor);
-            // Start with a neutral 1.0 scale on placeholder size and center approx.
-            vitem->setScale(m_scaleFactor);
-            const double w = 640.0 * m_scaleFactor;
-            const double h = 360.0 * m_scaleFactor;
-            vitem->setPos(scenePos.x() - w/2.0, scenePos.y() - h/2.0);
-            m_scene->addItem(vitem);
-            // Auto-select the newly dropped video item
-            if (m_scene) m_scene->clearSelection();
-            vitem->setSelected(true);
-            // If a real preview frame exists, set it as poster after adding to the scene
-            if (!m_dragPreviewPixmap.isNull()) {
-                vitem->setExternalPosterImage(m_dragPreviewPixmap.toImage());
-            }
-        } else {
-            QGraphicsView::dropEvent(event);
-            return;
-        }
-    } else {
-        QGraphicsView::dropEvent(event);
-        return;
-    }
-    ensureZOrder();
-    event->acceptProposedAction();
-    // Keep the preview visible at the drop location briefly until the new item paints, then clear
-    clearDragPreview();
-    if (m_dragCursorHidden) {
-#ifdef Q_OS_MACOS
-    MacCursorHider::show();
-#else
-    QApplication::restoreOverrideCursor();
-#endif
-    m_dragCursorHidden = false;
-    }
-}
-
-void ScreenCanvas::ensureDragPreview(const QMimeData* mime) {
-    if (!m_scene) return;
-    if (m_dragPreviewItem) return; // already created
-    QPixmap preview;
-    m_dragPreviewIsVideo = false;
-    m_dragPreviewPixmap = QPixmap();
-    m_dragPreviewBaseSize = QSize();
-    // Try image data directly
-    if (mime->hasImage()) {
-        QImage img = qvariant_cast<QImage>(mime->imageData());
-        if (!img.isNull()) {
-            preview = QPixmap::fromImage(img);
-        }
-    }
-    // Or a local file URL
-    if (preview.isNull() && mime->hasUrls()) {
-        const auto urls = mime->urls();
-        if (!urls.isEmpty()) {
-            const QUrl& url = urls.first();
-            const QString path = url.toLocalFile();
-            if (!path.isEmpty()) {
-                const QString ext = QFileInfo(path).suffix().toLower();
-                static const QSet<QString> kVideoExts = {"mp4","mov","m4v","avi","mkv","webm"};
-                if (kVideoExts.contains(ext)) {
-                    m_dragPreviewIsVideo = true;
-                    // Start background probe to fetch first frame ASAP; do not show any placeholder
-                    startVideoPreviewProbe(path);
-                    // Return early: we'll create the pixmap item when the first frame arrives
-                    return;
-                } else {
-                    preview.load(path); // may fail if not an image
-                }
-            }
-        }
-    }
-    if (preview.isNull()) return; // nothing to preview yet
-    m_dragPreviewPixmap = preview;
-    m_dragPreviewBaseSize = preview.size();
-    // Create a QGraphicsPixmapItem as the preview
-    auto* pmItem = new QGraphicsPixmapItem(preview);
-    // Start from transparent and fade in
-    pmItem->setOpacity(0.0);
-    pmItem->setZValue(5000.0); // on top of everything during drag
-    pmItem->setFlag(QGraphicsItem::ItemIgnoresTransformations, false); // scale with scene factor
-    // Apply initial scale to match our canvas scale factor
-    pmItem->setScale(m_scaleFactor);
-    m_scene->addItem(pmItem);
-    m_dragPreviewItem = pmItem;
-    startDragPreviewFadeIn();
-}
-
-void ScreenCanvas::updateDragPreviewPos(const QPointF& scenePos) {
-    if (!m_dragPreviewItem) return;
-    const QSize sz = m_dragPreviewBaseSize.isValid() ? m_dragPreviewBaseSize : QSize(320,180);
-    const double w = sz.width() * m_scaleFactor;
-    const double h = sz.height() * m_scaleFactor;
-    m_dragPreviewItem->setPos(scenePos.x() - w/2.0, scenePos.y() - h/2.0);
-}
-
-void ScreenCanvas::clearDragPreview() {
-    stopDragPreviewFade();
-    if (m_dragPreviewItem && m_scene) {
-        m_scene->removeItem(m_dragPreviewItem);
-        delete m_dragPreviewItem;
-    }
-    m_dragPreviewItem = nullptr;
-    m_dragPreviewBaseSize = QSize();
-    m_dragPreviewPixmap = QPixmap();
-    m_dragPreviewIsVideo = false;
-    stopVideoPreviewProbe();
-}
-
-QPixmap ScreenCanvas::makeVideoPlaceholderPixmap(const QSize& pxSize) {
-    QSize s = pxSize.isValid() ? pxSize : QSize(320, 180);
-    QPixmap pm(s);
-    pm.fill(Qt::transparent);
-    QPainter p(&pm);
-    p.setRenderHint(QPainter::Antialiasing);
-    QColor bg(0,0,0,180);
-    p.setBrush(bg);
-    p.setPen(Qt::NoPen);
-    const qreal r = 8.0;
-    p.drawRoundedRect(QRectF(0,0,s.width(), s.height()), r, r);
-    // Draw a simple play triangle in the center
-    const qreal triW = s.width() * 0.18;
-    const qreal triH = triW * 1.0;
-    QPointF c(s.width()/2.0, s.height()/2.0);
-    QPolygonF tri;
-    tri << QPointF(c.x() - triW/3.0, c.y() - triH/2.0)
-        << QPointF(c.x() - triW/3.0, c.y() + triH/2.0)
-        << QPointF(c.x() + triW*0.7, c.y());
-    p.setBrush(QColor(255,255,255,230));
-    p.drawPolygon(tri);
-    p.end();
-    return pm;
-}
-
-void ScreenCanvas::startVideoPreviewProbe(const QString& localFilePath) {
-    stopVideoPreviewProbe();
-    m_dragPreviewGotFrame = false;
-#ifdef Q_OS_MACOS
-    // Launch a very fast first-frame extraction via AVFoundation on a background thread
-    if (m_dragPreviewFallbackTimer) { m_dragPreviewFallbackTimer->stop(); m_dragPreviewFallbackTimer->deleteLater(); m_dragPreviewFallbackTimer = nullptr; }
-    QString pathCopy = localFilePath;
-    std::thread([this, pathCopy]() {
-        QImage img = MacVideoThumbnailer::firstFrame(pathCopy);
-        if (!img.isNull()) {
-            QImage copy = img;
-            QMetaObject::invokeMethod(this, [this, copy]() { onFastVideoThumbnailReady(copy); }, Qt::QueuedConnection);
-        }
-    }).detach();
-    // Fallback: if fast path doesn't answer quickly, start the decoder-based probe
-    m_dragPreviewFallbackTimer = new QTimer(this);
-    m_dragPreviewFallbackTimer->setSingleShot(true);
-    connect(m_dragPreviewFallbackTimer, &QTimer::timeout, this, [this, localFilePath]() {
-        startVideoPreviewProbeFallback(localFilePath);
-    });
-    m_dragPreviewFallbackTimer->start(120); // short grace period
-#else
-    startVideoPreviewProbeFallback(localFilePath);
-#endif
-}
-
-void ScreenCanvas::startVideoPreviewProbeFallback(const QString& localFilePath) {
-    if (m_dragPreviewPlayer) return; // already running
-    m_dragPreviewPlayer = new QMediaPlayer(this);
-    m_dragPreviewAudio = new QAudioOutput(this);
-    m_dragPreviewAudio->setMuted(true);
-    m_dragPreviewPlayer->setAudioOutput(m_dragPreviewAudio);
-    m_dragPreviewSink = new QVideoSink(this);
-    m_dragPreviewPlayer->setVideoSink(m_dragPreviewSink);
-    m_dragPreviewPlayer->setSource(QUrl::fromLocalFile(localFilePath));
-    connect(m_dragPreviewSink, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame& f){
-        if (m_dragPreviewGotFrame || !f.isValid()) return;
-        QImage img = f.toImage();
-        if (img.isNull()) return;
-        m_dragPreviewGotFrame = true;
-        QPixmap newPm = QPixmap::fromImage(img);
-        if (newPm.isNull()) return;
-        m_dragPreviewPixmap = newPm;
-        m_dragPreviewBaseSize = newPm.size();
-        if (!m_dragPreviewItem) {
-            auto* pmItem = new QGraphicsPixmapItem(m_dragPreviewPixmap);
-            pmItem->setOpacity(0.0);
-            pmItem->setZValue(5000.0);
-            pmItem->setFlag(QGraphicsItem::ItemIgnoresTransformations, false);
-            pmItem->setScale(m_scaleFactor);
-            m_scene->addItem(pmItem);
-            m_dragPreviewItem = pmItem;
-            updateDragPreviewPos(m_dragPreviewLastScenePos);
-            startDragPreviewFadeIn();
-        } else if (auto* pmItem = qgraphicsitem_cast<QGraphicsPixmapItem*>(m_dragPreviewItem)) {
-            pmItem->setPixmap(m_dragPreviewPixmap);
-            updateDragPreviewPos(m_dragPreviewLastScenePos);
-        }
-        if (m_dragPreviewPlayer) m_dragPreviewPlayer->pause();
-        if (m_dragPreviewFallbackTimer) { m_dragPreviewFallbackTimer->stop(); m_dragPreviewFallbackTimer->deleteLater(); m_dragPreviewFallbackTimer = nullptr; }
-    });
-    m_dragPreviewPlayer->play();
-}
-
-void ScreenCanvas::onFastVideoThumbnailReady(const QImage& img) {
-    if (img.isNull()) return;
-    if (m_dragPreviewGotFrame) return; // already satisfied by fallback
-    m_dragPreviewGotFrame = true;
-    QPixmap pm = QPixmap::fromImage(img);
-    if (pm.isNull()) return;
-    m_dragPreviewPixmap = pm;
-    m_dragPreviewBaseSize = pm.size();
-    if (!m_dragPreviewItem) {
-        auto* pmItem = new QGraphicsPixmapItem(m_dragPreviewPixmap);
-        pmItem->setOpacity(0.0);
-        pmItem->setZValue(5000.0);
-        pmItem->setFlag(QGraphicsItem::ItemIgnoresTransformations, false);
-        pmItem->setScale(m_scaleFactor);
-        if (m_scene) m_scene->addItem(pmItem);
-        m_dragPreviewItem = pmItem;
-        updateDragPreviewPos(m_dragPreviewLastScenePos);
-        startDragPreviewFadeIn();
-    } else if (auto* pix = qgraphicsitem_cast<QGraphicsPixmapItem*>(m_dragPreviewItem)) {
-        pix->setPixmap(m_dragPreviewPixmap);
-        updateDragPreviewPos(m_dragPreviewLastScenePos);
-    }
-    if (m_dragPreviewFallbackTimer) { m_dragPreviewFallbackTimer->stop(); m_dragPreviewFallbackTimer->deleteLater(); m_dragPreviewFallbackTimer = nullptr; }
-    // If decoder path started, stop it
-    if (m_dragPreviewPlayer) { m_dragPreviewPlayer->stop(); m_dragPreviewPlayer->deleteLater(); m_dragPreviewPlayer = nullptr; }
-    if (m_dragPreviewSink) { m_dragPreviewSink->deleteLater(); m_dragPreviewSink = nullptr; }
-    if (m_dragPreviewAudio) { m_dragPreviewAudio->deleteLater(); m_dragPreviewAudio = nullptr; }
-}
-
-void ScreenCanvas::stopVideoPreviewProbe() {
-    if (m_dragPreviewFallbackTimer) {
-        m_dragPreviewFallbackTimer->stop();
-        m_dragPreviewFallbackTimer->deleteLater();
-        m_dragPreviewFallbackTimer = nullptr;
-    }
-    if (m_dragPreviewPlayer) {
-        m_dragPreviewPlayer->stop();
-        m_dragPreviewPlayer->deleteLater();
-        m_dragPreviewPlayer = nullptr;
-    }
-    if (m_dragPreviewSink) {
-        m_dragPreviewSink->deleteLater();
-        m_dragPreviewSink = nullptr;
-    }
-    if (m_dragPreviewAudio) {
-        m_dragPreviewAudio->deleteLater();
-        m_dragPreviewAudio = nullptr;
-    }
-}
-
-void ScreenCanvas::startDragPreviewFadeIn() {
-    // Stop any existing animation first
-    stopDragPreviewFade();
-    if (!m_dragPreviewItem) return;
-    const qreal target = m_dragPreviewTargetOpacity;
-    if (m_dragPreviewItem->opacity() >= target - 0.001) return;
-    auto* anim = new QVariantAnimation(this);
-    m_dragPreviewFadeAnim = anim;
-    anim->setStartValue(0.0);
-    anim->setEndValue(target);
-    anim->setDuration(m_dragPreviewFadeMs);
-    anim->setEasingCurve(QEasingCurve::OutCubic);
-    connect(anim, &QVariantAnimation::valueChanged, this, [this](const QVariant& v){
-        if (m_dragPreviewItem) m_dragPreviewItem->setOpacity(v.toReal());
-    });
-    connect(anim, &QVariantAnimation::finished, this, [this](){
-        m_dragPreviewFadeAnim = nullptr;
-    });
-    anim->start(QAbstractAnimation::DeleteWhenStopped);
-}
-
-void ScreenCanvas::stopDragPreviewFade() {
-    if (m_dragPreviewFadeAnim) {
-        m_dragPreviewFadeAnim->stop();
-        m_dragPreviewFadeAnim = nullptr;
-    }
-}
-
-QGraphicsRectItem* ScreenCanvas::createScreenItem(const ScreenInfo& screen, int index, const QRectF& position) {
-    // Border must be fully inside so the outer size matches the logical screen size.
-    const int penWidth = m_screenBorderWidthPx; // configurable
-    // Inset the rect by half the pen width so the stroke stays entirely inside.
-    QRectF inner = position.adjusted(penWidth / 2.0, penWidth / 2.0,
-                                     -penWidth / 2.0, -penWidth / 2.0);
-    QGraphicsRectItem* item = new QGraphicsRectItem(inner);
-    
-    // Set appearance
-    if (screen.primary) {
-        item->setBrush(QBrush(QColor(74, 144, 226, 180))); // Primary screen - blue
-        item->setPen(QPen(QColor(74, 144, 226), penWidth));
-    } else {
-        item->setBrush(QBrush(QColor(80, 80, 80, 180))); // Secondary screen - gray
-        item->setPen(QPen(QColor(160, 160, 160), penWidth));
-    }
-    
-    // Store screen index for click handling
-    item->setData(0, index);
-    
-    // Add screen label
-    QGraphicsTextItem* label = new QGraphicsTextItem(QString("Screen %1\n%2×%3")
-        .arg(index + 1)
-        .arg(screen.width)
-        .arg(screen.height));
-    label->setDefaultTextColor(Qt::white);
-    label->setFont(QFont("Arial", 12, QFont::Bold));
-    
-    // Center the label on the screen
-    QRectF labelRect = label->boundingRect();
-    QRectF screenRect = item->rect();
-    label->setPos(screenRect.center() - labelRect.center());
-    label->setParentItem(item);
-    
-    return item;
-}
-
-void ScreenCanvas::setScreenBorderWidthPx(int px) {
-    m_screenBorderWidthPx = qMax(0, px);
-    // Update existing screen items to keep the same outer size while drawing the stroke fully inside
-    // We know m_screenItems aligns with m_screens by index after createScreenItems().
-    if (!m_scene) return;
-    for (int i = 0; i < m_screenItems.size() && i < m_screens.size(); ++i) {
-        QGraphicsRectItem* item = m_screenItems[i];
-        if (!item) continue;
-        const int penW = m_screenBorderWidthPx;
-        // Compute the outer rect from the current item rect by reversing the previous inset.
-        // Previous inset may differ; reconstruct outer by expanding by old half-pen, then re-inset by new half-pen.
-        // Since we don't track the old pen per-item, approximate using current pen width on the item.
-        int oldPenW = static_cast<int>(item->pen().widthF());
-        QRectF currentInner = item->rect();
-        QRectF outer = currentInner.adjusted(-(oldPenW/2.0), -(oldPenW/2.0), (oldPenW/2.0), (oldPenW/2.0));
-        QRectF newInner = outer.adjusted(penW/2.0, penW/2.0, -penW/2.0, -penW/2.0);
-        item->setRect(newInner);
-        QPen p = item->pen();
-        p.setWidthF(penW);
-        item->setPen(p);
-    }
-}
-
-QMap<int, QRectF> ScreenCanvas::calculateCompactPositions(double scaleFactor, double hSpacing, double vSpacing) const {
-    QMap<int, QRectF> positions;
-    
-    if (m_screens.isEmpty()) {
-        return positions;
-    }
-    
-    // Simple left-to-right, top-to-bottom compact layout
-    
-    // First, sort screens by their actual position (left to right, then top to bottom)
-    QList<QPair<int, ScreenInfo>> screenPairs;
-    for (int i = 0; i < m_screens.size(); ++i) {
-        screenPairs.append(qMakePair(i, m_screens[i]));
-    }
-    
-    // Sort by Y first (top to bottom), then by X (left to right)
-    std::sort(screenPairs.begin(), screenPairs.end(), 
-              [](const QPair<int, ScreenInfo>& a, const QPair<int, ScreenInfo>& b) {
-                  if (qAbs(a.second.y - b.second.y) < 100) { // If roughly same height
-                      return a.second.x < b.second.x; // Sort by X
-                  }
-                  return a.second.y < b.second.y; // Sort by Y
-              });
-    
-    // Layout screens with compact positioning
-    double currentX = 0;
-    double currentY = 0;
-    double rowHeight = 0;
-    int lastY = INT_MIN;
-    
-    for (const auto& pair : screenPairs) {
-        int index = pair.first;
-        const ScreenInfo& screen = pair.second;
-        
-        double screenWidth = screen.width * scaleFactor;
-        double screenHeight = screen.height * scaleFactor;
-        
-        // Start new row if Y position changed significantly
-        if (lastY != INT_MIN && qAbs(screen.y - lastY) > 100) {
-            currentX = 0;
-            currentY += rowHeight + vSpacing;
-            rowHeight = 0;
-        }
-        
-        // Position the screen
-        QRectF rect(currentX, currentY, screenWidth, screenHeight);
-    positions[index] = rect;
-        
-        // Update for next screen
-    currentX += screenWidth + hSpacing;
-        rowHeight = qMax(rowHeight, screenHeight);
-        lastY = screen.y;
-    }
-    
-    return positions;
-}
-
-QRectF ScreenCanvas::screensBoundingRect() const {
-    QRectF bounds;
-    bool first = true;
-    for (auto* item : m_screenItems) {
-        if (!item) continue;
-        QRectF r = item->sceneBoundingRect();
-        if (first) { bounds = r; first = false; }
-        else { bounds = bounds.united(r); }
-    }
-    return bounds;
-}
-
-void ScreenCanvas::recenterWithMargin(int marginPx) {
-    QRectF bounds = screensBoundingRect();
-    if (bounds.isNull() || !bounds.isValid()) return;
-    // Fit content with a fixed pixel margin in the viewport
-    const QSize vp = viewport() ? viewport()->size() : size();
-    const qreal availW = static_cast<qreal>(vp.width())  - 2.0 * marginPx;
-    const qreal availH = static_cast<qreal>(vp.height()) - 2.0 * marginPx;
-
-    if (availW <= 1 || availH <= 1 || bounds.width() <= 0 || bounds.height() <= 0) {
-        // Fallback to a simple fit if viewport is too small
-        fitInView(bounds, Qt::KeepAspectRatio);
-        centerOn(bounds.center());
-        return;
-    }
-
-    const qreal sx = availW / bounds.width();
-    const qreal sy = availH / bounds.height();
-    const qreal s = std::min(sx, sy);
-
-    // Apply the scale in one shot and center on content
-    QTransform t;
-    t.scale(s, s);
-    setTransform(t);
-    centerOn(bounds.center());
-    // After recenter, refresh overlays only for selected items (cheaper and sufficient)
-    if (m_scene) {
-        const QList<QGraphicsItem*> sel = m_scene->selectedItems();
-        for (QGraphicsItem* it : sel) {
-            if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) {
-                v->requestOverlayRelayout();
-            }
-            if (auto* b = dynamic_cast<ResizableMediaBase*>(it)) {
-                b->requestLabelRelayout();
-            }
-        }
-    }
-    // Start momentum suppression: ignore decaying inertial scroll deltas until an increase occurs
-    m_ignorePanMomentum = true;
-    m_momentumPrimed = false;
-    m_lastMomentumMag = 0.0;
-    m_lastMomentumDelta = QPoint(0, 0);
-    m_momentumTimer.restart();
-}
-
-void ScreenCanvas::keyPressEvent(QKeyEvent* event) {
-    // Delete selected media items
-    if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
-        if (m_scene) {
-            const QList<QGraphicsItem*> sel = m_scene->selectedItems();
-            for (QGraphicsItem* it : sel) {
-                if (auto* base = dynamic_cast<ResizableMediaBase*>(it)) {
-                    base->ungrabMouse();
-                    m_scene->removeItem(base);
-                    delete base;
-                }
-            }
-        }
-        event->accept();
-        return;
-    }
-    if (event->key() == Qt::Key_Space) {
-        recenterWithMargin(53);
-        event->accept();
-        return;
-    }
-    QGraphicsView::keyPressEvent(event);
-}
-
-bool ScreenCanvas::event(QEvent* event) {
-    if (event->type() == QEvent::Gesture) {
-#ifdef Q_OS_MACOS
-        // On macOS, rely on QNativeGestureEvent for trackpad pinch to avoid duplicate scaling
-        return false;
-#else
-        return gestureEvent(static_cast<QGestureEvent*>(event));
-#endif
-    }
-    // Handle native gestures (macOS trackpad pinch)
-    if (event->type() == QEvent::NativeGesture) {
-        auto* ng = static_cast<QNativeGestureEvent*>(event);
-        if (ng->gestureType() == Qt::ZoomNativeGesture) {
-            // Mark pinch as active and extend guard
-            m_nativePinchActive = true;
-            m_nativePinchGuardTimer->start();
-            // ng->value() is a delta; use exponential to convert to multiplicative factor
-            const qreal factor = std::pow(2.0, ng->value());
-            // Figma/Canva-style: anchor at the cursor position first
-            QPoint vpPos = viewport()->mapFromGlobal(QCursor::pos());
-            if (!viewport()->rect().contains(vpPos)) {
-                // Fallback to gesture position (view coords -> viewport) then last mouse pos/center
-                QPoint viewPos = ng->position().toPoint();
-                vpPos = viewport()->mapFrom(this, viewPos);
-                if (!viewport()->rect().contains(vpPos)) {
-                    vpPos = m_lastMousePos.isNull() ? viewport()->rect().center() : m_lastMousePos;
-                }
-            }
-            zoomAroundViewportPos(vpPos, factor);
-            event->accept();
-            return true;
-        }
-    }
-    return QGraphicsView::event(event);
-}
-
-bool ScreenCanvas::gestureEvent(QGestureEvent* event) {
-#ifdef Q_OS_MACOS
-    Q_UNUSED(event);
-    return false; // handled via NativeGesture on macOS
-#endif
-    if (QGesture* pinch = event->gesture(Qt::PinchGesture)) {
-        auto* pinchGesture = static_cast<QPinchGesture*>(pinch);
-        if (pinchGesture->changeFlags() & QPinchGesture::ScaleFactorChanged) {
-            const qreal factor = pinchGesture->scaleFactor();
-            const QPoint anchor = m_lastMousePos.isNull() ? viewport()->rect().center() : m_lastMousePos;
-            zoomAroundViewportPos(anchor, factor);
-        }
-        event->accept();
-        return true;
-    }
-    return false;
-}
-
-void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
-    if (event->button() == Qt::LeftButton) {
-        // Priority 0: forward to controls of currently selected videos before any other handling
-        if (m_scene) {
-            const QPointF scenePosEarly = mapToScene(event->pos());
-            const QList<QGraphicsItem*> selEarly = m_scene->selectedItems();
-            for (QGraphicsItem* it : selEarly) {
-                if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) {
-                    const QPointF itemPos = v->mapFromScene(scenePosEarly);
-                    if (v->handleControlsPressAtItemPos(itemPos)) {
-                        m_overlayMouseDown = true; // consume subsequent release as well
-                        event->accept();
-                        return;
-                    }
-                }
-            }
-        }
-        // Try to start resize on the topmost media item whose handle contains the point
-        // BUT only if the item is already selected
-        const QPointF scenePos = mapToScene(event->pos());
-        ResizableMediaBase* topHandleItem = nullptr;
-        qreal topZ = -std::numeric_limits<qreal>::infinity();
-    const QList<QGraphicsItem*> sel = m_scene ? m_scene->selectedItems() : QList<QGraphicsItem*>();
-    for (QGraphicsItem* it : sel) {
-            if (auto* rp = dynamic_cast<ResizableMediaBase*>(it)) {
-                // Only allow resize if item is selected
-                if (rp->isSelected() && rp->isOnHandleAtItemPos(rp->mapFromScene(scenePos))) {
-                    if (rp->zValue() > topZ) { topZ = rp->zValue(); topHandleItem = rp; }
-                }
-            }
-        }
-        if (topHandleItem) {
-            if (topHandleItem->beginResizeAtScenePos(scenePos)) {
-                // Set resize cursor during active resize
-                Qt::CursorShape cursor = topHandleItem->cursorForScenePos(scenePos);
-                viewport()->setCursor(cursor);
-                event->accept();
-                return;
-            }
-        }
-        // Decide based on item type under cursor: media (or its overlays) -> scene, screens/empty -> pan
-        const QList<QGraphicsItem*> hitItems = items(event->pos());
-        // If any hit item is an overlay panel/element (tagged with data(0) == "overlay"), swallow click without deselecting
-        bool clickedOverlayOnly = false;
-        if (!hitItems.isEmpty()) {
-            bool anyMedia = false;
-            for (QGraphicsItem* hi : hitItems) {
-                if (hi->data(0).toString() == QLatin1String("overlay")) {
-                    // keep flag but continue to see if there is also media underneath
-                    clickedOverlayOnly = true;
-                }
-                // Detect media by dynamic_cast; if found, treat as normal media click (handled below)
-                QGraphicsItem* scan = hi;
-                while (scan) {
-                    if (dynamic_cast<ResizableMediaBase*>(scan)) { anyMedia = true; break; }
-                    scan = scan->parentItem();
-                }
-            }
-            if (clickedOverlayOnly && !anyMedia) {
-                // Pure overlay (e.g., filename label) under cursor: keep current selection and do nothing
-                event->accept();
-                return;
-            }
-        }
-        auto toMedia = [](QGraphicsItem* x)->ResizableMediaBase* {
-            while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); }
-            return nullptr;
-        };
-        ResizableMediaBase* mediaHit = nullptr;
-        QGraphicsItem* rawHit = nullptr;
-        for (QGraphicsItem* it : hitItems) { if ((mediaHit = toMedia(it))) { rawHit = it; break; } }
-        if (mediaHit) {
-            // For simple UX: modifiers do nothing; always single-select the clicked media
-            if (m_scene) m_scene->clearSelection();
-            if (!mediaHit->isSelected()) mediaHit->setSelected(true);
-            // Map click to item pos and let video handle controls
-            if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaHit)) {
-                const QPointF itemPos = v->mapFromScene(mapToScene(event->pos()));
-                if (v->handleControlsPressAtItemPos(itemPos)) {
-                    event->accept();
-                    return;
-                }
-            }
-            // Let default behavior run (for move/drag, etc.), but ignore modifiers
-            QMouseEvent synthetic(event->type(), event->position(), event->scenePosition(), event->globalPosition(),
-                                  event->button(), event->buttons(), Qt::NoModifier);
-            QGraphicsView::mousePressEvent(&synthetic);
-            // Enforce single selection after default handling
-            if (m_scene) m_scene->clearSelection();
-            mediaHit->setSelected(true);
-            return;
-        }
-
-        // No item hit: allow interacting with controls of currently selected video items
-        // This covers the case where the floating controls are positioned outside the item's hittable area
-        for (QGraphicsItem* it : scene()->selectedItems()) {
-            if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) {
-                const QPointF itemPos = v->mapFromScene(mapToScene(event->pos()));
-                if (v->handleControlsPressAtItemPos(itemPos)) {
-                    event->accept();
-                    return;
-                }
-            }
-        }
-        // Otherwise start panning the view
-        if (m_scene) {
-            m_scene->clearSelection(); // single-click on empty space deselects items
-        }
-        m_panning = true;
-        m_lastPanPoint = event->pos();
-        event->accept();
-        return;
-    }
-    QGraphicsView::mousePressEvent(event);
-}
-
-void ScreenCanvas::mouseDoubleClickEvent(QMouseEvent* event) {
-    if (event->button() == Qt::LeftButton) {
-        if (m_scene) {
-            const QPointF scenePosSel = mapToScene(event->pos());
-            const QList<QGraphicsItem*> sel = m_scene->selectedItems();
-            for (QGraphicsItem* it : sel) {
-                if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) {
-                    const QPointF itemPos = v->mapFromScene(scenePosSel);
-                    if (v->handleControlsPressAtItemPos(itemPos)) {
-                        // Swallow the remainder of this double-click sequence (final release)
-                        m_overlayMouseDown = true;
-                        event->accept();
-                        return;
-                    }
-                }
-            }
-        }
-        const QPointF scenePos = mapToScene(event->pos());
-        const QList<QGraphicsItem*> hitItems = items(event->pos());
-        auto toMedia = [](QGraphicsItem* x)->ResizableMediaBase* {
-            while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); }
-            return nullptr;
-        };
-        ResizableMediaBase* mediaHit = nullptr;
-        for (QGraphicsItem* it : hitItems) { if ((mediaHit = toMedia(it))) break; }
-        if (mediaHit) {
-            if (scene()) scene()->clearSelection();
-            if (!mediaHit->isSelected()) mediaHit->setSelected(true);
-            if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaHit)) {
-                const QPointF itemPos = v->mapFromScene(scenePos);
-                if (v->handleControlsPressAtItemPos(itemPos)) { event->accept(); return; }
-            }
-            QGraphicsView::mouseDoubleClickEvent(event);
-            // Enforce single selection again
-            if (scene()) scene()->clearSelection();
-            mediaHit->setSelected(true);
-            return;
-        }
-        // If no media hit, pass through
-    }
-    QGraphicsView::mouseDoubleClickEvent(event);
-}
-
-void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
-    if (m_overlayMouseDown) {
-        // If an overlay initiated the interaction, forward moves to any dragging sliders
-        if (m_scene) {
-            const QList<QGraphicsItem*> sel = m_scene->selectedItems();
-            for (QGraphicsItem* it : sel) {
-                if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) {
-                    if (v->isDraggingProgress() || v->isDraggingVolume()) {
-                        v->updateDragWithScenePos(mapToScene(event->pos()));
-                        event->accept();
-                        return;
-                    }
-                }
-            }
-        }
-        // Not a drag-type overlay; just swallow move
-        event->accept();
-        return;
-    }
-    // Track last mouse pos in viewport coords (used for zoom anchoring)
-    m_lastMousePos = event->pos();
-    
-    // PRIORITY: Check if we're over a resize handle and set cursor accordingly
-    // This must be done BEFORE any other cursor management to ensure it's not overridden
-    // BUT only if the item is selected!
-    const QPointF scenePos = mapToScene(event->pos());
-    Qt::CursorShape resizeCursor = Qt::ArrowCursor;
-    bool onResizeHandle = false;
-    
-    // Check only selected media items for handle hover (prioritize topmost)
-    qreal topZ = -std::numeric_limits<qreal>::infinity();
-    const QList<QGraphicsItem*> sel = m_scene ? m_scene->selectedItems() : QList<QGraphicsItem*>();
-    for (QGraphicsItem* it : sel) {
-        if (auto* rp = dynamic_cast<ResizableMediaBase*>(it)) {
-            // Only show resize cursor if the item is selected
-            if (rp->isSelected() && rp->zValue() >= topZ) {
-                Qt::CursorShape itemCursor = rp->cursorForScenePos(scenePos);
-                if (itemCursor != Qt::ArrowCursor) {
-                    resizeCursor = itemCursor;
-                    onResizeHandle = true;
-                    topZ = rp->zValue();
-                }
-            }
-        }
-    }
-    
-    // Set the cursor with highest priority
-    if (onResizeHandle) {
-        viewport()->setCursor(resizeCursor);
-    } else {
-        viewport()->unsetCursor();
-    }
-    
-    // Handle dragging and panning logic
-    if (event->buttons() & Qt::LeftButton) {
-        // If a selected video is currently dragging its sliders, update it even if cursor left its shape
-    for (QGraphicsItem* it : sel) {
-            if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) {
-                if (v->isSelected() && (v->isDraggingProgress() || v->isDraggingVolume())) {
-                    v->updateDragWithScenePos(mapToScene(event->pos()));
-                    event->accept();
-                    return;
-                }
-            }
-        }
-        const QList<QGraphicsItem*> hitItems = items(event->pos());
-        auto toMedia = [](QGraphicsItem* x)->ResizableMediaBase* {
-            while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); }
-            return nullptr;
-        };
-        bool hitMedia = false;
-        for (QGraphicsItem* it : hitItems) { if (toMedia(it)) { hitMedia = true; break; } }
-        if (hitMedia) { QGraphicsView::mouseMoveEvent(event); return; }
-    }
-    if (m_panning) {
-        // Pan the view
-        QPoint delta = event->pos() - m_lastPanPoint;
-        horizontalScrollBar()->setValue(horizontalScrollBar()->value() - delta.x());
-        verticalScrollBar()->setValue(verticalScrollBar()->value() - delta.y());
-        m_lastPanPoint = event->pos();
-    }
-    QGraphicsView::mouseMoveEvent(event);
-}
-
-void ScreenCanvas::mouseReleaseEvent(QMouseEvent* event) {
-    if (event->button() == Qt::LeftButton) {
-        // If overlay consumed the press, finish any active slider drag and swallow release
-        if (m_overlayMouseDown) {
-            if (m_scene) {
-                const QList<QGraphicsItem*> sel = m_scene->selectedItems();
-                for (QGraphicsItem* it : sel) {
-                    if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) {
-                        if (v->isDraggingProgress() || v->isDraggingVolume()) {
-                            v->endDrag();
-                        }
-                    }
-                }
-            }
-            m_overlayMouseDown = false;
-            event->accept();
-            return;
-        }
-        // Finalize any active drag on selected video controls
-        for (QGraphicsItem* it : m_scene->items()) {
-            if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) {
-                if (v->isSelected() && (v->isDraggingProgress() || v->isDraggingVolume())) {
-                    v->endDrag();
-                    event->accept();
-                    return;
-                }
-            }
-        }
-        if (m_panning) {
-            m_panning = false;
-            event->accept();
-            return;
-        }
-        // Check if any item was being resized and reset cursor
-        bool wasResizing = false;
-        for (QGraphicsItem* it : m_scene->items()) {
-            if (auto* rp = dynamic_cast<ResizableMediaBase*>(it)) {
-                if (rp->isActivelyResizing()) {
-                    wasResizing = true;
-                    break;
-                }
-            }
-        }
-        if (wasResizing) {
-            // Reset cursor after resize
-            viewport()->unsetCursor();
-        }
-        // Route to base with modifiers stripped to avoid Qt toggling selection on Ctrl/Cmd
-        QMouseEvent synthetic(event->type(), event->position(), event->scenePosition(), event->globalPosition(),
-                              event->button(), event->buttons(), Qt::NoModifier);
-        QGraphicsView::mouseReleaseEvent(&synthetic);
-        // Enforce single-select policy regardless of modifiers once the click finishes
-        if (m_scene) {
-            const QList<QGraphicsItem*> sel = m_scene->selectedItems();
-            if (!sel.isEmpty()) {
-                // Keep the topmost media item under cursor if possible; otherwise keep the first selected
-                const QList<QGraphicsItem*> hitItems = items(event->pos());
-                auto toMedia = [](QGraphicsItem* x)->ResizableMediaBase* {
-                    while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); }
-                    return nullptr;
-                };
-                ResizableMediaBase* keep = nullptr;
-                for (QGraphicsItem* it : hitItems) { if ((keep = toMedia(it))) break; }
-                if (!keep) {
-                    for (QGraphicsItem* it : sel) { if ((keep = dynamic_cast<ResizableMediaBase*>(it))) break; }
-                }
-                m_scene->clearSelection();
-                if (keep) keep->setSelected(true);
-            }
-        }
-        return;
-    }
-    QGraphicsView::mouseReleaseEvent(event);
-}
-
-void ScreenCanvas::wheelEvent(QWheelEvent* event) {
-    // On macOS during an active pinch, ignore wheel-based two-finger scroll to avoid jitter
-#ifdef Q_OS_MACOS
-    if (m_nativePinchActive) {
-        event->ignore();
-        return;
-    }
-#endif
-    // If Cmd (macOS) or Ctrl (others) is held, treat the wheel as zoom, anchored under cursor
-#ifdef Q_OS_MACOS
-    const bool zoomModifier = event->modifiers().testFlag(Qt::MetaModifier);
-#else
-    const bool zoomModifier = event->modifiers().testFlag(Qt::ControlModifier);
-#endif
-
-    if (zoomModifier) {
-        qreal deltaY = 0.0;
-        if (!event->pixelDelta().isNull()) {
-            deltaY = event->pixelDelta().y();
-        } else if (!event->angleDelta().isNull()) {
-            // angleDelta is in 1/8 degree; 120 typically represents one step
-            deltaY = event->angleDelta().y() / 8.0; // convert to degrees-ish
-        }
-        if (deltaY != 0.0) {
-            // Convert delta to an exponential zoom factor for smoothness
-            const qreal factor = std::pow(1.0015, deltaY);
-            zoomAroundViewportPos(event->position(), factor);
-            event->accept();
-            return;
-        }
-    }
-
-    // Default behavior: scroll/pan content
-    // Prefer pixelDelta for trackpads (gives smooth 2D vector), fallback to angleDelta for mouse wheels.
-    QPoint delta;
-    if (!event->pixelDelta().isNull()) {
-        delta = event->pixelDelta();
-    } else if (!event->angleDelta().isNull()) {
-        delta = event->angleDelta() / 8; // small scaling for smoother feel
-    }
-    if (!delta.isNull()) {
-        // Momentum suppression: after recenter, ignore decaying inertial deltas robustly
-        if (m_ignorePanMomentum) {
-            // If the platform provides scroll phase, end suppression on a new phase begin
-#if QT_VERSION >= QT_VERSION_CHECK(6, 3, 0)
-            if (event->phase() == Qt::ScrollUpdate && !m_momentumPrimed) {
-                // still within the same fling; keep suppression
-            }
-            if (event->phase() == Qt::ScrollBegin) {
-                // New gesture explicitly began
-                m_ignorePanMomentum = false;
-            }
-            if (!m_ignorePanMomentum) {
-                // process normally
-            } else
-#endif
-            {
-                // Hysteresis thresholds
-                const double noiseGate = 1.0;   // ignore tiny bumps
-                const double boostRatio = 1.25; // require 25% increase to consider momentum ended
-                const qint64 graceMs = 180;     // ignore everything for a short time after recenter
-                const qint64 elapsed = m_momentumTimer.isValid() ? m_momentumTimer.elapsed() : LLONG_MAX;
-
-                // Use Manhattan length for magnitude; direction-agnostic
-                const double mag = std::abs(delta.x()) + std::abs(delta.y());
-                if (elapsed < graceMs) {
-                    // Short time gate immediately after centering
-                    event->accept();
-                    return;
-                }
-                if (mag <= noiseGate) {
-                    // Ignore tiny jitter
-                    event->accept();
-                    return;
-                }
-                if (!m_momentumPrimed) {
-                    // First observed delta after centering becomes the baseline and direction
-                    m_momentumPrimed = true;
-                    m_lastMomentumMag = mag;
-                    m_lastMomentumDelta = delta;
-                    event->accept();
-                    return; // cut immediately
-                } else {
-                    // If direction stays the same and magnitude does not significantly increase, keep ignoring
-                    const bool sameDir = (m_lastMomentumDelta.x() == 0 || (delta.x() == 0) || (std::signbit(m_lastMomentumDelta.x()) == std::signbit(delta.x()))) &&
-                                         (m_lastMomentumDelta.y() == 0 || (delta.y() == 0) || (std::signbit(m_lastMomentumDelta.y()) == std::signbit(delta.y())));
-                    if (sameDir) {
-                        if (mag <= m_lastMomentumMag * boostRatio) {
-                            // still decaying or not enough increase: continue suppressing
-                            m_lastMomentumMag = mag; // track new mag so we continue to follow the decay
-                            m_lastMomentumDelta = delta;
-                            event->accept();
-                            return;
-                        }
-                        // Significant boost in same direction -> consider it a new intentional scroll; end suppression
-                        m_ignorePanMomentum = false;
-                    } else {
-                        // Direction changed (user reversed) -> end suppression immediately to honor the user's input
-                        m_ignorePanMomentum = false;
-                    }
-                }
-            }
-        }
-        horizontalScrollBar()->setValue(horizontalScrollBar()->value() - delta.x());
-        verticalScrollBar()->setValue(verticalScrollBar()->value() - delta.y());
-        event->accept();
-        return;
-    }
-    QGraphicsView::wheelEvent(event);
-}
-
-void ScreenCanvas::zoomAroundViewportPos(const QPointF& vpPosF, qreal factor) {
-    QPoint vpPos = vpPosF.toPoint();
-    if (!viewport()->rect().contains(vpPos)) {
-        vpPos = viewport()->rect().center();
-    }
-    const QPointF sceneAnchor = mapToScene(vpPos);
-    // Compose a new transform that scales around the scene anchor directly
-    QTransform t = transform();
-    t.translate(sceneAnchor.x(), sceneAnchor.y());
-    t.scale(factor, factor);
-    t.translate(-sceneAnchor.x(), -sceneAnchor.y());
-    setTransform(t);
-    // After zoom, refresh overlays only for selected items
-    if (m_scene) {
-        const QList<QGraphicsItem*> sel = m_scene->selectedItems();
-        for (QGraphicsItem* it : sel) {
-            if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) {
-                v->requestOverlayRelayout();
-            }
-            if (auto* b = dynamic_cast<ResizableMediaBase*>(it)) {
-                b->requestLabelRelayout();
-            }
-        }
-    }
-}
 
 MainWindow::~MainWindow() {
     if (m_webSocketClient->isConnected()) {
@@ -1852,11 +516,11 @@ void MainWindow::createScreenViewPage() {
     // Ensure stylesheet background/border is actually painted
     m_canvasContainer->setAttribute(Qt::WA_StyledBackground, true);
     // Match the dark background used by the client list container via palette(base)
+    // Canvas container previously had a bordered panel look; remove to emulate design-tool feel
     m_canvasContainer->setStyleSheet(
         "QWidget#CanvasContainer { "
-        "   background-color: palette(base); "
-        "   border: 1px solid palette(mid); "
-        "   border-radius: 5px; "
+        "   background-color: transparent; "
+        "   border: none; "
         "}"
     );
     QVBoxLayout* containerLayout = new QVBoxLayout(m_canvasContainer);
@@ -1867,7 +531,7 @@ void MainWindow::createScreenViewPage() {
     // Match client list container: base background, no border on inner stack
     m_canvasStack->setStyleSheet(
         "QStackedWidget { "
-        "   background-color: palette(base); "
+        "   background-color: transparent; "
         "   border: none; "
         "}"
     );
@@ -1909,10 +573,9 @@ void MainWindow::createScreenViewPage() {
     m_screenCanvas->setMinimumHeight(400);
     // Ensure the viewport background matches and is rounded
     if (m_screenCanvas->viewport()) {
-        m_screenCanvas->viewport()->setAttribute(Qt::WA_StyledBackground, true);
-        m_screenCanvas->viewport()->setAutoFillBackground(true);
-        // No border on the viewport to avoid inner border effects
-        m_screenCanvas->viewport()->setStyleSheet("background-color: transparent; border: none;");
+        m_screenCanvas->viewport()->setAttribute(Qt::WA_StyledBackground, false);
+        m_screenCanvas->viewport()->setAutoFillBackground(false);
+        m_screenCanvas->viewport()->setStyleSheet("background: transparent; border: none;");
     }
     m_screenCanvas->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     // Full updates avoid ghosting when moving scene-level overlays with ItemIgnoresTransformations
