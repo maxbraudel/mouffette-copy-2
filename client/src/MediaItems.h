@@ -1,0 +1,210 @@
+// MediaItems.h - Extracted media item hierarchy from MainWindow.cpp
+#pragma once
+
+// Qt core/graphics includes
+#include <QGraphicsItem>
+#include <QGraphicsRectItem>
+#include <QtSvgWidgets/QGraphicsSvgItem>
+#include <QPixmap>
+#include <QImage>
+#include <QVideoFrame>
+#include <QVideoSink>
+#include <QSet>
+#include <QTimer>
+#include <QVariantAnimation>
+#include <QMutex>
+#include <QAtomicInteger>
+#include <QRunnable>
+#include <atomic>
+#include <memory>
+
+#include "OverlayPanels.h"
+#include "RoundedRectItem.h"
+
+class QMediaPlayer;
+class QAudioOutput;
+
+// Base resizable media item (image/video) providing selection chrome, resize handles, and overlay panels.
+class ResizableMediaBase : public QGraphicsItem {
+public:
+    ~ResizableMediaBase() override;
+    explicit ResizableMediaBase(const QSize& baseSizePx, int visualSizePx, int selectionSizePx, const QString& filename = QString());
+
+    void setSourcePath(const QString& p) { m_sourcePath = p; }
+    QString sourcePath() const { return m_sourcePath; }
+
+    static void setHeightOfMediaOverlaysPx(int px); // global override height (px) for overlays
+    static int  getHeightOfMediaOverlaysPx();
+    static void setCornerRadiusOfMediaOverlaysPx(int px);
+    static int  getCornerRadiusOfMediaOverlaysPx();
+
+    void requestLabelRelayout();
+    bool isOnHandleAtItemPos(const QPointF& itemPos) const; // used by view for cursor decision
+    bool beginResizeAtScenePos(const QPointF& scenePos);    // start interactive resize
+    Qt::CursorShape cursorForScenePos(const QPointF& scenePos) const;
+    bool isActivelyResizing() const { return m_activeHandle != None; }
+    void setHandleVisualSize(int px);
+    void setHandleSelectionSize(int px);
+
+    // Exposed so ScreenCanvas can relayout overlays after zoom changes.
+    void updateOverlayLayout();
+    void updateOverlayVisibility();
+
+    // Access to overlay panels (filename on top, controls bottom for videos) if needed.
+    OverlayPanel* topPanel() const { return m_topPanel.get(); }
+    OverlayPanel* bottomPanel() const { return m_bottomPanel.get(); }
+
+protected:
+    enum Handle { None, TopLeft, TopRight, BottomLeft, BottomRight };
+    QSize m_baseSize;
+    Handle m_activeHandle = None;
+    QPointF m_fixedItemPoint;  // item coords
+    QPointF m_fixedScenePoint; // scene coords
+    qreal m_initialScale = 1.0;
+    qreal m_initialGrabDist = 1.0;
+    int m_visualSize = 8;      // display size of handles (px)
+    int m_selectionSize = 12;  // hit zone size (px)
+    QString m_sourcePath;      // original path if any
+    QString m_filename;        // display name
+    std::unique_ptr<OverlayPanel> m_topPanel;
+    std::unique_ptr<OverlayPanel> m_bottomPanel;
+    OverlayStyle m_overlayStyle;
+    static int heightOfMediaOverlays;
+    static int cornerRadiusOfMediaOverlays;
+
+    // Core paint helpers
+    void paintSelectionAndLabel(QPainter* painter);
+
+    // Overlay helpers
+    void initializeOverlays();
+    qreal toItemLengthFromPixels(int px) const;
+    Handle hitTestHandle(const QPointF& p) const;
+    Handle opposite(Handle h) const;
+    QPointF handlePoint(Handle h) const;
+
+    // Subclass hook for live geometry changes (resize/drag) to keep overlays glued
+    virtual void onInteractiveGeometryChanged() {}
+
+    // QGraphicsItem overrides
+    QRectF boundingRect() const override;
+    QPainterPath shape() const override;
+    QVariant itemChange(GraphicsItemChange change, const QVariant &value) override;
+    void mousePressEvent(QGraphicsSceneMouseEvent* event) override;
+    void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override;
+    void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override;
+    void hoverMoveEvent(QGraphicsSceneHoverEvent* event) override;
+    void hoverLeaveEvent(QGraphicsSceneHoverEvent* event) override;
+
+private:
+    void relayoutIfNeeded(); // helper to keep overlays positioned (unused externally)
+};
+
+// Simple pixmap media item
+class ResizablePixmapItem : public ResizableMediaBase {
+public:
+    explicit ResizablePixmapItem(const QPixmap& pm, int visualSizePx, int selectionSizePx, const QString& filename = QString());
+    void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override;
+private:
+    QPixmap m_pix;
+};
+
+// Forward declaration for async worker
+class FrameConversionWorker;
+
+// Video media item with in-item controls overlays & performance instrumentation
+class ResizableVideoItem : public ResizableMediaBase {
+public:
+    explicit ResizableVideoItem(const QString& filePath, int visualSizePx, int selectionSizePx, const QString& filename = QString(), int controlsFadeMs = 140);
+    ~ResizableVideoItem() override;
+
+    // Public control helpers used by ScreenCanvas (drag gestures etc.)
+    void togglePlayPause();
+    void toggleRepeat();
+    void toggleMute();
+    void stopToBeginning();
+    void seekToRatio(qreal r);
+    void setInitialScaleFactor(qreal f) { m_initialScaleFactor = f; }
+    void setExternalPosterImage(const QImage& img);
+    bool isDraggingProgress() const { return m_draggingProgress; }
+    bool isDraggingVolume() const { return m_draggingVolume; }
+    void updateDragWithScenePos(const QPointF& scenePos);
+    void endDrag();
+    void requestOverlayRelayout() { updateControlsLayout(); }
+
+    // Performance / diagnostics
+    void setFrameProcessingBudget(int ms) { m_frameProcessBudgetMs = std::max(1, ms); }
+    void setRepaintBudget(int ms) { m_repaintBudgetMs = std::max(1, ms); }
+    void getFrameStats(int& received, int& processed, int& skipped) const;
+    void getFrameStatsExtended(int& received, int& processed, int& skipped, int& dropped, int& conversionsStarted, int& conversionsCompleted) const;
+    void resetFrameStats();
+    void onFrameConversionComplete(QImage convertedImage, quint64 serial); // async callback
+    bool handleControlsPressAtItemPos(const QPointF& itemPos); // view-level forwarding
+
+    // QGraphicsItem
+    void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override;
+    QRectF boundingRect() const override;
+    QPainterPath shape() const override;
+    void mousePressEvent(QGraphicsSceneMouseEvent* event) override;
+    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event) override;
+    QVariant itemChange(GraphicsItemChange change, const QVariant &value) override;
+    void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override;
+    void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override;
+
+protected:
+    void onInteractiveGeometryChanged() override;
+
+private:
+    void maybeAdoptFrameSize(const QVideoFrame& f);
+    void adoptBaseSize(const QSize& sz);
+    void setControlsVisible(bool show);
+    void updateControlsLayout();
+    bool isVisibleInAnyView() const;
+    bool shouldProcessFrame() const; // currently unused (kept for future tuning)
+    bool shouldRepaint() const;
+    void logFrameStats() const;
+    void updateProgressBar();
+
+    qreal baseWidth() const { return static_cast<qreal>(m_baseSize.width()); }
+    qreal baseHeight() const { return static_cast<qreal>(m_baseSize.height()); }
+
+    QMediaPlayer* m_player = nullptr;
+    QAudioOutput* m_audio = nullptr;
+    QVideoSink* m_sink = nullptr;
+    QVideoFrame m_lastFrame;
+    QImage m_lastFrameImage;
+    qint64 m_durationMs = 0;
+    qint64 m_positionMs = 0;
+    bool m_primingFirstFrame = false;
+    bool m_firstFramePrimed = false;
+    bool m_savedMuted = false;
+    QImage m_posterImage; bool m_posterImageSet = false;
+    QGraphicsRectItem* m_controlsBg = nullptr;
+    RoundedRectItem* m_playBtnRectItem = nullptr; QGraphicsSvgItem* m_playIcon = nullptr; QGraphicsSvgItem* m_pauseIcon = nullptr;
+    RoundedRectItem* m_stopBtnRectItem = nullptr; QGraphicsSvgItem* m_stopIcon = nullptr;
+    RoundedRectItem* m_repeatBtnRectItem = nullptr; QGraphicsSvgItem* m_repeatIcon = nullptr;
+    RoundedRectItem* m_muteBtnRectItem = nullptr; QGraphicsSvgItem* m_muteIcon = nullptr; QGraphicsSvgItem* m_muteSlashIcon = nullptr;
+    QGraphicsRectItem* m_volumeBgRectItem = nullptr; QGraphicsRectItem* m_volumeFillRectItem = nullptr;
+    QGraphicsRectItem* m_progressBgRectItem = nullptr; QGraphicsRectItem* m_progressFillRectItem = nullptr;
+    bool m_adoptedSize = false; qreal m_initialScaleFactor = 1.0;
+    QRectF m_playBtnRectItemCoords; QRectF m_stopBtnRectItemCoords; QRectF m_repeatBtnRectItemCoords; QRectF m_muteBtnRectItemCoords; QRectF m_volumeRectItemCoords; QRectF m_progRectItemCoords;
+    bool m_repeatEnabled = false;
+    bool m_draggingProgress = false; bool m_draggingVolume = false; bool m_holdLastFrameAtEnd = false;
+    QTimer* m_progressTimer = nullptr; qreal m_smoothProgressRatio = 0.0; bool m_seeking = false;
+    bool m_controlsLockedUntilReady = true; int m_controlsFadeMs = 140; QVariantAnimation* m_controlsFadeAnim = nullptr; bool m_controlsDidInitialFade = false;
+    qint64 m_lastFrameProcessMs = 0; qint64 m_lastRepaintMs = 0; int m_frameProcessBudgetMs = 16; int m_repaintBudgetMs = 16;
+    mutable int m_framesReceived = 0; mutable int m_framesProcessed = 0; mutable int m_framesSkipped = 0;
+    std::atomic<bool> m_conversionBusy{false}; QVideoFrame m_pendingFrame; QMutex m_frameMutex; std::atomic<quint64> m_frameSerial{0}; quint64 m_lastProcessedSerial = 0;
+    mutable int m_framesDropped = 0; mutable int m_conversionsStarted = 0; mutable int m_conversionsCompleted = 0;
+};
+
+// Worker used for asynchronous frame conversion to ARGB images; posts back to main thread.
+class FrameConversionWorker : public QRunnable {
+public:
+    FrameConversionWorker(ResizableVideoItem* item, QVideoFrame frame, quint64 serial);
+    void run() override;
+    static void registerItem(ResizableVideoItem* item);
+    static void unregisterItem(ResizableVideoItem* item);
+    static QSet<uintptr_t> s_activeItems;
+private:
+    uintptr_t m_itemPtr; QVideoFrame m_frame; quint64 m_serial;
+};

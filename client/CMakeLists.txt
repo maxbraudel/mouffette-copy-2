@@ -31,6 +31,7 @@ set(SOURCES
     src/WatchManager.cpp
     src/ScreenNavigationManager.cpp
     src/SpinnerWidget.cpp
+    src/MediaItems.cpp
 )
 
 # Platform-specific sources
