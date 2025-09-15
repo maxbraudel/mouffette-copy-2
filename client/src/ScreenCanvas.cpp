@@ -393,6 +393,11 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                     const qreal phH = 360.0 * m_scaleFactor;
                     v->setPos(scenePos - QPointF(phW/2.0, phH/2.0));
                     v->setScale(m_scaleFactor); // adoptBaseSize will keep center when real size arrives
+                    // If a drag preview frame was captured for this video, use it immediately as a poster to avoid flicker gap
+                    if (m_dragPreviewIsVideo && m_dragPreviewGotFrame && !m_dragPreviewPixmap.isNull()) {
+                        QImage poster = m_dragPreviewPixmap.toImage();
+                        if (!poster.isNull()) v->setExternalPosterImage(poster);
+                    }
                     m_scene->addItem(v);
                     v->setSelected(true);
                 } else {
