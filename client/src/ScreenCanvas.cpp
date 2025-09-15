@@ -199,7 +199,16 @@ void ScreenCanvas::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
         if (m_scene) {
             const QList<QGraphicsItem*> sel = m_scene->selectedItems();
-            for (QGraphicsItem* it : sel) if (auto* base = dynamic_cast<ResizableMediaBase*>(it)) { base->ungrabMouse(); m_scene->removeItem(base); delete base; }
+            for (QGraphicsItem* it : sel) {
+                if (auto* base = dynamic_cast<ResizableMediaBase*>(it)) {
+                    base->prepareForDeletion();
+                    // Remove from scene first so it stops receiving events.
+                    m_scene->removeItem(base);
+                    // Defer actual deletion to the next event loop cycle without relying on QObject::deleteLater (base is not a QObject).
+                    auto* toDelete = base;
+                    QTimer::singleShot(0, [toDelete]() { delete toDelete; });
+                }
+            }
         }
         event->accept(); return;
     }

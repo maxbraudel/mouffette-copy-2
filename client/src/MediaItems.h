@@ -54,6 +54,11 @@ public:
     OverlayPanel* topPanel() const { return m_topPanel.get(); }
     OverlayPanel* bottomPanel() const { return m_bottomPanel.get(); }
 
+    // Called by view prior to removing item from scene & scheduling deletion.
+    // Default implementation cancels interactive state & hides overlays.
+    virtual void prepareForDeletion();
+    bool isBeingDeleted() const { return m_beingDeleted; }
+
 protected:
     enum Handle { None, TopLeft, TopRight, BottomLeft, BottomRight };
     QSize m_baseSize;
@@ -97,6 +102,8 @@ protected:
 
 private:
     void relayoutIfNeeded(); // helper to keep overlays positioned (unused externally)
+protected:
+    bool m_beingDeleted = false;
 };
 
 // Simple pixmap media item
@@ -149,6 +156,8 @@ public:
     QVariant itemChange(GraphicsItemChange change, const QVariant &value) override;
     void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override;
     void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override;
+
+    void prepareForDeletion() override; // extra cleanup (stop timers, hide controls)
 
 protected:
     void onInteractiveGeometryChanged() override;

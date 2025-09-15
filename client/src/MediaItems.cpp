@@ -171,6 +171,22 @@ void ResizableMediaBase::mouseReleaseEvent(QGraphicsSceneMouseEvent* event) {
     QGraphicsItem::mouseReleaseEvent(event);
 }
 
+void ResizableMediaBase::prepareForDeletion() {
+    if (m_beingDeleted) return;
+    m_beingDeleted = true;
+    // Cancel any active resize interaction.
+    if (m_activeHandle != None) { m_activeHandle = None; ungrabMouse(); }
+    // Fully detach overlay panels: remove their background graphics items from the scene so no further relayout occurs.
+    auto detachPanel = [&](std::unique_ptr<OverlayPanel>& panel){
+        if (!panel) return;
+        panel->setVisible(false);
+        // We rely on panel destructor later; clear elements now to drop graphics.
+        panel->clearElements();
+    };
+    detachPanel(m_topPanel);
+    detachPanel(m_bottomPanel);
+}
+
 void ResizableMediaBase::hoverMoveEvent(QGraphicsSceneHoverEvent* event) { QGraphicsItem::hoverMoveEvent(event); }
 void ResizableMediaBase::hoverLeaveEvent(QGraphicsSceneHoverEvent* event) { QGraphicsItem::hoverLeaveEvent(event); }
 
@@ -448,6 +464,7 @@ void ResizableVideoItem::getFrameStatsExtended(int& received, int& processed, in
 void ResizableVideoItem::resetFrameStats() { m_framesReceived = m_framesProcessed = m_framesSkipped = 0; m_framesDropped = m_conversionsStarted = m_conversionsCompleted = 0; m_frameSerial = m_lastProcessedSerial = 0; }
 
 void ResizableVideoItem::onFrameConversionComplete(QImage convertedImage, quint64 serial) {
+    if (m_beingDeleted) return; // ignore late callbacks after deletion begun
     if (serial <= m_lastProcessedSerial) { ++m_framesDropped; return; }
     m_lastProcessedSerial = serial; m_lastFrameImage = std::move(convertedImage); ++m_conversionsCompleted; m_conversionBusy.store(false);
     if (m_conversionsCompleted % 30 == 0) qDebug() << "Frame conversion completed serial" << serial;
@@ -551,6 +568,19 @@ void ResizableVideoItem::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
 void ResizableVideoItem::mouseReleaseEvent(QGraphicsSceneMouseEvent* event) {
     if (m_draggingProgress || m_draggingVolume) { m_draggingProgress = false; m_draggingVolume = false; ungrabMouse(); QTimer::singleShot(30, [this]() { m_seeking = false; if (m_progressTimer && m_player && m_player->playbackState() == QMediaPlayer::PlayingState) m_progressTimer->start(); }); event->accept(); return; }
     ResizableMediaBase::mouseReleaseEvent(event);
+}
+
+void ResizableVideoItem::prepareForDeletion() {
+    ResizableMediaBase::prepareForDeletion();
+    // Stop timers / animations immediately.
+    if (m_progressTimer) m_progressTimer->stop();
+    if (m_controlsFadeAnim) m_controlsFadeAnim->stop();
+    m_draggingProgress = m_draggingVolume = false; m_seeking = false;
+    // Hide controls background & children (safer than deleting here; destructor will clean up if needed).
+    if (m_controlsBg) {
+        if (m_controlsBg->scene()) m_controlsBg->scene()->removeItem(m_controlsBg);
+        m_controlsBg->setVisible(false);
+    }
 }
 
 void ResizableVideoItem::maybeAdoptFrameSize(const QVideoFrame& f) { if (m_adoptedSize) return; if (!f.isValid()) return; QImage img = f.toImage(); if (img.isNull()) return; const QSize sz = img.size(); if (sz.isEmpty()) return; adoptBaseSize(sz); }
