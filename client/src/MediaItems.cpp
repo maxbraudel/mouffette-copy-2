@@ -283,6 +283,25 @@ void ResizableMediaBase::updateOverlayVisibility() {
     // matching bottom overlay behavior.
     bool shouldShowTop = isSelected() && !m_filename.isEmpty();
     if (m_topPanel) m_topPanel->setVisible(shouldShowTop);
+    // If item is no longer selected, hide settings panel but keep toggle state as-is (so it can restore on reselection)
+    if (!isSelected()) {
+        if (m_settingsPanel && m_settingsPanel->isVisible()) {
+            m_settingsPanel->setVisible(false);
+        }
+    } else {
+        // Item selected: if settings toggle is on, ensure the panel is visible again
+        if (m_topPanel) {
+            auto el = m_topPanel->findElement("settings_toggle");
+            if (el && el->state() == OverlayElement::Toggled) {
+                if (!m_settingsPanel) m_settingsPanel = std::make_unique<MediaSettingsPanel>();
+                if (scene()) m_settingsPanel->ensureInScene(scene());
+                if (scene() && !scene()->views().isEmpty()) {
+                    m_settingsPanel->updatePosition(scene()->views().first());
+                }
+                m_settingsPanel->setVisible(true);
+            }
+        }
+    }
     // bottom panel managed by video subclass
 }
 
