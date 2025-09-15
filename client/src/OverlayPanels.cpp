@@ -149,7 +149,14 @@ void OverlayButtonElement::createGraphicsItems() {
     m_background->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
     m_background->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     m_background->setData(0, QStringLiteral("overlay"));
-    if (m_onClicked) m_background->setClickCallback(m_onClicked);
+    if (m_onClicked) {
+        if (m_toggleOnly) {
+            // For toggle buttons, trigger click on mouse release to preserve state after full click
+            m_background->setPressCallback([this](bool down){ if (!down && m_onClicked) m_onClicked(); });
+        } else {
+            m_background->setClickCallback(m_onClicked);
+        }
+    }
     // Hover / press visual feedback (skip overriding if toggled state to keep its stronger tint)
         if (!m_toggleOnly) {
             m_background->setHoverCallback([this](bool inside){

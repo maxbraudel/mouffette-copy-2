@@ -199,9 +199,43 @@ public:
     bool isVisible() const override { return m_visible; }
     void setVisible(bool v) override;
     void setState(ElementState s) override; // updates brush
-    void setOnClicked(std::function<void()> cb) { m_onClicked = std::move(cb); if (m_background) m_background->setClickCallback(m_onClicked); }
+    void setOnClicked(std::function<void()> cb) {
+        m_onClicked = std::move(cb);
+        if (m_background) {
+            if (m_toggleOnly) {
+                // For toggle switches, invoke on full click (on release) and do not trigger on press
+                m_background->setClickCallback(nullptr);
+                m_background->setPressCallback([this](bool down){ if (!down && m_onClicked) m_onClicked(); });
+            } else {
+                // Normal buttons: trigger on press via click callback
+                m_background->setPressCallback(nullptr);
+                m_background->setClickCallback(m_onClicked);
+            }
+        }
+    }
     void setSvgIcon(const QString& resourcePath); // new: attach an SVG icon when no label
-    void setToggleOnly(bool v) { m_toggleOnly = v; if (m_background && m_toggleOnly) { m_background->setHoverCallback(nullptr); m_background->setPressCallback(nullptr); } }
+    void setToggleOnly(bool v) {
+        m_toggleOnly = v;
+        if (m_background) {
+            if (m_toggleOnly) {
+                // Disable transient hover/press visuals and wire release-to-toggle if onClicked set
+                m_background->setHoverCallback(nullptr);
+                // If we have an onClicked, ensure it triggers on release and not on press
+                if (m_onClicked) {
+                    m_background->setClickCallback(nullptr);
+                    m_background->setPressCallback([this](bool down){ if (!down && m_onClicked) m_onClicked(); });
+                } else {
+                    m_background->setPressCallback(nullptr);
+                }
+            } else {
+                // Restore normal behavior: click on press if onClicked set
+                if (m_onClicked) {
+                    m_background->setPressCallback(nullptr);
+                    m_background->setClickCallback(m_onClicked);
+                }
+            }
+        }
+    }
 private:
     void createGraphicsItems();
     void updateLabelPosition();

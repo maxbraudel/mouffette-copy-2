@@ -19,6 +19,7 @@ class QMediaPlayer;
 class QVideoSink;
 class QAudioOutput;
 class QVariantAnimation;
+class QResizeEvent;
 
 // Extracted canvas that manages screen layout, zoom/pan, drag&drop previews, and media interaction.
 class ScreenCanvas : public QGraphicsView {
@@ -61,6 +62,7 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dragMoveEvent(QDragMoveEvent* event) override;
     void dragLeaveEvent(QDragLeaveEvent* event) override;

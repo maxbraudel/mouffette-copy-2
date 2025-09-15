@@ -33,6 +33,7 @@ set(SOURCES
     src/SpinnerWidget.cpp
     src/MediaItems.cpp
     src/ScreenCanvas.cpp
+    src/MediaSettingsPanel.cpp
 )
 
 # Platform-specific sources
@@ -57,6 +58,7 @@ set(HEADERS
     src/ScreenNavigationManager.h
     src/SpinnerWidget.h
     src/ScreenCanvas.h
+    src/MediaSettingsPanel.h
 )
 
 # UI files

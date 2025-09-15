@@ -29,6 +29,19 @@
 #include <QPainter>
 #include <QBuffer>
 
+// Helper: relayout overlays for all media items so absolute panels (settings) stay pinned
+namespace {
+static void relayoutAllMediaOverlays(QGraphicsScene* scene) {
+    if (!scene) return;
+    const QList<QGraphicsItem*> items = scene->items();
+    for (QGraphicsItem* it : items) {
+        if (auto* base = dynamic_cast<ResizableMediaBase*>(it)) {
+            base->updateOverlayLayout();
+        }
+    }
+}
+}
+
 ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     setAcceptDrops(true);
     setDragMode(QGraphicsView::NoDrag); // manual panning / selection logic
@@ -94,6 +107,8 @@ void ScreenCanvas::recenterWithMargin(int marginPx) {
             if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) v->requestOverlayRelayout();
             if (auto* b = dynamic_cast<ResizableMediaBase*>(it)) b->requestLabelRelayout();
         }
+        // Also relayout all media overlays to keep absolute panels pinned
+        relayoutAllMediaOverlays(m_scene);
     }
     m_ignorePanMomentum = true; m_momentumPrimed = false; m_lastMomentumMag = 0.0; m_lastMomentumDelta = QPoint(0,0); m_momentumTimer.restart();
 }
@@ -146,7 +161,9 @@ bool ScreenCanvas::event(QEvent* event) {
                 if (!viewport()->rect().contains(vpPos)) vpPos = m_lastMousePos.isNull() ? viewport()->rect().center() : m_lastMousePos;
             }
             m_lastMousePos = vpPos; // remember anchor
-            zoomAroundViewportPos(vpPos, factor); event->accept(); return true;
+            zoomAroundViewportPos(vpPos, factor);
+            relayoutAllMediaOverlays(m_scene);
+            event->accept(); return true;
         }
     }
     return QGraphicsView::event(event);
@@ -164,6 +181,7 @@ bool ScreenCanvas::viewportEvent(QEvent* event) {
             if (!viewport()->rect().contains(vpPos)) vpPos = viewport()->rect().center();
             m_lastMousePos = vpPos; // remember anchor
             zoomAroundViewportPos(vpPos, factor);
+            relayoutAllMediaOverlays(m_scene);
             event->accept();
             return true;
         }
@@ -187,6 +205,7 @@ bool ScreenCanvas::gestureEvent(QGestureEvent* event) {
             m_lastMousePos = vpPos; // keep coherent for subsequent wheel/native zooms
             const qreal factor = pinch->scaleFactor();
             zoomAroundViewportPos(vpPos, factor);
+            relayoutAllMediaOverlays(m_scene);
         }
         event->accept();
         return true;
@@ -239,7 +258,14 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
         for (QGraphicsItem* hi : hitItems) {
             if (hi->data(0).toString() == QLatin1String("overlay")) hasOverlay = true;
         }
-        if (hasOverlay) { QGraphicsView::mousePressEvent(event); return; }
+        if (hasOverlay) {
+            // Preserve/ensure selection of the media under the overlay to avoid selection loss
+            auto toMedia = [](QGraphicsItem* x)->ResizableMediaBase* { while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); } return nullptr; };
+            ResizableMediaBase* mediaUnder = nullptr; for (QGraphicsItem* it : hitItems) { if ((mediaUnder = toMedia(it))) break; }
+            if (mediaUnder && !mediaUnder->isSelected()) mediaUnder->setSelected(true);
+            QGraphicsView::mousePressEvent(event);
+            return;
+        }
         auto toMedia = [](QGraphicsItem* x)->ResizableMediaBase* { while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); } return nullptr; };
         ResizableMediaBase* mediaHit = nullptr; for (QGraphicsItem* it : hitItems) { if ((mediaHit = toMedia(it))) break; }
         if (mediaHit) {
@@ -286,30 +312,36 @@ void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
     if (event->buttons() & Qt::LeftButton) {
         for (QGraphicsItem* it : sel) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) if (v->isSelected() && (v->isDraggingProgress() || v->isDraggingVolume())) { v->updateDragWithScenePos(mapToScene(event->pos())); event->accept(); return; }
         const QList<QGraphicsItem*> hitItems = items(event->pos()); auto toMedia = [](QGraphicsItem* x)->ResizableMediaBase* { while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); } return nullptr; }; bool hitMedia = false; for (QGraphicsItem* it : hitItems) if (toMedia(it)) { hitMedia = true; break; } if (hitMedia) { QGraphicsView::mouseMoveEvent(event); return; }
-    }
-    if (m_panning) {
-        QPoint delta = event->pos() - m_lastPanPoint;
-        if (!delta.isNull()) {
-            QTransform t = transform();
-            // Translate by raw delta scaled to current transform (so pixel drag equals screen pan)
-            t.translate(delta.x() * -1.0 / t.m11(), delta.y() * -1.0 / t.m22());
-            setTransform(t);
-            m_lastPanPoint = event->pos();
+        if (m_panning) {
+            QPoint delta = event->pos() - m_lastPanPoint;
+            if (!delta.isNull()) {
+                QTransform t = transform();
+                // Translate by raw delta scaled to current transform (so pixel drag equals screen pan)
+                t.translate(delta.x() * -1.0 / t.m11(), delta.y() * -1.0 / t.m22());
+                setTransform(t);
+                m_lastPanPoint = event->pos();
+                // Keep absolute panels pinned during pan
+                relayoutAllMediaOverlays(m_scene);
+            }
+            event->accept();
+            return;
         }
-        event->accept();
-        return;
     }
     QGraphicsView::mouseMoveEvent(event);
 }
 
 void ScreenCanvas::mouseReleaseEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton) {
+        // If releasing over any overlay item, deliver the event directly and avoid selection churn
+        const QList<QGraphicsItem*> hitItems = items(event->pos());
+        bool hasOverlay = false; for (QGraphicsItem* hi : hitItems) if (hi->data(0).toString() == QLatin1String("overlay")) { hasOverlay = true; break; }
+        if (hasOverlay) { QGraphicsView::mouseReleaseEvent(event); return; }
         if (m_overlayMouseDown) {
             if (m_scene) { const QList<QGraphicsItem*> sel = m_scene->selectedItems(); for (QGraphicsItem* it : sel) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) if (v->isDraggingProgress() || v->isDraggingVolume()) v->endDrag(); }
             m_overlayMouseDown = false; event->accept(); return;
         }
         for (QGraphicsItem* it : m_scene->items()) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) if (v->isSelected() && (v->isDraggingProgress() || v->isDraggingVolume())) { v->endDrag(); event->accept(); return; }
-    if (m_panning) { m_panning = false; event->accept(); return; }
+        if (m_panning) { m_panning = false; event->accept(); return; }
         bool wasResizing = false; for (QGraphicsItem* it : m_scene->items()) if (auto* rp = dynamic_cast<ResizableMediaBase*>(it)) if (rp->isActivelyResizing()) { wasResizing = true; break; }
         if (wasResizing) viewport()->unsetCursor();
         QMouseEvent synthetic(event->type(), event->position(), event->scenePosition(), event->globalPosition(), event->button(), event->buttons(), Qt::NoModifier);
@@ -357,9 +389,17 @@ void ScreenCanvas::wheelEvent(QWheelEvent* event) {
         }
         horizontalScrollBar()->setValue(horizontalScrollBar()->value() - delta.x());
         verticalScrollBar()->setValue(verticalScrollBar()->value() - delta.y());
+        // Keep absolute panels pinned during wheel-based panning
+        relayoutAllMediaOverlays(m_scene);
         event->accept(); return;
     }
     QGraphicsView::wheelEvent(event);
+}
+
+void ScreenCanvas::resizeEvent(QResizeEvent* event) {
+    QGraphicsView::resizeEvent(event);
+    // Keep absolute panels pinned during viewport resizes
+    relayoutAllMediaOverlays(m_scene);
 }
 
 void ScreenCanvas::dragEnterEvent(QDragEnterEvent* event) {

@@ -23,6 +23,7 @@
 
 class QMediaPlayer;
 class QAudioOutput;
+class MediaSettingsPanel;
 
 // Base resizable media item (image/video) providing selection chrome, resize handles, and overlay panels.
 class ResizableMediaBase : public QGraphicsItem {
@@ -76,6 +77,8 @@ protected:
     OverlayStyle m_overlayStyle;
     static int heightOfMediaOverlays;
     static int cornerRadiusOfMediaOverlays;
+    // Per-media settings panel (absolute, docked left)
+    std::unique_ptr<MediaSettingsPanel> m_settingsPanel;
 
     // Core paint helpers
     void paintSelectionAndLabel(QPainter* painter);

@@ -19,6 +19,7 @@
 #include <QTimer>
 #include <QMutexLocker>
 #include <QDebug>
+#include "MediaSettingsPanel.h"
 #include <cmath>
 
 // ---------------- ResizableMediaBase -----------------
@@ -185,6 +186,11 @@ void ResizableMediaBase::prepareForDeletion() {
     };
     detachPanel(m_topPanel);
     detachPanel(m_bottomPanel);
+    // Hide and drop settings panel (proxy will be removed from scene by destructor)
+    if (m_settingsPanel) {
+        m_settingsPanel->setVisible(false);
+        m_settingsPanel.reset();
+    }
 }
 
 void ResizableMediaBase::hoverMoveEvent(QGraphicsSceneHoverEvent* event) { QGraphicsItem::hoverMoveEvent(event); }
@@ -248,19 +254,24 @@ void ResizableMediaBase::initializeOverlays() {
         auto settingsBtn = std::make_shared<OverlayButtonElement>(QString(), "settings_toggle");
         // Resource path follows the same pattern as other media control icons (":/icons/icons/<name>.svg")
         settingsBtn->setSvgIcon(":/icons/icons/settings.svg");
-    settingsBtn->setToggleOnly(true);
+        settingsBtn->setToggleOnly(true);
         // Initial state normal
         settingsBtn->setState(OverlayElement::Normal);
         // Toggle logic: cycles Normal <-> Toggled
-        settingsBtn->setOnClicked([btnRef=settingsBtn]() {
+        settingsBtn->setOnClicked([this, btnRef=settingsBtn]() {
             if (!btnRef) return;
-            auto st = btnRef->state();
-            if (st == OverlayElement::Toggled) {
-                // Return to hovered if pointer still inside, else normal
-                btnRef->setState(OverlayElement::Normal);
-            } else {
-                btnRef->setState(OverlayElement::Toggled);
+            const bool enabling = (btnRef->state() != OverlayElement::Toggled);
+            btnRef->setState(enabling ? OverlayElement::Toggled : OverlayElement::Normal);
+            // Lazy-create settings panel
+            if (!m_settingsPanel) m_settingsPanel = std::make_unique<MediaSettingsPanel>();
+            // Ensure panel is in the scene
+            if (scene()) m_settingsPanel->ensureInScene(scene());
+            // Apply background color similar to overlay style
+            // (Handled inside MediaSettingsPanel using palette/stylesheet defaults)
+            if (scene() && !scene()->views().isEmpty()) {
+                m_settingsPanel->updatePosition(scene()->views().first());
             }
+            m_settingsPanel->setVisible(enabling);
         });
         m_topPanel->addElement(settingsBtn);
     }
@@ -268,10 +279,9 @@ void ResizableMediaBase::initializeOverlays() {
 }
 
 void ResizableMediaBase::updateOverlayVisibility() {
-    // Make top overlay (filename + settings button) always visible if filename exists,
-    // so the settings button can be toggled with a single click even when the item
-    // was not previously selected.
-    bool shouldShowTop = !m_filename.isEmpty();
+    // Show top overlay (filename + settings button) only when the item is selected,
+    // matching bottom overlay behavior.
+    bool shouldShowTop = isSelected() && !m_filename.isEmpty();
     if (m_topPanel) m_topPanel->setVisible(shouldShowTop);
     // bottom panel managed by video subclass
 }
@@ -286,6 +296,8 @@ void ResizableMediaBase::updateOverlayLayout() {
     QPointF bottomAnchorScene = mapToScene(QPointF(itemRect.center().x(), itemRect.bottom()));
     if (m_topPanel) m_topPanel->updateLayoutWithAnchor(topAnchorScene, view);
     if (m_bottomPanel) m_bottomPanel->updateLayoutWithAnchor(bottomAnchorScene, view);
+    // Keep settings panel docked
+    if (m_settingsPanel && m_settingsPanel->isVisible()) m_settingsPanel->updatePosition(view);
 }
 
 // ---------------- ResizablePixmapItem -----------------
