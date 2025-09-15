@@ -215,19 +215,29 @@ bool ScreenCanvas::gestureEvent(QGestureEvent* event) {
 
 void ScreenCanvas::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
-        if (m_scene) {
-            const QList<QGraphicsItem*> sel = m_scene->selectedItems();
-            for (QGraphicsItem* it : sel) {
-                if (auto* base = dynamic_cast<ResizableMediaBase*>(it)) {
-                    base->prepareForDeletion();
-                    // Remove from scene first so it stops receiving events.
-                    m_scene->removeItem(base);
-                    // Now that prepareForDeletion performs full detachment, we can delete immediately.
-                    delete base;
+        // Require Command (macOS) or Control (other platforms) modifier to delete
+#ifdef Q_OS_MACOS
+        const bool deleteAllowed = event->modifiers().testFlag(Qt::MetaModifier);
+#else
+        const bool deleteAllowed = event->modifiers().testFlag(Qt::ControlModifier);
+#endif
+        if (deleteAllowed) {
+            if (m_scene) {
+                const QList<QGraphicsItem*> sel = m_scene->selectedItems();
+                for (QGraphicsItem* it : sel) {
+                    if (auto* base = dynamic_cast<ResizableMediaBase*>(it)) {
+                        base->prepareForDeletion();
+                        // Remove from scene first so it stops receiving events.
+                        m_scene->removeItem(base);
+                        // Now that prepareForDeletion performs full detachment, we can delete immediately.
+                        delete base;
+                    }
                 }
             }
+            event->accept();
+            return;
         }
-        event->accept(); return;
+        // Without the required modifier, do not delete; fall through to base handling
     }
     if (event->key() == Qt::Key_Space) { recenterWithMargin(53); event->accept(); return; }
     QGraphicsView::keyPressEvent(event);
@@ -237,6 +247,17 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
     // (Space-to-pan currently disabled pending dedicated key tracking)
     const bool spaceHeld = false;
     if (event->button() == Qt::LeftButton) {
+        // If the pointer is over any overlay element (e.g., settings panel), route to base handler
+        // immediately to avoid altering selection/panning.
+        {
+            const QList<QGraphicsItem*> hit = items(event->pos());
+            for (QGraphicsItem* hi : hit) {
+                if (hi->data(0).toString() == QLatin1String("overlay")) {
+                    QGraphicsView::mousePressEvent(event);
+                    return;
+                }
+            }
+        }
         if (m_scene) {
             const QPointF scenePosEarly = mapToScene(event->pos());
             const QList<QGraphicsItem*> selEarly = m_scene->selectedItems();
@@ -285,6 +306,16 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
 
 void ScreenCanvas::mouseDoubleClickEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton) {
+        // Do not change selection when double-clicking on overlay elements
+        {
+            const QList<QGraphicsItem*> hit = items(event->pos());
+            for (QGraphicsItem* hi : hit) {
+                if (hi->data(0).toString() == QLatin1String("overlay")) {
+                    QGraphicsView::mouseDoubleClickEvent(event);
+                    return;
+                }
+            }
+        }
         if (m_scene) {
             const QPointF scenePosSel = mapToScene(event->pos());
             const QList<QGraphicsItem*> sel = m_scene->selectedItems();

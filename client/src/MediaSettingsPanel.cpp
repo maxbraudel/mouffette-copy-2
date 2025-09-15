@@ -12,7 +12,7 @@
 #include <QPalette>
 #include <QGuiApplication>
 #include "Theme.h"
-#include "RoundedRectItem.h"
+#include "OverlayPanels.h"
 
 MediaSettingsPanel::MediaSettingsPanel(QObject* parent)
     : QObject(parent)
@@ -115,14 +115,13 @@ void MediaSettingsPanel::buildUi() {
     }
 
     // Scene-drawn rounded background behind the widget, matching overlay style
-    m_bgRect = new RoundedRectItem();
+    m_bgRect = new MouseBlockingRoundedRectItem();
     m_bgRect->setRadius(gOverlayCornerRadiusPx);
     m_bgRect->setPen(Qt::NoPen);
     m_bgRect->setBrush(QBrush(gOverlayBackgroundColor));
     m_bgRect->setZValue(12009.5); // just below proxy
     m_bgRect->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     m_bgRect->setData(0, QStringLiteral("overlay"));
-    m_bgRect->setAcceptedMouseButtons(Qt::NoButton); // let the proxy receive clicks
 
     m_proxy = new QGraphicsProxyWidget();
     m_proxy->setWidget(m_widget);

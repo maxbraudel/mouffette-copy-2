@@ -9,7 +9,7 @@ class QLabel;
 class QCheckBox;
 class QLineEdit;
 class QGraphicsView;
-class RoundedRectItem;
+class MouseBlockingRoundedRectItem;
 
 // Floating settings panel shown when a media's settings toggle is enabled.
 // Implemented as a QWidget embedded into the scene via QGraphicsProxyWidget.
@@ -38,7 +38,7 @@ private:
 
 private:
     QGraphicsProxyWidget* m_proxy = nullptr;
-    RoundedRectItem* m_bgRect = nullptr;
+    MouseBlockingRoundedRectItem* m_bgRect = nullptr;
     QWidget* m_widget = nullptr;
     QVBoxLayout* m_layout = nullptr;
     QLabel* m_title = nullptr;
