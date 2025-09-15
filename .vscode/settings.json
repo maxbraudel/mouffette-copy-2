@@ -4,6 +4,8 @@
         "*.page-template": "vue",
         "*.layout-template": "vue",
         "*.vue": "vue",
-        "ios": "cpp"
+        "ios": "cpp",
+        "bitset": "cpp",
+        "forward_list": "cpp"
     }
 }

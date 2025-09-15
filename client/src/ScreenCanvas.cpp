@@ -204,9 +204,8 @@ void ScreenCanvas::keyPressEvent(QKeyEvent* event) {
                     base->prepareForDeletion();
                     // Remove from scene first so it stops receiving events.
                     m_scene->removeItem(base);
-                    // Defer actual deletion to the next event loop cycle without relying on QObject::deleteLater (base is not a QObject).
-                    auto* toDelete = base;
-                    QTimer::singleShot(0, [toDelete]() { delete toDelete; });
+                    // Now that prepareForDeletion performs full detachment, we can delete immediately.
+                    delete base;
                 }
             }
         }

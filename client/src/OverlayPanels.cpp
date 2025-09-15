@@ -702,9 +702,10 @@ QPointF OverlayPanel::calculatePanelPositionFromAnchor(const QPointF& anchorScen
     
     QPointF panelTopLeftViewport;
     if (m_position == Top) {
-        // Position above anchor: gap pixels up from anchor point
-        // Panel top-left = anchor - (width/2, gap + height) in viewport pixels
-        panelTopLeftViewport = anchorViewport + QPointF(-m_currentSize.width() / 2.0, -(m_style.gap + m_currentSize.height()));
+        // Position above anchor: gap pixels up from anchor point. To make perceived top/bottom spacing look equal,
+        // we subtract only (gap + height - paddingY) so the visual empty space outside the panel matches bottom gap.
+        qreal effectiveGap = std::max<qreal>(0.0, m_style.gap - m_style.paddingY);
+        panelTopLeftViewport = anchorViewport + QPointF(-m_currentSize.width() / 2.0, -(effectiveGap + m_currentSize.height()));
     } else {
         // Position below anchor: gap pixels down from anchor point  
         // Panel top-left = anchor - (width/2, -gap) in viewport pixels
