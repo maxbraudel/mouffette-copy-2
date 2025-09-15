@@ -49,6 +49,9 @@ class SpinnerWidget; // forward declaration for custom loading spinner
 class QGraphicsOpacityEffect;
 class QPropertyAnimation;
 class QProcess; // fwd decl to avoid including in header
+class UploadManager; // new component for upload/unload feature
+class WatchManager;  // new component for watch/unwatch feature
+class ScreenNavigationManager; // manages page switching & loader UX
 // using QStackedWidget for canvas container switching
 
 // Custom screen canvas widget with zoom and pan capabilities
@@ -219,8 +222,7 @@ private:
     void showClientListView();
     QWidget* createScreenWidget(const ScreenInfo& screen, int index);
     void updateVolumeIndicator();
-    void startWatchingSelectedClient();
-    void stopWatchingCurrentClient();
+    // watch management handled by WatchManager component now
 
     // UI Components
     QWidget* m_centralWidget;
@@ -299,7 +301,7 @@ private:
     
     // Navigation state
     bool m_ignoreSelectionChange;
-    QString m_watchedClientId;
+    // watched client id moved to WatchManager
     
     // Constants
     static const QString DEFAULT_SERVER_URL;
@@ -312,33 +314,14 @@ private:
 #endif
 
     // Upload feature state
-    bool m_uploadActive = false; // true after upload finished -> button shows "Unload medias"
-    QString m_currentUploadId;
-    int m_lastUploadPercent = 0;
-    int m_totalFilesToUpload = 0;
-    int m_filesUploadedSoFar = 0;
-    bool m_uploadInProgress = false; // true while sending/receiving
-    bool m_cancelRequested = false;  // set when user cancels mid-upload
-
-    // Incoming upload session (minimal, single active upload)
-    struct IncomingUpload {
-        QString senderId;
-        QString uploadId;
-        QString cacheDirPath;
-        QHash<QString, QFile*> openFiles; // fileId -> QFile*
-        QHash<QString, qint64> expectedSizes; // fileId -> total bytes
-        QHash<QString, qint64> receivedByFile; // fileId -> received bytes
-        qint64 totalSize = 0;
-        qint64 received = 0;
-        int totalFiles = 0;
-    } m_incomingUpload;
-    QSet<QString> m_canceledIncomingUploads; // uploadIds canceled by sender
+    UploadManager* m_uploadManager = nullptr; // encapsulates all upload logic
+    WatchManager* m_watchManager = nullptr;   // extracted watch logic
+    ScreenNavigationManager* m_navigationManager = nullptr; // new navigation component
 
 private slots:
     void onUploadButtonClicked();
     void onGenericMessageReceived(const QJsonObject& message);
-    void onUploadProgress(const QString& uploadId, int percent, int filesCompleted, int totalFiles);
-    void onUploadFinished(const QString& uploadId);
+    // Upload-specific progress/finish now managed by UploadManager
 };
 
 #endif // MAINWINDOW_H

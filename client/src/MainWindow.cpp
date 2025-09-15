@@ -1,5 +1,9 @@
 #include "MainWindow.h"
 #include "OverlayPanels.h"
+#include "UploadManager.h"
+#include "WatchManager.h"
+#include "ScreenNavigationManager.h"
+#include "SpinnerWidget.h"
 #include "RoundedRectItem.h"
 #include <QMenuBar>
 #include <QMessageBox>
@@ -103,156 +107,11 @@ constexpr qreal Z_REMOTE_CURSOR = 10000.0;
 constexpr qreal Z_SCENE_OVERLAY = 12000.0; // above all scene content
 }
 
-void MainWindow::onUploadProgress(const QString& uploadId, int percent, int filesCompleted, int totalFiles) {
-    if (uploadId != m_currentUploadId) return;
-    if (m_cancelRequested) return; // ignore late updates after cancel
-    m_lastUploadPercent = percent;
-    m_filesUploadedSoFar = filesCompleted;
-    m_totalFilesToUpload = totalFiles;
-    if (m_uploadButton && m_uploadButton->isChecked()) {
-        m_uploadButton->setText(QString("Downloading (%1/%2) %3%")
-                                    .arg(filesCompleted)
-                                    .arg(totalFiles)
-                                    .arg(percent));
-    }
-}
-
-void MainWindow::onUploadFinished(const QString& uploadId) {
-    if (uploadId != m_currentUploadId) return;
-    if (m_cancelRequested) return; // ignore finish if user cancelled
-    // Switch to active state => Unload
-    m_uploadActive = true;
-    m_lastUploadPercent = 100;
-    m_uploadInProgress = false;
-    if (m_uploadButton) {
-        m_uploadButton->setChecked(true);
-        m_uploadButton->setText("Unload medias");
-        m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #16a34a; color: white; border-radius: 5px; } QPushButton:checked { background-color: #15803d; }");
-        // Restore default proportional font after progress
-        m_uploadButton->setFont(m_uploadButtonDefaultFont);
-    }
-}
+// (Upload progress & finished handlers removed; handled by UploadManager)
 
 void MainWindow::onGenericMessageReceived(const QJsonObject& message) {
-    const QString type = message.value("type").toString();
-    if (type == "upload_start") {
-        // Initialize incoming upload session
-        m_incomingUpload = IncomingUpload();
-        m_incomingUpload.senderId = message.value("senderClientId").toString();
-        m_incomingUpload.uploadId = message.value("uploadId").toString();
-        // If previously canceled, allow this new uploadId to proceed
-        m_canceledIncomingUploads.remove(m_incomingUpload.uploadId);
-        // Create cache dir
-        QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-        if (base.isEmpty()) base = QDir::homePath() + "/.cache";
-        QDir dir(base);
-        dir.mkpath("Mouffette/Uploads");
-        QString cacheDir = base + "/Mouffette/Uploads/" + m_incomingUpload.uploadId;
-        QDir().mkpath(cacheDir);
-        m_incomingUpload.cacheDirPath = cacheDir;
-        // Prepare files
-        m_incomingUpload.totalSize = 0;
-        m_incomingUpload.received = 0;
-        m_incomingUpload.expectedSizes.clear();
-        m_incomingUpload.receivedByFile.clear();
-        QJsonArray files = message.value("files").toArray();
-        m_incomingUpload.totalFiles = files.size();
-        for (const QJsonValue& v : files) {
-            QJsonObject f = v.toObject();
-            const QString fileId = f.value("fileId").toString();
-            const QString name = f.value("name").toString();
-            const qint64 size = static_cast<qint64>(f.value("sizeBytes").toDouble());
-            m_incomingUpload.totalSize += qMax<qint64>(0, size);
-            QString safeName = name;
-            safeName.replace('/', '_');
-            QString fullPath = cacheDir + "/" + fileId + "_" + safeName;
-            QFile* qf = new QFile(fullPath);
-            if (!qf->open(QIODevice::WriteOnly)) { delete qf; continue; }
-            m_incomingUpload.openFiles.insert(fileId, qf);
-            m_incomingUpload.expectedSizes.insert(fileId, qMax<qint64>(0, size));
-            m_incomingUpload.receivedByFile.insert(fileId, 0);
-        }
-        // Optionally acknowledge start by sending 0%
-        if (!m_incomingUpload.senderId.isEmpty()) {
-            m_webSocketClient->notifyUploadProgressToSender(
-                m_incomingUpload.senderId,
-                m_incomingUpload.uploadId,
-                0,
-                0,
-                m_incomingUpload.totalFiles
-            );
-        }
-    } else if (type == "upload_chunk") {
-        const QString upId = message.value("uploadId").toString();
-        if (upId != m_incomingUpload.uploadId) return;
-        if (m_canceledIncomingUploads.contains(upId)) return; // ignore chunks after abort
-        const QString fid = message.value("fileId").toString();
-        QFile* qf = m_incomingUpload.openFiles.value(fid, nullptr);
-        if (!qf) return;
-        const QByteArray data = QByteArray::fromBase64(message.value("data").toString().toUtf8());
-        qf->write(data);
-        m_incomingUpload.received += data.size();
-        // Update per-file received and compute how many files are completed
-        if (m_incomingUpload.receivedByFile.contains(fid)) {
-            qint64 soFar = m_incomingUpload.receivedByFile.value(fid) + data.size();
-            m_incomingUpload.receivedByFile[fid] = soFar;
-        }
-        int filesCompleted = 0;
-        for (auto it = m_incomingUpload.expectedSizes.constBegin(); it != m_incomingUpload.expectedSizes.constEnd(); ++it) {
-            const QString& id = it.key();
-            qint64 expected = it.value();
-            qint64 got = m_incomingUpload.receivedByFile.value(id, 0);
-            if (expected > 0 && got >= expected) filesCompleted++;
-        }
-        if (!m_incomingUpload.senderId.isEmpty() && m_incomingUpload.totalSize > 0) {
-            int percent = static_cast<int>(std::round(m_incomingUpload.received * 100.0 / m_incomingUpload.totalSize));
-            m_webSocketClient->notifyUploadProgressToSender(
-                m_incomingUpload.senderId,
-                m_incomingUpload.uploadId,
-                percent,
-                filesCompleted,
-                m_incomingUpload.totalFiles
-            );
-        }
-    } else if (type == "upload_complete") {
-        if (message.value("uploadId").toString() != m_incomingUpload.uploadId) return;
-        // Close files
-        for (auto it = m_incomingUpload.openFiles.begin(); it != m_incomingUpload.openFiles.end(); ++it) {
-            if (it.value()) { it.value()->flush(); it.value()->close(); delete it.value(); }
-        }
-        m_incomingUpload.openFiles.clear();
-        // Notify sender finished
-        if (!m_incomingUpload.senderId.isEmpty()) {
-            m_webSocketClient->notifyUploadFinishedToSender(m_incomingUpload.senderId, m_incomingUpload.uploadId);
-        }
-    } else if (type == "upload_abort") {
-        // Abort current upload: close and delete partial files, then notify sender 'unloaded'
-        const QString abortedId = message.value("uploadId").toString();
-        if (!abortedId.isEmpty()) m_canceledIncomingUploads.insert(abortedId);
-        for (auto it = m_incomingUpload.openFiles.begin(); it != m_incomingUpload.openFiles.end(); ++it) {
-            if (it.value()) { it.value()->flush(); it.value()->close(); delete it.value(); }
-        }
-        m_incomingUpload.openFiles.clear();
-        if (!m_incomingUpload.cacheDirPath.isEmpty()) {
-            QDir dir(m_incomingUpload.cacheDirPath);
-            dir.removeRecursively();
-        }
-        if (!m_incomingUpload.senderId.isEmpty()) {
-            m_webSocketClient->notifyUnloadedToSender(m_incomingUpload.senderId);
-        }
-        m_incomingUpload = IncomingUpload();
-    } else if (type == "unload_media") {
-        // Delete cached files for last upload
-        if (!m_incomingUpload.cacheDirPath.isEmpty()) {
-            QDir dir(m_incomingUpload.cacheDirPath);
-            dir.removeRecursively();
-        }
-        // Confirm to sender
-        if (!m_incomingUpload.senderId.isEmpty()) {
-            m_webSocketClient->notifyUnloadedToSender(m_incomingUpload.senderId);
-        }
-        m_incomingUpload = IncomingUpload();
-    }
+    // Non-upload generic handling placeholder (upload handled by UploadManager now)
+    Q_UNUSED(message);
 }
 
 // Wire WebSocketClient signals after creation
@@ -265,90 +124,7 @@ void MainWindow::applyAnimationDurations() {
     if (m_volumeFade) m_volumeFade->setDuration(m_fadeDurationMs);
 }
 
-// Simple modern circular line spinner (no Q_OBJECT needed)
-class SpinnerWidget : public QWidget {
-public:
-    explicit SpinnerWidget(QWidget* parent = nullptr)
-        : QWidget(parent)
-        , m_angle(0)
-        , m_radiusPx(24)      // default visual radius in pixels
-        , m_lineWidthPx(6)    // default line width
-        , m_color("#4a90e2") // default color matches Send button
-    {
-        setAttribute(Qt::WA_TransparentForMouseEvents, true);
-        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-        m_timer = new QTimer(this);
-        connect(m_timer, &QTimer::timeout, this, [this]() {
-            m_angle = (m_angle + 6) % 360; // smooth rotation
-            update();
-        });
-        m_timer->setInterval(16); // ~60 FPS
-    }
-
-    void start() { if (!m_timer->isActive()) m_timer->start(); }
-    void stop() { if (m_timer->isActive()) m_timer->stop(); }
-
-    // Customization knobs
-    void setRadius(int radiusPx) {
-        m_radiusPx = qMax(8, radiusPx);
-        updateGeometry();
-        update();
-    }
-    void setLineWidth(int px) {
-        m_lineWidthPx = qMax(1, px);
-        update();
-    }
-    void setColor(const QColor& c) {
-        m_color = c;
-        update();
-    }
-    int radius() const { return m_radiusPx; }
-    int lineWidth() const { return m_lineWidthPx; }
-    QColor color() const { return m_color; }
-
-protected:
-    void paintEvent(QPaintEvent* event) override {
-        Q_UNUSED(event);
-        QPainter p(this);
-        p.setRenderHint(QPainter::Antialiasing, true);
-
-        // Palette-aware background
-        QStyleOption opt; opt.initFrom(this);
-        style()->drawPrimitive(QStyle::PE_Widget, &opt, &p, this);
-
-    const int s = qMin(width(), height());
-    // Use configured radius but ensure it fits inside current widget size with padding
-    int outer = 2 * m_radiusPx;        // desired diameter from config
-    const int maxOuter = qMax(16, s - 12); // keep some padding to avoid clipping
-    outer = qMin(outer, maxOuter);
-    const int thickness = qMin(m_lineWidthPx, qMax(1, outer / 2)); // ensure sane bounds
-
-        QPointF center(width() / 2.0, height() / 2.0);
-        QRectF rect(center.x() - outer/2.0, center.y() - outer/2.0, outer, outer);
-        
-    QColor arc = m_color;
-    arc.setAlpha(230);
-
-    // Flat caps (no rounded ends) as requested
-    p.setPen(QPen(arc, thickness, Qt::SolidLine, Qt::FlatCap));
-        int span = 16 * 300; // 300-degree arc for modern look
-        p.save();
-        p.translate(center);
-        p.rotate(m_angle);
-        p.translate(-center);
-        p.drawArc(rect, 0, span);
-        p.restore();
-    }
-
-    QSize minimumSizeHint() const override { return QSize(48, 48); }
-
-private:
-    QTimer* m_timer;
-    int m_angle;
-    int m_radiusPx;
-    int m_lineWidthPx;
-    QColor m_color;
-};
+// SpinnerWidget now defined in SpinnerWidget.h
 
 // Simple rounded-rectangle graphics item with a settable rect and radius
 
@@ -2008,6 +1784,8 @@ MainWindow::MainWindow(QWidget *parent)
     , m_ignoreSelectionChange(false)
     , m_displaySyncTimer(new QTimer(this))
     , m_canvasStack(new QStackedWidget(this)) // Initialize m_canvasStack
+    , m_uploadManager(new UploadManager(this))
+    , m_watchManager(new WatchManager(this))
 {
     // Check if system tray is available
     if (!QSystemTrayIcon::isSystemTrayAvailable()) {
@@ -2027,28 +1805,53 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_webSocketClient, &WebSocketClient::registrationConfirmed, this, &MainWindow::onRegistrationConfirmed);
     connect(m_webSocketClient, &WebSocketClient::screensInfoReceived, this, &MainWindow::onScreensInfoReceived);
     connect(m_webSocketClient, &WebSocketClient::watchStatusChanged, this, &MainWindow::onWatchStatusChanged);
-    // Upload-related signals
-    connect(m_webSocketClient, &WebSocketClient::uploadProgressReceived, this, &MainWindow::onUploadProgress);
-    connect(m_webSocketClient, &WebSocketClient::uploadFinishedReceived, this, &MainWindow::onUploadFinished);
-    connect(m_webSocketClient, &WebSocketClient::unloadedReceived, this, [this]() {
-        // Target confirmed unload; reset UI state
-        m_uploadActive = false;
-        m_currentUploadId.clear();
-        m_lastUploadPercent = 0;
-        m_uploadInProgress = false;
-        m_cancelRequested = false;
-        if (m_uploadButton) {
-            m_uploadButton->setCheckable(true);
+    // Upload manager wiring
+    m_uploadManager->setWebSocketClient(m_webSocketClient);
+    m_watchManager->setWebSocketClient(m_webSocketClient);
+    connect(m_webSocketClient, &WebSocketClient::uploadProgressReceived,
+            m_uploadManager, &UploadManager::onUploadProgress);
+    connect(m_webSocketClient, &WebSocketClient::uploadFinishedReceived,
+            m_uploadManager, &UploadManager::onUploadFinished);
+    connect(m_webSocketClient, &WebSocketClient::unloadedReceived,
+            m_uploadManager, &UploadManager::onUnloadedRemote);
+    // Generic message tap for target-side upload handling now handled by manager
+    connect(m_webSocketClient, &WebSocketClient::messageReceived, this, [this](const QJsonObject& obj){
+        m_uploadManager->handleIncomingMessage(obj);
+        onGenericMessageReceived(obj); // preserve any other logic later
+    });
+    connect(m_uploadManager, &UploadManager::uploadProgress, this, [this](int percent, int filesCompleted, int totalFiles){
+        Q_UNUSED(totalFiles);
+        if (!m_uploadButton) return;
+        // Show progress; keep monospace for stability
+        m_uploadButton->setText(QString("Downloading (%1/%2) %3%")
+                                    .arg(filesCompleted)
+                                    .arg(totalFiles)
+                                    .arg(percent));
+    });
+    connect(m_uploadManager, &UploadManager::uploadFinished, this, [this](){
+        if (!m_uploadButton) return;
+        m_uploadButton->setChecked(true);
+        m_uploadButton->setText("Unload medias");
+        m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #16a34a; color: white; border-radius: 5px; } QPushButton:checked { background-color: #15803d; }");
+        m_uploadButton->setFont(m_uploadButtonDefaultFont);
+    });
+    connect(m_uploadManager, &UploadManager::uiStateChanged, this, [this](){
+        if (!m_uploadButton) return;
+        if (m_uploadManager->hasActiveUpload()) {
+            m_uploadButton->setChecked(true);
+            m_uploadButton->setText("Unload medias");
+        } else if (m_uploadManager->isUploading()) {
+            // state already represented during progress
+        } else if (m_uploadManager->isCancelling()) {
+            m_uploadButton->setText("Cancelling…");
+        } else {
             m_uploadButton->setChecked(false);
             m_uploadButton->setText("Upload to Client");
             m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }");
-            // Restore default proportional font
             m_uploadButton->setFont(m_uploadButtonDefaultFont);
             m_uploadButton->setEnabled(true);
         }
     });
-    // Generic message tap for target-side upload handling
-    connect(m_webSocketClient, &WebSocketClient::messageReceived, this, &MainWindow::onGenericMessageReceived);
     connect(m_webSocketClient, &WebSocketClient::dataRequestReceived, this, [this]() {
         // Server requested immediate state (on first watch or refresh)
         m_webSocketClient->sendStateSnapshot(getLocalScreenInfo(), getSystemVolumePercent());
@@ -2104,87 +1907,13 @@ MainWindow::MainWindow(QWidget *parent)
 }
 
 void MainWindow::showScreenView(const ClientInfo& client) {
-    qDebug() << "showScreenView called for client:" << client.getMachineName();
-    // Update client name
-    m_clientNameLabel->setText(QString("%1 (%2)").arg(client.getMachineName()).arg(client.getPlatform()));
-    
-    // Reset to spinner state but delay showing the spinner to avoid flicker
-    if (m_canvasStack) m_canvasStack->setCurrentIndex(0);
-    if (m_loadingSpinner) {
-        m_loadingSpinner->stop();
-        m_spinnerFade->stop();
-        m_spinnerOpacity->setOpacity(0.0);
-    }
-    if (m_volumeIndicator) {
-        m_volumeIndicator->hide();
-        m_volumeFade->stop();
-        m_volumeOpacity->setOpacity(0.0);
-    }
-    if (m_canvasFade) m_canvasFade->stop();
-    if (m_canvasOpacity) m_canvasOpacity->setOpacity(0.0);
-    
-    if (m_loaderDelayTimer) {
-        m_loaderDelayTimer->stop();
-        // Prevent multiple connections across navigations
-        QObject::disconnect(m_loaderDelayTimer, nullptr, nullptr, nullptr);
-        connect(m_loaderDelayTimer, &QTimer::timeout, this, [this]() {
-            if (!m_canvasStack || !m_loadingSpinner || !m_spinnerFade || !m_spinnerOpacity) return;
-            m_canvasStack->setCurrentIndex(0);
-            m_spinnerFade->stop();
-            m_spinnerOpacity->setOpacity(0.0);
-            m_loadingSpinner->start();
-            // Spinner uses its own fade duration
-            if (m_spinnerFade) m_spinnerFade->setDuration(m_loaderFadeDurationMs);
-            m_spinnerFade->setStartValue(0.0);
-            m_spinnerFade->setEndValue(1.0);
-            m_spinnerFade->start();
-        });
-        m_loaderDelayTimer->start(m_loaderDelayMs);
-    }
-    if (m_screenCanvas) {
-        m_screenCanvas->clearScreens();
-    }
-    
-    // Request fresh screen info on demand
-    if (!client.getId().isEmpty()) {
-        m_webSocketClient->requestScreens(client.getId());
-    }
-    
-    // Switch to screen view page
-    m_stackedWidget->setCurrentWidget(m_screenViewWidget);
-    // Show back button when on screen view
-    if (m_backButton) m_backButton->show();
-    
-    // Start watching this client's screens for real-time updates
-    if (m_webSocketClient && m_webSocketClient->isConnected()) {
-        if (!m_watchedClientId.isEmpty() && m_watchedClientId != client.getId()) {
-            m_webSocketClient->unwatchScreens(m_watchedClientId);
-        }
-        if (!client.getId().isEmpty()) {
-            m_webSocketClient->watchScreens(client.getId());
-            m_watchedClientId = client.getId();
-        }
-    }
-    qDebug() << "Screen view now showing. Current widget index:" << m_stackedWidget->currentIndex();
+    if (m_clientNameLabel)
+        m_clientNameLabel->setText(QString("%1 (%2)").arg(client.getMachineName()).arg(client.getPlatform()));
+    if (m_navigationManager) m_navigationManager->showScreenView(client);
 }
 
 void MainWindow::showClientListView() {
-    qDebug() << "showClientListView called. Current widget index before:" << m_stackedWidget->currentIndex();
-    
-    // Switch to client list page
-    m_stackedWidget->setCurrentWidget(m_clientListPage);
-    // Hide back button when on client list
-    if (m_backButton) m_backButton->hide();
-    
-    qDebug() << "Client list view now showing. Current widget index:" << m_stackedWidget->currentIndex();
-    
-    // Stop watching when leaving screen view
-    if (m_webSocketClient && m_webSocketClient->isConnected() && !m_watchedClientId.isEmpty()) {
-        m_webSocketClient->unwatchScreens(m_watchedClientId);
-        m_watchedClientId.clear();
-    }
-    if (m_screenCanvas) m_screenCanvas->hideRemoteCursor();
-    // Clear selection without triggering selection change event
+    if (m_navigationManager) m_navigationManager->showClientList();
     m_ignoreSelectionChange = true;
     m_clientListWidget->clearSelection();
     m_ignoreSelectionChange = false;
@@ -2234,91 +1963,14 @@ void MainWindow::onUploadButtonClicked() {
         QMessageBox::warning(this, "Upload", "Not connected or no target selected");
         return;
     }
-    // If currently active (already uploaded), this acts as Unload
-    if (m_uploadActive) {
-        m_webSocketClient->sendUnloadMedia(m_selectedClient.getId());
-        // Reset local state; UI will finalize on unloadedReceived too
-        m_uploadActive = false;
-        m_currentUploadId.clear();
-        m_lastUploadPercent = 0;
-        m_uploadButton->setChecked(false);
-        m_uploadButton->setText("Upload to Client");
-        m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }");
-        return;
-    }
-
-    // If an upload is currently in progress, treat second click as cancel: abort and unload
-    if (m_uploadInProgress) {
-        m_cancelRequested = true;
-        if (!m_currentUploadId.isEmpty()) {
-            m_webSocketClient->sendUploadAbort(m_selectedClient.getId(), m_currentUploadId, "User cancelled");
-        }
-        if (m_uploadButton) {
-            m_uploadButton->setText("Cancelling…");
-            m_uploadButton->setEnabled(false);
-        }
-        // Treat as no longer in-progress locally so UI can start fresh on next click if needed
-        m_uploadInProgress = false;
-        // Fallback: if unloaded doesn't arrive within a short time, reset UI
-        QTimer::singleShot(3000, this, [this]() {
-            if (!m_cancelRequested) return; // already resolved
-            m_cancelRequested = false;
-            m_currentUploadId.clear();
-            if (m_uploadButton) {
-                m_uploadButton->setEnabled(true);
-                m_uploadButton->setCheckable(true);
-                m_uploadButton->setChecked(false);
-                m_uploadButton->setText("Upload to Client");
-                m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }");
-                m_uploadButton->setFont(m_uploadButtonDefaultFont);
-            }
-        });
-        return;
-    }
-
-    // Collect files from scene items that have a source path
-    if (!m_screenCanvas) return;
-    QGraphicsScene* scene = m_screenCanvas->scene();
-    if (!scene) return;
-    QList<QGraphicsItem*> items = scene->items();
-    QJsonArray manifest;
-    struct FileItem { QString fileId; QString path; QString name; qint64 size; };
-    QVector<FileItem> files;
-    for (QGraphicsItem* it : items) {
-        if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-            const QString path = media->sourcePath();
-            if (!path.isEmpty()) {
-                QFileInfo info(path);
-                if (info.exists() && info.isFile()) {
-                    FileItem fi{ QUuid::createUuid().toString(QUuid::WithoutBraces), path, info.fileName(), info.size() };
-                    files.push_back(fi);
-                    QJsonObject f;
-                    f["fileId"] = fi.fileId;
-                    f["name"] = fi.name;
-                    f["sizeBytes"] = static_cast<double>(fi.size);
-                    manifest.append(f);
-                }
-            }
-        }
-    }
-    if (files.isEmpty()) {
-        QMessageBox::information(this, "Upload", "No local files to upload. Drag files onto the screens first.");
-        return;
-    }
-
-    // Begin upload
-    m_currentUploadId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    m_lastUploadPercent = 0;
-    m_totalFilesToUpload = files.size();
-    m_filesUploadedSoFar = 0;
-    m_cancelRequested = false;
-    m_uploadInProgress = true;
-    m_uploadButton->setCheckable(true);
-    m_uploadButton->setChecked(true);
-    // Rely on target-side progress; show preparing state immediately
-    m_uploadButton->setText("Preparing download");
-    // Switch to monospace font during progress to avoid width jitter
-    {
+    // Inform manager of target and trigger
+    m_uploadManager->setTargetClientId(m_selectedClient.getId());
+    QGraphicsScene* scene = m_screenCanvas ? m_screenCanvas->scene() : nullptr;
+    // Prepare button immediate visual state for starting upload if idle
+    if (!m_uploadManager->hasActiveUpload() && !m_uploadManager->isUploading()) {
+        m_uploadButton->setCheckable(true);
+        m_uploadButton->setChecked(true);
+        m_uploadButton->setText("Preparing download");
         QFont mono = m_uploadButtonDefaultFont;
         mono.setStyleHint(QFont::Monospace);
         mono.setFixedPitch(true);
@@ -2328,39 +1980,23 @@ void MainWindow::onUploadButtonClicked() {
         mono.setFamily("Courier New");
 #endif
         m_uploadButton->setFont(mono);
+        m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #2d6cdf; color: white; border-radius: 5px; } QPushButton:checked { background-color: #1f4ea8; }");
     }
-    m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #2d6cdf; color: white; border-radius: 5px; } QPushButton:checked { background-color: #1f4ea8; }");
-
-    // Send manifest
-    m_webSocketClient->sendUploadStart(m_selectedClient.getId(), manifest, m_currentUploadId);
-
-    // Send chunks sequentially (simple implementation). 128KB chunks.
-    const int chunkSize = 128 * 1024;
-    qint64 total = 0; for (const auto& f : files) total += f.size;
-    qint64 sent = 0;
-    for (const auto& f : files) {
-        QFile file(f.path);
-        if (!file.open(QIODevice::ReadOnly)) continue;
-        int idx = 0;
-        while (!file.atEnd()) {
-            if (m_cancelRequested) break;
-            QByteArray chunk = file.read(chunkSize);
-            m_webSocketClient->sendUploadChunk(m_selectedClient.getId(), m_currentUploadId, f.fileId, idx++, chunk.toBase64());
-            sent += chunk.size();
-            // Do not update UI here; target reports authoritative progress
-            qApp->processEvents(QEventLoop::AllEvents, 2);
+    // Gather files explicitly from scene (local knowledge of ResizableMediaBase)
+    QVector<UploadFileInfo> files;
+    if (scene) {
+        for (QGraphicsItem* it : scene->items()) {
+            if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
+                QString path = media->sourcePath();
+                if (path.isEmpty()) continue;
+                QFileInfo info(path);
+                if (!info.exists() || !info.isFile()) continue;
+                UploadFileInfo fi { QUuid::createUuid().toString(QUuid::WithoutBraces), path, info.fileName(), info.size() };
+                files.push_back(fi);
+            }
         }
-        file.close();
-        if (m_cancelRequested) break;
     }
-    if (m_cancelRequested) {
-        // Already sent abort above; also request remote unload and reset UI once we get unloaded
-        m_webSocketClient->sendUnloadMedia(m_selectedClient.getId());
-        // Keep waiting for unloadedReceived to reset button; re-enable now to avoid frozen UI
-        if (m_uploadButton) m_uploadButton->setEnabled(true);
-        return;
-    }
-    m_webSocketClient->sendUploadComplete(m_selectedClient.getId(), m_currentUploadId);
+    m_uploadManager->toggleUpload(files);
 }
 
 
@@ -3713,10 +3349,41 @@ void MainWindow::setupUI() {
     // Start with client list page
     m_stackedWidget->setCurrentWidget(m_clientListPage);
 
+    // Initialize navigation manager (after widgets exist)
+    m_navigationManager = new ScreenNavigationManager(this);
+    {
+        ScreenNavigationManager::Widgets w;
+        w.stack = m_stackedWidget;
+        w.clientListPage = m_clientListPage;
+        w.screenViewPage = m_screenViewWidget;
+        w.backButton = m_backButton;
+        w.canvasStack = m_canvasStack;
+        w.loadingSpinner = m_loadingSpinner;
+        w.spinnerOpacity = m_spinnerOpacity;
+        w.spinnerFade = m_spinnerFade;
+        w.canvasOpacity = m_canvasOpacity;
+        w.canvasFade = m_canvasFade;
+        w.volumeOpacity = m_volumeOpacity;
+        w.volumeFade = m_volumeFade;
+        w.screenCanvas = m_screenCanvas;
+        m_navigationManager->setWidgets(w);
+        m_navigationManager->setDurations(m_loaderDelayMs, m_loaderFadeDurationMs, m_fadeDurationMs);
+        connect(m_navigationManager, &ScreenNavigationManager::requestScreens, this, [this](const QString& id){
+            if (m_webSocketClient && m_webSocketClient->isConnected()) m_webSocketClient->requestScreens(id);
+        });
+        connect(m_navigationManager, &ScreenNavigationManager::watchTargetRequested, this, [this](const QString& id){
+            if (m_watchManager && m_webSocketClient && m_webSocketClient->isConnected()) m_watchManager->toggleWatch(id);
+        });
+        connect(m_navigationManager, &ScreenNavigationManager::clientListEntered, this, [this](){
+            if (m_watchManager) m_watchManager->unwatchIfAny();
+            if (m_screenCanvas) m_screenCanvas->hideRemoteCursor();
+        });
+    }
+
     // Receive remote cursor updates when watching
     connect(m_webSocketClient, &WebSocketClient::cursorPositionReceived, this,
             [this](const QString& targetId, int x, int y) {
-                if (m_stackedWidget->currentWidget() == m_screenViewWidget && targetId == m_watchedClientId && m_screenCanvas) {
+                if (m_stackedWidget->currentWidget() == m_screenViewWidget && m_watchManager && targetId == m_watchManager->watchedClientId() && m_screenCanvas) {
                     m_screenCanvas->updateRemoteCursor(x, y);
                 }
             });
@@ -4192,9 +3859,7 @@ void MainWindow::onDisconnected() {
     }
     
     // Stop watching if any
-    if (!m_watchedClientId.isEmpty()) {
-        m_watchedClientId.clear();
-    }
+    if (m_watchManager) m_watchManager->unwatchIfAny();
     
     // Clear client list
     m_availableClients.clear();
@@ -4206,24 +3871,7 @@ void MainWindow::onDisconnected() {
     showTrayMessage("Mouffette Disconnected", "Disconnected from Mouffette server");
 }
 
-void MainWindow::startWatchingSelectedClient() {
-    if (!m_webSocketClient || !m_webSocketClient->isConnected()) return;
-    const QString targetId = m_selectedClient.getId();
-    if (targetId.isEmpty()) return;
-    if (m_watchedClientId == targetId) return; // already watching
-    if (!m_watchedClientId.isEmpty()) {
-        m_webSocketClient->unwatchScreens(m_watchedClientId);
-    }
-    m_webSocketClient->watchScreens(targetId);
-    m_watchedClientId = targetId;
-}
-
-void MainWindow::stopWatchingCurrentClient() {
-    if (!m_webSocketClient || !m_webSocketClient->isConnected()) { m_watchedClientId.clear(); return; }
-    if (m_watchedClientId.isEmpty()) return;
-    m_webSocketClient->unwatchScreens(m_watchedClientId);
-    m_watchedClientId.clear();
-}
+// startWatchingSelectedClient/stopWatchingCurrentClient removed (handled by WatchManager)
 
 void MainWindow::onConnectionError(const QString& error) {
     QMessageBox::warning(this, "Connection Error", 
@@ -4308,43 +3956,30 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
     if (!clientInfo.getId().isEmpty() && clientInfo.getId() == m_selectedClient.getId()) {
         qDebug() << "Updating canvas with fresh screens for" << clientInfo.getMachineName();
         m_selectedClient = clientInfo; // keep selected client in sync
-        
-    // Switch to canvas page and stop spinner; show volume with fresh data
-    if (m_loaderDelayTimer) m_loaderDelayTimer->stop();
-    if (m_canvasStack) m_canvasStack->setCurrentIndex(1);
-    if (m_screenCanvas) {
-        m_screenCanvas->viewport()->update();
-        if (m_screenCanvas->scene()) m_screenCanvas->scene()->update();
-    }
-    if (m_loadingSpinner) { m_loadingSpinner->stop(); }
+        // Update screen canvas content
         if (m_screenCanvas) {
             m_screenCanvas->setScreens(clientInfo.getScreens());
             m_screenCanvas->recenterWithMargin(33);
             m_screenCanvas->setFocus(Qt::OtherFocusReason);
         }
-        // Fade-in canvas content
-    if (m_canvasFade && m_canvasOpacity) {
-            applyAnimationDurations();
-            m_canvasOpacity->setOpacity(0.0);
-            m_canvasFade->setStartValue(0.0);
-            m_canvasFade->setEndValue(1.0);
-            m_canvasFade->start();
+
+        // Delegate reveal (spinner stop + canvas fade) to navigation manager
+        if (m_navigationManager) {
+            m_navigationManager->revealCanvas();
+        } else {
+            // Fallback if navigation manager not present (should not happen now)
+            if (m_canvasStack) m_canvasStack->setCurrentIndex(1);
         }
-        // Update and fade-in volume
+
+        // Update volume UI
         if (m_volumeIndicator) {
             updateVolumeIndicator();
             m_volumeIndicator->show();
-            if (m_volumeFade && m_volumeOpacity) {
-                applyAnimationDurations();
-                m_volumeOpacity->setOpacity(0.0);
-                m_volumeFade->setStartValue(0.0);
-                m_volumeFade->setEndValue(1.0);
-                m_volumeFade->start();
-            }
         }
-        
-        // Optional: refresh UI labels if platform/machine changed
-        m_clientNameLabel->setText(QString("%1 (%2)").arg(clientInfo.getMachineName()).arg(clientInfo.getPlatform()));
+
+        // Refresh client label
+        if (m_clientNameLabel)
+            m_clientNameLabel->setText(QString("%1 (%2)").arg(clientInfo.getMachineName()).arg(clientInfo.getPlatform()));
     }
 }
 

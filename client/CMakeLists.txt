@@ -27,6 +27,10 @@ set(SOURCES
     src/WebSocketClient.cpp
     src/ClientInfo.cpp
     src/OverlayPanels.cpp
+    src/UploadManager.cpp
+    src/WatchManager.cpp
+    src/ScreenNavigationManager.cpp
+    src/SpinnerWidget.cpp
 )
 
 # Platform-specific sources
@@ -46,6 +50,10 @@ set(HEADERS
     src/MacVideoThumbnailer.h
     src/OverlayPanels.h
     src/RoundedRectItem.h
+    src/UploadManager.h
+    src/WatchManager.h
+    src/ScreenNavigationManager.h
+    src/SpinnerWidget.h
 )
 
 # UI files

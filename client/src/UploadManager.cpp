@@ -1,0 +1,223 @@
+#include "UploadManager.h"
+#include "WebSocketClient.h"
+#include <QGraphicsScene>
+#include <QGraphicsItem>
+#include <QFileInfo>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QStandardPaths>
+#include <QDir>
+#include <QCoreApplication>
+#include <QEventLoop>
+#include <QTimer>
+#include <QDebug>
+
+// Removed dependency on ResizableMediaBase / scene scanning.
+
+UploadManager::UploadManager(QObject* parent) : QObject(parent) {}
+
+void UploadManager::setWebSocketClient(WebSocketClient* client) { m_ws = client; }
+void UploadManager::setTargetClientId(const QString& id) { m_targetClientId = id; }
+
+void UploadManager::toggleUpload(const QVector<UploadFileInfo>& files) {
+    if (!m_ws || !m_ws->isConnected() || m_targetClientId.isEmpty()) {
+        qWarning() << "UploadManager: Not connected or no target set";
+        return;
+    }
+    if (m_uploadActive) { // unload
+        requestUnload();
+        return;
+    }
+    if (m_uploadInProgress) { // cancel
+        requestCancel();
+        return;
+    }
+    if (files.isEmpty()) {
+        qInfo() << "UploadManager: No files provided";
+        return;
+    }
+    startUpload(files);
+}
+
+void UploadManager::requestUnload() {
+    if (!m_ws || !m_ws->isConnected() || m_targetClientId.isEmpty()) return;
+    if (!m_uploadActive) return; // nothing to unload
+    m_ws->sendUnloadMedia(m_targetClientId);
+    resetToInitial();
+    emit uiStateChanged();
+}
+
+void UploadManager::requestCancel() {
+    if (!m_ws || !m_ws->isConnected() || m_targetClientId.isEmpty()) return;
+    if (!m_uploadInProgress) return;
+    m_cancelRequested = true;
+    if (!m_currentUploadId.isEmpty()) {
+        m_ws->sendUploadAbort(m_targetClientId, m_currentUploadId, "User cancelled");
+    }
+    // Also request unloading to clean remote state
+    m_ws->sendUnloadMedia(m_targetClientId);
+    // We'll reset final state upon unloaded callback
+}
+
+void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
+    m_currentUploadId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_uploadInProgress = true;
+    m_cancelRequested = false;
+    m_lastPercent = 0;
+    m_filesCompleted = 0;
+    m_totalFiles = files.size();
+
+    // Build manifest
+    QJsonArray manifest;
+    for (const auto& f : files) {
+        QJsonObject obj;
+        obj["fileId"] = f.fileId;
+        obj["name"] = f.name;
+        obj["sizeBytes"] = static_cast<double>(f.size);
+        manifest.append(obj);
+    }
+    m_ws->sendUploadStart(m_targetClientId, manifest, m_currentUploadId);
+
+    // Stream sequentially (same logic as previously in MainWindow)
+    const int chunkSize = 128 * 1024;
+    for (const auto& f : files) {
+        QFile file(f.path);
+        if (!file.open(QIODevice::ReadOnly)) continue;
+        int chunkIndex = 0;
+        while (!file.atEnd()) {
+            if (m_cancelRequested) break;
+            QByteArray chunk = file.read(chunkSize);
+            m_ws->sendUploadChunk(m_targetClientId, m_currentUploadId, f.fileId, chunkIndex++, chunk.toBase64());
+            // Yield briefly
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
+        }
+        file.close();
+        if (m_cancelRequested) break;
+    }
+    if (m_cancelRequested) return; // completion suppressed
+    m_ws->sendUploadComplete(m_targetClientId, m_currentUploadId);
+}
+
+// collectSceneFiles removed; files now gathered by caller (MainWindow)
+
+void UploadManager::resetToInitial() {
+    m_uploadActive = false;
+    m_uploadInProgress = false;
+    m_cancelRequested = false;
+    m_currentUploadId.clear();
+    m_lastPercent = 0;
+    m_filesCompleted = 0;
+    m_totalFiles = 0;
+}
+
+// Slots forwarded from WebSocketClient (sender side)
+void UploadManager::onUploadProgress(const QString& uploadId, int percent, int filesCompleted, int totalFiles) {
+    if (uploadId != m_currentUploadId) return;
+    if (m_cancelRequested) return;
+    m_lastPercent = percent;
+    m_filesCompleted = filesCompleted;
+    m_totalFiles = totalFiles;
+    emit uploadProgress(percent, filesCompleted, totalFiles);
+}
+
+void UploadManager::onUploadFinished(const QString& uploadId) {
+    if (uploadId != m_currentUploadId) return;
+    if (m_cancelRequested) return;
+    m_uploadActive = true; // switch to active state
+    m_uploadInProgress = false;
+    emit uploadFinished();
+    emit uiStateChanged();
+}
+
+void UploadManager::onUnloadedRemote() {
+    // Remote side confirmed unload; reset state
+    resetToInitial();
+    emit unloaded();
+    emit uiStateChanged();
+}
+
+// Incoming side (target) - replicate subset of MainWindow logic for assembling files
+void UploadManager::handleIncomingMessage(const QJsonObject& message) {
+    const QString type = message.value("type").toString();
+    if (type == "upload_start") {
+        m_incoming = IncomingUploadSession();
+        m_incoming.senderId = message.value("senderClientId").toString();
+        m_incoming.uploadId = message.value("uploadId").toString();
+        m_canceledIncoming.remove(m_incoming.uploadId);
+        QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+        if (base.isEmpty()) base = QDir::homePath() + "/.cache";
+        QDir dir(base); dir.mkpath("Mouffette/Uploads");
+        QString cacheDir = base + "/Mouffette/Uploads/" + m_incoming.uploadId;
+        QDir().mkpath(cacheDir);
+        m_incoming.cacheDirPath = cacheDir;
+        QJsonArray files = message.value("files").toArray();
+        m_incoming.totalFiles = files.size();
+        for (const QJsonValue& v : files) {
+            QJsonObject f = v.toObject();
+            QString fileId = f.value("fileId").toString();
+            QString name = f.value("name").toString();
+            qint64 size = static_cast<qint64>(f.value("sizeBytes").toDouble());
+            m_incoming.totalSize += qMax<qint64>(0, size);
+            QString safeName = name; safeName.replace('/', '_');
+            QString fullPath = cacheDir + "/" + fileId + "_" + safeName;
+            QFile* qf = new QFile(fullPath);
+            if (!qf->open(QIODevice::WriteOnly)) { delete qf; continue; }
+            m_incoming.openFiles.insert(fileId, qf);
+            m_incoming.expectedSizes.insert(fileId, qMax<qint64>(0, size));
+            m_incoming.receivedByFile.insert(fileId, 0);
+        }
+        if (m_ws && !m_incoming.senderId.isEmpty()) {
+            m_ws->notifyUploadProgressToSender(m_incoming.senderId, m_incoming.uploadId, 0, 0, m_incoming.totalFiles);
+        }
+    } else if (type == "upload_chunk") {
+        if (message.value("uploadId").toString() != m_incoming.uploadId) return;
+        if (m_canceledIncoming.contains(m_incoming.uploadId)) return;
+        QString fid = message.value("fileId").toString();
+        QFile* qf = m_incoming.openFiles.value(fid, nullptr);
+        if (!qf) return;
+        QByteArray data = QByteArray::fromBase64(message.value("data").toString().toUtf8());
+        qf->write(data);
+        m_incoming.received += data.size();
+        if (m_incoming.receivedByFile.contains(fid)) {
+            qint64 soFar = m_incoming.receivedByFile.value(fid) + data.size();
+            m_incoming.receivedByFile[fid] = soFar;
+        }
+        int filesCompleted = 0;
+        for (auto it = m_incoming.expectedSizes.constBegin(); it != m_incoming.expectedSizes.constEnd(); ++it) {
+            qint64 expected = it.value();
+            qint64 got = m_incoming.receivedByFile.value(it.key(), 0);
+            if (expected > 0 && got >= expected) filesCompleted++;
+        }
+        if (m_ws && !m_incoming.senderId.isEmpty() && m_incoming.totalSize > 0) {
+            int percent = static_cast<int>(std::round(m_incoming.received * 100.0 / m_incoming.totalSize));
+            m_ws->notifyUploadProgressToSender(m_incoming.senderId, m_incoming.uploadId, percent, filesCompleted, m_incoming.totalFiles);
+        }
+    } else if (type == "upload_complete") {
+        if (message.value("uploadId").toString() != m_incoming.uploadId) return;
+        for (auto it = m_incoming.openFiles.begin(); it != m_incoming.openFiles.end(); ++it) {
+            if (it.value()) { it.value()->flush(); it.value()->close(); delete it.value(); }
+        }
+        m_incoming.openFiles.clear();
+        if (m_ws && !m_incoming.senderId.isEmpty()) {
+            m_ws->notifyUploadFinishedToSender(m_incoming.senderId, m_incoming.uploadId);
+        }
+    } else if (type == "upload_abort") {
+        const QString abortedId = message.value("uploadId").toString();
+        if (!abortedId.isEmpty()) m_canceledIncoming.insert(abortedId);
+        for (auto it = m_incoming.openFiles.begin(); it != m_incoming.openFiles.end(); ++it) {
+            if (it.value()) { it.value()->flush(); it.value()->close(); delete it.value(); }
+        }
+        m_incoming.openFiles.clear();
+        if (!m_incoming.cacheDirPath.isEmpty()) { QDir dir(m_incoming.cacheDirPath); dir.removeRecursively(); }
+        if (m_ws && !m_incoming.senderId.isEmpty()) {
+            m_ws->notifyUnloadedToSender(m_incoming.senderId);
+        }
+        m_incoming = IncomingUploadSession();
+    } else if (type == "unload_media") {
+        if (!m_incoming.cacheDirPath.isEmpty()) { QDir dir(m_incoming.cacheDirPath); dir.removeRecursively(); }
+        if (m_ws && !m_incoming.senderId.isEmpty()) {
+            m_ws->notifyUnloadedToSender(m_incoming.senderId);
+        }
+        m_incoming = IncomingUploadSession();
+    }
+}
