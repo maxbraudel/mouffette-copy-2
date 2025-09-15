@@ -241,10 +241,18 @@ QWidget* MainWindow::createScreenWidget(const ScreenInfo& screen, int index) {
 
 void MainWindow::updateVolumeIndicator() {
     if (!m_volumeIndicator) return;
-    int vol = getSystemVolumePercent();
+    int vol = -1;
+    if (!m_selectedClient.getId().isEmpty()) {
+        vol = m_selectedClient.getVolumePercent();
+    }
     if (vol < 0) { m_volumeIndicator->setText("🔈 --"); return; }
-    QString icon = (vol == 0) ? "🔇" : (vol < 50 ? "🔈" : "🔊");
+    QString icon;
+    if (vol == 0) icon = "🔇"; else if (vol < 34) icon = "🔈"; else if (vol < 67) icon = "🔉"; else icon = "🔊";
     m_volumeIndicator->setText(QString("%1 %2%" ).arg(icon).arg(vol));
+    if (m_volumeIndicator->isHidden()) m_volumeIndicator->show();
+    if (m_volumeOpacity) {
+        if (m_volumeOpacity->opacity() < 1.0) m_volumeOpacity->setOpacity(1.0);
+    }
 }
 
 void MainWindow::onUploadButtonClicked() {
@@ -405,7 +413,11 @@ void MainWindow::setupUI() {
     // Receive remote cursor updates when watching
     connect(m_webSocketClient, &WebSocketClient::cursorPositionReceived, this,
             [this](const QString& targetId, int x, int y) {
-                if (m_stackedWidget->currentWidget() == m_screenViewWidget && m_watchManager && targetId == m_watchManager->watchedClientId() && m_screenCanvas) {
+                if (!m_screenCanvas) return;
+                if (m_stackedWidget->currentWidget() != m_screenViewWidget) return;
+                bool matchWatch = (m_watchManager && targetId == m_watchManager->watchedClientId());
+                bool matchSelected = (!m_selectedClient.getId().isEmpty() && targetId == m_selectedClient.getId());
+                if (matchWatch || matchSelected) {
                     m_screenCanvas->updateRemoteCursor(x, y);
                 }
             });
@@ -519,8 +531,9 @@ void MainWindow::createScreenViewPage() {
     // Canvas container previously had a bordered panel look; remove to emulate design-tool feel
     m_canvasContainer->setStyleSheet(
         "QWidget#CanvasContainer { "
-        "   background-color: transparent; "
-        "   border: none; "
+        "   background-color: palette(base); "
+        "   border: 1px solid palette(mid); "
+        "   border-radius: 5px; "
         "}"
     );
     QVBoxLayout* containerLayout = new QVBoxLayout(m_canvasContainer);
@@ -573,9 +586,10 @@ void MainWindow::createScreenViewPage() {
     m_screenCanvas->setMinimumHeight(400);
     // Ensure the viewport background matches and is rounded
     if (m_screenCanvas->viewport()) {
-        m_screenCanvas->viewport()->setAttribute(Qt::WA_StyledBackground, false);
-        m_screenCanvas->viewport()->setAutoFillBackground(false);
-        m_screenCanvas->viewport()->setStyleSheet("background: transparent; border: none;");
+        m_screenCanvas->viewport()->setAttribute(Qt::WA_StyledBackground, true);
+        m_screenCanvas->viewport()->setAutoFillBackground(true);
+        // Keep viewport visually seamless inside white container while allowing scene clearing to white
+    m_screenCanvas->viewport()->setStyleSheet("background: palette(base); border: none; border-radius: 5px;");
     }
     m_screenCanvas->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     // Full updates avoid ghosting when moving scene-level overlays with ItemIgnoresTransformations

@@ -42,7 +42,8 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     // Remove frame and make background transparent so only content shows.
     setFrameStyle(QFrame::NoFrame);
-    setBackgroundBrush(Qt::NoBrush);
+    // White background to match surrounding container
+    setBackgroundBrush(QBrush(Qt::white));
     setAttribute(Qt::WA_AcceptTouchEvents, true);
     setTransformationAnchor(QGraphicsView::NoAnchor); // we'll anchor manually
     if (viewport()) {
@@ -98,7 +99,9 @@ void ScreenCanvas::recenterWithMargin(int marginPx) {
 }
 
 void ScreenCanvas::updateRemoteCursor(int globalX, int globalY) {
-    QPointF scenePos = mapToScene(mapFromGlobal(QPoint(globalX, globalY)));
+    // Inputs are remote global desktop coordinates relative to remote virtual desktop origin.
+    QPointF scenePos = mapRemoteCursorToScene(globalX, globalY);
+    if (scenePos.isNull()) return; // outside any screen
     if (!m_remoteCursorDot) {
         m_remoteCursorDot = new QGraphicsEllipseItem(QRectF(-6,-6,12,12));
         m_remoteCursorDot->setBrush(QBrush(QColor(255,64,64,200)));
@@ -106,7 +109,7 @@ void ScreenCanvas::updateRemoteCursor(int globalX, int globalY) {
         m_remoteCursorDot->setZValue(4000.0);
         if (m_scene) m_scene->addItem(m_remoteCursorDot);
     }
-    if (m_remoteCursorDot) m_remoteCursorDot->setPos(scenePos);
+    if (m_remoteCursorDot) { m_remoteCursorDot->setPos(scenePos); m_remoteCursorDot->show(); }
 }
 
 void ScreenCanvas::hideRemoteCursor() {
@@ -508,8 +511,16 @@ void ScreenCanvas::createScreenItems() {
     if (!m_scene) return;
     const double spacing = static_cast<double>(m_screenSpacingPx);
     QMap<int, QRectF> compactPositions = calculateCompactPositions(1.0, spacing, spacing);
+    m_sceneScreenRects.clear();
     for (int i = 0; i < m_screens.size(); ++i) {
-        const ScreenInfo& s = m_screens[i]; QRectF pos = compactPositions.value(i); auto* rect = createScreenItem(s, i, pos); rect->setZValue(-1000.0); m_scene->addItem(rect); m_screenItems << rect; }
+        const ScreenInfo& s = m_screens[i];
+        QRectF pos = compactPositions.value(i);
+        auto* rect = createScreenItem(s, i, pos);
+        rect->setZValue(-1000.0);
+        m_scene->addItem(rect);
+        m_screenItems << rect;
+        m_sceneScreenRects.insert(s.id, pos);
+    }
     ensureZOrder();
 }
 
@@ -548,6 +559,27 @@ QMap<int, QRectF> ScreenCanvas::calculateCompactPositions(double scaleFactor, do
     return positions; }
 
 QRectF ScreenCanvas::screensBoundingRect() const { QRectF bounds; bool first = true; for (auto* item : m_screenItems) { if (!item) continue; QRectF r = item->sceneBoundingRect(); if (first) { bounds = r; first = false; } else { bounds = bounds.united(r); } } return bounds; }
+
+QPointF ScreenCanvas::mapRemoteCursorToScene(int remoteX, int remoteY) const {
+    if (m_screens.isEmpty() || m_sceneScreenRects.isEmpty()) return QPointF();
+    const ScreenInfo* containing = nullptr;
+    for (const auto &s : m_screens) {
+        QRect r(s.x, s.y, s.width, s.height);
+        if (r.contains(remoteX, remoteY)) { containing = &s; break; }
+    }
+    if (!containing) return QPointF();
+    auto it = m_sceneScreenRects.find(containing->id);
+    if (it == m_sceneScreenRects.end()) return QPointF();
+    QRectF sceneRect = it.value();
+    QRect remoteRect(containing->x, containing->y, containing->width, containing->height);
+    if (remoteRect.width() <= 0 || remoteRect.height() <= 0) return QPointF();
+    qreal relX = (remoteX - remoteRect.x()) / static_cast<qreal>(remoteRect.width());
+    qreal relY = (remoteY - remoteRect.y()) / static_cast<qreal>(remoteRect.height());
+    // Clamp just in case due to rounding
+    relX = std::clamp(relX, 0.0, 1.0);
+    relY = std::clamp(relY, 0.0, 1.0);
+    return QPointF(sceneRect.x() + relX * sceneRect.width(), sceneRect.y() + relY * sceneRect.height());
+}
 
 void ScreenCanvas::zoomAroundViewportPos(const QPointF& vpPosF, qreal factor) {
     QPoint vpPos = vpPosF.toPoint(); if (!viewport()->rect().contains(vpPos)) vpPos = viewport()->rect().center(); const QPointF sceneAnchor = mapToScene(vpPos);

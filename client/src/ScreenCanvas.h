@@ -71,6 +71,8 @@ private:
     void createScreenItems();
     QGraphicsRectItem* createScreenItem(const ScreenInfo& screen, int index, const QRectF& position);
     QMap<int, QRectF> calculateCompactPositions(double scaleFactor, double hSpacing, double vSpacing) const;
+    // Map remote global cursor position (remote screen coords) to scene space using stored screen layout.
+    QPointF mapRemoteCursorToScene(int remoteX, int remoteY) const;
     QRectF screensBoundingRect() const;
     void zoomAroundViewportPos(const QPointF& vpPos, qreal factor);
     void ensureZOrder();
@@ -79,6 +81,8 @@ private:
     QGraphicsScene* m_scene = nullptr;
     QList<QGraphicsRectItem*> m_screenItems;
     QList<ScreenInfo> m_screens;
+    // Mapping screen id -> scene rect (inner content rect used when drawing label)
+    QHash<int, QRectF> m_sceneScreenRects;
     bool m_panning = false;
     QPoint m_lastPanPoint;
     QPoint m_lastMousePos;
