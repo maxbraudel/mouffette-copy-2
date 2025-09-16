@@ -55,8 +55,6 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     // Remove frame and make background transparent so only content shows.
     setFrameStyle(QFrame::NoFrame);
-    // White background to match surrounding container
-    setBackgroundBrush(QBrush(Qt::white));
     setAttribute(Qt::WA_AcceptTouchEvents, true);
     setTransformationAnchor(QGraphicsView::NoAnchor); // we'll anchor manually
     if (viewport()) {
