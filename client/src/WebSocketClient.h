@@ -20,6 +20,10 @@ public:
     void connectToServer(const QString& serverUrl);
     void disconnect();
     bool isConnected() const;
+    // Upload channel (secondary socket) management
+    bool ensureUploadChannel(); // opens m_uploadSocket if needed (async); returns true if already connected or opening
+    void closeUploadChannel();  // closes m_uploadSocket if open
+    bool isUploadChannelConnected() const;
     
     // Client registration
     void registerClient(const QString& machineName, const QString& platform, const QList<ScreenInfo>& screens, int volumePercent);
@@ -71,18 +75,26 @@ private slots:
     void onConnected();
     void onDisconnected();
     void onTextMessageReceived(const QString& message);
+    void onUploadTextMessageReceived(const QString& message);
     void onError(QAbstractSocket::SocketError error);
     void attemptReconnect();
+    // Upload socket handlers
+    void onUploadConnected();
+    void onUploadDisconnected();
+    void onUploadError(QAbstractSocket::SocketError error);
 
 private:
     void handleMessage(const QJsonObject& message);
     void sendMessage(const QJsonObject& message);
+    void sendMessageUpload(const QJsonObject& message);
     void setConnectionStatus(const QString& status);
     QSet<QString> m_canceledUploads; // uploadIds that should drop further chunk sends
     
     QWebSocket* m_webSocket;
+    QWebSocket* m_uploadSocket = nullptr;
     QString m_serverUrl;
     QString m_clientId;
+    QString m_uploadClientId;
     QString m_connectionStatus;
     QTimer* m_reconnectTimer;
     int m_reconnectAttempts;

@@ -40,22 +40,23 @@ void UploadManager::toggleUpload(const QVector<UploadFileInfo>& files) {
 }
 
 void UploadManager::requestUnload() {
-    if (!m_ws || !m_ws->isConnected() || m_targetClientId.isEmpty()) return;
+    if (!m_ws || !m_ws->isConnected() || (m_uploadTargetClientId.isEmpty() && m_targetClientId.isEmpty())) return;
     if (!m_uploadActive) return; // nothing to unload
-    m_ws->sendUnloadMedia(m_targetClientId);
+    m_ws->sendUnloadMedia(m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId);
     resetToInitial();
     emit uiStateChanged();
+    if (m_ws) m_ws->closeUploadChannel();
 }
 
 void UploadManager::requestCancel() {
-    if (!m_ws || !m_ws->isConnected() || m_targetClientId.isEmpty()) return;
+    if (!m_ws || !m_ws->isConnected() || (m_uploadTargetClientId.isEmpty() && m_targetClientId.isEmpty())) return;
     if (!m_uploadInProgress) return;
     m_cancelRequested = true;
     if (!m_currentUploadId.isEmpty()) {
-        m_ws->sendUploadAbort(m_targetClientId, m_currentUploadId, "User cancelled");
+        m_ws->sendUploadAbort(m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId, m_currentUploadId, "User cancelled");
     }
     // Also request unloading to clean remote state
-    m_ws->sendUnloadMedia(m_targetClientId);
+    m_ws->sendUnloadMedia(m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId);
     // We'll reset final state upon unloaded callback
     emit uiStateChanged();
     // Start fallback timer (3s) in case remote never responds
@@ -73,6 +74,12 @@ void UploadManager::requestCancel() {
 }
 
 void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
+    if (m_ws) {
+        // Open the dedicated upload channel to avoid blocking control messages
+        m_ws->ensureUploadChannel();
+    }
+    // Capture stable target id for the entire upload session
+    m_uploadTargetClientId = m_targetClientId;
     m_currentUploadId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     m_uploadInProgress = true;
     m_cancelRequested = false;
@@ -90,7 +97,7 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
         obj["sizeBytes"] = static_cast<double>(f.size);
         manifest.append(obj);
     }
-    m_ws->sendUploadStart(m_targetClientId, manifest, m_currentUploadId);
+    m_ws->sendUploadStart(m_uploadTargetClientId, manifest, m_currentUploadId);
 
     // Stream sequentially (same logic as previously in MainWindow)
     const int chunkSize = 128 * 1024;
@@ -101,7 +108,7 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
         while (!file.atEnd()) {
             if (m_cancelRequested) break;
             QByteArray chunk = file.read(chunkSize);
-            m_ws->sendUploadChunk(m_targetClientId, m_currentUploadId, f.fileId, chunkIndex++, chunk.toBase64());
+            m_ws->sendUploadChunk(m_uploadTargetClientId, m_currentUploadId, f.fileId, chunkIndex++, chunk.toBase64());
             // Yield briefly
             QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
         }
@@ -109,7 +116,7 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
         if (m_cancelRequested) break;
     }
     if (m_cancelRequested) return; // completion suppressed
-    m_ws->sendUploadComplete(m_targetClientId, m_currentUploadId);
+    m_ws->sendUploadComplete(m_uploadTargetClientId, m_currentUploadId);
 }
 
 // collectSceneFiles removed; files now gathered by caller (MainWindow)
@@ -123,6 +130,9 @@ void UploadManager::resetToInitial() {
     m_filesCompleted = 0;
     m_totalFiles = 0;
     if (m_cancelFallbackTimer) m_cancelFallbackTimer->stop();
+    m_uploadTargetClientId.clear();
+    // Close upload channel if open
+    if (m_ws) m_ws->closeUploadChannel();
 }
 
 // Slots forwarded from WebSocketClient (sender side)
@@ -142,6 +152,7 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
     m_uploadInProgress = false;
     emit uploadFinished();
     emit uiStateChanged();
+    if (m_ws) m_ws->closeUploadChannel();
 }
 
 void UploadManager::onUnloadedRemote() {

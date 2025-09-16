@@ -85,6 +85,8 @@ private:
 
     QPointer<WebSocketClient> m_ws;
     QString m_targetClientId;
+    // Captured at startUpload to remain stable across the whole transfer
+    QString m_uploadTargetClientId;
 
     // Sender side state
     bool m_uploadActive = false;      // true after remote finished (acts as toggle to unload)
