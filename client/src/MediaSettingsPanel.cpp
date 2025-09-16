@@ -8,11 +8,11 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QCheckBox>
-#include <QLineEdit>
 #include <QPalette>
 #include <QGuiApplication>
 #include "Theme.h"
 #include "OverlayPanels.h"
+#include "ValueBoxLabel.h"
 
 MediaSettingsPanel::MediaSettingsPanel(QObject* parent)
     : QObject(parent)
@@ -46,7 +46,14 @@ void MediaSettingsPanel::buildUi() {
     m_title->setStyleSheet("color: white;");
     m_layout->addWidget(m_title);
 
-    // 1) Play automatically after x seconds
+    // Helper to create a small value box label like [1]
+    auto makeValueBox = [&](const QString& text = QStringLiteral("1")) {
+        auto* box = new ValueBoxLabel(text, m_widget);
+        box->setMinimumWidth(28);
+        return box;
+    };
+
+    // 1) Play automatically after [1] seconds
     {
         auto* row = new QWidget(m_widget);
         auto* h = new QHBoxLayout(row);
@@ -54,16 +61,17 @@ void MediaSettingsPanel::buildUi() {
         h->setSpacing(8);
         m_autoPlayCheck = new QCheckBox("Play automatically after", row);
         m_autoPlayCheck->setStyleSheet("color: white;");
-        m_autoPlaySeconds = new QLineEdit(row);
-        m_autoPlaySeconds->setPlaceholderText("seconds");
-        m_autoPlaySeconds->setFixedWidth(80);
+        auto* box = makeValueBox();
+        auto* suffix = new QLabel("seconds", row);
+        suffix->setStyleSheet("color: white;");
         h->addWidget(m_autoPlayCheck);
-        h->addWidget(m_autoPlaySeconds);
+        h->addWidget(box);
+        h->addWidget(suffix);
         h->addStretch();
         m_layout->addWidget(row);
     }
 
-    // 2) Repeat X times
+    // 2) Repeat [1] time
     {
         auto* row = new QWidget(m_widget);
         auto* h = new QHBoxLayout(row);
@@ -71,45 +79,48 @@ void MediaSettingsPanel::buildUi() {
         h->setSpacing(8);
         m_repeatCheck = new QCheckBox("Repeat", row);
         m_repeatCheck->setStyleSheet("color: white;");
-        m_repeatTimes = new QLineEdit(row);
-        m_repeatTimes->setPlaceholderText("times");
-        m_repeatTimes->setFixedWidth(80);
+        auto* box = makeValueBox();
+        auto* suffix = new QLabel("time", row);
+        suffix->setStyleSheet("color: white;");
         h->addWidget(m_repeatCheck);
-        h->addWidget(m_repeatTimes);
+        h->addWidget(box);
+        h->addWidget(suffix);
         h->addStretch();
         m_layout->addWidget(row);
     }
 
-    // 3) Appear in X seconds fade in
+    // 3) Fade in during [1] seconds
     {
         auto* row = new QWidget(m_widget);
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(8);
-        m_fadeInCheck = new QCheckBox("Appear in", row);
+        m_fadeInCheck = new QCheckBox("Fade in during", row);
         m_fadeInCheck->setStyleSheet("color: white;");
-        m_fadeInSeconds = new QLineEdit(row);
-        m_fadeInSeconds->setPlaceholderText("seconds fade in");
-        m_fadeInSeconds->setFixedWidth(120);
+        auto* box = makeValueBox();
+        auto* suffix = new QLabel("seconds", row);
+        suffix->setStyleSheet("color: white;");
         h->addWidget(m_fadeInCheck);
-        h->addWidget(m_fadeInSeconds);
+        h->addWidget(box);
+        h->addWidget(suffix);
         h->addStretch();
         m_layout->addWidget(row);
     }
 
-    // 4) Disappear in X seconds fade out
+    // 4) Fade out during [1] seconds
     {
         auto* row = new QWidget(m_widget);
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(8);
-        m_fadeOutCheck = new QCheckBox("Disappear in", row);
+        m_fadeOutCheck = new QCheckBox("Fade out during", row);
         m_fadeOutCheck->setStyleSheet("color: white;");
-        m_fadeOutSeconds = new QLineEdit(row);
-        m_fadeOutSeconds->setPlaceholderText("seconds fade out");
-        m_fadeOutSeconds->setFixedWidth(140);
+        auto* box = makeValueBox();
+        auto* suffix = new QLabel("seconds", row);
+        suffix->setStyleSheet("color: white;");
         h->addWidget(m_fadeOutCheck);
-        h->addWidget(m_fadeOutSeconds);
+        h->addWidget(box);
+        h->addWidget(suffix);
         h->addStretch();
         m_layout->addWidget(row);
     }
