@@ -31,7 +31,8 @@ void MediaSettingsPanel::buildUi() {
 
     // Make the QWidget visually transparent; we'll draw an exact rounded background in the scene
     m_widget->setAttribute(Qt::WA_StyledBackground, true);
-    m_widget->setStyleSheet("background-color: transparent; color: white;");
+    // Apply unified font size to match media filename overlay (OverlayTextElement uses 16px)
+    m_widget->setStyleSheet("background-color: transparent; color: white; font-size: 16px;");
     m_widget->setAutoFillBackground(false);
 
     m_layout = new QVBoxLayout(m_widget);
@@ -40,8 +41,7 @@ void MediaSettingsPanel::buildUi() {
 
     m_title = new QLabel("Scene options");
     QFont tf = m_title->font();
-    tf.setBold(true);
-    tf.setPointSize(tf.pointSize() + 1);
+    tf.setBold(true); // keep bold, but do not change size beyond 16px baseline
     m_title->setFont(tf);
     m_title->setStyleSheet("color: white;");
     m_layout->addWidget(m_title);
