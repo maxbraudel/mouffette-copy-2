@@ -238,6 +238,21 @@ void ScreenCanvas::keyPressEvent(QKeyEvent* event) {
         // Without the required modifier, do not delete; fall through to base handling
     }
     if (event->key() == Qt::Key_Space) { recenterWithMargin(53); event->accept(); return; }
+    // Disable arrow-key/View navigation so the canvas doesn't move with directional keys
+    switch (event->key()) {
+        case Qt::Key_Left:
+        case Qt::Key_Right:
+        case Qt::Key_Up:
+        case Qt::Key_Down:
+        case Qt::Key_Home:
+        case Qt::Key_End:
+        case Qt::Key_PageUp:
+        case Qt::Key_PageDown:
+            event->accept();
+            return;
+        default:
+            break;
+    }
     QGraphicsView::keyPressEvent(event);
 }
 
@@ -296,8 +311,14 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
         }
         for (QGraphicsItem* it : scene()->selectedItems()) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) { const QPointF itemPos = v->mapFromScene(mapToScene(event->pos())); if (v->handleControlsPressAtItemPos(itemPos)) { event->accept(); return; } }
         if (m_scene) m_scene->clearSelection();
-        // Start panning when clicking empty space
-        m_panning = true; m_lastPanPoint = event->pos(); event->accept(); return;
+        // Start panning when clicking empty space: capture precise anchor so the scene point under
+        // the cursor stays under the cursor during the entire drag.
+        m_panning = true;
+        m_lastPanPoint = event->pos();
+        m_panAnchorView = event->pos();
+        m_panAnchorScene = mapToScene(event->pos());
+        event->accept();
+        return;
     }
     QGraphicsView::mousePressEvent(event);
 }
@@ -342,16 +363,19 @@ void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
         for (QGraphicsItem* it : sel) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) if (v->isSelected() && (v->isDraggingProgress() || v->isDraggingVolume())) { v->updateDragWithScenePos(mapToScene(event->pos())); event->accept(); return; }
         const QList<QGraphicsItem*> hitItems = items(event->pos()); auto toMedia = [](QGraphicsItem* x)->ResizableMediaBase* { while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); } return nullptr; }; bool hitMedia = false; for (QGraphicsItem* it : hitItems) if (toMedia(it)) { hitMedia = true; break; } if (hitMedia) { QGraphicsView::mouseMoveEvent(event); return; }
         if (m_panning) {
-            QPoint delta = event->pos() - m_lastPanPoint;
-            if (!delta.isNull()) {
+            // Compute where the original anchor scene point currently appears in view coordinates
+            const QPoint currentAnchorView = mapFromScene(m_panAnchorScene);
+            const QPoint deltaView = event->pos() - currentAnchorView;
+            if (!deltaView.isNull()) {
                 QTransform t = transform();
-                // Translate by raw delta scaled to current transform (so pixel drag equals screen pan)
-                t.translate(delta.x() * -1.0 / t.m11(), delta.y() * -1.0 / t.m22());
+                // Translate by the exact amount needed so that the anchor scene point maps to the
+                // current mouse position (keeps the grabbed point perfectly pinned under the cursor)
+                t.translate(deltaView.x() / t.m11(), deltaView.y() / t.m22());
                 setTransform(t);
-                m_lastPanPoint = event->pos();
                 // Keep absolute panels pinned during pan
                 relayoutAllMediaOverlays(m_scene);
             }
+            m_lastPanPoint = event->pos();
             event->accept();
             return;
         }
@@ -384,8 +408,6 @@ void ScreenCanvas::mouseReleaseEvent(QMouseEvent* event) {
 void ScreenCanvas::wheelEvent(QWheelEvent* event) {
 #ifdef Q_OS_MACOS
     if (m_nativePinchActive) { event->ignore(); return; }
-#endif
-#ifdef Q_OS_MACOS
     const bool zoomModifier = event->modifiers().testFlag(Qt::MetaModifier);
 #else
     const bool zoomModifier = event->modifiers().testFlag(Qt::ControlModifier);
@@ -394,33 +416,22 @@ void ScreenCanvas::wheelEvent(QWheelEvent* event) {
         qreal deltaY = 0.0;
         if (!event->pixelDelta().isNull()) deltaY = event->pixelDelta().y();
         else if (!event->angleDelta().isNull()) deltaY = event->angleDelta().y() / 8.0;
-        if (deltaY != 0.0) { const qreal factor = std::pow(1.0015, deltaY); zoomAroundViewportPos(event->position(), factor); event->accept(); return; }
-    }
-    QPoint delta; if (!event->pixelDelta().isNull()) delta = event->pixelDelta(); else if (!event->angleDelta().isNull()) delta = event->angleDelta() / 8;
-    if (!delta.isNull()) {
-        if (m_ignorePanMomentum) {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 3, 0)
-            if (event->phase() == Qt::ScrollBegin) { m_ignorePanMomentum = false; }
-            if (!m_ignorePanMomentum) {}
-#endif
-            if (m_ignorePanMomentum) {
-                const double noiseGate = 1.0; const double boostRatio = 1.25; const qint64 graceMs = 180; const qint64 elapsed = m_momentumTimer.isValid() ? m_momentumTimer.elapsed() : LLONG_MAX;
-                const double mag = std::abs(delta.x()) + std::abs(delta.y());
-                if (elapsed < graceMs) { event->accept(); return; }
-                if (mag <= noiseGate) { event->accept(); return; }
-                if (!m_momentumPrimed) { m_momentumPrimed = true; m_lastMomentumMag = mag; m_lastMomentumDelta = delta; event->accept(); return; }
-                const bool sameDir = (m_lastMomentumDelta.x()==0 || delta.x()==0 || (std::signbit(m_lastMomentumDelta.x())==std::signbit(delta.x()))) && (m_lastMomentumDelta.y()==0 || delta.y()==0 || (std::signbit(m_lastMomentumDelta.y())==std::signbit(delta.y())));
-                if (sameDir) {
-                    if (mag <= m_lastMomentumMag * boostRatio) { m_lastMomentumMag = mag; m_lastMomentumDelta = delta; event->accept(); return; }
-                    m_ignorePanMomentum = false;
-                } else { m_ignorePanMomentum = false; }
-            }
+        if (deltaY != 0.0) {
+            const qreal factor = std::pow(1.0015, deltaY);
+            zoomAroundViewportPos(event->position(), factor);
+            event->accept();
+            return;
         }
+    }
+    QPoint delta;
+    if (!event->pixelDelta().isNull()) delta = event->pixelDelta();
+    else if (!event->angleDelta().isNull()) delta = event->angleDelta() / 8;
+    if (!delta.isNull()) {
         horizontalScrollBar()->setValue(horizontalScrollBar()->value() - delta.x());
         verticalScrollBar()->setValue(verticalScrollBar()->value() - delta.y());
-        // Keep absolute panels pinned during wheel-based panning
         relayoutAllMediaOverlays(m_scene);
-        event->accept(); return;
+        event->accept();
+        return;
     }
     QGraphicsView::wheelEvent(event);
 }

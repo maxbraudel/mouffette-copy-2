@@ -100,6 +100,9 @@ private:
     bool m_panning = false;
     QPoint m_lastPanPoint;
     QPoint m_lastMousePos;
+    // Precise panning: keep the scene point under the cursor anchored during drag
+    QPointF m_panAnchorScene;   // scene position under the cursor at mouse press
+    QPoint  m_panAnchorView;    // viewport position at mouse press (for reference)
     bool m_overlayMouseDown = false;
     bool m_nativePinchActive = false;
     QTimer* m_nativePinchGuardTimer = nullptr;
