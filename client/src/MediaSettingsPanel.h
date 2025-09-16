@@ -32,8 +32,14 @@ public:
     // Optional: accessors to later read values (not used yet).
     QWidget* widget() const { return m_widget; }
 
+protected:
+    bool eventFilter(QObject* obj, QEvent* event) override;
+
 private:
     void buildUi();
+    void setBoxActive(QLabel* box, bool active);
+    void clearActiveBox();
+    bool isValidInputForBox(QLabel* box, QChar character);
 
 private:
     QGraphicsProxyWidget* m_proxy = nullptr;
@@ -49,4 +55,11 @@ private:
     QCheckBox* m_fadeInCheck = nullptr;
 
     QCheckBox* m_fadeOutCheck = nullptr;
+
+    // Value box widgets for click handling
+    QLabel* m_autoPlayBox = nullptr;
+    QLabel* m_repeatBox = nullptr;
+    QLabel* m_fadeInBox = nullptr;
+    QLabel* m_fadeOutBox = nullptr;
+    QLabel* m_activeBox = nullptr; // currently active box (if any)
 };

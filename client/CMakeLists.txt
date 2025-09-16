@@ -35,7 +35,6 @@ set(SOURCES
     src/ScreenCanvas.cpp
     src/MediaSettingsPanel.cpp
     src/Theme.cpp
-    src/ValueBoxLabel.cpp
 )
 
 # Platform-specific sources
@@ -62,7 +61,6 @@ set(HEADERS
     src/ScreenCanvas.h
     src/MediaSettingsPanel.h
     src/Theme.h
-    src/ValueBoxLabel.h
 )
 
 # UI files
