@@ -66,7 +66,7 @@ void MediaSettingsPanel::buildUi() {
         auto* row = new QWidget(m_widget);
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0,0,0,0);
-        h->setSpacing(8);
+        h->setSpacing(0);
         m_autoPlayCheck = new QCheckBox("Play automatically after", row);
         m_autoPlayCheck->setStyleSheet("color: white;");
         m_autoPlayCheck->installEventFilter(this);
@@ -85,7 +85,7 @@ void MediaSettingsPanel::buildUi() {
         auto* row = new QWidget(m_widget);
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0,0,0,0);
-        h->setSpacing(8);
+        h->setSpacing(0);
         m_repeatCheck = new QCheckBox("Repeat", row);
         m_repeatCheck->setStyleSheet("color: white;");
         m_repeatCheck->installEventFilter(this);
@@ -104,7 +104,7 @@ void MediaSettingsPanel::buildUi() {
         auto* row = new QWidget(m_widget);
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0,0,0,0);
-        h->setSpacing(8);
+        h->setSpacing(0);
         m_fadeInCheck = new QCheckBox("Fade in during", row);
         m_fadeInCheck->setStyleSheet("color: white;");
         m_fadeInCheck->installEventFilter(this);
@@ -123,7 +123,7 @@ void MediaSettingsPanel::buildUi() {
         auto* row = new QWidget(m_widget);
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0,0,0,0);
-        h->setSpacing(8);
+        h->setSpacing(0);
         m_fadeOutCheck = new QCheckBox("Fade out during", row);
         m_fadeOutCheck->setStyleSheet("color: white;");
         m_fadeOutCheck->installEventFilter(this);
@@ -210,17 +210,21 @@ void MediaSettingsPanel::setBoxActive(QLabel* box, bool active) {
             "  border: 1px solid rgb(200,200,200);"
             "  border-radius: 6px;"
             "  padding: 2px 10px;"
+            "  margin-left: 4px;"
+            "  margin-right: 0px;"
             "  color: white;"
             "}"
         );
     } else {
-        // Inactive state: normal grey background
+        // Inactive state: subtle translucent box with rounded corners; white text to match panel
         box->setStyleSheet(
             "QLabel {"
             "  background-color: rgb(60,60,60);"
             "  border: 1px solid rgb(200,200,200);"
             "  border-radius: 6px;"
             "  padding: 2px 10px;"
+            "  margin-left: 4px;"
+            "  margin-right: 0px;"
             "  color: white;"
             "}"
         );
