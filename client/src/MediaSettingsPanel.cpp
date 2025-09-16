@@ -207,7 +207,7 @@ void MediaSettingsPanel::setBoxActive(QLabel* box, bool active) {
         box->setStyleSheet(
             "QLabel {"
             "  background-color: rgb(74,144,226);"
-            "  border: 1px solid rgb(200,200,200);"
+            "  border: 1px solid rgb(74,144,226);"
             "  border-radius: 6px;"
             "  padding: 2px 10px;"
             "  margin-left: 4px;"
