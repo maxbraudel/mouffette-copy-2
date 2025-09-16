@@ -35,8 +35,11 @@ void MediaSettingsPanel::buildUi() {
     m_widget->setAutoFillBackground(false);
 
     m_layout = new QVBoxLayout(m_widget);
-    m_layout->setContentsMargins(16, 16, 16, 16);
+    m_layout->setContentsMargins(20, 16, 20, 16);
     m_layout->setSpacing(10);
+    
+    // Set a minimum width for the settings panel to make it wider
+    m_widget->setMinimumWidth(380);
 
     m_title = new QLabel("Scene options");
     QFont tf = m_title->font();
@@ -266,17 +269,36 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
             m_activeBox->setText("...");
             return true;
         }
+        // 'i' key sets infinity symbol
+        else if (keyEvent->key() == Qt::Key_I) {
+            m_activeBox->setText("∞");
+            return true;
+        }
         // Handle input based on which box is active
         else {
             QString text = keyEvent->text();
             if (!text.isEmpty() && isValidInputForBox(m_activeBox, text[0])) {
                 QString currentText = m_activeBox->text();
-                // If current text is "..." (cleared state), replace it
-                if (currentText == "...") {
-                    m_activeBox->setText(text);
+                QString newText;
+                
+                // If current text is "..." (cleared state) or infinity symbol, replace it
+                if (currentText == "..." || currentText == "∞") {
+                    newText = text;
                 } else {
                     // Append to existing text
-                    m_activeBox->setText(currentText + text);
+                    newText = currentText + text;
+                }
+                
+                // Check if we have more than 5 digits - if so, show infinity symbol
+                int digitCount = 0;
+                for (QChar c : newText) {
+                    if (c.isDigit()) digitCount++;
+                }
+                
+                if (digitCount > 5) {
+                    m_activeBox->setText("∞");
+                } else {
+                    m_activeBox->setText(newText);
                 }
                 return true;
             }

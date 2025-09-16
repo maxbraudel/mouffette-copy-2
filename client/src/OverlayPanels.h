@@ -116,7 +116,7 @@ struct OverlayStyle {
     int gap = 8;          // Distance panel <-> media edge (pixels, in viewport space)
     int itemSpacing = 8;  // Space between elements
     int defaultHeight = -1; // >0 forces uniform element height (text vertically centered)
-    int maxWidth = 300;
+    int maxWidth = -1; // -1 = no limit, allow filename to expand fully
     qreal zOverlay = 12000.0;
     qreal zOverlayContent = 12001.0;
     QBrush backgroundBrush() const { return QBrush(gOverlayBackgroundColor); }
