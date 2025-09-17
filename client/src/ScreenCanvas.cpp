@@ -1,5 +1,7 @@
 #include "ScreenCanvas.h"
-
+#include "MediaItems.h"
+#include "Theme.h"
+#include <algorithm>
 #include <QGraphicsScene>
 #include <QMimeData>
 #include <QDragEnterEvent>
@@ -246,47 +248,73 @@ void ScreenCanvas::keyPressEvent(QKeyEvent* event) {
         // Without the required modifier, do not delete; fall through to base handling
     }
     if (event->key() == Qt::Key_Space) { recenterWithMargin(53); event->accept(); return; }
-    // Arrow key handling: if any media is selected, nudge them by 1 screen pixel in that direction.
-    // Otherwise, consume arrows so the view does not pan.
+    // Arrow key handling: 
+    // - Shift+Up/Down: change Z-order of selected media
+    // - Regular arrows: nudge selected media by 1 screen pixel
+    // - No selection: consume arrows to prevent view navigation
     if (event->key() == Qt::Key_Left || event->key() == Qt::Key_Right ||
         event->key() == Qt::Key_Up   || event->key() == Qt::Key_Down) {
-        bool moved = false;
-        if (m_scene) {
-            const QList<QGraphicsItem*> sel = m_scene->selectedItems();
-            if (!sel.isEmpty()) {
-                // Move by exactly one scene pixel (grid unit) regardless of zoom level
-                const qreal unit = ResizableMediaBase::sceneGridUnit();
-                const qreal dxScene = unit;
-                const qreal dyScene = unit;
-                qreal dx = 0.0, dy = 0.0;
-                switch (event->key()) {
-                    case Qt::Key_Left:  dx = -dxScene; break;
-                    case Qt::Key_Right: dx =  dxScene; break;
-                    case Qt::Key_Up:    dy = -dyScene; break;
-                    case Qt::Key_Down:  dy =  dyScene; break;
-                    default: break;
-                }
-                if (dx != 0.0 || dy != 0.0) {
-                    for (QGraphicsItem* it : sel) {
-                        if (auto* base = dynamic_cast<ResizableMediaBase*>(it)) {
-                            base->setPos(base->pos() + QPointF(dx, dy));
-                            // Relayout overlays/labels for this item after movement
-                            base->requestLabelRelayout();
-                            base->updateOverlayLayout();
-                            moved = true;
+        
+        // Handle Shift+Up/Down for Z-order changes
+        if (event->modifiers().testFlag(Qt::ShiftModifier) && 
+            (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down)) {
+            
+            if (m_scene) {
+                const QList<QGraphicsItem*> sel = m_scene->selectedItems();
+                for (QGraphicsItem* it : sel) {
+                    if (auto* base = dynamic_cast<ResizableMediaBase*>(it)) {
+                        if (event->key() == Qt::Key_Up) {
+                            moveMediaUp(base);
+                        } else {
+                            moveMediaDown(base);
                         }
                     }
                 }
             }
-        }
-        if (moved) {
-            event->accept();
-            return;
-        } else {
-            // No selected media: consume arrows to avoid view navigation
             event->accept();
             return;
         }
+        
+        // Regular arrow key movement (no Shift modifier)
+        if (!event->modifiers().testFlag(Qt::ShiftModifier)) {
+            bool moved = false;
+            if (m_scene) {
+                const QList<QGraphicsItem*> sel = m_scene->selectedItems();
+                if (!sel.isEmpty()) {
+                    // Move by exactly one scene pixel (grid unit) regardless of zoom level
+                    const qreal unit = ResizableMediaBase::sceneGridUnit();
+                    const qreal dxScene = unit;
+                    const qreal dyScene = unit;
+                    qreal dx = 0.0, dy = 0.0;
+                    switch (event->key()) {
+                        case Qt::Key_Left:  dx = -dxScene; break;
+                        case Qt::Key_Right: dx =  dxScene; break;
+                        case Qt::Key_Up:    dy = -dyScene; break;
+                        case Qt::Key_Down:  dy =  dyScene; break;
+                        default: break;
+                    }
+                    if (dx != 0.0 || dy != 0.0) {
+                        for (QGraphicsItem* it : sel) {
+                            if (auto* base = dynamic_cast<ResizableMediaBase*>(it)) {
+                                base->setPos(base->pos() + QPointF(dx, dy));
+                                // Relayout overlays/labels for this item after movement
+                                base->requestLabelRelayout();
+                                base->updateOverlayLayout();
+                                moved = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if (moved) {
+                event->accept();
+                return;
+            }
+        }
+        
+        // Consume arrows to avoid view navigation
+        event->accept();
+        return;
     }
     // Block page/navigation keys from moving the view
     switch (event->key()) {
@@ -537,16 +565,18 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                         QImage poster = m_dragPreviewPixmap.toImage();
                         if (!poster.isNull()) v->setExternalPosterImage(poster);
                     }
+                    assignNextZValue(v);
                     m_scene->addItem(v);
                     v->setSelected(true);
                 } else {
                     QPixmap pm(localPath);
                     if (!pm.isNull()) {
-                        auto* p = new ResizablePixmapItem(pm, 12, 30, fi.fileName());
+                        auto* p = new ResizablePixmapItem(pm, 12, 30, QFileInfo(localPath).fileName());
                         // Record original file path for later upload manifest collection
                         p->setSourcePath(localPath);
                         p->setPos(scenePos - QPointF(pm.width()/2.0 * m_scaleFactor, pm.height()/2.0 * m_scaleFactor));
                         p->setScale(m_scaleFactor);
+                        assignNextZValue(p);
                         m_scene->addItem(p);
                         p->setSelected(true);
                     }
@@ -561,6 +591,7 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                 auto* p = new ResizablePixmapItem(pm, 12, 30, QString());
                 p->setPos(scenePos - QPointF(pm.width()/2.0 * m_scaleFactor, pm.height()/2.0 * m_scaleFactor));
                 p->setScale(m_scaleFactor);
+                assignNextZValue(p);
                 m_scene->addItem(p);
                 p->setSelected(true);
             }
@@ -927,4 +958,66 @@ qreal ScreenCanvas::snapResizeToScreenBorders(qreal currentScale, const QPointF&
     }
     
     return std::clamp<qreal>(bestScale, 0.05, 100.0);
+}
+
+// Z-order management methods
+void ScreenCanvas::assignNextZValue(QGraphicsItem* item) {
+    if (!item) return;
+    item->setZValue(m_nextMediaZValue);
+    m_nextMediaZValue += 1.0;
+}
+
+void ScreenCanvas::moveMediaUp(QGraphicsItem* item) {
+    if (!item) return;
+    
+    QList<QGraphicsItem*> mediaItems = getMediaItemsSortedByZ();
+    int currentIndex = mediaItems.indexOf(item);
+    
+    if (currentIndex >= 0 && currentIndex < mediaItems.size() - 1) {
+        // Swap Z values with the item above
+        QGraphicsItem* itemAbove = mediaItems[currentIndex + 1];
+        qreal tempZ = item->zValue();
+        item->setZValue(itemAbove->zValue());
+        itemAbove->setZValue(tempZ);
+    }
+}
+
+void ScreenCanvas::moveMediaDown(QGraphicsItem* item) {
+    if (!item) return;
+    
+    QList<QGraphicsItem*> mediaItems = getMediaItemsSortedByZ();
+    int currentIndex = mediaItems.indexOf(item);
+    
+    if (currentIndex > 0) {
+        // Swap Z values with the item below
+        QGraphicsItem* itemBelow = mediaItems[currentIndex - 1];
+        qreal tempZ = item->zValue();
+        item->setZValue(itemBelow->zValue());
+        itemBelow->setZValue(tempZ);
+    }
+}
+
+QList<QGraphicsItem*> ScreenCanvas::getMediaItemsSortedByZ() const {
+    QList<QGraphicsItem*> mediaItems;
+    
+    if (!m_scene) return mediaItems;
+    
+    // Collect all media items (ResizableMediaBase derived items)
+    for (QGraphicsItem* item : m_scene->items()) {
+        // Check if it's a media item by checking if it has a non-negative Z value in media range
+        if (item->zValue() >= 1.0 && item->zValue() < 10000.0) {
+            // Additional check: ensure it's actually a media item, not an overlay
+            QString dataType = item->data(0).toString();
+            if (dataType != "overlay") {
+                mediaItems.append(item);
+            }
+        }
+    }
+    
+    // Sort by Z value (lowest to highest)
+    std::sort(mediaItems.begin(), mediaItems.end(), [](QGraphicsItem* a, QGraphicsItem* b) {
+        return a->zValue() < b->zValue();
+    });
+    
+    return mediaItems;
 }

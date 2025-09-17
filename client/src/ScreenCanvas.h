@@ -153,6 +153,13 @@ private:
     
     // Snap-to-screen settings
     int m_snapDistancePx = 10; // pixels within which snapping occurs
+    
+    // Z-order management for media items
+    qreal m_nextMediaZValue = 1.0;
+    void assignNextZValue(QGraphicsItem* item);
+    void moveMediaUp(QGraphicsItem* item);
+    void moveMediaDown(QGraphicsItem* item);
+    QList<QGraphicsItem*> getMediaItemsSortedByZ() const;
 };
 
 #endif // SCREENCANVAS_H
