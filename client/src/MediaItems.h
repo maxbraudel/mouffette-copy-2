@@ -71,6 +71,9 @@ public:
     // Default implementation cancels interactive state & hides overlays.
     virtual void prepareForDeletion();
     bool isBeingDeleted() const { return m_beingDeleted; }
+    
+    // Override in derived classes to indicate media type for settings panel
+    virtual bool isVideoMedia() const { return false; }
 
 protected:
     enum Handle { None, TopLeft, TopRight, BottomLeft, BottomRight };
@@ -171,6 +174,9 @@ public:
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override;
     QRectF boundingRect() const override;
     QPainterPath shape() const override;
+    
+    // Override to indicate this is video media
+    bool isVideoMedia() const override { return true; }
     void mousePressEvent(QGraphicsSceneMouseEvent* event) override;
     void mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event) override;
     QVariant itemChange(GraphicsItemChange change, const QVariant &value) override;

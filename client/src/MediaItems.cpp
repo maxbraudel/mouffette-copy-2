@@ -336,7 +336,11 @@ void ResizableMediaBase::initializeOverlays() {
             const bool enabling = (btnRef->state() != OverlayElement::Toggled);
             btnRef->setState(enabling ? OverlayElement::Toggled : OverlayElement::Normal);
             // Lazy-create settings panel
-            if (!m_settingsPanel) m_settingsPanel = std::make_unique<MediaSettingsPanel>();
+            if (!m_settingsPanel) {
+                m_settingsPanel = std::make_unique<MediaSettingsPanel>();
+                // Configure panel based on media type
+                m_settingsPanel->setMediaType(isVideoMedia());
+            }
             // Ensure panel is in the scene
             if (scene()) m_settingsPanel->ensureInScene(scene());
             // Apply background color similar to overlay style
@@ -366,7 +370,11 @@ void ResizableMediaBase::updateOverlayVisibility() {
         if (m_topPanel) {
             auto el = m_topPanel->findElement("settings_toggle");
             if (el && el->state() == OverlayElement::Toggled) {
-                if (!m_settingsPanel) m_settingsPanel = std::make_unique<MediaSettingsPanel>();
+                if (!m_settingsPanel) {
+                    m_settingsPanel = std::make_unique<MediaSettingsPanel>();
+                    // Configure panel based on media type
+                    m_settingsPanel->setMediaType(isVideoMedia());
+                }
                 if (scene()) m_settingsPanel->ensureInScene(scene());
                 if (scene() && !scene()->views().isEmpty()) {
                     m_settingsPanel->updatePosition(scene()->views().first());

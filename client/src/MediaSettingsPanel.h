@@ -24,6 +24,9 @@ public:
     // Shows or hides the panel; when showing, position near the left edge of the view.
     void setVisible(bool visible);
     bool isVisible() const;
+    
+    // Configure which options are available based on media type
+    void setMediaType(bool isVideo);
 
     // Update absolute position based on the provided view (left-docked with margin).
     // Call whenever zoom/transform/resize occurs.
@@ -69,4 +72,8 @@ private:
     QLabel* m_opacityBox = nullptr;
     QLabel* m_activeBox = nullptr; // currently active box (if any)
     bool m_clearOnFirstType = false; // if true, first keypress replaces previous content
+    
+    // Video-only option widgets (for show/hide based on media type)
+    QWidget* m_autoPlayRow = nullptr;
+    QWidget* m_repeatRow = nullptr;
 };

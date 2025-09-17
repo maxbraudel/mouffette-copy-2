@@ -37,6 +37,8 @@ void MediaSettingsPanel::buildUi() {
     m_layout = new QVBoxLayout(m_widget);
     m_layout->setContentsMargins(20, 16, 20, 16);
     m_layout->setSpacing(10);
+    // Prevent layout from stretching when items are hidden
+    m_layout->setSizeConstraint(QLayout::SetMinAndMaxSize);
     
     // Set a minimum width for the settings panel to make it wider
     m_widget->setMinimumWidth(380);
@@ -80,42 +82,42 @@ void MediaSettingsPanel::buildUi() {
         m_layout->addWidget(row);
     }
 
-    // 1) Play automatically after [1] seconds
+    // 1) Play automatically after [1] seconds (video only)
     {
-        auto* row = new QWidget(m_widget);
-        auto* h = new QHBoxLayout(row);
+        m_autoPlayRow = new QWidget(m_widget);
+        auto* h = new QHBoxLayout(m_autoPlayRow);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
-        m_autoPlayCheck = new QCheckBox("Play automatically after ", row);
+        m_autoPlayCheck = new QCheckBox("Play automatically after ", m_autoPlayRow);
         m_autoPlayCheck->setStyleSheet("color: white;");
         m_autoPlayCheck->installEventFilter(this);
         m_autoPlayBox = makeValueBox();
-        auto* suffix = new QLabel(" seconds", row);
+        auto* suffix = new QLabel(" seconds", m_autoPlayRow);
         suffix->setStyleSheet("color: white;");
         h->addWidget(m_autoPlayCheck);
         h->addWidget(m_autoPlayBox);
         h->addWidget(suffix);
         h->addStretch();
-        m_layout->addWidget(row);
+        m_layout->addWidget(m_autoPlayRow);
     }
 
-    // 2) Repeat [1] time
+    // 2) Repeat [1] time (video only)
     {
-        auto* row = new QWidget(m_widget);
-        auto* h = new QHBoxLayout(row);
+        m_repeatRow = new QWidget(m_widget);
+        auto* h = new QHBoxLayout(m_repeatRow);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
-        m_repeatCheck = new QCheckBox("Repeat ", row);
+        m_repeatCheck = new QCheckBox("Repeat ", m_repeatRow);
         m_repeatCheck->setStyleSheet("color: white;");
         m_repeatCheck->installEventFilter(this);
         m_repeatBox = makeValueBox();
-        auto* suffix = new QLabel(" time", row);
+        auto* suffix = new QLabel(" time", m_repeatRow);
         suffix->setStyleSheet("color: white;");
         h->addWidget(m_repeatCheck);
         h->addWidget(m_repeatBox);
         h->addWidget(suffix);
         h->addStretch();
-        m_layout->addWidget(row);
+        m_layout->addWidget(m_repeatRow);
     }
 
     // 3) Fade in during [1] seconds
@@ -220,6 +222,43 @@ void MediaSettingsPanel::setVisible(bool visible) {
 
 bool MediaSettingsPanel::isVisible() const {
     return m_proxy && m_proxy->isVisible();
+}
+
+void MediaSettingsPanel::setMediaType(bool isVideo) {
+    // Show/hide video-only options
+    if (m_autoPlayRow) {
+        m_autoPlayRow->setVisible(isVideo);
+    }
+    if (m_repeatRow) {
+        m_repeatRow->setVisible(isVideo);
+    }
+    
+    // Clear active box if it belongs to a hidden video-only option
+    if (!isVideo && m_activeBox && (m_activeBox == m_autoPlayBox || m_activeBox == m_repeatBox)) {
+        clearActiveBox();
+    }
+    
+    // Force layout update to recalculate size
+    if (m_widget && m_layout) {
+        // Force layout to recalculate
+        m_layout->invalidate();
+        m_layout->activate();
+        
+        // Update widget geometry
+        m_widget->updateGeometry();
+        m_widget->adjustSize();
+        
+        // Update proxy widget size to match widget's preferred size
+        if (m_proxy) {
+            QSize preferredSize = m_widget->sizeHint();
+            m_proxy->resize(preferredSize);
+            
+            // Update background rect to match proxy size
+            if (m_bgRect) {
+                m_bgRect->setRect(0, 0, preferredSize.width(), preferredSize.height());
+            }
+        }
+    }
 }
 
 void MediaSettingsPanel::updatePosition(QGraphicsView* view) {
