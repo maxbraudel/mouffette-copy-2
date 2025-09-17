@@ -384,6 +384,21 @@ void ResizableMediaBase::initializeOverlays() {
             }
         });
         m_topPanel->addElement(bringBackwardBtn);
+
+        // Add delete button (remove media)
+        auto deleteBtn = std::make_shared<OverlayButtonElement>(QString(), "delete_media");
+        deleteBtn->setSvgIcon(":/icons/icons/delete.svg");
+        deleteBtn->setToggleOnly(false);
+        deleteBtn->setState(OverlayElement::Normal);
+        deleteBtn->setOnClicked([this]() {
+            // Defer deletion to the event loop to avoid re-entrancy issues
+            QTimer::singleShot(0, [itemPtr=this]() {
+                itemPtr->prepareForDeletion();
+                if (itemPtr->scene()) itemPtr->scene()->removeItem(itemPtr);
+                delete itemPtr;
+            });
+        });
+        m_topPanel->addElement(deleteBtn);
     }
     m_bottomPanel = std::make_unique<OverlayPanel>(OverlayPanel::Bottom); m_bottomPanel->setStyle(m_overlayStyle);
 }

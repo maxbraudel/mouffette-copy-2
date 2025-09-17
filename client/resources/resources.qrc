@@ -10,5 +10,6 @@
     <file>icons/settings.svg</file>
     <file>icons/arrow-up.svg</file>
     <file>icons/arrow-down.svg</file>
+    <file>icons/delete.svg</file>
     </qresource>
 </RCC>
