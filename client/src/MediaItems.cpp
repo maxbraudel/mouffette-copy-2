@@ -38,6 +38,7 @@ int ResizableMediaBase::cornerRadiusOfMediaOverlays = 6;
 double ResizableMediaBase::s_sceneGridUnit = 1.0; // default: 1 scene unit == 1 pixel
 std::function<QPointF(const QPointF&, const QRectF&, bool)> ResizableMediaBase::s_screenSnapCallback;
 std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> ResizableMediaBase::s_resizeSnapCallback;
+std::function<void()> ResizableMediaBase::s_uploadChangedNotifier = nullptr;
 
 QString ResizableMediaBase::displayName() const {
     if (!m_filename.isEmpty()) return m_filename;
@@ -80,6 +81,8 @@ ResizableMediaBase::ResizableMediaBase(const QSize& baseSizePx, int visualSizePx
     setScale(1.0);
     setZValue(1.0);
     m_filename = filename;
+    // Generate a stable unique identifier at creation time (used to disambiguate duplicates)
+    m_mediaId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     initializeOverlays();
 }
 

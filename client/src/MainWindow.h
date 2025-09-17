@@ -12,6 +12,7 @@
 #include <QScreen>
 #include <QApplication>
 #include <QSystemTrayIcon>
+#include <QSet>
 #include <QCloseEvent>
 #include <QResizeEvent>
 #include <QScrollArea>
@@ -41,9 +42,9 @@ class QMenu;
 QT_END_NAMESPACE
 class QMimeData; // fwd declare for drag preview helpers
 class QMediaPlayer;
-class QVideoSink;
-class QAudioOutput;
-class QFile;
+class QListWidgetItem;
+class OverlayPanel;
+class ResizableMediaBase;
 
 class SpinnerWidget; // forward declaration for custom loading spinner
 class QGraphicsOpacityEffect;
@@ -210,7 +211,14 @@ private:
 #endif
 
     // Upload feature state
-    UploadManager* m_uploadManager = nullptr; // encapsulates all upload logic
+    UploadManager* m_uploadManager;
+    // Track currently uploading media by unique mediaId (no more path/name-based tracking)
+    QSet<QString> m_mediaIdsBeingUploaded;
+    bool m_uploadSignalsConnected = false;
+    // Map upload fileId <-> mediaId for per-file progress tracking
+    QHash<QString, QString> m_mediaIdByFileId;
+    // Direct mapping from fileId to media item pointer for efficient progress updates
+    QHash<QString, ResizableMediaBase*> m_itemByFileId;
     WatchManager* m_watchManager = nullptr;   // extracted watch logic
     ScreenNavigationManager* m_navigationManager = nullptr; // new navigation component
 

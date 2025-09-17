@@ -36,6 +36,7 @@
 #include <QImageReader>
 #include "Theme.h" // for overlay colors
 #include <QSizePolicy>
+#include <QProgressBar>
 
 // Helper: relayout overlays for all media items so absolute panels (settings) stay pinned
 namespace {
@@ -48,6 +49,18 @@ static void relayoutAllMediaOverlays(QGraphicsScene* scene) {
         }
     }
 }
+}
+
+ScreenCanvas::~ScreenCanvas() {
+    // Prevent any further UI refresh callbacks after this view is destroyed
+    ResizableMediaBase::setUploadChangedNotifier(nullptr);
+    if (m_scene) {
+        disconnect(m_scene, nullptr, this, nullptr);
+    }
+    if (m_infoWidget) {
+        m_infoWidget->deleteLater();
+        m_infoWidget = nullptr;
+    }
 }
 
 void ScreenCanvas::maybeRefreshInfoOverlayOnSceneChanged() {
@@ -106,15 +119,27 @@ void ScreenCanvas::initInfoOverlay() {
     layoutInfoOverlay();
 }
 
+void ScreenCanvas::scheduleInfoOverlayRefresh() {
+    if (m_infoRefreshQueued) return;
+    m_infoRefreshQueued = true;
+    QTimer::singleShot(0, this, [this]() {
+        m_infoRefreshQueued = false;
+        refreshInfoOverlay();
+    });
+}
+
 void ScreenCanvas::refreshInfoOverlay() {
     if (!m_infoWidget || !m_infoLayout) return;
-    // Remove all rows except the first (title at index 0)
+    // Avoid intermediate paints while rebuilding; hide to prevent transient title-only state
+    const bool wasVisible = m_infoWidget->isVisible();
+    m_infoWidget->setUpdatesEnabled(false);
+    m_infoWidget->hide();
+    // Remove all rows except the first (title at index 0). Delete immediately to avoid duplicate content lingering this frame.
     while (m_infoLayout->count() > 1) {
         QLayoutItem* it = m_infoLayout->takeAt(1);
-        if (it) {
-            if (QWidget* w = it->widget()) w->deleteLater();
-            delete it;
-        }
+        if (!it) break;
+        if (QWidget* w = it->widget()) { w->hide(); delete w; }
+        delete it;
     }
     // Collect media items
     QList<ResizableMediaBase*> media;
@@ -148,7 +173,26 @@ void ScreenCanvas::refreshInfoOverlay() {
         nameLbl->setAttribute(Qt::WA_TranslucentBackground, true);
         nameLbl->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
         m_infoLayout->addWidget(nameLbl);
-        // Row: details smaller
+        // Row: upload status or progress
+        if (m->uploadState() == ResizableMediaBase::UploadState::Uploading) {
+            auto* bar = new QProgressBar(m_infoWidget);
+            bar->setRange(0, 100);
+            bar->setValue(m->uploadProgress());
+            bar->setTextVisible(false);
+            bar->setFixedHeight(10);
+            // Blue progress bar styling consistent with theme
+            bar->setStyleSheet("QProgressBar{background: rgba(255,255,255,0.15); border-radius: 5px;} QProgressBar::chunk{background: #2D8CFF; border-radius: 5px;}");
+            m_infoLayout->addWidget(bar);
+        } else {
+            auto* status = new QLabel(m->uploadState() == ResizableMediaBase::UploadState::Uploaded ? QStringLiteral("Uploaded") : QStringLiteral("Not uploaded"), m_infoWidget);
+            const char* color = (m->uploadState() == ResizableMediaBase::UploadState::Uploaded) ? "#2ecc71" : "#f39c12"; // green or orange
+            status->setStyleSheet(QString("color: %1; font-size: 14px; background: transparent;").arg(color));
+            status->setAutoFillBackground(false);
+            status->setAttribute(Qt::WA_TranslucentBackground, true);
+            status->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+            m_infoLayout->addWidget(status);
+        }
+        // Row: details smaller under status
         auto* details = new QLabel(dim + QStringLiteral("  ·  ") + sizeStr, m_infoWidget);
         details->setStyleSheet("color: rgba(255,255,255,0.85); font-size: 14px; background: transparent;");
         details->setAutoFillBackground(false);
@@ -170,7 +214,9 @@ void ScreenCanvas::refreshInfoOverlay() {
     preferred.setWidth(std::max(preferred.width(), m_infoWidget->minimumWidth()));
     m_infoWidget->setMinimumSize(preferred);
     m_infoWidget->resize(preferred);
-    m_infoWidget->show();
+    if (wasVisible) m_infoWidget->show(); else m_infoWidget->show();
+    m_infoWidget->setUpdatesEnabled(true);
+    m_infoWidget->repaint();
     // Reposition once after resize
     layoutInfoOverlay();
     // In case the widget's final metrics settle after this event loop turn (common on first show or font/layout updates),
@@ -228,6 +274,11 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
 
     // Initialize global info overlay (top-right)
     initInfoOverlay();
+
+    // Refresh overlay when any media upload state changes (coalesce multiple changes)
+    ResizableMediaBase::setUploadChangedNotifier([this]() {
+        scheduleInfoOverlayRefresh();
+    });
 }
 
 void ScreenCanvas::setScreens(const QList<ScreenInfo>& screens) {
@@ -728,7 +779,6 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                     QPixmap pm(localPath);
                     if (!pm.isNull()) {
                         auto* p = new ResizablePixmapItem(pm, 12, 30, QFileInfo(localPath).fileName());
-                        // Record original file path for later upload manifest collection
                         p->setSourcePath(localPath);
                         p->setPos(scenePos - QPointF(pm.width()/2.0 * m_scaleFactor, pm.height()/2.0 * m_scaleFactor));
                         p->setScale(m_scaleFactor);
@@ -745,6 +795,7 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
             QPixmap pm = QPixmap::fromImage(img);
             if (!pm.isNull()) {
                 auto* p = new ResizablePixmapItem(pm, 12, 30, QString());
+                p->setSourcePath(QString()); // Set sourcePath to empty string for images
                 p->setPos(scenePos - QPointF(pm.width()/2.0 * m_scaleFactor, pm.height()/2.0 * m_scaleFactor));
                 p->setScale(m_scaleFactor);
                 assignNextZValue(p);

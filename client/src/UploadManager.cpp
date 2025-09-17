@@ -100,19 +100,29 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
     m_ws->sendUploadStart(m_uploadTargetClientId, manifest, m_currentUploadId);
 
     // Stream sequentially (same logic as previously in MainWindow)
+    m_outgoingFiles = files;
     const int chunkSize = 128 * 1024;
     for (const auto& f : files) {
         QFile file(f.path);
         if (!file.open(QIODevice::ReadOnly)) continue;
+        emit fileUploadStarted(f.fileId);
+        qint64 sentForFile = 0;
         int chunkIndex = 0;
         while (!file.atEnd()) {
             if (m_cancelRequested) break;
             QByteArray chunk = file.read(chunkSize);
             m_ws->sendUploadChunk(m_uploadTargetClientId, m_currentUploadId, f.fileId, chunkIndex++, chunk.toBase64());
+            sentForFile += chunk.size();
+            if (f.size > 0) {
+                int p = static_cast<int>(std::round(sentForFile * 100.0 / static_cast<double>(f.size)));
+                p = std::clamp(p, 0, 100);
+                emit fileUploadProgress(f.fileId, p);
+            }
             // Yield briefly
             QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
         }
         file.close();
+        if (!m_cancelRequested) emit fileUploadFinished(f.fileId);
         if (m_cancelRequested) break;
     }
     if (m_cancelRequested) return; // completion suppressed

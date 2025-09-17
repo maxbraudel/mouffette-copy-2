@@ -313,35 +313,126 @@ void MainWindow::onUploadButtonClicked() {
     if (!m_uploadManager) return;
     if (m_uploadManager->isUploading()) { m_uploadManager->requestCancel(); return; }
     if (m_uploadManager->hasActiveUpload()) { m_uploadManager->requestUnload(); return; }
-    // Gather media items present on the scene (restoring original behavior)
+    // Gather media items present on the scene (using unique mediaId for each item)
     QVector<UploadFileInfo> files;
     if (m_screenCanvas && m_screenCanvas->scene()) {
         const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
         for (QGraphicsItem* it : allItems) {
             auto* media = dynamic_cast<ResizableMediaBase*>(it);
             if (!media) continue;
-            if (media->isBeingDeleted()) continue;
-            QString path = media->sourcePath();
-            if (path.isEmpty()) continue; // skip items without a concrete file source
+            const QString path = media->sourcePath();
+            if (path.isEmpty()) continue;
             QFileInfo fi(path);
             if (!fi.exists() || !fi.isFile()) continue;
-            UploadFileInfo info; info.fileId = QUuid::createUuid().toString(QUuid::WithoutBraces); info.path = fi.absoluteFilePath(); info.name = fi.fileName(); info.size = fi.size();
+            UploadFileInfo info; 
+            info.fileId = QUuid::createUuid().toString(QUuid::WithoutBraces); 
+            info.mediaId = media->mediaId(); // Use the unique mediaId from the media item
+            info.path = fi.absoluteFilePath(); 
+            info.name = fi.fileName(); 
+            info.size = fi.size();
             files.push_back(info);
+            // Map fileId to both mediaId and media item pointer for efficient lookups
+            m_mediaIdByFileId.insert(info.fileId, info.mediaId);
+            m_itemByFileId.insert(info.fileId, media);
         }
     }
     if (files.isEmpty()) {
         QMessageBox::information(this, "Upload", "Aucun média local à uploader sur le canevas (les éléments doivent provenir de fichiers locaux)." );
         return;
     }
+
+    // Initialize per-media upload state using unique mediaId
+    m_mediaIdsBeingUploaded.clear();
+    for (const auto& f : files) {
+        m_mediaIdsBeingUploaded.insert(f.mediaId);
+    }
+    // Set initial upload state for all media items being uploaded
+    if (m_screenCanvas && m_screenCanvas->scene()) {
+        const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
+        for (QGraphicsItem* it : allItems) {
+            if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
+                if (m_mediaIdsBeingUploaded.contains(media->mediaId())) {
+                    media->setUploadUploading(0);
+                }
+            }
+        }
+    }
+
+    // Wire upload manager signals to update progress and completion (connect only once)
+    if (m_uploadManager && !m_uploadSignalsConnected) {
+        // Note: we do not use aggregate uploadProgress for per-item bars; only per-file signals below
+        // Per-file progress signals: only advance the active file's bar; others remain at 0 until their turn
+        connect(m_uploadManager, &UploadManager::fileUploadStarted, this, [this](const QString& fileId){
+            if (!m_screenCanvas || !m_screenCanvas->scene()) return;
+            // Use direct mapping from fileId to media item pointer
+            if (auto item = m_itemByFileId.value(fileId)) { 
+                item->setUploadUploading(0); 
+            }
+        });
+        connect(m_uploadManager, &UploadManager::fileUploadProgress, this, [this](const QString& fileId, int percent){
+            if (!m_screenCanvas || !m_screenCanvas->scene()) return;
+            // Use direct mapping from fileId to media item pointer
+            if (auto item = m_itemByFileId.value(fileId)) { 
+                item->setUploadUploading(std::clamp(percent, 0, 100)); 
+            }
+        });
+        connect(m_uploadManager, &UploadManager::fileUploadFinished, this, [this](const QString& fileId){
+            if (!m_screenCanvas || !m_screenCanvas->scene()) return;
+            // Use direct mapping from fileId to media item pointer
+            if (auto item = m_itemByFileId.value(fileId)) { 
+                item->setUploadUploaded(); 
+            }
+        });
+        connect(m_uploadManager, &UploadManager::uploadFinished, this, [this](){
+            if (!m_screenCanvas || !m_screenCanvas->scene()) { 
+                m_mediaIdsBeingUploaded.clear(); 
+                m_mediaIdByFileId.clear();
+                m_itemByFileId.clear();
+                return; 
+            }
+            // Set uploaded state for all media items that were being uploaded
+            const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
+            for (QGraphicsItem* it : allItems) {
+                if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
+                    if (m_mediaIdsBeingUploaded.contains(media->mediaId())) {
+                        media->setUploadUploaded();
+                    }
+                }
+            }
+            // Clear tracking data
+            m_mediaIdsBeingUploaded.clear();
+            m_mediaIdByFileId.clear();
+            m_itemByFileId.clear();
+        });
+        connect(m_uploadManager, &UploadManager::unloaded, this, [this](){
+            // Reset to NotUploaded if user toggles unload after upload
+            if (!m_screenCanvas || !m_screenCanvas->scene()) return;
+            const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
+            for (QGraphicsItem* it : allItems) {
+                if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
+                    // Only reset those that were part of the last upload set if any
+                    if (m_mediaIdsBeingUploaded.isEmpty()) { 
+                        media->setUploadNotUploaded(); 
+                    }
+                    else if (m_mediaIdsBeingUploaded.contains(media->mediaId())) {
+                        media->setUploadNotUploaded();
+                    }
+                }
+            }
+        });
+        m_uploadSignalsConnected = true;
+    }
+
     m_uploadManager->toggleUpload(files);
 }
 
-void MainWindow::onSendMediaClicked() {
-    // Placeholder: would iterate scene media and send placement message
-    QMessageBox::information(this, "Send Media", "Send Media functionality not yet implemented.");
-}
 
 void MainWindow::onBackToClientListClicked() { showClientListView(); }
+
+void MainWindow::onSendMediaClicked() {
+    // Placeholder: iterate scene media and send placement in future
+    QMessageBox::information(this, "Send Media", "Send Media functionality not yet implemented.");
+}
 
 void MainWindow::onClientItemClicked(QListWidgetItem* item) {
     if (!item) return;

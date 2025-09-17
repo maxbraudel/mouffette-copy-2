@@ -18,6 +18,7 @@ class QGraphicsItem;  // no longer used
 
 struct UploadFileInfo {
     QString fileId;
+    QString mediaId; // persistent id of the canvas item
     QString path;
     QString name;
     qint64 size = 0;
@@ -72,6 +73,10 @@ signals:
     void uploadProgress(int percent, int filesCompleted, int totalFiles); // forwarded from server
     void uploadFinished();
     void unloaded();
+    // New: fine-grained per-file upload lifecycle (sender-side only)
+    void fileUploadStarted(const QString& fileId);
+    void fileUploadProgress(const QString& fileId, int percent);
+    void fileUploadFinished(const QString& fileId);
 
 public slots:
     // Forwarded from WebSocket layer
@@ -97,6 +102,9 @@ private:
     int m_filesCompleted = 0;
     int m_totalFiles = 0;
     QTimer* m_cancelFallbackTimer = nullptr; // fires if remote never responds to abort/unload
+
+    // Sender-side per-file tracking
+    QVector<UploadFileInfo> m_outgoingFiles;
 
     // Incoming session (target side)
     IncomingUploadSession m_incoming;
