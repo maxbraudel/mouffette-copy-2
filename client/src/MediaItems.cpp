@@ -16,6 +16,7 @@
 #include <QThreadPool>
 #include <QRunnable>
 #include <QApplication>
+#include <QGuiApplication>
 #include <QDateTime>
 #include <QTimer>
 #include <QMutexLocker>
@@ -29,9 +30,27 @@ int ResizableMediaBase::heightOfMediaOverlays = -1; // default auto
 int ResizableMediaBase::cornerRadiusOfMediaOverlays = 6;
 
 double ResizableMediaBase::s_sceneGridUnit = 1.0; // default: 1 scene unit == 1 pixel
+std::function<QPointF(const QPointF&, const QRectF&, bool)> ResizableMediaBase::s_screenSnapCallback;
+std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> ResizableMediaBase::s_resizeSnapCallback;
 
 void ResizableMediaBase::setSceneGridUnit(double u) { s_sceneGridUnit = (u > 1e-9 ? u : 1.0); }
 double ResizableMediaBase::sceneGridUnit() { return s_sceneGridUnit; }
+
+void ResizableMediaBase::setScreenSnapCallback(std::function<QPointF(const QPointF&, const QRectF&, bool)> callback) {
+    s_screenSnapCallback = callback;
+}
+
+std::function<QPointF(const QPointF&, const QRectF&, bool)> ResizableMediaBase::screenSnapCallback() {
+    return s_screenSnapCallback;
+}
+
+void ResizableMediaBase::setResizeSnapCallback(std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> callback) {
+    s_resizeSnapCallback = callback;
+}
+
+std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> ResizableMediaBase::resizeSnapCallback() {
+    return s_resizeSnapCallback;
+}
 
 ResizableMediaBase::~ResizableMediaBase() = default;
 
@@ -127,8 +146,23 @@ QPainterPath ResizableMediaBase::shape() const {
 QVariant ResizableMediaBase::itemChange(GraphicsItemChange change, const QVariant &value) {
     // Snap requested position changes to the scene pixel grid
     if (change == ItemPositionChange && value.canConvert<QPointF>()) {
-        const QPointF p = value.toPointF();
-        return QVariant(snapPointToGrid(p));
+        QPointF p = value.toPointF();
+        
+        // First apply pixel grid snapping
+        p = snapPointToGrid(p);
+        
+        // Then apply screen border snapping if Shift is pressed and callback is available
+        if (s_screenSnapCallback) {
+            // Check if Shift key is currently pressed
+            const bool shiftPressed = QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
+            if (shiftPressed) {
+                // Calculate media bounds at current position for snapping
+                const QRectF mediaBounds(0, 0, m_baseSize.width() * scale(), m_baseSize.height() * scale());
+                p = s_screenSnapCallback(p, mediaBounds, shiftPressed);
+            }
+        }
+        
+        return QVariant(p);
     }
     if (change == ItemSelectedChange) {
         prepareGeometryChange();
@@ -170,17 +204,23 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
         const QPointF itemVec = movingItemPoint - m_fixedItemPoint; // item coords
         if (std::abs(itemVec.x()) < 1e-12 && std::abs(itemVec.y()) < 1e-12) { QGraphicsItem::mouseMoveEvent(event); return; }
 
-        // Desired continuous size in pixels (scene units) at this scale
-        const qreal desiredW = newScale * static_cast<qreal>(m_baseSize.width());
-        const qreal desiredH = newScale * static_cast<qreal>(m_baseSize.height());
+        // Apply screen border snapping to resize if Shift is pressed
+        qreal finalScale = newScale;
+        if (s_resizeSnapCallback && QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier)) {
+            finalScale = s_resizeSnapCallback(newScale, m_fixedScenePoint, m_fixedItemPoint, m_baseSize, true);
+        }
+        
+        // Apply pixel-perfect size snapping to the final scale
+        const qreal desiredW = finalScale * static_cast<qreal>(m_baseSize.width());
+        const qreal desiredH = finalScale * static_cast<qreal>(m_baseSize.height());
         // Snap sizes individually to nearest integer pixel counts
         const qreal snappedW = std::round(desiredW);
         const qreal snappedH = std::round(desiredH);
         // Compute candidate uniform scales from each dimension
-        const qreal sFromW = (m_baseSize.width()  > 0) ? (snappedW / static_cast<qreal>(m_baseSize.width()))  : newScale;
-        const qreal sFromH = (m_baseSize.height() > 0) ? (snappedH / static_cast<qreal>(m_baseSize.height())) : newScale;
-        // Choose the candidate closest to the unconstrained scale (minimize jump feeling)
-        qreal snappedScale = (std::abs(sFromW - newScale) <= std::abs(sFromH - newScale)) ? sFromW : sFromH;
+        const qreal sFromW = (m_baseSize.width()  > 0) ? (snappedW / static_cast<qreal>(m_baseSize.width()))  : finalScale;
+        const qreal sFromH = (m_baseSize.height() > 0) ? (snappedH / static_cast<qreal>(m_baseSize.height())) : finalScale;
+        // Choose the candidate closest to the target scale (minimize jump feeling)
+        qreal snappedScale = (std::abs(sFromW - finalScale) <= std::abs(sFromH - finalScale)) ? sFromW : sFromH;
         snappedScale = std::clamp<qreal>(snappedScale, 0.05, 100.0);
 
         // Position derived from fixed corner to keep it exact; moving corner will land on pixel grid implicitly

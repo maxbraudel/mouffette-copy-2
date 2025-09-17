@@ -18,6 +18,7 @@
 #include <atomic>
 #include <memory>
 #include <cmath>
+#include <functional>
 
 #include "OverlayPanels.h"
 #include "RoundedRectItem.h"
@@ -55,6 +56,12 @@ public:
     // Grid unit control: 1 scene "pixel" in view coordinates (e.g., ScreenCanvas scale)
     static void setSceneGridUnit(double u);
     static double sceneGridUnit();
+    
+    // Snap-to-screen integration (set by ScreenCanvas)
+    static void setScreenSnapCallback(std::function<QPointF(const QPointF&, const QRectF&, bool)> callback);
+    static std::function<QPointF(const QPointF&, const QRectF&, bool)> screenSnapCallback();
+    static void setResizeSnapCallback(std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> callback);
+    static std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> resizeSnapCallback();
 
     // Access to overlay panels (filename on top, controls bottom for videos) if needed.
     OverlayPanel* topPanel() const { return m_topPanel.get(); }
@@ -111,6 +118,8 @@ protected:
 private:
     void relayoutIfNeeded(); // helper to keep overlays positioned (unused externally)
     static double s_sceneGridUnit;
+    static std::function<QPointF(const QPointF&, const QRectF&, bool)> s_screenSnapCallback;
+    static std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> s_resizeSnapCallback;
     static inline double snapToGrid(double v) { const double u = (s_sceneGridUnit > 1e-9 ? s_sceneGridUnit : 1.0); return std::round(v / u) * u; }
     static inline QPointF snapPointToGrid(const QPointF& p) { return QPointF(snapToGrid(p.x()), snapToGrid(p.y())); }
 protected:

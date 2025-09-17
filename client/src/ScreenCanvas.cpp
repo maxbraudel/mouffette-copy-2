@@ -69,6 +69,14 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     m_nativePinchGuardTimer->setInterval(180); // short guard after last native pinch
     m_nativePinchGuardTimer->setSingleShot(true);
     connect(m_nativePinchGuardTimer, &QTimer::timeout, this, [this]() { m_nativePinchActive = false; });
+    
+    // Set up screen border snapping callbacks for media items
+    ResizableMediaBase::setScreenSnapCallback([this](const QPointF& pos, const QRectF& bounds, bool shift) {
+        return snapToScreenBorders(pos, bounds, shift);
+    });
+    ResizableMediaBase::setResizeSnapCallback([this](qreal scale, const QPointF& fixed, const QPointF& moving, const QSize& base, bool shift) {
+        return snapResizeToScreenBorders(scale, fixed, moving, base, shift);
+    });
 }
 
 void ScreenCanvas::setScreens(const QList<ScreenInfo>& screens) {
@@ -754,4 +762,169 @@ void ScreenCanvas::recreateRemoteCursorItem() {
         m_remoteCursorDot->setFlag(QGraphicsItem::ItemIgnoresTransformations, false);
     }
     m_scene->addItem(m_remoteCursorDot);
+}
+
+QList<QRectF> ScreenCanvas::getScreenBorderRects() const {
+    QList<QRectF> rects;
+    for (const auto* item : m_screenItems) {
+        if (item) {
+            rects.append(item->sceneBoundingRect());
+        }
+    }
+    return rects;
+}
+
+QPointF ScreenCanvas::snapToScreenBorders(const QPointF& scenePos, const QRectF& mediaBounds, bool shiftPressed) const {
+    if (!shiftPressed) return scenePos;
+    
+    const QList<QRectF> screenRects = getScreenBorderRects();
+    if (screenRects.isEmpty()) return scenePos;
+    
+    // Convert snap distance from pixels to scene units
+    const QTransform t = transform();
+    const qreal snapDistanceScene = m_snapDistancePx / (t.m11() > 1e-6 ? t.m11() : 1.0);
+    
+    QPointF snappedPos = scenePos;
+    
+    // For each screen, test snapping to its borders
+    for (const QRectF& screenRect : screenRects) {
+        // Calculate media edges at the given position
+        const qreal mediaLeft = scenePos.x();
+        const qreal mediaRight = scenePos.x() + mediaBounds.width();
+        const qreal mediaTop = scenePos.y();
+        const qreal mediaBottom = scenePos.y() + mediaBounds.height();
+        
+        // Horizontal snapping
+        // Media left edge to screen left edge
+        if (std::abs(mediaLeft - screenRect.left()) < snapDistanceScene) {
+            snappedPos.setX(screenRect.left());
+        }
+        // Media right edge to screen right edge
+        else if (std::abs(mediaRight - screenRect.right()) < snapDistanceScene) {
+            snappedPos.setX(screenRect.right() - mediaBounds.width());
+        }
+        // Media left edge to screen right edge (adjacent positioning)
+        else if (std::abs(mediaLeft - screenRect.right()) < snapDistanceScene) {
+            snappedPos.setX(screenRect.right());
+        }
+        // Media right edge to screen left edge (adjacent positioning)
+        else if (std::abs(mediaRight - screenRect.left()) < snapDistanceScene) {
+            snappedPos.setX(screenRect.left() - mediaBounds.width());
+        }
+        
+        // Vertical snapping
+        // Media top edge to screen top edge
+        if (std::abs(mediaTop - screenRect.top()) < snapDistanceScene) {
+            snappedPos.setY(screenRect.top());
+        }
+        // Media bottom edge to screen bottom edge
+        else if (std::abs(mediaBottom - screenRect.bottom()) < snapDistanceScene) {
+            snappedPos.setY(screenRect.bottom() - mediaBounds.height());
+        }
+        // Media top edge to screen bottom edge (adjacent positioning)
+        else if (std::abs(mediaTop - screenRect.bottom()) < snapDistanceScene) {
+            snappedPos.setY(screenRect.bottom());
+        }
+        // Media bottom edge to screen top edge (adjacent positioning)
+        else if (std::abs(mediaBottom - screenRect.top()) < snapDistanceScene) {
+            snappedPos.setY(screenRect.top() - mediaBounds.height());
+        }
+    }
+    
+    return snappedPos;
+}
+
+qreal ScreenCanvas::snapResizeToScreenBorders(qreal currentScale, const QPointF& fixedScenePoint, const QPointF& fixedItemPoint, const QSize& baseSize, bool shiftPressed) const {
+    if (!shiftPressed) return currentScale;
+    
+    const QList<QRectF> screenRects = getScreenBorderRects();
+    if (screenRects.isEmpty()) return currentScale;
+    
+    // Convert snap distance from pixels to scene units
+    const QTransform t = transform();
+    const qreal snapDistanceScene = m_snapDistancePx / (t.m11() > 1e-6 ? t.m11() : 1.0);
+    
+    // Calculate current media position based on the fixed corner
+    // fixedScenePoint is where the fixed corner is, fixedItemPoint is its item coordinates
+    const QPointF mediaTopLeft = fixedScenePoint - currentScale * fixedItemPoint;
+    const qreal mediaWidth = currentScale * baseSize.width();
+    const qreal mediaHeight = currentScale * baseSize.height();
+    
+    // Determine which corner is moving based on fixedItemPoint
+    const bool fixedIsTopLeft = (fixedItemPoint.x() < baseSize.width() * 0.5 && fixedItemPoint.y() < baseSize.height() * 0.5);
+    const bool fixedIsTopRight = (fixedItemPoint.x() > baseSize.width() * 0.5 && fixedItemPoint.y() < baseSize.height() * 0.5);
+    const bool fixedIsBottomLeft = (fixedItemPoint.x() < baseSize.width() * 0.5 && fixedItemPoint.y() > baseSize.height() * 0.5);
+    const bool fixedIsBottomRight = (fixedItemPoint.x() > baseSize.width() * 0.5 && fixedItemPoint.y() > baseSize.height() * 0.5);
+    
+    // Determine which edges are moving
+    const bool movingRight = fixedIsTopLeft || fixedIsBottomLeft;
+    const bool movingDown = fixedIsTopLeft || fixedIsTopRight;
+    const bool movingLeft = fixedIsTopRight || fixedIsBottomRight;
+    const bool movingUp = fixedIsBottomLeft || fixedIsBottomRight;
+    
+    qreal bestScale = currentScale;
+    qreal minDistance = snapDistanceScene;
+    
+    for (const QRectF& screenRect : screenRects) {
+        // Calculate media edges at current scale
+        const qreal mediaLeft = mediaTopLeft.x();
+        const qreal mediaRight = mediaTopLeft.x() + mediaWidth;
+        const qreal mediaTop = mediaTopLeft.y();
+        const qreal mediaBottom = mediaTopLeft.y() + mediaHeight;
+        
+        // Test snapping based on which corner is moving
+        if (movingRight) {
+            // Right edge can snap to screen borders
+            const qreal distToScreenRight = std::abs(mediaRight - screenRect.right());
+            if (distToScreenRight < snapDistanceScene) {
+                // Snap media right edge to screen right edge
+                const qreal targetWidth = screenRect.right() - mediaLeft;
+                const qreal targetScale = targetWidth / baseSize.width();
+                if (targetScale > 0.05 && targetScale < 100.0) {
+                    return std::clamp<qreal>(targetScale, 0.05, 100.0);
+                }
+            }
+        }
+        
+        if (movingDown) {
+            // Bottom edge can snap to screen borders
+            const qreal distToScreenBottom = std::abs(mediaBottom - screenRect.bottom());
+            if (distToScreenBottom < snapDistanceScene) {
+                // Snap media bottom edge to screen bottom edge
+                const qreal targetHeight = screenRect.bottom() - mediaTop;
+                const qreal targetScale = targetHeight / baseSize.height();
+                if (targetScale > 0.05 && targetScale < 100.0) {
+                    return std::clamp<qreal>(targetScale, 0.05, 100.0);
+                }
+            }
+        }
+        
+        if (movingLeft) {
+            // Left edge can snap to screen borders
+            const qreal distToScreenLeft = std::abs(mediaLeft - screenRect.left());
+            if (distToScreenLeft < snapDistanceScene) {
+                // Snap media left edge to screen left edge
+                const qreal targetWidth = (mediaLeft + mediaWidth) - screenRect.left();
+                const qreal targetScale = targetWidth / baseSize.width();
+                if (targetScale > 0.05 && targetScale < 100.0) {
+                    return std::clamp<qreal>(targetScale, 0.05, 100.0);
+                }
+            }
+        }
+        
+        if (movingUp) {
+            // Top edge can snap to screen borders
+            const qreal distToScreenTop = std::abs(mediaTop - screenRect.top());
+            if (distToScreenTop < snapDistanceScene) {
+                // Snap media top edge to screen top edge
+                const qreal targetHeight = (mediaTop + mediaHeight) - screenRect.top();
+                const qreal targetScale = targetHeight / baseSize.height();
+                if (targetScale > 0.05 && targetScale < 100.0) {
+                    return std::clamp<qreal>(targetScale, 0.05, 100.0);
+                }
+            }
+        }
+    }
+    
+    return std::clamp<qreal>(bestScale, 0.05, 100.0);
 }

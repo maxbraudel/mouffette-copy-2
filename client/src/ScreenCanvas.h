@@ -53,6 +53,10 @@ public:
     void setRemoteCursorFixedSize(bool fixed) { m_remoteCursorFixedSize = fixed; if (m_remoteCursorDot) recreateRemoteCursorItem(); }
     bool remoteCursorFixedSize() const { return m_remoteCursorFixedSize; }
 
+    // Snap-to-screen configuration
+    void setSnapDistancePx(int px) { m_snapDistancePx = qMax(1, px); }
+    int snapDistancePx() const { return m_snapDistancePx; }
+
 protected:
     bool event(QEvent* event) override;
     bool viewportEvent(QEvent* event) override; // handle native gestures delivered to viewport (macOS pinch)
@@ -91,6 +95,11 @@ private:
     void ensureZOrder();
     void debugLogScreenSizes() const; // helper to verify screen rect pixel parity
     void recreateRemoteCursorItem();
+    
+    // Snap-to-screen helpers
+    QPointF snapToScreenBorders(const QPointF& scenePos, const QRectF& mediaBounds, bool shiftPressed) const;
+    qreal snapResizeToScreenBorders(qreal currentScale, const QPointF& fixedCorner, const QPointF& fixedItemPoint, const QSize& baseSize, bool shiftPressed) const;
+    QList<QRectF> getScreenBorderRects() const;
 
     QGraphicsScene* m_scene = nullptr;
     QList<QGraphicsRectItem*> m_screenItems;
@@ -141,6 +150,9 @@ private:
     QAudioOutput* m_dragPreviewAudio = nullptr;
     bool m_dragPreviewGotFrame = false;
     QTimer* m_dragPreviewFallbackTimer = nullptr;
+    
+    // Snap-to-screen settings
+    int m_snapDistancePx = 10; // pixels within which snapping occurs
 };
 
 #endif // SCREENCANVAS_H
