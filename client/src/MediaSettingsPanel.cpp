@@ -61,6 +61,25 @@ void MediaSettingsPanel::buildUi() {
         return box;
     };
 
+    // 0) Display automatically after [1] seconds
+    {
+        auto* row = new QWidget(m_widget);
+        auto* h = new QHBoxLayout(row);
+        h->setContentsMargins(0,0,0,0);
+        h->setSpacing(0);
+        m_displayAfterCheck = new QCheckBox("Display automatically after ", row);
+        m_displayAfterCheck->setStyleSheet("color: white;");
+        m_displayAfterCheck->installEventFilter(this);
+        m_displayAfterBox = makeValueBox();
+        auto* suffix = new QLabel(" seconds", row);
+        suffix->setStyleSheet("color: white;");
+        h->addWidget(m_displayAfterCheck);
+        h->addWidget(m_displayAfterBox);
+        h->addWidget(suffix);
+        h->addStretch();
+        m_layout->addWidget(row);
+    }
+
     // 1) Play automatically after [1] seconds
     {
         auto* row = new QWidget(m_widget);
@@ -132,6 +151,25 @@ void MediaSettingsPanel::buildUi() {
         suffix->setStyleSheet("color: white;");
         h->addWidget(m_fadeOutCheck);
         h->addWidget(m_fadeOutBox);
+        h->addWidget(suffix);
+        h->addStretch();
+        m_layout->addWidget(row);
+    }
+
+    // 5) Set opacity to [1]%
+    {
+        auto* row = new QWidget(m_widget);
+        auto* h = new QHBoxLayout(row);
+        h->setContentsMargins(0,0,0,0);
+        h->setSpacing(0);
+        m_opacityCheck = new QCheckBox("Set opacity to ", row);
+        m_opacityCheck->setStyleSheet("color: white;");
+        m_opacityCheck->installEventFilter(this);
+        m_opacityBox = makeValueBox();
+        auto* suffix = new QLabel("%", row);
+        suffix->setStyleSheet("color: white;");
+        h->addWidget(m_opacityCheck);
+        h->addWidget(m_opacityBox);
         h->addWidget(suffix);
         h->addStretch();
         m_layout->addWidget(row);
@@ -235,6 +273,8 @@ void MediaSettingsPanel::clearActiveBox() {
     if (m_activeBox) {
         setBoxActive(m_activeBox, false);
         m_activeBox = nullptr;
+        // Reset first-type-clears flag when deactivating
+        m_clearOnFirstType = false;
     }
 }
 
@@ -242,8 +282,8 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
     // Handle clicks on value boxes
     if (event->type() == QEvent::MouseButtonPress) {
         QLabel* box = qobject_cast<QLabel*>(obj);
-        if (box && (box == m_autoPlayBox || box == m_repeatBox || 
-                   box == m_fadeInBox || box == m_fadeOutBox)) {
+        if (box && (box == m_displayAfterBox || box == m_autoPlayBox || box == m_repeatBox || 
+                   box == m_fadeInBox || box == m_fadeOutBox || box == m_opacityBox)) {
             // Clear previous active box
             clearActiveBox();
             // Set this box as active
@@ -251,6 +291,8 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
             setBoxActive(box, true);
             // Give focus to the box so it can receive key events
             box->setFocus();
+            // Enable one-shot clear-on-type behavior
+            m_clearOnFirstType = true;
             return true; // consume the event
         }
         // Handle clicks on checkboxes or elsewhere in the panel - clear active box
@@ -285,8 +327,13 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
                 QString currentText = m_activeBox->text();
                 QString newText;
                 
-                // If current text is "..." (cleared state) or infinity symbol, replace it
-                if (currentText == "..." || currentText == "∞") {
+                // On first key after selection, replace entire content
+                if (m_clearOnFirstType) {
+                    newText = text;
+                    m_clearOnFirstType = false;
+                }
+                else if (currentText == "..." || currentText == "∞") {
+                    // If current text is cleared state or infinity symbol, replace it
                     newText = text;
                 } else {
                     // Append to existing text
@@ -313,7 +360,11 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
 }
 
 bool MediaSettingsPanel::isValidInputForBox(QLabel* box, QChar character) {
-    if (box == m_autoPlayBox) {
+    if (box == m_displayAfterBox) {
+        // Display automatically: numbers, dots, commas
+        return character.isDigit() || character == '.' || character == ',';
+    }
+    else if (box == m_autoPlayBox) {
         // Play automatically: numbers, dots, commas
         return character.isDigit() || character == '.' || character == ',';
     }
@@ -328,6 +379,10 @@ bool MediaSettingsPanel::isValidInputForBox(QLabel* box, QChar character) {
     else if (box == m_fadeOutBox) {
         // Fade out: numbers, dots, commas
         return character.isDigit() || character == '.' || character == ',';
+    }
+    else if (box == m_opacityBox) {
+        // Opacity: digits only
+        return character.isDigit();
     }
     
     return false; // Unknown box, reject input

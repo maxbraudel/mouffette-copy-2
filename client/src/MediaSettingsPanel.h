@@ -58,8 +58,15 @@ private:
 
     // Value box widgets for click handling
     QLabel* m_autoPlayBox = nullptr;
+    // New: display automatically after [x] seconds
+    QCheckBox* m_displayAfterCheck = nullptr;
+    QLabel* m_displayAfterBox = nullptr;
     QLabel* m_repeatBox = nullptr;
     QLabel* m_fadeInBox = nullptr;
     QLabel* m_fadeOutBox = nullptr;
+    // New: set opacity to [x]%
+    QCheckBox* m_opacityCheck = nullptr;
+    QLabel* m_opacityBox = nullptr;
     QLabel* m_activeBox = nullptr; // currently active box (if any)
+    bool m_clearOnFirstType = false; // if true, first keypress replaces previous content
 };
