@@ -35,6 +35,10 @@ public:
 
     void setSourcePath(const QString& p) { m_sourcePath = p; }
     QString sourcePath() const { return m_sourcePath; }
+    // Display name shown in overlays: filename if set, otherwise derived from sourcePath
+    QString displayName() const;
+    // Native media base size in pixels (unscaled)
+    QSize baseSizePx() const { return m_baseSize; }
 
     static void setHeightOfMediaOverlaysPx(int px); // global override height (px) for overlays
     static int  getHeightOfMediaOverlaysPx();

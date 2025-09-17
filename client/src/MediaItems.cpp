@@ -20,6 +20,7 @@
 #include <QVariantAnimation>
 #include <QtSvgWidgets/QGraphicsSvgItem>
 #include <QtSvg/QSvgRenderer>
+#include <QFileInfo>
 #include <QMediaPlayer>
 #include <QAudioOutput>
 #include <QVideoSink>
@@ -37,6 +38,16 @@ int ResizableMediaBase::cornerRadiusOfMediaOverlays = 6;
 double ResizableMediaBase::s_sceneGridUnit = 1.0; // default: 1 scene unit == 1 pixel
 std::function<QPointF(const QPointF&, const QRectF&, bool)> ResizableMediaBase::s_screenSnapCallback;
 std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> ResizableMediaBase::s_resizeSnapCallback;
+
+QString ResizableMediaBase::displayName() const {
+    if (!m_filename.isEmpty()) return m_filename;
+    if (!m_sourcePath.isEmpty()) {
+        QFileInfo fi(m_sourcePath);
+        const QString base = fi.fileName();
+        if (!base.isEmpty()) return base;
+    }
+    return QStringLiteral("Media");
+}
 
 void ResizableMediaBase::setSceneGridUnit(double u) { s_sceneGridUnit = (u > 1e-9 ? u : 1.0); }
 double ResizableMediaBase::sceneGridUnit() { return s_sceneGridUnit; }

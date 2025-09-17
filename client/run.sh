@@ -15,6 +15,6 @@ echo "👆 Click the icon to show the main window"
 echo "🎯 The client will auto-connect to localhost:8080"
 echo ""
 
-# Launch the client
+# Launch the clienta
 cd build
 ./MouffetteClient.app/Contents/MacOS/MouffetteClient

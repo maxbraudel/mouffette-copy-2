@@ -13,6 +13,10 @@
 #include "MediaItems.h" // for ResizableMediaBase / ResizableVideoItem
 #include <QGestureEvent>
 #include <QPinchGesture>
+class QLabel;
+class QVBoxLayout;
+class MouseBlockingRoundedRectItem;
+class QGraphicsProxyWidget; // kept for other uses, but not used by info overlay anymore
 
 class QMimeData;
 class QMediaPlayer;
@@ -99,6 +103,11 @@ private:
     void ensureZOrder();
     void debugLogScreenSizes() const; // helper to verify screen rect pixel parity
     void recreateRemoteCursorItem();
+    // Global top-right info overlay (lists media files)
+    void initInfoOverlay();
+    void refreshInfoOverlay();
+    void layoutInfoOverlay();
+    void maybeRefreshInfoOverlayOnSceneChanged();
     
     // Snap-to-screen helpers
     QPointF snapToScreenBorders(const QPointF& scenePos, const QRectF& mediaBounds, bool shiftPressed) const;
@@ -156,12 +165,18 @@ private:
     QTimer* m_dragPreviewFallbackTimer = nullptr;
     
     // Snap-to-screen settings
+    int m_repaintBudgetMs = 16;
     int m_snapDistancePx = 10; // pixels within which snapping occurs
     
     // Z-order management for media items
     qreal m_nextMediaZValue = 1.0;
     void assignNextZValue(QGraphicsItem* item);
     QList<QGraphicsItem*> getMediaItemsSortedByZ() const;
+
+    // Info overlay widgets (viewport child, independent from scene transforms)
+    QWidget* m_infoWidget = nullptr;       // panel widget parented to viewport()
+    QVBoxLayout* m_infoLayout = nullptr;
+    int m_lastMediaItemCount = -1; // cache to detect add/remove
 };
 
 #endif // SCREENCANVAS_H
