@@ -1,11 +1,22 @@
 // MediaItems.cpp - Implementation of media item hierarchy extracted from MainWindow.cpp
 
 #include "MediaItems.h"
+#include "ScreenCanvas.h"
 #include <numeric>
 #include <QPainter>
-#include <QGraphicsSceneMouseEvent>
 #include <QGraphicsView>
+#include <QGraphicsSceneMouseEvent>
+#include <QGraphicsSceneHoverEvent>
+#include <QGuiApplication>
+#include <QPainter>
 #include <QStyleOptionGraphicsItem>
+#include <QWidget>
+#include <QTimer>
+#include <QMutexLocker>
+#include <QDebug>
+#include "MediaSettingsPanel.h"
+#include <cmath>
+#include <numeric>
 #include <QVariantAnimation>
 #include <QtSvgWidgets/QGraphicsSvgItem>
 #include <QtSvg/QSvgRenderer>
@@ -16,13 +27,7 @@
 #include <QThreadPool>
 #include <QRunnable>
 #include <QApplication>
-#include <QGuiApplication>
 #include <QDateTime>
-#include <QTimer>
-#include <QMutexLocker>
-#include <QDebug>
-#include "MediaSettingsPanel.h"
-#include <cmath>
 
 // ---------------- ResizableMediaBase -----------------
 
@@ -351,6 +356,34 @@ void ResizableMediaBase::initializeOverlays() {
             m_settingsPanel->setVisible(enabling);
         });
         m_topPanel->addElement(settingsBtn);
+        
+        // Add bring forward button (Z-order up)
+        auto bringForwardBtn = std::make_shared<OverlayButtonElement>(QString(), "bring_forward");
+        bringForwardBtn->setSvgIcon(":/icons/icons/arrow-up.svg");
+        bringForwardBtn->setToggleOnly(false); // Simple button, not a toggle
+        bringForwardBtn->setState(OverlayElement::Normal);
+        bringForwardBtn->setOnClicked([this]() {
+            if (scene() && !scene()->views().isEmpty()) {
+                if (auto* screenCanvas = qobject_cast<ScreenCanvas*>(scene()->views().first())) {
+                    screenCanvas->moveMediaUp(this);
+                }
+            }
+        });
+        m_topPanel->addElement(bringForwardBtn);
+        
+        // Add bring backward button (Z-order down)
+        auto bringBackwardBtn = std::make_shared<OverlayButtonElement>(QString(), "bring_backward");
+        bringBackwardBtn->setSvgIcon(":/icons/icons/arrow-down.svg");
+        bringBackwardBtn->setToggleOnly(false); // Simple button, not a toggle
+        bringBackwardBtn->setState(OverlayElement::Normal);
+        bringBackwardBtn->setOnClicked([this]() {
+            if (scene() && !scene()->views().isEmpty()) {
+                if (auto* screenCanvas = qobject_cast<ScreenCanvas*>(scene()->views().first())) {
+                    screenCanvas->moveMediaDown(this);
+                }
+            }
+        });
+        m_topPanel->addElement(bringBackwardBtn);
     }
     m_bottomPanel = std::make_unique<OverlayPanel>(OverlayPanel::Bottom); m_bottomPanel->setStyle(m_overlayStyle);
 }

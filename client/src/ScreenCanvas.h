@@ -56,6 +56,10 @@ public:
     // Snap-to-screen configuration
     void setSnapDistancePx(int px) { m_snapDistancePx = qMax(1, px); }
     int snapDistancePx() const { return m_snapDistancePx; }
+    
+    // Z-order management for media items (public interface)
+    void moveMediaUp(QGraphicsItem* item);
+    void moveMediaDown(QGraphicsItem* item);
 
 protected:
     bool event(QEvent* event) override;
@@ -157,8 +161,6 @@ private:
     // Z-order management for media items
     qreal m_nextMediaZValue = 1.0;
     void assignNextZValue(QGraphicsItem* item);
-    void moveMediaUp(QGraphicsItem* item);
-    void moveMediaDown(QGraphicsItem* item);
     QList<QGraphicsItem*> getMediaItemsSortedByZ() const;
 };
 

@@ -208,9 +208,9 @@ public:
                 m_background->setClickCallback(nullptr);
                 m_background->setPressCallback([this](bool down){ if (!down && m_onClicked) m_onClicked(); });
             } else {
-                // Normal buttons: trigger on press via click callback
-                m_background->setPressCallback(nullptr);
-                m_background->setClickCallback(m_onClicked);
+                // Normal buttons: trigger on release to preserve Active visual while holding
+                // Do not override press callback here; createGraphicsItems wires visuals and release action.
+                m_background->setClickCallback(nullptr);
             }
         }
     }
@@ -229,11 +229,8 @@ public:
                     m_background->setPressCallback(nullptr);
                 }
             } else {
-                // Restore normal behavior: click on press if onClicked set
-                if (m_onClicked) {
-                    m_background->setPressCallback(nullptr);
-                    m_background->setClickCallback(m_onClicked);
-                }
+                // Restore normal behavior: click on press if onClicked set; keep press callback for visuals
+                if (m_onClicked) { m_background->setClickCallback(m_onClicked); }
             }
         }
     }

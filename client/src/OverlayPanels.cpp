@@ -56,9 +56,11 @@ static QBrush buttonBrushForState(const OverlayStyle& style, OverlayElement::Ele
         a.blue()*(1-t)+b.blue()*t,
         a.alpha());};
     switch(st) {
-        case OverlayElement::Hovered: return QBrush(blend(base, accent, 0.20));
-        case OverlayElement::Active: return QBrush(blend(base, accent, 0.35));
-        case OverlayElement::Toggled: return QBrush(blend(base, accent, 0.50));
+        // No hover highlight: keep normal background on hover
+        case OverlayElement::Hovered: return QBrush(base);
+        // Pressed and toggled use the exact active background color from style
+        case OverlayElement::Active: return QBrush(style.activeBackgroundColor);
+        case OverlayElement::Toggled: return QBrush(style.activeBackgroundColor);
         case OverlayElement::Disabled: {
             QColor dim = base; dim.setAlphaF(dim.alphaF()*0.35); return QBrush(dim);
         }
@@ -151,23 +153,32 @@ void OverlayButtonElement::createGraphicsItems() {
     m_background->setData(0, QStringLiteral("overlay"));
     if (m_onClicked) {
         if (m_toggleOnly) {
-            // For toggle buttons, trigger click on mouse release to preserve state after full click
+            // Toggle buttons: invoke action on release
+            m_background->setClickCallback(nullptr);
             m_background->setPressCallback([this](bool down){ if (!down && m_onClicked) m_onClicked(); });
         } else {
-            m_background->setClickCallback(m_onClicked);
+            // Normal buttons: invoke action on release so press visual (Active) persists while holding
+            m_background->setClickCallback(nullptr);
+            // We'll wire on release together with visual press callback below
         }
     }
     // Hover / press visual feedback (skip overriding if toggled state to keep its stronger tint)
-        if (!m_toggleOnly) {
-            m_background->setHoverCallback([this](bool inside){
-                if (state() == OverlayElement::Toggled || state() == OverlayElement::Disabled) return;
-                setState(inside ? OverlayElement::Hovered : OverlayElement::Normal);
-            });
-            m_background->setPressCallback([this](bool down){
-                if (state() == OverlayElement::Toggled || state() == OverlayElement::Disabled) return;
-                if (down) setState(OverlayElement::Active); else setState(OverlayElement::Hovered);
-            });
-        }
+    if (!m_toggleOnly) {
+        m_background->setHoverCallback([this](bool inside){
+            // Do not override Active (pressed) state and do not affect toggled/disabled
+            if (state() == OverlayElement::Active || state() == OverlayElement::Toggled || state() == OverlayElement::Disabled) return;
+            setState(inside ? OverlayElement::Hovered : OverlayElement::Normal);
+        });
+        m_background->setPressCallback([this](bool down){
+            if (state() == OverlayElement::Toggled || state() == OverlayElement::Disabled) return;
+            if (down) {
+                setState(OverlayElement::Active);
+            } else {
+                setState(OverlayElement::Hovered);
+                if (m_onClicked) m_onClicked(); // trigger action on release
+            }
+        });
+    }
 
     if (!m_label.isEmpty()) {
         m_textItem = new MouseBlockingTextItem(m_label, m_background);
