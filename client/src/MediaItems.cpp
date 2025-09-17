@@ -1,6 +1,7 @@
 // MediaItems.cpp - Implementation of media item hierarchy extracted from MainWindow.cpp
 
 #include "MediaItems.h"
+#include <numeric>
 #include <QPainter>
 #include <QGraphicsSceneMouseEvent>
 #include <QGraphicsView>
@@ -26,6 +27,11 @@
 
 int ResizableMediaBase::heightOfMediaOverlays = -1; // default auto
 int ResizableMediaBase::cornerRadiusOfMediaOverlays = 6;
+
+double ResizableMediaBase::s_sceneGridUnit = 1.0; // default: 1 scene unit == 1 pixel
+
+void ResizableMediaBase::setSceneGridUnit(double u) { s_sceneGridUnit = (u > 1e-9 ? u : 1.0); }
+double ResizableMediaBase::sceneGridUnit() { return s_sceneGridUnit; }
 
 ResizableMediaBase::~ResizableMediaBase() = default;
 
@@ -119,6 +125,11 @@ QPainterPath ResizableMediaBase::shape() const {
 }
 
 QVariant ResizableMediaBase::itemChange(GraphicsItemChange change, const QVariant &value) {
+    // Snap requested position changes to the scene pixel grid
+    if (change == ItemPositionChange && value.canConvert<QPointF>()) {
+        const QPointF p = value.toPointF();
+        return QVariant(snapPointToGrid(p));
+    }
     if (change == ItemSelectedChange) {
         prepareGeometryChange();
     }
@@ -148,12 +159,34 @@ void ResizableMediaBase::mousePressEvent(QGraphicsSceneMouseEvent* event) {
 
 void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
     if (m_activeHandle != None) {
+        // Compute unconstrained scale factor from current drag distance
         const QPointF v = event->scenePos() - m_fixedScenePoint;
         const qreal currDist = std::hypot(v.x(), v.y());
         qreal newScale = m_initialScale * (currDist / (m_initialGrabDist > 0 ? m_initialGrabDist : 1e-6));
         newScale = std::clamp<qreal>(newScale, 0.05, 100.0);
-        setScale(newScale);
-        setPos(m_fixedScenePoint - newScale * m_fixedItemPoint);
+
+        // Determine the vector from fixed corner to moving corner in item space
+        const QPointF movingItemPoint = handlePoint(m_activeHandle);
+        const QPointF itemVec = movingItemPoint - m_fixedItemPoint; // item coords
+        if (std::abs(itemVec.x()) < 1e-12 && std::abs(itemVec.y()) < 1e-12) { QGraphicsItem::mouseMoveEvent(event); return; }
+
+        // Desired continuous size in pixels (scene units) at this scale
+        const qreal desiredW = newScale * static_cast<qreal>(m_baseSize.width());
+        const qreal desiredH = newScale * static_cast<qreal>(m_baseSize.height());
+        // Snap sizes individually to nearest integer pixel counts
+        const qreal snappedW = std::round(desiredW);
+        const qreal snappedH = std::round(desiredH);
+        // Compute candidate uniform scales from each dimension
+        const qreal sFromW = (m_baseSize.width()  > 0) ? (snappedW / static_cast<qreal>(m_baseSize.width()))  : newScale;
+        const qreal sFromH = (m_baseSize.height() > 0) ? (snappedH / static_cast<qreal>(m_baseSize.height())) : newScale;
+        // Choose the candidate closest to the unconstrained scale (minimize jump feeling)
+        qreal snappedScale = (std::abs(sFromW - newScale) <= std::abs(sFromH - newScale)) ? sFromW : sFromH;
+        snappedScale = std::clamp<qreal>(snappedScale, 0.05, 100.0);
+
+        // Position derived from fixed corner to keep it exact; moving corner will land on pixel grid implicitly
+        QPointF snappedPos = m_fixedScenePoint - snappedScale * m_fixedItemPoint;
+        setScale(snappedScale);
+        setPos(snappedPos);
         onInteractiveGeometryChanged();
         event->accept();
         return;

@@ -238,12 +238,50 @@ void ScreenCanvas::keyPressEvent(QKeyEvent* event) {
         // Without the required modifier, do not delete; fall through to base handling
     }
     if (event->key() == Qt::Key_Space) { recenterWithMargin(53); event->accept(); return; }
-    // Disable arrow-key/View navigation so the canvas doesn't move with directional keys
+    // Arrow key handling: if any media is selected, nudge them by 1 screen pixel in that direction.
+    // Otherwise, consume arrows so the view does not pan.
+    if (event->key() == Qt::Key_Left || event->key() == Qt::Key_Right ||
+        event->key() == Qt::Key_Up   || event->key() == Qt::Key_Down) {
+        bool moved = false;
+        if (m_scene) {
+            const QList<QGraphicsItem*> sel = m_scene->selectedItems();
+            if (!sel.isEmpty()) {
+                // Move by exactly one scene pixel (grid unit) regardless of zoom level
+                const qreal unit = ResizableMediaBase::sceneGridUnit();
+                const qreal dxScene = unit;
+                const qreal dyScene = unit;
+                qreal dx = 0.0, dy = 0.0;
+                switch (event->key()) {
+                    case Qt::Key_Left:  dx = -dxScene; break;
+                    case Qt::Key_Right: dx =  dxScene; break;
+                    case Qt::Key_Up:    dy = -dyScene; break;
+                    case Qt::Key_Down:  dy =  dyScene; break;
+                    default: break;
+                }
+                if (dx != 0.0 || dy != 0.0) {
+                    for (QGraphicsItem* it : sel) {
+                        if (auto* base = dynamic_cast<ResizableMediaBase*>(it)) {
+                            base->setPos(base->pos() + QPointF(dx, dy));
+                            // Relayout overlays/labels for this item after movement
+                            base->requestLabelRelayout();
+                            base->updateOverlayLayout();
+                            moved = true;
+                        }
+                    }
+                }
+            }
+        }
+        if (moved) {
+            event->accept();
+            return;
+        } else {
+            // No selected media: consume arrows to avoid view navigation
+            event->accept();
+            return;
+        }
+    }
+    // Block page/navigation keys from moving the view
     switch (event->key()) {
-        case Qt::Key_Left:
-        case Qt::Key_Right:
-        case Qt::Key_Up:
-        case Qt::Key_Down:
         case Qt::Key_Home:
         case Qt::Key_End:
         case Qt::Key_PageUp:

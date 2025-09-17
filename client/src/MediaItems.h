@@ -17,6 +17,7 @@
 #include <QRunnable>
 #include <atomic>
 #include <memory>
+#include <cmath>
 
 #include "OverlayPanels.h"
 #include "RoundedRectItem.h"
@@ -50,6 +51,10 @@ public:
     // Exposed so ScreenCanvas can relayout overlays after zoom changes.
     void updateOverlayLayout();
     void updateOverlayVisibility();
+
+    // Grid unit control: 1 scene "pixel" in view coordinates (e.g., ScreenCanvas scale)
+    static void setSceneGridUnit(double u);
+    static double sceneGridUnit();
 
     // Access to overlay panels (filename on top, controls bottom for videos) if needed.
     OverlayPanel* topPanel() const { return m_topPanel.get(); }
@@ -105,6 +110,9 @@ protected:
 
 private:
     void relayoutIfNeeded(); // helper to keep overlays positioned (unused externally)
+    static double s_sceneGridUnit;
+    static inline double snapToGrid(double v) { const double u = (s_sceneGridUnit > 1e-9 ? s_sceneGridUnit : 1.0); return std::round(v / u) * u; }
+    static inline QPointF snapPointToGrid(const QPointF& p) { return QPointF(snapToGrid(p.x()), snapToGrid(p.y())); }
 protected:
     bool m_beingDeleted = false;
 };
