@@ -944,12 +944,21 @@ void MainWindow::syncRegistration() {
 void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
     // Update the canvas only if it matches the currently selected client
     if (!clientInfo.getId().isEmpty() && clientInfo.getId() == m_selectedClient.getId()) {
-        // Check if screen info has actually changed to avoid unnecessary canvas refresh
-        // Also handle the case where we're loading screens for the first time (initial load should always reveal canvas)
-        bool screensChanged = (m_selectedClient.getScreens().size() != clientInfo.getScreens().size());
-        bool isInitialLoad = m_selectedClient.getScreens().isEmpty() && !clientInfo.getScreens().isEmpty();
+        // Check if this is the initial load (when canvas needs to be revealed from spinner)
+        bool needsCanvasUpdate = false;
         
-        if (!screensChanged && !isInitialLoad) {
+        // Initial load: selected client has no screens but incoming info has screens
+        if (m_selectedClient.getScreens().isEmpty() && !clientInfo.getScreens().isEmpty()) {
+            needsCanvasUpdate = true;
+            qDebug() << "Initial screen load for" << clientInfo.getMachineName();
+        }
+        // Screen count changed
+        else if (m_selectedClient.getScreens().size() != clientInfo.getScreens().size()) {
+            needsCanvasUpdate = true;
+            qDebug() << "Screen count changed for" << clientInfo.getMachineName();
+        }
+        // Screen dimensions changed
+        else {
             const auto& oldScreens = m_selectedClient.getScreens();
             const auto& newScreens = clientInfo.getScreens();
             for (int i = 0; i < oldScreens.size() && i < newScreens.size(); ++i) {
@@ -957,15 +966,18 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
                     oldScreens[i].height != newScreens[i].height ||
                     oldScreens[i].x != newScreens[i].x ||
                     oldScreens[i].y != newScreens[i].y) {
-                    screensChanged = true;
+                    needsCanvasUpdate = true;
+                    qDebug() << "Screen dimensions changed for" << clientInfo.getMachineName();
                     break;
                 }
             }
         }
         
-        if (screensChanged || isInitialLoad) {
-            qDebug() << "Updating canvas with" << (isInitialLoad ? "initial" : "fresh") << "screens for" << clientInfo.getMachineName();
-            m_selectedClient = clientInfo; // keep selected client in sync
+        // Always update the selected client info
+        m_selectedClient = clientInfo;
+        
+        // Only update canvas if screens actually changed
+        if (needsCanvasUpdate) {
             // Update screen canvas content
             if (m_screenCanvas) {
                 m_screenCanvas->setScreens(clientInfo.getScreens());
@@ -981,12 +993,10 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
                 if (m_canvasStack) m_canvasStack->setCurrentIndex(1);
             }
         } else {
-            // Update client info without refreshing canvas
-            m_selectedClient = clientInfo;
             qDebug() << "Screen info update (no visual changes) for" << clientInfo.getMachineName();
         }
 
-        // Update volume UI
+        // Always update volume UI and client label (these don't cause visual flicker)
         if (m_volumeIndicator) {
             updateVolumeIndicator();
             m_volumeIndicator->show();
