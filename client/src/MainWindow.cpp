@@ -254,10 +254,10 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_statusUpdateTimer, &QTimer::timeout, this, &MainWindow::updateConnectionStatus);
     m_statusUpdateTimer->start();
 
-    // Periodic display sync if watched
+    // Periodic display sync only when watched
     m_displaySyncTimer->setInterval(3000);
     connect(m_displaySyncTimer, &QTimer::timeout, this, [this]() { if (m_isWatched && m_webSocketClient->isConnected()) syncRegistration(); });
-    m_displaySyncTimer->start();
+    // Don't start automatically - will be started when watched
 
     // Smart reconnect timer
     m_reconnectTimer->setSingleShot(true);
@@ -1051,21 +1051,43 @@ void MainWindow::syncRegistration() {
 void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
     // Update the canvas only if it matches the currently selected client
     if (!clientInfo.getId().isEmpty() && clientInfo.getId() == m_selectedClient.getId()) {
-        qDebug() << "Updating canvas with fresh screens for" << clientInfo.getMachineName();
-        m_selectedClient = clientInfo; // keep selected client in sync
-        // Update screen canvas content
-        if (m_screenCanvas) {
-            m_screenCanvas->setScreens(clientInfo.getScreens());
-            m_screenCanvas->recenterWithMargin(33);
-            m_screenCanvas->setFocus(Qt::OtherFocusReason);
+        // Check if screen info has actually changed to avoid unnecessary canvas refresh
+        bool screensChanged = (m_selectedClient.getScreens().size() != clientInfo.getScreens().size());
+        if (!screensChanged) {
+            const auto& oldScreens = m_selectedClient.getScreens();
+            const auto& newScreens = clientInfo.getScreens();
+            for (int i = 0; i < oldScreens.size() && i < newScreens.size(); ++i) {
+                if (oldScreens[i].width != newScreens[i].width || 
+                    oldScreens[i].height != newScreens[i].height ||
+                    oldScreens[i].x != newScreens[i].x ||
+                    oldScreens[i].y != newScreens[i].y) {
+                    screensChanged = true;
+                    break;
+                }
+            }
         }
+        
+        if (screensChanged) {
+            qDebug() << "Updating canvas with fresh screens for" << clientInfo.getMachineName();
+            m_selectedClient = clientInfo; // keep selected client in sync
+            // Update screen canvas content
+            if (m_screenCanvas) {
+                m_screenCanvas->setScreens(clientInfo.getScreens());
+                m_screenCanvas->recenterWithMargin(33);
+                m_screenCanvas->setFocus(Qt::OtherFocusReason);
+            }
 
-        // Delegate reveal (spinner stop + canvas fade) to navigation manager
-        if (m_navigationManager) {
-            m_navigationManager->revealCanvas();
+            // Delegate reveal (spinner stop + canvas fade) to navigation manager
+            if (m_navigationManager) {
+                m_navigationManager->revealCanvas();
+            } else {
+                // Fallback if navigation manager not present (should not happen now)
+                if (m_canvasStack) m_canvasStack->setCurrentIndex(1);
+            }
         } else {
-            // Fallback if navigation manager not present (should not happen now)
-            if (m_canvasStack) m_canvasStack->setCurrentIndex(1);
+            // Update client info without refreshing canvas
+            m_selectedClient = clientInfo;
+            qDebug() << "Screen info update (no visual changes) for" << clientInfo.getMachineName();
         }
 
         // Update volume UI
@@ -1085,6 +1107,20 @@ void MainWindow::onWatchStatusChanged(bool watched) {
     // We don't need a member; we can gate sending by this flag at runtime.
     // For simplicity, keep a static so our timers can read it.
     m_isWatched = watched;
+    
+    // Start/stop display sync timer based on watch status to prevent canvas refresh when not watched
+    if (watched) {
+        if (!m_displaySyncTimer->isActive()) {
+            qDebug() << "Starting display sync timer (watched)";
+            m_displaySyncTimer->start();
+        }
+    } else {
+        if (m_displaySyncTimer->isActive()) {
+            qDebug() << "Stopping display sync timer (not watched)";
+            m_displaySyncTimer->stop();
+        }
+    }
+    
     qDebug() << "Watch status changed:" << (watched ? "watched" : "not watched");
 
     // Begin/stop sending our cursor position to watchers (target side)
