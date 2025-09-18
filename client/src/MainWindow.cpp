@@ -1,7 +1,6 @@
 #include "MainWindow.h"
 #include "ScreenCanvas.h"
 #include "OverlayPanels.h"
-#include "UploadManager.h"
 #include "WatchManager.h"
 #include "ScreenNavigationManager.h"
 #include "SpinnerWidget.h"
@@ -130,10 +129,9 @@ MainWindow::MainWindow(QWidget* parent)
       m_canvasContainer(nullptr),
       m_canvasStack(nullptr),
       m_screenCanvas(nullptr),
-      m_volumeIndicator(nullptr),
-      m_loadingSpinner(nullptr),
-      m_sendButton(nullptr),
-      m_uploadButton(nullptr),
+            m_volumeIndicator(nullptr),
+            m_loadingSpinner(nullptr),
+            m_sendButton(nullptr),
       m_backButton(nullptr),
       m_spinnerOpacity(nullptr),
       m_spinnerFade(nullptr),
@@ -153,8 +151,7 @@ MainWindow::MainWindow(QWidget* parent)
       m_reconnectTimer(new QTimer(this)),
       m_reconnectAttempts(0),
       m_maxReconnectDelay(15000),
-      m_ignoreSelectionChange(false),
-      m_uploadManager(new UploadManager(this)),
+            m_ignoreSelectionChange(false),
       m_watchManager(new WatchManager(this)),
       m_navigationManager(nullptr)
 {
@@ -174,123 +171,42 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_webSocketClient, &WebSocketClient::screensInfoReceived, this, &MainWindow::onScreensInfoReceived);
     connect(m_webSocketClient, &WebSocketClient::watchStatusChanged, this, &MainWindow::onWatchStatusChanged);
     connect(m_webSocketClient, &WebSocketClient::messageReceived, this, &MainWindow::onGenericMessageReceived);
-    // Forward all generic messages to UploadManager so it can handle incoming upload_* and unload_media when we are the target
-    connect(m_webSocketClient, &WebSocketClient::messageReceived, m_uploadManager, &UploadManager::handleIncomingMessage);
-    // Upload progress forwards
-    connect(m_webSocketClient, &WebSocketClient::uploadProgressReceived, m_uploadManager, &UploadManager::onUploadProgress);
-    connect(m_webSocketClient, &WebSocketClient::uploadFinishedReceived, m_uploadManager, &UploadManager::onUploadFinished);
-    connect(m_webSocketClient, &WebSocketClient::unloadedReceived, m_uploadManager, &UploadManager::onUnloadedRemote);
-
     // Managers wiring
-    m_uploadManager->setWebSocketClient(m_webSocketClient);
     m_watchManager->setWebSocketClient(m_webSocketClient);
 
-    // UI refresh when upload state changes
-    auto applyUploadButtonStyle = [this]() {
-        if (!m_uploadButton) return;
-        // Base style strings
-        const QString greyStyle = "QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }";
-        const QString blueStyle = "QPushButton { padding: 12px 18px; font-weight: bold; background-color: #2d6cdf; color: white; border-radius: 5px; } QPushButton:checked { background-color: #1f4ea8; }";
-        const QString greenStyle = "QPushButton { padding: 12px 18px; font-weight: bold; background-color: #16a34a; color: white; border-radius: 5px; } QPushButton:checked { background-color: #15803d; }";
+    // Keep status label in sync with WebSocketClient status changes
+    connect(m_webSocketClient, &WebSocketClient::connectionStatusChanged, this, &MainWindow::updateConnectionStatus);
 
-        if (m_uploadManager->isUploading()) {
-            // Upload in progress (preparing or actively streaming): show preparing or cancelling state handled elsewhere
-            if (m_uploadManager->isCancelling()) {
-                m_uploadButton->setText("Cancelling…");
-                m_uploadButton->setEnabled(false);
-            } else {
-                // Initial immediate state after click before first progress message
-                if (m_uploadButton->text() == "Upload to Client") {
-                    m_uploadButton->setText("Preparing download");
-                }
-                m_uploadButton->setEnabled(true);
-            }
-            m_uploadButton->setCheckable(true);
-            m_uploadButton->setChecked(true);
-            m_uploadButton->setStyleSheet(blueStyle);
-            // Monospace font for stability
-#ifdef Q_OS_MACOS
-            QFont mono("Menlo");
-#else
-            QFont mono("Courier New");
-#endif
-            mono.setPointSize(m_uploadButtonDefaultFont.pointSize());
-            mono.setBold(true);
-            m_uploadButton->setFont(mono);
-        } else if (m_uploadManager->hasActiveUpload()) {
-            // Uploaded & resident on target: allow unload
-            m_uploadButton->setCheckable(true);
-            m_uploadButton->setChecked(true);
-            m_uploadButton->setEnabled(true);
-            m_uploadButton->setText("Unload medias");
-            m_uploadButton->setStyleSheet(greenStyle);
-            m_uploadButton->setFont(m_uploadButtonDefaultFont);
-        } else {
-            // Idle state
-            m_uploadButton->setCheckable(false);
-            m_uploadButton->setChecked(false);
-            m_uploadButton->setEnabled(true);
-            m_uploadButton->setText("Upload to Client");
-            m_uploadButton->setStyleSheet(greyStyle);
-            m_uploadButton->setFont(m_uploadButtonDefaultFont);
-        }
-    };
-    connect(m_uploadManager, &UploadManager::uiStateChanged, this, applyUploadButtonStyle);
-    connect(m_uploadManager, &UploadManager::uploadProgress, this, [this, applyUploadButtonStyle](int percent, int filesCompleted, int totalFiles){
-        if (!m_uploadButton) return;
-        if (m_uploadManager->isUploading() && !m_uploadManager->isCancelling()) {
-            m_uploadButton->setText(QString("Downloading (%1/%2) %3%")
-                                    .arg(filesCompleted)
-                                    .arg(totalFiles)
-                                    .arg(percent));
-        }
-        applyUploadButtonStyle();
-        
-        // Update individual media progress based on server-acknowledged data
-        updateIndividualProgressFromServer(percent, filesCompleted, totalFiles);
-    });
-    connect(m_uploadManager, &UploadManager::uploadFinished, this, [this, applyUploadButtonStyle](){ applyUploadButtonStyle(); });
-    connect(m_uploadManager, &UploadManager::unloaded, this, [this, applyUploadButtonStyle](){ applyUploadButtonStyle(); });
+    // After creating list page, show an initial placeholder
+    updateClientList({});
 
-    // Periodic connection status refresh
-    m_statusUpdateTimer->setInterval(1000);
-    connect(m_statusUpdateTimer, &QTimer::timeout, this, &MainWindow::updateConnectionStatus);
-    m_statusUpdateTimer->start();
-
-    // Periodic display sync only when watched
-    m_displaySyncTimer->setInterval(3000);
-    connect(m_displaySyncTimer, &QTimer::timeout, this, [this]() { if (m_isWatched && m_webSocketClient->isConnected()) syncRegistration(); });
-    // Don't start automatically - will be started when watched
-
-    // Smart reconnect timer
-    m_reconnectTimer->setSingleShot(true);
-    connect(m_reconnectTimer, &QTimer::timeout, this, &MainWindow::attemptReconnect);
-
-    connectToServer();
-}
-
-bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
-    // Block space bar from triggering button presses when focus is on stack/canvas container
-    if ((obj == m_stackedWidget || obj == m_canvasStack || obj == m_screenViewWidget) && event->type() == QEvent::KeyPress) {
-        QKeyEvent* ke = static_cast<QKeyEvent*>(event);
-        if (ke->key() == Qt::Key_Space) { event->accept(); return true; }
+    // Ensure the UI starts on the client list page
+    if (m_stackedWidget && m_clientListPage) {
+        m_stackedWidget->setCurrentWidget(m_clientListPage);
     }
-    return QMainWindow::eventFilter(obj, event);
-}
 
-void MainWindow::showScreenView(const ClientInfo& client) {
-    if (!m_navigationManager) return;
-    // New client selection: reset reveal flag so first incoming screens will fade in once
-    m_canvasRevealedForCurrentClient = false;
-    m_navigationManager->showScreenView(client);
-    // Update upload target
-    m_uploadManager->setTargetClientId(client.getId());
+    // Auto-connect on startup, unless the user previously disabled it
+    if (!m_userDisconnected) {
+        connectToServer();
+        updateConnectionStatus();
+    }
 }
 
 void MainWindow::showClientListView() {
     if (m_navigationManager) m_navigationManager->showClientList();
-    if (m_uploadButton) m_uploadButton->setText("Upload to Client");
-    m_uploadManager->setTargetClientId(QString());
+}
+
+void MainWindow::showScreenView(const ClientInfo& client) {
+    if (!m_navigationManager) return;
+    m_selectedClient = client;
+    // Reset reveal flag so first incoming screens will fade/focus once per client
+    m_canvasRevealedForCurrentClient = false;
+    if (m_clientNameLabel)
+        m_clientNameLabel->setText(QString("%1 (%2)").arg(client.getMachineName()).arg(client.getPlatform()));
+    // Kick off screen request/watch via navigation manager
+    m_navigationManager->showScreenView(client);
+    // Prime volume UI
+    updateVolumeIndicator();
 }
 
 QWidget* MainWindow::createScreenWidget(const ScreenInfo& screen, int index) {
@@ -314,117 +230,7 @@ void MainWindow::updateVolumeIndicator() {
     }
 }
 
-void MainWindow::onUploadButtonClicked() {
-    if (!m_uploadManager) return;
-    if (m_uploadManager->isUploading()) { m_uploadManager->requestCancel(); return; }
-    if (m_uploadManager->hasActiveUpload()) { m_uploadManager->requestUnload(); return; }
-    // Gather media items present on the scene (using unique mediaId for each item)
-    QVector<UploadFileInfo> files;
-    if (m_screenCanvas && m_screenCanvas->scene()) {
-        const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
-        for (QGraphicsItem* it : allItems) {
-            auto* media = dynamic_cast<ResizableMediaBase*>(it);
-            if (!media) continue;
-            const QString path = media->sourcePath();
-            if (path.isEmpty()) continue;
-            QFileInfo fi(path);
-            if (!fi.exists() || !fi.isFile()) continue;
-            UploadFileInfo info; 
-            info.fileId = QUuid::createUuid().toString(QUuid::WithoutBraces); 
-            info.mediaId = media->mediaId(); // Use the unique mediaId from the media item
-            info.path = fi.absoluteFilePath(); 
-            info.name = fi.fileName(); 
-            info.size = fi.size();
-            files.push_back(info);
-            // Map fileId to both mediaId and media item pointer for efficient lookups
-            m_mediaIdByFileId.insert(info.fileId, info.mediaId);
-            m_itemByFileId.insert(info.fileId, media);
-        }
-    }
-    if (files.isEmpty()) {
-        QMessageBox::information(this, "Upload", "Aucun média local à uploader sur le canevas (les éléments doivent provenir de fichiers locaux)." );
-        return;
-    }
-
-    // Initialize per-media upload state using unique mediaId
-    m_mediaIdsBeingUploaded.clear();
-    for (const auto& f : files) {
-        m_mediaIdsBeingUploaded.insert(f.mediaId);
-    }
-    // Set initial upload state for all media items being uploaded
-    if (m_screenCanvas && m_screenCanvas->scene()) {
-        const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
-        for (QGraphicsItem* it : allItems) {
-            if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-                if (m_mediaIdsBeingUploaded.contains(media->mediaId())) {
-                    media->setUploadUploading(0);
-                }
-            }
-        }
-    }
-
-    // Wire upload manager signals to update progress and completion (connect only once)
-    if (m_uploadManager && !m_uploadSignalsConnected) {
-        // Note: we do not use aggregate uploadProgress for per-item bars; only per-file signals below
-        // Per-file progress signals: only advance the active file's bar; others remain at 0 until their turn
-        connect(m_uploadManager, &UploadManager::fileUploadStarted, this, [this](const QString& fileId){
-            if (!m_screenCanvas || !m_screenCanvas->scene()) return;
-            // Use direct mapping from fileId to media item pointer
-            if (auto item = m_itemByFileId.value(fileId)) { 
-                item->setUploadUploading(0); 
-            }
-        });
-        // Per-file progress now calculated from server-acknowledged global progress
-        // (removed sender-side fileUploadProgress connection to prevent too-fast progress)
-        connect(m_uploadManager, &UploadManager::fileUploadFinished, this, [this](const QString& fileId){
-            if (!m_screenCanvas || !m_screenCanvas->scene()) return;
-            // Use direct mapping from fileId to media item pointer
-            if (auto item = m_itemByFileId.value(fileId)) { 
-                item->setUploadUploaded(); 
-            }
-        });
-        connect(m_uploadManager, &UploadManager::uploadFinished, this, [this](){
-            if (!m_screenCanvas || !m_screenCanvas->scene()) { 
-                m_mediaIdsBeingUploaded.clear(); 
-                m_mediaIdByFileId.clear();
-                m_itemByFileId.clear();
-                return; 
-            }
-            // Set uploaded state for all media items that were being uploaded
-            const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
-            for (QGraphicsItem* it : allItems) {
-                if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-                    if (m_mediaIdsBeingUploaded.contains(media->mediaId())) {
-                        media->setUploadUploaded();
-                    }
-                }
-            }
-            // Clear tracking data
-            m_mediaIdsBeingUploaded.clear();
-            m_mediaIdByFileId.clear();
-            m_itemByFileId.clear();
-        });
-        connect(m_uploadManager, &UploadManager::unloaded, this, [this](){
-            // Reset to NotUploaded if user toggles unload after upload
-            if (!m_screenCanvas || !m_screenCanvas->scene()) return;
-            const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
-            for (QGraphicsItem* it : allItems) {
-                if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-                    // Only reset those that were part of the last upload set if any
-                    if (m_mediaIdsBeingUploaded.isEmpty()) { 
-                        media->setUploadNotUploaded(); 
-                    }
-                    else if (m_mediaIdsBeingUploaded.contains(media->mediaId())) {
-                        media->setUploadNotUploaded();
-                    }
-                }
-            }
-        });
-        m_uploadSignalsConnected = true;
-    }
-
-    m_uploadManager->toggleUpload(files);
-}
+// Upload feature removed: onUploadButtonClicked() and related helpers deleted
 
 
 void MainWindow::onBackToClientListClicked() { showClientListView(); }
@@ -559,6 +365,11 @@ void MainWindow::setupUI() {
             if (m_watchManager) m_watchManager->unwatchIfAny();
             if (m_screenCanvas) m_screenCanvas->hideRemoteCursor();
         });
+    }
+
+    // Ensure we are on the client list page at startup
+    if (m_navigationManager) {
+        m_navigationManager->showClientList();
     }
 
     // Receive remote cursor updates when watching
@@ -770,23 +581,12 @@ void MainWindow::createScreenViewPage() {
     m_screenCanvas->setFocusPolicy(Qt::StrongFocus);
     m_screenCanvas->installEventFilter(this);
     
-    // Bottom action bar with Upload and Send
+    // Bottom action bar with Send only
     QWidget* actionBar = new QWidget();
     auto* actionLayout = new QHBoxLayout(actionBar);
     actionLayout->setContentsMargins(0, 8, 0, 0);
     actionLayout->setSpacing(12);
-    // Upload button
-    m_uploadButton = new QPushButton("Upload to Client");
-    m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }");
-    m_uploadButtonDefaultFont = m_uploadButton->font();
-    m_uploadButton->setFixedWidth(260);
-    m_uploadButton->setEnabled(true);
-    connect(m_uploadButton, &QPushButton::clicked, this, &MainWindow::onUploadButtonClicked);
-    // Apply initial style state machine
-    QTimer::singleShot(0, this, [this]() {
-        emit m_uploadManager->uiStateChanged();
-    });
-    actionLayout->addWidget(m_uploadButton, 0, Qt::AlignRight);
+    // Upload removed
     // Send button
     m_sendButton = new QPushButton("Send Media to All Screens");
     m_sendButton->setStyleSheet("QPushButton { padding: 12px 24px; font-weight: bold; background-color: #4a90e2; color: white; border-radius: 5px; }");
@@ -1028,48 +828,31 @@ void MainWindow::attemptReconnect() {
 
 void MainWindow::onConnected() {
     setUIEnabled(true);
-    // Reset reconnection state on successful connection
     m_reconnectAttempts = 0;
     m_reconnectTimer->stop();
-    
-    // Sync this client's info with the server
     syncRegistration();
-    
     statusBar()->showMessage("Connected to server", 3000);
-    
-    // Show tray notification
     showTrayMessage("Mouffette Connected", "Successfully connected to Mouffette server");
+    updateConnectionStatus();
 }
 
 void MainWindow::onDisconnected() {
     setUIEnabled(false);
-    
-    // Start smart reconnection if client is enabled and not manually disconnected
     if (!m_userDisconnected) {
         scheduleReconnect();
     }
-    
-    // Stop watching if any
     if (m_watchManager) m_watchManager->unwatchIfAny();
-    
-    // Clear client list
     m_availableClients.clear();
     updateClientList(m_availableClients);
-    
     statusBar()->showMessage("Disconnected from server", 3000);
-    
-    // Show tray notification
     showTrayMessage("Mouffette Disconnected", "Disconnected from Mouffette server");
+    updateConnectionStatus();
 }
 
-// startWatchingSelectedClient/stopWatchingCurrentClient removed (handled by WatchManager)
-
 void MainWindow::onConnectionError(const QString& error) {
-    QMessageBox::warning(this, "Connection Error", 
-        QString("Failed to connect to server:\n%1").arg(error));
-    
+    QMessageBox::warning(this, "Connection Error", QString("Failed to connect to server:\n%1").arg(error));
     setUIEnabled(false);
-    // No direct connect/disconnect buttons anymore
+    updateConnectionStatus();
 }
 
 void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
@@ -1407,39 +1190,11 @@ void MainWindow::updateConnectionStatus() {
     }
 }
 
-void MainWindow::updateIndividualProgressFromServer(int globalPercent, int filesCompleted, int totalFiles) {
-    if (!m_screenCanvas || !m_screenCanvas->scene() || totalFiles == 0) return;
-    
-    // Get list of files being uploaded in consistent order
-    QStringList orderedFileIds;
-    for (auto it = m_itemByFileId.constBegin(); it != m_itemByFileId.constEnd(); ++it) {
-        orderedFileIds.append(it.key());
-    }
-    
-    // Calculate progress for each file based on server acknowledgment
-    for (int i = 0; i < orderedFileIds.size() && i < totalFiles; ++i) {
-        const QString& fileId = orderedFileIds[i];
-        ResizableMediaBase* item = m_itemByFileId.value(fileId);
-        if (!item) continue;
-        
-        int fileProgress;
-        if (i < filesCompleted) {
-            // This file is completely received by server
-            fileProgress = 100;
-        } else if (i == filesCompleted && filesCompleted < totalFiles) {
-            // This is the currently uploading file
-            // Estimate progress: remaining global progress for current file
-            int progressForCompletedFiles = filesCompleted * 100;
-            int totalExpectedProgress = totalFiles * 100;
-            int currentFileProgress = (globalPercent * totalFiles) - progressForCompletedFiles;
-            fileProgress = std::clamp(currentFileProgress, 0, 100);
-        } else {
-            // Future files not yet started by server
-            fileProgress = 0;
-        }
-        
-        item->setUploadUploading(fileProgress);
-    }
+bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
+    // Currently no special filtering; pass through to base implementation
+    return QMainWindow::eventFilter(obj, event);
 }
+
+// Upload progress helper removed
 
 
