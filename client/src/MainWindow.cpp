@@ -944,59 +944,31 @@ void MainWindow::syncRegistration() {
 void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
     // Update the canvas only if it matches the currently selected client
     if (!clientInfo.getId().isEmpty() && clientInfo.getId() == m_selectedClient.getId()) {
-        // Check if this is the initial load (when canvas needs to be revealed from spinner)
-        bool needsCanvasUpdate = false;
+        qDebug() << "Updating screens for" << clientInfo.getMachineName();
         
-        // Initial load: selected client has no screens but incoming info has screens
-        if (m_selectedClient.getScreens().isEmpty() && !clientInfo.getScreens().isEmpty()) {
-            needsCanvasUpdate = true;
-            qDebug() << "Initial screen load for" << clientInfo.getMachineName();
-        }
-        // Screen count changed
-        else if (m_selectedClient.getScreens().size() != clientInfo.getScreens().size()) {
-            needsCanvasUpdate = true;
-            qDebug() << "Screen count changed for" << clientInfo.getMachineName();
-        }
-        // Screen dimensions changed
-        else {
-            const auto& oldScreens = m_selectedClient.getScreens();
-            const auto& newScreens = clientInfo.getScreens();
-            for (int i = 0; i < oldScreens.size() && i < newScreens.size(); ++i) {
-                if (oldScreens[i].width != newScreens[i].width || 
-                    oldScreens[i].height != newScreens[i].height ||
-                    oldScreens[i].x != newScreens[i].x ||
-                    oldScreens[i].y != newScreens[i].y) {
-                    needsCanvasUpdate = true;
-                    qDebug() << "Screen dimensions changed for" << clientInfo.getMachineName();
-                    break;
-                }
-            }
-        }
+        // Check if this is the initial load (when spinner needs to be stopped)
+        bool isInitialLoad = m_selectedClient.getScreens().isEmpty() && !clientInfo.getScreens().isEmpty();
         
         // Always update the selected client info
         m_selectedClient = clientInfo;
         
-        // Only update canvas if screens actually changed
-        if (needsCanvasUpdate) {
-            // Update screen canvas content
-            if (m_screenCanvas) {
-                m_screenCanvas->setScreens(clientInfo.getScreens());
-                m_screenCanvas->recenterWithMargin(33);
-                m_screenCanvas->setFocus(Qt::OtherFocusReason);
-            }
+        // Update screen canvas content seamlessly (no recentering, no fade effects)
+        if (m_screenCanvas) {
+            m_screenCanvas->setScreens(clientInfo.getScreens());
+            m_screenCanvas->setFocus(Qt::OtherFocusReason);
+        }
 
-            // Delegate reveal (spinner stop + canvas fade) to navigation manager
+        // Only reveal canvas on initial load (stop spinner, show canvas)
+        if (isInitialLoad) {
             if (m_navigationManager) {
                 m_navigationManager->revealCanvas();
             } else {
-                // Fallback if navigation manager not present (should not happen now)
+                // Fallback if navigation manager not present
                 if (m_canvasStack) m_canvasStack->setCurrentIndex(1);
             }
-        } else {
-            qDebug() << "Screen info update (no visual changes) for" << clientInfo.getMachineName();
         }
 
-        // Always update volume UI and client label (these don't cause visual flicker)
+        // Always update volume UI and client label
         if (m_volumeIndicator) {
             updateVolumeIndicator();
             m_volumeIndicator->show();
