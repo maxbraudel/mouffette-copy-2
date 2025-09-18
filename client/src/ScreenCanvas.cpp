@@ -36,6 +36,7 @@
 #include <QImageReader>
 #include "Theme.h" // for overlay colors
 #include <QSizePolicy>
+#include <QProgressBar>
 
 // Helper: relayout overlays for all media items so absolute panels (settings) stay pinned
 namespace {
@@ -51,20 +52,186 @@ static void relayoutAllMediaOverlays(QGraphicsScene* scene) {
 }
 
 ScreenCanvas::~ScreenCanvas() {
+    // Prevent any further UI refresh callbacks after this view is destroyed
+    ResizableMediaBase::setUploadChangedNotifier(nullptr);
     if (m_scene) {
         disconnect(m_scene, nullptr, this, nullptr);
     }
+    if (m_infoWidget) {
+        m_infoWidget->deleteLater();
+        m_infoWidget = nullptr;
+    }
 }
 
-// Info overlay removed
+void ScreenCanvas::maybeRefreshInfoOverlayOnSceneChanged() {
+    if (!m_scene) return;
+    auto recomputeAndRefreshIfNeeded = [this]() {
+        if (!m_scene) return;
+        int count = 0;
+        const auto itemsNow = m_scene->items();
+        for (QGraphicsItem* it : itemsNow) {
+            if (dynamic_cast<ResizableMediaBase*>(it)) ++count;
+        }
+        if (m_lastMediaItemCount == -1) { m_lastMediaItemCount = count; return; }
+        if (count != m_lastMediaItemCount) {
+            m_lastMediaItemCount = count;
+            refreshInfoOverlay();
+        }
+    };
+    // Do an immediate check (covers most cases)
+    recomputeAndRefreshIfNeeded();
+    // And schedule a microtask; some remove operations complete after the current event
+    QTimer::singleShot(0, this, [this, recomputeAndRefreshIfNeeded]() { recomputeAndRefreshIfNeeded(); });
+}
 
-// Info overlay removed
+void ScreenCanvas::initInfoOverlay() {
+    if (!viewport()) return;
+    if (!m_infoWidget) {
+        // Create a child widget of the viewport so it is entirely independent of scene transforms
+        m_infoWidget = new QWidget(viewport());
+        m_infoWidget->setAttribute(Qt::WA_StyledBackground, true);
+        m_infoWidget->setAutoFillBackground(true);
+        // Build stylesheet from theme colors
+        QColor c = gOverlayBackgroundColor;
+        const QString bg = QString("background-color: rgba(%1,%2,%3,%4); border-radius: %5px; color: white; font-size: 16px;")
+            .arg(c.red()).arg(c.green()).arg(c.blue()).arg(c.alpha())
+            .arg(gOverlayCornerRadiusPx);
+        m_infoWidget->setStyleSheet(bg);
+        // Baseline minimum width to avoid tiny panel before content exists
+        m_infoWidget->setMinimumWidth(380);
+        m_infoWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+        m_infoLayout = new QVBoxLayout(m_infoWidget);
+        m_infoLayout->setContentsMargins(20, 16, 20, 16);
+        m_infoLayout->setSpacing(6);
+        m_infoLayout->setSizeConstraint(QLayout::SetMinimumSize);
+        // Title
+        auto* title = new QLabel("Media list", m_infoWidget);
+        QFont tf = title->font(); tf.setBold(true); title->setFont(tf);
+        title->setStyleSheet("color: white; background: transparent;");
+        title->setAutoFillBackground(false);
+        title->setAttribute(Qt::WA_TranslucentBackground, true);
+        title->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+        m_infoLayout->addWidget(title);
+        m_infoWidget->hide(); // hidden until first layout
+    }
+    // Initial content and layout
+    refreshInfoOverlay();
+    layoutInfoOverlay();
+}
 
-// Info overlay removed
+void ScreenCanvas::scheduleInfoOverlayRefresh() {
+    if (m_infoRefreshQueued) return;
+    m_infoRefreshQueued = true;
+    QTimer::singleShot(0, this, [this]() {
+        m_infoRefreshQueued = false;
+        refreshInfoOverlay();
+    });
+}
 
-// Info overlay removed
+void ScreenCanvas::refreshInfoOverlay() {
+    if (!m_infoWidget || !m_infoLayout) return;
+    // Avoid intermediate paints while rebuilding; hide to prevent transient title-only state
+    const bool wasVisible = m_infoWidget->isVisible();
+    m_infoWidget->setUpdatesEnabled(false);
+    m_infoWidget->hide();
+    // Remove all rows except the first (title at index 0). Delete immediately to avoid duplicate content lingering this frame.
+    while (m_infoLayout->count() > 1) {
+        QLayoutItem* it = m_infoLayout->takeAt(1);
+        if (!it) break;
+        if (QWidget* w = it->widget()) { w->hide(); delete w; }
+        delete it;
+    }
+    // Collect media items
+    QList<ResizableMediaBase*> media;
+    if (m_scene) {
+        for (QGraphicsItem* it : m_scene->items()) {
+            if (auto* base = dynamic_cast<ResizableMediaBase*>(it)) media.append(base);
+        }
+    }
+    // Sort by z (topmost first)
+    std::sort(media.begin(), media.end(), [](ResizableMediaBase* a, ResizableMediaBase* b){ return a->zValue() > b->zValue(); });
 
-// Info overlay removed
+    auto humanSize = [](qint64 bytes) -> QString {
+        double b = static_cast<double>(bytes);
+        const char* units[] = {"B","KB","MB","GB"}; int u=0; while (b>=1024.0 && u<3){ b/=1024.0; ++u;} return QString::number(b, 'f', (u==0?0: (b<10?2:1))) + " " + units[u];
+    };
+
+    for (ResizableMediaBase* m : media) {
+        QString name = m->displayName();
+        QSize sz = m->baseSizePx();
+        QString dim = QString::number(sz.width()) + " x " + QString::number(sz.height()) + " px";
+        QString sizeStr = QStringLiteral("n/a");
+        QString src = m->sourcePath();
+        if (!src.isEmpty()) {
+            QFileInfo fi(src);
+            if (fi.exists() && fi.isFile()) sizeStr = humanSize(fi.size());
+        }
+        // Row: name
+        auto* nameLbl = new QLabel(name, m_infoWidget);
+        nameLbl->setStyleSheet("color: white; background: transparent;");
+        nameLbl->setAutoFillBackground(false);
+        nameLbl->setAttribute(Qt::WA_TranslucentBackground, true);
+        nameLbl->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+        m_infoLayout->addWidget(nameLbl);
+        // Row: upload status or progress
+        if (m->uploadState() == ResizableMediaBase::UploadState::Uploading) {
+            auto* bar = new QProgressBar(m_infoWidget);
+            bar->setRange(0, 100);
+            bar->setValue(m->uploadProgress());
+            bar->setTextVisible(false);
+            bar->setFixedHeight(10);
+            // Blue progress bar styling consistent with theme
+            bar->setStyleSheet("QProgressBar{background: rgba(255,255,255,0.15); border-radius: 5px;} QProgressBar::chunk{background: #2D8CFF; border-radius: 5px;}");
+            m_infoLayout->addWidget(bar);
+        } else {
+            auto* status = new QLabel(m->uploadState() == ResizableMediaBase::UploadState::Uploaded ? QStringLiteral("Uploaded") : QStringLiteral("Not uploaded"), m_infoWidget);
+            const char* color = (m->uploadState() == ResizableMediaBase::UploadState::Uploaded) ? "#2ecc71" : "#f39c12"; // green or orange
+            status->setStyleSheet(QString("color: %1; font-size: 14px; background: transparent;").arg(color));
+            status->setAutoFillBackground(false);
+            status->setAttribute(Qt::WA_TranslucentBackground, true);
+            status->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+            m_infoLayout->addWidget(status);
+        }
+        // Row: details smaller under status
+        auto* details = new QLabel(dim + QStringLiteral("  ·  ") + sizeStr, m_infoWidget);
+        details->setStyleSheet("color: rgba(255,255,255,0.85); font-size: 14px; background: transparent;");
+        details->setAutoFillBackground(false);
+        details->setAttribute(Qt::WA_TranslucentBackground, true);
+        details->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+        m_infoLayout->addWidget(details);
+    }
+
+    // Force layout recalculation and resize widget to fit content
+    if (m_infoLayout) {
+        m_infoLayout->invalidate();
+        m_infoLayout->activate();
+    }
+    m_infoWidget->ensurePolished();
+    m_infoWidget->updateGeometry();
+    m_infoWidget->adjustSize();
+    QSize preferred = m_infoLayout ? m_infoLayout->totalSizeHint() : m_infoWidget->sizeHint();
+    // Enforce a baseline minimum width, but do not cap maximum so it can grow with content
+    preferred.setWidth(std::max(preferred.width(), m_infoWidget->minimumWidth()));
+    m_infoWidget->setMinimumSize(preferred);
+    m_infoWidget->resize(preferred);
+    if (wasVisible) m_infoWidget->show(); else m_infoWidget->show();
+    m_infoWidget->setUpdatesEnabled(true);
+    m_infoWidget->repaint();
+    // Reposition once after resize
+    layoutInfoOverlay();
+    // In case the widget's final metrics settle after this event loop turn (common on first show or font/layout updates),
+    // schedule a one-shot re-anchor to avoid a transient displaced position after dropping media.
+    QTimer::singleShot(0, this, [this]() { layoutInfoOverlay(); });
+}
+
+void ScreenCanvas::layoutInfoOverlay() {
+    if (!m_infoWidget || !viewport()) return;
+    const int margin = 16;
+    const int w = m_infoWidget->width();
+    const int x = viewport()->width() - margin - w;
+    const int y = viewport()->height() - margin - m_infoWidget->height();
+    m_infoWidget->move(std::max(0, x), std::max(0, y));
+}
 
 ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     setAcceptDrops(true);
@@ -94,8 +261,8 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     m_nativePinchGuardTimer->setSingleShot(true);
     connect(m_nativePinchGuardTimer, &QTimer::timeout, this, [this]() { m_nativePinchActive = false; });
 
-    // On scene changes, relayout media overlays (info overlay removed)
-    connect(m_scene, &QGraphicsScene::changed, this, [this](const QList<QRectF>&){ relayoutAllMediaOverlays(m_scene); });
+    // On scene changes, re-anchor, and refresh the overlay only if media count changed
+    connect(m_scene, &QGraphicsScene::changed, this, [this](const QList<QRectF>&){ layoutInfoOverlay(); maybeRefreshInfoOverlayOnSceneChanged(); });
     
     // Set up screen border snapping callbacks for media items
     ResizableMediaBase::setScreenSnapCallback([this](const QPointF& pos, const QRectF& bounds, bool shift) {
@@ -105,7 +272,13 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
         return snapResizeToScreenBorders(scale, fixed, moving, base, shift);
     });
 
-    // Info overlay removed
+    // Initialize global info overlay (top-right)
+    initInfoOverlay();
+
+    // Refresh overlay when any media upload state changes (coalesce multiple changes)
+    ResizableMediaBase::setUploadChangedNotifier([this]() {
+        scheduleInfoOverlayRefresh();
+    });
 }
 
 void ScreenCanvas::setScreens(const QList<ScreenInfo>& screens) {
@@ -198,6 +371,7 @@ bool ScreenCanvas::event(QEvent* event) {
             m_lastMousePos = vpPos; // remember anchor
             zoomAroundViewportPos(vpPos, factor);
             relayoutAllMediaOverlays(m_scene);
+            layoutInfoOverlay();
             event->accept(); return true;
         }
     }
@@ -217,6 +391,7 @@ bool ScreenCanvas::viewportEvent(QEvent* event) {
             m_lastMousePos = vpPos; // remember anchor
             zoomAroundViewportPos(vpPos, factor);
             relayoutAllMediaOverlays(m_scene);
+            layoutInfoOverlay();
             event->accept();
             return true;
         }
@@ -241,6 +416,7 @@ bool ScreenCanvas::gestureEvent(QGestureEvent* event) {
             const qreal factor = pinch->scaleFactor();
             zoomAroundViewportPos(vpPos, factor);
             relayoutAllMediaOverlays(m_scene);
+            layoutInfoOverlay();
         }
         event->accept();
         return true;
@@ -268,7 +444,7 @@ void ScreenCanvas::keyPressEvent(QKeyEvent* event) {
                         delete base;
                     }
                 }
-                // overlay removed
+                refreshInfoOverlay();
             }
             event->accept();
             return;
@@ -476,7 +652,7 @@ void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
                 setTransform(t);
                 // Keep absolute panels pinned during pan
                 relayoutAllMediaOverlays(m_scene);
-                // overlay removed
+                layoutInfoOverlay();
             }
             m_lastPanPoint = event->pos();
             event->accept();
@@ -533,7 +709,7 @@ void ScreenCanvas::wheelEvent(QWheelEvent* event) {
         horizontalScrollBar()->setValue(horizontalScrollBar()->value() - delta.x());
         verticalScrollBar()->setValue(verticalScrollBar()->value() - delta.y());
         relayoutAllMediaOverlays(m_scene);
-    // overlay removed
+        layoutInfoOverlay();
         event->accept();
         return;
     }
@@ -544,7 +720,7 @@ void ScreenCanvas::resizeEvent(QResizeEvent* event) {
     QGraphicsView::resizeEvent(event);
     // Keep absolute panels pinned during viewport resizes
     relayoutAllMediaOverlays(m_scene);
-    // overlay removed
+    layoutInfoOverlay();
 }
 
 void ScreenCanvas::dragEnterEvent(QDragEnterEvent* event) {
@@ -630,7 +806,7 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
     }
     clearDragPreview(); if (m_dragCursorHidden) { viewport()->unsetCursor(); m_dragCursorHidden = false; }
     event->acceptProposedAction();
-    // overlay removed
+    refreshInfoOverlay();
 }
 
 void ScreenCanvas::ensureDragPreview(const QMimeData* mime) {

@@ -50,6 +50,7 @@ class SpinnerWidget; // forward declaration for custom loading spinner
 class QGraphicsOpacityEffect;
 class QPropertyAnimation;
 class QProcess; // fwd decl to avoid including in header
+class UploadManager; // new component for upload/unload feature
 class WatchManager;  // new component for watch/unwatch feature
 class ScreenNavigationManager; // manages page switching & loader UX
 // using QStackedWidget for canvas container switching
@@ -154,8 +155,9 @@ private:
     QLabel* m_volumeIndicator;
     SpinnerWidget* m_loadingSpinner;
     QPushButton* m_sendButton;
+    QPushButton* m_uploadButton;
     QPushButton* m_backButton;
-    QFont m_uploadButtonDefaultFont; // deprecated; no longer used
+    QFont m_uploadButtonDefaultFont;
     // Loader/content animations
     int m_loaderDelayMs = 1000;       // show spinner after this delay
     int m_loaderFadeDurationMs = 500; // fade-in duration for spinner (loader)
@@ -208,18 +210,27 @@ private:
     QTimer* m_volTimer = nullptr;        // polls in background
 #endif
 
-    // Upload feature removed: previously used members intentionally deleted
+    // Upload feature state
+    UploadManager* m_uploadManager;
+    // Track currently uploading media by unique mediaId (no more path/name-based tracking)
+    QSet<QString> m_mediaIdsBeingUploaded;
+    bool m_uploadSignalsConnected = false;
+    // Map upload fileId <-> mediaId for per-file progress tracking
+    QHash<QString, QString> m_mediaIdByFileId;
+    // Direct mapping from fileId to media item pointer for efficient progress updates
+    QHash<QString, ResizableMediaBase*> m_itemByFileId;
     WatchManager* m_watchManager = nullptr;   // extracted watch logic
     ScreenNavigationManager* m_navigationManager = nullptr; // new navigation component
     // Canvas reveal state: ensure fade-in/recenter happen only once per selected client
     bool m_canvasRevealedForCurrentClient = false;
 
 private slots:
+    void onUploadButtonClicked();
     void onGenericMessageReceived(const QJsonObject& message);
-    // Upload feature removed
+    // Upload-specific progress/finish now managed by UploadManager
 
 private:
-    // Upload helper removed
+    void updateIndividualProgressFromServer(int globalPercent, int filesCompleted, int totalFiles);
 };
 
 #endif // MAINWINDOW_H

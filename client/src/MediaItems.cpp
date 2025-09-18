@@ -38,7 +38,7 @@ int ResizableMediaBase::cornerRadiusOfMediaOverlays = 6;
 double ResizableMediaBase::s_sceneGridUnit = 1.0; // default: 1 scene unit == 1 pixel
 std::function<QPointF(const QPointF&, const QRectF&, bool)> ResizableMediaBase::s_screenSnapCallback;
 std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> ResizableMediaBase::s_resizeSnapCallback;
-// Upload feature removed: notifier deleted
+std::function<void()> ResizableMediaBase::s_uploadChangedNotifier = nullptr;
 
 QString ResizableMediaBase::displayName() const {
     if (!m_filename.isEmpty()) return m_filename;

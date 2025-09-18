@@ -105,7 +105,12 @@ private:
     void ensureZOrder();
     void debugLogScreenSizes() const; // helper to verify screen rect pixel parity
     void recreateRemoteCursorItem();
-    // Info overlay removed
+    // Global top-right info overlay (lists media files)
+    void initInfoOverlay();
+    void refreshInfoOverlay();
+    void scheduleInfoOverlayRefresh();
+    void layoutInfoOverlay();
+    void maybeRefreshInfoOverlayOnSceneChanged();
     
     // Snap-to-screen helpers
     QPointF snapToScreenBorders(const QPointF& scenePos, const QRectF& mediaBounds, bool shiftPressed) const;
@@ -171,7 +176,11 @@ private:
     void assignNextZValue(QGraphicsItem* item);
     QList<QGraphicsItem*> getMediaItemsSortedByZ() const;
 
-    // Info overlay removed
+    // Info overlay widgets (viewport child, independent from scene transforms)
+    QWidget* m_infoWidget = nullptr;       // panel widget parented to viewport()
+    QVBoxLayout* m_infoLayout = nullptr;
+    bool m_infoRefreshQueued = false;
+    int m_lastMediaItemCount = -1; // cache to detect add/remove
 };
 
 #endif // SCREENCANVAS_H

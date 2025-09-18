@@ -14,14 +14,35 @@ WebSocketClient::WebSocketClient(QObject *parent)
     connect(m_reconnectTimer, &QTimer::timeout, this, &WebSocketClient::attemptReconnect);
 }
 
-// Upload channel removed
+void WebSocketClient::onUploadTextMessageReceived(const QString& message) {
+    QJsonParseError error;
+    QJsonDocument doc = QJsonDocument::fromJson(message.toUtf8(), &error);
+    if (error.error != QJsonParseError::NoError) {
+        qWarning() << "Failed to parse JSON message on upload channel:" << error.errorString();
+        return;
+    }
+    QJsonObject obj = doc.object();
+    const QString type = obj.value("type").toString();
+    if (type == "welcome") {
+        // Keep a separate client id for the upload channel; do not override control id
+        m_uploadClientId = obj.value("clientId").toString();
+        qDebug() << "Upload channel received client ID:" << m_uploadClientId;
+        return;
+    }
+    // Reuse the same message handler for upload progress/finished/unloaded
+    handleMessage(obj);
+}
 
 WebSocketClient::~WebSocketClient() {
     if (m_webSocket) {
         m_webSocket->close();
         m_webSocket->deleteLater();
     }
-    // Upload socket removed
+    if (m_uploadSocket) {
+        m_uploadSocket->close();
+        m_uploadSocket->deleteLater();
+        m_uploadSocket = nullptr;
+    }
 }
 
 void WebSocketClient::connectToServer(const QString& serverUrl) {
@@ -55,16 +76,66 @@ void WebSocketClient::disconnect() {
             m_webSocket->close();
         }
     }
-    // Upload socket removed
+    if (m_uploadSocket) {
+        if (m_uploadSocket->state() == QAbstractSocket::ConnectedState || m_uploadSocket->state() == QAbstractSocket::ConnectingState) {
+            m_uploadSocket->close();
+        }
+    }
 }
 
-// Upload channel removed
+void WebSocketClient::onUploadConnected() {
+    qDebug() << "Upload channel connected";
+}
+
+void WebSocketClient::onUploadDisconnected() {
+    qDebug() << "Upload channel disconnected";
+}
+
+void WebSocketClient::onUploadError(QAbstractSocket::SocketError error) {
+    QString errorString;
+    switch (error) {
+        case QAbstractSocket::ConnectionRefusedError: errorString = "Connection refused"; break;
+        case QAbstractSocket::RemoteHostClosedError: errorString = "Remote host closed connection"; break;
+        case QAbstractSocket::HostNotFoundError: errorString = "Host not found"; break;
+        case QAbstractSocket::SocketTimeoutError: errorString = "Connection timeout"; break;
+        default: errorString = QString("Socket error: %1").arg(error);
+    }
+    qWarning() << "Upload WebSocket error:" << errorString;
+}
 
 bool WebSocketClient::isConnected() const {
     return m_webSocket && m_webSocket->state() == QAbstractSocket::ConnectedState;
 }
 
-// Upload channel removed
+bool WebSocketClient::isUploadChannelConnected() const {
+    return m_uploadSocket && m_uploadSocket->state() == QAbstractSocket::ConnectedState;
+}
+
+bool WebSocketClient::ensureUploadChannel() {
+    if (isUploadChannelConnected()) return true;
+    if (!m_uploadSocket) {
+        m_uploadSocket = new QWebSocket();
+        connect(m_uploadSocket, &QWebSocket::connected, this, &WebSocketClient::onUploadConnected);
+        connect(m_uploadSocket, &QWebSocket::disconnected, this, &WebSocketClient::onUploadDisconnected);
+        connect(m_uploadSocket, &QWebSocket::errorOccurred, this, &WebSocketClient::onUploadError);
+        // Use a dedicated slot so the upload channel's 'welcome' doesn't override m_clientId
+        connect(m_uploadSocket, &QWebSocket::textMessageReceived, this, &WebSocketClient::onUploadTextMessageReceived);
+    }
+    // Open same server URL with a hint that this is upload channel
+    QUrl url(m_serverUrl);
+    QUrlQuery q(url);
+    q.addQueryItem("channel", "upload");
+    url.setQuery(q);
+    m_uploadSocket->open(url);
+    return true;
+}
+
+void WebSocketClient::closeUploadChannel() {
+    if (!m_uploadSocket) return;
+    if (m_uploadSocket->state() == QAbstractSocket::ConnectedState || m_uploadSocket->state() == QAbstractSocket::ConnectingState) {
+        m_uploadSocket->close();
+    }
+}
 
 void WebSocketClient::registerClient(const QString& machineName, const QString& platform, const QList<ScreenInfo>& screens, int volumePercent) {
     if (!isConnected()) {
@@ -156,8 +227,96 @@ void WebSocketClient::sendCursorUpdate(int globalX, int globalY) {
     sendMessage(msg);
 }
 
-// Upload senders removed
-// Upload-related methods removed
+void WebSocketClient::sendUploadStart(const QString& targetClientId, const QJsonArray& filesManifest, const QString& uploadId) {
+    if (!(isConnected() || isUploadChannelConnected())) return;
+    QJsonObject msg;
+    msg["type"] = "upload_start";
+    msg["targetClientId"] = targetClientId;
+    msg["uploadId"] = uploadId;
+    msg["files"] = filesManifest;
+    if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
+    sendMessageUpload(msg);
+}
+
+void WebSocketClient::sendUploadChunk(const QString& targetClientId, const QString& uploadId, const QString& fileId, int chunkIndex, const QByteArray& dataBase64) {
+    if (!(isConnected() || isUploadChannelConnected())) return;
+    if (m_canceledUploads.contains(uploadId)) return; // drop silently
+    QJsonObject msg;
+    msg["type"] = "upload_chunk";
+    msg["targetClientId"] = targetClientId;
+    msg["uploadId"] = uploadId;
+    msg["fileId"] = fileId;
+    msg["chunkIndex"] = chunkIndex;
+    // Ensure Base64 encoded string (if caller passed raw bytes, encode here)
+    QByteArray payload = dataBase64;
+    // Heuristic: contains non-base64 characters? encode
+    if (!payload.isEmpty() && (payload.contains('\n') || payload.contains('{') || payload.contains('\0'))) {
+        payload = payload.toBase64();
+    }
+    msg["data"] = QString::fromUtf8(payload);
+    if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
+    sendMessageUpload(msg);
+}
+
+void WebSocketClient::sendUploadComplete(const QString& targetClientId, const QString& uploadId) {
+    if (!(isConnected() || isUploadChannelConnected())) return;
+    if (m_canceledUploads.contains(uploadId)) return; // already canceled
+    QJsonObject msg;
+    msg["type"] = "upload_complete";
+    msg["targetClientId"] = targetClientId;
+    msg["uploadId"] = uploadId;
+    if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
+    sendMessageUpload(msg);
+}
+
+void WebSocketClient::sendUploadAbort(const QString& targetClientId, const QString& uploadId, const QString& reason) {
+    if (!(isConnected() || isUploadChannelConnected())) return;
+    m_canceledUploads.insert(uploadId);
+    QJsonObject msg;
+    msg["type"] = "upload_abort";
+    msg["targetClientId"] = targetClientId;
+    msg["uploadId"] = uploadId;
+    if (!reason.isEmpty()) msg["reason"] = reason;
+    if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
+    sendMessageUpload(msg);
+}
+
+void WebSocketClient::sendUnloadMedia(const QString& targetClientId) {
+    if (!isConnected()) return;
+    QJsonObject msg;
+    msg["type"] = "unload_media";
+    msg["targetClientId"] = targetClientId;
+    sendMessage(msg);
+}
+
+void WebSocketClient::notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent, int filesCompleted, int totalFiles) {
+    if (!isConnected()) return;
+    QJsonObject msg;
+    msg["type"] = "upload_progress";
+    msg["senderClientId"] = senderClientId;
+    msg["uploadId"] = uploadId;
+    msg["percent"] = percent;
+    msg["filesCompleted"] = filesCompleted;
+    msg["totalFiles"] = totalFiles;
+    sendMessage(msg);
+}
+
+void WebSocketClient::notifyUploadFinishedToSender(const QString& senderClientId, const QString& uploadId) {
+    if (!isConnected()) return;
+    QJsonObject msg;
+    msg["type"] = "upload_finished";
+    msg["senderClientId"] = senderClientId;
+    msg["uploadId"] = uploadId;
+    sendMessage(msg);
+}
+
+void WebSocketClient::notifyUnloadedToSender(const QString& senderClientId) {
+    if (!isConnected()) return;
+    QJsonObject msg;
+    msg["type"] = "unloaded";
+    msg["senderClientId"] = senderClientId;
+    sendMessage(msg);
+}
 
 void WebSocketClient::onConnected() {
     qDebug() << "Connected to server";
@@ -239,7 +398,7 @@ void WebSocketClient::attemptReconnect() {
 void WebSocketClient::handleMessage(const QJsonObject& message) {
     QString type = message["type"].toString();
     // Suppress noisy logs for high-frequency message types
-    if (type != "cursor_update") {
+    if (type != "upload_progress" && type != "cursor_update") {
         qDebug() << "Received message type:" << type;
     }
     
@@ -286,7 +445,20 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         const int y = message.value("y").toInt();
         emit cursorPositionReceived(targetId, x, y);
     }
-    // Upload-related messages removed
+    else if (type == "upload_progress") {
+        const QString uploadId = message.value("uploadId").toString();
+        const int percent = message.value("percent").toInt();
+        const int filesCompleted = message.value("filesCompleted").toInt();
+        const int totalFiles = message.value("totalFiles").toInt();
+        emit uploadProgressReceived(uploadId, percent, filesCompleted, totalFiles);
+    }
+    else if (type == "upload_finished") {
+        const QString uploadId = message.value("uploadId").toString();
+        emit uploadFinishedReceived(uploadId);
+    }
+    else if (type == "unloaded") {
+        emit unloadedReceived();
+    }
     else {
         // Forward unknown messages
         emit messageReceived(message);
@@ -304,12 +476,21 @@ void WebSocketClient::sendMessage(const QJsonObject& message) {
     m_webSocket->sendTextMessage(jsonString);
 }
 
-// Upload channel removed
+void WebSocketClient::sendMessageUpload(const QJsonObject& message) {
+    // Prefer upload channel if connected; otherwise use control channel as fallback
+    if (isUploadChannelConnected()) {
+        QJsonDocument doc(message);
+        QString jsonString = doc.toJson(QJsonDocument::Compact);
+        m_uploadSocket->sendTextMessage(jsonString);
+        return;
+    }
+    // Fallback
+    sendMessage(message);
+}
 
 void WebSocketClient::setConnectionStatus(const QString& status) {
     if (m_connectionStatus != status) {
         m_connectionStatus = status;
         qDebug() << "Connection status changed to:" << status;
-        emit connectionStatusChanged(m_connectionStatus);
     }
 }
