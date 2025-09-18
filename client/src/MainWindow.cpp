@@ -945,8 +945,11 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
     // Update the canvas only if it matches the currently selected client
     if (!clientInfo.getId().isEmpty() && clientInfo.getId() == m_selectedClient.getId()) {
         // Check if screen info has actually changed to avoid unnecessary canvas refresh
+        // Also handle the case where we're loading screens for the first time (initial load should always reveal canvas)
         bool screensChanged = (m_selectedClient.getScreens().size() != clientInfo.getScreens().size());
-        if (!screensChanged) {
+        bool isInitialLoad = m_selectedClient.getScreens().isEmpty() && !clientInfo.getScreens().isEmpty();
+        
+        if (!screensChanged && !isInitialLoad) {
             const auto& oldScreens = m_selectedClient.getScreens();
             const auto& newScreens = clientInfo.getScreens();
             for (int i = 0; i < oldScreens.size() && i < newScreens.size(); ++i) {
@@ -960,8 +963,8 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
             }
         }
         
-        if (screensChanged) {
-            qDebug() << "Updating canvas with fresh screens for" << clientInfo.getMachineName();
+        if (screensChanged || isInitialLoad) {
+            qDebug() << "Updating canvas with" << (isInitialLoad ? "initial" : "fresh") << "screens for" << clientInfo.getMachineName();
             m_selectedClient = clientInfo; // keep selected client in sync
             // Update screen canvas content
             if (m_screenCanvas) {
