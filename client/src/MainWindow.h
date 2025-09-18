@@ -12,7 +12,6 @@
 #include <QScreen>
 #include <QApplication>
 #include <QSystemTrayIcon>
-#include <QSet>
 #include <QCloseEvent>
 #include <QResizeEvent>
 #include <QScrollArea>
@@ -42,9 +41,9 @@ class QMenu;
 QT_END_NAMESPACE
 class QMimeData; // fwd declare for drag preview helpers
 class QMediaPlayer;
-class QListWidgetItem;
-class OverlayPanel;
-class ResizableMediaBase;
+class QVideoSink;
+class QAudioOutput;
+class QFile;
 
 class SpinnerWidget; // forward declaration for custom loading spinner
 class QGraphicsOpacityEffect;
@@ -211,14 +210,7 @@ private:
 #endif
 
     // Upload feature state
-    UploadManager* m_uploadManager;
-    // Track currently uploading media by unique mediaId (no more path/name-based tracking)
-    QSet<QString> m_mediaIdsBeingUploaded;
-    bool m_uploadSignalsConnected = false;
-    // Map upload fileId <-> mediaId for per-file progress tracking
-    QHash<QString, QString> m_mediaIdByFileId;
-    // Direct mapping from fileId to media item pointer for efficient progress updates
-    QHash<QString, ResizableMediaBase*> m_itemByFileId;
+    UploadManager* m_uploadManager = nullptr; // encapsulates all upload logic
     WatchManager* m_watchManager = nullptr;   // extracted watch logic
     ScreenNavigationManager* m_navigationManager = nullptr; // new navigation component
 
@@ -226,9 +218,6 @@ private slots:
     void onUploadButtonClicked();
     void onGenericMessageReceived(const QJsonObject& message);
     // Upload-specific progress/finish now managed by UploadManager
-
-private:
-    void updateIndividualProgressFromServer(int globalPercent, int filesCompleted, int totalFiles);
 };
 
 #endif // MAINWINDOW_H

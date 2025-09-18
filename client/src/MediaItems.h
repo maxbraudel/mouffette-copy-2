@@ -3,7 +3,6 @@
 
 // Qt core/graphics includes
 #include <QGraphicsItem>
-#include <QUuid>
 #include <QGraphicsRectItem>
 #include <QtSvgWidgets/QGraphicsSvgItem>
 #include <QPixmap>
@@ -31,26 +30,15 @@ class MediaSettingsPanel;
 // Base resizable media item (image/video) providing selection chrome, resize handles, and overlay panels.
 class ResizableMediaBase : public QGraphicsItem {
 public:
-    enum class UploadState { NotUploaded, Uploading, Uploaded };
     ~ResizableMediaBase() override;
     explicit ResizableMediaBase(const QSize& baseSizePx, int visualSizePx, int selectionSizePx, const QString& filename = QString());
 
     void setSourcePath(const QString& p) { m_sourcePath = p; }
     QString sourcePath() const { return m_sourcePath; }
-    // Stable unique identifier for this media item (persists across uploads)
-    QString mediaId() const { return m_mediaId; }
     // Display name shown in overlays: filename if set, otherwise derived from sourcePath
     QString displayName() const;
     // Native media base size in pixels (unscaled)
     QSize baseSizePx() const { return m_baseSize; }
-
-    // Upload status API (non-QObject notification via static callback)
-    UploadState uploadState() const { return m_uploadState; }
-    int uploadProgress() const { return m_uploadProgress; } // 0..100 when Uploading
-    void setUploadNotUploaded() { m_uploadState = UploadState::NotUploaded; m_uploadProgress = 0; notifyUploadChanged(); }
-    void setUploadUploading(int progress) { m_uploadState = UploadState::Uploading; m_uploadProgress = std::clamp(progress, 0, 100); notifyUploadChanged(); }
-    void setUploadUploaded() { m_uploadState = UploadState::Uploaded; m_uploadProgress = 100; notifyUploadChanged(); }
-    static void setUploadChangedNotifier(std::function<void()> cb) { s_uploadChangedNotifier = std::move(cb); }
 
     static void setHeightOfMediaOverlaysPx(int px); // global override height (px) for overlays
     static int  getHeightOfMediaOverlaysPx();
@@ -102,8 +90,7 @@ protected:
     int m_visualSize = 8;      // display size of handles (px)
     int m_selectionSize = 12;  // hit zone size (px)
     QString m_sourcePath;      // original path if any
-    QString m_filename;
-    QString m_mediaId; // persistent unique id for the canvas item
+    QString m_filename;        // display name
     std::unique_ptr<OverlayPanel> m_topPanel;
     std::unique_ptr<OverlayPanel> m_bottomPanel;
     OverlayStyle m_overlayStyle;
@@ -136,10 +123,6 @@ protected:
     void hoverLeaveEvent(QGraphicsSceneHoverEvent* event) override;
 
 private:
-    void notifyUploadChanged() { if (s_uploadChangedNotifier) s_uploadChangedNotifier(); }
-    static std::function<void()> s_uploadChangedNotifier;
-    UploadState m_uploadState = UploadState::NotUploaded;
-    int m_uploadProgress = 0;
     void relayoutIfNeeded(); // helper to keep overlays positioned (unused externally)
     static double s_sceneGridUnit;
     static std::function<QPointF(const QPointF&, const QRectF&, bool)> s_screenSnapCallback;

@@ -29,8 +29,6 @@ class QResizeEvent;
 class ScreenCanvas : public QGraphicsView {
     Q_OBJECT
 public:
-    ~ScreenCanvas() override;
-public:
     explicit ScreenCanvas(QWidget* parent = nullptr);
     void setScreens(const QList<ScreenInfo>& screens);
     void clearScreens();
@@ -108,7 +106,6 @@ private:
     // Global top-right info overlay (lists media files)
     void initInfoOverlay();
     void refreshInfoOverlay();
-    void scheduleInfoOverlayRefresh();
     void layoutInfoOverlay();
     void maybeRefreshInfoOverlayOnSceneChanged();
     
@@ -179,7 +176,6 @@ private:
     // Info overlay widgets (viewport child, independent from scene transforms)
     QWidget* m_infoWidget = nullptr;       // panel widget parented to viewport()
     QVBoxLayout* m_infoLayout = nullptr;
-    bool m_infoRefreshQueued = false;
     int m_lastMediaItemCount = -1; // cache to detect add/remove
 };
 
