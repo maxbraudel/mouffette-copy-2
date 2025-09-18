@@ -79,6 +79,7 @@
 #include <QObject>
 #include <atomic>
 #include <thread>
+#include <optional>
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -108,6 +109,29 @@ constexpr qreal Z_SCREENS = -1000.0;
 constexpr qreal Z_MEDIA_BASE = 1.0;
 constexpr qreal Z_REMOTE_CURSOR = 10000.0;
 constexpr qreal Z_SCENE_OVERLAY = 12000.0; // above all scene content
+}
+
+void MainWindow::setRemoteConnectionStatus(const QString& status) {
+    if (!m_remoteConnectionStatusLabel) return;
+    const QString up = status.toUpper();
+    m_remoteConnectionStatusLabel->setText(up);
+    if (up == "CONNECTED") {
+        m_remoteConnectionStatusLabel->setStyleSheet(
+            "QLabel { padding: 2px 6px; border: 1px solid #2E7D32; border-radius: 6px; "
+            "background-color: rgba(76,175,80,0.15); color: #2E7D32; font-weight: bold; }"
+        );
+    } else if (up == "NETWORK ERROR" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
+        m_remoteConnectionStatusLabel->setStyleSheet(
+            "QLabel { padding: 2px 6px; border: 1px solid #FB8C00; border-radius: 6px; "
+            "background-color: rgba(255,152,0,0.15); color: #FB8C00; font-weight: bold; }"
+        );
+    } else {
+        // DISCONNECTED or any other
+        m_remoteConnectionStatusLabel->setStyleSheet(
+            "QLabel { padding: 2px 6px; border: 1px solid #E53935; border-radius: 6px; "
+            "background-color: rgba(244,67,54,0.15); color: #E53935; font-weight: bold; }"
+        );
+    }
 }
 
 MainWindow::MainWindow(QWidget* parent)
@@ -285,6 +309,8 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     m_navigationManager->showScreenView(client);
     // Update upload target
     m_uploadManager->setTargetClientId(client.getId());
+    // Until we confirm via client list or screens_info, assume disconnected
+    setRemoteConnectionStatus("DISCONNECTED");
 }
 
 void MainWindow::showClientListView() {
@@ -483,9 +509,12 @@ void MainWindow::setupUI() {
     m_backButton->hide(); // Initially hidden, shown only on screen view
     connect(m_backButton, &QPushButton::clicked, this, &MainWindow::onBackToClientListClicked);
     
-    // Status label (no "Status:")
+    // Status label (boxed style)
     m_connectionStatusLabel = new QLabel("DISCONNECTED");
-    m_connectionStatusLabel->setStyleSheet("QLabel { color: red; font-weight: bold; }");
+    m_connectionStatusLabel->setStyleSheet(
+        "QLabel { padding: 2px 6px; border: 1px solid #E53935; border-radius: 6px; "
+        "background-color: rgba(244,67,54,0.15); color: #E53935; font-weight: bold; }"
+    );
 
     // Enable/Disable toggle button with fixed width (left of Settings)
     m_connectToggleButton = new QPushButton("Disable");
@@ -660,12 +689,24 @@ void MainWindow::createScreenViewPage() {
     m_clientNameLabel->setStyleSheet("QLabel { font-size: 16px; font-weight: bold; color: palette(text); }");
     m_clientNameLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
 
+    // Remote connection status (to the right of hostname)
+    m_remoteConnectionStatusLabel = new QLabel("DISCONNECTED");
+    m_remoteConnectionStatusLabel->setStyleSheet(
+        "QLabel { padding: 2px 6px; border: 1px solid #E53935; border-radius: 6px; "
+        "background-color: rgba(244,67,54,0.15); color: #E53935; font-weight: bold; }"
+    );
+    m_remoteConnectionStatusLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    m_remoteConnectionStatusLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+
     m_volumeIndicator = new QLabel("🔈 --");
     m_volumeIndicator->setStyleSheet("QLabel { font-size: 16px; color: palette(text); font-weight: bold; }");
     m_volumeIndicator->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_volumeIndicator->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
 
     headerLayout->addWidget(m_clientNameLabel, 0, Qt::AlignLeft);
+    // Tighter gap between hostname and remote status (visually matching the top bar)
+    headerLayout->addSpacing(6);
+    headerLayout->addWidget(m_remoteConnectionStatusLabel, 0, Qt::AlignLeft);
     headerLayout->addStretch();
     headerLayout->addWidget(m_volumeIndicator, 0, Qt::AlignRight);
     headerLayout->setContentsMargins(0, 0, 0, 0);
@@ -1035,6 +1076,25 @@ void MainWindow::onConnected() {
     // Sync this client's info with the server
     syncRegistration();
     
+    // If we were on a client's canvas page when the connection dropped,
+    // re-request that client's screens and re-establish watch so content returns
+    // when data is received.
+    if (m_navigationManager && m_navigationManager->isOnScreenView()) {
+        // Ensure the canvas will reveal again on fresh screens
+        m_canvasRevealedForCurrentClient = false;
+        const QString selId = m_selectedClient.getId();
+        if (!selId.isEmpty() && m_webSocketClient && m_webSocketClient->isConnected()) {
+            // Indicate we're attempting to reach the remote again
+            setRemoteConnectionStatus("CONNECTING...");
+            m_webSocketClient->requestScreens(selId);
+            if (m_watchManager) {
+                // Ensure a clean state after reconnect, then start watching the selected client again
+                m_watchManager->unwatchIfAny();
+                m_watchManager->toggleWatch(selId);
+            }
+        }
+    }
+
     statusBar()->showMessage("Connected to server", 3000);
     
     // Show tray notification
@@ -1043,6 +1103,13 @@ void MainWindow::onConnected() {
 
 void MainWindow::onDisconnected() {
     setUIEnabled(false);
+    // If user is currently on a client's canvas page, immediately switch the canvas
+    // area to a loading state and clear any displayed content/overlays.
+    if (m_navigationManager && m_navigationManager->isOnScreenView()) {
+        m_navigationManager->enterLoadingStateImmediate();
+        // Our local network just dropped; remote status is unknown due to network error
+        setRemoteConnectionStatus("NETWORK ERROR");
+    }
     
     // Start smart reconnection if client is enabled and not manually disconnected
     if (!m_userDisconnected) {
@@ -1088,6 +1155,61 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
                 .arg(newClients)
                 .arg(newClients == 1 ? "" : "s");
             showTrayMessage("New Clients Available", message);
+        }
+    }
+
+    // Update remote status and canvas behavior if we're on screen view:
+    // Handle remote reconnect where the server assigns a NEW clientId.
+    // Strategy:
+    // 1) If selected client's id is present -> mark CONNECTED. If we're on loader, request screens + watch.
+    // 2) Else, try to match by machineName (and platform). If found -> treat as same device, switch selection to new id,
+    //    reset reveal flag, show screen view for it, request screens + watch.
+    // 3) Else -> mark DISCONNECTED and keep loader.
+    if (m_navigationManager && m_navigationManager->isOnScreenView() && !m_selectedClient.getId().isEmpty()) {
+        const QString selId = m_selectedClient.getId();
+        const QString selName = m_selectedClient.getMachineName();
+        const QString selPlatform = m_selectedClient.getPlatform();
+
+        const auto findById = [&clients](const QString& id) -> std::optional<ClientInfo> {
+            for (const auto& c : clients) { if (c.getId() == id) return c; }
+            return std::nullopt;
+        };
+        const auto findByNamePlatform = [&clients](const QString& name, const QString& platform) -> std::optional<ClientInfo> {
+            for (const auto& c : clients) {
+                if (c.getMachineName().compare(name, Qt::CaseInsensitive) == 0 && c.getPlatform() == platform) return c;
+            }
+            return std::nullopt;
+        };
+
+        auto byId = findById(selId);
+        if (byId.has_value()) {
+            setRemoteConnectionStatus("CONNECTED");
+            // Only force a refresh if the canvas is currently in loader state.
+            if (m_canvasStack && m_canvasStack->currentIndex() == 0 && m_webSocketClient && m_webSocketClient->isConnected()) {
+                m_canvasRevealedForCurrentClient = false;
+                m_webSocketClient->requestScreens(selId);
+                if (m_watchManager) { m_watchManager->unwatchIfAny(); m_watchManager->toggleWatch(selId); }
+            }
+        } else {
+            auto byName = findByNamePlatform(selName, selPlatform);
+            if (byName.has_value()) {
+                // Remote reconnected with a new id: switch selection and re-enter screen view for new id
+                m_selectedClient = byName.value();
+                if (m_uploadManager) m_uploadManager->setTargetClientId(m_selectedClient.getId());
+                m_canvasRevealedForCurrentClient = false;
+                // Update the screen view context to the new client id (also ensures loader state is consistent)
+                showScreenView(m_selectedClient);
+                setRemoteConnectionStatus("CONNECTING...");
+                if (m_webSocketClient && m_webSocketClient->isConnected()) {
+                    m_webSocketClient->requestScreens(m_selectedClient.getId());
+                }
+                if (m_watchManager) { m_watchManager->unwatchIfAny(); m_watchManager->toggleWatch(m_selectedClient.getId()); }
+            } else {
+                setRemoteConnectionStatus("DISCONNECTED");
+                // Remote client went away while on canvas: unload and show loader immediately
+                m_navigationManager->enterLoadingStateImmediate();
+                m_canvasRevealedForCurrentClient = false;
+            }
         }
     }
 }
@@ -1150,24 +1272,21 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
         // Update screen canvas content
         if (m_screenCanvas) {
             m_screenCanvas->setScreens(clientInfo.getScreens());
-            // Preserve user's current zoom/pan; do not recenter on periodic updates
-            // Focus is applied once on initial reveal
-        }
-
-        // Reveal (spinner stop + canvas fade) only once per selected client
-        if (!m_canvasRevealedForCurrentClient) {
-            if (m_navigationManager) {
-                m_navigationManager->revealCanvas();
-            } else if (m_canvasStack) {
-                // Fallback if navigation manager not present
-                m_canvasStack->setCurrentIndex(1);
+            // Only trigger reveal/fade if the canvas is currently hidden (spinner shown)
+            bool canvasHidden = (m_canvasStack && m_canvasStack->currentIndex() == 0);
+            if (!m_canvasRevealedForCurrentClient && canvasHidden) {
+                // On first reveal for the selected client, do a gentle recenter and show canvas
+                if (m_navigationManager) {
+                    m_navigationManager->revealCanvas();
+                } else if (m_canvasStack) {
+                    m_canvasStack->setCurrentIndex(1);
+                }
+                if (m_screenCanvas) {
+                    m_screenCanvas->recenterWithMargin(33);
+                    m_screenCanvas->setFocus(Qt::OtherFocusReason);
+                }
+                m_canvasRevealedForCurrentClient = true;
             }
-            // Apply initial recenter and focus only on first reveal to give a good starting view
-            if (m_screenCanvas) {
-                m_screenCanvas->recenterWithMargin(33);
-                m_screenCanvas->setFocus(Qt::OtherFocusReason);
-            }
-            m_canvasRevealedForCurrentClient = true;
         }
 
         // Update volume UI
@@ -1175,6 +1294,9 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
             updateVolumeIndicator();
             m_volumeIndicator->show();
         }
+
+        // Remote responded with data: status is connected
+        setRemoteConnectionStatus("CONNECTED");
 
         // Refresh client label
         if (m_clientNameLabel)
@@ -1399,11 +1521,20 @@ void MainWindow::updateConnectionStatus() {
     m_connectionStatusLabel->setText(status.toUpper());
     
     if (status == "Connected") {
-        m_connectionStatusLabel->setStyleSheet("QLabel { color: green; font-weight: bold; }");
+        m_connectionStatusLabel->setStyleSheet(
+            "QLabel { padding: 2px 6px; border: 1px solid #2E7D32; border-radius: 6px; "
+            "background-color: rgba(76,175,80,0.15); color: #2E7D32; font-weight: bold; }"
+        );
     } else if (status.startsWith("Connecting") || status.startsWith("Reconnecting")) {
-        m_connectionStatusLabel->setStyleSheet("QLabel { color: orange; font-weight: bold; }");
+        m_connectionStatusLabel->setStyleSheet(
+            "QLabel { padding: 2px 6px; border: 1px solid #FB8C00; border-radius: 6px; "
+            "background-color: rgba(255,152,0,0.15); color: #FB8C00; font-weight: bold; }"
+        );
     } else {
-        m_connectionStatusLabel->setStyleSheet("QLabel { color: red; font-weight: bold; }");
+        m_connectionStatusLabel->setStyleSheet(
+            "QLabel { padding: 2px 6px; border: 1px solid #E53935; border-radius: 6px; "
+            "background-color: rgba(244,67,54,0.15); color: #E53935; font-weight: bold; }"
+        );
     }
 }
 

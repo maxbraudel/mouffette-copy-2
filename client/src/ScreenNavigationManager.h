@@ -36,6 +36,10 @@ public:
     void showClientList();
     // Called when screens data has arrived and we can display the canvas
     void revealCanvas();
+    // Immediately switch the canvas area to a loading state (spinner visible,
+    // canvas and volume overlays hidden). Intended for connection loss while
+    // on the screen view so the UI reflects the disconnected state.
+    void enterLoadingStateImmediate();
 
     bool isOnScreenView() const;
     QString currentClientId() const { return m_currentClientId; }

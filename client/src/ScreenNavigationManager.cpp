@@ -2,6 +2,7 @@
 #include "ScreenNavigationManager.h"
 #include "ClientInfo.h"
 #include "SpinnerWidget.h"
+#include "ScreenCanvas.h"
 #include <QStackedWidget>
 #include <QPushButton>
 #include <QTimer>
@@ -68,6 +69,30 @@ void ScreenNavigationManager::revealCanvas() {
     stopSpinner();
     if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(1); // show canvas
     fadeInCanvas();
+}
+
+void ScreenNavigationManager::enterLoadingStateImmediate() {
+    if (!isOnScreenView()) return;
+    // Stop any pending loader delay and fades
+    if (m_loaderDelayTimer && m_loaderDelayTimer->isActive()) m_loaderDelayTimer->stop();
+    if (m_w.canvasFade) m_w.canvasFade->stop();
+    if (m_w.volumeFade) m_w.volumeFade->stop();
+    if (m_w.spinnerFade) m_w.spinnerFade->stop();
+
+    // Clear canvas content and cursor, then switch to spinner page
+    if (m_w.screenCanvas) {
+        m_w.screenCanvas->hideRemoteCursor();
+        m_w.screenCanvas->clearScreens();
+    }
+    if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(0.0);
+    if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(0); // spinner page
+
+    // Hide volume overlay immediately
+    if (m_w.volumeOpacity) m_w.volumeOpacity->setOpacity(0.0);
+
+    // Show spinner immediately (no delay)
+    if (m_w.loadingSpinner) m_w.loadingSpinner->start();
+    if (m_w.spinnerOpacity) m_w.spinnerOpacity->setOpacity(1.0);
 }
 
 void ScreenNavigationManager::ensureLoaderTimer() {

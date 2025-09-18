@@ -120,6 +120,7 @@ private:
     void showClientListView();
     QWidget* createScreenWidget(const ScreenInfo& screen, int index);
     void updateVolumeIndicator();
+    void setRemoteConnectionStatus(const QString& status);
     // watch management handled by WatchManager component now
 
     // UI Components
@@ -148,6 +149,7 @@ private:
     QWidget* m_screenViewWidget;
     QVBoxLayout* m_screenViewLayout;
     QLabel* m_clientNameLabel;
+    QLabel* m_remoteConnectionStatusLabel;
     // Canvas container keeps border visible; inside we switch between spinner and canvas
     QWidget* m_canvasContainer;
     QStackedWidget* m_canvasStack;
