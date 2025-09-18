@@ -200,16 +200,24 @@ class MouffetteServer {
         const targetId = message.targetClientId;
         const requester = this.clients.get(requesterId);
         const target = this.clients.get(targetId);
+        console.log(`🔍 Request screens: requester=${requesterId}, targetId=${targetId}`);
+        console.log(`🔍 Requester found: ${!!requester}, Target found: ${!!target}`);
+        if (target) {
+            console.log(`🔍 Target details: machineName=${target.machineName}, screens=${target.screens?.length || 0}, volumePercent=${target.volumePercent}`);
+        }
+        
         if (!requester) return;
         if (!target || !target.machineName) {
+            console.log(`❌ Sending error: Target client not found or not registered`);
             requester.ws.send(JSON.stringify({
                 type: 'error',
                 message: 'Target client not found or not registered'
             }));
             return;
         }
+        
         // Reply with current known screens info for the target
-        requester.ws.send(JSON.stringify({
+        const response = {
             type: 'screens_info',
             clientInfo: {
                 id: target.id,
@@ -218,7 +226,9 @@ class MouffetteServer {
                 screens: target.screens,
                 volumePercent: target.volumePercent
             }
-        }));
+        };
+        console.log(`📤 Sending screens_info response:`, JSON.stringify(response, null, 2));
+        requester.ws.send(JSON.stringify(response));
     }
     
     handleRegister(clientId, message) {
