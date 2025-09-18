@@ -245,6 +245,9 @@ MainWindow::MainWindow(QWidget* parent)
                                     .arg(percent));
         }
         applyUploadButtonStyle();
+        
+        // Update individual media progress based on server-acknowledged data
+        updateIndividualProgressFromServer(percent, filesCompleted, totalFiles);
     });
     connect(m_uploadManager, &UploadManager::uploadFinished, this, [this, applyUploadButtonStyle](){ applyUploadButtonStyle(); });
     connect(m_uploadManager, &UploadManager::unloaded, this, [this, applyUploadButtonStyle](){ applyUploadButtonStyle(); });
@@ -254,10 +257,10 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_statusUpdateTimer, &QTimer::timeout, this, &MainWindow::updateConnectionStatus);
     m_statusUpdateTimer->start();
 
-    // Periodic display sync if watched
+    // Periodic display sync only when watched
     m_displaySyncTimer->setInterval(3000);
     connect(m_displaySyncTimer, &QTimer::timeout, this, [this]() { if (m_isWatched && m_webSocketClient->isConnected()) syncRegistration(); });
-    m_displaySyncTimer->start();
+    // Don't start automatically - will be started when watched
 
     // Smart reconnect timer
     m_reconnectTimer->setSingleShot(true);
@@ -369,13 +372,8 @@ void MainWindow::onUploadButtonClicked() {
                 item->setUploadUploading(0); 
             }
         });
-        connect(m_uploadManager, &UploadManager::fileUploadProgress, this, [this](const QString& fileId, int percent){
-            if (!m_screenCanvas || !m_screenCanvas->scene()) return;
-            // Use direct mapping from fileId to media item pointer
-            if (auto item = m_itemByFileId.value(fileId)) { 
-                item->setUploadUploading(std::clamp(percent, 0, 100)); 
-            }
-        });
+        // Per-file progress now calculated from server-acknowledged global progress
+        // (removed sender-side fileUploadProgress connection to prevent too-fast progress)
         connect(m_uploadManager, &UploadManager::fileUploadFinished, this, [this](const QString& fileId){
             if (!m_screenCanvas || !m_screenCanvas->scene()) return;
             // Use direct mapping from fileId to media item pointer
@@ -1176,6 +1174,14 @@ void MainWindow::onWatchStatusChanged(bool watched) {
     // We don't need a member; we can gate sending by this flag at runtime.
     // For simplicity, keep a static so our timers can read it.
     m_isWatched = watched;
+    
+    // Start/stop display sync timer based on watch status to prevent unnecessary canvas reloads
+    if (watched) {
+        if (!m_displaySyncTimer->isActive()) m_displaySyncTimer->start();
+    } else {
+        if (m_displaySyncTimer->isActive()) m_displaySyncTimer->stop();
+    }
+    
     qDebug() << "Watch status changed:" << (watched ? "watched" : "not watched");
 
     // Begin/stop sending our cursor position to watchers (target side)
@@ -1385,6 +1391,41 @@ void MainWindow::updateConnectionStatus() {
         m_connectionStatusLabel->setStyleSheet("QLabel { color: orange; font-weight: bold; }");
     } else {
         m_connectionStatusLabel->setStyleSheet("QLabel { color: red; font-weight: bold; }");
+    }
+}
+
+void MainWindow::updateIndividualProgressFromServer(int globalPercent, int filesCompleted, int totalFiles) {
+    if (!m_screenCanvas || !m_screenCanvas->scene() || totalFiles == 0) return;
+    
+    // Get list of files being uploaded in consistent order
+    QStringList orderedFileIds;
+    for (auto it = m_itemByFileId.constBegin(); it != m_itemByFileId.constEnd(); ++it) {
+        orderedFileIds.append(it.key());
+    }
+    
+    // Calculate progress for each file based on server acknowledgment
+    for (int i = 0; i < orderedFileIds.size() && i < totalFiles; ++i) {
+        const QString& fileId = orderedFileIds[i];
+        ResizableMediaBase* item = m_itemByFileId.value(fileId);
+        if (!item) continue;
+        
+        int fileProgress;
+        if (i < filesCompleted) {
+            // This file is completely received by server
+            fileProgress = 100;
+        } else if (i == filesCompleted && filesCompleted < totalFiles) {
+            // This is the currently uploading file
+            // Estimate progress: remaining global progress for current file
+            int progressForCompletedFiles = filesCompleted * 100;
+            int totalExpectedProgress = totalFiles * 100;
+            int currentFileProgress = (globalPercent * totalFiles) - progressForCompletedFiles;
+            fileProgress = std::clamp(currentFileProgress, 0, 100);
+        } else {
+            // Future files not yet started by server
+            fileProgress = 0;
+        }
+        
+        item->setUploadUploading(fileProgress);
     }
 }
 

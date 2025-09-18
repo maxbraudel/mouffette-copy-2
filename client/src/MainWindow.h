@@ -226,6 +226,9 @@ private slots:
     void onUploadButtonClicked();
     void onGenericMessageReceived(const QJsonObject& message);
     // Upload-specific progress/finish now managed by UploadManager
+
+private:
+    void updateIndividualProgressFromServer(int globalPercent, int filesCompleted, int totalFiles);
 };
 
 #endif // MAINWINDOW_H
