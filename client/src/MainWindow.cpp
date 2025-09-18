@@ -280,6 +280,8 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
 
 void MainWindow::showScreenView(const ClientInfo& client) {
     if (!m_navigationManager) return;
+    // New client selection: reset reveal flag so first incoming screens will fade in once
+    m_canvasRevealedForCurrentClient = false;
     m_navigationManager->showScreenView(client);
     // Update upload target
     m_uploadManager->setTargetClientId(client.getId());
@@ -439,7 +441,7 @@ void MainWindow::onClientItemClicked(QListWidgetItem* item) {
         const ClientInfo& client = m_availableClients[index];
         m_selectedClient = client;
         showScreenView(client);
-        if (m_webSocketClient && m_webSocketClient->isConnected()) m_webSocketClient->requestScreens(client.getId());
+        // ScreenNavigationManager will request screens; no need to duplicate here
     }
 }
 
@@ -885,10 +887,13 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
     QMainWindow::resizeEvent(event);
     
     // If we're currently showing the screen view and have a canvas with content,
-    // recenter the view to maintain good visibility after window resize
+    // recenter the view to maintain good visibility only before first reveal or when no screens are present
     if (m_stackedWidget && m_stackedWidget->currentWidget() == m_screenViewWidget && 
-        m_screenCanvas && !m_selectedClient.getScreens().isEmpty()) {
-        m_screenCanvas->recenterWithMargin(33);
+        m_screenCanvas) {
+        const bool hasScreens = !m_selectedClient.getScreens().isEmpty();
+        if (!m_canvasRevealedForCurrentClient || !hasScreens) {
+            m_screenCanvas->recenterWithMargin(33);
+        }
     }
 }
 
@@ -1145,16 +1150,24 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
         // Update screen canvas content
         if (m_screenCanvas) {
             m_screenCanvas->setScreens(clientInfo.getScreens());
-            m_screenCanvas->recenterWithMargin(33);
-            m_screenCanvas->setFocus(Qt::OtherFocusReason);
+            // Preserve user's current zoom/pan; do not recenter on periodic updates
+            // Focus is applied once on initial reveal
         }
 
-        // Delegate reveal (spinner stop + canvas fade) to navigation manager
-        if (m_navigationManager) {
-            m_navigationManager->revealCanvas();
-        } else {
-            // Fallback if navigation manager not present (should not happen now)
-            if (m_canvasStack) m_canvasStack->setCurrentIndex(1);
+        // Reveal (spinner stop + canvas fade) only once per selected client
+        if (!m_canvasRevealedForCurrentClient) {
+            if (m_navigationManager) {
+                m_navigationManager->revealCanvas();
+            } else if (m_canvasStack) {
+                // Fallback if navigation manager not present
+                m_canvasStack->setCurrentIndex(1);
+            }
+            // Apply initial recenter and focus only on first reveal to give a good starting view
+            if (m_screenCanvas) {
+                m_screenCanvas->recenterWithMargin(33);
+                m_screenCanvas->setFocus(Qt::OtherFocusReason);
+            }
+            m_canvasRevealedForCurrentClient = true;
         }
 
         // Update volume UI

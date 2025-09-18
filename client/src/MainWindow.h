@@ -221,6 +221,8 @@ private:
     QHash<QString, ResizableMediaBase*> m_itemByFileId;
     WatchManager* m_watchManager = nullptr;   // extracted watch logic
     ScreenNavigationManager* m_navigationManager = nullptr; // new navigation component
+    // Canvas reveal state: ensure fade-in/recenter happen only once per selected client
+    bool m_canvasRevealedForCurrentClient = false;
 
 private slots:
     void onUploadButtonClicked();
