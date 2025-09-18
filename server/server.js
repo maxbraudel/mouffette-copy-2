@@ -144,32 +144,7 @@ class MouffetteServer {
             case 'unwatch_screens':
                 this.handleUnwatchScreens(clientId, message);
                 break;
-            // Upload flow: pure relay between sender and target
-            case 'upload_start':
-                this.relayToTarget(clientId, message.targetClientId, message);
-                break;
-            case 'upload_chunk':
-                this.relayToTarget(clientId, message.targetClientId, message);
-                break;
-            case 'upload_complete':
-                this.relayToTarget(clientId, message.targetClientId, message);
-                break;
-            case 'upload_abort':
-                this.relayToTarget(clientId, message.targetClientId, message);
-                break;
-            case 'unload_media':
-                this.relayToTarget(clientId, message.targetClientId, message);
-                break;
-            // Progress/status notifications from target back to sender
-            case 'upload_progress':
-                this.relayToSender(clientId, message.senderClientId, message);
-                break;
-            case 'upload_finished':
-                this.relayToSender(clientId, message.senderClientId, message);
-                break;
-            case 'unloaded':
-                this.relayToSender(clientId, message.senderClientId, message);
-                break;
+
             case 'media_share':
                 this.handleMediaShare(clientId, message);
                 break;

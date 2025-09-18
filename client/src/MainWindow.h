@@ -49,7 +49,7 @@ class SpinnerWidget; // forward declaration for custom loading spinner
 class QGraphicsOpacityEffect;
 class QPropertyAnimation;
 class QProcess; // fwd decl to avoid including in header
-class UploadManager; // new component for upload/unload feature
+
 class WatchManager;  // new component for watch/unwatch feature
 class ScreenNavigationManager; // manages page switching & loader UX
 // using QStackedWidget for canvas container switching
@@ -154,9 +154,7 @@ private:
     QLabel* m_volumeIndicator;
     SpinnerWidget* m_loadingSpinner;
     QPushButton* m_sendButton;
-    QPushButton* m_uploadButton;
     QPushButton* m_backButton;
-    QFont m_uploadButtonDefaultFont;
     // Loader/content animations
     int m_loaderDelayMs = 1000;       // show spinner after this delay
     int m_loaderFadeDurationMs = 500; // fade-in duration for spinner (loader)
@@ -209,15 +207,14 @@ private:
     QTimer* m_volTimer = nullptr;        // polls in background
 #endif
 
-    // Upload feature state
-    UploadManager* m_uploadManager = nullptr; // encapsulates all upload logic
+
     WatchManager* m_watchManager = nullptr;   // extracted watch logic
     ScreenNavigationManager* m_navigationManager = nullptr; // new navigation component
 
 private slots:
-    void onUploadButtonClicked();
+
     void onGenericMessageReceived(const QJsonObject& message);
-    // Upload-specific progress/finish now managed by UploadManager
+
 };
 
 #endif // MAINWINDOW_H
