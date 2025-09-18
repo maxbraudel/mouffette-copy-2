@@ -144,7 +144,32 @@ class MouffetteServer {
             case 'unwatch_screens':
                 this.handleUnwatchScreens(clientId, message);
                 break;
-
+            // Upload flow: pure relay between sender and target
+            case 'upload_start':
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
+            case 'upload_chunk':
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
+            case 'upload_complete':
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
+            case 'upload_abort':
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
+            case 'unload_media':
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
+            // Progress/status notifications from target back to sender
+            case 'upload_progress':
+                this.relayToSender(clientId, message.senderClientId, message);
+                break;
+            case 'upload_finished':
+                this.relayToSender(clientId, message.senderClientId, message);
+                break;
+            case 'unloaded':
+                this.relayToSender(clientId, message.senderClientId, message);
+                break;
             case 'media_share':
                 this.handleMediaShare(clientId, message);
                 break;
@@ -200,24 +225,16 @@ class MouffetteServer {
         const targetId = message.targetClientId;
         const requester = this.clients.get(requesterId);
         const target = this.clients.get(targetId);
-        console.log(`🔍 Request screens: requester=${requesterId}, targetId=${targetId}`);
-        console.log(`🔍 Requester found: ${!!requester}, Target found: ${!!target}`);
-        if (target) {
-            console.log(`🔍 Target details: machineName=${target.machineName}, screens=${target.screens?.length || 0}, volumePercent=${target.volumePercent}`);
-        }
-        
         if (!requester) return;
         if (!target || !target.machineName) {
-            console.log(`❌ Sending error: Target client not found or not registered`);
             requester.ws.send(JSON.stringify({
                 type: 'error',
                 message: 'Target client not found or not registered'
             }));
             return;
         }
-        
         // Reply with current known screens info for the target
-        const response = {
+        requester.ws.send(JSON.stringify({
             type: 'screens_info',
             clientInfo: {
                 id: target.id,
@@ -226,9 +243,7 @@ class MouffetteServer {
                 screens: target.screens,
                 volumePercent: target.volumePercent
             }
-        };
-        console.log(`📤 Sending screens_info response:`, JSON.stringify(response, null, 2));
-        requester.ws.send(JSON.stringify(response));
+        }));
     }
     
     handleRegister(clientId, message) {
