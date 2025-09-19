@@ -404,6 +404,7 @@ MainWindow::MainWindow(QWidget* parent)
                 "    color: " + AppColors::colorToCss(AppColors::gOverlayTextColor) + "; "
                 "    background: transparent; "
                 "    border: none; "
+                "    border-radius: 0px; "
                 "    border-top: 1px solid " + AppColors::colorToCss(AppColors::gOverlayBorderColor) + "; "
                 "    text-align: center; "
                 "} "
@@ -415,7 +416,7 @@ MainWindow::MainWindow(QWidget* parent)
                 "    color: white; "
                 "    background: rgba(255,255,255,0.1); "
                 "}";
-            const QString overlayActiveStyle = 
+            const QString overlayUploadingStyle = 
                 "QPushButton { "
                 "    padding: 0px 20px; "
                 "    font-weight: bold; "
@@ -424,7 +425,7 @@ MainWindow::MainWindow(QWidget* parent)
                 "    background: " + AppColors::colorToCss(AppColors::gButtonPrimaryBg) + "; "
                 "    border: none; "
                 "    border-radius: 0px; "
-                "    border-top: 1px solid " + AppColors::colorSourceToCss(AppColors::gAppBorderColorSource) + "; "
+                "    border-top: 1px solid " + AppColors::gBrandBlue.name() + "; "
                 "    text-align: center; "
                 "} "
                 "QPushButton:hover { "
@@ -434,6 +435,26 @@ MainWindow::MainWindow(QWidget* parent)
                 "QPushButton:pressed { "
                 "    color: " + AppColors::gBrandBlue.name() + "; "
                 "    background: " + AppColors::colorToCss(AppColors::gButtonPrimaryPressed) + "; "
+                "}";
+            const QString overlayUnloadStyle = 
+                "QPushButton { "
+                "    padding: 0px 20px; "
+                "    font-weight: bold; "
+                "    font-size: 12px; "
+                "    color: " + AppColors::colorToCss(AppColors::gMediaUploadedColor) + "; "
+                "    background: " + AppColors::colorToCss(AppColors::gStatusConnectedBg) + "; "
+                "    border: none; "
+                "    border-radius: 0px; "
+                "    border-top: 1px solid " + AppColors::colorToCss(AppColors::gStatusConnectedText) + "; "
+                "    text-align: center; "
+                "} "
+                "QPushButton:hover { "
+                "    color: " + AppColors::colorToCss(AppColors::gMediaUploadedColor) + "; "
+                "    background: rgba(76, 175, 80, 56); "
+                "} "
+                "QPushButton:pressed { "
+                "    color: " + AppColors::colorToCss(AppColors::gMediaUploadedColor) + "; "
+                "    background: rgba(76, 175, 80, 77); "
                 "}";
             
             if (m_uploadManager->isUploading()) {
@@ -446,11 +467,11 @@ MainWindow::MainWindow(QWidget* parent)
                     }
                     m_uploadButton->setEnabled(true);
                 }
-                m_uploadButton->setStyleSheet(overlayActiveStyle);
+                m_uploadButton->setStyleSheet(overlayUploadingStyle);
             } else if (m_uploadManager->hasActiveUpload()) {
                 m_uploadButton->setText("Unload");
                 m_uploadButton->setEnabled(true);
-                m_uploadButton->setStyleSheet(overlayActiveStyle);
+                m_uploadButton->setStyleSheet(overlayUnloadStyle);
             } else {
                 m_uploadButton->setText("Upload");
                 m_uploadButton->setEnabled(true);
@@ -1596,7 +1617,7 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
         m_screenCanvas) {
         const bool hasScreens = !m_selectedClient.getScreens().isEmpty();
         if (!m_canvasRevealedForCurrentClient || !hasScreens) {
-            m_screenCanvas->recenterWithMargin(33);
+            m_screenCanvas->recenterWithMargin(53);
         }
     }
 }
@@ -1944,7 +1965,7 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
                     m_canvasStack->setCurrentIndex(1);
                 }
                 if (m_screenCanvas) {
-                    m_screenCanvas->recenterWithMargin(33);
+                    m_screenCanvas->recenterWithMargin(53);
                     m_screenCanvas->setFocus(Qt::OtherFocusReason);
                 }
                 m_canvasRevealedForCurrentClient = true;
