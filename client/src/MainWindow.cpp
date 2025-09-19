@@ -140,6 +140,13 @@ int gDynamicBoxFontPx = 13;           // Standard font size for buttons/status b
 // Remote client info container configuration
 int gRemoteClientContainerPadding = 6; // Horizontal padding for elements in remote client container
 
+// Global border configuration - will be initialized in initializeAppBorderColor()
+QString gAppBorderColor = "palette(midlight)"; // Default fallback
+
+// Global interaction background configuration - will be initialized in initializeAppColors()
+QString gInteractionBackgroundColor = "palette(mid)"; // Default fallback
+
+
 // Global title text configuration (for headers like "Connected Clients" and hostname)
 int gTitleTextFontSize = 16;          // Title font size (px)
 int gTitleTextHeight = 24;            // Title fixed height (px)
@@ -155,13 +162,13 @@ inline void applyPillBtn(QPushButton* b) {
     b->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
     // Enforce exact visual height via stylesheet (min/max-height) and zero vertical padding
     b->setStyleSheet(QString(
-        "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; border: 1px solid palette(mid);"
-        " border-radius: %1px; background-color: rgba(128,128,128,0.08); color: palette(buttonText);"
-        " min-height: %2px; max-height: %2px; }"
+        "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %4px; border: 1px solid %1;"
+        " border-radius: %2px; background-color: rgba(128,128,128,0.08); color: palette(buttonText);"
+        " min-height: %3px; max-height: %3px; }"
         "QPushButton:hover { background-color: rgba(128,128,128,0.16); }"
         "QPushButton:pressed { background-color: rgba(128,128,128,0.24); }"
-        "QPushButton:disabled { color: palette(mid); border-color: palette(mid); background-color: rgba(128,128,128,0.06); }"
-    ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx));
+        "QPushButton:disabled { color: palette(mid); border-color: %1; background-color: rgba(128,128,128,0.06); }"
+    ).arg(gAppBorderColor).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx));
     // Final enforcement (some styles ignore min/max rules)
     b->setFixedHeight(gDynamicBoxHeight);
 }
@@ -185,13 +192,13 @@ inline void applyPrimaryBtn(QPushButton* b) {
     b->setMinimumWidth(gDynamicBoxMinWidth);
     b->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
     b->setStyleSheet(QString(
-        "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; border: 1px solid #4a90e2;"
-        " border-radius: %1px; background-color: rgba(74,144,226,0.15); color: #4a90e2;"
-        " min-height: %2px; max-height: %2px; }"
+        "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %4px; border: 1px solid %1;"
+        " border-radius: %2px; background-color: rgba(74,144,226,0.15); color: #4a90e2;"
+        " min-height: %3px; max-height: %3px; }"
         "QPushButton:hover { background-color: rgba(74,144,226,0.22); }"
         "QPushButton:pressed { background-color: rgba(74,144,226,0.30); }"
-        "QPushButton:disabled { color: palette(mid); border-color: palette(mid); background-color: rgba(74,144,226,0.10); }"
-    ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx));
+        "QPushButton:disabled { color: palette(mid); border-color: %1; background-color: rgba(74,144,226,0.10); }"
+    ).arg(gAppBorderColor).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx));
     // Final enforcement (some styles ignore min/max rules)
     b->setFixedHeight(gDynamicBoxHeight);
 }
@@ -342,6 +349,7 @@ MainWindow::MainWindow(QWidget* parent)
     resize(1280, 900);
     // Use Qt's native positioning to avoid menu bar overlap
     move(QGuiApplication::primaryScreen()->availableGeometry().topLeft() + QPoint(50, 50));
+    
     setupUI();
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN) || defined(Q_OS_LINUX)
     // Ensure no status bar is shown at the bottom
@@ -410,7 +418,7 @@ MainWindow::MainWindow(QWidget* parent)
                 "    background: rgba(74,144,226,0.1); "
                 "    border: none; "
                 "    border-radius: 0px; "
-                "    border-top: 1px solid #4a90e2; "
+                "    border-top: 1px solid " + gAppBorderColor + "; "
                 "    text-align: center; "
                 "} "
                 "QPushButton:hover { "
@@ -643,12 +651,12 @@ void MainWindow::createRemoteClientInfoContainer() {
         "QWidget { "
         "    background-color: transparent; "
         "    color: palette(button-text); "
-        "    border: 1px solid palette(mid); "
+        "    border: 1px solid %3; "
         "    border-radius: %1px; "
         "    min-height: %2px; "
         "    max-height: %2px; "
         "}"
-    ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight);
+    ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gAppBorderColor);
     
     m_remoteClientInfoContainer->setStyleSheet(containerStyle);
     m_remoteClientInfoContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
@@ -675,7 +683,7 @@ void MainWindow::createRemoteClientInfoContainer() {
     QFrame* separator1 = new QFrame();
     separator1->setFrameShape(QFrame::VLine);
     separator1->setFrameShadow(QFrame::Sunken);
-    separator1->setStyleSheet("QFrame { color: palette(mid); }");
+    separator1->setStyleSheet(QString("QFrame { color: %1; }").arg(gAppBorderColor));
     separator1->setFixedWidth(1);
     containerLayout->addWidget(separator1);
     
@@ -687,7 +695,7 @@ void MainWindow::createRemoteClientInfoContainer() {
     QFrame* separator2 = new QFrame();
     separator2->setFrameShape(QFrame::VLine);
     separator2->setFrameShadow(QFrame::Sunken);
-    separator2->setStyleSheet("QFrame { color: palette(mid); }");
+    separator2->setStyleSheet(QString("QFrame { color: %1; }").arg(gAppBorderColor));
     separator2->setFixedWidth(1);
     containerLayout->addWidget(separator2);
     
@@ -1181,17 +1189,17 @@ void MainWindow::createClientListPage() {
     // Use palette-based colors so light/dark themes adapt automatically
     // Add subtle hover effect and remove persistent selection highlight
     m_clientListWidget->setStyleSheet(
-        "QListWidget { "
-        "   border: 1px solid palette(mid); "
+        QString("QListWidget { "
+        "   border: 1px solid %1; "
         "   border-radius: 5px; "
         "   padding: 5px; "
-        "   background-color: palette(base); "
-        "   color: palette(text); "
+        "   background-color: %2; "
+        "   outline: none; "
         "}"
         "QListWidget::item { "
         "   padding: 10px; "
         "   border-bottom: 1px solid palette(midlight); "
-        "}" 
+        "}"
         // Hover: very light blue tint
         "QListWidget::item:hover { "
         "   background-color: rgba(74, 144, 226, 28); "
@@ -1208,7 +1216,7 @@ void MainWindow::createClientListPage() {
         "QListWidget::item:selected:hover { "
         "   background-color: rgba(74, 144, 226, 28); "
         "   color: palette(text); "
-        "}"
+        "}").arg(gAppBorderColor).arg(gInteractionBackgroundColor)
     );
     connect(m_clientListWidget, &QListWidget::itemClicked, this, &MainWindow::onClientItemClicked);
     // Prevent keyboard (space/enter) from triggering navigation
@@ -1284,11 +1292,11 @@ void MainWindow::createScreenViewPage() {
     // Match the dark background used by the client list container via palette(base)
     // Canvas container previously had a bordered panel look; remove to emulate design-tool feel
     m_canvasContainer->setStyleSheet(
-        "QWidget#CanvasContainer { "
-        "   background-color: palette(base); "
-        "   border: 1px solid palette(mid); "
+        QString("QWidget#CanvasContainer { "
+        "   background-color: %2; "
+        "   border: 1px solid %1; "
         "   border-radius: 5px; "
-        "}"
+        "}").arg(gAppBorderColor).arg(gInteractionBackgroundColor)
     );
     QVBoxLayout* containerLayout = new QVBoxLayout(m_canvasContainer);
     // Provide real inner padding so child doesn't cover the border area
