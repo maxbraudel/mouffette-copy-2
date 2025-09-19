@@ -357,9 +357,6 @@ MainWindow::MainWindow(QWidget* parent)
     // Use Qt's native positioning to avoid menu bar overlap
     move(QGuiApplication::primaryScreen()->availableGeometry().topLeft() + QPoint(50, 50));
     
-    // Initialize colors from system palette
-    AppColors::initializeColors();
-    
     setupUI();
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN) || defined(Q_OS_LINUX)
     // Ensure no status bar is shown at the bottom
@@ -793,6 +790,9 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     if (!m_navigationManager) return;
     // New client selection: reset reveal flag so first incoming screens will fade in once
     m_canvasRevealedForCurrentClient = false;
+    // Hide top-bar page title and show back button on screen view
+    if (m_pageTitleLabel) m_pageTitleLabel->hide();
+    if (m_backButton) m_backButton->show();
     m_navigationManager->showScreenView(client);
     // Update upload target
     m_uploadManager->setTargetClientId(client.getId());
@@ -816,12 +816,12 @@ void MainWindow::showClientListView() {
     if (m_remoteClientInfoContainer) {
         m_remoteClientInfoContainer->setVisible(false);
     }
+    // Show top-bar page title and hide back button on client list
+    if (m_pageTitleLabel) m_pageTitleLabel->show();
+    if (m_backButton) m_backButton->hide();
 }
 
-QWidget* MainWindow::createScreenWidget(const ScreenInfo& screen, int index) {
-    // Legacy helper (may be simplified); currently ScreenCanvas draws screens itself; return nullptr
-    Q_UNUSED(screen); Q_UNUSED(index); return nullptr;
-}
+// Removed legacy createScreenWidget(): ScreenCanvas draws screens directly now
 
 void MainWindow::updateVolumeIndicator() {
     if (!m_volumeIndicator) return;
@@ -1158,6 +1158,21 @@ void MainWindow::setupUI() {
     m_connectionLayout->addSpacing(12);
 #endif
 
+    // Contextual page title next to traffic lights (e.g., "Connected Clients")
+    m_pageTitleLabel = new QLabel("Connected Clients");
+    applyTitleText(m_pageTitleLabel);
+    // Match hostname styling: same font size, weight, and color
+    m_pageTitleLabel->setStyleSheet(QString(
+        "QLabel { "
+        "    background: transparent; "
+        "    border: none; "
+        "    font-size: %1px; "
+        "    font-weight: bold; "
+        "    color: palette(text); "
+        "}").arg(gTitleTextFontSize)
+    );
+    m_connectionLayout->addWidget(m_pageTitleLabel);
+
     // Note: applyPillBtn and applyPrimaryBtn are now defined globally at the top of the file
     // using gDynamicBox configuration for consistent sizing
 
@@ -1182,7 +1197,7 @@ void MainWindow::setupUI() {
     applyPillBtn(m_settingsButton);
     connect(m_settingsButton, &QPushButton::clicked, this, &MainWindow::showSettingsDialog);
 
-    // Layout: [traffic-lights][gap][back][stretch][status][connect][settings]
+    // Layout: [traffic-lights][title][back][stretch][status][connect][settings]
     m_connectionLayout->addWidget(m_backButton);
     m_connectionLayout->addStretch();
     m_connectionLayout->addWidget(m_connectionStatusLabel);
@@ -1274,10 +1289,7 @@ void MainWindow::createClientListPage() {
     layout->setSpacing(gInnerContentGap);
     layout->setContentsMargins(0, 0, 0, 0);
     
-    // Client list section
-    m_clientListLabel = new QLabel("Connected Clients:");
-    applyTitleText(m_clientListLabel);
-    layout->addWidget(m_clientListLabel);
+    // Client list section (title moved to top bar as m_pageTitleLabel)
     
     m_clientListWidget = new QListWidget();
     // Use palette-based colors so light/dark themes adapt automatically

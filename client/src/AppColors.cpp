@@ -117,16 +117,6 @@ QColor getCurrentColor(const ColorSource& source) {
     return color;
 }
 
-void initializeColors() {
-    if (!qApp) {
-        qWarning("AppColors::initializeColors() called before QApplication creation!");
-        return;
-    }
-    
-    // ColorSource system is now fully dynamic - no need to pre-compute anything
-    // Colors are resolved on-demand via getCurrentColor() and colorSourceToCss()
-}
-
 QString colorToCss(const QColor& color) {
     return QString("rgba(%1, %2, %3, %4)")
         .arg(color.red())

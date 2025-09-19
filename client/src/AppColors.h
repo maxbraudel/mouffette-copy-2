@@ -138,14 +138,6 @@ extern QColor gHoverHighlight;               // Light blue hover highlight
 QColor getCurrentColor(const ColorSource& source);
 
 /**
- * @brief Initialize all color variables from system palette
- * 
- * This function must be called after QApplication is created
- * to properly initialize colors based on the current system theme.
- */
-void initializeColors();
-
-/**
  * @brief Convert QColor to CSS string format
  * 
  * Converts a QColor to rgba() CSS string format for use in stylesheets.

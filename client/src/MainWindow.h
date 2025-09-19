@@ -167,6 +167,8 @@ private:
     QVBoxLayout* m_screenViewLayout;
     QLabel* m_clientNameLabel;
     QLabel* m_remoteConnectionStatusLabel;
+    // Top bar contextual title (e.g., "Connected Clients" on client list page)
+    QLabel* m_pageTitleLabel = nullptr;
     QWidget* m_remoteClientInfoContainer = nullptr; // Container for hostname, status, volume
     // Canvas container keeps border visible; inside we switch between spinner and canvas
     QWidget* m_canvasContainer;
