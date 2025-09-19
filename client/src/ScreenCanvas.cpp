@@ -3,6 +3,9 @@
 #include "Theme.h"
 #include <algorithm>
 #include <QGraphicsScene>
+#include <QPushButton>
+#include <QHBoxLayout>
+#include <QTimer>
 #include <QMimeData>
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
@@ -81,7 +84,7 @@ void ScreenCanvas::maybeRefreshInfoOverlayOnSceneChanged() {
     // Do an immediate check (covers most cases)
     recomputeAndRefreshIfNeeded();
     // And schedule a microtask; some remove operations complete after the current event
-    QTimer::singleShot(0, this, [this, recomputeAndRefreshIfNeeded]() { recomputeAndRefreshIfNeeded(); });
+    QTimer::singleShot(0, [recomputeAndRefreshIfNeeded]() { recomputeAndRefreshIfNeeded(); });
 }
 
 void ScreenCanvas::initInfoOverlay() {
@@ -101,17 +104,57 @@ void ScreenCanvas::initInfoOverlay() {
         m_infoWidget->setMinimumWidth(380);
         m_infoWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
         m_infoLayout = new QVBoxLayout(m_infoWidget);
-        m_infoLayout->setContentsMargins(20, 16, 20, 16);
-        m_infoLayout->setSpacing(6);
+        m_infoLayout->setContentsMargins(0, 0, 0, 0); // No margins on main container
+        m_infoLayout->setSpacing(0);
         m_infoLayout->setSizeConstraint(QLayout::SetMinimumSize);
-        // Title
-        auto* title = new QLabel("Media list", m_infoWidget);
-        QFont tf = title->font(); tf.setBold(true); title->setFont(tf);
-        title->setStyleSheet("color: white; background: transparent;");
-        title->setAutoFillBackground(false);
-        title->setAttribute(Qt::WA_TranslucentBackground, true);
-        title->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-        m_infoLayout->addWidget(title);
+        
+        // Create content container for media list items with margins
+        m_contentWidget = new QWidget(m_infoWidget);
+        m_contentWidget->setStyleSheet("background: transparent;");
+        m_contentWidget->setAutoFillBackground(false);
+        m_contentWidget->setAttribute(Qt::WA_TranslucentBackground, true);
+        m_contentLayout = new QVBoxLayout(m_contentWidget);
+        m_contentLayout->setContentsMargins(20, 16, 20, 16); // Margins only for content
+        m_contentLayout->setSpacing(6);
+        
+        // Add content widget to main layout
+        m_infoLayout->addWidget(m_contentWidget);
+        // Upload button in overlay (no title)
+        m_overlayHeaderWidget = new QWidget(m_infoWidget);
+        m_overlayHeaderWidget->setStyleSheet("background: transparent;");
+        m_overlayHeaderWidget->setAutoFillBackground(false);
+        m_overlayHeaderWidget->setAttribute(Qt::WA_TranslucentBackground, true);
+        auto* headerLayout = new QHBoxLayout(m_overlayHeaderWidget);
+        headerLayout->setContentsMargins(0, 0, 0, 0);
+        headerLayout->setSpacing(0);
+        
+        // Upload button in overlay - integrated style with top border only
+        m_uploadButton = new QPushButton("Upload", m_overlayHeaderWidget);
+        m_uploadButton->setStyleSheet(
+            "QPushButton { "
+            "    padding: 8px 0px; "
+            "    font-weight: bold; "
+            "    font-size: 12px; "
+            "    color: rgba(255,255,255,0.9); "
+            "    background: transparent; "
+            "    border: none; "
+            "    border-top: 1px solid rgba(255,255,255,0.2); "
+            "} "
+            "QPushButton:hover { "
+            "    color: white; "
+            "    background: rgba(255,255,255,0.05); "
+            "} "
+            "QPushButton:pressed { "
+            "    color: white; "
+            "    background: rgba(255,255,255,0.1); "
+            "}"
+        );
+        m_uploadButton->setFixedHeight(40);
+        m_uploadButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        
+        // Full width button
+        headerLayout->addWidget(m_uploadButton);
+        // Do not add header here; refreshInfoOverlay() will place it at the bottom of the panel
         m_infoWidget->hide(); // hidden until first layout
     }
     // Initial content and layout
@@ -122,23 +165,27 @@ void ScreenCanvas::initInfoOverlay() {
 void ScreenCanvas::scheduleInfoOverlayRefresh() {
     if (m_infoRefreshQueued) return;
     m_infoRefreshQueued = true;
-    QTimer::singleShot(0, this, [this]() {
+    QTimer::singleShot(0, [this]() {
         m_infoRefreshQueued = false;
         refreshInfoOverlay();
+        layoutInfoOverlay();
     });
 }
 
 void ScreenCanvas::refreshInfoOverlay() {
-    if (!m_infoWidget || !m_infoLayout) return;
-    // Avoid intermediate paints while rebuilding; hide to prevent transient title-only state
+    if (!m_infoWidget || !m_infoLayout || !m_contentLayout) return;
+    // Avoid intermediate paints while rebuilding
     const bool wasVisible = m_infoWidget->isVisible();
     m_infoWidget->setUpdatesEnabled(false);
     m_infoWidget->hide();
-    // Remove all rows except the first (title at index 0). Delete immediately to avoid duplicate content lingering this frame.
-    while (m_infoLayout->count() > 1) {
-        QLayoutItem* it = m_infoLayout->takeAt(1);
+    // Clear only the content layout (media items), keep the content widget and header widget
+    while (m_contentLayout->count() > 0) {
+        QLayoutItem* it = m_contentLayout->takeAt(0);
         if (!it) break;
-        if (QWidget* w = it->widget()) { w->hide(); delete w; }
+        if (QWidget* w = it->widget()) {
+            w->hide();
+            delete w;
+        }
         delete it;
     }
     // Collect media items
@@ -167,38 +214,44 @@ void ScreenCanvas::refreshInfoOverlay() {
             if (fi.exists() && fi.isFile()) sizeStr = humanSize(fi.size());
         }
         // Row: name
-        auto* nameLbl = new QLabel(name, m_infoWidget);
+        auto* nameLbl = new QLabel(name, m_contentWidget);
         nameLbl->setStyleSheet("color: white; background: transparent;");
         nameLbl->setAutoFillBackground(false);
         nameLbl->setAttribute(Qt::WA_TranslucentBackground, true);
         nameLbl->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-        m_infoLayout->addWidget(nameLbl);
+        m_contentLayout->addWidget(nameLbl);
         // Row: upload status or progress
         if (m->uploadState() == ResizableMediaBase::UploadState::Uploading) {
-            auto* bar = new QProgressBar(m_infoWidget);
+            auto* bar = new QProgressBar(m_contentWidget);
             bar->setRange(0, 100);
             bar->setValue(m->uploadProgress());
             bar->setTextVisible(false);
             bar->setFixedHeight(10);
             // Blue progress bar styling consistent with theme
             bar->setStyleSheet("QProgressBar{background: rgba(255,255,255,0.15); border-radius: 5px;} QProgressBar::chunk{background: #2D8CFF; border-radius: 5px;}");
-            m_infoLayout->addWidget(bar);
+            m_contentLayout->addWidget(bar);
         } else {
-            auto* status = new QLabel(m->uploadState() == ResizableMediaBase::UploadState::Uploaded ? QStringLiteral("Uploaded") : QStringLiteral("Not uploaded"), m_infoWidget);
+            auto* status = new QLabel(m->uploadState() == ResizableMediaBase::UploadState::Uploaded ? QStringLiteral("Uploaded") : QStringLiteral("Not uploaded"), m_contentWidget);
             const char* color = (m->uploadState() == ResizableMediaBase::UploadState::Uploaded) ? "#2ecc71" : "#f39c12"; // green or orange
             status->setStyleSheet(QString("color: %1; font-size: 14px; background: transparent;").arg(color));
             status->setAutoFillBackground(false);
             status->setAttribute(Qt::WA_TranslucentBackground, true);
             status->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-            m_infoLayout->addWidget(status);
+            m_contentLayout->addWidget(status);
         }
         // Row: details smaller under status
-        auto* details = new QLabel(dim + QStringLiteral("  ·  ") + sizeStr, m_infoWidget);
+        auto* details = new QLabel(dim + QStringLiteral("  ·  ") + sizeStr, m_contentWidget);
         details->setStyleSheet("color: rgba(255,255,255,0.85); font-size: 14px; background: transparent;");
         details->setAutoFillBackground(false);
         details->setAttribute(Qt::WA_TranslucentBackground, true);
         details->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-        m_infoLayout->addWidget(details);
+        m_contentLayout->addWidget(details);
+    }
+
+    // Finally, place the header (with upload button) at the bottom, full width, no margins
+    if (m_overlayHeaderWidget) {
+        m_overlayHeaderWidget->show();
+        m_infoLayout->addWidget(m_overlayHeaderWidget);
     }
 
     // Force layout recalculation and resize widget to fit content
@@ -221,7 +274,7 @@ void ScreenCanvas::refreshInfoOverlay() {
     layoutInfoOverlay();
     // In case the widget's final metrics settle after this event loop turn (common on first show or font/layout updates),
     // schedule a one-shot re-anchor to avoid a transient displaced position after dropping media.
-    QTimer::singleShot(0, this, [this]() { layoutInfoOverlay(); });
+    QTimer::singleShot(0, [this]() { layoutInfoOverlay(); });
 }
 
 void ScreenCanvas::layoutInfoOverlay() {

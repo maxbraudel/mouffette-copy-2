@@ -79,7 +79,6 @@ private slots:
     
     // Screen view slots
     void onBackToClientListClicked();
-    void onSendMediaClicked();
     void onScreensInfoReceived(const ClientInfo& clientInfo);
     void onWatchStatusChanged(bool watched);
     
@@ -167,8 +166,8 @@ private:
     ScreenCanvas* m_screenCanvas;
     QLabel* m_volumeIndicator;
     SpinnerWidget* m_loadingSpinner;
-    QPushButton* m_sendButton;
     QPushButton* m_uploadButton;
+    bool m_uploadButtonInOverlay = false; // Track if upload button is in overlay (uses custom styling)
     QPushButton* m_backButton;
     // Frameless window custom controls (macOS/Windows)
     QPushButton* m_btnClose = nullptr;

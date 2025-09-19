@@ -117,14 +117,18 @@ constexpr qreal Z_SCENE_OVERLAY = 12000.0; // above all scene content
 constexpr int TL_SIZE_PT = 12;          // traffic light diameter (pt)
 constexpr int TL_GAP_PT = 8;            // gap between traffic lights (pt)
 
-// Global top container margins (independent of traffic lights positioning)
-int gTopContainerMarginLeft = 16;       // Left margin for top container
-int gTopContainerMarginTop = 10;         // Top margin for top container  
-int gTopContainerMarginRight = 16;      // Right margin for top container
+// Global window content margins (between all content and window borders)
+int gWindowContentMarginTop = 10;       // Top margin for all window content
+int gWindowContentMarginRight = 30;     // Right margin for all window content
+int gWindowContentMarginBottom = 20;    // Bottom margin for all window content
+int gWindowContentMarginLeft = 20;      // Left margin for all window content
 
 // Global window appearance variables (edit to customize)
 int gWindowBorderRadiusPx = 10;                    // Rounded corner radius (px)
 QColor gWindowBackgroundColor = QColor();          // If invalid, uses palette(window)
+
+// Global inner content gap between sections inside the window (top container <-> hostname, hostname <-> canvas)
+int gInnerContentGap = 20;
 
 // Global dynamicBox configuration for standardized buttons and status indicators
 // Edit these values to change all buttons and status boxes at once
@@ -132,6 +136,10 @@ int gDynamicBoxMinWidth = 80;         // Minimum width for buttons/status boxes
 int gDynamicBoxHeight = 24;           // Fixed height for all elements
 int gDynamicBoxBorderRadius = 6;      // Border radius for rounded corners
 int gDynamicBoxFontPx = 13;           // Standard font size for buttons/status boxes
+
+// Global title text configuration (for headers like "Connected Clients" and hostname)
+int gTitleTextFontSize = 16;          // Title font size (px)
+int gTitleTextHeight = 24;            // Title fixed height (px)
 
 // Shared button style helpers using dynamicBox configuration
 inline void applyPillBtn(QPushButton* b) {
@@ -153,6 +161,17 @@ inline void applyPillBtn(QPushButton* b) {
     ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx));
     // Final enforcement (some styles ignore min/max rules)
     b->setFixedHeight(gDynamicBoxHeight);
+}
+
+// Shared title text helper
+inline void applyTitleText(QLabel* l) {
+    if (!l) return;
+    l->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    l->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+    l->setStyleSheet(QString(
+        "QLabel { font-size: %1px; font-weight: bold; color: palette(text); min-height: %2px; max-height: %2px; }"
+    ).arg(gTitleTextFontSize).arg(gTitleTextHeight));
+    l->setFixedHeight(gTitleTextHeight);
 }
 inline void applyPrimaryBtn(QPushButton* b) {
     if (!b) return;
@@ -259,7 +278,6 @@ MainWindow::MainWindow(QWidget* parent)
       m_screenCanvas(nullptr),
       m_volumeIndicator(nullptr),
       m_loadingSpinner(nullptr),
-      m_sendButton(nullptr),
       m_uploadButton(nullptr),
       m_backButton(nullptr),
       m_spinnerOpacity(nullptr),
@@ -340,19 +358,89 @@ MainWindow::MainWindow(QWidget* parent)
     // UI refresh when upload state changes
     auto applyUploadButtonStyle = [this]() {
         if (!m_uploadButton) return;
-        // Base style strings using gDynamicBox configuration
+        
+        // If button is in overlay, use custom overlay styling
+        if (m_uploadButtonInOverlay) {
+            const QString overlayIdleStyle = 
+                "QPushButton { "
+                "    padding: 0px 20px; "
+                "    font-weight: bold; "
+                "    font-size: 12px; "
+                "    color: rgba(255,255,255,0.9); "
+                "    background: transparent; "
+                "    border: none; "
+                "    border-radius: 0px; "
+                "    border-top: 1px solid rgba(255,255,255,0.2); "
+                "    text-align: center; "
+                "    qproperty-alignment: AlignCenter; "
+                "} "
+                "QPushButton:hover { "
+                "    color: white; "
+                "    background: rgba(255,255,255,0.05); "
+                "} "
+                "QPushButton:pressed { "
+                "    color: white; "
+                "    background: rgba(255,255,255,0.1); "
+                "}";
+            const QString overlayActiveStyle = 
+                "QPushButton { "
+                "    padding: 0px 20px; "
+                "    font-weight: bold; "
+                "    font-size: 12px; "
+                "    color: #4a90e2; "
+                "    background: rgba(74,144,226,0.1); "
+                "    border: none; "
+                "    border-radius: 0px; "
+                "    border-top: 1px solid #4a90e2; "
+                "    text-align: center; "
+                "    qproperty-alignment: AlignCenter; "
+                "} "
+                "QPushButton:hover { "
+                "    color: #4a90e2; "
+                "    background: rgba(74,144,226,0.15); "
+                "} "
+                "QPushButton:pressed { "
+                "    color: #4a90e2; "
+                "    background: rgba(74,144,226,0.2); "
+                "}";
+            
+            if (m_uploadManager->isUploading()) {
+                if (m_uploadManager->isCancelling()) {
+                    m_uploadButton->setText("Cancelling…");
+                    m_uploadButton->setEnabled(false);
+                } else {
+                    if (m_uploadButton->text() == "Upload") {
+                        m_uploadButton->setText("Preparing");
+                    }
+                    m_uploadButton->setEnabled(true);
+                }
+                m_uploadButton->setStyleSheet(overlayActiveStyle);
+            } else if (m_uploadManager->hasActiveUpload()) {
+                m_uploadButton->setText("Unload");
+                m_uploadButton->setEnabled(true);
+                m_uploadButton->setStyleSheet(overlayActiveStyle);
+            } else {
+                m_uploadButton->setText("Upload");
+                m_uploadButton->setEnabled(true);
+                m_uploadButton->setStyleSheet(overlayIdleStyle);
+            }
+            m_uploadButton->setFixedHeight(40);
+            return;
+        }
+        
+        // Base style strings using gDynamicBox configuration for regular buttons
         const QString greyStyle = QString(
-            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %4px; background-color: #666; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
+            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; background-color: #666; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
             "QPushButton:checked { background-color: #444; }"
-        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxMinWidth).arg(gDynamicBoxFontPx);
+        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx);
         const QString blueStyle = QString(
-            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %4px; background-color: #2d6cdf; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
+            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; background-color: #2d6cdf; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
             "QPushButton:checked { background-color: #1f4ea8; }"
-        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxMinWidth).arg(gDynamicBoxFontPx);
+        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx);
         const QString greenStyle = QString(
-            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %4px; background-color: #16a34a; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
+            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; background-color: #16a34a; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
             "QPushButton:checked { background-color: #15803d; }"
-        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxMinWidth).arg(gDynamicBoxFontPx);
+        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx);
 
         if (m_uploadManager->isUploading()) {
             // Upload in progress (preparing or actively streaming): show preparing or cancelling state handled elsewhere
@@ -720,10 +808,6 @@ void MainWindow::onUploadButtonClicked() {
 
 void MainWindow::onBackToClientListClicked() { showClientListView(); }
 
-void MainWindow::onSendMediaClicked() {
-    // Placeholder: iterate scene media and send placement in future
-    QMessageBox::information(this, "Send Media", "Send Media functionality not yet implemented.");
-}
 
 void MainWindow::onClientItemClicked(QListWidgetItem* item) {
     if (!item) return;
@@ -759,8 +843,10 @@ void MainWindow::setupUI() {
     setCentralWidget(m_centralWidget);
     
     m_mainLayout = new QVBoxLayout(m_centralWidget);
-    m_mainLayout->setSpacing(0); // Remove spacing, we'll handle it manually
-    m_mainLayout->setContentsMargins(0, 0, 0, 0); // Remove margins from main layout
+    // Use explicit spacer to control gap so it's not affected by any nested margins
+    m_mainLayout->setSpacing(0);
+    // Apply global window content margins to wrap all content
+    m_mainLayout->setContentsMargins(gWindowContentMarginLeft, gWindowContentMarginTop, gWindowContentMarginRight, gWindowContentMarginBottom);
     
     // Top section with margins
     QWidget* topSection = new QWidget();
@@ -770,12 +856,14 @@ void MainWindow::setupUI() {
 #endif
     QVBoxLayout* topLayout = new QVBoxLayout(topSection);
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
-    // For frameless windows, use configurable top container margins
-    topLayout->setContentsMargins(gTopContainerMarginLeft, gTopContainerMarginTop, gTopContainerMarginRight, 12);
+    // Remove all margins around the top section (traffic lights container)
+    topLayout->setContentsMargins(0, 0, 0, 0);
 #else
-    topLayout->setContentsMargins(20, 20, 20, 20); // Apply margins only to top section
+    // Remove all margins on non-mac/win as well
+    topLayout->setContentsMargins(0, 0, 0, 0);
 #endif
-    topLayout->setSpacing(20);
+    // No internal vertical spacing inside the top section; vertical gap is controlled by gInnerContentGap
+    topLayout->setSpacing(0);
     
     // Connection section (always visible)
     m_connectionBar = new QWidget();
@@ -876,15 +964,20 @@ void MainWindow::setupUI() {
 #endif
     topLayout->addWidget(m_connectionBar);
     m_mainLayout->addWidget(topSection);
+    // Explicit inner gap between top container and hostname container
+    m_mainLayout->addSpacing(gInnerContentGap);
     
     // Bottom section with margins (no separator line)
     QWidget* bottomSection = new QWidget();
     QVBoxLayout* bottomLayout = new QVBoxLayout(bottomSection);
-    bottomLayout->setContentsMargins(20, 20, 20, 20); // Apply margins only to bottom section
-    bottomLayout->setSpacing(20);
+    // Remove all margins for the bottom section; outer spacing is controlled by gInnerContentGap spacer
+    bottomLayout->setContentsMargins(0, 0, 0, 0);
+    bottomLayout->setSpacing(0);
     
     // Create stacked widget for page navigation
     m_stackedWidget = new QStackedWidget();
+    // Ensure the stacked widget adds no extra padding; vertical gap is controlled by gInnerContentGap
+    m_stackedWidget->setContentsMargins(0, 0, 0, 0);
     // Block stray key events (like space) at the stack level
     m_stackedWidget->installEventFilter(this);
     bottomLayout->addWidget(m_stackedWidget);
@@ -946,12 +1039,13 @@ void MainWindow::setupUI() {
 void MainWindow::createClientListPage() {
     m_clientListPage = new QWidget();
     QVBoxLayout* layout = new QVBoxLayout(m_clientListPage);
-    layout->setSpacing(15);
+    // Use the global inner content gap between the header label and the client list container
+    layout->setSpacing(gInnerContentGap);
     layout->setContentsMargins(0, 0, 0, 0);
     
     // Client list section
     m_clientListLabel = new QLabel("Connected Clients:");
-    m_clientListLabel->setStyleSheet("QLabel { font-size: 16px; font-weight: bold; }");
+    applyTitleText(m_clientListLabel);
     layout->addWidget(m_clientListLabel);
     
     m_clientListWidget = new QListWidget();
@@ -1019,14 +1113,15 @@ void MainWindow::createScreenViewPage() {
     // Screen view page
     m_screenViewWidget = new QWidget();
     m_screenViewLayout = new QVBoxLayout(m_screenViewWidget);
-    m_screenViewLayout->setSpacing(15);
+    // Gap between hostname container and canvas
+    m_screenViewLayout->setSpacing(gInnerContentGap);
     m_screenViewLayout->setContentsMargins(0, 0, 0, 0);
     
     // Header row: hostname on the left, indicators on the right (replaces "Connected Clients:" title)
     QHBoxLayout* headerLayout = new QHBoxLayout();
 
     m_clientNameLabel = new QLabel();
-    m_clientNameLabel->setStyleSheet("QLabel { font-size: 16px; font-weight: bold; color: palette(text); }");
+    applyTitleText(m_clientNameLabel);
     m_clientNameLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
 
     // Remote connection status (to the right of hostname)
@@ -1147,29 +1242,19 @@ void MainWindow::createScreenViewPage() {
     m_screenCanvas->setFocusPolicy(Qt::StrongFocus);
     m_screenCanvas->installEventFilter(this);
     
-    // Bottom action bar with Upload and Send
-    QWidget* actionBar = new QWidget();
-    auto* actionLayout = new QHBoxLayout(actionBar);
-    actionLayout->setContentsMargins(0, 8, 0, 0);
-    actionLayout->setSpacing(12);
-    // Upload button
-    m_uploadButton = new QPushButton("Upload to Client");
-    m_uploadButtonDefaultFont = m_uploadButton->font();
-    applyPrimaryBtn(m_uploadButton);
-    m_uploadButton->setEnabled(true);
-    connect(m_uploadButton, &QPushButton::clicked, this, &MainWindow::onUploadButtonClicked);
-    // Apply initial style state machine
-    QTimer::singleShot(0, this, [this]() {
-        emit m_uploadManager->uiStateChanged();
-    });
-    actionLayout->addWidget(m_uploadButton, 0, Qt::AlignRight);
-    // Send button
-    m_sendButton = new QPushButton("Send Media to All Screens");
-    applyPrimaryBtn(m_sendButton);
-    m_sendButton->setEnabled(false); // Initially disabled until media is placed
-    connect(m_sendButton, &QPushButton::clicked, this, &MainWindow::onSendMediaClicked);
-    actionLayout->addWidget(m_sendButton, 0, Qt::AlignLeft);
-    m_screenViewLayout->addWidget(actionBar, 0, Qt::AlignHCenter);
+    // Connect upload button in media list overlay to upload functionality
+    if (QPushButton* overlayUploadBtn = m_screenCanvas->getUploadButton()) {
+        m_uploadButton = overlayUploadBtn; // Use the overlay button as our upload button
+        m_uploadButtonInOverlay = true; // Flag that this button uses overlay styling
+        m_uploadButtonDefaultFont = m_uploadButton->font();
+        connect(m_uploadButton, &QPushButton::clicked, this, &MainWindow::onUploadButtonClicked);
+        // Apply initial style state machine
+        QTimer::singleShot(0, [this]() {
+            emit m_uploadManager->uiStateChanged();
+        });
+    }
+    
+    // Upload button moved to media list overlay - no action bar needed
     // Ensure header has no stretch, container expands, button fixed
     m_screenViewLayout->setStretch(0, 0); // header
     m_screenViewLayout->setStretch(1, 1); // container expands

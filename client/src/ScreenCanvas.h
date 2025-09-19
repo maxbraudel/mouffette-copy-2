@@ -24,14 +24,17 @@ class QVideoSink;
 class QAudioOutput;
 class QVariantAnimation;
 class QResizeEvent;
+class QPushButton;
 
 // Extracted canvas that manages screen layout, zoom/pan, drag&drop previews, and media interaction.
 class ScreenCanvas : public QGraphicsView {
     Q_OBJECT
 public:
-    ~ScreenCanvas() override;
-public:
     explicit ScreenCanvas(QWidget* parent = nullptr);
+    ~ScreenCanvas() override;
+    
+    // Access to upload button in media list overlay
+    QPushButton* getUploadButton() const { return m_uploadButton; }
     void setScreens(const QList<ScreenInfo>& screens);
     void clearScreens();
     void recenterWithMargin(int marginPx = 33);
@@ -107,11 +110,12 @@ private:
     void recreateRemoteCursorItem();
     // Global top-right info overlay (lists media files)
     void initInfoOverlay();
-    void refreshInfoOverlay();
     void scheduleInfoOverlayRefresh();
+    void refreshInfoOverlay();
     void layoutInfoOverlay();
     void maybeRefreshInfoOverlayOnSceneChanged();
     
+    void OnSceneChanged();
     // Snap-to-screen helpers
     QPointF snapToScreenBorders(const QPointF& scenePos, const QRectF& mediaBounds, bool shiftPressed) const;
     qreal snapResizeToScreenBorders(qreal currentScale, const QPointF& fixedCorner, const QPointF& fixedItemPoint, const QSize& baseSize, bool shiftPressed) const;
@@ -178,7 +182,11 @@ private:
 
     // Info overlay widgets (viewport child, independent from scene transforms)
     QWidget* m_infoWidget = nullptr;       // panel widget parented to viewport()
-    QVBoxLayout* m_infoLayout = nullptr;
+    QVBoxLayout* m_infoLayout = nullptr;   // main layout (no margins)
+    QWidget* m_contentWidget = nullptr;    // content container (with margins)
+    QVBoxLayout* m_contentLayout = nullptr; // content layout (for media items)
+    QWidget* m_overlayHeaderWidget = nullptr; // container for overlay header row (holds upload button)
+    QPushButton* m_uploadButton = nullptr; // upload button in media list overlay
     bool m_infoRefreshQueued = false;
     int m_lastMediaItemCount = -1; // cache to detect add/remove
 };
