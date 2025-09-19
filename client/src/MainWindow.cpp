@@ -1,12 +1,14 @@
 #include "MainWindow.h"
-#include "ScreenCanvas.h"
-#include "OverlayPanels.h"
+#include "WebSocketClient.h"
+#include "ClientInfo.h"
+#include "ScreenNavigationManager.h"
 #include "UploadManager.h"
 #include "WatchManager.h"
-#include "ScreenNavigationManager.h"
 #include "SpinnerWidget.h"
-#include "RoundedRectItem.h"
-#include "MediaItems.h"
+#include "ScreenCanvas.h"
+#include "MediaSettingsPanel.h"
+#include "Theme.h"
+#include "AppColors.h"
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QHostInfo>
@@ -118,14 +120,13 @@ constexpr int TL_SIZE_PT = 12;          // traffic light diameter (pt)
 constexpr int TL_GAP_PT = 8;            // gap between traffic lights (pt)
 
 // Global window content margins (between all content and window borders)
-int gWindowContentMarginTop = 10;       // Top margin for all window content
+int gWindowContentMarginTop = 20;       // Top margin for all window content
 int gWindowContentMarginRight = 20;     // Right margin for all window content
 int gWindowContentMarginBottom = 20;    // Bottom margin for all window content
 int gWindowContentMarginLeft = 20;      // Left margin for all window content
 
 // Global window appearance variables (edit to customize)
 int gWindowBorderRadiusPx = 10;                    // Rounded corner radius (px)
-QColor gWindowBackgroundColor = QColor();          // If invalid, uses palette(window)
 
 // Global inner content gap between sections inside the window (top container <-> hostname, hostname <-> canvas)
 int gInnerContentGap = 20;
@@ -140,12 +141,9 @@ int gDynamicBoxFontPx = 13;           // Standard font size for buttons/status b
 // Remote client info container configuration
 int gRemoteClientContainerPadding = 6; // Horizontal padding for elements in remote client container
 
-// Global border configuration - will be initialized in initializeAppBorderColor()
-QString gAppBorderColor = "palette(midlight)"; // Default fallback
 
-// Global interaction background configuration - will be initialized in initializeAppColors()
-QString gInteractionBackgroundColor = "palette(mid)"; // Default fallback
-
+// Note: Border and background colors are now managed in AppColors.h/cpp
+// Use AppColors::colorSourceToCss(AppColors::gAppBorderColorSource) and AppColors::colorSourceToCss(AppColors::gInteractionBackgroundColorSource)
 
 // Global title text configuration (for headers like "Connected Clients" and hostname)
 int gTitleTextFontSize = 16;          // Title font size (px)
@@ -163,12 +161,13 @@ inline void applyPillBtn(QPushButton* b) {
     // Enforce exact visual height via stylesheet (min/max-height) and zero vertical padding
     b->setStyleSheet(QString(
         "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %4px; border: 1px solid %1;"
-        " border-radius: %2px; background-color: rgba(128,128,128,0.08); color: palette(buttonText);"
+        " border-radius: %2px; background-color: %5; color: palette(buttonText);"
         " min-height: %3px; max-height: %3px; }"
-        "QPushButton:hover { background-color: rgba(128,128,128,0.16); }"
-        "QPushButton:pressed { background-color: rgba(128,128,128,0.24); }"
-        "QPushButton:disabled { color: palette(mid); border-color: %1; background-color: rgba(128,128,128,0.06); }"
-    ).arg(gAppBorderColor).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx));
+        "QPushButton:hover { background-color: %6; }"
+        "QPushButton:pressed { background-color: %7; }"
+        "QPushButton:disabled { color: palette(mid); border-color: %1; background-color: %8; }"
+    ).arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx)
+     .arg(AppColors::colorToCss(AppColors::gButtonNormalBg)).arg(AppColors::colorToCss(AppColors::gButtonHoverBg)).arg(AppColors::colorToCss(AppColors::gButtonPressedBg)).arg(AppColors::colorToCss(AppColors::gButtonDisabledBg)));
     // Final enforcement (some styles ignore min/max rules)
     b->setFixedHeight(gDynamicBoxHeight);
 }
@@ -193,12 +192,14 @@ inline void applyPrimaryBtn(QPushButton* b) {
     b->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
     b->setStyleSheet(QString(
         "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %4px; border: 1px solid %1;"
-        " border-radius: %2px; background-color: rgba(74,144,226,0.15); color: #4a90e2;"
+        " border-radius: %2px; background-color: %5; color: %9;"
         " min-height: %3px; max-height: %3px; }"
-        "QPushButton:hover { background-color: rgba(74,144,226,0.22); }"
-        "QPushButton:pressed { background-color: rgba(74,144,226,0.30); }"
-        "QPushButton:disabled { color: palette(mid); border-color: %1; background-color: rgba(74,144,226,0.10); }"
-    ).arg(gAppBorderColor).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx));
+        "QPushButton:hover { background-color: %6; }"
+        "QPushButton:pressed { background-color: %7; }"
+        "QPushButton:disabled { color: palette(mid); border-color: %1; background-color: %8; }"
+    ).arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx)
+     .arg(AppColors::colorToCss(AppColors::gButtonPrimaryBg)).arg(AppColors::colorToCss(AppColors::gButtonPrimaryHover)).arg(AppColors::colorToCss(AppColors::gButtonPrimaryPressed)).arg(AppColors::colorToCss(AppColors::gButtonPrimaryDisabled))
+     .arg(AppColors::gBrandBlue.name()));
     // Final enforcement (some styles ignore min/max rules)
     b->setFixedHeight(gDynamicBoxHeight);
 }
@@ -225,12 +226,11 @@ inline void applyStatusBox(QLabel* l, const QString& borderColor, const QString&
 // A central container that paints a rounded rect with antialiased border
 class RoundedContainer : public QWidget {
 public:
-    explicit RoundedContainer(QWidget* parent = nullptr) : QWidget(parent) {
-        setAttribute(Qt::WA_TranslucentBackground, true);
-        setAutoFillBackground(false);
-    }
+    RoundedContainer(QWidget* parent = nullptr) : QWidget(parent) {}
+    
 protected:
-    void paintEvent(QPaintEvent*) override {
+    void paintEvent(QPaintEvent* event) override {
+        Q_UNUSED(event);
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing, true);
 
@@ -241,9 +241,8 @@ protected:
         QPainterPath path;
         path.addRoundedRect(borderRect, radius, radius);
 
-        // Match the client list container background by default (QPalette::Base)
-        QColor fill = gWindowBackgroundColor.isValid() ? gWindowBackgroundColor
-                                                       : palette().color(QPalette::Base);
+        // Use dynamic palette color that updates automatically with theme changes
+        QColor fill = AppColors::getCurrentColor(AppColors::gWindowBackgroundColorSource);
         // Avoid halo on rounded edges by drawing fill with Source composition
         p.setCompositionMode(QPainter::CompositionMode_Source);
         p.fillPath(path, fill);
@@ -251,6 +250,14 @@ protected:
         // No outer border drawing — only rounded fill is rendered
     }
 };
+
+bool MainWindow::event(QEvent* event) {
+    if (event->type() == QEvent::PaletteChange) {
+        // Theme changed - update stylesheets that use ColorSource
+        updateStylesheetsForTheme();
+    }
+    return QMainWindow::event(event);
+}
 
 void MainWindow::setRemoteConnectionStatus(const QString& status) {
     if (!m_remoteConnectionStatusLabel) return;
@@ -260,14 +267,14 @@ void MainWindow::setRemoteConnectionStatus(const QString& status) {
     // Apply same styling as main connection status with colored background
     QString textColor, bgColor;
     if (up == "CONNECTED") {
-        textColor = "#2E7D32"; // Green text
-        bgColor = "rgba(76,175,80,0.15)"; // Green background
+        textColor = AppColors::colorToCss(AppColors::gStatusConnectedText);
+        bgColor = AppColors::colorToCss(AppColors::gStatusConnectedBg);
     } else if (up == "NETWORK ERROR" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
-        textColor = "#FB8C00"; // Orange text
-        bgColor = "rgba(255,152,0,0.15)"; // Orange background
+        textColor = AppColors::colorToCss(AppColors::gStatusWarningText);
+        bgColor = AppColors::colorToCss(AppColors::gStatusWarningBg);
     } else {
-        textColor = "#E53935"; // Red text
-        bgColor = "rgba(244,67,54,0.15)"; // Red background
+        textColor = AppColors::colorToCss(AppColors::gStatusErrorText);
+        bgColor = AppColors::colorToCss(AppColors::gStatusErrorBg);
     }
     
     m_remoteConnectionStatusLabel->setStyleSheet(
@@ -350,6 +357,9 @@ MainWindow::MainWindow(QWidget* parent)
     // Use Qt's native positioning to avoid menu bar overlap
     move(QGuiApplication::primaryScreen()->availableGeometry().topLeft() + QPoint(50, 50));
     
+    // Initialize colors from system palette
+    AppColors::initializeColors();
+    
     setupUI();
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN) || defined(Q_OS_LINUX)
     // Ensure no status bar is shown at the bottom
@@ -394,11 +404,10 @@ MainWindow::MainWindow(QWidget* parent)
                 "    padding: 0px 20px; "
                 "    font-weight: bold; "
                 "    font-size: 12px; "
-                "    color: rgba(255,255,255,0.9); "
+                "    color: " + AppColors::colorToCss(AppColors::gOverlayTextColor) + "; "
                 "    background: transparent; "
                 "    border: none; "
-                "    border-radius: 0px; "
-                "    border-top: 1px solid rgba(255,255,255,0.2); "
+                "    border-top: 1px solid " + AppColors::colorToCss(AppColors::gOverlayBorderColor) + "; "
                 "    text-align: center; "
                 "} "
                 "QPushButton:hover { "
@@ -414,20 +423,20 @@ MainWindow::MainWindow(QWidget* parent)
                 "    padding: 0px 20px; "
                 "    font-weight: bold; "
                 "    font-size: 12px; "
-                "    color: #4a90e2; "
-                "    background: rgba(74,144,226,0.1); "
+                "    color: " + AppColors::gBrandBlue.name() + "; "
+                "    background: " + AppColors::colorToCss(AppColors::gButtonPrimaryBg) + "; "
                 "    border: none; "
                 "    border-radius: 0px; "
-                "    border-top: 1px solid " + gAppBorderColor + "; "
+                "    border-top: 1px solid " + AppColors::colorSourceToCss(AppColors::gAppBorderColorSource) + "; "
                 "    text-align: center; "
                 "} "
                 "QPushButton:hover { "
-                "    color: #4a90e2; "
-                "    background: rgba(74,144,226,0.15); "
+                "    color: " + AppColors::gBrandBlue.name() + "; "
+                "    background: " + AppColors::colorToCss(AppColors::gButtonPrimaryHover) + "; "
                 "} "
                 "QPushButton:pressed { "
-                "    color: #4a90e2; "
-                "    background: rgba(74,144,226,0.2); "
+                "    color: " + AppColors::gBrandBlue.name() + "; "
+                "    background: " + AppColors::colorToCss(AppColors::gButtonPrimaryPressed) + "; "
                 "}";
             
             if (m_uploadManager->isUploading()) {
@@ -456,17 +465,17 @@ MainWindow::MainWindow(QWidget* parent)
         
         // Base style strings using gDynamicBox configuration for regular buttons
         const QString greyStyle = QString(
-            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; background-color: #666; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
-            "QPushButton:checked { background-color: #444; }"
-        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx);
+            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; background-color: %4; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
+            "QPushButton:checked { background-color: %5; }"
+        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx).arg(AppColors::colorToCss(AppColors::gButtonGreyBg)).arg(AppColors::colorToCss(AppColors::gButtonGreyPressed));
         const QString blueStyle = QString(
-            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; background-color: #2d6cdf; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
-            "QPushButton:checked { background-color: #1f4ea8; }"
-        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx);
+            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; background-color: %4; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
+            "QPushButton:checked { background-color: %5; }"
+        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx).arg(AppColors::colorToCss(AppColors::gButtonBlueBg)).arg(AppColors::colorToCss(AppColors::gButtonBluePressed));
         const QString greenStyle = QString(
-            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; background-color: #16a34a; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
-            "QPushButton:checked { background-color: #15803d; }"
-        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx);
+            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; background-color: %4; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
+            "QPushButton:checked { background-color: %5; }"
+        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx).arg(AppColors::colorToCss(AppColors::gButtonGreenBg)).arg(AppColors::colorToCss(AppColors::gButtonGreenPressed));
 
         if (m_uploadManager->isUploading()) {
             // Upload in progress (preparing or actively streaming): show preparing or cancelling state handled elsewhere
@@ -656,7 +665,7 @@ void MainWindow::createRemoteClientInfoContainer() {
         "    min-height: %2px; "
         "    max-height: %2px; "
         "}"
-    ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gAppBorderColor);
+    ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource));
     
     m_remoteClientInfoContainer->setStyleSheet(containerStyle);
     m_remoteClientInfoContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
@@ -683,7 +692,7 @@ void MainWindow::createRemoteClientInfoContainer() {
     QFrame* separator1 = new QFrame();
     separator1->setFrameShape(QFrame::VLine);
     separator1->setFrameShadow(QFrame::Sunken);
-    separator1->setStyleSheet(QString("QFrame { color: %1; }").arg(gAppBorderColor));
+    separator1->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
     separator1->setFixedWidth(1);
     containerLayout->addWidget(separator1);
     
@@ -695,7 +704,7 @@ void MainWindow::createRemoteClientInfoContainer() {
     QFrame* separator2 = new QFrame();
     separator2->setFrameShape(QFrame::VLine);
     separator2->setFrameShadow(QFrame::Sunken);
-    separator2->setStyleSheet(QString("QFrame { color: %1; }").arg(gAppBorderColor));
+    separator2->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
     separator2->setFixedWidth(1);
     containerLayout->addWidget(separator2);
     
@@ -969,6 +978,91 @@ MainWindow::~MainWindow() {
     }
 }
 
+void MainWindow::updateStylesheetsForTheme() {
+    // Re-apply stylesheets that use ColorSource to pick up theme changes
+    if (m_clientListWidget) {
+        m_clientListWidget->setStyleSheet(
+            QString("QListWidget { "
+            "   border: 1px solid %1; "
+            "   border-radius: 5px; "
+            "   padding: 5px; "
+            "   background-color: %2; "
+            "   outline: none; "
+            "}"
+            "QListWidget::item { "
+            "   padding: 10px; "
+            "   border-bottom: 1px solid palette(midlight); "
+            "}"
+            // Hover: very light blue tint
+            "QListWidget::item:hover { "
+            "   background-color: rgba(74, 144, 226, 28); "
+            "}"
+            // Suppress active/selected highlight colors
+            "QListWidget::item:selected { "
+            "   background-color: transparent; "
+            "   color: palette(text); "
+            "}"
+            "QListWidget::item:selected:active { "
+            "   background-color: transparent; "
+            "   color: palette(text); "
+            "}"
+            "QListWidget::item:selected:hover { "
+            "   background-color: " + AppColors::colorToCss(AppColors::gHoverHighlight) + "; "
+            "   color: palette(text); "
+            "}").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)).arg(AppColors::colorSourceToCss(AppColors::gInteractionBackgroundColorSource))
+        );
+    }
+    
+    if (m_canvasContainer) {
+        m_canvasContainer->setStyleSheet(
+            QString("QWidget#CanvasContainer { "
+            "   background-color: %2; "
+            "   border: 1px solid %1; "
+            "   border-radius: 5px; "
+            "}").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)).arg(AppColors::colorSourceToCss(AppColors::gInteractionBackgroundColorSource))
+        );
+    }
+    
+    // Update remote client info container border
+    if (m_remoteClientInfoContainer) {
+        const QString containerStyle = QString(
+            "QWidget { "
+            "    background-color: transparent; "
+            "    color: palette(button-text); "
+            "    border: 1px solid %3; "
+            "    border-radius: %1px; "
+            "    min-height: %2px; "
+            "    max-height: %2px; "
+            "}"
+        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource));
+        m_remoteClientInfoContainer->setStyleSheet(containerStyle);
+    }
+    
+    // Update separators in remote client info
+    QList<QFrame*> separators = m_remoteClientInfoContainer ? m_remoteClientInfoContainer->findChildren<QFrame*>() : QList<QFrame*>();
+    for (QFrame* separator : separators) {
+        if (separator && separator->frameShape() == QFrame::VLine) {
+            separator->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
+        }
+    }
+    
+    // Update all buttons that use gAppBorderColorSource (exclude traffic lights and transparent buttons)
+    QList<QPushButton*> buttons = findChildren<QPushButton*>();
+    for (QPushButton* button : buttons) {
+        if (button && button->styleSheet().contains("border:") && 
+            !button->styleSheet().contains("border: none") &&
+            !button->styleSheet().contains("background: transparent")) {
+            // Re-apply button styles - check if it's a primary or normal button
+            QString currentStyle = button->styleSheet();
+            if (currentStyle.contains(AppColors::gBrandBlue.name())) {
+                applyPrimaryBtn(button);
+            } else if (currentStyle.contains("QPushButton")) {
+                applyPillBtn(button);
+            }
+        }
+    }
+}
+
 void MainWindow::setupUI() {
     // Use a custom painted container for smooth rounded corners and border
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
@@ -1075,7 +1169,7 @@ void MainWindow::setupUI() {
     
     // Status label (boxed style using dynamicBox)
     m_connectionStatusLabel = new QLabel("DISCONNECTED");
-    applyStatusBox(m_connectionStatusLabel, "#E53935", "rgba(244,67,54,0.15)", "#E53935");
+    applyStatusBox(m_connectionStatusLabel, AppColors::colorToCss(AppColors::gStatusErrorText), AppColors::colorToCss(AppColors::gStatusErrorBg), AppColors::colorToCss(AppColors::gStatusErrorText));
 
     // Enable/Disable toggle button with fixed width (left of Settings)
     m_connectToggleButton = new QPushButton("Disable");
@@ -1214,9 +1308,9 @@ void MainWindow::createClientListPage() {
         "   color: palette(text); "
         "}"
         "QListWidget::item:selected:hover { "
-        "   background-color: rgba(74, 144, 226, 28); "
+        "   background-color: " + AppColors::colorToCss(AppColors::gHoverHighlight) + "; "
         "   color: palette(text); "
-        "}").arg(gAppBorderColor).arg(gInteractionBackgroundColor)
+        "}").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)).arg(AppColors::colorSourceToCss(AppColors::gInteractionBackgroundColorSource))
     );
     connect(m_clientListWidget, &QListWidget::itemClicked, this, &MainWindow::onClientItemClicked);
     // Prevent keyboard (space/enter) from triggering navigation
@@ -1227,7 +1321,7 @@ void MainWindow::createClientListPage() {
     layout->addWidget(m_clientListWidget);
     
     m_noClientsLabel = new QLabel("No clients connected. Make sure other devices are running Mouffette and connected to the same server.");
-    m_noClientsLabel->setStyleSheet("QLabel { color: #666; font-style: italic; text-align: center; }");
+    m_noClientsLabel->setStyleSheet("QLabel { color: " + AppColors::colorToCss(AppColors::gTextMuted) + "; font-style: italic; text-align: center; }");
     m_noClientsLabel->setAlignment(Qt::AlignCenter);
     m_noClientsLabel->setWordWrap(true);
     layout->addWidget(m_noClientsLabel);
@@ -1296,7 +1390,7 @@ void MainWindow::createScreenViewPage() {
         "   background-color: %2; "
         "   border: 1px solid %1; "
         "   border-radius: 5px; "
-        "}").arg(gAppBorderColor).arg(gInteractionBackgroundColor)
+        "}").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)).arg(AppColors::colorSourceToCss(AppColors::gInteractionBackgroundColorSource))
     );
     QVBoxLayout* containerLayout = new QVBoxLayout(m_canvasContainer);
     // Provide real inner padding so child doesn't cover the border area
@@ -1319,7 +1413,7 @@ void MainWindow::createScreenViewPage() {
     // Initial appearance (easy to tweak):
     m_loadingSpinner->setRadius(22);        // circle radius in px
     m_loadingSpinner->setLineWidth(6);      // line width in px
-    m_loadingSpinner->setColor(QColor("#4a90e2")); // brand blue
+    m_loadingSpinner->setColor(AppColors::gBrandBlue); // brand blue
     m_loadingSpinner->setMinimumSize(QSize(48, 48));
     // Spinner page widget wraps the spinner centered
     QWidget* spinnerPage = new QWidget();
@@ -2036,7 +2130,7 @@ void MainWindow::updateClientList(const QList<ClientInfo>& clients) {
         font.setItalic(true);
         font.setPointSize(16); // Make the font larger
         item->setFont(font);
-        item->setForeground(QColor(102, 102, 102)); // #666 color
+        item->setForeground(AppColors::gTextMuted); // Muted text color
         
     // Set a custom size hint to center the item vertically in the list widget.
     // Use the viewport height (content area) to avoid off-by-margins that cause scrollbars.
@@ -2077,11 +2171,11 @@ void MainWindow::updateConnectionStatus() {
     m_connectionStatusLabel->setText(status.toUpper());
     
     if (status == "Connected") {
-        applyStatusBox(m_connectionStatusLabel, "#2E7D32", "rgba(76,175,80,0.15)", "#2E7D32");
+        applyStatusBox(m_connectionStatusLabel, AppColors::colorToCss(AppColors::gStatusConnectedText), AppColors::colorToCss(AppColors::gStatusConnectedBg), AppColors::colorToCss(AppColors::gStatusConnectedText));
     } else if (status.startsWith("Connecting") || status.startsWith("Reconnecting")) {
-        applyStatusBox(m_connectionStatusLabel, "#FB8C00", "rgba(255,152,0,0.15)", "#FB8C00");
+        applyStatusBox(m_connectionStatusLabel, AppColors::colorToCss(AppColors::gStatusWarningText), AppColors::colorToCss(AppColors::gStatusWarningBg), AppColors::colorToCss(AppColors::gStatusWarningText));
     } else {
-        applyStatusBox(m_connectionStatusLabel, "#E53935", "rgba(244,67,54,0.15)", "#E53935");
+        applyStatusBox(m_connectionStatusLabel, AppColors::colorToCss(AppColors::gStatusErrorText), AppColors::colorToCss(AppColors::gStatusErrorBg), AppColors::colorToCss(AppColors::gStatusErrorText));
     }
 }
 

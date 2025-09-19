@@ -1,5 +1,6 @@
 #include "MediaSettingsPanel.h"
-
+#include "Theme.h"
+#include "AppColors.h"
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QGraphicsProxyWidget>
@@ -181,7 +182,7 @@ void MediaSettingsPanel::buildUi() {
     m_bgRect = new MouseBlockingRoundedRectItem();
     m_bgRect->setRadius(gOverlayCornerRadiusPx);
     m_bgRect->setPen(Qt::NoPen);
-    m_bgRect->setBrush(QBrush(gOverlayBackgroundColor));
+    m_bgRect->setBrush(QBrush(AppColors::gOverlayBackgroundColor));
     m_bgRect->setZValue(12009.5); // just below proxy
     m_bgRect->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     m_bgRect->setData(0, QStringLiteral("overlay"));
@@ -282,28 +283,28 @@ void MediaSettingsPanel::setBoxActive(QLabel* box, bool active) {
     if (active) {
         // Active state: use the same blue tint as enabled settings button (74,144,226)
         box->setStyleSheet(
-            "QLabel {"
-            "  background-color: rgb(74,144,226);"
-            "  border: 1px solid rgb(74,144,226);"
+            QString("QLabel {"
+            "  background-color: %1;"
+            "  border: 1px solid %1;"
             "  border-radius: 6px;"
             "  padding: 2px 10px;"
             "  margin-left: 4px;"
             "  margin-right: 0px;"
             "  color: white;"
-            "}"
+            "}").arg(AppColors::gMediaPanelActiveBg.name())
         );
     } else {
         // Inactive state: subtle translucent box with rounded corners; white text to match panel
         box->setStyleSheet(
-            "QLabel {"
-            "  background-color: rgb(60,60,60);"
-            "  border: 1px solid rgb(200,200,200);"
+            QString("QLabel {"
+            "  background-color: %1;"
+            "  border: 1px solid %2;"
             "  border-radius: 6px;"
             "  padding: 2px 10px;"
             "  margin-left: 4px;"
             "  margin-right: 0px;"
             "  color: white;"
-            "}"
+            "}").arg(AppColors::gMediaPanelInactiveBg.name()).arg(AppColors::gMediaPanelInactiveBorder.name())
         );
     }
 }

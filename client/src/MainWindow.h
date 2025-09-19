@@ -88,10 +88,11 @@ private slots:
     void showSettingsDialog();
 
 protected:
-    void closeEvent(QCloseEvent *event) override;
+    bool event(QEvent* event) override;
     void resizeEvent(QResizeEvent *event) override;
     void changeEvent(QEvent* event) override;
     bool eventFilter(QObject* obj, QEvent* event) override;
+    void closeEvent(QCloseEvent *event) override;
     // Dragging support for frameless window (macOS/Windows)
     bool m_dragging = false;
     QPoint m_dragStartGlobal;
@@ -104,6 +105,9 @@ protected:
 
 private:
     void setupUI();
+    void setupTrayIcon();
+    void setupConnections();
+    void updateStylesheetsForTheme();
     void createClientListPage();
     void createScreenViewPage();
     void setupMenuBar();

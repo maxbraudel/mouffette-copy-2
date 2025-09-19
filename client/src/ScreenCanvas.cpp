@@ -1,6 +1,8 @@
 #include "ScreenCanvas.h"
 #include "MediaItems.h"
+#include "OverlayPanels.h"
 #include "Theme.h"
+#include "AppColors.h"
 #include <algorithm>
 #include <QGraphicsScene>
 #include <QPushButton>
@@ -95,7 +97,7 @@ void ScreenCanvas::initInfoOverlay() {
         m_infoWidget->setAttribute(Qt::WA_StyledBackground, true);
         m_infoWidget->setAutoFillBackground(true);
         // Build stylesheet from theme colors
-        QColor c = gOverlayBackgroundColor;
+        QColor c = AppColors::gOverlayBackgroundColor;
         const QString bg = QString("background-color: rgba(%1,%2,%3,%4); border-radius: %5px; color: white; font-size: 16px;")
             .arg(c.red()).arg(c.green()).arg(c.blue()).arg(c.alpha())
             .arg(gOverlayCornerRadiusPx);
@@ -135,10 +137,10 @@ void ScreenCanvas::initInfoOverlay() {
             "    padding: 8px 0px; "
             "    font-weight: bold; "
             "    font-size: 12px; "
-            "    color: rgba(255,255,255,0.9); "
+            "    color: " + AppColors::colorToCss(AppColors::gOverlayTextColor) + "; "
             "    background: transparent; "
             "    border: none; "
-            "    border-top: 1px solid rgba(255,255,255,0.2); "
+            "    border-top: 1px solid " + AppColors::colorToCss(AppColors::gOverlayBorderColor) + "; "
             "} "
             "QPushButton:hover { "
             "    color: white; "
@@ -239,11 +241,11 @@ void ScreenCanvas::refreshInfoOverlay() {
             bar->setFixedHeight(10);
             bar->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed); // Full width
             // Blue progress bar styling consistent with theme - no border radius
-            bar->setStyleSheet("QProgressBar{background: rgba(255,255,255,0.15);} QProgressBar::chunk{background: #2D8CFF;}");
+            bar->setStyleSheet("QProgressBar{background: " + AppColors::colorToCss(AppColors::gMediaProgressBg) + ";} QProgressBar::chunk{background: " + AppColors::colorToCss(AppColors::gMediaProgressFill) + ";}");
             statusLayout->addWidget(bar, 0, Qt::AlignVCenter); // Only center vertically, full width horizontally
         } else {
             auto* status = new QLabel(m->uploadState() == ResizableMediaBase::UploadState::Uploaded ? QStringLiteral("Uploaded") : QStringLiteral("Not uploaded"), statusContainer);
-            const char* color = (m->uploadState() == ResizableMediaBase::UploadState::Uploaded) ? "#2ecc71" : "#f39c12"; // green or orange
+            const QString color = (m->uploadState() == ResizableMediaBase::UploadState::Uploaded) ? AppColors::colorToCss(AppColors::gMediaUploadedColor) : AppColors::colorToCss(AppColors::gMediaNotUploadedColor);
             status->setStyleSheet(QString("color: %1; font-size: 14px; background: transparent;").arg(color));
             status->setAutoFillBackground(false);
             status->setAttribute(Qt::WA_TranslucentBackground, true);
@@ -254,7 +256,7 @@ void ScreenCanvas::refreshInfoOverlay() {
         m_contentLayout->addWidget(statusContainer);
         // Row: details smaller under status
         auto* details = new QLabel(dim + QStringLiteral("  ·  ") + sizeStr, m_contentWidget);
-        details->setStyleSheet("color: rgba(255,255,255,0.85); font-size: 14px; background: transparent;");
+        details->setStyleSheet("color: " + AppColors::colorToCss(AppColors::gTextSecondary) + "; font-size: 14px; background: transparent;");
         details->setAutoFillBackground(false);
         details->setAttribute(Qt::WA_TranslucentBackground, true);
         details->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);

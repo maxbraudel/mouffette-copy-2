@@ -1,5 +1,7 @@
 // Unified overlay implementation
 #include "OverlayPanels.h"
+#include "Theme.h"
+#include "AppColors.h"
 #include "RoundedRectItem.h"
 #include <QGraphicsScene>
 #include <QGraphicsView>
@@ -48,7 +50,7 @@ static QBrush overlayStateBrush(const OverlayStyle& style) {
 }
 
 static QBrush buttonBrushForState(const OverlayStyle& style, OverlayElement::ElementState st) {
-    QColor base = style.backgroundColor;
+    QColor base = AppColors::gOverlayBackgroundColor;
     const QColor accent(74,144,226,255);
     auto blend=[&](const QColor&a,const QColor&b,qreal t){return QColor(
         a.red()*(1-t)+b.red()*t,
@@ -59,8 +61,8 @@ static QBrush buttonBrushForState(const OverlayStyle& style, OverlayElement::Ele
         // No hover highlight: keep normal background on hover
         case OverlayElement::Hovered: return QBrush(base);
         // Pressed and toggled use the exact active background color from style
-        case OverlayElement::Active: return QBrush(style.activeBackgroundColor);
-        case OverlayElement::Toggled: return QBrush(style.activeBackgroundColor);
+        case OverlayElement::Active: return QBrush(AppColors::gOverlayActiveBackgroundColor);
+        case OverlayElement::Toggled: return QBrush(AppColors::gOverlayActiveBackgroundColor);
         case OverlayElement::Disabled: {
             QColor dim = base; dim.setAlphaF(dim.alphaF()*0.35); return QBrush(dim);
         }
@@ -342,7 +344,7 @@ void OverlaySliderElement::applyStyle(const OverlayStyle& style) {
     m_currentStyle = style;
     createGraphicsItems();
     if (m_track) {
-        QColor trackColor = style.backgroundColor;
+        QColor trackColor = AppColors::gOverlayBackgroundColor;
         trackColor.setAlphaF(std::min(1.0, trackColor.alphaF() * 0.55)); // lighter track
         m_track->setBrush(trackColor);
         m_track->setRadius(style.cornerRadius);
