@@ -89,7 +89,17 @@ private slots:
 protected:
     void closeEvent(QCloseEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
+    void changeEvent(QEvent* event) override;
     bool eventFilter(QObject* obj, QEvent* event) override;
+    // Dragging support for frameless window (macOS/Windows)
+    bool m_dragging = false;
+    QPoint m_dragStartGlobal;
+    QPoint m_windowStartPos;
+    // macOS traffic lights state
+    enum class TrafficLightsMode { NoFocus, WindowHover, ButtonHover };
+    void updateTrafficLightsIcons(TrafficLightsMode mode);
+    TrafficLightsMode m_trafficLightsMode = TrafficLightsMode::NoFocus;
+    bool m_anyTrafficLightHovered = false;
 
 private:
     void setupUI();
@@ -127,6 +137,7 @@ private:
     QWidget* m_centralWidget;
     QVBoxLayout* m_mainLayout;
     QStackedWidget* m_stackedWidget;
+    QWidget* m_connectionBar; // container widget for top connection layout
     
     // Client list page
     QWidget* m_clientListPage;
@@ -159,6 +170,10 @@ private:
     QPushButton* m_sendButton;
     QPushButton* m_uploadButton;
     QPushButton* m_backButton;
+    // Frameless window custom controls (macOS/Windows)
+    QPushButton* m_btnClose = nullptr;
+    QPushButton* m_btnMinimize = nullptr;
+    QPushButton* m_btnMaximize = nullptr;
     QFont m_uploadButtonDefaultFont;
     // Loader/content animations
     int m_loaderDelayMs = 1000;       // show spinner after this delay

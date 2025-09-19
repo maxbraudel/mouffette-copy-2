@@ -24,6 +24,8 @@
 #include <QCursor>
 #include <QRandomGenerator>
 #include <QPainter>
+#include <QGuiApplication>
+#include <algorithm>
 #include <QPaintEvent>
 #include <QGraphicsOpacityEffect>
 #include <QPropertyAnimation>
@@ -34,6 +36,7 @@
 #include <QDropEvent>
 #include <QDragMoveEvent>
 #include <QMimeData>
+#include <QStatusBar>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsSceneMouseEvent>
 #include <QPen>
@@ -47,6 +50,7 @@
 #include <QtSvgWidgets/QGraphicsSvgItem>
 #include <QtSvg/QSvgRenderer>
 #include <QPainterPathStroker>
+#include <QPainter>
 #include <QFileInfo>
 #include <QFile>
 #include <QDir>
@@ -109,28 +113,127 @@ constexpr qreal Z_SCREENS = -1000.0;
 constexpr qreal Z_MEDIA_BASE = 1.0;
 constexpr qreal Z_REMOTE_CURSOR = 10000.0;
 constexpr qreal Z_SCENE_OVERLAY = 12000.0; // above all scene content
+// Global UI constants for macOS traffic lights
+constexpr int TL_SIZE_PT = 12;          // traffic light diameter (pt)
+constexpr int TL_GAP_PT = 8;            // gap between traffic lights (pt)
+
+// Global top container margins (independent of traffic lights positioning)
+int gTopContainerMarginLeft = 16;       // Left margin for top container
+int gTopContainerMarginTop = 10;         // Top margin for top container  
+int gTopContainerMarginRight = 16;      // Right margin for top container
+
+// Global window appearance variables (edit to customize)
+int gWindowBorderRadiusPx = 10;                    // Rounded corner radius (px)
+QColor gWindowBackgroundColor = QColor();          // If invalid, uses palette(window)
+
+// Global dynamicBox configuration for standardized buttons and status indicators
+// Edit these values to change all buttons and status boxes at once
+int gDynamicBoxMinWidth = 80;         // Minimum width for buttons/status boxes
+int gDynamicBoxHeight = 24;           // Fixed height for all elements
+int gDynamicBoxBorderRadius = 6;      // Border radius for rounded corners
+int gDynamicBoxFontPx = 13;           // Standard font size for buttons/status boxes
+
+// Shared button style helpers using dynamicBox configuration
+inline void applyPillBtn(QPushButton* b) {
+    if (!b) return;
+    // Avoid platform default/autoDefault enlarging the control on macOS
+    b->setAutoDefault(false);
+    b->setDefault(false);
+    b->setFocusPolicy(Qt::NoFocus);
+    b->setMinimumWidth(gDynamicBoxMinWidth);
+    b->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+    // Enforce exact visual height via stylesheet (min/max-height) and zero vertical padding
+    b->setStyleSheet(QString(
+        "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; border: 1px solid palette(mid);"
+        " border-radius: %1px; background-color: rgba(128,128,128,0.08); color: palette(buttonText);"
+        " min-height: %2px; max-height: %2px; }"
+        "QPushButton:hover { background-color: rgba(128,128,128,0.16); }"
+        "QPushButton:pressed { background-color: rgba(128,128,128,0.24); }"
+        "QPushButton:disabled { color: palette(mid); border-color: palette(mid); background-color: rgba(128,128,128,0.06); }"
+    ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx));
+    // Final enforcement (some styles ignore min/max rules)
+    b->setFixedHeight(gDynamicBoxHeight);
 }
+inline void applyPrimaryBtn(QPushButton* b) {
+    if (!b) return;
+    // Avoid platform default/autoDefault enlarging the control on macOS
+    b->setAutoDefault(false);
+    b->setDefault(false);
+    b->setFocusPolicy(Qt::NoFocus);
+    b->setMinimumWidth(gDynamicBoxMinWidth);
+    b->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+    b->setStyleSheet(QString(
+        "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; border: 1px solid #4a90e2;"
+        " border-radius: %1px; background-color: rgba(74,144,226,0.15); color: #4a90e2;"
+        " min-height: %2px; max-height: %2px; }"
+        "QPushButton:hover { background-color: rgba(74,144,226,0.22); }"
+        "QPushButton:pressed { background-color: rgba(74,144,226,0.30); }"
+        "QPushButton:disabled { color: palette(mid); border-color: palette(mid); background-color: rgba(74,144,226,0.10); }"
+    ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx));
+    // Final enforcement (some styles ignore min/max rules)
+    b->setFixedHeight(gDynamicBoxHeight);
+}
+inline void applyStatusBox(QLabel* l, const QString& borderColor, const QString& bgColor, const QString& textColor) {
+    if (!l) return;
+    l->setMinimumWidth(gDynamicBoxMinWidth);
+    l->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+    l->setAlignment(Qt::AlignCenter);
+    l->setStyleSheet(QString(
+        "QLabel { padding: 0px 8px; font-size: %5px; border: 1px solid %1; border-radius: %2px; "
+        "background-color: %3; color: %4; font-weight: bold; min-height: %6px; max-height: %6px; }"
+    ).arg(borderColor)
+     .arg(gDynamicBoxBorderRadius)
+     .arg(bgColor)
+     .arg(textColor)
+     .arg(gDynamicBoxFontPx)
+     .arg(gDynamicBoxHeight));
+    // Final enforcement
+    l->setFixedHeight(gDynamicBoxHeight);
+}
+}
+
+
+// A central container that paints a rounded rect with antialiased border
+class RoundedContainer : public QWidget {
+public:
+    explicit RoundedContainer(QWidget* parent = nullptr) : QWidget(parent) {
+        setAttribute(Qt::WA_TranslucentBackground, true);
+        setAutoFillBackground(false);
+    }
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+
+        const qreal radius = qMax(0, gWindowBorderRadiusPx);
+        QRectF r = rect();
+        // Align to half-pixels for crisp 1px strokes
+        QRectF borderRect = r.adjusted(0.5, 0.5, -0.5, -0.5);
+        QPainterPath path;
+        path.addRoundedRect(borderRect, radius, radius);
+
+        // Match the client list container background by default (QPalette::Base)
+        QColor fill = gWindowBackgroundColor.isValid() ? gWindowBackgroundColor
+                                                       : palette().color(QPalette::Base);
+        // Avoid halo on rounded edges by drawing fill with Source composition
+        p.setCompositionMode(QPainter::CompositionMode_Source);
+        p.fillPath(path, fill);
+        p.setCompositionMode(QPainter::CompositionMode_SourceOver);
+        // No outer border drawing — only rounded fill is rendered
+    }
+};
 
 void MainWindow::setRemoteConnectionStatus(const QString& status) {
     if (!m_remoteConnectionStatusLabel) return;
     const QString up = status.toUpper();
     m_remoteConnectionStatusLabel->setText(up);
     if (up == "CONNECTED") {
-        m_remoteConnectionStatusLabel->setStyleSheet(
-            "QLabel { padding: 2px 6px; border: 1px solid #2E7D32; border-radius: 6px; "
-            "background-color: rgba(76,175,80,0.15); color: #2E7D32; font-weight: bold; }"
-        );
+        applyStatusBox(m_remoteConnectionStatusLabel, "#2E7D32", "rgba(76,175,80,0.15)", "#2E7D32");
     } else if (up == "NETWORK ERROR" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
-        m_remoteConnectionStatusLabel->setStyleSheet(
-            "QLabel { padding: 2px 6px; border: 1px solid #FB8C00; border-radius: 6px; "
-            "background-color: rgba(255,152,0,0.15); color: #FB8C00; font-weight: bold; }"
-        );
+        applyStatusBox(m_remoteConnectionStatusLabel, "#FB8C00", "rgba(255,152,0,0.15)", "#FB8C00");
     } else {
         // DISCONNECTED or any other
-        m_remoteConnectionStatusLabel->setStyleSheet(
-            "QLabel { padding: 2px 6px; border: 1px solid #E53935; border-radius: 6px; "
-            "background-color: rgba(244,67,54,0.15); color: #E53935; font-weight: bold; }"
-        );
+        applyStatusBox(m_remoteConnectionStatusLabel, "#E53935", "rgba(244,67,54,0.15)", "#E53935");
     }
 }
 
@@ -183,9 +286,34 @@ MainWindow::MainWindow(QWidget* parent)
       m_navigationManager(nullptr)
 {
     setWindowTitle("Mouffette");
+#ifdef Q_OS_MACOS
+    setWindowIcon(QIcon(":/icons/appicon.icns"));
+#elif defined(Q_OS_WIN)
+    setWindowIcon(QIcon(":/icons/appicon.ico"));
+#endif
+    // Frameless window and no menu bar on macOS/Windows
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+    setWindowFlags(windowFlags() | Qt::FramelessWindowHint);
+    // Disable context menus app-wide for a clean look
+    setContextMenuPolicy(Qt::NoContextMenu);
+    // Ensure QMainWindow does not reserve space for a (hidden) menu bar
+    setMenuBar(nullptr);
+    // Enable transparent window background so inner container can draw rounded corners
+    setAttribute(Qt::WA_TranslucentBackground);
+#endif
     resize(1280, 900);
+    // Use Qt's native positioning to avoid menu bar overlap
+    move(QGuiApplication::primaryScreen()->availableGeometry().topLeft() + QPoint(50, 50));
     setupUI();
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN) || defined(Q_OS_LINUX)
+    // Ensure no status bar is shown at the bottom
+    if (QStatusBar* sb = findChild<QStatusBar*>()) {
+        sb->deleteLater();
+    }
+#endif
+#if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)
     setupMenuBar();
+#endif
     setupSystemTray();
     setupVolumeMonitoring();
 
@@ -212,10 +340,19 @@ MainWindow::MainWindow(QWidget* parent)
     // UI refresh when upload state changes
     auto applyUploadButtonStyle = [this]() {
         if (!m_uploadButton) return;
-        // Base style strings
-        const QString greyStyle = "QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }";
-        const QString blueStyle = "QPushButton { padding: 12px 18px; font-weight: bold; background-color: #2d6cdf; color: white; border-radius: 5px; } QPushButton:checked { background-color: #1f4ea8; }";
-        const QString greenStyle = "QPushButton { padding: 12px 18px; font-weight: bold; background-color: #16a34a; color: white; border-radius: 5px; } QPushButton:checked { background-color: #15803d; }";
+        // Base style strings using gDynamicBox configuration
+        const QString greyStyle = QString(
+            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %4px; background-color: #666; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
+            "QPushButton:checked { background-color: #444; }"
+        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxMinWidth).arg(gDynamicBoxFontPx);
+        const QString blueStyle = QString(
+            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %4px; background-color: #2d6cdf; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
+            "QPushButton:checked { background-color: #1f4ea8; }"
+        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxMinWidth).arg(gDynamicBoxFontPx);
+        const QString greenStyle = QString(
+            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %4px; background-color: #16a34a; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
+            "QPushButton:checked { background-color: #15803d; }"
+        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxMinWidth).arg(gDynamicBoxFontPx);
 
         if (m_uploadManager->isUploading()) {
             // Upload in progress (preparing or actively streaming): show preparing or cancelling state handled elsewhere
@@ -232,6 +369,7 @@ MainWindow::MainWindow(QWidget* parent)
             m_uploadButton->setCheckable(true);
             m_uploadButton->setChecked(true);
             m_uploadButton->setStyleSheet(blueStyle);
+            m_uploadButton->setFixedHeight(gDynamicBoxHeight);
             // Monospace font for stability
 #ifdef Q_OS_MACOS
             QFont mono("Menlo");
@@ -248,6 +386,7 @@ MainWindow::MainWindow(QWidget* parent)
             m_uploadButton->setEnabled(true);
             m_uploadButton->setText("Unload medias");
             m_uploadButton->setStyleSheet(greenStyle);
+            m_uploadButton->setFixedHeight(gDynamicBoxHeight);
             m_uploadButton->setFont(m_uploadButtonDefaultFont);
         } else {
             // Idle state
@@ -256,6 +395,7 @@ MainWindow::MainWindow(QWidget* parent)
             m_uploadButton->setEnabled(true);
             m_uploadButton->setText("Upload to Client");
             m_uploadButton->setStyleSheet(greyStyle);
+            m_uploadButton->setFixedHeight(gDynamicBoxHeight);
             m_uploadButton->setFont(m_uploadButtonDefaultFont);
         }
     };
@@ -299,8 +439,133 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
         QKeyEvent* ke = static_cast<QKeyEvent*>(event);
         if (ke->key() == Qt::Key_Space) { event->accept(); return true; }
     }
+
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+    // Enable window dragging on the connection bar for frameless window
+    if (obj == m_connectionBar) {
+        switch (event->type()) {
+        case QEvent::MouseButtonPress: {
+            QMouseEvent* me = static_cast<QMouseEvent*>(event);
+            if (me->button() == Qt::LeftButton) {
+                // Ignore presses on interactive child widgets (buttons)
+                QWidget* child = m_connectionBar->childAt(me->pos());
+                if (child && (qobject_cast<QPushButton*>(child))) break;
+                m_dragging = true;
+                m_dragStartGlobal = me->globalPosition().toPoint();
+                m_windowStartPos = frameGeometry().topLeft();
+                event->accept();
+                return true;
+            }
+            break;
+        }
+        case QEvent::Enter: {
+#ifdef Q_OS_MACOS
+            if (!m_anyTrafficLightHovered) {
+                updateTrafficLightsIcons(TrafficLightsMode::WindowHover);
+            }
+#endif
+            break;
+        }
+        case QEvent::Leave: {
+#ifdef Q_OS_MACOS
+            // If window remains active, keep normal state; otherwise go to no-focus
+            if (isActiveWindow()) {
+                if (!m_anyTrafficLightHovered) updateTrafficLightsIcons(TrafficLightsMode::WindowHover);
+            } else {
+                updateTrafficLightsIcons(TrafficLightsMode::NoFocus);
+            }
+#endif
+            break;
+        }
+        case QEvent::MouseMove: {
+            if (m_dragging) {
+                QMouseEvent* me = static_cast<QMouseEvent*>(event);
+                const QPoint delta = me->globalPosition().toPoint() - m_dragStartGlobal;
+                move(m_windowStartPos + delta);
+                event->accept();
+                return true;
+            }
+            break;
+        }
+        case QEvent::MouseButtonRelease: {
+            if (m_dragging) {
+                m_dragging = false;
+                event->accept();
+                return true;
+            }
+            break;
+        }
+        default: break;
+        }
+    }
+#endif
+
+#ifdef Q_OS_MACOS
+    // macOS traffic lights: group hover logic
+    if (obj == m_btnClose || obj == m_btnMinimize || obj == m_btnMaximize) {
+        if (event->type() == QEvent::Enter) {
+            m_anyTrafficLightHovered = true;
+            updateTrafficLightsIcons(TrafficLightsMode::ButtonHover);
+            return false;
+        } else if (event->type() == QEvent::Leave) {
+            // If still inside the connection bar, show window hover; otherwise no focus
+            m_anyTrafficLightHovered = false;
+            QPoint gpos = QCursor::pos();
+            QPoint local = m_connectionBar->mapFromGlobal(gpos);
+            if (m_connectionBar->rect().contains(local) || isActiveWindow()) {
+                updateTrafficLightsIcons(TrafficLightsMode::WindowHover);
+            } else {
+                updateTrafficLightsIcons(TrafficLightsMode::NoFocus);
+            }
+            return false;
+        }
+    }
+#endif
     return QMainWindow::eventFilter(obj, event);
 }
+
+void MainWindow::changeEvent(QEvent* event) {
+    QMainWindow::changeEvent(event);
+#ifdef Q_OS_MACOS
+    if (event->type() == QEvent::ActivationChange) {
+        if (isActiveWindow()) {
+            if (!m_anyTrafficLightHovered) {
+                updateTrafficLightsIcons(TrafficLightsMode::WindowHover);
+            }
+        } else {
+            updateTrafficLightsIcons(TrafficLightsMode::NoFocus);
+        }
+    }
+#endif
+}
+
+#ifdef Q_OS_MACOS
+void MainWindow::updateTrafficLightsIcons(TrafficLightsMode mode) {
+    if (!m_btnClose || !m_btnMinimize || !m_btnMaximize) return;
+    if (mode == m_trafficLightsMode) return;
+    m_trafficLightsMode = mode;
+    switch (mode) {
+    case TrafficLightsMode::NoFocus:
+        m_btnClose->setIcon(QIcon(":/icons/icons/traffic-lights/no-focus.svg"));
+        m_btnMinimize->setIcon(QIcon(":/icons/icons/traffic-lights/no-focus.svg"));
+        m_btnMaximize->setIcon(QIcon(":/icons/icons/traffic-lights/no-focus.svg"));
+        break;
+    case TrafficLightsMode::WindowHover:
+        m_btnClose->setIcon(QIcon(":/icons/icons/traffic-lights/close-normal.svg"));
+        m_btnMinimize->setIcon(QIcon(":/icons/icons/traffic-lights/min-normal.svg"));
+        m_btnMaximize->setIcon(QIcon(":/icons/icons/traffic-lights/max-normal.svg"));
+        break;
+    case TrafficLightsMode::ButtonHover:
+        m_btnClose->setIcon(QIcon(":/icons/icons/traffic-lights/close-hover.svg"));
+        m_btnMinimize->setIcon(QIcon(":/icons/icons/traffic-lights/min-hover.svg"));
+        m_btnMaximize->setIcon(QIcon(":/icons/icons/traffic-lights/max-hover.svg"));
+        break;
+    }
+    m_btnClose->setIconSize(QSize(TL_SIZE_PT, TL_SIZE_PT));
+    m_btnMinimize->setIconSize(QSize(TL_SIZE_PT, TL_SIZE_PT));
+    m_btnMaximize->setIconSize(QSize(TL_SIZE_PT, TL_SIZE_PT));
+}
+#endif
 
 void MainWindow::showScreenView(const ClientInfo& client) {
     if (!m_navigationManager) return;
@@ -484,7 +749,13 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::setupUI() {
+    // Use a custom painted container for smooth rounded corners and border
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+    m_centralWidget = new RoundedContainer(this);
+    m_centralWidget->setObjectName("RootContainer");
+#else
     m_centralWidget = new QWidget(this);
+#endif
     setCentralWidget(m_centralWidget);
     
     m_mainLayout = new QVBoxLayout(m_centralWidget);
@@ -493,48 +764,117 @@ void MainWindow::setupUI() {
     
     // Top section with margins
     QWidget* topSection = new QWidget();
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+    // Disable context menus on top section as well
+    topSection->setContextMenuPolicy(Qt::NoContextMenu);
+#endif
     QVBoxLayout* topLayout = new QVBoxLayout(topSection);
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+    // For frameless windows, use configurable top container margins
+    topLayout->setContentsMargins(gTopContainerMarginLeft, gTopContainerMarginTop, gTopContainerMarginRight, 12);
+#else
     topLayout->setContentsMargins(20, 20, 20, 20); // Apply margins only to top section
+#endif
     topLayout->setSpacing(20);
     
     // Connection section (always visible)
-    m_connectionLayout = new QHBoxLayout();
+    m_connectionBar = new QWidget();
+    m_connectionBar->setObjectName("ConnectionBar");
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+    m_connectionBar->setContextMenuPolicy(Qt::NoContextMenu);
+#endif
+    m_connectionLayout = new QHBoxLayout(m_connectionBar);
+    m_connectionLayout->setContentsMargins(0, 0, 0, 0);
+    // Ensure the spacing between traffic lights is controlled solely by TL_GAP_PT
+    m_connectionLayout->setSpacing(TL_GAP_PT);
     
+    // Custom window controls on macOS/Windows (top-left)
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+#ifdef Q_OS_MACOS
+    // macOS traffic lights with native-like PNG icons
+    auto makeIconBtn = [](const QString& iconPath) {
+        QPushButton* b = new QPushButton();
+        b->setFixedSize(TL_SIZE_PT, TL_SIZE_PT);
+        b->setIcon(QIcon(iconPath));
+        b->setIconSize(QSize(TL_SIZE_PT, TL_SIZE_PT));
+        b->setFlat(true);
+        b->setCursor(Qt::PointingHandCursor);
+        b->setFocusPolicy(Qt::NoFocus);
+        b->setStyleSheet("QPushButton { border: none; background: transparent; padding: 0px; }");
+        return b;
+    };
+    // Note: resources.qrc uses prefix "/icons" and files under "icons/...", so full path is 
+    // ":/icons/icons/traffic-lights/...". Use SVG assets.
+    m_btnClose = makeIconBtn(":/icons/icons/traffic-lights/no-focus.svg");
+    m_btnMinimize = makeIconBtn(":/icons/icons/traffic-lights/no-focus.svg");
+    m_btnMaximize = makeIconBtn(":/icons/icons/traffic-lights/no-focus.svg");
+#else
+    // Windows: small flat buttons with symbols
+    m_btnClose = new QPushButton("×");
+    m_btnMinimize = new QPushButton("–");
+    m_btnMaximize = new QPushButton("□");
+    for (QPushButton* b : {m_btnClose, m_btnMinimize, m_btnMaximize}) {
+        b->setFixedSize(22,18);
+        b->setCursor(Qt::PointingHandCursor);
+        b->setFocusPolicy(Qt::NoFocus);
+        b->setStyleSheet("QPushButton { border: none; background: transparent; font-weight: bold; }"
+                         "QPushButton:hover { background: rgba(255,255,255,0.12); }");
+    }
+#endif
+    connect(m_btnClose, &QPushButton::clicked, this, [this](){ close(); });
+    connect(m_btnMinimize, &QPushButton::clicked, this, [this](){ setWindowState(windowState() | Qt::WindowMinimized); });
+    connect(m_btnMaximize, &QPushButton::clicked, this, [this](){
+        if (isMaximized()) showNormal(); else showMaximized();
+    });
+    
+    // Install hover filters for macOS traffic lights group behavior
+#ifdef Q_OS_MACOS
+    m_btnClose->installEventFilter(this);
+    m_btnMinimize->installEventFilter(this);
+    m_btnMaximize->installEventFilter(this);
+#endif
+    m_connectionLayout->addWidget(m_btnClose);
+    m_connectionLayout->addWidget(m_btnMinimize);
+    m_connectionLayout->addWidget(m_btnMaximize);
+    m_connectionLayout->addSpacing(12);
+#endif
+
+    // Note: applyPillBtn and applyPrimaryBtn are now defined globally at the top of the file
+    // using gDynamicBox configuration for consistent sizing
+
     // Back button (left-aligned, initially hidden)
     m_backButton = new QPushButton("← Back to Client List");
-    m_backButton->setStyleSheet("QPushButton { padding: 8px 16px; font-weight: bold; }");
-    m_backButton->setAutoDefault(false);
-    m_backButton->setDefault(false);
-    m_backButton->setFocusPolicy(Qt::NoFocus);
+    applyPillBtn(m_backButton);
     m_backButton->hide(); // Initially hidden, shown only on screen view
     connect(m_backButton, &QPushButton::clicked, this, &MainWindow::onBackToClientListClicked);
     
-    // Status label (boxed style)
+    // Status label (boxed style using dynamicBox)
     m_connectionStatusLabel = new QLabel("DISCONNECTED");
-    m_connectionStatusLabel->setStyleSheet(
-        "QLabel { padding: 2px 6px; border: 1px solid #E53935; border-radius: 6px; "
-        "background-color: rgba(244,67,54,0.15); color: #E53935; font-weight: bold; }"
-    );
+    applyStatusBox(m_connectionStatusLabel, "#E53935", "rgba(244,67,54,0.15)", "#E53935");
 
     // Enable/Disable toggle button with fixed width (left of Settings)
     m_connectToggleButton = new QPushButton("Disable");
-    m_connectToggleButton->setStyleSheet("QPushButton { padding: 8px 16px; font-weight: bold; }");
-    m_connectToggleButton->setFixedWidth(111);
+    applyPillBtn(m_connectToggleButton);
+    // Remove fixed width - now handled by dynamicBox minWidth
     connect(m_connectToggleButton, &QPushButton::clicked, this, &MainWindow::onEnableDisableClicked);
 
     // Settings button
     m_settingsButton = new QPushButton("Settings");
-    m_settingsButton->setStyleSheet("QPushButton { padding: 8px 16px; font-weight: bold; }");
+    applyPillBtn(m_settingsButton);
     connect(m_settingsButton, &QPushButton::clicked, this, &MainWindow::showSettingsDialog);
 
-    // Layout: [back][stretch][status][connect][settings]
+    // Layout: [traffic-lights][gap][back][stretch][status][connect][settings]
     m_connectionLayout->addWidget(m_backButton);
     m_connectionLayout->addStretch();
     m_connectionLayout->addWidget(m_connectionStatusLabel);
     m_connectionLayout->addWidget(m_connectToggleButton);
     m_connectionLayout->addWidget(m_settingsButton);
-    
-    topLayout->addLayout(m_connectionLayout);
+
+    // Install dragging on the connection bar for frameless window
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+    m_connectionBar->installEventFilter(this);
+#endif
+    topLayout->addWidget(m_connectionBar);
     m_mainLayout->addWidget(topSection);
     
     // Bottom section with margins (no separator line)
@@ -691,11 +1031,7 @@ void MainWindow::createScreenViewPage() {
 
     // Remote connection status (to the right of hostname)
     m_remoteConnectionStatusLabel = new QLabel("DISCONNECTED");
-    m_remoteConnectionStatusLabel->setStyleSheet(
-        "QLabel { padding: 2px 6px; border: 1px solid #E53935; border-radius: 6px; "
-        "background-color: rgba(244,67,54,0.15); color: #E53935; font-weight: bold; }"
-    );
-    m_remoteConnectionStatusLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    applyStatusBox(m_remoteConnectionStatusLabel, "#E53935", "rgba(244,67,54,0.15)", "#E53935");
     m_remoteConnectionStatusLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 
     m_volumeIndicator = new QLabel("🔈 --");
@@ -818,9 +1154,8 @@ void MainWindow::createScreenViewPage() {
     actionLayout->setSpacing(12);
     // Upload button
     m_uploadButton = new QPushButton("Upload to Client");
-    m_uploadButton->setStyleSheet("QPushButton { padding: 12px 18px; font-weight: bold; background-color: #666; color: white; border-radius: 5px; } QPushButton:checked { background-color: #444; }");
     m_uploadButtonDefaultFont = m_uploadButton->font();
-    m_uploadButton->setFixedWidth(260);
+    applyPrimaryBtn(m_uploadButton);
     m_uploadButton->setEnabled(true);
     connect(m_uploadButton, &QPushButton::clicked, this, &MainWindow::onUploadButtonClicked);
     // Apply initial style state machine
@@ -830,7 +1165,7 @@ void MainWindow::createScreenViewPage() {
     actionLayout->addWidget(m_uploadButton, 0, Qt::AlignRight);
     // Send button
     m_sendButton = new QPushButton("Send Media to All Screens");
-    m_sendButton->setStyleSheet("QPushButton { padding: 12px 24px; font-weight: bold; background-color: #4a90e2; color: white; border-radius: 5px; }");
+    applyPrimaryBtn(m_sendButton);
     m_sendButton->setEnabled(false); // Initially disabled until media is placed
     connect(m_sendButton, &QPushButton::clicked, this, &MainWindow::onSendMediaClicked);
     actionLayout->addWidget(m_sendButton, 0, Qt::AlignLeft);
@@ -952,9 +1287,8 @@ void MainWindow::onTrayIconActivated(QSystemTrayIcon::ActivationReason reason) {
                 if (minimized) {
                     setWindowState(windowState() & ~Qt::WindowMinimized);
                     showNormal();
-                } else {
-                    show();
                 }
+                show();
                 raise();
                 activateWindow();
             } else {
@@ -1010,6 +1344,8 @@ void MainWindow::showSettingsDialog() {
     btnRow->addStretch();
     QPushButton* cancelBtn = new QPushButton("Cancel");
     QPushButton* saveBtn = new QPushButton("Save");
+    applyPillBtn(cancelBtn);
+    applyPrimaryBtn(saveBtn);
     btnRow->addWidget(cancelBtn);
     btnRow->addWidget(saveBtn);
     v->addLayout(btnRow);
@@ -1095,7 +1431,6 @@ void MainWindow::onConnected() {
         }
     }
 
-    statusBar()->showMessage("Connected to server", 3000);
     
     // Show tray notification
     showTrayMessage("Mouffette Connected", "Successfully connected to Mouffette server");
@@ -1123,7 +1458,6 @@ void MainWindow::onDisconnected() {
     m_availableClients.clear();
     updateClientList(m_availableClients);
     
-    statusBar()->showMessage("Disconnected from server", 3000);
     
     // Show tray notification
     showTrayMessage("Mouffette Disconnected", "Disconnected from Mouffette server");
@@ -1521,20 +1855,11 @@ void MainWindow::updateConnectionStatus() {
     m_connectionStatusLabel->setText(status.toUpper());
     
     if (status == "Connected") {
-        m_connectionStatusLabel->setStyleSheet(
-            "QLabel { padding: 2px 6px; border: 1px solid #2E7D32; border-radius: 6px; "
-            "background-color: rgba(76,175,80,0.15); color: #2E7D32; font-weight: bold; }"
-        );
+        applyStatusBox(m_connectionStatusLabel, "#2E7D32", "rgba(76,175,80,0.15)", "#2E7D32");
     } else if (status.startsWith("Connecting") || status.startsWith("Reconnecting")) {
-        m_connectionStatusLabel->setStyleSheet(
-            "QLabel { padding: 2px 6px; border: 1px solid #FB8C00; border-radius: 6px; "
-            "background-color: rgba(255,152,0,0.15); color: #FB8C00; font-weight: bold; }"
-        );
+        applyStatusBox(m_connectionStatusLabel, "#FB8C00", "rgba(255,152,0,0.15)", "#FB8C00");
     } else {
-        m_connectionStatusLabel->setStyleSheet(
-            "QLabel { padding: 2px 6px; border: 1px solid #E53935; border-radius: 6px; "
-            "background-color: rgba(244,67,54,0.15); color: #E53935; font-weight: bold; }"
-        );
+        applyStatusBox(m_connectionStatusLabel, "#E53935", "rgba(244,67,54,0.15)", "#E53935");
     }
 }
 

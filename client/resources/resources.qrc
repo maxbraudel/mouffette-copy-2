@@ -11,5 +11,13 @@
     <file>icons/arrow-up.svg</file>
     <file>icons/arrow-down.svg</file>
     <file>icons/delete.svg</file>
+    <!-- macOS traffic lights (SVG) -->
+    <file>icons/traffic-lights/no-focus.svg</file>
+    <file>icons/traffic-lights/close-normal.svg</file>
+    <file>icons/traffic-lights/min-normal.svg</file>
+    <file>icons/traffic-lights/max-normal.svg</file>
+    <file>icons/traffic-lights/close-hover.svg</file>
+    <file>icons/traffic-lights/min-hover.svg</file>
+    <file>icons/traffic-lights/max-hover.svg</file>
     </qresource>
 </RCC>
