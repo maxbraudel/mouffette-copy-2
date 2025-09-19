@@ -84,6 +84,8 @@ private slots:
     
     // System tray slots
     void onTrayIconActivated(QSystemTrayIcon::ActivationReason reason);
+    void onUploadButtonClicked();
+    void showSettingsDialog();
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -107,7 +109,6 @@ private:
     void setupMenuBar();
     void setupSystemTray();
     void connectToServer();
-    void showSettingsDialog();
     void scheduleReconnect();
     // Sync local display/machine info with the server (used on connect and on display changes)
     void syncRegistration();
@@ -127,6 +128,8 @@ private:
     // Screen view methods
     void showScreenView(const ClientInfo& client);
     void showClientListView();
+    void createRemoteClientInfoContainer(); // Create grouped container for remote client info
+    void initializeRemoteClientInfoInTopBar(); // Initialize container in top bar permanently
     QWidget* createScreenWidget(const ScreenInfo& screen, int index);
     void updateVolumeIndicator();
     void setRemoteConnectionStatus(const QString& status);
@@ -160,6 +163,7 @@ private:
     QVBoxLayout* m_screenViewLayout;
     QLabel* m_clientNameLabel;
     QLabel* m_remoteConnectionStatusLabel;
+    QWidget* m_remoteClientInfoContainer = nullptr; // Container for hostname, status, volume
     // Canvas container keeps border visible; inside we switch between spinner and canvas
     QWidget* m_canvasContainer;
     QStackedWidget* m_canvasStack;
@@ -241,7 +245,6 @@ private:
     bool m_canvasRevealedForCurrentClient = false;
 
 private slots:
-    void onUploadButtonClicked();
     void onGenericMessageReceived(const QJsonObject& message);
     // Upload-specific progress/finish now managed by UploadManager
 

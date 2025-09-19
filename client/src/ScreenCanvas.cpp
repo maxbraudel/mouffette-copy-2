@@ -220,25 +220,38 @@ void ScreenCanvas::refreshInfoOverlay() {
         nameLbl->setAttribute(Qt::WA_TranslucentBackground, true);
         nameLbl->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
         m_contentLayout->addWidget(nameLbl);
-        // Row: upload status or progress
+        // Row: upload status or progress - fixed height container to prevent flickering
+        auto* statusContainer = new QWidget(m_contentWidget);
+        statusContainer->setStyleSheet("background: transparent;");
+        statusContainer->setAutoFillBackground(false);
+        statusContainer->setAttribute(Qt::WA_TranslucentBackground, true);
+        statusContainer->setFixedHeight(20); // Fixed height to prevent flickering
+        auto* statusLayout = new QVBoxLayout(statusContainer);
+        statusLayout->setContentsMargins(0, 0, 0, 0);
+        statusLayout->setSpacing(0);
+        statusLayout->setAlignment(Qt::AlignVCenter);
+        
         if (m->uploadState() == ResizableMediaBase::UploadState::Uploading) {
-            auto* bar = new QProgressBar(m_contentWidget);
+            auto* bar = new QProgressBar(statusContainer);
             bar->setRange(0, 100);
             bar->setValue(m->uploadProgress());
             bar->setTextVisible(false);
             bar->setFixedHeight(10);
-            // Blue progress bar styling consistent with theme
-            bar->setStyleSheet("QProgressBar{background: rgba(255,255,255,0.15); border-radius: 5px;} QProgressBar::chunk{background: #2D8CFF; border-radius: 5px;}");
-            m_contentLayout->addWidget(bar);
+            bar->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed); // Full width
+            // Blue progress bar styling consistent with theme - no border radius
+            bar->setStyleSheet("QProgressBar{background: rgba(255,255,255,0.15);} QProgressBar::chunk{background: #2D8CFF;}");
+            statusLayout->addWidget(bar, 0, Qt::AlignVCenter); // Only center vertically, full width horizontally
         } else {
-            auto* status = new QLabel(m->uploadState() == ResizableMediaBase::UploadState::Uploaded ? QStringLiteral("Uploaded") : QStringLiteral("Not uploaded"), m_contentWidget);
+            auto* status = new QLabel(m->uploadState() == ResizableMediaBase::UploadState::Uploaded ? QStringLiteral("Uploaded") : QStringLiteral("Not uploaded"), statusContainer);
             const char* color = (m->uploadState() == ResizableMediaBase::UploadState::Uploaded) ? "#2ecc71" : "#f39c12"; // green or orange
             status->setStyleSheet(QString("color: %1; font-size: 14px; background: transparent;").arg(color));
             status->setAutoFillBackground(false);
             status->setAttribute(Qt::WA_TranslucentBackground, true);
             status->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-            m_contentLayout->addWidget(status);
+            statusLayout->addWidget(status, 0, Qt::AlignLeft | Qt::AlignVCenter); // Left-aligned, vertically centered
         }
+        
+        m_contentLayout->addWidget(statusContainer);
         // Row: details smaller under status
         auto* details = new QLabel(dim + QStringLiteral("  ·  ") + sizeStr, m_contentWidget);
         details->setStyleSheet("color: rgba(255,255,255,0.85); font-size: 14px; background: transparent;");

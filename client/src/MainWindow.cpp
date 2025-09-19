@@ -119,7 +119,7 @@ constexpr int TL_GAP_PT = 8;            // gap between traffic lights (pt)
 
 // Global window content margins (between all content and window borders)
 int gWindowContentMarginTop = 10;       // Top margin for all window content
-int gWindowContentMarginRight = 30;     // Right margin for all window content
+int gWindowContentMarginRight = 20;     // Right margin for all window content
 int gWindowContentMarginBottom = 20;    // Bottom margin for all window content
 int gWindowContentMarginLeft = 20;      // Left margin for all window content
 
@@ -136,6 +136,9 @@ int gDynamicBoxMinWidth = 80;         // Minimum width for buttons/status boxes
 int gDynamicBoxHeight = 24;           // Fixed height for all elements
 int gDynamicBoxBorderRadius = 6;      // Border radius for rounded corners
 int gDynamicBoxFontPx = 13;           // Standard font size for buttons/status boxes
+
+// Remote client info container configuration
+int gRemoteClientContainerPadding = 6; // Horizontal padding for elements in remote client container
 
 // Global title text configuration (for headers like "Connected Clients" and hostname)
 int gTitleTextFontSize = 16;          // Title font size (px)
@@ -246,14 +249,31 @@ void MainWindow::setRemoteConnectionStatus(const QString& status) {
     if (!m_remoteConnectionStatusLabel) return;
     const QString up = status.toUpper();
     m_remoteConnectionStatusLabel->setText(up);
+    
+    // Apply same styling as main connection status with colored background
+    QString textColor, bgColor;
     if (up == "CONNECTED") {
-        applyStatusBox(m_remoteConnectionStatusLabel, "#2E7D32", "rgba(76,175,80,0.15)", "#2E7D32");
+        textColor = "#2E7D32"; // Green text
+        bgColor = "rgba(76,175,80,0.15)"; // Green background
     } else if (up == "NETWORK ERROR" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
-        applyStatusBox(m_remoteConnectionStatusLabel, "#FB8C00", "rgba(255,152,0,0.15)", "#FB8C00");
+        textColor = "#FB8C00"; // Orange text
+        bgColor = "rgba(255,152,0,0.15)"; // Orange background
     } else {
-        // DISCONNECTED or any other
-        applyStatusBox(m_remoteConnectionStatusLabel, "#E53935", "rgba(244,67,54,0.15)", "#E53935");
+        textColor = "#E53935"; // Red text
+        bgColor = "rgba(244,67,54,0.15)"; // Red background
     }
+    
+    m_remoteConnectionStatusLabel->setStyleSheet(
+        QString("QLabel { "
+        "    color: %1; "
+        "    background-color: %2; "
+        "    border: none; "
+        "    border-radius: 0px; "
+        "    padding: 0px %4px; "
+        "    font-size: %3px; "
+        "    font-weight: bold; "
+        "}").arg(textColor).arg(bgColor).arg(gDynamicBoxFontPx).arg(gRemoteClientContainerPadding)
+    );
 }
 
 MainWindow::MainWindow(QWidget* parent)
@@ -372,7 +392,6 @@ MainWindow::MainWindow(QWidget* parent)
                 "    border-radius: 0px; "
                 "    border-top: 1px solid rgba(255,255,255,0.2); "
                 "    text-align: center; "
-                "    qproperty-alignment: AlignCenter; "
                 "} "
                 "QPushButton:hover { "
                 "    color: white; "
@@ -393,7 +412,6 @@ MainWindow::MainWindow(QWidget* parent)
                 "    border-radius: 0px; "
                 "    border-top: 1px solid #4a90e2; "
                 "    text-align: center; "
-                "    qproperty-alignment: AlignCenter; "
                 "} "
                 "QPushButton:hover { "
                 "    color: #4a90e2; "
@@ -612,6 +630,105 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
     return QMainWindow::eventFilter(obj, event);
 }
 
+void MainWindow::createRemoteClientInfoContainer() {
+    if (m_remoteClientInfoContainer) {
+        return; // Already created
+    }
+    
+    // Create container widget with dynamic box styling
+    m_remoteClientInfoContainer = new QWidget();
+    
+    // Apply dynamic box styling with transparent background
+    const QString containerStyle = QString(
+        "QWidget { "
+        "    background-color: transparent; "
+        "    color: palette(button-text); "
+        "    border: 1px solid palette(mid); "
+        "    border-radius: %1px; "
+        "    min-height: %2px; "
+        "    max-height: %2px; "
+        "}"
+    ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight);
+    
+    m_remoteClientInfoContainer->setStyleSheet(containerStyle);
+    m_remoteClientInfoContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    
+    // Create horizontal layout for the container
+    QHBoxLayout* containerLayout = new QHBoxLayout(m_remoteClientInfoContainer);
+    containerLayout->setContentsMargins(0, 0, 0, 0); // No padding at all
+    containerLayout->setSpacing(0); // We'll add separators manually
+    
+    // Add hostname (keep title styling but transparent background)
+    m_clientNameLabel->setStyleSheet(
+        QString("QLabel { "
+        "    background: transparent; "
+        "    border: none; "
+        "    padding: 0px %1px; "
+        "    font-size: 16px; "
+        "    font-weight: bold; "
+        "    color: palette(text); "
+        "}").arg(gRemoteClientContainerPadding)
+    );
+    containerLayout->addWidget(m_clientNameLabel);
+    
+    // Add vertical separator
+    QFrame* separator1 = new QFrame();
+    separator1->setFrameShape(QFrame::VLine);
+    separator1->setFrameShadow(QFrame::Sunken);
+    separator1->setStyleSheet("QFrame { color: palette(mid); }");
+    separator1->setFixedWidth(1);
+    containerLayout->addWidget(separator1);
+    
+    // Add status (minimal styling - just inherit from container)
+    // Note: Color and font styling will be applied by setRemoteConnectionStatus()
+    containerLayout->addWidget(m_remoteConnectionStatusLabel);
+    
+    // Add vertical separator
+    QFrame* separator2 = new QFrame();
+    separator2->setFrameShape(QFrame::VLine);
+    separator2->setFrameShadow(QFrame::Sunken);
+    separator2->setStyleSheet("QFrame { color: palette(mid); }");
+    separator2->setFixedWidth(1);
+    containerLayout->addWidget(separator2);
+    
+    // Add volume indicator (ensure no individual styling)
+    m_volumeIndicator->setStyleSheet(
+        QString("QLabel { "
+        "    background: transparent; "
+        "    border: none; "
+        "    padding: 0px %1px; "
+        "    font-size: 16px; "
+        "    font-weight: bold; "
+        "}").arg(gRemoteClientContainerPadding)
+    );
+    containerLayout->addWidget(m_volumeIndicator);
+}
+
+void MainWindow::initializeRemoteClientInfoInTopBar() {
+    // Create the container if it doesn't exist
+    if (!m_remoteClientInfoContainer) {
+        createRemoteClientInfoContainer();
+    }
+    
+    // Initially hide the container (will be shown when viewing a client)
+    m_remoteClientInfoContainer->setVisible(false);
+    
+    // Add container to connection layout after back button permanently
+    int backButtonIndex = -1;
+    for (int i = 0; i < m_connectionLayout->count(); ++i) {
+        if (auto* item = m_connectionLayout->itemAt(i)) {
+            if (item->widget() == m_backButton) {
+                backButtonIndex = i;
+                break;
+            }
+        }
+    }
+    
+    if (backButtonIndex >= 0) {
+        m_connectionLayout->insertWidget(backButtonIndex + 1, m_remoteClientInfoContainer);
+    }
+}
+
 void MainWindow::changeEvent(QEvent* event) {
     QMainWindow::changeEvent(event);
 #ifdef Q_OS_MACOS
@@ -664,12 +781,24 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     m_uploadManager->setTargetClientId(client.getId());
     // Until we confirm via client list or screens_info, assume disconnected
     setRemoteConnectionStatus("DISCONNECTED");
+    
+    // Show remote client info container when viewing a client
+    if (m_remoteClientInfoContainer) {
+        m_remoteClientInfoContainer->setVisible(true);
+    }
 }
 
 void MainWindow::showClientListView() {
     if (m_navigationManager) m_navigationManager->showClientList();
     if (m_uploadButton) m_uploadButton->setText("Upload to Client");
     m_uploadManager->setTargetClientId(QString());
+    // Clear remote connection status when leaving screen view
+    setRemoteConnectionStatus("DISCONNECTED");
+    
+    // Hide remote client info container when on client list
+    if (m_remoteClientInfoContainer) {
+        m_remoteClientInfoContainer->setVisible(false);
+    }
 }
 
 QWidget* MainWindow::createScreenWidget(const ScreenInfo& screen, int index) {
@@ -1113,36 +1242,38 @@ void MainWindow::createScreenViewPage() {
     // Screen view page
     m_screenViewWidget = new QWidget();
     m_screenViewLayout = new QVBoxLayout(m_screenViewWidget);
-    // Gap between hostname container and canvas
+    // Gap between canvas sections
     m_screenViewLayout->setSpacing(gInnerContentGap);
     m_screenViewLayout->setContentsMargins(0, 0, 0, 0);
     
-    // Header row: hostname on the left, indicators on the right (replaces "Connected Clients:" title)
-    QHBoxLayout* headerLayout = new QHBoxLayout();
-
+    // Create labels for remote client info (will be used in top bar container)
     m_clientNameLabel = new QLabel();
     applyTitleText(m_clientNameLabel);
     m_clientNameLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
 
     // Remote connection status (to the right of hostname)
     m_remoteConnectionStatusLabel = new QLabel("DISCONNECTED");
-    applyStatusBox(m_remoteConnectionStatusLabel, "#E53935", "rgba(244,67,54,0.15)", "#E53935");
-    m_remoteConnectionStatusLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    // Initial styling - will be updated by setRemoteConnectionStatus()
+    m_remoteConnectionStatusLabel->setStyleSheet(
+        QString("QLabel { "
+        "    color: #E53935; "
+        "    background-color: rgba(244,67,54,0.15); "
+        "    border: none; "
+        "    border-radius: 0px; "
+        "    padding: 0px %2px; "
+        "    font-size: %1px; "
+        "    font-weight: bold; "
+        "}").arg(gDynamicBoxFontPx).arg(gRemoteClientContainerPadding)
+    );
+    m_remoteConnectionStatusLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
 
     m_volumeIndicator = new QLabel("🔈 --");
     m_volumeIndicator->setStyleSheet("QLabel { font-size: 16px; color: palette(text); font-weight: bold; }");
     m_volumeIndicator->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_volumeIndicator->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
 
-    headerLayout->addWidget(m_clientNameLabel, 0, Qt::AlignLeft);
-    // Tighter gap between hostname and remote status (visually matching the top bar)
-    headerLayout->addSpacing(6);
-    headerLayout->addWidget(m_remoteConnectionStatusLabel, 0, Qt::AlignLeft);
-    headerLayout->addStretch();
-    headerLayout->addWidget(m_volumeIndicator, 0, Qt::AlignRight);
-    headerLayout->setContentsMargins(0, 0, 0, 0);
-
-    m_screenViewLayout->addLayout(headerLayout);
+    // Initialize remote client info container in top bar permanently
+    initializeRemoteClientInfoInTopBar();
     
     // Canvas container holds spinner and canvas with a stacked layout
     m_canvasContainer = new QWidget();
@@ -1255,10 +1386,8 @@ void MainWindow::createScreenViewPage() {
     }
     
     // Upload button moved to media list overlay - no action bar needed
-    // Ensure header has no stretch, container expands, button fixed
-    m_screenViewLayout->setStretch(0, 0); // header
-    m_screenViewLayout->setStretch(1, 1); // container expands
-    m_screenViewLayout->setStretch(2, 0); // button fixed
+    // Ensure canvas container expands to fill available space
+    m_screenViewLayout->setStretch(0, 1); // container expands
 
     // Volume label opacity effect & animation
     m_volumeOpacity = new QGraphicsOpacityEffect(m_volumeIndicator);
