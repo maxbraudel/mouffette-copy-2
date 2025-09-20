@@ -867,7 +867,7 @@ void MainWindow::createLocalClientInfoContainer() {
     m_localNetworkStatusLabel = new QLabel("DISCONNECTED");
     // Make status label non-shrinkable with fixed width
     m_localNetworkStatusLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    m_localNetworkStatusLabel->setFixedWidth(100); // Fixed width for consistency
+    m_localNetworkStatusLabel->setFixedWidth(120); // Fixed width for consistency
     m_localNetworkStatusLabel->setAlignment(Qt::AlignCenter); // Center the text
     // Note: Color and font styling will be applied by setLocalNetworkStatus()
     
@@ -1678,7 +1678,7 @@ void MainWindow::createScreenViewPage() {
         "}").arg(gDynamicBoxFontPx).arg(gRemoteClientContainerPadding)
     );
     m_remoteConnectionStatusLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    m_remoteConnectionStatusLabel->setFixedWidth(100); // Fixed width for consistency
+    m_remoteConnectionStatusLabel->setFixedWidth(120); // Fixed width for consistency
     m_remoteConnectionStatusLabel->setAlignment(Qt::AlignCenter); // Center the text
 
     m_volumeIndicator = new QLabel("🔈 --");

@@ -104,17 +104,21 @@ void ScreenCanvas::initInfoOverlay() {
         m_infoWidget->setStyleSheet(bg);
         // Baseline minimum width to avoid tiny panel before content exists
         m_infoWidget->setMinimumWidth(380);
-        m_infoWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-        m_infoLayout = new QVBoxLayout(m_infoWidget);
+    // Vertically, the overlay must never stretch; we'll size it explicitly
+    m_infoWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    m_infoLayout = new QVBoxLayout(m_infoWidget);
         m_infoLayout->setContentsMargins(0, 0, 0, 0); // No margins on main container
         m_infoLayout->setSpacing(0);
-        m_infoLayout->setSizeConstraint(QLayout::SetMinimumSize);
+    // Let us control the container height explicitly (no automatic min size from layout)
+    m_infoLayout->setSizeConstraint(QLayout::SetNoConstraint);
         
         // Create content container for media list items with margins
-        m_contentWidget = new QWidget(m_infoWidget);
+    m_contentWidget = new QWidget(m_infoWidget);
         m_contentWidget->setStyleSheet("background: transparent;");
         m_contentWidget->setAutoFillBackground(false);
         m_contentWidget->setAttribute(Qt::WA_TranslucentBackground, true);
+    // Important: content should never stretch vertically beyond its size hint
+    m_contentWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         m_contentLayout = new QVBoxLayout(m_contentWidget);
         m_contentLayout->setContentsMargins(20, 16, 20, 16); // Margins only for content
         m_contentLayout->setSpacing(6);
@@ -122,10 +126,12 @@ void ScreenCanvas::initInfoOverlay() {
         // Add content widget to main layout
         m_infoLayout->addWidget(m_contentWidget);
         // Upload button in overlay (no title)
-        m_overlayHeaderWidget = new QWidget(m_infoWidget);
+    m_overlayHeaderWidget = new QWidget(m_infoWidget);
         m_overlayHeaderWidget->setStyleSheet("background: transparent;");
         m_overlayHeaderWidget->setAutoFillBackground(false);
         m_overlayHeaderWidget->setAttribute(Qt::WA_TranslucentBackground, true);
+    // Prevent header area from expanding vertically; height should follow its children (the button)
+    m_overlayHeaderWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         auto* headerLayout = new QHBoxLayout(m_overlayHeaderWidget);
         headerLayout->setContentsMargins(0, 0, 0, 0);
         headerLayout->setSpacing(0);
@@ -151,8 +157,8 @@ void ScreenCanvas::initInfoOverlay() {
             "    background: rgba(255,255,255,0.1); "
             "}"
         );
-        m_uploadButton->setFixedHeight(40);
-        m_uploadButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_uploadButton->setFixedHeight(40);
+    m_uploadButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         
         // Full width button
         headerLayout->addWidget(m_uploadButton);
@@ -180,6 +186,9 @@ void ScreenCanvas::refreshInfoOverlay() {
     const bool wasVisible = m_infoWidget->isVisible();
     m_infoWidget->setUpdatesEnabled(false);
     m_infoWidget->hide();
+    // Release any previous fixed-height constraints so we can shrink/grow accurately this pass
+    m_infoWidget->setMinimumHeight(0);
+    m_infoWidget->setMaximumHeight(QWIDGETSIZE_MAX);
     // Clear only the content layout (media items), keep the content widget and header widget
     while (m_contentLayout->count() > 0) {
         QLayoutItem* it = m_contentLayout->takeAt(0);
@@ -274,19 +283,38 @@ void ScreenCanvas::refreshInfoOverlay() {
         m_infoLayout->invalidate();
         m_infoLayout->activate();
     }
+    
     m_infoWidget->ensurePolished();
     m_infoWidget->updateGeometry();
     m_infoWidget->adjustSize();
+    // Fix the inner content widget height to its exact size hint to avoid vertical stretching
+    const QSize contentHint = m_contentLayout ? m_contentLayout->totalSizeHint() : m_contentWidget->sizeHint();
+    m_contentWidget->setFixedHeight(contentHint.height());
+    // Now recompute preferred size including header
     QSize preferred = m_infoLayout ? m_infoLayout->totalSizeHint() : m_infoWidget->sizeHint();
-    // Enforce a baseline minimum width, but do not cap maximum so it can grow with content
-    preferred.setWidth(std::max(preferred.width(), m_infoWidget->minimumWidth()));
-    m_infoWidget->setMinimumSize(preferred);
-    m_infoWidget->resize(preferred);
-    if (wasVisible) m_infoWidget->show(); else m_infoWidget->show();
+    // Enforce a baseline minimum width (380px as set in initInfoOverlay), but always set height to exact content height
+    const int baselineMinWidth = 380;
+    const int targetW = std::max(preferred.width(), baselineMinWidth);
+    const int targetH = preferred.height();
+    // Lock the overlay height exactly to content+header height to avoid internal gaps
+    m_infoWidget->setMinimumHeight(targetH);
+    m_infoWidget->setMaximumHeight(targetH);
+    m_infoWidget->resize(targetW, targetH);
+    
+    // Only show overlay if there are media items present
+    if (!media.isEmpty()) {
+        m_infoWidget->show();
+        // Reposition once after resize
+        layoutInfoOverlay();
+    } else {
+        // Hide overlay when no media is present
+        m_infoWidget->hide();
+    }
+    
     m_infoWidget->setUpdatesEnabled(true);
-    m_infoWidget->repaint();
-    // Reposition once after resize
-    layoutInfoOverlay();
+    if (!media.isEmpty()) {
+        m_infoWidget->repaint();
+    }
     // In case the widget's final metrics settle after this event loop turn (common on first show or font/layout updates),
     // schedule a one-shot re-anchor to avoid a transient displaced position after dropping media.
     QTimer::singleShot(0, [this]() { layoutInfoOverlay(); });
