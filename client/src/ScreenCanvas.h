@@ -26,6 +26,7 @@ class QVariantAnimation;
 class QResizeEvent;
 class QPushButton;
 class QScrollArea;
+class QScrollBar;
 
 // Extracted canvas that manages screen layout, zoom/pan, drag&drop previews, and media interaction.
 class ScreenCanvas : public QGraphicsView {
@@ -73,6 +74,7 @@ public:
 
 protected:
     bool event(QEvent* event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
     bool viewportEvent(QEvent* event) override; // handle native gestures delivered to viewport (macOS pinch)
     void keyPressEvent(QKeyEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
@@ -116,6 +118,7 @@ private:
     void layoutInfoOverlay();
     void maybeRefreshInfoOverlayOnSceneChanged();
     void updateInfoOverlayGeometryForViewport(); // fast path: recalc height/scroll cap on resize
+    void updateOverlayVScrollVisibilityAndGeometry(); // overlay scrollbar sizing/visibility
     
     void OnSceneChanged();
     // Snap-to-screen helpers
@@ -187,6 +190,7 @@ private:
     QVBoxLayout* m_infoLayout = nullptr;   // main layout (no margins)
     QWidget* m_contentWidget = nullptr;    // content container (with margins)
     QScrollArea* m_contentScroll = nullptr; // scroll area for content when overlay is too tall
+    QScrollBar* m_overlayVScroll = nullptr;  // custom overlay vertical scrollbar (floating)
     QVBoxLayout* m_contentLayout = nullptr; // content layout (for media items)
     QWidget* m_overlayHeaderWidget = nullptr; // container for overlay header row (holds upload button)
     QPushButton* m_uploadButton = nullptr; // upload button in media list overlay

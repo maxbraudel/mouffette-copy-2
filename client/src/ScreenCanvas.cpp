@@ -17,6 +17,7 @@
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QScrollBar>
+#include <QApplication>
 #include <QGestureEvent>
 #include <QPinchGesture>
 #include <QNativeGestureEvent>
@@ -30,6 +31,7 @@
 #include <QStyleHints>
 #include <QCursor>
 #include <QGraphicsPixmapItem>
+#include <QCoreApplication>
 #include <QtMath>
 #include <QRandomGenerator>
 #include <QJsonObject>
@@ -43,6 +45,7 @@
 #include <QSizePolicy>
 #include <QProgressBar>
 #include <QScrollArea>
+#include <QScrollBar>
 
 // Helper: relayout overlays for all media items so absolute panels (settings) stay pinned
 namespace {
@@ -97,6 +100,8 @@ void ScreenCanvas::initInfoOverlay() {
         m_infoWidget = new QWidget(viewport());
         m_infoWidget->setAttribute(Qt::WA_StyledBackground, true);
         m_infoWidget->setAutoFillBackground(true);
+        // Ensure overlay blocks mouse events to canvas behind it
+        m_infoWidget->setAttribute(Qt::WA_NoMousePropagation, true);
         // Build stylesheet from theme colors
         QColor c = AppColors::gOverlayBackgroundColor;
         const QString bg = QString("background-color: rgba(%1,%2,%3,%4); border-radius: %5px; color: white; font-size: 16px;")
@@ -114,17 +119,67 @@ void ScreenCanvas::initInfoOverlay() {
     m_infoLayout->setSizeConstraint(QLayout::SetNoConstraint);
         
     // Create content container for media list items with margins, wrapped in a scroll area
-    m_contentScroll = new QScrollArea(m_infoWidget);
+        m_contentScroll = new QScrollArea(m_infoWidget);
     m_contentScroll->setFrameShape(QFrame::NoFrame);
+    // Hide native scrollbars; we'll draw a floating overlay scrollbar instead
     m_contentScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_contentScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_contentScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_contentScroll->setWidgetResizable(true);
-    m_contentScroll->setStyleSheet("QScrollArea { background: transparent; } QScrollArea > QWidget > QWidget { background: transparent; }");
+        // Ensure viewport is fully transparent (no gray behind the track)
+        if (m_contentScroll->viewport()) {
+            m_contentScroll->viewport()->setAutoFillBackground(false);
+        }
+        // Force-hide the native vertical scrollbar widget to avoid double scrollbars
+        // but keep it enabled so wheel events can be forwarded to it
+        if (QScrollBar* nativeV = m_contentScroll->verticalScrollBar()) {
+            nativeV->hide();
+            // Don't disable it - we need it functional for wheel event forwarding
+        }
+        m_contentScroll->setStyleSheet(
+            // Transparent backgrounds for area and viewport
+            "QAbstractScrollArea { background: transparent; border: none; }"
+            " QAbstractScrollArea > QWidget#qt_scrollarea_viewport { background: transparent; }"
+            " QAbstractScrollArea::corner { background: transparent; }"
+            // Ensure any native vertical scrollbar inside the scroll area is 0 width and invisible
+            " QScrollArea QScrollBar:vertical { width: 0px; margin: 0; background: transparent; }"
+        );
+
+        // Enable wheel scrolling over the content area by forwarding to the hidden scrollbar
+        m_contentScroll->installEventFilter(this);
+
+        // Create a floating overlay vertical scrollbar that sits above content
+        if (!m_overlayVScroll) {
+            m_overlayVScroll = new QScrollBar(Qt::Vertical, m_infoWidget);
+            m_overlayVScroll->setObjectName("overlayVScroll");
+            m_overlayVScroll->setAutoFillBackground(false);
+            m_overlayVScroll->setAttribute(Qt::WA_TranslucentBackground, true);
+            m_overlayVScroll->setCursor(Qt::ArrowCursor);
+            m_overlayVScroll->setStyleSheet(
+                "QScrollBar#overlayVScroll { background: transparent; border: none; width: 8px; margin: 0px; }"
+                " QScrollBar#overlayVScroll::groove:vertical { background: transparent; border: none; margin: 0px; }"
+                " QScrollBar#overlayVScroll::handle:vertical { background: rgba(255,255,255,0.35); min-height: 24px; border-radius: 4px; }"
+                " QScrollBar#overlayVScroll::handle:vertical:hover { background: rgba(255,255,255,0.55); }"
+                " QScrollBar#overlayVScroll::handle:vertical:pressed { background: rgba(255,255,255,0.7); }"
+                " QScrollBar#overlayVScroll::add-line:vertical, QScrollBar#overlayVScroll::sub-line:vertical { height: 0px; width: 0px; background: transparent; border: none; }"
+                " QScrollBar#overlayVScroll::add-page:vertical, QScrollBar#overlayVScroll::sub-page:vertical { background: transparent; }"
+            );
+            // Sync with the hidden scroll area's vertical scrollbar
+            QScrollBar* src = m_contentScroll->verticalScrollBar();
+            connect(m_overlayVScroll, &QScrollBar::valueChanged, src, &QScrollBar::setValue);
+            connect(src, &QScrollBar::rangeChanged, this, [this](int min, int max){
+                if (m_overlayVScroll) m_overlayVScroll->setRange(min, max);
+                updateOverlayVScrollVisibilityAndGeometry();
+            });
+            connect(src, &QScrollBar::valueChanged, this, [this](int v){ if (m_overlayVScroll) m_overlayVScroll->setValue(v); });
+            // Initialize current values immediately
+            m_overlayVScroll->setRange(src->minimum(), src->maximum());
+            m_overlayVScroll->setPageStep(src->pageStep());
+            m_overlayVScroll->setValue(src->value());
+        }
 
     m_contentWidget = new QWidget();
         m_contentWidget->setStyleSheet("background: transparent;");
         m_contentWidget->setAutoFillBackground(false);
-        m_contentWidget->setAttribute(Qt::WA_TranslucentBackground, true);
     // Let content report its natural height; we'll clamp via the scroll area when needed
     m_contentWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
         m_contentLayout = new QVBoxLayout(m_contentWidget);
@@ -138,7 +193,6 @@ void ScreenCanvas::initInfoOverlay() {
     m_overlayHeaderWidget = new QWidget(m_infoWidget);
         m_overlayHeaderWidget->setStyleSheet("background: transparent;");
         m_overlayHeaderWidget->setAutoFillBackground(false);
-        m_overlayHeaderWidget->setAttribute(Qt::WA_TranslucentBackground, true);
     // Prevent header area from expanding vertically; height should follow its children (the button)
     m_overlayHeaderWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         auto* headerLayout = new QHBoxLayout(m_overlayHeaderWidget);
@@ -305,9 +359,8 @@ void ScreenCanvas::refreshInfoOverlay() {
     const int maxOverlayH = viewport() ? std::max(0, viewport()->height() - margin*2) : naturalHeight;
     int overlayH = naturalHeight;
     if (overlayH > maxOverlayH) {
-        // Enable scrolling and clamp the scroll viewport height
+        // Clamp the scroll viewport height and show overlay scrollbar
         if (m_contentScroll) {
-            m_contentScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
             const int maxContentH = std::max(0, maxOverlayH - headerHint.height());
             m_contentScroll->setMaximumHeight(maxContentH);
             m_contentScroll->setMinimumHeight(0);
@@ -315,9 +368,8 @@ void ScreenCanvas::refreshInfoOverlay() {
         }
         overlayH = maxOverlayH;
     } else {
-        // No scroll: let the scroll area wrap content tightly and hide the scrollbar
+        // No scroll: wrap tightly and prepare overlay scrollbar to hide
         if (m_contentScroll) {
-            m_contentScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
             m_contentScroll->setMaximumHeight(contentHint.height());
             m_contentScroll->setMinimumHeight(0);
             m_contentScroll->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
@@ -325,6 +377,7 @@ void ScreenCanvas::refreshInfoOverlay() {
     }
     m_infoWidget->setFixedHeight(overlayH);
     m_infoWidget->resize(targetW, overlayH);
+    updateOverlayVScrollVisibilityAndGeometry();
     
     // Only show overlay if there are media items present
     if (!media.isEmpty()) {
@@ -347,6 +400,7 @@ void ScreenCanvas::layoutInfoOverlay() {
     const int x = viewport()->width() - margin - w;
     const int y = viewport()->height() - margin - m_infoWidget->height();
     m_infoWidget->move(std::max(0, x), std::max(0, y));
+    updateOverlayVScrollVisibilityAndGeometry();
 }
 
 void ScreenCanvas::updateInfoOverlayGeometryForViewport() {
@@ -361,7 +415,6 @@ void ScreenCanvas::updateInfoOverlayGeometryForViewport() {
     int overlayH = naturalHeight;
     if (overlayH > maxOverlayH) {
         if (m_contentScroll) {
-            m_contentScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
             const int maxContentH = std::max(0, maxOverlayH - headerHint.height());
             m_contentScroll->setMaximumHeight(maxContentH);
             m_contentScroll->setMinimumHeight(0);
@@ -370,7 +423,6 @@ void ScreenCanvas::updateInfoOverlayGeometryForViewport() {
         overlayH = maxOverlayH;
     } else {
         if (m_contentScroll) {
-            m_contentScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
             m_contentScroll->setMaximumHeight(contentHint.height());
             m_contentScroll->setMinimumHeight(0);
             m_contentScroll->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
@@ -380,6 +432,28 @@ void ScreenCanvas::updateInfoOverlayGeometryForViewport() {
     m_infoWidget->setFixedHeight(overlayH);
     m_infoWidget->resize(m_infoWidget->width(), overlayH);
     layoutInfoOverlay();
+    updateOverlayVScrollVisibilityAndGeometry();
+}
+
+void ScreenCanvas::updateOverlayVScrollVisibilityAndGeometry() {
+    if (!m_overlayVScroll || !m_contentScroll || !m_overlayVScroll->parentWidget()) return;
+    QScrollBar* src = m_contentScroll->verticalScrollBar();
+    if (!src) { m_overlayVScroll->hide(); return; }
+    const bool need = src->maximum() > src->minimum();
+    if (!need) { m_overlayVScroll->hide(); return; }
+    // Position the overlay scrollbar on the right edge of the overlay panel, above content
+    const int sbWidth = 8;
+    // Match the content scroll viewport geometry within the overlay panel
+    const QRect contentGeom = m_contentScroll->geometry();
+    const int x = m_infoWidget->width() - sbWidth - 2; // slight inset
+    const int y = contentGeom.top();
+    const int h = contentGeom.height();
+    // Sync range/value/page step on every geometry update
+    m_overlayVScroll->setRange(src->minimum(), src->maximum());
+    m_overlayVScroll->setPageStep(src->pageStep());
+    m_overlayVScroll->setValue(src->value());
+    m_overlayVScroll->setGeometry(x, y, sbWidth, h);
+    m_overlayVScroll->show();
 }
 
 ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
@@ -502,7 +576,28 @@ void ScreenCanvas::setScreenBorderWidthPx(int px) {
     }
 }
 
+bool ScreenCanvas::eventFilter(QObject* watched, QEvent* event) {
+    // Forward wheel events from content scroll area to its vertical scrollbar
+    if (watched == m_contentScroll && event->type() == QEvent::Wheel) {
+        QWheelEvent* wheelEvent = static_cast<QWheelEvent*>(event);
+        if (QScrollBar* vsb = m_contentScroll->verticalScrollBar()) {
+            // Forward the wheel event to the vertical scrollbar for smooth scrolling
+            QApplication::sendEvent(vsb, wheelEvent);
+            return true; // Event handled
+        }
+    }
+    return QGraphicsView::eventFilter(watched, event);
+}
+
 bool ScreenCanvas::event(QEvent* event) {
+    // Block gestures that would affect the canvas if the pointer is over the overlay
+    if ((event->type() == QEvent::Gesture || event->type() == QEvent::NativeGesture) && m_infoWidget && m_infoWidget->isVisible() && viewport()) {
+        QPoint vpPos = viewport()->mapFromGlobal(QCursor::pos());
+        if (m_infoWidget->geometry().contains(vpPos)) {
+            event->accept();
+            return true;
+        }
+    }
     if (event->type() == QEvent::Gesture) {
     return gestureEvent(static_cast<QGestureEvent*>(event));
     }
@@ -531,6 +626,10 @@ bool ScreenCanvas::viewportEvent(QEvent* event) {
 #ifdef Q_OS_MACOS
     // Some trackpad gestures may arrive directly to the viewport; handle zoom similarly
     if (event->type() == QEvent::NativeGesture) {
+        if (m_infoWidget && m_infoWidget->isVisible()) {
+            QPoint vpPosNow = viewport()->mapFromGlobal(QCursor::pos());
+            if (m_infoWidget->geometry().contains(vpPosNow)) { event->accept(); return true; }
+        }
         auto* ng = static_cast<QNativeGestureEvent*>(event);
         if (ng->gestureType() == Qt::ZoomNativeGesture) {
             m_nativePinchActive = true; m_nativePinchGuardTimer->start();
@@ -552,6 +651,11 @@ bool ScreenCanvas::viewportEvent(QEvent* event) {
 bool ScreenCanvas::gestureEvent(QGestureEvent* event) {
     if (QGesture* g = event->gesture(Qt::PinchGesture)) {
         auto* pinch = static_cast<QPinchGesture*>(g);
+        // If pinch is over the overlay, don't alter the canvas
+        if (m_infoWidget && m_infoWidget->isVisible() && viewport()) {
+            QPoint vpPosChk = pinch->centerPoint().toPoint();
+            if (m_infoWidget->geometry().contains(vpPosChk)) { event->accept(); return true; }
+        }
         if (pinch->changeFlags() & QPinchGesture::ScaleFactorChanged) {
             // centerPoint() is already in the receiving widget's coordinate system (our view)
             QPoint vpPos = pinch->centerPoint().toPoint();
@@ -684,6 +788,26 @@ void ScreenCanvas::keyPressEvent(QKeyEvent* event) {
 }
 
 void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
+    // When pressing over the overlay, forward event to the overlay widget under cursor and stop canvas handling
+    if (m_infoWidget && m_infoWidget->isVisible() && viewport()) {
+        const QPoint vpPos = viewport()->mapFrom(this, event->pos());
+        if (m_infoWidget->geometry().contains(vpPos)) {
+            const QPoint overlayLocal = m_infoWidget->mapFrom(viewport(), vpPos);
+            QWidget* dst = m_infoWidget->childAt(overlayLocal);
+            if (!dst) dst = m_infoWidget;
+            const QPoint dstLocal = dst->mapFrom(m_infoWidget, overlayLocal);
+            const QPoint globalP = dst->mapToGlobal(dstLocal);
+            const QWidget* win = dst->window();
+            const QPoint windowP = win ? win->mapFromGlobal(globalP) : QPoint();
+            const QPointF localF = QPointF(dstLocal);
+            const QPointF windowF = QPointF(windowP);
+            const QPointF screenF = QPointF(globalP);
+            QMouseEvent forwarded(event->type(), localF, windowF, screenF, event->button(), event->buttons(), event->modifiers());
+            QCoreApplication::sendEvent(dst, &forwarded);
+            event->accept();
+            return;
+        }
+    }
     // (Space-to-pan currently disabled pending dedicated key tracking)
     const bool spaceHeld = false;
     if (event->button() == Qt::LeftButton) {
@@ -751,6 +875,26 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
 }
 
 void ScreenCanvas::mouseDoubleClickEvent(QMouseEvent* event) {
+    // Forward double-clicks to overlay when over it
+    if (m_infoWidget && m_infoWidget->isVisible() && viewport()) {
+        const QPoint vpPos = viewport()->mapFrom(this, event->pos());
+        if (m_infoWidget->geometry().contains(vpPos)) {
+            const QPoint overlayLocal = m_infoWidget->mapFrom(viewport(), vpPos);
+            QWidget* dst = m_infoWidget->childAt(overlayLocal);
+            if (!dst) dst = m_infoWidget;
+            const QPoint dstLocal = dst->mapFrom(m_infoWidget, overlayLocal);
+            const QPoint globalP = dst->mapToGlobal(dstLocal);
+            const QWidget* win = dst->window();
+            const QPoint windowP = win ? win->mapFromGlobal(globalP) : QPoint();
+            const QPointF localF = QPointF(dstLocal);
+            const QPointF windowF = QPointF(windowP);
+            const QPointF screenF = QPointF(globalP);
+            QMouseEvent forwarded(event->type(), localF, windowF, screenF, event->button(), event->buttons(), event->modifiers());
+            QCoreApplication::sendEvent(dst, &forwarded);
+            event->accept();
+            return;
+        }
+    }
     if (event->button() == Qt::LeftButton) {
         // Do not change selection when double-clicking on overlay elements
         {
@@ -776,6 +920,26 @@ void ScreenCanvas::mouseDoubleClickEvent(QMouseEvent* event) {
 }
 
 void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
+    // While over overlay, forward moves to overlay widget and block canvas panning
+    if (m_infoWidget && m_infoWidget->isVisible() && viewport()) {
+        const QPoint vpPos = viewport()->mapFrom(this, event->pos());
+        if (m_infoWidget->geometry().contains(vpPos)) {
+            const QPoint overlayLocal = m_infoWidget->mapFrom(viewport(), vpPos);
+            QWidget* dst = m_infoWidget->childAt(overlayLocal);
+            if (!dst) dst = m_infoWidget;
+            const QPoint dstLocal = dst->mapFrom(m_infoWidget, overlayLocal);
+            const QPoint globalP = dst->mapToGlobal(dstLocal);
+            const QWidget* win = dst->window();
+            const QPoint windowP = win ? win->mapFromGlobal(globalP) : QPoint();
+            const QPointF localF = QPointF(dstLocal);
+            const QPointF windowF = QPointF(windowP);
+            const QPointF screenF = QPointF(globalP);
+            QMouseEvent forwarded(event->type(), localF, windowF, screenF, event->button(), event->buttons(), event->modifiers());
+            QCoreApplication::sendEvent(dst, &forwarded);
+            event->accept();
+            return;
+        }
+    }
     if (m_overlayMouseDown) {
         if (m_scene) { const QList<QGraphicsItem*> sel = m_scene->selectedItems(); for (QGraphicsItem* it : sel) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) { if (v->isDraggingProgress() || v->isDraggingVolume()) { v->updateDragWithScenePos(mapToScene(event->pos())); event->accept(); return; } } }
         event->accept(); return;
@@ -812,6 +976,22 @@ void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void ScreenCanvas::mouseReleaseEvent(QMouseEvent* event) {
+    // Forward release to overlay when over it and block canvas handling
+    if (m_infoWidget && m_infoWidget->isVisible() && viewport()) {
+        const QPoint vpPos = viewport()->mapFrom(this, event->pos());
+        if (m_infoWidget->geometry().contains(vpPos)) {
+            const QPoint overlayLocal = m_infoWidget->mapFrom(viewport(), vpPos);
+            QWidget* dst = m_infoWidget->childAt(overlayLocal);
+            if (!dst) dst = m_infoWidget;
+            const QPoint dstLocal = dst->mapFrom(m_infoWidget, overlayLocal);
+            const QPointF localF = QPointF(dstLocal);
+            const QPointF globalF = QPointF(dst->mapToGlobal(dstLocal));
+            QMouseEvent forwarded(event->type(), localF, QPointF(), globalF, event->button(), event->buttons(), event->modifiers());
+            QCoreApplication::sendEvent(dst, &forwarded);
+            event->accept();
+            return;
+        }
+    }
     if (event->button() == Qt::LeftButton) {
         // If releasing over any overlay item, deliver the event directly and avoid selection churn
         const QList<QGraphicsItem*> hitItems = items(event->pos());
@@ -834,6 +1014,35 @@ void ScreenCanvas::mouseReleaseEvent(QMouseEvent* event) {
 }
 
 void ScreenCanvas::wheelEvent(QWheelEvent* event) {
+#if 1
+    // If the cursor is over the media info overlay, route the scroll to its scroll area
+    if (m_infoWidget && m_infoWidget->isVisible() && m_contentScroll) {
+        // Map wheel position (relative to this view) to viewport, then to the overlay scroll viewport
+        QPointF vpPos = viewport() ? QPointF(viewport()->mapFrom(this, event->position().toPoint())) : event->position();
+        if (m_infoWidget->geometry().contains(vpPos.toPoint())) {
+            QWidget* dst = m_contentScroll->viewport() ? m_contentScroll->viewport() : static_cast<QWidget*>(m_contentScroll);
+            if (dst) {
+                const QPoint dstLocal = dst->mapFrom(viewport(), vpPos.toPoint());
+                const QPoint globalP = dst->mapToGlobal(dstLocal);
+                // Forward the wheel event so QScrollArea handles smooth scrolling
+                QWheelEvent forwarded(
+                    QPointF(dstLocal),
+                    QPointF(globalP),
+                    event->pixelDelta(),
+                    event->angleDelta(),
+                    event->buttons(),
+                    event->modifiers(),
+                    event->phase(),
+                    event->inverted(),
+                    event->source()
+                );
+                QCoreApplication::sendEvent(dst, &forwarded);
+            }
+            event->accept();
+            return; // Block canvas zoom/pan when wheel is over the overlay
+        }
+    }
+#endif
 #ifdef Q_OS_MACOS
     if (m_nativePinchActive) { event->ignore(); return; }
     const bool zoomModifier = event->modifiers().testFlag(Qt::MetaModifier);
