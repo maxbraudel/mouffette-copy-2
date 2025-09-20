@@ -70,6 +70,7 @@
 #include "MacVideoThumbnailer.h"
 #include "MacWindowManager.h"
 #endif
+#include "ResponsiveLayoutManager.h"
 #include <QGraphicsItem>
 #include <QSet>
 #include <QMediaPlayer>
@@ -160,11 +161,11 @@ inline void applyPillBtn(QPushButton* b) {
     b->setFocusPolicy(Qt::NoFocus);
     b->setMinimumWidth(gDynamicBoxMinWidth);
     b->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
-    // Enforce exact visual height via stylesheet (min/max-height) and zero vertical padding
+    // Enforce exact visual height via stylesheet (min/max-height) and fixed padding
     b->setStyleSheet(QString(
         "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %4px; border: 1px solid %1;"
         " border-radius: %2px; background-color: %5; color: palette(buttonText);"
-        " min-height: %3px; max-height: %3px; }"
+        " min-height: %3px; max-height: %3px; text-align: center; }"
         "QPushButton:hover { background-color: %6; }"
         "QPushButton:pressed { background-color: %7; }"
         "QPushButton:disabled { color: palette(mid); border-color: %1; background-color: %8; }"
@@ -359,7 +360,8 @@ MainWindow::MainWindow(QWidget* parent)
       m_ignoreSelectionChange(false),
       m_uploadManager(new UploadManager(this)),
       m_watchManager(new WatchManager(this)),
-      m_navigationManager(nullptr)
+      m_navigationManager(nullptr),
+      m_responsiveLayoutManager(new ResponsiveLayoutManager(this))
 {
     setWindowTitle("Mouffette");
 #ifdef Q_OS_MACOS
@@ -380,6 +382,8 @@ MainWindow::MainWindow(QWidget* parent)
 #endif
     // Remove any minimum height constraint to allow full flexibility
     setMinimumHeight(0);
+    // Set reasonable minimum width to prevent window from becoming unusable and avoid UI element compression
+    setMinimumWidth(600);
     // Set window to maximized state to fill available workspace
     setWindowState(Qt::WindowMaximized);
     
@@ -727,6 +731,7 @@ void MainWindow::createRemoteClientInfoContainer() {
     
     m_remoteClientInfoContainer->setStyleSheet(containerStyle);
     m_remoteClientInfoContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    m_remoteClientInfoContainer->setMinimumWidth(300); // More conservative minimum for the entire container
     
     // Create horizontal layout for the container
     QHBoxLayout* containerLayout = new QHBoxLayout(m_remoteClientInfoContainer);
@@ -744,6 +749,9 @@ void MainWindow::createRemoteClientInfoContainer() {
         "    color: palette(text); "
         "}").arg(gRemoteClientContainerPadding)
     );
+    // Allow client name some flexibility but with conservative minimum
+    m_clientNameLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    m_clientNameLabel->setMinimumWidth(20); // Adjust this value to change hostname minimum width
     containerLayout->addWidget(m_clientNameLabel);
     
     // Add vertical separator
@@ -803,6 +811,8 @@ void MainWindow::initializeRemoteClientInfoInTopBar() {
         m_connectionLayout->insertWidget(backButtonIndex + 1, m_remoteClientInfoContainer);
     }
 }
+
+
 
 void MainWindow::changeEvent(QEvent* event) {
     QMainWindow::changeEvent(event);
@@ -864,6 +874,11 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     if (m_remoteClientInfoContainer) {
         m_remoteClientInfoContainer->setVisible(true);
     }
+    
+    // Update button visibility for screen view page
+    if (m_responsiveLayoutManager) {
+        m_responsiveLayoutManager->updateResponsiveButtonVisibility();
+    }
 }
 
 void MainWindow::showClientListView() {
@@ -880,6 +895,11 @@ void MainWindow::showClientListView() {
     // Show top-bar page title and hide back button on client list
     if (m_pageTitleLabel) m_pageTitleLabel->show();
     if (m_backButton) m_backButton->hide();
+    
+    // Update button visibility for client list page
+    if (m_responsiveLayoutManager) {
+        m_responsiveLayoutManager->updateResponsiveButtonVisibility();
+    }
 }
 
 // Removed legacy createScreenWidget(): ScreenCanvas draws screens directly now
@@ -1248,22 +1268,36 @@ void MainWindow::setupUI() {
     // Back button (left-aligned, initially hidden)
     m_backButton = new QPushButton("← Back to Client List");
     applyPillBtn(m_backButton);
+    // Ensure button is sized properly for its text content
+    m_backButton->adjustSize();
+    int textWidth = m_backButton->fontMetrics().horizontalAdvance(m_backButton->text()) + 24; // text + padding
+    int buttonWidth = qMax(150, textWidth);
+    m_backButton->setFixedWidth(buttonWidth); // Use fixed width to prevent any changes
     m_backButton->hide(); // Initially hidden, shown only on screen view
     connect(m_backButton, &QPushButton::clicked, this, &MainWindow::onBackToClientListClicked);
     
     // Status label (boxed style using dynamicBox)
     m_connectionStatusLabel = new QLabel("DISCONNECTED");
     applyStatusBox(m_connectionStatusLabel, AppColors::colorToCss(AppColors::gStatusErrorText), AppColors::colorToCss(AppColors::gStatusErrorBg), AppColors::colorToCss(AppColors::gStatusErrorText));
+    // Use fixed width to prevent any compression
+    m_connectionStatusLabel->setFixedWidth(110);
 
     // Enable/Disable toggle button with fixed width (left of Settings)
     m_connectToggleButton = new QPushButton("Disable");
     applyPillBtn(m_connectToggleButton);
-    // Remove fixed width - now handled by dynamicBox minWidth
+    // Ensure button is sized properly for "Disable"/"Enable" text (using longer text)
+    int toggleTextWidth = m_connectToggleButton->fontMetrics().horizontalAdvance("Disable") + 24;
+    int toggleButtonWidth = qMax(80, toggleTextWidth);
+    m_connectToggleButton->setFixedWidth(toggleButtonWidth); // Use fixed width to prevent any changes
     connect(m_connectToggleButton, &QPushButton::clicked, this, &MainWindow::onEnableDisableClicked);
 
     // Settings button
     m_settingsButton = new QPushButton("Settings");
     applyPillBtn(m_settingsButton);
+    // Ensure button is sized properly for its text content
+    int settingsTextWidth = m_settingsButton->fontMetrics().horizontalAdvance("Settings") + 24;
+    int settingsButtonWidth = qMax(80, settingsTextWidth);
+    m_settingsButton->setFixedWidth(settingsButtonWidth); // Use fixed width to prevent any changes
     connect(m_settingsButton, &QPushButton::clicked, this, &MainWindow::showSettingsDialog);
 
     // Layout: [traffic-lights][title][back][stretch][status][connect][settings]
@@ -1309,6 +1343,11 @@ void MainWindow::setupUI() {
 
     // Initialize navigation manager (after widgets exist)
     m_navigationManager = new ScreenNavigationManager(this);
+    
+    // Initialize responsive layout manager (after UI is created)
+    if (m_responsiveLayoutManager) {
+        m_responsiveLayoutManager->initialize();
+    }
     {
         ScreenNavigationManager::Widgets w;
         w.stack = m_stackedWidget;
@@ -1349,6 +1388,13 @@ void MainWindow::setupUI() {
                     m_screenCanvas->updateRemoteCursor(x, y);
                 }
             });
+
+    // Initialize responsive layout
+    QTimer::singleShot(0, this, [this]() {
+        if (m_responsiveLayoutManager) {
+            m_responsiveLayoutManager->updateResponsiveLayout();
+        }
+    });
 
 #ifdef Q_OS_MACOS
     // Set native macOS window level for true always-on-top behavior across Spaces
@@ -1665,6 +1711,11 @@ void MainWindow::closeEvent(QCloseEvent *event) {
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
     QMainWindow::resizeEvent(event);
+    
+    // Update responsive layout based on window width
+    if (m_responsiveLayoutManager) {
+        m_responsiveLayoutManager->updateResponsiveLayout();
+    }
     
     // Adjust client list height when window is resized to maintain dynamic sizing
     adjustClientListHeight();
@@ -2343,6 +2394,11 @@ void MainWindow::updateIndividualProgressFromServer(int globalPercent, int files
         
         item->setUploadUploading(fileProgress);
     }
+}
+
+int MainWindow::getInnerContentGap() const
+{
+    return gInnerContentGap;
 }
 
 

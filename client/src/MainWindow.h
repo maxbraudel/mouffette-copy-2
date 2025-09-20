@@ -7,6 +7,7 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QSpacerItem>
 #include <QStatusBar>
 #include <QTimer>
 #include <QScreen>
@@ -53,6 +54,7 @@ class QProcess; // fwd decl to avoid including in header
 class UploadManager; // new component for upload/unload feature
 class WatchManager;  // new component for watch/unwatch feature
 class ScreenNavigationManager; // manages page switching & loader UX
+class ResponsiveLayoutManager; // manages responsive layout behavior
 // using QStackedWidget for canvas container switching
 
 // Forward declaration of extracted ScreenCanvas
@@ -64,6 +66,19 @@ class MainWindow : public QMainWindow {
 public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
+    
+    // Accessor methods for ResponsiveLayoutManager
+    QWidget* getRemoteClientInfoContainer() const { return m_remoteClientInfoContainer; }
+    QHBoxLayout* getConnectionLayout() const { return m_connectionLayout; }
+    QVBoxLayout* getMainLayout() const { return m_mainLayout; }
+    QStackedWidget* getStackedWidget() const { return m_stackedWidget; }
+    QWidget* getScreenViewWidget() const { return m_screenViewWidget; }
+    QWidget* getClientListPage() const { return m_clientListPage; }
+    QPushButton* getBackButton() const { return m_backButton; }
+    QLabel* getConnectionStatusLabel() const { return m_connectionStatusLabel; }
+    QPushButton* getConnectToggleButton() const { return m_connectToggleButton; }
+    QPushButton* getSettingsButton() const { return m_settingsButton; }
+    int getInnerContentGap() const;
 
 private slots:
     void onConnected();
@@ -197,6 +212,9 @@ private:
     // Cursor monitoring (only when this client is watched by someone else)
     QTimer* m_cursorTimer = nullptr;
     int m_cursorUpdateIntervalMs = 33; // ~30 Hz by default
+    
+    // Responsive layout manager
+    ResponsiveLayoutManager* m_responsiveLayoutManager = nullptr;
 
     // Menu and actions
     QMenu* m_fileMenu;

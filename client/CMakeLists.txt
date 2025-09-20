@@ -30,6 +30,7 @@ set(SOURCES
     src/UploadManager.cpp
     src/WatchManager.cpp
     src/ScreenNavigationManager.cpp
+    src/ResponsiveLayoutManager.cpp
     src/SpinnerWidget.cpp
     src/MediaItems.cpp
     src/ScreenCanvas.cpp
@@ -59,6 +60,7 @@ set(HEADERS
     src/UploadManager.h
     src/WatchManager.h
     src/ScreenNavigationManager.h
+    src/ResponsiveLayoutManager.h
     src/SpinnerWidget.h
     src/ScreenCanvas.h
     src/MediaSettingsPanel.h
