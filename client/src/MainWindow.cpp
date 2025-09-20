@@ -49,6 +49,7 @@
 #include <QGraphicsTextItem>
 #include <QGraphicsRectItem>
 #include <QGraphicsPathItem>
+#include <QStyledItemDelegate>
 #include <QtSvgWidgets/QGraphicsSvgItem>
 #include <QtSvg/QSvgRenderer>
 #include <QPainterPathStroker>
@@ -248,6 +249,29 @@ protected:
         p.fillPath(path, fill);
         p.setCompositionMode(QPainter::CompositionMode_SourceOver);
         // No outer border drawing — only rounded fill is rendered
+    }
+};
+
+// Lightweight delegate that draws separators only between items (no line above first, none below last)
+class ClientListSeparatorDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override {
+        QStyledItemDelegate::paint(painter, option, index);
+        if (!index.isValid()) return;
+        const QAbstractItemModel* model = index.model();
+        if (!model) return;
+        // Draw a 1px separator line at the top of items after the first
+        if (index.row() > 0) {
+            painter->save();
+            painter->setRenderHint(QPainter::Antialiasing, false);
+            QColor c = AppColors::getCurrentColor(AppColors::gAppBorderColorSource);
+            painter->setPen(QPen(c, 1));
+            const QRect r = option.rect;
+            const int y = r.top();
+            painter->drawLine(r.left(), y, r.right(), y);
+            painter->restore();
+        }
     }
 };
 
@@ -1012,7 +1036,7 @@ void MainWindow::updateStylesheetsForTheme() {
             "}"
             "QListWidget::item { "
             "   padding: 10px; "
-            "   border-bottom: 1px solid " + AppColors::colorSourceToCss(AppColors::gAppBorderColorSource) + "; "
+            // No per-item borders; separators are painted via a custom delegate
             "}"
             // Hover: very light blue tint
             "QListWidget::item:hover { "
@@ -1325,7 +1349,7 @@ void MainWindow::createClientListPage() {
         "}"
         "QListWidget::item { "
         "   padding: 10px; "
-        "   border-bottom: 1px solid " + AppColors::colorSourceToCss(AppColors::gAppBorderColorSource) + "; "
+        // No per-item borders; separators are painted via a custom delegate
         "}"
         // Hover: very light blue tint
         "QListWidget::item:hover { "
@@ -1351,6 +1375,8 @@ void MainWindow::createClientListPage() {
     m_clientListWidget->installEventFilter(this);
     // Enable hover state over items (for :hover style)
     m_clientListWidget->setMouseTracking(true);
+    // Draw separators only between items
+    m_clientListWidget->setItemDelegate(new ClientListSeparatorDelegate(m_clientListWidget));
     layout->addWidget(m_clientListWidget);
     
     m_noClientsLabel = new QLabel("No clients connected. Make sure other devices are running Mouffette and connected to the same server.");

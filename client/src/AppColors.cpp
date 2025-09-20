@@ -10,7 +10,7 @@ namespace AppColors {
 
 // Configuration: Change these to customize color behavior
 ColorSource gAppBorderColorSource = ColorSource(QPalette::Text, 50);        // Dynamic: Mid palette - more visible borders
-ColorSource gInteractionBackgroundColorSource = ColorSource(QPalette::Text, 4); // Dynamic: Text palette
+ColorSource gInteractionBackgroundColorSource = ColorSource(QPalette::Text, 8); // Dynamic: Text palette
 ColorSource gWindowBackgroundColorSource = ColorSource(QPalette::Base); // Dynamic: Base palette
 
 // ============================================================================
