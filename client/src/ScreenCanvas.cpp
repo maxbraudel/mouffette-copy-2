@@ -132,11 +132,6 @@ void ScreenCanvas::initInfoOverlay() {
         hBar->setEnabled(false);
         hBar->hide();
     }
-    // Ensure horizontal scrollbar is completely disabled
-    if (QScrollBar* hBar = m_contentScroll->horizontalScrollBar()) {
-        hBar->setEnabled(false);
-        hBar->hide();
-    }
         // Ensure viewport is fully transparent (no gray behind the track)
         if (m_contentScroll->viewport()) {
             m_contentScroll->viewport()->setAutoFillBackground(false);
@@ -187,7 +182,7 @@ void ScreenCanvas::initInfoOverlay() {
     m_contentWidget = new QWidget();
         m_contentWidget->setStyleSheet("background: transparent;");
         m_contentWidget->setAutoFillBackground(false);
-    // Use Maximum to prevent unwanted stretching while allowing natural sizing
+    // Prevent unwanted stretching while allowing natural sizing
     m_contentWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
         m_contentLayout = new QVBoxLayout(m_contentWidget);
         m_contentLayout->setContentsMargins(20, 16, 20, 16); // Margins only for content
@@ -1110,6 +1105,11 @@ void ScreenCanvas::dragLeaveEvent(QDragLeaveEvent* event) {
 void ScreenCanvas::dropEvent(QDropEvent* event) {
     const QMimeData* mime = event->mimeData(); if (!mime) { event->ignore(); return; }
     QPointF scenePos = mapToScene(event->position().toPoint());
+    
+    // Clear any existing selection before adding new media
+    if (m_scene) {
+        m_scene->clearSelection();
+    }
     if (mime->hasUrls()) {
         const QList<QUrl> urls = mime->urls();
         for (const QUrl& url : urls) {
