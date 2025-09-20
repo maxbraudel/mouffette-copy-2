@@ -190,8 +190,8 @@ void ScreenCanvas::initInfoOverlay() {
     // Use Maximum to prevent unwanted stretching while allowing natural sizing
     m_contentWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
         m_contentLayout = new QVBoxLayout(m_contentWidget);
-        m_contentLayout->setContentsMargins(20, 16, 20, 16); // Margins only for content
-        m_contentLayout->setSpacing(gMediaListItemSpacing);
+        m_contentLayout->setContentsMargins(0, 0, 0, 0); // No margins for debugging
+        m_contentLayout->setSpacing(0); // No automatic spacing - we'll add manual gaps
     m_contentScroll->setWidget(m_contentWidget);
         
     // Add scroll area (containing content) to main layout
@@ -283,7 +283,14 @@ void ScreenCanvas::refreshInfoOverlay() {
         const char* units[] = {"B","KB","MB","GB"}; int u=0; while (b>=1024.0 && u<3){ b/=1024.0; ++u;} return QString::number(b, 'f', (u==0?0: (b<10?2:1))) + " " + units[u];
     };
 
+    bool isFirstMedia = true;
     for (ResizableMediaBase* m : media) {
+        // Add gap between media items (but not before the first one)
+        if (!isFirstMedia) {
+            m_contentLayout->addSpacing(gMediaListItemSpacing);
+        }
+        isFirstMedia = false;
+        
         QString name = m->displayName();
         QSize sz = m->baseSizePx();
         QString dim = QString::number(sz.width()) + " x " + QString::number(sz.height()) + " px";
