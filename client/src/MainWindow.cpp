@@ -254,6 +254,60 @@ protected:
     }
 };
 
+// A container that properly clips child widgets to its rounded shape
+class ClippedContainer : public QWidget {
+public:
+    ClippedContainer(QWidget* parent = nullptr) : QWidget(parent) {}
+
+protected:
+    void showEvent(QShowEvent* event) override {
+        QWidget::showEvent(event);
+        updateMaskIfNeeded();
+    }
+
+    void resizeEvent(QResizeEvent* event) override {
+        QWidget::resizeEvent(event);
+        updateMaskIfNeeded();
+    }
+
+private:
+    QSize m_lastMaskSize;  // Cache last size to avoid unnecessary recalculation
+    
+    void updateMaskIfNeeded() {
+        const QSize currentSize = size();
+        // Skip if size hasn't changed (common during theme switches, etc.)
+        if (currentSize == m_lastMaskSize && !mask().isEmpty()) return;
+        
+        // Ensure we have a valid size
+        if (currentSize.width() <= 0 || currentSize.height() <= 0) return;
+        
+        // Cache the size
+        m_lastMaskSize = currentSize;
+        
+        // Use more efficient QRegion constructor for rounded rectangles
+        const int radius = qMax(0, qMin(gDynamicBoxBorderRadius, qMin(currentSize.width(), currentSize.height()) / 2));
+        const QRect r(0, 0, currentSize.width(), currentSize.height());
+        
+        // Create rounded region more efficiently using ellipse corners
+        QRegion region(r);
+        if (radius > 0) {
+            // Subtract corner rectangles and add back rounded corners
+            const int d = radius * 2;
+            region -= QRegion(0, 0, radius, radius);                           // top-left corner
+            region -= QRegion(r.width() - radius, 0, radius, radius);         // top-right corner  
+            region -= QRegion(0, r.height() - radius, radius, radius);        // bottom-left corner
+            region -= QRegion(r.width() - radius, r.height() - radius, radius, radius); // bottom-right corner
+            
+            region += QRegion(0, 0, d, d, QRegion::Ellipse);                           // top-left rounded
+            region += QRegion(r.width() - d, 0, d, d, QRegion::Ellipse);               // top-right rounded
+            region += QRegion(0, r.height() - d, d, d, QRegion::Ellipse);              // bottom-left rounded  
+            region += QRegion(r.width() - d, r.height() - d, d, d, QRegion::Ellipse);  // bottom-right rounded
+        }
+        
+        setMask(region);
+    }
+};
+
 // Lightweight delegate that draws separators only between items (no line above first, none below last)
 class ClientListSeparatorDelegate : public QStyledItemDelegate {
 public:
@@ -717,10 +771,10 @@ void MainWindow::createRemoteClientInfoContainer() {
         return; // Already created
     }
     
-    // Create container widget with dynamic box styling
-    m_remoteClientInfoContainer = new QWidget();
+    // Create container widget with dynamic box styling and proper clipping
+    m_remoteClientInfoContainer = new ClippedContainer();
     
-    // Apply dynamic box styling with transparent background
+    // Apply dynamic box styling with transparent background and clipping
     const QString containerStyle = QString(
         "QWidget { "
         "    background-color: transparent; "
@@ -817,10 +871,10 @@ void MainWindow::createLocalClientInfoContainer() {
     m_localNetworkStatusLabel->setAlignment(Qt::AlignCenter); // Center the text
     // Note: Color and font styling will be applied by setLocalNetworkStatus()
     
-    // Create container widget with same styling as remote client container
-    m_localClientInfoContainer = new QWidget();
+    // Create container widget with same styling as remote client container and proper clipping
+    m_localClientInfoContainer = new ClippedContainer();
     
-    // Apply same dynamic box styling as remote container
+    // Apply same dynamic box styling as remote container with clipping
     const QString containerStyle = QString(
         "QWidget { "
         "    background-color: transparent; "
@@ -1849,7 +1903,7 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
     if (m_stackedWidget && m_stackedWidget->currentWidget() == m_screenViewWidget && 
         m_screenCanvas) {
         const bool hasScreens = !m_selectedClient.getScreens().isEmpty();
-        if (!m_canvasRevealedForCurrentClient || !hasScreens) {
+        if (!m_canvasRevealedForCurrentClient && hasScreens) {
             m_screenCanvas->recenterWithMargin(53);
         }
     }
