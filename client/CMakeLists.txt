@@ -40,7 +40,7 @@ set(SOURCES
 
 # Platform-specific sources
 if(APPLE)
-    list(APPEND SOURCES src/MacDockHider.mm src/MacCursorHider.mm src/MacVideoThumbnailer.mm)
+    list(APPEND SOURCES src/MacDockHider.mm src/MacCursorHider.mm src/MacVideoThumbnailer.mm src/MacWindowManager.mm)
 else()
     # Provide a no-op implementation on non-macOS so linking succeeds
     list(APPEND SOURCES src/MacDockHider.cpp)
@@ -53,6 +53,7 @@ set(HEADERS
     src/ClientInfo.h
     src/MacDockHider.h
     src/MacVideoThumbnailer.h
+    src/MacWindowManager.h
     src/OverlayPanels.h
     src/RoundedRectItem.h
     src/UploadManager.h

@@ -68,6 +68,7 @@
 #ifdef Q_OS_MACOS
 #include "MacCursorHider.h"
 #include "MacVideoThumbnailer.h"
+#include "MacWindowManager.h"
 #endif
 #include <QGraphicsItem>
 #include <QSet>
@@ -368,7 +369,8 @@ MainWindow::MainWindow(QWidget* parent)
 #endif
     // Frameless window and no menu bar on macOS/Windows
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
-    setWindowFlags(windowFlags() | Qt::FramelessWindowHint);
+    // Configure borderless window that stays on top
+    setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     // Disable context menus app-wide for a clean look
     setContextMenuPolicy(Qt::NoContextMenu);
     // Ensure QMainWindow does not reserve space for a (hidden) menu bar
@@ -376,11 +378,10 @@ MainWindow::MainWindow(QWidget* parent)
     // Enable transparent window background so inner container can draw rounded corners
     setAttribute(Qt::WA_TranslucentBackground);
 #endif
-    resize(1280, 900);
     // Remove any minimum height constraint to allow full flexibility
     setMinimumHeight(0);
-    // Use Qt's native positioning to avoid menu bar overlap
-    move(QGuiApplication::primaryScreen()->availableGeometry().topLeft() + QPoint(50, 50));
+    // Set window to maximized state to fill available workspace
+    setWindowState(Qt::WindowMaximized);
     
     setupUI();
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN) || defined(Q_OS_LINUX)
@@ -607,15 +608,29 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
     }
 
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
-    // Enable window dragging on the connection bar for frameless window
-    if (obj == m_connectionBar) {
+    // Enable window dragging on the entire window for frameless window
+    // This allows dragging from the top margin area as well as the connection bar
+    if (obj == m_centralWidget || obj == m_connectionBar) {
         switch (event->type()) {
         case QEvent::MouseButtonPress: {
             QMouseEvent* me = static_cast<QMouseEvent*>(event);
             if (me->button() == Qt::LeftButton) {
-                // Ignore presses on interactive child widgets (buttons)
-                QWidget* child = m_connectionBar->childAt(me->pos());
-                if (child && (qobject_cast<QPushButton*>(child))) break;
+                // If we're on the connection bar, ignore presses on interactive child widgets (buttons)
+                if (obj == m_connectionBar) {
+                    QWidget* child = m_connectionBar->childAt(me->pos());
+                    if (child && (qobject_cast<QPushButton*>(child))) break;
+                }
+                // If we're on the central widget, only allow dragging from the top margin area
+                // or if there's no interactive widget under the cursor
+                if (obj == m_centralWidget) {
+                    QPoint globalPos = me->globalPosition().toPoint();
+                    QWidget* childAtGlobal = qApp->widgetAt(globalPos);
+                    // Don't drag if clicking on interactive widgets like buttons or list widgets
+                    if (childAtGlobal && (qobject_cast<QPushButton*>(childAtGlobal) || 
+                                         qobject_cast<QListWidget*>(childAtGlobal))) {
+                        break;
+                    }
+                }
                 m_dragging = true;
                 m_dragStartGlobal = me->globalPosition().toPoint();
                 m_windowStartPos = frameGeometry().topLeft();
@@ -1122,6 +1137,11 @@ void MainWindow::setupUI() {
 #endif
     setCentralWidget(m_centralWidget);
     
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+    // Install event filter on central widget to enable window dragging from anywhere in the window
+    m_centralWidget->installEventFilter(this);
+#endif
+    
     m_mainLayout = new QVBoxLayout(m_centralWidget);
     // Use explicit spacer to control gap so it's not affected by any nested margins
     m_mainLayout->setSpacing(0);
@@ -1329,6 +1349,13 @@ void MainWindow::setupUI() {
                     m_screenCanvas->updateRemoteCursor(x, y);
                 }
             });
+
+#ifdef Q_OS_MACOS
+    // Set native macOS window level for true always-on-top behavior across Spaces
+    QTimer::singleShot(100, this, [this]() {
+        MacWindowManager::setWindowAlwaysOnTop(this);
+    });
+#endif
 }
 
 void MainWindow::createClientListPage() {
