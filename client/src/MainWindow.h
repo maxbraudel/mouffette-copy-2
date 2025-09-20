@@ -73,6 +73,7 @@ private slots:
     void onRegistrationConfirmed(const ClientInfo& clientInfo);
     void onClientSelectionChanged();
     void onClientItemClicked(QListWidgetItem* item);
+    void adjustClientListHeight();
     void updateConnectionStatus();
     void onEnableDisableClicked();
     void attemptReconnect();

@@ -1106,6 +1106,9 @@ void MainWindow::updateStylesheetsForTheme() {
             }
         }
     }
+    
+    // Recalculate client list height after style changes
+    adjustClientListHeight();
 }
 
 void MainWindow::setupUI() {
@@ -1377,6 +1380,10 @@ void MainWindow::createClientListPage() {
     m_clientListWidget->setMouseTracking(true);
     // Draw separators only between items
     m_clientListWidget->setItemDelegate(new ClientListSeparatorDelegate(m_clientListWidget));
+    
+    // Set size policy to adapt to content height instead of expanding to fill
+    m_clientListWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+    
     layout->addWidget(m_clientListWidget);
     
     m_noClientsLabel = new QLabel("No clients connected. Make sure other devices are running Mouffette and connected to the same server.");
@@ -1391,6 +1398,9 @@ void MainWindow::createClientListPage() {
     m_selectedClientLabel->setWordWrap(true);
     m_selectedClientLabel->hide();
     layout->addWidget(m_selectedClientLabel);
+    
+    // Add vertical spacer to push content to the top
+    layout->addStretch();
     
     // Add to stacked widget
     m_stackedWidget->addWidget(m_clientListPage);
@@ -1636,6 +1646,9 @@ void MainWindow::closeEvent(QCloseEvent *event) {
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
     QMainWindow::resizeEvent(event);
+    
+    // Adjust client list height when window is resized to maintain dynamic sizing
+    adjustClientListHeight();
     
     // If we're currently showing the screen view and have a canvas with content,
     // recenter the view to maintain good visibility only before first reveal or when no screens are present
@@ -2217,6 +2230,49 @@ void MainWindow::updateClientList(const QList<ClientInfo>& clients) {
     
     // Hide selected client info when list changes
     m_selectedClientLabel->hide();
+    
+    // Adjust height to fit content
+    adjustClientListHeight();
+}
+
+void MainWindow::adjustClientListHeight() {
+    if (!m_clientListWidget) {
+        return;
+    }
+    
+    int totalHeight = 0;
+    
+    // Calculate total height needed for all items
+    for (int i = 0; i < m_clientListWidget->count(); ++i) {
+        QListWidgetItem* item = m_clientListWidget->item(i);
+        if (item) {
+            totalHeight += m_clientListWidget->sizeHintForRow(i);
+        }
+    }
+    
+    // Add frame width (border, padding)
+    int frameWidth = m_clientListWidget->frameWidth() * 2;
+    totalHeight += frameWidth;
+    
+    // Calculate maximum available height (leave some margin for other UI elements)
+    int windowHeight = this->height();
+    int headerHeight = 60; // Approximate height for top bar with traffic lights
+    int bottomMargin = 40; // Margin for selected client info and spacing
+    int maxAvailableHeight = windowHeight - headerHeight - bottomMargin;
+    
+    // Ensure minimum height for usability
+    int minHeight = 100;
+    maxAvailableHeight = qMax(maxAvailableHeight, minHeight);
+    
+    if (totalHeight <= maxAvailableHeight) {
+        // Content fits - use exact height and disable scrollbars
+        m_clientListWidget->setFixedHeight(totalHeight);
+        m_clientListWidget->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    } else {
+        // Content too tall - use max height and enable scrolling
+        m_clientListWidget->setFixedHeight(maxAvailableHeight);
+        m_clientListWidget->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    }
 }
 
 void MainWindow::setUIEnabled(bool enabled) {
