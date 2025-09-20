@@ -158,7 +158,6 @@ private:
     // Client list section
     QLabel* m_clientListLabel;
     QListWidget* m_clientListWidget;
-    QLabel* m_noClientsLabel;
     
     // Selected client info
     QLabel* m_selectedClientLabel;

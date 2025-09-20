@@ -326,7 +326,6 @@ MainWindow::MainWindow(QWidget* parent)
       m_connectionStatusLabel(nullptr),
       m_clientListLabel(nullptr),
       m_clientListWidget(nullptr),
-      m_noClientsLabel(nullptr),
       m_selectedClientLabel(nullptr),
       m_screenViewWidget(nullptr),
       m_screenViewLayout(nullptr),
@@ -1388,12 +1387,6 @@ void MainWindow::createClientListPage() {
     
     layout->addWidget(m_clientListWidget);
     
-    m_noClientsLabel = new QLabel("No clients connected. Make sure other devices are running Mouffette and connected to the same server.");
-    m_noClientsLabel->setStyleSheet("QLabel { color: " + AppColors::colorToCss(AppColors::gTextMuted) + "; font-style: italic; text-align: center; }");
-    m_noClientsLabel->setAlignment(Qt::AlignCenter);
-    m_noClientsLabel->setWordWrap(true);
-    layout->addWidget(m_noClientsLabel);
-    
     // Selected client info
     m_selectedClientLabel = new QLabel();
     m_selectedClientLabel->setStyleSheet("QLabel { background-color: #e8f4fd; padding: 10px; border-radius: 5px; }");
@@ -1406,9 +1399,6 @@ void MainWindow::createClientListPage() {
     
     // Add to stacked widget
     m_stackedWidget->addWidget(m_clientListPage);
-    
-    // Initially hide the separate "no clients" label since we'll show it in the list widget itself
-    m_noClientsLabel->hide();
 }
 
 void MainWindow::createScreenViewPage() {
@@ -2196,32 +2186,21 @@ void MainWindow::updateClientList(const QList<ClientInfo>& clients) {
     m_clientListWidget->clear();
     
     if (clients.isEmpty()) {
-        // Show the "no clients" message centered in the list widget with larger font
+        // Create "no clients" message item
         QListWidgetItem* item = new QListWidgetItem("No clients connected. Make sure other devices are running Mouffette and connected to the same server.");
         item->setFlags(Qt::NoItemFlags); // Make it non-selectable and non-interactive
         item->setTextAlignment(Qt::AlignCenter);
+        
+        // Style the message text
         QFont font = item->font();
         font.setItalic(true);
-        font.setPointSize(16); // Make the font larger
+        font.setPointSize(16);
         item->setFont(font);
-        item->setForeground(AppColors::gTextMuted); // Muted text color
-        
-    // Set a custom size hint to center the item vertically in the list widget.
-    // Use the viewport height (content area) to avoid off-by-margins that cause scrollbars.
-    const int viewportH = m_clientListWidget->viewport() ? m_clientListWidget->viewport()->height() : m_clientListWidget->height();
-    item->setSizeHint(QSize(m_clientListWidget->width(), qMax(0, viewportH)));
+        item->setForeground(AppColors::gTextMuted);
         
         m_clientListWidget->addItem(item);
-    // Ensure no scrollbars are shown for the single placeholder item
-    m_clientListWidget->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_clientListWidget->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        m_noClientsLabel->hide(); // Hide the separate label since we show message in list
     } else {
-        m_noClientsLabel->hide();
-    // Restore scrollbar policies when there are items to potentially scroll
-    m_clientListWidget->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    m_clientListWidget->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        
+        // Add client items
         for (const ClientInfo& client : clients) {
             QString displayText = client.getDisplayText();
             QListWidgetItem* item = new QListWidgetItem(displayText);
@@ -2233,7 +2212,7 @@ void MainWindow::updateClientList(const QList<ClientInfo>& clients) {
     // Hide selected client info when list changes
     m_selectedClientLabel->hide();
     
-    // Adjust height to fit content
+    // Adjust container size and scrolling behavior based on content
     adjustClientListHeight();
 }
 
@@ -2242,56 +2221,46 @@ void MainWindow::adjustClientListHeight() {
         return;
     }
     
-    // Calculate maximum available height (leave some margin for other UI elements)
-    int windowHeight = this->height();
-    int headerHeight = 60; // Approximate height for top bar with traffic lights
-    int bottomMargin = 40; // Margin for selected client info and spacing
-    int maxAvailableHeight = windowHeight - headerHeight - bottomMargin;
+    // Calculate available height for the client list container
+    const int windowHeight = this->height();
+    const int headerHeight = 60; // Top bar with traffic lights
+    const int bottomMargin = 40;  // Space for selected client info and padding
+    const int maxAvailableHeight = qMax(0, windowHeight - headerHeight - bottomMargin);
     
-    // Allow complete flexibility - no minimum height constraint
-    maxAvailableHeight = qMax(maxAvailableHeight, 0);
+    // Detect if showing "No clients connected" message (single non-interactive item)
+    const bool isNoClientsMessage = (m_clientListWidget->count() == 1 && 
+                                    m_clientListWidget->item(0) && 
+                                    m_clientListWidget->item(0)->flags() == Qt::NoItemFlags);
     
-    // Check if we're showing the "No clients connected" message
-    bool isShowingNoClientsMessage = (m_clientListWidget->count() == 1 && 
-                                     m_clientListWidget->item(0) && 
-                                     (m_clientListWidget->item(0)->flags() == Qt::NoItemFlags));
-    
-    if (isShowingNoClientsMessage) {
-        // Special case: "No clients" message - expand to full height, center content, no scrolling
+    if (isNoClientsMessage) {
+        // No clients: expand to full height, center message, disable scrolling
         m_clientListWidget->setFixedHeight(maxAvailableHeight);
         m_clientListWidget->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         m_clientListWidget->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         
-        // Update the item's size hint to use the full container height for proper centering
-        QListWidgetItem* item = m_clientListWidget->item(0);
-        if (item) {
-            item->setSizeHint(QSize(m_clientListWidget->width(), maxAvailableHeight));
-        }
+        // Make the message item fill the entire container for proper centering
+        m_clientListWidget->item(0)->setSizeHint(QSize(m_clientListWidget->width(), maxAvailableHeight));
     } else {
-        // Normal case: client list with actual clients
-        int totalHeight = 0;
+        // Client list: calculate required height and enable scrolling if needed
+        int totalHeight = m_clientListWidget->frameWidth() * 2; // Start with frame borders
         
-        // Calculate total height needed for all items
+        // Sum up all item heights
         for (int i = 0; i < m_clientListWidget->count(); ++i) {
-            QListWidgetItem* item = m_clientListWidget->item(i);
-            if (item) {
-                totalHeight += m_clientListWidget->sizeHintForRow(i);
-            }
+            totalHeight += m_clientListWidget->sizeHintForRow(i);
         }
-        
-        // Add frame width (border, padding)
-        int frameWidth = m_clientListWidget->frameWidth() * 2;
-        totalHeight += frameWidth;
         
         if (totalHeight <= maxAvailableHeight) {
-            // Content fits - use exact height and disable scrollbars
+            // Content fits: use exact height, no scrolling
             m_clientListWidget->setFixedHeight(totalHeight);
             m_clientListWidget->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         } else {
-            // Content too tall - use max height and enable scrolling
+            // Content too tall: use max height, enable scrolling
             m_clientListWidget->setFixedHeight(maxAvailableHeight);
             m_clientListWidget->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         }
+        
+        // Always disable horizontal scrolling for client list
+        m_clientListWidget->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     }
 }
 
