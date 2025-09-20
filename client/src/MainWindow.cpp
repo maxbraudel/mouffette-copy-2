@@ -378,6 +378,8 @@ MainWindow::MainWindow(QWidget* parent)
     setAttribute(Qt::WA_TranslucentBackground);
 #endif
     resize(1280, 900);
+    // Remove any minimum height constraint to allow full flexibility
+    setMinimumHeight(0);
     // Use Qt's native positioning to avoid menu bar overlap
     move(QGuiApplication::primaryScreen()->availableGeometry().topLeft() + QPoint(50, 50));
     
@@ -1449,7 +1451,7 @@ void MainWindow::createScreenViewPage() {
     // Canvas container holds spinner and canvas with a stacked layout
     m_canvasContainer = new QWidget();
     m_canvasContainer->setObjectName("CanvasContainer");
-    m_canvasContainer->setMinimumHeight(400);
+    // Remove minimum height to allow flexible window resizing
     // Ensure stylesheet background/border is actually painted
     m_canvasContainer->setAttribute(Qt::WA_StyledBackground, true);
     // Match the dark background used by the client list container via palette(base)
@@ -1508,7 +1510,7 @@ void MainWindow::createScreenViewPage() {
     canvasLayout->setContentsMargins(0,0,0,0);
     canvasLayout->setSpacing(0);
     m_screenCanvas = new ScreenCanvas();
-    m_screenCanvas->setMinimumHeight(400);
+    // Remove minimum height to allow flexible window resizing
     // Ensure the viewport background matches and is rounded
     if (m_screenCanvas->viewport()) {
         m_screenCanvas->viewport()->setAttribute(Qt::WA_StyledBackground, true);
@@ -2240,38 +2242,56 @@ void MainWindow::adjustClientListHeight() {
         return;
     }
     
-    int totalHeight = 0;
-    
-    // Calculate total height needed for all items
-    for (int i = 0; i < m_clientListWidget->count(); ++i) {
-        QListWidgetItem* item = m_clientListWidget->item(i);
-        if (item) {
-            totalHeight += m_clientListWidget->sizeHintForRow(i);
-        }
-    }
-    
-    // Add frame width (border, padding)
-    int frameWidth = m_clientListWidget->frameWidth() * 2;
-    totalHeight += frameWidth;
-    
     // Calculate maximum available height (leave some margin for other UI elements)
     int windowHeight = this->height();
     int headerHeight = 60; // Approximate height for top bar with traffic lights
     int bottomMargin = 40; // Margin for selected client info and spacing
     int maxAvailableHeight = windowHeight - headerHeight - bottomMargin;
     
-    // Ensure minimum height for usability
-    int minHeight = 100;
-    maxAvailableHeight = qMax(maxAvailableHeight, minHeight);
+    // Allow complete flexibility - no minimum height constraint
+    maxAvailableHeight = qMax(maxAvailableHeight, 0);
     
-    if (totalHeight <= maxAvailableHeight) {
-        // Content fits - use exact height and disable scrollbars
-        m_clientListWidget->setFixedHeight(totalHeight);
-        m_clientListWidget->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    } else {
-        // Content too tall - use max height and enable scrolling
+    // Check if we're showing the "No clients connected" message
+    bool isShowingNoClientsMessage = (m_clientListWidget->count() == 1 && 
+                                     m_clientListWidget->item(0) && 
+                                     (m_clientListWidget->item(0)->flags() == Qt::NoItemFlags));
+    
+    if (isShowingNoClientsMessage) {
+        // Special case: "No clients" message - expand to full height, center content, no scrolling
         m_clientListWidget->setFixedHeight(maxAvailableHeight);
-        m_clientListWidget->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        m_clientListWidget->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_clientListWidget->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        
+        // Update the item's size hint to use the full container height for proper centering
+        QListWidgetItem* item = m_clientListWidget->item(0);
+        if (item) {
+            item->setSizeHint(QSize(m_clientListWidget->width(), maxAvailableHeight));
+        }
+    } else {
+        // Normal case: client list with actual clients
+        int totalHeight = 0;
+        
+        // Calculate total height needed for all items
+        for (int i = 0; i < m_clientListWidget->count(); ++i) {
+            QListWidgetItem* item = m_clientListWidget->item(i);
+            if (item) {
+                totalHeight += m_clientListWidget->sizeHintForRow(i);
+            }
+        }
+        
+        // Add frame width (border, padding)
+        int frameWidth = m_clientListWidget->frameWidth() * 2;
+        totalHeight += frameWidth;
+        
+        if (totalHeight <= maxAvailableHeight) {
+            // Content fits - use exact height and disable scrollbars
+            m_clientListWidget->setFixedHeight(totalHeight);
+            m_clientListWidget->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        } else {
+            // Content too tall - use max height and enable scrolling
+            m_clientListWidget->setFixedHeight(maxAvailableHeight);
+            m_clientListWidget->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        }
     }
 }
 
