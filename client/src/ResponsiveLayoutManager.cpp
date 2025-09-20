@@ -159,11 +159,11 @@ void ResponsiveLayoutManager::moveClientInfoBelowTopBar()
 
 void ResponsiveLayoutManager::updateButtonVisibility(bool visible)
 {
-    QLabel* connectionStatusLabel = getConnectionStatusLabel();
+    QWidget* localClientInfoContainer = getLocalClientInfoContainer();
     QPushButton* connectToggleButton = getConnectToggleButton();
     QPushButton* settingsButton = getSettingsButton();
     
-    if (connectionStatusLabel) connectionStatusLabel->setVisible(visible);
+    if (localClientInfoContainer) localClientInfoContainer->setVisible(visible);
     if (connectToggleButton) connectToggleButton->setVisible(visible);
     if (settingsButton) settingsButton->setVisible(visible);
 }
@@ -215,6 +215,11 @@ QPushButton* ResponsiveLayoutManager::getBackButton() const
 QLabel* ResponsiveLayoutManager::getConnectionStatusLabel() const
 {
     return m_mainWindow ? m_mainWindow->getConnectionStatusLabel() : nullptr;
+}
+
+QWidget* ResponsiveLayoutManager::getLocalClientInfoContainer() const
+{
+    return m_mainWindow ? m_mainWindow->getLocalClientInfoContainer() : nullptr;
 }
 
 QPushButton* ResponsiveLayoutManager::getConnectToggleButton() const

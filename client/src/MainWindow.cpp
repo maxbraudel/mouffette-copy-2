@@ -326,6 +326,9 @@ MainWindow::MainWindow(QWidget* parent)
       m_settingsButton(nullptr),
       m_connectToggleButton(nullptr),
       m_connectionStatusLabel(nullptr),
+      m_localClientInfoContainer(nullptr),
+      m_localClientTitleLabel(nullptr),
+      m_localNetworkStatusLabel(nullptr),
       m_clientListLabel(nullptr),
       m_clientListWidget(nullptr),
       m_selectedClientLabel(nullptr),
@@ -731,7 +734,7 @@ void MainWindow::createRemoteClientInfoContainer() {
     
     m_remoteClientInfoContainer->setStyleSheet(containerStyle);
     m_remoteClientInfoContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    m_remoteClientInfoContainer->setMinimumWidth(300); // More conservative minimum for the entire container
+    m_remoteClientInfoContainer->setMinimumWidth(120); // Reduced minimum to allow proper hostname shrinking
     
     // Create horizontal layout for the container
     QHBoxLayout* containerLayout = new QHBoxLayout(m_remoteClientInfoContainer);
@@ -785,6 +788,102 @@ void MainWindow::createRemoteClientInfoContainer() {
         "}").arg(gRemoteClientContainerPadding)
     );
     containerLayout->addWidget(m_volumeIndicator);
+}
+
+void MainWindow::createLocalClientInfoContainer() {
+    if (m_localClientInfoContainer) {
+        return; // Already created
+    }
+    
+    // Create "You" title label first
+    m_localClientTitleLabel = new QLabel("You");
+    m_localClientTitleLabel->setStyleSheet(
+        QString("QLabel { "
+        "    background: transparent; "
+        "    border: none; "
+        "    padding: 0px %1px; "
+        "    font-size: 16px; "
+        "    font-weight: bold; "
+        "    color: palette(text); "
+        "}").arg(gRemoteClientContainerPadding)
+    );
+    m_localClientTitleLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    
+    // Create network status label
+    m_localNetworkStatusLabel = new QLabel("DISCONNECTED");
+    // Make status label non-shrinkable with fixed width like other status indicators
+    m_localNetworkStatusLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    m_localNetworkStatusLabel->setFixedWidth(110); // Same width as old connection status label
+    // Note: Color and font styling will be applied by setLocalNetworkStatus()
+    
+    // Create container widget with same styling as remote client container
+    m_localClientInfoContainer = new QWidget();
+    
+    // Apply same dynamic box styling as remote container
+    const QString containerStyle = QString(
+        "QWidget { "
+        "    background-color: transparent; "
+        "    color: palette(button-text); "
+        "    border: 1px solid %3; "
+        "    border-radius: %1px; "
+        "    min-height: %2px; "
+        "    max-height: %2px; "
+        "}"
+    ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource));
+    
+    m_localClientInfoContainer->setStyleSheet(containerStyle);
+    m_localClientInfoContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    m_localClientInfoContainer->setMinimumWidth(120); // Same minimum as remote container
+    
+    // Create horizontal layout for the container
+    QHBoxLayout* containerLayout = new QHBoxLayout(m_localClientInfoContainer);
+    containerLayout->setContentsMargins(0, 0, 0, 0); // No padding at all
+    containerLayout->setSpacing(0); // We'll add separators manually
+    
+    // Add "You" title (same styling as hostname in remote container)
+    containerLayout->addWidget(m_localClientTitleLabel);
+    
+    // Add vertical separator
+    QFrame* separator = new QFrame();
+    separator->setFrameShape(QFrame::VLine);
+    separator->setFrameShadow(QFrame::Sunken);
+    separator->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
+    separator->setFixedWidth(1);
+    containerLayout->addWidget(separator);
+    
+    // Add network status (styling will be applied by setLocalNetworkStatus())
+    containerLayout->addWidget(m_localNetworkStatusLabel);
+}
+
+void MainWindow::setLocalNetworkStatus(const QString& status) {
+    if (!m_localNetworkStatusLabel) return;
+    const QString up = status.toUpper();
+    m_localNetworkStatusLabel->setText(up);
+    
+    // Apply same styling as remote connection status
+    QString textColor, bgColor;
+    if (up == "CONNECTED") {
+        textColor = AppColors::colorToCss(AppColors::gStatusConnectedText);
+        bgColor = AppColors::colorToCss(AppColors::gStatusConnectedBg);
+    } else if (up == "NETWORK ERROR" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
+        textColor = AppColors::colorToCss(AppColors::gStatusWarningText);
+        bgColor = AppColors::colorToCss(AppColors::gStatusWarningBg);
+    } else {
+        textColor = AppColors::colorToCss(AppColors::gStatusErrorText);
+        bgColor = AppColors::colorToCss(AppColors::gStatusErrorBg);
+    }
+    
+    m_localNetworkStatusLabel->setStyleSheet(
+        QString("QLabel { "
+        "    color: %1; "
+        "    background-color: %2; "
+        "    border: none; "
+        "    border-radius: 0px; "
+        "    padding: 0px %4px; "
+        "    font-size: %3px; "
+        "    font-weight: bold; "
+        "}").arg(textColor).arg(bgColor).arg(gDynamicBoxFontPx).arg(gRemoteClientContainerPadding)
+    );
 }
 
 void MainWindow::initializeRemoteClientInfoInTopBar() {
@@ -1119,9 +1218,32 @@ void MainWindow::updateStylesheetsForTheme() {
         m_remoteClientInfoContainer->setStyleSheet(containerStyle);
     }
     
+    // Update local client info container border
+    if (m_localClientInfoContainer) {
+        const QString containerStyle = QString(
+            "QWidget { "
+            "    background-color: transparent; "
+            "    color: palette(button-text); "
+            "    border: 1px solid %3; "
+            "    border-radius: %1px; "
+            "    min-height: %2px; "
+            "    max-height: %2px; "
+            "}"
+        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource));
+        m_localClientInfoContainer->setStyleSheet(containerStyle);
+    }
+    
     // Update separators in remote client info
     QList<QFrame*> separators = m_remoteClientInfoContainer ? m_remoteClientInfoContainer->findChildren<QFrame*>() : QList<QFrame*>();
     for (QFrame* separator : separators) {
+        if (separator && separator->frameShape() == QFrame::VLine) {
+            separator->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
+        }
+    }
+    
+    // Update separators in local client info
+    QList<QFrame*> localSeparators = m_localClientInfoContainer ? m_localClientInfoContainer->findChildren<QFrame*>() : QList<QFrame*>();
+    for (QFrame* separator : localSeparators) {
         if (separator && separator->frameShape() == QFrame::VLine) {
             separator->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
         }
@@ -1276,11 +1398,10 @@ void MainWindow::setupUI() {
     m_backButton->hide(); // Initially hidden, shown only on screen view
     connect(m_backButton, &QPushButton::clicked, this, &MainWindow::onBackToClientListClicked);
     
-    // Status label (boxed style using dynamicBox)
-    m_connectionStatusLabel = new QLabel("DISCONNECTED");
-    applyStatusBox(m_connectionStatusLabel, AppColors::colorToCss(AppColors::gStatusErrorText), AppColors::colorToCss(AppColors::gStatusErrorBg), AppColors::colorToCss(AppColors::gStatusErrorText));
-    // Use fixed width to prevent any compression
-    m_connectionStatusLabel->setFixedWidth(110);
+    // Create local client info container ("You" + network status)
+    createLocalClientInfoContainer();
+    // Initialize with disconnected status
+    setLocalNetworkStatus("DISCONNECTED");
 
     // Enable/Disable toggle button with fixed width (left of Settings)
     m_connectToggleButton = new QPushButton("Disable");
@@ -1300,10 +1421,10 @@ void MainWindow::setupUI() {
     m_settingsButton->setFixedWidth(settingsButtonWidth); // Use fixed width to prevent any changes
     connect(m_settingsButton, &QPushButton::clicked, this, &MainWindow::showSettingsDialog);
 
-    // Layout: [traffic-lights][title][back][stretch][status][connect][settings]
+    // Layout: [traffic-lights][title][back][stretch][local-client-info][connect][settings]
     m_connectionLayout->addWidget(m_backButton);
     m_connectionLayout->addStretch();
-    m_connectionLayout->addWidget(m_connectionStatusLabel);
+    m_connectionLayout->addWidget(m_localClientInfoContainer);
     m_connectionLayout->addWidget(m_connectToggleButton);
     m_connectionLayout->addWidget(m_settingsButton);
 
@@ -2349,16 +2470,8 @@ void MainWindow::setUIEnabled(bool enabled) {
 
 void MainWindow::updateConnectionStatus() {
     QString status = m_webSocketClient->getConnectionStatus();
-    // Always display status in uppercase
-    m_connectionStatusLabel->setText(status.toUpper());
-    
-    if (status == "Connected") {
-        applyStatusBox(m_connectionStatusLabel, AppColors::colorToCss(AppColors::gStatusConnectedText), AppColors::colorToCss(AppColors::gStatusConnectedBg), AppColors::colorToCss(AppColors::gStatusConnectedText));
-    } else if (status.startsWith("Connecting") || status.startsWith("Reconnecting")) {
-        applyStatusBox(m_connectionStatusLabel, AppColors::colorToCss(AppColors::gStatusWarningText), AppColors::colorToCss(AppColors::gStatusWarningBg), AppColors::colorToCss(AppColors::gStatusWarningText));
-    } else {
-        applyStatusBox(m_connectionStatusLabel, AppColors::colorToCss(AppColors::gStatusErrorText), AppColors::colorToCss(AppColors::gStatusErrorBg), AppColors::colorToCss(AppColors::gStatusErrorText));
-    }
+    // Update the local network status in the new container
+    setLocalNetworkStatus(status);
 }
 
 void MainWindow::updateIndividualProgressFromServer(int globalPercent, int filesCompleted, int totalFiles) {

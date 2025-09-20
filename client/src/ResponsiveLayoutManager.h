@@ -36,7 +36,7 @@ private:
     
     // Thresholds for responsive behavior
     int m_clientInfoThreshold = 600;     // Width threshold for client info positioning
-    int m_buttonVisibilityThreshold = 1000; // Width threshold for button visibility
+    int m_buttonVisibilityThreshold = 1100; // Width threshold for button visibility
     
     // State tracking
     bool m_clientInfoInTopBar = true;
@@ -61,6 +61,7 @@ private:
     QWidget* getClientListPage() const;
     QPushButton* getBackButton() const;
     QLabel* getConnectionStatusLabel() const;
+    QWidget* getLocalClientInfoContainer() const;
     QPushButton* getConnectToggleButton() const;
     QPushButton* getSettingsButton() const;
     int getInnerContentGap() const;

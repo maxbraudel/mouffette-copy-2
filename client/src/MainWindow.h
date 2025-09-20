@@ -69,6 +69,7 @@ public:
     
     // Accessor methods for ResponsiveLayoutManager
     QWidget* getRemoteClientInfoContainer() const { return m_remoteClientInfoContainer; }
+    QWidget* getLocalClientInfoContainer() const { return m_localClientInfoContainer; }
     QHBoxLayout* getConnectionLayout() const { return m_connectionLayout; }
     QVBoxLayout* getMainLayout() const { return m_mainLayout; }
     QStackedWidget* getStackedWidget() const { return m_stackedWidget; }
@@ -149,7 +150,9 @@ private:
     void showScreenView(const ClientInfo& client);
     void showClientListView();
     void createRemoteClientInfoContainer(); // Create grouped container for remote client info
-    void initializeRemoteClientInfoInTopBar(); // Initialize container in top bar permanently
+    void initializeRemoteClientInfoInTopBar(); // Initialize remote client info in top bar
+    void createLocalClientInfoContainer(); // Create grouped container for local client info (You + network status)
+    void setLocalNetworkStatus(const QString& status); // Update local network status
     QWidget* createScreenWidget(const ScreenInfo& screen, int index);
     void updateVolumeIndicator();
     void setRemoteConnectionStatus(const QString& status);
@@ -185,6 +188,9 @@ private:
     // Top bar contextual title (e.g., "Connected Clients" on client list page)
     QLabel* m_pageTitleLabel = nullptr;
     QWidget* m_remoteClientInfoContainer = nullptr; // Container for hostname, status, volume
+    QWidget* m_localClientInfoContainer = nullptr; // Container for "You" and network status
+    QLabel* m_localClientTitleLabel = nullptr; // "You" label in local client container
+    QLabel* m_localNetworkStatusLabel = nullptr; // Network status in local client container
     // Canvas container keeps border visible; inside we switch between spinner and canvas
     QWidget* m_canvasContainer;
     QStackedWidget* m_canvasStack;
