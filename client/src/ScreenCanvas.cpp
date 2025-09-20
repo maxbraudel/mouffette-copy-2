@@ -17,7 +17,6 @@
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QScrollBar>
-#include <QApplication>
 #include <QGestureEvent>
 #include <QPinchGesture>
 #include <QNativeGestureEvent>
@@ -129,11 +128,9 @@ void ScreenCanvas::initInfoOverlay() {
         if (m_contentScroll->viewport()) {
             m_contentScroll->viewport()->setAutoFillBackground(false);
         }
-        // Force-hide the native vertical scrollbar widget to avoid double scrollbars
-        // but keep it enabled so wheel events can be forwarded to it
+        // Hide the native vertical scrollbar widget but keep it functional
         if (QScrollBar* nativeV = m_contentScroll->verticalScrollBar()) {
             nativeV->hide();
-            // Don't disable it - we need it functional for wheel event forwarding
         }
         m_contentScroll->setStyleSheet(
             // Transparent backgrounds for area and viewport
@@ -143,9 +140,6 @@ void ScreenCanvas::initInfoOverlay() {
             // Ensure any native vertical scrollbar inside the scroll area is 0 width and invisible
             " QScrollArea QScrollBar:vertical { width: 0px; margin: 0; background: transparent; }"
         );
-
-        // Enable wheel scrolling over the content area by forwarding to the hidden scrollbar
-        m_contentScroll->installEventFilter(this);
 
         // Create a floating overlay vertical scrollbar that sits above content
         if (!m_overlayVScroll) {
@@ -574,19 +568,6 @@ void ScreenCanvas::setScreenBorderWidthPx(int px) {
         QRectF newInner = outer.adjusted(penW/2.0, penW/2.0, -penW/2.0, -penW/2.0);
         item->setRect(newInner); QPen p = item->pen(); p.setWidthF(penW); item->setPen(p);
     }
-}
-
-bool ScreenCanvas::eventFilter(QObject* watched, QEvent* event) {
-    // Forward wheel events from content scroll area to its vertical scrollbar
-    if (watched == m_contentScroll && event->type() == QEvent::Wheel) {
-        QWheelEvent* wheelEvent = static_cast<QWheelEvent*>(event);
-        if (QScrollBar* vsb = m_contentScroll->verticalScrollBar()) {
-            // Forward the wheel event to the vertical scrollbar for smooth scrolling
-            QApplication::sendEvent(vsb, wheelEvent);
-            return true; // Event handled
-        }
-    }
-    return QGraphicsView::eventFilter(watched, event);
 }
 
 bool ScreenCanvas::event(QEvent* event) {

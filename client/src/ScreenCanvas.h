@@ -74,7 +74,6 @@ public:
 
 protected:
     bool event(QEvent* event) override;
-    bool eventFilter(QObject *watched, QEvent *event) override;
     bool viewportEvent(QEvent* event) override; // handle native gestures delivered to viewport (macOS pinch)
     void keyPressEvent(QKeyEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
