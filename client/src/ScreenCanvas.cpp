@@ -42,6 +42,7 @@
 #include "Theme.h" // for overlay colors
 #include <QSizePolicy>
 #include <QProgressBar>
+#include <QScrollArea>
 
 // Helper: relayout overlays for all media items so absolute panels (settings) stay pinned
 namespace {
@@ -112,19 +113,27 @@ void ScreenCanvas::initInfoOverlay() {
     // Let us control the container height explicitly (no automatic min size from layout)
     m_infoLayout->setSizeConstraint(QLayout::SetNoConstraint);
         
-        // Create content container for media list items with margins
-    m_contentWidget = new QWidget(m_infoWidget);
+    // Create content container for media list items with margins, wrapped in a scroll area
+    m_contentScroll = new QScrollArea(m_infoWidget);
+    m_contentScroll->setFrameShape(QFrame::NoFrame);
+    m_contentScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_contentScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_contentScroll->setWidgetResizable(true);
+    m_contentScroll->setStyleSheet("QScrollArea { background: transparent; } QScrollArea > QWidget > QWidget { background: transparent; }");
+
+    m_contentWidget = new QWidget();
         m_contentWidget->setStyleSheet("background: transparent;");
         m_contentWidget->setAutoFillBackground(false);
         m_contentWidget->setAttribute(Qt::WA_TranslucentBackground, true);
-    // Important: content should never stretch vertically beyond its size hint
-    m_contentWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    // Let content report its natural height; we'll clamp via the scroll area when needed
+    m_contentWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
         m_contentLayout = new QVBoxLayout(m_contentWidget);
         m_contentLayout->setContentsMargins(20, 16, 20, 16); // Margins only for content
         m_contentLayout->setSpacing(6);
+    m_contentScroll->setWidget(m_contentWidget);
         
-        // Add content widget to main layout
-        m_infoLayout->addWidget(m_contentWidget);
+    // Add scroll area (containing content) to main layout
+    m_infoLayout->addWidget(m_contentScroll);
         // Upload button in overlay (no title)
     m_overlayHeaderWidget = new QWidget(m_infoWidget);
         m_overlayHeaderWidget->setStyleSheet("background: transparent;");
@@ -183,7 +192,6 @@ void ScreenCanvas::scheduleInfoOverlayRefresh() {
 void ScreenCanvas::refreshInfoOverlay() {
     if (!m_infoWidget || !m_infoLayout || !m_contentLayout) return;
     // Avoid intermediate paints while rebuilding
-    const bool wasVisible = m_infoWidget->isVisible();
     m_infoWidget->setUpdatesEnabled(false);
     m_infoWidget->hide();
     // Release any previous fixed-height constraints so we can shrink/grow accurately this pass
@@ -286,35 +294,47 @@ void ScreenCanvas::refreshInfoOverlay() {
     
     m_infoWidget->ensurePolished();
     m_infoWidget->updateGeometry();
-    m_infoWidget->adjustSize();
-    // Fix the inner content widget height to its exact size hint to avoid vertical stretching
+    // Compute natural preferred size including header
     const QSize contentHint = m_contentLayout ? m_contentLayout->totalSizeHint() : m_contentWidget->sizeHint();
-    m_contentWidget->setFixedHeight(contentHint.height());
-    // Now recompute preferred size including header
-    QSize preferred = m_infoLayout ? m_infoLayout->totalSizeHint() : m_infoWidget->sizeHint();
-    // Enforce a baseline minimum width (380px as set in initInfoOverlay), but always set height to exact content height
+    const QSize headerHint = m_overlayHeaderWidget ? m_overlayHeaderWidget->sizeHint() : QSize(0,0);
+    const int naturalHeight = contentHint.height() + headerHint.height();
     const int baselineMinWidth = 380;
-    const int targetW = std::max(preferred.width(), baselineMinWidth);
-    const int targetH = preferred.height();
-    // Lock the overlay height exactly to content+header height to avoid internal gaps
-    m_infoWidget->setMinimumHeight(targetH);
-    m_infoWidget->setMaximumHeight(targetH);
-    m_infoWidget->resize(targetW, targetH);
+    int targetW = std::max(m_infoLayout ? m_infoLayout->totalSizeHint().width() : m_infoWidget->sizeHint().width(), baselineMinWidth);
+    // Cap height to viewport height minus margins to avoid overlay exceeding canvas
+    const int margin = 16;
+    const int maxOverlayH = viewport() ? std::max(0, viewport()->height() - margin*2) : naturalHeight;
+    int overlayH = naturalHeight;
+    if (overlayH > maxOverlayH) {
+        // Enable scrolling and clamp the scroll viewport height
+        if (m_contentScroll) {
+            m_contentScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+            const int maxContentH = std::max(0, maxOverlayH - headerHint.height());
+            m_contentScroll->setMaximumHeight(maxContentH);
+            m_contentScroll->setMinimumHeight(0);
+            m_contentScroll->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+        }
+        overlayH = maxOverlayH;
+    } else {
+        // No scroll: let the scroll area wrap content tightly and hide the scrollbar
+        if (m_contentScroll) {
+            m_contentScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            m_contentScroll->setMaximumHeight(contentHint.height());
+            m_contentScroll->setMinimumHeight(0);
+            m_contentScroll->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        }
+    }
+    m_infoWidget->setFixedHeight(overlayH);
+    m_infoWidget->resize(targetW, overlayH);
     
     // Only show overlay if there are media items present
     if (!media.isEmpty()) {
         m_infoWidget->show();
-        // Reposition once after resize
-        layoutInfoOverlay();
     } else {
         // Hide overlay when no media is present
         m_infoWidget->hide();
     }
     
     m_infoWidget->setUpdatesEnabled(true);
-    if (!media.isEmpty()) {
-        m_infoWidget->repaint();
-    }
     // In case the widget's final metrics settle after this event loop turn (common on first show or font/layout updates),
     // schedule a one-shot re-anchor to avoid a transient displaced position after dropping media.
     QTimer::singleShot(0, [this]() { layoutInfoOverlay(); });
@@ -327,6 +347,39 @@ void ScreenCanvas::layoutInfoOverlay() {
     const int x = viewport()->width() - margin - w;
     const int y = viewport()->height() - margin - m_infoWidget->height();
     m_infoWidget->move(std::max(0, x), std::max(0, y));
+}
+
+void ScreenCanvas::updateInfoOverlayGeometryForViewport() {
+    if (!m_infoWidget || !m_infoLayout || !viewport()) return;
+    if (!m_infoWidget->isVisible()) return; // nothing to adjust if hidden
+    // Compute current natural size based on existing content
+    const QSize contentHint = m_contentLayout ? m_contentLayout->totalSizeHint() : (m_contentWidget ? m_contentWidget->sizeHint() : QSize());
+    const QSize headerHint = m_overlayHeaderWidget ? m_overlayHeaderWidget->sizeHint() : QSize(0,0);
+    const int naturalHeight = contentHint.height() + headerHint.height();
+    const int margin = 16;
+    const int maxOverlayH = std::max(0, viewport()->height() - margin*2);
+    int overlayH = naturalHeight;
+    if (overlayH > maxOverlayH) {
+        if (m_contentScroll) {
+            m_contentScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+            const int maxContentH = std::max(0, maxOverlayH - headerHint.height());
+            m_contentScroll->setMaximumHeight(maxContentH);
+            m_contentScroll->setMinimumHeight(0);
+            m_contentScroll->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+        }
+        overlayH = maxOverlayH;
+    } else {
+        if (m_contentScroll) {
+            m_contentScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            m_contentScroll->setMaximumHeight(contentHint.height());
+            m_contentScroll->setMinimumHeight(0);
+            m_contentScroll->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        }
+    }
+    // Keep width as-is; just update height and position
+    m_infoWidget->setFixedHeight(overlayH);
+    m_infoWidget->resize(m_infoWidget->width(), overlayH);
+    layoutInfoOverlay();
 }
 
 ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
@@ -816,7 +869,8 @@ void ScreenCanvas::resizeEvent(QResizeEvent* event) {
     QGraphicsView::resizeEvent(event);
     // Keep absolute panels pinned during viewport resizes
     relayoutAllMediaOverlays(m_scene);
-    layoutInfoOverlay();
+    // Fast-path update: adjust overlay height cap in real-time on viewport size changes
+    updateInfoOverlayGeometryForViewport();
 }
 
 void ScreenCanvas::dragEnterEvent(QDragEnterEvent* event) {

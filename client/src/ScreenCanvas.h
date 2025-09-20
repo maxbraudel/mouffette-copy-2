@@ -25,6 +25,7 @@ class QAudioOutput;
 class QVariantAnimation;
 class QResizeEvent;
 class QPushButton;
+class QScrollArea;
 
 // Extracted canvas that manages screen layout, zoom/pan, drag&drop previews, and media interaction.
 class ScreenCanvas : public QGraphicsView {
@@ -114,6 +115,7 @@ private:
     void refreshInfoOverlay();
     void layoutInfoOverlay();
     void maybeRefreshInfoOverlayOnSceneChanged();
+    void updateInfoOverlayGeometryForViewport(); // fast path: recalc height/scroll cap on resize
     
     void OnSceneChanged();
     // Snap-to-screen helpers
@@ -184,6 +186,7 @@ private:
     QWidget* m_infoWidget = nullptr;       // panel widget parented to viewport()
     QVBoxLayout* m_infoLayout = nullptr;   // main layout (no margins)
     QWidget* m_contentWidget = nullptr;    // content container (with margins)
+    QScrollArea* m_contentScroll = nullptr; // scroll area for content when overlay is too tall
     QVBoxLayout* m_contentLayout = nullptr; // content layout (for media items)
     QWidget* m_overlayHeaderWidget = nullptr; // container for overlay header row (holds upload button)
     QPushButton* m_uploadButton = nullptr; // upload button in media list overlay
