@@ -1006,13 +1006,13 @@ void MainWindow::updateStylesheetsForTheme() {
             QString("QListWidget { "
             "   border: 1px solid %1; "
             "   border-radius: 5px; "
-            "   padding: 5px; "
+            "   padding: 0px; "
             "   background-color: %2; "
             "   outline: none; "
             "}"
             "QListWidget::item { "
             "   padding: 10px; "
-            "   border-bottom: 1px solid palette(midlight); "
+            "   border-bottom: 1px solid " + AppColors::colorSourceToCss(AppColors::gAppBorderColorSource) + "; "
             "}"
             // Hover: very light blue tint
             "QListWidget::item:hover { "
@@ -1319,13 +1319,13 @@ void MainWindow::createClientListPage() {
         QString("QListWidget { "
         "   border: 1px solid %1; "
         "   border-radius: 5px; "
-        "   padding: 5px; "
+        "   padding: 0px; "
         "   background-color: %2; "
         "   outline: none; "
         "}"
         "QListWidget::item { "
         "   padding: 10px; "
-        "   border-bottom: 1px solid palette(midlight); "
+        "   border-bottom: 1px solid " + AppColors::colorSourceToCss(AppColors::gAppBorderColorSource) + "; "
         "}"
         // Hover: very light blue tint
         "QListWidget::item:hover { "
@@ -1426,8 +1426,8 @@ void MainWindow::createScreenViewPage() {
         "}").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)).arg(AppColors::colorSourceToCss(AppColors::gInteractionBackgroundColorSource))
     );
     QVBoxLayout* containerLayout = new QVBoxLayout(m_canvasContainer);
-    // Provide real inner padding so child doesn't cover the border area
-    containerLayout->setContentsMargins(5,5,5,5);
+    // Remove inner padding so content goes right to the border edge
+    containerLayout->setContentsMargins(0,0,0,0);
     containerLayout->setSpacing(0);
     m_canvasStack = new QStackedWidget();
     // Match client list container: base background, no border on inner stack
