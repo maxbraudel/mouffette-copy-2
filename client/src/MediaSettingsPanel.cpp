@@ -1,6 +1,7 @@
 #include "MediaSettingsPanel.h"
 #include "Theme.h"
 #include "AppColors.h"
+#include "OverlayPanels.h"
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QGraphicsProxyWidget>
@@ -181,7 +182,7 @@ void MediaSettingsPanel::buildUi() {
     // Scene-drawn rounded background behind the widget, matching overlay style
     m_bgRect = new MouseBlockingRoundedRectItem();
     m_bgRect->setRadius(gOverlayCornerRadiusPx);
-    m_bgRect->setPen(Qt::NoPen);
+    applyOverlayBorder(m_bgRect);
     m_bgRect->setBrush(QBrush(AppColors::gOverlayBackgroundColor));
     m_bgRect->setZValue(12009.5); // just below proxy
     m_bgRect->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);

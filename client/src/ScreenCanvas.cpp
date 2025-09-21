@@ -45,6 +45,61 @@
 #include <QProgressBar>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <cmath>
+
+// A container that properly clips child widgets to its rounded shape
+class ClippedContainer : public QWidget {
+public:
+    ClippedContainer(QWidget* parent = nullptr) : QWidget(parent) {}
+
+protected:
+    void showEvent(QShowEvent* event) override {
+        QWidget::showEvent(event);
+        updateMaskIfNeeded();
+    }
+
+    void resizeEvent(QResizeEvent* event) override {
+        QWidget::resizeEvent(event);
+        updateMaskIfNeeded();
+    }
+
+private:
+    QSize m_lastMaskSize;  // Cache last size to avoid unnecessary recalculation
+    
+    void updateMaskIfNeeded() {
+        const QSize currentSize = size();
+        // Skip if size hasn't changed (common during theme switches, etc.)
+        if (currentSize == m_lastMaskSize && !mask().isEmpty()) return;
+        
+        // Ensure we have a valid size
+        if (currentSize.width() <= 0 || currentSize.height() <= 0) return;
+        
+        // Cache the size
+        m_lastMaskSize = currentSize;
+        
+        // Use overlay corner radius instead of dynamic box radius
+        const int radius = qMax(0, qMin(gOverlayCornerRadiusPx, qMin(currentSize.width(), currentSize.height()) / 2));
+        const QRect r(0, 0, currentSize.width(), currentSize.height());
+        
+        // Create rounded region more efficiently using ellipse corners
+        QRegion region(r);
+        if (radius > 0) {
+            // Subtract corner rectangles and add back rounded corners
+            const int d = radius * 2;
+            region -= QRegion(0, 0, radius, radius);                           // top-left corner
+            region -= QRegion(r.width() - radius, 0, radius, radius);         // top-right corner  
+            region -= QRegion(0, r.height() - radius, radius, radius);        // bottom-left corner
+            region -= QRegion(r.width() - radius, r.height() - radius, radius, radius); // bottom-right corner
+            
+            region += QRegion(0, 0, d, d, QRegion::Ellipse);                           // top-left rounded
+            region += QRegion(r.width() - d, 0, d, d, QRegion::Ellipse);               // top-right rounded
+            region += QRegion(0, r.height() - d, d, d, QRegion::Ellipse);              // bottom-left rounded  
+            region += QRegion(r.width() - d, r.height() - d, d, d, QRegion::Ellipse);  // bottom-right rounded
+        }
+        
+        setMask(region);
+    }
+};
 
 // Configuration constants
 static const int gMediaListItemSpacing = 3; // Spacing between media list items (name, status, details)
@@ -68,6 +123,11 @@ ScreenCanvas::~ScreenCanvas() {
     ResizableMediaBase::setUploadChangedNotifier(nullptr);
     if (m_scene) {
         disconnect(m_scene, nullptr, this, nullptr);
+    }
+    if (m_infoBorderRect && scene()) {
+        scene()->removeItem(m_infoBorderRect);
+        delete m_infoBorderRect;
+        m_infoBorderRect = nullptr;
     }
     if (m_infoWidget) {
         m_infoWidget->deleteLater();
@@ -99,40 +159,39 @@ void ScreenCanvas::maybeRefreshInfoOverlayOnSceneChanged() {
 void ScreenCanvas::initInfoOverlay() {
     if (!viewport()) return;
     if (!m_infoWidget) {
-        // Create a child widget of the viewport so it is entirely independent of scene transforms
-        m_infoWidget = new QWidget(viewport());
+        // Create a clipped container to properly handle border-radius clipping
+        m_infoWidget = new ClippedContainer(viewport());
         m_infoWidget->setAttribute(Qt::WA_StyledBackground, true);
         m_infoWidget->setAutoFillBackground(true);
         // Ensure overlay blocks mouse events to canvas behind it
         m_infoWidget->setAttribute(Qt::WA_NoMousePropagation, true);
-        // Build stylesheet from theme colors
-        QColor c = AppColors::gOverlayBackgroundColor;
-        const QString bg = QString("background-color: rgba(%1,%2,%3,%4); border-radius: %5px; color: white; font-size: 16px;")
-            .arg(c.red()).arg(c.green()).arg(c.blue()).arg(c.alpha())
+        // Build stylesheet - transparent background like MediaSettingsPanel (background handled by graphics rect)
+        const QString bg = QString("background-color: transparent; border-radius: %1px; color: white; font-size: 16px;")
             .arg(gOverlayCornerRadiusPx);
         m_infoWidget->setStyleSheet(bg);
         // Baseline minimum width to avoid tiny panel before content exists
         m_infoWidget->setMinimumWidth(380);
-    // Vertically, the overlay must never stretch; we'll size it explicitly
-    m_infoWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    m_infoLayout = new QVBoxLayout(m_infoWidget);
+        // Vertically, the overlay must never stretch; we'll size it explicitly
+        m_infoWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        
+        m_infoLayout = new QVBoxLayout(m_infoWidget);
         m_infoLayout->setContentsMargins(0, 0, 0, 0); // No margins on main container
         m_infoLayout->setSpacing(0);
-    // Let us control the container height explicitly (no automatic min size from layout)
-    m_infoLayout->setSizeConstraint(QLayout::SetNoConstraint);
+        // Let us control the container height explicitly (no automatic min size from layout)
+        m_infoLayout->setSizeConstraint(QLayout::SetNoConstraint);
         
-    // Create content container for media list items with margins, wrapped in a scroll area
+        // Create content container for media list items with margins, wrapped in a scroll area
         m_contentScroll = new QScrollArea(m_infoWidget);
-    m_contentScroll->setFrameShape(QFrame::NoFrame);
-    // Hide native scrollbars; we'll draw a floating overlay scrollbar instead
-    m_contentScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_contentScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_contentScroll->setWidgetResizable(true);
-    // Ensure horizontal scrollbar is completely disabled
-    if (QScrollBar* hBar = m_contentScroll->horizontalScrollBar()) {
-        hBar->setEnabled(false);
-        hBar->hide();
-    }
+        m_contentScroll->setFrameShape(QFrame::NoFrame);
+        // Hide native scrollbars; we'll draw a floating overlay scrollbar instead
+        m_contentScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_contentScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_contentScroll->setWidgetResizable(true);
+        // Ensure horizontal scrollbar is completely disabled
+        if (QScrollBar* hBar = m_contentScroll->horizontalScrollBar()) {
+            hBar->setEnabled(false);
+            hBar->hide();
+        }
         // Ensure viewport is fully transparent (no gray behind the track)
         if (m_contentScroll->viewport()) {
             m_contentScroll->viewport()->setAutoFillBackground(false);
@@ -208,24 +267,25 @@ void ScreenCanvas::initInfoOverlay() {
             m_overlayVScroll->setValue(src->value());
         }
 
-    m_contentWidget = new QWidget();
+        m_contentWidget = new QWidget();
         m_contentWidget->setStyleSheet("background: transparent;");
         m_contentWidget->setAutoFillBackground(false);
-    // Prevent unwanted stretching while allowing natural sizing
-    m_contentWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+        // Prevent unwanted stretching while allowing natural sizing
+        m_contentWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
         m_contentLayout = new QVBoxLayout(m_contentWidget);
         m_contentLayout->setContentsMargins(20, 16, 20, 16); // Margins only for content
         m_contentLayout->setSpacing(gMediaListItemSpacing);
-    m_contentScroll->setWidget(m_contentWidget);
+        m_contentScroll->setWidget(m_contentWidget);
         
-    // Add scroll area (containing content) to main layout
-    m_infoLayout->addWidget(m_contentScroll);
+        // Add scroll area (containing content) to main layout
+        m_infoLayout->addWidget(m_contentScroll);
+        
         // Upload button in overlay (no title)
-    m_overlayHeaderWidget = new QWidget(m_infoWidget);
+        m_overlayHeaderWidget = new QWidget(m_infoWidget);
         m_overlayHeaderWidget->setStyleSheet("background: transparent;");
         m_overlayHeaderWidget->setAutoFillBackground(false);
-    // Prevent header area from expanding vertically; height should follow its children (the button)
-    m_overlayHeaderWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        // Prevent header area from expanding vertically; height should follow its children (the button)
+        m_overlayHeaderWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         auto* headerLayout = new QHBoxLayout(m_overlayHeaderWidget);
         headerLayout->setContentsMargins(0, 0, 0, 0);
         headerLayout->setSpacing(0);
@@ -240,7 +300,7 @@ void ScreenCanvas::initInfoOverlay() {
             "    color: " + AppColors::colorToCss(AppColors::gOverlayTextColor) + "; "
             "    background: transparent; "
             "    border: none; "
-            "    border-top: 1px solid " + AppColors::colorToCss(AppColors::gOverlayBorderColor) + "; "
+            "    border-radius: 0px; "
             "} "
             "QPushButton:hover { "
             "    color: white; "
@@ -251,8 +311,8 @@ void ScreenCanvas::initInfoOverlay() {
             "    background: rgba(255,255,255,0.1); "
             "}"
         );
-    m_uploadButton->setFixedHeight(40);
-    m_uploadButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        m_uploadButton->setFixedHeight(40);
+        m_uploadButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         
         // Full width button
         headerLayout->addWidget(m_uploadButton);
@@ -424,9 +484,11 @@ void ScreenCanvas::refreshInfoOverlay() {
     // Only show overlay if there are media items present
     if (!media.isEmpty()) {
         m_infoWidget->show();
+        if (m_infoBorderRect) m_infoBorderRect->setVisible(true);
     } else {
         // Hide overlay when no media is present
         m_infoWidget->hide();
+        if (m_infoBorderRect) m_infoBorderRect->setVisible(false);
     }
     
     m_infoWidget->setUpdatesEnabled(true);
@@ -442,6 +504,29 @@ void ScreenCanvas::layoutInfoOverlay() {
     const int x = viewport()->width() - margin - w;
     const int y = viewport()->height() - margin - m_infoWidget->height();
     m_infoWidget->move(std::max(0, x), std::max(0, y));
+    
+    // Create or update border rectangle in scene (same approach as MediaSettingsPanel)
+    if (m_infoWidget->isVisible() && scene()) {
+        if (!m_infoBorderRect) {
+            m_infoBorderRect = new MouseBlockingRoundedRectItem();
+            m_infoBorderRect->setRadius(gOverlayCornerRadiusPx);
+            applyOverlayBorder(m_infoBorderRect);
+            m_infoBorderRect->setBrush(QBrush(AppColors::gOverlayBackgroundColor));
+            m_infoBorderRect->setZValue(12009.5); // same Z-value as MediaSettingsPanel
+            m_infoBorderRect->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+            m_infoBorderRect->setData(0, QStringLiteral("overlay"));
+            scene()->addItem(m_infoBorderRect);
+        }
+        // Position border rect using same method as MediaSettingsPanel - direct viewport transform
+        QPointF widgetTopLeftVp(std::max(0, x), std::max(0, y));
+        QPointF widgetTopLeftScene = viewportTransform().inverted().map(widgetTopLeftVp);
+        m_infoBorderRect->setRect(0, 0, w, m_infoWidget->height());
+        m_infoBorderRect->setPos(widgetTopLeftScene);
+    } else if (m_infoBorderRect) {
+        // Hide border when overlay is hidden
+        m_infoBorderRect->setVisible(false);
+    }
+    
     updateOverlayVScrollVisibilityAndGeometry();
 }
 
@@ -562,6 +647,13 @@ void ScreenCanvas::clearScreens() {
         delete r;
     }
     m_screenItems.clear();
+    
+    // Reset info overlay border rectangle when clearing screens (connection reload)
+    if (m_infoBorderRect) {
+        if (m_scene) m_scene->removeItem(m_infoBorderRect);
+        delete m_infoBorderRect;
+        m_infoBorderRect = nullptr;
+    }
 }
 
 void ScreenCanvas::recenterWithMargin(int marginPx) {

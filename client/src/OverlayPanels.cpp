@@ -16,6 +16,15 @@ namespace {
     constexpr qreal Z_OVERLAY_CONTENT = 12001.0;
 }
 
+// Utility function to apply standard overlay border styling
+// Helper function to apply 1px border to overlay elements
+void applyOverlayBorder(QAbstractGraphicsShapeItem* item) {
+    if (item) {
+        QPen borderPen(AppColors::gOverlayBorderColor, 1);
+        item->setPen(borderPen);
+    }
+}
+
 // ============================================================================
 // OverlayTextElement Implementation (new system)
 // ============================================================================
@@ -30,7 +39,7 @@ OverlayTextElement::~OverlayTextElement() {
 void OverlayTextElement::createGraphicsItems() {
     if (m_background) return;
     m_background = new MouseBlockingRoundedRectItem();
-    m_background->setPen(Qt::NoPen);
+    applyOverlayBorder(m_background);
     m_background->setZValue(Z_SCENE_OVERLAY);
     m_background->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
     m_background->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
@@ -148,7 +157,7 @@ OverlayButtonElement::~OverlayButtonElement() { delete m_background; }
 void OverlayButtonElement::createGraphicsItems() {
     if (m_background) return;
     m_background = new MouseBlockingRoundedRectItem();
-    m_background->setPen(Qt::NoPen);
+    applyOverlayBorder(m_background);
     m_background->setZValue(Z_SCENE_OVERLAY);
     m_background->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
     m_background->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
@@ -328,7 +337,7 @@ void OverlaySliderElement::createGraphicsItems() {
     m_container->setData(0, QStringLiteral("overlay"));
 
     m_track = new MouseBlockingRoundedRectItem(m_container);
-    m_track->setPen(Qt::NoPen);
+    applyOverlayBorder(m_track);
     m_track->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
     m_track->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     m_track->setData(0, QStringLiteral("overlay"));

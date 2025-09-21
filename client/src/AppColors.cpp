@@ -51,9 +51,9 @@ QColor gButtonPrimaryDisabled = QColor(74, 144, 226, 26); // Primary disabled (0
 // ============================================================================
 
 QColor gOverlayBackgroundColor = QColor(50, 50, 50, 240);        // Semi-transparent dark
-QColor gOverlayActiveBackgroundColor = QColor(62, 97, 138, 240); // Active overlay
+QColor gOverlayActiveBackgroundColor = QColor(52, 87, 128, 240); // Active overlay
 QColor gOverlayTextColor = QColor(255, 255, 255, 230);      // White text (0.9 * 255 ≈ 230)
-QColor gOverlayBorderColor = QColor(255, 255, 255, 51); // White border (0.2 * 255 ≈ 51)
+QColor gOverlayBorderColor = QColor(255, 255, 255, 50); // White border (0.2 * 255 ≈ 51)
 
 // ============================================================================
 // MEDIA COLORS

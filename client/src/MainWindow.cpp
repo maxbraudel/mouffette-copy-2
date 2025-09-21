@@ -7,6 +7,7 @@
 #include "SpinnerWidget.h"
 #include "ScreenCanvas.h"
 #include "MediaSettingsPanel.h"
+#include "OverlayPanels.h"
 #include "Theme.h"
 #include "AppColors.h"
 #include <QMenuBar>
@@ -1600,6 +1601,8 @@ void MainWindow::setupUI() {
     int textWidth = m_backButton->fontMetrics().horizontalAdvance(m_backButton->text()) + 24; // text + padding
     int buttonWidth = qMax(150, textWidth);
     m_backButton->setFixedWidth(buttonWidth); // Use fixed width to prevent any changes
+    // Override size policy to prevent shrinking when window reduces
+    m_backButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     m_backButton->hide(); // Initially hidden, shown only on screen view
     connect(m_backButton, &QPushButton::clicked, this, &MainWindow::onBackToClientListClicked);
     

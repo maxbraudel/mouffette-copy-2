@@ -25,6 +25,9 @@ class QGraphicsSvgItem;
 // Forward declarations
 class QGraphicsSceneMouseEvent;
 
+// Utility function to apply standard overlay border styling
+void applyOverlayBorder(QAbstractGraphicsShapeItem* item);
+
 // Custom RoundedRectItem that blocks mouse events from passing through
 class MouseBlockingRoundedRectItem : public RoundedRectItem {
 public:
