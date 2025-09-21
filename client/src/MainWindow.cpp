@@ -349,7 +349,7 @@ void MainWindow::setRemoteConnectionStatus(const QString& status) {
     if (up == "CONNECTED") {
         textColor = AppColors::colorToCss(AppColors::gStatusConnectedText);
         bgColor = AppColors::colorToCss(AppColors::gStatusConnectedBg);
-    } else if (up == "NETWORK ERROR" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
+    } else if (up == "ERROR" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
         textColor = AppColors::colorToCss(AppColors::gStatusWarningText);
         bgColor = AppColors::colorToCss(AppColors::gStatusWarningBg);
     } else {
@@ -824,12 +824,12 @@ void MainWindow::createRemoteClientInfoContainer() {
     containerLayout->addWidget(m_remoteConnectionStatusLabel);
     
     // Add vertical separator
-    QFrame* separator2 = new QFrame();
-    separator2->setFrameShape(QFrame::VLine);
-    separator2->setFrameShadow(QFrame::Sunken);
-    separator2->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
-    separator2->setFixedWidth(1);
-    containerLayout->addWidget(separator2);
+    m_remoteInfoSep2 = new QFrame();
+    m_remoteInfoSep2->setFrameShape(QFrame::VLine);
+    m_remoteInfoSep2->setFrameShadow(QFrame::Sunken);
+    m_remoteInfoSep2->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
+    m_remoteInfoSep2->setFixedWidth(1);
+    containerLayout->addWidget(m_remoteInfoSep2);
     
     // Add volume indicator (ensure no individual styling)
     m_volumeIndicator->setStyleSheet(
@@ -842,6 +842,54 @@ void MainWindow::createRemoteClientInfoContainer() {
         "}").arg(gRemoteClientContainerPadding)
     );
     containerLayout->addWidget(m_volumeIndicator);
+}
+// Remove the volume indicator (and its preceding separator) from the layout entirely
+void MainWindow::removeVolumeIndicatorFromLayout() {
+    if (!m_remoteClientInfoContainer || !m_volumeIndicator) return;
+    if (QHBoxLayout* layout = qobject_cast<QHBoxLayout*>(m_remoteClientInfoContainer->layout())) {
+        // Remove volume label
+        int idx = layout->indexOf(m_volumeIndicator);
+        if (idx != -1) {
+            layout->removeWidget(m_volumeIndicator);
+            m_volumeIndicator->setParent(nullptr);
+            m_volumeIndicator->hide();
+        }
+        // Remove the trailing separator if present and parented here
+        if (m_remoteInfoSep2 && m_remoteInfoSep2->parent() == m_remoteClientInfoContainer) {
+            int sidx = layout->indexOf(m_remoteInfoSep2);
+            if (sidx != -1) {
+                layout->removeWidget(m_remoteInfoSep2);
+                m_remoteInfoSep2->setParent(nullptr);
+                m_remoteInfoSep2->hide();
+            }
+        }
+    }
+}
+
+// Add the volume indicator (and its separator) back into the layout if missing
+void MainWindow::addVolumeIndicatorToLayout() {
+    if (!m_remoteClientInfoContainer || !m_volumeIndicator) return;
+    QHBoxLayout* layout = qobject_cast<QHBoxLayout*>(m_remoteClientInfoContainer->layout());
+    if (!layout) return;
+    // Determine positions: after status label; we added sep2 just after status in createRemoteClientInfoContainer
+    // Ensure separator exists
+    if (!m_remoteInfoSep2) {
+        m_remoteInfoSep2 = new QFrame();
+        m_remoteInfoSep2->setFrameShape(QFrame::VLine);
+        m_remoteInfoSep2->setFrameShadow(QFrame::Sunken);
+        m_remoteInfoSep2->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
+        m_remoteInfoSep2->setFixedWidth(1);
+    }
+    // Check if separator already in layout
+    if (layout->indexOf(m_remoteInfoSep2) == -1) {
+        layout->addWidget(m_remoteInfoSep2);
+        m_remoteInfoSep2->show();
+    }
+    // Add volume indicator if not in layout
+    if (layout->indexOf(m_volumeIndicator) == -1) {
+        layout->addWidget(m_volumeIndicator);
+    }
+    m_volumeIndicator->show();
 }
 
 void MainWindow::createLocalClientInfoContainer() {
@@ -920,7 +968,7 @@ void MainWindow::setLocalNetworkStatus(const QString& status) {
     if (up == "CONNECTED") {
         textColor = AppColors::colorToCss(AppColors::gStatusConnectedText);
         bgColor = AppColors::colorToCss(AppColors::gStatusConnectedBg);
-    } else if (up == "NETWORK ERROR" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
+    } else if (up == "ERROR" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
         textColor = AppColors::colorToCss(AppColors::gStatusWarningText);
         bgColor = AppColors::colorToCss(AppColors::gStatusWarningBg);
     } else {
@@ -1028,6 +1076,8 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     if (m_remoteClientInfoContainer) {
         m_remoteClientInfoContainer->setVisible(true);
     }
+    // While the remote is loading/unloading, remove the volume indicator from layout (display:none)
+    removeVolumeIndicatorFromLayout();
     
     // Update button visibility for screen view page
     if (m_responsiveLayoutManager) {
@@ -1046,6 +1096,8 @@ void MainWindow::showClientListView() {
     if (m_remoteClientInfoContainer) {
         m_remoteClientInfoContainer->setVisible(false);
     }
+    // Ensure volume indicator is removed when leaving screen view
+    removeVolumeIndicatorFromLayout();
     // Show top-bar page title and hide back button on client list
     if (m_pageTitleLabel) m_pageTitleLabel->show();
     if (m_backButton) m_backButton->hide();
@@ -1068,7 +1120,7 @@ void MainWindow::updateVolumeIndicator() {
     QString icon;
     if (vol == 0) icon = "🔇"; else if (vol < 34) icon = "🔈"; else if (vol < 67) icon = "🔉"; else icon = "🔊";
     m_volumeIndicator->setText(QString("%1 %2%" ).arg(icon).arg(vol));
-    if (m_volumeIndicator->isHidden()) m_volumeIndicator->show();
+    // Don't force-show here; presence in layout is managed elsewhere
     if (m_volumeOpacity) {
         if (m_volumeOpacity->opacity() < 1.0) m_volumeOpacity->setOpacity(1.0);
     }
@@ -1294,6 +1346,10 @@ void MainWindow::updateStylesheetsForTheme() {
         if (separator && separator->frameShape() == QFrame::VLine) {
             separator->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
         }
+    }
+    // Also update the cached trailing separator if it's currently detached
+    if (m_remoteInfoSep2 && (!m_remoteClientInfoContainer || m_remoteInfoSep2->parent() != m_remoteClientInfoContainer)) {
+        m_remoteInfoSep2->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
     }
     
     // Update separators in local client info
@@ -2054,6 +2110,8 @@ void MainWindow::onConnected() {
     if (m_navigationManager && m_navigationManager->isOnScreenView()) {
         // Ensure the canvas will reveal again on fresh screens
         m_canvasRevealedForCurrentClient = false;
+        // Remove volume indicator until remote is ready again
+        removeVolumeIndicatorFromLayout();
         const QString selId = m_selectedClient.getId();
         if (!selId.isEmpty() && m_webSocketClient && m_webSocketClient->isConnected()) {
             // Indicate we're attempting to reach the remote again
@@ -2079,7 +2137,9 @@ void MainWindow::onDisconnected() {
     if (m_navigationManager && m_navigationManager->isOnScreenView()) {
         m_navigationManager->enterLoadingStateImmediate();
         // Our local network just dropped; remote status is unknown due to network error
-        setRemoteConnectionStatus("NETWORK ERROR");
+        setRemoteConnectionStatus("ERROR");
+        // Remove volume indicator while remote is unavailable
+        removeVolumeIndicatorFromLayout();
     }
     
     // Start smart reconnection if client is enabled and not manually disconnected
@@ -2179,6 +2239,7 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
                 // Remote client went away while on canvas: unload and show loader immediately
                 m_navigationManager->enterLoadingStateImmediate();
                 m_canvasRevealedForCurrentClient = false;
+                removeVolumeIndicatorFromLayout();
             }
         }
     }
@@ -2259,10 +2320,10 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
             }
         }
 
-        // Update volume UI
+        // Update volume UI and re-add it to the layout now that the client is ready
         if (m_volumeIndicator) {
+            addVolumeIndicatorToLayout();
             updateVolumeIndicator();
-            m_volumeIndicator->show();
         }
 
         // Remote responded with data: status is connected

@@ -56,6 +56,7 @@ class WatchManager;  // new component for watch/unwatch feature
 class ScreenNavigationManager; // manages page switching & loader UX
 class ResponsiveLayoutManager; // manages responsive layout behavior
 // using QStackedWidget for canvas container switching
+class QFrame; // forward declare for separators in remote info container
 
 // Forward declaration of extracted ScreenCanvas
 class ScreenCanvas;
@@ -157,6 +158,9 @@ private:
     void updateVolumeIndicator();
     void setRemoteConnectionStatus(const QString& status);
     // watch management handled by WatchManager component now
+    // Manage presence of the volume indicator in the top bar layout
+    void removeVolumeIndicatorFromLayout();
+    void addVolumeIndicatorToLayout();
 
     // UI Components
     QWidget* m_centralWidget;
@@ -188,6 +192,7 @@ private:
     // Top bar contextual title (e.g., "Connected Clients" on client list page)
     QLabel* m_pageTitleLabel = nullptr;
     QWidget* m_remoteClientInfoContainer = nullptr; // Container for hostname, status, volume
+    QFrame* m_remoteInfoSep2 = nullptr; // Trailing separator before volume indicator
     QWidget* m_localClientInfoContainer = nullptr; // Container for "You" and network status
     QLabel* m_localClientTitleLabel = nullptr; // "You" label in local client container
     QLabel* m_localNetworkStatusLabel = nullptr; // Network status in local client container
