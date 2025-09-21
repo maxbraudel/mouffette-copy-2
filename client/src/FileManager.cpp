@@ -67,13 +67,14 @@ void FileManager::removeMediaAssociation(const QString& mediaId)
     
     QString fileId = m_mediaIdToFileId[mediaId];
     qDebug() << "FileManager: Media" << mediaId << "was associated with file" << fileId;
+    qDebug() << "FileManager: Before removal, file" << fileId << "has" << m_fileIdToMediaIds[fileId].size() << "media associations:" << m_fileIdToMediaIds[fileId];
     
     m_fileIdToMediaIds[fileId].removeAll(mediaId);
     m_mediaIdToFileId.remove(mediaId);
     
-    qDebug() << "FileManager: File" << fileId << "now has" << m_fileIdToMediaIds[fileId].size() << "media associations";
+    qDebug() << "FileManager: After removal, file" << fileId << "now has" << m_fileIdToMediaIds[fileId].size() << "media associations:" << m_fileIdToMediaIds[fileId];
     
-    // Clean up file if no more media references it
+    // Clean up file if no more media references it  
     removeFileIfUnused(fileId);
     
     qDebug() << "FileManager: Removed media association for" << mediaId;
