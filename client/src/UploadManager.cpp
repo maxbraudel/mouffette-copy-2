@@ -43,7 +43,7 @@ void UploadManager::toggleUpload(const QVector<UploadFileInfo>& files) {
 void UploadManager::requestUnload() {
     if (!m_ws || !m_ws->isConnected() || (m_uploadTargetClientId.isEmpty() && m_targetClientId.isEmpty())) return;
     if (!m_uploadActive) return; // nothing to unload
-    m_ws->sendUnloadMedia(m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId);
+    m_ws->sendRemoveAllFiles(m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId);
     resetToInitial();
     emit uiStateChanged();
     if (m_ws) m_ws->closeUploadChannel();
@@ -56,8 +56,8 @@ void UploadManager::requestCancel() {
     if (!m_currentUploadId.isEmpty()) {
         m_ws->sendUploadAbort(m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId, m_currentUploadId, "User cancelled");
     }
-    // Also request unloading to clean remote state
-    m_ws->sendUnloadMedia(m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId);
+    // Also request removal of all files to clean remote state
+    m_ws->sendRemoveAllFiles(m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId);
     // We'll reset final state upon unloaded callback
     emit uiStateChanged();
     // Start fallback timer (3s) in case remote never responds
@@ -186,10 +186,10 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
     if (m_ws) m_ws->closeUploadChannel();
 }
 
-void UploadManager::onUnloadedRemote() {
+void UploadManager::onAllFilesRemovedRemote() {
     // Remote side confirmed unload; reset state
     resetToInitial();
-    emit unloaded();
+    emit allFilesRemoved();
     emit uiStateChanged();
 }
 
@@ -289,13 +289,13 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         m_incoming.openFiles.clear();
         if (!m_incoming.cacheDirPath.isEmpty()) { QDir dir(m_incoming.cacheDirPath); dir.removeRecursively(); }
         if (m_ws && !m_incoming.senderId.isEmpty()) {
-            m_ws->notifyUnloadedToSender(m_incoming.senderId);
+            m_ws->notifyAllFilesRemovedToSender(m_incoming.senderId);
         }
         m_incoming = IncomingUploadSession();
-    } else if (type == "unload_media") {
+    } else if (type == "remove_all_files") {
         if (!m_incoming.cacheDirPath.isEmpty()) { QDir dir(m_incoming.cacheDirPath); dir.removeRecursively(); }
         if (m_ws && !m_incoming.senderId.isEmpty()) {
-            m_ws->notifyUnloadedToSender(m_incoming.senderId);
+            m_ws->notifyAllFilesRemovedToSender(m_incoming.senderId);
         }
         m_incoming = IncomingUploadSession();
     } else if (type == "remove_file") {
@@ -328,6 +328,18 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
                     } else {
                         qWarning() << "UploadManager: Failed to remove file:" << filePath;
                     }
+                }
+                
+                // Check if directory is now empty and remove it if so
+                QFileInfoList remainingFiles = dir.entryInfoList(QDir::Files);
+                if (remainingFiles.isEmpty()) {
+                    if (dir.rmdir(dirPath)) {
+                        qDebug() << "UploadManager: Removed empty directory:" << dirPath;
+                    } else {
+                        qDebug() << "UploadManager: Failed to remove directory:" << dirPath;
+                    }
+                } else {
+                    qDebug() << "UploadManager: Directory still has" << remainingFiles.size() << "files, keeping it";
                 }
                 
                 if (files.isEmpty()) {

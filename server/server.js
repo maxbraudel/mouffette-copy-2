@@ -157,7 +157,7 @@ class MouffetteServer {
             case 'upload_abort':
                 this.relayToTarget(clientId, message.targetClientId, message);
                 break;
-            case 'unload_media':
+            case 'remove_all_files':
                 this.relayToTarget(clientId, message.targetClientId, message);
                 break;
             case 'remove_file':
@@ -170,7 +170,7 @@ class MouffetteServer {
             case 'upload_finished':
                 this.relayToSender(clientId, message.senderClientId, message);
                 break;
-            case 'unloaded':
+            case 'all_files_removed':
                 this.relayToSender(clientId, message.senderClientId, message);
                 break;
             case 'media_share':

@@ -40,12 +40,12 @@ public:
     void sendUploadChunk(const QString& targetClientId, const QString& uploadId, const QString& fileId, int chunkIndex, const QByteArray& dataBase64);
     void sendUploadComplete(const QString& targetClientId, const QString& uploadId);
     void sendUploadAbort(const QString& targetClientId, const QString& uploadId, const QString& reason = QString());
-    void sendUnloadMedia(const QString& targetClientId);
+    void sendRemoveAllFiles(const QString& targetClientId);
     void sendRemoveFile(const QString& targetClientId, const QString& fileId);
     // Target -> Sender notifications
     void notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent, int filesCompleted, int totalFiles);
     void notifyUploadFinishedToSender(const QString& senderClientId, const QString& uploadId);
-    void notifyUnloadedToSender(const QString& senderClientId);
+    void notifyAllFilesRemovedToSender(const QString& senderClientId);
 
     // Client-side cancel safeguard: mark an uploadId as cancelled to ignore any further chunk sends
     void cancelUploadId(const QString& uploadId) { m_canceledUploads.insert(uploadId); }
@@ -70,7 +70,7 @@ signals:
     // Upload progress signals (from target via server)
     void uploadProgressReceived(const QString& uploadId, int percent, int filesCompleted, int totalFiles);
     void uploadFinishedReceived(const QString& uploadId);
-    void unloadedReceived();
+    void allFilesRemovedReceived();
 
 private slots:
     void onConnected();

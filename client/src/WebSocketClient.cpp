@@ -281,10 +281,10 @@ void WebSocketClient::sendUploadAbort(const QString& targetClientId, const QStri
     sendMessageUpload(msg);
 }
 
-void WebSocketClient::sendUnloadMedia(const QString& targetClientId) {
+void WebSocketClient::sendRemoveAllFiles(const QString& targetClientId) {
     if (!isConnected()) return;
     QJsonObject msg;
-    msg["type"] = "unload_media";
+    msg["type"] = "remove_all_files";
     msg["targetClientId"] = targetClientId;
     sendMessage(msg);
 }
@@ -321,10 +321,10 @@ void WebSocketClient::notifyUploadFinishedToSender(const QString& senderClientId
     sendMessage(msg);
 }
 
-void WebSocketClient::notifyUnloadedToSender(const QString& senderClientId) {
+void WebSocketClient::notifyAllFilesRemovedToSender(const QString& senderClientId) {
     if (!isConnected()) return;
     QJsonObject msg;
-    msg["type"] = "unloaded";
+    msg["type"] = "all_files_removed";
     msg["senderClientId"] = senderClientId;
     sendMessage(msg);
 }
@@ -467,8 +467,8 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         const QString uploadId = message.value("uploadId").toString();
         emit uploadFinishedReceived(uploadId);
     }
-    else if (type == "unloaded") {
-        emit unloadedReceived();
+    else if (type == "all_files_removed") {
+        emit allFilesRemovedReceived();
     }
     else {
         // Forward unknown messages

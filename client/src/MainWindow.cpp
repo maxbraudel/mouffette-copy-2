@@ -470,12 +470,12 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_webSocketClient, &WebSocketClient::screensInfoReceived, this, &MainWindow::onScreensInfoReceived);
     connect(m_webSocketClient, &WebSocketClient::watchStatusChanged, this, &MainWindow::onWatchStatusChanged);
     connect(m_webSocketClient, &WebSocketClient::messageReceived, this, &MainWindow::onGenericMessageReceived);
-    // Forward all generic messages to UploadManager so it can handle incoming upload_* and unload_media when we are the target
+    // Forward all generic messages to UploadManager so it can handle incoming upload_* and remove_all_files when we are the target
     connect(m_webSocketClient, &WebSocketClient::messageReceived, m_uploadManager, &UploadManager::handleIncomingMessage);
     // Upload progress forwards
     connect(m_webSocketClient, &WebSocketClient::uploadProgressReceived, m_uploadManager, &UploadManager::onUploadProgress);
     connect(m_webSocketClient, &WebSocketClient::uploadFinishedReceived, m_uploadManager, &UploadManager::onUploadFinished);
-    connect(m_webSocketClient, &WebSocketClient::unloadedReceived, m_uploadManager, &UploadManager::onUnloadedRemote);
+    connect(m_webSocketClient, &WebSocketClient::allFilesRemovedReceived, m_uploadManager, &UploadManager::onAllFilesRemovedRemote);
 
     // Managers wiring
     m_uploadManager->setWebSocketClient(m_webSocketClient);
@@ -705,7 +705,7 @@ MainWindow::MainWindow(QWidget* parent)
             m_uploadButton->setCheckable(true);
             m_uploadButton->setChecked(true);
             m_uploadButton->setEnabled(true);
-            m_uploadButton->setText("Unload medias");
+            m_uploadButton->setText("Remove all files");
             m_uploadButton->setStyleSheet(greenStyle);
             m_uploadButton->setFixedHeight(gDynamicBoxHeight);
             m_uploadButton->setFont(m_uploadButtonDefaultFont);
@@ -735,7 +735,7 @@ MainWindow::MainWindow(QWidget* parent)
         updateIndividualProgressFromServer(percent, filesCompleted, totalFiles);
     });
     connect(m_uploadManager, &UploadManager::uploadFinished, this, [this, applyUploadButtonStyle](){ applyUploadButtonStyle(); });
-    connect(m_uploadManager, &UploadManager::unloaded, this, [this, applyUploadButtonStyle](){ applyUploadButtonStyle(); });
+    connect(m_uploadManager, &UploadManager::allFilesRemoved, this, [this, applyUploadButtonStyle](){ applyUploadButtonStyle(); });
 
     // Periodic connection status refresh
     m_statusUpdateTimer->setInterval(1000);
@@ -1421,8 +1421,8 @@ void MainWindow::onUploadButtonClicked() {
             m_mediaIdByFileId.clear();
             m_itemsByFileId.clear();
         });
-        connect(m_uploadManager, &UploadManager::unloaded, this, [this](){
-            // Reset to NotUploaded if user toggles unload after upload
+        connect(m_uploadManager, &UploadManager::allFilesRemoved, this, [this](){
+            // Reset to NotUploaded if user toggles remove all files after upload
             if (!m_screenCanvas || !m_screenCanvas->scene()) return;
             const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
             for (QGraphicsItem* it : allItems) {
