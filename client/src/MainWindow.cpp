@@ -1376,6 +1376,19 @@ void MainWindow::updateStylesheetsForTheme() {
         );
     }
     
+    // Ensure the client list page title uses the same text color as other texts
+    if (m_pageTitleLabel) {
+        m_pageTitleLabel->setStyleSheet(QString(
+            "QLabel { "
+            "    background: transparent; "
+            "    border: none; "
+            "    font-size: %1px; "
+            "    font-weight: bold; "
+            "    color: palette(text); "
+            "}").arg(gTitleTextFontSize)
+        );
+    }
+
     if (m_canvasContainer) {
         m_canvasContainer->setStyleSheet(
             QString("QWidget#CanvasContainer { "
