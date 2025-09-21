@@ -1187,7 +1187,12 @@ void ScreenCanvas::wheelEvent(QWheelEvent* event) {
         else if (!event->angleDelta().isNull()) deltaY = event->angleDelta().y() / 8.0;
         if (deltaY != 0.0) {
             const qreal factor = std::pow(1.0015, deltaY);
-            zoomAroundViewportPos(event->position(), factor);
+            // Convert from view widget coords to viewport coords for correct anchoring
+            QPoint vpPos = viewport() ? viewport()->mapFrom(this, event->position().toPoint()) : event->position().toPoint();
+            zoomAroundViewportPos(vpPos, factor);
+            // After zooming, re-anchor all absolute overlays and the media info overlay
+            relayoutAllMediaOverlays(m_scene);
+            layoutInfoOverlay();
             event->accept();
             return;
         }
