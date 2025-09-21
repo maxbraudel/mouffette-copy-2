@@ -161,6 +161,9 @@ private:
     // Manage presence of the volume indicator in the top bar layout
     void removeVolumeIndicatorFromLayout();
     void addVolumeIndicatorToLayout();
+    // Manage presence of the remote status (and its leading separator) in the top bar layout
+    void removeRemoteStatusFromLayout();
+    void addRemoteStatusToLayout();
 
     // UI Components
     QWidget* m_centralWidget;
@@ -193,6 +196,7 @@ private:
     QLabel* m_pageTitleLabel = nullptr;
     QWidget* m_remoteClientInfoContainer = nullptr; // Container for hostname, status, volume
     QFrame* m_remoteInfoSep2 = nullptr; // Trailing separator before volume indicator
+    QFrame* m_remoteInfoSep1 = nullptr; // Leading separator before remote status
     QWidget* m_localClientInfoContainer = nullptr; // Container for "You" and network status
     QLabel* m_localClientTitleLabel = nullptr; // "You" label in local client container
     QLabel* m_localNetworkStatusLabel = nullptr; // Network status in local client container

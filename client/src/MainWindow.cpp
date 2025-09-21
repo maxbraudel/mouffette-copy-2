@@ -812,12 +812,12 @@ void MainWindow::createRemoteClientInfoContainer() {
     containerLayout->addWidget(m_clientNameLabel);
     
     // Add vertical separator
-    QFrame* separator1 = new QFrame();
-    separator1->setFrameShape(QFrame::VLine);
-    separator1->setFrameShadow(QFrame::Sunken);
-    separator1->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
-    separator1->setFixedWidth(1);
-    containerLayout->addWidget(separator1);
+    m_remoteInfoSep1 = new QFrame();
+    m_remoteInfoSep1->setFrameShape(QFrame::VLine);
+    m_remoteInfoSep1->setFrameShadow(QFrame::Sunken);
+    m_remoteInfoSep1->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
+    m_remoteInfoSep1->setFixedWidth(1);
+    containerLayout->addWidget(m_remoteInfoSep1);
     
     // Add status (minimal styling - just inherit from container)
     // Note: Color and font styling will be applied by setRemoteConnectionStatus()
@@ -842,6 +842,63 @@ void MainWindow::createRemoteClientInfoContainer() {
         "}").arg(gRemoteClientContainerPadding)
     );
     containerLayout->addWidget(m_volumeIndicator);
+}
+// Remove remote status (and its leading separator) from layout entirely
+void MainWindow::removeRemoteStatusFromLayout() {
+    if (!m_remoteClientInfoContainer || !m_remoteConnectionStatusLabel) return;
+    if (auto* layout = qobject_cast<QHBoxLayout*>(m_remoteClientInfoContainer->layout())) {
+        int idx = layout->indexOf(m_remoteConnectionStatusLabel);
+        if (idx != -1) {
+            layout->removeWidget(m_remoteConnectionStatusLabel);
+            m_remoteConnectionStatusLabel->setParent(nullptr);
+            m_remoteConnectionStatusLabel->hide();
+        }
+        if (m_remoteInfoSep1 && m_remoteInfoSep1->parent() == m_remoteClientInfoContainer) {
+            int sidx = layout->indexOf(m_remoteInfoSep1);
+            if (sidx != -1) {
+                layout->removeWidget(m_remoteInfoSep1);
+                m_remoteInfoSep1->setParent(nullptr);
+                m_remoteInfoSep1->hide();
+            }
+        }
+    }
+}
+
+// Add remote status (and its leading separator) into layout if missing
+void MainWindow::addRemoteStatusToLayout() {
+    if (!m_remoteClientInfoContainer || !m_remoteConnectionStatusLabel) return;
+    auto* layout = qobject_cast<QHBoxLayout*>(m_remoteClientInfoContainer->layout());
+    if (!layout) return;
+    if (!m_remoteInfoSep1) {
+        m_remoteInfoSep1 = new QFrame();
+        m_remoteInfoSep1->setFrameShape(QFrame::VLine);
+        m_remoteInfoSep1->setFrameShadow(QFrame::Sunken);
+        m_remoteInfoSep1->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
+        m_remoteInfoSep1->setFixedWidth(1);
+    }
+    // Remove from current position (if any) to re-insert at a fixed index
+    int sepIdx = layout->indexOf(m_remoteInfoSep1);
+    if (sepIdx != -1) {
+        layout->removeWidget(m_remoteInfoSep1);
+    }
+    int statusIdx = layout->indexOf(m_remoteConnectionStatusLabel);
+    if (statusIdx != -1) {
+        layout->removeWidget(m_remoteConnectionStatusLabel);
+    }
+
+    // Insert after hostname label (m_clientNameLabel) to guarantee order: hostname → sep1 → status
+    int baseIdx = 0;
+    if (m_clientNameLabel && m_clientNameLabel->parent() == m_remoteClientInfoContainer) {
+        int nameIdx = layout->indexOf(m_clientNameLabel);
+        if (nameIdx != -1) baseIdx = nameIdx + 1;
+    }
+    layout->insertWidget(baseIdx, m_remoteInfoSep1);
+    m_remoteInfoSep1->setParent(m_remoteClientInfoContainer);
+    m_remoteInfoSep1->show();
+
+    layout->insertWidget(baseIdx + 1, m_remoteConnectionStatusLabel);
+    m_remoteConnectionStatusLabel->setParent(m_remoteClientInfoContainer);
+    m_remoteConnectionStatusLabel->show();
 }
 // Remove the volume indicator (and its preceding separator) from the layout entirely
 void MainWindow::removeVolumeIndicatorFromLayout() {
@@ -880,15 +937,33 @@ void MainWindow::addVolumeIndicatorToLayout() {
         m_remoteInfoSep2->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
         m_remoteInfoSep2->setFixedWidth(1);
     }
-    // Check if separator already in layout
-    if (layout->indexOf(m_remoteInfoSep2) == -1) {
-        layout->addWidget(m_remoteInfoSep2);
-        m_remoteInfoSep2->show();
+    // Remove current instances (if any) so we can reinsert at a fixed index
+    int sepIdx = layout->indexOf(m_remoteInfoSep2);
+    if (sepIdx != -1) {
+        layout->removeWidget(m_remoteInfoSep2);
     }
-    // Add volume indicator if not in layout
-    if (layout->indexOf(m_volumeIndicator) == -1) {
-        layout->addWidget(m_volumeIndicator);
+    int volIdx = layout->indexOf(m_volumeIndicator);
+    if (volIdx != -1) {
+        layout->removeWidget(m_volumeIndicator);
     }
+
+    // Insert after status if present; otherwise after hostname
+    int baseIdx = -1;
+    if (m_remoteConnectionStatusLabel && m_remoteConnectionStatusLabel->parent() == m_remoteClientInfoContainer) {
+        baseIdx = layout->indexOf(m_remoteConnectionStatusLabel);
+    }
+    if (baseIdx == -1 && m_clientNameLabel && m_clientNameLabel->parent() == m_remoteClientInfoContainer) {
+        baseIdx = layout->indexOf(m_clientNameLabel);
+    }
+    if (baseIdx == -1) baseIdx = layout->count() - 1; // Fallback to end if neither found
+
+    // Guarantee order: ... status → sep2 → volume (or hostname → sep2 → volume when status absent)
+    layout->insertWidget(baseIdx + 1, m_remoteInfoSep2);
+    m_remoteInfoSep2->setParent(m_remoteClientInfoContainer);
+    m_remoteInfoSep2->show();
+
+    layout->insertWidget(baseIdx + 2, m_volumeIndicator);
+    m_volumeIndicator->setParent(m_remoteClientInfoContainer);
     m_volumeIndicator->show();
 }
 
@@ -1069,8 +1144,7 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     m_navigationManager->showScreenView(client);
     // Update upload target
     m_uploadManager->setTargetClientId(client.getId());
-    // Until we confirm via client list or screens_info, assume disconnected
-    setRemoteConnectionStatus("DISCONNECTED");
+    // Do not set a default DISCONNECTED to avoid flicker; we'll show status when we get a real one
     
     // Show remote client info container when viewing a client
     if (m_remoteClientInfoContainer) {
@@ -1078,6 +1152,8 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     }
     // While the remote is loading/unloading, remove the volume indicator from layout (display:none)
     removeVolumeIndicatorFromLayout();
+    // Also do not show a default remote status; remove it until we know actual state
+    removeRemoteStatusFromLayout();
     
     // Update button visibility for screen view page
     if (m_responsiveLayoutManager) {
@@ -1350,6 +1426,10 @@ void MainWindow::updateStylesheetsForTheme() {
     // Also update the cached trailing separator if it's currently detached
     if (m_remoteInfoSep2 && (!m_remoteClientInfoContainer || m_remoteInfoSep2->parent() != m_remoteClientInfoContainer)) {
         m_remoteInfoSep2->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
+    }
+    // And the leading separator if detached
+    if (m_remoteInfoSep1 && (!m_remoteClientInfoContainer || m_remoteInfoSep1->parent() != m_remoteClientInfoContainer)) {
+        m_remoteInfoSep1->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
     }
     
     // Update separators in local client info
@@ -2116,6 +2196,7 @@ void MainWindow::onConnected() {
         if (!selId.isEmpty() && m_webSocketClient && m_webSocketClient->isConnected()) {
             // Indicate we're attempting to reach the remote again
             setRemoteConnectionStatus("CONNECTING...");
+            addRemoteStatusToLayout();
             m_webSocketClient->requestScreens(selId);
             if (m_watchManager) {
                 // Ensure a clean state after reconnect, then start watching the selected client again
@@ -2136,7 +2217,8 @@ void MainWindow::onDisconnected() {
     // area to a loading state and clear any displayed content/overlays.
     if (m_navigationManager && m_navigationManager->isOnScreenView()) {
         m_navigationManager->enterLoadingStateImmediate();
-        // Our local network just dropped; remote status is unknown due to network error
+        // Our local network just dropped; show error state explicitly
+        addRemoteStatusToLayout();
         setRemoteConnectionStatus("ERROR");
         // Remove volume indicator while remote is unavailable
         removeVolumeIndicatorFromLayout();
@@ -2214,6 +2296,7 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
         auto byId = findById(selId);
         if (byId.has_value()) {
             setRemoteConnectionStatus("CONNECTED");
+            addRemoteStatusToLayout();
             // Only force a refresh if the canvas is currently in loader state.
             if (m_canvasStack && m_canvasStack->currentIndex() == 0 && m_webSocketClient && m_webSocketClient->isConnected()) {
                 m_canvasRevealedForCurrentClient = false;
@@ -2230,11 +2313,13 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
                 // Update the screen view context to the new client id (also ensures loader state is consistent)
                 showScreenView(m_selectedClient);
                 setRemoteConnectionStatus("CONNECTING...");
+                addRemoteStatusToLayout();
                 if (m_webSocketClient && m_webSocketClient->isConnected()) {
                     m_webSocketClient->requestScreens(m_selectedClient.getId());
                 }
                 if (m_watchManager) { m_watchManager->unwatchIfAny(); m_watchManager->toggleWatch(m_selectedClient.getId()); }
             } else {
+                addRemoteStatusToLayout();
                 setRemoteConnectionStatus("DISCONNECTED");
                 // Remote client went away while on canvas: unload and show loader immediately
                 m_navigationManager->enterLoadingStateImmediate();
@@ -2326,8 +2411,9 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
             updateVolumeIndicator();
         }
 
-        // Remote responded with data: status is connected
-        setRemoteConnectionStatus("CONNECTED");
+    // Remote responded with data: status is connected
+    setRemoteConnectionStatus("CONNECTED");
+    addRemoteStatusToLayout();
 
         // Refresh client label
         if (m_clientNameLabel)
