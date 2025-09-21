@@ -175,6 +175,7 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
     
     // Mark all uploaded files as available on the target client
     for (const auto& f : m_outgoingFiles) {
+        qDebug() << "UploadManager: Marking file" << f.fileId << "as uploaded to client" << m_uploadTargetClientId;
         FileManager::instance().markFileUploadedToClient(f.fileId, m_uploadTargetClientId);
     }
     

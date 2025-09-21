@@ -119,6 +119,8 @@ void FileManager::removeFileIfUnused(const QString& fileId)
         QList<QString> clientsWithFile = m_fileIdToClients.value(fileId);
         
         qDebug() << "FileManager: File" << fileId << "is unused, removing from" << clientsWithFile.size() << "clients";
+        qDebug() << "FileManager: Clients with file:" << clientsWithFile;
+        qDebug() << "FileManager: All tracked clients for all files:" << m_fileIdToClients;
         
         // Notify that file should be removed from remote clients
         if (!clientsWithFile.isEmpty() && s_fileRemovalNotifier) {
@@ -159,12 +161,16 @@ QString FileManager::generateFileId(const QString& filePath)
 
 void FileManager::markFileUploadedToClient(const QString& fileId, const QString& clientId)
 {
+    qDebug() << "FileManager: markFileUploadedToClient called for fileId:" << fileId << "clientId:" << clientId;
     if (!m_fileIdToClients.contains(fileId)) {
         m_fileIdToClients[fileId] = QList<QString>();
     }
     if (!m_fileIdToClients[fileId].contains(clientId)) {
         m_fileIdToClients[fileId].append(clientId);
-        qDebug() << "Marked file" << fileId << "as uploaded to client" << clientId;
+        qDebug() << "FileManager: Marked file" << fileId << "as uploaded to client" << clientId;
+        qDebug() << "FileManager: File" << fileId << "now uploaded to clients:" << m_fileIdToClients[fileId];
+    } else {
+        qDebug() << "FileManager: File" << fileId << "was already marked as uploaded to client" << clientId;
     }
 }
 
