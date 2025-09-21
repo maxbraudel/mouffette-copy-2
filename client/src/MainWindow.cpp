@@ -1532,7 +1532,8 @@ void MainWindow::setupUI() {
         b->setIcon(QIcon(iconPath));
         b->setIconSize(QSize(TL_SIZE_PT, TL_SIZE_PT));
         b->setFlat(true);
-        b->setCursor(Qt::PointingHandCursor);
+        // Use default arrow cursor; no hover cursor change for traffic lights
+        b->setCursor(Qt::ArrowCursor);
         b->setFocusPolicy(Qt::NoFocus);
         b->setStyleSheet("QPushButton { border: none; background: transparent; padding: 0px; }");
         return b;
