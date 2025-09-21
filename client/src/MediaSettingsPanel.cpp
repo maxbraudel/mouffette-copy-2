@@ -51,6 +51,9 @@ void MediaSettingsPanel::buildUi() {
     m_title->setFont(tf);
     m_title->setStyleSheet("color: white;");
     m_layout->addWidget(m_title);
+    
+    // Add extra spacing after the title
+    m_layout->addSpacing(15);
 
     // Helper to create a small value box label like [1]
     auto makeValueBox = [&](const QString& text = QStringLiteral("1")) {
@@ -65,45 +68,78 @@ void MediaSettingsPanel::buildUi() {
         return box;
     };
 
-    // 0) Display automatically after [1] seconds
+    // 0) Display automatically + Display delay as separate checkboxes
     {
-        auto* row = new QWidget(m_widget);
-        auto* h = new QHBoxLayout(row);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
-        m_displayAfterCheck = new QCheckBox("Display automatically after ", row);
+        // Display automatically checkbox with proper alignment
+        auto* autoRow = new QWidget(m_widget);
+        auto* autoLayout = new QHBoxLayout(autoRow);
+        autoLayout->setContentsMargins(0, 0, 0, 0);
+        autoLayout->setSpacing(0);
+        m_displayAfterCheck = new QCheckBox("Display automatically more text here to test text breaking feature", autoRow);
         m_displayAfterCheck->setStyleSheet("color: white;");
         m_displayAfterCheck->installEventFilter(this);
+        autoLayout->addWidget(m_displayAfterCheck);
+        autoLayout->addStretch();
+        m_layout->addWidget(autoRow);
+        
+        // Display delay checkbox with input (separate checkbox)
+        auto* delayRow = new QWidget(m_widget);
+        auto* h = new QHBoxLayout(delayRow);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->setSpacing(0);
+        auto* delayCheck = new QCheckBox("Display delay: ", delayRow);
+        delayCheck->setStyleSheet("color: white;");
+        delayCheck->installEventFilter(this);
         m_displayAfterBox = makeValueBox();
-        auto* suffix = new QLabel(" seconds", row);
+        auto* suffix = new QLabel(" seconds", delayRow);
         suffix->setStyleSheet("color: white;");
-        h->addWidget(m_displayAfterCheck);
+        h->addWidget(delayCheck);
         h->addWidget(m_displayAfterBox);
         h->addWidget(suffix);
         h->addStretch();
-        m_layout->addWidget(row);
+        m_layout->addWidget(delayRow);
     }
 
-    // 1) Play automatically after [1] seconds (video only)
+    // 1) Play automatically + Play delay as separate checkboxes (video only)
     {
         m_autoPlayRow = new QWidget(m_widget);
-        auto* h = new QHBoxLayout(m_autoPlayRow);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
-        m_autoPlayCheck = new QCheckBox("Play automatically after ", m_autoPlayRow);
+        auto* vLayout = new QVBoxLayout(m_autoPlayRow);
+        vLayout->setContentsMargins(0, 0, 0, 0);
+        vLayout->setSpacing(5);
+        
+        // Play automatically checkbox
+        auto* autoRow = new QWidget(m_autoPlayRow);
+        auto* autoLayout = new QHBoxLayout(autoRow);
+        autoLayout->setContentsMargins(0, 0, 0, 0);
+        autoLayout->setSpacing(0);
+        m_autoPlayCheck = new QCheckBox("Play automatically", autoRow);
         m_autoPlayCheck->setStyleSheet("color: white;");
         m_autoPlayCheck->installEventFilter(this);
+        autoLayout->addWidget(m_autoPlayCheck);
+        autoLayout->addStretch();
+        vLayout->addWidget(autoRow);
+        
+        // Play delay checkbox with input
+        auto* delayRow = new QWidget(m_autoPlayRow);
+        auto* h = new QHBoxLayout(delayRow);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->setSpacing(0);
+        m_playDelayCheck = new QCheckBox("Play delay: ", delayRow);
+        m_playDelayCheck->setStyleSheet("color: white;");
+        m_playDelayCheck->installEventFilter(this);
         m_autoPlayBox = makeValueBox();
-        auto* suffix = new QLabel(" seconds", m_autoPlayRow);
+        auto* suffix = new QLabel(" seconds", delayRow);
         suffix->setStyleSheet("color: white;");
-        h->addWidget(m_autoPlayCheck);
+        h->addWidget(m_playDelayCheck);
         h->addWidget(m_autoPlayBox);
         h->addWidget(suffix);
         h->addStretch();
+        vLayout->addWidget(delayRow);
+        
         m_layout->addWidget(m_autoPlayRow);
     }
 
-    // 2) Repeat [1] time (video only)
+    // 2) Repeat (video only) - keeping original single checkbox format
     {
         m_repeatRow = new QWidget(m_widget);
         auto* h = new QHBoxLayout(m_repeatRow);
@@ -113,7 +149,7 @@ void MediaSettingsPanel::buildUi() {
         m_repeatCheck->setStyleSheet("color: white;");
         m_repeatCheck->installEventFilter(this);
         m_repeatBox = makeValueBox();
-        auto* suffix = new QLabel(" time", m_repeatRow);
+        auto* suffix = new QLabel(" times", m_repeatRow);
         suffix->setStyleSheet("color: white;");
         h->addWidget(m_repeatCheck);
         h->addWidget(m_repeatBox);
@@ -122,13 +158,13 @@ void MediaSettingsPanel::buildUi() {
         m_layout->addWidget(m_repeatRow);
     }
 
-    // 3) Fade in during [1] seconds
+    // 3) Fade in with checkbox format
     {
         auto* row = new QWidget(m_widget);
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
-        m_fadeInCheck = new QCheckBox("Fade in during ", row);
+        m_fadeInCheck = new QCheckBox("Fade in: ", row);
         m_fadeInCheck->setStyleSheet("color: white;");
         m_fadeInCheck->installEventFilter(this);
         m_fadeInBox = makeValueBox();
@@ -141,13 +177,13 @@ void MediaSettingsPanel::buildUi() {
         m_layout->addWidget(row);
     }
 
-    // 4) Fade out during [1] seconds
+    // 4) Fade out with checkbox format
     {
         auto* row = new QWidget(m_widget);
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
-        m_fadeOutCheck = new QCheckBox("Fade out during ", row);
+        m_fadeOutCheck = new QCheckBox("Fade out: ", row);
         m_fadeOutCheck->setStyleSheet("color: white;");
         m_fadeOutCheck->installEventFilter(this);
         m_fadeOutBox = makeValueBox();
@@ -160,16 +196,16 @@ void MediaSettingsPanel::buildUi() {
         m_layout->addWidget(row);
     }
 
-    // 5) Set opacity to [1]%
+    // 5) Opacity with checkbox format
     {
         auto* row = new QWidget(m_widget);
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
-        m_opacityCheck = new QCheckBox("Set opacity to ", row);
+        m_opacityCheck = new QCheckBox("Opacity: ", row);
         m_opacityCheck->setStyleSheet("color: white;");
         m_opacityCheck->installEventFilter(this);
-        m_opacityBox = makeValueBox();
+        m_opacityBox = makeValueBox(QStringLiteral("100")); // Default to 100%
         auto* suffix = new QLabel("%", row);
         suffix->setStyleSheet("color: white;");
         h->addWidget(m_opacityCheck);

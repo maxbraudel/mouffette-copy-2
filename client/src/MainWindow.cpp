@@ -1727,7 +1727,7 @@ void MainWindow::setupUI() {
     // Ensure button is sized properly for its text content
     m_backButton->adjustSize();
     int textWidth = m_backButton->fontMetrics().horizontalAdvance(m_backButton->text()) + 24; // text + padding
-    int buttonWidth = qMax(150, textWidth);
+    int buttonWidth = qMax(10, textWidth);
     m_backButton->setFixedWidth(buttonWidth); // Use fixed width to prevent any changes
     // Override size policy to prevent shrinking when window reduces
     m_backButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);

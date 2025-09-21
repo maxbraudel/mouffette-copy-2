@@ -52,6 +52,7 @@ private:
     QLabel* m_title = nullptr;
 
     QCheckBox* m_autoPlayCheck = nullptr;
+    QCheckBox* m_playDelayCheck = nullptr; // New: separate play delay checkbox
 
     QCheckBox* m_repeatCheck = nullptr;
 

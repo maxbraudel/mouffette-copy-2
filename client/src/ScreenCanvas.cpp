@@ -456,8 +456,15 @@ void ScreenCanvas::refreshInfoOverlay() {
     const int naturalHeight = contentHint.height() + headerHint.height();
     const int baselineMinWidth = 380;
     int targetW = std::max(m_infoLayout ? m_infoLayout->totalSizeHint().width() : m_infoWidget->sizeHint().width(), baselineMinWidth);
-    // Cap height to viewport height minus margins to avoid overlay exceeding canvas
+    // Cap width to 50% of viewport width to ensure overlay doesn't dominate on narrow screens
     const int margin = 16;
+    if (viewport()) {
+        const int maxOverlayW = (viewport()->width() - margin*2) / 2; // 50% of available width
+        if (targetW > maxOverlayW && maxOverlayW > 0) {
+            targetW = maxOverlayW;
+        }
+    }
+    // Cap height to viewport height minus margins to avoid overlay exceeding canvas
     const int maxOverlayH = viewport() ? std::max(0, viewport()->height() - margin*2) : naturalHeight;
     int overlayH = naturalHeight;
     if (overlayH > maxOverlayH) {
@@ -477,7 +484,20 @@ void ScreenCanvas::refreshInfoOverlay() {
             m_contentScroll->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         }
     }
+    
+    // Ensure all internal widgets respect the width constraint but can shrink/expand within bounds
+    if (m_contentWidget) {
+        m_contentWidget->setMaximumWidth(targetW - 4); // Leave small margin for borders
+        m_contentWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum); // Allow width flexibility
+    }
+    if (m_contentScroll) {
+        m_contentScroll->setMaximumWidth(targetW);
+        m_contentScroll->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding); // Allow width flexibility
+    }
+    
     m_infoWidget->setFixedHeight(overlayH);
+    m_infoWidget->setFixedWidth(targetW);  // Force exact width
+    m_infoWidget->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed); // Prevent expansion
     m_infoWidget->resize(targetW, overlayH);
     updateOverlayVScrollVisibilityAndGeometry();
     
@@ -555,9 +575,34 @@ void ScreenCanvas::updateInfoOverlayGeometryForViewport() {
             m_contentScroll->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         }
     }
-    // Keep width as-is; just update height and position
+    // Recalculate preferred width (like in refreshInfoOverlay) to allow expansion when space is available
+    const int baselineMinWidth = 380;
+    int preferredW = std::max(m_infoLayout ? m_infoLayout->totalSizeHint().width() : m_infoWidget->sizeHint().width(), baselineMinWidth);
+    const int maxOverlayW = (viewport()->width() - margin*2) / 2; // 50% of available width
+    
+    // Use preferred width if it fits within the 50% limit, otherwise clamp to the limit
+    int targetW = preferredW;
+    if (targetW > maxOverlayW && maxOverlayW > 0) {
+        targetW = maxOverlayW;
+    }
+    
+    // Reset and ensure all internal widgets respect the new width constraint
+    if (m_contentWidget) {
+        m_contentWidget->setMaximumWidth(QWIDGETSIZE_MAX); // Reset any previous constraint
+        m_contentWidget->setMaximumWidth(targetW - 4); // Apply new constraint with margin for borders
+        m_contentWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum); // Allow width flexibility
+    }
+    if (m_contentScroll) {
+        m_contentScroll->setMaximumWidth(QWIDGETSIZE_MAX); // Reset any previous constraint
+        m_contentScroll->setMaximumWidth(targetW); // Apply new constraint
+        m_contentScroll->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding); // Allow width flexibility
+    }
+    
+    // Update both width and height, then reposition
     m_infoWidget->setFixedHeight(overlayH);
-    m_infoWidget->resize(m_infoWidget->width(), overlayH);
+    m_infoWidget->setFixedWidth(targetW);  // Force exact width
+    m_infoWidget->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed); // Prevent expansion
+    m_infoWidget->resize(targetW, overlayH);
     layoutInfoOverlay();
     updateOverlayVScrollVisibilityAndGeometry();
 }
