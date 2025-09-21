@@ -1,6 +1,7 @@
 #include "FileManager.h"
-#include <QUuid>
 #include <QFile>
+#include <QFileInfo>
+#include <QCryptographicHash>
 #include <QDebug>
 
 // Static member definition
@@ -67,12 +68,10 @@ void FileManager::removeMediaAssociation(const QString& mediaId)
     
     QString fileId = m_mediaIdToFileId[mediaId];
     qDebug() << "FileManager: Media" << mediaId << "was associated with file" << fileId;
-    qDebug() << "FileManager: Before removal, file" << fileId << "has" << m_fileIdToMediaIds[fileId].size() << "media associations:" << m_fileIdToMediaIds[fileId];
-    
     m_fileIdToMediaIds[fileId].removeAll(mediaId);
     m_mediaIdToFileId.remove(mediaId);
     
-    qDebug() << "FileManager: After removal, file" << fileId << "now has" << m_fileIdToMediaIds[fileId].size() << "media associations:" << m_fileIdToMediaIds[fileId];
+    qDebug() << "FileManager: File" << fileId << "now has" << m_fileIdToMediaIds[fileId].size() << "media associations";
     
     // Clean up file if no more media references it  
     removeFileIfUnused(fileId);
@@ -119,8 +118,6 @@ void FileManager::removeFileIfUnused(const QString& fileId)
         QList<QString> clientsWithFile = m_fileIdToClients.value(fileId);
         
         qDebug() << "FileManager: File" << fileId << "is unused, removing from" << clientsWithFile.size() << "clients";
-        qDebug() << "FileManager: Clients with file:" << clientsWithFile;
-        qDebug() << "FileManager: All tracked clients for all files:" << m_fileIdToClients;
         
         // Notify that file should be removed from remote clients
         if (!clientsWithFile.isEmpty() && s_fileRemovalNotifier) {
@@ -161,16 +158,12 @@ QString FileManager::generateFileId(const QString& filePath)
 
 void FileManager::markFileUploadedToClient(const QString& fileId, const QString& clientId)
 {
-    qDebug() << "FileManager: markFileUploadedToClient called for fileId:" << fileId << "clientId:" << clientId;
     if (!m_fileIdToClients.contains(fileId)) {
         m_fileIdToClients[fileId] = QList<QString>();
     }
     if (!m_fileIdToClients[fileId].contains(clientId)) {
         m_fileIdToClients[fileId].append(clientId);
         qDebug() << "FileManager: Marked file" << fileId << "as uploaded to client" << clientId;
-        qDebug() << "FileManager: File" << fileId << "now uploaded to clients:" << m_fileIdToClients[fileId];
-    } else {
-        qDebug() << "FileManager: File" << fileId << "was already marked as uploaded to client" << clientId;
     }
 }
 

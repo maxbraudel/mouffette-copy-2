@@ -29,7 +29,7 @@ void WebSocketClient::onUploadTextMessageReceived(const QString& message) {
         qDebug() << "Upload channel received client ID:" << m_uploadClientId;
         return;
     }
-    // Reuse the same message handler for upload progress/finished/unloaded
+    // Reuse the same message handler for upload progress/finished/all_files_removed
     handleMessage(obj);
 }
 

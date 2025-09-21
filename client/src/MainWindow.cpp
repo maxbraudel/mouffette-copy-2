@@ -1422,7 +1422,7 @@ void MainWindow::onUploadButtonClicked() {
             m_itemsByFileId.clear();
         });
         connect(m_uploadManager, &UploadManager::allFilesRemoved, this, [this](){
-            // Reset to NotUploaded if user toggles remove all files after upload
+            // Reset to NotUploaded when all files are removed
             if (!m_screenCanvas || !m_screenCanvas->scene()) return;
             const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
             for (QGraphicsItem* it : allItems) {

@@ -58,7 +58,7 @@ void UploadManager::requestCancel() {
     }
     // Also request removal of all files to clean remote state
     m_ws->sendRemoveAllFiles(m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId);
-    // We'll reset final state upon unloaded callback
+    // We'll reset final state upon all_files_removed callback
     emit uiStateChanged();
     // Start fallback timer (3s) in case remote never responds
     if (!m_cancelFallbackTimer) {
@@ -175,7 +175,6 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
     
     // Mark all uploaded files as available on the target client
     for (const auto& f : m_outgoingFiles) {
-        qDebug() << "UploadManager: Marking file" << f.fileId << "as uploaded to client" << m_uploadTargetClientId;
         FileManager::instance().markFileUploadedToClient(f.fileId, m_uploadTargetClientId);
     }
     
@@ -196,7 +195,6 @@ void UploadManager::onAllFilesRemovedRemote() {
 // Incoming side (target) - replicate subset of MainWindow logic for assembling files
 void UploadManager::handleIncomingMessage(const QJsonObject& message) {
     const QString type = message.value("type").toString();
-    qDebug() << "UploadManager::handleIncomingMessage - type:" << type;
     if (type == "upload_start") {
         m_incoming = IncomingUploadSession();
         m_incoming.senderId = message.value("senderClientId").toString();
@@ -299,26 +297,21 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         }
         m_incoming = IncomingUploadSession();
     } else if (type == "remove_file") {
-        qDebug() << "UploadManager: Received remove_file message";
         QString senderClientId = message.value("senderClientId").toString();
         QString fileId = message.value("fileId").toString();
-        qDebug() << "UploadManager: remove_file - senderClientId:" << senderClientId << "fileId:" << fileId;
         
         if (!senderClientId.isEmpty() && !fileId.isEmpty()) {
             // Build directory path based on sender ID
             QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
             if (base.isEmpty()) base = QDir::homePath() + "/.cache";
             QString dirPath = base + "/Mouffette/Uploads/" + senderClientId;
-            qDebug() << "UploadManager: Looking for files in directory:" << dirPath;
             
             QDir dir(dirPath);
             if (dir.exists()) {
-                qDebug() << "UploadManager: Directory exists, looking for files matching:" << fileId + "*";
                 // Find all files that start with the fileId (to handle different extensions)
                 QStringList nameFilters;
                 nameFilters << fileId + "*";
                 QFileInfoList files = dir.entryInfoList(nameFilters, QDir::Files);
-                qDebug() << "UploadManager: Found" << files.size() << "files matching pattern";
                 
                 for (const QFileInfo& fileInfo : files) {
                     QString filePath = fileInfo.absoluteFilePath();
@@ -335,27 +328,13 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
                 if (remainingFiles.isEmpty()) {
                     if (dir.rmdir(dirPath)) {
                         qDebug() << "UploadManager: Removed empty directory:" << dirPath;
-                    } else {
-                        qDebug() << "UploadManager: Failed to remove directory:" << dirPath;
                     }
-                } else {
-                    qDebug() << "UploadManager: Directory still has" << remainingFiles.size() << "files, keeping it";
                 }
                 
                 if (files.isEmpty()) {
                     qDebug() << "UploadManager: No files found matching fileId:" << fileId;
-                    // List all files in directory for debugging
-                    QFileInfoList allFiles = dir.entryInfoList(QDir::Files);
-                    qDebug() << "UploadManager: All files in directory:" << allFiles.size();
-                    for (const QFileInfo& info : allFiles) {
-                        qDebug() << "  - " << info.fileName();
-                    }
                 }
-            } else {
-                qDebug() << "UploadManager: Directory does not exist:" << dirPath;
             }
-        } else {
-            qDebug() << "UploadManager: Invalid remove_file parameters - senderClientId:" << senderClientId << "fileId:" << fileId;
         }
     }
 }
