@@ -1337,7 +1337,8 @@ void MainWindow::onUploadButtonClicked() {
                 info.fileId = fileId; // Use the shared file ID
                 info.mediaId = media->mediaId(); // Keep one mediaId for reference
                 info.path = fi.absoluteFilePath(); 
-                info.name = fi.fileName(); 
+                info.name = fi.fileName();
+                info.extension = fi.suffix(); // Extract file extension
                 info.size = fi.size();
                 files.push_back(info);
                 processedFileIds.insert(fileId);

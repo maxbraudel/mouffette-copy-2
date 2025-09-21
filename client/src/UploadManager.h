@@ -21,6 +21,7 @@ struct UploadFileInfo {
     QString mediaId; // persistent id of the canvas item
     QString path;
     QString name;
+    QString extension; // file extension (e.g., "jpg", "png", "mp4")
     qint64 size = 0;
 };
 

@@ -153,7 +153,7 @@ QString FileManager::generateFileId(const QString& filePath)
     }
     
     QString result = hash.result().toHex().left(16); // Use first 16 chars of hash
-    return "file_" + result;
+    return result; // Remove "file_" prefix
 }
 
 void FileManager::markFileUploadedToClient(const QString& fileId, const QString& clientId)

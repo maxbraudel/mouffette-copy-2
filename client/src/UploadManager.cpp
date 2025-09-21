@@ -96,6 +96,7 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
         QJsonObject obj;
         obj["fileId"] = f.fileId;
         obj["name"] = f.name;
+        obj["extension"] = f.extension;
         obj["sizeBytes"] = static_cast<double>(f.size);
         
         // Include all mediaIds that use this fileId
@@ -215,6 +216,7 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             QJsonObject f = v.toObject();
             QString fileId = f.value("fileId").toString();
             QString name = f.value("name").toString();
+            QString extension = f.value("extension").toString();
             QJsonArray mediaIdsArray = f.value("mediaIds").toArray();
             qint64 size = static_cast<qint64>(f.value("sizeBytes").toDouble());
             m_incoming.totalSize += qMax<qint64>(0, size);
@@ -227,8 +229,12 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
                 m_incoming.fileIdToMediaId.insert(fileId, mediaId);
             }
             
-            // Use fileId as filename (since it's unique and represents the actual file)
-            QString fullPath = cacheDir + "/" + fileId;
+            // Use fileId as filename with original extension
+            QString filename = fileId;
+            if (!extension.isEmpty()) {
+                filename += "." + extension;
+            }
+            QString fullPath = cacheDir + "/" + filename;
             qDebug() << "UploadManager: Creating file:" << fullPath;
             qDebug() << "UploadManager: File ID:" << fileId;
             QFile* qf = new QFile(fullPath);
@@ -295,20 +301,31 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         QString fileId = message.value("fileId").toString();
         
         if (!senderClientId.isEmpty() && !fileId.isEmpty()) {
-            // Build file path based on sender ID and file ID
+            // Build directory path based on sender ID
             QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
             if (base.isEmpty()) base = QDir::homePath() + "/.cache";
-            QString filePath = base + "/Mouffette/Uploads/" + senderClientId + "/" + fileId;
+            QString dirPath = base + "/Mouffette/Uploads/" + senderClientId;
             
-            QFile file(filePath);
-            if (file.exists()) {
-                if (file.remove()) {
-                    qDebug() << "UploadManager: Successfully removed file:" << filePath;
-                } else {
-                    qWarning() << "UploadManager: Failed to remove file:" << filePath;
+            QDir dir(dirPath);
+            if (dir.exists()) {
+                // Find all files that start with the fileId (to handle different extensions)
+                QStringList nameFilters;
+                nameFilters << fileId + "*";
+                QFileInfoList files = dir.entryInfoList(nameFilters, QDir::Files);
+                
+                for (const QFileInfo& fileInfo : files) {
+                    QString filePath = fileInfo.absoluteFilePath();
+                    QFile file(filePath);
+                    if (file.remove()) {
+                        qDebug() << "UploadManager: Successfully removed file:" << filePath;
+                    } else {
+                        qWarning() << "UploadManager: Failed to remove file:" << filePath;
+                    }
                 }
-            } else {
-                qDebug() << "UploadManager: File already removed or not found:" << filePath;
+                
+                if (files.isEmpty()) {
+                    qDebug() << "UploadManager: No files found matching fileId:" << fileId;
+                }
             }
         }
     }
