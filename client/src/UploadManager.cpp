@@ -1,5 +1,6 @@
 #include "UploadManager.h"
 #include "WebSocketClient.h"
+#include "FileManager.h"
 #include <QGraphicsScene>
 #include <QGraphicsItem>
 #include <QFileInfo>
@@ -88,13 +89,25 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
     m_totalFiles = files.size();
     emit uiStateChanged();
 
-    // Build manifest
+    // Build manifest with file deduplication info
     QJsonArray manifest;
+    qDebug() << "UploadManager: Building manifest for" << files.size() << "unique files";
     for (const auto& f : files) {
         QJsonObject obj;
         obj["fileId"] = f.fileId;
         obj["name"] = f.name;
         obj["sizeBytes"] = static_cast<double>(f.size);
+        
+        // Include all mediaIds that use this fileId
+        QList<QString> mediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
+        QJsonArray mediaIdArray;
+        for (const QString& mediaId : mediaIds) {
+            mediaIdArray.append(mediaId);
+        }
+        obj["mediaIds"] = mediaIdArray;
+        
+        qDebug() << "UploadManager: File in manifest - fileId:" << f.fileId << "name:" << f.name << "mediaIds:" << mediaIds.size();
+        
         manifest.append(obj);
     }
     m_ws->sendUploadStart(m_uploadTargetClientId, manifest, m_currentUploadId);
@@ -183,19 +196,35 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
         if (base.isEmpty()) base = QDir::homePath() + "/.cache";
         QDir dir(base); dir.mkpath("Mouffette/Uploads");
-        QString cacheDir = base + "/Mouffette/Uploads/" + m_incoming.uploadId;
+        // Use sender client ID as folder name instead of upload ID
+        QString cacheDir = base + "/Mouffette/Uploads/" + m_incoming.senderId;
         QDir().mkpath(cacheDir);
         m_incoming.cacheDirPath = cacheDir;
+        
+        qDebug() << "UploadManager: Creating upload folder:" << cacheDir;
+        qDebug() << "UploadManager: Sender ID:" << m_incoming.senderId;
         QJsonArray files = message.value("files").toArray();
         m_incoming.totalFiles = files.size();
         for (const QJsonValue& v : files) {
             QJsonObject f = v.toObject();
             QString fileId = f.value("fileId").toString();
             QString name = f.value("name").toString();
+            QJsonArray mediaIdsArray = f.value("mediaIds").toArray();
             qint64 size = static_cast<qint64>(f.value("sizeBytes").toDouble());
             m_incoming.totalSize += qMax<qint64>(0, size);
-            QString safeName = name; safeName.replace('/', '_');
-            QString fullPath = cacheDir + "/" + fileId + "_" + safeName;
+            
+            // Store all mediaIds for this fileId
+            QStringList mediaIdsList;
+            for (const QJsonValue& mediaIdVal : mediaIdsArray) {
+                QString mediaId = mediaIdVal.toString();
+                mediaIdsList.append(mediaId);
+                m_incoming.fileIdToMediaId.insert(fileId, mediaId);
+            }
+            
+            // Use fileId as filename (since it's unique and represents the actual file)
+            QString fullPath = cacheDir + "/" + fileId;
+            qDebug() << "UploadManager: Creating file:" << fullPath;
+            qDebug() << "UploadManager: File ID:" << fileId;
             QFile* qf = new QFile(fullPath);
             if (!qf->open(QIODevice::WriteOnly)) { delete qf; continue; }
             m_incoming.openFiles.insert(fileId, qf);

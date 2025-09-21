@@ -11,6 +11,7 @@
 #include "OverlayPanels.h"
 #include "Theme.h"
 #include "AppColors.h"
+#include "FileManager.h"
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QHostInfo>
@@ -1285,10 +1286,15 @@ void MainWindow::onUploadButtonClicked() {
     if (!m_uploadManager) return;
     if (m_uploadManager->isUploading()) { m_uploadManager->requestCancel(); return; }
     if (m_uploadManager->hasActiveUpload()) { m_uploadManager->requestUnload(); return; }
-    // Gather media items present on the scene (using unique mediaId for each item)
+    // Clear previous upload tracking data
+    m_itemsByFileId.clear();
+    m_mediaIdByFileId.clear();
+    
+    // Gather unique files from media items (deduplicate by fileId)
     // Also check for missing files and remove associated media items
     QVector<UploadFileInfo> files;
     QList<ResizableMediaBase*> mediaItemsToRemove;
+    QSet<QString> processedFileIds; // Track unique files to avoid duplicates
     
     if (m_screenCanvas && m_screenCanvas->scene()) {
         const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
@@ -1306,16 +1312,31 @@ void MainWindow::onUploadButtonClicked() {
                 continue;
             }
             
-            UploadFileInfo info; 
-            info.fileId = QUuid::createUuid().toString(QUuid::WithoutBraces); 
-            info.mediaId = media->mediaId(); // Use the unique mediaId from the media item
-            info.path = fi.absoluteFilePath(); 
-            info.name = fi.fileName(); 
-            info.size = fi.size();
-            files.push_back(info);
-            // Map fileId to both mediaId and media item pointer for efficient lookups
-            m_mediaIdByFileId.insert(info.fileId, info.mediaId);
-            m_itemByFileId.insert(info.fileId, media);
+            QString fileId = media->fileId();
+            if (fileId.isEmpty()) {
+                qWarning() << "MainWindow: Media item has no fileId, skipping:" << media->mediaId();
+                continue;
+            }
+            
+            // Only add unique files (skip duplicates)
+            if (!processedFileIds.contains(fileId)) {
+                UploadFileInfo info; 
+                info.fileId = fileId; // Use the shared file ID
+                info.mediaId = media->mediaId(); // Keep one mediaId for reference
+                info.path = fi.absoluteFilePath(); 
+                info.name = fi.fileName(); 
+                info.size = fi.size();
+                files.push_back(info);
+                processedFileIds.insert(fileId);
+                
+                qDebug() << "MainWindow: Added unique file for upload:" << fileId << "path:" << info.path;
+            }
+            
+            // Map fileId to media item pointers (multiple media can share same fileId)
+            if (!m_itemsByFileId.contains(fileId)) {
+                m_itemsByFileId[fileId] = QList<ResizableMediaBase*>();
+            }
+            m_itemsByFileId[fileId].append(media);
         }
         
         // Remove media items with missing files
@@ -1341,10 +1362,14 @@ void MainWindow::onUploadButtonClicked() {
         return;
     }
 
-    // Initialize per-media upload state using unique mediaId
+    // Initialize per-media upload state using ALL mediaIds that share the uploaded fileIds
     m_mediaIdsBeingUploaded.clear();
     for (const auto& f : files) {
-        m_mediaIdsBeingUploaded.insert(f.mediaId);
+        // Get ALL media IDs for this file ID from FileManager
+        QList<QString> allMediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
+        for (const QString& mediaId : allMediaIds) {
+            m_mediaIdsBeingUploaded.insert(mediaId);
+        }
     }
     // Set initial upload state for all media items being uploaded
     if (m_screenCanvas && m_screenCanvas->scene()) {
@@ -1364,40 +1389,23 @@ void MainWindow::onUploadButtonClicked() {
         // Per-file progress signals: only advance the active file's bar; others remain at 0 until their turn
         connect(m_uploadManager, &UploadManager::fileUploadStarted, this, [this](const QString& fileId){
             if (!m_screenCanvas || !m_screenCanvas->scene()) return;
-            // Use direct mapping from fileId to media item pointer
-            if (auto item = m_itemByFileId.value(fileId)) { 
-                item->setUploadUploading(0); 
-            }
-        });
-        // Per-file progress now calculated from server-acknowledged global progress
-        // (removed sender-side fileUploadProgress connection to prevent too-fast progress)
-        connect(m_uploadManager, &UploadManager::fileUploadFinished, this, [this](const QString& fileId){
-            if (!m_screenCanvas || !m_screenCanvas->scene()) return;
-            // Use direct mapping from fileId to media item pointer
-            if (auto item = m_itemByFileId.value(fileId)) { 
-                item->setUploadUploaded(); 
-            }
-        });
-        connect(m_uploadManager, &UploadManager::uploadFinished, this, [this](){
-            if (!m_screenCanvas || !m_screenCanvas->scene()) { 
-                m_mediaIdsBeingUploaded.clear(); 
-                m_mediaIdByFileId.clear();
-                m_itemByFileId.clear();
-                return; 
-            }
-            // Set uploaded state for all media items that were being uploaded
-            const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
-            for (QGraphicsItem* it : allItems) {
-                if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-                    if (m_mediaIdsBeingUploaded.contains(media->mediaId())) {
-                        media->setUploadUploaded();
-                    }
+            // Update ALL media items that share this fileId
+            const QList<ResizableMediaBase*> items = m_itemsByFileId.value(fileId);
+            for (ResizableMediaBase* item : items) {
+                if (item) {
+                    item->setUploadUploading(0);
                 }
-            }
-            // Clear tracking data
+            } 
+        });
+        // Per-file progress connection disabled to avoid flickering with server progress updates
+        // Progress updates now come only from server via updateIndividualProgressFromServer
+        // fileUploadFinished connection disabled to avoid race condition with server progress
+        // Files are marked as uploaded only when server confirms completion via updateIndividualProgressFromServer
+        connect(m_uploadManager, &UploadManager::uploadFinished, this, [this](){
+            // Clear tracking data (fileUploadFinished already handled state updates)
             m_mediaIdsBeingUploaded.clear();
             m_mediaIdByFileId.clear();
-            m_itemByFileId.clear();
+            m_itemsByFileId.clear();
         });
         connect(m_uploadManager, &UploadManager::unloaded, this, [this](){
             // Reset to NotUploaded if user toggles unload after upload
@@ -2816,20 +2824,22 @@ void MainWindow::updateIndividualProgressFromServer(int globalPercent, int files
     
     // Get list of files being uploaded in consistent order
     QStringList orderedFileIds;
-    for (auto it = m_itemByFileId.constBegin(); it != m_itemByFileId.constEnd(); ++it) {
+    for (auto it = m_itemsByFileId.constBegin(); it != m_itemsByFileId.constEnd(); ++it) {
         orderedFileIds.append(it.key());
     }
     
     // Calculate progress for each file based on server acknowledgment
     for (int i = 0; i < orderedFileIds.size() && i < totalFiles; ++i) {
         const QString& fileId = orderedFileIds[i];
-        ResizableMediaBase* item = m_itemByFileId.value(fileId);
-        if (!item) continue;
+        const QList<ResizableMediaBase*> items = m_itemsByFileId.value(fileId);
+        if (items.isEmpty()) continue;
         
         int fileProgress;
+        bool fileCompleted = false;
         if (i < filesCompleted) {
             // This file is completely received by server
             fileProgress = 100;
+            fileCompleted = true;
         } else if (i == filesCompleted && filesCompleted < totalFiles) {
             // This is the currently uploading file
             // Estimate progress: remaining global progress for current file
@@ -2842,7 +2852,18 @@ void MainWindow::updateIndividualProgressFromServer(int globalPercent, int files
             fileProgress = 0;
         }
         
-        item->setUploadUploading(fileProgress);
+        // Update ALL media items that share this fileId
+        for (ResizableMediaBase* item : items) {
+            if (item) {
+                if (fileCompleted) {
+                    // Server confirmed file is completely received
+                    item->setUploadUploaded();
+                } else if (item->uploadState() != ResizableMediaBase::UploadState::Uploaded) {
+                    // Update progress only if not already uploaded
+                    item->setUploadUploading(fileProgress);
+                }
+            }
+        }
     }
 }
 

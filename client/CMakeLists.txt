@@ -36,6 +36,7 @@ set(SOURCES
     src/ScreenCanvas.cpp
     src/MediaSettingsPanel.cpp
     src/FileWatcher.cpp
+    src/FileManager.cpp
     src/Theme.cpp
     src/AppColors.cpp
 )
@@ -66,6 +67,7 @@ set(HEADERS
     src/ScreenCanvas.h
     src/MediaSettingsPanel.h
     src/FileWatcher.h
+    src/FileManager.h
     src/Theme.h
     src/AppColors.h
 )

@@ -31,6 +31,7 @@ struct IncomingUploadSession {
     QHash<QString, QFile*> openFiles;          // fileId -> QFile*
     QHash<QString, qint64> expectedSizes;      // fileId -> total bytes
     QHash<QString, qint64> receivedByFile;     // fileId -> received bytes
+    QHash<QString, QString> fileIdToMediaId;   // fileId -> mediaId for target-side naming
     qint64 totalSize = 0;
     qint64 received = 0;
     int totalFiles = 0;

@@ -277,8 +277,8 @@ private:
     bool m_uploadSignalsConnected = false;
     // Map upload fileId <-> mediaId for per-file progress tracking
     QHash<QString, QString> m_mediaIdByFileId;
-    // Direct mapping from fileId to media item pointer for efficient progress updates
-    QHash<QString, ResizableMediaBase*> m_itemByFileId;
+    // Direct mapping from fileId to media item pointers (multiple media can share same fileId)
+    QHash<QString, QList<ResizableMediaBase*>> m_itemsByFileId;
     WatchManager* m_watchManager = nullptr;   // extracted watch logic
     ScreenNavigationManager* m_navigationManager = nullptr; // new navigation component
     FileWatcher* m_fileWatcher = nullptr; // monitors source files for deletion

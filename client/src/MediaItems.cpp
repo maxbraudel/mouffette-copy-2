@@ -71,7 +71,12 @@ std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> 
     return s_resizeSnapCallback;
 }
 
-ResizableMediaBase::~ResizableMediaBase() = default;
+ResizableMediaBase::~ResizableMediaBase() {
+    // Clean up FileManager associations
+    if (!m_mediaId.isEmpty()) {
+        FileManager::instance().removeMediaAssociation(m_mediaId);
+    }
+}
 
 ResizableMediaBase::ResizableMediaBase(const QSize& baseSizePx, int visualSizePx, int selectionSizePx, const QString& filename)
 {
@@ -86,6 +91,16 @@ ResizableMediaBase::ResizableMediaBase(const QSize& baseSizePx, int visualSizePx
     // Generate a stable unique identifier at creation time (used to disambiguate duplicates)
     m_mediaId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     initializeOverlays();
+}
+
+void ResizableMediaBase::setSourcePath(const QString& p) {
+    m_sourcePath = p;
+    
+    // If we have a valid file path, register it with FileManager
+    if (!p.isEmpty()) {
+        m_fileId = FileManager::instance().getOrCreateFileId(p);
+        FileManager::instance().associateMediaWithFile(m_mediaId, m_fileId);
+    }
 }
 
 void ResizableMediaBase::setHeightOfMediaOverlaysPx(int px) { heightOfMediaOverlays = px; }

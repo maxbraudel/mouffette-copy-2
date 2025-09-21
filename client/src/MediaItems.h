@@ -23,6 +23,7 @@
 
 #include "OverlayPanels.h"
 #include "RoundedRectItem.h"
+#include "FileManager.h"
 
 class QMediaPlayer;
 class QAudioOutput;
@@ -35,10 +36,13 @@ public:
     ~ResizableMediaBase() override;
     explicit ResizableMediaBase(const QSize& baseSizePx, int visualSizePx, int selectionSizePx, const QString& filename = QString());
 
-    void setSourcePath(const QString& p) { m_sourcePath = p; }
+    void setSourcePath(const QString& p);
     QString sourcePath() const { return m_sourcePath; }
     // Stable unique identifier for this media item (persists across uploads)
     QString mediaId() const { return m_mediaId; }
+    // Shared file identifier (multiple media items can have same fileId)
+    QString fileId() const { return m_fileId; }
+    void setFileId(const QString& fileId) { m_fileId = fileId; }
     // Display name shown in overlays: filename if set, otherwise derived from sourcePath
     QString displayName() const;
     // Native media base size in pixels (unscaled)
@@ -108,6 +112,7 @@ protected:
     QString m_sourcePath;      // original path if any
     QString m_filename;
     QString m_mediaId; // persistent unique id for the canvas item
+    QString m_fileId;  // shared file id (multiple media can have same fileId)
     std::unique_ptr<OverlayPanel> m_topPanel;
     std::unique_ptr<OverlayPanel> m_bottomPanel;
     OverlayStyle m_overlayStyle;
