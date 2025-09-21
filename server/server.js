@@ -160,6 +160,9 @@ class MouffetteServer {
             case 'unload_media':
                 this.relayToTarget(clientId, message.targetClientId, message);
                 break;
+            case 'remove_file':
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
             // Progress/status notifications from target back to sender
             case 'upload_progress':
                 this.relayToSender(clientId, message.senderClientId, message);
