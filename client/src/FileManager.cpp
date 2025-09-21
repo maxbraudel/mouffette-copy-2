@@ -58,18 +58,25 @@ void FileManager::associateMediaWithFile(const QString& mediaId, const QString& 
 
 void FileManager::removeMediaAssociation(const QString& mediaId)
 {
+    qDebug() << "FileManager: Removing media association for" << mediaId;
+    
     if (!m_mediaIdToFileId.contains(mediaId)) {
+        qDebug() << "FileManager: Media ID" << mediaId << "not found in associations";
         return;
     }
     
     QString fileId = m_mediaIdToFileId[mediaId];
+    qDebug() << "FileManager: Media" << mediaId << "was associated with file" << fileId;
+    
     m_fileIdToMediaIds[fileId].removeAll(mediaId);
     m_mediaIdToFileId.remove(mediaId);
+    
+    qDebug() << "FileManager: File" << fileId << "now has" << m_fileIdToMediaIds[fileId].size() << "media associations";
     
     // Clean up file if no more media references it
     removeFileIfUnused(fileId);
     
-    qDebug() << "Removed media association for" << mediaId;
+    qDebug() << "FileManager: Removed media association for" << mediaId;
 }
 
 QString FileManager::getFileIdForMedia(const QString& mediaId) const
@@ -99,13 +106,25 @@ bool FileManager::hasFileId(const QString& fileId) const
 
 void FileManager::removeFileIfUnused(const QString& fileId)
 {
-    if (!m_fileIdToMediaIds.contains(fileId) || m_fileIdToMediaIds[fileId].isEmpty()) {
+    qDebug() << "FileManager: Checking if file" << fileId << "is unused";
+    
+    if (!m_fileIdToMediaIds.contains(fileId)) {
+        qDebug() << "FileManager: File" << fileId << "not found in media associations";
+        return;
+    }
+    
+    if (m_fileIdToMediaIds[fileId].isEmpty()) {
         QString filePath = m_fileIdToPath.value(fileId);
         QList<QString> clientsWithFile = m_fileIdToClients.value(fileId);
         
+        qDebug() << "FileManager: File" << fileId << "is unused, removing from" << clientsWithFile.size() << "clients";
+        
         // Notify that file should be removed from remote clients
         if (!clientsWithFile.isEmpty() && s_fileRemovalNotifier) {
+            qDebug() << "FileManager: Calling removal notifier for clients:" << clientsWithFile;
             s_fileRemovalNotifier(fileId, clientsWithFile);
+        } else {
+            qDebug() << "FileManager: No clients to notify or no notifier set";
         }
         
         // Clean up local tracking data
@@ -114,7 +133,9 @@ void FileManager::removeFileIfUnused(const QString& fileId)
         m_fileIdToMediaIds.remove(fileId);
         m_fileIdToClients.remove(fileId);
         
-        qDebug() << "Removed unused file ID:" << fileId << "from" << clientsWithFile.size() << "clients";
+        qDebug() << "FileManager: Removed unused file ID:" << fileId << "from" << clientsWithFile.size() << "clients";
+    } else {
+        qDebug() << "FileManager: File" << fileId << "still has" << m_fileIdToMediaIds[fileId].size() << "media associations, not removing";
     }
 }
 

@@ -483,8 +483,13 @@ MainWindow::MainWindow(QWidget* parent)
     
     // FileManager: configure callback to send file removal commands to remote clients
     FileManager::setFileRemovalNotifier([this](const QString& fileId, const QList<QString>& clientIds) {
-        if (!m_webSocketClient) return;
+        qDebug() << "MainWindow: FileManager requested removal of file" << fileId << "from clients:" << clientIds;
+        if (!m_webSocketClient) {
+            qWarning() << "MainWindow: No WebSocket client available for file removal";
+            return;
+        }
         for (const QString& clientId : clientIds) {
+            qDebug() << "MainWindow: Sending remove_file command for" << fileId << "to" << clientId;
             m_webSocketClient->sendRemoveFile(clientId, fileId);
         }
     });

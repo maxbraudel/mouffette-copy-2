@@ -74,6 +74,7 @@ std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> 
 ResizableMediaBase::~ResizableMediaBase() {
     // Clean up FileManager associations
     if (!m_mediaId.isEmpty()) {
+        qDebug() << "MediaItems: Destructing media" << m_mediaId << "with fileId" << m_fileId;
         FileManager::instance().removeMediaAssociation(m_mediaId);
     }
 }
