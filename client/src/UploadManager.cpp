@@ -344,7 +344,6 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             }
         } else {
             qDebug() << "UploadManager: Invalid remove_file parameters - senderClientId:" << senderClientId << "fileId:" << fileId;
-            }
         }
     }
 }
