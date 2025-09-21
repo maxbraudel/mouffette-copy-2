@@ -171,6 +171,12 @@ void UploadManager::onUploadProgress(const QString& uploadId, int percent, int f
 void UploadManager::onUploadFinished(const QString& uploadId) {
     if (uploadId != m_currentUploadId) return;
     if (m_cancelRequested) return;
+    
+    // Mark all uploaded files as available on the target client
+    for (const auto& f : m_outgoingFiles) {
+        FileManager::instance().markFileUploadedToClient(f.fileId, m_uploadTargetClientId);
+    }
+    
     m_uploadActive = true; // switch to active state
     m_uploadInProgress = false;
     emit uploadFinished();
@@ -284,5 +290,26 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             m_ws->notifyUnloadedToSender(m_incoming.senderId);
         }
         m_incoming = IncomingUploadSession();
+    } else if (type == "remove_file") {
+        QString senderClientId = message.value("senderClientId").toString();
+        QString fileId = message.value("fileId").toString();
+        
+        if (!senderClientId.isEmpty() && !fileId.isEmpty()) {
+            // Build file path based on sender ID and file ID
+            QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+            if (base.isEmpty()) base = QDir::homePath() + "/.cache";
+            QString filePath = base + "/Mouffette/Uploads/" + senderClientId + "/" + fileId;
+            
+            QFile file(filePath);
+            if (file.exists()) {
+                if (file.remove()) {
+                    qDebug() << "UploadManager: Successfully removed file:" << filePath;
+                } else {
+                    qWarning() << "UploadManager: Failed to remove file:" << filePath;
+                }
+            } else {
+                qDebug() << "UploadManager: File already removed or not found:" << filePath;
+            }
+        }
     }
 }

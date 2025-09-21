@@ -481,6 +481,14 @@ MainWindow::MainWindow(QWidget* parent)
     m_uploadManager->setWebSocketClient(m_webSocketClient);
     m_watchManager->setWebSocketClient(m_webSocketClient);
     
+    // FileManager: configure callback to send file removal commands to remote clients
+    FileManager::setFileRemovalNotifier([this](const QString& fileId, const QList<QString>& clientIds) {
+        if (!m_webSocketClient) return;
+        for (const QString& clientId : clientIds) {
+            m_webSocketClient->sendRemoveFile(clientId, fileId);
+        }
+    });
+    
     // FileWatcher: remove media items when their source files are deleted
     connect(m_fileWatcher, &FileWatcher::filesDeleted, this, [this](const QList<ResizableMediaBase*>& mediaItems) {
         if (!m_screenCanvas || !m_screenCanvas->scene()) return;

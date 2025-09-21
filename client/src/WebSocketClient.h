@@ -41,6 +41,7 @@ public:
     void sendUploadComplete(const QString& targetClientId, const QString& uploadId);
     void sendUploadAbort(const QString& targetClientId, const QString& uploadId, const QString& reason = QString());
     void sendUnloadMedia(const QString& targetClientId);
+    void sendRemoveFile(const QString& targetClientId, const QString& fileId);
     // Target -> Sender notifications
     void notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent, int filesCompleted, int totalFiles);
     void notifyUploadFinishedToSender(const QString& senderClientId, const QString& uploadId);

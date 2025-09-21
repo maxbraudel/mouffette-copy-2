@@ -38,6 +38,13 @@ public:
     
     // Remove file completely (when no more media references it)
     void removeFileIfUnused(const QString& fileId);
+    
+    // Track which clients have received which files
+    void markFileUploadedToClient(const QString& fileId, const QString& clientId);
+    QList<QString> getClientsWithFile(const QString& fileId) const;
+    
+    // Set callback for when file should be deleted from remote clients
+    static void setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds)> cb);
 
 private:
     FileManager() = default;
@@ -49,6 +56,9 @@ private:
     QHash<QString, QString> m_pathToFileId;        // filePath -> fileId
     QHash<QString, QList<QString>> m_fileIdToMediaIds; // fileId -> [mediaId1, mediaId2, ...]
     QHash<QString, QString> m_mediaIdToFileId;     // mediaId -> fileId
+    QHash<QString, QList<QString>> m_fileIdToClients; // fileId -> [clientId1, clientId2, ...]
+    
+    static std::function<void(const QString& fileId, const QList<QString>& clientIds)> s_fileRemovalNotifier;
 };
 
 #endif // FILEMANAGER_H

@@ -3,6 +3,9 @@
 #include <QFile>
 #include <QDebug>
 
+// Static member definition
+std::function<void(const QString& fileId, const QList<QString>& clientIds)> FileManager::s_fileRemovalNotifier;
+
 FileManager& FileManager::instance()
 {
     static FileManager instance;
@@ -98,12 +101,20 @@ void FileManager::removeFileIfUnused(const QString& fileId)
 {
     if (!m_fileIdToMediaIds.contains(fileId) || m_fileIdToMediaIds[fileId].isEmpty()) {
         QString filePath = m_fileIdToPath.value(fileId);
+        QList<QString> clientsWithFile = m_fileIdToClients.value(fileId);
         
+        // Notify that file should be removed from remote clients
+        if (!clientsWithFile.isEmpty() && s_fileRemovalNotifier) {
+            s_fileRemovalNotifier(fileId, clientsWithFile);
+        }
+        
+        // Clean up local tracking data
         m_fileIdToPath.remove(fileId);
         m_pathToFileId.remove(filePath);
         m_fileIdToMediaIds.remove(fileId);
+        m_fileIdToClients.remove(fileId);
         
-        qDebug() << "Removed unused file ID:" << fileId;
+        qDebug() << "Removed unused file ID:" << fileId << "from" << clientsWithFile.size() << "clients";
     }
 }
 
@@ -122,4 +133,25 @@ QString FileManager::generateFileId(const QString& filePath)
     
     QString result = hash.result().toHex().left(16); // Use first 16 chars of hash
     return "file_" + result;
+}
+
+void FileManager::markFileUploadedToClient(const QString& fileId, const QString& clientId)
+{
+    if (!m_fileIdToClients.contains(fileId)) {
+        m_fileIdToClients[fileId] = QList<QString>();
+    }
+    if (!m_fileIdToClients[fileId].contains(clientId)) {
+        m_fileIdToClients[fileId].append(clientId);
+        qDebug() << "Marked file" << fileId << "as uploaded to client" << clientId;
+    }
+}
+
+QList<QString> FileManager::getClientsWithFile(const QString& fileId) const
+{
+    return m_fileIdToClients.value(fileId);
+}
+
+void FileManager::setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds)> cb)
+{
+    s_fileRemovalNotifier = std::move(cb);
 }

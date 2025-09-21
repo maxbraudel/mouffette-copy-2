@@ -289,6 +289,17 @@ void WebSocketClient::sendUnloadMedia(const QString& targetClientId) {
     sendMessage(msg);
 }
 
+void WebSocketClient::sendRemoveFile(const QString& targetClientId, const QString& fileId) {
+    if (!isConnected()) return;
+    QJsonObject msg;
+    msg["type"] = "remove_file";
+    msg["targetClientId"] = targetClientId;
+    msg["fileId"] = fileId;
+    if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
+    qDebug() << "Sending remove_file command for fileId:" << fileId << "to client:" << targetClientId;
+    sendMessage(msg);
+}
+
 void WebSocketClient::notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent, int filesCompleted, int totalFiles) {
     if (!isConnected()) return;
     QJsonObject msg;
