@@ -40,6 +40,7 @@ double ResizableMediaBase::s_sceneGridUnit = 1.0; // default: 1 scene unit == 1 
 std::function<QPointF(const QPointF&, const QRectF&, bool)> ResizableMediaBase::s_screenSnapCallback;
 std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> ResizableMediaBase::s_resizeSnapCallback;
 std::function<void()> ResizableMediaBase::s_uploadChangedNotifier = nullptr;
+std::function<void(ResizableMediaBase*)> ResizableMediaBase::s_fileErrorNotifier = nullptr;
 
 QString ResizableMediaBase::displayName() const {
     if (!m_filename.isEmpty()) return m_filename;
@@ -626,6 +627,18 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
     });
     QObject::connect(m_player, &QMediaPlayer::durationChanged, m_player, [this](qint64 d){ m_durationMs = d; update(); });
     QObject::connect(m_player, &QMediaPlayer::positionChanged, m_player, [this](qint64 p){ if (m_holdLastFrameAtEnd) return; m_positionMs = p; });
+    
+    // Connect to error signals to detect missing/corrupted source files
+    QObject::connect(m_player, &QMediaPlayer::errorOccurred, m_player, [this](QMediaPlayer::Error error, const QString& errorString) {
+        qDebug() << "ResizableVideoItem: Media player error occurred for" << sourcePath() 
+                 << "- Error:" << error << "Message:" << errorString;
+        
+        // Check if the error indicates the file is missing or corrupted
+        if (error == QMediaPlayer::ResourceError || error == QMediaPlayer::FormatError) {
+            qDebug() << "ResizableVideoItem: File appears to be missing or corrupted, requesting removal";
+            notifyFileError();
+        }
+    });
 }
 
 ResizableVideoItem::~ResizableVideoItem() {

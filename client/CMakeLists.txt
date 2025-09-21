@@ -35,6 +35,7 @@ set(SOURCES
     src/MediaItems.cpp
     src/ScreenCanvas.cpp
     src/MediaSettingsPanel.cpp
+    src/FileWatcher.cpp
     src/Theme.cpp
     src/AppColors.cpp
 )
@@ -64,6 +65,7 @@ set(HEADERS
     src/SpinnerWidget.h
     src/ScreenCanvas.h
     src/MediaSettingsPanel.h
+    src/FileWatcher.h
     src/Theme.h
     src/AppColors.h
 )

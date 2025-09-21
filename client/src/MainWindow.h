@@ -55,6 +55,7 @@ class UploadManager; // new component for upload/unload feature
 class WatchManager;  // new component for watch/unwatch feature
 class ScreenNavigationManager; // manages page switching & loader UX
 class ResponsiveLayoutManager; // manages responsive layout behavior
+class FileWatcher; // monitors source files and removes media when files are deleted
 // using QStackedWidget for canvas container switching
 class QFrame; // forward declare for separators in remote info container
 
@@ -280,6 +281,7 @@ private:
     QHash<QString, ResizableMediaBase*> m_itemByFileId;
     WatchManager* m_watchManager = nullptr;   // extracted watch logic
     ScreenNavigationManager* m_navigationManager = nullptr; // new navigation component
+    FileWatcher* m_fileWatcher = nullptr; // monitors source files for deletion
     // Canvas reveal state: ensure fade-in/recenter happen only once per selected client
     bool m_canvasRevealedForCurrentClient = false;
 

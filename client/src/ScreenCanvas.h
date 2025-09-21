@@ -71,6 +71,13 @@ public:
     // Z-order management for media items (public interface)
     void moveMediaUp(QGraphicsItem* item);
     void moveMediaDown(QGraphicsItem* item);
+    
+    // Media list overlay management
+    void refreshInfoOverlay();
+
+signals:
+    // Emitted when a new media item is added to the canvas
+    void mediaItemAdded(ResizableMediaBase* mediaItem);
 
 protected:
     bool event(QEvent* event) override;
@@ -113,7 +120,6 @@ private:
     // Global top-right info overlay (lists media files)
     void initInfoOverlay();
     void scheduleInfoOverlayRefresh();
-    void refreshInfoOverlay();
     void layoutInfoOverlay();
     void maybeRefreshInfoOverlayOnSceneChanged();
     void updateInfoOverlayGeometryForViewport(); // fast path: recalc height/scroll cap on resize

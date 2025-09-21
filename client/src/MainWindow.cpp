@@ -4,6 +4,7 @@
 #include "ScreenNavigationManager.h"
 #include "UploadManager.h"
 #include "WatchManager.h"
+#include "FileWatcher.h"
 #include "SpinnerWidget.h"
 #include "ScreenCanvas.h"
 #include "MediaSettingsPanel.h"
@@ -418,6 +419,7 @@ MainWindow::MainWindow(QWidget* parent)
       m_ignoreSelectionChange(false),
       m_uploadManager(new UploadManager(this)),
       m_watchManager(new WatchManager(this)),
+      m_fileWatcher(new FileWatcher(this)),
       m_navigationManager(nullptr),
       m_responsiveLayoutManager(new ResponsiveLayoutManager(this))
 {
@@ -477,6 +479,82 @@ MainWindow::MainWindow(QWidget* parent)
     // Managers wiring
     m_uploadManager->setWebSocketClient(m_webSocketClient);
     m_watchManager->setWebSocketClient(m_webSocketClient);
+    
+    // FileWatcher: remove media items when their source files are deleted
+    connect(m_fileWatcher, &FileWatcher::filesDeleted, this, [this](const QList<ResizableMediaBase*>& mediaItems) {
+        if (!m_screenCanvas || !m_screenCanvas->scene()) return;
+        
+        qDebug() << "MainWindow: Removing" << mediaItems.size() << "media items due to deleted source files";
+        
+        for (ResizableMediaBase* mediaItem : mediaItems) {
+            // Safety check: ensure the mediaItem pointer is valid
+            if (!mediaItem) {
+                qDebug() << "MainWindow: Skipping null mediaItem in filesDeleted callback";
+                continue;
+            }
+            
+            // Additional safety: check if mediaId is valid
+            QString mediaId = mediaItem->mediaId();
+            if (mediaId.isEmpty() || mediaId.contains('\0')) {
+                qDebug() << "MainWindow: Skipping mediaItem with invalid mediaId:" << mediaId;
+                continue;
+            }
+            
+            // Stop watching this item
+            m_fileWatcher->unwatchMediaItem(mediaItem);
+            
+            // Use the same safe deletion pattern as the delete button
+            // Defer deletion to the event loop to avoid re-entrancy issues
+            QTimer::singleShot(0, [itemPtr=mediaItem]() {
+                if (itemPtr) { // Extra safety check in lambda
+                    itemPtr->prepareForDeletion();
+                    if (itemPtr->scene()) itemPtr->scene()->removeItem(itemPtr);
+                    delete itemPtr;
+                }
+            });
+        }
+        
+        // Refresh the media list overlay if it's visible (also deferred)
+        if (m_screenCanvas) {
+            QTimer::singleShot(0, [this]() {
+                if (m_screenCanvas) {
+                    m_screenCanvas->refreshInfoOverlay();
+                }
+            });
+        }
+    });
+    
+    // File error callback: remove media items when playback detects missing/corrupted files
+    ResizableMediaBase::setFileErrorNotifier([this](ResizableMediaBase* mediaItem) {
+        if (!m_screenCanvas || !m_screenCanvas->scene() || !mediaItem) return;
+        
+        // Additional safety: check if mediaId is valid
+        QString mediaId = mediaItem->mediaId();
+        if (mediaId.isEmpty() || mediaId.contains('\0')) {
+            qDebug() << "MainWindow: Skipping mediaItem with invalid mediaId in file error callback:" << mediaId;
+            return;
+        }
+        
+        qDebug() << "MainWindow: Removing media item due to file error:" << mediaItem->sourcePath();
+        
+        // Stop watching this item
+        m_fileWatcher->unwatchMediaItem(mediaItem);
+        
+        // Use the same safe deletion pattern as the delete button
+        // Defer deletion to the event loop to avoid re-entrancy issues
+        QTimer::singleShot(0, [itemPtr=mediaItem]() {
+            itemPtr->prepareForDeletion();
+            if (itemPtr->scene()) itemPtr->scene()->removeItem(itemPtr);
+            delete itemPtr;
+        });
+        
+        // Refresh the media list overlay (also deferred)
+        QTimer::singleShot(0, [this]() {
+            if (m_screenCanvas) {
+                m_screenCanvas->refreshInfoOverlay();
+            }
+        });
+    });
 
     // UI refresh when upload state changes
     auto applyUploadButtonStyle = [this]() {
@@ -1208,7 +1286,10 @@ void MainWindow::onUploadButtonClicked() {
     if (m_uploadManager->isUploading()) { m_uploadManager->requestCancel(); return; }
     if (m_uploadManager->hasActiveUpload()) { m_uploadManager->requestUnload(); return; }
     // Gather media items present on the scene (using unique mediaId for each item)
+    // Also check for missing files and remove associated media items
     QVector<UploadFileInfo> files;
+    QList<ResizableMediaBase*> mediaItemsToRemove;
+    
     if (m_screenCanvas && m_screenCanvas->scene()) {
         const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
         for (QGraphicsItem* it : allItems) {
@@ -1216,8 +1297,15 @@ void MainWindow::onUploadButtonClicked() {
             if (!media) continue;
             const QString path = media->sourcePath();
             if (path.isEmpty()) continue;
+            
             QFileInfo fi(path);
-            if (!fi.exists() || !fi.isFile()) continue;
+            if (!fi.exists() || !fi.isFile()) {
+                // File no longer exists, mark media item for removal
+                mediaItemsToRemove.append(media);
+                qDebug() << "MainWindow: File no longer exists during upload check, will remove media:" << path;
+                continue;
+            }
+            
             UploadFileInfo info; 
             info.fileId = QUuid::createUuid().toString(QUuid::WithoutBraces); 
             info.mediaId = media->mediaId(); // Use the unique mediaId from the media item
@@ -1228,6 +1316,24 @@ void MainWindow::onUploadButtonClicked() {
             // Map fileId to both mediaId and media item pointer for efficient lookups
             m_mediaIdByFileId.insert(info.fileId, info.mediaId);
             m_itemByFileId.insert(info.fileId, media);
+        }
+        
+        // Remove media items with missing files
+        for (ResizableMediaBase* mediaItem : mediaItemsToRemove) {
+            m_fileWatcher->unwatchMediaItem(mediaItem);
+            
+            // Use the same safe deletion pattern as the delete button
+            // Defer deletion to the event loop to avoid re-entrancy issues
+            QTimer::singleShot(0, [itemPtr=mediaItem]() {
+                itemPtr->prepareForDeletion();
+                if (itemPtr->scene()) itemPtr->scene()->removeItem(itemPtr);
+                delete itemPtr;
+            });
+        }
+        
+        // Refresh overlay if items were removed
+        if (!mediaItemsToRemove.isEmpty()) {
+            m_screenCanvas->refreshInfoOverlay();
         }
     }
     if (files.isEmpty()) {
@@ -1594,7 +1700,7 @@ void MainWindow::setupUI() {
     // using gDynamicBox configuration for consistent sizing
 
     // Back button (left-aligned, initially hidden)
-    m_backButton = new QPushButton("← Back to Client List");
+    m_backButton = new QPushButton("← Go Back");
     applyPillBtn(m_backButton);
     // Ensure button is sized properly for its text content
     m_backButton->adjustSize();
@@ -1904,6 +2010,16 @@ void MainWindow::createScreenViewPage() {
     canvasLayout->setContentsMargins(0,0,0,0);
     canvasLayout->setSpacing(0);
     m_screenCanvas = new ScreenCanvas();
+    
+    // Connect ScreenCanvas signals for file watching
+    connect(m_screenCanvas, &ScreenCanvas::mediaItemAdded, this, [this](ResizableMediaBase* mediaItem) {
+        // Add the new media item to file watching
+        if (m_fileWatcher && mediaItem && !mediaItem->sourcePath().isEmpty()) {
+            m_fileWatcher->watchMediaItem(mediaItem);
+            qDebug() << "MainWindow: Added media item to file watcher:" << mediaItem->sourcePath();
+        }
+    });
+    
     // Remove minimum height to allow flexible window resizing
     // Ensure the viewport background matches and is rounded
     if (m_screenCanvas->viewport()) {

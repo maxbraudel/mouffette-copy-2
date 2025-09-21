@@ -51,6 +51,10 @@ public:
     void setUploadUploading(int progress) { m_uploadState = UploadState::Uploading; m_uploadProgress = std::clamp(progress, 0, 100); notifyUploadChanged(); }
     void setUploadUploaded() { m_uploadState = UploadState::Uploaded; m_uploadProgress = 100; notifyUploadChanged(); }
     static void setUploadChangedNotifier(std::function<void()> cb) { s_uploadChangedNotifier = std::move(cb); }
+    
+    // File error callback: called when a media item detects its source file is missing/corrupted
+    static void setFileErrorNotifier(std::function<void(ResizableMediaBase*)> cb) { s_fileErrorNotifier = std::move(cb); }
+    void notifyFileError() { if (s_fileErrorNotifier) s_fileErrorNotifier(this); }
 
     static void setHeightOfMediaOverlaysPx(int px); // global override height (px) for overlays
     static int  getHeightOfMediaOverlaysPx();
@@ -138,6 +142,7 @@ protected:
 private:
     void notifyUploadChanged() { if (s_uploadChangedNotifier) s_uploadChangedNotifier(); }
     static std::function<void()> s_uploadChangedNotifier;
+    static std::function<void(ResizableMediaBase*)> s_fileErrorNotifier;
     UploadState m_uploadState = UploadState::NotUploaded;
     int m_uploadProgress = 0;
     void relayoutIfNeeded(); // helper to keep overlays positioned (unused externally)

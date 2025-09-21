@@ -1271,6 +1271,7 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                     assignNextZValue(v);
                     m_scene->addItem(v);
                     v->setSelected(true);
+                    emit mediaItemAdded(v);
                 } else {
                     QPixmap pm(localPath);
                     if (!pm.isNull()) {
@@ -1281,6 +1282,7 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                         assignNextZValue(p);
                         m_scene->addItem(p);
                         p->setSelected(true);
+                        emit mediaItemAdded(p);
                     }
                 }
             }
@@ -1297,6 +1299,7 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                 assignNextZValue(p);
                 m_scene->addItem(p);
                 p->setSelected(true);
+                emit mediaItemAdded(p);
             }
         }
     }
