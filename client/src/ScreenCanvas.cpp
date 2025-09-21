@@ -47,7 +47,8 @@
 #include <QScrollBar>
 
 // Configuration constants
-static const int gMediaListItemSpacing = 1; // Spacing between media list items (name, status, details)
+static const int gMediaListItemSpacing = 3; // Spacing between media list items (name, status, details)
+static const int gScrollbarAutoHideDelayMs = 500; // Time in milliseconds before scrollbar auto-hides after scroll inactivity
 
 // Helper: relayout overlays for all media items so absolute panels (settings) stay pinned
 namespace {
@@ -156,6 +157,18 @@ void ScreenCanvas::initInfoOverlay() {
             m_overlayVScroll->setAutoFillBackground(false);
             m_overlayVScroll->setAttribute(Qt::WA_TranslucentBackground, true);
             m_overlayVScroll->setCursor(Qt::ArrowCursor);
+            
+            // Create timer for auto-hiding scrollbar after inactivity
+            if (!m_scrollbarHideTimer) {
+                m_scrollbarHideTimer = new QTimer(this);
+                m_scrollbarHideTimer->setSingleShot(true);
+                m_scrollbarHideTimer->setInterval(gScrollbarAutoHideDelayMs);
+                connect(m_scrollbarHideTimer, &QTimer::timeout, this, [this]() {
+                    if (m_overlayVScroll) {
+                        m_overlayVScroll->hide();
+                    }
+                });
+            }
             m_overlayVScroll->setStyleSheet(
                 "QScrollBar#overlayVScroll { background: transparent; border: none; width: 8px; margin: 0px; }"
                 " QScrollBar#overlayVScroll::groove:vertical { background: transparent; border: none; margin: 0px; }"
@@ -172,7 +185,23 @@ void ScreenCanvas::initInfoOverlay() {
                 if (m_overlayVScroll) m_overlayVScroll->setRange(min, max);
                 updateOverlayVScrollVisibilityAndGeometry();
             });
-            connect(src, &QScrollBar::valueChanged, this, [this](int v){ if (m_overlayVScroll) m_overlayVScroll->setValue(v); });
+            connect(src, &QScrollBar::valueChanged, this, [this](int v){ 
+                if (m_overlayVScroll) m_overlayVScroll->setValue(v); 
+            });
+            
+            // Show scrollbar and restart hide timer on any scroll activity
+            auto showScrollbarAndRestartTimer = [this]() {
+                if (m_overlayVScroll && m_scrollbarHideTimer) {
+                    m_overlayVScroll->show();
+                    m_scrollbarHideTimer->start(); // restart the 1.5s timer
+                }
+            };
+            
+            // Connect to all scroll activity events
+            connect(m_overlayVScroll, &QScrollBar::valueChanged, this, showScrollbarAndRestartTimer);
+            connect(src, &QScrollBar::valueChanged, this, showScrollbarAndRestartTimer);
+            connect(m_overlayVScroll, &QScrollBar::sliderPressed, this, showScrollbarAndRestartTimer);
+            connect(m_overlayVScroll, &QScrollBar::sliderMoved, this, showScrollbarAndRestartTimer);
             // Initialize current values immediately
             m_overlayVScroll->setRange(src->minimum(), src->maximum());
             m_overlayVScroll->setPageStep(src->pageStep());
@@ -466,7 +495,12 @@ void ScreenCanvas::updateOverlayVScrollVisibilityAndGeometry() {
     m_overlayVScroll->setPageStep(src->pageStep());
     m_overlayVScroll->setValue(src->value());
     m_overlayVScroll->setGeometry(x, y, sbWidth, h);
-    m_overlayVScroll->show();
+    
+    // Only show if not using auto-hide, or if timer is currently active
+    // (this prevents forcing visibility when timer should hide it)
+    if (!m_scrollbarHideTimer || m_scrollbarHideTimer->isActive()) {
+        m_overlayVScroll->show();
+    }
 }
 
 ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
@@ -1037,6 +1071,12 @@ void ScreenCanvas::wheelEvent(QWheelEvent* event) {
                     event->source()
                 );
                 QCoreApplication::sendEvent(dst, &forwarded);
+                
+                // Show scrollbar and restart hide timer on wheel scroll over overlay
+                if (m_overlayVScroll && m_scrollbarHideTimer) {
+                    m_overlayVScroll->show();
+                    m_scrollbarHideTimer->start();
+                }
             }
             event->accept();
             return; // Block canvas zoom/pan when wheel is over the overlay

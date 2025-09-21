@@ -190,6 +190,7 @@ private:
     QWidget* m_contentWidget = nullptr;    // content container (with margins)
     QScrollArea* m_contentScroll = nullptr; // scroll area for content when overlay is too tall
     QScrollBar* m_overlayVScroll = nullptr;  // custom overlay vertical scrollbar (floating)
+    QTimer* m_scrollbarHideTimer = nullptr; // timer to auto-hide scrollbar after inactivity
     QVBoxLayout* m_contentLayout = nullptr; // content layout (for media items)
     QWidget* m_overlayHeaderWidget = nullptr; // container for overlay header row (holds upload button)
     QPushButton* m_uploadButton = nullptr; // upload button in media list overlay
