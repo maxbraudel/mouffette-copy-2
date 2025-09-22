@@ -37,13 +37,16 @@ void MediaSettingsPanel::buildUi() {
     m_widget->setAutoFillBackground(false);
 
     m_layout = new QVBoxLayout(m_widget);
-    m_layout->setContentsMargins(20, 16, 20, 16);
-    m_layout->setSpacing(10);
-    // Prevent layout from stretching when items are hidden
-    m_layout->setSizeConstraint(QLayout::SetMinAndMaxSize);
+    m_layout->setContentsMargins(20, 30, 20, 35); // Extra bottom margin to prevent clipping
+    m_layout->setSpacing(12); // Slightly more spacing
+    // Use NoConstraint to let the layout expand freely
+    m_layout->setSizeConstraint(QLayout::SetNoConstraint);
     
-    // Set a minimum width for the settings panel to make it wider
-    m_widget->setMinimumWidth(380);
+    // Start with no size constraints - let updatePosition handle width constraints
+    m_widget->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+    m_widget->setMinimumSize(0, 0);
+    // Set size policy for natural expansion
+    m_widget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::MinimumExpanding);
 
     m_title = new QLabel("Scene options");
     QFont tf = m_title->font();
@@ -70,33 +73,64 @@ void MediaSettingsPanel::buildUi() {
 
     // 0) Display automatically + Display delay as separate checkboxes
     {
-        // Display automatically checkbox with proper alignment
+        // Display automatically checkbox with separate label below
         auto* autoRow = new QWidget(m_widget);
-        auto* autoLayout = new QHBoxLayout(autoRow);
+        auto* autoLayout = new QVBoxLayout(autoRow); // Use vertical layout for checkbox + label
         autoLayout->setContentsMargins(0, 0, 0, 0);
-        autoLayout->setSpacing(0);
-        m_displayAfterCheck = new QCheckBox("Display automatically more text here to test text breaking feature", autoRow);
-        m_displayAfterCheck->setStyleSheet("color: white;");
+        autoLayout->setSpacing(4); // Small spacing between checkbox and label
+        
+        m_displayAfterCheck = new QCheckBox(autoRow); // Empty checkbox text
         m_displayAfterCheck->installEventFilter(this);
+        
+        auto* displayLabel = new QLabel("Display automatically with very Display automatically with veryDisplay automatically with veryDisplay automatically with veryDisplay automatically with veryDisplay automatically with veryDisplay automatically with veryDisplay automatically with veryDisplay automatically with very ", autoRow);
+        displayLabel->setStyleSheet("color: white; padding: 4px 0px; line-height: 1.3em;"); // Better line height for readability
+        displayLabel->setWordWrap(true); // Enable word wrapping on the label
+        displayLabel->setAlignment(Qt::AlignTop | Qt::AlignLeft); // Ensure proper alignment
+        // Critical: Use Preferred for both width and height to allow natural sizing
+        displayLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+        // Remove fixed height constraints to allow dynamic height based on content
+        displayLabel->setMinimumHeight(0);
+        displayLabel->setMaximumHeight(QWIDGETSIZE_MAX);
+        displayLabel->setContentsMargins(0, 2, 0, 2); // Additional margins inside the label
+        
         autoLayout->addWidget(m_displayAfterCheck);
-        autoLayout->addStretch();
+        autoLayout->addWidget(displayLabel);
+        
         m_layout->addWidget(autoRow);
         
         // Display delay checkbox with input (separate checkbox)
         auto* delayRow = new QWidget(m_widget);
-        auto* h = new QHBoxLayout(delayRow);
+        auto* delayMainLayout = new QVBoxLayout(delayRow);
+        delayMainLayout->setContentsMargins(0, 0, 0, 0);
+        delayMainLayout->setSpacing(4);
+        
+        // Checkbox with no text
+        auto* delayCheck = new QCheckBox(delayRow);
+        delayCheck->installEventFilter(this);
+        
+        // Label + input box layout
+        auto* delayInputRow = new QWidget(delayRow);
+        auto* h = new QHBoxLayout(delayInputRow);
         h->setContentsMargins(0, 0, 0, 0);
         h->setSpacing(0);
-        auto* delayCheck = new QCheckBox("Display delay: ", delayRow);
-        delayCheck->setStyleSheet("color: white;");
-        delayCheck->installEventFilter(this);
+        
+        auto* delayLabel = new QLabel("Display delay:", delayInputRow);
+        delayLabel->setStyleSheet("color: white;");
+        delayLabel->setWordWrap(true);
+        delayLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred); // Allow natural sizing
+        
         m_displayAfterBox = makeValueBox();
-        auto* suffix = new QLabel(" seconds", delayRow);
+        auto* suffix = new QLabel(" seconds", delayInputRow);
         suffix->setStyleSheet("color: white;");
-        h->addWidget(delayCheck);
+        
+        h->addWidget(delayLabel);
         h->addWidget(m_displayAfterBox);
         h->addWidget(suffix);
         h->addStretch();
+        
+        delayMainLayout->addWidget(delayCheck);
+        delayMainLayout->addWidget(delayInputRow);
+        
         m_layout->addWidget(delayRow);
     }
 
@@ -107,111 +141,208 @@ void MediaSettingsPanel::buildUi() {
         vLayout->setContentsMargins(0, 0, 0, 0);
         vLayout->setSpacing(5);
         
-        // Play automatically checkbox
+        // Play automatically checkbox with separate label
         auto* autoRow = new QWidget(m_autoPlayRow);
-        auto* autoLayout = new QHBoxLayout(autoRow);
+        auto* autoLayout = new QVBoxLayout(autoRow);
         autoLayout->setContentsMargins(0, 0, 0, 0);
-        autoLayout->setSpacing(0);
-        m_autoPlayCheck = new QCheckBox("Play automatically", autoRow);
-        m_autoPlayCheck->setStyleSheet("color: white;");
+        autoLayout->setSpacing(4);
+        
+        m_autoPlayCheck = new QCheckBox(autoRow); // Empty checkbox text
         m_autoPlayCheck->installEventFilter(this);
+        
+        auto* playLabel = new QLabel("Play automatically", autoRow);
+        playLabel->setStyleSheet("color: white;");
+        playLabel->setWordWrap(true);
+        playLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred); // Allow natural sizing
+        
         autoLayout->addWidget(m_autoPlayCheck);
-        autoLayout->addStretch();
+        autoLayout->addWidget(playLabel);
+        
         vLayout->addWidget(autoRow);
         
         // Play delay checkbox with input
         auto* delayRow = new QWidget(m_autoPlayRow);
-        auto* h = new QHBoxLayout(delayRow);
+        auto* delayMainLayout = new QVBoxLayout(delayRow);
+        delayMainLayout->setContentsMargins(0, 0, 0, 0);
+        delayMainLayout->setSpacing(4);
+        
+        // Checkbox with no text
+        m_playDelayCheck = new QCheckBox(delayRow);
+        m_playDelayCheck->installEventFilter(this);
+        
+        // Label + input box layout
+        auto* delayInputRow = new QWidget(delayRow);
+        auto* h = new QHBoxLayout(delayInputRow);
         h->setContentsMargins(0, 0, 0, 0);
         h->setSpacing(0);
-        m_playDelayCheck = new QCheckBox("Play delay: ", delayRow);
-        m_playDelayCheck->setStyleSheet("color: white;");
-        m_playDelayCheck->installEventFilter(this);
+        
+        auto* playDelayLabel = new QLabel("Play delay:", delayInputRow);
+        playDelayLabel->setStyleSheet("color: white;");
+        playDelayLabel->setWordWrap(true);
+        playDelayLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred); // Allow natural sizing
+        
         m_autoPlayBox = makeValueBox();
-        auto* suffix = new QLabel(" seconds", delayRow);
+        auto* suffix = new QLabel(" seconds", delayInputRow);
         suffix->setStyleSheet("color: white;");
-        h->addWidget(m_playDelayCheck);
+        
+        h->addWidget(playDelayLabel);
         h->addWidget(m_autoPlayBox);
         h->addWidget(suffix);
         h->addStretch();
+        
+        delayMainLayout->addWidget(m_playDelayCheck);
+        delayMainLayout->addWidget(delayInputRow);
+        
         vLayout->addWidget(delayRow);
         
         m_layout->addWidget(m_autoPlayRow);
     }
 
-    // 2) Repeat (video only) - keeping original single checkbox format
+    // 2) Repeat (video only) - using separate checkbox and label
     {
         m_repeatRow = new QWidget(m_widget);
-        auto* h = new QHBoxLayout(m_repeatRow);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
-        m_repeatCheck = new QCheckBox("Repeat ", m_repeatRow);
-        m_repeatCheck->setStyleSheet("color: white;");
+        auto* mainLayout = new QVBoxLayout(m_repeatRow);
+        mainLayout->setContentsMargins(0, 0, 0, 0);
+        mainLayout->setSpacing(4);
+        
+        // Checkbox with no text
+        m_repeatCheck = new QCheckBox(m_repeatRow);
         m_repeatCheck->installEventFilter(this);
+        
+        // Label + input box layout
+        auto* inputRow = new QWidget(m_repeatRow);
+        auto* h = new QHBoxLayout(inputRow);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->setSpacing(0);
+        
+        auto* repeatLabel = new QLabel("Repeat", inputRow);
+        repeatLabel->setStyleSheet("color: white;");
+        repeatLabel->setWordWrap(true);
+        repeatLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred); // Allow natural sizing
+        
         m_repeatBox = makeValueBox();
-        auto* suffix = new QLabel(" times", m_repeatRow);
+        auto* suffix = new QLabel(" times", inputRow);
         suffix->setStyleSheet("color: white;");
-        h->addWidget(m_repeatCheck);
+        
+        h->addWidget(repeatLabel);
         h->addWidget(m_repeatBox);
         h->addWidget(suffix);
         h->addStretch();
+        
+        mainLayout->addWidget(m_repeatCheck);
+        mainLayout->addWidget(inputRow);
+        
         m_layout->addWidget(m_repeatRow);
     }
 
-    // 3) Fade in with checkbox format
+    // 3) Fade in with separate checkbox and label
     {
         auto* row = new QWidget(m_widget);
-        auto* h = new QHBoxLayout(row);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
-        m_fadeInCheck = new QCheckBox("Fade in: ", row);
-        m_fadeInCheck->setStyleSheet("color: white;");
+        auto* mainLayout = new QVBoxLayout(row);
+        mainLayout->setContentsMargins(0, 0, 0, 0);
+        mainLayout->setSpacing(4);
+        
+        // Checkbox with no text
+        m_fadeInCheck = new QCheckBox(row);
         m_fadeInCheck->installEventFilter(this);
+        
+        // Label + input box layout
+        auto* inputRow = new QWidget(row);
+        auto* h = new QHBoxLayout(inputRow);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->setSpacing(0);
+        
+        auto* fadeInLabel = new QLabel("Fade in:", inputRow);
+        fadeInLabel->setStyleSheet("color: white;");
+        fadeInLabel->setWordWrap(true);
+        fadeInLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred); // Allow natural sizing
+        
         m_fadeInBox = makeValueBox();
-        auto* suffix = new QLabel(" seconds", row);
+        auto* suffix = new QLabel(" seconds", inputRow);
         suffix->setStyleSheet("color: white;");
-        h->addWidget(m_fadeInCheck);
+        
+        h->addWidget(fadeInLabel);
         h->addWidget(m_fadeInBox);
         h->addWidget(suffix);
         h->addStretch();
+        
+        mainLayout->addWidget(m_fadeInCheck);
+        mainLayout->addWidget(inputRow);
+        
         m_layout->addWidget(row);
     }
 
-    // 4) Fade out with checkbox format
+    // 4) Fade out with separate checkbox and label
     {
         auto* row = new QWidget(m_widget);
-        auto* h = new QHBoxLayout(row);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
-        m_fadeOutCheck = new QCheckBox("Fade out: ", row);
-        m_fadeOutCheck->setStyleSheet("color: white;");
+        auto* mainLayout = new QVBoxLayout(row);
+        mainLayout->setContentsMargins(0, 0, 0, 0);
+        mainLayout->setSpacing(4);
+        
+        // Checkbox with no text
+        m_fadeOutCheck = new QCheckBox(row);
         m_fadeOutCheck->installEventFilter(this);
+        
+        // Label + input box layout
+        auto* inputRow = new QWidget(row);
+        auto* h = new QHBoxLayout(inputRow);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->setSpacing(0);
+        
+        auto* fadeOutLabel = new QLabel("Fade out:", inputRow);
+        fadeOutLabel->setStyleSheet("color: white;");
+        fadeOutLabel->setWordWrap(true);
+        fadeOutLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred); // Allow natural sizing
+        
         m_fadeOutBox = makeValueBox();
-        auto* suffix = new QLabel(" seconds", row);
+        auto* suffix = new QLabel(" seconds", inputRow);
         suffix->setStyleSheet("color: white;");
-        h->addWidget(m_fadeOutCheck);
+        
+        h->addWidget(fadeOutLabel);
         h->addWidget(m_fadeOutBox);
         h->addWidget(suffix);
         h->addStretch();
+        
+        mainLayout->addWidget(m_fadeOutCheck);
+        mainLayout->addWidget(inputRow);
+        
         m_layout->addWidget(row);
     }
 
-    // 5) Opacity with checkbox format
+    // 5) Opacity with separate checkbox and label
     {
         auto* row = new QWidget(m_widget);
-        auto* h = new QHBoxLayout(row);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
-        m_opacityCheck = new QCheckBox("Opacity: ", row);
-        m_opacityCheck->setStyleSheet("color: white;");
+        auto* mainLayout = new QVBoxLayout(row);
+        mainLayout->setContentsMargins(0, 0, 0, 0);
+        mainLayout->setSpacing(4);
+        
+        // Checkbox with no text
+        m_opacityCheck = new QCheckBox(row);
         m_opacityCheck->installEventFilter(this);
+        
+        // Label + input box layout
+        auto* inputRow = new QWidget(row);
+        auto* h = new QHBoxLayout(inputRow);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->setSpacing(0);
+        
+        auto* opacityLabel = new QLabel("Opacity:", inputRow);
+        opacityLabel->setStyleSheet("color: white;");
+        opacityLabel->setWordWrap(true);
+        opacityLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred); // Allow natural sizing
+        
         m_opacityBox = makeValueBox(QStringLiteral("100")); // Default to 100%
-        auto* suffix = new QLabel("%", row);
+        auto* suffix = new QLabel("%", inputRow);
         suffix->setStyleSheet("color: white;");
-        h->addWidget(m_opacityCheck);
+        
+        h->addWidget(opacityLabel);
         h->addWidget(m_opacityBox);
         h->addWidget(suffix);
         h->addStretch();
+        
+        mainLayout->addWidget(m_opacityCheck);
+        mainLayout->addWidget(inputRow);
+        
         m_layout->addWidget(row);
     }
 
@@ -230,15 +361,26 @@ void MediaSettingsPanel::buildUi() {
     m_proxy->setOpacity(1.0);
     // Ignore view scaling (keep absolute pixel size)
     m_proxy->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    // Prevent clipping of content
+    m_proxy->setFlag(QGraphicsItem::ItemClipsToShape, false);
+    m_proxy->setFlag(QGraphicsItem::ItemClipsChildrenToShape, false);
     // Ensure the panel receives mouse events and is treated as an overlay by the canvas
     m_proxy->setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton | Qt::MiddleButton);
     m_proxy->setAcceptHoverEvents(true);
     m_proxy->setData(0, QStringLiteral("overlay"));
+    
+    // Remove any size constraints from proxy - let it follow widget size naturally
+    m_proxy->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+    m_proxy->setMinimumSize(0, 0);
+    
     // Also make underlying widget track mouse (not strictly required for click blocking)
     m_widget->setMouseTracking(true);
     
     // Install event filter on the main widget to catch clicks elsewhere
     m_widget->installEventFilter(this);
+    
+    // Initial geometry update to ensure proper sizing
+    updatePanelGeometry();
 }
 
 void MediaSettingsPanel::ensureInScene(QGraphicsScene* scene) {
@@ -276,41 +418,46 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
         clearActiveBox();
     }
     
-    // Force layout update to recalculate size
-    if (m_widget && m_layout) {
-        // Force layout to recalculate
-        m_layout->invalidate();
-        m_layout->activate();
-        
-        // Update widget geometry
-        m_widget->updateGeometry();
-        m_widget->adjustSize();
-        
-        // Update proxy widget size to match widget's preferred size
-        if (m_proxy) {
-            QSize preferredSize = m_widget->sizeHint();
-            m_proxy->resize(preferredSize);
-            
-            // Update background rect to match proxy size
-            if (m_bgRect) {
-                m_bgRect->setRect(0, 0, preferredSize.width(), preferredSize.height());
-            }
-        }
-    }
+    // Force panel geometry update to recalculate size
+    updatePanelGeometry();
 }
 
 void MediaSettingsPanel::updatePosition(QGraphicsView* view) {
     if (!view || !m_proxy) return;
+    
     const int margin = 16;
-    // Position at left edge of viewport, vertically near top with margin
+    
+    // Calculate maximum allowed width (50% of viewport)
+    const int maxOverlayW = (view->viewport()->width() - margin*2) / 2;
+    
+    // Always set width constraints - either the 50% limit or unlimited
+    if (maxOverlayW > 0 && maxOverlayW < QWIDGETSIZE_MAX) {
+        m_widget->setMaximumWidth(maxOverlayW);
+    } else {
+        // No effective constraint - let it expand freely
+        m_widget->setMaximumWidth(QWIDGETSIZE_MAX);
+    }
+    m_widget->setMinimumWidth(200); // Reasonable minimum
+    
+    // Critical: Remove ALL height constraints
+    m_widget->setMaximumHeight(QWIDGETSIZE_MAX);
+    m_widget->setMinimumHeight(0);
+    
+    // Set size policy to expand vertically as needed
+    m_widget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::MinimumExpanding);
+    
+    // Force a geometry update after changing width constraints
+    updatePanelGeometry();
+    
+    // Position at left edge of viewport
     QPointF topLeftVp(margin, margin);
     QPointF topLeftScene = view->viewportTransform().inverted().map(topLeftVp);
     m_proxy->setPos(topLeftScene);
-    // Match background rect to proxy widget geometry
+    
+    // Let the background rect follow the proxy's natural size
     if (m_bgRect) {
         m_bgRect->setPos(topLeftScene);
-        const QSizeF s = m_proxy->size();
-        m_bgRect->setRect(0, 0, s.width(), s.height());
+        // The background will be updated when the proxy resizes naturally
     }
 }
 
@@ -356,6 +503,19 @@ void MediaSettingsPanel::clearActiveBox() {
 }
 
 bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
+    // Handle widget resize events to update proxy and background
+    if (obj == m_widget && event->type() == QEvent::Resize) {
+        if (m_proxy && m_widget) {
+            QSize widgetSize = m_widget->size();
+            m_proxy->resize(widgetSize);
+            // Update background rect to match
+            if (m_bgRect) {
+                m_bgRect->setRect(0, 0, widgetSize.width(), widgetSize.height());
+            }
+        }
+        return false; // Continue normal processing
+    }
+    
     // Handle clicks on value boxes
     if (event->type() == QEvent::MouseButtonPress) {
         QLabel* box = qobject_cast<QLabel*>(obj);
@@ -390,11 +550,13 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
         // Backspace clears the box and shows "..."
         else if (keyEvent->key() == Qt::Key_Backspace) {
             m_activeBox->setText("...");
+            updatePanelGeometry();
             return true;
         }
         // 'i' key sets infinity symbol
         else if (keyEvent->key() == Qt::Key_I) {
             m_activeBox->setText("∞");
+            updatePanelGeometry();
             return true;
         }
         // Handle input based on which box is active
@@ -428,12 +590,54 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
                 } else {
                     m_activeBox->setText(newText);
                 }
+                
+                // Update panel geometry when text content changes
+                updatePanelGeometry();
+                
                 return true;
             }
         }
     }
     
     return QObject::eventFilter(obj, event);
+}
+
+void MediaSettingsPanel::updatePanelGeometry() {
+    if (!m_widget || !m_layout) return;
+    
+    // Force the layout to recalculate based on new content
+    m_layout->invalidate();
+    m_layout->activate();
+    
+    // Get the current width constraint
+    int currentWidth = m_widget->maximumWidth();
+    if (currentWidth == QWIDGETSIZE_MAX) {
+        // No width constraint - let widget choose its preferred width
+        m_widget->adjustSize();
+    } else {
+        // Width is constrained - calculate height for this specific width
+        m_widget->resize(currentWidth, 0); // Set width, let height calculate
+        
+        // Use heightForWidth if the layout supports it
+        int heightForWidth = m_layout->heightForWidth(currentWidth);
+        if (heightForWidth > 0) {
+            m_widget->resize(currentWidth, heightForWidth);
+        } else {
+            // Fallback to adjustSize
+            m_widget->adjustSize();
+        }
+    }
+    
+    // Directly update proxy and background to match widget size
+    if (m_proxy && m_widget) {
+        QSize widgetSize = m_widget->size();
+        m_proxy->resize(widgetSize);
+        
+        // Update background rect to match
+        if (m_bgRect) {
+            m_bgRect->setRect(0, 0, widgetSize.width(), widgetSize.height());
+        }
+    }
 }
 
 bool MediaSettingsPanel::isValidInputForBox(QLabel* box, QChar character) {
