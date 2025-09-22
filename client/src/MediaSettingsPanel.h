@@ -43,7 +43,6 @@ private:
     void setBoxActive(QLabel* box, bool active);
     void clearActiveBox();
     bool isValidInputForBox(QLabel* box, QChar character);
-    void updatePanelGeometry(); // Update proxy and background rect sizes
 
 private:
     QGraphicsProxyWidget* m_proxy = nullptr;
