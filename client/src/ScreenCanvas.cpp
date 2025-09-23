@@ -604,11 +604,8 @@ void ScreenCanvas::updateInfoOverlayGeometryForViewport() {
         }
     }
     // Recompute desired width from current content and apply 50% viewport cap
+    // contentHint.width() from totalSizeHint() already includes layout margins, so no need to add them again
     int desiredW = std::max(contentHint.width(), headerHint.width());
-    if (m_contentLayout) {
-        const int lr = m_contentLayout->contentsMargins().left() + m_contentLayout->contentsMargins().right();
-        desiredW = std::max(desiredW, contentHint.width() + lr);
-    }
     desiredW = std::max(desiredW, m_infoWidget->minimumWidth());
     const int capW = static_cast<int>(viewport()->width() * 0.5);
     desiredW = std::min(desiredW, capW);
