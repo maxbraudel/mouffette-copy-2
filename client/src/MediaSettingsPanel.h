@@ -38,6 +38,10 @@ public:
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;
 
+private slots:
+    void onDisplayAutomaticallyToggled(bool checked);
+    void onPlayAutomaticallyToggled(bool checked);
+
 private:
     void buildUi();
     void setBoxActive(QLabel* box, bool active);
@@ -55,6 +59,9 @@ private:
     QCheckBox* m_playDelayCheck = nullptr; // New: separate play delay checkbox
 
     QCheckBox* m_repeatCheck = nullptr;
+    
+    // Display delay checkbox (separate from display automatically)
+    QCheckBox* m_displayDelayCheck = nullptr;
 
     QCheckBox* m_fadeInCheck = nullptr;
 
@@ -62,9 +69,11 @@ private:
 
     // Value box widgets for click handling
     QLabel* m_autoPlayBox = nullptr;
+    QLabel* m_autoPlaySecondsLabel = nullptr; // "seconds" text after the play delay input box
     // New: display automatically after [x] seconds
     QCheckBox* m_displayAfterCheck = nullptr;
     QLabel* m_displayAfterBox = nullptr;
+    QLabel* m_displayAfterSecondsLabel = nullptr; // "seconds" text after the input box
     QLabel* m_repeatBox = nullptr;
     QLabel* m_fadeInBox = nullptr;
     QLabel* m_fadeOutBox = nullptr;
@@ -76,5 +85,6 @@ private:
     
     // Video-only option widgets (for show/hide based on media type)
     QWidget* m_autoPlayRow = nullptr;
+    QWidget* m_playDelayRow = nullptr;
     QWidget* m_repeatRow = nullptr;
 };

@@ -42,8 +42,8 @@ void MediaSettingsPanel::buildUi() {
     // Prevent layout from stretching when items are hidden
     m_layout->setSizeConstraint(QLayout::SetMinAndMaxSize);
     
-    // Set a minimum width for the settings panel to make it wider
-    m_widget->setMinimumWidth(380);
+    // Set a fixed width for the settings panel
+    m_widget->setFixedWidth(450);
 
     m_title = new QLabel("Scene options");
     QFont tf = m_title->font();
@@ -75,7 +75,7 @@ void MediaSettingsPanel::buildUi() {
         auto* autoLayout = new QHBoxLayout(autoRow);
         autoLayout->setContentsMargins(0, 0, 0, 0);
         autoLayout->setSpacing(0);
-        m_displayAfterCheck = new QCheckBox("Display automatically more text here to test text breaking feature", autoRow);
+        m_displayAfterCheck = new QCheckBox("Display automatically", autoRow);
         m_displayAfterCheck->setStyleSheet("color: white;");
         m_displayAfterCheck->installEventFilter(this);
         autoLayout->addWidget(m_displayAfterCheck);
@@ -87,56 +87,50 @@ void MediaSettingsPanel::buildUi() {
         auto* h = new QHBoxLayout(delayRow);
         h->setContentsMargins(0, 0, 0, 0);
         h->setSpacing(0);
-        auto* delayCheck = new QCheckBox("Display delay: ", delayRow);
-        delayCheck->setStyleSheet("color: white;");
-        delayCheck->installEventFilter(this);
+        m_displayDelayCheck = new QCheckBox("Display delay: ", delayRow);
+        m_displayDelayCheck->setStyleSheet("color: white;");
+        m_displayDelayCheck->installEventFilter(this);
         m_displayAfterBox = makeValueBox();
-        auto* suffix = new QLabel(" seconds", delayRow);
-        suffix->setStyleSheet("color: white;");
-        h->addWidget(delayCheck);
+        m_displayAfterSecondsLabel = new QLabel("s", delayRow);
+        m_displayAfterSecondsLabel->setStyleSheet("color: white;");
+        h->addWidget(m_displayDelayCheck);
         h->addWidget(m_displayAfterBox);
-        h->addWidget(suffix);
+        h->addWidget(m_displayAfterSecondsLabel);
         h->addStretch();
         m_layout->addWidget(delayRow);
     }
 
-    // 1) Play automatically + Play delay as separate checkboxes (video only)
+    // 1) Play automatically as separate widget (video only) - matching display layout
     {
         m_autoPlayRow = new QWidget(m_widget);
-        auto* vLayout = new QVBoxLayout(m_autoPlayRow);
-        vLayout->setContentsMargins(0, 0, 0, 0);
-        vLayout->setSpacing(5);
-        
-        // Play automatically checkbox
-        auto* autoRow = new QWidget(m_autoPlayRow);
-        auto* autoLayout = new QHBoxLayout(autoRow);
+        auto* autoLayout = new QHBoxLayout(m_autoPlayRow);
         autoLayout->setContentsMargins(0, 0, 0, 0);
         autoLayout->setSpacing(0);
-        m_autoPlayCheck = new QCheckBox("Play automatically", autoRow);
+        m_autoPlayCheck = new QCheckBox("Play automatically", m_autoPlayRow);
         m_autoPlayCheck->setStyleSheet("color: white;");
         m_autoPlayCheck->installEventFilter(this);
         autoLayout->addWidget(m_autoPlayCheck);
         autoLayout->addStretch();
-        vLayout->addWidget(autoRow);
-        
-        // Play delay checkbox with input
-        auto* delayRow = new QWidget(m_autoPlayRow);
-        auto* h = new QHBoxLayout(delayRow);
+        m_layout->addWidget(m_autoPlayRow);
+    }
+    
+    // Play delay as a separate widget (video only) - matching display delay layout
+    {
+        m_playDelayRow = new QWidget(m_widget);
+        auto* h = new QHBoxLayout(m_playDelayRow);
         h->setContentsMargins(0, 0, 0, 0);
         h->setSpacing(0);
-        m_playDelayCheck = new QCheckBox("Play delay: ", delayRow);
+        m_playDelayCheck = new QCheckBox("Play delay: ", m_playDelayRow);
         m_playDelayCheck->setStyleSheet("color: white;");
         m_playDelayCheck->installEventFilter(this);
         m_autoPlayBox = makeValueBox();
-        auto* suffix = new QLabel(" seconds", delayRow);
-        suffix->setStyleSheet("color: white;");
+        m_autoPlaySecondsLabel = new QLabel("s", m_playDelayRow);
+        m_autoPlaySecondsLabel->setStyleSheet("color: white;");
         h->addWidget(m_playDelayCheck);
         h->addWidget(m_autoPlayBox);
-        h->addWidget(suffix);
+        h->addWidget(m_autoPlaySecondsLabel);
         h->addStretch();
-        vLayout->addWidget(delayRow);
-        
-        m_layout->addWidget(m_autoPlayRow);
+        m_layout->addWidget(m_playDelayRow);
     }
 
     // 2) Repeat (video only) - keeping original single checkbox format
@@ -168,7 +162,7 @@ void MediaSettingsPanel::buildUi() {
         m_fadeInCheck->setStyleSheet("color: white;");
         m_fadeInCheck->installEventFilter(this);
         m_fadeInBox = makeValueBox();
-        auto* suffix = new QLabel(" seconds", row);
+        auto* suffix = new QLabel("s", row);
         suffix->setStyleSheet("color: white;");
         h->addWidget(m_fadeInCheck);
         h->addWidget(m_fadeInBox);
@@ -187,7 +181,7 @@ void MediaSettingsPanel::buildUi() {
         m_fadeOutCheck->setStyleSheet("color: white;");
         m_fadeOutCheck->installEventFilter(this);
         m_fadeOutBox = makeValueBox();
-        auto* suffix = new QLabel(" seconds", row);
+        auto* suffix = new QLabel("s", row);
         suffix->setStyleSheet("color: white;");
         h->addWidget(m_fadeOutCheck);
         h->addWidget(m_fadeOutBox);
@@ -223,6 +217,11 @@ void MediaSettingsPanel::buildUi() {
     m_bgRect->setZValue(12009.5); // just below proxy
     m_bgRect->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     m_bgRect->setData(0, QStringLiteral("overlay"));
+    
+    // Set initial size for background rect
+    QSize initialSize = m_widget->sizeHint();
+    initialSize.setWidth(450);
+    m_bgRect->setRect(0, 0, initialSize.width(), initialSize.height());
 
     m_proxy = new QGraphicsProxyWidget();
     m_proxy->setWidget(m_widget);
@@ -234,11 +233,30 @@ void MediaSettingsPanel::buildUi() {
     m_proxy->setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton | Qt::MiddleButton);
     m_proxy->setAcceptHoverEvents(true);
     m_proxy->setData(0, QStringLiteral("overlay"));
+    
+    // Force the proxy to use our fixed width
+    QSize fixedSize = m_widget->sizeHint();
+    fixedSize.setWidth(450);
+    m_proxy->resize(fixedSize);
     // Also make underlying widget track mouse (not strictly required for click blocking)
     m_widget->setMouseTracking(true);
     
     // Install event filter on the main widget to catch clicks elsewhere
     m_widget->installEventFilter(this);
+    
+    // Connect display automatically checkbox to enable/disable display delay controls
+    if (m_displayAfterCheck) {
+        connect(m_displayAfterCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onDisplayAutomaticallyToggled);
+        // Set initial state (display delay disabled by default since display automatically is unchecked)
+        onDisplayAutomaticallyToggled(m_displayAfterCheck->isChecked());
+    }
+    
+    // Connect play automatically checkbox to enable/disable play delay controls
+    if (m_autoPlayCheck) {
+        connect(m_autoPlayCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onPlayAutomaticallyToggled);
+        // Set initial state (play delay disabled by default since play automatically is unchecked)
+        onPlayAutomaticallyToggled(m_autoPlayCheck->isChecked());
+    }
 }
 
 void MediaSettingsPanel::ensureInScene(QGraphicsScene* scene) {
@@ -267,6 +285,9 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
     if (m_autoPlayRow) {
         m_autoPlayRow->setVisible(isVideo);
     }
+    if (m_playDelayRow) {
+        m_playDelayRow->setVisible(isVideo);
+    }
     if (m_repeatRow) {
         m_repeatRow->setVisible(isVideo);
     }
@@ -286,9 +307,10 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
         m_widget->updateGeometry();
         m_widget->adjustSize();
         
-        // Update proxy widget size to match widget's preferred size
+        // Update proxy widget size to match widget's preferred size but enforce fixed width
         if (m_proxy) {
             QSize preferredSize = m_widget->sizeHint();
+            preferredSize.setWidth(450); // Enforce our fixed width
             m_proxy->resize(preferredSize);
             
             // Update background rect to match proxy size
@@ -361,6 +383,11 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
         QLabel* box = qobject_cast<QLabel*>(obj);
         if (box && (box == m_displayAfterBox || box == m_autoPlayBox || box == m_repeatBox || 
                    box == m_fadeInBox || box == m_fadeOutBox || box == m_opacityBox)) {
+            // Don't allow interaction with disabled boxes
+            if (!box->isEnabled()) {
+                return true; // consume the event but don't activate
+            }
+            
             // Clear previous active box
             clearActiveBox();
             // Set this box as active
@@ -463,4 +490,110 @@ bool MediaSettingsPanel::isValidInputForBox(QLabel* box, QChar character) {
     }
     
     return false; // Unknown box, reject input
+}
+
+void MediaSettingsPanel::onDisplayAutomaticallyToggled(bool checked) {
+    // Enable/disable display delay checkbox and input box based on display automatically state
+    if (m_displayDelayCheck) {
+        m_displayDelayCheck->setEnabled(checked);
+        
+        // Update visual styling for disabled state
+        if (checked) {
+            m_displayDelayCheck->setStyleSheet("color: white;");
+        } else {
+            m_displayDelayCheck->setStyleSheet("color: #808080;"); // Gray color for disabled
+            // Also uncheck the display delay checkbox when disabled
+            m_displayDelayCheck->setChecked(false);
+        }
+    }
+    
+    if (m_displayAfterBox) {
+        m_displayAfterBox->setEnabled(checked);
+        
+        // Update visual styling for the input box
+        if (checked) {
+            // Reset to normal styling when enabled
+            setBoxActive(m_displayAfterBox, m_activeBox == m_displayAfterBox);
+        } else {
+            // Apply disabled styling
+            m_displayAfterBox->setStyleSheet(
+                "QLabel {"
+                "  background-color: #404040;"
+                "  border: 1px solid #606060;"
+                "  border-radius: 6px;"
+                "  padding: 2px 10px;"
+                "  margin-left: 4px;"
+                "  margin-right: 0px;"
+                "  color: #808080;"
+                "}"
+            );
+            
+            // Clear active state if this box was active
+            if (m_activeBox == m_displayAfterBox) {
+                clearActiveBox();
+            }
+        }
+    }
+    
+    // Also update the "seconds" label styling
+    if (m_displayAfterSecondsLabel) {
+        if (checked) {
+            m_displayAfterSecondsLabel->setStyleSheet("color: white;");
+        } else {
+            m_displayAfterSecondsLabel->setStyleSheet("color: #808080;"); // Gray color for disabled
+        }
+    }
+}
+
+void MediaSettingsPanel::onPlayAutomaticallyToggled(bool checked) {
+    // Enable/disable play delay checkbox and input box based on play automatically state
+    if (m_playDelayCheck) {
+        m_playDelayCheck->setEnabled(checked);
+        
+        // Update visual styling for disabled state
+        if (checked) {
+            m_playDelayCheck->setStyleSheet("color: white;");
+        } else {
+            m_playDelayCheck->setStyleSheet("color: #808080;"); // Gray color for disabled
+            // Also uncheck the play delay checkbox when disabled
+            m_playDelayCheck->setChecked(false);
+        }
+    }
+    
+    if (m_autoPlayBox) {
+        m_autoPlayBox->setEnabled(checked);
+        
+        // Update visual styling for the input box
+        if (checked) {
+            // Reset to normal styling when enabled
+            setBoxActive(m_autoPlayBox, m_activeBox == m_autoPlayBox);
+        } else {
+            // Apply disabled styling
+            m_autoPlayBox->setStyleSheet(
+                "QLabel {"
+                "  background-color: #404040;"
+                "  border: 1px solid #606060;"
+                "  border-radius: 6px;"
+                "  padding: 2px 10px;"
+                "  margin-left: 4px;"
+                "  margin-right: 0px;"
+                "  color: #808080;"
+                "}"
+            );
+            
+            // Clear active state if this box was active
+            if (m_activeBox == m_autoPlayBox) {
+                clearActiveBox();
+            }
+        }
+    }
+    
+    // Also update the "seconds" label styling
+    if (m_autoPlaySecondsLabel) {
+        if (checked) {
+            m_autoPlaySecondsLabel->setStyleSheet("color: white;");
+        } else {
+            m_autoPlaySecondsLabel->setStyleSheet("color: #808080;"); // Gray color for disabled
+        }
+    }
 }
