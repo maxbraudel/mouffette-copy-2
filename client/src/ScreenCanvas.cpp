@@ -615,13 +615,16 @@ void ScreenCanvas::updateOverlayVScrollVisibilityAndGeometry() {
     if (!src) { m_overlayVScroll->hide(); return; }
     const bool need = src->maximum() > src->minimum();
     if (!need) { m_overlayVScroll->hide(); return; }
-    // Position the overlay scrollbar on the right edge of the overlay panel, above content
+    // Position the overlay scrollbar on the right edge of the overlay panel, with margins for aesthetics
     const int sbWidth = 8;
+    const int margin = 6; // small inset from edge (same as settings overlay)
+    const int topMargin = 6; // top margin (same as settings overlay)
+    const int bottomMargin = 6; // bottom margin (same as settings overlay)
     // Match the content scroll viewport geometry within the overlay panel
     const QRect contentGeom = m_contentScroll->geometry();
-    const int x = m_infoWidget->width() - sbWidth - 2; // slight inset
-    const int y = contentGeom.top();
-    const int h = contentGeom.height();
+    const int x = m_infoWidget->width() - sbWidth - margin;
+    const int y = contentGeom.top() + topMargin;
+    const int h = qMax(0, contentGeom.height() - topMargin - bottomMargin);
     // Sync range/value/page step on every geometry update
     m_overlayVScroll->setRange(src->minimum(), src->maximum());
     m_overlayVScroll->setPageStep(src->pageStep());
