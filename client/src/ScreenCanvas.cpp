@@ -321,6 +321,20 @@ void ScreenCanvas::initInfoOverlay() {
         // Do not add header here; refreshInfoOverlay() will place it at the bottom of the panel
         m_infoWidget->hide(); // hidden until first layout
     }
+    
+    // Create background rectangle early to prevent visibility issues during window state changes
+    if (!m_infoBorderRect && scene()) {
+        m_infoBorderRect = new MouseBlockingRoundedRectItem();
+        m_infoBorderRect->setRadius(gOverlayCornerRadiusPx);
+        applyOverlayBorder(m_infoBorderRect);
+        m_infoBorderRect->setBrush(QBrush(AppColors::gOverlayBackgroundColor));
+        m_infoBorderRect->setZValue(12009.5);
+        m_infoBorderRect->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+        m_infoBorderRect->setData(0, QStringLiteral("overlay"));
+        scene()->addItem(m_infoBorderRect);
+        m_infoBorderRect->setVisible(false);
+    }
+    
     // Initial content and layout
     refreshInfoOverlay();
     layoutInfoOverlay();
@@ -550,25 +564,14 @@ void ScreenCanvas::layoutInfoOverlay() {
     const int y = viewport()->height() - margin - m_infoWidget->height();
     m_infoWidget->move(std::max(0, x), std::max(0, y));
     
-    // Create or update border rectangle in scene (same approach as MediaSettingsPanel)
-    if (m_infoWidget->isVisible() && scene()) {
-        if (!m_infoBorderRect) {
-            m_infoBorderRect = new MouseBlockingRoundedRectItem();
-            m_infoBorderRect->setRadius(gOverlayCornerRadiusPx);
-            applyOverlayBorder(m_infoBorderRect);
-            m_infoBorderRect->setBrush(QBrush(AppColors::gOverlayBackgroundColor));
-            m_infoBorderRect->setZValue(12009.5); // same Z-value as MediaSettingsPanel
-            m_infoBorderRect->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-            m_infoBorderRect->setData(0, QStringLiteral("overlay"));
-            scene()->addItem(m_infoBorderRect);
-        }
-        // Position border rect using same method as MediaSettingsPanel - direct viewport transform
+    // Update border rect position and visibility based on widget state
+    if (m_infoWidget->isVisible() && m_infoBorderRect) {
         QPointF widgetTopLeftVp(std::max(0, x), std::max(0, y));
         QPointF widgetTopLeftScene = viewportTransform().inverted().map(widgetTopLeftVp);
         m_infoBorderRect->setRect(0, 0, w, m_infoWidget->height());
         m_infoBorderRect->setPos(widgetTopLeftScene);
+        m_infoBorderRect->setVisible(true);
     } else if (m_infoBorderRect) {
-        // Hide border when overlay is hidden
         m_infoBorderRect->setVisible(false);
     }
     
@@ -702,6 +705,16 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     });
 }
 
+void ScreenCanvas::showEvent(QShowEvent* event) {
+    QGraphicsView::showEvent(event);
+    // Restore overlay background when window becomes visible (fixes minimize/restore issue)
+    if (m_infoBorderRect && m_infoWidget && m_infoWidget->isVisible()) {
+        m_infoBorderRect->setVisible(true);
+        m_infoBorderRect->setBrush(QBrush(AppColors::gOverlayBackgroundColor));
+        QTimer::singleShot(0, [this]() { layoutInfoOverlay(); });
+    }
+}
+
 void ScreenCanvas::setScreens(const QList<ScreenInfo>& screens) {
     m_screens = screens;
     createScreenItems();
@@ -714,12 +727,7 @@ void ScreenCanvas::clearScreens() {
     }
     m_screenItems.clear();
     
-    // Reset info overlay border rectangle when clearing screens (connection reload)
-    if (m_infoBorderRect) {
-        if (m_scene) m_scene->removeItem(m_infoBorderRect);
-        delete m_infoBorderRect;
-        m_infoBorderRect = nullptr;
-    }
+    // Note: Overlay background persists across screen updates
 }
 
 void ScreenCanvas::recenterWithMargin(int marginPx) {
