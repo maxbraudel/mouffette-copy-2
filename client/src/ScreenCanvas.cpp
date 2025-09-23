@@ -5,6 +5,7 @@
 #include "AppColors.h"
 #include <algorithm>
 #include <QGraphicsScene>
+#include <QGraphicsProxyWidget>
 #include <QPushButton>
 #include <QHBoxLayout>
 #include <QTimer>
@@ -17,6 +18,7 @@
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QScrollBar>
+#include <QScrollArea>
 #include <QGestureEvent>
 #include <QPinchGesture>
 #include <QNativeGestureEvent>
@@ -982,12 +984,12 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
     // (Space-to-pan currently disabled pending dedicated key tracking)
     const bool spaceHeld = false;
     if (event->button() == Qt::LeftButton) {
-        // If the pointer is over any overlay element (e.g., settings panel), route to base handler
-        // immediately to avoid altering selection/panning.
+        // If the pointer is over any blocking overlay element (e.g., settings panel), route to base handler
+        // immediately to avoid altering selection/panning. Media overlays (filename, buttons) should not block.
         {
             const QList<QGraphicsItem*> hit = items(event->pos());
             for (QGraphicsItem* hi : hit) {
-                if (hi->data(0).toString() == QLatin1String("overlay")) {
+                if (hi->data(0).toString() == QLatin1String("blocking-overlay")) {
                     QGraphicsView::mousePressEvent(event);
                     return;
                 }
@@ -1164,10 +1166,10 @@ void ScreenCanvas::mouseReleaseEvent(QMouseEvent* event) {
         }
     }
     if (event->button() == Qt::LeftButton) {
-        // If releasing over any overlay item, deliver the event directly and avoid selection churn
+        // If releasing over any blocking overlay item, deliver the event directly and avoid selection churn
         const QList<QGraphicsItem*> hitItems = items(event->pos());
-        bool hasOverlay = false; for (QGraphicsItem* hi : hitItems) if (hi->data(0).toString() == QLatin1String("overlay")) { hasOverlay = true; break; }
-        if (hasOverlay) { QGraphicsView::mouseReleaseEvent(event); return; }
+        bool hasBlockingOverlay = false; for (QGraphicsItem* hi : hitItems) if (hi->data(0).toString() == QLatin1String("blocking-overlay")) { hasBlockingOverlay = true; break; }
+        if (hasBlockingOverlay) { QGraphicsView::mouseReleaseEvent(event); return; }
         if (m_overlayMouseDown) {
             if (m_scene) { const QList<QGraphicsItem*> sel = m_scene->selectedItems(); for (QGraphicsItem* it : sel) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) if (v->isDraggingProgress() || v->isDraggingVolume()) v->endDrag(); }
             m_overlayMouseDown = false; event->accept(); return;
@@ -1217,6 +1219,59 @@ void ScreenCanvas::wheelEvent(QWheelEvent* event) {
             }
             event->accept();
             return; // Block canvas zoom/pan when wheel is over the overlay
+        }
+    }
+    
+    // Check for settings overlay widgets with scroll areas that should block canvas interaction
+    const QList<QGraphicsItem*> hitItems = items(event->position().toPoint());
+    for (QGraphicsItem* item : hitItems) {
+        if (item->data(0).toString() == QLatin1String("blocking-overlay")) {
+            // Found an overlay item - check if it's a proxy widget with a scroll area
+            if (auto* proxyWidget = dynamic_cast<QGraphicsProxyWidget*>(item)) {
+                if (auto* widget = proxyWidget->widget()) {
+                    // Look for a QScrollArea within the overlay widget
+                    QScrollArea* scrollArea = widget->findChild<QScrollArea*>();
+                    if (scrollArea && scrollArea->isVisible()) {
+                        // Forward wheel event to the scroll area's viewport
+                        QWidget* dst = scrollArea->viewport() ? scrollArea->viewport() : static_cast<QWidget*>(scrollArea);
+                        if (dst) {
+                            // Map coordinates from canvas to the scroll area viewport
+                            const QPointF scenePos = mapToScene(event->position().toPoint());
+                            const QPointF itemPos = item->mapFromScene(scenePos);
+                            const QPoint widgetPos = widget->mapFromParent(itemPos.toPoint());
+                            const QPoint dstLocal = dst->mapFrom(widget, widgetPos);
+                            const QPoint globalP = dst->mapToGlobal(dstLocal);
+                            
+                            // Forward the wheel event
+                            QWheelEvent forwarded(
+                                QPointF(dstLocal),
+                                QPointF(globalP),
+                                event->pixelDelta(),
+                                event->angleDelta(),
+                                event->buttons(),
+                                event->modifiers(),
+                                event->phase(),
+                                event->inverted(),
+                                event->source()
+                            );
+                            QCoreApplication::sendEvent(dst, &forwarded);
+                            
+                            // Show scrollbar if it exists and has a hide timer
+                            QScrollBar* vScrollBar = scrollArea->findChild<QScrollBar*>("overlayScrollBar");
+                            QTimer* hideTimer = scrollArea->findChild<QTimer*>("scrollbarHideTimer");
+                            if (vScrollBar && hideTimer) {
+                                vScrollBar->show();
+                                hideTimer->start();
+                            }
+                        }
+                        event->accept();
+                        return; // Block canvas zoom/pan when wheel is over settings overlay
+                    }
+                }
+            }
+            // If we found an overlay but no scroll area, still block canvas interaction
+            event->accept();
+            return;
         }
     }
 #endif

@@ -9,6 +9,9 @@ class QLabel;
 class QCheckBox;
 class QGraphicsView;
 class MouseBlockingRoundedRectItem;
+class QScrollArea;
+class QScrollBar;
+class QTimer;
 
 // Floating settings panel shown when a media's settings toggle is enabled.
 // Implemented as a QWidget embedded into the scene via QGraphicsProxyWidget.
@@ -47,12 +50,18 @@ private:
     void setBoxActive(QLabel* box, bool active);
     void clearActiveBox();
     bool isValidInputForBox(QLabel* box, QChar character);
+    void updateScrollbarGeometry();
 
 private:
     QGraphicsProxyWidget* m_proxy = nullptr;
     MouseBlockingRoundedRectItem* m_bgRect = nullptr;
     QWidget* m_widget = nullptr;
-    QVBoxLayout* m_layout = nullptr;
+    // Root layout (wraps scroll area)
+    QVBoxLayout* m_rootLayout = nullptr;
+    // Scrollable content
+    QScrollArea* m_scrollArea = nullptr;
+    QWidget* m_innerContent = nullptr;
+    QVBoxLayout* m_contentLayout = nullptr;
     QLabel* m_title = nullptr;
 
     QCheckBox* m_autoPlayCheck = nullptr;
@@ -82,6 +91,9 @@ private:
     QLabel* m_opacityBox = nullptr;
     QLabel* m_activeBox = nullptr; // currently active box (if any)
     bool m_clearOnFirstType = false; // if true, first keypress replaces previous content
+    // Overlay scrollbar to mirror media list behavior
+    QScrollBar* m_overlayVScroll = nullptr;
+    QTimer* m_scrollbarHideTimer = nullptr;
     
     // Video-only option widgets (for show/hide based on media type)
     QWidget* m_autoPlayRow = nullptr;
