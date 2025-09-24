@@ -181,6 +181,11 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
     // Mark all uploaded files as available on the target client
     for (const auto& f : m_outgoingFiles) {
         FileManager::instance().markFileUploadedToClient(f.fileId, m_uploadTargetClientId);
+        // Also mark all media instances for this file as uploaded
+        QList<QString> mediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
+        for (const QString& mediaId : mediaIds) {
+            FileManager::instance().markMediaUploadedToClient(mediaId, m_uploadTargetClientId);
+        }
     }
     
     m_uploadActive = true; // switch to active state
@@ -196,6 +201,11 @@ void UploadManager::onAllFilesRemovedRemote() {
     if (!m_uploadTargetClientId.isEmpty()) {
         for (const auto& f : m_outgoingFiles) {
             FileManager::instance().unmarkFileUploadedToClient(f.fileId, m_uploadTargetClientId);
+            // Also unmark all media instances for this file
+            QList<QString> mediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
+            for (const QString& mediaId : mediaIds) {
+                FileManager::instance().unmarkMediaUploadedToClient(mediaId, m_uploadTargetClientId);
+            }
         }
     }
     

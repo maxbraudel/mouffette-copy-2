@@ -1354,9 +1354,9 @@ void MainWindow::onUploadButtonClicked() {
                 continue;
             }
             
-            // Only add unique files (skip duplicates) and only if not uploaded to the target yet
-            const bool alreadyOnTarget = (!targetClient.isEmpty()) && FileManager::instance().isFileUploadedToClient(fileId, targetClient);
-            if (!processedFileIds.contains(fileId) && !alreadyOnTarget) {
+            // Check if this specific media instance has been uploaded to the target
+            const bool mediaAlreadyOnTarget = (!targetClient.isEmpty()) && FileManager::instance().isMediaUploadedToClient(media->mediaId(), targetClient);
+            if (!processedFileIds.contains(fileId) && !mediaAlreadyOnTarget) {
                 UploadFileInfo info; 
                 info.fileId = fileId; // Use the shared file ID
                 info.mediaId = media->mediaId(); // Keep one mediaId for reference
@@ -2928,12 +2928,14 @@ int MainWindow::getInnerContentGap() const
 
 bool MainWindow::hasUnuploadedFilesForTarget(const QString& targetClientId) const {
     if (!m_screenCanvas || !m_screenCanvas->scene() || targetClientId.isEmpty()) return false;
+    
     const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
     for (QGraphicsItem* it : allItems) {
         if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-            const QString fileId = media->fileId();
-            if (fileId.isEmpty()) continue;
-            if (!FileManager::instance().isFileUploadedToClient(fileId, targetClientId)) {
+            const QString mediaId = media->mediaId();
+            if (mediaId.isEmpty()) continue;
+            // Check if this specific media instance has been uploaded to the target
+            if (!FileManager::instance().isMediaUploadedToClient(mediaId, targetClientId)) {
                 return true;
             }
         }

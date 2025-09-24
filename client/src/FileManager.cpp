@@ -97,6 +97,9 @@ void FileManager::removeMediaAssociation(const QString& mediaId)
     m_fileIdToMediaIds[fileId].removeAll(mediaId);
     m_mediaIdToFileId.remove(mediaId);
     
+    // Clean up media-level client associations
+    m_mediaIdToClients.remove(mediaId);
+    
     qDebug() << "FileManager: File" << fileId << "now has" << m_fileIdToMediaIds[fileId].size() << "media associations";
     
     // Clean up file if no more media references it  
@@ -210,6 +213,31 @@ void FileManager::unmarkFileUploadedToClient(const QString& fileId, const QStrin
     if (!m_fileIdToClients.contains(fileId)) return;
     QList<QString>& clients = m_fileIdToClients[fileId];
     clients.removeAll(clientId);
+}
+
+void FileManager::markMediaUploadedToClient(const QString& mediaId, const QString& clientId)
+{
+    if (!m_mediaIdToClients.contains(mediaId)) {
+        m_mediaIdToClients[mediaId] = QList<QString>();
+    }
+    if (!m_mediaIdToClients[mediaId].contains(clientId)) {
+        m_mediaIdToClients[mediaId].append(clientId);
+        qDebug() << "FileManager: Marked media" << mediaId << "as uploaded to client" << clientId;
+    }
+}
+
+bool FileManager::isMediaUploadedToClient(const QString& mediaId, const QString& clientId) const
+{
+    const QList<QString> clients = m_mediaIdToClients.value(mediaId);
+    return clients.contains(clientId);
+}
+
+void FileManager::unmarkMediaUploadedToClient(const QString& mediaId, const QString& clientId)
+{
+    if (!m_mediaIdToClients.contains(mediaId)) return;
+    QList<QString>& clients = m_mediaIdToClients[mediaId];
+    clients.removeAll(clientId);
+    qDebug() << "FileManager: Unmarked media" << mediaId << "from client" << clientId;
 }
 
 void FileManager::setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds)> cb)
