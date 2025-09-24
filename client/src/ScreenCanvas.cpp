@@ -1142,10 +1142,18 @@ void ScreenCanvas::keyPressEvent(QKeyEvent* event) {
 }
 
 void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
-    // When pressing over the overlay, forward event to the overlay widget under cursor and stop canvas handling
+    // When pressing over the overlay, forward event to the overlay widget ONLY if we're not in the middle of drag/resize/pan operations
     if (m_infoWidget && m_infoWidget->isVisible() && viewport()) {
+        bool anyResizing = false;
+        if (m_scene) {
+            for (QGraphicsItem* it : m_scene->items()) {
+                if (auto* rp = dynamic_cast<ResizableMediaBase*>(it)) { if (rp->isActivelyResizing()) { anyResizing = true; break; } }
+            }
+        }
+        const bool dragging = (m_draggingSelected != nullptr);
+        const bool panningNow = m_panning;
         const QPoint vpPos = viewport()->mapFrom(this, event->pos());
-        if (m_infoWidget->geometry().contains(vpPos)) {
+        if (!dragging && !anyResizing && !panningNow && m_infoWidget->geometry().contains(vpPos)) {
             const QPoint overlayLocal = m_infoWidget->mapFrom(viewport(), vpPos);
             QWidget* dst = m_infoWidget->childAt(overlayLocal);
             if (!dst) dst = m_infoWidget;
@@ -1264,10 +1272,18 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
 }
 
 void ScreenCanvas::mouseDoubleClickEvent(QMouseEvent* event) {
-    // Forward double-clicks to overlay when over it
+    // Forward double-clicks to overlay when over it ONLY if we're not in the middle of drag/resize/pan operations
     if (m_infoWidget && m_infoWidget->isVisible() && viewport()) {
+        bool anyResizing = false;
+        if (m_scene) {
+            for (QGraphicsItem* it : m_scene->items()) {
+                if (auto* rp = dynamic_cast<ResizableMediaBase*>(it)) { if (rp->isActivelyResizing()) { anyResizing = true; break; } }
+            }
+        }
+        const bool dragging = (m_draggingSelected != nullptr);
+        const bool panningNow = m_panning;
         const QPoint vpPos = viewport()->mapFrom(this, event->pos());
-        if (m_infoWidget->geometry().contains(vpPos)) {
+        if (!dragging && !anyResizing && !panningNow && m_infoWidget->geometry().contains(vpPos)) {
             const QPoint overlayLocal = m_infoWidget->mapFrom(viewport(), vpPos);
             QWidget* dst = m_infoWidget->childAt(overlayLocal);
             if (!dst) dst = m_infoWidget;
@@ -1330,10 +1346,18 @@ void ScreenCanvas::mouseDoubleClickEvent(QMouseEvent* event) {
 }
 
 void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
-    // While over overlay, forward moves to overlay widget and block canvas panning
+    // While over overlay, forward moves to overlay widget and block canvas handling ONLY if we're not dragging/resizing/panning
     if (m_infoWidget && m_infoWidget->isVisible() && viewport()) {
+        bool anyResizing = false;
+        if (m_scene) {
+            for (QGraphicsItem* it : m_scene->items()) {
+                if (auto* rp = dynamic_cast<ResizableMediaBase*>(it)) { if (rp->isActivelyResizing()) { anyResizing = true; break; } }
+            }
+        }
+        const bool dragging = (m_draggingSelected != nullptr);
+        const bool panningNow = m_panning;
         const QPoint vpPos = viewport()->mapFrom(this, event->pos());
-        if (m_infoWidget->geometry().contains(vpPos)) {
+        if (!dragging && !anyResizing && !panningNow && m_infoWidget->geometry().contains(vpPos)) {
             const QPoint overlayLocal = m_infoWidget->mapFrom(viewport(), vpPos);
             QWidget* dst = m_infoWidget->childAt(overlayLocal);
             if (!dst) dst = m_infoWidget;
@@ -1410,10 +1434,18 @@ void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void ScreenCanvas::mouseReleaseEvent(QMouseEvent* event) {
-    // Forward release to overlay when over it and block canvas handling
+    // Forward release to overlay when over it ONLY if we're not dragging/resizing/panning
     if (m_infoWidget && m_infoWidget->isVisible() && viewport()) {
+        bool anyResizing = false;
+        if (m_scene) {
+            for (QGraphicsItem* it : m_scene->items()) {
+                if (auto* rp = dynamic_cast<ResizableMediaBase*>(it)) { if (rp->isActivelyResizing()) { anyResizing = true; break; } }
+            }
+        }
+        const bool dragging = (m_draggingSelected != nullptr);
+        const bool panningNow = m_panning;
         const QPoint vpPos = viewport()->mapFrom(this, event->pos());
-        if (m_infoWidget->geometry().contains(vpPos)) {
+        if (!dragging && !anyResizing && !panningNow && m_infoWidget->geometry().contains(vpPos)) {
             const QPoint overlayLocal = m_infoWidget->mapFrom(viewport(), vpPos);
             QWidget* dst = m_infoWidget->childAt(overlayLocal);
             if (!dst) dst = m_infoWidget;
