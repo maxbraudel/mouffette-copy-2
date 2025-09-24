@@ -9,7 +9,6 @@
 #include <QMap>
 #include <QPixmap>
 #include <QTimer>
-#include <QPointer>
 #include "ClientInfo.h" // for ScreenInfo
 #include "MediaItems.h" // for ResizableMediaBase / ResizableVideoItem
 #include <QGestureEvent>
@@ -219,6 +218,17 @@ private:
     MouseBlockingRoundedRectItem* m_infoBorderRect = nullptr; // graphics rect for info overlay border
     bool m_infoRefreshQueued = false;
     int m_lastMediaItemCount = -1; // cache to detect add/remove
+
+    // Persistent selection helpers: remember selection at press and restore after drags
+    bool m_leftMouseActive = false;
+    bool m_draggingSincePress = false;
+    QPoint m_pressViewPos;
+    QList<ResizableMediaBase*> m_selectionAtPress;
+
+    // Manual drag of selected item under occlusion
+    ResizableMediaBase* m_draggingSelected = nullptr;
+    QPointF m_dragStartScene;
+    QPointF m_dragItemStartPos;
 };
 
 #endif // SCREENCANVAS_H
