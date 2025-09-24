@@ -347,7 +347,8 @@ void ResizableMediaBase::initializeOverlays() {
     if (getHeightOfMediaOverlaysPx() > 0) m_overlayStyle.defaultHeight = getHeightOfMediaOverlaysPx();
     m_topPanel = std::make_unique<OverlayPanel>(OverlayPanel::Top); m_topPanel->setStyle(m_overlayStyle);
     if (!m_filename.isEmpty()) {
-        auto filenameElement = std::make_shared<OverlayTextElement>(m_filename, "filename");
+    auto filenameElement = std::make_shared<OverlayTextElement>(m_filename, "filename");
+    filenameElement->setMaxWidthPx(gOverlayFilenameMaxWidthPx);
         m_topPanel->addElement(filenameElement);
         // Add settings toggle button to the right of filename
         auto settingsBtn = std::make_shared<OverlayButtonElement>(QString(), "settings_toggle");

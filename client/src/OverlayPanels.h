@@ -165,6 +165,9 @@ public:
     ~OverlayTextElement() override;
     QString text() const { return m_text; }
     void setText(const QString& text);
+    // Limit the element width (in px). If set, text will be elided with '…' to fit.
+    void setMaxWidthPx(int px) { m_maxWidthPx = px > 0 ? px : -1; if (m_background) setSize(m_background->rect().size()); }
+    int maxWidthPx() const { return m_maxWidthPx; }
     // OverlayElement implementation
     void applyStyle(const OverlayStyle& style) override;
     QSizeF preferredSize(const OverlayStyle& style) const override;
@@ -182,6 +185,7 @@ private:
     MouseBlockingRoundedRectItem* m_background = nullptr;
     MouseBlockingTextItem* m_textItem = nullptr;
     OverlayStyle m_currentStyle; // last applied style snapshot
+    int m_maxWidthPx = -1; // -1 = unlimited
 };
 
 // Basic square button element (stub). Will gain richer state visuals in a later step.
