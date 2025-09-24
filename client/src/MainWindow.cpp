@@ -69,7 +69,6 @@
 #include <climits>
 #include <memory>
 #ifdef Q_OS_MACOS
-#include "MacCursorHider.h"
 #include "MacVideoThumbnailer.h"
 #include "MacWindowManager.h"
 #endif

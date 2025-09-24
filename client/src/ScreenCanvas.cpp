@@ -610,11 +610,18 @@ void ScreenCanvas::layoutInfoOverlay() {
     
     // Update border rect position and visibility based on widget state
     if (m_infoWidget->isVisible() && m_infoBorderRect) {
-        QPointF widgetTopLeftVp(std::max(0, x), std::max(0, y));
-        QPointF widgetTopLeftScene = viewportTransform().inverted().map(widgetTopLeftVp);
-        m_infoBorderRect->setRect(0, 0, w, m_infoWidget->height());
-        m_infoBorderRect->setPos(widgetTopLeftScene);
-        m_infoBorderRect->setVisible(true);
+        // Defer the scene-backed border rect positioning to the next cycle to avoid
+        // a brief mismatch while the view's transform/center updates settle.
+        const int widthNow = w;
+        const int heightNow = m_infoWidget->height();
+        const QPoint vpPosNow(std::max(0, x), std::max(0, y));
+        QTimer::singleShot(0, this, [this, widthNow, heightNow, vpPosNow]() {
+            if (!viewport() || !m_infoBorderRect) return;
+            const QPointF widgetTopLeftScene = viewportTransform().inverted().map(vpPosNow);
+            m_infoBorderRect->setRect(0, 0, widthNow, heightNow);
+            m_infoBorderRect->setPos(widgetTopLeftScene);
+            m_infoBorderRect->setVisible(true);
+        });
     } else if (m_infoBorderRect) {
         m_infoBorderRect->setVisible(false);
     }
@@ -831,6 +838,10 @@ void ScreenCanvas::recenterWithMargin(int marginPx) {
     if (availW <= 1 || availH <= 1 || bounds.width() <= 0 || bounds.height() <= 0) {
         fitInView(bounds, Qt::KeepAspectRatio);
         centerOn(bounds.center());
+        // Ensure overlays are repositioned immediately in this early-exit path as well
+        relayoutAllMediaOverlays(m_scene);
+        layoutInfoOverlay();
+        updateSelectionChrome();
         return;
     }
     const qreal sx = availW / bounds.width();
@@ -847,6 +858,10 @@ void ScreenCanvas::recenterWithMargin(int marginPx) {
         relayoutAllMediaOverlays(m_scene);
     }
     updateSelectionChrome();
+    // Also immediately re-layout the media list overlay to avoid a brief misalignment
+    // between the QWidget overlay (in viewport coords) and its scene-backed background rect
+    // when the view's transform/center changes.
+    layoutInfoOverlay();
     m_ignorePanMomentum = true; m_momentumPrimed = false; m_lastMomentumMag = 0.0; m_lastMomentumDelta = QPoint(0,0); m_momentumTimer.restart();
 }
 
