@@ -92,6 +92,8 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
     m_lastPercent = 0;
     m_filesCompleted = 0;
     m_totalFiles = files.size();
+    m_totalBytes = 0;
+    m_sentBytes = 0;
     emit uiStateChanged();
 
     // Build manifest with file deduplication info
@@ -115,6 +117,8 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
         
         
         manifest.append(obj);
+        // accumulate for weighted progress
+        if (f.size > 0) m_totalBytes += f.size;
     }
     m_ws->sendUploadStart(m_uploadTargetClientId, manifest, m_currentUploadId);
 
@@ -132,10 +136,19 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
             QByteArray chunk = file.read(chunkSize);
             m_ws->sendUploadChunk(m_uploadTargetClientId, m_currentUploadId, f.fileId, chunkIndex++, chunk.toBase64());
             sentForFile += chunk.size();
+            m_sentBytes += chunk.size();
             if (f.size > 0) {
                 int p = static_cast<int>(std::round(sentForFile * 100.0 / static_cast<double>(f.size)));
                 p = std::clamp(p, 0, 100);
                 emit fileUploadProgress(f.fileId, p);
+            }
+            // Emit weighted global progress based on bytes
+            if (m_totalBytes > 0) {
+                int globalPercent = static_cast<int>(std::round(m_sentBytes * 100.0 / static_cast<double>(m_totalBytes)));
+                globalPercent = std::clamp(globalPercent, 0, 100);
+                // filesCompleted is count of files fully sent by sender (not necessarily acknowledged yet)
+                int filesCompletedLocal = m_filesCompleted + (file.atEnd() ? 1 : 0);
+                emit uploadProgress(globalPercent, filesCompletedLocal, m_totalFiles);
             }
             // Yield briefly
             QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
@@ -143,6 +156,15 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
         file.close();
         if (!m_cancelRequested) emit fileUploadFinished(f.fileId);
         if (m_cancelRequested) break;
+        // After a file is fully sent, update local filesCompleted
+        if (!m_cancelRequested) {
+            m_filesCompleted = std::min(m_filesCompleted + 1, m_totalFiles);
+            if (m_totalBytes > 0) {
+                int globalPercent = static_cast<int>(std::round(m_sentBytes * 100.0 / static_cast<double>(m_totalBytes)));
+                globalPercent = std::clamp(globalPercent, 0, 100);
+                emit uploadProgress(globalPercent, m_filesCompleted, m_totalFiles);
+            }
+        }
     }
     if (m_cancelRequested) return; // completion suppressed
     m_ws->sendUploadComplete(m_uploadTargetClientId, m_currentUploadId);
@@ -168,6 +190,8 @@ void UploadManager::resetToInitial() {
 void UploadManager::onUploadProgress(const QString& uploadId, int percent, int filesCompleted, int totalFiles) {
     if (uploadId != m_currentUploadId) return;
     if (m_cancelRequested) return;
+    // While we are the sender and currently streaming, prefer local weighted progress to avoid desync.
+    if (m_uploadInProgress) return;
     m_lastPercent = percent;
     m_filesCompleted = filesCompleted;
     m_totalFiles = totalFiles;

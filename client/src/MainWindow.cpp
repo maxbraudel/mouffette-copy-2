@@ -1473,25 +1473,20 @@ void MainWindow::onUploadButtonClicked() {
             const QList<ResizableMediaBase*> items = m_itemsByFileId.value(fileId);
             for (ResizableMediaBase* item : items) {
                 if (item && item->uploadState() != ResizableMediaBase::UploadState::Uploaded) {
-                    item->setUploadUploading(percent);
+                    // Clamp to 99% locally; we'll set to Uploaded on server ack to avoid early completion
+                    int clamped = qMin(99, percent);
+                    item->setUploadUploading(clamped);
                 }
             }
         });
-        connect(m_uploadManager, &UploadManager::fileUploadFinished, this, [this](const QString& fileId){
-            if (!m_screenCanvas || !m_screenCanvas->scene()) return;
-            const QList<ResizableMediaBase*> items = m_itemsByFileId.value(fileId);
-            for (ResizableMediaBase* item : items) {
-                if (item) {
-                    item->setUploadUploaded();
-                }
-            }
-        });
+        // Do not mark Uploaded on local fileUploadFinished; wait for server confirmation in updateIndividualProgressFromServer
         connect(m_uploadManager, &UploadManager::uploadFinished, this, [this](){
             // Clear tracking data (fileUploadFinished already handled state updates)
             m_mediaIdsBeingUploaded.clear();
             m_mediaIdByFileId.clear();
             m_itemsByFileId.clear();
             m_currentUploadFileOrder.clear();
+            m_serverCompletedFileIds.clear();
         });
         connect(m_uploadManager, &UploadManager::allFilesRemoved, this, [this](){
             // Reset to NotUploaded when all files are removed
@@ -1509,6 +1504,7 @@ void MainWindow::onUploadButtonClicked() {
                 }
             }
             m_currentUploadFileOrder.clear();
+            m_serverCompletedFileIds.clear();
         });
         m_uploadSignalsConnected = true;
     }
@@ -2924,10 +2920,12 @@ void MainWindow::updateIndividualProgressFromServer(int globalPercent, int files
     const int completed = qMax(0, qMin(filesCompleted, totalFiles));
     for (int i = 0; i < completed && i < m_currentUploadFileOrder.size(); ++i) {
         const QString& fileId = m_currentUploadFileOrder[i];
+        if (m_serverCompletedFileIds.contains(fileId)) continue;
         const QList<ResizableMediaBase*> items = m_itemsByFileId.value(fileId);
         for (ResizableMediaBase* item : items) {
             if (item) item->setUploadUploaded();
         }
+        m_serverCompletedFileIds.insert(fileId);
     }
 }
 

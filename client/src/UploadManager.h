@@ -104,6 +104,9 @@ private:
     int m_filesCompleted = 0;
     int m_totalFiles = 0;
     QTimer* m_cancelFallbackTimer = nullptr; // fires if remote never responds to abort/unload
+    // Sender-side byte tracking for accurate weighted progress
+    qint64 m_totalBytes = 0;
+    qint64 m_sentBytes = 0;
 
     // Sender-side per-file tracking
     QVector<UploadFileInfo> m_outgoingFiles;

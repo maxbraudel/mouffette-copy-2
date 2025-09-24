@@ -284,6 +284,8 @@ private:
     QHash<QString, QList<ResizableMediaBase*>> m_itemsByFileId;
     // Deterministic order of files for the current upload session (matches sender streaming order)
     QStringList m_currentUploadFileOrder;
+    // Files that the server has acknowledged as fully received in the current session
+    QSet<QString> m_serverCompletedFileIds;
     WatchManager* m_watchManager = nullptr;   // extracted watch logic
     ScreenNavigationManager* m_navigationManager = nullptr; // new navigation component
     FileWatcher* m_fileWatcher = nullptr; // monitors source files for deletion
