@@ -125,6 +125,12 @@ static qreal itemLengthFromPixels(const ResizableMediaBase* item, int px) {
     if (sx <= 1e-6) return px;
     return px / sx;
 }
+
+// Helper: climb parent chain to find the ResizableMediaBase ancestor for any graphics item
+static ResizableMediaBase* toMedia(QGraphicsItem* x) {
+    while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); }
+    return nullptr;
+}
 }
 
 ScreenCanvas::~ScreenCanvas() {
@@ -1170,8 +1176,8 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
             return;
         }
     }
-    // (Space-to-pan currently disabled pending dedicated key tracking)
-    const bool spaceHeld = false; // kept for future re-enable but currently unused
+    // (Space-to-pan currently disabled; can be re-enabled with dedicated key tracking)
+    const bool spaceHeld = false;
     if (event->button() == Qt::LeftButton) {
         // Record selection at press for persistence across drag/release
         m_leftMouseActive = true;
@@ -1211,7 +1217,6 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
             QGraphicsView::mousePressEvent(event);
             return;
         }
-        auto toMedia = [](QGraphicsItem* x)->ResizableMediaBase* { while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); } return nullptr; };
         // If there is a selected media under the cursor (possibly occluded), prefer dragging it instead of top item
         ResizableMediaBase* selectedUnderCursor = nullptr;
         if (m_scene) {
@@ -1223,7 +1228,7 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
                 }
             }
         }
-        ResizableMediaBase* mediaHit = nullptr; for (QGraphicsItem* it : hitItems) { if ((mediaHit = toMedia(it))) break; }
+    ResizableMediaBase* mediaHit = nullptr; for (QGraphicsItem* it : hitItems) { if ((mediaHit = toMedia(it))) break; }
         if (selectedUnderCursor) {
             // Begin manual drag of the already-selected item; do not change selection
             m_draggingSelected = selectedUnderCursor;
@@ -1317,7 +1322,6 @@ void ScreenCanvas::mouseDoubleClickEvent(QMouseEvent* event) {
             }
         }
         const QList<QGraphicsItem*> hitItems = items(event->pos());
-        auto toMedia = [](QGraphicsItem* x)->ResizableMediaBase* { while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); } return nullptr; };
         ResizableMediaBase* mediaHit = nullptr; for (QGraphicsItem* it : hitItems) { if ((mediaHit = toMedia(it))) break; }
         if (mediaHit) {
             // Do not steal selection from an already selected media (persistent selection)
@@ -1386,7 +1390,7 @@ void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
             return;
         }
         for (QGraphicsItem* it : sel) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) if (v->isSelected() && (v->isDraggingProgress() || v->isDraggingVolume())) { v->updateDragWithScenePos(mapToScene(event->pos())); event->accept(); return; }
-        const QList<QGraphicsItem*> hitItems = items(event->pos()); auto toMedia = [](QGraphicsItem* x)->ResizableMediaBase* { while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); } return nullptr; }; bool hitMedia = false; for (QGraphicsItem* it : hitItems) if (toMedia(it)) { hitMedia = true; break; } if (hitMedia) { QGraphicsView::mouseMoveEvent(event); return; }
+    const QList<QGraphicsItem*> hitItems = items(event->pos()); bool hitMedia = false; for (QGraphicsItem* it : hitItems) if (toMedia(it)) { hitMedia = true; break; } if (hitMedia) { QGraphicsView::mouseMoveEvent(event); return; }
         if (m_panning) {
             // Compute where the original anchor scene point currently appears in view coordinates
             const QPoint currentAnchorView = mapFromScene(m_panAnchorScene);
