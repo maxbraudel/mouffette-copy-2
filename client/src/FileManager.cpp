@@ -241,3 +241,36 @@ void FileManager::setFileRemovalNotifier(std::function<void(const QString& fileI
 {
     s_fileRemovalNotifier = std::move(cb);
 }
+
+void FileManager::unmarkAllFilesForClient(const QString& clientId)
+{
+    if (clientId.isEmpty()) return;
+    // Iterate copy of keys to allow modification during iteration
+    const QList<QString> fileIds = m_fileIdToClients.keys();
+    for (const QString& fid : fileIds) {
+        QList<QString>& clients = m_fileIdToClients[fid];
+        clients.removeAll(clientId);
+        if (clients.isEmpty()) {
+            // keep entry; removal not strictly necessary here
+        }
+    }
+}
+
+void FileManager::unmarkAllMediaForClient(const QString& clientId)
+{
+    if (clientId.isEmpty()) return;
+    const QList<QString> mediaIds = m_mediaIdToClients.keys();
+    for (const QString& mid : mediaIds) {
+        QList<QString>& clients = m_mediaIdToClients[mid];
+        clients.removeAll(clientId);
+        if (clients.isEmpty()) {
+            // keep entry; optional cleanup
+        }
+    }
+}
+
+void FileManager::unmarkAllForClient(const QString& clientId)
+{
+    unmarkAllFilesForClient(clientId);
+    unmarkAllMediaForClient(clientId);
+}

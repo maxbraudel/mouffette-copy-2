@@ -51,6 +51,10 @@ public:
     void markMediaUploadedToClient(const QString& mediaId, const QString& clientId);
     bool isMediaUploadedToClient(const QString& mediaId, const QString& clientId) const;
     void unmarkMediaUploadedToClient(const QString& mediaId, const QString& clientId);
+    // Clear all uploaded markers for a given client across all files and media
+    void unmarkAllFilesForClient(const QString& clientId);
+    void unmarkAllMediaForClient(const QString& clientId);
+    void unmarkAllForClient(const QString& clientId);
     
     // Set callback for when file should be deleted from remote clients
     static void setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds)> cb);
