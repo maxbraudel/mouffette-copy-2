@@ -390,8 +390,6 @@ void ScreenCanvas::refreshInfoOverlay() {
         double b = static_cast<double>(bytes);
         const char* units[] = {"B","KB","MB","GB"}; int u=0; while (b>=1024.0 && u<3){ b/=1024.0; ++u;} return QString::number(b, 'f', (u==0?0: (b<10?2:1))) + " " + units[u];
     };
-
-    int measuredContentW = 0; // track widest intrinsic content width (excluding margins)
     
     // Create media item containers to be added to main layout with separators
     QList<QWidget*> mediaContainers;
@@ -430,7 +428,6 @@ void ScreenCanvas::refreshInfoOverlay() {
         nameLbl->setAlignment(Qt::AlignLeft | Qt::AlignTop); // Align text to top
         nameLbl->setProperty("originalText", name); // Store original text for ellipsis
         mediaLayout->addWidget(nameLbl);
-        measuredContentW = std::max(measuredContentW, nameLbl->sizeHint().width());
         
         // Row: upload status or progress - fixed height container to prevent flickering
         auto* statusContainer = new QWidget(mediaContainer);
@@ -479,7 +476,6 @@ void ScreenCanvas::refreshInfoOverlay() {
         details->setFixedHeight(18); // Fixed height to prevent stretching
         details->setProperty("originalText", dim + QStringLiteral("  ·  ") + sizeStr); // Store original text for ellipsis
         mediaLayout->addWidget(details);
-        measuredContentW = std::max(measuredContentW, details->sizeHint().width());
         
         mediaContainers.append(mediaContainer);
     }
@@ -540,21 +536,9 @@ void ScreenCanvas::refreshInfoOverlay() {
     const QSize headerHint = m_overlayHeaderWidget ? m_overlayHeaderWidget->sizeHint() : QSize(0,0);
     const int naturalHeight = contentHint.height() + headerHint.height();
     
-    // Calculate desired width from measured content plus margins
+    // Use consolidated width calculation for consistency
+    auto [desiredW, isWidthConstrained] = calculateDesiredWidthAndConstraint();
     const int margin = 16;
-    const int contentMarginsLR = m_contentLayout ? (m_contentLayout->contentsMargins().left() + m_contentLayout->contentsMargins().right()) : 0;
-    int desiredW = std::max(measuredContentW + contentMarginsLR, headerHint.width());
-    
-    // If no content measured (empty list), use minimum width
-    if (measuredContentW == 0 && media.isEmpty()) {
-        desiredW = m_infoWidget->minimumWidth();
-    } else {
-        desiredW = std::max(desiredW, m_infoWidget->minimumWidth());
-    }
-    
-    // Use consolidated width calculation to ensure consistency
-    auto [finalDesiredW, isWidthConstrained] = calculateDesiredWidthAndConstraint();
-    desiredW = finalDesiredW;
     // Cap height to viewport height minus margins to avoid overlay exceeding canvas
     const int maxOverlayH = viewport() ? std::max(0, viewport()->height() - margin*2) : naturalHeight;
     int overlayH = naturalHeight;
@@ -597,7 +581,7 @@ void ScreenCanvas::refreshInfoOverlay() {
     }
     
     // Apply ellipsis BEFORE updateGeometry to prevent Qt from rendering unconstrained text
-    applyTextEllipsisIfConstrained(desiredW, isWidthConstrained);
+    applyTextEllipsisIfConstrained(isWidthConstrained);
     
     m_infoWidget->updateGeometry();
     
@@ -616,10 +600,10 @@ void ScreenCanvas::refreshInfoOverlay() {
     m_infoWidget->setUpdatesEnabled(true);
     // In case the widget's final metrics settle after this event loop turn (common on first show or font/layout updates),
     // schedule a one-shot re-anchor to avoid a transient displaced position after dropping media.
-    QTimer::singleShot(0, [this, desiredW, isWidthConstrained]() { 
+    QTimer::singleShot(0, [this, constrained = isWidthConstrained]() { 
         layoutInfoOverlay(); 
         // Reapply ellipsis as a safeguard in case layout operations reset the text
-        applyTextEllipsisIfConstrained(desiredW, isWidthConstrained);
+        applyTextEllipsisIfConstrained(constrained);
     });
 }
 
@@ -685,7 +669,7 @@ void ScreenCanvas::updateInfoOverlayGeometryForViewport() {
     }
     
     // Apply ellipsis BEFORE updateGeometry to prevent Qt from rendering unconstrained text
-    applyTextEllipsisIfConstrained(desiredW, isWidthConstrained);
+    applyTextEllipsisIfConstrained(isWidthConstrained);
     
     m_infoWidget->updateGeometry();
     
@@ -693,8 +677,8 @@ void ScreenCanvas::updateInfoOverlayGeometryForViewport() {
     updateOverlayVScrollVisibilityAndGeometry();
     
     // Apply ellipsis again after all layout operations complete to handle any layout-induced changes
-    QTimer::singleShot(0, [this, desiredW, isWidthConstrained]() {
-        applyTextEllipsisIfConstrained(desiredW, isWidthConstrained);
+    QTimer::singleShot(0, [this, constrained = isWidthConstrained]() {
+        applyTextEllipsisIfConstrained(constrained);
     });
 }
 
@@ -727,50 +711,23 @@ void ScreenCanvas::updateOverlayVScrollVisibilityAndGeometry() {
     }
 }
 
-void ScreenCanvas::applyTextEllipsisIfConstrained(int overlayWidth, bool isWidthConstrained) {
+void ScreenCanvas::applyTextEllipsisIfConstrained(bool isWidthConstrained) {
     if (!m_contentWidget || !m_infoWidget) return;
     
-    // Use actual widget width instead of calculated width to avoid race conditions
-    const int actualOverlayWidth = m_infoWidget->width();
-    const int availableTextWidth = actualOverlayWidth - 40; // Account for left/right margins (20px each)
+    const int availableTextWidth = m_infoWidget->width() - 40; // Account for left/right margins (20px each)
     
-    // Determine if we should apply ellipsis based on actual constraint detection
-    // Check if any label's natural width exceeds available space
-    bool shouldApplyEllipsis = false;
-    if (isWidthConstrained) {
-        for (QLabel* label : m_contentWidget->findChildren<QLabel*>()) {
-            if (label->property("originalText").isValid()) {
-                const QString originalText = label->property("originalText").toString();
-                const QFontMetrics metrics(label->font());
-                if (metrics.horizontalAdvance(originalText) > availableTextWidth) {
-                    shouldApplyEllipsis = true;
-                    break;
-                }
-            }
-        }
-    }
-    
-    if (shouldApplyEllipsis) {
-        // Apply ellipsis to labels that need it
-        for (QLabel* label : m_contentWidget->findChildren<QLabel*>()) {
-            if (label->property("originalText").isValid()) {
-                const QString originalText = label->property("originalText").toString();
-                const QFontMetrics metrics(label->font());
-                if (metrics.horizontalAdvance(originalText) > availableTextWidth) {
-                    const QString elidedText = metrics.elidedText(originalText, Qt::ElideRight, availableTextWidth);
-                    label->setText(elidedText);
-                } else {
-                    label->setText(originalText); // No ellipsis needed
-                }
-            }
-        }
-    } else {
-        // Restore original text when not constrained or no ellipsis needed
-        for (QLabel* label : m_contentWidget->findChildren<QLabel*>()) {
-            if (label->property("originalText").isValid()) {
-                const QString originalText = label->property("originalText").toString();
-                label->setText(originalText);
-            }
+    // Apply ellipsis only when constrained and text actually exceeds available space
+    for (QLabel* label : m_contentWidget->findChildren<QLabel*>()) {
+        if (!label->property("originalText").isValid()) continue;
+        
+        const QString originalText = label->property("originalText").toString();
+        const QFontMetrics metrics(label->font());
+        
+        if (isWidthConstrained && metrics.horizontalAdvance(originalText) > availableTextWidth) {
+            const QString elidedText = metrics.elidedText(originalText, Qt::ElideRight, availableTextWidth);
+            label->setText(elidedText);
+        } else {
+            label->setText(originalText);
         }
     }
 }
@@ -779,13 +736,10 @@ void ScreenCanvas::applyTextEllipsisIfConstrained(int overlayWidth, bool isWidth
 std::pair<int, bool> ScreenCanvas::calculateDesiredWidthAndConstraint() {
     if (!m_infoWidget || !viewport()) return {200, false};
     
-    // Use the same calculation method as refreshInfoOverlay for consistency
-    const QSize headerHint = m_overlayHeaderWidget ? m_overlayHeaderWidget->sizeHint() : QSize(0,0);
-    
-    // Calculate from measured content widths (same as refreshInfoOverlay)
+    // Calculate from measured content widths
     int measuredContentW = 0;
     if (m_contentWidget) {
-        for (QLabel* label : m_contentWidget->findChildren<QLabel*>()) {
+        for (const QLabel* label : m_contentWidget->findChildren<QLabel*>()) {
             if (label->property("originalText").isValid()) {
                 const QString originalText = label->property("originalText").toString();
                 const QFontMetrics metrics(label->font());
@@ -794,16 +748,16 @@ std::pair<int, bool> ScreenCanvas::calculateDesiredWidthAndConstraint() {
         }
     }
     
-    // Add margins (same as refreshInfoOverlay: 20px left + 20px right for content)
-    const int contentMarginsLR = 40;
+    // Calculate desired width with margins and header
+    const QSize headerHint = m_overlayHeaderWidget ? m_overlayHeaderWidget->sizeHint() : QSize(0,0);
+    const int contentMarginsLR = 40; // 20px left + 20px right for content
     int desiredW = std::max(measuredContentW + contentMarginsLR, headerHint.width());
     desiredW = std::max(desiredW, m_infoWidget->minimumWidth());
     
-    // Apply 50% viewport cap and track if constraint was applied
+    // Apply 50% viewport cap and determine if constraint is applied
     const int capW = static_cast<int>(viewport()->width() * 0.5);
-    const int originalDesiredW = desiredW;
+    const bool isWidthConstrained = (desiredW > capW);
     desiredW = std::min(desiredW, capW);
-    const bool isWidthConstrained = (desiredW < originalDesiredW);
     
     return {desiredW, isWidthConstrained};
 }
