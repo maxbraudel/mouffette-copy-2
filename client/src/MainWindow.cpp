@@ -570,23 +570,7 @@ MainWindow::MainWindow(QWidget* parent)
     });
 
     // UI refresh when upload state changes
-    auto hasNewUnuploadedFilesForTarget = [this]() -> bool {
-        if (!m_screenCanvas || !m_screenCanvas->scene()) return false;
-        const QString target = m_uploadManager ? m_uploadManager->targetClientId() : QString();
-        if (target.isEmpty()) return false;
-        const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
-        for (QGraphicsItem* it : allItems) {
-            if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-                const QString fileId = media->fileId();
-                if (fileId.isEmpty()) continue;
-                // If not already uploaded to the current target, we have new work to upload
-                if (!FileManager::instance().isFileUploadedToClient(fileId, target)) return true;
-            }
-        }
-        return false;
-    };
-
-    auto applyUploadButtonStyle = [this, hasNewUnuploadedFilesForTarget]() {
+    auto applyUploadButtonStyle = [this]() {
         if (!m_uploadButton) return;
         
         // If button is in overlay, use custom overlay styling
@@ -665,7 +649,8 @@ MainWindow::MainWindow(QWidget* parent)
                 m_uploadButton->setStyleSheet(overlayUploadingStyle);
             } else if (m_uploadManager->hasActiveUpload()) {
                 // If there are newly added items not yet uploaded to the target, switch back to Upload
-                if (hasNewUnuploadedFilesForTarget()) {
+                const QString target = m_uploadManager->targetClientId();
+                if (hasUnuploadedFilesForTarget(target)) {
                     m_uploadButton->setText("Upload");
                     m_uploadButton->setEnabled(true);
                     m_uploadButton->setStyleSheet(overlayIdleStyle);
@@ -724,7 +709,8 @@ MainWindow::MainWindow(QWidget* parent)
             m_uploadButton->setFont(mono);
         } else if (m_uploadManager->hasActiveUpload()) {
             // If there are new unuploaded files, return to Upload state; otherwise offer unload
-            if (hasNewUnuploadedFilesForTarget()) {
+            const QString target = m_uploadManager->targetClientId();
+            if (hasUnuploadedFilesForTarget(target)) {
                 m_uploadButton->setCheckable(false);
                 m_uploadButton->setChecked(false);
                 m_uploadButton->setEnabled(true);
@@ -1368,7 +1354,6 @@ void MainWindow::onUploadButtonClicked() {
             
             // Only add unique files (skip duplicates) and only if not uploaded to the target yet
             const bool alreadyOnTarget = (!targetClient.isEmpty()) && FileManager::instance().isFileUploadedToClient(fileId, targetClient);
-            qDebug() << "MainWindow: Upload check for fileId:" << fileId << "target:" << targetClient << "alreadyOnTarget:" << alreadyOnTarget;
             if (!processedFileIds.contains(fileId) && !alreadyOnTarget) {
                 UploadFileInfo info; 
                 info.fileId = fileId; // Use the shared file ID
@@ -2933,6 +2918,23 @@ void MainWindow::updateIndividualProgressFromServer(int globalPercent, int files
 int MainWindow::getInnerContentGap() const
 {
     return gInnerContentGap;
+}
+
+bool MainWindow::hasUnuploadedFilesForTarget(const QString& targetClientId) const {
+    if (!m_screenCanvas || !m_screenCanvas->scene() || targetClientId.isEmpty()) return false;
+    
+    const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
+    for (QGraphicsItem* it : allItems) {
+        if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
+            const QString fileId = media->fileId();
+            if (fileId.isEmpty()) continue;
+            // If not already uploaded to the target, we have work to upload
+            if (!FileManager::instance().isFileUploadedToClient(fileId, targetClientId)) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 

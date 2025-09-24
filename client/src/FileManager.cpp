@@ -180,13 +180,9 @@ bool FileManager::isFileUploadedToClient(const QString& fileId, const QString& c
 
 void FileManager::unmarkFileUploadedToClient(const QString& fileId, const QString& clientId)
 {
-    if (!m_fileIdToClients.contains(fileId)) {
-        qDebug() << "FileManager: Attempted to unmark fileId that doesn't exist:" << fileId;
-        return;
-    }
+    if (!m_fileIdToClients.contains(fileId)) return;
     QList<QString>& clients = m_fileIdToClients[fileId];
-    bool wasRemoved = clients.removeAll(clientId) > 0;
-    qDebug() << "FileManager: Unmarked fileId:" << fileId << "from clientId:" << clientId << "removed:" << wasRemoved << "remaining clients:" << clients;
+    clients.removeAll(clientId);
 }
 
 void FileManager::setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds)> cb)

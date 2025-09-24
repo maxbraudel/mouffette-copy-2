@@ -193,12 +193,8 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
 void UploadManager::onAllFilesRemovedRemote() {
     // Remote side confirmed unload; reset state
     // Clear per-client file uploaded markers so future uploads can re-send if needed
-    qDebug() << "UploadManager: onAllFilesRemovedRemote called, targetClient:" << m_uploadTargetClientId << "files count:" << m_outgoingFiles.size();
-    
-    // Unmark files before resetting (since we still have the target client ID)
     if (!m_uploadTargetClientId.isEmpty()) {
         for (const auto& f : m_outgoingFiles) {
-            qDebug() << "UploadManager: Unmarking fileId:" << f.fileId << "from client:" << m_uploadTargetClientId;
             FileManager::instance().unmarkFileUploadedToClient(f.fileId, m_uploadTargetClientId);
         }
     }

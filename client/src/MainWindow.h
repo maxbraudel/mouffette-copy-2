@@ -105,6 +105,9 @@ private slots:
     void onTrayIconActivated(QSystemTrayIcon::ActivationReason reason);
     void onUploadButtonClicked();
     void showSettingsDialog();
+    
+    // Helper methods
+    bool hasUnuploadedFilesForTarget(const QString& targetClientId) const;
 
 protected:
     bool event(QEvent* event) override;
