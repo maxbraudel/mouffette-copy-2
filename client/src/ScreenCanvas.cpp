@@ -1025,6 +1025,8 @@ bool ScreenCanvas::viewportEvent(QEvent* event) {
 
 bool ScreenCanvas::gestureEvent(QGestureEvent* event) {
     if (QGesture* g = event->gesture(Qt::PinchGesture)) {
+        // Treat pinch as fresh input; cancel momentum ignore state
+        if (m_ignorePanMomentum) { m_ignorePanMomentum = false; m_momentumPrimed = false; }
         auto* pinch = static_cast<QPinchGesture*>(g);
         // If pinch is over the overlay, don't alter the canvas
         if (m_infoWidget && m_infoWidget->isVisible() && viewport()) {
@@ -1053,6 +1055,8 @@ bool ScreenCanvas::gestureEvent(QGestureEvent* event) {
 }
 
 void ScreenCanvas::keyPressEvent(QKeyEvent* event) {
+    // Any key press is considered fresh input; cancel momentum blocking
+    if (m_ignorePanMomentum) { m_ignorePanMomentum = false; m_momentumPrimed = false; }
     if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
         // Require Command (macOS) or Control (other platforms) modifier to delete
 #ifdef Q_OS_MACOS
@@ -1163,6 +1167,8 @@ void ScreenCanvas::keyPressEvent(QKeyEvent* event) {
 }
 
 void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
+    // Fresh user interaction cancels any momentum ignore state
+    if (m_ignorePanMomentum) { m_ignorePanMomentum = false; m_momentumPrimed = false; }
     // When pressing over the overlay, forward event to the overlay widget ONLY if we're not in the middle of drag/resize/pan operations
     if (m_infoWidget && m_infoWidget->isVisible() && viewport()) {
         bool anyResizing = false;
@@ -1355,6 +1361,7 @@ void ScreenCanvas::mouseDoubleClickEvent(QMouseEvent* event) {
 }
 
 void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
+    if (m_ignorePanMomentum) { m_ignorePanMomentum = false; m_momentumPrimed = false; }
     // While over overlay, forward moves to overlay widget and block canvas handling ONLY if we're not dragging/resizing/panning
     if (m_infoWidget && m_infoWidget->isVisible() && viewport()) {
         bool anyResizing = false;
@@ -1443,6 +1450,7 @@ void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void ScreenCanvas::mouseReleaseEvent(QMouseEvent* event) {
+    if (m_ignorePanMomentum) { m_ignorePanMomentum = false; m_momentumPrimed = false; }
     // Forward release to overlay when over it ONLY if we're not dragging/resizing/panning
     if (m_infoWidget && m_infoWidget->isVisible() && viewport()) {
         bool anyResizing = false;
@@ -1620,6 +1628,31 @@ void ScreenCanvas::wheelEvent(QWheelEvent* event) {
     if (!event->pixelDelta().isNull()) delta = event->pixelDelta();
     else if (!event->angleDelta().isNull()) delta = event->angleDelta() / 8;
     if (!delta.isNull()) {
+        // Momentum blocking: if we're in an ignore state (just after recenter),
+        // drop deltas that are smaller than the previous one; lift the block if a
+        // larger delta arrives, which we treat as fresh user input.
+        if (m_ignorePanMomentum) {
+            const double curMag = std::sqrt(double(delta.x())*delta.x() + double(delta.y())*delta.y());
+            if (!m_momentumPrimed) {
+                // First delta after recenter primes the baseline and is ignored
+                m_lastMomentumMag = curMag;
+                m_lastMomentumDelta = delta;
+                m_momentumPrimed = true;
+                event->accept();
+                return;
+            } else {
+                if (curMag <= m_lastMomentumMag) {
+                    // Still decaying momentum: ignore
+                    m_lastMomentumMag = curMag; // track decay to tighten the gate
+                    m_lastMomentumDelta = delta;
+                    event->accept();
+                    return;
+                }
+                // Larger delta => fresh input, lift the block
+                m_ignorePanMomentum = false;
+                m_momentumPrimed = false;
+            }
+        }
         horizontalScrollBar()->setValue(horizontalScrollBar()->value() - delta.x());
         verticalScrollBar()->setValue(verticalScrollBar()->value() - delta.y());
         relayoutAllMediaOverlays(m_scene);
