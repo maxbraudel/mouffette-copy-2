@@ -1299,6 +1299,16 @@ void ScreenCanvas::mouseDoubleClickEvent(QMouseEvent* event) {
             const QPointF scenePosSel = mapToScene(event->pos());
             const QList<QGraphicsItem*> sel = m_scene->selectedItems();
             for (QGraphicsItem* it : sel) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) if (v->handleControlsPressAtItemPos(v->mapFromScene(scenePosSel))) { m_overlayMouseDown = true; event->accept(); return; }
+            // Prefer the already-selected item under the cursor, even if occluded
+            for (QGraphicsItem* it : sel) {
+                if (auto* m = dynamic_cast<ResizableMediaBase*>(it)) {
+                    if (m->contains(m->mapFromScene(scenePosSel))) {
+                        // Consume the double-click so selection is not transferred to a top item
+                        event->accept();
+                        return;
+                    }
+                }
+            }
         }
         const QList<QGraphicsItem*> hitItems = items(event->pos());
         auto toMedia = [](QGraphicsItem* x)->ResizableMediaBase* { while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); } return nullptr; };
