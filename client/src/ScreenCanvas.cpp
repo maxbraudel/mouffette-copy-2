@@ -591,7 +591,15 @@ void ScreenCanvas::refreshInfoOverlay() {
     } else {
         // Hide overlay when no media is present
         m_infoWidget->hide();
-        if (m_infoBorderRect) m_infoBorderRect->setVisible(false);
+        if (m_infoBorderRect) {
+            m_infoBorderRect->setVisible(false);
+            // Guard against any deferred layout that might resurrect visibility
+            QTimer::singleShot(0, this, [this]() {
+                if (m_infoBorderRect && (!m_infoWidget || !m_infoWidget->isVisible())) {
+                    m_infoBorderRect->setVisible(false);
+                }
+            });
+        }
     }
     
     // Perform final layout and positioning synchronously to prevent flicker
@@ -616,7 +624,11 @@ void ScreenCanvas::layoutInfoOverlay() {
         const int heightNow = m_infoWidget->height();
         const QPoint vpPosNow(std::max(0, x), std::max(0, y));
         QTimer::singleShot(0, this, [this, widthNow, heightNow, vpPosNow]() {
-            if (!viewport() || !m_infoBorderRect) return;
+            // If the overlay was hidden in the meantime, keep the background hidden too
+            if (!viewport() || !m_infoBorderRect || !m_infoWidget || !m_infoWidget->isVisible()) {
+                if (m_infoBorderRect) m_infoBorderRect->setVisible(false);
+                return;
+            }
             const QPointF widgetTopLeftScene = viewportTransform().inverted().map(vpPosNow);
             m_infoBorderRect->setRect(0, 0, widthNow, heightNow);
             m_infoBorderRect->setPos(widgetTopLeftScene);
