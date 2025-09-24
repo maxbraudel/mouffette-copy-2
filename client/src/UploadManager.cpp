@@ -89,6 +89,7 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
     m_currentUploadId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     m_uploadInProgress = true;
     m_cancelRequested = false;
+    m_finalizing = false;
     m_lastPercent = 0;
     m_filesCompleted = 0;
     m_totalFiles = files.size();
@@ -168,6 +169,10 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
     }
     if (m_cancelRequested) return; // completion suppressed
     m_ws->sendUploadComplete(m_uploadTargetClientId, m_currentUploadId);
+    // We have sent all bytes; mark as finalizing until server acks upload_finished
+    m_uploadInProgress = false;
+    m_finalizing = true;
+    emit uiStateChanged();
 }
 
 // collectSceneFiles removed; files now gathered by caller (MainWindow)
@@ -176,6 +181,7 @@ void UploadManager::resetToInitial() {
     m_uploadActive = false;
     m_uploadInProgress = false;
     m_cancelRequested = false;
+    m_finalizing = false;
     m_currentUploadId.clear();
     m_lastPercent = 0;
     m_filesCompleted = 0;
@@ -214,6 +220,7 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
     
     m_uploadActive = true; // switch to active state
     m_uploadInProgress = false;
+    m_finalizing = false; // finalization complete
     emit uploadFinished();
     emit uiStateChanged();
     if (m_ws) m_ws->closeUploadChannel();

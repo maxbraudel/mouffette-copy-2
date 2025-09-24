@@ -649,6 +649,10 @@ MainWindow::MainWindow(QWidget* parent)
                     m_uploadButton->setEnabled(true);
                 }
                 m_uploadButton->setStyleSheet(overlayUploadingStyle);
+            } else if (m_uploadManager->isFinalizing()) {
+                m_uploadButton->setText("Finalizing…");
+                m_uploadButton->setEnabled(false);
+                m_uploadButton->setStyleSheet(overlayUploadingStyle);
             } else if (m_uploadManager->hasActiveUpload()) {
                 // If there are newly added items not yet uploaded to the target, switch back to Upload
                 const QString target = m_uploadManager->targetClientId();
@@ -711,6 +715,15 @@ MainWindow::MainWindow(QWidget* parent)
             mono.setPointSize(m_uploadButtonDefaultFont.pointSize());
             mono.setBold(true);
             m_uploadButton->setFont(mono);
+        } else if (m_uploadManager->isFinalizing()) {
+            // Waiting for server to ack upload_finished
+            m_uploadButton->setCheckable(true);
+            m_uploadButton->setChecked(true);
+            m_uploadButton->setEnabled(false);
+            m_uploadButton->setText("Finalizing…");
+            m_uploadButton->setStyleSheet(blueStyle);
+            m_uploadButton->setFixedHeight(gDynamicBoxHeight);
+            m_uploadButton->setFont(m_uploadButtonDefaultFont);
         } else if (m_uploadManager->hasActiveUpload()) {
             // If there are new unuploaded files, return to Upload state; otherwise offer unload
             const QString target = m_uploadManager->targetClientId();
@@ -747,11 +760,15 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_uploadManager, &UploadManager::uiStateChanged, this, applyUploadButtonStyle);
     connect(m_uploadManager, &UploadManager::uploadProgress, this, [this, applyUploadButtonStyle](int percent, int filesCompleted, int totalFiles){
         if (!m_uploadButton) return;
-        if (m_uploadManager->isUploading() && !m_uploadManager->isCancelling()) {
+        if ((m_uploadManager->isUploading() || m_uploadManager->isFinalizing()) && !m_uploadManager->isCancelling()) {
+            if (m_uploadManager->isFinalizing()) {
+                m_uploadButton->setText("Finalizing…");
+            } else {
             m_uploadButton->setText(QString("Downloading (%1/%2) %3%")
                                     .arg(filesCompleted)
                                     .arg(totalFiles)
                                     .arg(percent));
+            }
         }
         applyUploadButtonStyle();
         

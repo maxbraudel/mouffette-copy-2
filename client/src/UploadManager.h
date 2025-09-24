@@ -57,6 +57,7 @@ public:
     bool hasActiveUpload() const { return m_uploadActive; }
     bool isUploading() const { return m_uploadInProgress; }
     bool isCancelling() const { return m_cancelRequested; }
+    bool isFinalizing() const { return m_finalizing; }
     QString currentUploadId() const { return m_currentUploadId; }
 
     // Toggle behavior (call from UI):
@@ -99,6 +100,7 @@ private:
     bool m_uploadActive = false;      // true after remote finished (acts as toggle to unload)
     bool m_uploadInProgress = false;  // true while streaming chunks
     bool m_cancelRequested = false;   // user pressed cancel mid-stream
+    bool m_finalizing = false;        // true after all bytes sent, awaiting server ack
     QString m_currentUploadId;        // uuid
     int m_lastPercent = 0;
     int m_filesCompleted = 0;
