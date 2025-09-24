@@ -42,7 +42,7 @@ QString FileManager::getOrCreateFileId(const QString& filePath)
         m_fileIdToClients.remove(existingId);
         // Record new meta
         m_fileIdMeta[newId] = { curSize, curMtime };
-        qDebug() << "FileManager: File changed at path, new fileId" << newId << "old" << existingId << "path" << normalizedPath;
+        
         return newId;
     }
     
@@ -57,7 +57,7 @@ QString FileManager::getOrCreateFileId(const QString& filePath)
     QFileInfo info(normalizedPath);
     m_fileIdMeta[fileId] = { info.exists() ? info.size() : 0, info.exists() ? info.lastModified().toSecsSinceEpoch() : 0 };
     
-    qDebug() << "Created new file ID:" << fileId << "for path:" << normalizedPath;
+    
     return fileId;
 }
 
@@ -80,32 +80,29 @@ void FileManager::associateMediaWithFile(const QString& mediaId, const QString& 
         m_fileIdToMediaIds[fileId].append(mediaId);
     }
     
-    qDebug() << "Associated media" << mediaId << "with file" << fileId;
+    
 }
 
 void FileManager::removeMediaAssociation(const QString& mediaId)
 {
-    qDebug() << "FileManager: Removing media association for" << mediaId;
+    
     
     if (!m_mediaIdToFileId.contains(mediaId)) {
-        qDebug() << "FileManager: Media ID" << mediaId << "not found in associations";
+        
         return;
     }
     
     QString fileId = m_mediaIdToFileId[mediaId];
-    qDebug() << "FileManager: Media" << mediaId << "was associated with file" << fileId;
+    
     m_fileIdToMediaIds[fileId].removeAll(mediaId);
     m_mediaIdToFileId.remove(mediaId);
     
-    // Clean up media-level client associations
-    m_mediaIdToClients.remove(mediaId);
     
-    qDebug() << "FileManager: File" << fileId << "now has" << m_fileIdToMediaIds[fileId].size() << "media associations";
     
     // Clean up file if no more media references it  
     removeFileIfUnused(fileId);
     
-    qDebug() << "FileManager: Removed media association for" << mediaId;
+    
 }
 
 QString FileManager::getFileIdForMedia(const QString& mediaId) const
@@ -135,10 +132,10 @@ bool FileManager::hasFileId(const QString& fileId) const
 
 void FileManager::removeFileIfUnused(const QString& fileId)
 {
-    qDebug() << "FileManager: Checking if file" << fileId << "is unused";
+    
     
     if (!m_fileIdToMediaIds.contains(fileId)) {
-        qDebug() << "FileManager: File" << fileId << "not found in media associations";
+        
         return;
     }
     
@@ -146,14 +143,14 @@ void FileManager::removeFileIfUnused(const QString& fileId)
         QString filePath = m_fileIdToPath.value(fileId);
         QList<QString> clientsWithFile = m_fileIdToClients.value(fileId);
         
-        qDebug() << "FileManager: File" << fileId << "is unused, removing from" << clientsWithFile.size() << "clients";
+        
         
         // Notify that file should be removed from remote clients
         if (!clientsWithFile.isEmpty() && s_fileRemovalNotifier) {
-            qDebug() << "FileManager: Calling removal notifier for clients:" << clientsWithFile;
+            
             s_fileRemovalNotifier(fileId, clientsWithFile);
         } else {
-            qDebug() << "FileManager: No clients to notify or no notifier set";
+            
         }
         
         // Clean up local tracking data
@@ -163,9 +160,9 @@ void FileManager::removeFileIfUnused(const QString& fileId)
         m_fileIdToClients.remove(fileId);
     m_fileIdMeta.remove(fileId);
         
-        qDebug() << "FileManager: Removed unused file ID:" << fileId << "from" << clientsWithFile.size() << "clients";
+        
     } else {
-        qDebug() << "FileManager: File" << fileId << "still has" << m_fileIdToMediaIds[fileId].size() << "media associations, not removing";
+        
     }
 }
 
@@ -193,7 +190,7 @@ void FileManager::markFileUploadedToClient(const QString& fileId, const QString&
     }
     if (!m_fileIdToClients[fileId].contains(clientId)) {
         m_fileIdToClients[fileId].append(clientId);
-        qDebug() << "FileManager: Marked file" << fileId << "as uploaded to client" << clientId;
+        
     }
 }
 

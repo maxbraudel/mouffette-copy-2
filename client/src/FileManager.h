@@ -46,8 +46,8 @@ public:
     bool isFileUploadedToClient(const QString& fileId, const QString& clientId) const;
     // Remove the association indicating a file is uploaded to a client
     void unmarkFileUploadedToClient(const QString& fileId, const QString& clientId);
-    
-    // Track which clients have received which media instances
+
+    // Track which clients have received which media instances (per-item, independent of file dedupe)
     void markMediaUploadedToClient(const QString& mediaId, const QString& clientId);
     bool isMediaUploadedToClient(const QString& mediaId, const QString& clientId) const;
     void unmarkMediaUploadedToClient(const QString& mediaId, const QString& clientId);
@@ -71,8 +71,8 @@ private:
     QHash<QString, QList<QString>> m_fileIdToMediaIds; // fileId -> [mediaId1, mediaId2, ...]
     QHash<QString, QString> m_mediaIdToFileId;     // mediaId -> fileId
     QHash<QString, QList<QString>> m_fileIdToClients; // fileId -> [clientId1, clientId2, ...]
-    QHash<QString, FileMeta> m_fileIdMeta;         // fileId -> size/mtime captured at id creation
     QHash<QString, QList<QString>> m_mediaIdToClients; // mediaId -> [clientId1, clientId2, ...]
+    QHash<QString, FileMeta> m_fileIdMeta;         // fileId -> size/mtime captured at id creation
     
     static std::function<void(const QString& fileId, const QList<QString>& clientIds)> s_fileRemovalNotifier;
 };

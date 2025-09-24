@@ -96,7 +96,7 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
 
     // Build manifest with file deduplication info
     QJsonArray manifest;
-    qDebug() << "UploadManager: Building manifest for" << files.size() << "unique files";
+    
     for (const auto& f : files) {
         QJsonObject obj;
         obj["fileId"] = f.fileId;
@@ -112,7 +112,7 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
         }
         obj["mediaIds"] = mediaIdArray;
         
-        qDebug() << "UploadManager: File in manifest - fileId:" << f.fileId << "name:" << f.name << "mediaIds:" << mediaIds.size();
+        
         
         manifest.append(obj);
     }
@@ -178,11 +178,11 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
     if (uploadId != m_currentUploadId) return;
     if (m_cancelRequested) return;
     
-    // Mark all uploaded files as available on the target client
+    // Mark all uploaded files and media as available on the target client
     for (const auto& f : m_outgoingFiles) {
         FileManager::instance().markFileUploadedToClient(f.fileId, m_uploadTargetClientId);
-        // Also mark all media instances for this file as uploaded
-        QList<QString> mediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
+        // mark all media associated to this file id
+        const QList<QString> mediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
         for (const QString& mediaId : mediaIds) {
             FileManager::instance().markMediaUploadedToClient(mediaId, m_uploadTargetClientId);
         }
@@ -201,8 +201,7 @@ void UploadManager::onAllFilesRemovedRemote() {
     if (!m_uploadTargetClientId.isEmpty()) {
         for (const auto& f : m_outgoingFiles) {
             FileManager::instance().unmarkFileUploadedToClient(f.fileId, m_uploadTargetClientId);
-            // Also unmark all media instances for this file
-            QList<QString> mediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
+            const QList<QString> mediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
             for (const QString& mediaId : mediaIds) {
                 FileManager::instance().unmarkMediaUploadedToClient(mediaId, m_uploadTargetClientId);
             }

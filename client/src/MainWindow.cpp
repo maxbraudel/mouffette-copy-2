@@ -573,6 +573,8 @@ MainWindow::MainWindow(QWidget* parent)
     auto applyUploadButtonStyle = [this]() {
         if (!m_uploadButton) return;
         
+        
+        
         // If button is in overlay, use custom overlay styling
         if (m_uploadButtonInOverlay) {
             const QString overlayIdleStyle = 
@@ -650,8 +652,9 @@ MainWindow::MainWindow(QWidget* parent)
             } else if (m_uploadManager->hasActiveUpload()) {
                 // If there are newly added items not yet uploaded to the target, switch back to Upload
                 const QString target = m_uploadManager->targetClientId();
+                const bool hasUnuploaded = hasUnuploadedFilesForTarget(target);
                 // If target is unknown for any reason, default to offering Upload rather than Unload
-                if (target.isEmpty() || hasUnuploadedFilesForTarget(target)) {
+                if (target.isEmpty() || hasUnuploaded) {
                     m_uploadButton->setText("Upload");
                     m_uploadButton->setEnabled(true);
                     m_uploadButton->setStyleSheet(overlayIdleStyle);
@@ -1344,7 +1347,7 @@ void MainWindow::onUploadButtonClicked() {
             if (!fi.exists() || !fi.isFile()) {
                 // File no longer exists, mark media item for removal
                 mediaItemsToRemove.append(media);
-                qDebug() << "MainWindow: File no longer exists during upload check, will remove media:" << path;
+                
                 continue;
             }
             
@@ -1354,9 +1357,9 @@ void MainWindow::onUploadButtonClicked() {
                 continue;
             }
             
-            // Check if this specific media instance has been uploaded to the target
-            const bool mediaAlreadyOnTarget = (!targetClient.isEmpty()) && FileManager::instance().isMediaUploadedToClient(media->mediaId(), targetClient);
-            if (!processedFileIds.contains(fileId) && !mediaAlreadyOnTarget) {
+            // Only add unique files (skip duplicates) and only if not uploaded to the target yet
+            const bool alreadyOnTarget = (!targetClient.isEmpty()) && FileManager::instance().isFileUploadedToClient(fileId, targetClient);
+            if (!processedFileIds.contains(fileId) && !alreadyOnTarget) {
                 UploadFileInfo info; 
                 info.fileId = fileId; // Use the shared file ID
                 info.mediaId = media->mediaId(); // Keep one mediaId for reference
@@ -1367,7 +1370,7 @@ void MainWindow::onUploadButtonClicked() {
                 files.push_back(info);
                 processedFileIds.insert(fileId);
                 
-                qDebug() << "MainWindow: Added unique file for upload:" << fileId << "path:" << info.path;
+                
             }
             
             // Map fileId to media item pointers (multiple media can share same fileId)
@@ -1397,7 +1400,28 @@ void MainWindow::onUploadButtonClicked() {
     }
     if (files.isEmpty()) {
         if (hasActive) {
-            // No new files to upload and an active upload exists: treat click as unload
+            // If there are media not yet marked uploaded for this target but their files are already on target,
+            // promote them to Uploaded locally (no bytes to send) instead of unloading.
+            bool promotedAny = false;
+            if (!targetClient.isEmpty() && m_screenCanvas && m_screenCanvas->scene()) {
+                const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
+                for (QGraphicsItem* it : allItems) {
+                    if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
+                        const QString mediaId = media->mediaId();
+                        if (mediaId.isEmpty()) continue;
+                        if (!FileManager::instance().isMediaUploadedToClient(mediaId, targetClient)) {
+                            FileManager::instance().markMediaUploadedToClient(mediaId, targetClient);
+                            media->setUploadUploaded();
+                            promotedAny = true;
+                        }
+                    }
+                }
+            }
+            if (promotedAny) {
+                if (m_uploadManager) emit m_uploadManager->uiStateChanged();
+                return;
+            }
+            // No new media to mark; treat click as unload
             m_uploadManager->requestUnload();
         } else {
             QMessageBox::information(this, "Upload", "Aucun média local à uploader sur le canevas (les éléments doivent être nouveaux ou non encore envoyés au client cible)." );
@@ -2928,16 +2952,12 @@ int MainWindow::getInnerContentGap() const
 
 bool MainWindow::hasUnuploadedFilesForTarget(const QString& targetClientId) const {
     if (!m_screenCanvas || !m_screenCanvas->scene() || targetClientId.isEmpty()) return false;
-    
     const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
     for (QGraphicsItem* it : allItems) {
         if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
             const QString mediaId = media->mediaId();
             if (mediaId.isEmpty()) continue;
-            // Check if this specific media instance has been uploaded to the target
-            if (!FileManager::instance().isMediaUploadedToClient(mediaId, targetClientId)) {
-                return true;
-            }
+            if (!FileManager::instance().isMediaUploadedToClient(mediaId, targetClientId)) return true;
         }
     }
     return false;
