@@ -25,7 +25,13 @@ void UploadManager::toggleUpload(const QVector<UploadFileInfo>& files) {
         qWarning() << "UploadManager: Not connected or no target set";
         return;
     }
-    if (m_uploadActive) { // unload
+    if (m_uploadActive) {
+        // If active state but we are provided with additional files, start a new upload for them
+        if (!files.isEmpty()) {
+            startUpload(files);
+            return;
+        }
+        // No new files: behave as unload toggle
         requestUnload();
         return;
     }
@@ -44,9 +50,8 @@ void UploadManager::requestUnload() {
     if (!m_ws || !m_ws->isConnected() || (m_uploadTargetClientId.isEmpty() && m_targetClientId.isEmpty())) return;
     if (!m_uploadActive) return; // nothing to unload
     m_ws->sendRemoveAllFiles(m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId);
-    resetToInitial();
+    // Don't reset state here - wait for onAllFilesRemovedRemote() callback
     emit uiStateChanged();
-    if (m_ws) m_ws->closeUploadChannel();
 }
 
 void UploadManager::requestCancel() {
@@ -187,7 +192,20 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
 
 void UploadManager::onAllFilesRemovedRemote() {
     // Remote side confirmed unload; reset state
+    // Clear per-client file uploaded markers so future uploads can re-send if needed
+    qDebug() << "UploadManager: onAllFilesRemovedRemote called, targetClient:" << m_uploadTargetClientId << "files count:" << m_outgoingFiles.size();
+    
+    // Unmark files before resetting (since we still have the target client ID)
+    if (!m_uploadTargetClientId.isEmpty()) {
+        for (const auto& f : m_outgoingFiles) {
+            qDebug() << "UploadManager: Unmarking fileId:" << f.fileId << "from client:" << m_uploadTargetClientId;
+            FileManager::instance().unmarkFileUploadedToClient(f.fileId, m_uploadTargetClientId);
+        }
+    }
+    
+    // Now reset state
     resetToInitial();
+    
     emit allFilesRemoved();
     emit uiStateChanged();
 }

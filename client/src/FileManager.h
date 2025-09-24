@@ -42,6 +42,10 @@ public:
     // Track which clients have received which files
     void markFileUploadedToClient(const QString& fileId, const QString& clientId);
     QList<QString> getClientsWithFile(const QString& fileId) const;
+    // Check if a specific file was already uploaded to a given client
+    bool isFileUploadedToClient(const QString& fileId, const QString& clientId) const;
+    // Remove the association indicating a file is uploaded to a client
+    void unmarkFileUploadedToClient(const QString& fileId, const QString& clientId);
     
     // Set callback for when file should be deleted from remote clients
     static void setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds)> cb);

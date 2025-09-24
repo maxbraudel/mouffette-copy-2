@@ -570,7 +570,23 @@ MainWindow::MainWindow(QWidget* parent)
     });
 
     // UI refresh when upload state changes
-    auto applyUploadButtonStyle = [this]() {
+    auto hasNewUnuploadedFilesForTarget = [this]() -> bool {
+        if (!m_screenCanvas || !m_screenCanvas->scene()) return false;
+        const QString target = m_uploadManager ? m_uploadManager->targetClientId() : QString();
+        if (target.isEmpty()) return false;
+        const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
+        for (QGraphicsItem* it : allItems) {
+            if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
+                const QString fileId = media->fileId();
+                if (fileId.isEmpty()) continue;
+                // If not already uploaded to the current target, we have new work to upload
+                if (!FileManager::instance().isFileUploadedToClient(fileId, target)) return true;
+            }
+        }
+        return false;
+    };
+
+    auto applyUploadButtonStyle = [this, hasNewUnuploadedFilesForTarget]() {
         if (!m_uploadButton) return;
         
         // If button is in overlay, use custom overlay styling
@@ -648,9 +664,16 @@ MainWindow::MainWindow(QWidget* parent)
                 }
                 m_uploadButton->setStyleSheet(overlayUploadingStyle);
             } else if (m_uploadManager->hasActiveUpload()) {
-                m_uploadButton->setText("Unload");
-                m_uploadButton->setEnabled(true);
-                m_uploadButton->setStyleSheet(overlayUnloadStyle);
+                // If there are newly added items not yet uploaded to the target, switch back to Upload
+                if (hasNewUnuploadedFilesForTarget()) {
+                    m_uploadButton->setText("Upload");
+                    m_uploadButton->setEnabled(true);
+                    m_uploadButton->setStyleSheet(overlayIdleStyle);
+                } else {
+                    m_uploadButton->setText("Unload");
+                    m_uploadButton->setEnabled(true);
+                    m_uploadButton->setStyleSheet(overlayUnloadStyle);
+                }
             } else {
                 m_uploadButton->setText("Upload");
                 m_uploadButton->setEnabled(true);
@@ -700,14 +723,25 @@ MainWindow::MainWindow(QWidget* parent)
             mono.setBold(true);
             m_uploadButton->setFont(mono);
         } else if (m_uploadManager->hasActiveUpload()) {
-            // Uploaded & resident on target: allow unload
-            m_uploadButton->setCheckable(true);
-            m_uploadButton->setChecked(true);
-            m_uploadButton->setEnabled(true);
-            m_uploadButton->setText("Remove all files");
-            m_uploadButton->setStyleSheet(greenStyle);
-            m_uploadButton->setFixedHeight(gDynamicBoxHeight);
-            m_uploadButton->setFont(m_uploadButtonDefaultFont);
+            // If there are new unuploaded files, return to Upload state; otherwise offer unload
+            if (hasNewUnuploadedFilesForTarget()) {
+                m_uploadButton->setCheckable(false);
+                m_uploadButton->setChecked(false);
+                m_uploadButton->setEnabled(true);
+                m_uploadButton->setText("Upload to Client");
+                m_uploadButton->setStyleSheet(greyStyle);
+                m_uploadButton->setFixedHeight(gDynamicBoxHeight);
+                m_uploadButton->setFont(m_uploadButtonDefaultFont);
+            } else {
+                // Uploaded & resident on target: allow unload
+                m_uploadButton->setCheckable(true);
+                m_uploadButton->setChecked(true);
+                m_uploadButton->setEnabled(true);
+                m_uploadButton->setText("Remove all files");
+                m_uploadButton->setStyleSheet(greenStyle);
+                m_uploadButton->setFixedHeight(gDynamicBoxHeight);
+                m_uploadButton->setFont(m_uploadButtonDefaultFont);
+            }
         } else {
             // Idle state
             m_uploadButton->setCheckable(false);
@@ -1297,14 +1331,16 @@ void MainWindow::updateVolumeIndicator() {
 void MainWindow::onUploadButtonClicked() {
     if (!m_uploadManager) return;
     if (m_uploadManager->isUploading()) { m_uploadManager->requestCancel(); return; }
-    if (m_uploadManager->hasActiveUpload()) { m_uploadManager->requestUnload(); return; }
+    // If we have an active upload, we may either unload or upload newly added files
+    const QString targetClient = m_uploadManager->targetClientId();
+    const bool hasActive = m_uploadManager->hasActiveUpload();
     // Clear previous upload tracking data
     m_itemsByFileId.clear();
     m_mediaIdByFileId.clear();
     
     // Gather unique files from media items (deduplicate by fileId)
     // Also check for missing files and remove associated media items
-    QVector<UploadFileInfo> files;
+    QVector<UploadFileInfo> files; // will contain only files not yet uploaded to current target
     QList<ResizableMediaBase*> mediaItemsToRemove;
     QSet<QString> processedFileIds; // Track unique files to avoid duplicates
     
@@ -1330,8 +1366,10 @@ void MainWindow::onUploadButtonClicked() {
                 continue;
             }
             
-            // Only add unique files (skip duplicates)
-            if (!processedFileIds.contains(fileId)) {
+            // Only add unique files (skip duplicates) and only if not uploaded to the target yet
+            const bool alreadyOnTarget = (!targetClient.isEmpty()) && FileManager::instance().isFileUploadedToClient(fileId, targetClient);
+            qDebug() << "MainWindow: Upload check for fileId:" << fileId << "target:" << targetClient << "alreadyOnTarget:" << alreadyOnTarget;
+            if (!processedFileIds.contains(fileId) && !alreadyOnTarget) {
                 UploadFileInfo info; 
                 info.fileId = fileId; // Use the shared file ID
                 info.mediaId = media->mediaId(); // Keep one mediaId for reference
@@ -1371,7 +1409,12 @@ void MainWindow::onUploadButtonClicked() {
         }
     }
     if (files.isEmpty()) {
-        QMessageBox::information(this, "Upload", "Aucun média local à uploader sur le canevas (les éléments doivent provenir de fichiers locaux)." );
+        if (hasActive) {
+            // No new files to upload and an active upload exists: treat click as unload
+            m_uploadManager->requestUnload();
+        } else {
+            QMessageBox::information(this, "Upload", "Aucun média local à uploader sur le canevas (les éléments doivent être nouveaux ou non encore envoyés au client cible)." );
+        }
         return;
     }
 
@@ -2086,6 +2129,13 @@ void MainWindow::createScreenViewPage() {
         // Apply initial style state machine
         QTimer::singleShot(0, [this]() {
             emit m_uploadManager->uiStateChanged();
+        });
+    }
+
+    // When a new media item is added to the canvas, re-evaluate the upload button state.
+    if (m_screenCanvas) {
+        connect(m_screenCanvas, &ScreenCanvas::mediaItemAdded, this, [this](ResizableMediaBase*){
+            if (m_uploadManager) emit m_uploadManager->uiStateChanged();
         });
     }
     
