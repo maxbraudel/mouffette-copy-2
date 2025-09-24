@@ -1171,7 +1171,7 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
         }
     }
     // (Space-to-pan currently disabled pending dedicated key tracking)
-    const bool spaceHeld = false;
+    const bool spaceHeld = false; // kept for future re-enable but currently unused
     if (event->button() == Qt::LeftButton) {
         // Record selection at press for persistence across drag/release
         m_leftMouseActive = true;
@@ -1204,20 +1204,10 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
         const QList<QGraphicsItem*> sel = m_scene ? m_scene->selectedItems() : QList<QGraphicsItem*>();
         for (QGraphicsItem* it : sel) if (auto* rp = dynamic_cast<ResizableMediaBase*>(it)) if (rp->isSelected() && rp->isOnHandleAtItemPos(rp->mapFromScene(scenePos))) { if (rp->zValue() > topZ) { topZ = rp->zValue(); topHandleItem = rp; } }
         if (topHandleItem) { if (topHandleItem->beginResizeAtScenePos(scenePos)) { viewport()->setCursor(topHandleItem->cursorForScenePos(scenePos)); event->accept(); return; } }
-    const QList<QGraphicsItem*> hitItems = items(event->pos()); bool clickedOverlayOnly = false; bool anyMedia = false;
-        for (QGraphicsItem* hi : hitItems) {
-            if (hi->data(0).toString() == QLatin1String("overlay")) clickedOverlayOnly = true;
-            QGraphicsItem* scan = hi; while (scan) { if (dynamic_cast<ResizableMediaBase*>(scan)) { anyMedia = true; break; } scan = scan->parentItem(); }
-        }
-        bool hasOverlay = false;
-        for (QGraphicsItem* hi : hitItems) {
-            if (hi->data(0).toString() == QLatin1String("overlay")) hasOverlay = true;
-        }
+    const QList<QGraphicsItem*> hitItems = items(event->pos());
+        bool hasOverlay = false; for (QGraphicsItem* hi : hitItems) if (hi->data(0).toString() == QLatin1String("overlay")) { hasOverlay = true; break; }
         if (hasOverlay) {
-            // Preserve/ensure selection of the media under the overlay to avoid selection loss
-            auto toMedia = [](QGraphicsItem* x)->ResizableMediaBase* { while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); } return nullptr; };
-            ResizableMediaBase* mediaUnder = nullptr; for (QGraphicsItem* it : hitItems) { if ((mediaUnder = toMedia(it))) break; }
-            if (mediaUnder && !mediaUnder->isSelected()) mediaUnder->setSelected(true);
+            // Do not alter media selection on overlay clicks; just pass event to overlay
             QGraphicsView::mousePressEvent(event);
             return;
         }
@@ -1472,11 +1462,7 @@ void ScreenCanvas::mouseReleaseEvent(QMouseEvent* event) {
         bool wasResizing = false; for (QGraphicsItem* it : m_scene->items()) if (auto* rp = dynamic_cast<ResizableMediaBase*>(it)) if (rp->isActivelyResizing()) { wasResizing = true; break; }
         if (wasResizing) viewport()->unsetCursor();
         // Preserve the selection that existed before dispatching to base handler
-        QList<ResizableMediaBase*> prevSelected;
-        if (m_scene) {
-            const QList<QGraphicsItem*> beforeSel = m_scene->selectedItems();
-            for (QGraphicsItem* it : beforeSel) if (auto* m = dynamic_cast<ResizableMediaBase*>(it)) prevSelected.append(m);
-        }
+        // No need to capture prevSelected; if no drag occurred we let base selection stand
         // If we were manually dragging a selected (possibly occluded) item, finish without letting base change selection
         if (m_draggingSelected) {
             m_draggingSelected = nullptr;
@@ -1486,7 +1472,6 @@ void ScreenCanvas::mouseReleaseEvent(QMouseEvent* event) {
         }
         QMouseEvent synthetic(event->type(), event->position(), event->scenePosition(), event->globalPosition(), event->button(), event->buttons(), Qt::NoModifier);
         QGraphicsView::mouseReleaseEvent(&synthetic);
-        // If we were dragging an item, restore selection that existed at press time; otherwise keep base selection
         if (m_scene) {
             if (m_draggingSincePress && !m_selectionAtPress.isEmpty()) {
                 m_scene->clearSelection();
