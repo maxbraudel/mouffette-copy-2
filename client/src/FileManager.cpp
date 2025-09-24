@@ -18,9 +18,32 @@ QString FileManager::getOrCreateFileId(const QString& filePath)
     // Normalize the path
     QString normalizedPath = QFileInfo(filePath).absoluteFilePath();
     
-    // Check if we already have this file
+    // Check if we already have this path and whether the file has changed since the id was created
     if (m_pathToFileId.contains(normalizedPath)) {
-        return m_pathToFileId[normalizedPath];
+        const QString existingId = m_pathToFileId[normalizedPath];
+        QFileInfo info(normalizedPath);
+        const qint64 curSize = info.exists() ? info.size() : 0;
+        const qint64 curMtime = info.exists() ? info.lastModified().toSecsSinceEpoch() : 0;
+        const FileMeta meta = m_fileIdMeta.value(existingId);
+        if (meta.size == curSize && meta.mtimeSecs == curMtime) {
+            return existingId;
+        }
+        // File content changed at same path: generate a new id and re-point mappings
+        QString newId = generateFileId(normalizedPath);
+        m_pathToFileId[normalizedPath] = newId;
+        m_fileIdToPath.remove(existingId);
+        m_fileIdToPath[newId] = normalizedPath;
+        m_fileIdToMediaIds[newId] = m_fileIdToMediaIds.take(existingId); // move media associations
+        // Update reverse media -> file map
+        for (const QString& mediaId : m_fileIdToMediaIds[newId]) {
+            m_mediaIdToFileId[mediaId] = newId;
+        }
+        // Clients association does not carry over: treat as not uploaded anywhere yet
+        m_fileIdToClients.remove(existingId);
+        // Record new meta
+        m_fileIdMeta[newId] = { curSize, curMtime };
+        qDebug() << "FileManager: File changed at path, new fileId" << newId << "old" << existingId << "path" << normalizedPath;
+        return newId;
     }
     
     // Generate new file ID
@@ -30,6 +53,9 @@ QString FileManager::getOrCreateFileId(const QString& filePath)
     m_pathToFileId[normalizedPath] = fileId;
     m_fileIdToPath[fileId] = normalizedPath;
     m_fileIdToMediaIds[fileId] = QList<QString>(); // Initialize empty list
+    // Capture file metadata for change detection
+    QFileInfo info(normalizedPath);
+    m_fileIdMeta[fileId] = { info.exists() ? info.size() : 0, info.exists() ? info.lastModified().toSecsSinceEpoch() : 0 };
     
     qDebug() << "Created new file ID:" << fileId << "for path:" << normalizedPath;
     return fileId;
@@ -132,6 +158,7 @@ void FileManager::removeFileIfUnused(const QString& fileId)
         m_pathToFileId.remove(filePath);
         m_fileIdToMediaIds.remove(fileId);
         m_fileIdToClients.remove(fileId);
+    m_fileIdMeta.remove(fileId);
         
         qDebug() << "FileManager: Removed unused file ID:" << fileId << "from" << clientsWithFile.size() << "clients";
     } else {

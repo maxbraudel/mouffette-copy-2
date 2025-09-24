@@ -56,11 +56,17 @@ private:
     // Generate unique file ID based on file path and content hash
     QString generateFileId(const QString& filePath);
     
+    struct FileMeta {
+        qint64 size = 0;
+        qint64 mtimeSecs = 0;
+    };
+    
     QHash<QString, QString> m_fileIdToPath;        // fileId -> filePath
     QHash<QString, QString> m_pathToFileId;        // filePath -> fileId
     QHash<QString, QList<QString>> m_fileIdToMediaIds; // fileId -> [mediaId1, mediaId2, ...]
     QHash<QString, QString> m_mediaIdToFileId;     // mediaId -> fileId
     QHash<QString, QList<QString>> m_fileIdToClients; // fileId -> [clientId1, clientId2, ...]
+    QHash<QString, FileMeta> m_fileIdMeta;         // fileId -> size/mtime captured at id creation
     
     static std::function<void(const QString& fileId, const QList<QString>& clientIds)> s_fileRemovalNotifier;
 };

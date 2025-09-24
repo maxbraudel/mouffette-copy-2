@@ -650,7 +650,8 @@ MainWindow::MainWindow(QWidget* parent)
             } else if (m_uploadManager->hasActiveUpload()) {
                 // If there are newly added items not yet uploaded to the target, switch back to Upload
                 const QString target = m_uploadManager->targetClientId();
-                if (hasUnuploadedFilesForTarget(target)) {
+                // If target is unknown for any reason, default to offering Upload rather than Unload
+                if (target.isEmpty() || hasUnuploadedFilesForTarget(target)) {
                     m_uploadButton->setText("Upload");
                     m_uploadButton->setEnabled(true);
                     m_uploadButton->setStyleSheet(overlayIdleStyle);
@@ -710,7 +711,8 @@ MainWindow::MainWindow(QWidget* parent)
         } else if (m_uploadManager->hasActiveUpload()) {
             // If there are new unuploaded files, return to Upload state; otherwise offer unload
             const QString target = m_uploadManager->targetClientId();
-            if (hasUnuploadedFilesForTarget(target)) {
+            // If target is unknown for any reason, default to offering Upload rather than Unload
+            if (target.isEmpty() || hasUnuploadedFilesForTarget(target)) {
                 m_uploadButton->setCheckable(false);
                 m_uploadButton->setChecked(false);
                 m_uploadButton->setEnabled(true);
@@ -2117,10 +2119,14 @@ void MainWindow::createScreenViewPage() {
         });
     }
 
-    // When a new media item is added to the canvas, re-evaluate the upload button state.
+    // When a new media item is added to the canvas, re-evaluate the upload button state immediately
     if (m_screenCanvas) {
         connect(m_screenCanvas, &ScreenCanvas::mediaItemAdded, this, [this](ResizableMediaBase*){
-            if (m_uploadManager) emit m_uploadManager->uiStateChanged();
+            if (!m_uploadButton) return;
+            // Post to the event loop so the scene and overlay have finished updating before we re-evaluate
+            QTimer::singleShot(0, [this]() {
+                if (m_uploadManager) emit m_uploadManager->uiStateChanged();
+            });
         });
     }
     
@@ -2922,13 +2928,11 @@ int MainWindow::getInnerContentGap() const
 
 bool MainWindow::hasUnuploadedFilesForTarget(const QString& targetClientId) const {
     if (!m_screenCanvas || !m_screenCanvas->scene() || targetClientId.isEmpty()) return false;
-    
     const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
     for (QGraphicsItem* it : allItems) {
         if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
             const QString fileId = media->fileId();
             if (fileId.isEmpty()) continue;
-            // If not already uploaded to the target, we have work to upload
             if (!FileManager::instance().isFileUploadedToClient(fileId, targetClientId)) {
                 return true;
             }
