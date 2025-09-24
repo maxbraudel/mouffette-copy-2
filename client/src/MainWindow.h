@@ -282,6 +282,8 @@ private:
     QHash<QString, QString> m_mediaIdByFileId;
     // Direct mapping from fileId to media item pointers (multiple media can share same fileId)
     QHash<QString, QList<ResizableMediaBase*>> m_itemsByFileId;
+    // Deterministic order of files for the current upload session (matches sender streaming order)
+    QStringList m_currentUploadFileOrder;
     WatchManager* m_watchManager = nullptr;   // extracted watch logic
     ScreenNavigationManager* m_navigationManager = nullptr; // new navigation component
     FileWatcher* m_fileWatcher = nullptr; // monitors source files for deletion

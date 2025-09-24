@@ -1328,6 +1328,7 @@ void MainWindow::onUploadButtonClicked() {
     // Clear previous upload tracking data
     m_itemsByFileId.clear();
     m_mediaIdByFileId.clear();
+    m_currentUploadFileOrder.clear();
     
     // Gather unique files from media items (deduplicate by fileId)
     // Also check for missing files and remove associated media items
@@ -1369,15 +1370,20 @@ void MainWindow::onUploadButtonClicked() {
                 info.size = fi.size();
                 files.push_back(info);
                 processedFileIds.insert(fileId);
+                m_currentUploadFileOrder.append(fileId);
                 
                 
             }
             
             // Map fileId to media item pointers (multiple media can share same fileId)
-            if (!m_itemsByFileId.contains(fileId)) {
-                m_itemsByFileId[fileId] = QList<ResizableMediaBase*>();
+            // Only track items for files that are part of this upload (either not on target yet or provided in files)
+            const bool partOfThisUpload = !alreadyOnTarget; // since we filtered by alreadyOnTarget above
+            if (partOfThisUpload) {
+                if (!m_itemsByFileId.contains(fileId)) {
+                    m_itemsByFileId[fileId] = QList<ResizableMediaBase*>();
+                }
+                m_itemsByFileId[fileId].append(media);
             }
-            m_itemsByFileId[fileId].append(media);
         }
         
         // Remove media items with missing files
@@ -1452,27 +1458,40 @@ void MainWindow::onUploadButtonClicked() {
 
     // Wire upload manager signals to update progress and completion (connect only once)
     if (m_uploadManager && !m_uploadSignalsConnected) {
-        // Note: we do not use aggregate uploadProgress for per-item bars; only per-file signals below
-        // Per-file progress signals: only advance the active file's bar; others remain at 0 until their turn
+        // Note: We now use per-file progress signals for smooth individual bars and server progress for completion confirmation
         connect(m_uploadManager, &UploadManager::fileUploadStarted, this, [this](const QString& fileId){
             if (!m_screenCanvas || !m_screenCanvas->scene()) return;
-            // Update ALL media items that share this fileId
+            const QList<ResizableMediaBase*> items = m_itemsByFileId.value(fileId);
+            for (ResizableMediaBase* item : items) {
+                if (item && item->uploadState() != ResizableMediaBase::UploadState::Uploaded) {
+                    item->setUploadUploading(0);
+                }
+            }
+        });
+        connect(m_uploadManager, &UploadManager::fileUploadProgress, this, [this](const QString& fileId, int percent){
+            if (!m_screenCanvas || !m_screenCanvas->scene()) return;
+            const QList<ResizableMediaBase*> items = m_itemsByFileId.value(fileId);
+            for (ResizableMediaBase* item : items) {
+                if (item && item->uploadState() != ResizableMediaBase::UploadState::Uploaded) {
+                    item->setUploadUploading(percent);
+                }
+            }
+        });
+        connect(m_uploadManager, &UploadManager::fileUploadFinished, this, [this](const QString& fileId){
+            if (!m_screenCanvas || !m_screenCanvas->scene()) return;
             const QList<ResizableMediaBase*> items = m_itemsByFileId.value(fileId);
             for (ResizableMediaBase* item : items) {
                 if (item) {
-                    item->setUploadUploading(0);
+                    item->setUploadUploaded();
                 }
-            } 
+            }
         });
-        // Per-file progress connection disabled to avoid flickering with server progress updates
-        // Progress updates now come only from server via updateIndividualProgressFromServer
-        // fileUploadFinished connection disabled to avoid race condition with server progress
-        // Files are marked as uploaded only when server confirms completion via updateIndividualProgressFromServer
         connect(m_uploadManager, &UploadManager::uploadFinished, this, [this](){
             // Clear tracking data (fileUploadFinished already handled state updates)
             m_mediaIdsBeingUploaded.clear();
             m_mediaIdByFileId.clear();
             m_itemsByFileId.clear();
+            m_currentUploadFileOrder.clear();
         });
         connect(m_uploadManager, &UploadManager::allFilesRemoved, this, [this](){
             // Reset to NotUploaded when all files are removed
@@ -1489,6 +1508,7 @@ void MainWindow::onUploadButtonClicked() {
                     }
                 }
             }
+            m_currentUploadFileOrder.clear();
         });
         m_uploadSignalsConnected = true;
     }
@@ -2899,48 +2919,14 @@ void MainWindow::updateConnectionStatus() {
 
 void MainWindow::updateIndividualProgressFromServer(int globalPercent, int filesCompleted, int totalFiles) {
     if (!m_screenCanvas || !m_screenCanvas->scene() || totalFiles == 0) return;
-    
-    // Get list of files being uploaded in consistent order
-    QStringList orderedFileIds;
-    for (auto it = m_itemsByFileId.constBegin(); it != m_itemsByFileId.constEnd(); ++it) {
-        orderedFileIds.append(it.key());
-    }
-    
-    // Calculate progress for each file based on server acknowledgment
-    for (int i = 0; i < orderedFileIds.size() && i < totalFiles; ++i) {
-        const QString& fileId = orderedFileIds[i];
+    // Use server updates only to mark completed files to 100% and "Uploaded".
+    // Smooth in-file progress comes from fileUploadProgress emitted locally during streaming.
+    const int completed = qMax(0, qMin(filesCompleted, totalFiles));
+    for (int i = 0; i < completed && i < m_currentUploadFileOrder.size(); ++i) {
+        const QString& fileId = m_currentUploadFileOrder[i];
         const QList<ResizableMediaBase*> items = m_itemsByFileId.value(fileId);
-        if (items.isEmpty()) continue;
-        
-        int fileProgress;
-        bool fileCompleted = false;
-        if (i < filesCompleted) {
-            // This file is completely received by server
-            fileProgress = 100;
-            fileCompleted = true;
-        } else if (i == filesCompleted && filesCompleted < totalFiles) {
-            // This is the currently uploading file
-            // Estimate progress: remaining global progress for current file
-            int progressForCompletedFiles = filesCompleted * 100;
-            int totalExpectedProgress = totalFiles * 100;
-            int currentFileProgress = (globalPercent * totalFiles) - progressForCompletedFiles;
-            fileProgress = std::clamp(currentFileProgress, 0, 100);
-        } else {
-            // Future files not yet started by server
-            fileProgress = 0;
-        }
-        
-        // Update ALL media items that share this fileId
         for (ResizableMediaBase* item : items) {
-            if (item) {
-                if (fileCompleted) {
-                    // Server confirmed file is completely received
-                    item->setUploadUploaded();
-                } else if (item->uploadState() != ResizableMediaBase::UploadState::Uploaded) {
-                    // Update progress only if not already uploaded
-                    item->setUploadUploading(fileProgress);
-                }
-            }
+            if (item) item->setUploadUploaded();
         }
     }
 }
