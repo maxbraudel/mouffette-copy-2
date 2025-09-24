@@ -125,6 +125,8 @@ private:
     void maybeRefreshInfoOverlayOnSceneChanged();
     void updateInfoOverlayGeometryForViewport(); // fast path: recalc height/scroll cap on resize
     void updateOverlayVScrollVisibilityAndGeometry(); // overlay scrollbar sizing/visibility
+    void applyTextEllipsisIfConstrained(int overlayWidth, bool isWidthConstrained); // apply ellipsis to text labels
+    std::pair<int, bool> calculateDesiredWidthAndConstraint(); // calculate desired width and constraint state consistently
     
     void OnSceneChanged();
     // Snap-to-screen helpers
