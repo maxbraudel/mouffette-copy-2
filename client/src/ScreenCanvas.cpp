@@ -115,6 +115,16 @@ static void relayoutAllMediaOverlays(QGraphicsScene* scene) {
         }
     }
 }
+
+// Helper: convert a pixel length (in screen/view px) to item-space length for a given media item
+static qreal itemLengthFromPixels(const ResizableMediaBase* item, int px) {
+    if (!item || !item->scene() || item->scene()->views().isEmpty()) return px;
+    const QGraphicsView* v = item->scene()->views().first();
+    QTransform itemToViewport = v->viewportTransform() * item->sceneTransform();
+    qreal sx = std::hypot(itemToViewport.m11(), itemToViewport.m21());
+    if (sx <= 1e-6) return px;
+    return px / sx;
+}
 }
 
 ScreenCanvas::~ScreenCanvas() {
@@ -760,8 +770,9 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     m_nativePinchGuardTimer->setSingleShot(true);
     connect(m_nativePinchGuardTimer, &QTimer::timeout, this, [this]() { m_nativePinchActive = false; });
 
-    // On scene changes, re-anchor, and refresh the overlay only if media count changed
-    connect(m_scene, &QGraphicsScene::changed, this, [this](const QList<QRectF>&){ layoutInfoOverlay(); maybeRefreshInfoOverlayOnSceneChanged(); });
+    // On scene changes, re-anchor, refresh overlay on media count change, and keep selection chrome in sync
+    connect(m_scene, &QGraphicsScene::changed, this, [this](const QList<QRectF>&){ layoutInfoOverlay(); maybeRefreshInfoOverlayOnSceneChanged(); updateSelectionChrome(); });
+    connect(m_scene, &QGraphicsScene::selectionChanged, this, [this](){ updateSelectionChrome(); });
     
     // Set up screen border snapping callbacks for media items
     ResizableMediaBase::setScreenSnapCallback([this](const QPointF& pos, const QRectF& bounds, bool shift) {
@@ -829,6 +840,7 @@ void ScreenCanvas::recenterWithMargin(int marginPx) {
         // Also relayout all media overlays to keep absolute panels pinned
         relayoutAllMediaOverlays(m_scene);
     }
+    updateSelectionChrome();
     m_ignorePanMomentum = true; m_momentumPrimed = false; m_lastMomentumMag = 0.0; m_lastMomentumDelta = QPoint(0,0); m_momentumTimer.restart();
 }
 
@@ -849,6 +861,71 @@ void ScreenCanvas::hideRemoteCursor() {
 void ScreenCanvas::setMediaHandleSelectionSizePx(int px) { m_mediaHandleSelectionSizePx = qMax(1, px); }
 void ScreenCanvas::setMediaHandleVisualSizePx(int px) { m_mediaHandleVisualSizePx = qMax(1, px); }
 void ScreenCanvas::setMediaHandleSizePx(int px) { setMediaHandleSelectionSizePx(px); setMediaHandleVisualSizePx(px); }
+
+// Create/update high-z selection chrome so borders/handles are always visible above media
+void ScreenCanvas::updateSelectionChrome() {
+    if (!m_scene) return;
+    QSet<ResizableMediaBase*> stillSelected;
+    for (QGraphicsItem* it : m_scene->selectedItems()) {
+        if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
+            stillSelected.insert(media);
+            SelectionChrome sc = m_selectionChromeMap.value(media);
+            const qreal zBorderWhite = 11998.0; // below overlay (>=12000), above any media (<10000 used)
+            const qreal zBorderBlue  = 11999.0;
+            const qreal zHandle      = 11999.5;
+            auto ensurePath = [&](QGraphicsPathItem*& p, const QColor& color, qreal z, Qt::PenStyle style, qreal dashOffset){
+                if (!p) { p = new QGraphicsPathItem(); m_scene->addItem(p); p->setAcceptedMouseButtons(Qt::NoButton); p->setFlag(QGraphicsItem::ItemIgnoresTransformations, false); }
+                QPen pen(color); pen.setCosmetic(true); pen.setWidth(1); pen.setStyle(style); if (style == Qt::DashLine) pen.setDashPattern({4,4}); if (dashOffset != 0.0) pen.setDashOffset(dashOffset); pen.setCapStyle(Qt::FlatCap); pen.setJoinStyle(Qt::MiterJoin); p->setPen(pen); p->setBrush(Qt::NoBrush); p->setZValue(z); p->setData(0, QVariant());
+            };
+            auto ensureHandle = [&](QGraphicsRectItem*& r){ if (!r) { r = new QGraphicsRectItem(); m_scene->addItem(r); r->setAcceptedMouseButtons(Qt::NoButton); r->setFlag(QGraphicsItem::ItemIgnoresTransformations, false);} r->setBrush(Qt::white); r->setPen(QPen(QColor(74,144,226), 0)); r->setZValue(zHandle); r->setData(0, QVariant()); };
+            ensurePath(sc.borderWhite, QColor(255,255,255), zBorderWhite, Qt::DashLine, 0.0);
+            ensurePath(sc.borderBlue,  QColor(74,144,226), zBorderBlue,  Qt::DashLine, 4.0);
+            for (int i=0;i<4;++i) ensureHandle(sc.handles[i]);
+            m_selectionChromeMap[media] = sc;
+            updateSelectionChromeGeometry(media);
+        }
+    }
+    // Remove chrome for items no longer selected
+    QList<ResizableMediaBase*> toRemove;
+    for (auto it = m_selectionChromeMap.begin(); it != m_selectionChromeMap.end(); ++it) {
+        if (!stillSelected.contains(it.key())) toRemove.append(it.key());
+    }
+    for (ResizableMediaBase* m : toRemove) clearSelectionChromeFor(m);
+}
+
+void ScreenCanvas::updateSelectionChromeGeometry(ResizableMediaBase* item) {
+    if (!item) return; auto it = m_selectionChromeMap.find(item); if (it == m_selectionChromeMap.end()) return; SelectionChrome& sc = it.value();
+    // Build rectangle in scene coords matching item base rect exactly (no padding) so border hugs media edges
+    QRectF brItem(0,0, item->baseSizePx().width(), item->baseSizePx().height());
+    QRectF selRectItem = brItem; // no expansion — avoid visual gap between media and border
+    QPainterPath path; path.addRect(selRectItem);
+    if (sc.borderWhite) { sc.borderWhite->setPath(item->mapToScene(path)); }
+    if (sc.borderBlue)  { sc.borderBlue->setPath(item->mapToScene(path)); }
+    // Handle squares at corners in item coords
+    const qreal s = itemLengthFromPixels(item, m_mediaHandleVisualSizePx);
+    const QPointF tl = selRectItem.topLeft();
+    const QPointF tr = QPointF(selRectItem.right(), selRectItem.top());
+    const QPointF bl = QPointF(selRectItem.left(), selRectItem.bottom());
+    const QPointF br = selRectItem.bottomRight();
+    auto place = [&](QGraphicsRectItem* r, const QPointF& centerItem){ if (!r) return; QRectF rect(centerItem.x()-s/2.0, centerItem.y()-s/2.0, s, s); QRectF sceneRect = item->mapToScene(rect).boundingRect(); r->setRect(sceneRect); };
+    place(sc.handles[0], tl);
+    place(sc.handles[1], tr);
+    place(sc.handles[2], bl);
+    place(sc.handles[3], br);
+}
+
+void ScreenCanvas::clearSelectionChromeFor(ResizableMediaBase* item) {
+    auto it = m_selectionChromeMap.find(item); if (it == m_selectionChromeMap.end()) return; SelectionChrome sc = it.value();
+    if (sc.borderWhite) { if (m_scene) m_scene->removeItem(sc.borderWhite); delete sc.borderWhite; }
+    if (sc.borderBlue)  { if (m_scene) m_scene->removeItem(sc.borderBlue);  delete sc.borderBlue; }
+    for (QGraphicsRectItem*& r : sc.handles) { if (r) { if (m_scene) m_scene->removeItem(r); delete r; r = nullptr; } }
+    m_selectionChromeMap.erase(it);
+}
+
+void ScreenCanvas::clearAllSelectionChrome() {
+    QList<ResizableMediaBase*> keys = m_selectionChromeMap.keys();
+    for (ResizableMediaBase* k : keys) clearSelectionChromeFor(k);
+}
 
 void ScreenCanvas::setScreenBorderWidthPx(int px) {
     m_screenBorderWidthPx = qMax(0, px);
@@ -891,6 +968,7 @@ bool ScreenCanvas::event(QEvent* event) {
             zoomAroundViewportPos(vpPos, factor);
             relayoutAllMediaOverlays(m_scene);
             layoutInfoOverlay();
+            updateSelectionChrome();
             event->accept(); return true;
         }
     }
@@ -915,6 +993,7 @@ bool ScreenCanvas::viewportEvent(QEvent* event) {
             zoomAroundViewportPos(vpPos, factor);
             relayoutAllMediaOverlays(m_scene);
             layoutInfoOverlay();
+            updateSelectionChrome();
             event->accept();
             return true;
         }
@@ -1395,6 +1474,7 @@ void ScreenCanvas::wheelEvent(QWheelEvent* event) {
             // After zooming, re-anchor all absolute overlays and the media info overlay
             relayoutAllMediaOverlays(m_scene);
             layoutInfoOverlay();
+            updateSelectionChrome();
             event->accept();
             return;
         }

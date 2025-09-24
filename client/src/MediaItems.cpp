@@ -307,21 +307,10 @@ void ResizableMediaBase::hoverMoveEvent(QGraphicsSceneHoverEvent* event) { QGrap
 void ResizableMediaBase::hoverLeaveEvent(QGraphicsSceneHoverEvent* event) { QGraphicsItem::hoverLeaveEvent(event); }
 
 void ResizableMediaBase::paintSelectionAndLabel(QPainter* painter) {
-    if (!isSelected()) return;
-    QRectF br(0, 0, m_baseSize.width(), m_baseSize.height());
-    painter->save();
-    painter->setBrush(Qt::NoBrush);
-    QPen whitePen(QColor(255,255,255)); whitePen.setCosmetic(true); whitePen.setWidth(1); whitePen.setStyle(Qt::DashLine); whitePen.setDashPattern({4,4}); whitePen.setCapStyle(Qt::FlatCap); whitePen.setJoinStyle(Qt::MiterJoin);
-    painter->setPen(whitePen); painter->drawRect(br);
-    QPen bluePen(QColor(74,144,226)); bluePen.setCosmetic(true); bluePen.setWidth(1); bluePen.setStyle(Qt::DashLine); bluePen.setDashPattern({4,4}); bluePen.setDashOffset(4); bluePen.setCapStyle(Qt::FlatCap); bluePen.setJoinStyle(Qt::MiterJoin);
-    painter->setPen(bluePen); painter->drawRect(br);
-    painter->restore();
-    const qreal s = toItemLengthFromPixels(m_visualSize);
-    painter->setPen(QPen(QColor(74,144,226), 0)); painter->setBrush(QBrush(Qt::white));
-    painter->drawRect(QRectF(br.topLeft() - QPointF(s/2,s/2), QSizeF(s,s)));
-    painter->drawRect(QRectF(QPointF(br.right(), br.top()) - QPointF(s/2,s/2), QSizeF(s,s)));
-    painter->drawRect(QRectF(QPointF(br.left(), br.bottom()) - QPointF(s/2,s/2), QSizeF(s,s)));
-    painter->drawRect(QRectF(br.bottomRight() - QPointF(s/2,s/2), QSizeF(s,s)));
+    Q_UNUSED(painter);
+    // Selection chrome (borders + handles) is now drawn by ScreenCanvas as high-z scene items
+    // to ensure it appears above all media regardless of Z order. We intentionally no-op here
+    // to avoid duplicate visuals.
 }
 
 ResizableMediaBase::Handle ResizableMediaBase::hitTestHandle(const QPointF& p) const {

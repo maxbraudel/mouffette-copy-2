@@ -4,6 +4,7 @@
 #include <QGraphicsView>
 #include <QGraphicsRectItem>
 #include <QGraphicsEllipseItem>
+#include <QGraphicsPathItem>
 #include <QElapsedTimer>
 #include <QMap>
 #include <QPixmap>
@@ -192,6 +193,18 @@ private:
     qreal m_nextMediaZValue = 1.0;
     void assignNextZValue(QGraphicsItem* item);
     QList<QGraphicsItem*> getMediaItemsSortedByZ() const;
+
+    // Selection chrome (border + corner handles) drawn as separate scene items above media, below overlays
+    struct SelectionChrome {
+        QGraphicsPathItem* borderWhite = nullptr;
+        QGraphicsPathItem* borderBlue = nullptr;
+        QGraphicsRectItem* handles[4] = { nullptr, nullptr, nullptr, nullptr };
+    };
+    QMap<ResizableMediaBase*, SelectionChrome> m_selectionChromeMap;
+    void updateSelectionChrome();
+    void updateSelectionChromeGeometry(ResizableMediaBase* item);
+    void clearSelectionChromeFor(ResizableMediaBase* item);
+    void clearAllSelectionChrome();
 
     // Info overlay widgets (viewport child, independent from scene transforms)
     QWidget* m_infoWidget = nullptr;       // panel widget parented to viewport()
