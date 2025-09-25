@@ -15,7 +15,6 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QHostInfo>
-#include <QGuiApplication>
 #include <QDebug>
 #include <QCloseEvent>
 #include <QResizeEvent>
@@ -28,8 +27,6 @@
 #include <QNativeGestureEvent>
 #include <QCursor>
 #include <QRandomGenerator>
-#include <QPainter>
-#include <QGuiApplication>
 #include <algorithm>
 #include <QPaintEvent>
 #include <QGraphicsOpacityEffect>
@@ -56,7 +53,6 @@
 #include <QtSvgWidgets/QGraphicsSvgItem>
 #include <QtSvg/QSvgRenderer>
 #include <QPainterPathStroker>
-#include <QPainter>
 #include <QFileInfo>
 #include <QFile>
 #include <QDir>
@@ -75,11 +71,6 @@
 #include "ResponsiveLayoutManager.h"
 #include <QGraphicsItem>
 #include <QSet>
-#include <QMediaPlayer>
-#include <QAudioOutput>
-#include <QVideoSink>
-#include <QMediaMetaData>
-#include <QVideoFrame>
 #include <QElapsedTimer>
 #include <QDateTime>
 #include <QThreadPool>
@@ -469,7 +460,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_webSocketClient, &WebSocketClient::screensInfoReceived, this, &MainWindow::onScreensInfoReceived);
     connect(m_webSocketClient, &WebSocketClient::watchStatusChanged, this, &MainWindow::onWatchStatusChanged);
     connect(m_webSocketClient, &WebSocketClient::dataRequestReceived, this, &MainWindow::onDataRequestReceived);
-    connect(m_webSocketClient, &WebSocketClient::messageReceived, this, &MainWindow::onGenericMessageReceived);
+    // Unused generic message hook removed; specific handlers are wired explicitly
     // Forward all generic messages to UploadManager so it can handle incoming upload_* and remove_all_files when we are the target
     connect(m_webSocketClient, &WebSocketClient::messageReceived, m_uploadManager, &UploadManager::handleIncomingMessage);
     // Upload progress forwards
@@ -1545,10 +1536,7 @@ void MainWindow::onClientItemClicked(QListWidgetItem* item) {
     }
 }
 
-void MainWindow::onGenericMessageReceived(const QJsonObject& message) {
-    Q_UNUSED(message);
-    // Currently unused; placeholder for future protocol extensions
-}
+// Note: generic message hook removed; we handle specific message types via dedicated slots
 
 
 MainWindow::~MainWindow() {

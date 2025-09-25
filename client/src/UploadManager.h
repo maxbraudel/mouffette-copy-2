@@ -13,8 +13,7 @@
 #include <functional>
 
 class WebSocketClient;
-class QGraphicsScene; // no longer used directly (kept for forward compatibility)
-class QGraphicsItem;  // no longer used
+// (graphics scene/item no longer needed here)
 
 struct UploadFileInfo {
     QString fileId;

@@ -13,7 +13,6 @@
 #include <QScreen>
 #include <QApplication>
 #include <QSystemTrayIcon>
-#include <QSet>
 #include <QCloseEvent>
 #include <QResizeEvent>
 #include <QScrollArea>
@@ -22,12 +21,6 @@
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QMessageBox>
-#include <QGraphicsView>
-#include <QGraphicsScene>
-#include <QGraphicsRectItem>
-#include <QGraphicsEllipseItem>
-#include <QGestureEvent>
-#include <QPinchGesture>
 #include <QScrollBar>
 #include <QStackedWidget>
 #include <QElapsedTimer>
@@ -150,7 +143,7 @@ private:
     void updateClientList(const QList<ClientInfo>& clients);
     void setUIEnabled(bool enabled);
     void showTrayMessage(const QString& title, const QString& message);
-    void applyAnimationDurations();
+    // Animation durations are set directly where animations are created
     
     // Screen view methods
     void showScreenView(const ClientInfo& client);
@@ -159,7 +152,7 @@ private:
     void initializeRemoteClientInfoInTopBar(); // Initialize remote client info in top bar
     void createLocalClientInfoContainer(); // Create grouped container for local client info (You + network status)
     void setLocalNetworkStatus(const QString& status); // Update local network status
-    QWidget* createScreenWidget(const ScreenInfo& screen, int index);
+    // Legacy helper removed; ScreenCanvas renders screens directly
     void updateVolumeIndicator();
     void setRemoteConnectionStatus(const QString& status);
     // watch management handled by WatchManager component now
@@ -296,7 +289,6 @@ private:
     bool m_preserveViewportOnReconnect = false;
 
 private slots:
-    void onGenericMessageReceived(const QJsonObject& message);
     // Upload-specific progress/finish now managed by UploadManager
 
 private:
