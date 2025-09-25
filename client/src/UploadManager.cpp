@@ -172,29 +172,7 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
     // We have sent all bytes; mark as finalizing until server acks upload_finished
     m_uploadInProgress = false;
     m_finalizing = true;
-    m_finalizingTimer.restart();
-    qDebug() << "UploadManager: Entering finalizing state (waiting for upload_finished)";
     emit uiStateChanged();
-    // Start a safety timeout (e.g., 5 seconds). If the target doesn't ack by then,
-    // we'll assume success to avoid long "Finalizing…" stalls. This mirrors observed behavior
-    // where the upload channel may disconnect slightly after completion.
-    if (!m_finalizeTimeoutTimer) {
-        m_finalizeTimeoutTimer = new QTimer(this);
-        m_finalizeTimeoutTimer->setSingleShot(true);
-        connect(m_finalizeTimeoutTimer, &QTimer::timeout, this, [this]() {
-            if (m_finalizing) {
-                qWarning() << "UploadManager: Finalizing timeout hit; proceeding without upload_finished ack";
-                // Consider the upload finished locally
-                m_uploadActive = true;
-                m_uploadInProgress = false;
-                m_finalizing = false;
-                emit uploadFinished();
-                emit uiStateChanged();
-                if (m_ws) m_ws->closeUploadChannel();
-            }
-        });
-    }
-    m_finalizeTimeoutTimer->start(5000);
 }
 
 // collectSceneFiles removed; files now gathered by caller (MainWindow)
@@ -240,11 +218,6 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
         }
     }
     
-    const qint64 finalizeMs = m_finalizingTimer.isValid() ? m_finalizingTimer.elapsed() : -1;
-    if (finalizeMs >= 0) {
-        qDebug() << "UploadManager: Finalizing complete in" << finalizeMs << "ms";
-    }
-    if (m_finalizeTimeoutTimer) m_finalizeTimeoutTimer->stop();
     m_uploadActive = true; // switch to active state
     m_uploadInProgress = false;
     m_finalizing = false; // finalization complete
