@@ -13,7 +13,8 @@
 #include <functional>
 
 class WebSocketClient;
-// (graphics scene/item no longer needed here)
+class QGraphicsScene; // no longer used directly (kept for forward compatibility)
+class QGraphicsItem;  // no longer used
 
 struct UploadFileInfo {
     QString fileId;
@@ -56,7 +57,6 @@ public:
     bool hasActiveUpload() const { return m_uploadActive; }
     bool isUploading() const { return m_uploadInProgress; }
     bool isCancelling() const { return m_cancelRequested; }
-    bool isFinalizing() const { return m_finalizing; }
     QString currentUploadId() const { return m_currentUploadId; }
 
     // Toggle behavior (call from UI):
@@ -85,8 +85,6 @@ public slots:
     void onUploadProgress(const QString& uploadId, int percent, int filesCompleted, int totalFiles);
     void onUploadFinished(const QString& uploadId);
     void onAllFilesRemovedRemote();
-    // Handle network connection loss while uploading/finalizing
-    void onConnectionLost();
 
 private:
     void startUpload(const QVector<UploadFileInfo>& files);
@@ -101,15 +99,11 @@ private:
     bool m_uploadActive = false;      // true after remote finished (acts as toggle to unload)
     bool m_uploadInProgress = false;  // true while streaming chunks
     bool m_cancelRequested = false;   // user pressed cancel mid-stream
-    bool m_finalizing = false;        // true after all bytes sent, awaiting server ack
     QString m_currentUploadId;        // uuid
     int m_lastPercent = 0;
     int m_filesCompleted = 0;
     int m_totalFiles = 0;
     QTimer* m_cancelFallbackTimer = nullptr; // fires if remote never responds to abort/unload
-    // Sender-side byte tracking for accurate weighted progress
-    qint64 m_totalBytes = 0;
-    qint64 m_sentBytes = 0;
 
     // Sender-side per-file tracking
     QVector<UploadFileInfo> m_outgoingFiles;

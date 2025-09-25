@@ -4,19 +4,22 @@
 #include <QGraphicsView>
 #include <QGraphicsRectItem>
 #include <QGraphicsEllipseItem>
-#include <QGraphicsPathItem>
 #include <QElapsedTimer>
 #include <QMap>
+#include <QHash>
 #include <QPixmap>
 #include <QTimer>
+#include <QPointer>
 #include "ClientInfo.h" // for ScreenInfo
 #include "MediaItems.h" // for ResizableMediaBase / ResizableVideoItem
 #include <QGestureEvent>
 #include <QPinchGesture>
+#include <utility>
 class QLabel;
 class QVBoxLayout;
 class MouseBlockingRoundedRectItem;
 class QGraphicsProxyWidget; // kept for other uses, but not used by info overlay anymore
+class QGraphicsPathItem;
 
 class QMimeData;
 class QMediaPlayer;
@@ -39,8 +42,6 @@ public:
     QPushButton* getUploadButton() const { return m_uploadButton; }
     void setScreens(const QList<ScreenInfo>& screens);
     void clearScreens();
-    void hideContentPreservingState(); // Hide content without clearing, preserving viewport
-    void showContentAfterReconnect();  // Show content after reconnection
     void recenterWithMargin(int marginPx = 33);
     void setDragPreviewFadeDurationMs(int ms) { m_dragPreviewFadeMs = qMax(0, ms); }
     void setVideoControlsFadeDurationMs(int ms) { m_videoControlsFadeMs = qMax(0, ms); }
@@ -77,6 +78,10 @@ public:
     // Media list overlay management
     void refreshInfoOverlay();
 
+    // Preserve content visibility without losing viewport state during reconnects
+    void hideContentPreservingState();
+    void showContentAfterReconnect();
+
 signals:
     // Emitted when a new media item is added to the canvas
     void mediaItemAdded(ResizableMediaBase* mediaItem);
@@ -91,11 +96,11 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
-    void showEvent(QShowEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dragMoveEvent(QDragMoveEvent* event) override;
     void dragLeaveEvent(QDragLeaveEvent* event) override;
     void dropEvent(QDropEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private:
     bool gestureEvent(QGestureEvent* event);
@@ -127,10 +132,15 @@ private:
     void maybeRefreshInfoOverlayOnSceneChanged();
     void updateInfoOverlayGeometryForViewport(); // fast path: recalc height/scroll cap on resize
     void updateOverlayVScrollVisibilityAndGeometry(); // overlay scrollbar sizing/visibility
-    void applyTextEllipsisIfConstrained(bool isWidthConstrained); // apply ellipsis to text labels
-    std::pair<int, bool> calculateDesiredWidthAndConstraint(); // calculate desired width and constraint state consistently
-    
-    void OnSceneChanged();
+    void applyLaunchButtonStyle(); // launch scene button styling
+    void applyTextEllipsisIfConstrained(bool isWidthConstrained);
+    std::pair<int, bool> calculateDesiredWidthAndConstraint();
+
+    // Selection chrome (high-z selection borders and handles)
+    void updateSelectionChrome();
+    void updateSelectionChromeGeometry(ResizableMediaBase* item);
+    void clearSelectionChromeFor(ResizableMediaBase* item);
+    void clearAllSelectionChrome();
     // Snap-to-screen helpers
     QPointF snapToScreenBorders(const QPointF& scenePos, const QRectF& mediaBounds, bool shiftPressed) const;
     qreal snapResizeToScreenBorders(qreal currentScale, const QPointF& fixedCorner, const QPointF& fixedItemPoint, const QSize& baseSize, bool shiftPressed) const;
@@ -195,18 +205,6 @@ private:
     void assignNextZValue(QGraphicsItem* item);
     QList<QGraphicsItem*> getMediaItemsSortedByZ() const;
 
-    // Selection chrome (border + corner handles) drawn as separate scene items above media, below overlays
-    struct SelectionChrome {
-        QGraphicsPathItem* borderWhite = nullptr;
-        QGraphicsPathItem* borderBlue = nullptr;
-        QGraphicsRectItem* handles[4] = { nullptr, nullptr, nullptr, nullptr };
-    };
-    QMap<ResizableMediaBase*, SelectionChrome> m_selectionChromeMap;
-    void updateSelectionChrome();
-    void updateSelectionChromeGeometry(ResizableMediaBase* item);
-    void clearSelectionChromeFor(ResizableMediaBase* item);
-    void clearAllSelectionChrome();
-
     // Info overlay widgets (viewport child, independent from scene transforms)
     QWidget* m_infoWidget = nullptr;       // panel widget parented to viewport()
     QVBoxLayout* m_infoLayout = nullptr;   // main layout (no margins)
@@ -215,20 +213,28 @@ private:
     QScrollBar* m_overlayVScroll = nullptr;  // custom overlay vertical scrollbar (floating)
     QTimer* m_scrollbarHideTimer = nullptr; // timer to auto-hide scrollbar after inactivity
     QVBoxLayout* m_contentLayout = nullptr; // content layout (for media items)
-    QWidget* m_overlayHeaderWidget = nullptr; // container for overlay header row (holds upload button)
+    QWidget* m_overlayHeaderWidget = nullptr; // container for overlay header row (holds buttons)
+    QPushButton* m_launchButton = nullptr; // launch/stop scene toggle button
     QPushButton* m_uploadButton = nullptr; // upload button in media list overlay
+    bool m_sceneLaunched = false; // visual state only
     MouseBlockingRoundedRectItem* m_infoBorderRect = nullptr; // graphics rect for info overlay border
     bool m_infoRefreshQueued = false;
     int m_lastMediaItemCount = -1; // cache to detect add/remove
 
-    // Persistent selection helpers: remember selection at press and restore after drags
+    // Selection chrome data structure and map
+    struct SelectionChrome {
+        QGraphicsPathItem* borderWhite = nullptr;
+        QGraphicsPathItem* borderBlue  = nullptr;
+        QGraphicsRectItem* handles[4] = {nullptr, nullptr, nullptr, nullptr};
+    };
+    QHash<ResizableMediaBase*, SelectionChrome> m_selectionChromeMap;
+
+    // Dragging/selection interaction state
+    ResizableMediaBase* m_draggingSelected = nullptr;
     bool m_leftMouseActive = false;
     bool m_draggingSincePress = false;
     QPoint m_pressViewPos;
     QList<ResizableMediaBase*> m_selectionAtPress;
-
-    // Manual drag of selected item under occlusion
-    ResizableMediaBase* m_draggingSelected = nullptr;
     QPointF m_dragStartScene;
     QPointF m_dragItemStartPos;
 };

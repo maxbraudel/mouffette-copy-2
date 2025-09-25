@@ -25,13 +25,7 @@ void UploadManager::toggleUpload(const QVector<UploadFileInfo>& files) {
         qWarning() << "UploadManager: Not connected or no target set";
         return;
     }
-    if (m_uploadActive) {
-        // If active state but we are provided with additional files, start a new upload for them
-        if (!files.isEmpty()) {
-            startUpload(files);
-            return;
-        }
-        // No new files: behave as unload toggle
+    if (m_uploadActive) { // unload
         requestUnload();
         return;
     }
@@ -50,8 +44,9 @@ void UploadManager::requestUnload() {
     if (!m_ws || !m_ws->isConnected() || (m_uploadTargetClientId.isEmpty() && m_targetClientId.isEmpty())) return;
     if (!m_uploadActive) return; // nothing to unload
     m_ws->sendRemoveAllFiles(m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId);
-    // Don't reset state here - wait for onAllFilesRemovedRemote() callback
+    resetToInitial();
     emit uiStateChanged();
+    if (m_ws) m_ws->closeUploadChannel();
 }
 
 void UploadManager::requestCancel() {
@@ -89,17 +84,14 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
     m_currentUploadId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     m_uploadInProgress = true;
     m_cancelRequested = false;
-    m_finalizing = false;
     m_lastPercent = 0;
     m_filesCompleted = 0;
     m_totalFiles = files.size();
-    m_totalBytes = 0;
-    m_sentBytes = 0;
     emit uiStateChanged();
 
     // Build manifest with file deduplication info
     QJsonArray manifest;
-    
+    qDebug() << "UploadManager: Building manifest for" << files.size() << "unique files";
     for (const auto& f : files) {
         QJsonObject obj;
         obj["fileId"] = f.fileId;
@@ -115,11 +107,9 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
         }
         obj["mediaIds"] = mediaIdArray;
         
-        
+        qDebug() << "UploadManager: File in manifest - fileId:" << f.fileId << "name:" << f.name << "mediaIds:" << mediaIds.size();
         
         manifest.append(obj);
-        // accumulate for weighted progress
-        if (f.size > 0) m_totalBytes += f.size;
     }
     m_ws->sendUploadStart(m_uploadTargetClientId, manifest, m_currentUploadId);
 
@@ -137,19 +127,10 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
             QByteArray chunk = file.read(chunkSize);
             m_ws->sendUploadChunk(m_uploadTargetClientId, m_currentUploadId, f.fileId, chunkIndex++, chunk.toBase64());
             sentForFile += chunk.size();
-            m_sentBytes += chunk.size();
             if (f.size > 0) {
                 int p = static_cast<int>(std::round(sentForFile * 100.0 / static_cast<double>(f.size)));
                 p = std::clamp(p, 0, 100);
                 emit fileUploadProgress(f.fileId, p);
-            }
-            // Emit weighted global progress based on bytes
-            if (m_totalBytes > 0) {
-                int globalPercent = static_cast<int>(std::round(m_sentBytes * 100.0 / static_cast<double>(m_totalBytes)));
-                globalPercent = std::clamp(globalPercent, 0, 100);
-                // filesCompleted is count of files fully sent by sender (not necessarily acknowledged yet)
-                int filesCompletedLocal = m_filesCompleted + (file.atEnd() ? 1 : 0);
-                emit uploadProgress(globalPercent, filesCompletedLocal, m_totalFiles);
             }
             // Yield briefly
             QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
@@ -157,22 +138,9 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
         file.close();
         if (!m_cancelRequested) emit fileUploadFinished(f.fileId);
         if (m_cancelRequested) break;
-        // After a file is fully sent, update local filesCompleted
-        if (!m_cancelRequested) {
-            m_filesCompleted = std::min(m_filesCompleted + 1, m_totalFiles);
-            if (m_totalBytes > 0) {
-                int globalPercent = static_cast<int>(std::round(m_sentBytes * 100.0 / static_cast<double>(m_totalBytes)));
-                globalPercent = std::clamp(globalPercent, 0, 100);
-                emit uploadProgress(globalPercent, m_filesCompleted, m_totalFiles);
-            }
-        }
     }
     if (m_cancelRequested) return; // completion suppressed
     m_ws->sendUploadComplete(m_uploadTargetClientId, m_currentUploadId);
-    // We have sent all bytes; mark as finalizing until server acks upload_finished
-    m_uploadInProgress = false;
-    m_finalizing = true;
-    emit uiStateChanged();
 }
 
 // collectSceneFiles removed; files now gathered by caller (MainWindow)
@@ -181,7 +149,6 @@ void UploadManager::resetToInitial() {
     m_uploadActive = false;
     m_uploadInProgress = false;
     m_cancelRequested = false;
-    m_finalizing = false;
     m_currentUploadId.clear();
     m_lastPercent = 0;
     m_filesCompleted = 0;
@@ -196,8 +163,6 @@ void UploadManager::resetToInitial() {
 void UploadManager::onUploadProgress(const QString& uploadId, int percent, int filesCompleted, int totalFiles) {
     if (uploadId != m_currentUploadId) return;
     if (m_cancelRequested) return;
-    // While we are the sender and currently streaming, prefer local weighted progress to avoid desync.
-    if (m_uploadInProgress) return;
     m_lastPercent = percent;
     m_filesCompleted = filesCompleted;
     m_totalFiles = totalFiles;
@@ -208,19 +173,13 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
     if (uploadId != m_currentUploadId) return;
     if (m_cancelRequested) return;
     
-    // Mark all uploaded files and media as available on the target client
+    // Mark all uploaded files as available on the target client
     for (const auto& f : m_outgoingFiles) {
         FileManager::instance().markFileUploadedToClient(f.fileId, m_uploadTargetClientId);
-        // mark all media associated to this file id
-        const QList<QString> mediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
-        for (const QString& mediaId : mediaIds) {
-            FileManager::instance().markMediaUploadedToClient(mediaId, m_uploadTargetClientId);
-        }
     }
     
     m_uploadActive = true; // switch to active state
     m_uploadInProgress = false;
-    m_finalizing = false; // finalization complete
     emit uploadFinished();
     emit uiStateChanged();
     if (m_ws) m_ws->closeUploadChannel();
@@ -228,52 +187,9 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
 
 void UploadManager::onAllFilesRemovedRemote() {
     // Remote side confirmed unload; reset state
-    // Clear all uploaded markers for this client so that all items are considered Not uploaded
-    if (!m_uploadTargetClientId.isEmpty()) {
-        FileManager::instance().unmarkAllForClient(m_uploadTargetClientId);
-    } else if (!m_targetClientId.isEmpty()) {
-        FileManager::instance().unmarkAllForClient(m_targetClientId);
-    }
-    
-    // Now reset state
     resetToInitial();
-    
     emit allFilesRemoved();
     emit uiStateChanged();
-}
-
-void UploadManager::onConnectionLost() {
-    // If we were uploading or finalizing, treat it as an aborted session.
-    const bool hadOngoing = m_uploadInProgress || m_finalizing;
-    if (!hadOngoing) return;
-
-    // Cancel local flags immediately
-    m_cancelRequested = true;
-    m_uploadInProgress = false;
-    m_finalizing = false;
-
-    // Do not mark anything as uploaded; roll back any optimistic UI
-    // Unmark any files that were part of the outgoing batch but not yet confirmed by onUploadFinished
-    if (!m_uploadTargetClientId.isEmpty()) {
-        for (const auto& f : m_outgoingFiles) {
-            // Only unmark if this file hasn't been confirmed uploaded (conservative: unmark all in batch)
-            FileManager::instance().unmarkFileUploadedToClient(f.fileId, m_uploadTargetClientId);
-            const QList<QString> mediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
-            for (const QString& mediaId : mediaIds) {
-                FileManager::instance().unmarkMediaUploadedToClient(mediaId, m_uploadTargetClientId);
-            }
-        }
-    }
-
-    // Notify UI to recompute button state and progress text
-    emit uiStateChanged();
-
-    // Leave m_uploadActive = false so next click starts a fresh upload.
-    m_uploadActive = false;
-    m_currentUploadId.clear();
-    m_lastPercent = 0;
-    m_filesCompleted = 0;
-    // Keep m_outgoingFiles; they describe the interrupted batch (optional: clear if you prefer)
 }
 
 // Incoming side (target) - replicate subset of MainWindow logic for assembling files
@@ -380,18 +296,6 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             m_ws->notifyAllFilesRemovedToSender(m_incoming.senderId);
         }
         m_incoming = IncomingUploadSession();
-    } else if (type == "connection_lost_cleanup") {
-        // Optional: sender notified us to clean any partials; delete cache folder for that sender
-        QString senderClientId = message.value("senderClientId").toString();
-        if (!senderClientId.isEmpty()) {
-            QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-            if (base.isEmpty()) base = QDir::homePath() + "/.cache";
-            QString dirPath = base + "/Mouffette/Uploads/" + senderClientId;
-            QDir dir(dirPath);
-            if (dir.exists()) {
-                dir.removeRecursively();
-            }
-        }
     } else if (type == "remove_file") {
         QString senderClientId = message.value("senderClientId").toString();
         QString fileId = message.value("fileId").toString();

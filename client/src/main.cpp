@@ -2,11 +2,13 @@
 #include <QSystemTrayIcon>
 #include <QMessageBox>
 #include "MainWindow.h"
+#include "MacDockHider.h"
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     
-    // If you previously hid the dock icon via MacDockHider, that feature has been removed.
+    // Hide from dock on macOS
+    MacDockHider::hideDockIcon();
     
     // Set application properties
     app.setApplicationName("Mouffette");

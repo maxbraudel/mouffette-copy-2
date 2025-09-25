@@ -13,6 +13,7 @@
 #include <QScreen>
 #include <QApplication>
 #include <QSystemTrayIcon>
+#include <QSet>
 #include <QCloseEvent>
 #include <QResizeEvent>
 #include <QScrollArea>
@@ -21,6 +22,12 @@
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QMessageBox>
+#include <QGraphicsView>
+#include <QGraphicsScene>
+#include <QGraphicsRectItem>
+#include <QGraphicsEllipseItem>
+#include <QGestureEvent>
+#include <QPinchGesture>
 #include <QScrollBar>
 #include <QStackedWidget>
 #include <QElapsedTimer>
@@ -93,15 +100,11 @@ private slots:
     void onBackToClientListClicked();
     void onScreensInfoReceived(const ClientInfo& clientInfo);
     void onWatchStatusChanged(bool watched);
-    void onDataRequestReceived();
     
     // System tray slots
     void onTrayIconActivated(QSystemTrayIcon::ActivationReason reason);
     void onUploadButtonClicked();
     void showSettingsDialog();
-    
-    // Helper methods
-    bool hasUnuploadedFilesForTarget(const QString& targetClientId) const;
 
 protected:
     bool event(QEvent* event) override;
@@ -143,7 +146,7 @@ private:
     void updateClientList(const QList<ClientInfo>& clients);
     void setUIEnabled(bool enabled);
     void showTrayMessage(const QString& title, const QString& message);
-    // Animation durations are set directly where animations are created
+    void applyAnimationDurations();
     
     // Screen view methods
     void showScreenView(const ClientInfo& client);
@@ -152,7 +155,7 @@ private:
     void initializeRemoteClientInfoInTopBar(); // Initialize remote client info in top bar
     void createLocalClientInfoContainer(); // Create grouped container for local client info (You + network status)
     void setLocalNetworkStatus(const QString& status); // Update local network status
-    // Legacy helper removed; ScreenCanvas renders screens directly
+    QWidget* createScreenWidget(const ScreenInfo& screen, int index);
     void updateVolumeIndicator();
     void setRemoteConnectionStatus(const QString& status);
     // watch management handled by WatchManager component now
@@ -276,19 +279,14 @@ private:
     QHash<QString, QString> m_mediaIdByFileId;
     // Direct mapping from fileId to media item pointers (multiple media can share same fileId)
     QHash<QString, QList<ResizableMediaBase*>> m_itemsByFileId;
-    // Deterministic order of files for the current upload session (matches sender streaming order)
-    QStringList m_currentUploadFileOrder;
-    // Files that the server has acknowledged as fully received in the current session
-    QSet<QString> m_serverCompletedFileIds;
     WatchManager* m_watchManager = nullptr;   // extracted watch logic
     ScreenNavigationManager* m_navigationManager = nullptr; // new navigation component
     FileWatcher* m_fileWatcher = nullptr; // monitors source files for deletion
     // Canvas reveal state: ensure fade-in/recenter happen only once per selected client
     bool m_canvasRevealedForCurrentClient = false;
-    // Preserve the current viewport (zoom/pan) across temporary connection losses
-    bool m_preserveViewportOnReconnect = false;
 
 private slots:
+    void onGenericMessageReceived(const QJsonObject& message);
     // Upload-specific progress/finish now managed by UploadManager
 
 private:

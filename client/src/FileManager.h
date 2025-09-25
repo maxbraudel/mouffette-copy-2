@@ -42,19 +42,6 @@ public:
     // Track which clients have received which files
     void markFileUploadedToClient(const QString& fileId, const QString& clientId);
     QList<QString> getClientsWithFile(const QString& fileId) const;
-    // Check if a specific file was already uploaded to a given client
-    bool isFileUploadedToClient(const QString& fileId, const QString& clientId) const;
-    // Remove the association indicating a file is uploaded to a client
-    void unmarkFileUploadedToClient(const QString& fileId, const QString& clientId);
-
-    // Track which clients have received which media instances (per-item, independent of file dedupe)
-    void markMediaUploadedToClient(const QString& mediaId, const QString& clientId);
-    bool isMediaUploadedToClient(const QString& mediaId, const QString& clientId) const;
-    void unmarkMediaUploadedToClient(const QString& mediaId, const QString& clientId);
-    // Clear all uploaded markers for a given client across all files and media
-    void unmarkAllFilesForClient(const QString& clientId);
-    void unmarkAllMediaForClient(const QString& clientId);
-    void unmarkAllForClient(const QString& clientId);
     
     // Set callback for when file should be deleted from remote clients
     static void setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds)> cb);
@@ -65,18 +52,11 @@ private:
     // Generate unique file ID based on file path and content hash
     QString generateFileId(const QString& filePath);
     
-    struct FileMeta {
-        qint64 size = 0;
-        qint64 mtimeSecs = 0;
-    };
-    
     QHash<QString, QString> m_fileIdToPath;        // fileId -> filePath
     QHash<QString, QString> m_pathToFileId;        // filePath -> fileId
     QHash<QString, QList<QString>> m_fileIdToMediaIds; // fileId -> [mediaId1, mediaId2, ...]
     QHash<QString, QString> m_mediaIdToFileId;     // mediaId -> fileId
     QHash<QString, QList<QString>> m_fileIdToClients; // fileId -> [clientId1, clientId2, ...]
-    QHash<QString, QList<QString>> m_mediaIdToClients; // mediaId -> [clientId1, clientId2, ...]
-    QHash<QString, FileMeta> m_fileIdMeta;         // fileId -> size/mtime captured at id creation
     
     static std::function<void(const QString& fileId, const QList<QString>& clientIds)> s_fileRemovalNotifier;
 };
