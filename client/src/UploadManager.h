@@ -11,6 +11,7 @@
 #include <QTimer>
 #include <QUuid>
 #include <functional>
+#include <QElapsedTimer>
 
 class WebSocketClient;
 class QGraphicsScene; // no longer used directly (kept for forward compatibility)
@@ -103,11 +104,13 @@ private:
     bool m_uploadInProgress = false;  // true while streaming chunks
     bool m_cancelRequested = false;   // user pressed cancel mid-stream
     bool m_finalizing = false;        // true after all bytes sent, awaiting server ack
+    QElapsedTimer m_finalizingTimer;  // measures how long finalizing lasts
     QString m_currentUploadId;        // uuid
     int m_lastPercent = 0;
     int m_filesCompleted = 0;
     int m_totalFiles = 0;
     QTimer* m_cancelFallbackTimer = nullptr; // fires if remote never responds to abort/unload
+    QTimer* m_finalizeTimeoutTimer = nullptr; // safety: exit finalizing if ack is excessively delayed
     // Sender-side byte tracking for accurate weighted progress
     qint64 m_totalBytes = 0;
     qint64 m_sentBytes = 0;
