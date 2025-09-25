@@ -74,6 +74,8 @@ signals:
     void uiStateChanged(); // generic signal to refresh button text/state
     void uploadProgress(int percent, int filesCompleted, int totalFiles); // forwarded from server
     void uploadFinished();
+    // New: subset of files confirmed complete by target so far
+    void uploadCompletedFileIds(const QStringList& fileIds);
     void allFilesRemoved();
     // New: fine-grained per-file upload lifecycle (sender-side only)
     void fileUploadStarted(const QString& fileId);
@@ -83,6 +85,7 @@ signals:
 public slots:
     // Forwarded from WebSocket layer
     void onUploadProgress(const QString& uploadId, int percent, int filesCompleted, int totalFiles);
+    void onUploadCompletedFileIds(const QString& uploadId, const QStringList& fileIds);
     void onUploadFinished(const QString& uploadId);
     void onAllFilesRemovedRemote();
     // Handle network connection loss while uploading/finalizing

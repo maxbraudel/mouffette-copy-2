@@ -300,7 +300,7 @@ void WebSocketClient::sendRemoveFile(const QString& targetClientId, const QStrin
     sendMessage(msg);
 }
 
-void WebSocketClient::notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent, int filesCompleted, int totalFiles) {
+void WebSocketClient::notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent, int filesCompleted, int totalFiles, const QStringList& completedFileIds) {
     if (!isConnected()) return;
     QJsonObject msg;
     msg["type"] = "upload_progress";
@@ -309,6 +309,11 @@ void WebSocketClient::notifyUploadProgressToSender(const QString& senderClientId
     msg["percent"] = percent;
     msg["filesCompleted"] = filesCompleted;
     msg["totalFiles"] = totalFiles;
+    if (!completedFileIds.isEmpty()) {
+        QJsonArray arr;
+        for (const QString& fid : completedFileIds) arr.append(fid);
+        msg["completedFileIds"] = arr;
+    }
     sendMessage(msg);
 }
 
@@ -462,6 +467,13 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         const int filesCompleted = message.value("filesCompleted").toInt();
         const int totalFiles = message.value("totalFiles").toInt();
         emit uploadProgressReceived(uploadId, percent, filesCompleted, totalFiles);
+        if (message.contains("completedFileIds") && message.value("completedFileIds").isArray()) {
+            QStringList ids;
+            const QJsonArray arr = message.value("completedFileIds").toArray();
+            ids.reserve(arr.size());
+            for (const auto& v : arr) ids.append(v.toString());
+            emit uploadCompletedFileIdsReceived(uploadId, ids);
+        }
     }
     else if (type == "upload_finished") {
         const QString uploadId = message.value("uploadId").toString();

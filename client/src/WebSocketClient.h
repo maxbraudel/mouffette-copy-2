@@ -43,7 +43,7 @@ public:
     void sendRemoveAllFiles(const QString& targetClientId);
     void sendRemoveFile(const QString& targetClientId, const QString& fileId);
     // Target -> Sender notifications
-    void notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent, int filesCompleted, int totalFiles);
+    void notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent, int filesCompleted, int totalFiles, const QStringList& completedFileIds = QStringList());
     void notifyUploadFinishedToSender(const QString& senderClientId, const QString& uploadId);
     void notifyAllFilesRemovedToSender(const QString& senderClientId);
 
@@ -69,6 +69,8 @@ signals:
 
     // Upload progress signals (from target via server)
     void uploadProgressReceived(const QString& uploadId, int percent, int filesCompleted, int totalFiles);
+    // New: carries fileIds that the target reports as fully received so far
+    void uploadCompletedFileIdsReceived(const QString& uploadId, const QStringList& fileIds);
     void uploadFinishedReceived(const QString& uploadId);
     void allFilesRemovedReceived();
 

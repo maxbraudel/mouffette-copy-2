@@ -205,6 +205,13 @@ void UploadManager::onUploadProgress(const QString& uploadId, int percent, int f
     emit uploadProgress(percent, filesCompleted, totalFiles);
 }
 
+void UploadManager::onUploadCompletedFileIds(const QString& uploadId, const QStringList& fileIds) {
+    if (uploadId != m_currentUploadId) return;
+    if (m_cancelRequested) return;
+    if (fileIds.isEmpty()) return;
+    emit uploadCompletedFileIds(fileIds);
+}
+
 void UploadManager::onUploadFinished(const QString& uploadId) {
     if (uploadId != m_currentUploadId) return;
     if (m_cancelRequested) return;
@@ -333,7 +340,7 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             m_incoming.receivedByFile.insert(fileId, 0);
         }
         if (m_ws && !m_incoming.senderId.isEmpty()) {
-            m_ws->notifyUploadProgressToSender(m_incoming.senderId, m_incoming.uploadId, 0, 0, m_incoming.totalFiles);
+            m_ws->notifyUploadProgressToSender(m_incoming.senderId, m_incoming.uploadId, 0, 0, m_incoming.totalFiles, QStringList());
         }
     } else if (type == "upload_chunk") {
         if (message.value("uploadId").toString() != m_incoming.uploadId) return;
@@ -349,14 +356,15 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             m_incoming.receivedByFile[fid] = soFar;
         }
         int filesCompleted = 0;
+        QStringList completedIds;
         for (auto it = m_incoming.expectedSizes.constBegin(); it != m_incoming.expectedSizes.constEnd(); ++it) {
             qint64 expected = it.value();
             qint64 got = m_incoming.receivedByFile.value(it.key(), 0);
-            if (expected > 0 && got >= expected) filesCompleted++;
+            if (expected > 0 && got >= expected) { filesCompleted++; completedIds.append(it.key()); }
         }
         if (m_ws && !m_incoming.senderId.isEmpty() && m_incoming.totalSize > 0) {
             int percent = static_cast<int>(std::round(m_incoming.received * 100.0 / m_incoming.totalSize));
-            m_ws->notifyUploadProgressToSender(m_incoming.senderId, m_incoming.uploadId, percent, filesCompleted, m_incoming.totalFiles);
+            m_ws->notifyUploadProgressToSender(m_incoming.senderId, m_incoming.uploadId, percent, filesCompleted, m_incoming.totalFiles, completedIds);
         }
     } else if (type == "upload_complete") {
         if (message.value("uploadId").toString() != m_incoming.uploadId) return;
@@ -368,7 +376,9 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         if (m_ws && !m_incoming.senderId.isEmpty()) {
             const int finalPercent = 100;
             const int filesCompleted = m_incoming.totalFiles;
-            m_ws->notifyUploadProgressToSender(m_incoming.senderId, m_incoming.uploadId, finalPercent, filesCompleted, m_incoming.totalFiles);
+            // Include all fileIds as completed
+            QStringList allIds = m_incoming.expectedSizes.keys();
+            m_ws->notifyUploadProgressToSender(m_incoming.senderId, m_incoming.uploadId, finalPercent, filesCompleted, m_incoming.totalFiles, allIds);
         }
         if (m_ws && !m_incoming.senderId.isEmpty()) {
             m_ws->notifyUploadFinishedToSender(m_incoming.senderId, m_incoming.uploadId);

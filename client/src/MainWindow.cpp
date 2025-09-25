@@ -466,6 +466,8 @@ MainWindow::MainWindow(QWidget* parent)
     // Upload progress forwards
     connect(m_webSocketClient, &WebSocketClient::uploadProgressReceived, m_uploadManager, &UploadManager::onUploadProgress);
     connect(m_webSocketClient, &WebSocketClient::uploadFinishedReceived, m_uploadManager, &UploadManager::onUploadFinished);
+    // New: per-file completion ids
+    connect(m_webSocketClient, &WebSocketClient::uploadCompletedFileIdsReceived, m_uploadManager, &UploadManager::onUploadCompletedFileIds);
     connect(m_webSocketClient, &WebSocketClient::allFilesRemovedReceived, m_uploadManager, &UploadManager::onAllFilesRemovedRemote);
 
     // Managers wiring
@@ -1493,6 +1495,18 @@ void MainWindow::onUploadButtonClicked() {
             m_itemsByFileId.clear();
             m_currentUploadFileOrder.clear();
             m_serverCompletedFileIds.clear();
+        });
+        // Mark specific items uploaded when target reports completed fileIds
+        connect(m_uploadManager, &UploadManager::uploadCompletedFileIds, this, [this](const QStringList& fileIds){
+            if (!m_screenCanvas || !m_screenCanvas->scene()) return;
+            for (const QString& fileId : fileIds) {
+                if (m_serverCompletedFileIds.contains(fileId)) continue;
+                const QList<ResizableMediaBase*> items = m_itemsByFileId.value(fileId);
+                for (ResizableMediaBase* item : items) {
+                    if (item) item->setUploadUploaded();
+                }
+                m_serverCompletedFileIds.insert(fileId);
+            }
         });
         connect(m_uploadManager, &UploadManager::allFilesRemoved, this, [this](){
             // Reset to NotUploaded when all files are removed
@@ -2961,17 +2975,22 @@ void MainWindow::updateConnectionStatus() {
 
 void MainWindow::updateIndividualProgressFromServer(int globalPercent, int filesCompleted, int totalFiles) {
     if (!m_screenCanvas || !m_screenCanvas->scene() || totalFiles == 0) return;
-    // Use server updates only to mark completed files to 100% and "Uploaded".
-    // Smooth in-file progress comes from fileUploadProgress emitted locally during streaming.
-    const int completed = qMax(0, qMin(filesCompleted, totalFiles));
-    for (int i = 0; i < completed && i < m_currentUploadFileOrder.size(); ++i) {
-        const QString& fileId = m_currentUploadFileOrder[i];
+    Q_UNUSED(globalPercent);
+    Q_UNUSED(totalFiles);
+    // Fallback for legacy targets that don't send completedFileIds: promote first N not-yet-completed by order
+    int desired = qMax(0, filesCompleted);
+    if (desired <= 0) return;
+    int have = m_serverCompletedFileIds.size();
+    if (have >= desired) return;
+    for (const QString& fileId : m_currentUploadFileOrder) {
         if (m_serverCompletedFileIds.contains(fileId)) continue;
         const QList<ResizableMediaBase*> items = m_itemsByFileId.value(fileId);
         for (ResizableMediaBase* item : items) {
             if (item) item->setUploadUploaded();
         }
         m_serverCompletedFileIds.insert(fileId);
+        have++;
+        if (have >= desired) break;
     }
 }
 
