@@ -45,7 +45,11 @@ void ScreenNavigationManager::showScreenView(const ClientInfo& client) {
     if (m_w.canvasFade) m_w.canvasFade->stop();
     if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(0.0);
 
-    startSpinnerDelayed();
+    // Show loader immediately to avoid a blank period before first data arrives
+    if (m_loaderDelayTimer) m_loaderDelayTimer->stop();
+    if (m_w.loadingSpinner) m_w.loadingSpinner->start();
+    if (m_w.spinnerFade) m_w.spinnerFade->stop();
+    if (m_w.spinnerOpacity) m_w.spinnerOpacity->setOpacity(1.0);
 
     if (!id.isEmpty()) {
         emit requestScreens(id);

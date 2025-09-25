@@ -100,6 +100,7 @@ private slots:
     void onBackToClientListClicked();
     void onScreensInfoReceived(const ClientInfo& clientInfo);
     void onWatchStatusChanged(bool watched);
+    void onDataRequestReceived();
     
     // System tray slots
     void onTrayIconActivated(QSystemTrayIcon::ActivationReason reason);

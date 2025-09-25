@@ -468,6 +468,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_webSocketClient, &WebSocketClient::registrationConfirmed, this, &MainWindow::onRegistrationConfirmed);
     connect(m_webSocketClient, &WebSocketClient::screensInfoReceived, this, &MainWindow::onScreensInfoReceived);
     connect(m_webSocketClient, &WebSocketClient::watchStatusChanged, this, &MainWindow::onWatchStatusChanged);
+    connect(m_webSocketClient, &WebSocketClient::dataRequestReceived, this, &MainWindow::onDataRequestReceived);
     connect(m_webSocketClient, &WebSocketClient::messageReceived, this, &MainWindow::onGenericMessageReceived);
     // Forward all generic messages to UploadManager so it can handle incoming upload_* and remove_all_files when we are the target
     connect(m_webSocketClient, &WebSocketClient::messageReceived, m_uploadManager, &UploadManager::handleIncomingMessage);
@@ -2712,6 +2713,10 @@ void MainWindow::onWatchStatusChanged(bool watched) {
     
     // Start/stop display sync timer based on watch status to prevent unnecessary canvas reloads
     if (watched) {
+        // Immediately push a fresh snapshot so watchers don't wait for the first 3s tick
+        if (m_webSocketClient && m_webSocketClient->isConnected()) {
+            syncRegistration();
+        }
         if (!m_displaySyncTimer->isActive()) m_displaySyncTimer->start();
     } else {
         if (m_displaySyncTimer->isActive()) m_displaySyncTimer->stop();
@@ -2742,6 +2747,14 @@ void MainWindow::onWatchStatusChanged(bool watched) {
     } else {
         if (m_cursorTimer) m_cursorTimer->stop();
     }
+}
+
+void MainWindow::onDataRequestReceived() {
+    // Target-side: server asked us to send fresh state now (screens + volume)
+    if (!m_webSocketClient || !m_webSocketClient->isConnected()) return;
+    QList<ScreenInfo> screens = getLocalScreenInfo();
+    int volumePercent = getSystemVolumePercent();
+    m_webSocketClient->sendStateSnapshot(screens, volumePercent);
 }
 
 QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
