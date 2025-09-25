@@ -303,7 +303,56 @@ void ScreenCanvas::initInfoOverlay() {
         headerLayout->setContentsMargins(0, 0, 0, 0);
         headerLayout->setSpacing(0);
         
-        // Upload button in overlay - integrated style with top border only
+        // Switch header to a vertical stack to host Launch Scene above Upload with separators
+        delete headerLayout;
+        auto* vHeaderLayout = new QVBoxLayout(m_overlayHeaderWidget);
+        vHeaderLayout->setContentsMargins(0, 0, 0, 0);
+        vHeaderLayout->setSpacing(0);
+
+        auto createSeparator = [this]() {
+            auto* sep = new QLabel(m_overlayHeaderWidget);
+            sep->setStyleSheet(QString(
+                "QLabel { background-color: %1; border: none; }"
+            ).arg(AppColors::colorToCss(AppColors::gOverlayBorderColor)));
+            sep->setAutoFillBackground(true);
+            sep->setFixedHeight(1);
+            sep->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+            return sep;
+        };
+
+        // Top separator
+        vHeaderLayout->addWidget(createSeparator());
+
+        // Launch Scene toggle button
+        m_launchSceneButton = new QPushButton("Launch Scene", m_overlayHeaderWidget);
+        m_launchSceneButton->setCheckable(true);
+        m_launchSceneButton->setStyleSheet(
+            "QPushButton { "
+            "    padding: 8px 0px; "
+            "    font-weight: bold; "
+            "    font-size: 12px; "
+            "    color: " + AppColors::colorToCss(AppColors::gOverlayTextColor) + "; "
+            "    background: transparent; "
+            "    border: none; "
+            "    border-radius: 0px; "
+            "} "
+            "QPushButton:hover { "
+            "    color: white; "
+            "    background: rgba(255,255,255,0.05); "
+            "} "
+            "QPushButton:pressed { "
+            "    color: white; "
+            "    background: rgba(255,255,255,0.1); "
+            "}"
+        );
+        m_launchSceneButton->setFixedHeight(40);
+        m_launchSceneButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        vHeaderLayout->addWidget(m_launchSceneButton);
+
+        // Separator between Launch Scene and Upload
+        vHeaderLayout->addWidget(createSeparator());
+
+        // Upload button (kept as before, with no top border)
         m_uploadButton = new QPushButton("Upload", m_overlayHeaderWidget);
         m_uploadButton->setStyleSheet(
             "QPushButton { "
@@ -326,9 +375,20 @@ void ScreenCanvas::initInfoOverlay() {
         );
         m_uploadButton->setFixedHeight(40);
         m_uploadButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-        
-        // Full width button
-        headerLayout->addWidget(m_uploadButton);
+        vHeaderLayout->addWidget(m_uploadButton);
+
+        // Wire Launch Scene toggle behavior (UI only)
+        connect(m_launchSceneButton, &QPushButton::clicked, this, [this]() {
+            m_sceneLaunched = !m_sceneLaunched;
+            if (m_launchSceneButton->isCheckable()) {
+                m_launchSceneButton->setChecked(m_sceneLaunched);
+            }
+            updateLaunchSceneButtonStyle();
+        });
+
+        // Initialize Launch Scene style
+        updateLaunchSceneButtonStyle();
+
         // Do not add header here; refreshInfoOverlay() will place it at the bottom of the panel
         m_infoWidget->hide(); // hidden until first layout
     }
@@ -2228,4 +2288,59 @@ QList<QGraphicsItem*> ScreenCanvas::getMediaItemsSortedByZ() const {
     });
     
     return mediaItems;
+}
+
+void ScreenCanvas::updateLaunchSceneButtonStyle() {
+    if (!m_launchSceneButton) return;
+
+    // Idle (stopped) style: transparent background, overlay text color
+    const QString idleStyle =
+        "QPushButton { "
+        "    padding: 8px 0px; "
+        "    font-weight: bold; "
+        "    font-size: 12px; "
+        "    color: " + AppColors::colorToCss(AppColors::gOverlayTextColor) + "; "
+        "    background: transparent; "
+        "    border: none; "
+        "    border-radius: 0px; "
+        "} "
+        "QPushButton:hover { "
+        "    color: white; "
+        "    background: rgba(255,255,255,0.05); "
+        "} "
+        "QPushButton:pressed { "
+        "    color: white; "
+        "    background: rgba(255,255,255,0.1); "
+        "}";
+
+    // Active (launched) style: blue tint background + blue text (matching overlay uploading look)
+    const QString activeStyle =
+        "QPushButton { "
+        "    padding: 8px 0px; "
+        "    font-weight: bold; "
+        "    font-size: 12px; "
+        "    color: " + AppColors::gBrandBlue.name() + "; "
+        "    background: " + AppColors::colorToCss(AppColors::gButtonPrimaryBg) + "; "
+        "    border: none; "
+        "    border-radius: 0px; "
+        "} "
+        "QPushButton:hover { "
+        "    color: " + AppColors::gBrandBlue.name() + "; "
+        "    background: " + AppColors::colorToCss(AppColors::gButtonPrimaryHover) + "; "
+        "} "
+        "QPushButton:pressed { "
+        "    color: " + AppColors::gBrandBlue.name() + "; "
+        "    background: " + AppColors::colorToCss(AppColors::gButtonPrimaryPressed) + "; "
+        "}";
+
+    if (m_sceneLaunched) {
+        m_launchSceneButton->setText("Stop Scene");
+        m_launchSceneButton->setChecked(true);
+        m_launchSceneButton->setStyleSheet(activeStyle);
+    } else {
+        m_launchSceneButton->setText("Launch Scene");
+        m_launchSceneButton->setChecked(false);
+        m_launchSceneButton->setStyleSheet(idleStyle);
+    }
+    m_launchSceneButton->setFixedHeight(40);
 }

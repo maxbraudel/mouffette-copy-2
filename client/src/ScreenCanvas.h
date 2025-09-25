@@ -216,10 +216,15 @@ private:
     QTimer* m_scrollbarHideTimer = nullptr; // timer to auto-hide scrollbar after inactivity
     QVBoxLayout* m_contentLayout = nullptr; // content layout (for media items)
     QWidget* m_overlayHeaderWidget = nullptr; // container for overlay header row (holds upload button)
+    QPushButton* m_launchSceneButton = nullptr; // new Launch Scene toggle button
     QPushButton* m_uploadButton = nullptr; // upload button in media list overlay
     MouseBlockingRoundedRectItem* m_infoBorderRect = nullptr; // graphics rect for info overlay border
     bool m_infoRefreshQueued = false;
     int m_lastMediaItemCount = -1; // cache to detect add/remove
+
+    // Launch Scene toggle state
+    bool m_sceneLaunched = false;
+    void updateLaunchSceneButtonStyle();
 
     // Persistent selection helpers: remember selection at press and restore after drags
     bool m_leftMouseActive = false;
