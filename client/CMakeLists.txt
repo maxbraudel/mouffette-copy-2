@@ -115,9 +115,10 @@ if(APPLE)
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/Info.plist
     )
-    # Link with macOS frameworks for cursor and AVFoundation thumbnailing
+    # Link with macOS frameworks used by native integrations
     target_link_libraries(MouffetteClient "-framework AppKit" "-framework AVFoundation" "-framework CoreMedia" "-framework CoreGraphics")
     
     # Set Objective-C++ properties for .mm files
     set_source_files_properties(src/MacVideoThumbnailer.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
+    set_source_files_properties(src/MacWindowManager.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
 endif()

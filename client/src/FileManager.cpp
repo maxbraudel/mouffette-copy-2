@@ -18,9 +18,32 @@ QString FileManager::getOrCreateFileId(const QString& filePath)
     // Normalize the path
     QString normalizedPath = QFileInfo(filePath).absoluteFilePath();
     
-    // Check if we already have this file
+    // Check if we already have this path and whether the file has changed since the id was created
     if (m_pathToFileId.contains(normalizedPath)) {
-        return m_pathToFileId[normalizedPath];
+        const QString existingId = m_pathToFileId[normalizedPath];
+        QFileInfo info(normalizedPath);
+        const qint64 curSize = info.exists() ? info.size() : 0;
+        const qint64 curMtime = info.exists() ? info.lastModified().toSecsSinceEpoch() : 0;
+        const FileMeta meta = m_fileIdMeta.value(existingId);
+        if (meta.size == curSize && meta.mtimeSecs == curMtime) {
+            return existingId;
+        }
+        // File content changed at same path: generate a new id and re-point mappings
+        QString newId = generateFileId(normalizedPath);
+        m_pathToFileId[normalizedPath] = newId;
+        m_fileIdToPath.remove(existingId);
+        m_fileIdToPath[newId] = normalizedPath;
+        m_fileIdToMediaIds[newId] = m_fileIdToMediaIds.take(existingId); // move media associations
+        // Update reverse media -> file map
+        for (const QString& mediaId : m_fileIdToMediaIds[newId]) {
+            m_mediaIdToFileId[mediaId] = newId;
+        }
+        // Clients association does not carry over: treat as not uploaded anywhere yet
+        m_fileIdToClients.remove(existingId);
+        // Record new meta
+        m_fileIdMeta[newId] = { curSize, curMtime };
+        
+        return newId;
     }
     
     // Generate new file ID
@@ -30,8 +53,11 @@ QString FileManager::getOrCreateFileId(const QString& filePath)
     m_pathToFileId[normalizedPath] = fileId;
     m_fileIdToPath[fileId] = normalizedPath;
     m_fileIdToMediaIds[fileId] = QList<QString>(); // Initialize empty list
+    // Capture file metadata for change detection
+    QFileInfo info(normalizedPath);
+    m_fileIdMeta[fileId] = { info.exists() ? info.size() : 0, info.exists() ? info.lastModified().toSecsSinceEpoch() : 0 };
     
-    qDebug() << "Created new file ID:" << fileId << "for path:" << normalizedPath;
+    
     return fileId;
 }
 
@@ -54,29 +80,29 @@ void FileManager::associateMediaWithFile(const QString& mediaId, const QString& 
         m_fileIdToMediaIds[fileId].append(mediaId);
     }
     
-    qDebug() << "Associated media" << mediaId << "with file" << fileId;
+    
 }
 
 void FileManager::removeMediaAssociation(const QString& mediaId)
 {
-    qDebug() << "FileManager: Removing media association for" << mediaId;
+    
     
     if (!m_mediaIdToFileId.contains(mediaId)) {
-        qDebug() << "FileManager: Media ID" << mediaId << "not found in associations";
+        
         return;
     }
     
     QString fileId = m_mediaIdToFileId[mediaId];
-    qDebug() << "FileManager: Media" << mediaId << "was associated with file" << fileId;
+    
     m_fileIdToMediaIds[fileId].removeAll(mediaId);
     m_mediaIdToFileId.remove(mediaId);
     
-    qDebug() << "FileManager: File" << fileId << "now has" << m_fileIdToMediaIds[fileId].size() << "media associations";
+    
     
     // Clean up file if no more media references it  
     removeFileIfUnused(fileId);
     
-    qDebug() << "FileManager: Removed media association for" << mediaId;
+    
 }
 
 QString FileManager::getFileIdForMedia(const QString& mediaId) const
@@ -106,10 +132,10 @@ bool FileManager::hasFileId(const QString& fileId) const
 
 void FileManager::removeFileIfUnused(const QString& fileId)
 {
-    qDebug() << "FileManager: Checking if file" << fileId << "is unused";
+    
     
     if (!m_fileIdToMediaIds.contains(fileId)) {
-        qDebug() << "FileManager: File" << fileId << "not found in media associations";
+        
         return;
     }
     
@@ -117,14 +143,14 @@ void FileManager::removeFileIfUnused(const QString& fileId)
         QString filePath = m_fileIdToPath.value(fileId);
         QList<QString> clientsWithFile = m_fileIdToClients.value(fileId);
         
-        qDebug() << "FileManager: File" << fileId << "is unused, removing from" << clientsWithFile.size() << "clients";
+        
         
         // Notify that file should be removed from remote clients
         if (!clientsWithFile.isEmpty() && s_fileRemovalNotifier) {
-            qDebug() << "FileManager: Calling removal notifier for clients:" << clientsWithFile;
+            
             s_fileRemovalNotifier(fileId, clientsWithFile);
         } else {
-            qDebug() << "FileManager: No clients to notify or no notifier set";
+            
         }
         
         // Clean up local tracking data
@@ -132,10 +158,11 @@ void FileManager::removeFileIfUnused(const QString& fileId)
         m_pathToFileId.remove(filePath);
         m_fileIdToMediaIds.remove(fileId);
         m_fileIdToClients.remove(fileId);
+    m_fileIdMeta.remove(fileId);
         
-        qDebug() << "FileManager: Removed unused file ID:" << fileId << "from" << clientsWithFile.size() << "clients";
+        
     } else {
-        qDebug() << "FileManager: File" << fileId << "still has" << m_fileIdToMediaIds[fileId].size() << "media associations, not removing";
+        
     }
 }
 
@@ -163,7 +190,7 @@ void FileManager::markFileUploadedToClient(const QString& fileId, const QString&
     }
     if (!m_fileIdToClients[fileId].contains(clientId)) {
         m_fileIdToClients[fileId].append(clientId);
-        qDebug() << "FileManager: Marked file" << fileId << "as uploaded to client" << clientId;
+        
     }
 }
 
@@ -172,7 +199,78 @@ QList<QString> FileManager::getClientsWithFile(const QString& fileId) const
     return m_fileIdToClients.value(fileId);
 }
 
+bool FileManager::isFileUploadedToClient(const QString& fileId, const QString& clientId) const
+{
+    const QList<QString> clients = m_fileIdToClients.value(fileId);
+    return clients.contains(clientId);
+}
+
+void FileManager::unmarkFileUploadedToClient(const QString& fileId, const QString& clientId)
+{
+    if (!m_fileIdToClients.contains(fileId)) return;
+    QList<QString>& clients = m_fileIdToClients[fileId];
+    clients.removeAll(clientId);
+}
+
+void FileManager::markMediaUploadedToClient(const QString& mediaId, const QString& clientId)
+{
+    if (!m_mediaIdToClients.contains(mediaId)) {
+        m_mediaIdToClients[mediaId] = QList<QString>();
+    }
+    if (!m_mediaIdToClients[mediaId].contains(clientId)) {
+        m_mediaIdToClients[mediaId].append(clientId);
+        qDebug() << "FileManager: Marked media" << mediaId << "as uploaded to client" << clientId;
+    }
+}
+
+bool FileManager::isMediaUploadedToClient(const QString& mediaId, const QString& clientId) const
+{
+    const QList<QString> clients = m_mediaIdToClients.value(mediaId);
+    return clients.contains(clientId);
+}
+
+void FileManager::unmarkMediaUploadedToClient(const QString& mediaId, const QString& clientId)
+{
+    if (!m_mediaIdToClients.contains(mediaId)) return;
+    QList<QString>& clients = m_mediaIdToClients[mediaId];
+    clients.removeAll(clientId);
+    qDebug() << "FileManager: Unmarked media" << mediaId << "from client" << clientId;
+}
+
 void FileManager::setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds)> cb)
 {
     s_fileRemovalNotifier = std::move(cb);
+}
+
+void FileManager::unmarkAllFilesForClient(const QString& clientId)
+{
+    if (clientId.isEmpty()) return;
+    // Iterate copy of keys to allow modification during iteration
+    const QList<QString> fileIds = m_fileIdToClients.keys();
+    for (const QString& fid : fileIds) {
+        QList<QString>& clients = m_fileIdToClients[fid];
+        clients.removeAll(clientId);
+        if (clients.isEmpty()) {
+            // keep entry; removal not strictly necessary here
+        }
+    }
+}
+
+void FileManager::unmarkAllMediaForClient(const QString& clientId)
+{
+    if (clientId.isEmpty()) return;
+    const QList<QString> mediaIds = m_mediaIdToClients.keys();
+    for (const QString& mid : mediaIds) {
+        QList<QString>& clients = m_mediaIdToClients[mid];
+        clients.removeAll(clientId);
+        if (clients.isEmpty()) {
+            // keep entry; optional cleanup
+        }
+    }
+}
+
+void FileManager::unmarkAllForClient(const QString& clientId)
+{
+    unmarkAllFilesForClient(clientId);
+    unmarkAllMediaForClient(clientId);
 }

@@ -105,6 +105,7 @@ QSizeF OverlayTextElement::preferredSize(const OverlayStyle& style) const {
         // Enforce uniform element height but never shrink below natural content height
         h = std::max(h, static_cast<qreal>(style.defaultHeight));
     }
+    if (m_maxWidthPx > 0 && w > m_maxWidthPx) w = m_maxWidthPx;
     return QSizeF(w, h);
 }
 
@@ -114,8 +115,13 @@ void OverlayTextElement::setSize(const QSizeF& size) {
         m_background->setRect(0,0,size.width(), size.height());
     }
     if (m_textItem) {
+        // Apply elision if necessary to fit within size.width() - 2*paddingX
+        QFont f = m_textItem->font();
+        QFontMetrics fm(f);
+        const qreal innerW = std::max<qreal>(0.0, size.width() - 2*m_currentStyle.paddingX);
+        const QString display = fm.elidedText(m_text, Qt::ElideRight, static_cast<int>(innerW));
+        m_textItem->setPlainText(display);
         QRectF tb = m_textItem->boundingRect();
-        // If a defaultHeight is enforced, we rely on m_currentStyle for vertical centering; otherwise natural center
         qreal y = (size.height()-tb.height())/2.0;
         m_textItem->setPos((size.width()-tb.width())/2.0, y);
     }
@@ -802,5 +808,3 @@ QPointF OverlayPanel::calculatePanelPositionFromAnchor(const QPointF& anchorScen
     return vt.inverted().map(panelTopLeftViewport);
 }
 
-
-// (Legacy label hit-testing and interaction removed)

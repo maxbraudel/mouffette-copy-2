@@ -35,16 +35,15 @@ void ScreenNavigationManager::showScreenView(const ClientInfo& client) {
 
     // Reset spinner/canvas states
     if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(0); // assume 0 = spinner container
-    if (m_w.loadingSpinner) {
-        m_w.loadingSpinner->stop();
-        if (m_w.spinnerFade) m_w.spinnerFade->stop();
-        if (m_w.spinnerOpacity) m_w.spinnerOpacity->setOpacity(0.0);
-    }
+    if (m_w.loadingSpinner) m_w.loadingSpinner->stop();
+    if (m_w.spinnerFade) m_w.spinnerFade->stop();
+    if (m_w.spinnerOpacity) m_w.spinnerOpacity->setOpacity(0.0);
     if (m_w.volumeFade) m_w.volumeFade->stop();
     if (m_w.volumeOpacity) m_w.volumeOpacity->setOpacity(0.0);
     if (m_w.canvasFade) m_w.canvasFade->stop();
     if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(0.0);
 
+    // Start a delayed spinner: if data arrives quickly, we'll reveal the canvas and never show it
     startSpinnerDelayed();
 
     if (!id.isEmpty()) {
@@ -68,6 +67,12 @@ void ScreenNavigationManager::revealCanvas() {
     if (!isOnScreenView()) return; // Only if we're still on screen view
     stopSpinner();
     if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(1); // show canvas
+    
+    // Show preserved content after reconnection
+    if (m_w.screenCanvas) {
+        m_w.screenCanvas->showContentAfterReconnect();
+    }
+    
     fadeInCanvas();
 }
 
@@ -79,10 +84,9 @@ void ScreenNavigationManager::enterLoadingStateImmediate() {
     if (m_w.volumeFade) m_w.volumeFade->stop();
     if (m_w.spinnerFade) m_w.spinnerFade->stop();
 
-    // Clear canvas content and cursor, then switch to spinner page
+    // Hide canvas content but preserve viewport state (do not clear the screen items)
     if (m_w.screenCanvas) {
-        m_w.screenCanvas->hideRemoteCursor();
-        m_w.screenCanvas->clearScreens();
+        m_w.screenCanvas->hideContentPreservingState();
     }
     if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(0.0);
     if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(0); // spinner page

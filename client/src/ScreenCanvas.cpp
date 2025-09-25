@@ -7,6 +7,7 @@
 #include <QGraphicsScene>
 #include <QGraphicsProxyWidget>
 #include <QPushButton>
+#include <QHBoxLayout>
 #include <QTimer>
 #include <QMimeData>
 #include <QDragEnterEvent>
@@ -292,47 +293,18 @@ void ScreenCanvas::initInfoOverlay() {
         // Add scroll area (containing content) to main layout
         m_infoLayout->addWidget(m_contentScroll);
         
-        // Overlay header container with vertical stacking (Launch above Upload)
+        // Upload button in overlay (no title)
         m_overlayHeaderWidget = new QWidget(m_infoWidget);
         m_overlayHeaderWidget->setStyleSheet("background: transparent;");
         m_overlayHeaderWidget->setAutoFillBackground(false);
-        // Prevent header area from expanding vertically; height should follow its children (the buttons)
+        // Prevent header area from expanding vertically; height should follow its children (the button)
         m_overlayHeaderWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    auto* headerLayout = new QVBoxLayout(m_overlayHeaderWidget);
-    headerLayout->setContentsMargins(0, 0, 0, 0);
-    headerLayout->setSpacing(0);
-
-        // Grey separator line above Launch Scene
-        auto* sepAboveLaunch = new QWidget(m_overlayHeaderWidget);
-        sepAboveLaunch->setFixedHeight(1);
-        sepAboveLaunch->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        sepAboveLaunch->setStyleSheet(QString("background-color: %1;")
-            .arg(AppColors::colorToCss(AppColors::gOverlayBorderColor)));
-        headerLayout->addWidget(sepAboveLaunch);
-
-        // Launch Scene toggle button (visual only)
-    m_launchButton = new QPushButton("Launch Scene", m_overlayHeaderWidget);
-        m_launchButton->setFixedHeight(40);
-        m_launchButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    m_launchButton->setContentsMargins(0, 0, 0, 0);
-        headerLayout->addWidget(m_launchButton);
-        connect(m_launchButton, &QPushButton::clicked, this, [this]() {
-            // Toggle visual state only
-            m_sceneLaunched = !m_sceneLaunched;
-            m_launchButton->setText(m_sceneLaunched ? QStringLiteral("Stop Scene") : QStringLiteral("Launch Scene"));
-            applyLaunchButtonStyle();
-        });
-
-        // Grey separator line above Upload
-        auto* sepAboveUpload = new QWidget(m_overlayHeaderWidget);
-        sepAboveUpload->setFixedHeight(1);
-        sepAboveUpload->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        sepAboveUpload->setStyleSheet(QString("background-color: %1;")
-            .arg(AppColors::colorToCss(AppColors::gOverlayBorderColor)));
-        headerLayout->addWidget(sepAboveUpload);
-
-        // Upload button in overlay - integrated style with transparent background
-    m_uploadButton = new QPushButton("Upload", m_overlayHeaderWidget);
+        auto* headerLayout = new QHBoxLayout(m_overlayHeaderWidget);
+        headerLayout->setContentsMargins(0, 0, 0, 0);
+        headerLayout->setSpacing(0);
+        
+        // Upload button in overlay - integrated style with top border only
+        m_uploadButton = new QPushButton("Upload", m_overlayHeaderWidget);
         m_uploadButton->setStyleSheet(
             "QPushButton { "
             "    padding: 8px 0px; "
@@ -352,15 +324,11 @@ void ScreenCanvas::initInfoOverlay() {
             "    background: rgba(255,255,255,0.1); "
             "}"
         );
-    m_uploadButton->setFixedHeight(40);
+        m_uploadButton->setFixedHeight(40);
         m_uploadButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    m_uploadButton->setContentsMargins(0, 0, 0, 0);
+        
+        // Full width button
         headerLayout->addWidget(m_uploadButton);
-
-    // Initial style for Launch button
-    m_sceneLaunched = false;
-    applyLaunchButtonStyle();
-
         // Do not add header here; refreshInfoOverlay() will place it at the bottom of the panel
         m_infoWidget->hide(); // hidden until first layout
     }
@@ -558,7 +526,7 @@ void ScreenCanvas::refreshInfoOverlay() {
         }
     }
 
-    // Finally, place the header (with launch + upload buttons) at the bottom, full width, no margins
+    // Finally, place the header (with upload button) at the bottom, full width, no margins
     if (m_overlayHeaderWidget) {
         m_overlayHeaderWidget->show();
         m_infoLayout->addWidget(m_overlayHeaderWidget);
@@ -616,8 +584,6 @@ void ScreenCanvas::refreshInfoOverlay() {
     
     updateOverlayVScrollVisibilityAndGeometry();
     
-    // Launch button no longer gated by upload completeness
-
     // Only show overlay if there are media items present
     if (!media.isEmpty()) {
         m_infoWidget->show();
@@ -640,40 +606,6 @@ void ScreenCanvas::refreshInfoOverlay() {
     layoutInfoOverlay();
     
     m_infoWidget->setUpdatesEnabled(true);
-}
-
-// Note: Launch button is always enabled; no gating on upload completeness
-
-void ScreenCanvas::applyLaunchButtonStyle() {
-    if (!m_launchButton) return;
-    // Base colors
-    const QString greenText = AppColors::colorToCss(AppColors::gMediaUploadedColor);
-    const QString greenBg = AppColors::colorToCss(AppColors::gStatusConnectedBg);
-    const QString textColor = m_sceneLaunched ? greenText : AppColors::colorToCss(AppColors::gOverlayTextColor);
-    const QString normalBg = QStringLiteral("transparent"); // default state should be transparent
-    const QString hoverBg = AppColors::colorToCss(AppColors::gButtonHoverBg);
-    const QString pressedBg = AppColors::colorToCss(AppColors::gButtonPressedBg);
-    // Unload-style greens (match Upload button's "Unload" state)
-    const QString unloadHover = QStringLiteral("rgba(76, 175, 80, 56)");
-    const QString unloadPressed = QStringLiteral("rgba(76, 175, 80, 77)");
-
-    // When launched, use green unload styling; otherwise subtle gray background
-    const QString baseSection = QString(
-        "QPushButton { padding: 8px 0px; font-weight: bold; font-size: 12px; "
-        "color: %1; background: %2; border: none; border-radius: 0px; }"
-    ).arg(textColor, m_sceneLaunched ? greenBg : normalBg);
-
-    const QString hoverSection = QString(
-        "QPushButton:hover { color: %1; background: %2; }"
-    ).arg(m_sceneLaunched ? greenText : QString("white"),
-          m_sceneLaunched ? unloadHover : hoverBg);
-
-    const QString pressedSection = QString(
-        "QPushButton:pressed { color: %1; background: %2; }"
-    ).arg(m_sceneLaunched ? greenText : QString("white"),
-          m_sceneLaunched ? unloadPressed : pressedBg);
-
-    m_launchButton->setStyleSheet(baseSection + " " + hoverSection + " " + pressedSection);
 }
 
 void ScreenCanvas::layoutInfoOverlay() {
