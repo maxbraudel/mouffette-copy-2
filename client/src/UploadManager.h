@@ -110,6 +110,8 @@ private:
     // Sender-side byte tracking for accurate weighted progress
     qint64 m_totalBytes = 0;
     qint64 m_sentBytes = 0;
+    // Prefer remote (target-reported) progress when available to avoid early 100%
+    bool m_remoteProgressReceived = false;
 
     // Sender-side per-file tracking
     QVector<UploadFileInfo> m_outgoingFiles;

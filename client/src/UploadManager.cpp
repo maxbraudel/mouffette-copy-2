@@ -95,6 +95,7 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
     m_totalFiles = files.size();
     m_totalBytes = 0;
     m_sentBytes = 0;
+    m_remoteProgressReceived = false;
     emit uiStateChanged();
 
     // Build manifest with file deduplication info
@@ -143,11 +144,10 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
                 p = std::clamp(p, 0, 100);
                 emit fileUploadProgress(f.fileId, p);
             }
-            // Emit weighted global progress based on bytes
-            if (m_totalBytes > 0) {
+            // Emit weighted global progress based on bytes, but do not exceed 99%
+            if (!m_remoteProgressReceived && m_totalBytes > 0) {
                 int globalPercent = static_cast<int>(std::round(m_sentBytes * 100.0 / static_cast<double>(m_totalBytes)));
-                globalPercent = std::clamp(globalPercent, 0, 100);
-                // filesCompleted is count of files fully sent by sender (not necessarily acknowledged yet)
+                globalPercent = std::clamp(globalPercent, 0, 99); // keep <100 until remote confirms
                 int filesCompletedLocal = m_filesCompleted + (file.atEnd() ? 1 : 0);
                 emit uploadProgress(globalPercent, filesCompletedLocal, m_totalFiles);
             }
@@ -158,20 +158,21 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
         if (!m_cancelRequested) emit fileUploadFinished(f.fileId);
         if (m_cancelRequested) break;
         // After a file is fully sent, update local filesCompleted
-        if (!m_cancelRequested) {
+        if (!m_cancelRequested && !m_remoteProgressReceived) {
             m_filesCompleted = std::min(m_filesCompleted + 1, m_totalFiles);
             if (m_totalBytes > 0) {
                 int globalPercent = static_cast<int>(std::round(m_sentBytes * 100.0 / static_cast<double>(m_totalBytes)));
-                globalPercent = std::clamp(globalPercent, 0, 100);
+                globalPercent = std::clamp(globalPercent, 0, 99);
                 emit uploadProgress(globalPercent, m_filesCompleted, m_totalFiles);
             }
         }
     }
     if (m_cancelRequested) return; // completion suppressed
     m_ws->sendUploadComplete(m_uploadTargetClientId, m_currentUploadId);
-    // We have sent all bytes; mark as finalizing until server acks upload_finished
-    m_uploadInProgress = false;
-    m_finalizing = true;
+    // We have sent all bytes; remain in uploading state until remote finishes
+    // Enter finalizing only when we stop sending and await remote ack
+    m_uploadInProgress = true;
+    m_finalizing = false;
     emit uiStateChanged();
 }
 
@@ -196,8 +197,8 @@ void UploadManager::resetToInitial() {
 void UploadManager::onUploadProgress(const QString& uploadId, int percent, int filesCompleted, int totalFiles) {
     if (uploadId != m_currentUploadId) return;
     if (m_cancelRequested) return;
-    // While we are the sender and currently streaming, prefer local weighted progress to avoid desync.
-    if (m_uploadInProgress) return;
+    // Always accept target-side progress; it's authoritative
+    m_remoteProgressReceived = true;
     m_lastPercent = percent;
     m_filesCompleted = filesCompleted;
     m_totalFiles = totalFiles;
@@ -207,6 +208,10 @@ void UploadManager::onUploadProgress(const QString& uploadId, int percent, int f
 void UploadManager::onUploadFinished(const QString& uploadId) {
     if (uploadId != m_currentUploadId) return;
     if (m_cancelRequested) return;
+    // Switch to finalizing for a brief moment to align UI state, then finish
+    m_uploadInProgress = false;
+    m_finalizing = true;
+    emit uiStateChanged();
     
     // Mark all uploaded files and media as available on the target client
     for (const auto& f : m_outgoingFiles) {
@@ -359,6 +364,12 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             if (it.value()) { it.value()->flush(); it.value()->close(); delete it.value(); }
         }
         m_incoming.openFiles.clear();
+        // Send a final 100% progress update to the sender to ensure UI reaches 100 only when target is fully done
+        if (m_ws && !m_incoming.senderId.isEmpty()) {
+            const int finalPercent = 100;
+            const int filesCompleted = m_incoming.totalFiles;
+            m_ws->notifyUploadProgressToSender(m_incoming.senderId, m_incoming.uploadId, finalPercent, filesCompleted, m_incoming.totalFiles);
+        }
         if (m_ws && !m_incoming.senderId.isEmpty()) {
             m_ws->notifyUploadFinishedToSender(m_incoming.senderId, m_incoming.uploadId);
         }
