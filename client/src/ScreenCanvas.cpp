@@ -842,6 +842,7 @@ void ScreenCanvas::clearScreens() {
 }
 
 void ScreenCanvas::hideContentPreservingState() {
+    if (!m_scene) return;
     // Hide screen items and remote cursor without deleting them
     // This preserves the viewport state (zoom/pan position)
     for (auto* r : m_screenItems) {
@@ -856,6 +857,7 @@ void ScreenCanvas::hideContentPreservingState() {
 }
 
 void ScreenCanvas::showContentAfterReconnect() {
+    if (!m_scene) return;
     // Show screen items and overlays again
     // Viewport state (zoom/pan) is automatically preserved
     for (auto* r : m_screenItems) {

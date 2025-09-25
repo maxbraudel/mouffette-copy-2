@@ -2641,7 +2641,6 @@ void MainWindow::onClientSelectionChanged() {
     }
 }
 
-// (Duplicate removed) onScreensInfoReceived is implemented later in the file
 
 void MainWindow::syncRegistration() {
     QString machineName = getMachineName();

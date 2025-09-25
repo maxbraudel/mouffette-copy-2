@@ -85,7 +85,7 @@ void ScreenNavigationManager::enterLoadingStateImmediate() {
     if (m_w.volumeFade) m_w.volumeFade->stop();
     if (m_w.spinnerFade) m_w.spinnerFade->stop();
 
-    // Hide canvas content but preserve viewport state (don't clear screens)
+    // Hide canvas content but preserve viewport state (do not clear the screen items)
     if (m_w.screenCanvas) {
         m_w.screenCanvas->hideContentPreservingState();
     }
