@@ -2,13 +2,13 @@
 #include <QSystemTrayIcon>
 #include <QMessageBox>
 #include "MainWindow.h"
-#include "MacDockHider.h"
+// #include "MacDockHider.h"  // Temporarily disabled - file missing
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     
     // Hide from dock on macOS
-    MacDockHider::hideDockIcon();
+    // MacDockHider::hideDockIcon();  // Temporarily disabled - file missing
     
     // Set application properties
     app.setApplicationName("Mouffette");
