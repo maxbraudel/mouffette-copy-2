@@ -35,21 +35,16 @@ void ScreenNavigationManager::showScreenView(const ClientInfo& client) {
 
     // Reset spinner/canvas states
     if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(0); // assume 0 = spinner container
-    if (m_w.loadingSpinner) {
-        m_w.loadingSpinner->stop();
-        if (m_w.spinnerFade) m_w.spinnerFade->stop();
-        if (m_w.spinnerOpacity) m_w.spinnerOpacity->setOpacity(0.0);
-    }
+    if (m_w.loadingSpinner) m_w.loadingSpinner->stop();
+    if (m_w.spinnerFade) m_w.spinnerFade->stop();
+    if (m_w.spinnerOpacity) m_w.spinnerOpacity->setOpacity(0.0);
     if (m_w.volumeFade) m_w.volumeFade->stop();
     if (m_w.volumeOpacity) m_w.volumeOpacity->setOpacity(0.0);
     if (m_w.canvasFade) m_w.canvasFade->stop();
     if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(0.0);
 
-    // Show loader immediately to avoid a blank period before first data arrives
-    if (m_loaderDelayTimer) m_loaderDelayTimer->stop();
-    if (m_w.loadingSpinner) m_w.loadingSpinner->start();
-    if (m_w.spinnerFade) m_w.spinnerFade->stop();
-    if (m_w.spinnerOpacity) m_w.spinnerOpacity->setOpacity(1.0);
+    // Start a delayed spinner: if data arrives quickly, we'll reveal the canvas and never show it
+    startSpinnerDelayed();
 
     if (!id.isEmpty()) {
         emit requestScreens(id);
