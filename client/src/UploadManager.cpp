@@ -242,6 +242,40 @@ void UploadManager::onAllFilesRemovedRemote() {
     emit uiStateChanged();
 }
 
+void UploadManager::onConnectionLost() {
+    // If we were uploading or finalizing, treat it as an aborted session.
+    const bool hadOngoing = m_uploadInProgress || m_finalizing;
+    if (!hadOngoing) return;
+
+    // Cancel local flags immediately
+    m_cancelRequested = true;
+    m_uploadInProgress = false;
+    m_finalizing = false;
+
+    // Do not mark anything as uploaded; roll back any optimistic UI
+    // Unmark any files that were part of the outgoing batch but not yet confirmed by onUploadFinished
+    if (!m_uploadTargetClientId.isEmpty()) {
+        for (const auto& f : m_outgoingFiles) {
+            // Only unmark if this file hasn't been confirmed uploaded (conservative: unmark all in batch)
+            FileManager::instance().unmarkFileUploadedToClient(f.fileId, m_uploadTargetClientId);
+            const QList<QString> mediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
+            for (const QString& mediaId : mediaIds) {
+                FileManager::instance().unmarkMediaUploadedToClient(mediaId, m_uploadTargetClientId);
+            }
+        }
+    }
+
+    // Notify UI to recompute button state and progress text
+    emit uiStateChanged();
+
+    // Leave m_uploadActive = false so next click starts a fresh upload.
+    m_uploadActive = false;
+    m_currentUploadId.clear();
+    m_lastPercent = 0;
+    m_filesCompleted = 0;
+    // Keep m_outgoingFiles; they describe the interrupted batch (optional: clear if you prefer)
+}
+
 // Incoming side (target) - replicate subset of MainWindow logic for assembling files
 void UploadManager::handleIncomingMessage(const QJsonObject& message) {
     const QString type = message.value("type").toString();
@@ -346,6 +380,18 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             m_ws->notifyAllFilesRemovedToSender(m_incoming.senderId);
         }
         m_incoming = IncomingUploadSession();
+    } else if (type == "connection_lost_cleanup") {
+        // Optional: sender notified us to clean any partials; delete cache folder for that sender
+        QString senderClientId = message.value("senderClientId").toString();
+        if (!senderClientId.isEmpty()) {
+            QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+            if (base.isEmpty()) base = QDir::homePath() + "/.cache";
+            QString dirPath = base + "/Mouffette/Uploads/" + senderClientId;
+            QDir dir(dirPath);
+            if (dir.exists()) {
+                dir.removeRecursively();
+            }
+        }
     } else if (type == "remove_file") {
         QString senderClientId = message.value("senderClientId").toString();
         QString fileId = message.value("fileId").toString();

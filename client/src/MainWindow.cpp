@@ -2476,11 +2476,34 @@ void MainWindow::onDisconnected() {
         removeVolumeIndicatorFromLayout();
     }
     
+    // Inform upload manager of connection loss to cancel any ongoing upload/finalizing state
+    if (m_uploadManager) {
+        m_uploadManager->onConnectionLost();
+    }
+
     // Start smart reconnection if client is enabled and not manually disconnected
     if (!m_userDisconnected) {
         scheduleReconnect();
     }
     
+    // Reset any in-progress upload UI so items don’t appear uploaded
+    if (m_screenCanvas && m_screenCanvas->scene()) {
+        const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
+        for (QGraphicsItem* it : allItems) {
+            if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
+                if (media->uploadState() == ResizableMediaBase::UploadState::Uploading) {
+                    media->setUploadNotUploaded();
+                }
+            }
+        }
+    }
+    // Clear local tracking for current batch
+    m_mediaIdsBeingUploaded.clear();
+    m_mediaIdByFileId.clear();
+    m_itemsByFileId.clear();
+    m_currentUploadFileOrder.clear();
+    m_serverCompletedFileIds.clear();
+
     // Stop watching if any
     if (m_watchManager) m_watchManager->unwatchIfAny();
     

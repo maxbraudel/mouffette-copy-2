@@ -86,6 +86,8 @@ public slots:
     void onUploadProgress(const QString& uploadId, int percent, int filesCompleted, int totalFiles);
     void onUploadFinished(const QString& uploadId);
     void onAllFilesRemovedRemote();
+    // Handle network connection loss while uploading/finalizing
+    void onConnectionLost();
 
 private:
     void startUpload(const QVector<UploadFileInfo>& files);
