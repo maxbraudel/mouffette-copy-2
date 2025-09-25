@@ -291,6 +291,8 @@ private:
     FileWatcher* m_fileWatcher = nullptr; // monitors source files for deletion
     // Canvas reveal state: ensure fade-in/recenter happen only once per selected client
     bool m_canvasRevealedForCurrentClient = false;
+    // Preserve the current viewport (zoom/pan) across temporary connection losses
+    bool m_preserveViewportOnReconnect = false;
 
 private slots:
     void onGenericMessageReceived(const QJsonObject& message);

@@ -2468,7 +2468,10 @@ void MainWindow::onDisconnected() {
     // If user is currently on a client's canvas page, immediately switch the canvas
     // area to a loading state and clear any displayed content/overlays.
     if (m_navigationManager && m_navigationManager->isOnScreenView()) {
-        m_navigationManager->enterLoadingStateImmediate();
+    // Enter loading state but preserve the current canvas content/viewport; the navigation
+    // manager now hides content instead of clearing it. Mark that we should not recenter on reconnect.
+    m_preserveViewportOnReconnect = true;
+    m_navigationManager->enterLoadingStateImmediate();
         // Our local network just dropped; show error state explicitly
         addRemoteStatusToLayout();
         setRemoteConnectionStatus("ERROR");
@@ -2596,7 +2599,8 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
             } else {
                 addRemoteStatusToLayout();
                 setRemoteConnectionStatus("DISCONNECTED");
-                // Remote client went away while on canvas: unload and show loader immediately
+                // Remote client went away while on canvas: show loader but preserve viewport
+                m_preserveViewportOnReconnect = true;
                 m_navigationManager->enterLoadingStateImmediate();
                 m_canvasRevealedForCurrentClient = false;
                 removeVolumeIndicatorFromLayout();
@@ -2673,9 +2677,14 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
                     m_canvasStack->setCurrentIndex(1);
                 }
                 if (m_screenCanvas) {
-                    m_screenCanvas->recenterWithMargin(53);
+                    // Preserve the user's previous viewport if we just reconnected
+                    if (!m_preserveViewportOnReconnect) {
+                        m_screenCanvas->recenterWithMargin(53);
+                    }
                     m_screenCanvas->setFocus(Qt::OtherFocusReason);
                 }
+                // Reset the preservation flag after first reveal
+                m_preserveViewportOnReconnect = false;
                 m_canvasRevealedForCurrentClient = true;
             }
         }

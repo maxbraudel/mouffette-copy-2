@@ -39,6 +39,8 @@ public:
     QPushButton* getUploadButton() const { return m_uploadButton; }
     void setScreens(const QList<ScreenInfo>& screens);
     void clearScreens();
+    void hideContentPreservingState(); // Hide content without clearing, preserving viewport
+    void showContentAfterReconnect();  // Show content after reconnection
     void recenterWithMargin(int marginPx = 33);
     void setDragPreviewFadeDurationMs(int ms) { m_dragPreviewFadeMs = qMax(0, ms); }
     void setVideoControlsFadeDurationMs(int ms) { m_videoControlsFadeMs = qMax(0, ms); }

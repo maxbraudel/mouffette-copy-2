@@ -841,6 +841,36 @@ void ScreenCanvas::clearScreens() {
     // Note: Overlay background persists across screen updates
 }
 
+void ScreenCanvas::hideContentPreservingState() {
+    // Hide screen items and remote cursor without deleting them
+    // This preserves the viewport state (zoom/pan position)
+    for (auto* r : m_screenItems) {
+        if (r) r->setVisible(false);
+    }
+    hideRemoteCursor();
+    
+    // Hide overlays but don't clear them
+    if (m_infoWidget) {
+        m_infoWidget->setVisible(false);
+    }
+}
+
+void ScreenCanvas::showContentAfterReconnect() {
+    // Show screen items and overlays again
+    // Viewport state (zoom/pan) is automatically preserved
+    for (auto* r : m_screenItems) {
+        if (r) r->setVisible(true);
+    }
+    
+    // Show overlays again
+    if (m_infoWidget) {
+        m_infoWidget->setVisible(true);
+    }
+    
+    // Refresh overlay content in case it changed during disconnection
+    refreshInfoOverlay();
+}
+
 void ScreenCanvas::recenterWithMargin(int marginPx) {
     QRectF bounds = screensBoundingRect();
     if (bounds.isNull() || !bounds.isValid()) return;

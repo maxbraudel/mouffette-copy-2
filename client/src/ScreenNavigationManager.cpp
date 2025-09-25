@@ -68,6 +68,12 @@ void ScreenNavigationManager::revealCanvas() {
     if (!isOnScreenView()) return; // Only if we're still on screen view
     stopSpinner();
     if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(1); // show canvas
+    
+    // Show preserved content after reconnection
+    if (m_w.screenCanvas) {
+        m_w.screenCanvas->showContentAfterReconnect();
+    }
+    
     fadeInCanvas();
 }
 
@@ -79,10 +85,9 @@ void ScreenNavigationManager::enterLoadingStateImmediate() {
     if (m_w.volumeFade) m_w.volumeFade->stop();
     if (m_w.spinnerFade) m_w.spinnerFade->stop();
 
-    // Clear canvas content and cursor, then switch to spinner page
+    // Hide canvas content but preserve viewport state (don't clear screens)
     if (m_w.screenCanvas) {
-        m_w.screenCanvas->hideRemoteCursor();
-        m_w.screenCanvas->clearScreens();
+        m_w.screenCanvas->hideContentPreservingState();
     }
     if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(0.0);
     if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(0); // spinner page
