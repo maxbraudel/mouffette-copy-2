@@ -9,6 +9,9 @@ class QLabel;
 class QCheckBox;
 class QGraphicsView;
 class MouseBlockingRoundedRectItem;
+class QScrollArea;
+class QScrollBar;
+class QTimer;
 
 // Floating settings panel shown when a media's settings toggle is enabled.
 // Implemented as a QWidget embedded into the scene via QGraphicsProxyWidget.
@@ -38,23 +41,36 @@ public:
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;
 
+private slots:
+    void onDisplayAutomaticallyToggled(bool checked);
+    void onPlayAutomaticallyToggled(bool checked);
+
 private:
     void buildUi();
     void setBoxActive(QLabel* box, bool active);
     void clearActiveBox();
     bool isValidInputForBox(QLabel* box, QChar character);
+    void updateScrollbarGeometry();
 
 private:
     QGraphicsProxyWidget* m_proxy = nullptr;
     MouseBlockingRoundedRectItem* m_bgRect = nullptr;
     QWidget* m_widget = nullptr;
-    QVBoxLayout* m_layout = nullptr;
+    // Root layout (wraps scroll area)
+    QVBoxLayout* m_rootLayout = nullptr;
+    // Scrollable content
+    QScrollArea* m_scrollArea = nullptr;
+    QWidget* m_innerContent = nullptr;
+    QVBoxLayout* m_contentLayout = nullptr;
     QLabel* m_title = nullptr;
 
     QCheckBox* m_autoPlayCheck = nullptr;
     QCheckBox* m_playDelayCheck = nullptr; // New: separate play delay checkbox
 
     QCheckBox* m_repeatCheck = nullptr;
+    
+    // Display delay checkbox (separate from display automatically)
+    QCheckBox* m_displayDelayCheck = nullptr;
 
     QCheckBox* m_fadeInCheck = nullptr;
 
@@ -62,9 +78,11 @@ private:
 
     // Value box widgets for click handling
     QLabel* m_autoPlayBox = nullptr;
+    QLabel* m_autoPlaySecondsLabel = nullptr; // "seconds" text after the play delay input box
     // New: display automatically after [x] seconds
     QCheckBox* m_displayAfterCheck = nullptr;
     QLabel* m_displayAfterBox = nullptr;
+    QLabel* m_displayAfterSecondsLabel = nullptr; // "seconds" text after the input box
     QLabel* m_repeatBox = nullptr;
     QLabel* m_fadeInBox = nullptr;
     QLabel* m_fadeOutBox = nullptr;
@@ -73,8 +91,12 @@ private:
     QLabel* m_opacityBox = nullptr;
     QLabel* m_activeBox = nullptr; // currently active box (if any)
     bool m_clearOnFirstType = false; // if true, first keypress replaces previous content
+    // Overlay scrollbar to mirror media list behavior
+    QScrollBar* m_overlayVScroll = nullptr;
+    QTimer* m_scrollbarHideTimer = nullptr;
     
     // Video-only option widgets (for show/hide based on media type)
     QWidget* m_autoPlayRow = nullptr;
+    QWidget* m_playDelayRow = nullptr;
     QWidget* m_repeatRow = nullptr;
 };
