@@ -755,7 +755,7 @@ MainWindow::MainWindow(QWidget* parent)
             if (m_uploadManager->isFinalizing()) {
                 m_uploadButton->setText("Finalizing…");
             } else {
-            m_uploadButton->setText(QString("Downloading (%1/%2) %3%")
+            m_uploadButton->setText(QString("Uploading (%1/%2) %3%")
                                     .arg(filesCompleted)
                                     .arg(totalFiles)
                                     .arg(percent));
@@ -1478,6 +1478,7 @@ void MainWindow::onUploadButtonClicked() {
         });
         connect(m_uploadManager, &UploadManager::fileUploadProgress, this, [this](const QString& fileId, int percent){
             if (!m_screenCanvas || !m_screenCanvas->scene()) return;
+            if (m_serverPerFileProgressActive.contains(fileId)) return; // remote is authoritative now
             const QList<ResizableMediaBase*> items = m_itemsByFileId.value(fileId);
             for (ResizableMediaBase* item : items) {
                 if (item && item->uploadState() != ResizableMediaBase::UploadState::Uploaded) {
@@ -1485,6 +1486,23 @@ void MainWindow::onUploadButtonClicked() {
                     int clamped = qMin(99, percent);
                     item->setUploadUploading(clamped);
                 }
+            }
+        });
+        // Also accept authoritative per-file progress from target when available
+        connect(m_webSocketClient, &WebSocketClient::uploadPerFileProgressReceived, this, [this](const QString& uploadId, const QHash<QString,int>& filePercents){
+            Q_UNUSED(uploadId);
+            if (!m_screenCanvas || !m_screenCanvas->scene()) return;
+            for (auto it = filePercents.constBegin(); it != filePercents.constEnd(); ++it) {
+                const QString& fid = it.key();
+                int p = std::clamp(it.value(), 0, 100);
+                m_serverPerFileProgressActive.insert(fid);
+                const QList<ResizableMediaBase*> items = m_itemsByFileId.value(fid);
+                for (ResizableMediaBase* item : items) {
+                    if (!item) continue;
+                    if (p >= 100) item->setUploadUploaded();
+                    else item->setUploadUploading(p);
+                }
+                if (p >= 100) m_serverCompletedFileIds.insert(fid);
             }
         });
         // Do not mark Uploaded on local fileUploadFinished; wait for server confirmation in updateIndividualProgressFromServer
@@ -1495,6 +1513,7 @@ void MainWindow::onUploadButtonClicked() {
             m_itemsByFileId.clear();
             m_currentUploadFileOrder.clear();
             m_serverCompletedFileIds.clear();
+            m_serverPerFileProgressActive.clear();
         });
         // Mark specific items uploaded when target reports completed fileIds
         connect(m_uploadManager, &UploadManager::uploadCompletedFileIds, this, [this](const QStringList& fileIds){
@@ -1525,6 +1544,7 @@ void MainWindow::onUploadButtonClicked() {
             }
             m_currentUploadFileOrder.clear();
             m_serverCompletedFileIds.clear();
+            m_serverPerFileProgressActive.clear();
         });
         m_uploadSignalsConnected = true;
     }

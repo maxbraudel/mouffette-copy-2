@@ -4,9 +4,11 @@
 #include <QObject>
 #include <QWebSocket>
 #include <QSet>
+#include <QHash>
 #include <QJsonObject>
 #include <QJsonDocument>
 #include <QTimer>
+#include <QJsonArray>
 #include "ClientInfo.h"
 
 class WebSocketClient : public QObject {
@@ -43,7 +45,7 @@ public:
     void sendRemoveAllFiles(const QString& targetClientId);
     void sendRemoveFile(const QString& targetClientId, const QString& fileId);
     // Target -> Sender notifications
-    void notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent, int filesCompleted, int totalFiles, const QStringList& completedFileIds = QStringList());
+    void notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent, int filesCompleted, int totalFiles, const QStringList& completedFileIds = QStringList(), const QJsonArray& perFileProgress = QJsonArray());
     void notifyUploadFinishedToSender(const QString& senderClientId, const QString& uploadId);
     void notifyAllFilesRemovedToSender(const QString& senderClientId);
 
@@ -71,6 +73,8 @@ signals:
     void uploadProgressReceived(const QString& uploadId, int percent, int filesCompleted, int totalFiles);
     // New: carries fileIds that the target reports as fully received so far
     void uploadCompletedFileIdsReceived(const QString& uploadId, const QStringList& fileIds);
+    // New: fine-grained per-file percent from target
+    void uploadPerFileProgressReceived(const QString& uploadId, const QHash<QString,int>& filePercents);
     void uploadFinishedReceived(const QString& uploadId);
     void allFilesRemovedReceived();
 

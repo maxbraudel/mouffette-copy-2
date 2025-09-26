@@ -364,7 +364,17 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         }
         if (m_ws && !m_incoming.senderId.isEmpty() && m_incoming.totalSize > 0) {
             int percent = static_cast<int>(std::round(m_incoming.received * 100.0 / m_incoming.totalSize));
-            m_ws->notifyUploadProgressToSender(m_incoming.senderId, m_incoming.uploadId, percent, filesCompleted, m_incoming.totalFiles, completedIds);
+            // Build per-file progress array (only for files in progress to reduce payload)
+            QJsonArray perFileArr;
+            // Include the file that just received data
+            if (m_incoming.expectedSizes.contains(fid)) {
+                const qint64 expected = m_incoming.expectedSizes.value(fid);
+                const qint64 got = m_incoming.receivedByFile.value(fid, 0);
+                int pf = 0;
+                if (expected > 0) pf = static_cast<int>(std::round(got * 100.0 / expected));
+                QJsonObject o; o["fileId"] = fid; o["percent"] = pf; perFileArr.append(o);
+            }
+            m_ws->notifyUploadProgressToSender(m_incoming.senderId, m_incoming.uploadId, percent, filesCompleted, m_incoming.totalFiles, completedIds, perFileArr);
         }
     } else if (type == "upload_complete") {
         if (message.value("uploadId").toString() != m_incoming.uploadId) return;
@@ -376,9 +386,11 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         if (m_ws && !m_incoming.senderId.isEmpty()) {
             const int finalPercent = 100;
             const int filesCompleted = m_incoming.totalFiles;
-            // Include all fileIds as completed
+            // Include all fileIds as completed and per-file 100
             QStringList allIds = m_incoming.expectedSizes.keys();
-            m_ws->notifyUploadProgressToSender(m_incoming.senderId, m_incoming.uploadId, finalPercent, filesCompleted, m_incoming.totalFiles, allIds);
+            QJsonArray perFileArr;
+            for (const QString& fidAll : allIds) { QJsonObject o; o["fileId"] = fidAll; o["percent"] = 100; perFileArr.append(o); }
+            m_ws->notifyUploadProgressToSender(m_incoming.senderId, m_incoming.uploadId, finalPercent, filesCompleted, m_incoming.totalFiles, allIds, perFileArr);
         }
         if (m_ws && !m_incoming.senderId.isEmpty()) {
             m_ws->notifyUploadFinishedToSender(m_incoming.senderId, m_incoming.uploadId);

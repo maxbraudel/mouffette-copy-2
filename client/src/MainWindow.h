@@ -280,6 +280,8 @@ private:
     QStringList m_currentUploadFileOrder;
     // Files that the server has acknowledged as fully received in the current session
     QSet<QString> m_serverCompletedFileIds;
+    // Files for which we have received authoritative per-file progress from target; ignore local progress for them
+    QSet<QString> m_serverPerFileProgressActive;
     WatchManager* m_watchManager = nullptr;   // extracted watch logic
     ScreenNavigationManager* m_navigationManager = nullptr; // new navigation component
     FileWatcher* m_fileWatcher = nullptr; // monitors source files for deletion
