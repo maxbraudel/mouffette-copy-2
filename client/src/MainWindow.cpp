@@ -13,7 +13,6 @@
 #include "AppColors.h"
 #include "FileManager.h"
 #include <QMenuBar>
-#include <QMessageBox>
 #include <QHostInfo>
 #include "ClientInfo.h"
 
@@ -1449,7 +1448,7 @@ void MainWindow::onUploadButtonClicked() {
             // No new media to mark; treat click as unload
             m_uploadManager->requestUnload();
         } else {
-            QMessageBox::information(this, "Upload", "Aucun média local à uploader sur le canevas (les éléments doivent être nouveaux ou non encore envoyés au client cible)." );
+            qDebug() << "Upload skipped: aucun média local nouveau (popup supprimée).";
         }
         return;
     }
@@ -2266,11 +2265,7 @@ void MainWindow::setupMenuBar() {
     
     m_aboutAction = new QAction("About", this);
     connect(m_aboutAction, &QAction::triggered, this, [this]() {
-        QMessageBox::about(this, "About Mouffette", 
-            "Mouffette v1.0.0\n\n"
-            "A cross-platform media sharing application that allows users to "
-            "share and display media on other connected users' screens.\n\n"
-            "Built with Qt and WebSocket technology.");
+        qDebug() << "About dialog suppressed (no popup mode).";
     });
     m_helpMenu->addAction(m_aboutAction);
 }
@@ -2569,17 +2564,14 @@ void MainWindow::onDisconnected() {
     
     
     // Show tray notification
-    showTrayMessage("Mouffette Disconnected", "Disconnected from Mouffette server");
+    // Notification supprimée (mode silencieux)
 }
 
 // startWatchingSelectedClient/stopWatchingCurrentClient removed (handled by WatchManager)
 
 void MainWindow::onConnectionError(const QString& error) {
-    QMessageBox::warning(this, "Connection Error", 
-        QString("Failed to connect to server:\n%1").arg(error));
-    
+    qWarning() << "Failed to connect to server:" << error << "(silent mode, aucune popup)";
     setUIEnabled(false);
-    // No direct connect/disconnect buttons anymore
 }
 
 void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
@@ -2597,7 +2589,7 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
             QString message = QString("%1 new client%2 available for sharing")
                 .arg(newClients)
                 .arg(newClients == 1 ? "" : "s");
-            showTrayMessage("New Clients Available", message);
+            qDebug() << "New clients available:" << message;
         }
     }
 

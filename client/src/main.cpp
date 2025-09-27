@@ -1,6 +1,5 @@
 #include <QApplication>
 #include <QSystemTrayIcon>
-#include <QMessageBox>
 #include "MainWindow.h"
 
 int main(int argc, char *argv[]) {
@@ -14,18 +13,10 @@ int main(int argc, char *argv[]) {
     app.setOrganizationName("Mouffette");
     app.setOrganizationDomain("mouffette.app");
     
-    // Don't quit when last window is closed (for tray applications)
-    app.setQuitOnLastWindowClosed(false);
-    
-    // Check if system tray is available
-    if (!QSystemTrayIcon::isSystemTrayAvailable()) {
-        QMessageBox::critical(nullptr, "System Tray",
-                             "System tray is not available on this system.");
-        return 1;
-    }
-    
+    // Allow normal quit when last window is closed now that tray popups are removed
+    app.setQuitOnLastWindowClosed(true);
+
     MainWindow window;
-    // Window will be hidden by default and shown in tray
-    
+    window.show(); // Explicitly show main window since tray UX removed
     return app.exec();
 }

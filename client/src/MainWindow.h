@@ -20,7 +20,6 @@
 #include <QEvent>
 #include <QMouseEvent>
 #include <QWheelEvent>
-#include <QMessageBox>
 #include <QScrollBar>
 #include <QStackedWidget>
 #include <QElapsedTimer>
@@ -142,7 +141,7 @@ private:
     void setupCursorMonitoring();
     void updateClientList(const QList<ClientInfo>& clients);
     void setUIEnabled(bool enabled);
-    void showTrayMessage(const QString& title, const QString& message);
+    void showTrayMessage(const QString& title, const QString& message); // deprecated (no-op)
     // Animation durations are set directly where animations are created
     
     // Screen view methods
@@ -236,7 +235,7 @@ private:
     QAction* m_aboutAction;
     
     // System tray
-    QSystemTrayIcon* m_trayIcon;
+    QSystemTrayIcon* m_trayIcon = nullptr; // deprecated; retained pointer to avoid widespread removal
     
     // Backend
     WebSocketClient* m_webSocketClient;
