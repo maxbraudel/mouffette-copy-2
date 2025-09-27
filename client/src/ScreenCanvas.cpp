@@ -889,6 +889,10 @@ void ScreenCanvas::showEvent(QShowEvent* event) {
 void ScreenCanvas::setScreens(const QList<ScreenInfo>& screens) {
     m_screens = screens;
     createScreenItems();
+    // Re-draw system UI overlays if we already have elements (layout may have changed)
+    if (!m_systemUIElements.isEmpty()) {
+        setSystemUIElements(m_systemUIElements);
+    }
 }
 
 void ScreenCanvas::setSystemUIElements(const QList<SystemUIElement>& elems) {
@@ -899,16 +903,38 @@ void ScreenCanvas::setSystemUIElements(const QList<SystemUIElement>& elems) {
     if (!m_scene) return;
     QColor fill(128,128,128,90); // semi-transparent gray
     QPen pen(Qt::NoPen);
+    // Build original geometry map (global desktop coordinates) for each screen
+    QHash<int, QRect> originalScreenGeoms;
+    for (const auto& s : m_screens) {
+        originalScreenGeoms.insert(s.id, QRect(s.x, s.y, s.width, s.height));
+    }
+    // For each UI element, find intersecting screen(s) and map into compact scene coordinates
     for (const auto& e : m_systemUIElements) {
-        QRectF rf(e.x, e.y, e.width, e.height);
-        if (rf.width() <= 0 || rf.height() <= 0) continue;
-        auto* rect = new QGraphicsRectItem(rf);
-        rect->setBrush(fill);
-        rect->setPen(pen);
-        rect->setZValue(-500.0); // Behind media but above background (-1000)
-        rect->setAcceptedMouseButtons(Qt::NoButton);
-        m_scene->addItem(rect);
-        m_systemUIItems.append(rect);
+        QRect uiRectGlobal(e.x, e.y, e.width, e.height);
+        if (uiRectGlobal.width() <= 0 || uiRectGlobal.height() <= 0) continue;
+        bool placed = false;
+        for (const auto& s : m_screens) {
+            QRect screenGlobal(s.x, s.y, s.width, s.height);
+            if (!screenGlobal.intersects(uiRectGlobal)) continue;
+            QRect intersect = screenGlobal.intersected(uiRectGlobal);
+            // Offset inside this screen
+            int dx = intersect.x() - screenGlobal.x();
+            int dy = intersect.y() - screenGlobal.y();
+            // Find compact rect for this screen
+            if (!m_sceneScreenRects.contains(s.id)) continue;
+            QRectF compact = m_sceneScreenRects.value(s.id);
+            QRectF mapped(compact.x() + dx, compact.y() + dy, intersect.width(), intersect.height());
+            auto* rect = new QGraphicsRectItem(mapped);
+            rect->setBrush(fill);
+            rect->setPen(pen);
+            rect->setZValue(-500.0); // Above screen background
+            rect->setAcceptedMouseButtons(Qt::NoButton);
+            m_scene->addItem(rect);
+            m_systemUIItems.append(rect);
+            placed = true;
+        }
+        // If no intersection (shouldn't happen), skip
+        Q_UNUSED(placed);
     }
 }
 
