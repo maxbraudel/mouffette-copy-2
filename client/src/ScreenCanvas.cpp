@@ -905,20 +905,35 @@ void ScreenCanvas::setSystemUIElements(const QList<SystemUIElement>& elems) {
     for (const auto& e : m_systemUIElements) {
         QRectF rfGlobal(e.x, e.y, e.width, e.height);
         if (rfGlobal.width() <= 0 || rfGlobal.height() <= 0) continue;
-        // Determine which screen this element belongs to using center point
-        QPointF center = rfGlobal.center();
-        QRectF rfScene = rfGlobal; // default (single screen or no compaction)
-        for (const auto& s : m_screens) {
-            QRectF sGeom(s.x, s.y, s.width, s.height);
-            if (sGeom.contains(center)) {
-                QRectF sceneScreen = screenRectForId(s.id);
-                if (sceneScreen.isValid()) {
-                    // Offset by difference between compact scene origin and original global origin
-                    qreal dx = sceneScreen.x() - sGeom.x();
-                    qreal dy = sceneScreen.y() - sGeom.y();
-                    rfScene.translate(dx, dy);
+        QRectF rfScene = rfGlobal;
+        // Prefer explicit screenId mapping if provided
+        if (e.screenId >= 0) {
+            for (const auto& s : m_screens) {
+                if (s.id == e.screenId) {
+                    QRectF sGeom(s.x, s.y, s.width, s.height);
+                    QRectF sceneScreen = screenRectForId(s.id);
+                    if (sceneScreen.isValid()) {
+                        qreal dx = sceneScreen.x() - sGeom.x();
+                        qreal dy = sceneScreen.y() - sGeom.y();
+                        rfScene.translate(dx, dy);
+                    }
+                    break;
                 }
-                break;
+            }
+        } else {
+            // Fallback: center-based detection
+            QPointF center = rfGlobal.center();
+            for (const auto& s : m_screens) {
+                QRectF sGeom(s.x, s.y, s.width, s.height);
+                if (sGeom.contains(center)) {
+                    QRectF sceneScreen = screenRectForId(s.id);
+                    if (sceneScreen.isValid()) {
+                        qreal dx = sceneScreen.x() - sGeom.x();
+                        qreal dy = sceneScreen.y() - sGeom.y();
+                        rfScene.translate(dx, dy);
+                    }
+                    break;
+                }
             }
         }
         auto* rect = new QGraphicsRectItem(rfScene);
