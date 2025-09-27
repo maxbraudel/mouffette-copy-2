@@ -2303,7 +2303,6 @@ void MainWindow::closeEvent(QCloseEvent *event) {
         // Show message first time
         static bool firstHide = true;
         if (firstHide) {
-            showTrayMessage("Mouffette", "Application is now running in the background. Click the tray icon to show the window again.");
             firstHide = false;
         }
     } else {
@@ -2359,12 +2358,6 @@ void MainWindow::onTrayIconActivated(QSystemTrayIcon::ActivationReason reason) {
         break;
     default:
         break;
-    }
-}
-
-void MainWindow::showTrayMessage(const QString& title, const QString& message) {
-    if (m_trayIcon) {
-        m_trayIcon->showMessage(title, message, QSystemTrayIcon::Information, 3000);
     }
 }
 
@@ -2508,7 +2501,6 @@ void MainWindow::onConnected() {
 
     
     // Show tray notification
-    showTrayMessage("Mouffette Connected", "Successfully connected to Mouffette server");
 }
 
 void MainWindow::onDisconnected() {

@@ -141,7 +141,6 @@ private:
     void setupCursorMonitoring();
     void updateClientList(const QList<ClientInfo>& clients);
     void setUIEnabled(bool enabled);
-    void showTrayMessage(const QString& title, const QString& message); // deprecated (no-op)
     // Animation durations are set directly where animations are created
     
     // Screen view methods
