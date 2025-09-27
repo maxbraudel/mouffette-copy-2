@@ -2865,21 +2865,44 @@ static QList<SystemUIElement> computeSystemUIElements() {
             int w = geom.right() - avail.right();
             if (w > 0) elems.append(SystemUIElement("dock", avail.right()+1, geom.y(), w, geom.height()));
         }
-#elif defined(Q_OS_WIN)
-        // Taskbar detection: difference between geometry and available geometry on one edge (primary screen)
-        if (screen == QGuiApplication::primaryScreen()) {
-            if (avail.top() > geom.top()) { // top taskbar
-                int h = avail.top() - geom.top(); if (h > 0) elems.append(SystemUIElement("taskbar", geom.x(), geom.y(), geom.width(), h));
-            } else if (avail.bottom() < geom.bottom()) { // bottom taskbar
-                int h = geom.bottom() - avail.bottom(); if (h > 0) elems.append(SystemUIElement("taskbar", geom.x(), avail.bottom()+1, geom.width(), h));
-            } else if (avail.left() > geom.left()) { // left taskbar
-                int w = avail.left() - geom.left(); if (w > 0) elems.append(SystemUIElement("taskbar", geom.x(), geom.y(), w, geom.height()));
-            } else if (avail.right() < geom.right()) { // right taskbar
-                int w = geom.right() - avail.right(); if (w > 0) elems.append(SystemUIElement("taskbar", avail.right()+1, geom.y(), w, geom.height()));
-            }
-        }
 #endif
     }
+#if defined(Q_OS_WIN)
+    // --- Enhanced Windows multi-monitor taskbar detection ---
+    // Qt's availableGeometry usually only reflects the *primary* taskbar difference.
+    // When "Show taskbar on all displays" is enabled, secondary taskbars are separate windows
+    // with class name "Shell_SecondaryTrayWnd". The primary taskbar window class is "Shell_TrayWnd".
+    // We enumerate those windows to collect their exact rectangles.
+    struct TaskbarCollector {
+        QList<SystemUIElement>* out;
+        static BOOL CALLBACK enumProc(HWND hwnd, LPARAM lParam) {
+            char cls[256] = {0};
+            if (!GetClassNameA(hwnd, cls, 255)) return TRUE;
+            if (strcmp(cls, "Shell_TrayWnd") == 0 || strcmp(cls, "Shell_SecondaryTrayWnd") == 0) {
+                RECT r; if (GetWindowRect(hwnd, &r)) {
+                    int w = r.right - r.left; int h = r.bottom - r.top;
+                    if (w > 0 && h > 0) {
+                        auto* list = reinterpret_cast<QList<SystemUIElement>*>(lParam);
+                        // De-duplicate: skip if a rectangle with same coords already present
+                        bool exists = false;
+                        for (const auto& e : *list) {
+                            if (e.type == "taskbar" && e.x == r.left && e.y == r.top && e.width == w && e.height == h) { exists = true; break; }
+                        }
+                        if (!exists) list->append(SystemUIElement("taskbar", r.left, r.top, w, h));
+                    }
+                }
+            }
+            return TRUE;
+        }
+    };
+    // Include necessary headers locally to avoid global pollution
+    #ifndef NOMINMAX
+    #define NOMINMAX
+    #endif
+    // windows.h already implicitly available in most toolchains; ensure include
+    #include <windows.h>
+    EnumWindows(TaskbarCollector::enumProc, reinterpret_cast<LPARAM>(&elems));
+#endif
     return elems;
 }
 
