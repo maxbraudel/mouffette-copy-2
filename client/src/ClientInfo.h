@@ -30,19 +30,6 @@ struct ScreenInfo {
     static ScreenInfo fromJson(const QJsonObject& json);
 };
 
-struct SystemUIElement {
-    QString type; // menu_bar, dock, taskbar
-    int x = 0;
-    int y = 0;
-    int width = 0;
-    int height = 0;
-    SystemUIElement() {}
-    SystemUIElement(const QString& t, int X, int Y, int W, int H) : type(t), x(X), y(Y), width(W), height(H) {}
-    QJsonObject toJson() const {
-        QJsonObject o; o["type"] = type; o["x"] = x; o["y"] = y; o["width"] = width; o["height"] = height; return o; }
-    static SystemUIElement fromJson(const QJsonObject& o) {
-        SystemUIElement e; e.type = o.value("type").toString(); e.x = o.value("x").toInt(); e.y = o.value("y").toInt(); e.width = o.value("width").toInt(); e.height = o.value("height").toInt(); return e; }
-};
 
 class ClientInfo {
 public:
@@ -56,7 +43,6 @@ public:
     QString getStatus() const { return m_status; }
     QList<ScreenInfo> getScreens() const { return m_screens; }
     int getVolumePercent() const { return m_volumePercent; }
-    QList<SystemUIElement> getSystemUIElements() const { return m_systemUIElements; }
     
     // Setters
     void setId(const QString& id) { m_id = id; }
@@ -65,7 +51,6 @@ public:
     void setStatus(const QString& status) { m_status = status; }
     void setScreens(const QList<ScreenInfo>& screens) { m_screens = screens; }
     void setVolumePercent(int v) { m_volumePercent = v; }
-    void setSystemUIElements(const QList<SystemUIElement>& elems) { m_systemUIElements = elems; }
     
     // JSON serialization
     QJsonObject toJson() const;
@@ -74,7 +59,6 @@ public:
     // Helper methods
     QString getDisplayText() const;
     int getScreenCount() const { return m_screens.size(); }
-    bool hasSystemUI() const { return !m_systemUIElements.isEmpty(); }
     
 private:
     QString m_id;
@@ -83,7 +67,6 @@ private:
     QString m_status;
     QList<ScreenInfo> m_screens;
     int m_volumePercent = -1; // 0-100, -1 when unknown
-    QList<SystemUIElement> m_systemUIElements; // OS UI zones (menu bar, dock, taskbar)
 };
 
 #endif // CLIENTINFO_H

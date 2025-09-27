@@ -15,10 +15,9 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QHostInfo>
-#include "ClientInfo.h" // ensure SystemUIElement visible
+#include "ClientInfo.h"
 
 // Forward declaration for system UI extraction
-static QList<SystemUIElement> computeSystemUIElements();
 #include <QDebug>
 #include <QCloseEvent>
 #include <QResizeEvent>
@@ -64,8 +63,6 @@ static QList<SystemUIElement> computeSystemUIElements();
 #include <QDir>
 
 // Forward declaration for system UI element computation (implemented later in this file)
-struct SystemUIElement; // from ClientInfo.h
-static QList<SystemUIElement> computeSystemUIElements();
 #include <QStandardPaths>
 #include <QUuid>
 #include <QJsonObject>
@@ -2708,30 +2705,56 @@ void MainWindow::syncRegistration() {
         screens = getLocalScreenInfo();
         volumePercent = getSystemVolumePercent();
     }
-    QList<SystemUIElement> uiElems = computeSystemUIElements();
-    // Derive per-screen uiZones from global list (temporary until legacy removed)
-    if (!uiElems.isEmpty()) {
+    // Build per-screen uiZones directly (taskbar/menu/dock) without legacy global structure
+    if (!screens.isEmpty()) {
+        QList<QScreen*> qScreens = QGuiApplication::screens();
         for (auto &screen : screens) {
-            QRect screenRect(screen.x, screen.y, screen.width, screen.height);
-            for (const auto &e : uiElems) {
-                QRect r(e.x, e.y, e.width, e.height);
-                if (r.intersects(screenRect)) {
-                    QRect inter = r.intersected(screenRect);
-                    ScreenInfo::UIZone z; z.type = e.type; z.x = inter.x() - screenRect.x(); z.y = inter.y() - screenRect.y(); z.width = inter.width(); z.height = inter.height();
-                    screen.uiZones.append(z);
-                }
+            if (screen.id < 0 || screen.id >= qScreens.size()) continue;
+            QScreen* qs = qScreens[screen.id]; if (!qs) continue;
+            QRect geom = qs->geometry();
+            QRect avail = qs->availableGeometry();
+#if defined(Q_OS_WIN)
+            // Detect per-monitor taskbar edges via availableGeometry deltas
+            if (avail.bottom() < geom.bottom()) { // bottom taskbar
+                int h = geom.bottom() - avail.bottom(); if (h>0)
+                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("taskbar"), 0, geom.height()-h, geom.width(), h});
+            } else if (avail.top() > geom.top()) { // top taskbar
+                int h = avail.top() - geom.top(); if (h>0)
+                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("taskbar"), 0, 0, geom.width(), h});
+            } else if (avail.left() > geom.left()) { // left taskbar
+                int w = avail.left() - geom.left(); if (w>0)
+                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("taskbar"), 0, 0, w, geom.height()});
+            } else if (avail.right() < geom.right()) { // right taskbar
+                int w = geom.right() - avail.right(); if (w>0)
+                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("taskbar"), geom.width()-w, 0, w, geom.height()});
             }
-            if (!screen.uiZones.isEmpty()) {
-                for (const auto &z : screen.uiZones) {
-                    qDebug() << "syncRegistration uiZone screen" << screen.id << z.type << z.x << z.y << z.width << z.height;
-                }
+#elif defined(Q_OS_MACOS)
+            // Menu bar
+            if (avail.y() > geom.y()) {
+                int h = avail.y() - geom.y(); if (h>0)
+                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("menu_bar"), 0, 0, geom.width(), h});
+            }
+            // Dock: one differing edge
+            if (avail.bottom() < geom.bottom()) { // bottom dock
+                int h = geom.bottom() - avail.bottom(); if (h>0)
+                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("dock"), 0, geom.height()-h, geom.width(), h});
+            } else if (avail.x() > geom.x()) { // left dock
+                int w = avail.x() - geom.x(); if (w>0)
+                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("dock"), 0, 0, w, geom.height()});
+            } else if (avail.right() < geom.right()) { // right dock
+                int w = geom.right() - avail.right(); if (w>0)
+                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("dock"), geom.width()-w, 0, w, geom.height()});
+            }
+#endif
+            for (const auto &z : screen.uiZones) {
+                qDebug() << "syncRegistration uiZone screen" << screen.id << z.type << z.x << z.y << z.width << z.height;
             }
         }
     }
     
     qDebug() << "Sync registration:" << machineName << "on" << platform << "with" << screens.size() << "screens";
     
-    m_webSocketClient->registerClient(machineName, platform, screens, volumePercent, uiElems);
+    m_webSocketClient->registerClient(machineName, platform, screens, volumePercent);
 }
 
 void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
@@ -2745,10 +2768,7 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
             bool anyPerScreenZones = false;
             for (const auto &s : scrs) { if (!s.uiZones.isEmpty()) { anyPerScreenZones = true; break; } }
             m_screenCanvas->setScreens(scrs);
-            if (!anyPerScreenZones && clientInfo.hasSystemUI()) {
-                // Only fall back to legacy global systemUI rendering if no per-screen zones provided
-                m_screenCanvas->setSystemUIElements(clientInfo.getSystemUIElements());
-            } else if (anyPerScreenZones) {
+            if (anyPerScreenZones) {
                 qDebug() << "Per-screen uiZones received:";
                 for (const auto &s : scrs) {
                     if (s.uiZones.isEmpty()) continue;
@@ -2844,26 +2864,25 @@ void MainWindow::onDataRequestReceived() {
     if (!m_webSocketClient || !m_webSocketClient->isConnected()) return;
     QList<ScreenInfo> screens = getLocalScreenInfo();
     int volumePercent = getSystemVolumePercent();
-    QList<SystemUIElement> uiElems = computeSystemUIElements();
-    if (!uiElems.isEmpty()) {
-        for (auto &screen : screens) {
-            QRect screenRect(screen.x, screen.y, screen.width, screen.height);
-            for (const auto &e : uiElems) {
-                QRect r(e.x, e.y, e.width, e.height);
-                if (r.intersects(screenRect)) {
-                    QRect inter = r.intersected(screenRect);
-                    ScreenInfo::UIZone z; z.type = e.type; z.x = inter.x() - screenRect.x(); z.y = inter.y() - screenRect.y(); z.width = inter.width(); z.height = inter.height();
-                    screen.uiZones.append(z);
-                }
-            }
-            if (!screen.uiZones.isEmpty()) {
-                for (const auto &z : screen.uiZones) {
-                    qDebug() << "snapshot uiZone screen" << screen.id << z.type << z.x << z.y << z.width << z.height;
-                }
-            }
-        }
+    // Build uiZones immediately for snapshot (reuse same logic as syncRegistration)
+    QList<QScreen*> qScreens = QGuiApplication::screens();
+    for (auto &screen : screens) {
+        if (screen.id < 0 || screen.id >= qScreens.size()) continue; QScreen* qs = qScreens[screen.id]; if (!qs) continue;
+        QRect geom = qs->geometry(); QRect avail = qs->availableGeometry();
+#if defined(Q_OS_WIN)
+        if (avail.bottom() < geom.bottom()) { int h = geom.bottom()-avail.bottom(); if (h>0) screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, geom.height()-h, geom.width(), h}); }
+        else if (avail.top() > geom.top()) { int h = avail.top()-geom.top(); if (h>0) screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, 0, geom.width(), h}); }
+        else if (avail.left() > geom.left()) { int w = avail.left()-geom.left(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, 0, w, geom.height()}); }
+        else if (avail.right() < geom.right()) { int w = geom.right()-avail.right(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"taskbar", geom.width()-w, 0, w, geom.height()}); }
+#elif defined(Q_OS_MACOS)
+        if (avail.y() > geom.y()) { int h = avail.y()-geom.y(); if (h>0) screen.uiZones.append(ScreenInfo::UIZone{"menu_bar", 0, 0, geom.width(), h}); }
+        if (avail.bottom() < geom.bottom()) { int h = geom.bottom()-avail.bottom(); if (h>0) screen.uiZones.append(ScreenInfo::UIZone{"dock", 0, geom.height()-h, geom.width(), h}); }
+        else if (avail.x() > geom.x()) { int w = avail.x()-geom.x(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"dock", 0, 0, w, geom.height()}); }
+        else if (avail.right() < geom.right()) { int w = geom.right()-avail.right(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"dock", geom.width()-w, 0, w, geom.height()}); }
+#endif
+        for (const auto &z : screen.uiZones) qDebug() << "snapshot uiZone screen" << screen.id << z.type << z.x << z.y << z.width << z.height;
     }
-    m_webSocketClient->sendStateSnapshot(screens, volumePercent, uiElems);
+    m_webSocketClient->sendStateSnapshot(screens, volumePercent);
 }
 
 QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
@@ -2882,63 +2901,6 @@ QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
     return screens;
 }
 
-static QList<SystemUIElement> computeSystemUIElements() {
-    QList<SystemUIElement> elems;
-    QList<QScreen*> screenList = QGuiApplication::screens();
-    if (screenList.isEmpty()) return elems;
-    for (QScreen* screen : screenList) {
-        if (!screen) continue;
-        const QRect geom = screen->geometry();
-        const QRect avail = screen->availableGeometry();
-#if defined(Q_OS_MACOS)
-        // Menu bar: top strip removed from available area
-        if (avail.y() > geom.y()) {
-            int h = avail.y() - geom.y();
-            if (h > 0) elems.append(SystemUIElement("menu_bar", geom.x(), geom.y(), geom.width(), h));
-        }
-        // Dock: difference on one edge
-        if (avail.bottom() < geom.bottom()) { // bottom dock
-            int h = geom.bottom() - avail.bottom();
-            if (h > 0) elems.append(SystemUIElement("dock", geom.x(), avail.bottom()+1, geom.width(), h));
-        } else if (avail.x() > geom.x()) { // left dock
-            int w = avail.x() - geom.x();
-            if (w > 0) elems.append(SystemUIElement("dock", geom.x(), geom.y(), w, geom.height()));
-        } else if (avail.right() < geom.right()) { // right dock
-            int w = geom.right() - avail.right();
-            if (w > 0) elems.append(SystemUIElement("dock", avail.right()+1, geom.y(), w, geom.height()));
-        }
-#elif defined(Q_OS_WIN)
-        // Windows 10/11 per-monitor taskbars: availableGeometry per screen reflects its own taskbar (if present)
-        // Detect on EVERY screen (not only primary). Only one edge should differ.
-        if (avail.top() > geom.top()) { // top taskbar
-            int h = avail.top() - geom.top();
-            if (h > 0) {
-                elems.append(SystemUIElement("taskbar", geom.x(), geom.y(), geom.width(), h));
-                qDebug() << "Detected top taskbar on screen" << geom << "height" << h;
-            }
-        } else if (avail.bottom() < geom.bottom()) { // bottom taskbar
-            int h = geom.bottom() - avail.bottom();
-            if (h > 0) {
-                elems.append(SystemUIElement("taskbar", geom.x(), avail.bottom()+1, geom.width(), h));
-                qDebug() << "Detected bottom taskbar on screen" << geom << "height" << h;
-            }
-        } else if (avail.left() > geom.left()) { // left taskbar
-            int w = avail.left() - geom.left();
-            if (w > 0) {
-                elems.append(SystemUIElement("taskbar", geom.x(), geom.y(), w, geom.height()));
-                qDebug() << "Detected left taskbar on screen" << geom << "width" << w;
-            }
-        } else if (avail.right() < geom.right()) { // right taskbar
-            int w = geom.right() - avail.right();
-            if (w > 0) {
-                elems.append(SystemUIElement("taskbar", avail.right()+1, geom.y(), w, geom.height()));
-                qDebug() << "Detected right taskbar on screen" << geom << "width" << w;
-            }
-        }
-#endif
-    }
-    return elems;
-}
 
 void MainWindow::connectToServer() {
     if (!m_webSocketClient) return;

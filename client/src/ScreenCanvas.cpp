@@ -889,56 +889,6 @@ void ScreenCanvas::showEvent(QShowEvent* event) {
 void ScreenCanvas::setScreens(const QList<ScreenInfo>& screens) {
     m_screens = screens;
     createScreenItems();
-    // Re-draw system UI overlays if we already have elements (layout may have changed)
-    bool havePerScreenZones = false;
-    for (const auto &s : m_screens) { if (!s.uiZones.isEmpty()) { havePerScreenZones = true; break; } }
-    if (!havePerScreenZones && !m_systemUIElements.isEmpty()) {
-        // Only use legacy global path if no per-screen zones provided
-        setSystemUIElements(m_systemUIElements);
-    }
-}
-
-void ScreenCanvas::setSystemUIElements(const QList<SystemUIElement>& elems) {
-    m_systemUIElements = elems;
-    // Clear previous items
-    for (auto* r : m_systemUIItems) { if (r && m_scene) m_scene->removeItem(r); delete r; }
-    m_systemUIItems.clear();
-    if (!m_scene) return;
-    QColor fill(128,128,128,90); // semi-transparent gray
-    QPen pen(Qt::NoPen);
-    // Build original geometry map (global desktop coordinates) for each screen
-    QHash<int, QRect> originalScreenGeoms;
-    for (const auto& s : m_screens) {
-        originalScreenGeoms.insert(s.id, QRect(s.x, s.y, s.width, s.height));
-    }
-    // For each UI element, find intersecting screen(s) and map into compact scene coordinates
-    for (const auto& e : m_systemUIElements) {
-        QRect uiRectGlobal(e.x, e.y, e.width, e.height);
-        if (uiRectGlobal.width() <= 0 || uiRectGlobal.height() <= 0) continue;
-        bool placed = false;
-        for (const auto& s : m_screens) {
-            QRect screenGlobal(s.x, s.y, s.width, s.height);
-            if (!screenGlobal.intersects(uiRectGlobal)) continue;
-            QRect intersect = screenGlobal.intersected(uiRectGlobal);
-            // Offset inside this screen
-            int dx = intersect.x() - screenGlobal.x();
-            int dy = intersect.y() - screenGlobal.y();
-            // Find compact rect for this screen
-            if (!m_sceneScreenRects.contains(s.id)) continue;
-            QRectF compact = m_sceneScreenRects.value(s.id);
-            QRectF mapped(compact.x() + dx, compact.y() + dy, intersect.width(), intersect.height());
-            auto* rect = new QGraphicsRectItem(mapped);
-            rect->setBrush(fill);
-            rect->setPen(pen);
-            rect->setZValue(-500.0); // Above screen background
-            rect->setAcceptedMouseButtons(Qt::NoButton);
-            m_scene->addItem(rect);
-            m_systemUIItems.append(rect);
-            placed = true;
-        }
-        // If no intersection (shouldn't happen), skip
-        Q_UNUSED(placed);
-    }
 }
 
 void ScreenCanvas::clearScreens() {
@@ -1988,9 +1938,9 @@ void ScreenCanvas::onFastVideoThumbnailReady(const QImage& img) {
 void ScreenCanvas::createScreenItems() {
     clearScreens();
     if (!m_scene) return;
-    // Clear legacy/previous UI overlay rects so we don't accumulate duplicates
-    for (auto* r : m_systemUIItems) { if (r && m_scene) m_scene->removeItem(r); delete r; }
-    m_systemUIItems.clear();
+    // Clear any previous UI overlay rects so we don't accumulate duplicates
+    for (auto* it : m_uiZoneItems) { if (it && m_scene) m_scene->removeItem(it); delete it; }
+    m_uiZoneItems.clear();
     const double spacing = static_cast<double>(m_screenSpacingPx);
     QMap<int, QRectF> compactPositions = calculateCompactPositions(1.0, spacing, spacing);
     m_sceneScreenRects.clear();
@@ -2045,7 +1995,7 @@ void ScreenCanvas::createScreenItems() {
             rItem->setAcceptedMouseButtons(Qt::NoButton);
             m_scene->addItem(rItem);
             // Keep in same container as legacy system UI items for unified clearing
-            m_systemUIItems.append(rItem);
+            m_uiZoneItems.append(rItem);
         }
     }
 }

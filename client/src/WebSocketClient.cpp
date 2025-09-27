@@ -137,7 +137,7 @@ void WebSocketClient::closeUploadChannel() {
     }
 }
 
-void WebSocketClient::registerClient(const QString& machineName, const QString& platform, const QList<ScreenInfo>& screens, int volumePercent, const QList<SystemUIElement>& uiElems) {
+void WebSocketClient::registerClient(const QString& machineName, const QString& platform, const QList<ScreenInfo>& screens, int volumePercent) {
     if (!isConnected()) {
         qWarning() << "Cannot register client: not connected to server";
         return;
@@ -156,10 +156,7 @@ void WebSocketClient::registerClient(const QString& machineName, const QString& 
         }
         message["screens"] = screensArray;
     }
-    if (!uiElems.isEmpty()) {
-        QJsonArray uiArr; for (const auto& e : uiElems) uiArr.append(e.toJson());
-        message["systemUI"] = uiArr;
-    }
+    // Legacy systemUI field removed; per-screen uiZones now embedded in screens
     
     sendMessage(message);
     qDebug() << "Registering client:" << machineName << "(" << platform << ")";
@@ -209,7 +206,7 @@ void WebSocketClient::unwatchScreens(const QString& targetClientId) {
     sendMessage(message);
 }
 
-void WebSocketClient::sendStateSnapshot(const QList<ScreenInfo>& screens, int volumePercent, const QList<SystemUIElement>& uiElems) {
+void WebSocketClient::sendStateSnapshot(const QList<ScreenInfo>& screens, int volumePercent) {
     if (!isConnected()) return;
     QJsonObject msg;
     msg["type"] = "register"; // reuse register payload to update server-side cache
@@ -219,7 +216,7 @@ void WebSocketClient::sendStateSnapshot(const QList<ScreenInfo>& screens, int vo
     for (const auto& s : screens) arr.append(s.toJson());
     msg["screens"] = arr;
     if (volumePercent >= 0) msg["volumePercent"] = volumePercent;
-    if (!uiElems.isEmpty()) { QJsonArray uiArr; for (const auto& e : uiElems) uiArr.append(e.toJson()); msg["systemUI"] = uiArr; }
+    // Legacy systemUI omitted
     sendMessage(msg);
 }
 

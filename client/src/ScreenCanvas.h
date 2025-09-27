@@ -38,7 +38,6 @@ public:
     // Access to upload button in media list overlay
     QPushButton* getUploadButton() const { return m_uploadButton; }
     void setScreens(const QList<ScreenInfo>& screens);
-    void setSystemUIElements(const QList<SystemUIElement>& elems);
     void clearScreens();
     void hideContentPreservingState(); // Hide content without clearing, preserving viewport
     void showContentAfterReconnect();  // Show content after reconnection
@@ -140,8 +139,7 @@ private:
     QGraphicsScene* m_scene = nullptr;
     QList<QGraphicsRectItem*> m_screenItems;
     QList<ScreenInfo> m_screens;
-    QList<SystemUIElement> m_systemUIElements;
-    QList<QGraphicsRectItem*> m_systemUIItems; // drawn overlays
+    QList<QGraphicsRectItem*> m_uiZoneItems; // per-screen uiZones overlays
     // Mapping screen id -> scene rect (inner content rect used when drawing label)
     QHash<int, QRectF> m_sceneScreenRects;
     bool m_panning = false;
