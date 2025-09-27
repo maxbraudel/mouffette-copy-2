@@ -2844,146 +2844,42 @@ static QList<SystemUIElement> computeSystemUIElements() {
     QList<SystemUIElement> elems;
     QList<QScreen*> screenList = QGuiApplication::screens();
     if (screenList.isEmpty()) return elems;
-    for (int idx = 0; idx < screenList.size(); ++idx) {
-        QScreen* screen = screenList[idx];
+    for (QScreen* screen : screenList) {
         if (!screen) continue;
         const QRect geom = screen->geometry();
         const QRect avail = screen->availableGeometry();
 #if defined(Q_OS_MACOS)
-        if (avail.y() > geom.y()) { // menu bar
-            int h = avail.y() - geom.y(); if (h > 0) elems.append(SystemUIElement("menu_bar", geom.x(), geom.y(), geom.width(), h, idx));
+        // Menu bar: top strip removed from available area
+        if (avail.y() > geom.y()) {
+            int h = avail.y() - geom.y();
+            if (h > 0) elems.append(SystemUIElement("menu_bar", geom.x(), geom.y(), geom.width(), h));
         }
+        // Dock: difference on one edge
         if (avail.bottom() < geom.bottom()) { // bottom dock
-            int h = geom.bottom() - avail.bottom(); if (h > 0) elems.append(SystemUIElement("dock", geom.x(), avail.bottom()+1, geom.width(), h, idx));
+            int h = geom.bottom() - avail.bottom();
+            if (h > 0) elems.append(SystemUIElement("dock", geom.x(), avail.bottom()+1, geom.width(), h));
         } else if (avail.x() > geom.x()) { // left dock
-            int w = avail.x() - geom.x(); if (w > 0) elems.append(SystemUIElement("dock", geom.x(), geom.y(), w, geom.height(), idx));
+            int w = avail.x() - geom.x();
+            if (w > 0) elems.append(SystemUIElement("dock", geom.x(), geom.y(), w, geom.height()));
         } else if (avail.right() < geom.right()) { // right dock
-            int w = geom.right() - avail.right(); if (w > 0) elems.append(SystemUIElement("dock", avail.right()+1, geom.y(), w, geom.height(), idx));
+            int w = geom.right() - avail.right();
+            if (w > 0) elems.append(SystemUIElement("dock", avail.right()+1, geom.y(), w, geom.height()));
         }
 #elif defined(Q_OS_WIN)
-        // Taskbar via availableGeometry only reliably reflects primary; we still record if difference exists.
+        // Taskbar detection: difference between geometry and available geometry on one edge (primary screen)
         if (screen == QGuiApplication::primaryScreen()) {
-            if (avail.top() > geom.top()) { int h = avail.top() - geom.top(); if (h > 0) elems.append(SystemUIElement("taskbar", geom.x(), geom.y(), geom.width(), h, idx)); }
-            else if (avail.bottom() < geom.bottom()) { int h = geom.bottom() - avail.bottom(); if (h > 0) elems.append(SystemUIElement("taskbar", geom.x(), avail.bottom()+1, geom.width(), h, idx)); }
-            else if (avail.left() > geom.left()) { int w = avail.left() - geom.left(); if (w > 0) elems.append(SystemUIElement("taskbar", geom.x(), geom.y(), w, geom.height(), idx)); }
-            else if (avail.right() < geom.right()) { int w = geom.right() - avail.right(); if (w > 0) elems.append(SystemUIElement("taskbar", avail.right()+1, geom.y(), w, geom.height(), idx)); }
+            if (avail.top() > geom.top()) { // top taskbar
+                int h = avail.top() - geom.top(); if (h > 0) elems.append(SystemUIElement("taskbar", geom.x(), geom.y(), geom.width(), h));
+            } else if (avail.bottom() < geom.bottom()) { // bottom taskbar
+                int h = geom.bottom() - avail.bottom(); if (h > 0) elems.append(SystemUIElement("taskbar", geom.x(), avail.bottom()+1, geom.width(), h));
+            } else if (avail.left() > geom.left()) { // left taskbar
+                int w = avail.left() - geom.left(); if (w > 0) elems.append(SystemUIElement("taskbar", geom.x(), geom.y(), w, geom.height()));
+            } else if (avail.right() < geom.right()) { // right taskbar
+                int w = geom.right() - avail.right(); if (w > 0) elems.append(SystemUIElement("taskbar", avail.right()+1, geom.y(), w, geom.height()));
+            }
         }
 #endif
     }
-#if defined(Q_OS_WIN)
-    // Enumerate all taskbar windows (primary + secondary) and attach screenId.
-    struct TaskbarEnumCtx { QList<SystemUIElement>* list; QList<QScreen*> screens; } ctx{ &elems, screenList };
-    #ifndef NOMINMAX
-    #define NOMINMAX
-    #endif
-    #include <windows.h>
-    auto computeScreenIdForRect = [&](const QRect& logicalRect)->int {
-        const int TOL = 6; // tolerance in logical pixels
-        int bestId = -1;
-        int bestScore = -1;
-        for (int i = 0; i < screenList.size(); ++i) {
-            QScreen* sc = screenList[i]; if (!sc) continue;
-            QRect sg = sc->geometry();
-            // Overlaps (projections)
-            int overlapX = std::max(0, std::min(logicalRect.right(), sg.right()) - std::max(logicalRect.left(), sg.left()));
-            int overlapY = std::max(0, std::min(logicalRect.bottom(), sg.bottom()) - std::max(logicalRect.top(), sg.top()));
-            bool horizAlignedBelow = std::abs(logicalRect.top() - sg.bottom()) <= TOL && overlapX > 0;
-            bool horizAlignedAbove = std::abs(logicalRect.bottom() - sg.top())   <= TOL && overlapX > 0;
-            bool vertAlignedRight  = std::abs(logicalRect.left() - sg.right())   <= TOL && overlapY > 0;
-            bool vertAlignedLeft   = std::abs(logicalRect.right() - sg.left())   <= TOL && overlapY > 0;
-            bool inside = sg.contains(logicalRect.center());
-            int score = 0;
-            if (horizAlignedBelow || horizAlignedAbove || vertAlignedRight || vertAlignedLeft) score += 200000; // dominant feature
-            if (inside) score += 100000; // fallback if actually inside
-            score += overlapX + overlapY; // tie-breaker
-            // Distance penalty if far away
-            int dist = 0;
-            if (overlapX == 0) {
-                if (logicalRect.right() < sg.left()) dist += sg.left() - logicalRect.right();
-                else if (logicalRect.left() > sg.right()) dist += logicalRect.left() - sg.right();
-            }
-            if (overlapY == 0) {
-                if (logicalRect.bottom() < sg.top()) dist += sg.top() - logicalRect.bottom();
-                else if (logicalRect.top() > sg.bottom()) dist += logicalRect.top() - sg.bottom();
-            }
-            score -= dist * 10; // penalize distance
-            if (score > bestScore) { bestScore = score; bestId = i; }
-        }
-        return bestId;
-    };
-    EnumWindows([](HWND hwnd, LPARAM lp)->BOOL {
-        char cls[128] = {0}; if (!GetClassNameA(hwnd, cls, 127)) return TRUE;
-        if (strcmp(cls, "Shell_TrayWnd") != 0 && strcmp(cls, "Shell_SecondaryTrayWnd") != 0) return TRUE;
-        RECT r; if (!GetWindowRect(hwnd, &r)) return TRUE;
-        int w = r.right - r.left; int h = r.bottom - r.top; if (w <= 0 || h <= 0) return TRUE;
-        auto* c = reinterpret_cast<TaskbarEnumCtx*>(lp);
-        // Convert physical (Win32) coords to Qt logical if scaling active.
-        // We'll assign screen after logical conversion using a robust heuristic (not only center).
-        // Skip if we already have a taskbar with identical rect & sid
-        for (const auto& e : *c->list) { if (e.type == "taskbar" && e.x == r.left && e.y == r.top && e.width == w && e.height == h) return TRUE; }
-        // Attempt to get DPI for this window (independent of screen assignment step)
-        double scale = 1.0; UINT dpi = 0; HMODULE user32 = GetModuleHandleW(L"user32.dll");
-        if (user32) {
-            typedef UINT (WINAPI *GetDpiForWindowFn)(HWND);
-            auto pGetDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(GetProcAddress(user32, "GetDpiForWindow"));
-            if (pGetDpiForWindow) dpi = pGetDpiForWindow(hwnd);
-        }
-        if (dpi >= 96) scale = static_cast<double>(dpi) / 96.0;
-    // Position: keep raw desktop logical assumption (don't divide) because dividing X/Y by local scale distorts multi-monitor layout.
-    double lx = r.left;   // raw
-    double ly = r.top;    // raw
-    double lw = w / scale; // scale width/height only (approximate logical thickness)
-    double lh = h / scale;
-    QRect logicalRect( (int)std::lround(lx), (int)std::lround(ly), (int)std::lround(lw), (int)std::lround(lh) );
-    // Robust screen assignment heuristic
-    int sid = -1;
-        // Rebuild local lambda reference from outer scope
-        TaskbarEnumCtx* outer = reinterpret_cast<TaskbarEnumCtx*>(lp);
-        // We cannot call captureless outer lambda directly; re-implement minimal scoring:
-        const int TOL = 6;
-        int bestId = -1; int bestScore = -1;
-        for (int i = 0; i < outer->screens.size(); ++i) {
-            QScreen* sc = outer->screens[i]; if (!sc) continue; QRect sg = sc->geometry();
-            int overlapX = std::max(0, std::min(logicalRect.right(), sg.right()) - std::max(logicalRect.left(), sg.left()));
-            int overlapY = std::max(0, std::min(logicalRect.bottom(), sg.bottom()) - std::max(logicalRect.top(), sg.top()));
-            bool horizAlignedBelow = std::abs(logicalRect.top() - sg.bottom()) <= TOL && overlapX > 0;
-            bool horizAlignedAbove = std::abs(logicalRect.bottom() - sg.top()) <= TOL && overlapX > 0;
-            bool vertAlignedRight  = std::abs(logicalRect.left() - sg.right()) <= TOL && overlapY > 0;
-            bool vertAlignedLeft   = std::abs(logicalRect.right() - sg.left()) <= TOL && overlapY > 0;
-            bool inside = sg.contains(logicalRect.center());
-            int score = 0;
-            if (horizAlignedBelow || horizAlignedAbove || vertAlignedRight || vertAlignedLeft) score += 200000;
-            if (inside) score += 100000;
-            score += overlapX + overlapY;
-            int dist = 0;
-            if (overlapX == 0) {
-                if (logicalRect.right() < sg.left()) dist += sg.left() - logicalRect.right();
-                else if (logicalRect.left() > sg.right()) dist += logicalRect.left() - sg.right();
-            }
-            if (overlapY == 0) {
-                if (logicalRect.bottom() < sg.top()) dist += sg.top() - logicalRect.bottom();
-                else if (logicalRect.top() > sg.bottom()) dist += logicalRect.top() - sg.bottom();
-            }
-            score -= dist * 10;
-            if (score > bestScore) { bestScore = score; bestId = i; }
-        }
-        sid = bestId;
-        if (sid >= 0 && sid < outer->screens.size() && outer->screens[sid]) {
-            QRect sg = outer->screens[sid]->geometry();
-            // If the bar sits just outside an edge, pull it inside.
-            if (logicalRect.top() >= sg.bottom() && logicalRect.height() < sg.height()/2) logicalRect.moveTop( sg.bottom() - logicalRect.height() );
-            else if (logicalRect.bottom() <= sg.top() && logicalRect.height() < sg.height()/2) logicalRect.moveTop( sg.top() );
-            else if (logicalRect.left() >= sg.right() && logicalRect.width() < sg.width()/2) logicalRect.moveLeft( sg.right() - logicalRect.width() );
-            else if (logicalRect.right() <= sg.left() && logicalRect.width() < sg.width()/2) logicalRect.moveLeft( sg.left() );
-            // Normalize width if almost full width (horizontal taskbar)
-            if (logicalRect.width() >= sg.width()*0.8 && logicalRect.height() < logicalRect.width()) {
-                logicalRect.setLeft(sg.left()); logicalRect.setWidth(sg.width());
-            }
-        }
-    c->list->append(SystemUIElement("taskbar", logicalRect.x(), logicalRect.y(), logicalRect.width(), logicalRect.height(), sid)); // sid heuristic applied
-        return TRUE;
-    }, reinterpret_cast<LPARAM>(&ctx));
-#endif
     return elems;
 }
 

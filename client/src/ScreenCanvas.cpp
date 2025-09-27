@@ -899,123 +899,13 @@ void ScreenCanvas::setSystemUIElements(const QList<SystemUIElement>& elems) {
     if (!m_scene) return;
     QColor fill(128,128,128,90); // semi-transparent gray
     QPen pen(Qt::NoPen);
-    // Detect whether screens were re-laid out compactly (scene rect origin differs from original geometry origin)
-    // We'll remap each system UI rect into the scene coordinate space using per-screen offset.
-    auto screenRectForId = [&](int sid)->QRectF { return m_sceneScreenRects.contains(sid) ? m_sceneScreenRects.value(sid) : QRectF(); };
     for (const auto& e : m_systemUIElements) {
-        QRectF rfGlobal(e.x, e.y, e.width, e.height);
-        if (rfGlobal.width() <= 0 || rfGlobal.height() <= 0) continue;
-        QRectF rfScene = rfGlobal; // will be rebuilt below when we know the screen mapping
-        bool mapped = false;
-        auto rebuildFor = [&](const auto& s){
-            QRectF sGeom(s.x, s.y, s.width, s.height);
-            QRectF sceneScreen = screenRectForId(s.id);
-            if (!sceneScreen.isValid() || sGeom.width() <= 0 || sGeom.height() <= 0) return;
-            // Convert outer stored rect to inner content rect (actual painted screen area) by removing the border pen.
-            int pen = m_screenBorderWidthPx;
-            QRectF contentSceneScreen = sceneScreen.adjusted(pen/2.0, pen/2.0, -pen/2.0, -pen/2.0);
-            // Compute scale in case the compact layout or DPI scaling changed size.
-            qreal scaleX = contentSceneScreen.width() / sGeom.width();
-            qreal scaleY = contentSceneScreen.height() / sGeom.height();
-            // Reconstruct rectangle in scene space (avoid translate on original to prevent DPI mismatch).
-            rfScene = QRectF(
-                contentSceneScreen.x() + (rfGlobal.x() - sGeom.x()) * scaleX,
-                contentSceneScreen.y() + (rfGlobal.y() - sGeom.y()) * scaleY,
-                rfGlobal.width() * scaleX,
-                rfGlobal.height() * scaleY
-            );
-            // Clamp & adjust if the rectangle drifts outside its screen due to DPI mismatch (common on Windows multi-DPI setups)
-            if (e.type == "taskbar" || e.type == "dock" || e.type == "menu_bar") {
-                // If bottom edge spills below, move it up
-                if (rfScene.bottom() > contentSceneScreen.bottom()) {
-                    qreal overlap = rfScene.bottom() - contentSceneScreen.bottom();
-                    rfScene.translate(0, -overlap);
-                }
-                // If top edge above
-                if (rfScene.top() < contentSceneScreen.top()) {
-                    qreal overlap = contentSceneScreen.top() - rfScene.top();
-                    rfScene.translate(0, overlap);
-                }
-                // If right edge spills
-                if (rfScene.right() > contentSceneScreen.right()) {
-                    qreal overlap = rfScene.right() - contentSceneScreen.right();
-                    rfScene.translate(-overlap, 0);
-                }
-                // If left edge spills
-                if (rfScene.left() < contentSceneScreen.left()) {
-                    qreal overlap = contentSceneScreen.left() - rfScene.left();
-                    rfScene.translate(overlap, 0);
-                }
-                // Final safeguard: if height is unrealistically large (>50% of screen) for a taskbar/dock/menu bar, shrink to 5% and align to nearest edge
-                if ((e.type == "taskbar" || e.type == "dock" || e.type == "menu_bar") && rfScene.height() > contentSceneScreen.height() * 0.5) {
-                    qreal targetH = contentSceneScreen.height() * 0.05; // heuristic thin bar
-                    // Prefer bottom edge for taskbar/dock, top for menu_bar
-                    if (e.type == "menu_bar") {
-                        rfScene = QRectF(contentSceneScreen.x(), contentSceneScreen.y(), contentSceneScreen.width(), targetH);
-                    } else {
-                        rfScene = QRectF(contentSceneScreen.x(), contentSceneScreen.bottom() - targetH + 1, contentSceneScreen.width(), targetH);
-                    }
-                }
-            }
-            mapped = true;
-        };
-        if (e.screenId >= 0) {
-            for (const auto& s : m_screens) {
-                if (s.id == e.screenId) { rebuildFor(s); break; }
-            }
-        }
-        if (!mapped) {
-            // Fallback: find containing screen by center point
-            QPointF center = rfGlobal.center();
-            for (const auto& s : m_screens) {
-                QRectF sGeom(s.x, s.y, s.width, s.height);
-                if (sGeom.contains(center)) { rebuildFor(s); break; }
-            }
-        }
-        if (!mapped && (e.type == "taskbar" || e.type == "dock" || e.type == "menu_bar")) {
-            // Heuristic adjacency fallback (viewer side) if still unmapped.
-            const int TOL = 6;
-            int bestIdx = -1; int bestScore = -1;
-            for (int i = 0; i < m_screens.size(); ++i) {
-                const auto& s = m_screens[i];
-                QRectF sGeom(s.x, s.y, s.width, s.height);
-                // Overlaps projection
-                qreal overlapX = std::max<qreal>(0.0, std::min(rfGlobal.right(), sGeom.right()) - std::max(rfGlobal.left(), sGeom.left()));
-                qreal overlapY = std::max<qreal>(0.0, std::min(rfGlobal.bottom(), sGeom.bottom()) - std::max(rfGlobal.top(), sGeom.top()));
-                bool below = std::abs(rfGlobal.top() - sGeom.bottom()) <= TOL && overlapX > 0;
-                bool above = std::abs(rfGlobal.bottom() - sGeom.top()) <= TOL && overlapX > 0;
-                bool right = std::abs(rfGlobal.left() - sGeom.right()) <= TOL && overlapY > 0;
-                bool left  = std::abs(rfGlobal.right() - sGeom.left()) <= TOL && overlapY > 0;
-                bool inside = sGeom.contains(rfGlobal.center());
-                int score = 0;
-                if (below || above || right || left) score += 200000;
-                if (inside) score += 100000;
-                score += static_cast<int>(overlapX + overlapY);
-                if (score > bestScore) { bestScore = score; bestIdx = i; }
-            }
-            if (bestIdx >= 0) {
-                for (const auto& s : m_screens) { if (s.id == m_screens[bestIdx].id) { rebuildFor(s); break; } }
-                // After rebuild, snap inside if positioned just outside (Y below etc.)
-                const auto& s = m_screens[bestIdx];
-                QRectF sGeom(s.x, s.y, s.width, s.height);
-                QRectF sceneScreen = screenRectForId(s.id);
-                if (sceneScreen.isValid()) {
-                    int pen = m_screenBorderWidthPx;
-                    QRectF contentScene = sceneScreen.adjusted(pen/2.0, pen/2.0, -pen/2.0, -pen/2.0);
-                    if (rfScene.top() >= contentScene.bottom() && rfScene.height() < contentScene.height()/2.0) {
-                        rfScene.moveTop(contentScene.bottom() - rfScene.height());
-                    }
-                }
-            }
-        }
-        if (!mapped) {
-            // As a last resort keep global rect (will likely be off if layout compacted), but still draw to aid debugging.
-            rfScene = rfGlobal;
-        }
-        auto* rect = new QGraphicsRectItem(rfScene);
+        QRectF rf(e.x, e.y, e.width, e.height);
+        if (rf.width() <= 0 || rf.height() <= 0) continue;
+        auto* rect = new QGraphicsRectItem(rf);
         rect->setBrush(fill);
         rect->setPen(pen);
-        rect->setZValue(-500.0);
+        rect->setZValue(-500.0); // Behind media but above background (-1000)
         rect->setAcceptedMouseButtons(Qt::NoButton);
         m_scene->addItem(rect);
         m_systemUIItems.append(rect);

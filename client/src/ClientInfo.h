@@ -26,13 +26,12 @@ struct SystemUIElement {
     int y = 0;
     int width = 0;
     int height = 0;
-    int screenId = -1; // optional originating screen index
     SystemUIElement() {}
-    SystemUIElement(const QString& t, int X, int Y, int W, int H, int sid = -1) : type(t), x(X), y(Y), width(W), height(H), screenId(sid) {}
+    SystemUIElement(const QString& t, int X, int Y, int W, int H) : type(t), x(X), y(Y), width(W), height(H) {}
     QJsonObject toJson() const {
-        QJsonObject o; o["type"] = type; o["x"] = x; o["y"] = y; o["width"] = width; o["height"] = height; if (screenId >= 0) o["screenId"] = screenId; return o; }
+        QJsonObject o; o["type"] = type; o["x"] = x; o["y"] = y; o["width"] = width; o["height"] = height; return o; }
     static SystemUIElement fromJson(const QJsonObject& o) {
-        SystemUIElement e; e.type = o.value("type").toString(); e.x = o.value("x").toInt(); e.y = o.value("y").toInt(); e.width = o.value("width").toInt(); e.height = o.value("height").toInt(); e.screenId = o.value("screenId").toInt(-1); return e; }
+        SystemUIElement e; e.type = o.value("type").toString(); e.x = o.value("x").toInt(); e.y = o.value("y").toInt(); e.width = o.value("width").toInt(); e.height = o.value("height").toInt(); return e; }
 };
 
 class ClientInfo {
