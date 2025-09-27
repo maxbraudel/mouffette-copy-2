@@ -108,6 +108,7 @@ protected:
     void changeEvent(QEvent* event) override;
     bool eventFilter(QObject* obj, QEvent* event) override;
     void closeEvent(QCloseEvent *event) override;
+    void showEvent(QShowEvent* event) override;
     // Dragging support for frameless window (macOS/Windows)
     bool m_dragging = false;
     QPoint m_dragStartGlobal;

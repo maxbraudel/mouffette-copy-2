@@ -13,8 +13,8 @@ int main(int argc, char *argv[]) {
     app.setOrganizationName("Mouffette");
     app.setOrganizationDomain("mouffette.app");
     
-    // Allow normal quit when last window is closed now that tray popups are removed
-    app.setQuitOnLastWindowClosed(true);
+    // Keep application alive when window is closed (so user can reopen via other means later)
+    app.setQuitOnLastWindowClosed(false);
 
     MainWindow window;
     window.show(); // Explicitly show main window since tray UX removed

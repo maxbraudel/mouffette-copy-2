@@ -2244,6 +2244,11 @@ void MainWindow::createScreenViewPage() {
     
     // Add to stacked widget
     m_stackedWidget->addWidget(m_screenViewWidget);
+
+    // Ensure watch session stops if application quits via menu/shortcut
+    connect(qApp, &QCoreApplication::aboutToQuit, this, [this]() {
+        if (m_watchManager) m_watchManager->unwatchIfAny();
+    });
 }
 
 void MainWindow::setupMenuBar() {
@@ -2295,18 +2300,23 @@ void MainWindow::setupSystemTray() {
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
-    if (m_trayIcon && m_trayIcon->isVisible()) {
-        // Hide to tray instead of closing
-        hide();
-        event->ignore();
-        
-        // Show message first time
-        static bool firstHide = true;
-        if (firstHide) {
-            firstHide = false;
+    // Interpret window close as: stop watching (to stop remote stream) but keep app running in background.
+    if (m_watchManager) m_watchManager->unwatchIfAny();
+    hide();
+    event->ignore(); // do not quit app
+}
+
+void MainWindow::showEvent(QShowEvent* event) {
+    QMainWindow::showEvent(event);
+    // If user reopens the window and we are on the canvas view with a selected client but not watching anymore, restart watch.
+    if (m_navigationManager && m_navigationManager->isOnScreenView() && m_watchManager) {
+        const QString selId = m_selectedClient.getId();
+        if (!selId.isEmpty() && !m_watchManager->isWatching() && m_webSocketClient && m_webSocketClient->isConnected()) {
+            qDebug() << "Reopening window: auto-resuming watch on" << selId;
+            m_watchManager->toggleWatch(selId); // since not watching, this starts watch
+            // Also request screens to ensure fresh snapshot if server paused sending after unwatch
+            m_webSocketClient->requestScreens(selId);
         }
-    } else {
-        event->accept();
     }
 }
 
