@@ -905,36 +905,40 @@ void ScreenCanvas::setSystemUIElements(const QList<SystemUIElement>& elems) {
     for (const auto& e : m_systemUIElements) {
         QRectF rfGlobal(e.x, e.y, e.width, e.height);
         if (rfGlobal.width() <= 0 || rfGlobal.height() <= 0) continue;
-        QRectF rfScene = rfGlobal;
-        // Prefer explicit screenId mapping if provided
+        QRectF rfScene = rfGlobal; // will be rebuilt below when we know the screen mapping
+        bool mapped = false;
+        auto rebuildFor = [&](const auto& s){
+            QRectF sGeom(s.x, s.y, s.width, s.height);
+            QRectF sceneScreen = screenRectForId(s.id);
+            if (!sceneScreen.isValid() || sGeom.width() <= 0 || sGeom.height() <= 0) return;
+            // Compute scale in case the compact layout or DPI scaling changed size.
+            qreal scaleX = sceneScreen.width() / sGeom.width();
+            qreal scaleY = sceneScreen.height() / sGeom.height();
+            // Reconstruct rectangle in scene space (avoid translate on original to prevent DPI mismatch).
+            rfScene = QRectF(
+                sceneScreen.x() + (rfGlobal.x() - sGeom.x()) * scaleX,
+                sceneScreen.y() + (rfGlobal.y() - sGeom.y()) * scaleY,
+                rfGlobal.width() * scaleX,
+                rfGlobal.height() * scaleY
+            );
+            mapped = true;
+        };
         if (e.screenId >= 0) {
             for (const auto& s : m_screens) {
-                if (s.id == e.screenId) {
-                    QRectF sGeom(s.x, s.y, s.width, s.height);
-                    QRectF sceneScreen = screenRectForId(s.id);
-                    if (sceneScreen.isValid()) {
-                        qreal dx = sceneScreen.x() - sGeom.x();
-                        qreal dy = sceneScreen.y() - sGeom.y();
-                        rfScene.translate(dx, dy);
-                    }
-                    break;
-                }
+                if (s.id == e.screenId) { rebuildFor(s); break; }
             }
-        } else {
-            // Fallback: center-based detection
+        }
+        if (!mapped) {
+            // Fallback: find containing screen by center point
             QPointF center = rfGlobal.center();
             for (const auto& s : m_screens) {
                 QRectF sGeom(s.x, s.y, s.width, s.height);
-                if (sGeom.contains(center)) {
-                    QRectF sceneScreen = screenRectForId(s.id);
-                    if (sceneScreen.isValid()) {
-                        qreal dx = sceneScreen.x() - sGeom.x();
-                        qreal dy = sceneScreen.y() - sGeom.y();
-                        rfScene.translate(dx, dy);
-                    }
-                    break;
-                }
+                if (sGeom.contains(center)) { rebuildFor(s); break; }
             }
+        }
+        if (!mapped) {
+            // As a last resort keep global rect (will likely be off if layout compacted), but still draw to aid debugging.
+            rfScene = rfGlobal;
         }
         auto* rect = new QGraphicsRectItem(rfScene);
         rect->setBrush(fill);
