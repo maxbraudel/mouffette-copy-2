@@ -24,6 +24,8 @@
 #include <cmath>
 #include <QDialog>
 #include <QLineEdit>
+#include <QCheckBox>
+#include <QSettings>
 #include <QNativeGestureEvent>
 #include <QCursor>
 #include <QRandomGenerator>
@@ -420,6 +422,12 @@ MainWindow::MainWindow(QWidget* parent)
 #elif defined(Q_OS_WIN)
     setWindowIcon(QIcon(":/icons/appicon.ico"));
 #endif
+    // Load persisted settings (server URL, auto-upload)
+    {
+        QSettings settings("Mouffette", "Client");
+        m_serverUrlConfig = settings.value("serverUrl", DEFAULT_SERVER_URL).toString();
+        m_autoUploadImportedMedia = settings.value("autoUploadImportedMedia", false).toBool();
+    }
     // Frameless window and no menu bar on macOS/Windows
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
     // Configure borderless window that stays on top
@@ -1571,9 +1579,14 @@ void MainWindow::onClientItemClicked(QListWidgetItem* item) {
 
 
 MainWindow::~MainWindow() {
+    // Cleanly disconnect
     if (m_webSocketClient->isConnected()) {
         m_webSocketClient->disconnect();
     }
+    // Persist current settings on shutdown (safety in case dialog not used)
+    QSettings settings("Mouffette", "Client");
+    settings.setValue("serverUrl", m_serverUrlConfig.isEmpty() ? DEFAULT_SERVER_URL : m_serverUrlConfig);
+    settings.setValue("autoUploadImportedMedia", m_autoUploadImportedMedia);
 }
 
 void MainWindow::updateStylesheetsForTheme() {
@@ -2146,6 +2159,11 @@ void MainWindow::createScreenViewPage() {
             m_fileWatcher->watchMediaItem(mediaItem);
             qDebug() << "MainWindow: Added media item to file watcher:" << mediaItem->sourcePath();
         }
+        // Auto-upload logic: if enabled and not currently streaming/cancelling
+        if (m_autoUploadImportedMedia && m_uploadManager && !m_uploadManager->isUploading() && !m_uploadManager->isCancelling()) {
+            // Defer to allow item to fully initialize and overlay to refresh
+            QTimer::singleShot(0, this, [this]() { onUploadButtonClicked(); });
+        }
     });
     
     // Remove minimum height to allow flexible window resizing
@@ -2384,6 +2402,12 @@ void MainWindow::showSettingsDialog() {
     v->addWidget(urlLabel);
     v->addWidget(urlEdit);
 
+    // New: Auto-upload imported media checkbox
+    QCheckBox* autoUploadChk = new QCheckBox("Upload imported media automatically", &dialog);
+    autoUploadChk->setChecked(m_autoUploadImportedMedia);
+    v->addSpacing(8);
+    v->addWidget(autoUploadChk);
+
     QHBoxLayout* btnRow = new QHBoxLayout();
     btnRow->addStretch();
     QPushButton* cancelBtn = new QPushButton("Cancel");
@@ -2395,7 +2419,7 @@ void MainWindow::showSettingsDialog() {
     v->addLayout(btnRow);
 
     connect(cancelBtn, &QPushButton::clicked, &dialog, &QDialog::reject);
-    connect(saveBtn, &QPushButton::clicked, this, [this, urlEdit, &dialog]() {
+    connect(saveBtn, &QPushButton::clicked, this, [this, urlEdit, autoUploadChk, &dialog]() {
         const QString newUrl = urlEdit->text().trimmed();
         if (!newUrl.isEmpty()) {
             bool changed = (newUrl != (m_serverUrlConfig.isEmpty() ? DEFAULT_SERVER_URL : m_serverUrlConfig));
@@ -2409,11 +2433,22 @@ void MainWindow::showSettingsDialog() {
                 connectToServer();
             }
         }
+        m_autoUploadImportedMedia = autoUploadChk->isChecked();
+
+        // Persist immediately
+        {
+            QSettings settings("Mouffette", "Client");
+            settings.setValue("serverUrl", m_serverUrlConfig.isEmpty() ? DEFAULT_SERVER_URL : m_serverUrlConfig);
+            settings.setValue("autoUploadImportedMedia", m_autoUploadImportedMedia);
+            settings.sync();
+        }
         dialog.accept();
     });
 
     dialog.exec();
 }
+
+// (Removed duplicate destructor definition)
 
 void MainWindow::connectToServer() {
     const QString url = m_serverUrlConfig.isEmpty() ? DEFAULT_SERVER_URL : m_serverUrlConfig;

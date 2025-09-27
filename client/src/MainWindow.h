@@ -252,6 +252,7 @@ private:
     bool m_isWatched = false; // true when at least one remote client is watching us
     bool m_userDisconnected = false; // suppress auto-reconnect UI flows when true
     QString m_serverUrlConfig; // configurable server URL
+    bool m_autoUploadImportedMedia = false; // new setting: auto-upload on drop
     
     // Navigation state
     bool m_ignoreSelectionChange;
