@@ -406,7 +406,6 @@ MainWindow::MainWindow(QWidget* parent)
       m_helpMenu(nullptr),
       m_exitAction(nullptr),
       m_aboutAction(nullptr),
-    /* tray removed */, 
       m_webSocketClient(new WebSocketClient(this)),
       m_statusUpdateTimer(new QTimer(this)),
       m_displaySyncTimer(new QTimer(this)),
@@ -2608,9 +2607,6 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
 void MainWindow::onRegistrationConfirmed(const ClientInfo& clientInfo) {
     m_thisClient = clientInfo;
     qDebug() << "Registration confirmed for:" << clientInfo.getMachineName();
-    
-    // Request initial client list
-    m_webSocketClient->requestClientList();
 }
 
 void MainWindow::onClientSelectionChanged() {

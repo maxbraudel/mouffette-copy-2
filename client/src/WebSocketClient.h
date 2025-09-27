@@ -29,7 +29,6 @@ public:
     
     // Client registration
     void registerClient(const QString& machineName, const QString& platform, const QList<ScreenInfo>& screens, int volumePercent);
-    void requestClientList();
     void requestScreens(const QString& targetClientId);
     void watchScreens(const QString& targetClientId);
     void unwatchScreens(const QString& targetClientId);

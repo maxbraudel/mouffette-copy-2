@@ -162,17 +162,6 @@ void WebSocketClient::registerClient(const QString& machineName, const QString& 
     qDebug() << "Registering client:" << machineName << "(" << platform << ")";
 }
 
-void WebSocketClient::requestClientList() {
-    if (!isConnected()) {
-        qWarning() << "Cannot request client list: not connected to server";
-        return;
-    }
-    
-    QJsonObject message;
-    message["type"] = "request_client_list";
-    sendMessage(message);
-}
-
 void WebSocketClient::requestScreens(const QString& targetClientId) {
     if (!isConnected()) {
         qWarning() << "Cannot request screens: not connected to server";
