@@ -129,6 +129,11 @@ extern QColor gTextSecondary;                // Secondary text color
 extern QColor gHoverHighlight;               // Light blue hover highlight
 
 // ============================================================================
+// SYSTEM UI ZONE COLORS
+// ============================================================================
+extern QColor gSystemTaskbarColor;            // Color used to render remote taskbar uiZones
+
+// ============================================================================
 // INITIALIZATION
 // ============================================================================
 

@@ -93,6 +93,11 @@ QColor gTextSecondary = QColor(255, 255, 255, 217);    // Secondary white text (
 QColor gHoverHighlight = QColor(74, 144, 226, 28);     // Light blue hover
 
 // ============================================================================
+// SYSTEM UI ZONE COLORS
+// ============================================================================
+QColor gSystemTaskbarColor = QColor(0, 0, 0, 80);      // Default opaque black for taskbars
+
+// ============================================================================
 // INITIALIZATION
 // ============================================================================
 

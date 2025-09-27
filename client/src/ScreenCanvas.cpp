@@ -2006,7 +2006,8 @@ void ScreenCanvas::createScreenItems() {
     ensureZOrder();
 
     // Draw per-screen UI zones (new approach superseding global remap logic)
-    QColor fill(128,128,128,90);
+    QColor genericFill(128,128,128,90); // semi-transparent gray for non-taskbar zones
+    QColor taskbarFill = AppColors::gSystemTaskbarColor; // configurable taskbar color
     QPen pen(Qt::NoPen);
     for (const auto &screen : m_screens) {
         if (screen.uiZones.isEmpty()) continue;
@@ -2024,8 +2025,21 @@ void ScreenCanvas::createScreenItems() {
                       sceneRect.y() + sy * sceneRect.height(),
                       sw * sceneRect.width(),
                       sh * sceneRect.height());
+            // Enforce a minimum visual thickness so it can't vanish after scaling
+            if (zr.height() < 3.0) {
+                qreal delta = 3.0 - zr.height();
+                zr.setHeight(3.0);
+                // Anchor to bottom if it's a bottom taskbar (heuristic: y near bottom)
+                if (sy > 0.5) zr.moveTop(zr.top() - delta);
+            }
+            qDebug() << "Drawing uiZone screen" << screen.id << zone.type << "mapped rect" << zr;
             auto* rItem = new QGraphicsRectItem(zr);
-            rItem->setBrush(fill);
+            // Taskbars: solid black; other zone types keep generic translucent fill
+            if (zone.type.compare("taskbar", Qt::CaseInsensitive) == 0) {
+                rItem->setBrush(QBrush(taskbarFill));
+            } else {
+                rItem->setBrush(QBrush(genericFill));
+            }
             rItem->setPen(pen);
             rItem->setZValue(-500.0);
             rItem->setAcceptedMouseButtons(Qt::NoButton);
