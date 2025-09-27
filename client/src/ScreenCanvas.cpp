@@ -678,22 +678,15 @@ void ScreenCanvas::layoutInfoOverlay() {
     
     // Update border rect position and visibility based on widget state
     if (m_infoWidget->isVisible() && m_infoBorderRect) {
-        // Defer the scene-backed border rect positioning to the next cycle to avoid
-        // a brief mismatch while the view's transform/center updates settle.
+        // Immediate positioning to avoid jitter caused by queued updates while panning/zooming
         const int widthNow = w;
         const int heightNow = m_infoWidget->height();
         const QPoint vpPosNow(std::max(0, x), std::max(0, y));
-        QTimer::singleShot(0, this, [this, widthNow, heightNow, vpPosNow]() {
-            // If the overlay was hidden in the meantime, keep the background hidden too
-            if (!viewport() || !m_infoBorderRect || !m_infoWidget || !m_infoWidget->isVisible()) {
-                if (m_infoBorderRect) m_infoBorderRect->setVisible(false);
-                return;
-            }
-            const QPointF widgetTopLeftScene = viewportTransform().inverted().map(vpPosNow);
-            m_infoBorderRect->setRect(0, 0, widthNow, heightNow);
-            m_infoBorderRect->setPos(widgetTopLeftScene);
-            m_infoBorderRect->setVisible(true);
-        });
+        // map viewport pixel position directly to scene
+        const QPointF widgetTopLeftScene = mapToScene(vpPosNow);
+        m_infoBorderRect->setRect(0, 0, widthNow, heightNow);
+        m_infoBorderRect->setPos(widgetTopLeftScene);
+        m_infoBorderRect->setVisible(true);
     } else if (m_infoBorderRect) {
         m_infoBorderRect->setVisible(false);
     }
@@ -869,6 +862,7 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
 
     // Initialize global info overlay (top-right)
     initInfoOverlay();
+    m_lastOverlayLayoutTimer.start();
 
     // Refresh overlay when any media upload state changes (coalesce multiple changes)
     ResizableMediaBase::setUploadChangedNotifier([this]() {
@@ -1076,7 +1070,7 @@ bool ScreenCanvas::event(QEvent* event) {
         }
     }
     if (event->type() == QEvent::Gesture) {
-    return gestureEvent(static_cast<QGestureEvent*>(event));
+        return gestureEvent(static_cast<QGestureEvent*>(event));
     }
     if (event->type() == QEvent::NativeGesture) {
         auto* ng = static_cast<QNativeGestureEvent*>(event);
@@ -1092,7 +1086,8 @@ bool ScreenCanvas::event(QEvent* event) {
             m_lastMousePos = vpPos; // remember anchor
             zoomAroundViewportPos(vpPos, factor);
             relayoutAllMediaOverlays(m_scene);
-            layoutInfoOverlay();
+            // Throttle overlay layout during rapid native pinch; rely on updateInfoOverlayGeometryForViewport on resize
+            if (m_lastOverlayLayoutTimer.elapsed() > 16) { layoutInfoOverlay(); m_lastOverlayLayoutTimer.restart(); }
             updateSelectionChrome();
             event->accept(); return true;
         }

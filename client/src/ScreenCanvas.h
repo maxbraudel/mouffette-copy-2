@@ -156,6 +156,7 @@ private:
     double m_lastMomentumMag = 0.0;
     QPoint m_lastMomentumDelta;
     QElapsedTimer m_momentumTimer;
+    QElapsedTimer m_lastOverlayLayoutTimer; // throttle rapid overlay relayouts during pinch/scroll
     QGraphicsEllipseItem* m_remoteCursorDot = nullptr;
     // Remote cursor styling
     int m_remoteCursorDiameterPx = 30;
