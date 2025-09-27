@@ -899,13 +899,32 @@ void ScreenCanvas::setSystemUIElements(const QList<SystemUIElement>& elems) {
     if (!m_scene) return;
     QColor fill(128,128,128,90); // semi-transparent gray
     QPen pen(Qt::NoPen);
+    // Detect whether screens were re-laid out compactly (scene rect origin differs from original geometry origin)
+    // We'll remap each system UI rect into the scene coordinate space using per-screen offset.
+    auto screenRectForId = [&](int sid)->QRectF { return m_sceneScreenRects.contains(sid) ? m_sceneScreenRects.value(sid) : QRectF(); };
     for (const auto& e : m_systemUIElements) {
-        QRectF rf(e.x, e.y, e.width, e.height);
-        if (rf.width() <= 0 || rf.height() <= 0) continue;
-        auto* rect = new QGraphicsRectItem(rf);
+        QRectF rfGlobal(e.x, e.y, e.width, e.height);
+        if (rfGlobal.width() <= 0 || rfGlobal.height() <= 0) continue;
+        // Determine which screen this element belongs to using center point
+        QPointF center = rfGlobal.center();
+        QRectF rfScene = rfGlobal; // default (single screen or no compaction)
+        for (const auto& s : m_screens) {
+            QRectF sGeom(s.x, s.y, s.width, s.height);
+            if (sGeom.contains(center)) {
+                QRectF sceneScreen = screenRectForId(s.id);
+                if (sceneScreen.isValid()) {
+                    // Offset by difference between compact scene origin and original global origin
+                    qreal dx = sceneScreen.x() - sGeom.x();
+                    qreal dy = sceneScreen.y() - sGeom.y();
+                    rfScene.translate(dx, dy);
+                }
+                break;
+            }
+        }
+        auto* rect = new QGraphicsRectItem(rfScene);
         rect->setBrush(fill);
         rect->setPen(pen);
-        rect->setZValue(-500.0); // Behind media but above background (-1000)
+        rect->setZValue(-500.0);
         rect->setAcceptedMouseButtons(Qt::NoButton);
         m_scene->addItem(rect);
         m_systemUIItems.append(rect);
