@@ -1984,8 +1984,10 @@ void ScreenCanvas::createScreenItems() {
             }
             qDebug() << "Drawing uiZone screen" << screen.id << zone.type << "mapped rect" << zr;
             auto* rItem = new QGraphicsRectItem(zr);
-            // Taskbars: solid black; other zone types keep generic translucent fill
-            if (zone.type.compare("taskbar", Qt::CaseInsensitive) == 0) {
+            // System UI bars (taskbar / dock / menu_bar) share the same configurable color
+            if (zone.type.compare("taskbar", Qt::CaseInsensitive) == 0 ||
+                zone.type.compare("dock", Qt::CaseInsensitive) == 0 ||
+                zone.type.compare("menu_bar", Qt::CaseInsensitive) == 0) {
                 rItem->setBrush(QBrush(taskbarFill));
             } else {
                 rItem->setBrush(QBrush(genericFill));
