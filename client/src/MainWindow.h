@@ -12,7 +12,6 @@
 #include <QTimer>
 #include <QScreen>
 #include <QApplication>
-#include <QSystemTrayIcon>
 #include <QCloseEvent>
 #include <QResizeEvent>
 #include <QScrollArea>
@@ -95,7 +94,7 @@ private slots:
     void onDataRequestReceived();
     
     // System tray slots
-    void onTrayIconActivated(QSystemTrayIcon::ActivationReason reason);
+    // (tray icon removed)
     void onUploadButtonClicked();
     void showSettingsDialog();
     
@@ -235,7 +234,7 @@ private:
     QAction* m_aboutAction;
     
     // System tray
-    QSystemTrayIcon* m_trayIcon = nullptr; // deprecated; retained pointer to avoid widespread removal
+    // tray icon removed
     
     // Backend
     WebSocketClient* m_webSocketClient;
