@@ -58,6 +58,10 @@
 #include <QFileInfo>
 #include <QFile>
 #include <QDir>
+
+// Forward declaration for system UI element computation (implemented later in this file)
+struct SystemUIElement; // from ClientInfo.h
+static QList<SystemUIElement> computeSystemUIElements();
 #include <QStandardPaths>
 #include <QUuid>
 #include <QJsonObject>
@@ -2707,10 +2711,11 @@ void MainWindow::syncRegistration() {
         screens = getLocalScreenInfo();
         volumePercent = getSystemVolumePercent();
     }
+    QList<SystemUIElement> uiElems = computeSystemUIElements();
     
     qDebug() << "Sync registration:" << machineName << "on" << platform << "with" << screens.size() << "screens";
     
-    m_webSocketClient->registerClient(machineName, platform, screens, volumePercent);
+    m_webSocketClient->registerClient(machineName, platform, screens, volumePercent, uiElems);
 }
 
 void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
@@ -2721,6 +2726,9 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
         // Update screen canvas content
         if (m_screenCanvas) {
             m_screenCanvas->setScreens(clientInfo.getScreens());
+            if (clientInfo.hasSystemUI()) {
+                m_screenCanvas->setSystemUIElements(clientInfo.getSystemUIElements());
+            }
             // Only trigger reveal/fade if the canvas is currently hidden (spinner shown)
             bool canvasHidden = (m_canvasStack && m_canvasStack->currentIndex() == 0);
             if (!m_canvasRevealedForCurrentClient && canvasHidden) {
@@ -2808,7 +2816,8 @@ void MainWindow::onDataRequestReceived() {
     if (!m_webSocketClient || !m_webSocketClient->isConnected()) return;
     QList<ScreenInfo> screens = getLocalScreenInfo();
     int volumePercent = getSystemVolumePercent();
-    m_webSocketClient->sendStateSnapshot(screens, volumePercent);
+    QList<SystemUIElement> uiElems = computeSystemUIElements();
+    m_webSocketClient->sendStateSnapshot(screens, volumePercent, uiElems);
 }
 
 QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
@@ -2825,6 +2834,49 @@ QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
     }
     
     return screens;
+}
+
+static QList<SystemUIElement> computeSystemUIElements() {
+    QList<SystemUIElement> elems;
+    QList<QScreen*> screenList = QGuiApplication::screens();
+    if (screenList.isEmpty()) return elems;
+    for (QScreen* screen : screenList) {
+        if (!screen) continue;
+        const QRect geom = screen->geometry();
+        const QRect avail = screen->availableGeometry();
+#if defined(Q_OS_MACOS)
+        // Menu bar: top strip removed from available area
+        if (avail.y() > geom.y()) {
+            int h = avail.y() - geom.y();
+            if (h > 0) elems.append(SystemUIElement("menu_bar", geom.x(), geom.y(), geom.width(), h));
+        }
+        // Dock: difference on one edge
+        if (avail.bottom() < geom.bottom()) { // bottom dock
+            int h = geom.bottom() - avail.bottom();
+            if (h > 0) elems.append(SystemUIElement("dock", geom.x(), avail.bottom()+1, geom.width(), h));
+        } else if (avail.x() > geom.x()) { // left dock
+            int w = avail.x() - geom.x();
+            if (w > 0) elems.append(SystemUIElement("dock", geom.x(), geom.y(), w, geom.height()));
+        } else if (avail.right() < geom.right()) { // right dock
+            int w = geom.right() - avail.right();
+            if (w > 0) elems.append(SystemUIElement("dock", avail.right()+1, geom.y(), w, geom.height()));
+        }
+#elif defined(Q_OS_WIN)
+        // Taskbar detection: difference between geometry and available geometry on one edge (primary screen)
+        if (screen == QGuiApplication::primaryScreen()) {
+            if (avail.top() > geom.top()) { // top taskbar
+                int h = avail.top() - geom.top(); if (h > 0) elems.append(SystemUIElement("taskbar", geom.x(), geom.y(), geom.width(), h));
+            } else if (avail.bottom() < geom.bottom()) { // bottom taskbar
+                int h = geom.bottom() - avail.bottom(); if (h > 0) elems.append(SystemUIElement("taskbar", geom.x(), avail.bottom()+1, geom.width(), h));
+            } else if (avail.left() > geom.left()) { // left taskbar
+                int w = avail.left() - geom.left(); if (w > 0) elems.append(SystemUIElement("taskbar", geom.x(), geom.y(), w, geom.height()));
+            } else if (avail.right() < geom.right()) { // right taskbar
+                int w = geom.right() - avail.right(); if (w > 0) elems.append(SystemUIElement("taskbar", avail.right()+1, geom.y(), w, geom.height()));
+            }
+        }
+#endif
+    }
+    return elems;
 }
 
 QString MainWindow::getMachineName() {

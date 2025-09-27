@@ -45,6 +45,11 @@ QJsonObject ClientInfo::toJson() const {
         screensArray.append(screen.toJson());
     }
     obj["screens"] = screensArray;
+    if (!m_systemUIElements.isEmpty()) {
+        QJsonArray uiArr;
+        for (const auto& e : m_systemUIElements) uiArr.append(e.toJson());
+        obj["systemUI"] = uiArr;
+    }
     
     return obj;
 }
@@ -60,6 +65,10 @@ ClientInfo ClientInfo::fromJson(const QJsonObject& json) {
     QJsonArray screensArray = json["screens"].toArray();
     for (const auto& screenValue : screensArray) {
         client.m_screens.append(ScreenInfo::fromJson(screenValue.toObject()));
+    }
+    if (json.contains("systemUI") && json.value("systemUI").isArray()) {
+        QJsonArray uiArr = json.value("systemUI").toArray();
+        for (const auto& v : uiArr) client.m_systemUIElements.append(SystemUIElement::fromJson(v.toObject()));
     }
     
     return client;

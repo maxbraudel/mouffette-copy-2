@@ -891,6 +891,27 @@ void ScreenCanvas::setScreens(const QList<ScreenInfo>& screens) {
     createScreenItems();
 }
 
+void ScreenCanvas::setSystemUIElements(const QList<SystemUIElement>& elems) {
+    m_systemUIElements = elems;
+    // Clear previous items
+    for (auto* r : m_systemUIItems) { if (r && m_scene) m_scene->removeItem(r); delete r; }
+    m_systemUIItems.clear();
+    if (!m_scene) return;
+    QColor fill(128,128,128,90); // semi-transparent gray
+    QPen pen(Qt::NoPen);
+    for (const auto& e : m_systemUIElements) {
+        QRectF rf(e.x, e.y, e.width, e.height);
+        if (rf.width() <= 0 || rf.height() <= 0) continue;
+        auto* rect = new QGraphicsRectItem(rf);
+        rect->setBrush(fill);
+        rect->setPen(pen);
+        rect->setZValue(-500.0); // Behind media but above background (-1000)
+        rect->setAcceptedMouseButtons(Qt::NoButton);
+        m_scene->addItem(rect);
+        m_systemUIItems.append(rect);
+    }
+}
+
 void ScreenCanvas::clearScreens() {
     for (auto* r : m_screenItems) {
         if (r) m_scene->removeItem(r);
