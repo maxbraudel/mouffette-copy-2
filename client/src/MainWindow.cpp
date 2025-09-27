@@ -406,6 +406,7 @@ MainWindow::MainWindow(QWidget* parent)
       m_helpMenu(nullptr),
       m_exitAction(nullptr),
       m_aboutAction(nullptr),
+      m_trayIcon(nullptr),
       m_webSocketClient(new WebSocketClient(this)),
       m_statusUpdateTimer(new QTimer(this)),
       m_displaySyncTimer(new QTimer(this)),
@@ -457,7 +458,7 @@ MainWindow::MainWindow(QWidget* parent)
 #if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)
     setupMenuBar();
 #endif
-    // Tray removed
+    setupSystemTray();
     setupVolumeMonitoring();
 
     // Connect WebSocketClient signals
@@ -2274,6 +2275,30 @@ void MainWindow::setupMenuBar() {
     m_helpMenu->addAction(m_aboutAction);
 }
 
+void MainWindow::setupSystemTray() {
+    // Create tray icon (no context menu, just click handling)
+    m_trayIcon = new QSystemTrayIcon(this);
+    
+    // Set icon - try to load from resources, fallback to simple icon
+    QIcon trayIconIcon(":/icons/mouffette.png");
+    if (trayIconIcon.isNull()) {
+        // Fallback to simple colored icon
+        QPixmap pixmap(16, 16);
+        pixmap.fill(Qt::blue);
+        trayIconIcon = QIcon(pixmap);
+    }
+    m_trayIcon->setIcon(trayIconIcon);
+    
+    // Set tooltip
+    m_trayIcon->setToolTip("Mouffette - Media Sharing");
+    
+    // Connect tray icon activation for non-context menu clicks
+    connect(m_trayIcon, &QSystemTrayIcon::activated, this, &MainWindow::onTrayIconActivated);
+    
+    // Show the tray icon
+    m_trayIcon->show();
+}
+
 void MainWindow::closeEvent(QCloseEvent *event) {
     // Interpret window close as: stop watching (to stop remote stream) but keep app running in background.
     if (m_watchManager) m_watchManager->unwatchIfAny();
@@ -2317,7 +2342,34 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
     }
 }
 
-// (Removed tray activation handler)
+void MainWindow::onTrayIconActivated(QSystemTrayIcon::ActivationReason reason) {
+    // Show/hide window on any click (left, right, or double-click)
+    switch (reason) {
+    case QSystemTrayIcon::Trigger:        // Single left-click
+    case QSystemTrayIcon::DoubleClick:    // Double left-click  
+    case QSystemTrayIcon::Context:        // Right-click
+        {
+            const bool minimized = (windowState() & Qt::WindowMinimized);
+            const bool hidden = isHidden() || !isVisible();
+            if (minimized || hidden) {
+                // Reveal and focus the window if minimized or hidden
+                if (minimized) {
+                    setWindowState(windowState() & ~Qt::WindowMinimized);
+                    showNormal();
+                }
+                show();
+                raise();
+                activateWindow();
+            } else {
+                // Fully visible: toggle to hide to tray
+                hide();
+            }
+        }
+        break;
+    default:
+        break;
+    }
+}
 
 void MainWindow::onEnableDisableClicked() {
     if (!m_webSocketClient) return;
@@ -2458,7 +2510,7 @@ void MainWindow::onConnected() {
     }
 
     
-    // (tray notifications removed)
+    // Show tray notification
 }
 
 void MainWindow::onDisconnected() {
@@ -2513,7 +2565,7 @@ void MainWindow::onDisconnected() {
     updateClientList(m_availableClients);
     
     
-    // (tray notifications removed)
+    // Show tray notification
     // Notification supprimée (mode silencieux)
 }
 
