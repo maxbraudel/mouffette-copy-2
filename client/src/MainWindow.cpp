@@ -2866,16 +2866,31 @@ static QList<SystemUIElement> computeSystemUIElements() {
             if (w > 0) elems.append(SystemUIElement("dock", avail.right()+1, geom.y(), w, geom.height()));
         }
 #elif defined(Q_OS_WIN)
-        // Taskbar detection: difference between geometry and available geometry on one edge (primary screen)
-        if (screen == QGuiApplication::primaryScreen()) {
-            if (avail.top() > geom.top()) { // top taskbar
-                int h = avail.top() - geom.top(); if (h > 0) elems.append(SystemUIElement("taskbar", geom.x(), geom.y(), geom.width(), h));
-            } else if (avail.bottom() < geom.bottom()) { // bottom taskbar
-                int h = geom.bottom() - avail.bottom(); if (h > 0) elems.append(SystemUIElement("taskbar", geom.x(), avail.bottom()+1, geom.width(), h));
-            } else if (avail.left() > geom.left()) { // left taskbar
-                int w = avail.left() - geom.left(); if (w > 0) elems.append(SystemUIElement("taskbar", geom.x(), geom.y(), w, geom.height()));
-            } else if (avail.right() < geom.right()) { // right taskbar
-                int w = geom.right() - avail.right(); if (w > 0) elems.append(SystemUIElement("taskbar", avail.right()+1, geom.y(), w, geom.height()));
+        // Windows 10/11 per-monitor taskbars: availableGeometry per screen reflects its own taskbar (if present)
+        // Detect on EVERY screen (not only primary). Only one edge should differ.
+        if (avail.top() > geom.top()) { // top taskbar
+            int h = avail.top() - geom.top();
+            if (h > 0) {
+                elems.append(SystemUIElement("taskbar", geom.x(), geom.y(), geom.width(), h));
+                qDebug() << "Detected top taskbar on screen" << geom << "height" << h;
+            }
+        } else if (avail.bottom() < geom.bottom()) { // bottom taskbar
+            int h = geom.bottom() - avail.bottom();
+            if (h > 0) {
+                elems.append(SystemUIElement("taskbar", geom.x(), avail.bottom()+1, geom.width(), h));
+                qDebug() << "Detected bottom taskbar on screen" << geom << "height" << h;
+            }
+        } else if (avail.left() > geom.left()) { // left taskbar
+            int w = avail.left() - geom.left();
+            if (w > 0) {
+                elems.append(SystemUIElement("taskbar", geom.x(), geom.y(), w, geom.height()));
+                qDebug() << "Detected left taskbar on screen" << geom << "width" << w;
+            }
+        } else if (avail.right() < geom.right()) { // right taskbar
+            int w = geom.right() - avail.right();
+            if (w > 0) {
+                elems.append(SystemUIElement("taskbar", avail.right()+1, geom.y(), w, geom.height()));
+                qDebug() << "Detected right taskbar on screen" << geom << "width" << w;
             }
         }
 #endif
