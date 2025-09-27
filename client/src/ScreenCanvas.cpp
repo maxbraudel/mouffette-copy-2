@@ -921,6 +921,39 @@ void ScreenCanvas::setSystemUIElements(const QList<SystemUIElement>& elems) {
                 rfGlobal.width() * scaleX,
                 rfGlobal.height() * scaleY
             );
+            // Clamp & adjust if the rectangle drifts outside its screen due to DPI mismatch (common on Windows multi-DPI setups)
+            if (e.type == "taskbar" || e.type == "dock" || e.type == "menu_bar") {
+                // If bottom edge spills below, move it up
+                if (rfScene.bottom() > sceneScreen.bottom()) {
+                    qreal overlap = rfScene.bottom() - sceneScreen.bottom();
+                    rfScene.translate(0, -overlap);
+                }
+                // If top edge above
+                if (rfScene.top() < sceneScreen.top()) {
+                    qreal overlap = sceneScreen.top() - rfScene.top();
+                    rfScene.translate(0, overlap);
+                }
+                // If right edge spills
+                if (rfScene.right() > sceneScreen.right()) {
+                    qreal overlap = rfScene.right() - sceneScreen.right();
+                    rfScene.translate(-overlap, 0);
+                }
+                // If left edge spills
+                if (rfScene.left() < sceneScreen.left()) {
+                    qreal overlap = sceneScreen.left() - rfScene.left();
+                    rfScene.translate(overlap, 0);
+                }
+                // Final safeguard: if height is unrealistically large (>50% of screen) for a taskbar/dock/menu bar, shrink to 5% and align to nearest edge
+                if ((e.type == "taskbar" || e.type == "dock" || e.type == "menu_bar") && rfScene.height() > sceneScreen.height() * 0.5) {
+                    qreal targetH = sceneScreen.height() * 0.05; // heuristic thin bar
+                    // Prefer bottom edge for taskbar/dock, top for menu_bar
+                    if (e.type == "menu_bar") {
+                        rfScene = QRectF(sceneScreen.x(), sceneScreen.y(), sceneScreen.width(), targetH);
+                    } else {
+                        rfScene = QRectF(sceneScreen.x(), sceneScreen.bottom() - targetH + 1, sceneScreen.width(), targetH);
+                    }
+                }
+            }
             mapped = true;
         };
         if (e.screenId >= 0) {
