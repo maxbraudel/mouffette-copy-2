@@ -2721,6 +2721,11 @@ void MainWindow::syncRegistration() {
                     screen.uiZones.append(z);
                 }
             }
+            if (!screen.uiZones.isEmpty()) {
+                for (const auto &z : screen.uiZones) {
+                    qDebug() << "syncRegistration uiZone screen" << screen.id << z.type << z.x << z.y << z.width << z.height;
+                }
+            }
         }
     }
     
@@ -2736,9 +2741,21 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
         m_selectedClient = clientInfo; // keep selected client in sync
         // Update screen canvas content
         if (m_screenCanvas) {
-            m_screenCanvas->setScreens(clientInfo.getScreens());
-            if (clientInfo.hasSystemUI()) {
+            const QList<ScreenInfo> scrs = clientInfo.getScreens();
+            bool anyPerScreenZones = false;
+            for (const auto &s : scrs) { if (!s.uiZones.isEmpty()) { anyPerScreenZones = true; break; } }
+            m_screenCanvas->setScreens(scrs);
+            if (!anyPerScreenZones && clientInfo.hasSystemUI()) {
+                // Only fall back to legacy global systemUI rendering if no per-screen zones provided
                 m_screenCanvas->setSystemUIElements(clientInfo.getSystemUIElements());
+            } else if (anyPerScreenZones) {
+                qDebug() << "Per-screen uiZones received:";
+                for (const auto &s : scrs) {
+                    if (s.uiZones.isEmpty()) continue;
+                    for (const auto &z : s.uiZones) {
+                        qDebug() << " screen" << s.id << "zone" << z.type << "rel(x,y,w,h)=" << z.x << z.y << z.width << z.height;
+                    }
+                }
             }
             // Only trigger reveal/fade if the canvas is currently hidden (spinner shown)
             bool canvasHidden = (m_canvasStack && m_canvasStack->currentIndex() == 0);
@@ -2837,6 +2854,11 @@ void MainWindow::onDataRequestReceived() {
                     QRect inter = r.intersected(screenRect);
                     ScreenInfo::UIZone z; z.type = e.type; z.x = inter.x() - screenRect.x(); z.y = inter.y() - screenRect.y(); z.width = inter.width(); z.height = inter.height();
                     screen.uiZones.append(z);
+                }
+            }
+            if (!screen.uiZones.isEmpty()) {
+                for (const auto &z : screen.uiZones) {
+                    qDebug() << "snapshot uiZone screen" << screen.id << z.type << z.x << z.y << z.width << z.height;
                 }
             }
         }
