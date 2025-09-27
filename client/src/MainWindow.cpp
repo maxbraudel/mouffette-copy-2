@@ -54,6 +54,7 @@
 #include <QGraphicsRectItem>
 #include <QGraphicsPathItem>
 #include <QStyledItemDelegate>
+#include <QStyle>
 #include <QtSvgWidgets/QGraphicsSvgItem>
 #include <QtSvg/QSvgRenderer>
 #include <QPainterPathStroker>
@@ -312,7 +313,17 @@ class ClientListSeparatorDelegate : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
     void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override {
-        QStyledItemDelegate::paint(painter, option, index);
+        QStyleOptionViewItem opt(option);
+        // Supprimer l'effet hover / sélection pour l'item message "no clients" (flags vides)
+        if (index.isValid()) {
+            Qt::ItemFlags f = index.model() ? index.model()->flags(index) : Qt::NoItemFlags;
+            if (f == Qt::NoItemFlags) {
+                opt.state &= ~QStyle::State_MouseOver;
+                opt.state &= ~QStyle::State_Selected;
+                opt.state &= ~QStyle::State_HasFocus;
+            }
+        }
+        QStyledItemDelegate::paint(painter, opt, index);
         if (!index.isValid()) return;
         const QAbstractItemModel* model = index.model();
         if (!model) return;
