@@ -426,7 +426,21 @@ MainWindow::MainWindow(QWidget* parent)
 {
     setWindowTitle("Mouffette");
 #ifdef Q_OS_MACOS
-    setWindowIcon(QIcon(":/icons/appicon.icns"));
+        QList<ClientInfo::SystemUIElement> systemUI = computeSystemUIElements(); // legacy global (will deprecate)
+
+        // Additionally assign per-screen uiZones if not already populated
+        for (auto &screen : screens) {
+            // collect zones that intersect this screen, convert to relative
+            QRect screenRect(screen.x, screen.y, screen.width, screen.height);
+            for (const auto &e : systemUI) {
+                QRect r(e.x, e.y, e.width, e.height);
+                if (r.intersects(screenRect)) {
+                    QRect inter = r.intersected(screenRect);
+                    ScreenInfo::UIZone z; z.type = e.type; z.x = inter.x() - screenRect.x(); z.y = inter.y() - screenRect.y(); z.width = inter.width(); z.height = inter.height();
+                    screen.uiZones.append(z);
+                }
+            }
+        }
 #elif defined(Q_OS_WIN)
     setWindowIcon(QIcon(":/icons/appicon.ico"));
 #endif
@@ -2458,7 +2472,18 @@ void MainWindow::showSettingsDialog() {
 
 // (Removed duplicate destructor definition)
 
-void MainWindow::connectToServer() {
+        QList<ClientInfo::SystemUIElement> systemUI = computeSystemUIElements();
+        for (auto &screen : screens) {
+            QRect screenRect(screen.x, screen.y, screen.width, screen.height);
+            for (const auto &e : systemUI) {
+                QRect r(e.x, e.y, e.width, e.height);
+                if (r.intersects(screenRect)) {
+                    QRect inter = r.intersected(screenRect);
+                    ScreenInfo::UIZone z; z.type = e.type; z.x = inter.x() - screenRect.x(); z.y = inter.y() - screenRect.y(); z.width = inter.width(); z.height = inter.height();
+                    screen.uiZones.append(z);
+                }
+            }
+        }
     const QString url = m_serverUrlConfig.isEmpty() ? DEFAULT_SERVER_URL : m_serverUrlConfig;
     m_webSocketClient->connectToServer(url);
 }

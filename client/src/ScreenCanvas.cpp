@@ -890,7 +890,10 @@ void ScreenCanvas::setScreens(const QList<ScreenInfo>& screens) {
     m_screens = screens;
     createScreenItems();
     // Re-draw system UI overlays if we already have elements (layout may have changed)
-    if (!m_systemUIElements.isEmpty()) {
+    bool havePerScreenZones = false;
+    for (const auto &s : m_screens) { if (!s.uiZones.isEmpty()) { havePerScreenZones = true; break; } }
+    if (!havePerScreenZones && !m_systemUIElements.isEmpty()) {
+        // Only use legacy global path if no per-screen zones provided
         setSystemUIElements(m_systemUIElements);
     }
 }
@@ -1985,6 +1988,9 @@ void ScreenCanvas::onFastVideoThumbnailReady(const QImage& img) {
 void ScreenCanvas::createScreenItems() {
     clearScreens();
     if (!m_scene) return;
+    // Clear legacy/previous UI overlay rects so we don't accumulate duplicates
+    for (auto* r : m_systemUIItems) { if (r && m_scene) m_scene->removeItem(r); delete r; }
+    m_systemUIItems.clear();
     const double spacing = static_cast<double>(m_screenSpacingPx);
     QMap<int, QRectF> compactPositions = calculateCompactPositions(1.0, spacing, spacing);
     m_sceneScreenRects.clear();
@@ -1998,6 +2004,36 @@ void ScreenCanvas::createScreenItems() {
         m_sceneScreenRects.insert(s.id, pos);
     }
     ensureZOrder();
+
+    // Draw per-screen UI zones (new approach superseding global remap logic)
+    QColor fill(128,128,128,90);
+    QPen pen(Qt::NoPen);
+    for (const auto &screen : m_screens) {
+        if (screen.uiZones.isEmpty()) continue;
+        auto it = m_sceneScreenRects.find(screen.id);
+        if (it == m_sceneScreenRects.end()) continue;
+        QRectF sceneRect = it.value();
+        for (const auto &zone : screen.uiZones) {
+            if (screen.width <=0 || screen.height <=0) continue;
+            double sx = zone.x / double(screen.width);
+            double sy = zone.y / double(screen.height);
+            double sw = zone.width / double(screen.width);
+            double sh = zone.height / double(screen.height);
+            if (sw <= 0 || sh <= 0) continue;
+            QRectF zr(sceneRect.x() + sx * sceneRect.width(),
+                      sceneRect.y() + sy * sceneRect.height(),
+                      sw * sceneRect.width(),
+                      sh * sceneRect.height());
+            auto* rItem = new QGraphicsRectItem(zr);
+            rItem->setBrush(fill);
+            rItem->setPen(pen);
+            rItem->setZValue(-500.0);
+            rItem->setAcceptedMouseButtons(Qt::NoButton);
+            m_scene->addItem(rItem);
+            // Keep in same container as legacy system UI items for unified clearing
+            m_systemUIItems.append(rItem);
+        }
+    }
 }
 
 QGraphicsRectItem* ScreenCanvas::createScreenItem(const ScreenInfo& screen, int index, const QRectF& position) {

@@ -12,6 +12,16 @@ struct ScreenInfo {
     int x;
     int y;
     bool primary;
+    struct UIZone {
+        QString type; // menu_bar, dock, taskbar
+        int x = 0; // relative to screen origin
+        int y = 0;
+        int width = 0;
+        int height = 0;
+        QJsonObject toJson() const;
+        static UIZone fromJson(const QJsonObject &json);
+    };
+    QList<UIZone> uiZones; // per-screen UI overlays
     
     ScreenInfo() : id(0), width(0), height(0), x(0), y(0), primary(false) {}
     ScreenInfo(int id, int w, int h, int x, int y, bool p) : id(id), width(w), height(h), x(x), y(y), primary(p) {}

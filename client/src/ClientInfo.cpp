@@ -10,6 +10,9 @@ QJsonObject ScreenInfo::toJson() const {
     obj["x"] = x;
     obj["y"] = y;
     obj["primary"] = primary;
+    if (!uiZones.isEmpty()) {
+        QJsonArray arr; for (const auto& z : uiZones) arr.append(z.toJson()); obj["uiZones"] = arr;
+    }
     return obj;
 }
 
@@ -21,6 +24,10 @@ ScreenInfo ScreenInfo::fromJson(const QJsonObject& json) {
     screen.x = json["x"].toInt(0);
     screen.y = json["y"].toInt(0);
     screen.primary = json["primary"].toBool();
+    if (json.contains("uiZones") && json.value("uiZones").isArray()) {
+        QJsonArray arr = json.value("uiZones").toArray();
+        for (const auto& v : arr) screen.uiZones.append(ScreenInfo::UIZone::fromJson(v.toObject()));
+    }
     return screen;
 }
 
@@ -52,6 +59,26 @@ QJsonObject ClientInfo::toJson() const {
     }
     
     return obj;
+}
+
+QJsonObject ScreenInfo::UIZone::toJson() const {
+    QJsonObject obj; 
+    obj["type"] = type; 
+    obj["x"] = x; 
+    obj["y"] = y; 
+    obj["width"] = width; 
+    obj["height"] = height; 
+    return obj;
+}
+
+ScreenInfo::UIZone ScreenInfo::UIZone::fromJson(const QJsonObject &json) {
+    ScreenInfo::UIZone z; 
+    z.type = json.value("type").toString(); 
+    z.x = json.value("x").toDouble(); 
+    z.y = json.value("y").toDouble(); 
+    z.width = json.value("width").toDouble(); 
+    z.height = json.value("height").toDouble(); 
+    return z;
 }
 
 ClientInfo ClientInfo::fromJson(const QJsonObject& json) {
