@@ -2791,34 +2791,18 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
                 } else if (m_canvasStack) {
                     m_canvasStack->setCurrentIndex(1);
                 }
-                bool didImmediateRecenter = false;
                 if (m_screenCanvas) {
                     // Arm a deferred recenter as a safety net (in case screens visually populate after first paint)
                     m_screenCanvas->requestDeferredInitialRecenter(53);
                     if (!m_preserveViewportOnReconnect) {
                         qDebug() << "[screensInfo] performing immediate recenter";
                         m_screenCanvas->recenterWithMargin(53);
-                        didImmediateRecenter = true;
                     } else {
                         qDebug() << "[screensInfo] skipping immediate recenter (preserving viewport)";
                     }
                     m_screenCanvas->setFocus(Qt::OtherFocusReason);
                 }
-                // Schedule a fallback recenter after layout/paint cycle if the first did not scale (common on first launch)
-                if (!m_preserveViewportOnReconnect) {
-                    QTimer::singleShot(0, this, [this]() {
-                        if (!m_screenCanvas) return;
-                        if (m_selectedClient.getScreens().isEmpty()) return; // nothing to center
-                        QTransform t = m_screenCanvas->transform();
-                        // If still identity (no zoom applied), try one more time; indicates viewport may have been 0-sized earlier
-                        if (qFuzzyCompare(t.m11(), 1.0) && qFuzzyCompare(t.m22(), 1.0)) {
-                            qDebug() << "[screensInfo] fallback recenter (transform still identity)";
-                            m_screenCanvas->recenterWithMargin(53);
-                        } else {
-                            qDebug() << "[screensInfo] fallback recenter not needed (transform=" << t.m11() << t.m22() << ")";
-                        }
-                    });
-                }
+                // (Removed older fallback recenter logic; deferred handling is now centralized inside ScreenCanvas)
                 // Reset the preservation flag after first reveal
                 m_preserveViewportOnReconnect = false;
                 m_canvasRevealedForCurrentClient = true;
