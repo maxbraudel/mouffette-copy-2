@@ -972,6 +972,42 @@ void ScreenCanvas::setSystemUIElements(const QList<SystemUIElement>& elems) {
                 if (sGeom.contains(center)) { rebuildFor(s); break; }
             }
         }
+        if (!mapped && (e.type == "taskbar" || e.type == "dock" || e.type == "menu_bar")) {
+            // Heuristic adjacency fallback (viewer side) if still unmapped.
+            const int TOL = 6;
+            int bestIdx = -1; int bestScore = -1;
+            for (int i = 0; i < m_screens.size(); ++i) {
+                const auto& s = m_screens[i];
+                QRectF sGeom(s.x, s.y, s.width, s.height);
+                // Overlaps projection
+                qreal overlapX = std::max<qreal>(0.0, std::min(rfGlobal.right(), sGeom.right()) - std::max(rfGlobal.left(), sGeom.left()));
+                qreal overlapY = std::max<qreal>(0.0, std::min(rfGlobal.bottom(), sGeom.bottom()) - std::max(rfGlobal.top(), sGeom.top()));
+                bool below = std::abs(rfGlobal.top() - sGeom.bottom()) <= TOL && overlapX > 0;
+                bool above = std::abs(rfGlobal.bottom() - sGeom.top()) <= TOL && overlapX > 0;
+                bool right = std::abs(rfGlobal.left() - sGeom.right()) <= TOL && overlapY > 0;
+                bool left  = std::abs(rfGlobal.right() - sGeom.left()) <= TOL && overlapY > 0;
+                bool inside = sGeom.contains(rfGlobal.center());
+                int score = 0;
+                if (below || above || right || left) score += 200000;
+                if (inside) score += 100000;
+                score += static_cast<int>(overlapX + overlapY);
+                if (score > bestScore) { bestScore = score; bestIdx = i; }
+            }
+            if (bestIdx >= 0) {
+                for (const auto& s : m_screens) { if (s.id == m_screens[bestIdx].id) { rebuildFor(s); break; } }
+                // After rebuild, snap inside if positioned just outside (Y below etc.)
+                const auto& s = m_screens[bestIdx];
+                QRectF sGeom(s.x, s.y, s.width, s.height);
+                QRectF sceneScreen = screenRectForId(s.id);
+                if (sceneScreen.isValid()) {
+                    int pen = m_screenBorderWidthPx;
+                    QRectF contentScene = sceneScreen.adjusted(pen/2.0, pen/2.0, -pen/2.0, -pen/2.0);
+                    if (rfScene.top() >= contentScene.bottom() && rfScene.height() < contentScene.height()/2.0) {
+                        rfScene.moveTop(contentScene.bottom() - rfScene.height());
+                    }
+                }
+            }
+        }
         if (!mapped) {
             // As a last resort keep global rect (will likely be off if layout compacted), but still draw to aid debugging.
             rfScene = rfGlobal;
