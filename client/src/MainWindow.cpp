@@ -425,23 +425,7 @@ MainWindow::MainWindow(QWidget* parent)
       m_responsiveLayoutManager(new ResponsiveLayoutManager(this))
 {
     setWindowTitle("Mouffette");
-#ifdef Q_OS_MACOS
-        QList<ClientInfo::SystemUIElement> systemUI = computeSystemUIElements(); // legacy global (will deprecate)
-
-        // Additionally assign per-screen uiZones if not already populated
-        for (auto &screen : screens) {
-            // collect zones that intersect this screen, convert to relative
-            QRect screenRect(screen.x, screen.y, screen.width, screen.height);
-            for (const auto &e : systemUI) {
-                QRect r(e.x, e.y, e.width, e.height);
-                if (r.intersects(screenRect)) {
-                    QRect inter = r.intersected(screenRect);
-                    ScreenInfo::UIZone z; z.type = e.type; z.x = inter.x() - screenRect.x(); z.y = inter.y() - screenRect.y(); z.width = inter.width(); z.height = inter.height();
-                    screen.uiZones.append(z);
-                }
-            }
-        }
-#elif defined(Q_OS_WIN)
+#if defined(Q_OS_WIN)
     setWindowIcon(QIcon(":/icons/appicon.ico"));
 #endif
     // Load persisted settings (server URL, auto-upload)
@@ -2470,23 +2454,7 @@ void MainWindow::showSettingsDialog() {
     dialog.exec();
 }
 
-// (Removed duplicate destructor definition)
-
-        QList<ClientInfo::SystemUIElement> systemUI = computeSystemUIElements();
-        for (auto &screen : screens) {
-            QRect screenRect(screen.x, screen.y, screen.width, screen.height);
-            for (const auto &e : systemUI) {
-                QRect r(e.x, e.y, e.width, e.height);
-                if (r.intersects(screenRect)) {
-                    QRect inter = r.intersected(screenRect);
-                    ScreenInfo::UIZone z; z.type = e.type; z.x = inter.x() - screenRect.x(); z.y = inter.y() - screenRect.y(); z.width = inter.width(); z.height = inter.height();
-                    screen.uiZones.append(z);
-                }
-            }
-        }
-    const QString url = m_serverUrlConfig.isEmpty() ? DEFAULT_SERVER_URL : m_serverUrlConfig;
-    m_webSocketClient->connectToServer(url);
-}
+// (Removed stray duplicated code block previously injected)
 
 void MainWindow::scheduleReconnect() {
     if (m_userDisconnected) {
@@ -2741,6 +2709,20 @@ void MainWindow::syncRegistration() {
         volumePercent = getSystemVolumePercent();
     }
     QList<SystemUIElement> uiElems = computeSystemUIElements();
+    // Derive per-screen uiZones from global list (temporary until legacy removed)
+    if (!uiElems.isEmpty()) {
+        for (auto &screen : screens) {
+            QRect screenRect(screen.x, screen.y, screen.width, screen.height);
+            for (const auto &e : uiElems) {
+                QRect r(e.x, e.y, e.width, e.height);
+                if (r.intersects(screenRect)) {
+                    QRect inter = r.intersected(screenRect);
+                    ScreenInfo::UIZone z; z.type = e.type; z.x = inter.x() - screenRect.x(); z.y = inter.y() - screenRect.y(); z.width = inter.width(); z.height = inter.height();
+                    screen.uiZones.append(z);
+                }
+            }
+        }
+    }
     
     qDebug() << "Sync registration:" << machineName << "on" << platform << "with" << screens.size() << "screens";
     
@@ -2846,6 +2828,19 @@ void MainWindow::onDataRequestReceived() {
     QList<ScreenInfo> screens = getLocalScreenInfo();
     int volumePercent = getSystemVolumePercent();
     QList<SystemUIElement> uiElems = computeSystemUIElements();
+    if (!uiElems.isEmpty()) {
+        for (auto &screen : screens) {
+            QRect screenRect(screen.x, screen.y, screen.width, screen.height);
+            for (const auto &e : uiElems) {
+                QRect r(e.x, e.y, e.width, e.height);
+                if (r.intersects(screenRect)) {
+                    QRect inter = r.intersected(screenRect);
+                    ScreenInfo::UIZone z; z.type = e.type; z.x = inter.x() - screenRect.x(); z.y = inter.y() - screenRect.y(); z.width = inter.width(); z.height = inter.height();
+                    screen.uiZones.append(z);
+                }
+            }
+        }
+    }
     m_webSocketClient->sendStateSnapshot(screens, volumePercent, uiElems);
 }
 
@@ -2921,6 +2916,13 @@ static QList<SystemUIElement> computeSystemUIElements() {
 #endif
     }
     return elems;
+}
+
+void MainWindow::connectToServer() {
+    if (!m_webSocketClient) return;
+    const QString url = m_serverUrlConfig.isEmpty() ? DEFAULT_SERVER_URL : m_serverUrlConfig;
+    qDebug() << "Connecting to server:" << url;
+    m_webSocketClient->connectToServer(url);
 }
 
 QString MainWindow::getMachineName() {
