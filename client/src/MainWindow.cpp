@@ -15,6 +15,10 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QHostInfo>
+#include "ClientInfo.h" // ensure SystemUIElement visible
+
+// Forward declaration for system UI extraction
+static QList<SystemUIElement> computeSystemUIElements();
 #include <QDebug>
 #include <QCloseEvent>
 #include <QResizeEvent>

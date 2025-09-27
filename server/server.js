@@ -24,6 +24,7 @@ class MouffetteServer {
                 ws: ws,
                 machineName: null,
                 screens: [],
+                systemUI: [], // array of system UI element rects
                 volumePercent: -1,
                 status: 'connected',
                 connectedAt: new Date().toISOString()
@@ -244,6 +245,7 @@ class MouffetteServer {
                 machineName: target.machineName,
                 platform: target.platform,
                 screens: target.screens,
+                systemUI: target.systemUI || [],
                 volumePercent: target.volumePercent
             }
         }));
@@ -261,6 +263,9 @@ class MouffetteServer {
         }
         if (Object.prototype.hasOwnProperty.call(message, 'screens')) {
             client.screens = message.screens || [];
+        }
+        if (Object.prototype.hasOwnProperty.call(message, 'systemUI') && Array.isArray(message.systemUI)) {
+            client.systemUI = message.systemUI;
         }
         if (typeof message.volumePercent === 'number') {
             client.volumePercent = Math.max(0, Math.min(100, Math.round(message.volumePercent)));
@@ -281,6 +286,7 @@ class MouffetteServer {
                 machineName: client.machineName,
                 screens: client.screens,
                 platform: client.platform,
+                systemUI: client.systemUI || [],
                 volumePercent: client.volumePercent
             }
         }));
@@ -302,6 +308,7 @@ class MouffetteServer {
                 machineName: c.machineName,
                 screens: c.screens,
                 platform: c.platform,
+                systemUI: c.systemUI || [],
                 volumePercent: c.volumePercent,
                 status: c.status
             }));
@@ -463,6 +470,7 @@ class MouffetteServer {
                     machineName: target.machineName,
                     platform: target.platform,
                     screens: target.screens,
+                    systemUI: target.systemUI || [],
                     volumePercent: target.volumePercent
                 }
             }));
