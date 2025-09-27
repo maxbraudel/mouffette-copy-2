@@ -883,6 +883,20 @@ void ScreenCanvas::showEvent(QShowEvent* event) {
 void ScreenCanvas::setScreens(const QList<ScreenInfo>& screens) {
     m_screens = screens;
     createScreenItems();
+    // If screens just became non-empty, ensure any previously requested deferred recenter triggers
+    if (m_pendingInitialRecenter && !m_screens.isEmpty()) {
+        QTimer::singleShot(0, this, [this]() {
+            if (!m_pendingInitialRecenter) return; // might have been cleared
+            m_pendingInitialRecenter = false;
+            // Only recenter if transform is still identity (i.e., user hasn't interacted yet)
+            if (qFuzzyCompare(transform().m11(), 1.0) && qFuzzyCompare(transform().m22(), 1.0)) {
+                qDebug() << "[ScreenCanvas] executing deferred initial recenter";
+                recenterWithMargin(m_pendingInitialRecenterMargin);
+            } else {
+                qDebug() << "[ScreenCanvas] deferred recenter skipped (transform already changed)";
+            }
+        });
+    }
 }
 
 void ScreenCanvas::clearScreens() {
@@ -927,13 +941,37 @@ void ScreenCanvas::showContentAfterReconnect() {
     refreshInfoOverlay();
 }
 
+void ScreenCanvas::requestDeferredInitialRecenter(int marginPx) {
+    m_pendingInitialRecenter = true;
+    m_pendingInitialRecenterMargin = marginPx;
+    // If screens already exist, trigger immediately next tick.
+    if (!m_screens.isEmpty()) {
+        QTimer::singleShot(0, this, [this]() {
+            if (!m_pendingInitialRecenter) return;
+            m_pendingInitialRecenter = false;
+            if (qFuzzyCompare(transform().m11(), 1.0) && qFuzzyCompare(transform().m22(), 1.0)) {
+                qDebug() << "[ScreenCanvas] immediate deferred recenter (screens already present)";
+                recenterWithMargin(m_pendingInitialRecenterMargin);
+            } else {
+                qDebug() << "[ScreenCanvas] immediate deferred recenter skipped (transform modified)";
+            }
+        });
+    } else {
+        qDebug() << "[ScreenCanvas] deferred recenter armed; waiting for screens";
+    }
+}
+
 void ScreenCanvas::recenterWithMargin(int marginPx) {
     QRectF bounds = screensBoundingRect();
-    if (bounds.isNull() || !bounds.isValid()) return;
+    if (bounds.isNull() || !bounds.isValid()) {
+        qDebug() << "[recenterWithMargin] abort: invalid bounds" << bounds;
+        return;
+    }
     const QSize vp = viewport() ? viewport()->size() : size();
     const qreal availW = static_cast<qreal>(vp.width())  - 2.0 * marginPx;
     const qreal availH = static_cast<qreal>(vp.height()) - 2.0 * marginPx;
     if (availW <= 1 || availH <= 1 || bounds.width() <= 0 || bounds.height() <= 0) {
+        qDebug() << "[recenterWithMargin] early fitInView path. vp=" << vp << "bounds=" << bounds << "availW/H=" << availW << availH;
         fitInView(bounds, Qt::KeepAspectRatio);
         centerOn(bounds.center());
         // Ensure overlays are repositioned immediately in this early-exit path as well
@@ -945,6 +983,7 @@ void ScreenCanvas::recenterWithMargin(int marginPx) {
     const qreal sx = availW / bounds.width();
     const qreal sy = availH / bounds.height();
     const qreal s = std::min(sx, sy);
+    qDebug() << "[recenterWithMargin] vp=" << vp << "bounds=" << bounds << "availW/H=" << availW << availH << "scale=" << s;
     QTransform t; t.scale(s, s); setTransform(t); centerOn(bounds.center());
     if (m_scene) {
         const QList<QGraphicsItem*> sel = m_scene->selectedItems();

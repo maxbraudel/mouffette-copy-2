@@ -2777,25 +2777,53 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
                     }
                 }
             }
-            // Only trigger reveal/fade if the canvas is currently hidden (spinner shown)
-            bool canvasHidden = (m_canvasStack && m_canvasStack->currentIndex() == 0);
-            if (!m_canvasRevealedForCurrentClient && canvasHidden) {
-                // On first reveal for the selected client, do a gentle recenter and show canvas
+            // First-time reveal & recenter logic (improved):
+            // We no longer depend on the spinner still being visible; if this is the first batch of screens
+            // for the selected client, we always ensure the canvas is revealed and (unless preserving viewport)
+            // perform an initial recenter (with a deferred safety pass to handle late layout sizing).
+            if (!m_canvasRevealedForCurrentClient) {
+                const bool canvasHidden = (m_canvasStack && m_canvasStack->currentIndex() == 0);
+                qDebug() << "[screensInfo] first batch for selected client. canvasHidden=" << canvasHidden
+                         << "preserveViewportOnReconnect=" << m_preserveViewportOnReconnect
+                         << "screenCount=" << scrs.size();
                 if (m_navigationManager) {
                     m_navigationManager->revealCanvas();
                 } else if (m_canvasStack) {
                     m_canvasStack->setCurrentIndex(1);
                 }
+                bool didImmediateRecenter = false;
                 if (m_screenCanvas) {
-                    // Preserve the user's previous viewport if we just reconnected
+                    // Arm a deferred recenter as a safety net (in case screens visually populate after first paint)
+                    m_screenCanvas->requestDeferredInitialRecenter(53);
                     if (!m_preserveViewportOnReconnect) {
+                        qDebug() << "[screensInfo] performing immediate recenter";
                         m_screenCanvas->recenterWithMargin(53);
+                        didImmediateRecenter = true;
+                    } else {
+                        qDebug() << "[screensInfo] skipping immediate recenter (preserving viewport)";
                     }
                     m_screenCanvas->setFocus(Qt::OtherFocusReason);
+                }
+                // Schedule a fallback recenter after layout/paint cycle if the first did not scale (common on first launch)
+                if (!m_preserveViewportOnReconnect) {
+                    QTimer::singleShot(0, this, [this]() {
+                        if (!m_screenCanvas) return;
+                        if (m_selectedClient.getScreens().isEmpty()) return; // nothing to center
+                        QTransform t = m_screenCanvas->transform();
+                        // If still identity (no zoom applied), try one more time; indicates viewport may have been 0-sized earlier
+                        if (qFuzzyCompare(t.m11(), 1.0) && qFuzzyCompare(t.m22(), 1.0)) {
+                            qDebug() << "[screensInfo] fallback recenter (transform still identity)";
+                            m_screenCanvas->recenterWithMargin(53);
+                        } else {
+                            qDebug() << "[screensInfo] fallback recenter not needed (transform=" << t.m11() << t.m22() << ")";
+                        }
+                    });
                 }
                 // Reset the preservation flag after first reveal
                 m_preserveViewportOnReconnect = false;
                 m_canvasRevealedForCurrentClient = true;
+            } else {
+                qDebug() << "[screensInfo] update for already revealed client; no recenter";
             }
         }
 

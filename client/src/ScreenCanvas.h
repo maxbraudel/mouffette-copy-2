@@ -39,6 +39,8 @@ public:
     QPushButton* getUploadButton() const { return m_uploadButton; }
     void setScreens(const QList<ScreenInfo>& screens);
     void clearScreens();
+    // Schedule a one-time recenter after the next event loop turn if screens just appeared
+    void requestDeferredInitialRecenter(int marginPx = 53);
     void hideContentPreservingState(); // Hide content without clearing, preserving viewport
     void showContentAfterReconnect();  // Show content after reconnection
     void recenterWithMargin(int marginPx = 33);
@@ -140,6 +142,8 @@ private:
     QList<QGraphicsRectItem*> m_screenItems;
     QList<ScreenInfo> m_screens;
     QList<QGraphicsRectItem*> m_uiZoneItems; // per-screen uiZones overlays
+    bool m_pendingInitialRecenter = false;
+    int m_pendingInitialRecenterMargin = 53;
     // Mapping screen id -> scene rect (inner content rect used when drawing label)
     QHash<int, QRectF> m_sceneScreenRects;
     bool m_panning = false;
