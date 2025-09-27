@@ -80,7 +80,6 @@ private slots:
     void onDisconnected();
     void onConnectionError(const QString& error);
     void onClientListReceived(const QList<ClientInfo>& clients);
-    void onRegistrationConfirmed(const ClientInfo& clientInfo);
     void onClientSelectionChanged();
     void onClientItemClicked(QListWidgetItem* item);
     void adjustClientListHeight();
@@ -92,7 +91,6 @@ private slots:
     void onBackToClientListClicked();
     void onScreensInfoReceived(const ClientInfo& clientInfo);
     void onWatchStatusChanged(bool watched);
-    void onDataRequestReceived();
     
     // System tray slots
     void onTrayIconActivated(QSystemTrayIcon::ActivationReason reason);

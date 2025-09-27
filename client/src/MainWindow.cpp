@@ -466,19 +466,29 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_webSocketClient, &WebSocketClient::disconnected, this, &MainWindow::onDisconnected);
     connect(m_webSocketClient, &WebSocketClient::connectionError, this, &MainWindow::onConnectionError);
     connect(m_webSocketClient, &WebSocketClient::clientListReceived, this, &MainWindow::onClientListReceived);
-    connect(m_webSocketClient, &WebSocketClient::registrationConfirmed, this, &MainWindow::onRegistrationConfirmed);
     connect(m_webSocketClient, &WebSocketClient::screensInfoReceived, this, &MainWindow::onScreensInfoReceived);
     connect(m_webSocketClient, &WebSocketClient::watchStatusChanged, this, &MainWindow::onWatchStatusChanged);
-    connect(m_webSocketClient, &WebSocketClient::dataRequestReceived, this, &MainWindow::onDataRequestReceived);
+    // Protocol simplified: registration_confirmed & data_request removed
     // Unused generic message hook removed; specific handlers are wired explicitly
     // Forward all generic messages to UploadManager so it can handle incoming upload_* and remove_all_files when we are the target
     connect(m_webSocketClient, &WebSocketClient::messageReceived, m_uploadManager, &UploadManager::handleIncomingMessage);
     // Upload progress forwards
-    connect(m_webSocketClient, &WebSocketClient::uploadProgressReceived, m_uploadManager, &UploadManager::onUploadProgress);
-    connect(m_webSocketClient, &WebSocketClient::uploadFinishedReceived, m_uploadManager, &UploadManager::onUploadFinished);
-    // New: per-file completion ids
-    connect(m_webSocketClient, &WebSocketClient::uploadCompletedFileIdsReceived, m_uploadManager, &UploadManager::onUploadCompletedFileIds);
-    connect(m_webSocketClient, &WebSocketClient::allFilesRemovedReceived, m_uploadManager, &UploadManager::onAllFilesRemovedRemote);
+    connect(m_webSocketClient, &WebSocketClient::uploadStatusReceived, this, [this](const QString& uploadId, const QJsonObject& status){
+        if (!m_uploadManager) return;
+        if (status.value("allRemoved").toBool(false)) { m_uploadManager->onAllFilesRemovedRemote(); return; }
+        if (status.value("finished").toBool(false)) { m_uploadManager->onUploadFinished(uploadId); return; }
+        int percent = status.value("percent").toInt(-1);
+        if (percent >= 0) {
+            int filesCompleted = status.value("filesCompleted").toInt();
+            int totalFiles = status.value("totalFiles").toInt();
+            m_uploadManager->onUploadProgress(uploadId, percent, filesCompleted, totalFiles);
+        }
+        if (status.contains("completedFileIds") && status.value("completedFileIds").isArray()) {
+            QStringList ids; const QJsonArray arr = status.value("completedFileIds").toArray(); ids.reserve(arr.size());
+            for (const auto& v : arr) ids.append(v.toString());
+            if (!ids.isEmpty()) m_uploadManager->onUploadCompletedFileIds(uploadId, ids);
+        }
+    });
 
     // Managers wiring
     m_uploadManager->setWebSocketClient(m_webSocketClient);
@@ -1498,23 +1508,7 @@ void MainWindow::onUploadButtonClicked() {
                 }
             }
         });
-        // Also accept authoritative per-file progress from target when available
-        connect(m_webSocketClient, &WebSocketClient::uploadPerFileProgressReceived, this, [this](const QString& uploadId, const QHash<QString,int>& filePercents){
-            Q_UNUSED(uploadId);
-            if (!m_screenCanvas || !m_screenCanvas->scene()) return;
-            for (auto it = filePercents.constBegin(); it != filePercents.constEnd(); ++it) {
-                const QString& fid = it.key();
-                int p = std::clamp(it.value(), 0, 100);
-                m_serverPerFileProgressActive.insert(fid);
-                const QList<ResizableMediaBase*> items = m_itemsByFileId.value(fid);
-                for (ResizableMediaBase* item : items) {
-                    if (!item) continue;
-                    if (p >= 100) item->setUploadUploaded();
-                    else item->setUploadUploading(p);
-                }
-                if (p >= 100) m_serverCompletedFileIds.insert(fid);
-            }
-        });
+        // Authoritative per-file server progress now comes embedded in unified uploadStatusReceived and applied via UploadManager pathways.
         // Do not mark Uploaded on local fileUploadFinished; wait for server confirmation in updateIndividualProgressFromServer
         connect(m_uploadManager, &UploadManager::uploadFinished, this, [this](){
             // Clear tracking data (fileUploadFinished already handled state updates)
@@ -2656,11 +2650,6 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
     }
 }
 
-void MainWindow::onRegistrationConfirmed(const ClientInfo& clientInfo) {
-    m_thisClient = clientInfo;
-    qDebug() << "Registration confirmed for:" << clientInfo.getMachineName();
-}
-
 void MainWindow::onClientSelectionChanged() {
     if (m_ignoreSelectionChange) {
         return;
@@ -2862,31 +2851,6 @@ void MainWindow::onWatchStatusChanged(bool watched) {
     }
 }
 
-void MainWindow::onDataRequestReceived() {
-    // Target-side: server asked us to send fresh state now (screens + volume)
-    if (!m_webSocketClient || !m_webSocketClient->isConnected()) return;
-    QList<ScreenInfo> screens = getLocalScreenInfo();
-    int volumePercent = getSystemVolumePercent();
-    // Build uiZones immediately for snapshot (reuse same logic as syncRegistration)
-    QList<QScreen*> qScreens = QGuiApplication::screens();
-    for (auto &screen : screens) {
-        if (screen.id < 0 || screen.id >= qScreens.size()) continue; QScreen* qs = qScreens[screen.id]; if (!qs) continue;
-        QRect geom = qs->geometry(); QRect avail = qs->availableGeometry();
-#if defined(Q_OS_WIN)
-        if (avail.bottom() < geom.bottom()) { int h = geom.bottom()-avail.bottom(); if (h>0) screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, geom.height()-h, geom.width(), h}); }
-        else if (avail.top() > geom.top()) { int h = avail.top()-geom.top(); if (h>0) screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, 0, geom.width(), h}); }
-        else if (avail.left() > geom.left()) { int w = avail.left()-geom.left(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, 0, w, geom.height()}); }
-        else if (avail.right() < geom.right()) { int w = geom.right()-avail.right(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"taskbar", geom.width()-w, 0, w, geom.height()}); }
-#elif defined(Q_OS_MACOS)
-        if (avail.y() > geom.y()) { int h = avail.y()-geom.y(); if (h>0) screen.uiZones.append(ScreenInfo::UIZone{"menu_bar", 0, 0, geom.width(), h}); }
-        if (avail.bottom() < geom.bottom()) { int h = geom.bottom()-avail.bottom(); if (h>0) screen.uiZones.append(ScreenInfo::UIZone{"dock", 0, geom.height()-h, geom.width(), h}); }
-        else if (avail.x() > geom.x()) { int w = avail.x()-geom.x(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"dock", 0, 0, w, geom.height()}); }
-        else if (avail.right() < geom.right()) { int w = geom.right()-avail.right(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"dock", geom.width()-w, 0, w, geom.height()}); }
-#endif
-        for (const auto &z : screen.uiZones) qDebug() << "snapshot uiZone screen" << screen.id << z.type << z.x << z.y << z.width << z.height;
-    }
-    m_webSocketClient->sendStateSnapshot(screens, volumePercent);
-}
 
 QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
     QList<ScreenInfo> screens;

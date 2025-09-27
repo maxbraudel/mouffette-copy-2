@@ -60,22 +60,16 @@ signals:
     void disconnected();
     void connectionError(const QString& error);
     void clientListReceived(const QList<ClientInfo>& clients);
-    void registrationConfirmed(const ClientInfo& clientInfo);
     void screensInfoReceived(const ClientInfo& clientInfo);
     void messageReceived(const QJsonObject& message);
     void watchStatusChanged(bool watched);
-    void dataRequestReceived();
         // Emitted to watchers with remote cursor position of the watched target
         void cursorPositionReceived(const QString& targetClientId, int x, int y);
-
-    // Upload progress signals (from target via server)
-    void uploadProgressReceived(const QString& uploadId, int percent, int filesCompleted, int totalFiles);
-    // New: carries fileIds that the target reports as fully received so far
-    void uploadCompletedFileIdsReceived(const QString& uploadId, const QStringList& fileIds);
-    // New: fine-grained per-file percent from target
-    void uploadPerFileProgressReceived(const QString& uploadId, const QHash<QString,int>& filePercents);
-    void uploadFinishedReceived(const QString& uploadId);
-    void allFilesRemovedReceived();
+    // Unified upload status (progress + completed ids + per-file + finished + allRemoved)
+    // When type == Progress: percent/filesCompleted/totalFiles + optional perFilePercents + optional completedFileIds
+    // When type == Finished: finished=true
+    // When type == AllRemoved: allRemoved=true
+    void uploadStatusReceived(const QString& uploadId, const QJsonObject& status);
 
 private slots:
     void onConnected();

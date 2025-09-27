@@ -420,11 +420,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         const QString err = message.value("message").toString();
         qWarning() << "Server error:" << err;
     }
-    else if (type == "registration_confirmed") {
-        QJsonObject clientInfoObj = message["clientInfo"].toObject();
-        ClientInfo clientInfo = ClientInfo::fromJson(clientInfoObj);
-        emit registrationConfirmed(clientInfo);
-    }
+    // registration_confirmed removed (handled through existing flows)
     else if (type == "client_list") {
         QJsonArray clientsArray = message["clients"].toArray();
         QList<ClientInfo> clients;
@@ -445,9 +441,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         bool watched = message["watched"].toBool(false);
         emit watchStatusChanged(watched);
     }
-    else if (type == "data_request") {
-        emit dataRequestReceived();
-    }
+    // data_request removed: server now relies on cached state / periodic sync
     else if (type == "cursor_update") {
         // Forward to UI with target id context
         const QString targetId = message.value("targetClientId").toString();
@@ -456,36 +450,17 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         emit cursorPositionReceived(targetId, x, y);
     }
     else if (type == "upload_progress") {
-        const QString uploadId = message.value("uploadId").toString();
-        const int percent = message.value("percent").toInt();
-        const int filesCompleted = message.value("filesCompleted").toInt();
-        const int totalFiles = message.value("totalFiles").toInt();
-        emit uploadProgressReceived(uploadId, percent, filesCompleted, totalFiles);
-        if (message.contains("completedFileIds") && message.value("completedFileIds").isArray()) {
-            QStringList ids;
-            const QJsonArray arr = message.value("completedFileIds").toArray();
-            ids.reserve(arr.size());
-            for (const auto& v : arr) ids.append(v.toString());
-            emit uploadCompletedFileIdsReceived(uploadId, ids);
-        }
-        if (message.contains("perFileProgress") && message.value("perFileProgress").isArray()) {
-            const QJsonArray arr = message.value("perFileProgress").toArray();
-            QHash<QString,int> map;
-            for (const auto& v : arr) {
-                const QJsonObject o = v.toObject();
-                const QString fid = o.value("fileId").toString();
-                const int p = o.value("percent").toInt();
-                if (!fid.isEmpty()) map.insert(fid, p);
-            }
-            if (!map.isEmpty()) emit uploadPerFileProgressReceived(uploadId, map);
-        }
+        // Unified status dispatch
+        QJsonObject status = message; // includes percent/filesCompleted/totalFiles/completedFileIds/perFileProgress
+        status["finished"] = false;
+        status["allRemoved"] = false;
+        emit uploadStatusReceived(message.value("uploadId").toString(), status);
     }
     else if (type == "upload_finished") {
-        const QString uploadId = message.value("uploadId").toString();
-        emit uploadFinishedReceived(uploadId);
+        QJsonObject status; status["finished"] = true; status["allRemoved"] = false; emit uploadStatusReceived(message.value("uploadId").toString(), status);
     }
     else if (type == "all_files_removed") {
-        emit allFilesRemovedReceived();
+        QJsonObject status; status["finished"] = false; status["allRemoved"] = true; emit uploadStatusReceived(QString(), status);
     }
     else {
         // Forward unknown messages
