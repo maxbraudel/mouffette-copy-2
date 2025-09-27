@@ -278,7 +278,20 @@ class MouffetteServer {
         
         console.log(`✅ Client registered: ${client.machineName} (${client.platform}) with ${client.screens.length} screen(s)`);
         
-        // Broadcast updated client list (client itself can infer its state locally)
+        // Send confirmation
+        client.ws.send(JSON.stringify({
+            type: 'registration_confirmed',
+            clientInfo: {
+                id: clientId,
+                machineName: client.machineName,
+                screens: client.screens,
+                platform: client.platform,
+                systemUI: client.systemUI || [],
+                volumePercent: client.volumePercent
+            }
+        }));
+        
+        // Broadcast updated client list
         this.broadcastClientList();
     // Notify watchers of this target with fresh screens
     this.notifyWatchersOfTarget(clientId);
@@ -420,19 +433,10 @@ class MouffetteServer {
     // Notify target that it is watched (start sending updates)
         if (target.ws) {
             target.ws.send(JSON.stringify({ type: 'watch_status', watched: true }));
+            // Ask target to send fresh state now
+            target.ws.send(JSON.stringify({ type: 'data_request', fields: ['screens', 'volume'] }));
         }
-        // Immediately send cached screens + volume to watcher (no roundtrip data_request)
-        watcher.ws.send(JSON.stringify({
-            type: 'screens_info',
-            clientInfo: {
-                id: target.id,
-                machineName: target.machineName,
-                platform: target.platform,
-                screens: target.screens,
-                systemUI: target.systemUI || [],
-                volumePercent: target.volumePercent
-            }
-        }));
+    // Do not send cached info; wait for target to reply so watcher receives fresh data only
     }
     
     handleUnwatchScreens(watcherId, message) {
