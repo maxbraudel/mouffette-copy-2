@@ -227,6 +227,8 @@ private:
     MouseBlockingRoundedRectItem* m_infoBorderRect = nullptr; // graphics rect for info overlay border
     bool m_infoRefreshQueued = false;
     int m_lastMediaItemCount = -1; // cache to detect add/remove
+    // Mapping media item -> container widget in overlay (pour gestion sélection visuelle)
+    QHash<ResizableMediaBase*, QWidget*> m_mediaContainerByItem;
 
     // Launch Scene toggle state
     bool m_sceneLaunched = false;

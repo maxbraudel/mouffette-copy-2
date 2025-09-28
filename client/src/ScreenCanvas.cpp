@@ -179,8 +179,8 @@ void ScreenCanvas::initInfoOverlay() {
         // Ensure overlay blocks mouse events to canvas behind it
         m_infoWidget->setAttribute(Qt::WA_NoMousePropagation, true);
         // Build stylesheet - transparent background like MediaSettingsPanel (background handled by graphics rect)
-        const QString bg = QString("background-color: transparent; border-radius: %1px; color: white; font-size: 16px;")
-            .arg(gOverlayCornerRadiusPx);
+        // Remove corner rounding (was using gOverlayCornerRadiusPx) to have sharp edges per latest design
+        const QString bg = QString("background-color: transparent; border-radius: 0px; color: white; font-size: 16px;");
         m_infoWidget->setStyleSheet(bg);
         // Baseline minimum width to avoid tiny panel before content exists
         m_infoWidget->setMinimumWidth(200);
@@ -425,6 +425,9 @@ void ScreenCanvas::refreshInfoOverlay() {
     // Avoid intermediate paints while rebuilding
     m_infoWidget->setUpdatesEnabled(false);
     m_infoWidget->hide();
+
+    // Clear mapping (sera reconstruit)
+    m_mediaContainerByItem.clear();
     
     // Reset widget constraints for rebuilding
     m_infoWidget->setMinimumHeight(0);
@@ -476,12 +479,23 @@ void ScreenCanvas::refreshInfoOverlay() {
         }
         
         // Create a container widget for this media item with content margins
-        auto* mediaContainer = new QWidget(m_contentWidget);
-        mediaContainer->setStyleSheet("background: transparent;");
-        mediaContainer->setAutoFillBackground(false);
-        mediaContainer->setAttribute(Qt::WA_TranslucentBackground, true);
-        auto* mediaLayout = new QVBoxLayout(mediaContainer);
-        mediaLayout->setContentsMargins(20, 0, 20, 0); // Left/right margins for content
+               auto* mediaContainer = new QWidget(m_contentWidget);
+               bool isSelected = m && m->isSelected();
+               const QString selectedBg = "rgba(255,255,255,0.10)"; // sélection gris clair
+               mediaContainer->setAutoFillBackground(true);
+               mediaContainer->setAttribute(Qt::WA_TranslucentBackground, false);
+               mediaContainer->setStyleSheet(QString("QWidget { background-color: %1; }")
+                                       .arg(isSelected ? selectedBg : "transparent"));
+               auto* mediaLayoutOuter = new QVBoxLayout(mediaContainer);
+               mediaLayoutOuter->setContentsMargins(0,0,0,0); // aucune marge pour que le fond aille jusqu'aux séparateurs
+               mediaLayoutOuter->setSpacing(0);
+               // Inner content widget that provides horizontal padding
+               auto* mediaInner = new QWidget(mediaContainer);
+               mediaInner->setAutoFillBackground(false);
+               mediaInner->setAttribute(Qt::WA_TranslucentBackground, true);
+        auto* mediaLayout = new QVBoxLayout(mediaInner);
+        // Ajouter un léger padding vertical interne (ex: 8 px en haut et bas) pour aérer sans créer de "gap" externe
+        mediaLayout->setContentsMargins(20,8,20,8); // left, top, right, bottom
         mediaLayout->setSpacing(gMediaListItemSpacing);
         
         // Row: name
@@ -532,7 +546,7 @@ void ScreenCanvas::refreshInfoOverlay() {
             statusLayout->addWidget(status, 0, Qt::AlignLeft | Qt::AlignVCenter); // Left-aligned, vertically centered
         }
         
-        mediaLayout->addWidget(statusContainer);
+    mediaLayout->addWidget(statusContainer);
         
         // Row: details smaller under status
         auto* details = new QLabel(dim + QStringLiteral("  ·  ") + sizeStr, mediaContainer);
@@ -544,46 +558,36 @@ void ScreenCanvas::refreshInfoOverlay() {
         details->setTextInteractionFlags(Qt::NoTextInteraction);
         details->setFixedHeight(18); // Fixed height to prevent stretching
         details->setProperty("originalText", dim + QStringLiteral("  ·  ") + sizeStr); // Store original text for ellipsis
-        mediaLayout->addWidget(details);
+    mediaLayout->addWidget(details);
+
+    // Add inner content to outer layout
+    mediaLayoutOuter->addWidget(mediaInner);
         
         mediaContainers.append(mediaContainer);
+        m_mediaContainerByItem.insert(m, mediaContainer);
     }
     
-    // Now add all media containers and separators to the content layout
+    // Revised layout: no external vertical gaps so selection background touches separator lines.
+    // Add separator BEFORE each item except the first; no extra spacings.
     for (int i = 0; i < mediaContainers.size(); ++i) {
-        // Add top spacing for first item
-        if (i == 0) {
-            m_contentLayout->addSpacing(16);
-        }
-        
-        m_contentLayout->addWidget(mediaContainers[i]);
-        
-        // Add separator line between media items (not after the last item)
-        if (i < mediaContainers.size() - 1) {
-            // Add spacing before separator
-            m_contentLayout->addSpacing(12);
-            
-            // Create separator line that spans full overlay width (no margins)
+        if (i > 0) {
             auto* separator = new QLabel(m_contentWidget);
-            separator->setStyleSheet(QString("QLabel { "
-                "background-color: %1; "
-                "border: none; "
-                "}").arg(AppColors::colorToCss(AppColors::gOverlayBorderColor)));
+            separator->setStyleSheet(QString("QLabel { background-color: %1; border: none; }")
+                                     .arg(AppColors::colorToCss(AppColors::gOverlayBorderColor)));
             separator->setAutoFillBackground(true);
             separator->setFixedHeight(1);
             separator->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
             separator->setTextInteractionFlags(Qt::NoTextInteraction);
-            // No margins needed - separator will naturally span full width
             m_contentLayout->addWidget(separator);
-            
-            // Add spacing after separator
-            m_contentLayout->addSpacing(12);
         }
-        
-        // Add bottom spacing for last item
-        if (i == mediaContainers.size() - 1) {
-            m_contentLayout->addSpacing(16);
+        // Ensure internal vertical padding inside the media item instead of external spacers
+        if (auto* innerLayout = mediaContainers[i]->findChild<QVBoxLayout*>()) {
+            // innerLayout corresponds to mediaLayoutOuter or its child; adjust child that has content margins 20,0,20,0
+            // We prefer to locate the inner content widget (mediaInner) and modify its layout
+            // but to keep it simple we set contentsMargins on the second (content) layout when found.
         }
+        // Add the media container full width
+        m_contentLayout->addWidget(mediaContainers[i]);
     }
 
     // Finally, place the header (with upload button) at the bottom, full width, no margins
@@ -1049,6 +1053,19 @@ void ScreenCanvas::updateSelectionChrome() {
         if (!stillSelected.contains(it.key())) toRemove.append(it.key());
     }
     for (ResizableMediaBase* m : toRemove) clearSelectionChromeFor(m);
+
+    // Mettre à jour le style de surbrillance dans l'overlay sans forcer un rebuild complet
+    const QString selectedBg = "rgba(255,255,255,0.10)";
+    for (auto it = m_mediaContainerByItem.begin(); it != m_mediaContainerByItem.end(); ++it) {
+        ResizableMediaBase* media = it.key(); QWidget* w = it.value(); if (!w) continue;
+        bool sel = stillSelected.contains(media);
+        w->setAutoFillBackground(true);
+        w->setAttribute(Qt::WA_TranslucentBackground, false);
+        // Pleine largeur: pas de border-radius pour que le fond touche les séparateurs
+        w->setStyleSheet(QString("QWidget { background-color: %1; }")
+                         .arg(sel ? selectedBg : "transparent"));
+        w->update();
+    }
 }
 
 void ScreenCanvas::updateSelectionChromeGeometry(ResizableMediaBase* item) {
