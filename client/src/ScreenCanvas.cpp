@@ -428,6 +428,7 @@ void ScreenCanvas::refreshInfoOverlay() {
 
     // Clear mapping (sera reconstruit)
     m_mediaContainerByItem.clear();
+    m_mediaItemByContainer.clear();
     
     // Reset widget constraints for rebuilding
     m_infoWidget->setMinimumHeight(0);
@@ -564,7 +565,14 @@ void ScreenCanvas::refreshInfoOverlay() {
     mediaLayoutOuter->addWidget(mediaInner);
         
         mediaContainers.append(mediaContainer);
-        m_mediaContainerByItem.insert(m, mediaContainer);
+    m_mediaContainerByItem.insert(m, mediaContainer);
+    m_mediaItemByContainer.insert(mediaContainer, m);
+    // Enable mouse interaction on the container
+    mediaContainer->setAttribute(Qt::WA_Hover, true); // no custom cursor, keep default arrow
+    mediaContainer->installEventFilter(this);
+    // Make inner child widgets transparent for mouse so container gets the click
+    const auto children = mediaContainer->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
+    for (QWidget* c : children) c->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     }
     
     // Revised layout: no external vertical gaps so selection background touches separator lines.
@@ -1100,6 +1108,47 @@ void ScreenCanvas::clearSelectionChromeFor(ResizableMediaBase* item) {
 void ScreenCanvas::clearAllSelectionChrome() {
     QList<ResizableMediaBase*> keys = m_selectionChromeMap.keys();
     for (ResizableMediaBase* k : keys) clearSelectionChromeFor(k);
+}
+
+bool ScreenCanvas::eventFilter(QObject* watched, QEvent* event) {
+    // Handle clicks on media container widgets to select the associated scene media item
+    if (event->type() == QEvent::MouseButtonPress) {
+        if (auto* w = qobject_cast<QWidget*>(watched)) {
+            auto it = m_mediaItemByContainer.find(w);
+            if (it != m_mediaItemByContainer.end()) {
+                if (ResizableMediaBase* media = it.value()) {
+                    if (m_scene) {
+                        // Clear existing selection unless multi-select with modifier could be added later
+                        m_scene->clearSelection();
+                        media->setSelected(true);
+                        updateSelectionChrome();
+                        return true; // consume event
+                    }
+                }
+            }
+        }
+    } else if (event->type() == QEvent::Enter) {
+        if (auto* w = qobject_cast<QWidget*>(watched)) {
+            if (m_mediaItemByContainer.contains(w)) {
+                // Subtle hover feedback (light background) only if not already selected
+                ResizableMediaBase* media = m_mediaItemByContainer.value(w);
+                if (media && !media->isSelected()) {
+                    w->setStyleSheet("QWidget { background-color: rgba(255,255,255,0.05); }");
+                }
+            }
+        }
+    } else if (event->type() == QEvent::Leave) {
+        if (auto* w = qobject_cast<QWidget*>(watched)) {
+            if (m_mediaItemByContainer.contains(w)) {
+                ResizableMediaBase* media = m_mediaItemByContainer.value(w);
+                const QString selectedBg = "rgba(255,255,255,0.10)";
+                bool sel = media && media->isSelected();
+                w->setStyleSheet(QString("QWidget { background-color: %1; }")
+                                  .arg(sel ? selectedBg : "transparent"));
+            }
+        }
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void ScreenCanvas::setScreenBorderWidthPx(int px) {

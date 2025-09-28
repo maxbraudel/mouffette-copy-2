@@ -229,6 +229,11 @@ private:
     int m_lastMediaItemCount = -1; // cache to detect add/remove
     // Mapping media item -> container widget in overlay (pour gestion sélection visuelle)
     QHash<ResizableMediaBase*, QWidget*> m_mediaContainerByItem;
+    // Reverse mapping container widget -> media item (pour clic sélection)
+    QHash<QWidget*, ResizableMediaBase*> m_mediaItemByContainer;
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
     // Launch Scene toggle state
     bool m_sceneLaunched = false;
