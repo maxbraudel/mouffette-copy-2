@@ -529,7 +529,7 @@ void ResizableMediaBase::initializeOverlays() {
         });
         m_topPanel->addElement(deleteBtn);
     }
-    m_bottomPanel = std::make_unique<OverlayPanel>(OverlayPanel::Bottom); m_bottomPanel->setStyle(m_overlayStyle);
+    // Legacy bottom overlay panel (textual media controls) removed.
 }
 
 void ResizableMediaBase::updateOverlayVisibility() {
@@ -560,19 +560,16 @@ void ResizableMediaBase::updateOverlayVisibility() {
             }
         }
     }
-    // bottom panel managed by video subclass
+    // (Legacy bottom panel removed.)
 }
 
 void ResizableMediaBase::updateOverlayLayout() {
     if (!scene() || scene()->views().isEmpty()) return;
     QGraphicsView* view = scene()->views().first();
     if (m_topPanel && !m_topPanel->scene()) m_topPanel->setScene(scene());
-    if (m_bottomPanel && !m_bottomPanel->scene()) m_bottomPanel->setScene(scene());
     QRectF itemRect(0,0,m_baseSize.width(), m_baseSize.height());
     QPointF topAnchorScene = mapToScene(QPointF(itemRect.center().x(), itemRect.top()));
-    QPointF bottomAnchorScene = mapToScene(QPointF(itemRect.center().x(), itemRect.bottom()));
     if (m_topPanel) m_topPanel->updateLayoutWithAnchor(topAnchorScene, view);
-    if (m_bottomPanel) m_bottomPanel->updateLayoutWithAnchor(bottomAnchorScene, view);
     // Keep settings panel docked
     if (m_settingsPanel && m_settingsPanel->isVisible()) m_settingsPanel->updatePosition(view);
 }
@@ -639,13 +636,7 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
     m_player->setVideoSink(m_sink);
     m_player->setSource(QUrl::fromLocalFile(filePath));
 
-    if (m_bottomPanel) {
-        auto playBtn = m_bottomPanel->addButton("▶", "play"); if (playBtn) playBtn->setOnClicked([this]() { togglePlayPause(); });
-        auto stopBtn = m_bottomPanel->addButton("■", "stop"); if (stopBtn) stopBtn->setOnClicked([this]() { stopToBeginning(); });
-        auto repeatBtn = m_bottomPanel->addButton("R", "repeat"); if (repeatBtn) { repeatBtn->setOnClicked([this]() { toggleRepeat(); }); repeatBtn->setState(m_repeatEnabled ? OverlayElement::Toggled : OverlayElement::Normal); }
-        auto muteBtn = m_bottomPanel->addButton("M", "mute"); if (muteBtn) { muteBtn->setOnClicked([this]() { toggleMute(); }); bool muted = m_audio && m_audio->isMuted(); muteBtn->setState(muted ? OverlayElement::Toggled : OverlayElement::Normal); }
-        m_bottomPanel->setVisible(isSelected());
-    }
+    // Legacy textual bottom overlay (play/stop/repeat/mute) fully removed; floating HUD replaces it.
 
     QObject::connect(m_sink, &QVideoSink::videoFrameChanged, m_player, [this](const QVideoFrame& f){
         ++m_framesReceived;
@@ -781,9 +772,9 @@ void ResizableVideoItem::togglePlayPause() {
     updateControlsLayout(); update();
 }
 
-void ResizableVideoItem::toggleRepeat() { m_repeatEnabled = !m_repeatEnabled; if (m_bottomPanel) { auto btn = std::dynamic_pointer_cast<OverlayButtonElement>(m_bottomPanel->findElement("repeat")); if (btn) btn->setState(m_repeatEnabled ? OverlayElement::Toggled : OverlayElement::Normal); } updateControlsLayout(); update(); }
+void ResizableVideoItem::toggleRepeat() { m_repeatEnabled = !m_repeatEnabled; updateControlsLayout(); update(); }
 
-void ResizableVideoItem::toggleMute() { if (!m_audio) return; m_audio->setMuted(!m_audio->isMuted()); bool muted = m_audio->isMuted(); if (m_bottomPanel) { auto btn = std::dynamic_pointer_cast<OverlayButtonElement>(m_bottomPanel->findElement("mute")); if (btn) btn->setState(muted ? OverlayElement::Toggled : OverlayElement::Normal); } updateControlsLayout(); update(); }
+void ResizableVideoItem::toggleMute() { if (!m_audio) return; m_audio->setMuted(!m_audio->isMuted()); bool muted = m_audio->isMuted(); updateControlsLayout(); update(); }
 
 void ResizableVideoItem::stopToBeginning() { if (!m_player) return; m_holdLastFrameAtEnd = false; m_player->pause(); m_player->setPosition(0); m_positionMs = 0; m_smoothProgressRatio = 0.0; updateProgressBar(); if (m_progressTimer) m_progressTimer->stop(); updateControlsLayout(); update(); }
 
