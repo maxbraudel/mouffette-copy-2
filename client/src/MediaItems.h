@@ -87,16 +87,15 @@ public:
     static void setResizeSnapCallback(std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> callback);
     static std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> resizeSnapCallback();
 
-    // Access to overlay panels (filename on top, controls bottom for videos) if needed.
+    // Access to top overlay panel (filename + utility buttons).
     OverlayPanel* topPanel() const { return m_topPanel.get(); }
-    OverlayPanel* bottomPanel() const { return m_bottomPanel.get(); }
 
     // Called by view prior to removing item from scene & scheduling deletion.
     // Default implementation cancels interactive state & hides overlays.
     virtual void prepareForDeletion();
     bool isBeingDeleted() const { return m_beingDeleted; }
     // Visibility toggle (content only; overlays & selection chrome remain)
-    void setContentVisible(bool v) { m_contentVisible = v; update(); if (m_bottomPanel) m_bottomPanel->setVisible(true); if (m_topPanel) m_topPanel->setVisible(true); }
+    void setContentVisible(bool v) { m_contentVisible = v; update(); if (m_topPanel) m_topPanel->setVisible(true); }
     bool isContentVisible() const { return m_contentVisible; }
     void setContentOpacity(qreal op) { m_contentOpacity = std::clamp(op, 0.0, 1.0); update(); }
     qreal contentOpacity() const { return m_contentOpacity; }
@@ -124,8 +123,7 @@ protected:
     QString m_filename;
     QString m_mediaId; // persistent unique id for the canvas item
     QString m_fileId;  // shared file id (multiple media can have same fileId)
-    std::unique_ptr<OverlayPanel> m_topPanel;
-    std::unique_ptr<OverlayPanel> m_bottomPanel;
+    std::unique_ptr<OverlayPanel> m_topPanel; // legacy bottom panel removed
     OverlayStyle m_overlayStyle;
     static int heightOfMediaOverlays;
     static int cornerRadiusOfMediaOverlays;

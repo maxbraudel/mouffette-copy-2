@@ -351,7 +351,6 @@ void ResizableMediaBase::prepareForDeletion() {
         panel->clearElements();
     };
     detachPanel(m_topPanel);
-    detachPanel(m_bottomPanel);
     // Hide and drop settings panel (proxy will be removed from scene by destructor)
     if (m_settingsPanel) {
         m_settingsPanel->setVisible(false);
