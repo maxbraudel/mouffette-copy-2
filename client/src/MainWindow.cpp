@@ -495,6 +495,8 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_webSocketClient, &WebSocketClient::disconnected, this, &MainWindow::onDisconnected);
     connect(m_webSocketClient, &WebSocketClient::connectionError, this, &MainWindow::onConnectionError);
     connect(m_webSocketClient, &WebSocketClient::clientListReceived, this, &MainWindow::onClientListReceived);
+    // Immediate status reflection without polling
+    connect(m_webSocketClient, &WebSocketClient::connectionStatusChanged, this, [this](const QString& s){ setLocalNetworkStatus(s); });
     connect(m_webSocketClient, &WebSocketClient::registrationConfirmed, this, &MainWindow::onRegistrationConfirmed);
     connect(m_webSocketClient, &WebSocketClient::screensInfoReceived, this, &MainWindow::onScreensInfoReceived);
     connect(m_webSocketClient, &WebSocketClient::watchStatusChanged, this, &MainWindow::onWatchStatusChanged);
@@ -808,10 +810,8 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_uploadManager, &UploadManager::uploadFinished, this, [this, applyUploadButtonStyle](){ applyUploadButtonStyle(); });
     connect(m_uploadManager, &UploadManager::allFilesRemoved, this, [this, applyUploadButtonStyle](){ applyUploadButtonStyle(); });
 
-    // Periodic connection status refresh
-    m_statusUpdateTimer->setInterval(1000);
-    connect(m_statusUpdateTimer, &QTimer::timeout, this, &MainWindow::updateConnectionStatus);
-    m_statusUpdateTimer->start();
+    // Periodic connection status refresh no longer needed (now event-driven); keep timer disabled
+    m_statusUpdateTimer->stop();
 
     // Periodic display sync only when watched
     m_displaySyncTimer->setInterval(3000);
@@ -2511,6 +2511,7 @@ void MainWindow::attemptReconnect() {
 
 void MainWindow::onConnected() {
     setUIEnabled(true);
+    setLocalNetworkStatus("Connected"); // immediate visual update
     // Reset reconnection state on successful connection
     m_reconnectAttempts = 0;
     m_reconnectTimer->stop();
@@ -2546,6 +2547,7 @@ void MainWindow::onConnected() {
 
 void MainWindow::onDisconnected() {
     setUIEnabled(false);
+    setLocalNetworkStatus("Disconnected");
     // If user is currently on a client's canvas page, immediately switch the canvas
     // area to a loading state and clear any displayed content/overlays.
     if (m_navigationManager && m_navigationManager->isOnScreenView()) {
@@ -2605,6 +2607,7 @@ void MainWindow::onDisconnected() {
 void MainWindow::onConnectionError(const QString& error) {
     qWarning() << "Failed to connect to server:" << error << "(silent mode, aucune popup)";
     setUIEnabled(false);
+    setLocalNetworkStatus("Error");
 }
 
 void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {

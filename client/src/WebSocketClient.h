@@ -59,6 +59,7 @@ signals:
     void connected();
     void disconnected();
     void connectionError(const QString& error);
+    void connectionStatusChanged(const QString& status); // emitted whenever textual connection status updates
     void clientListReceived(const QList<ClientInfo>& clients);
     void registrationConfirmed(const ClientInfo& clientInfo);
     void screensInfoReceived(const ClientInfo& clientInfo);

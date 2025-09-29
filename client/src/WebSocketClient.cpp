@@ -520,5 +520,6 @@ void WebSocketClient::setConnectionStatus(const QString& status) {
     if (m_connectionStatus != status) {
         m_connectionStatus = status;
         qDebug() << "Connection status changed to:" << status;
+        emit connectionStatusChanged(m_connectionStatus);
     }
 }
