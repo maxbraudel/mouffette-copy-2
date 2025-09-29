@@ -30,6 +30,8 @@ public:
     
     // Configure which options are available based on media type
     void setMediaType(bool isVideo);
+    void setMediaItem(class ResizableMediaBase* item) { m_mediaItem = item; }
+    void applyOpacityFromUi(); // make publicly callable
 
     // Update absolute position based on the provided view (left-docked with margin).
     // Call whenever zoom/transform/resize occurs.
@@ -44,6 +46,7 @@ protected:
 private slots:
     void onDisplayAutomaticallyToggled(bool checked);
     void onPlayAutomaticallyToggled(bool checked);
+    void onOpacityToggled(bool checked);
 
 private:
     void buildUi();
@@ -99,4 +102,5 @@ private:
     QWidget* m_autoPlayRow = nullptr;
     QWidget* m_playDelayRow = nullptr;
     QWidget* m_repeatRow = nullptr;
+    class ResizableMediaBase* m_mediaItem = nullptr; // not owning
 };

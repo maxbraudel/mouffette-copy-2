@@ -17,6 +17,7 @@
 #include <QTimer>
 #include "Theme.h"
 #include "OverlayPanels.h"
+#include "MediaItems.h" // for ResizableMediaBase
 
 MediaSettingsPanel::MediaSettingsPanel(QObject* parent)
     : QObject(parent)
@@ -247,6 +248,7 @@ void MediaSettingsPanel::buildUi() {
         h->addWidget(m_opacityBox);
         h->addWidget(suffix);
         h->addStretch();
+        QObject::connect(m_opacityCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onOpacityToggled);
     m_contentLayout->addWidget(row);
     }
 
@@ -625,6 +627,27 @@ bool MediaSettingsPanel::isValidInputForBox(QLabel* box, QChar character) {
     }
     
     return false; // Unknown box, reject input
+}
+
+void MediaSettingsPanel::onOpacityToggled(bool checked) {
+    Q_UNUSED(checked);
+    applyOpacityFromUi();
+}
+
+void MediaSettingsPanel::applyOpacityFromUi() {
+    if (!m_mediaItem) return;
+    if (!m_opacityCheck || !m_opacityBox) return;
+    qreal finalOpacity = 1.0;
+    if (m_opacityCheck->isChecked()) {
+        QString t = m_opacityBox->text().trimmed();
+        bool ok = false; int val = t.toInt(&ok); if (!ok) val = 100;
+        val = std::clamp(val, 0, 100);
+        finalOpacity = static_cast<qreal>(val) / 100.0;
+    }
+    // Apply only to media content; we adjust an internal multiplier (add API on media item)
+    if (auto* base = m_mediaItem) {
+        base->setContentOpacity(finalOpacity); // method we will add to ResizableMediaBase
+    }
 }
 
 void MediaSettingsPanel::updateScrollbarGeometry() {

@@ -367,6 +367,7 @@ void ResizableMediaBase::initializeOverlays() {
                 m_settingsPanel = std::make_unique<MediaSettingsPanel>();
                 // Configure panel based on media type
                 m_settingsPanel->setMediaType(isVideoMedia());
+                m_settingsPanel->setMediaItem(this);
             }
             // Ensure panel is in the scene
             if (scene()) m_settingsPanel->ensureInScene(scene());
@@ -376,6 +377,10 @@ void ResizableMediaBase::initializeOverlays() {
                 m_settingsPanel->updatePosition(scene()->views().first());
             }
             m_settingsPanel->setVisible(enabling);
+            if (enabling) {
+                // Re-apply opacity in case user modified values previously
+                QMetaObject::invokeMethod(m_settingsPanel.get(), [panel=m_settingsPanel.get()](){ panel->applyOpacityFromUi(); }, Qt::QueuedConnection);
+            }
         });
         m_topPanel->addElement(settingsBtn);
 
@@ -500,7 +505,16 @@ ResizablePixmapItem::ResizablePixmapItem(const QPixmap& pm, int visualSizePx, in
 void ResizablePixmapItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) {
     Q_UNUSED(option); Q_UNUSED(widget);
     if (isContentVisible()) {
-        if (!m_pix.isNull()) painter->drawPixmap(QPointF(0,0), m_pix);
+        if (!m_pix.isNull()) {
+            if (contentOpacity() >= 0.999) {
+                painter->drawPixmap(QPointF(0,0), m_pix);
+            } else if (contentOpacity() > 0.0) {
+                painter->save();
+                painter->setOpacity(contentOpacity());
+                painter->drawPixmap(QPointF(0,0), m_pix);
+                painter->restore();
+            }
+        }
     }
     paintSelectionAndLabel(painter);
 }
@@ -737,9 +751,10 @@ void ResizableVideoItem::paint(QPainter* painter, const QStyleOptionGraphicsItem
     auto fitRect = [](const QRectF& bounds, const QSize& imgSz) -> QRectF {
         if (bounds.isEmpty() || imgSz.isEmpty()) return bounds; qreal brW = bounds.width(); qreal brH = bounds.height(); qreal imgW = imgSz.width(); qreal imgH = imgSz.height(); if (imgW <= 0 || imgH <= 0) return bounds; qreal brAR = brW / brH; qreal imgAR = imgW / imgH; if (imgAR > brAR) { qreal h = brW / imgAR; return QRectF(bounds.left(), bounds.top() + (brH - h)/2.0, brW, h);} else { qreal w = brH * imgAR; return QRectF(bounds.left() + (brW - w)/2.0, bounds.top(), w, brH);} };
     if (isContentVisible()) {
-        if (!m_lastFrameImage.isNull()) { QRectF dst = fitRect(br, m_lastFrameImage.size()); painter->drawImage(dst, m_lastFrameImage); }
-        else if (m_lastFrame.isValid()) { QImage img = m_lastFrame.toImage(); if (!img.isNull()) { QRectF dst = fitRect(br, img.size()); painter->drawImage(dst, img); } else if (m_posterImageSet && !m_posterImage.isNull()) { QRectF dst = fitRect(br, m_posterImage.size()); painter->drawImage(dst, m_posterImage); } }
-        else if (m_posterImageSet && !m_posterImage.isNull()) { QRectF dst = fitRect(br, m_posterImage.size()); painter->drawImage(dst, m_posterImage); }
+        auto drawImg = [&](const QImage& img){ if (img.isNull()) return; QRectF dst = fitRect(br, img.size()); if (contentOpacity() >= 0.999) { painter->drawImage(dst, img); } else if (contentOpacity() > 0.0) { painter->save(); painter->setOpacity(contentOpacity()); painter->drawImage(dst, img); painter->restore(); } };
+        if (!m_lastFrameImage.isNull()) { drawImg(m_lastFrameImage); }
+        else if (m_lastFrame.isValid()) { QImage img = m_lastFrame.toImage(); if (!img.isNull()) { drawImg(img); } else if (m_posterImageSet && !m_posterImage.isNull()) { drawImg(m_posterImage); } }
+        else if (m_posterImageSet && !m_posterImage.isNull()) { drawImg(m_posterImage); }
     }
     paintSelectionAndLabel(painter);
 }

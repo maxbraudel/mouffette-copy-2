@@ -98,6 +98,8 @@ public:
     // Visibility toggle (content only; overlays & selection chrome remain)
     void setContentVisible(bool v) { m_contentVisible = v; update(); if (m_bottomPanel) m_bottomPanel->setVisible(true); if (m_topPanel) m_topPanel->setVisible(true); }
     bool isContentVisible() const { return m_contentVisible; }
+    void setContentOpacity(qreal op) { m_contentOpacity = std::clamp(op, 0.0, 1.0); update(); }
+    qreal contentOpacity() const { return m_contentOpacity; }
     
     // Override in derived classes to indicate media type for settings panel
     virtual bool isVideoMedia() const { return false; }
@@ -162,6 +164,7 @@ private:
 protected:
     bool m_beingDeleted = false;
     bool m_contentVisible = true; // controlled by visibility toggle overlay button
+    qreal m_contentOpacity = 1.0; // multiplicative opacity for content only
 };
 
 // Simple pixmap media item
