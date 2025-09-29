@@ -505,8 +505,14 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
         // Accept and consume these events to prevent canvas panning/interaction
         if (obj == m_widget || obj == m_innerContent || obj == m_scrollArea ||
             (obj->isWidgetType() && static_cast<QWidget*>(obj)->isAncestorOf(m_widget))) {
+            // If this is a mouse press on a non-value-box blank area, clear any active box selection.
+            if (event->type() == QEvent::MouseButtonPress) {
+                // We only want to clear if the object clicked is exactly one of the container surfaces
+                // (value boxes and checkboxes are handled later in the dedicated branch below).
+                clearActiveBox();
+            }
             // Let normal widget handling occur but prevent propagation to canvas
-            return false; // Allow widget to handle, but WA_NoMousePropagation will block further propagation
+            return false; // Allow widget to handle, WA_NoMousePropagation blocks further propagation
         }
     }
     
