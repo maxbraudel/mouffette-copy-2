@@ -656,6 +656,25 @@ void MediaSettingsPanel::applyOpacityFromUi() {
     }
 }
 
+double MediaSettingsPanel::fadeInSeconds() const {
+    if (!m_fadeInCheck || !m_fadeInBox) return 0.0;
+    if (!m_fadeInCheck->isChecked()) return 0.0;
+    QString t = m_fadeInBox->text().trimmed();
+    if (t == "∞" || t.isEmpty() || t == "...") return 0.0; // treat infinity / empty as instant for now
+    // Replace comma with dot for parsing
+    t.replace(',', '.');
+    bool ok=false; double v = t.toDouble(&ok); if (!ok) return 0.0; return std::clamp(v, 0.0, 3600.0); // clamp to 1 hour max
+}
+
+double MediaSettingsPanel::fadeOutSeconds() const {
+    if (!m_fadeOutCheck || !m_fadeOutBox) return 0.0;
+    if (!m_fadeOutCheck->isChecked()) return 0.0;
+    QString t = m_fadeOutBox->text().trimmed();
+    if (t == "∞" || t.isEmpty() || t == "...") return 0.0;
+    t.replace(',', '.');
+    bool ok=false; double v = t.toDouble(&ok); if (!ok) return 0.0; return std::clamp(v, 0.0, 3600.0);
+}
+
 void MediaSettingsPanel::updateScrollbarGeometry() {
     if (!m_overlayVScroll || !m_proxy) return;
     const QRectF r = m_proxy->boundingRect();

@@ -100,6 +100,12 @@ public:
     bool isContentVisible() const { return m_contentVisible; }
     void setContentOpacity(qreal op) { m_contentOpacity = std::clamp(op, 0.0, 1.0); update(); }
     qreal contentOpacity() const { return m_contentOpacity; }
+    // Effective display opacity = user contentOpacity() * m_contentDisplayOpacity (animation multiplier)
+    qreal animatedDisplayOpacity() const { return m_contentDisplayOpacity; }
+    // Fading helpers (seconds can be fractional). If duration <= 0, apply immediately.
+    void fadeContentIn(double seconds);
+    void fadeContentOut(double seconds);
+    void cancelFade();
     
     // Override in derived classes to indicate media type for settings panel
     virtual bool isVideoMedia() const { return false; }
@@ -165,6 +171,8 @@ protected:
     bool m_beingDeleted = false;
     bool m_contentVisible = true; // controlled by visibility toggle overlay button
     qreal m_contentOpacity = 1.0; // multiplicative opacity for content only
+    qreal m_contentDisplayOpacity = 1.0; // animated multiplier (0..1) for fade in/out
+    QVariantAnimation* m_fadeAnimation = nullptr; // owned manually (ResizableMediaBase not QObject)
 };
 
 // Simple pixmap media item

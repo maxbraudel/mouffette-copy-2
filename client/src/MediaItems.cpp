@@ -94,6 +94,68 @@ ResizableMediaBase::ResizableMediaBase(const QSize& baseSizePx, int visualSizePx
     initializeOverlays();
 }
 
+void ResizableMediaBase::cancelFade() {
+    if (m_fadeAnimation) {
+        m_fadeAnimation->stop();
+        delete m_fadeAnimation;
+        m_fadeAnimation = nullptr;
+    }
+}
+
+void ResizableMediaBase::fadeContentIn(double seconds) {
+    cancelFade();
+    // Ensure visible state and starting opacity
+    m_contentVisible = true;
+    if (seconds <= 0.0) {
+        m_contentDisplayOpacity = 1.0;
+        update();
+        return;
+    }
+    m_fadeAnimation = new QVariantAnimation();
+    m_fadeAnimation->setStartValue(m_contentDisplayOpacity);
+    m_fadeAnimation->setEndValue(1.0);
+    int durationMs = static_cast<int>(seconds * 1000.0);
+    m_fadeAnimation->setDuration(std::max(1, durationMs));
+    QObject::connect(m_fadeAnimation, &QVariantAnimation::valueChanged, [this](const QVariant& v){
+        m_contentDisplayOpacity = v.toDouble();
+        update();
+    });
+    QObject::connect(m_fadeAnimation, &QVariantAnimation::finished, [this](){
+        // clamp and cleanup
+        m_contentDisplayOpacity = 1.0;
+        if (m_fadeAnimation) { m_fadeAnimation->deleteLater(); m_fadeAnimation = nullptr; }
+        update();
+    });
+    m_fadeAnimation->start();
+}
+
+void ResizableMediaBase::fadeContentOut(double seconds) {
+    cancelFade();
+    if (seconds <= 0.0) {
+        m_contentDisplayOpacity = 0.0;
+        // Keep visibility flag false so paint() skips content
+        m_contentVisible = false;
+        update();
+        return;
+    }
+    m_fadeAnimation = new QVariantAnimation();
+    m_fadeAnimation->setStartValue(m_contentDisplayOpacity);
+    m_fadeAnimation->setEndValue(0.0);
+    int durationMs = static_cast<int>(seconds * 1000.0);
+    m_fadeAnimation->setDuration(std::max(1, durationMs));
+    QObject::connect(m_fadeAnimation, &QVariantAnimation::valueChanged, [this](const QVariant& v){
+        m_contentDisplayOpacity = v.toDouble();
+        update();
+    });
+    QObject::connect(m_fadeAnimation, &QVariantAnimation::finished, [this](){
+        m_contentDisplayOpacity = 0.0;
+        m_contentVisible = false; // finalize hidden state
+        if (m_fadeAnimation) { m_fadeAnimation->deleteLater(); m_fadeAnimation = nullptr; }
+        update();
+    });
+    m_fadeAnimation->start();
+}
+
 void ResizableMediaBase::setSourcePath(const QString& p) {
     m_sourcePath = p;
     
@@ -392,17 +454,37 @@ void ResizableMediaBase::initializeOverlays() {
         visibilityBtn->setOnClicked([this, btnRef=visibilityBtn]() {
             if (!btnRef) return;
             const bool currentlyVisible = (btnRef->state() == OverlayElement::Toggled);
+            // Access fade parameters if settings panel exists
+            double fadeInSeconds = 0.0;
+            double fadeOutSeconds = 0.0;
+            if (m_settingsPanel) {
+                fadeInSeconds = m_settingsPanel->fadeInSeconds();
+                fadeOutSeconds = m_settingsPanel->fadeOutSeconds();
+            }
             if (currentlyVisible) {
-                // Switch to hidden
-                setContentVisible(false);
+                // Switch to hidden using fade out if configured
+                if (fadeOutSeconds > 0.0) {
+                    fadeContentOut(fadeOutSeconds);
+                } else {
+                    setContentVisible(false);
+                    m_contentDisplayOpacity = 0.0;
+                }
                 btnRef->setState(OverlayElement::Normal);
                 btnRef->setSvgIcon(":/icons/icons/visibility-off.svg");
             } else {
-                // Switch to visible
-                setContentVisible(true);
+                // Switch to visible using fade in if configured
+                setContentVisible(true); // ensure base visible flag true so paint runs
+                if (fadeInSeconds > 0.0) {
+                    // Start from 0 if previously fully hidden
+                    if (m_contentDisplayOpacity <= 0.0) m_contentDisplayOpacity = 0.0;
+                    fadeContentIn(fadeInSeconds);
+                } else {
+                    m_contentDisplayOpacity = 1.0;
+                }
                 btnRef->setState(OverlayElement::Toggled);
                 btnRef->setSvgIcon(":/icons/icons/visibility-on.svg");
             }
+            update();
         });
         m_topPanel->addElement(visibilityBtn);
         
@@ -504,13 +586,14 @@ ResizablePixmapItem::ResizablePixmapItem(const QPixmap& pm, int visualSizePx, in
 
 void ResizablePixmapItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) {
     Q_UNUSED(option); Q_UNUSED(widget);
-    if (isContentVisible()) {
-        if (!m_pix.isNull()) {
-            if (contentOpacity() >= 0.999) {
+    if (isContentVisible() || m_contentDisplayOpacity > 0.0) {
+        qreal effective = contentOpacity() * m_contentDisplayOpacity;
+        if (!m_pix.isNull() && effective > 0.0) {
+            if (effective >= 0.999) {
                 painter->drawPixmap(QPointF(0,0), m_pix);
-            } else if (contentOpacity() > 0.0) {
+            } else {
                 painter->save();
-                painter->setOpacity(contentOpacity());
+                painter->setOpacity(effective);
                 painter->drawPixmap(QPointF(0,0), m_pix);
                 painter->restore();
             }
@@ -750,8 +833,9 @@ void ResizableVideoItem::paint(QPainter* painter, const QStyleOptionGraphicsItem
     QRectF br(0,0, baseWidth(), baseHeight());
     auto fitRect = [](const QRectF& bounds, const QSize& imgSz) -> QRectF {
         if (bounds.isEmpty() || imgSz.isEmpty()) return bounds; qreal brW = bounds.width(); qreal brH = bounds.height(); qreal imgW = imgSz.width(); qreal imgH = imgSz.height(); if (imgW <= 0 || imgH <= 0) return bounds; qreal brAR = brW / brH; qreal imgAR = imgW / imgH; if (imgAR > brAR) { qreal h = brW / imgAR; return QRectF(bounds.left(), bounds.top() + (brH - h)/2.0, brW, h);} else { qreal w = brH * imgAR; return QRectF(bounds.left() + (brW - w)/2.0, bounds.top(), w, brH);} };
-    if (isContentVisible()) {
-        auto drawImg = [&](const QImage& img){ if (img.isNull()) return; QRectF dst = fitRect(br, img.size()); if (contentOpacity() >= 0.999) { painter->drawImage(dst, img); } else if (contentOpacity() > 0.0) { painter->save(); painter->setOpacity(contentOpacity()); painter->drawImage(dst, img); painter->restore(); } };
+    if (isContentVisible() || m_contentDisplayOpacity > 0.0) {
+        qreal effective = contentOpacity() * m_contentDisplayOpacity;
+        auto drawImg = [&](const QImage& img){ if (img.isNull() || effective <= 0.0) return; QRectF dst = fitRect(br, img.size()); if (effective >= 0.999) { painter->drawImage(dst, img); } else { painter->save(); painter->setOpacity(effective); painter->drawImage(dst, img); painter->restore(); } };
         if (!m_lastFrameImage.isNull()) { drawImg(m_lastFrameImage); }
         else if (m_lastFrame.isValid()) { QImage img = m_lastFrame.toImage(); if (!img.isNull()) { drawImg(img); } else if (m_posterImageSet && !m_posterImage.isNull()) { drawImg(m_posterImage); } }
         else if (m_posterImageSet && !m_posterImage.isNull()) { drawImg(m_posterImage); }

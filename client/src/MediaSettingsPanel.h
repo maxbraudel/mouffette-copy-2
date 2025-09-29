@@ -32,6 +32,9 @@ public:
     void setMediaType(bool isVideo);
     void setMediaItem(class ResizableMediaBase* item) { m_mediaItem = item; }
     void applyOpacityFromUi(); // make publicly callable
+    // Access fade durations (seconds). Returns 0 if disabled or invalid. Infinity symbol => treat as 0 (instant) for now.
+    double fadeInSeconds() const;
+    double fadeOutSeconds() const;
 
     // Update absolute position based on the provided view (left-docked with margin).
     // Call whenever zoom/transform/resize occurs.
