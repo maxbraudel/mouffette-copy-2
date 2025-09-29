@@ -317,7 +317,12 @@ void OverlayButtonElement::setSvgIcon(const QString& resourcePath) {
         m_svgIcon->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
         m_svgIcon->setData(0, QStringLiteral("overlay"));
     } else {
-        m_svgIcon->setElementId(QString());
+        // Reload by deleting and recreating (QtSvg lacks direct source change API for some builds)
+        delete m_svgIcon;
+        m_svgIcon = new QGraphicsSvgItem(resourcePath, m_background);
+        m_svgIcon->setZValue(Z_OVERLAY_CONTENT);
+        m_svgIcon->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+        m_svgIcon->setData(0, QStringLiteral("overlay"));
     }
     // Trigger size/layout recompute using current background size
     if (m_background) setSize(m_background->rect().size());

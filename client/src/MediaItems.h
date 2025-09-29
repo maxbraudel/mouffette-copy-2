@@ -95,6 +95,9 @@ public:
     // Default implementation cancels interactive state & hides overlays.
     virtual void prepareForDeletion();
     bool isBeingDeleted() const { return m_beingDeleted; }
+    // Visibility toggle (content only; overlays & selection chrome remain)
+    void setContentVisible(bool v) { m_contentVisible = v; update(); if (m_bottomPanel) m_bottomPanel->setVisible(true); if (m_topPanel) m_topPanel->setVisible(true); }
+    bool isContentVisible() const { return m_contentVisible; }
     
     // Override in derived classes to indicate media type for settings panel
     virtual bool isVideoMedia() const { return false; }
@@ -158,6 +161,7 @@ private:
     static inline QPointF snapPointToGrid(const QPointF& p) { return QPointF(snapToGrid(p.x()), snapToGrid(p.y())); }
 protected:
     bool m_beingDeleted = false;
+    bool m_contentVisible = true; // controlled by visibility toggle overlay button
 };
 
 // Simple pixmap media item

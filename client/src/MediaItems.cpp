@@ -378,6 +378,28 @@ void ResizableMediaBase::initializeOverlays() {
             m_settingsPanel->setVisible(enabling);
         });
         m_topPanel->addElement(settingsBtn);
+
+        // Add visibility toggle button (content visibility only)
+        auto visibilityBtn = std::make_shared<OverlayButtonElement>(QString(), "visibility_toggle");
+        visibilityBtn->setSvgIcon(":/icons/icons/visibility-on.svg"); // start visible
+        visibilityBtn->setToggleOnly(true);
+        visibilityBtn->setState(OverlayElement::Toggled); // initial: visible ON
+        visibilityBtn->setOnClicked([this, btnRef=visibilityBtn]() {
+            if (!btnRef) return;
+            const bool currentlyVisible = (btnRef->state() == OverlayElement::Toggled);
+            if (currentlyVisible) {
+                // Switch to hidden
+                setContentVisible(false);
+                btnRef->setState(OverlayElement::Normal);
+                btnRef->setSvgIcon(":/icons/icons/visibility-off.svg");
+            } else {
+                // Switch to visible
+                setContentVisible(true);
+                btnRef->setState(OverlayElement::Toggled);
+                btnRef->setSvgIcon(":/icons/icons/visibility-on.svg");
+            }
+        });
+        m_topPanel->addElement(visibilityBtn);
         
         // Add bring forward button (Z-order up)
         auto bringForwardBtn = std::make_shared<OverlayButtonElement>(QString(), "bring_forward");
@@ -477,7 +499,9 @@ ResizablePixmapItem::ResizablePixmapItem(const QPixmap& pm, int visualSizePx, in
 
 void ResizablePixmapItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) {
     Q_UNUSED(option); Q_UNUSED(widget);
-    if (!m_pix.isNull()) painter->drawPixmap(QPointF(0,0), m_pix);
+    if (isContentVisible()) {
+        if (!m_pix.isNull()) painter->drawPixmap(QPointF(0,0), m_pix);
+    }
     paintSelectionAndLabel(painter);
 }
 
@@ -712,9 +736,11 @@ void ResizableVideoItem::paint(QPainter* painter, const QStyleOptionGraphicsItem
     QRectF br(0,0, baseWidth(), baseHeight());
     auto fitRect = [](const QRectF& bounds, const QSize& imgSz) -> QRectF {
         if (bounds.isEmpty() || imgSz.isEmpty()) return bounds; qreal brW = bounds.width(); qreal brH = bounds.height(); qreal imgW = imgSz.width(); qreal imgH = imgSz.height(); if (imgW <= 0 || imgH <= 0) return bounds; qreal brAR = brW / brH; qreal imgAR = imgW / imgH; if (imgAR > brAR) { qreal h = brW / imgAR; return QRectF(bounds.left(), bounds.top() + (brH - h)/2.0, brW, h);} else { qreal w = brH * imgAR; return QRectF(bounds.left() + (brW - w)/2.0, bounds.top(), w, brH);} };
-    if (!m_lastFrameImage.isNull()) { QRectF dst = fitRect(br, m_lastFrameImage.size()); painter->drawImage(dst, m_lastFrameImage); }
-    else if (m_lastFrame.isValid()) { QImage img = m_lastFrame.toImage(); if (!img.isNull()) { QRectF dst = fitRect(br, img.size()); painter->drawImage(dst, img); } else if (m_posterImageSet && !m_posterImage.isNull()) { QRectF dst = fitRect(br, m_posterImage.size()); painter->drawImage(dst, m_posterImage); } }
-    else if (m_posterImageSet && !m_posterImage.isNull()) { QRectF dst = fitRect(br, m_posterImage.size()); painter->drawImage(dst, m_posterImage); }
+    if (isContentVisible()) {
+        if (!m_lastFrameImage.isNull()) { QRectF dst = fitRect(br, m_lastFrameImage.size()); painter->drawImage(dst, m_lastFrameImage); }
+        else if (m_lastFrame.isValid()) { QImage img = m_lastFrame.toImage(); if (!img.isNull()) { QRectF dst = fitRect(br, img.size()); painter->drawImage(dst, img); } else if (m_posterImageSet && !m_posterImage.isNull()) { QRectF dst = fitRect(br, m_posterImage.size()); painter->drawImage(dst, m_posterImage); } }
+        else if (m_posterImageSet && !m_posterImage.isNull()) { QRectF dst = fitRect(br, m_posterImage.size()); painter->drawImage(dst, m_posterImage); }
+    }
     paintSelectionAndLabel(painter);
 }
 
