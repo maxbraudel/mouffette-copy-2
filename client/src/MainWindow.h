@@ -154,6 +154,7 @@ private:
     // Legacy helper removed; ScreenCanvas renders screens directly
     void updateVolumeIndicator();
     void setRemoteConnectionStatus(const QString& status);
+    void ensureClientListPlaceholder();
     // watch management handled by WatchManager component now
     // Manage presence of the volume indicator in the top bar layout
     void removeVolumeIndicatorFromLayout();

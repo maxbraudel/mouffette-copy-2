@@ -349,6 +349,20 @@ bool MainWindow::event(QEvent* event) {
     return QMainWindow::event(event);
 }
 
+// Ensure placeholder item is visible when there are no clients yet (including connecting state)
+void MainWindow::ensureClientListPlaceholder() {
+    if (!m_clientListWidget) return;
+    if (m_clientListWidget->count() == 0) {
+        QListWidgetItem* item = new QListWidgetItem("No clients connected. Make sure other devices are running Mouffette and connected to the same server.");
+        item->setFlags(Qt::NoItemFlags);
+        item->setTextAlignment(Qt::AlignCenter);
+        QFont font = item->font(); font.setItalic(true); font.setPointSize(16); item->setFont(font);
+        item->setForeground(AppColors::gTextMuted);
+        m_clientListWidget->addItem(item);
+        adjustClientListHeight();
+    }
+}
+
 void MainWindow::setRemoteConnectionStatus(const QString& status) {
     if (!m_remoteConnectionStatusLabel) return;
     const QString up = status.toUpper();
@@ -378,6 +392,10 @@ void MainWindow::setRemoteConnectionStatus(const QString& status) {
         "    font-weight: bold; "
         "}").arg(textColor).arg(bgColor).arg(gDynamicBoxFontPx).arg(gRemoteClientContainerPadding)
     );
+    // If transitioning into a connecting-like state and list is empty, show placeholder
+    if (up == "CONNECTING" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
+        ensureClientListPlaceholder();
+    }
 }
 
 MainWindow::MainWindow(QWidget* parent)
@@ -1923,6 +1941,8 @@ void MainWindow::setupUI() {
     
     // Create client list page
     createClientListPage();
+    // Show placeholder immediately (before any connection) so page isn't empty during CONNECTING state
+    ensureClientListPlaceholder();
     
     // Create screen view page  
     createScreenViewPage();
