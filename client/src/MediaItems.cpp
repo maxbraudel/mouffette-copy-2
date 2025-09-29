@@ -106,11 +106,8 @@ void ResizableMediaBase::fadeContentIn(double seconds) {
     cancelFade();
     // Ensure visible state and starting opacity
     m_contentVisible = true;
-    if (seconds <= 0.0) {
-        m_contentDisplayOpacity = 1.0;
-        update();
-        return;
-    }
+    if (seconds <= 0.0) { m_contentDisplayOpacity = 1.0; update(); return; }
+    if (m_contentDisplayOpacity <= 0.0 || m_contentDisplayOpacity > 1.0) m_contentDisplayOpacity = 0.0;
     m_fadeAnimation = new QVariantAnimation();
     m_fadeAnimation->setStartValue(m_contentDisplayOpacity);
     m_fadeAnimation->setEndValue(1.0);
@@ -131,13 +128,10 @@ void ResizableMediaBase::fadeContentIn(double seconds) {
 
 void ResizableMediaBase::fadeContentOut(double seconds) {
     cancelFade();
-    if (seconds <= 0.0) {
-        m_contentDisplayOpacity = 0.0;
-        // Keep visibility flag false so paint() skips content
-        m_contentVisible = false;
-        update();
-        return;
-    }
+    // Keep visible during fade so we can animate down; we flip flag at end
+    if (seconds <= 0.0) { m_contentDisplayOpacity = 0.0; m_contentVisible = false; update(); return; }
+    if (m_contentDisplayOpacity < 0.0 || m_contentDisplayOpacity > 1.0) m_contentDisplayOpacity = 1.0;
+    m_contentVisible = true;
     m_fadeAnimation = new QVariantAnimation();
     m_fadeAnimation->setStartValue(m_contentDisplayOpacity);
     m_fadeAnimation->setEndValue(0.0);
@@ -461,6 +455,8 @@ void ResizableMediaBase::initializeOverlays() {
                 fadeInSeconds = m_settingsPanel->fadeInSeconds();
                 fadeOutSeconds = m_settingsPanel->fadeOutSeconds();
             }
+            // Always cancel any in-flight fade before starting a new transition or applying an instant change
+            cancelFade();
             if (currentlyVisible) {
                 // Switch to hidden using fade out if configured
                 if (fadeOutSeconds > 0.0) {
@@ -468,23 +464,25 @@ void ResizableMediaBase::initializeOverlays() {
                 } else {
                     setContentVisible(false);
                     m_contentDisplayOpacity = 0.0;
+                    update();
                 }
                 btnRef->setState(OverlayElement::Normal);
                 btnRef->setSvgIcon(":/icons/icons/visibility-off.svg");
             } else {
                 // Switch to visible using fade in if configured
-                setContentVisible(true); // ensure base visible flag true so paint runs
                 if (fadeInSeconds > 0.0) {
-                    // Start from 0 if previously fully hidden
+                    // Start from 0 for a consistent fade-in if currently fully hidden
                     if (m_contentDisplayOpacity <= 0.0) m_contentDisplayOpacity = 0.0;
+                    setContentVisible(true);
                     fadeContentIn(fadeInSeconds);
                 } else {
+                    setContentVisible(true);
                     m_contentDisplayOpacity = 1.0;
+                    update();
                 }
                 btnRef->setState(OverlayElement::Toggled);
                 btnRef->setSvgIcon(":/icons/icons/visibility-on.svg");
             }
-            update();
         });
         m_topPanel->addElement(visibilityBtn);
         
