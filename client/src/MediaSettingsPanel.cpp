@@ -483,10 +483,16 @@ void MediaSettingsPanel::setBoxActive(QLabel* box, bool active) {
 
 void MediaSettingsPanel::clearActiveBox() {
     if (m_activeBox) {
+        QLabel* was = m_activeBox;
+        bool wasOpacityBox = (was == m_opacityBox);
         setBoxActive(m_activeBox, false);
         m_activeBox = nullptr;
         // Reset first-type-clears flag when deactivating
         m_clearOnFirstType = false;
+        // If user just finished editing opacity and option is enabled, apply it now
+        if (wasOpacityBox && m_opacityCheck && m_opacityCheck->isChecked()) {
+            applyOpacityFromUi();
+        }
     }
 }
 
