@@ -81,10 +81,6 @@ public:
 
     // Snapping support for side (midpoint) resize handles: clamps scale so the moving edge
     // sticks to nearby screen borders when within snap distance.
-    qreal snapAxisResizeToScreenBorders(qreal currentScale,
-                                        const QPointF& fixedScenePoint,
-                                        const QSize& baseSize,
-                                        ResizableMediaBase::Handle activeHandle) const;
     qreal applyAxisSnapWithHysteresis(ResizableMediaBase* item,
                                       qreal proposedScale,
                                       const QPointF& fixedScenePoint,

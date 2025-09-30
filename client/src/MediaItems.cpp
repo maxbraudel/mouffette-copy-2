@@ -604,7 +604,6 @@ void ResizableMediaBase::initializeOverlays() {
         });
         m_topPanel->addElement(deleteBtn);
     }
-    // Legacy bottom overlay panel (textual media controls) removed.
 }
 
 void ResizableMediaBase::updateOverlayVisibility() {
@@ -635,7 +634,6 @@ void ResizableMediaBase::updateOverlayVisibility() {
             }
         }
     }
-    // (Legacy bottom panel removed.)
 }
 
 void ResizableMediaBase::updateOverlayLayout() {
@@ -711,7 +709,6 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
     m_player->setVideoSink(m_sink);
     m_player->setSource(QUrl::fromLocalFile(filePath));
 
-    // Legacy textual bottom overlay (play/stop/repeat/mute) fully removed; floating HUD replaces it.
 
     QObject::connect(m_sink, &QVideoSink::videoFrameChanged, m_player, [this](const QVideoFrame& f){
         ++m_framesReceived;

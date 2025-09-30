@@ -134,7 +134,7 @@ protected:
     QString m_filename;
     QString m_mediaId; // persistent unique id for the canvas item
     QString m_fileId;  // shared file id (multiple media can have same fileId)
-    std::unique_ptr<OverlayPanel> m_topPanel; // legacy bottom panel removed
+    std::unique_ptr<OverlayPanel> m_topPanel;
     OverlayStyle m_overlayStyle;
     static int heightOfMediaOverlays;
     static int cornerRadiusOfMediaOverlays;
