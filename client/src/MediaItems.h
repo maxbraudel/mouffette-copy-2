@@ -170,7 +170,6 @@ private:
     static std::function<void(ResizableMediaBase*)> s_fileErrorNotifier;
     UploadState m_uploadState = UploadState::NotUploaded;
     int m_uploadProgress = 0;
-    void relayoutIfNeeded(); // helper to keep overlays positioned (unused externally)
     static double s_sceneGridUnit;
     static std::function<QPointF(const QPointF&, const QRectF&, bool)> s_screenSnapCallback;
     static std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> s_resizeSnapCallback;
@@ -221,7 +220,6 @@ public:
     void requestOverlayRelayout() { updateControlsLayout(); }
 
     // Performance / diagnostics
-    void setFrameProcessingBudget(int ms) { m_frameProcessBudgetMs = std::max(1, ms); }
     void setRepaintBudget(int ms) { m_repaintBudgetMs = std::max(1, ms); }
     void getFrameStats(int& received, int& processed, int& skipped) const;
     void getFrameStatsExtended(int& received, int& processed, int& skipped, int& dropped, int& conversionsStarted, int& conversionsCompleted) const;
@@ -253,7 +251,6 @@ private:
     void setControlsVisible(bool show);
     void updateControlsLayout();
     bool isVisibleInAnyView() const;
-    bool shouldProcessFrame() const; // currently unused (kept for future tuning)
     bool shouldRepaint() const;
     void logFrameStats() const;
     void updateProgressBar();
@@ -285,7 +282,7 @@ private:
     bool m_draggingProgress = false; bool m_draggingVolume = false; bool m_holdLastFrameAtEnd = false;
     QTimer* m_progressTimer = nullptr; qreal m_smoothProgressRatio = 0.0; bool m_seeking = false;
     bool m_controlsLockedUntilReady = true; int m_controlsFadeMs = 140; QVariantAnimation* m_controlsFadeAnim = nullptr; bool m_controlsDidInitialFade = false;
-    qint64 m_lastFrameProcessMs = 0; qint64 m_lastRepaintMs = 0; int m_frameProcessBudgetMs = 16; int m_repaintBudgetMs = 16;
+    qint64 m_lastRepaintMs = 0; int m_repaintBudgetMs = 16;
     mutable int m_framesReceived = 0; mutable int m_framesProcessed = 0; mutable int m_framesSkipped = 0;
     std::atomic<bool> m_conversionBusy{false}; QVideoFrame m_pendingFrame; QMutex m_frameMutex; std::atomic<quint64> m_frameSerial{0}; quint64 m_lastProcessedSerial = 0;
     mutable int m_framesDropped = 0; mutable int m_conversionsStarted = 0; mutable int m_conversionsCompleted = 0;
