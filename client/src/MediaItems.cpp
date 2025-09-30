@@ -255,12 +255,12 @@ QVariant ResizableMediaBase::itemChange(GraphicsItemChange change, const QVarian
         // First apply pixel grid snapping
         p = snapPointToGrid(p);
         
-        // Then apply screen border snapping if Shift is pressed and callback is available
-        if (s_screenSnapCallback) {
-            // Check if Shift key is currently pressed
+        // Movement screen-border snapping (Shift) is disabled while performing an axis-only midpoint resize
+        // to avoid the anchored (opposite) edge snapping when only the dragged edge should snap via scale logic.
+        bool axisMidResizeActive = (m_activeHandle == LeftMid || m_activeHandle == RightMid || m_activeHandle == TopMid || m_activeHandle == BottomMid);
+        if (s_screenSnapCallback && !axisMidResizeActive) {
             const bool shiftPressed = QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
             if (shiftPressed) {
-                // Calculate media bounds at current position for snapping
                 const QRectF mediaBounds(0, 0, m_baseSize.width() * scale(), m_baseSize.height() * scale());
                 p = s_screenSnapCallback(p, mediaBounds, shiftPressed);
             }

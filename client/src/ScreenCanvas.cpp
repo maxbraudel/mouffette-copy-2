@@ -1319,7 +1319,18 @@ qreal ScreenCanvas::applyAxisSnapWithHysteresis(ResizableMediaBase* item,
     // Otherwise evaluate for potential new snap engagement.
     qreal bestDist = snapDistanceScene;
     qreal bestScale = proposedScale;
+    // Determine expansion direction: are we growing (scale increasing) or shrinking relative to current item scale?
+    const qreal currentScale = item->scale();
+    bool growing = proposedScale > currentScale + 1e-9;
+
     for (qreal edge : targetEdges) {
+        // Filter edges so only the side being dragged can trigger snap while growing.
+        if (growing) {
+            if (activeHandle == H::RightMid && edge < movingEdgePos) continue; // ignore left-side borders when expanding right
+            if (activeHandle == H::LeftMid  && edge > movingEdgePos) continue; // ignore right-side borders when expanding left
+            if (activeHandle == H::BottomMid && edge < movingEdgePos) continue; // ignore top borders when expanding downward
+            if (activeHandle == H::TopMid    && edge > movingEdgePos) continue; // ignore bottom borders when expanding upward
+        }
         qreal dist = std::abs(movingEdgePos - edge);
         if (dist < bestDist) {
             qreal targetScale = computeScaleFor(edge);
