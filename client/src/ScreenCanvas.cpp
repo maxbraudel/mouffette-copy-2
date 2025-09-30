@@ -1118,6 +1118,106 @@ void ScreenCanvas::clearAllSelectionChrome() {
     for (ResizableMediaBase* k : keys) clearSelectionChromeFor(k);
 }
 
+qreal ScreenCanvas::snapAxisResizeToScreenBorders(qreal currentScale,
+                                                  const QPointF& fixedScenePoint,
+                                                  const QSize& baseSize,
+                                                  ResizableMediaBase::Handle activeHandle) const {
+    // Only handle midpoint side handles
+    using H = ResizableMediaBase::Handle;
+    if (!(activeHandle == H::LeftMid || activeHandle == H::RightMid || activeHandle == H::TopMid || activeHandle == H::BottomMid)) {
+        return currentScale;
+    }
+    if (!m_scene) return currentScale;
+    const QList<QRectF> screenRects = getScreenBorderRects();
+    if (screenRects.isEmpty()) return currentScale;
+
+    // Convert snap distance from pixels to scene units
+    const QTransform t = transform();
+    const qreal snapDistanceScene = m_snapDistancePx / (t.m11() > 1e-6 ? t.m11() : 1.0);
+
+    // Current dimensions
+    const qreal currWidth  = currentScale * baseSize.width();
+    const qreal currHeight = currentScale * baseSize.height();
+
+    // Determine which edge is moving and compute its scene coordinate.
+    // fixedScenePoint corresponds to the opposite side midpoint item point translated to scene.
+    // For side midpoint handles, the fixed item point is one full side away.
+    // We reconstruct media top-left from fixed point and current scale for stable calculations.
+    QPointF mediaTopLeft;
+    switch (activeHandle) {
+        case H::LeftMid:   // fixed is RightMid
+            mediaTopLeft = QPointF(fixedScenePoint.x() - currWidth, fixedScenePoint.y() - currHeight/2.0);
+            break;
+        case H::RightMid:  // fixed is LeftMid
+            mediaTopLeft = QPointF(fixedScenePoint.x(), fixedScenePoint.y() - currHeight/2.0);
+            break;
+        case H::TopMid:    // fixed is BottomMid
+            mediaTopLeft = QPointF(fixedScenePoint.x() - currWidth/2.0, fixedScenePoint.y() - currHeight);
+            break;
+        case H::BottomMid: // fixed is TopMid
+            mediaTopLeft = QPointF(fixedScenePoint.x() - currWidth/2.0, fixedScenePoint.y());
+            break;
+        default: return currentScale;
+    }
+
+    const qreal mediaLeft   = mediaTopLeft.x();
+    const qreal mediaRight  = mediaTopLeft.x() + currWidth;
+    const qreal mediaTop    = mediaTopLeft.y();
+    const qreal mediaBottom = mediaTopLeft.y() + currHeight;
+
+    qreal bestScale = currentScale;
+    qreal bestDelta = snapDistanceScene;
+
+    auto consider = [&](qreal targetEdgePos, bool horizontal, bool positiveDirection){
+        if (horizontal) {
+            qreal targetWidth = positiveDirection ? (targetEdgePos - mediaLeft)
+                                                  : (mediaRight - targetEdgePos);
+            if (targetWidth <= 0) return; // invalid
+            qreal tScale = targetWidth / baseSize.width();
+            qreal dist = std::abs((positiveDirection ? mediaRight : mediaLeft) - targetEdgePos);
+            if (dist < bestDelta) { bestDelta = dist; bestScale = tScale; }
+        } else {
+            qreal targetHeight = positiveDirection ? (targetEdgePos - mediaTop)
+                                                   : (mediaBottom - targetEdgePos);
+            if (targetHeight <= 0) return;
+            qreal tScale = targetHeight / baseSize.height();
+            qreal dist = std::abs((positiveDirection ? mediaBottom : mediaTop) - targetEdgePos);
+            if (dist < bestDelta) { bestDelta = dist; bestScale = tScale; }
+        }
+    };
+
+    for (const QRectF& sr : screenRects) {
+        switch (activeHandle) {
+            case H::LeftMid:
+                // moving left edge -> test screen left/right borders
+                consider(sr.left(),  true, false);
+                consider(sr.right(), true, false);
+                break;
+            case H::RightMid:
+                // moving right edge -> test screen left/right borders
+                consider(sr.left(),  true, true);
+                consider(sr.right(), true, true);
+                break;
+            case H::TopMid:
+                // moving top edge -> test screen top/bottom borders
+                consider(sr.top(),    false, false);
+                consider(sr.bottom(), false, false);
+                break;
+            case H::BottomMid:
+                // moving bottom edge -> test screen top/bottom borders
+                consider(sr.top(),    false, true);
+                consider(sr.bottom(), false, true);
+                break;
+            default: break;
+        }
+    }
+
+    if (bestDelta < snapDistanceScene) {
+        return std::clamp<qreal>(bestScale, 0.05, 100.0);
+    }
+    return currentScale;
+}
+
 bool ScreenCanvas::eventFilter(QObject* watched, QEvent* event) {
     // Handle clicks on media container widgets to select the associated scene media item
     if (event->type() == QEvent::MouseButtonPress) {

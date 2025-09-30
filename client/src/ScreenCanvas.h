@@ -79,6 +79,13 @@ public:
     // Media list overlay management
     void refreshInfoOverlay();
 
+    // Snapping support for side (midpoint) resize handles: clamps scale so the moving edge
+    // sticks to nearby screen borders when within snap distance.
+    qreal snapAxisResizeToScreenBorders(qreal currentScale,
+                                        const QPointF& fixedScenePoint,
+                                        const QSize& baseSize,
+                                        ResizableMediaBase::Handle activeHandle) const;
+
 signals:
     // Emitted when a new media item is added to the canvas
     void mediaItemAdded(ResizableMediaBase* mediaItem);

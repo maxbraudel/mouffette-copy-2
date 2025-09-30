@@ -33,6 +33,8 @@ class MediaSettingsPanel;
 class ResizableMediaBase : public QGraphicsItem {
 public:
     enum class UploadState { NotUploaded, Uploading, Uploaded };
+    // Resize handles (now public so external helpers like ScreenCanvas can reference them)
+    enum Handle { None, TopLeft, TopRight, BottomLeft, BottomRight, LeftMid, RightMid, TopMid, BottomMid };
     ~ResizableMediaBase() override;
     explicit ResizableMediaBase(const QSize& baseSizePx, int visualSizePx, int selectionSizePx, const QString& filename = QString());
 
@@ -110,7 +112,6 @@ public:
     virtual bool isVideoMedia() const { return false; }
 
 protected:
-    enum Handle { None, TopLeft, TopRight, BottomLeft, BottomRight, LeftMid, RightMid, TopMid, BottomMid };
     QSize m_baseSize;
     Handle m_activeHandle = None;
     QPointF m_fixedItemPoint;  // item coords

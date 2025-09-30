@@ -339,6 +339,12 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
             qreal newScale = extent / (baseLen > 0 ? baseLen : 1.0);
             newScale = std::clamp<qreal>(newScale, 0.05, 100.0);
             targetScale = newScale;
+            // Attempt snapping to screen borders via ScreenCanvas helper
+            if (scene() && !scene()->views().isEmpty()) {
+                if (auto* scView = qobject_cast<ScreenCanvas*>(scene()->views().first())) {
+                    targetScale = scView->snapAxisResizeToScreenBorders(targetScale, m_fixedScenePoint, m_baseSize, m_activeHandle);
+                }
+            }
         }
 
         QPointF snappedPos = m_fixedScenePoint - targetScale * m_fixedItemPoint;
