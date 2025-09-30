@@ -110,7 +110,7 @@ public:
     virtual bool isVideoMedia() const { return false; }
 
 protected:
-    enum Handle { None, TopLeft, TopRight, BottomLeft, BottomRight };
+    enum Handle { None, TopLeft, TopRight, BottomLeft, BottomRight, LeftMid, RightMid, TopMid, BottomMid };
     QSize m_baseSize;
     Handle m_activeHandle = None;
     QPointF m_fixedItemPoint;  // item coords

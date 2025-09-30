@@ -1050,7 +1050,7 @@ void ScreenCanvas::updateSelectionChrome() {
             auto ensureHandle = [&](QGraphicsRectItem*& r){ if (!r) { r = new QGraphicsRectItem(); m_scene->addItem(r); r->setAcceptedMouseButtons(Qt::NoButton); r->setFlag(QGraphicsItem::ItemIgnoresTransformations, false);} r->setBrush(Qt::white); r->setPen(QPen(QColor(74,144,226), 0)); r->setZValue(zHandle); r->setData(0, QVariant()); };
             ensurePath(sc.borderWhite, QColor(255,255,255), zBorderWhite, Qt::DashLine, 0.0);
             ensurePath(sc.borderBlue,  QColor(74,144,226), zBorderBlue,  Qt::DashLine, 4.0);
-            for (int i=0;i<4;++i) ensureHandle(sc.handles[i]);
+            for (int i=0;i<8;++i) ensureHandle(sc.handles[i]);
             m_selectionChromeMap[media] = sc;
             updateSelectionChromeGeometry(media);
         }
@@ -1090,11 +1090,19 @@ void ScreenCanvas::updateSelectionChromeGeometry(ResizableMediaBase* item) {
     const QPointF tr = QPointF(selRectItem.right(), selRectItem.top());
     const QPointF bl = QPointF(selRectItem.left(), selRectItem.bottom());
     const QPointF br = selRectItem.bottomRight();
+    const QPointF topMid    = QPointF(selRectItem.center().x(), selRectItem.top());
+    const QPointF bottomMid = QPointF(selRectItem.center().x(), selRectItem.bottom());
+    const QPointF leftMid   = QPointF(selRectItem.left(), selRectItem.center().y());
+    const QPointF rightMid  = QPointF(selRectItem.right(), selRectItem.center().y());
     auto place = [&](QGraphicsRectItem* r, const QPointF& centerItem){ if (!r) return; QRectF rect(centerItem.x()-s/2.0, centerItem.y()-s/2.0, s, s); QRectF sceneRect = item->mapToScene(rect).boundingRect(); r->setRect(sceneRect); };
     place(sc.handles[0], tl);
     place(sc.handles[1], tr);
     place(sc.handles[2], bl);
     place(sc.handles[3], br);
+    place(sc.handles[4], topMid);
+    place(sc.handles[5], bottomMid);
+    place(sc.handles[6], leftMid);
+    place(sc.handles[7], rightMid);
 }
 
 void ScreenCanvas::clearSelectionChromeFor(ResizableMediaBase* item) {

@@ -205,7 +205,8 @@ private:
     struct SelectionChrome {
         QGraphicsPathItem* borderWhite = nullptr;
         QGraphicsPathItem* borderBlue = nullptr;
-        QGraphicsRectItem* handles[4] = { nullptr, nullptr, nullptr, nullptr };
+        // 0: TL, 1: TR, 2: BL, 3: BR, 4: TopMid, 5: BottomMid, 6: LeftMid, 7: RightMid
+        QGraphicsRectItem* handles[8] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
     };
     QMap<ResizableMediaBase*, SelectionChrome> m_selectionChromeMap;
     void updateSelectionChrome();

@@ -190,6 +190,12 @@ Qt::CursorShape ResizableMediaBase::cursorForScenePos(const QPointF& scenePos) c
         case TopRight:
         case BottomLeft:
             return Qt::SizeBDiagCursor;
+        case LeftMid:
+        case RightMid:
+            return Qt::SizeHorCursor;
+        case TopMid:
+        case BottomMid:
+            return Qt::SizeVerCursor;
         default:
             return Qt::ArrowCursor;
     }
@@ -232,6 +238,11 @@ QPainterPath ResizableMediaBase::shape() const {
         path.addRect(QRectF(QPointF(br.right(), br.top()) - QPointF(s/2,s/2), QSizeF(s,s)));
         path.addRect(QRectF(QPointF(br.left(), br.bottom()) - QPointF(s/2,s/2), QSizeF(s,s)));
         path.addRect(QRectF(br.bottomRight() - QPointF(s/2,s/2), QSizeF(s,s)));
+        // Midpoint handles
+        path.addRect(QRectF(QPointF(br.center().x(), br.top()) - QPointF(s/2,s/2), QSizeF(s,s)));
+        path.addRect(QRectF(QPointF(br.center().x(), br.bottom()) - QPointF(s/2,s/2), QSizeF(s,s)));
+        path.addRect(QRectF(QPointF(br.left(), br.center().y()) - QPointF(s/2,s/2), QSizeF(s,s)));
+        path.addRect(QRectF(QPointF(br.right(), br.center().y()) - QPointF(s/2,s/2), QSizeF(s,s)));
     }
     return path;
 }
@@ -286,39 +297,52 @@ void ResizableMediaBase::mousePressEvent(QGraphicsSceneMouseEvent* event) {
 
 void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
     if (m_activeHandle != None) {
-        // Compute unconstrained scale factor from current drag distance
-        const QPointF v = event->scenePos() - m_fixedScenePoint;
-        const qreal currDist = std::hypot(v.x(), v.y());
-        qreal newScale = m_initialScale * (currDist / (m_initialGrabDist > 0 ? m_initialGrabDist : 1e-6));
-        newScale = std::clamp<qreal>(newScale, 0.05, 100.0);
-
-        // Determine the vector from fixed corner to moving corner in item space
+        const QPointF sceneDelta = event->scenePos() - m_fixedScenePoint;
         const QPointF movingItemPoint = handlePoint(m_activeHandle);
-        const QPointF itemVec = movingItemPoint - m_fixedItemPoint; // item coords
+        const QPointF itemVec = movingItemPoint - m_fixedItemPoint; // in item coords
         if (std::abs(itemVec.x()) < 1e-12 && std::abs(itemVec.y()) < 1e-12) { QGraphicsItem::mouseMoveEvent(event); return; }
 
-        // Apply screen border snapping to resize if Shift is pressed
-        qreal finalScale = newScale;
-        if (s_resizeSnapCallback && QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier)) {
-            finalScale = s_resizeSnapCallback(newScale, m_fixedScenePoint, m_fixedItemPoint, m_baseSize, true);
-        }
-        
-        // Apply pixel-perfect size snapping to the final scale
-        const qreal desiredW = finalScale * static_cast<qreal>(m_baseSize.width());
-        const qreal desiredH = finalScale * static_cast<qreal>(m_baseSize.height());
-        // Snap sizes individually to nearest integer pixel counts
-        const qreal snappedW = std::round(desiredW);
-        const qreal snappedH = std::round(desiredH);
-        // Compute candidate uniform scales from each dimension
-        const qreal sFromW = (m_baseSize.width()  > 0) ? (snappedW / static_cast<qreal>(m_baseSize.width()))  : finalScale;
-        const qreal sFromH = (m_baseSize.height() > 0) ? (snappedH / static_cast<qreal>(m_baseSize.height())) : finalScale;
-        // Choose the candidate closest to the target scale (minimize jump feeling)
-        qreal snappedScale = (std::abs(sFromW - finalScale) <= std::abs(sFromH - finalScale)) ? sFromW : sFromH;
-        snappedScale = std::clamp<qreal>(snappedScale, 0.05, 100.0);
+        qreal targetScale = scale();
+        bool axisLocked = false;
+        if (m_activeHandle == LeftMid || m_activeHandle == RightMid) axisLocked = true; // horizontal only
+        if (m_activeHandle == TopMid || m_activeHandle == BottomMid) axisLocked = true; // vertical only
 
-        // Position derived from fixed corner to keep it exact; moving corner will land on pixel grid implicitly
-        QPointF snappedPos = m_fixedScenePoint - snappedScale * m_fixedItemPoint;
-        setScale(snappedScale);
+        if (!axisLocked) {
+            // Corner style uniform scaling (original logic simplified)
+            const qreal currDist = std::hypot(sceneDelta.x(), sceneDelta.y());
+            qreal newScale = m_initialScale * (currDist / (m_initialGrabDist > 0 ? m_initialGrabDist : 1e-6));
+            newScale = std::clamp<qreal>(newScale, 0.05, 100.0);
+            qreal finalScale = newScale;
+            if (s_resizeSnapCallback && QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier)) {
+                finalScale = s_resizeSnapCallback(newScale, m_fixedScenePoint, m_fixedItemPoint, m_baseSize, true);
+            }
+            // Pixel snap uniform
+            const qreal desiredW = finalScale * static_cast<qreal>(m_baseSize.width());
+            const qreal desiredH = finalScale * static_cast<qreal>(m_baseSize.height());
+            const qreal snappedW = std::round(desiredW);
+            const qreal snappedH = std::round(desiredH);
+            const qreal sFromW = (m_baseSize.width()  > 0) ? (snappedW / static_cast<qreal>(m_baseSize.width()))  : finalScale;
+            const qreal sFromH = (m_baseSize.height() > 0) ? (snappedH / static_cast<qreal>(m_baseSize.height())) : finalScale;
+            targetScale = (std::abs(sFromW - finalScale) <= std::abs(sFromH - finalScale)) ? sFromW : sFromH;
+            targetScale = std::clamp<qreal>(targetScale, 0.05, 100.0);
+        } else {
+            // Axis-only resize (side midpoint handles) using scene delta for smooth tracking.
+            const bool horizontal = (m_activeHandle == LeftMid || m_activeHandle == RightMid);
+            qreal baseLen = horizontal ? m_baseSize.width() : m_baseSize.height();
+            // Scene delta from fixed side to cursor along axis
+            qreal deltaScene = horizontal ? (event->scenePos().x() - m_fixedScenePoint.x())
+                                          : (event->scenePos().y() - m_fixedScenePoint.y());
+            // Invert for negative direction handles so growing outward gives positive length
+            if (m_activeHandle == LeftMid || m_activeHandle == TopMid) deltaScene = -deltaScene;
+            qreal extent = std::abs(deltaScene);
+            // Derive scale directly (no per-move rounding to avoid flicker)
+            qreal newScale = extent / (baseLen > 0 ? baseLen : 1.0);
+            newScale = std::clamp<qreal>(newScale, 0.05, 100.0);
+            targetScale = newScale;
+        }
+
+        QPointF snappedPos = m_fixedScenePoint - targetScale * m_fixedItemPoint;
+        setScale(targetScale);
         setPos(snappedPos);
         onInteractiveGeometryChanged();
         event->accept();
@@ -329,6 +353,21 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
 
 void ResizableMediaBase::mouseReleaseEvent(QGraphicsSceneMouseEvent* event) {
     if (m_activeHandle != None) {
+        // For side midpoint handles, perform a one-time pixel snap to avoid accumulated subpixel drift
+        if (m_activeHandle == LeftMid || m_activeHandle == RightMid || m_activeHandle == TopMid || m_activeHandle == BottomMid) {
+            const bool horizontal = (m_activeHandle == LeftMid || m_activeHandle == RightMid);
+            qreal baseLen = horizontal ? m_baseSize.width() : m_baseSize.height();
+            // Compute current world length along axis
+            qreal currLen = baseLen * scale();
+            qreal snappedLen = std::round(currLen);
+            if (baseLen > 0) {
+                qreal snappedScale = std::clamp<qreal>(snappedLen / baseLen, 0.05, 100.0);
+                // Adjust position so fixed side remains anchored
+                QPointF fixedScene = m_fixedScenePoint; // was captured at press
+                setScale(snappedScale);
+                setPos(fixedScene - snappedScale * m_fixedItemPoint);
+            }
+        }
         m_activeHandle = None;
         ungrabMouse();
         onInteractiveGeometryChanged();
@@ -372,21 +411,46 @@ ResizableMediaBase::Handle ResizableMediaBase::hitTestHandle(const QPointF& p) c
     if (!isSelected()) return None;
     const qreal s = toItemLengthFromPixels(m_selectionSize);
     QRectF br(0, 0, m_baseSize.width(), m_baseSize.height());
-    if (QRectF(br.topLeft() - QPointF(s/2,s/2), QSizeF(s,s)).contains(p)) return TopLeft;
-    if (QRectF(QPointF(br.right(), br.top()) - QPointF(s/2,s/2), QSizeF(s,s)).contains(p)) return TopRight;
-    if (QRectF(QPointF(br.left(), br.bottom()) - QPointF(s/2,s/2), QSizeF(s,s)).contains(p)) return BottomLeft;
-    if (QRectF(br.bottomRight() - QPointF(s/2,s/2), QSizeF(s,s)).contains(p)) return BottomRight;
+    auto contains = [&](const QPointF& center){ return QRectF(center - QPointF(s/2,s/2), QSizeF(s,s)).contains(p); };
+    if (contains(br.topLeft())) return TopLeft;
+    if (contains(QPointF(br.right(), br.top()))) return TopRight;
+    if (contains(QPointF(br.left(), br.bottom()))) return BottomLeft;
+    if (contains(br.bottomRight())) return BottomRight;
+    // Midpoints
+    if (contains(QPointF(br.center().x(), br.top()))) return TopMid;
+    if (contains(QPointF(br.center().x(), br.bottom()))) return BottomMid;
+    if (contains(QPointF(br.left(), br.center().y()))) return LeftMid;
+    if (contains(QPointF(br.right(), br.center().y()))) return RightMid;
     return None;
 }
 
 ResizableMediaBase::Handle ResizableMediaBase::opposite(Handle h) const {
     switch (h) {
-        case TopLeft: return BottomRight; case TopRight: return BottomLeft; case BottomLeft: return TopRight; case BottomRight: return TopLeft; default: return None;
+        case TopLeft: return BottomRight;
+        case TopRight: return BottomLeft;
+        case BottomLeft: return TopRight;
+        case BottomRight: return TopLeft;
+        case LeftMid: return RightMid;
+        case RightMid: return LeftMid;
+        case TopMid: return BottomMid;
+        case BottomMid: return TopMid;
+        default: return None;
     }
 }
 
 QPointF ResizableMediaBase::handlePoint(Handle h) const {
-    switch (h) { case TopLeft: return QPointF(0,0); case TopRight: return QPointF(m_baseSize.width(),0); case BottomLeft: return QPointF(0,m_baseSize.height()); case BottomRight: return QPointF(m_baseSize.width(), m_baseSize.height()); default: return QPointF(0,0);} }
+    switch (h) {
+        case TopLeft: return QPointF(0,0);
+        case TopRight: return QPointF(m_baseSize.width(),0);
+        case BottomLeft: return QPointF(0,m_baseSize.height());
+        case BottomRight: return QPointF(m_baseSize.width(), m_baseSize.height());
+        case LeftMid: return QPointF(0, m_baseSize.height()/2.0);
+        case RightMid: return QPointF(m_baseSize.width(), m_baseSize.height()/2.0);
+        case TopMid: return QPointF(m_baseSize.width()/2.0, 0);
+        case BottomMid: return QPointF(m_baseSize.width()/2.0, m_baseSize.height());
+        default: return QPointF(0,0);
+    }
+}
 
 qreal ResizableMediaBase::toItemLengthFromPixels(int px) const {
     if (!scene() || scene()->views().isEmpty()) return px;
