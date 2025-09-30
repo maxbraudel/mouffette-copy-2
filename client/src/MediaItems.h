@@ -107,6 +107,16 @@ public:
     void fadeContentIn(double seconds);
     void fadeContentOut(double seconds);
     void cancelFade();
+
+    // Axis snap hysteresis state accessors (used by ScreenCanvas helper)
+    bool isAxisSnapActive() const { return m_axisSnapActive; }
+    Handle axisSnapHandle() const { return m_axisSnapHandle; }
+    qreal axisSnapTargetScale() const { return m_axisSnapTargetScale; }
+    void setAxisSnapActive(bool active, Handle handle, qreal targetScale) {
+        m_axisSnapActive = active;
+        m_axisSnapHandle = handle;
+        m_axisSnapTargetScale = targetScale;
+    }
     
     // Override in derived classes to indicate media type for settings panel
     virtual bool isVideoMedia() const { return false; }
@@ -172,6 +182,10 @@ protected:
     qreal m_contentOpacity = 1.0; // multiplicative opacity for content only
     qreal m_contentDisplayOpacity = 1.0; // animated multiplier (0..1) for fade in/out
     QVariantAnimation* m_fadeAnimation = nullptr; // owned manually (ResizableMediaBase not QObject)
+    // Axis (midpoint) resize snapping state (hysteresis)
+    bool m_axisSnapActive = false;
+    Handle m_axisSnapHandle = None;
+    qreal m_axisSnapTargetScale = 1.0;
 };
 
 // Simple pixmap media item

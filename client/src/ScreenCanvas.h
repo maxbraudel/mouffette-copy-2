@@ -85,6 +85,11 @@ public:
                                         const QPointF& fixedScenePoint,
                                         const QSize& baseSize,
                                         ResizableMediaBase::Handle activeHandle) const;
+    qreal applyAxisSnapWithHysteresis(ResizableMediaBase* item,
+                                      qreal proposedScale,
+                                      const QPointF& fixedScenePoint,
+                                      const QSize& baseSize,
+                                      ResizableMediaBase::Handle activeHandle) const;
 
 signals:
     // Emitted when a new media item is added to the canvas

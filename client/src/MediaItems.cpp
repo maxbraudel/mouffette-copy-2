@@ -339,10 +339,10 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
             qreal newScale = extent / (baseLen > 0 ? baseLen : 1.0);
             newScale = std::clamp<qreal>(newScale, 0.05, 100.0);
             targetScale = newScale;
-            // Attempt snapping to screen borders via ScreenCanvas helper
+            // Attempt snapping with hysteresis to screen borders via ScreenCanvas helper
             if (scene() && !scene()->views().isEmpty()) {
                 if (auto* scView = qobject_cast<ScreenCanvas*>(scene()->views().first())) {
-                    targetScale = scView->snapAxisResizeToScreenBorders(targetScale, m_fixedScenePoint, m_baseSize, m_activeHandle);
+                    targetScale = scView->applyAxisSnapWithHysteresis(this, targetScale, m_fixedScenePoint, m_baseSize, m_activeHandle);
                 }
             }
         }
@@ -375,6 +375,12 @@ void ResizableMediaBase::mouseReleaseEvent(QGraphicsSceneMouseEvent* event) {
             }
         }
         m_activeHandle = None;
+        // Clear axis snap hysteresis state after resize interaction ends
+        if (m_axisSnapActive) {
+            m_axisSnapActive = false;
+            m_axisSnapHandle = None;
+            m_axisSnapTargetScale = 1.0;
+        }
         ungrabMouse();
         onInteractiveGeometryChanged();
         event->accept();

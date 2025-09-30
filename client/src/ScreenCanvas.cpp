@@ -1170,18 +1170,26 @@ qreal ScreenCanvas::snapAxisResizeToScreenBorders(qreal currentScale,
 
     auto consider = [&](qreal targetEdgePos, bool horizontal, bool positiveDirection){
         if (horizontal) {
+            qreal movingEdgePos = positiveDirection ? mediaRight : mediaLeft;
+            bool overshoot = positiveDirection ? (movingEdgePos > targetEdgePos)
+                                               : (movingEdgePos < targetEdgePos);
             qreal targetWidth = positiveDirection ? (targetEdgePos - mediaLeft)
                                                   : (mediaRight - targetEdgePos);
             if (targetWidth <= 0) return; // invalid
             qreal tScale = targetWidth / baseSize.width();
-            qreal dist = std::abs((positiveDirection ? mediaRight : mediaLeft) - targetEdgePos);
+            qreal dist = std::abs(movingEdgePos - targetEdgePos);
+            if (overshoot) dist = 0; // treat outward overshoot as stuck to edge
             if (dist < bestDelta) { bestDelta = dist; bestScale = tScale; }
         } else {
+            qreal movingEdgePos = positiveDirection ? mediaBottom : mediaTop;
+            bool overshoot = positiveDirection ? (movingEdgePos > targetEdgePos)
+                                               : (movingEdgePos < targetEdgePos);
             qreal targetHeight = positiveDirection ? (targetEdgePos - mediaTop)
                                                    : (mediaBottom - targetEdgePos);
             if (targetHeight <= 0) return;
             qreal tScale = targetHeight / baseSize.height();
-            qreal dist = std::abs((positiveDirection ? mediaBottom : mediaTop) - targetEdgePos);
+            qreal dist = std::abs(movingEdgePos - targetEdgePos);
+            if (overshoot) dist = 0;
             if (dist < bestDelta) { bestDelta = dist; bestScale = tScale; }
         }
     };
@@ -1216,6 +1224,116 @@ qreal ScreenCanvas::snapAxisResizeToScreenBorders(qreal currentScale,
         return std::clamp<qreal>(bestScale, 0.05, 100.0);
     }
     return currentScale;
+}
+
+qreal ScreenCanvas::applyAxisSnapWithHysteresis(ResizableMediaBase* item,
+                                      qreal proposedScale,
+                                      const QPointF& fixedScenePoint,
+                                      const QSize& baseSize,
+                                      ResizableMediaBase::Handle activeHandle) const {
+    if (!item) return proposedScale;
+    using H = ResizableMediaBase::Handle;
+    bool isSide = (activeHandle == H::LeftMid || activeHandle == H::RightMid || activeHandle == H::TopMid || activeHandle == H::BottomMid);
+    if (!isSide) return proposedScale;
+    if (!m_scene) return proposedScale;
+
+    const QList<QRectF> screenRects = getScreenBorderRects();
+    if (screenRects.isEmpty()) return proposedScale;
+
+    const QTransform t = transform();
+    const qreal snapDistanceScene = m_snapDistancePx / (t.m11() > 1e-6 ? t.m11() : 1.0);
+    constexpr qreal releaseFactor = 1.4; // must move 40% farther to release
+    const qreal releaseDist = snapDistanceScene * releaseFactor;
+
+    // current half sizes with proposed scale
+    const qreal halfW = (baseSize.width() * proposedScale) / 2.0;
+    const qreal halfH = (baseSize.height() * proposedScale) / 2.0;
+
+    // Compute moving edge coordinate based on which handle is active; fixedScenePoint is opposite side midpoint.
+    auto movingEdgePos = [&]() -> qreal {
+        switch (activeHandle) {
+            case H::LeftMid:   return fixedScenePoint.x() - 2*halfW; // left = fixedRight - width
+            case H::RightMid:  return fixedScenePoint.x() + 2*halfW; // right = fixedLeft + width
+            case H::TopMid:    return fixedScenePoint.y() - 2*halfH; // top = fixedBottom - height
+            case H::BottomMid: return fixedScenePoint.y() + 2*halfH; // bottom = fixedTop + height
+            default: return 0.0;
+        }
+    }();
+
+    // Gather candidate border positions along movement axis.
+    QList<qreal> targetEdges;
+    for (const QRectF& sr : screenRects) {
+        switch (activeHandle) {
+            case H::LeftMid:
+            case H::RightMid:
+                targetEdges << sr.left() << sr.right();
+                break;
+            case H::TopMid:
+            case H::BottomMid:
+                targetEdges << sr.top() << sr.bottom();
+                break;
+            default: break;
+        }
+    }
+    if (targetEdges.isEmpty()) return proposedScale;
+
+    bool snapActive = item->isAxisSnapActive();
+    H snapHandle = item->axisSnapHandle();
+    qreal snapTargetScale = item->axisSnapTargetScale();
+
+    auto computeScaleFor = [&](qreal edgeScenePos) -> qreal {
+        if (activeHandle == H::LeftMid || activeHandle == H::RightMid) {
+            // width = |fixed - moving|
+            qreal desiredHalfWidth = (activeHandle == H::LeftMid)
+                ? (fixedScenePoint.x() - edgeScenePos) / 2.0
+                : (edgeScenePos - fixedScenePoint.x()) / 2.0;
+            if (desiredHalfWidth <= 0) return proposedScale;
+            return (desiredHalfWidth * 2.0) / baseSize.width();
+        } else {
+            qreal desiredHalfHeight = (activeHandle == H::TopMid)
+                ? (fixedScenePoint.y() - edgeScenePos) / 2.0
+                : (edgeScenePos - fixedScenePoint.y()) / 2.0;
+            if (desiredHalfHeight <= 0) return proposedScale;
+            return (desiredHalfHeight * 2.0) / baseSize.height();
+        }
+    };
+
+    // If a snap is already active, check release condition first.
+    if (snapActive && snapHandle == activeHandle) {
+        // Determine distance from moving edge (under proposed scale) to the snap edge implied by snapTargetScale.
+        // Recompute moving edge with proposedScale (not snapTarget) to decide release threshold, encouraging fluid exit.
+        qreal dist = std::numeric_limits<qreal>::max();
+        for (qreal edge : targetEdges) {
+            dist = std::min(dist, std::abs(movingEdgePos - edge));
+        }
+        if (dist <= releaseDist) {
+            // Stay snapped - lock to stored target scale (prevents jitter)
+            return snapTargetScale;
+        } else {
+            // Release
+            item->setAxisSnapActive(false, H::None, 0.0);
+            return proposedScale;
+        }
+    }
+
+    // Otherwise evaluate for potential new snap engagement.
+    qreal bestDist = snapDistanceScene;
+    qreal bestScale = proposedScale;
+    for (qreal edge : targetEdges) {
+        qreal dist = std::abs(movingEdgePos - edge);
+        if (dist < bestDist) {
+            qreal targetScale = computeScaleFor(edge);
+            if (targetScale > 0.0) {
+                bestDist = dist;
+                bestScale = targetScale;
+            }
+        }
+    }
+    if (bestScale != proposedScale) {
+        item->setAxisSnapActive(true, activeHandle, bestScale);
+        return bestScale;
+    }
+    return proposedScale;
 }
 
 bool ScreenCanvas::eventFilter(QObject* watched, QEvent* event) {
