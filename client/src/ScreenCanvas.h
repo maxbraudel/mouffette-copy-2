@@ -218,7 +218,6 @@ private:
     QTimer* m_dragPreviewFallbackTimer = nullptr;
     
     // Snap-to-screen settings
-    int m_repaintBudgetMs = 16;
     int m_snapDistancePx = 10; // pixels within which snapping occurs
     int m_cornerSnapDistancePx = 20; // larger region for corner snapping precedence
     
@@ -277,8 +276,7 @@ protected:
     QPointF m_dragStartScene;
     QPointF m_dragItemStartPos;
 
-    // Snap visual indicators (cached scene-space lines, rendered in drawForeground pixel-invariant)
-    QVector<QLineF> m_lastSnapIndicatorLines;             // cached logical lines (scene space)
+    // Snap visual indicators routed through dedicated SnapGuideItem (no local caching needed)
     void updateSnapIndicators(const QVector<QLineF>& lines);
     void clearSnapIndicators();
     void keyReleaseEvent(QKeyEvent* event) override; // clear indicators when Shift released

@@ -1,6 +1,4 @@
-// (Snap indicator drawing migrated to dedicated SnapGuideItem.)
-
-// Re-introduced required includes after accidental removal in previous refactor.
+// ScreenCanvas implementation (snap guides rendered via dedicated SnapGuideItem)
 #include "ScreenCanvas.h"
 #include "AppColors.h"
 #include "MediaItems.h"
@@ -11,7 +9,6 @@
 #include <QGraphicsProxyWidget>
 #include <QGraphicsTextItem>
 #include <QApplication>
-#include <QClipboard>
 #include <QMimeData>
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
@@ -39,11 +36,6 @@
 #include <QStyleHints>
 #include <QCursor>
 #include <QRandomGenerator>
-#include <QBuffer>
-#include <QJsonObject>
-#include <QJsonDocument>
-#include <QJsonArray>
-#include <QImageReader>
 #include <QSizePolicy>
 #include <QMediaPlayer>
 #include <QAudioOutput>
@@ -53,7 +45,7 @@
 #include <algorithm>
 #include <limits>
 
-// NOTE: Any remaining includes needed by later code will be added as they surface during build.
+// (Trimmed includes to essentials; further pruning can be done if desired.)
 
 // Forward declare SnapGuideItem (full definition just below) and provide a lightweight local ClippedContainer
 class SnapGuideItem;
@@ -75,7 +67,7 @@ void ScreenCanvas::drawForeground(QPainter* painter, const QRectF& rect) {
     QGraphicsView::drawForeground(painter, rect);
 }
 
-// (Removed heavy MainWindow include; using local ClippedContainer definition above.)
+// Local lightweight ClippedContainer for viewport overlay clipping.
 
 // Configuration constants
 static const int gMediaListItemSpacing = 3; // Spacing between media list items (name, status, details)
@@ -197,13 +189,11 @@ private:
 
 // --- Snap indicator API (now that SnapGuideItem is defined) ---
 void ScreenCanvas::clearSnapIndicators() {
-    m_lastSnapIndicatorLines.clear();
     if (m_snapGuides) { m_snapGuides->clearLines(); m_snapGuides->update(); }
 }
 
 void ScreenCanvas::updateSnapIndicators(const QVector<QLineF>& lines) {
     if (!m_scene) return;
-    m_lastSnapIndicatorLines = lines;
     if (m_snapGuides) { m_snapGuides->setLines(lines); m_snapGuides->update(); }
 }
 
