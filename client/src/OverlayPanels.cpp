@@ -602,20 +602,8 @@ void OverlayPanel::updateLayoutWithAnchor(const QPointF& anchorScenePoint, QGrap
         createBackground();
     }
 
-    // Decide visual background presence: if only a single text element on a top panel, hide visual fill
-    if (m_position == Top) {
-        int visibleElements = 0;
-        bool singleText = false;
-        for (const auto &e : m_elements) {
-            if (!e->isVisible()) continue;
-            ++visibleElements;
-            if (visibleElements == 1 && dynamic_cast<OverlayTextElement*>(e.get())) singleText = true;
-            if (visibleElements > 1) break;
-        }
-        m_backgroundVisible = !(visibleElements == 1 && singleText);
-    } else {
-        m_backgroundVisible = true;
-    }
+    // For top panels we never render a shared background rect; for others keep it.
+    m_backgroundVisible = (m_position != Top);
     updateBackground();
     updateLabelsLayout();
 }
@@ -867,26 +855,7 @@ void OverlayPanel::updateLabelsLayout() {
             }
         }
     }
-    // Special case: if top panel with a single visible text element and background hidden,
-    // shrink the background rect to match that element's bounding rect so the hit area is tight.
-    if (m_position == Top && !m_backgroundVisible) {
-        int visibleCount = 0;
-        OverlayTextElement* onlyText = nullptr;
-        for (auto &e : m_elements) {
-            if (!e->isVisible()) continue;
-            ++visibleCount;
-            if (visibleCount == 1) {
-                onlyText = dynamic_cast<OverlayTextElement*>(e.get());
-            } else {
-                onlyText = nullptr; break;
-            }
-        }
-        if (onlyText && m_background) {
-            // Use element size without extra padding (background already positioned at m_currentPosition)
-            QSizeF tightSize = onlyText->preferredSize(m_style);
-            m_background->setRect(0,0,tightSize.width(), tightSize.height());
-        }
-    }
+    // (Shrinking background for single text no longer needed – top panels have no shared background)
 }
 
 

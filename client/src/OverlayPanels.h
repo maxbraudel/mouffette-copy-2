@@ -136,7 +136,7 @@ struct OverlayStyle {
 
 class OverlayElement {
 public:
-    enum ElementType { Label, Button, ToggleButton, Slider, RowBreak };
+    enum ElementType { Label, Button, Slider, RowBreak };
     enum ElementState { Normal, Hovered, Active, Disabled, Toggled };
     OverlayElement(ElementType type, const QString& id = QString()) : m_type(type), m_id(id) {}
     virtual ~OverlayElement() = default;
@@ -178,8 +178,6 @@ public:
     void setVisible(bool v) override;
 private:
     void createGraphicsItems();
-    void updateAppearance();
-    void updateText();
     QString m_text;
     bool m_visible = true;
     MouseBlockingRoundedRectItem* m_background = nullptr;
