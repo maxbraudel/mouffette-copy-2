@@ -100,7 +100,7 @@ QColor gSystemTaskbarColor = QColor(0, 0, 0, 80);      // Default opaque black f
 // ============================================================================
 // SNAP INDICATOR CONFIG
 // ============================================================================
-QColor gSnapIndicatorColor = QColor(117, 4, 77);     // Default: brand pink
+QColor gSnapIndicatorColor = QColor(209, 0, 136);     // Default: brand pink
 qreal  gSnapIndicatorDashLength = 6.0;                 // Default dash length (on/off) -> dotted appearance
 
 // ============================================================================
