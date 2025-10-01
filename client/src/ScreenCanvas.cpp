@@ -994,6 +994,21 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
     qreal candidateVerticalLineX = 0.0; // line to draw for X snap
     qreal candidateHorizontalLineY = 0.0; // line to draw for Y snap
 
+    // First consider screen edges for edge snapping indicators (the initial screen snap may already have aligned them)
+    for (const QRectF& sr : screenRects) {
+        QRectF m = QRectF(snapped, movingRect.size());
+        auto considerDx = [&](qreal fromEdge, qreal toEdge, qreal indicatorX){ qreal delta = toEdge - fromEdge; qreal absd = std::abs(delta); if (absd < bestDxAbs && absd < snapDistanceScene) { bestDxAbs = absd; bestDx = delta; edgeAdjusted = true; candidateVerticalLineX = indicatorX; } };
+        auto considerDy = [&](qreal fromEdge, qreal toEdge, qreal indicatorY){ qreal delta = toEdge - fromEdge; qreal absd = std::abs(delta); if (absd < bestDyAbs && absd < snapDistanceScene) { bestDyAbs = absd; bestDy = delta; edgeAdjusted = true; candidateHorizontalLineY = indicatorY; } };
+        considerDx(m.left(),  sr.left(),  sr.left());   // left-left
+        considerDx(m.left(),  sr.right(), sr.right());  // left-right adjacency
+        considerDx(m.right(), sr.right(), sr.right());  // right-right
+        considerDx(m.right(), sr.left(),  sr.left());   // right-left adjacency
+        considerDy(m.top(),    sr.top(),    sr.top());    // top-top
+        considerDy(m.top(),    sr.bottom(), sr.bottom()); // top-bottom adjacency
+        considerDy(m.bottom(), sr.bottom(), sr.bottom()); // bottom-bottom
+        considerDy(m.bottom(), sr.top(),    sr.top());    // bottom-top adjacency
+    }
+
     for (QGraphicsItem* gi : items) {
         auto* other = dynamic_cast<ResizableMediaBase*>(gi);
         if (!other || other == movingItem) continue;
