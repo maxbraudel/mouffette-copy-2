@@ -2262,6 +2262,7 @@ void ScreenCanvas::wheelEvent(QWheelEvent* event) {
             relayoutAllMediaOverlays(m_scene);
             layoutInfoOverlay();
             updateSelectionChrome();
+            rebuildSnapIndicatorsForZoom();
             event->accept();
             return;
         }
@@ -3047,45 +3048,77 @@ void ScreenCanvas::updateLaunchSceneButtonStyle() {
 
 // --- Snap Indicator Helpers ---
 void ScreenCanvas::clearSnapIndicators() {
-    for (auto* l : m_snapIndicatorItems) {
-        if (l && m_scene) m_scene->removeItem(l);
-        delete l;
-    }
-    m_snapIndicatorItems.clear();
+    m_lastSnapIndicatorLines.clear();
+    if (viewport()) viewport()->update();
 }
 
 void ScreenCanvas::updateSnapIndicators(const QVector<QLineF>& lines) {
     if (!m_scene) return;
+    m_lastSnapIndicatorLines = lines;
+    if (viewport()) viewport()->update();
+}
+
+void ScreenCanvas::rebuildSnapIndicatorsForZoom() {
+    // Nothing needed now; drawForeground uses view mapping each frame.
+    if (!m_lastSnapIndicatorLines.isEmpty() && viewport()) viewport()->update();
+}
+
+// Explicit override to avoid undefined symbol errors when vtable expects a ScreenCanvas-specific entry.
+// Currently we just delegate to base implementation because all snap indicators are separate QGraphicsItems.
+void ScreenCanvas::drawForeground(QPainter* painter, const QRectF& rect) {
+    QGraphicsView::drawForeground(painter, rect);
+    if (m_lastSnapIndicatorLines.isEmpty()) return;
+    painter->save();
+    // We want pixel-invariant drawing: reset transform so coordinates are in viewport pixels
+    painter->resetTransform();
+    qreal thickness = std::max<qreal>(0.1, AppColors::gSnapIndicatorLineThickness);
+    qreal gapPx = std::max<qreal>(1.0, AppColors::gSnapIndicatorDashGap);
+    qreal dashLenPx = std::clamp(gapPx * 0.9, thickness * 2.0, gapPx * 2.5);
+    qreal period = dashLenPx + gapPx;
     QPen pen(AppColors::gSnapIndicatorColor);
-    pen.setCosmetic(true);
-    pen.setWidth(1);
-    pen.setStyle(Qt::DashLine);
-    pen.setDashPattern({AppColors::gSnapIndicatorDashLength, AppColors::gSnapIndicatorDashLength});
-    // Grow / reuse pool
-    int i = 0;
-    for (; i < lines.size(); ++i) {
-        if (i < m_snapIndicatorItems.size()) {
-            auto* li = m_snapIndicatorItems[i];
-            if (!li) {
-                li = new QGraphicsLineItem();
-                m_scene->addItem(li);
-                m_snapIndicatorItems[i] = li;
+    pen.setWidthF(thickness);
+    pen.setCapStyle(Qt::FlatCap);
+    painter->setPen(pen);
+    // Pixel alignment (for crisp 1px lines) – center on half-pixel if thickness is odd integer-ish
+    auto alignCoord = [&](qreal v){
+        if (std::fabs(std::round(thickness) - thickness) < 0.01 && (static_cast<int>(std::round(thickness)) % 2 == 1)) {
+            return std::floor(v) + 0.5; // center stroke
+        }
+        return v; // leave as-is
+    };
+    for (const QLineF& sl : m_lastSnapIndicatorLines) {
+        // Map scene endpoints to viewport coordinates
+        QPointF v1 = mapFromScene(sl.p1());
+        QPointF v2 = mapFromScene(sl.p2());
+        qreal dx = v2.x() - v1.x();
+        qreal dy = v2.y() - v1.y();
+        qreal length = std::hypot(dx, dy);
+        if (length < 0.5) continue;
+        bool vertical = std::fabs(dx) < std::fabs(dy);
+        if (vertical) {
+            if (v2.y() < v1.y()) std::swap(v1, v2);
+            qreal x = alignCoord(v1.x());
+            qreal yStart = v1.y();
+            qreal yEnd   = v2.y();
+            // Anchor phase to global pixel grid to avoid sliding during zoom (stable modulo period)
+            qreal phaseBase = std::floor(yStart / period) * period;
+            for (qreal y = phaseBase; y < yEnd; y += period) {
+                qreal segA = std::max(y, yStart);
+                qreal segB = std::min(y + dashLenPx, yEnd);
+                if (segB - segA > 0.2) painter->drawLine(QPointF(x, segA), QPointF(x, segB));
             }
-            li->setLine(lines[i]);
-            li->setPen(pen);
-            li->setZValue(11997.5);
-            li->setVisible(true);
         } else {
-            auto* li = new QGraphicsLineItem(lines[i]);
-            li->setPen(pen);
-            li->setZValue(11997.5);
-            li->setData(0, QStringLiteral("snap-indicator"));
-            m_scene->addItem(li);
-            m_snapIndicatorItems.append(li);
+            if (v2.x() < v1.x()) std::swap(v1, v2);
+            qreal y = alignCoord(v1.y());
+            qreal xStart = v1.x();
+            qreal xEnd   = v2.x();
+            qreal phaseBase = std::floor(xStart / period) * period;
+            for (qreal x = phaseBase; x < xEnd; x += period) {
+                qreal segA = std::max(x, xStart);
+                qreal segB = std::min(x + dashLenPx, xEnd);
+                if (segB - segA > 0.2) painter->drawLine(QPointF(segA, y), QPointF(segB, y));
+            }
         }
     }
-    // Hide leftovers
-    for (; i < m_snapIndicatorItems.size(); ++i) {
-        if (m_snapIndicatorItems[i]) m_snapIndicatorItems[i]->setVisible(false);
-    }
+    painter->restore();
 }

@@ -108,6 +108,7 @@ protected:
     void dragMoveEvent(QDragMoveEvent* event) override;
     void dragLeaveEvent(QDragLeaveEvent* event) override;
     void dropEvent(QDropEvent* event) override;
+    void drawForeground(QPainter* painter, const QRectF& rect) override; // ensure symbol defined (even if pass-through)
 
 private:
     bool gestureEvent(QGestureEvent* event);
@@ -275,10 +276,11 @@ protected:
     QPointF m_dragStartScene;
     QPointF m_dragItemStartPos;
 
-    // Snap visual indicators (blue dotted lines)
-    QList<QGraphicsLineItem*> m_snapIndicatorItems; // transient lines
+    // Snap visual indicators (cached scene-space lines, rendered in drawForeground pixel-invariant)
+    QVector<QLineF> m_lastSnapIndicatorLines;             // cached logical lines (scene space)
     void updateSnapIndicators(const QVector<QLineF>& lines);
     void clearSnapIndicators();
+    void rebuildSnapIndicatorsForZoom(); // no-op now (kept for compatibility)
     void keyReleaseEvent(QKeyEvent* event) override; // clear indicators when Shift released
 };
 

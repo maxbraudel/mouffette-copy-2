@@ -137,7 +137,8 @@ extern QColor gSystemTaskbarColor;            // Color used to render remote tas
 // SNAP INDICATOR CONFIG
 // ============================================================================
 extern QColor gSnapIndicatorColor;            // Color for snapping guide lines
-extern qreal  gSnapIndicatorDashLength;       // Dash length (on/off use same length for dotted look)
+extern qreal  gSnapIndicatorLineThickness;    // Stroke thickness (cosmetic px)
+extern qreal  gSnapIndicatorDashGap;          // Gap between dashes (cosmetic px)
 
 // ============================================================================
 // INITIALIZATION
