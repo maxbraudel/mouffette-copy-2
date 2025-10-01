@@ -366,6 +366,10 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
         }
         setScale(targetScale);
         setPos(snappedPos);
+        // Explicitly update overlay layout during corner resize so the top anchor tracks
+        // width/height changes in real time. This fixes the observed drift where the
+        // top panel (filename + buttons) lags behind when resizing from the bottom-right.
+        updateOverlayLayout();
         onInteractiveGeometryChanged();
         event->accept();
         return;
@@ -391,6 +395,8 @@ void ResizableMediaBase::mouseReleaseEvent(QGraphicsSceneMouseEvent* event) {
             }
         }
         m_activeHandle = None;
+        // One final layout sync after any resize completes to guarantee centering.
+        updateOverlayLayout();
         // Clear axis snap hysteresis state after resize interaction ends
         if (m_axisSnapActive) {
             m_axisSnapActive = false;
@@ -497,6 +503,10 @@ void ResizableMediaBase::initializeOverlays() {
     auto filenameElement = std::make_shared<OverlayTextElement>(m_filename, "filename");
     filenameElement->setMaxWidthPx(gOverlayFilenameMaxWidthPx);
         m_topPanel->addElement(filenameElement);
+        // Insert an explicit row break so buttons are laid out on a second row below the filename.
+        // Subsequent layout logic in OverlayPanel ensures the first row (filename) is widened
+        // to match the exact width of the buttons row for a clean vertical stack.
+        m_topPanel->newRow();
         // Add settings toggle button to the right of filename
         auto settingsBtn = std::make_shared<OverlayButtonElement>(QString(), "settings_toggle");
         // Resource path follows the same pattern as other media control icons (":/icons/icons/<name>.svg")

@@ -735,36 +735,136 @@ void OverlayPanel::updateLabelsLayout() {
         QPointF origin(m_style.paddingX, m_style.paddingY);
         QPointF cursor = origin;
         qreal currentRowMaxH = 0;
-        for (auto &element : m_elements) {
-            if (element->type() == OverlayElement::RowBreak) {
-                // New row only if something placed in current row
-                if (cursor.x() != origin.x()) {
-                    // advance to next row
-                    origin.setY(origin.y() + currentRowMaxH + m_style.itemSpacing);
-                    cursor = QPointF(m_style.paddingX, origin.y());
-                    currentRowMaxH = 0;
+
+        // Detect special two-row top panel pattern: first row = single text element, then row break, then buttons.
+        bool specialTwoRowTop = false;
+        if (m_position == Top) {
+            int rowBreakIndex = -1;
+            int visibleBeforeBreak = 0;
+            OverlayTextElement* firstText = nullptr;
+            for (int i=0;i<m_elements.size();++i) {
+                auto &el = m_elements[i];
+                if (!el->isVisible()) continue;
+                if (el->type() == OverlayElement::RowBreak) { rowBreakIndex = i; break; }
+                ++visibleBeforeBreak;
+                if (visibleBeforeBreak == 1) firstText = dynamic_cast<OverlayTextElement*>(el.get());
+                else firstText = nullptr; // more than one element before break
+            }
+            if (rowBreakIndex >=0 && firstText && visibleBeforeBreak==1) {
+                // Count buttons after break
+                int buttonsCount = 0;
+                qreal buttonsRowWidth = 0;
+                qreal buttonsRowHeight = 0;
+                for (int j=rowBreakIndex+1;j<m_elements.size();++j) {
+                    auto &el = m_elements[j];
+                    if (!el->isVisible()) continue;
+                    if (el->type() == OverlayElement::RowBreak) break; // only first row after break considered
+                    QSizeF sz = el->preferredSize(m_style);
+                    if (buttonsCount>0) buttonsRowWidth += m_style.itemSpacing;
+                    buttonsRowWidth += sz.width();
+                    buttonsRowHeight = std::max(buttonsRowHeight, sz.height());
+                    ++buttonsCount;
                 }
-                continue;
-            }
-            if (!element->isVisible()) continue;
-            QSizeF elementSize = element->preferredSize(m_style);
-            // Constrain width if exceeding panel width (rare)
-            if (m_style.maxWidth > 0) {
-                qreal maxInner = std::min(panelInnerW, static_cast<qreal>(m_style.maxWidth - 2*m_style.paddingX));
-                if (elementSize.width() > maxInner) elementSize.setWidth(maxInner);
-            }
-            element->setSize(elementSize);
-            if (haveContainer) {
-                if (auto *gi = element->graphicsItem()) {
-                    if (gi->parentItem() != m_background) gi->setParentItem(m_background);
+                if (buttonsCount>0) {
+                    // Force the filename text element width to match the buttons row width exactly.
+                    // If the natural text is wider it will be elided; if narrower it is expanded to align edges.
+                    QSizeF textPref = firstText->preferredSize(m_style);
+                    firstText->setSize(QSizeF(buttonsRowWidth, textPref.height()));
+                    // Ensure the overall panel width matches this new enforced width so centering math stays correct.
+                    qreal desiredPanelWidth = buttonsRowWidth + 2*m_style.paddingX;
+                    if (std::abs(desiredPanelWidth - m_currentSize.width()) > 0.5) {
+                        // Adjust panel width and shift panel position left/right so its visual center is preserved.
+                        qreal oldWidth = m_currentSize.width();
+                        m_currentSize.setWidth(desiredPanelWidth);
+                        qreal deltaW = desiredPanelWidth - oldWidth;
+                        // Shift current panel position left by half the added width so anchor center remains stable.
+                        m_currentPosition.rx() -= deltaW / 2.0;
+                        if (m_background) {
+                            m_background->setRect(0, 0, m_currentSize.width(), m_currentSize.height());
+                            m_background->setPos(m_currentPosition);
+                        }
+                    }
+                    specialTwoRowTop = true;
+                    // Layout first row explicitly, then second row.
+                    if (haveContainer) {
+                        if (auto *gi = firstText->graphicsItem()) {
+                            if (gi->parentItem() != m_background) gi->setParentItem(m_background);
+                        }
+                        firstText->setPosition(QPointF(m_style.paddingX, m_style.paddingY));
+                    } else {
+                        firstText->setPosition(m_currentPosition + QPointF(m_style.paddingX, m_style.paddingY));
+                    }
+                    qreal ySecond = m_style.paddingY + firstText->preferredSize(m_style).height() + m_style.itemSpacing;
+                    QPointF btnCursor(m_style.paddingX, ySecond);
+                    qreal rowMaxH = 0;
+                    for (int j=rowBreakIndex+1;j<m_elements.size();++j) {
+                        auto &el = m_elements[j];
+                        if (!el->isVisible()) continue;
+                        if (el->type() == OverlayElement::RowBreak) break;
+                        QSizeF sz = el->preferredSize(m_style);
+                        el->setSize(sz);
+                        if (haveContainer) {
+                            if (auto *gi = el->graphicsItem()) {
+                                if (gi->parentItem() != m_background) gi->setParentItem(m_background);
+                            }
+                            el->setPosition(btnCursor);
+                        } else {
+                            el->setPosition(m_currentPosition + btnCursor);
+                        }
+                        btnCursor.setX(btnCursor.x() + sz.width() + m_style.itemSpacing);
+                        rowMaxH = std::max(rowMaxH, sz.height());
+                    }
                 }
-                element->setPosition(cursor);
-            } else {
-                element->setPosition(m_currentPosition + cursor);
             }
-            cursor.setX(cursor.x() + elementSize.width() + m_style.itemSpacing);
-            currentRowMaxH = std::max(currentRowMaxH, elementSize.height());
-            // If next element is row break we'll wrap automatically on next iteration
+        }
+
+        if (!specialTwoRowTop) {
+            for (auto &element : m_elements) {
+                if (element->type() == OverlayElement::RowBreak) {
+                    // New row only if something placed in current row
+                    if (cursor.x() != origin.x()) {
+                        // advance to next row
+                        origin.setY(origin.y() + currentRowMaxH + m_style.itemSpacing);
+                        cursor = QPointF(m_style.paddingX, origin.y());
+                        currentRowMaxH = 0;
+                    }
+                    continue;
+                }
+                if (!element->isVisible()) continue;
+                QSizeF elementSize = element->preferredSize(m_style);
+                // Constrain width if exceeding panel width (rare)
+                if (m_style.maxWidth > 0) {
+                    qreal maxInner = std::min(panelInnerW, static_cast<qreal>(m_style.maxWidth - 2*m_style.paddingX));
+                    if (elementSize.width() > maxInner) elementSize.setWidth(maxInner);
+                }
+                element->setSize(elementSize);
+                if (haveContainer) {
+                    if (auto *gi = element->graphicsItem()) {
+                        if (gi->parentItem() != m_background) gi->setParentItem(m_background);
+                    }
+                    element->setPosition(cursor);
+                } else {
+                    element->setPosition(m_currentPosition + cursor);
+                }
+                cursor.setX(cursor.x() + elementSize.width() + m_style.itemSpacing);
+                currentRowMaxH = std::max(currentRowMaxH, elementSize.height());
+            }
+        }
+        // If we used the special two-row top layout, ensure final background rect and position reflect possibly updated m_currentSize while keeping anchor center.
+        if (specialTwoRowTop && m_position == Top) {
+            // Recompute horizontal centering relative to anchor: anchor viewport X center should align with panel center.
+            if (m_lastView) {
+                const QTransform &vt = m_lastView->viewportTransform();
+                QPointF anchorViewport = vt.map(m_lastAnchorScenePoint);
+                QPointF panelTopLeftViewport(anchorViewport.x() - m_currentSize.width()/2.0, vt.map(m_currentPosition).y());
+                // Map back without altering vertical (we keep existing vertical in viewport space)
+                QPointF newTopLeftScene = vt.inverted().map(panelTopLeftViewport);
+                qreal dx = newTopLeftScene.x() - m_currentPosition.x();
+                if (std::abs(dx) > 0.1) {
+                    m_currentPosition.setX(newTopLeftScene.x());
+                    if (m_background) m_background->setPos(m_currentPosition);
+                }
+            }
         }
     }
     // Special case: if top panel with a single visible text element and background hidden,
