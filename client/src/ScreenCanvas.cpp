@@ -1470,10 +1470,27 @@ qreal ScreenCanvas::applyAxisSnapWithHysteresis(ResizableMediaBase* item,
         }
         if (dist <= releaseDist) {
             // Stay snapped - lock to stored target scale (prevents jitter)
+            // Show indicator only while within the primary snap distance threshold; hide when in hysteresis-only zone.
+            if (dist <= snapDistanceScene) {
+                QVector<QLineF> lines;
+                qreal snappedHalfW = (baseSize.width() * snapTargetScale)/2.0;
+                qreal snappedHalfH = (baseSize.height() * snapTargetScale)/2.0;
+                switch (activeHandle) {
+                    case H::LeftMid:   lines.append(QLineF(fixedScenePoint.x() - 2*snappedHalfW, -1e6, fixedScenePoint.x() - 2*snappedHalfW, 1e6)); break;
+                    case H::RightMid:  lines.append(QLineF(fixedScenePoint.x() + 2*snappedHalfW, -1e6, fixedScenePoint.x() + 2*snappedHalfW, 1e6)); break;
+                    case H::TopMid:    lines.append(QLineF(-1e6, fixedScenePoint.y() - 2*snappedHalfH, 1e6, fixedScenePoint.y() - 2*snappedHalfH)); break;
+                    case H::BottomMid: lines.append(QLineF(-1e6, fixedScenePoint.y() + 2*snappedHalfH, 1e6, fixedScenePoint.y() + 2*snappedHalfH)); break;
+                    default: break;
+                }
+                const_cast<ScreenCanvas*>(this)->updateSnapIndicators(lines);
+            } else {
+                const_cast<ScreenCanvas*>(this)->clearSnapIndicators();
+            }
             return snapTargetScale;
         } else {
-            // Release
+            // Release: clear indicator immediately
             item->setAxisSnapActive(false, H::None, 0.0);
+            const_cast<ScreenCanvas*>(this)->clearSnapIndicators();
             return proposedScale;
         }
     }
