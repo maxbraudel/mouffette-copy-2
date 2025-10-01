@@ -1062,6 +1062,40 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
         QRectF finalRect(finalPos, movingRect.size());
         auto finalCorners = rectCorners(finalRect);
 
+        // Detect full overlap with another media item (identical rect) – in that case show all four borders.
+        bool fullOverlap = false;
+        QRectF overlapSourceRect; // rect we overlapped (for potential future styling)
+        const qreal fullTol = cornerSnapDistanceScene * 0.5; // reuse tight tolerance
+        for (QGraphicsItem* gi : items) {
+            auto* other = dynamic_cast<ResizableMediaBase*>(gi);
+            if (!other || other == movingItem) continue;
+            QRectF o = other->sceneBoundingRect();
+            if (std::abs(o.left()   - finalRect.left())   < fullTol &&
+                std::abs(o.right()  - finalRect.right())  < fullTol &&
+                std::abs(o.top()    - finalRect.top())    < fullTol &&
+                std::abs(o.bottom() - finalRect.bottom()) < fullTol) {
+                fullOverlap = true; overlapSourceRect = o; break;
+            }
+        }
+        if (!fullOverlap) {
+            // Also consider screen rects: if we perfectly cover a screen, show all borders too.
+            for (const QRectF& sr : screenRects) {
+                if (std::abs(sr.left()   - finalRect.left())   < fullTol &&
+                    std::abs(sr.right()  - finalRect.right())  < fullTol &&
+                    std::abs(sr.top()    - finalRect.top())    < fullTol &&
+                    std::abs(sr.bottom() - finalRect.bottom()) < fullTol) { fullOverlap = true; overlapSourceRect = sr; break; }
+            }
+        }
+        if (fullOverlap) {
+            QVector<QLineF> fullLines;
+            fullLines.append(QLineF(finalRect.left(),  finalRect.top(),    finalRect.right(), finalRect.top()));    // top
+            fullLines.append(QLineF(finalRect.left(),  finalRect.bottom(), finalRect.right(), finalRect.bottom())); // bottom
+            fullLines.append(QLineF(finalRect.left(),  finalRect.top(),    finalRect.left(),  finalRect.bottom())); // left
+            fullLines.append(QLineF(finalRect.right(), finalRect.top(),    finalRect.right(), finalRect.bottom())); // right
+            const_cast<ScreenCanvas*>(this)->updateSnapIndicators(fullLines);
+            return finalPos;
+        }
+
         // Collect all target corner coordinates that align with moving item corners along same X or same Y.
         QVector<qreal> matchedYs; // for vertical edge orientation (multiple corners stacked vertically)
         QVector<qreal> matchedXs; // for horizontal edge orientation (multiple corners horizontally)
@@ -1172,6 +1206,33 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
 
         // Re-evaluate final rect to find ALL aligned edges (not just the one used to compute translation)
         QRectF finalRect(bestPos, movingRect.size());
+        // Full overlap detection in edge-alignment path (identical rect case where edge logic, not corner, resolved last)
+        bool fullOverlap = false; QRectF overlapSourceRect; const qreal fullTol = snapDistanceScene * 0.5;
+        for (QGraphicsItem* gi : items) {
+            auto* other = dynamic_cast<ResizableMediaBase*>(gi); if (!other || other == movingItem) continue;
+            QRectF o = other->sceneBoundingRect();
+            if (std::abs(o.left()   - finalRect.left())   < fullTol &&
+                std::abs(o.right()  - finalRect.right())  < fullTol &&
+                std::abs(o.top()    - finalRect.top())    < fullTol &&
+                std::abs(o.bottom() - finalRect.bottom()) < fullTol) { fullOverlap = true; overlapSourceRect = o; break; }
+        }
+        if (!fullOverlap) {
+            for (const QRectF& sr : screenRects) {
+                if (std::abs(sr.left()   - finalRect.left())   < fullTol &&
+                    std::abs(sr.right()  - finalRect.right())  < fullTol &&
+                    std::abs(sr.top()    - finalRect.top())    < fullTol &&
+                    std::abs(sr.bottom() - finalRect.bottom()) < fullTol) { fullOverlap = true; overlapSourceRect = sr; break; }
+            }
+        }
+        if (fullOverlap) {
+            QVector<QLineF> fullLines;
+            fullLines.append(QLineF(finalRect.left(),  finalRect.top(),    finalRect.right(), finalRect.top()));    // top
+            fullLines.append(QLineF(finalRect.left(),  finalRect.bottom(), finalRect.right(), finalRect.bottom())); // bottom
+            fullLines.append(QLineF(finalRect.left(),  finalRect.top(),    finalRect.left(),  finalRect.bottom())); // left
+            fullLines.append(QLineF(finalRect.right(), finalRect.top(),    finalRect.right(), finalRect.bottom())); // right
+            const_cast<ScreenCanvas*>(this)->updateSnapIndicators(fullLines);
+            return bestPos;
+        }
         const qreal tol = snapDistanceScene * 0.5; // tighter tolerance for displaying multiple guides
 
         // Helper to accumulate unique coordinates (avoid near-duplicates)
