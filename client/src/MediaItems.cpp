@@ -37,8 +37,8 @@ int ResizableMediaBase::heightOfMediaOverlays = -1; // default auto
 int ResizableMediaBase::cornerRadiusOfMediaOverlays = 6;
 
 double ResizableMediaBase::s_sceneGridUnit = 1.0; // default: 1 scene unit == 1 pixel
-std::function<QPointF(const QPointF&, const QRectF&, bool)> ResizableMediaBase::s_screenSnapCallback;
-std::function<ResizableMediaBase::ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool)> ResizableMediaBase::s_resizeSnapCallback;
+std::function<QPointF(const QPointF&, const QRectF&, bool, ResizableMediaBase*)> ResizableMediaBase::s_screenSnapCallback;
+std::function<ResizableMediaBase::ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool, ResizableMediaBase*)> ResizableMediaBase::s_resizeSnapCallback;
 std::function<void()> ResizableMediaBase::s_uploadChangedNotifier = nullptr;
 std::function<void(ResizableMediaBase*)> ResizableMediaBase::s_fileErrorNotifier = nullptr;
 
@@ -55,19 +55,19 @@ QString ResizableMediaBase::displayName() const {
 void ResizableMediaBase::setSceneGridUnit(double u) { s_sceneGridUnit = (u > 1e-9 ? u : 1.0); }
 double ResizableMediaBase::sceneGridUnit() { return s_sceneGridUnit; }
 
-void ResizableMediaBase::setScreenSnapCallback(std::function<QPointF(const QPointF&, const QRectF&, bool)> callback) {
+void ResizableMediaBase::setScreenSnapCallback(std::function<QPointF(const QPointF&, const QRectF&, bool, ResizableMediaBase*)> callback) {
     s_screenSnapCallback = callback;
 }
 
-std::function<QPointF(const QPointF&, const QRectF&, bool)> ResizableMediaBase::screenSnapCallback() {
+std::function<QPointF(const QPointF&, const QRectF&, bool, ResizableMediaBase*)> ResizableMediaBase::screenSnapCallback() {
     return s_screenSnapCallback;
 }
 
-void ResizableMediaBase::setResizeSnapCallback(std::function<ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool)> callback) {
+void ResizableMediaBase::setResizeSnapCallback(std::function<ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool, ResizableMediaBase*)> callback) {
     s_resizeSnapCallback = callback;
 }
 
-std::function<ResizableMediaBase::ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool)> ResizableMediaBase::resizeSnapCallback() {
+std::function<ResizableMediaBase::ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool, ResizableMediaBase*)> ResizableMediaBase::resizeSnapCallback() {
     return s_resizeSnapCallback;
 }
 
@@ -262,7 +262,7 @@ QVariant ResizableMediaBase::itemChange(GraphicsItemChange change, const QVarian
             const bool shiftPressed = QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
             if (shiftPressed) {
                 const QRectF mediaBounds(0, 0, m_baseSize.width() * scale(), m_baseSize.height() * scale());
-                p = s_screenSnapCallback(p, mediaBounds, shiftPressed);
+                p = s_screenSnapCallback(p, mediaBounds, shiftPressed, this);
             }
         }
         
@@ -316,7 +316,7 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
             newScale = std::clamp<qreal>(newScale, 0.05, 100.0);
             qreal finalScale = newScale;
             if (s_resizeSnapCallback && QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier)) {
-                auto feedback = s_resizeSnapCallback(newScale, m_fixedScenePoint, m_fixedItemPoint, m_baseSize, true);
+                auto feedback = s_resizeSnapCallback(newScale, m_fixedScenePoint, m_fixedItemPoint, m_baseSize, true, this);
                 finalScale = feedback.scale;
                 cornerSnapped = feedback.cornerSnapped;
                 desiredMovingCornerScene = feedback.snappedMovingCornerScene;

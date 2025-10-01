@@ -865,11 +865,18 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     connect(m_scene, &QGraphicsScene::selectionChanged, this, [this](){ updateSelectionChrome(); });
     
     // Set up screen border snapping callbacks for media items
-    ResizableMediaBase::setScreenSnapCallback([this](const QPointF& pos, const QRectF& bounds, bool shift) {
-        return snapToScreenBorders(pos, bounds, shift);
+    ResizableMediaBase::setScreenSnapCallback([this](const QPointF& pos, const QRectF& bounds, bool shift, ResizableMediaBase* item) {
+        return snapToMediaAndScreenTargets(pos, bounds, shift, item);
     });
-    ResizableMediaBase::setResizeSnapCallback([this](qreal scale, const QPointF& fixed, const QPointF& moving, const QSize& base, bool shift) {
-        auto r = snapResizeToScreenBorders(scale, fixed, moving, base, shift);
+
+    // Unified resize snap: screens + other media (corner precedence)
+    ResizableMediaBase::setResizeSnapCallback([this](qreal scale,
+                                                     const QPointF& fixed,
+                                                     const QPointF& movingItemPoint,
+                                                     const QSize& base,
+                                                     bool shift,
+                                                     ResizableMediaBase* item) {
+        auto r = snapResizeToScreenBorders(scale, fixed, movingItemPoint, base, shift, item);
         return ResizableMediaBase::ResizeSnapFeedback{ r.scale, r.cornerSnapped, r.snappedMovingCornerScene };
     });
 
@@ -881,6 +888,99 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     ResizableMediaBase::setUploadChangedNotifier([this]() {
         scheduleInfoOverlayRefresh();
     });
+}
+
+QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const QRectF& mediaBounds, bool shiftPressed, ResizableMediaBase* movingItem) const {
+    if (!shiftPressed) return scenePos;
+    QPointF snapped = scenePos;
+    // First apply screen snapping (reuse existing logic)
+    snapped = snapToScreenBorders(snapped, mediaBounds, true);
+
+    // Convert pixel snap distances to scene units
+    const QTransform t = transform();
+    const qreal snapDistanceScene = m_snapDistancePx / (t.m11() > 1e-6 ? t.m11() : 1.0);
+    const qreal cornerSnapDistanceScene = m_cornerSnapDistancePx / (t.m11() > 1e-6 ? t.m11() : 1.0);
+
+    // Collect other media items
+    QList<QGraphicsItem*> items = getMediaItemsSortedByZ();
+    // Represent the prospective moved rect
+    QRectF movingRect(snapped, QSizeF(mediaBounds.width(), mediaBounds.height()));
+
+    // Track best edge snap adjustments (prefer smallest delta)
+    bool cornerCaptured = false;
+    QPointF bestPos = snapped;
+    qreal bestCornerErr = std::numeric_limits<qreal>::max();
+    bool edgeAdjusted = false;
+
+    // Derive moving rect corners AFTER initial screen snap
+    auto rectCorners = [](const QRectF& r){ return QVector<QPointF>{ r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight() }; };
+    auto updateCorners = [&](const QPointF& pos){ return rectCorners(QRectF(pos, movingRect.size())); };
+
+    QVector<QPointF> currentCorners = updateCorners(snapped);
+
+    for (QGraphicsItem* gi : items) {
+        auto* other = dynamic_cast<ResizableMediaBase*>(gi);
+        if (!other || other == movingItem) continue;
+        QRectF otherR = other->sceneBoundingRect();
+
+        // Corner snapping between media (priority over edges)
+        QVector<QPointF> otherCorners = rectCorners(otherR);
+        for (const QPointF& oc : otherCorners) {
+            for (int i=0;i<currentCorners.size();++i) {
+                const QPointF& mc = currentCorners[i];
+                qreal dx = std::abs(mc.x() - oc.x());
+                qreal dy = std::abs(mc.y() - oc.y());
+                if (dx < cornerSnapDistanceScene && dy < cornerSnapDistanceScene) {
+                    qreal err = std::hypot(dx, dy);
+                    if (err < bestCornerErr) {
+                        bestCornerErr = err;
+                        cornerCaptured = true;
+                        // Compute translation so mc aligns with oc
+                        QPointF delta = oc - mc;
+                        bestPos = snapped + delta;
+                    }
+                }
+            }
+        }
+    }
+
+    if (cornerCaptured) {
+        return bestPos; // corner precedence
+    }
+
+    // Edge (line) snapping against other media
+    // We recompute moving rect each candidate; accumulate smallest adjustment separately on X and Y.
+    qreal bestDx = 0.0; qreal bestDxAbs = snapDistanceScene + 1.0;
+    qreal bestDy = 0.0; qreal bestDyAbs = snapDistanceScene + 1.0;
+
+    for (QGraphicsItem* gi : items) {
+        auto* other = dynamic_cast<ResizableMediaBase*>(gi);
+        if (!other || other == movingItem) continue;
+        QRectF o = other->sceneBoundingRect();
+        QRectF m = QRectF(snapped, movingRect.size());
+        // Candidate deltas for X alignment
+        struct EdgePair { qreal a; qreal b; enum Type { Overlap, Adjacent } type; }; // type retained if future logic wants to differentiate
+        // Compute deltas: movingEdge -> otherEdge
+        auto considerDx = [&](qreal fromEdge, qreal toEdge){ qreal delta = toEdge - fromEdge; qreal absd = std::abs(delta); if (absd < bestDxAbs && absd < snapDistanceScene) { bestDxAbs = absd; bestDx = delta; edgeAdjusted = true; } };
+        auto considerDy = [&](qreal fromEdge, qreal toEdge){ qreal delta = toEdge - fromEdge; qreal absd = std::abs(delta); if (absd < bestDyAbs && absd < snapDistanceScene) { bestDyAbs = absd; bestDy = delta; edgeAdjusted = true; } };
+
+        // Horizontal possibilities
+        considerDx(m.left(),  o.left());   // left-left
+        considerDx(m.left(),  o.right());  // left-right adjacency
+        considerDx(m.right(), o.right());  // right-right
+        considerDx(m.right(), o.left());   // right-left adjacency
+
+        // Vertical possibilities
+        considerDy(m.top(),    o.top());    // top-top
+        considerDy(m.top(),    o.bottom()); // top-bottom adjacency
+        considerDy(m.bottom(), o.bottom()); // bottom-bottom
+        considerDy(m.bottom(), o.top());    // bottom-top adjacency
+    }
+
+    if (edgeAdjusted) {
+        bestPos = QPointF(snapped.x() + bestDx, snapped.y() + bestDy);
+    }
+    return bestPos;
 }
 
 void ScreenCanvas::showEvent(QShowEvent* event) {
@@ -1154,21 +1254,25 @@ qreal ScreenCanvas::applyAxisSnapWithHysteresis(ResizableMediaBase* item,
         }
     }();
 
-    // Gather candidate border positions along movement axis.
+    // Gather candidate border positions along movement axis (screens + other media items).
     QList<qreal> targetEdges;
+    targetEdges.reserve(screenRects.size() * 2);
     for (const QRectF& sr : screenRects) {
-        switch (activeHandle) {
-            case H::LeftMid:
-            case H::RightMid:
-                targetEdges << sr.left() << sr.right();
-                break;
-            case H::TopMid:
-            case H::BottomMid:
-                targetEdges << sr.top() << sr.bottom();
-                break;
-            default: break;
+        if (activeHandle == H::LeftMid || activeHandle == H::RightMid) { targetEdges << sr.left() << sr.right(); }
+        else if (activeHandle == H::TopMid || activeHandle == H::BottomMid) { targetEdges << sr.top() << sr.bottom(); }
+    }
+    if (m_scene) {
+        for (QGraphicsItem* gi : m_scene->items()) {
+            auto* other = dynamic_cast<ResizableMediaBase*>(gi);
+            if (!other || other == item) continue;
+            QRectF r = other->sceneBoundingRect();
+            if (activeHandle == H::LeftMid || activeHandle == H::RightMid) { targetEdges << r.left() << r.right(); }
+            else if (activeHandle == H::TopMid || activeHandle == H::BottomMid) { targetEdges << r.top() << r.bottom(); }
         }
     }
+    // Remove duplicates (optional) to reduce redundant computations
+    std::sort(targetEdges.begin(), targetEdges.end());
+    targetEdges.erase(std::unique(targetEdges.begin(), targetEdges.end(), [](qreal a, qreal b){ return std::abs(a-b) < 1e-6; }), targetEdges.end());
     if (targetEdges.isEmpty()) return proposedScale;
 
     bool snapActive = item->isAxisSnapActive();
@@ -2413,11 +2517,16 @@ QPointF ScreenCanvas::snapToScreenBorders(const QPointF& scenePos, const QRectF&
     return snappedPos;
 }
 
-ScreenCanvas::ResizeSnapResult ScreenCanvas::snapResizeToScreenBorders(qreal currentScale, const QPointF& fixedScenePoint, const QPointF& fixedItemPoint, const QSize& baseSize, bool shiftPressed) const {
+ScreenCanvas::ResizeSnapResult ScreenCanvas::snapResizeToScreenBorders(qreal currentScale,
+                                                                      const QPointF& fixedScenePoint,
+                                                                      const QPointF& fixedItemPoint,
+                                                                      const QSize& baseSize,
+                                                                      bool shiftPressed,
+                                                                      ResizableMediaBase* movingItem) const {
     ResizeSnapResult result; result.scale = currentScale; result.cornerSnapped = false;
     if (!shiftPressed) return result;
+
     const QList<QRectF> screenRects = getScreenBorderRects();
-    if (screenRects.isEmpty()) return result;
     const QTransform t = transform();
     const qreal snapDistanceScene = m_snapDistancePx / (t.m11() > 1e-6 ? t.m11() : 1.0);
     const qreal cornerSnapDistanceScene = m_cornerSnapDistancePx / (t.m11() > 1e-6 ? t.m11() : 1.0);
@@ -2436,128 +2545,150 @@ ScreenCanvas::ResizeSnapResult ScreenCanvas::snapResizeToScreenBorders(qreal cur
     const bool movingLeft = fixedIsTopRight || fixedIsBottomRight;
     const bool movingUp = fixedIsBottomLeft || fixedIsBottomRight;
 
-    for (const QRectF& screenRect : screenRects) {
-        const qreal mediaLeft = mediaTopLeft.x();
-        const qreal mediaRight = mediaTopLeft.x() + mediaWidth;
-        const qreal mediaTop = mediaTopLeft.y();
-        const qreal mediaBottom = mediaTopLeft.y() + mediaHeight;
-
+    // Helper lambdas
+    auto movingCornerPoint = [&]() -> QPointF {
         QPointF mediaTL = mediaTopLeft;
         QPointF mediaTR = QPointF(mediaTopLeft.x() + mediaWidth, mediaTopLeft.y());
         QPointF mediaBL = QPointF(mediaTopLeft.x(), mediaTopLeft.y() + mediaHeight);
         QPointF mediaBR = QPointF(mediaTopLeft.x() + mediaWidth, mediaTopLeft.y() + mediaHeight);
-        QPointF movingCorner;
-        if (fixedIsTopLeft) movingCorner = mediaBR;
-        else if (fixedIsTopRight) movingCorner = mediaBL;
-        else if (fixedIsBottomLeft) movingCorner = mediaTR;
-        else if (fixedIsBottomRight) movingCorner = mediaTL;
+        if (fixedIsTopLeft) return mediaBR;
+        if (fixedIsTopRight) return mediaBL;
+        if (fixedIsBottomLeft) return mediaTR;
+        return mediaTL; // fixedIsBottomRight
+    }();
 
-    // Corner priority snapping (overrides edge snapping). If within corner zone, we attempt to place moving corner at screen corner.
-    QList<QPointF> screenCorners { screenRect.topLeft(), screenRect.topRight(), screenRect.bottomLeft(), screenRect.bottomRight() };
-    bool inCornerZone = false;
-    qreal bestCornerErr = std::numeric_limits<qreal>::max();
-    qreal bestCornerScale = currentScale;
-    QPointF bestCornerTarget;
-    for (const QPointF& sc : screenCorners) {
-            const qreal dx = std::abs(movingCorner.x() - sc.x());
-            const qreal dy = std::abs(movingCorner.y() - sc.y());
-            if (dx < cornerSnapDistanceScene && dy < cornerSnapDistanceScene) {
-                inCornerZone = true; // declare corner zone so edges are suppressed even if we fail to find perfect scale
-                // Derive independent target width/height needed
-                qreal targetWidth = mediaWidth;
-                qreal targetHeight = mediaHeight;
-                if (movingCorner == mediaBR) { targetWidth = sc.x() - mediaLeft; targetHeight = sc.y() - mediaTop; }
-                else if (movingCorner == mediaBL) { targetWidth = mediaRight - sc.x(); targetHeight = sc.y() - mediaTop; }
-                else if (movingCorner == mediaTR) { targetWidth = sc.x() - mediaLeft; targetHeight = mediaBottom - sc.y(); }
-                else if (movingCorner == mediaTL) { targetWidth = mediaRight - sc.x(); targetHeight = mediaBottom - sc.y(); }
-                if (targetWidth <= 0 || targetHeight <= 0) continue;
-                const qreal scaleW = targetWidth / baseSize.width();
-                const qreal scaleH = targetHeight / baseSize.height();
-                // Candidate uniform scales: scaleW, scaleH, currentScale (status quo)
-                qreal candidates[3] = { scaleW, scaleH, currentScale };
-                qreal bestCandidate = currentScale;
-                qreal bestErr = std::numeric_limits<qreal>::max();
-                auto cornerErrorForScale = [&](qreal s){
-                    // Recompute moving corner with hypothetical scale s
-                    qreal newWidth = s * baseSize.width();
-                    qreal newHeight = s * baseSize.height();
-                    QPointF newMoving;
-                    if (fixedIsTopLeft) newMoving = QPointF(mediaTopLeft.x() + newWidth, mediaTopLeft.y() + newHeight);
-                    else if (fixedIsTopRight) newMoving = QPointF(mediaTopLeft.x(), mediaTopLeft.y() + newHeight);
-                    else if (fixedIsBottomLeft) newMoving = QPointF(mediaTopLeft.x() + newWidth, mediaTopLeft.y());
-                    else /* fixedIsBottomRight */ newMoving = QPointF(mediaTopLeft.x(), mediaTopLeft.y());
-                    return std::hypot(newMoving.x() - sc.x(), newMoving.y() - sc.y());
-                };
-                for (qreal c : candidates) {
-                    if (c <= 0.05 || c >= 100.0) continue;
-                    qreal err = cornerErrorForScale(c);
-                    if (err < bestErr) { bestErr = err; bestCandidate = c; }
-                }
-                // If scales are close, use their average to reduce jitter
-                if (std::abs(scaleW - scaleH) / std::max(0.0001, std::max(scaleW, scaleH)) < 0.05) {
-                    qreal avg = (scaleW + scaleH) * 0.5;
-                    qreal errAvg = cornerErrorForScale(avg);
-                    if (errAvg <= bestErr) { bestErr = errAvg; bestCandidate = avg; }
-                }
-                // Track best candidate even if error not yet below threshold
-                if (bestErr < bestCornerErr) {
-                    bestCornerErr = bestErr;
-                    bestCornerScale = std::clamp<qreal>(bestCandidate, 0.05, 100.0);
-                    bestCornerTarget = sc;
-                }
-                if (bestErr < cornerSnapDistanceScene) {
-                    // Perfect enough: set result and return
-                    result.scale = bestCornerScale;
-                    result.cornerSnapped = true;
-                    result.snappedMovingCornerScene = bestCornerTarget;
-                    return result;
-                }
-                // If we didn't get below error threshold, still suppress edge snapping while in corner zone; we'll return best later
-            }
-        }
-        // If in any corner zone for this screen rect and no perfect candidate yet, finalize with best candidate
-        if (inCornerZone) {
-            result.scale = bestCornerScale;
-            result.cornerSnapped = true;
-            result.snappedMovingCornerScene = bestCornerTarget;
-            return result;
-        }
+    auto recomputeMovingCornerForScale = [&](qreal s) -> QPointF {
+        qreal w = s * baseSize.width();
+        qreal h = s * baseSize.height();
+        QPointF tl = fixedScenePoint - s * fixedItemPoint; // new top-left
+        if (fixedIsTopLeft) return QPointF(tl.x() + w, tl.y() + h);
+        if (fixedIsTopRight) return QPointF(tl.x(), tl.y() + h);
+        if (fixedIsBottomLeft) return QPointF(tl.x() + w, tl.y());
+        return tl; // fixedIsBottomRight
+    };
 
-        // Edge snapping only if no corner snap
-    if (movingRight) {
-            const qreal distToScreenRight = std::abs(mediaRight - screenRect.right());
-            if (distToScreenRight < snapDistanceScene) {
-                const qreal targetWidth = screenRect.right() - mediaLeft;
-                const qreal targetScale = targetWidth / baseSize.width();
-                if (targetScale > 0.05 && targetScale < 100.0) { result.scale = std::clamp<qreal>(targetScale, 0.05, 100.0); return result; }
-            }
+    // 1. Corner snapping across screens and other media (precedence)
+    struct CornerCandidate { qreal err; qreal scale; QPointF target; };
+    CornerCandidate bestCorner { std::numeric_limits<qreal>::max(), currentScale, QPointF() };
+
+    auto considerCornerTarget = [&](const QPointF& sc){
+        const QPointF mc = movingCornerPoint;
+        const qreal dx = std::abs(mc.x() - sc.x());
+        const qreal dy = std::abs(mc.y() - sc.y());
+        if (dx >= cornerSnapDistanceScene || dy >= cornerSnapDistanceScene) return; // outside corner zone
+        // Derive potential target width/height given which corner is moving
+        qreal targetWidth = mediaWidth;
+        qreal targetHeight = mediaHeight;
+        const qreal mediaLeft = mediaTopLeft.x();
+        const qreal mediaRight = mediaTopLeft.x() + mediaWidth;
+        const qreal mediaTop = mediaTopLeft.y();
+        const qreal mediaBottom = mediaTopLeft.y() + mediaHeight;
+        if (fixedIsTopLeft) { targetWidth = sc.x() - mediaLeft; targetHeight = sc.y() - mediaTop; }
+        else if (fixedIsTopRight) { targetWidth = mediaRight - sc.x(); targetHeight = sc.y() - mediaTop; }
+        else if (fixedIsBottomLeft) { targetWidth = sc.x() - mediaLeft; targetHeight = mediaBottom - sc.y(); }
+        else { targetWidth = mediaRight - sc.x(); targetHeight = mediaBottom - sc.y(); }
+        if (targetWidth <= 0 || targetHeight <= 0) return;
+        const qreal scaleW = targetWidth / baseSize.width();
+        const qreal scaleH = targetHeight / baseSize.height();
+        qreal candidates[3] = { scaleW, scaleH, currentScale };
+        qreal bestC = currentScale;
+        qreal bestErr = std::numeric_limits<qreal>::max();
+        auto errorFor = [&](qreal s){ QPointF mcs = recomputeMovingCornerForScale(s); return std::hypot(mcs.x() - sc.x(), mcs.y() - sc.y()); };
+        for (qreal c : candidates) { if (c <= 0.05 || c >= 100.0) continue; qreal e = errorFor(c); if (e < bestErr) { bestErr = e; bestC = c; } }
+        if (std::abs(scaleW - scaleH) / std::max(0.0001, std::max(scaleW, scaleH)) < 0.05) {
+            qreal avg = (scaleW + scaleH) * 0.5; qreal eAvg = errorFor(avg); if (eAvg < bestErr) { bestErr = eAvg; bestC = avg; }
         }
-    if (movingDown) {
-            const qreal distToScreenBottom = std::abs(mediaBottom - screenRect.bottom());
-            if (distToScreenBottom < snapDistanceScene) {
-                const qreal targetHeight = screenRect.bottom() - mediaTop;
-                const qreal targetScale = targetHeight / baseSize.height();
-                if (targetScale > 0.05 && targetScale < 100.0) { result.scale = std::clamp<qreal>(targetScale, 0.05, 100.0); return result; }
-            }
+        if (bestErr < bestCorner.err) {
+            bestCorner.err = bestErr;
+            bestCorner.scale = std::clamp<qreal>(bestC, 0.05, 100.0);
+            bestCorner.target = sc;
         }
-    if (movingLeft) {
-            const qreal distToScreenLeft = std::abs(mediaLeft - screenRect.left());
-            if (distToScreenLeft < snapDistanceScene) {
-                const qreal targetWidth = (mediaLeft + mediaWidth) - screenRect.left();
-                const qreal targetScale = targetWidth / baseSize.width();
-                if (targetScale > 0.05 && targetScale < 100.0) { result.scale = std::clamp<qreal>(targetScale, 0.05, 100.0); return result; }
-            }
-        }
-    if (movingUp) {
-            const qreal distToScreenTop = std::abs(mediaTop - screenRect.top());
-            if (distToScreenTop < snapDistanceScene) {
-                const qreal targetHeight = (mediaTop + mediaHeight) - screenRect.top();
-                const qreal targetScale = targetHeight / baseSize.height();
-                if (targetScale > 0.05 && targetScale < 100.0) { result.scale = std::clamp<qreal>(targetScale, 0.05, 100.0); return result; }
-            }
+    };
+
+    // Screen corners
+    for (const QRectF& sr : screenRects) {
+        considerCornerTarget(sr.topLeft());
+        considerCornerTarget(sr.topRight());
+        considerCornerTarget(sr.bottomLeft());
+        considerCornerTarget(sr.bottomRight());
+    }
+    // Media corners (other items)
+    if (m_scene) {
+        for (QGraphicsItem* gi : m_scene->items()) {
+            auto* other = dynamic_cast<ResizableMediaBase*>(gi);
+            if (!other || other == movingItem) continue;
+            QRectF r = other->sceneBoundingRect();
+            considerCornerTarget(r.topLeft());
+            considerCornerTarget(r.topRight());
+            considerCornerTarget(r.bottomLeft());
+            considerCornerTarget(r.bottomRight());
         }
     }
-    result.scale = std::clamp<qreal>(result.scale, 0.05, 100.0);
+    if (bestCorner.err < std::numeric_limits<qreal>::max()) {
+        // Only treat as a corner snap if error is sufficiently small relative to corner zone.
+        const qreal cornerAcceptThreshold = cornerSnapDistanceScene * 0.65; // 65% of zone radius
+        if (bestCorner.err <= cornerAcceptThreshold) {
+            result.scale = bestCorner.scale;
+            result.cornerSnapped = true;
+            result.snappedMovingCornerScene = bestCorner.target;
+            return result;
+        }
+        // Otherwise do NOT early-return; allow edge snapping to compete.
+    }
+
+    // 2. Edge snapping (only if no corner snap) – evaluate against screens then other media; choose closest scale delta.
+    struct EdgeCandidate { qreal dist; qreal scale; };
+    EdgeCandidate bestEdge { std::numeric_limits<qreal>::max(), currentScale };
+
+    auto considerEdgeWidth = [&](qreal targetWidth){ if (targetWidth <= 0) return; qreal s = targetWidth / baseSize.width(); if (s <= 0.05 || s >= 100.0) return; qreal d = std::abs(s - currentScale); if (d < bestEdge.dist) { bestEdge = { d, s }; } };
+    auto considerEdgeHeight = [&](qreal targetHeight){ if (targetHeight <= 0) return; qreal s = targetHeight / baseSize.height(); if (s <= 0.05 || s >= 100.0) return; qreal d = std::abs(s - currentScale); if (d < bestEdge.dist) { bestEdge = { d, s }; } };
+
+    const qreal mediaLeft = mediaTopLeft.x();
+    const qreal mediaRight = mediaTopLeft.x() + mediaWidth;
+    const qreal mediaTop = mediaTopLeft.y();
+    const qreal mediaBottom = mediaTopLeft.y() + mediaHeight;
+
+    auto testRectEdges = [&](const QRectF& r){
+        // Horizontal moving edges (include adjacency: right->left / left->right)
+        if (movingRight) {
+            qreal distSame = std::abs(mediaRight - r.right());
+            if (distSame < snapDistanceScene) considerEdgeWidth(r.right() - mediaLeft); // right-right
+            qreal distAdj = std::abs(mediaRight - r.left());
+            if (distAdj < snapDistanceScene) considerEdgeWidth(r.left() - mediaLeft);  // right-left adjacency
+        }
+        if (movingLeft) {
+            qreal distSame = std::abs(mediaLeft - r.left());
+            if (distSame < snapDistanceScene) considerEdgeWidth(mediaRight - r.left()); // left-left
+            qreal distAdj = std::abs(mediaLeft - r.right());
+            if (distAdj < snapDistanceScene) considerEdgeWidth(mediaRight - r.right()); // left-right adjacency
+        }
+        // Vertical moving edges (include adjacency: bottom->top / top->bottom)
+        if (movingDown) {
+            qreal distSame = std::abs(mediaBottom - r.bottom());
+            if (distSame < snapDistanceScene) considerEdgeHeight(r.bottom() - mediaTop); // bottom-bottom
+            qreal distAdj = std::abs(mediaBottom - r.top());
+            if (distAdj < snapDistanceScene) considerEdgeHeight(r.top() - mediaTop);    // bottom-top adjacency
+        }
+        if (movingUp) {
+            qreal distSame = std::abs(mediaTop - r.top());
+            if (distSame < snapDistanceScene) considerEdgeHeight(mediaBottom - r.top()); // top-top
+            qreal distAdj = std::abs(mediaTop - r.bottom());
+            if (distAdj < snapDistanceScene) considerEdgeHeight(mediaBottom - r.bottom()); // top-bottom adjacency
+        }
+    };
+
+    for (const QRectF& sr : screenRects) testRectEdges(sr);
+    if (m_scene) {
+        for (QGraphicsItem* gi : m_scene->items()) {
+            auto* other = dynamic_cast<ResizableMediaBase*>(gi);
+            if (!other || other == movingItem) continue;
+            testRectEdges(other->sceneBoundingRect());
+        }
+    }
+
+    if (bestEdge.dist < std::numeric_limits<qreal>::max()) {
+        result.scale = std::clamp<qreal>(bestEdge.scale, 0.05, 100.0);
+    }
     return result;
 }
 

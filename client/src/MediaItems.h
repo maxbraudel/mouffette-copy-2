@@ -84,15 +84,15 @@ public:
     static double sceneGridUnit();
     
     // Snap-to-screen integration (set by ScreenCanvas)
-    static void setScreenSnapCallback(std::function<QPointF(const QPointF&, const QRectF&, bool)> callback);
-    static std::function<QPointF(const QPointF&, const QRectF&, bool)> screenSnapCallback();
+    static void setScreenSnapCallback(std::function<QPointF(const QPointF&, const QRectF&, bool, ResizableMediaBase*)> callback);
+    static std::function<QPointF(const QPointF&, const QRectF&, bool, ResizableMediaBase*)> screenSnapCallback();
     struct ResizeSnapFeedback {
         qreal scale;    // resulting scale
         bool cornerSnapped; // true if a corner snap happened (implies we may need translation)
         QPointF snappedMovingCornerScene; // desired scene position of moving corner when snapped
     };
-    static void setResizeSnapCallback(std::function<ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool)> callback);
-    static std::function<ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool)> resizeSnapCallback();
+    static void setResizeSnapCallback(std::function<ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool, ResizableMediaBase*)> callback);
+    static std::function<ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool, ResizableMediaBase*)> resizeSnapCallback();
 
     // Access to top overlay panel (filename + utility buttons).
     OverlayPanel* topPanel() const { return m_topPanel.get(); }
@@ -176,8 +176,8 @@ private:
     UploadState m_uploadState = UploadState::NotUploaded;
     int m_uploadProgress = 0;
     static double s_sceneGridUnit;
-    static std::function<QPointF(const QPointF&, const QRectF&, bool)> s_screenSnapCallback;
-    static std::function<ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool)> s_resizeSnapCallback;
+    static std::function<QPointF(const QPointF&, const QRectF&, bool, ResizableMediaBase*)> s_screenSnapCallback;
+    static std::function<ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool, ResizableMediaBase*)> s_resizeSnapCallback;
     static inline double snapToGrid(double v) { const double u = (s_sceneGridUnit > 1e-9 ? s_sceneGridUnit : 1.0); return std::round(v / u) * u; }
     static inline QPointF snapPointToGrid(const QPointF& p) { return QPointF(snapToGrid(p.x()), snapToGrid(p.y())); }
 protected:
