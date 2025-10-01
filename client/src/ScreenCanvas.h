@@ -280,7 +280,6 @@ protected:
     QVector<QLineF> m_lastSnapIndicatorLines;             // cached logical lines (scene space)
     void updateSnapIndicators(const QVector<QLineF>& lines);
     void clearSnapIndicators();
-    void rebuildSnapIndicatorsForZoom(); // no-op now (kept for compatibility)
     void keyReleaseEvent(QKeyEvent* event) override; // clear indicators when Shift released
 };
 

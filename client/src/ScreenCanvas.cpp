@@ -2262,7 +2262,6 @@ void ScreenCanvas::wheelEvent(QWheelEvent* event) {
             relayoutAllMediaOverlays(m_scene);
             layoutInfoOverlay();
             updateSelectionChrome();
-            rebuildSnapIndicatorsForZoom();
             event->accept();
             return;
         }
@@ -3058,10 +3057,6 @@ void ScreenCanvas::updateSnapIndicators(const QVector<QLineF>& lines) {
     if (viewport()) viewport()->update();
 }
 
-void ScreenCanvas::rebuildSnapIndicatorsForZoom() {
-    // Nothing needed now; drawForeground uses view mapping each frame.
-    if (!m_lastSnapIndicatorLines.isEmpty() && viewport()) viewport()->update();
-}
 
 // Explicit override to avoid undefined symbol errors when vtable expects a ScreenCanvas-specific entry.
 // Currently we just delegate to base implementation because all snap indicators are separate QGraphicsItems.

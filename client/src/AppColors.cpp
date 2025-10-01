@@ -101,8 +101,8 @@ QColor gSystemTaskbarColor = QColor(0, 0, 0, 80);      // Default opaque black f
 // SNAP INDICATOR CONFIG
 // ============================================================================
 QColor gSnapIndicatorColor = QColor(209, 0, 136);     // Snap guide color
-qreal  gSnapIndicatorLineThickness = 2.0;              // Stroke thickness (cosmetic pixels)
-qreal  gSnapIndicatorDashGap = 20.0;                    // Gap (pixels) between dash segments
+qreal  gSnapIndicatorLineThickness = 1.5;              // Stroke thickness (cosmetic pixels)
+qreal  gSnapIndicatorDashGap = 5.0;                    // Gap (pixels) between dash segments
 
 // ============================================================================
 // INITIALIZATION
