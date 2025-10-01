@@ -1,104 +1,81 @@
+// (Snap indicator drawing migrated to dedicated SnapGuideItem.)
+
+// Re-introduced required includes after accidental removal in previous refactor.
 #include "ScreenCanvas.h"
-#include "MediaItems.h"
-#include "OverlayPanels.h"
-#include "Theme.h"
 #include "AppColors.h"
-#include <algorithm>
+#include "MediaItems.h"
 #include <QGraphicsScene>
+#include <QGraphicsSceneMouseEvent>
+#include <QGraphicsSceneHoverEvent>
+#include <QGraphicsPixmapItem>
 #include <QGraphicsProxyWidget>
-#include <QPushButton>
-#include <QHBoxLayout>
-#include <QTimer>
+#include <QGraphicsTextItem>
+#include <QApplication>
+#include <QClipboard>
 #include <QMimeData>
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
 #include <QDragLeaveEvent>
 #include <QDropEvent>
+#include <QScrollBar>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QProgressBar>
+#include <QVariantAnimation>
+#include <QPainter>
+#include <QStyleOptionGraphicsItem>
+#include <QTimer>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QWheelEvent>
-#include <QScrollBar>
-#include <QScrollArea>
-#include <QGestureEvent>
-#include <QPinchGesture>
-#include <QNativeGestureEvent>
 #include <QFileInfo>
-#include <QVariantAnimation>
-#include <QVideoSink>
-#include <QMediaPlayer>
-#include <QAudioOutput>
+#include <QDir>
+#include <QDebug>
 #include <QGuiApplication>
 #include <QScreen>
 #include <QStyleHints>
 #include <QCursor>
-#include <QGraphicsPixmapItem>
-#include <QCoreApplication>
-#include <QtMath>
 #include <QRandomGenerator>
-#include <QJsonObject>
-#include <QPainter>
 #include <QBuffer>
-#include <QWidget>
-#include <QVBoxLayout>
-#include <QLabel>
+#include <QJsonObject>
+#include <QJsonDocument>
+#include <QJsonArray>
 #include <QImageReader>
 #include <QSizePolicy>
-#include <QProgressBar>
+#include <QMediaPlayer>
+#include <QAudioOutput>
+#include <QVideoSink>
+#include <QRegion>
 #include <cmath>
+#include <algorithm>
+#include <limits>
 
-// A container that properly clips child widgets to its rounded shape
+// NOTE: Any remaining includes needed by later code will be added as they surface during build.
+
+// Forward declare SnapGuideItem (full definition just below) and provide a lightweight local ClippedContainer
+class SnapGuideItem;
 class ClippedContainer : public QWidget {
 public:
-    ClippedContainer(QWidget* parent = nullptr) : QWidget(parent) {}
-
+    using QWidget::QWidget;
 protected:
-    void showEvent(QShowEvent* event) override {
-        QWidget::showEvent(event);
-        updateMaskIfNeeded();
-    }
-
-    void resizeEvent(QResizeEvent* event) override {
-        QWidget::resizeEvent(event);
-        updateMaskIfNeeded();
-    }
-
-private:
-    QSize m_lastMaskSize;  // Cache last size to avoid unnecessary recalculation
-    
-    void updateMaskIfNeeded() {
-        const QSize currentSize = size();
-        // Skip if size hasn't changed (common during theme switches, etc.)
-        if (currentSize == m_lastMaskSize && !mask().isEmpty()) return;
-        
-        // Ensure we have a valid size
-        if (currentSize.width() <= 0 || currentSize.height() <= 0) return;
-        
-        // Cache the size
-        m_lastMaskSize = currentSize;
-        
-        // Use overlay corner radius instead of dynamic box radius
-        const int radius = qMax(0, qMin(gOverlayCornerRadiusPx, qMin(currentSize.width(), currentSize.height()) / 2));
-        const QRect r(0, 0, currentSize.width(), currentSize.height());
-        
-        // Create rounded region more efficiently using ellipse corners
-        QRegion region(r);
-        if (radius > 0) {
-            // Subtract corner rectangles and add back rounded corners
-            const int d = radius * 2;
-            region -= QRegion(0, 0, radius, radius);                           // top-left corner
-            region -= QRegion(r.width() - radius, 0, radius, radius);         // top-right corner  
-            region -= QRegion(0, r.height() - radius, radius, radius);        // bottom-left corner
-            region -= QRegion(r.width() - radius, r.height() - radius, radius, radius); // bottom-right corner
-            
-            region += QRegion(0, 0, d, d, QRegion::Ellipse);                           // top-left rounded
-            region += QRegion(r.width() - d, 0, d, d, QRegion::Ellipse);               // top-right rounded
-            region += QRegion(0, r.height() - d, d, d, QRegion::Ellipse);              // bottom-left rounded  
-            region += QRegion(r.width() - d, r.height() - d, d, d, QRegion::Ellipse);  // bottom-right rounded
-        }
-        
-        setMask(region);
+    void resizeEvent(QResizeEvent* e) override {
+        QWidget::resizeEvent(e);
+        setMask(QRegion(rect()));
     }
 };
+
+void ScreenCanvas::drawBackground(QPainter* painter, const QRectF& rect) {
+    QGraphicsView::drawBackground(painter, rect);
+}
+
+void ScreenCanvas::drawForeground(QPainter* painter, const QRectF& rect) {
+    QGraphicsView::drawForeground(painter, rect);
+}
+
+// (Removed heavy MainWindow include; using local ClippedContainer definition above.)
 
 // Configuration constants
 static const int gMediaListItemSpacing = 3; // Spacing between media list items (name, status, details)
@@ -131,6 +108,103 @@ static ResizableMediaBase* toMedia(QGraphicsItem* x) {
     while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); }
     return nullptr;
 }
+}
+
+// Dedicated item to render snap guides between scene content and overlays.
+class SnapGuideItem : public QGraphicsItem {
+public:
+    explicit SnapGuideItem(ScreenCanvas* view) : m_view(view) {
+        setZValue(11999.0); // overlays at 12000+
+        setAcceptedMouseButtons(Qt::NoButton);
+        setFlag(QGraphicsItem::ItemIsSelectable, false);
+        setFlag(QGraphicsItem::ItemIsMovable, false);
+    }
+    QRectF boundingRect() const override {
+        if (m_lines.isEmpty()) return QRectF();
+        qreal minX=std::numeric_limits<qreal>::max();
+        qreal minY=std::numeric_limits<qreal>::max();
+        qreal maxX=std::numeric_limits<qreal>::lowest();
+        qreal maxY=std::numeric_limits<qreal>::lowest();
+        for (const QLineF& l : m_lines) {
+            minX = std::min({minX, l.x1(), l.x2()});
+            minY = std::min({minY, l.y1(), l.y2()});
+            maxX = std::max({maxX, l.x1(), l.x2()});
+            maxY = std::max({maxY, l.y1(), l.y2()});
+        }
+        return QRectF(QPointF(minX, minY), QPointF(maxX, maxY)).adjusted(-2,-2,2,2);
+    }
+    void setLines(const QVector<QLineF>& lines) { prepareGeometryChange(); m_lines = lines; }
+    void clearLines() { if (m_lines.isEmpty()) return; prepareGeometryChange(); m_lines.clear(); }
+    void paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget*) override {
+        if (!m_view || m_lines.isEmpty()) return;
+        painter->save();
+        // Pixel invariant: draw in viewport pixels
+        QGraphicsView* gv = m_view;
+        const QTransform sceneToViewport = gv->viewportTransform();
+        painter->resetTransform();
+        qreal thickness = std::max<qreal>(0.1, AppColors::gSnapIndicatorLineThickness);
+        qreal gapPx = std::max<qreal>(1.0, AppColors::gSnapIndicatorDashGap);
+        qreal dashLenPx = std::clamp(gapPx * 0.9, thickness * 2.0, gapPx * 2.5);
+        qreal period = dashLenPx + gapPx;
+        QPen pen(AppColors::gSnapIndicatorColor);
+        pen.setWidthF(thickness);
+        pen.setCapStyle(Qt::FlatCap);
+        painter->setPen(pen);
+        auto alignCoord = [&](qreal v){
+            if (std::fabs(std::round(thickness) - thickness) < 0.01 && (static_cast<int>(std::round(thickness)) % 2 == 1)) {
+                return std::floor(v) + 0.5;
+            }
+            return v;
+        };
+        for (const QLineF& sl : m_lines) {
+            QPointF v1 = sceneToViewport.map(sl.p1());
+            QPointF v2 = sceneToViewport.map(sl.p2());
+            qreal dx = v2.x() - v1.x();
+            qreal dy = v2.y() - v1.y();
+            qreal length = std::hypot(dx, dy);
+            if (length < 0.5) continue;
+            bool vertical = std::fabs(dx) < std::fabs(dy);
+            if (vertical) {
+                if (v2.y() < v1.y()) std::swap(v1, v2);
+                qreal x = alignCoord(v1.x());
+                qreal yStart = v1.y();
+                qreal yEnd   = v2.y();
+                qreal phaseBase = std::floor(yStart / period) * period;
+                for (qreal y = phaseBase; y < yEnd; y += period) {
+                    qreal segA = std::max(y, yStart);
+                    qreal segB = std::min(y + dashLenPx, yEnd);
+                    if (segB - segA > 0.2) painter->drawLine(QPointF(x, segA), QPointF(x, segB));
+                }
+            } else {
+                if (v2.x() < v1.x()) std::swap(v1, v2);
+                qreal y = alignCoord(v1.y());
+                qreal xStart = v1.x();
+                qreal xEnd   = v2.x();
+                qreal phaseBase = std::floor(xStart / period) * period;
+                for (qreal x = phaseBase; x < xEnd; x += period) {
+                    qreal segA = std::max(x, xStart);
+                    qreal segB = std::min(x + dashLenPx, xEnd);
+                    if (segB - segA > 0.2) painter->drawLine(QPointF(segA, y), QPointF(segB, y));
+                }
+            }
+        }
+        painter->restore();
+    }
+private:
+    ScreenCanvas* m_view = nullptr;
+    QVector<QLineF> m_lines;
+};
+
+// --- Snap indicator API (now that SnapGuideItem is defined) ---
+void ScreenCanvas::clearSnapIndicators() {
+    m_lastSnapIndicatorLines.clear();
+    if (m_snapGuides) { m_snapGuides->clearLines(); m_snapGuides->update(); }
+}
+
+void ScreenCanvas::updateSnapIndicators(const QVector<QLineF>& lines) {
+    if (!m_scene) return;
+    m_lastSnapIndicatorLines = lines;
+    if (m_snapGuides) { m_snapGuides->setLines(lines); m_snapGuides->update(); }
 }
 
 ScreenCanvas::~ScreenCanvas() {
@@ -859,6 +933,10 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     m_nativePinchGuardTimer->setInterval(180); // short guard after last native pinch
     m_nativePinchGuardTimer->setSingleShot(true);
     connect(m_nativePinchGuardTimer, &QTimer::timeout, this, [this]() { m_nativePinchActive = false; });
+
+    // Create snap guide item (between media and overlays)
+    m_snapGuides = new SnapGuideItem(this);
+    m_scene->addItem(m_snapGuides);
 
     // On scene changes, re-anchor, refresh overlay on media count change, and keep selection chrome in sync
     connect(m_scene, &QGraphicsScene::changed, this, [this](const QList<QRectF>&){ layoutInfoOverlay(); maybeRefreshInfoOverlayOnSceneChanged(); updateSelectionChrome(); });
@@ -3045,75 +3123,4 @@ void ScreenCanvas::updateLaunchSceneButtonStyle() {
     m_launchSceneButton->setFixedHeight(40);
 }
 
-// --- Snap Indicator Helpers ---
-void ScreenCanvas::clearSnapIndicators() {
-    m_lastSnapIndicatorLines.clear();
-    if (viewport()) viewport()->update();
-}
-
-void ScreenCanvas::updateSnapIndicators(const QVector<QLineF>& lines) {
-    if (!m_scene) return;
-    m_lastSnapIndicatorLines = lines;
-    if (viewport()) viewport()->update();
-}
-
-
-// Explicit override to avoid undefined symbol errors when vtable expects a ScreenCanvas-specific entry.
-// Currently we just delegate to base implementation because all snap indicators are separate QGraphicsItems.
-void ScreenCanvas::drawForeground(QPainter* painter, const QRectF& rect) {
-    QGraphicsView::drawForeground(painter, rect);
-    if (m_lastSnapIndicatorLines.isEmpty()) return;
-    painter->save();
-    // We want pixel-invariant drawing: reset transform so coordinates are in viewport pixels
-    painter->resetTransform();
-    qreal thickness = std::max<qreal>(0.1, AppColors::gSnapIndicatorLineThickness);
-    qreal gapPx = std::max<qreal>(1.0, AppColors::gSnapIndicatorDashGap);
-    qreal dashLenPx = std::clamp(gapPx * 0.9, thickness * 2.0, gapPx * 2.5);
-    qreal period = dashLenPx + gapPx;
-    QPen pen(AppColors::gSnapIndicatorColor);
-    pen.setWidthF(thickness);
-    pen.setCapStyle(Qt::FlatCap);
-    painter->setPen(pen);
-    // Pixel alignment (for crisp 1px lines) – center on half-pixel if thickness is odd integer-ish
-    auto alignCoord = [&](qreal v){
-        if (std::fabs(std::round(thickness) - thickness) < 0.01 && (static_cast<int>(std::round(thickness)) % 2 == 1)) {
-            return std::floor(v) + 0.5; // center stroke
-        }
-        return v; // leave as-is
-    };
-    for (const QLineF& sl : m_lastSnapIndicatorLines) {
-        // Map scene endpoints to viewport coordinates
-        QPointF v1 = mapFromScene(sl.p1());
-        QPointF v2 = mapFromScene(sl.p2());
-        qreal dx = v2.x() - v1.x();
-        qreal dy = v2.y() - v1.y();
-        qreal length = std::hypot(dx, dy);
-        if (length < 0.5) continue;
-        bool vertical = std::fabs(dx) < std::fabs(dy);
-        if (vertical) {
-            if (v2.y() < v1.y()) std::swap(v1, v2);
-            qreal x = alignCoord(v1.x());
-            qreal yStart = v1.y();
-            qreal yEnd   = v2.y();
-            // Anchor phase to global pixel grid to avoid sliding during zoom (stable modulo period)
-            qreal phaseBase = std::floor(yStart / period) * period;
-            for (qreal y = phaseBase; y < yEnd; y += period) {
-                qreal segA = std::max(y, yStart);
-                qreal segB = std::min(y + dashLenPx, yEnd);
-                if (segB - segA > 0.2) painter->drawLine(QPointF(x, segA), QPointF(x, segB));
-            }
-        } else {
-            if (v2.x() < v1.x()) std::swap(v1, v2);
-            qreal y = alignCoord(v1.y());
-            qreal xStart = v1.x();
-            qreal xEnd   = v2.x();
-            qreal phaseBase = std::floor(xStart / period) * period;
-            for (qreal x = phaseBase; x < xEnd; x += period) {
-                qreal segA = std::max(x, xStart);
-                qreal segB = std::min(x + dashLenPx, xEnd);
-                if (segB - segA > 0.2) painter->drawLine(QPointF(segA, y), QPointF(segB, y));
-            }
-        }
-    }
-    painter->restore();
-}
+// (Removed legacy duplicate snap indicator drawing functions; SnapGuideItem now handles rendering.)

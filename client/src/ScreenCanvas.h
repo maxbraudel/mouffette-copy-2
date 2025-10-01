@@ -108,7 +108,8 @@ protected:
     void dragMoveEvent(QDragMoveEvent* event) override;
     void dragLeaveEvent(QDragLeaveEvent* event) override;
     void dropEvent(QDropEvent* event) override;
-    void drawForeground(QPainter* painter, const QRectF& rect) override; // ensure symbol defined (even if pass-through)
+    void drawForeground(QPainter* painter, const QRectF& rect) override; // may be used for future overlay-specific painting
+    void drawBackground(QPainter* painter, const QRectF& rect) override; // snap indicators drawn here (below overlays)
 
 private:
     bool gestureEvent(QGestureEvent* event);
@@ -281,6 +282,8 @@ protected:
     void updateSnapIndicators(const QVector<QLineF>& lines);
     void clearSnapIndicators();
     void keyReleaseEvent(QKeyEvent* event) override; // clear indicators when Shift released
+    // Snap guides item (renders between scene content and overlay panels)
+    class SnapGuideItem* m_snapGuides = nullptr;
 };
 
 #endif // SCREENCANVAS_H
