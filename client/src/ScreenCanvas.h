@@ -150,7 +150,7 @@ private:
         bool cornerSnapped {false};
         QPointF snappedMovingCornerScene; // valid if cornerSnapped
     };
-    ResizeSnapResult snapResizeToScreenBorders(qreal currentScale, const QPointF& fixedCorner, const QPointF& fixedItemPoint, const QSize& baseSize, bool shiftPressed, ResizableMediaBase::Handle activeHandle = ResizableMediaBase::None) const;
+    ResizeSnapResult snapResizeToScreenBorders(qreal currentScale, const QPointF& fixedCorner, const QPointF& fixedItemPoint, const QSize& baseSize, bool shiftPressed) const;
     QList<QRectF> getScreenBorderRects() const;
 
     QGraphicsScene* m_scene = nullptr;

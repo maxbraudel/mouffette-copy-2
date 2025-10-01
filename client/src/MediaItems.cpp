@@ -38,7 +38,7 @@ int ResizableMediaBase::cornerRadiusOfMediaOverlays = 6;
 
 double ResizableMediaBase::s_sceneGridUnit = 1.0; // default: 1 scene unit == 1 pixel
 std::function<QPointF(const QPointF&, const QRectF&, bool)> ResizableMediaBase::s_screenSnapCallback;
-std::function<ResizableMediaBase::ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool, ResizableMediaBase::Handle)> ResizableMediaBase::s_resizeSnapCallback;
+std::function<ResizableMediaBase::ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool)> ResizableMediaBase::s_resizeSnapCallback;
 std::function<void()> ResizableMediaBase::s_uploadChangedNotifier = nullptr;
 std::function<void(ResizableMediaBase*)> ResizableMediaBase::s_fileErrorNotifier = nullptr;
 
@@ -63,11 +63,11 @@ std::function<QPointF(const QPointF&, const QRectF&, bool)> ResizableMediaBase::
     return s_screenSnapCallback;
 }
 
-void ResizableMediaBase::setResizeSnapCallback(std::function<ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool, Handle)> callback) {
+void ResizableMediaBase::setResizeSnapCallback(std::function<ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool)> callback) {
     s_resizeSnapCallback = callback;
 }
 
-std::function<ResizableMediaBase::ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool, ResizableMediaBase::Handle)> ResizableMediaBase::resizeSnapCallback() {
+std::function<ResizableMediaBase::ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool)> ResizableMediaBase::resizeSnapCallback() {
     return s_resizeSnapCallback;
 }
 
@@ -316,7 +316,7 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
             newScale = std::clamp<qreal>(newScale, 0.05, 100.0);
             qreal finalScale = newScale;
             if (s_resizeSnapCallback && QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier)) {
-                auto feedback = s_resizeSnapCallback(newScale, m_fixedScenePoint, m_fixedItemPoint, m_baseSize, true, m_activeHandle);
+                auto feedback = s_resizeSnapCallback(newScale, m_fixedScenePoint, m_fixedItemPoint, m_baseSize, true);
                 finalScale = feedback.scale;
                 cornerSnapped = feedback.cornerSnapped;
                 desiredMovingCornerScene = feedback.snappedMovingCornerScene;

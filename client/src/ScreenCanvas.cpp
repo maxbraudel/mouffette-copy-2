@@ -868,8 +868,8 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     ResizableMediaBase::setScreenSnapCallback([this](const QPointF& pos, const QRectF& bounds, bool shift) {
         return snapToScreenBorders(pos, bounds, shift);
     });
-    ResizableMediaBase::setResizeSnapCallback([this](qreal scale, const QPointF& fixed, const QPointF& moving, const QSize& base, bool shift, ResizableMediaBase::Handle h) {
-        auto r = snapResizeToScreenBorders(scale, fixed, moving, base, shift, h);
+    ResizableMediaBase::setResizeSnapCallback([this](qreal scale, const QPointF& fixed, const QPointF& moving, const QSize& base, bool shift) {
+        auto r = snapResizeToScreenBorders(scale, fixed, moving, base, shift);
         return ResizableMediaBase::ResizeSnapFeedback{ r.scale, r.cornerSnapped, r.snappedMovingCornerScene };
     });
 
@@ -2413,7 +2413,7 @@ QPointF ScreenCanvas::snapToScreenBorders(const QPointF& scenePos, const QRectF&
     return snappedPos;
 }
 
-ScreenCanvas::ResizeSnapResult ScreenCanvas::snapResizeToScreenBorders(qreal currentScale, const QPointF& fixedScenePoint, const QPointF& fixedItemPoint, const QSize& baseSize, bool shiftPressed, ResizableMediaBase::Handle activeHandle) const {
+ScreenCanvas::ResizeSnapResult ScreenCanvas::snapResizeToScreenBorders(qreal currentScale, const QPointF& fixedScenePoint, const QPointF& fixedItemPoint, const QSize& baseSize, bool shiftPressed) const {
     ResizeSnapResult result; result.scale = currentScale; result.cornerSnapped = false;
     if (!shiftPressed) return result;
     const QList<QRectF> screenRects = getScreenBorderRects();
