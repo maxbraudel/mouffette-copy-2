@@ -979,12 +979,57 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
     }
 
     if (cornerCaptured) {
-        // Show two orthogonal snap lines through snapped corner
+        // Re-evaluate after applying the corner snap to detect additional aligned corners (e.g. both top & bottom).
+        QPointF finalPos = bestPos;
+        QRectF finalRect(finalPos, movingRect.size());
+        auto finalCorners = rectCorners(finalRect);
+
+        // Collect all target corner y's that align with any moving corner at the same snapped x (or vice versa) and within tolerance.
+        QVector<qreal> matchedYs;
+        auto addYUnique = [&](qreal y){ for (qreal yy : matchedYs) if (std::abs(yy - y) < 0.5) return; matchedYs.append(y); };
+
+        // Tolerance for considering a corner aligned (reuse cornerSnapDistanceScene but narrower for secondary detection)
+        const qreal tol = cornerSnapDistanceScene * 0.5;
+
+        auto considerTargetCorners = [&](const QVector<QPointF>& targets){
+            for (const QPointF& tc : targets) {
+                // Only interested in targets sharing X with snappedVerticalLineX (edge alignment) or exactly matching one moving corner.
+                if (std::abs(tc.x() - snappedVerticalLineX) > tol) continue;
+                for (const QPointF& mc : finalCorners) {
+                    qreal dx = std::abs(mc.x() - tc.x());
+                    qreal dy = std::abs(mc.y() - tc.y());
+                    if (dx < tol && dy < tol) {
+                        addYUnique(tc.y());
+                        break;
+                    }
+                }
+            }
+        };
+
+        // Screen corners
+        for (const QRectF& sr : screenRects) {
+            considerTargetCorners({ sr.topLeft(), sr.topRight(), sr.bottomLeft(), sr.bottomRight() });
+        }
+        // Media corners
+        for (QGraphicsItem* gi : items) {
+            auto* other = dynamic_cast<ResizableMediaBase*>(gi);
+            if (!other || other == movingItem) continue;
+            QRectF r = other->sceneBoundingRect();
+            considerTargetCorners({ r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight() });
+        }
+
+        // Always include the primary snapped corner's Y
+        addYUnique(snappedHorizontalLineY);
+
         QVector<QLineF> lines;
+        // One vertical line for the aligned edge
         lines.append(QLineF(snappedVerticalLineX, -1e6, snappedVerticalLineX, 1e6));
-        lines.append(QLineF(-1e6, snappedHorizontalLineY, 1e6, snappedHorizontalLineY));
+        // Horizontal lines for each aligned corner along that vertical edge
+        for (qreal y : matchedYs) {
+            lines.append(QLineF(-1e6, y, 1e6, y));
+        }
         const_cast<ScreenCanvas*>(this)->updateSnapIndicators(lines);
-        return bestPos; // corner precedence
+        return finalPos; // corner precedence
     }
 
     // Edge (line) snapping against other media
@@ -1033,12 +1078,55 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
 
     if (edgeAdjusted) {
         bestPos = QPointF(snapped.x() + bestDx, snapped.y() + bestDy);
-        if (bestDxAbs <= snapDistanceScene) { xSnapped = true; snappedVerticalLineX = candidateVerticalLineX; }
-        if (bestDyAbs <= snapDistanceScene) { ySnapped = true; snappedHorizontalLineY = candidateHorizontalLineY; }
+
+        // Re-evaluate final rect to find ALL aligned edges (not just the one used to compute translation)
+        QRectF finalRect(bestPos, movingRect.size());
+        const qreal tol = snapDistanceScene * 0.5; // tighter tolerance for displaying multiple guides
+
+        // Helper to accumulate unique coordinates (avoid near-duplicates)
+        auto addUnique = [](QVector<qreal>& vec, qreal v){
+            for (qreal existing : vec) if (std::abs(existing - v) < 0.5) return; // merge close
+            vec.append(v);
+        };
+        QVector<qreal> verticalXs;   // lines x = const
+        QVector<qreal> horizontalYs; // lines y = const
+
+        // Consider screens
+        for (const QRectF& sr : screenRects) {
+            // Overlapping (alignment) edges
+            if (std::abs(finalRect.left() - sr.left()) < tol) addUnique(verticalXs, sr.left());
+            if (std::abs(finalRect.left() - sr.right()) < tol) addUnique(verticalXs, sr.right());
+            if (std::abs(finalRect.right() - sr.right()) < tol) addUnique(verticalXs, sr.right());
+            if (std::abs(finalRect.right() - sr.left()) < tol) addUnique(verticalXs, sr.left());
+
+            if (std::abs(finalRect.top() - sr.top()) < tol) addUnique(horizontalYs, sr.top());
+            if (std::abs(finalRect.top() - sr.bottom()) < tol) addUnique(horizontalYs, sr.bottom());
+            if (std::abs(finalRect.bottom() - sr.bottom()) < tol) addUnique(horizontalYs, sr.bottom());
+            if (std::abs(finalRect.bottom() - sr.top()) < tol) addUnique(horizontalYs, sr.top());
+        }
+        // Consider other media
+        for (QGraphicsItem* gi : items) {
+            auto* other = dynamic_cast<ResizableMediaBase*>(gi);
+            if (!other || other == movingItem) continue;
+            QRectF o = other->sceneBoundingRect();
+            if (std::abs(finalRect.left() - o.left()) < tol) addUnique(verticalXs, o.left());
+            if (std::abs(finalRect.left() - o.right()) < tol) addUnique(verticalXs, o.right());
+            if (std::abs(finalRect.right() - o.right()) < tol) addUnique(verticalXs, o.right());
+            if (std::abs(finalRect.right() - o.left()) < tol) addUnique(verticalXs, o.left());
+
+            if (std::abs(finalRect.top() - o.top()) < tol) addUnique(horizontalYs, o.top());
+            if (std::abs(finalRect.top() - o.bottom()) < tol) addUnique(horizontalYs, o.bottom());
+            if (std::abs(finalRect.bottom() - o.bottom()) < tol) addUnique(horizontalYs, o.bottom());
+            if (std::abs(finalRect.bottom() - o.top()) < tol) addUnique(horizontalYs, o.top());
+        }
+
         QVector<QLineF> lines;
-        if (xSnapped) lines.append(QLineF(snappedVerticalLineX, -1e6, snappedVerticalLineX, 1e6));
-        if (ySnapped) lines.append(QLineF(-1e6, snappedHorizontalLineY, 1e6, snappedHorizontalLineY));
-        if (!lines.isEmpty()) const_cast<ScreenCanvas*>(this)->updateSnapIndicators(lines); else const_cast<ScreenCanvas*>(this)->clearSnapIndicators();
+        for (qreal x : verticalXs) lines.append(QLineF(x, -1e6, x, 1e6));
+        for (qreal y : horizontalYs) lines.append(QLineF(-1e6, y, 1e6, y));
+
+        if (!lines.isEmpty()) const_cast<ScreenCanvas*>(this)->updateSnapIndicators(lines);
+        else const_cast<ScreenCanvas*>(this)->clearSnapIndicators();
+
         return bestPos;
     }
     // No snap – clear indicators
