@@ -98,6 +98,12 @@ QColor gHoverHighlight = QColor(74, 144, 226, 28);     // Light blue hover
 QColor gSystemTaskbarColor = QColor(0, 0, 0, 80);      // Default opaque black for taskbars
 
 // ============================================================================
+// SNAP INDICATOR CONFIG
+// ============================================================================
+QColor gSnapIndicatorColor = QColor(74, 244, 226);     // Default: brand blue
+qreal  gSnapIndicatorDashLength = 6.0;                 // Default dash length (on/off) -> dotted appearance
+
+// ============================================================================
 // INITIALIZATION
 // ============================================================================
 

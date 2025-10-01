@@ -134,6 +134,12 @@ extern QColor gHoverHighlight;               // Light blue hover highlight
 extern QColor gSystemTaskbarColor;            // Color used to render remote taskbar uiZones
 
 // ============================================================================
+// SNAP INDICATOR CONFIG
+// ============================================================================
+extern QColor gSnapIndicatorColor;            // Color for snapping guide lines
+extern qreal  gSnapIndicatorDashLength;       // Dash length (on/off use same length for dotted look)
+
+// ============================================================================
 // INITIALIZATION
 // ============================================================================
 

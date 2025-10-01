@@ -274,6 +274,12 @@ protected:
     ResizableMediaBase* m_draggingSelected = nullptr;
     QPointF m_dragStartScene;
     QPointF m_dragItemStartPos;
+
+    // Snap visual indicators (blue dotted lines)
+    QList<QGraphicsLineItem*> m_snapIndicatorItems; // transient lines
+    void updateSnapIndicators(const QVector<QLineF>& lines);
+    void clearSnapIndicators();
+    void keyReleaseEvent(QKeyEvent* event) override; // clear indicators when Shift released
 };
 
 #endif // SCREENCANVAS_H
