@@ -71,6 +71,8 @@ public:
     // Snap-to-screen configuration
     void setSnapDistancePx(int px) { m_snapDistancePx = qMax(1, px); }
     int snapDistancePx() const { return m_snapDistancePx; }
+    void setCornerSnapDistancePx(int px) { m_cornerSnapDistancePx = qMax(1, px); }
+    int cornerSnapDistancePx() const { return m_cornerSnapDistancePx; }
     
     // Z-order management for media items (public interface)
     void moveMediaUp(QGraphicsItem* item);
@@ -143,7 +145,12 @@ private:
     void OnSceneChanged();
     // Snap-to-screen helpers
     QPointF snapToScreenBorders(const QPointF& scenePos, const QRectF& mediaBounds, bool shiftPressed) const;
-    qreal snapResizeToScreenBorders(qreal currentScale, const QPointF& fixedCorner, const QPointF& fixedItemPoint, const QSize& baseSize, bool shiftPressed) const;
+    struct ResizeSnapResult {
+        qreal scale {1.0};
+        bool cornerSnapped {false};
+        QPointF snappedMovingCornerScene; // valid if cornerSnapped
+    };
+    ResizeSnapResult snapResizeToScreenBorders(qreal currentScale, const QPointF& fixedCorner, const QPointF& fixedItemPoint, const QSize& baseSize, bool shiftPressed, ResizableMediaBase::Handle activeHandle = ResizableMediaBase::None) const;
     QList<QRectF> getScreenBorderRects() const;
 
     QGraphicsScene* m_scene = nullptr;
@@ -203,6 +210,7 @@ private:
     // Snap-to-screen settings
     int m_repaintBudgetMs = 16;
     int m_snapDistancePx = 10; // pixels within which snapping occurs
+    int m_cornerSnapDistancePx = 76; // larger region for corner snapping precedence
     
     // Z-order management for media items
     qreal m_nextMediaZValue = 1.0;

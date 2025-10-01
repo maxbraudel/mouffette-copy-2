@@ -38,7 +38,7 @@ int ResizableMediaBase::cornerRadiusOfMediaOverlays = 6;
 
 double ResizableMediaBase::s_sceneGridUnit = 1.0; // default: 1 scene unit == 1 pixel
 std::function<QPointF(const QPointF&, const QRectF&, bool)> ResizableMediaBase::s_screenSnapCallback;
-std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> ResizableMediaBase::s_resizeSnapCallback;
+std::function<ResizableMediaBase::ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool, ResizableMediaBase::Handle)> ResizableMediaBase::s_resizeSnapCallback;
 std::function<void()> ResizableMediaBase::s_uploadChangedNotifier = nullptr;
 std::function<void(ResizableMediaBase*)> ResizableMediaBase::s_fileErrorNotifier = nullptr;
 
@@ -63,11 +63,11 @@ std::function<QPointF(const QPointF&, const QRectF&, bool)> ResizableMediaBase::
     return s_screenSnapCallback;
 }
 
-void ResizableMediaBase::setResizeSnapCallback(std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> callback) {
+void ResizableMediaBase::setResizeSnapCallback(std::function<ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool, Handle)> callback) {
     s_resizeSnapCallback = callback;
 }
 
-std::function<qreal(qreal, const QPointF&, const QPointF&, const QSize&, bool)> ResizableMediaBase::resizeSnapCallback() {
+std::function<ResizableMediaBase::ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool, ResizableMediaBase::Handle)> ResizableMediaBase::resizeSnapCallback() {
     return s_resizeSnapCallback;
 }
 
@@ -255,10 +255,10 @@ QVariant ResizableMediaBase::itemChange(GraphicsItemChange change, const QVarian
         // First apply pixel grid snapping
         p = snapPointToGrid(p);
         
-        // Movement screen-border snapping (Shift) is disabled while performing an axis-only midpoint resize
-        // to avoid the anchored (opposite) edge snapping when only the dragged edge should snap via scale logic.
-        bool axisMidResizeActive = (m_activeHandle == LeftMid || m_activeHandle == RightMid || m_activeHandle == TopMid || m_activeHandle == BottomMid);
-        if (s_screenSnapCallback && !axisMidResizeActive) {
+        // Disable movement screen-border snapping (Shift) during ANY active resize (corner or midpoint)
+        // to prevent the opposite/fixed corner from being repositioned while scaling.
+        bool anyResizeActive = (m_activeHandle != None);
+        if (s_screenSnapCallback && !anyResizeActive) {
             const bool shiftPressed = QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
             if (shiftPressed) {
                 const QRectF mediaBounds(0, 0, m_baseSize.width() * scale(), m_baseSize.height() * scale());
@@ -307,14 +307,19 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
         if (m_activeHandle == LeftMid || m_activeHandle == RightMid) axisLocked = true; // horizontal only
         if (m_activeHandle == TopMid || m_activeHandle == BottomMid) axisLocked = true; // vertical only
 
-        if (!axisLocked) {
+    QPointF desiredMovingCornerScene; // carry outside to translation phase
+    bool cornerSnapped = false;
+    if (!axisLocked) {
             // Corner style uniform scaling (original logic simplified)
             const qreal currDist = std::hypot(sceneDelta.x(), sceneDelta.y());
             qreal newScale = m_initialScale * (currDist / (m_initialGrabDist > 0 ? m_initialGrabDist : 1e-6));
             newScale = std::clamp<qreal>(newScale, 0.05, 100.0);
             qreal finalScale = newScale;
             if (s_resizeSnapCallback && QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier)) {
-                finalScale = s_resizeSnapCallback(newScale, m_fixedScenePoint, m_fixedItemPoint, m_baseSize, true);
+                auto feedback = s_resizeSnapCallback(newScale, m_fixedScenePoint, m_fixedItemPoint, m_baseSize, true, m_activeHandle);
+                finalScale = feedback.scale;
+                cornerSnapped = feedback.cornerSnapped;
+                desiredMovingCornerScene = feedback.snappedMovingCornerScene;
             }
             // Pixel snap uniform
             const qreal desiredW = finalScale * static_cast<qreal>(m_baseSize.width());
@@ -348,6 +353,17 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
         }
 
         QPointF snappedPos = m_fixedScenePoint - targetScale * m_fixedItemPoint;
+        if (!axisLocked) {
+            // If corner snapped we may need to translate so moving corner matches target exactly
+            if (cornerSnapped && m_activeHandle != None) {
+                QPointF newMovingCornerItem = handlePoint(m_activeHandle); // moving handle item point
+                QPointF newMovingCornerScene = snappedPos + targetScale * newMovingCornerItem;
+                if (!desiredMovingCornerScene.isNull()) {
+                    QPointF delta = desiredMovingCornerScene - newMovingCornerScene;
+                    snappedPos += delta; // translate whole item so moving corner aligns
+                }
+            }
+        }
         setScale(targetScale);
         setPos(snappedPos);
         onInteractiveGeometryChanged();
