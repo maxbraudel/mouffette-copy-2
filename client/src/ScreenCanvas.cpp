@@ -2264,7 +2264,8 @@ void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
         const bool dragging = (m_draggingSelected != nullptr);
         const bool panningNow = m_panning;
         const QPoint vpPos = viewport()->mapFrom(this, event->pos());
-        if (!dragging && !anyResizing && !panningNow && m_infoWidget->geometry().contains(vpPos)) {
+        // Also check m_draggingSincePress to prevent overlay interference during any drag operation
+        if (!dragging && !m_draggingSincePress && !anyResizing && !panningNow && m_infoWidget->geometry().contains(vpPos)) {
             const QPoint overlayLocal = m_infoWidget->mapFrom(viewport(), vpPos);
             QWidget* dst = m_infoWidget->childAt(overlayLocal);
             if (!dst) dst = m_infoWidget;
