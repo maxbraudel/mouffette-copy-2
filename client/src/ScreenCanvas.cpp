@@ -1086,63 +1086,48 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
             return finalPos;
         }
 
-        // Collect all target corner coordinates that align with moving item corners along same X or same Y.
-        QVector<qreal> matchedYs; // for vertical edge orientation (multiple corners stacked vertically)
-        QVector<qreal> matchedXs; // for horizontal edge orientation (multiple corners horizontally)
-        auto addYUnique = [&](qreal y){ for (qreal yy : matchedYs) if (std::abs(yy - y) < 0.5) return; matchedYs.append(y); };
-        auto addXUnique = [&](qreal x){ for (qreal xx : matchedXs) if (std::abs(xx - x) < 0.5) return; matchedXs.append(x); };
-
-        const qreal tol = cornerSnapDistanceScene * 0.5; // tighter tolerance for secondary detection
-
-        auto considerTargetCorners = [&](const QVector<QPointF>& targets){
-            for (const QPointF& tc : targets) {
-                for (const QPointF& mc : finalCorners) {
-                    qreal dx = std::abs(mc.x() - tc.x());
-                    qreal dy = std::abs(mc.y() - tc.y());
-                    if (dx < tol && dy < tol) {
-                        // Record potential aligned coordinates.
-                        if (std::abs(tc.x() - snappedVerticalLineX) < tol) addYUnique(tc.y()); // vertical edge candidate
-                        if (std::abs(tc.y() - snappedHorizontalLineY) < tol) addXUnique(tc.x()); // horizontal edge candidate
-                        break;
-                    }
-                }
-            }
+        // Simplified corner indicator logic: draw the two orthogonal lines through the snapped corner.
+        // Additionally, if the opposite parallel edge of finalRect also aligns (within tolerance) with another item/screen edge,
+        // include that second parallel line (double-edge visualization) without duplicating stale previous lines.
+        const qreal edgeTol = cornerSnapDistanceScene * 0.5;
+        bool topAligned    = false;
+        bool bottomAligned = false;
+        bool leftAligned   = false;
+        bool rightAligned  = false;
+        auto checkEdgeAligned = [&](const QRectF& r){
+            if (std::abs(finalRect.top()    - r.top())    < edgeTol) topAligned = true;
+            if (std::abs(finalRect.top()    - r.bottom()) < edgeTol) topAligned = true; // adjacency top to bottom
+            if (std::abs(finalRect.bottom() - r.bottom()) < edgeTol) bottomAligned = true;
+            if (std::abs(finalRect.bottom() - r.top())    < edgeTol) bottomAligned = true; // adjacency bottom to top
+            if (std::abs(finalRect.left()   - r.left())   < edgeTol) leftAligned = true;
+            if (std::abs(finalRect.left()   - r.right())  < edgeTol) leftAligned = true;   // adjacency left to right
+            if (std::abs(finalRect.right()  - r.right())  < edgeTol) rightAligned = true;
+            if (std::abs(finalRect.right()  - r.left())   < edgeTol) rightAligned = true;  // adjacency right to left
         };
-
-        // Screen corners
-        for (const QRectF& sr : screenRects) {
-            considerTargetCorners({ sr.topLeft(), sr.topRight(), sr.bottomLeft(), sr.bottomRight() });
-        }
-        // Media corners
+        for (const QRectF& sr : screenRects) checkEdgeAligned(sr);
         for (QGraphicsItem* gi : items) {
-            auto* other = dynamic_cast<ResizableMediaBase*>(gi);
-            if (!other || other == movingItem) continue;
-            QRectF r = other->sceneBoundingRect();
-            considerTargetCorners({ r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight() });
+            auto* other = dynamic_cast<ResizableMediaBase*>(gi); if (!other || other == movingItem) continue; checkEdgeAligned(other->sceneBoundingRect());
         }
-
-        // Always include the primary snapped corner in both axes sets (ensures at least baseline lines)
-        addYUnique(snappedHorizontalLineY); // Actually Y value
-        addXUnique(snappedVerticalLineX);   // Actually X value
-
-        // Determine orientation: prefer vertical edge if we have >1 matched Y at same X; else if >1 matched X at same Y treat as horizontal edge.
-        bool verticalEdgeOrientation = matchedYs.size() > 1; // multiple corners stacked vertically along same X
-        bool horizontalEdgeOrientation = matchedXs.size() > 1; // multiple corners horizontally along same Y
-
         QVector<QLineF> lines;
-        if (verticalEdgeOrientation) {
-            // One vertical line at shared X plus horizontal lines per corner
-            lines.append(QLineF(snappedVerticalLineX, -1e6, snappedVerticalLineX, 1e6));
-            for (qreal y : matchedYs) lines.append(QLineF(-1e6, y, 1e6, y));
-        } else if (horizontalEdgeOrientation) {
-            // One horizontal line at shared Y plus vertical lines per corner
-            lines.append(QLineF(-1e6, snappedHorizontalLineY, 1e6, snappedHorizontalLineY));
-            for (qreal x : matchedXs) lines.append(QLineF(x, -1e6, x, 1e6));
-        } else {
-            // Fallback to original two orthogonal lines
-            lines.append(QLineF(snappedVerticalLineX, -1e6, snappedVerticalLineX, 1e6));
-            lines.append(QLineF(-1e6, snappedHorizontalLineY, 1e6, snappedHorizontalLineY));
+        // Always the two lines crossing at corner (snappedVerticalLineX, snappedHorizontalLineY)
+        lines.append(QLineF(snappedVerticalLineX, -1e6, snappedVerticalLineX, 1e6));
+        lines.append(QLineF(-1e6, snappedHorizontalLineY, 1e6, snappedHorizontalLineY));
+        // If both top & bottom aligned, add bottom edge explicitly (only if different from top)
+        if (topAligned && bottomAligned && std::abs(finalRect.bottom() - finalRect.top()) > 0.5) {
+            lines.append(QLineF(-1e6, finalRect.bottom(), 1e6, finalRect.bottom()));
         }
+        // If both left & right aligned, add right edge explicitly (only if different from left)
+        if (leftAligned && rightAligned && std::abs(finalRect.right() - finalRect.left()) > 0.5) {
+            lines.append(QLineF(finalRect.right(), -1e6, finalRect.right(), 1e6));
+        }
+        // Deduplicate any accidental near-duplicates (defensive, though we aim to prevent them)
+        auto dedup = [](QVector<QLineF>& ls){
+            QVector<QLineF> out; out.reserve(ls.size());
+            auto key = [](const QLineF& l){ bool vertical = std::abs(l.p1().x()-l.p2().x()) < 0.5; if (vertical) return QPointF(std::round(l.p1().x()*1000)/1000.0, 0); else return QPointF(0, std::round(l.p1().y()*1000)/1000.0); };
+            for (const QLineF& l : ls) { QPointF k = key(l); bool exists = false; for (const QLineF& e : out) if (key(e) == k) { exists = true; break; } if (!exists) out.append(l); }
+            ls = out;
+        };
+        dedup(lines);
         const_cast<ScreenCanvas*>(this)->updateSnapIndicators(lines);
         return finalPos; // corner precedence
     }
