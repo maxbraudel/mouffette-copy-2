@@ -1308,6 +1308,55 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
         QVector<qreal> displayVertical = buildClusters(verticalXs, m_lastSnapVerticalX, candidateVerticalLineX);
         QVector<qreal> displayHorizontal = buildClusters(horizontalYs, m_lastSnapHorizontalY, candidateHorizontalLineY);
 
+        // Enforce that the primary candidate line (actual snapped edge) is reflected in the display set.
+        auto enforcePrimary = [](QVector<qreal>& lines, qreal primary){
+            if (std::isnan(primary)) return;
+            int idx = -1;
+            for (int i=0;i<lines.size();++i) {
+                if (std::abs(lines[i] - primary) < 0.5) { idx = i; break; }
+            }
+            if (idx == -1) {
+                // Insert primary at front for determinism
+                lines.prepend(primary);
+            } else if (idx != 0) {
+                // Move to front to avoid showing stale previous representative
+                qreal v = lines[idx];
+                lines.removeAt(idx);
+                lines.prepend(v);
+            }
+        };
+        enforcePrimary(displayVertical, candidateVerticalLineX);
+        enforcePrimary(displayHorizontal, candidateHorizontalLineY);
+        // Update hysteresis anchors so subsequent clustering remains stable around the newly enforced primary.
+        if (!displayVertical.isEmpty()) m_lastSnapVerticalX = displayVertical.first();
+        if (!displayHorizontal.isEmpty()) m_lastSnapHorizontalY = displayHorizontal.first();
+
+        // Recompute which edges of the moving rect are actually aligned now; discard stale cluster representatives.
+        const qreal edgeTol = snapDistanceScene * 0.45; // slightly tighter than engage distance
+        auto alignedEdge = [&](qreal edgeCoord, const QVector<qreal>& raw){
+            for (qreal v : raw) if (std::abs(v - edgeCoord) < edgeTol) return true; return false; };
+
+        bool topAligned    = alignedEdge(finalRect.top(),    horizontalYs);
+        bool bottomAligned = alignedEdge(finalRect.bottom(), horizontalYs);
+        bool leftAligned   = alignedEdge(finalRect.left(),   verticalXs);
+        bool rightAligned  = alignedEdge(finalRect.right(),  verticalXs);
+
+        QVector<qreal> prunedHorizontal;
+        if (topAligned)    prunedHorizontal.append(finalRect.top());
+        if (bottomAligned && (!topAligned || std::abs(finalRect.bottom() - finalRect.top()) > 0.5)) prunedHorizontal.append(finalRect.bottom());
+
+        QVector<qreal> prunedVertical;
+        if (leftAligned)   prunedVertical.append(finalRect.left());
+        if (rightAligned && (!leftAligned || std::abs(finalRect.right() - finalRect.left()) > 0.5)) prunedVertical.append(finalRect.right());
+
+        if (!prunedHorizontal.isEmpty()) displayHorizontal = prunedHorizontal;
+        else displayHorizontal.clear();
+        if (!prunedVertical.isEmpty()) displayVertical = prunedVertical;
+        else displayVertical.clear();
+
+        std::sort(displayVertical.begin(), displayVertical.end());
+        std::sort(displayHorizontal.begin(), displayHorizontal.end());
+
         QVector<QLineF> lines;
         for (qreal x : displayVertical) lines.append(QLineF(x, -1e6, x, 1e6));
         for (qreal y : displayHorizontal) lines.append(QLineF(-1e6, y, 1e6, y));
