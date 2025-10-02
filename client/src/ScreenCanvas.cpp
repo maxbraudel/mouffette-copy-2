@@ -1054,7 +1054,9 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
         // Detect full overlap with another media item (identical rect) – in that case show all four borders.
         bool fullOverlap = false;
         QRectF overlapSourceRect; // rect we overlapped (for potential future styling)
-        const qreal fullTol = cornerSnapDistanceScene * 0.5; // reuse tight tolerance
+    // Full overlap now requires a much stricter tolerance than corner capture to avoid
+    // showing inner-snap indicators when the inner item is merely close in size.
+    const qreal fullTol = std::min<qreal>(0.75, cornerSnapDistanceScene * 0.15);
         for (QGraphicsItem* gi : items) {
             auto* other = dynamic_cast<ResizableMediaBase*>(gi);
             if (!other || other == movingItem) continue;
@@ -1182,7 +1184,7 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
         // Re-evaluate final rect to find ALL aligned edges (not just the one used to compute translation)
         QRectF finalRect(bestPos, movingRect.size());
         // Full overlap detection in edge-alignment path (identical rect case where edge logic, not corner, resolved last)
-        bool fullOverlap = false; QRectF overlapSourceRect; const qreal fullTol = snapDistanceScene * 0.5;
+    bool fullOverlap = false; QRectF overlapSourceRect; const qreal fullTol = std::min<qreal>(0.75, snapDistanceScene * 0.15);
         for (QGraphicsItem* gi : items) {
             auto* other = dynamic_cast<ResizableMediaBase*>(gi); if (!other || other == movingItem) continue;
             QRectF o = other->sceneBoundingRect();
