@@ -141,7 +141,12 @@ public:
         pen.setWidthF(thickness);
         pen.setCapStyle(Qt::FlatCap);
         painter->setPen(pen);
-        auto alignCoord = [&](qreal v){ return std::round(v); };
+        auto alignCoord = [&](qreal v){
+            if (std::fabs(std::round(thickness) - thickness) < 0.01 && (static_cast<int>(std::round(thickness)) % 2 == 1)) {
+                return std::floor(v) + 0.5;
+            }
+            return v;
+        };
         for (const QLineF& sl : m_lines) {
             QPointF v1 = sceneToViewport.map(sl.p1());
             QPointF v2 = sceneToViewport.map(sl.p2());
@@ -189,24 +194,6 @@ void ScreenCanvas::clearSnapIndicators() {
 void ScreenCanvas::updateSnapIndicators(const QVector<QLineF>& lines) {
     if (!m_scene) return;
     if (m_snapGuides) { m_snapGuides->setLines(lines); m_snapGuides->update(); }
-}
-
-void ScreenCanvas::setOverlayPassthrough(bool enable) {
-    if (!m_infoWidget) return;
-    if (enable == m_overlayPassthroughActive) return;
-    m_overlayPassthroughActive = enable;
-    // We make the overlay transparent for mouse input so drags continue uninterrupted.
-    // Keep visual appearance intact.
-    m_infoWidget->setAttribute(Qt::WA_TransparentForMouseEvents, enable);
-}
-
-// Helper to get the actual media rectangle (without handle padding) in scene coordinates
-QRectF ScreenCanvas::getMediaSceneRect(ResizableMediaBase* media) const {
-    if (!media) return QRectF();
-    QSize baseSize = media->baseSizePx();
-    qreal scale = media->scale();
-    QPointF pos = media->pos();
-    return QRectF(pos, QSizeF(baseSize.width() * scale, baseSize.height() * scale));
 }
 
 ScreenCanvas::~ScreenCanvas() {
@@ -1033,7 +1020,7 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
     for (QGraphicsItem* gi : items) {
         auto* other = dynamic_cast<ResizableMediaBase*>(gi);
         if (!other || other == movingItem) continue;
-        QRectF otherR = getMediaSceneRect(other);
+        QRectF otherR = other->sceneBoundingRect();
 
         // Corner snapping between media (priority over edges)
         QVector<QPointF> otherCorners = rectCorners(otherR);
@@ -1073,7 +1060,7 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
         for (QGraphicsItem* gi : items) {
             auto* other = dynamic_cast<ResizableMediaBase*>(gi);
             if (!other || other == movingItem) continue;
-            QRectF o = getMediaSceneRect(other);
+            QRectF o = other->sceneBoundingRect();
             if (std::abs(o.left()   - finalRect.left())   < fullTol &&
                 std::abs(o.right()  - finalRect.right())  < fullTol &&
                 std::abs(o.top()    - finalRect.top())    < fullTol &&
@@ -1124,7 +1111,7 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
         }
         // Media corners
         for (QGraphicsItem* gi : items) {
-            auto* other = dynamic_cast<ResizableMediaBase*>(gi); if (!other || other == movingItem) continue; QRectF r = getMediaSceneRect(other);
+            auto* other = dynamic_cast<ResizableMediaBase*>(gi); if (!other || other == movingItem) continue; QRectF r = other->sceneBoundingRect();
             testCornerSet({ r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight() });
         }
         QVector<qreal> verticalXs; QVector<qreal> horizontalYs;
@@ -1195,7 +1182,7 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
     bool fullOverlap = false; QRectF overlapSourceRect; const qreal fullTol = std::min<qreal>(0.75, snapDistanceScene * 0.15);
         for (QGraphicsItem* gi : items) {
             auto* other = dynamic_cast<ResizableMediaBase*>(gi); if (!other || other == movingItem) continue;
-            QRectF o = getMediaSceneRect(other);
+            QRectF o = other->sceneBoundingRect();
             if (std::abs(o.left()   - finalRect.left())   < fullTol &&
                 std::abs(o.right()  - finalRect.right())  < fullTol &&
                 std::abs(o.top()    - finalRect.top())    < fullTol &&
@@ -1245,7 +1232,7 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
         for (QGraphicsItem* gi : items) {
             auto* other = dynamic_cast<ResizableMediaBase*>(gi);
             if (!other || other == movingItem) continue;
-            QRectF o = getMediaSceneRect(other);
+            QRectF o = other->sceneBoundingRect();
             if (std::abs(finalRect.left() - o.left()) < tol) addUnique(verticalXs, o.left());
             if (std::abs(finalRect.left() - o.right()) < tol) addUnique(verticalXs, o.right());
             if (std::abs(finalRect.right() - o.right()) < tol) addUnique(verticalXs, o.right());
@@ -1651,7 +1638,7 @@ qreal ScreenCanvas::applyAxisSnapWithHysteresis(ResizableMediaBase* item,
         for (QGraphicsItem* gi : m_scene->items()) {
             auto* other = dynamic_cast<ResizableMediaBase*>(gi);
             if (!other || other == item) continue;
-            QRectF r = getMediaSceneRect(other);
+            QRectF r = other->sceneBoundingRect();
             if (activeHandle == H::LeftMid || activeHandle == H::RightMid) { targetEdges << r.left() << r.right(); }
             else if (activeHandle == H::TopMid || activeHandle == H::BottomMid) { targetEdges << r.top() << r.bottom(); }
         }
@@ -2159,7 +2146,6 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
             m_draggingSelected = selectedUnderCursor;
             m_dragStartScene = mapToScene(event->pos());
             m_dragItemStartPos = m_draggingSelected->pos();
-            setOverlayPassthrough(true);
             event->accept();
             return;
         }
@@ -2170,25 +2156,12 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
                 if (m_scene) m_scene->clearSelection();
                 mediaHit->setSelected(true);
             }
-            // If selecting a new media item, immediately prepare for potential drag with overlay passthrough
-            // This ensures smooth dragging even when cursor moves over overlay during initial press-hold-drag
-            m_draggingSelected = mediaHit;
-            m_dragStartScene = mapToScene(event->pos());
-            m_dragItemStartPos = mediaHit->pos();
-            setOverlayPassthrough(true);
-            
-            // Check for video control interactions
             if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaHit)) {
                 const QPointF itemPos = v->mapFromScene(mapToScene(event->pos()));
-                if (v->handleControlsPressAtItemPos(itemPos)) { 
-                    // Cancel drag setup for control interactions
-                    m_draggingSelected = nullptr;
-                    setOverlayPassthrough(false);
-                    event->accept(); 
-                    return; 
-                }
+                if (v->handleControlsPressAtItemPos(itemPos)) { event->accept(); return; }
             }
-            event->accept();
+            QMouseEvent synthetic(event->type(), event->position(), event->scenePosition(), event->globalPosition(), event->button(), event->buttons(), Qt::NoModifier);
+            QGraphicsView::mousePressEvent(&synthetic);
             return;
         }
         for (QGraphicsItem* it : scene()->selectedItems()) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) { const QPointF itemPos = v->mapFromScene(mapToScene(event->pos())); if (v->handleControlsPressAtItemPos(itemPos)) { event->accept(); return; } }
@@ -2354,8 +2327,6 @@ void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
     if (m_leftMouseActive && (event->buttons() & Qt::LeftButton)) {
         if ((event->pos() - m_pressViewPos).manhattanLength() > 2) m_draggingSincePress = true;
         if (m_draggingSelected) {
-            // Ensure overlay is passthrough during active drag
-            setOverlayPassthrough(true);
             const QPointF sceneNow = mapToScene(event->pos());
             const QPointF delta = sceneNow - m_dragStartScene;
             m_draggingSelected->setPos(m_dragItemStartPos + delta);
@@ -2412,16 +2383,8 @@ void ScreenCanvas::mouseReleaseEvent(QMouseEvent* event) {
         // No need to capture prevSelected; if no drag occurred we let base selection stand
         // If we were manually dragging a selected (possibly occluded) item, finish without letting base change selection
         if (m_draggingSelected) {
-            // Only treat as actual drag if we moved beyond threshold
-            bool wasActualDrag = m_draggingSincePress;
             m_draggingSelected = nullptr;
-            setOverlayPassthrough(false);
             m_leftMouseActive = false; m_draggingSincePress = false; m_selectionAtPress.clear();
-            
-            // If it was just a selection click (no actual drag), let the selection stand
-            if (!wasActualDrag) {
-                // Selection was already handled in mousePressEvent, just clean up
-            }
             event->accept();
             return;
         }
@@ -2434,7 +2397,6 @@ void ScreenCanvas::mouseReleaseEvent(QMouseEvent* event) {
             }
             updateSelectionChrome();
         }
-        if (m_overlayPassthroughActive) setOverlayPassthrough(false);
         m_leftMouseActive = false; m_draggingSincePress = false; m_selectionAtPress.clear();
         return;
     }
@@ -3089,7 +3051,7 @@ ScreenCanvas::ResizeSnapResult ScreenCanvas::snapResizeToScreenBorders(qreal cur
         for (QGraphicsItem* gi : m_scene->items()) {
             auto* other = dynamic_cast<ResizableMediaBase*>(gi);
             if (!other || other == movingItem) continue;
-            QRectF r = getMediaSceneRect(other);
+            QRectF r = other->sceneBoundingRect();
             considerCornerTarget(r.topLeft());
             considerCornerTarget(r.topRight());
             considerCornerTarget(r.bottomLeft());
@@ -3311,4 +3273,4 @@ void ScreenCanvas::updateLaunchSceneButtonStyle() {
     m_launchSceneButton->setFixedHeight(40);
 }
 
-
+// (Removed legacy duplicate snap indicator drawing functions; SnapGuideItem now handles rendering.)

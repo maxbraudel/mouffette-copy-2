@@ -276,17 +276,12 @@ protected:
     // Snap visual indicators routed through dedicated SnapGuideItem (no local caching needed)
     void updateSnapIndicators(const QVector<QLineF>& lines);
     void clearSnapIndicators();
-    QRectF getMediaSceneRect(ResizableMediaBase* media) const;
     void keyReleaseEvent(QKeyEvent* event) override; // clear indicators when Shift released
     // Snap guides item (renders between scene content and overlay panels)
     class SnapGuideItem* m_snapGuides = nullptr;
     // Persist last chosen snap guide positions for hysteresis / tie-breaking
     mutable qreal m_lastSnapVerticalX = std::numeric_limits<qreal>::quiet_NaN();
     mutable qreal m_lastSnapHorizontalY = std::numeric_limits<qreal>::quiet_NaN();
-    // While dragging a media item we temporarily let the overlay pass mouse events through so
-    // the drag is not interrupted when cursor passes under the media list overlay.
-    bool m_overlayPassthroughActive = false;
-    void setOverlayPassthrough(bool enable);
 };
 
 #endif // SCREENCANVAS_H

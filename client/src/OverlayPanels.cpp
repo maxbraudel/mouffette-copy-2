@@ -547,7 +547,7 @@ std::shared_ptr<OverlayElement> OverlayPanel::findElement(const QString& id) con
     return (it != m_elements.end()) ? *it : nullptr;
 }
 
-
+// (Legacy label management removed)
 
 void OverlayPanel::setVisible(bool visible) {
     if (m_visible == visible) return;

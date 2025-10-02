@@ -501,7 +501,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_webSocketClient, &WebSocketClient::screensInfoReceived, this, &MainWindow::onScreensInfoReceived);
     connect(m_webSocketClient, &WebSocketClient::watchStatusChanged, this, &MainWindow::onWatchStatusChanged);
     connect(m_webSocketClient, &WebSocketClient::dataRequestReceived, this, &MainWindow::onDataRequestReceived);
-
+    // Unused generic message hook removed; specific handlers are wired explicitly
     // Forward all generic messages to UploadManager so it can handle incoming upload_* and remove_all_files when we are the target
     connect(m_webSocketClient, &WebSocketClient::messageReceived, m_uploadManager, &UploadManager::handleIncomingMessage);
     // Upload progress forwards
@@ -1348,7 +1348,7 @@ void MainWindow::showClientListView() {
     }
 }
 
-
+// Removed legacy createScreenWidget(): ScreenCanvas draws screens directly now
 
 void MainWindow::updateVolumeIndicator() {
     if (!m_volumeIndicator) return;
@@ -1477,7 +1477,7 @@ void MainWindow::onUploadButtonClicked() {
             // No new media to mark; treat click as unload
             m_uploadManager->requestUnload();
         } else {
-
+            qDebug() << "Upload skipped: aucun média local nouveau (popup supprimée).";
         }
         return;
     }
@@ -2301,7 +2301,7 @@ void MainWindow::setupMenuBar() {
     
     m_aboutAction = new QAction("About", this);
     connect(m_aboutAction, &QAction::triggered, this, [this]() {
-
+        qDebug() << "About dialog suppressed (no popup mode).";
     });
     m_helpMenu->addAction(m_aboutAction);
 }
