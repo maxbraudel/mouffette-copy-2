@@ -276,6 +276,7 @@ protected:
     // Snap visual indicators routed through dedicated SnapGuideItem (no local caching needed)
     void updateSnapIndicators(const QVector<QLineF>& lines);
     void clearSnapIndicators();
+    QRectF getMediaSceneRect(ResizableMediaBase* media) const;
     void keyReleaseEvent(QKeyEvent* event) override; // clear indicators when Shift released
     // Snap guides item (renders between scene content and overlay panels)
     class SnapGuideItem* m_snapGuides = nullptr;

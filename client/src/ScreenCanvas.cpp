@@ -142,10 +142,11 @@ public:
         pen.setCapStyle(Qt::FlatCap);
         painter->setPen(pen);
         auto alignCoord = [&](qreal v){
-            if (std::fabs(std::round(thickness) - thickness) < 0.01 && (static_cast<int>(std::round(thickness)) % 2 == 1)) {
-                return std::floor(v) + 0.5;
-            }
-            return v;
+            // Previously we shifted odd-width strokes by 0.5 for crispness, but selection borders
+            // (cosmetic pens) are drawn at raw scene coordinates, causing a visible gap between
+            // snap lines and media borders when fractional scaling occurs. We now snap to the
+            // nearest device pixel without adding a half-pixel bias so lines coincide visually.
+            return std::round(v);
         };
         for (const QLineF& sl : m_lines) {
             QPointF v1 = sceneToViewport.map(sl.p1());
@@ -194,6 +195,15 @@ void ScreenCanvas::clearSnapIndicators() {
 void ScreenCanvas::updateSnapIndicators(const QVector<QLineF>& lines) {
     if (!m_scene) return;
     if (m_snapGuides) { m_snapGuides->setLines(lines); m_snapGuides->update(); }
+}
+
+// Helper to get the actual media rectangle (without handle padding) in scene coordinates
+QRectF ScreenCanvas::getMediaSceneRect(ResizableMediaBase* media) const {
+    if (!media) return QRectF();
+    QSize baseSize = media->baseSizePx();
+    qreal scale = media->scale();
+    QPointF pos = media->pos();
+    return QRectF(pos, QSizeF(baseSize.width() * scale, baseSize.height() * scale));
 }
 
 ScreenCanvas::~ScreenCanvas() {
@@ -1020,7 +1030,7 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
     for (QGraphicsItem* gi : items) {
         auto* other = dynamic_cast<ResizableMediaBase*>(gi);
         if (!other || other == movingItem) continue;
-        QRectF otherR = other->sceneBoundingRect();
+        QRectF otherR = getMediaSceneRect(other);
 
         // Corner snapping between media (priority over edges)
         QVector<QPointF> otherCorners = rectCorners(otherR);
@@ -1060,7 +1070,7 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
         for (QGraphicsItem* gi : items) {
             auto* other = dynamic_cast<ResizableMediaBase*>(gi);
             if (!other || other == movingItem) continue;
-            QRectF o = other->sceneBoundingRect();
+            QRectF o = getMediaSceneRect(other);
             if (std::abs(o.left()   - finalRect.left())   < fullTol &&
                 std::abs(o.right()  - finalRect.right())  < fullTol &&
                 std::abs(o.top()    - finalRect.top())    < fullTol &&
@@ -1111,7 +1121,7 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
         }
         // Media corners
         for (QGraphicsItem* gi : items) {
-            auto* other = dynamic_cast<ResizableMediaBase*>(gi); if (!other || other == movingItem) continue; QRectF r = other->sceneBoundingRect();
+            auto* other = dynamic_cast<ResizableMediaBase*>(gi); if (!other || other == movingItem) continue; QRectF r = getMediaSceneRect(other);
             testCornerSet({ r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight() });
         }
         QVector<qreal> verticalXs; QVector<qreal> horizontalYs;
@@ -1182,7 +1192,7 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
     bool fullOverlap = false; QRectF overlapSourceRect; const qreal fullTol = std::min<qreal>(0.75, snapDistanceScene * 0.15);
         for (QGraphicsItem* gi : items) {
             auto* other = dynamic_cast<ResizableMediaBase*>(gi); if (!other || other == movingItem) continue;
-            QRectF o = other->sceneBoundingRect();
+            QRectF o = getMediaSceneRect(other);
             if (std::abs(o.left()   - finalRect.left())   < fullTol &&
                 std::abs(o.right()  - finalRect.right())  < fullTol &&
                 std::abs(o.top()    - finalRect.top())    < fullTol &&
@@ -1232,7 +1242,7 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
         for (QGraphicsItem* gi : items) {
             auto* other = dynamic_cast<ResizableMediaBase*>(gi);
             if (!other || other == movingItem) continue;
-            QRectF o = other->sceneBoundingRect();
+            QRectF o = getMediaSceneRect(other);
             if (std::abs(finalRect.left() - o.left()) < tol) addUnique(verticalXs, o.left());
             if (std::abs(finalRect.left() - o.right()) < tol) addUnique(verticalXs, o.right());
             if (std::abs(finalRect.right() - o.right()) < tol) addUnique(verticalXs, o.right());
@@ -1601,6 +1611,8 @@ qreal ScreenCanvas::applyAxisSnapWithHysteresis(ResizableMediaBase* item,
     bool isSide = (activeHandle == H::LeftMid || activeHandle == H::RightMid || activeHandle == H::TopMid || activeHandle == H::BottomMid);
     if (!isSide) return proposedScale;
     if (!m_scene) return proposedScale;
+    // Global modality: only snap when Shift is currently pressed (mirrors corner snap rule)
+    if (!QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier)) return proposedScale;
 
     const QList<QRectF> screenRects = getScreenBorderRects();
     if (screenRects.isEmpty()) return proposedScale;
@@ -1636,7 +1648,7 @@ qreal ScreenCanvas::applyAxisSnapWithHysteresis(ResizableMediaBase* item,
         for (QGraphicsItem* gi : m_scene->items()) {
             auto* other = dynamic_cast<ResizableMediaBase*>(gi);
             if (!other || other == item) continue;
-            QRectF r = other->sceneBoundingRect();
+            QRectF r = getMediaSceneRect(other);
             if (activeHandle == H::LeftMid || activeHandle == H::RightMid) { targetEdges << r.left() << r.right(); }
             else if (activeHandle == H::TopMid || activeHandle == H::BottomMid) { targetEdges << r.top() << r.bottom(); }
         }
@@ -1722,21 +1734,20 @@ qreal ScreenCanvas::applyAxisSnapWithHysteresis(ResizableMediaBase* item,
 
         // No switch candidate: decide whether to remain locked or release.
         if (distToLocked <= releaseDist) {
-            if (distToLocked <= snapDistanceScene) {
-                QVector<QLineF> lines;
-                qreal snappedHalfW = (baseSize.width() * snapTargetScale)/2.0;
-                qreal snappedHalfH = (baseSize.height() * snapTargetScale)/2.0;
-                switch (activeHandle) {
-                    case H::LeftMid:   lines.append(QLineF(fixedScenePoint.x() - 2*snappedHalfW, -1e6, fixedScenePoint.x() - 2*snappedHalfW, 1e6)); break;
-                    case H::RightMid:  lines.append(QLineF(fixedScenePoint.x() + 2*snappedHalfW, -1e6, fixedScenePoint.x() + 2*snappedHalfW, 1e6)); break;
-                    case H::TopMid:    lines.append(QLineF(-1e6, fixedScenePoint.y() - 2*snappedHalfH, 1e6, fixedScenePoint.y() - 2*snappedHalfH)); break;
-                    case H::BottomMid: lines.append(QLineF(-1e6, fixedScenePoint.y() + 2*snappedHalfH, 1e6, fixedScenePoint.y() + 2*snappedHalfH)); break;
-                    default: break;
-                }
-                const_cast<ScreenCanvas*>(this)->updateSnapIndicators(lines);
-            } else {
-                const_cast<ScreenCanvas*>(this)->clearSnapIndicators();
+            // Remain snapped: always show the indicator while snap is logically active.
+            // (Previously the line was hidden in the hysteresis band between snapDistance and releaseDist
+            // which felt like a premature disappearance while still locked.)
+            QVector<QLineF> lines;
+            qreal snappedHalfW = (baseSize.width() * snapTargetScale)/2.0;
+            qreal snappedHalfH = (baseSize.height() * snapTargetScale)/2.0;
+            switch (activeHandle) {
+                case H::LeftMid:   lines.append(QLineF(fixedScenePoint.x() - 2*snappedHalfW, -1e6, fixedScenePoint.x() - 2*snappedHalfW, 1e6)); break;
+                case H::RightMid:  lines.append(QLineF(fixedScenePoint.x() + 2*snappedHalfW, -1e6, fixedScenePoint.x() + 2*snappedHalfW, 1e6)); break;
+                case H::TopMid:    lines.append(QLineF(-1e6, fixedScenePoint.y() - 2*snappedHalfH, 1e6, fixedScenePoint.y() - 2*snappedHalfH)); break;
+                case H::BottomMid: lines.append(QLineF(-1e6, fixedScenePoint.y() + 2*snappedHalfH, 1e6, fixedScenePoint.y() + 2*snappedHalfH)); break;
+                default: break;
             }
+            const_cast<ScreenCanvas*>(this)->updateSnapIndicators(lines);
             return snapTargetScale;
         }
 
@@ -3050,7 +3061,7 @@ ScreenCanvas::ResizeSnapResult ScreenCanvas::snapResizeToScreenBorders(qreal cur
         for (QGraphicsItem* gi : m_scene->items()) {
             auto* other = dynamic_cast<ResizableMediaBase*>(gi);
             if (!other || other == movingItem) continue;
-            QRectF r = other->sceneBoundingRect();
+            QRectF r = getMediaSceneRect(other);
             considerCornerTarget(r.topLeft());
             considerCornerTarget(r.topRight());
             considerCornerTarget(r.bottomLeft());

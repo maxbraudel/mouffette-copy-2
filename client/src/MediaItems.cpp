@@ -332,21 +332,26 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
             // Axis-only resize (side midpoint handles) using scene delta for smooth tracking.
             const bool horizontal = (m_activeHandle == LeftMid || m_activeHandle == RightMid);
             qreal baseLen = horizontal ? m_baseSize.width() : m_baseSize.height();
-            // Scene delta from fixed side to cursor along axis
             qreal deltaScene = horizontal ? (event->scenePos().x() - m_fixedScenePoint.x())
                                           : (event->scenePos().y() - m_fixedScenePoint.y());
-            // Invert for negative direction handles so growing outward gives positive length
-            if (m_activeHandle == LeftMid || m_activeHandle == TopMid) deltaScene = -deltaScene;
+            if (m_activeHandle == LeftMid || m_activeHandle == TopMid) deltaScene = -deltaScene; // normalize direction
             qreal extent = std::abs(deltaScene);
-            // Derive scale directly (no per-move rounding to avoid flicker)
             qreal newScale = extent / (baseLen > 0 ? baseLen : 1.0);
             newScale = std::clamp<qreal>(newScale, 0.05, 100.0);
             targetScale = newScale;
-            // Attempt snapping with hysteresis to screen borders via ScreenCanvas helper
-            if (scene() && !scene()->views().isEmpty()) {
-                if (auto* scView = qobject_cast<ScreenCanvas*>(scene()->views().first())) {
-                    targetScale = scView->applyAxisSnapWithHysteresis(this, targetScale, m_fixedScenePoint, m_baseSize, m_activeHandle);
+            // Only perform axis snap when Shift is held (same modality as corner snap)
+            const bool shiftPressed = QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
+            if (shiftPressed) {
+                if (scene() && !scene()->views().isEmpty()) {
+                    if (auto* scView = qobject_cast<ScreenCanvas*>(scene()->views().first())) {
+                        targetScale = scView->applyAxisSnapWithHysteresis(this, targetScale, m_fixedScenePoint, m_baseSize, m_activeHandle);
+                    }
                 }
+            } else if (m_axisSnapActive) {
+                // User released Shift mid-resize: drop snap state so scaling resumes free-form
+                m_axisSnapActive = false;
+                m_axisSnapHandle = None;
+                m_axisSnapTargetScale = 1.0;
             }
         }
 
