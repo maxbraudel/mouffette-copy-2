@@ -283,6 +283,10 @@ protected:
     // Persist last chosen snap guide positions for hysteresis / tie-breaking
     mutable qreal m_lastSnapVerticalX = std::numeric_limits<qreal>::quiet_NaN();
     mutable qreal m_lastSnapHorizontalY = std::numeric_limits<qreal>::quiet_NaN();
+    // While dragging a media item we temporarily let the overlay pass mouse events through so
+    // the drag is not interrupted when cursor passes under the media list overlay.
+    bool m_overlayPassthroughActive = false;
+    void setOverlayPassthrough(bool enable);
 };
 
 #endif // SCREENCANVAS_H
