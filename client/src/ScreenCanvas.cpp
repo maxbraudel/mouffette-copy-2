@@ -1087,50 +1087,45 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
             return finalPos;
         }
 
-        // Simplified corner indicator logic: draw the two orthogonal lines through the snapped corner.
-        // Additionally, if the opposite parallel edge of finalRect also aligns (within tolerance) with another item/screen edge,
-        // include that second parallel line (double-edge visualization) without duplicating stale previous lines.
-    const qreal edgeTol = cornerSnapDistanceScene * 0.5;
-    const qreal displayTolCorner = std::min<qreal>(0.8, edgeTol * 0.35);
-        bool topAligned    = false;
-        bool bottomAligned = false;
-        bool leftAligned   = false;
-        bool rightAligned  = false;
-        auto checkEdgeAligned = [&](const QRectF& r){
-            if (std::abs(finalRect.top()    - r.top())    < displayTolCorner) topAligned = true;
-            if (std::abs(finalRect.top()    - r.bottom()) < displayTolCorner) topAligned = true; // adjacency top to bottom
-            if (std::abs(finalRect.bottom() - r.bottom()) < displayTolCorner) bottomAligned = true;
-            if (std::abs(finalRect.bottom() - r.top())    < displayTolCorner) bottomAligned = true; // adjacency bottom to top
-            if (std::abs(finalRect.left()   - r.left())   < displayTolCorner) leftAligned = true;
-            if (std::abs(finalRect.left()   - r.right())  < displayTolCorner) leftAligned = true;   // adjacency left to right
-            if (std::abs(finalRect.right()  - r.right())  < displayTolCorner) rightAligned = true;
-            if (std::abs(finalRect.right()  - r.left())   < displayTolCorner) rightAligned = true;  // adjacency right to left
+        // Multi-corner simultaneous snapping:
+        // Determine which of the moving item's four corners are snapped (within strict display tolerance)
+        // to ANY target corner (screens or other media). Show all unique vertical/horizontal lines for those corners.
+        const qreal cornerDisplayTol = std::min<qreal>(0.8, cornerSnapDistanceScene * 0.35);
+        bool snappedTL = false, snappedTR = false, snappedBL = false, snappedBR = false;
+        // Moving item corner positions (after final placement)
+        QPointF tl(finalRect.left(), finalRect.top());
+        QPointF tr(finalRect.right(), finalRect.top());
+        QPointF bl(finalRect.left(), finalRect.bottom());
+        QPointF br(finalRect.right(), finalRect.bottom());
+        auto testCornerSet = [&](const QVector<QPointF>& targets){
+            for (const QPointF& tc : targets) {
+                if (!snappedTL && std::abs(tc.x()-tl.x()) < cornerDisplayTol && std::abs(tc.y()-tl.y()) < cornerDisplayTol) snappedTL = true;
+                if (!snappedTR && std::abs(tc.x()-tr.x()) < cornerDisplayTol && std::abs(tc.y()-tr.y()) < cornerDisplayTol) snappedTR = true;
+                if (!snappedBL && std::abs(tc.x()-bl.x()) < cornerDisplayTol && std::abs(tc.y()-bl.y()) < cornerDisplayTol) snappedBL = true;
+                if (!snappedBR && std::abs(tc.x()-br.x()) < cornerDisplayTol && std::abs(tc.y()-br.y()) < cornerDisplayTol) snappedBR = true;
+            }
         };
-        for (const QRectF& sr : screenRects) checkEdgeAligned(sr);
+        // Screen corners
+        for (const QRectF& sr : screenRects) {
+            testCornerSet({ sr.topLeft(), sr.topRight(), sr.bottomLeft(), sr.bottomRight() });
+        }
+        // Media corners
         for (QGraphicsItem* gi : items) {
-            auto* other = dynamic_cast<ResizableMediaBase*>(gi); if (!other || other == movingItem) continue; checkEdgeAligned(other->sceneBoundingRect());
+            auto* other = dynamic_cast<ResizableMediaBase*>(gi); if (!other || other == movingItem) continue; QRectF r = other->sceneBoundingRect();
+            testCornerSet({ r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight() });
         }
+        QVector<qreal> verticalXs; QVector<qreal> horizontalYs;
+        if (snappedTL || snappedBL) verticalXs.append(finalRect.left());
+        if (snappedTR || snappedBR) verticalXs.append(finalRect.right());
+        if (snappedTL || snappedTR) horizontalYs.append(finalRect.top());
+        if (snappedBL || snappedBR) horizontalYs.append(finalRect.bottom());
+        // Deduplicate
+        auto dedupVals = [](QVector<qreal>& v){ std::sort(v.begin(), v.end()); v.erase(std::unique(v.begin(), v.end(), [](qreal a, qreal b){ return std::abs(a-b) < 0.5; }), v.end()); };
+        dedupVals(verticalXs); dedupVals(horizontalYs);
         QVector<QLineF> lines;
-        // Always the two lines crossing at corner (snappedVerticalLineX, snappedHorizontalLineY)
-        lines.append(QLineF(snappedVerticalLineX, -1e6, snappedVerticalLineX, 1e6));
-        lines.append(QLineF(-1e6, snappedHorizontalLineY, 1e6, snappedHorizontalLineY));
-        // If both top & bottom aligned, add bottom edge explicitly (only if different from top)
-        if (topAligned && bottomAligned && std::abs(finalRect.bottom() - finalRect.top()) > 0.5) {
-            lines.append(QLineF(-1e6, finalRect.bottom(), 1e6, finalRect.bottom()));
-        }
-        // If both left & right aligned, add right edge explicitly (only if different from left)
-        if (leftAligned && rightAligned && std::abs(finalRect.right() - finalRect.left()) > 0.5) {
-            lines.append(QLineF(finalRect.right(), -1e6, finalRect.right(), 1e6));
-        }
-        // Deduplicate any accidental near-duplicates (defensive, though we aim to prevent them)
-        auto dedup = [](QVector<QLineF>& ls){
-            QVector<QLineF> out; out.reserve(ls.size());
-            auto key = [](const QLineF& l){ bool vertical = std::abs(l.p1().x()-l.p2().x()) < 0.5; if (vertical) return QPointF(std::round(l.p1().x()*1000)/1000.0, 0); else return QPointF(0, std::round(l.p1().y()*1000)/1000.0); };
-            for (const QLineF& l : ls) { QPointF k = key(l); bool exists = false; for (const QLineF& e : out) if (key(e) == k) { exists = true; break; } if (!exists) out.append(l); }
-            ls = out;
-        };
-        dedup(lines);
-        const_cast<ScreenCanvas*>(this)->updateSnapIndicators(lines);
+        for (qreal x : verticalXs) lines.append(QLineF(x, -1e6, x, 1e6));
+        for (qreal y : horizontalYs) lines.append(QLineF(-1e6, y, 1e6, y));
+        if (!lines.isEmpty()) const_cast<ScreenCanvas*>(this)->updateSnapIndicators(lines); else const_cast<ScreenCanvas*>(this)->clearSnapIndicators();
         return finalPos; // corner precedence
     }
 
