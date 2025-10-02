@@ -2392,10 +2392,9 @@ void ScreenCanvas::mouseReleaseEvent(QMouseEvent* event) {
         QMouseEvent synthetic(event->type(), event->position(), event->scenePosition(), event->globalPosition(), event->button(), event->buttons(), Qt::NoModifier);
         QGraphicsView::mouseReleaseEvent(&synthetic);
         if (m_scene) {
-            if (m_draggingSincePress && !m_selectionAtPress.isEmpty()) {
-                m_scene->clearSelection();
-                for (auto* p : m_selectionAtPress) if (p && !p->isBeingDeleted()) p->setSelected(true);
-            }
+            // Don't restore stale selection - let current selection stand after drag operations
+            // The problematic restoration logic was reverting selection to items that were selected
+            // at press time, not accounting for selection changes during the press/drag sequence
             updateSelectionChrome();
         }
         m_leftMouseActive = false; m_draggingSincePress = false; m_selectionAtPress.clear();
