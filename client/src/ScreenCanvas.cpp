@@ -2139,7 +2139,7 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
                 }
             }
         }
-    ResizableMediaBase* mediaHit = nullptr; for (QGraphicsItem* it : hitItems) { if ((mediaHit = toMedia(it))) break; }
+        ResizableMediaBase* mediaHit = nullptr; for (QGraphicsItem* it : hitItems) { if ((mediaHit = toMedia(it))) break; }
         if (selectedUnderCursor) {
             // Begin manual drag of the already-selected item; do not change selection
             m_draggingSelected = selectedUnderCursor;

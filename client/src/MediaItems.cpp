@@ -222,28 +222,19 @@ void ResizableMediaBase::setHandleSelectionSize(int px) {
 }
 
 QRectF ResizableMediaBase::boundingRect() const {
+    // Always inflate by handle size for consistent selection area
     QRectF br(0, 0, m_baseSize.width(), m_baseSize.height());
-    if (isSelected()) {
-        qreal pad = toItemLengthFromPixels(m_selectionSize) / 2.0;
-        return br.adjusted(-pad, -pad, pad, pad);
-    }
-    return br;
+    qreal pad = toItemLengthFromPixels(m_selectionSize) / 2.0;
+    return br.adjusted(-pad, -pad, pad, pad);
 }
 
 QPainterPath ResizableMediaBase::shape() const {
-    QPainterPath path; QRectF br(0,0, m_baseSize.width(), m_baseSize.height()); path.addRect(br);
-    if (isSelected()) {
-        const qreal s = toItemLengthFromPixels(m_selectionSize);
-        path.addRect(QRectF(br.topLeft() - QPointF(s/2,s/2), QSizeF(s,s)));
-        path.addRect(QRectF(QPointF(br.right(), br.top()) - QPointF(s/2,s/2), QSizeF(s,s)));
-        path.addRect(QRectF(QPointF(br.left(), br.bottom()) - QPointF(s/2,s/2), QSizeF(s,s)));
-        path.addRect(QRectF(br.bottomRight() - QPointF(s/2,s/2), QSizeF(s,s)));
-        // Midpoint handles
-        path.addRect(QRectF(QPointF(br.center().x(), br.top()) - QPointF(s/2,s/2), QSizeF(s,s)));
-        path.addRect(QRectF(QPointF(br.center().x(), br.bottom()) - QPointF(s/2,s/2), QSizeF(s,s)));
-        path.addRect(QRectF(QPointF(br.left(), br.center().y()) - QPointF(s/2,s/2), QSizeF(s,s)));
-        path.addRect(QRectF(QPointF(br.right(), br.center().y()) - QPointF(s/2,s/2), QSizeF(s,s)));
-    }
+    QPainterPath path; 
+    QRectF mediaRect(0,0, m_baseSize.width(), m_baseSize.height());
+    // Always include the inflated outer rect so near-edge clicks (future handle zones) select.
+    // This single expanded rectangle covers all handle areas without overlap issues.
+    qreal pad = toItemLengthFromPixels(m_selectionSize) / 2.0;
+    path.addRect(mediaRect.adjusted(-pad, -pad, pad, pad));
     return path;
 }
 
@@ -282,15 +273,22 @@ QVariant ResizableMediaBase::itemChange(GraphicsItemChange change, const QVarian
 }
 
 void ResizableMediaBase::mousePressEvent(QGraphicsSceneMouseEvent* event) {
-    m_activeHandle = hitTestHandle(event->pos());
-    if (m_activeHandle != None) {
-        m_fixedItemPoint = handlePoint(opposite(m_activeHandle));
-        m_fixedScenePoint = mapToScene(m_fixedItemPoint);
-        m_initialScale = scale();
-        const qreal d = std::hypot(event->scenePos().x() - m_fixedScenePoint.x(), event->scenePos().y() - m_fixedScenePoint.y());
-        m_initialGrabDist = (d > 1e-6) ? d : 1e-6;
-        event->accept();
-        return;
+    // When not selected, clicking anywhere inside the item's bounding rect (including where handles
+    // would appear) should select the item. Only treat handle hits as resize starts if already selected.
+    if (isSelected()) {
+        m_activeHandle = hitTestHandle(event->pos());
+        if (m_activeHandle != None) {
+            m_fixedItemPoint = handlePoint(opposite(m_activeHandle));
+            m_fixedScenePoint = mapToScene(m_fixedItemPoint);
+            m_initialScale = scale();
+            const qreal d = std::hypot(event->scenePos().x() - m_fixedScenePoint.x(), event->scenePos().y() - m_fixedScenePoint.y());
+            m_initialGrabDist = (d > 1e-6) ? d : 1e-6;
+            event->accept();
+            return;
+        }
+    } else {
+        // If not selected, ensure this press is treated as a normal selection click (no handle pre-emption)
+        m_activeHandle = None;
     }
     QGraphicsItem::mousePressEvent(event);
 }
