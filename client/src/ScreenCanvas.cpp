@@ -1262,9 +1262,55 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
             if (std::abs(finalRect.bottom() - o.top()) < tol) addUnique(horizontalYs, o.top());
         }
 
+        // Improved clustering: keep ability to switch between very close lines by choosing the one nearer the active candidate.
+        auto buildClusters = [&](QVector<qreal>& vals, qreal& lastPreferred, qreal candidate) {
+            QVector<qreal> out; if (vals.isEmpty()) return out;
+            std::sort(vals.begin(), vals.end());
+            qreal clusterTol = snapDistanceScene * 0.6; // grouping tolerance
+            qreal switchTol  = clusterTol * 0.35;       // distance needed to switch to another value in same cluster
+            QVector<qreal> bucket;
+            auto flushBucket = [&](){
+                if (bucket.isEmpty()) return;
+                // Pick representative:
+                qreal chosen = bucket.first();
+                // If previous preferred is inside bucket range, consider keeping it unless user moved towards another enough.
+                qreal minVal = bucket.first();
+                qreal maxVal = bucket.last();
+                auto nearestToCandidate = [&](){
+                    qreal best = bucket.first(); qreal bestAbs = std::abs(best - candidate);
+                    for (qreal v : bucket) { qreal d = std::abs(v - candidate); if (d < bestAbs) { bestAbs = d; best = v; } }
+                    return best;
+                };
+                if (bucket.size() == 1) {
+                    chosen = bucket.first();
+                } else {
+                    bool lastInside = !std::isnan(lastPreferred) && lastPreferred >= minVal - 1e-6 && lastPreferred <= maxVal + 1e-6;
+                    qreal nearest = nearestToCandidate();
+                    if (!lastInside) {
+                        chosen = nearest;
+                    } else {
+                        // If candidate pulls far enough from lastPreferred choose nearest, else keep lastPreferred for stability.
+                        if (std::abs(nearest - lastPreferred) > switchTol) chosen = nearest; else chosen = lastPreferred;
+                    }
+                }
+                out.append(chosen);
+                lastPreferred = chosen; // persist choice
+                bucket.clear();
+            };
+            for (qreal v : vals) {
+                if (bucket.isEmpty()) { bucket.append(v); continue; }
+                if (std::abs(v - bucket.last()) <= clusterTol) bucket.append(v); else { flushBucket(); bucket.append(v); }
+            }
+            flushBucket();
+            return out;
+        };
+
+        QVector<qreal> displayVertical = buildClusters(verticalXs, m_lastSnapVerticalX, candidateVerticalLineX);
+        QVector<qreal> displayHorizontal = buildClusters(horizontalYs, m_lastSnapHorizontalY, candidateHorizontalLineY);
+
         QVector<QLineF> lines;
-        for (qreal x : verticalXs) lines.append(QLineF(x, -1e6, x, 1e6));
-        for (qreal y : horizontalYs) lines.append(QLineF(-1e6, y, 1e6, y));
+        for (qreal x : displayVertical) lines.append(QLineF(x, -1e6, x, 1e6));
+        for (qreal y : displayHorizontal) lines.append(QLineF(-1e6, y, 1e6, y));
 
         if (!lines.isEmpty()) const_cast<ScreenCanvas*>(this)->updateSnapIndicators(lines);
         else const_cast<ScreenCanvas*>(this)->clearSnapIndicators();
@@ -1589,18 +1635,62 @@ qreal ScreenCanvas::applyAxisSnapWithHysteresis(ResizableMediaBase* item,
         }
     };
 
-    // If a snap is already active, check release condition first.
+    // If a snap is already active, evaluate release OR switch-to-closer-edge logic.
     if (snapActive && snapHandle == activeHandle) {
-        // Determine distance from moving edge (under proposed scale) to the snap edge implied by snapTargetScale.
-        // Recompute moving edge with proposedScale (not snapTarget) to decide release threshold, encouraging fluid exit.
-        qreal dist = std::numeric_limits<qreal>::max();
+        auto snappedEdgePosForScale = [&](qreal s) -> qreal {
+            qreal halfWLocked = (baseSize.width() * s) / 2.0;
+            qreal halfHLocked = (baseSize.height() * s) / 2.0;
+            switch (activeHandle) {
+                case H::LeftMid:   return fixedScenePoint.x() - 2*halfWLocked;
+                case H::RightMid:  return fixedScenePoint.x() + 2*halfWLocked;
+                case H::TopMid:    return fixedScenePoint.y() - 2*halfHLocked;
+                case H::BottomMid: return fixedScenePoint.y() + 2*halfHLocked;
+                default: return 0.0;
+            }
+        };
+        qreal snappedEdgePos = snappedEdgePosForScale(snapTargetScale);
+        // Distance of current proposed geometry to the locked snap edge.
+        qreal distToLocked = std::abs(movingEdgePos - snappedEdgePos);
+
+        // Attempt switch: find a candidate edge meaningfully closer than the locked one.
+        qreal bestSwitchDist = std::numeric_limits<qreal>::max();
+        qreal bestSwitchScale = snapTargetScale;
+        bool haveSwitch = false;
         for (qreal edge : targetEdges) {
-            dist = std::min(dist, std::abs(movingEdgePos - edge));
+            // Skip if this edge corresponds (numerically) to the locked one.
+            if (std::abs(edge - snappedEdgePos) < 1e-6) continue;
+            qreal candDist = std::abs(movingEdgePos - edge);
+            if (candDist > snapDistanceScene) continue; // Only consider within engage zone.
+            if (candDist + 0.25 <= distToLocked && candDist < bestSwitchDist) { // 0.25px bias to avoid rapid toggling.
+                qreal candScale = computeScaleFor(edge);
+                if (candScale > 0.0) {
+                    bestSwitchDist = candDist;
+                    bestSwitchScale = candScale;
+                    haveSwitch = true;
+                }
+            }
         }
-        if (dist <= releaseDist) {
-            // Stay snapped - lock to stored target scale (prevents jitter)
-            // Show indicator only while within the primary snap distance threshold; hide when in hysteresis-only zone.
-            if (dist <= snapDistanceScene) {
+
+        if (haveSwitch) {
+            // Switch directly to the new closer edge without full release cycle.
+            item->setAxisSnapActive(true, activeHandle, bestSwitchScale);
+            qreal snappedHalfW = (baseSize.width() * bestSwitchScale)/2.0;
+            qreal snappedHalfH = (baseSize.height() * bestSwitchScale)/2.0;
+            QVector<QLineF> lines;
+            switch (activeHandle) {
+                case H::LeftMid:   lines.append(QLineF(fixedScenePoint.x() - 2*snappedHalfW, -1e6, fixedScenePoint.x() - 2*snappedHalfW, 1e6)); break;
+                case H::RightMid:  lines.append(QLineF(fixedScenePoint.x() + 2*snappedHalfW, -1e6, fixedScenePoint.x() + 2*snappedHalfW, 1e6)); break;
+                case H::TopMid:    lines.append(QLineF(-1e6, fixedScenePoint.y() - 2*snappedHalfH, 1e6, fixedScenePoint.y() - 2*snappedHalfH)); break;
+                case H::BottomMid: lines.append(QLineF(-1e6, fixedScenePoint.y() + 2*snappedHalfH, 1e6, fixedScenePoint.y() + 2*snappedHalfH)); break;
+                default: break;
+            }
+            const_cast<ScreenCanvas*>(this)->updateSnapIndicators(lines);
+            return bestSwitchScale;
+        }
+
+        // No switch candidate: decide whether to remain locked or release.
+        if (distToLocked <= releaseDist) {
+            if (distToLocked <= snapDistanceScene) {
                 QVector<QLineF> lines;
                 qreal snappedHalfW = (baseSize.width() * snapTargetScale)/2.0;
                 qreal snappedHalfH = (baseSize.height() * snapTargetScale)/2.0;
@@ -1616,39 +1706,67 @@ qreal ScreenCanvas::applyAxisSnapWithHysteresis(ResizableMediaBase* item,
                 const_cast<ScreenCanvas*>(this)->clearSnapIndicators();
             }
             return snapTargetScale;
-        } else {
-            // Release: clear indicator immediately
-            item->setAxisSnapActive(false, H::None, 0.0);
-            const_cast<ScreenCanvas*>(this)->clearSnapIndicators();
-            return proposedScale;
         }
+
+        // Release: user moved far enough from locked edge and no closer switch candidate.
+        item->setAxisSnapActive(false, H::None, 0.0);
+        const_cast<ScreenCanvas*>(this)->clearSnapIndicators();
+        // Continue to acquisition logic below (do not early-return) using unsnapped path.
     }
 
     // Otherwise evaluate for potential new snap engagement.
     qreal bestDist = snapDistanceScene;
     qreal bestScale = proposedScale;
-    // Determine expansion direction: are we growing (scale increasing) or shrinking relative to current item scale?
+    
+    // Find the closest snap target in the direction of movement, and also consider very close alternatives
+    qreal closestInDirection = std::numeric_limits<qreal>::max();
+    qreal bestScaleInDirection = proposedScale;
+    qreal closestOverall = std::numeric_limits<qreal>::max();
+    qreal bestScaleOverall = proposedScale;
+    
+    // Determine movement direction
     const qreal currentScale = item->scale();
-    bool growing = proposedScale > currentScale + 1e-9;
-
+    bool expanding = proposedScale > currentScale + 1e-9;
+    
     for (qreal edge : targetEdges) {
-        // Filter edges so only the side being dragged can trigger snap while growing.
-        if (growing) {
-            if (activeHandle == H::RightMid && edge < movingEdgePos) continue; // ignore left-side borders when expanding right
-            if (activeHandle == H::LeftMid  && edge > movingEdgePos) continue; // ignore right-side borders when expanding left
-            if (activeHandle == H::BottomMid && edge < movingEdgePos) continue; // ignore top borders when expanding downward
-            if (activeHandle == H::TopMid    && edge > movingEdgePos) continue; // ignore bottom borders when expanding upward
-        }
         qreal dist = std::abs(movingEdgePos - edge);
-        if (dist < bestDist) {
-            qreal targetScale = computeScaleFor(edge);
-            if (targetScale > 0.0) {
-                bestDist = dist;
-                bestScale = targetScale;
-            }
+        qreal targetScale = computeScaleFor(edge);
+        if (targetScale <= 0.0) continue;
+        
+        // Track closest overall (for fallback in tight clusters)
+        if (dist < closestOverall) {
+            closestOverall = dist;
+            bestScaleOverall = targetScale;
+        }
+        
+        // Check if this edge is in the direction of movement
+        bool inDirection = false;
+        if (expanding) {
+            if (activeHandle == H::RightMid && edge >= movingEdgePos - 1e-6) inDirection = true;
+            else if (activeHandle == H::LeftMid && edge <= movingEdgePos + 1e-6) inDirection = true;
+            else if (activeHandle == H::BottomMid && edge >= movingEdgePos - 1e-6) inDirection = true;
+            else if (activeHandle == H::TopMid && edge <= movingEdgePos + 1e-6) inDirection = true;
+        } else {
+            // Contracting - allow any direction for more flexible snapping
+            inDirection = true;
+        }
+        
+        if (inDirection && dist < closestInDirection) {
+            closestInDirection = dist;
+            bestScaleInDirection = targetScale;
         }
     }
-    if (bestScale != proposedScale) {
+    
+    // Choose best snap target: prefer directional if within snap distance, otherwise use closest overall if very close
+    if (closestInDirection < snapDistanceScene) {
+        bestDist = closestInDirection;
+        bestScale = bestScaleInDirection;
+    } else if (closestOverall < snapDistanceScene * 0.7) { // allow non-directional snaps if very close
+        bestDist = closestOverall;
+        bestScale = bestScaleOverall;
+    }
+    
+    if (bestScale != proposedScale && bestDist < snapDistanceScene) {
         item->setAxisSnapActive(true, activeHandle, bestScale);
         // Visual snapping line for axis resizing
         QVector<QLineF> lines;

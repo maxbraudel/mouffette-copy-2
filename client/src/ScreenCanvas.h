@@ -282,6 +282,9 @@ protected:
     void keyReleaseEvent(QKeyEvent* event) override; // clear indicators when Shift released
     // Snap guides item (renders between scene content and overlay panels)
     class SnapGuideItem* m_snapGuides = nullptr;
+    // Persist last chosen snap guide positions for hysteresis / tie-breaking
+    mutable qreal m_lastSnapVerticalX = std::numeric_limits<qreal>::quiet_NaN();
+    mutable qreal m_lastSnapHorizontalY = std::numeric_limits<qreal>::quiet_NaN();
 };
 
 #endif // SCREENCANVAS_H
