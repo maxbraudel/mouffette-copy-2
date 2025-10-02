@@ -231,7 +231,7 @@ QRectF ResizableMediaBase::boundingRect() const {
 QPainterPath ResizableMediaBase::shape() const {
     QPainterPath path; 
     QRectF mediaRect(0,0, m_baseSize.width(), m_baseSize.height());
-    // Always include the inflated outer rect so near-edge clicks (future handle zones) select.
+    // Include handle zones for selection but only add explicit handle shapes when selected.
     // This single expanded rectangle covers all handle areas without overlap issues.
     qreal pad = toItemLengthFromPixels(m_selectionSize) / 2.0;
     path.addRect(mediaRect.adjusted(-pad, -pad, pad, pad));
@@ -273,8 +273,7 @@ QVariant ResizableMediaBase::itemChange(GraphicsItemChange change, const QVarian
 }
 
 void ResizableMediaBase::mousePressEvent(QGraphicsSceneMouseEvent* event) {
-    // When not selected, clicking anywhere inside the item's bounding rect (including where handles
-    // would appear) should select the item. Only treat handle hits as resize starts if already selected.
+    // Only handle resize if already selected; otherwise defer to normal selection.
     if (isSelected()) {
         m_activeHandle = hitTestHandle(event->pos());
         if (m_activeHandle != None) {
@@ -287,7 +286,7 @@ void ResizableMediaBase::mousePressEvent(QGraphicsSceneMouseEvent* event) {
             return;
         }
     } else {
-        // If not selected, ensure this press is treated as a normal selection click (no handle pre-emption)
+        // Not selected: defer to normal selection
         m_activeHandle = None;
     }
     QGraphicsItem::mousePressEvent(event);
@@ -902,7 +901,7 @@ void ResizableVideoItem::onFrameConversionComplete(QImage convertedImage, quint6
     if (m_beingDeleted) return; // ignore late callbacks after deletion begun
     if (serial <= m_lastProcessedSerial) { ++m_framesDropped; return; }
     m_lastProcessedSerial = serial; m_lastFrameImage = std::move(convertedImage); ++m_conversionsCompleted; m_conversionBusy.store(false);
-    if (m_conversionsCompleted % 30 == 0) qDebug() << "Frame conversion completed serial" << serial;
+
     { QMutexLocker locker(&m_frameMutex); if (m_pendingFrame.isValid() && !m_conversionBusy.exchange(true)) { quint64 newSerial = ++m_frameSerial; auto* worker = new FrameConversionWorker(this, m_pendingFrame, newSerial); QThreadPool::globalInstance()->start(worker); ++m_conversionsStarted; m_pendingFrame = QVideoFrame(); } }
     if (shouldRepaint()) { m_lastRepaintMs = QDateTime::currentMSecsSinceEpoch(); update(); }
 }

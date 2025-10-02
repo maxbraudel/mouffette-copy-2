@@ -141,13 +141,7 @@ public:
         pen.setWidthF(thickness);
         pen.setCapStyle(Qt::FlatCap);
         painter->setPen(pen);
-        auto alignCoord = [&](qreal v){
-            // Previously we shifted odd-width strokes by 0.5 for crispness, but selection borders
-            // (cosmetic pens) are drawn at raw scene coordinates, causing a visible gap between
-            // snap lines and media borders when fractional scaling occurs. We now snap to the
-            // nearest device pixel without adding a half-pixel bias so lines coincide visually.
-            return std::round(v);
-        };
+        auto alignCoord = [&](qreal v){ return std::round(v); };
         for (const QLineF& sl : m_lines) {
             QPointF v1 = sceneToViewport.map(sl.p1());
             QPointF v2 = sceneToViewport.map(sl.p2());
@@ -3283,4 +3277,4 @@ void ScreenCanvas::updateLaunchSceneButtonStyle() {
     m_launchSceneButton->setFixedHeight(40);
 }
 
-// (Removed legacy duplicate snap indicator drawing functions; SnapGuideItem now handles rendering.)
+
