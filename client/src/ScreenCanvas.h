@@ -131,8 +131,6 @@ private:
     QPointF mapRemoteCursorToScene(int remoteX, int remoteY) const;
     QRectF screensBoundingRect() const;
     void zoomAroundViewportPos(const QPointF& vpPos, qreal factor);
-    void ensureZOrder();
-    void debugLogScreenSizes() const; // helper to verify screen rect pixel parity
     void recreateRemoteCursorItem();
     // Global top-right info overlay (lists media files)
     void initInfoOverlay();

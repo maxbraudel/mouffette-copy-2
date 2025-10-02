@@ -1714,58 +1714,27 @@ qreal ScreenCanvas::applyAxisSnapWithHysteresis(ResizableMediaBase* item,
         // Continue to acquisition logic below (do not early-return) using unsnapped path.
     }
 
-    // Otherwise evaluate for potential new snap engagement.
+    // Otherwise evaluate for potential new snap engagement (reverted to original directional filtering logic).
     qreal bestDist = snapDistanceScene;
     qreal bestScale = proposedScale;
-    
-    // Find the closest snap target in the direction of movement, and also consider very close alternatives
-    qreal closestInDirection = std::numeric_limits<qreal>::max();
-    qreal bestScaleInDirection = proposedScale;
-    qreal closestOverall = std::numeric_limits<qreal>::max();
-    qreal bestScaleOverall = proposedScale;
-    
-    // Determine movement direction
     const qreal currentScale = item->scale();
-    bool expanding = proposedScale > currentScale + 1e-9;
-    
+    bool growing = proposedScale > currentScale + 1e-9;
     for (qreal edge : targetEdges) {
+        if (growing) {
+            if (activeHandle == H::RightMid  && edge < movingEdgePos) continue;
+            if (activeHandle == H::LeftMid   && edge > movingEdgePos) continue;
+            if (activeHandle == H::BottomMid && edge < movingEdgePos) continue;
+            if (activeHandle == H::TopMid    && edge > movingEdgePos) continue;
+        }
         qreal dist = std::abs(movingEdgePos - edge);
-        qreal targetScale = computeScaleFor(edge);
-        if (targetScale <= 0.0) continue;
-        
-        // Track closest overall (for fallback in tight clusters)
-        if (dist < closestOverall) {
-            closestOverall = dist;
-            bestScaleOverall = targetScale;
-        }
-        
-        // Check if this edge is in the direction of movement
-        bool inDirection = false;
-        if (expanding) {
-            if (activeHandle == H::RightMid && edge >= movingEdgePos - 1e-6) inDirection = true;
-            else if (activeHandle == H::LeftMid && edge <= movingEdgePos + 1e-6) inDirection = true;
-            else if (activeHandle == H::BottomMid && edge >= movingEdgePos - 1e-6) inDirection = true;
-            else if (activeHandle == H::TopMid && edge <= movingEdgePos + 1e-6) inDirection = true;
-        } else {
-            // Contracting - allow any direction for more flexible snapping
-            inDirection = true;
-        }
-        
-        if (inDirection && dist < closestInDirection) {
-            closestInDirection = dist;
-            bestScaleInDirection = targetScale;
+        if (dist < bestDist) {
+            qreal targetScale = computeScaleFor(edge);
+            if (targetScale > 0.0) {
+                bestDist = dist;
+                bestScale = targetScale;
+            }
         }
     }
-    
-    // Choose best snap target: prefer directional if within snap distance, otherwise use closest overall if very close
-    if (closestInDirection < snapDistanceScene) {
-        bestDist = closestInDirection;
-        bestScale = bestScaleInDirection;
-    } else if (closestOverall < snapDistanceScene * 0.7) { // allow non-directional snaps if very close
-        bestDist = closestOverall;
-        bestScale = bestScaleOverall;
-    }
-    
     if (bestScale != proposedScale && bestDist < snapDistanceScene) {
         item->setAxisSnapActive(true, activeHandle, bestScale);
         // Visual snapping line for axis resizing
@@ -2738,7 +2707,7 @@ void ScreenCanvas::createScreenItems() {
         m_screenItems << rect;
         m_sceneScreenRects.insert(s.id, pos);
     }
-    ensureZOrder();
+    // Z-order previously normalized by ensureZOrder(); items now rely on explicit z-values at creation time.
 
     // Draw per-screen UI zones (new approach superseding global remap logic)
     QColor genericFill(128,128,128,90); // semi-transparent gray for non-taskbar zones
@@ -2850,24 +2819,7 @@ void ScreenCanvas::zoomAroundViewportPos(const QPointF& vpPosF, qreal factor) {
     if (m_scene) { const QList<QGraphicsItem*> sel = m_scene->selectedItems(); for (QGraphicsItem* it : sel) { if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) v->requestOverlayRelayout(); if (auto* b = dynamic_cast<ResizableMediaBase*>(it)) b->requestLabelRelayout(); } }
 }
 
-void ScreenCanvas::ensureZOrder() {
-    // Ensures overlays or future interactive layers can sit above screens; currently screens use -1000.
-}
-
-void ScreenCanvas::debugLogScreenSizes() const {
-    if (m_screenItems.size() != m_screens.size()) {
-        qDebug() << "Screen/item count mismatch" << m_screenItems.size() << m_screens.size();
-    }
-    for (int i = 0; i < m_screenItems.size() && i < m_screens.size(); ++i) {
-        auto* item = m_screenItems[i]; if (!item) continue;
-        const ScreenInfo& si = m_screens[i];
-        QRectF r = item->rect(); // local (inner) rect already adjusted for border
-        qDebug() << "Screen" << i << "expected" << si.width << "x" << si.height
-                 << "scaleFactor" << m_scaleFactor
-                 << "itemRect" << r.width() << "x" << r.height()
-                 << "sceneBounding" << item->sceneBoundingRect().size();
-    }
-}
+// ensureZOrder removed (previously a placeholder) -- z layering enforced directly where items are created.
 
 void ScreenCanvas::recreateRemoteCursorItem() {
     if (!m_scene) return;
