@@ -116,7 +116,6 @@ private:
     void ensureDragPreview(const QMimeData* mime);
     void updateDragPreviewPos(const QPointF& scenePos);
     void clearDragPreview();
-    QPixmap makeVideoPlaceholderPixmap(const QSize& pxSize);
     void startVideoPreviewProbe(const QString& localFilePath);
     void startVideoPreviewProbeFallback(const QString& localFilePath);
     void stopVideoPreviewProbe();

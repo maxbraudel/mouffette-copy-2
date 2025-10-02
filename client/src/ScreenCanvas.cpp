@@ -1088,20 +1088,21 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
         // Simplified corner indicator logic: draw the two orthogonal lines through the snapped corner.
         // Additionally, if the opposite parallel edge of finalRect also aligns (within tolerance) with another item/screen edge,
         // include that second parallel line (double-edge visualization) without duplicating stale previous lines.
-        const qreal edgeTol = cornerSnapDistanceScene * 0.5;
+    const qreal edgeTol = cornerSnapDistanceScene * 0.5;
+    const qreal displayTolCorner = std::min<qreal>(0.8, edgeTol * 0.35);
         bool topAligned    = false;
         bool bottomAligned = false;
         bool leftAligned   = false;
         bool rightAligned  = false;
         auto checkEdgeAligned = [&](const QRectF& r){
-            if (std::abs(finalRect.top()    - r.top())    < edgeTol) topAligned = true;
-            if (std::abs(finalRect.top()    - r.bottom()) < edgeTol) topAligned = true; // adjacency top to bottom
-            if (std::abs(finalRect.bottom() - r.bottom()) < edgeTol) bottomAligned = true;
-            if (std::abs(finalRect.bottom() - r.top())    < edgeTol) bottomAligned = true; // adjacency bottom to top
-            if (std::abs(finalRect.left()   - r.left())   < edgeTol) leftAligned = true;
-            if (std::abs(finalRect.left()   - r.right())  < edgeTol) leftAligned = true;   // adjacency left to right
-            if (std::abs(finalRect.right()  - r.right())  < edgeTol) rightAligned = true;
-            if (std::abs(finalRect.right()  - r.left())   < edgeTol) rightAligned = true;  // adjacency right to left
+            if (std::abs(finalRect.top()    - r.top())    < displayTolCorner) topAligned = true;
+            if (std::abs(finalRect.top()    - r.bottom()) < displayTolCorner) topAligned = true; // adjacency top to bottom
+            if (std::abs(finalRect.bottom() - r.bottom()) < displayTolCorner) bottomAligned = true;
+            if (std::abs(finalRect.bottom() - r.top())    < displayTolCorner) bottomAligned = true; // adjacency bottom to top
+            if (std::abs(finalRect.left()   - r.left())   < displayTolCorner) leftAligned = true;
+            if (std::abs(finalRect.left()   - r.right())  < displayTolCorner) leftAligned = true;   // adjacency left to right
+            if (std::abs(finalRect.right()  - r.right())  < displayTolCorner) rightAligned = true;
+            if (std::abs(finalRect.right()  - r.left())   < displayTolCorner) rightAligned = true;  // adjacency right to left
         };
         for (const QRectF& sr : screenRects) checkEdgeAligned(sr);
         for (QGraphicsItem* gi : items) {
@@ -1316,9 +1317,18 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
         if (!displayHorizontal.isEmpty()) m_lastSnapHorizontalY = displayHorizontal.first();
 
         // Recompute which edges of the moving rect are actually aligned now; discard stale cluster representatives.
-        const qreal edgeTol = snapDistanceScene * 0.45; // slightly tighter than engage distance
+        // Only display an indicator if the edge is virtually perfectly aligned (not just within snap capture tolerance).
+        // We use a strict display tolerance (<= 0.8 scene units and a fraction of the snap tolerance) to avoid
+        // showing lines for near-but-not-equal heights.
+        const qreal edgeTol = snapDistanceScene * 0.45; // broader acceptance for switching logic
+        const qreal displayTol = std::min<qreal>(0.8, edgeTol * 0.3); // strict visual requirement
         auto alignedEdge = [&](qreal edgeCoord, const QVector<qreal>& raw){
-            for (qreal v : raw) if (std::abs(v - edgeCoord) < edgeTol) return true; return false; };
+            qreal best = std::numeric_limits<qreal>::max();
+            for (qreal v : raw) {
+                qreal d = std::abs(v - edgeCoord);
+                if (d < best) best = d;
+            }
+            return best < displayTol; };
 
         bool topAligned    = alignedEdge(finalRect.top(),    horizontalYs);
         bool bottomAligned = alignedEdge(finalRect.bottom(), horizontalYs);
@@ -2676,9 +2686,6 @@ void ScreenCanvas::clearDragPreview() {
     m_dragPreviewPixmap = QPixmap(); m_dragPreviewGotFrame = false; m_dragPreviewIsVideo = false;
 }
 
-QPixmap ScreenCanvas::makeVideoPlaceholderPixmap(const QSize& pxSize) {
-    QPixmap pm(pxSize); pm.fill(Qt::transparent); QPainter p(&pm); p.setRenderHint(QPainter::Antialiasing, true); QRect r(0,0,pxSize.width()-1, pxSize.height()-1); p.setBrush(QColor(40,40,40,220)); p.setPen(Qt::NoPen); p.drawRoundedRect(r, 16,16); QPolygon play; play << QPoint(pxSize.width()/2 - 18, pxSize.height()/2 - 24) << QPoint(pxSize.width()/2 - 18, pxSize.height()/2 + 24) << QPoint(pxSize.width()/2 + 26, pxSize.height()/2); p.setBrush(QColor(255,255,255,200)); p.drawPolygon(play); return pm;
-}
 
 void ScreenCanvas::startVideoPreviewProbe(const QString& localFilePath) {
 #ifdef Q_OS_MACOS
