@@ -375,32 +375,59 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                     QPointF currentMovingEdgeScene = mapToScene(handlePoint(m_activeHandle));
                     qreal cursorToEdgeDist = horizontalHandle ? (event->scenePos().x() - currentMovingEdgeScene.x())
                                                               : (event->scenePos().y() - currentMovingEdgeScene.y());
+                    // Apply the same direction normalization as deltaScene to ensure consistency
+                    if (m_activeHandle == LeftMid || m_activeHandle == TopMid) cursorToEdgeDist = -cursorToEdgeDist;
                     m_axisStretchInitialOffset = cursorToEdgeDist;
                     m_axisStretchOriginalBaseSize = m_baseSize;
                     m_axisStretchOrigCaptured = true;
                 }
+                // Check for Shift+Alt snapping before applying size changes
+                const bool shiftPressed = QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
+                qreal desiredAxisSize = extent - m_axisStretchInitialOffset;
+                
+                if (shiftPressed) {
+                    // Apply axis snapping for Alt stretch mode
+                    // Convert the desired axis size to an equivalent scale for snapping logic
+                    qreal origAxisSize = horizontalHandle ? m_axisStretchOriginalBaseSize.width() : m_axisStretchOriginalBaseSize.height();
+                    qreal equivalentScale = (origAxisSize > 0) ? (desiredAxisSize / origAxisSize) : 1.0;
+                    equivalentScale = std::clamp<qreal>(equivalentScale, 0.05, 100.0);
+                    
+                    if (scene() && !scene()->views().isEmpty()) {
+                        if (auto* scView = qobject_cast<ScreenCanvas*>(scene()->views().first())) {
+                            qreal snappedScale = scView->applyAxisSnapWithHysteresis(this, equivalentScale, m_fixedScenePoint, m_axisStretchOriginalBaseSize, m_activeHandle);
+                            // Convert snapped scale back to desired size
+                            desiredAxisSize = snappedScale * origAxisSize;
+                        }
+                    }
+                } else if (m_axisSnapActive) {
+                    // User released Shift mid-resize: drop snap state
+                    m_axisSnapActive = false; m_axisSnapHandle = None; m_axisSnapTargetScale = 1.0;
+                }
+
                 QSize newBase = m_baseSize;
                 if (horizontalHandle) {
-                    // Calculate desired width preserving initial cursor-to-edge offset
-                    qreal desiredFullW = extent - m_axisStretchInitialOffset;
-                    int newW = std::max(1, static_cast<int>(std::round(desiredFullW)));
+                    int newW = std::max(1, static_cast<int>(std::round(desiredAxisSize)));
                     if (newW != newBase.width()) {
                         prepareGeometryChange();
                         newBase.setWidth(newW);
                         m_baseSize = newBase;
                     }
                 } else {
-                    qreal desiredFullH = extent - m_axisStretchInitialOffset;
-                    int newH = std::max(1, static_cast<int>(std::round(desiredFullH)));
+                    int newH = std::max(1, static_cast<int>(std::round(desiredAxisSize)));
                     if (newH != newBase.height()) {
                         prepareGeometryChange();
                         newBase.setHeight(newH);
                         m_baseSize = newBase;
                     }
                 }
-                // Keep scale unchanged; anchor fixed side: recompute fixed item point once dimension changed
+                // Keep scale unchanged; anchor fixed side. We ONLY update the item-space point for the fixed side
+                // (its coordinates change when base size changes) but we DO NOT overwrite the stored scene-space
+                // fixed point. Overwriting m_fixedScenePoint caused the apparent growth to occur in the opposite
+                // direction for left & bottom handles because the anchor drifted. By preserving the original
+                // scene anchor captured at press (or after the initial scale bake), the resizing now correctly
+                // expands/contracts toward the dragged midpoint handle.
                 m_fixedItemPoint = handlePoint(opposite(m_activeHandle));
-                m_fixedScenePoint = mapToScene(m_fixedItemPoint); // ensure anchor stays correct
+                // m_fixedScenePoint intentionally left unchanged here.
                 targetScale = scale();
             }
         }
