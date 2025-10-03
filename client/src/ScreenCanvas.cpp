@@ -3520,6 +3520,16 @@ void ScreenCanvas::updateLaunchTestSceneButtonStyle() {
 void ScreenCanvas::startHostSceneState() {
     if (m_hostSceneActive) return;
     m_hostSceneActive = true;
+    // Capture current selection (only ResizableMediaBase items) before clearing so we can restore later.
+    m_prevSelectionBeforeHostScene.clear();
+    if (m_scene) {
+        const auto selectedNow = m_scene->selectedItems();
+        for (QGraphicsItem* it : selectedNow) {
+            if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
+                m_prevSelectionBeforeHostScene.append(media);
+            }
+        }
+    }
     // Deselect all media and block further selection by clearing selections.
     if (m_scene) {
         for (QGraphicsItem* it : m_scene->selectedItems()) it->setSelected(false);
@@ -3578,6 +3588,13 @@ void ScreenCanvas::stopHostSceneState() {
         for (QGraphicsItem* gi : m_scene->items()) {
             if (auto* media = dynamic_cast<ResizableMediaBase*>(gi)) media->showImmediateNoFade();
         }
+        // Restore previous selection (only items that still exist in the scene)
+        for (auto* media : std::as_const(m_prevSelectionBeforeHostScene)) {
+            if (media && media->scene() == m_scene) {
+                media->setSelected(true);
+            }
+        }
+        m_prevSelectionBeforeHostScene.clear();
     }
 }
 

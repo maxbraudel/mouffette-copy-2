@@ -290,6 +290,8 @@ protected:
     bool m_hostSceneActive = false;
     QTimer* m_autoDisplayTimer = nullptr;
     QTimer* m_autoPlayTimer = nullptr;
+    // Remember selection present just before entering host scene so it can be restored afterward
+    QList<ResizableMediaBase*> m_prevSelectionBeforeHostScene;
     void updateLaunchSceneButtonStyle();
     void updateLaunchTestSceneButtonStyle();
 
