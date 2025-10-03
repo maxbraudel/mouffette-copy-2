@@ -134,6 +134,12 @@ protected:
     QSize m_axisStretchOriginalBaseSize; // captured at first Alt midpoint movement
     bool  m_axisStretchOrigCaptured = false;
     qreal m_axisStretchInitialOffset = 0.0; // initial cursor-to-moving-edge offset
+
+    // Corner Alt stretch state (independent width/height non-uniform scaling from a corner)
+    bool  m_cornerStretchOrigCaptured = false;
+    QSize m_cornerStretchOriginalBaseSize; // baked original size when Alt first used on a corner
+    qreal m_cornerStretchInitialOffsetX = 0.0; // cursor-to-moving-edge offset along X (normalized direction)
+    qreal m_cornerStretchInitialOffsetY = 0.0; // cursor-to-moving-edge offset along Y (normalized direction)
     QPointF m_fixedItemPoint;  // item coords
     QPointF m_fixedScenePoint; // scene coords
     qreal m_initialScale = 1.0;

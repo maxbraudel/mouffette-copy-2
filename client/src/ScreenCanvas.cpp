@@ -1787,6 +1787,104 @@ qreal ScreenCanvas::applyAxisSnapWithHysteresis(ResizableMediaBase* item,
     return proposedScale;
 }
 
+ScreenCanvas::CornerAltSnapResult ScreenCanvas::applyCornerAltSnapWithHysteresis(ResizableMediaBase* item,
+                                                         ResizableMediaBase::Handle activeHandle,
+                                                         const QPointF& fixedScenePoint,
+                                                         const QSize& originalBaseSize,
+                                                         qreal proposedW,
+                                                         qreal proposedH) const {
+    CornerAltSnapResult result; result.cornerSnapped = false;
+    using H = ResizableMediaBase::Handle;
+    bool isCorner = (activeHandle == H::TopLeft || activeHandle == H::TopRight || activeHandle == H::BottomLeft || activeHandle == H::BottomRight);
+    if (!isCorner) return result;
+    if (!QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier)) return result; // Shift required for snapping
+    if (!m_scene) return result;
+
+    // Convert snap distances to scene units
+    const QTransform t = transform();
+    const qreal snapDist = m_snapDistancePx / (t.m11() > 1e-6 ? t.m11() : 1.0);
+    const qreal cornerZone = m_cornerSnapDistancePx / (t.m11() > 1e-6 ? t.m11() : 1.0);
+    constexpr qreal releaseFactor = 1.4;
+    const qreal releaseDist = cornerZone * releaseFactor;
+
+    // Derive current moving corner scene point from proposedW/H keeping fixed corner anchored.
+    auto movingCornerSceneFor = [&](qreal w, qreal h) -> QPointF {
+        // Top-left of new rect given fixed corner and which corner is fixed
+        // We know fixedScenePoint corresponds to opposite corner (fixed) recorded at press.
+        // Determine orientation relative to proposed width/height.
+        // For simplicity compute new rect by placing fixed corner then offsetting.
+        if (activeHandle == H::TopLeft) {
+            // fixed is BottomRight
+            return QPointF(fixedScenePoint.x() - w, fixedScenePoint.y() - h);
+        } else if (activeHandle == H::TopRight) {
+            // fixed is BottomLeft
+            return QPointF(fixedScenePoint.x(), fixedScenePoint.y() - h);
+        } else if (activeHandle == H::BottomLeft) {
+            // fixed is TopRight
+            return QPointF(fixedScenePoint.x() - w, fixedScenePoint.y());
+        } else { // BottomRight
+            // fixed is TopLeft
+            return QPointF(fixedScenePoint.x(), fixedScenePoint.y());
+        }
+    };
+    auto movingCornerPoint = [&](qreal w, qreal h) -> QPointF {
+        QPointF tl = movingCornerSceneFor(w, h); // tl
+        if (activeHandle == H::TopLeft) return tl; // moving corner is top-left
+        if (activeHandle == H::TopRight) return QPointF(tl.x() + w, tl.y());
+        if (activeHandle == H::BottomLeft) return QPointF(tl.x(), tl.y() + h);
+        return QPointF(tl.x() + w, tl.y() + h);
+    };
+
+    QPointF candidate = movingCornerPoint(proposedW, proposedH);
+
+    // Collect potential corner targets (screen corners + other media corners)
+    QList<QPointF> targets;
+    for (const QRectF& sr : getScreenBorderRects()) {
+        targets << sr.topLeft() << sr.topRight() << sr.bottomLeft() << sr.bottomRight();
+    }
+    for (QGraphicsItem* gi : m_scene->items()) {
+        auto* other = dynamic_cast<ResizableMediaBase*>(gi);
+        if (!other || other == item) continue;
+        QRectF r = other->sceneBoundingRect();
+        targets << r.topLeft() << r.topRight() << r.bottomLeft() << r.bottomRight();
+    }
+    if (targets.isEmpty()) return result;
+
+    struct Cand { qreal err; QPointF target; } best{ std::numeric_limits<qreal>::max(), QPointF() };
+    for (const QPointF& tpt : targets) {
+        qreal dx = std::abs(candidate.x() - tpt.x());
+        qreal dy = std::abs(candidate.y() - tpt.y());
+        if (dx > cornerZone || dy > cornerZone) continue; // outside snapping zone
+        qreal err = std::hypot(dx, dy);
+        if (err < best.err) { best.err = err; best.target = tpt; }
+    }
+    if (best.err == std::numeric_limits<qreal>::max()) return result; // no candidate
+
+    // Hysteresis: if already corner-snapped (tracked globally via axis flags?), rely on axis system for release.
+    // For now simple engage without persistent state: treat like immediate corner snap.
+    if (best.err <= cornerZone) {
+        // Compute snapped dimensions from fixed corner to snapped target
+        qreal snappedW = proposedW;
+        qreal snappedH = proposedH;
+        if (activeHandle == H::TopLeft) { snappedW = fixedScenePoint.x() - best.target.x(); snappedH = fixedScenePoint.y() - best.target.y(); }
+        else if (activeHandle == H::TopRight) { snappedW = best.target.x() - fixedScenePoint.x(); snappedH = fixedScenePoint.y() - best.target.y(); }
+        else if (activeHandle == H::BottomLeft) { snappedW = fixedScenePoint.x() - best.target.x(); snappedH = best.target.y() - fixedScenePoint.y(); }
+        else { snappedW = best.target.x() - fixedScenePoint.x(); snappedH = best.target.y() - fixedScenePoint.y(); }
+        if (snappedW > 0 && snappedH > 0) {
+            result.cornerSnapped = true;
+            result.snappedW = snappedW;
+            result.snappedH = snappedH;
+            result.snappedCorner = best.target;
+            // Visual: reuse existing updateSnapIndicators with two orthogonal lines
+            QVector<QLineF> lines;
+            lines.append(QLineF(best.target.x(), -1e6, best.target.x(), 1e6));
+            lines.append(QLineF(-1e6, best.target.y(), 1e6, best.target.y()));
+            const_cast<ScreenCanvas*>(this)->updateSnapIndicators(lines);
+        }
+    }
+    return result;
+}
+
 bool ScreenCanvas::eventFilter(QObject* watched, QEvent* event) {
     // Handle clicks on media container widgets to select the associated scene media item
     if (event->type() == QEvent::MouseButtonPress) {

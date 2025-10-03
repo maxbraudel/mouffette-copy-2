@@ -306,26 +306,112 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
     QPointF desiredMovingCornerScene; // carry outside to translation phase
     bool cornerSnapped = false;
     if (!axisLocked) {
-            // Corner style uniform scaling (original logic simplified)
-            const qreal currDist = std::hypot(sceneDelta.x(), sceneDelta.y());
-            qreal newScale = m_initialScale * (currDist / (m_initialGrabDist > 0 ? m_initialGrabDist : 1e-6));
-            newScale = std::clamp<qreal>(newScale, 0.05, 100.0);
-            qreal finalScale = newScale;
-            if (s_resizeSnapCallback && QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier)) {
-                auto feedback = s_resizeSnapCallback(newScale, m_fixedScenePoint, m_fixedItemPoint, m_baseSize, true, this);
-                finalScale = feedback.scale;
-                cornerSnapped = feedback.cornerSnapped;
-                desiredMovingCornerScene = feedback.snappedMovingCornerScene;
+            const bool altPressed = QGuiApplication::keyboardModifiers().testFlag(Qt::AltModifier);
+            if (!altPressed) {
+                // Corner style uniform scaling (original logic simplified)
+                const qreal currDist = std::hypot(sceneDelta.x(), sceneDelta.y());
+                qreal newScale = m_initialScale * (currDist / (m_initialGrabDist > 0 ? m_initialGrabDist : 1e-6));
+                newScale = std::clamp<qreal>(newScale, 0.05, 100.0);
+                qreal finalScale = newScale;
+                if (s_resizeSnapCallback && QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier)) {
+                    auto feedback = s_resizeSnapCallback(newScale, m_fixedScenePoint, m_fixedItemPoint, m_baseSize, true, this);
+                    finalScale = feedback.scale;
+                    cornerSnapped = feedback.cornerSnapped;
+                    desiredMovingCornerScene = feedback.snappedMovingCornerScene;
+                }
+                // Pixel snap uniform
+                const qreal desiredW = finalScale * static_cast<qreal>(m_baseSize.width());
+                const qreal desiredH = finalScale * static_cast<qreal>(m_baseSize.height());
+                const qreal snappedW = std::round(desiredW);
+                const qreal snappedH = std::round(desiredH);
+                const qreal sFromW = (m_baseSize.width()  > 0) ? (snappedW / static_cast<qreal>(m_baseSize.width()))  : finalScale;
+                const qreal sFromH = (m_baseSize.height() > 0) ? (snappedH / static_cast<qreal>(m_baseSize.height())) : finalScale;
+                targetScale = (std::abs(sFromW - finalScale) <= std::abs(sFromH - finalScale)) ? sFromW : sFromH;
+                targetScale = std::clamp<qreal>(targetScale, 0.05, 100.0);
+                m_lastAxisAltStretch = false;
+                // Reset corner stretch state if previously used
+                if (m_cornerStretchOrigCaptured) m_cornerStretchOrigCaptured = false;
+            } else {
+                // Alt + corner: non-uniform two-axis stretch by directly changing base size (independent width/height)
+                // Bake current uniform scale into base size on first Alt use for this interaction
+                if (!m_cornerStretchOrigCaptured) {
+                    qreal s = scale();
+                    if (std::abs(s - 1.0) > 1e-9) {
+                        prepareGeometryChange();
+                        m_baseSize.setWidth(std::max(1, int(std::round(m_baseSize.width() * s))));
+                        m_baseSize.setHeight(std::max(1, int(std::round(m_baseSize.height() * s))));
+                        setScale(1.0);
+                        // Re-evaluate fixed corner scene point after transform change
+                        m_fixedItemPoint = handlePoint(opposite(m_activeHandle));
+                        m_fixedScenePoint = mapToScene(m_fixedItemPoint);
+                    }
+                    // Capture initial cursor offsets along X/Y relative to moving corner edge endpoints.
+                    QPointF movingCornerScene = mapToScene(handlePoint(m_activeHandle));
+                    QPointF cursor = event->scenePos();
+                    // Normalize deltas so outward drag increases positive dimension similarly for all corners.
+                    qreal dx = cursor.x() - movingCornerScene.x();
+                    qreal dy = cursor.y() - movingCornerScene.y();
+                    if (m_activeHandle == TopLeft || m_activeHandle == BottomLeft) dx = -dx; // outward = to left for left corners
+                    if (m_activeHandle == TopLeft || m_activeHandle == TopRight)  dy = -dy; // outward = up for top corners
+                    m_cornerStretchInitialOffsetX = dx;
+                    m_cornerStretchInitialOffsetY = dy;
+                    m_cornerStretchOriginalBaseSize = m_baseSize;
+                    m_cornerStretchOrigCaptured = true;
+                }
+                // Compute current outward deltas
+                QPointF cursor = event->scenePos();
+                QPointF fixedCornerScene = m_fixedScenePoint; // preserved anchor
+                // Determine extent along X: distance from fixed corner to cursor, normalized by corner orientation
+                QPointF movingCornerItem = handlePoint(m_activeHandle);
+                QPointF movingCornerScene = mapToScene(movingCornerItem);
+                // Outward direction normalization like above
+                qreal dxRaw = cursor.x() - movingCornerScene.x();
+                qreal dyRaw = cursor.y() - movingCornerScene.y();
+                if (m_activeHandle == TopLeft || m_activeHandle == BottomLeft) dxRaw = -dxRaw;
+                if (m_activeHandle == TopLeft || m_activeHandle == TopRight)  dyRaw = -dyRaw;
+                qreal desiredW = std::abs((movingCornerScene.x() - fixedCornerScene.x())) + dxRaw - m_cornerStretchInitialOffsetX;
+                qreal desiredH = std::abs((movingCornerScene.y() - fixedCornerScene.y())) + dyRaw - m_cornerStretchInitialOffsetY;
+                desiredW = std::max<qreal>(1.0, desiredW);
+                desiredH = std::max<qreal>(1.0, desiredH);
+                // Shift+Alt snapping: first attempt corner snap (intersection). If that fails, fall back to per-axis.
+                const bool shiftPressed = QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
+                if (shiftPressed && scene() && !scene()->views().isEmpty()) {
+                    if (auto* scView = qobject_cast<ScreenCanvas*>(scene()->views().first())) {
+                        auto cornerRes = scView->applyCornerAltSnapWithHysteresis(this, m_activeHandle, m_fixedScenePoint, m_cornerStretchOriginalBaseSize, desiredW, desiredH);
+                        if (cornerRes.cornerSnapped) {
+                            desiredW = cornerRes.snappedW;
+                            desiredH = cornerRes.snappedH;
+                        } else {
+                            // Fallback to per-axis snapping
+                            Handle hForX = (m_activeHandle == TopLeft || m_activeHandle == BottomLeft) ? LeftMid : RightMid;
+                            qreal eqScaleX = (m_cornerStretchOriginalBaseSize.width() > 0) ? (desiredW / m_cornerStretchOriginalBaseSize.width()) : 1.0;
+                            eqScaleX = std::clamp<qreal>(eqScaleX, 0.05, 100.0);
+                            qreal snappedScaleX = scView->applyAxisSnapWithHysteresis(this, eqScaleX, m_fixedScenePoint, m_cornerStretchOriginalBaseSize, hForX);
+                            desiredW = snappedScaleX * m_cornerStretchOriginalBaseSize.width();
+                            Handle hForY = (m_activeHandle == TopLeft || m_activeHandle == TopRight) ? TopMid : BottomMid;
+                            qreal eqScaleY = (m_cornerStretchOriginalBaseSize.height() > 0) ? (desiredH / m_cornerStretchOriginalBaseSize.height()) : 1.0;
+                            eqScaleY = std::clamp<qreal>(eqScaleY, 0.05, 100.0);
+                            qreal snappedScaleY = scView->applyAxisSnapWithHysteresis(this, eqScaleY, m_fixedScenePoint, m_cornerStretchOriginalBaseSize, hForY);
+                            desiredH = snappedScaleY * m_cornerStretchOriginalBaseSize.height();
+                        }
+                    }
+                } else if (m_axisSnapActive) {
+                    // If previously snapping and Shift released, clear state
+                    m_axisSnapActive = false; m_axisSnapHandle = None; m_axisSnapTargetScale = 1.0;
+                }
+                // Apply new base size (non-uniform)
+                QSize newBase = m_baseSize;
+                int newW = std::max(1, static_cast<int>(std::round(desiredW)));
+                int newH = std::max(1, static_cast<int>(std::round(desiredH)));
+                if (newW != newBase.width() || newH != newBase.height()) {
+                    prepareGeometryChange();
+                    newBase.setWidth(newW); newBase.setHeight(newH); m_baseSize = newBase;
+                    // Update fixed item point (opposite corner) but keep scene anchor stable
+                    m_fixedItemPoint = handlePoint(opposite(m_activeHandle));
+                }
+                targetScale = scale(); // keep overall scale (should be 1 after bake)
+                m_lastAxisAltStretch = true; // reuse flag to denote custom base mutation
             }
-            // Pixel snap uniform
-            const qreal desiredW = finalScale * static_cast<qreal>(m_baseSize.width());
-            const qreal desiredH = finalScale * static_cast<qreal>(m_baseSize.height());
-            const qreal snappedW = std::round(desiredW);
-            const qreal snappedH = std::round(desiredH);
-            const qreal sFromW = (m_baseSize.width()  > 0) ? (snappedW / static_cast<qreal>(m_baseSize.width()))  : finalScale;
-            const qreal sFromH = (m_baseSize.height() > 0) ? (snappedH / static_cast<qreal>(m_baseSize.height())) : finalScale;
-            targetScale = (std::abs(sFromW - finalScale) <= std::abs(sFromH - finalScale)) ? sFromW : sFromH;
-            targetScale = std::clamp<qreal>(targetScale, 0.05, 100.0);
         } else {
             // Axis-only resize (side midpoint handles). Supports two modes:
             //  1) Default (no Alt): uniform scaling along both axes derived from movement on one axis.
@@ -481,6 +567,7 @@ void ResizableMediaBase::mouseReleaseEvent(QGraphicsSceneMouseEvent* event) {
         }
     m_activeHandle = None;
     m_axisStretchOrigCaptured = false; // reset for next interaction
+        m_cornerStretchOrigCaptured = false; // reset corner stretch state
         // One final layout sync after any resize completes to guarantee centering.
         updateOverlayLayout();
         // Clear axis snap hysteresis state after resize interaction ends

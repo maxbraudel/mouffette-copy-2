@@ -89,6 +89,19 @@ public:
                                       const QSize& baseSize,
                                       ResizableMediaBase::Handle activeHandle) const;
 
+    struct CornerAltSnapResult {
+        bool cornerSnapped = false;
+        qreal snappedW = 0.0;
+        qreal snappedH = 0.0;
+        QPointF snappedCorner; // scene point of moving corner
+    };
+    CornerAltSnapResult applyCornerAltSnapWithHysteresis(ResizableMediaBase* item,
+                                                         ResizableMediaBase::Handle activeHandle,
+                                                         const QPointF& fixedScenePoint,
+                                                         const QSize& originalBaseSize,
+                                                         qreal proposedW,
+                                                         qreal proposedH) const;
+
 signals:
     // Emitted when a new media item is added to the canvas
     void mediaItemAdded(ResizableMediaBase* mediaItem);
