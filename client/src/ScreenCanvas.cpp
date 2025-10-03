@@ -3597,6 +3597,7 @@ void ScreenCanvas::startHostSceneState() {
     m_hostSceneActive = true;
     // Capture current selection (only ResizableMediaBase items) before clearing so we can restore later.
     m_prevSelectionBeforeHostScene.clear();
+    m_prevVideoStates.clear();
     if (m_scene) {
         const auto selectedNow = m_scene->selectedItems();
         for (QGraphicsItem* it : selectedNow) {
@@ -3626,8 +3627,10 @@ void ScreenCanvas::startHostSceneState() {
                         playDelayMs = media->settingsPanel()->playDelayMillis();
                     }
                 }
-                // Always ensure videos are reset to beginning before any scheduling
+                // Snapshot and reset videos
                 if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
+                    VideoPreState st; st.video = vid; st.posMs = vid->currentPositionMs(); st.wasPlaying = vid->isPlaying();
+                    m_prevVideoStates.append(st);
                     vid->stopToBeginning();
                 }
                 media->hideImmediateNoFade();
@@ -3683,6 +3686,14 @@ void ScreenCanvas::stopHostSceneState() {
         }
         m_prevSelectionBeforeHostScene.clear();
     }
+    // Restore pre-scene video positions (always paused)
+    for (const VideoPreState& st : std::as_const(m_prevVideoStates)) {
+        if (st.video && st.video->scene() == m_scene) {
+            st.video->pauseAndSetPosition(st.posMs);
+        }
+    }
+    m_prevVideoStates.clear();
+
     // Notify remote client to stop scene if applicable (only if we previously launched)
     if (m_wsClient && !m_remoteSceneTargetClientId.isEmpty()) {
         qDebug() << "ScreenCanvas: sending remote_scene_stop to" << m_remoteSceneTargetClientId;

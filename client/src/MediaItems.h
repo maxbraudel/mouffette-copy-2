@@ -10,6 +10,7 @@
 #include <QImage>
 #include <QVideoFrame>
 #include <QVideoSink>
+#include <QMediaPlayer>
 #include <QSet>
 #include <QTimer>
 #include <QVariantAnimation>
@@ -235,6 +236,9 @@ public:
     void toggleMute();
     void stopToBeginning();
     void seekToRatio(qreal r);
+    qint64 currentPositionMs() const { return m_positionMs; }
+    bool isPlaying() const { return m_player && m_player->playbackState() == QMediaPlayer::PlayingState; }
+    void pauseAndSetPosition(qint64 posMs);
     void setInitialScaleFactor(qreal f) { m_initialScaleFactor = f; }
     void setExternalPosterImage(const QImage& img);
     bool isDraggingProgress() const { return m_draggingProgress; }

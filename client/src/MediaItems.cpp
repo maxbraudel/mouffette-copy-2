@@ -1130,6 +1130,9 @@ void ResizableVideoItem::stopToBeginning() { if (!m_player) return; m_holdLastFr
 void ResizableVideoItem::seekToRatio(qreal r) {
     if (!m_player || m_durationMs <= 0) return; r = std::clamp<qreal>(r, 0.0, 1.0); m_holdLastFrameAtEnd = false; m_seeking = true; if (m_progressTimer) m_progressTimer->stop(); m_smoothProgressRatio = r; m_positionMs = static_cast<qint64>(r * m_durationMs); updateProgressBar(); updateControlsLayout(); update(); const qint64 pos = m_positionMs; m_player->setPosition(pos); QTimer::singleShot(30, [this]() { m_seeking = false; if (m_progressTimer && m_player && m_player->playbackState() == QMediaPlayer::PlayingState) m_progressTimer->start(); }); }
 
+void ResizableVideoItem::pauseAndSetPosition(qint64 posMs) {
+    if (!m_player) return; if (posMs < 0) posMs = 0; if (m_durationMs > 0 && posMs > m_durationMs) posMs = m_durationMs; m_holdLastFrameAtEnd = false; m_player->pause(); if (m_progressTimer) m_progressTimer->stop(); m_player->setPosition(posMs); m_positionMs = posMs; m_smoothProgressRatio = (m_durationMs > 0 ? double(posMs)/double(m_durationMs) : 0.0); updateProgressBar(); updateControlsLayout(); update(); }
+
 void ResizableVideoItem::setExternalPosterImage(const QImage& img) { if (!img.isNull()) { m_posterImage = img; m_posterImageSet = true; if (!m_adoptedSize) adoptBaseSize(img.size()); update(); } }
 
 void ResizableVideoItem::updateDragWithScenePos(const QPointF& scenePos) {

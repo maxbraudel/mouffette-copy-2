@@ -297,6 +297,8 @@ protected:
     QTimer* m_autoPlayTimer = nullptr;
     // Remember selection present just before entering host scene so it can be restored afterward (multi-select supported)
     QList<ResizableMediaBase*> m_prevSelectionBeforeHostScene;
+    struct VideoPreState { class ResizableVideoItem* video = nullptr; qint64 posMs = 0; bool wasPlaying = false; };
+    QList<VideoPreState> m_prevVideoStates;
     void updateLaunchSceneButtonStyle();
     void updateLaunchTestSceneButtonStyle();
 
