@@ -158,12 +158,22 @@ void FileManager::removeFileIfUnused(const QString& fileId)
         m_pathToFileId.remove(filePath);
         m_fileIdToMediaIds.remove(fileId);
         m_fileIdToClients.remove(fileId);
-    m_fileIdMeta.remove(fileId);
+        m_fileIdMeta.remove(fileId);
         
         
     } else {
         
     }
+}
+
+void FileManager::registerReceivedFilePath(const QString& fileId, const QString& absolutePath) {
+    if (fileId.isEmpty() || absolutePath.isEmpty()) return;
+    if (m_fileIdToPath.contains(fileId)) return; // already known (sender side)
+    m_fileIdToPath.insert(fileId, absolutePath);
+    m_pathToFileId.insert(absolutePath, fileId);
+    if (!m_fileIdToMediaIds.contains(fileId)) m_fileIdToMediaIds[fileId] = QList<QString>();
+    QFileInfo info(absolutePath);
+    m_fileIdMeta[fileId] = { info.exists() ? info.size() : 0, info.exists() ? info.lastModified().toSecsSinceEpoch() : 0 };
 }
 
 QString FileManager::generateFileId(const QString& filePath)

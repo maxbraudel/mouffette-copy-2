@@ -39,6 +39,7 @@ set(SOURCES
     src/FileManager.cpp
     src/Theme.cpp
     src/AppColors.cpp
+    src/RemoteSceneController.cpp
 )
 
 # Platform-specific sources
@@ -66,6 +67,7 @@ set(HEADERS
     src/FileManager.h
     src/Theme.h
     src/AppColors.h
+    src/RemoteSceneController.h
 )
 
 # UI files

@@ -328,6 +328,25 @@ void WebSocketClient::notifyAllFilesRemovedToSender(const QString& senderClientI
     sendMessage(msg);
 }
 
+void WebSocketClient::sendRemoteSceneStart(const QString& targetClientId, const QJsonObject& scenePayload) {
+    if (!isConnected()) return;
+    QJsonObject msg;
+    msg["type"] = "remote_scene_start";
+    msg["targetClientId"] = targetClientId;
+    msg["scene"] = scenePayload; // contains screens + media arrays
+    if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
+    sendMessage(msg);
+}
+
+void WebSocketClient::sendRemoteSceneStop(const QString& targetClientId) {
+    if (!isConnected()) return;
+    QJsonObject msg;
+    msg["type"] = "remote_scene_stop";
+    msg["targetClientId"] = targetClientId;
+    if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
+    sendMessage(msg);
+}
+
 void WebSocketClient::onConnected() {
     qDebug() << "Connected to server";
     setConnectionStatus("Connected");
@@ -486,6 +505,15 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
     }
     else if (type == "all_files_removed") {
         emit allFilesRemovedReceived();
+    }
+    else if (type == "remote_scene_start") {
+        const QString sender = message.value("senderClientId").toString();
+        const QJsonObject scene = message.value("scene").toObject();
+        emit remoteSceneStartReceived(sender, scene);
+    }
+    else if (type == "remote_scene_stop") {
+        const QString sender = message.value("senderClientId").toString();
+        emit remoteSceneStopReceived(sender);
     }
     else {
         // Forward unknown messages

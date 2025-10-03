@@ -12,6 +12,7 @@
 #include "Theme.h"
 #include "AppColors.h"
 #include "FileManager.h"
+#include "RemoteSceneController.h"
 #include <QMenuBar>
 #include <QHostInfo>
 #include "ClientInfo.h"
@@ -61,8 +62,6 @@
 #include <QFileInfo>
 #include <QFile>
 #include <QDir>
-
-// Forward declaration for system UI element computation (implemented later in this file)
 #include <QStandardPaths>
 #include <QUuid>
 #include <QJsonObject>
@@ -110,6 +109,8 @@
 #ifdef Q_OS_MACOS
 #include <QProcess>
 #endif
+
+static RemoteSceneController* g_remoteSceneController = nullptr; // Remote scene controller global instance
 
 const QString MainWindow::DEFAULT_SERVER_URL = "ws://192.168.0.188:8080";
 // Z-ordering constants used throughout the scene
@@ -478,6 +479,13 @@ MainWindow::MainWindow(QWidget* parent)
     setWindowState(Qt::WindowMaximized);
     
     setupUI();
+#ifdef Q_OS_MACOS
+    // Ensure macOS app focus to allow transparent overlay windows (remote scene) to appear properly
+#endif
+    // Initialize remote scene controller once
+    if (!g_remoteSceneController) {
+        g_remoteSceneController = new RemoteSceneController(m_webSocketClient, this);
+    }
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN) || defined(Q_OS_LINUX)
     // Ensure no status bar is shown at the bottom
     if (QStatusBar* sb = findChild<QStatusBar*>()) {
@@ -1601,6 +1609,10 @@ void MainWindow::onClientItemClicked(QListWidgetItem* item) {
     if (index >=0 && index < m_availableClients.size()) {
         const ClientInfo& client = m_availableClients[index];
         m_selectedClient = client;
+        if (m_screenCanvas) {
+            // Use accessor; ClientInfo does not expose a public clientId member
+            m_screenCanvas->setRemoteSceneTargetClientId(client.getId());
+        }
         showScreenView(client);
         // ScreenNavigationManager will request screens; no need to duplicate here
     }
@@ -2150,9 +2162,6 @@ void MainWindow::createScreenViewPage() {
         "}"
     );
     containerLayout->addWidget(m_canvasStack);
-    // Clip stack to rounded corners
-    m_canvasStack->installEventFilter(this);
-
     // Spinner page
     m_loadingSpinner = new SpinnerWidget();
     // Initial appearance (easy to tweak):
@@ -2184,6 +2193,9 @@ void MainWindow::createScreenViewPage() {
     canvasLayout->setContentsMargins(0,0,0,0);
     canvasLayout->setSpacing(0);
     m_screenCanvas = new ScreenCanvas();
+    if (m_screenCanvas && m_webSocketClient) {
+        m_screenCanvas->setWebSocketClient(m_webSocketClient);
+    }
     
     // Connect ScreenCanvas signals for file watching
     connect(m_screenCanvas, &ScreenCanvas::mediaItemAdded, this, [this](ResizableMediaBase* mediaItem) {
@@ -2263,9 +2275,6 @@ void MainWindow::createScreenViewPage() {
     m_screenViewLayout->setStretch(0, 1); // container expands
 
     // Volume label opacity effect & animation
-    m_volumeOpacity = new QGraphicsOpacityEffect(m_volumeIndicator);
-    m_volumeIndicator->setGraphicsEffect(m_volumeOpacity);
-    m_volumeOpacity->setOpacity(0.0);
     m_volumeFade = new QPropertyAnimation(m_volumeOpacity, "opacity", this);
     m_volumeFade->setDuration(m_fadeDurationMs);
     m_volumeFade->setStartValue(0.0);

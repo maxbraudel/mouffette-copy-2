@@ -1,5 +1,6 @@
 // ScreenCanvas implementation (snap guides rendered via dedicated SnapGuideItem)
 #include "ScreenCanvas.h"
+#include "WebSocketClient.h" // for remote scene start/stop messaging
 #include <QTimer>
 #include "AppColors.h"
 #include "MediaItems.h"
@@ -42,6 +43,8 @@
 #include <QAudioOutput>
 #include <QVideoSink>
 #include <QRegion>
+#include <QJsonObject>
+#include <QJsonArray>
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -213,6 +216,75 @@ ScreenCanvas::~ScreenCanvas() {
         m_infoWidget->deleteLater();
         m_infoWidget = nullptr;
     }
+}
+
+QJsonObject ScreenCanvas::serializeSceneState() const {
+    QJsonObject root;
+    // Screens
+    QJsonArray screensArr;
+    for (const ScreenInfo& si : m_screens) {
+        screensArr.append(si.toJson());
+    }
+    root["screens"] = screensArr;
+    // Media items
+    QJsonArray mediaArr;
+    if (m_scene) {
+        for (QGraphicsItem* gi : m_scene->items()) {
+            auto* media = dynamic_cast<ResizableMediaBase*>(gi);
+            if (!media) continue;
+            QJsonObject m;
+            m["mediaId"] = media->mediaId();
+            m["fileId"] = media->fileId();
+            // Include original filename (no path) to help remote resolve or display placeholder
+            if (!media->fileId().isEmpty()) {
+                QString p = FileManager::instance().getFilePathForId(media->fileId());
+                if (!p.isEmpty()) {
+                    QFileInfo fi(p); m["fileName"] = fi.fileName();
+                }
+            }
+            m["type"] = media->isVideoMedia() ? "video" : "image";
+            QRectF br = media->sceneBoundingRect();
+            m["x"] = br.x();
+            m["y"] = br.y();
+            m["width"] = br.width();
+            m["height"] = br.height();
+            m["baseWidth"] = media->baseSizePx().width();
+            m["baseHeight"] = media->baseSizePx().height();
+            m["visible"] = media->isContentVisible();
+            // Derive which screen this media belongs to (by center point) and normalized geometry within that screen
+            int screenIdForMedia = -1; QRectF screenRect;
+            QPointF center = br.center();
+            for (auto it = m_sceneScreenRects.constBegin(); it != m_sceneScreenRects.constEnd(); ++it) {
+                if (it.value().contains(center)) { screenIdForMedia = it.key(); screenRect = it.value(); break; }
+            }
+            if (screenIdForMedia != -1 && screenRect.width() > 0.0 && screenRect.height() > 0.0) {
+                double normX = (br.x() - screenRect.x()) / screenRect.width();
+                double normY = (br.y() - screenRect.y()) / screenRect.height();
+                double normW = br.width() / screenRect.width();
+                double normH = br.height() / screenRect.height();
+                // Clamp to [0,1] just in case of slight numerical drift
+                auto clamp01 = [](double v){ return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); };
+                m["screenId"] = screenIdForMedia;
+                m["normX"] = clamp01(normX);
+                m["normY"] = clamp01(normY);
+                m["normW"] = clamp01(normW);
+                m["normH"] = clamp01(normH);
+            }
+            if (auto* panel = media->settingsPanel()) {
+                m["autoDisplay"] = panel->displayAutomaticallyEnabled();
+                m["autoDisplayDelayMs"] = panel->displayDelayMillis();
+                if (media->isVideoMedia()) {
+                    m["autoPlay"] = panel->playAutomaticallyEnabled();
+                    m["autoPlayDelayMs"] = panel->playDelayMillis();
+                }
+                m["fadeInSeconds"] = panel->fadeInSeconds();
+                m["fadeOutSeconds"] = panel->fadeOutSeconds();
+            }
+            mediaArr.append(m);
+        }
+    }
+    root["media"] = mediaArr;
+    return root;
 }
 
 void ScreenCanvas::maybeRefreshInfoOverlayOnSceneChanged() {
@@ -483,13 +555,14 @@ void ScreenCanvas::initInfoOverlay() {
                     }
                 }
                 if (m_launchTestSceneButton) m_launchTestSceneButton->setEnabled(false);
+                m_sceneLaunched = true; // set before starting so remote start condition (if reintroduced) sees true
                 startHostSceneState();
             } else {
                 // Re-enable test scene button when stopping remote scene
                 if (m_launchTestSceneButton) m_launchTestSceneButton->setEnabled(true);
                 stopHostSceneState();
             }
-            m_sceneLaunched = newState;
+            m_sceneLaunched = newState; // final authoritative state
             if (m_launchSceneButton->isCheckable()) {
                 m_launchSceneButton->setChecked(m_sceneLaunched);
             }
@@ -3458,7 +3531,6 @@ void ScreenCanvas::updateLaunchSceneButtonStyle() {
 
 void ScreenCanvas::updateLaunchTestSceneButtonStyle() {
     if (!m_launchTestSceneButton) return;
-
     // Idle (stopped) style: transparent background, overlay text color
     const QString idleStyle =
         "QPushButton { "
@@ -3479,7 +3551,7 @@ void ScreenCanvas::updateLaunchTestSceneButtonStyle() {
         "    background: rgba(255,255,255,0.1); "
         "}";
 
-    // Active (launched) style: magenta tint background + magenta text
+    // Active (launched) style: test scene magenta variant
     const QString activeStyle =
         "QPushButton { "
         "    padding: 8px 0px; "
@@ -3513,6 +3585,7 @@ void ScreenCanvas::updateLaunchTestSceneButtonStyle() {
             "QPushButton { padding:8px 0px; font-weight:bold; font-size:12px; color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.04); border:none; }" );
     }
     m_launchTestSceneButton->setFixedHeight(40);
+
 }
 
 // (Removed legacy duplicate snap indicator drawing functions; SnapGuideItem now handles rendering.)
@@ -3534,17 +3607,22 @@ void ScreenCanvas::startHostSceneState() {
     if (m_scene) {
         for (QGraphicsItem* it : m_scene->selectedItems()) it->setSelected(false);
     }
-    // Hide all media unless display automatically is enabled AND its settings panel indicates auto-display.
-    // For now we approximate: always hide, then schedule auto-display if any auto-display flags are active per item (future: per-item state).
+    // Hide all media then schedule per-item auto display / playback based on their individual automation settings.
     if (m_scene) {
         for (QGraphicsItem* gi : m_scene->items()) {
             if (auto* media = dynamic_cast<ResizableMediaBase*>(gi)) {
                 // Decide if it should auto-display immediately
                 bool shouldAutoDisplay = false;
                 int displayDelayMs = 0;
+                bool shouldAutoPlay = false;
+                int playDelayMs = 0;
                 if (media->settingsPanel()) {
                     shouldAutoDisplay = media->settingsPanel()->displayAutomaticallyEnabled();
                     displayDelayMs = media->settingsPanel()->displayDelayMillis();
+                    if (media->isVideoMedia()) {
+                        shouldAutoPlay = media->settingsPanel()->playAutomaticallyEnabled();
+                        playDelayMs = media->settingsPanel()->playDelayMillis();
+                    }
                 }
                 media->hideImmediateNoFade();
                 if (shouldAutoDisplay) {
@@ -3560,28 +3638,39 @@ void ScreenCanvas::startHostSceneState() {
                         media->showWithConfiguredFade();
                     }
                 }
+                if (shouldAutoPlay) {
+                    if (playDelayMs > 0) {
+                        QTimer::singleShot(playDelayMs, this, [this, media](){
+                            if (!m_hostSceneActive) return;
+                            if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
+                                // Only start playback if still at beginning / paused
+                                vid->togglePlayPause();
+                            }
+                        });
+                    } else {
+                        if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
+                            vid->togglePlayPause();
+                        }
+                    }
+                }
             }
             if (auto* vid = dynamic_cast<ResizableVideoItem*>(gi)) vid->stopToBeginning();
         }
     }
-    // Setup timers (single-shot) for automatic display and playback; placeholder logic uses uniform delay of 1000ms.
-    if (!m_autoDisplayTimer) {
-        m_autoDisplayTimer = new QTimer(this);
-        m_autoDisplayTimer->setSingleShot(true);
-        connect(m_autoDisplayTimer, &QTimer::timeout, this, &ScreenCanvas::handleAutoDisplay);
+    // Dispatch remote scene start (independent of UI toggle race) if a target is set
+    if (m_wsClient && !m_remoteSceneTargetClientId.isEmpty()) {
+        QJsonObject sceneObj = serializeSceneState();
+        qDebug() << "ScreenCanvas: sending remote_scene_start to" << m_remoteSceneTargetClientId
+                 << "mediaCount=" << sceneObj.value("media").toArray().size()
+                 << "screenCount=" << sceneObj.value("screens").toArray().size();
+        m_wsClient->sendRemoteSceneStart(m_remoteSceneTargetClientId, sceneObj);
     }
-    if (!m_autoPlayTimer) {
-        m_autoPlayTimer = new QTimer(this);
-        m_autoPlayTimer->setSingleShot(true);
-        connect(m_autoPlayTimer, &QTimer::timeout, this, &ScreenCanvas::handleAutoPlayback);
-    }
-    scheduleAutoDisplayAndPlayback();
 }
 
 void ScreenCanvas::stopHostSceneState() {
     if (!m_hostSceneActive) return;
     m_hostSceneActive = false;
-    if (m_autoDisplayTimer) m_autoDisplayTimer->stop();
+    if (m_autoDisplayTimer) m_autoDisplayTimer->stop(); // legacy batch timers (may be null if never created)
     if (m_autoPlayTimer) m_autoPlayTimer->stop();
     // Restore visibility of media items (leave videos stopped).
     if (m_scene) {
@@ -3595,6 +3684,15 @@ void ScreenCanvas::stopHostSceneState() {
             }
         }
         m_prevSelectionBeforeHostScene.clear();
+    }
+    // Notify remote client to stop scene if applicable (only if we previously launched)
+    if (m_wsClient && !m_remoteSceneTargetClientId.isEmpty()) {
+        qDebug() << "ScreenCanvas: sending remote_scene_stop to" << m_remoteSceneTargetClientId;
+        m_wsClient->sendRemoteSceneStop(m_remoteSceneTargetClientId);
+    }
+    // Notify remote client scene stop if we were in remote scene mode
+    if (m_sceneLaunched && m_wsClient && !m_remoteSceneTargetClientId.isEmpty()) {
+        m_wsClient->sendRemoteSceneStop(m_remoteSceneTargetClientId);
     }
 }
 

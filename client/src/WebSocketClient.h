@@ -48,6 +48,10 @@ public:
     void notifyUploadFinishedToSender(const QString& senderClientId, const QString& uploadId);
     void notifyAllFilesRemovedToSender(const QString& senderClientId);
 
+    // Remote scene control
+    void sendRemoteSceneStart(const QString& targetClientId, const QJsonObject& scenePayload);
+    void sendRemoteSceneStop(const QString& targetClientId);
+
     // Client-side cancel safeguard: mark an uploadId as cancelled to ignore any further chunk sends
     void cancelUploadId(const QString& uploadId) { m_canceledUploads.insert(uploadId); }
     
@@ -77,6 +81,9 @@ signals:
     void uploadPerFileProgressReceived(const QString& uploadId, const QHash<QString,int>& filePercents);
     void uploadFinishedReceived(const QString& uploadId);
     void allFilesRemovedReceived();
+    // Remote scene inbound events
+    void remoteSceneStartReceived(const QString& senderClientId, const QJsonObject& scenePayload);
+    void remoteSceneStopReceived(const QString& senderClientId);
 
 private slots:
     void onConnected();

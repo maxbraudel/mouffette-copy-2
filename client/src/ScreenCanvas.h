@@ -61,9 +61,14 @@ public:
     void startHostSceneState();
     void stopHostSceneState();
     bool isHostSceneActive() const { return m_hostSceneActive; }
+    // Serialize current canvas state (screens + media) for remote scene start
+    QJsonObject serializeSceneState() const;
     void scheduleAutoDisplayAndPlayback();
     void handleAutoDisplay();
     void handleAutoPlayback();
+    // Remote scene integration setters
+    void setWebSocketClient(class WebSocketClient* client) { m_wsClient = client; }
+    void setRemoteSceneTargetClientId(const QString& id) { m_remoteSceneTargetClientId = id; }
     // Remote cursor style setters
     void setRemoteCursorDiameterPx(int d) { m_remoteCursorDiameterPx = qMax(2, d); if (m_remoteCursorDot) { recreateRemoteCursorItem(); } }
     void setRemoteCursorFillColor(const QColor& c) { m_remoteCursorFill = c; if (m_remoteCursorDot) { m_remoteCursorDot->setBrush(m_remoteCursorFill); } }
@@ -290,7 +295,7 @@ protected:
     bool m_hostSceneActive = false;
     QTimer* m_autoDisplayTimer = nullptr;
     QTimer* m_autoPlayTimer = nullptr;
-    // Remember selection present just before entering host scene so it can be restored afterward
+    // Remember selection present just before entering host scene so it can be restored afterward (multi-select supported)
     QList<ResizableMediaBase*> m_prevSelectionBeforeHostScene;
     void updateLaunchSceneButtonStyle();
     void updateLaunchTestSceneButtonStyle();
@@ -315,6 +320,10 @@ protected:
     // Persist last chosen snap guide positions for hysteresis / tie-breaking
     mutable qreal m_lastSnapVerticalX = std::numeric_limits<qreal>::quiet_NaN();
     mutable qreal m_lastSnapHorizontalY = std::numeric_limits<qreal>::quiet_NaN();
+
+    // Remote scene networking
+    class WebSocketClient* m_wsClient = nullptr; // not owned
+    QString m_remoteSceneTargetClientId; // target client to receive remote scene commands
 };
 
 #endif // SCREENCANVAS_H

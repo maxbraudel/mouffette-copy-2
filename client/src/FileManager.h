@@ -32,6 +32,9 @@ public:
     
     // Get all unique file IDs (for upload)
     QList<QString> getAllFileIds() const;
+
+    // Register a file path for a fileId when receiving from remote (target side). If already exists, leave unchanged.
+    void registerReceivedFilePath(const QString& fileId, const QString& absolutePath);
     
     // Check if a file ID exists
     bool hasFileId(const QString& fileId) const;

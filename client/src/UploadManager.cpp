@@ -338,6 +338,8 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             m_incoming.openFiles.insert(fileId, qf);
             m_incoming.expectedSizes.insert(fileId, qMax<qint64>(0, size));
             m_incoming.receivedByFile.insert(fileId, 0);
+            // Register mapping so remote scene resolution can find this fileId immediately (even before complete)
+            FileManager::instance().registerReceivedFilePath(fileId, fullPath);
         }
         if (m_ws && !m_incoming.senderId.isEmpty()) {
             m_ws->notifyUploadProgressToSender(m_incoming.senderId, m_incoming.uploadId, 0, 0, m_incoming.totalFiles, QStringList());

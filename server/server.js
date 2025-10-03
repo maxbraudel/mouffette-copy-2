@@ -186,6 +186,13 @@ class MouffetteServer {
             case 'cursor_update':
                 this.handleCursorUpdate(clientId, message);
                 break;
+            case 'remote_scene_start':
+                // Relay to target client (like uploads). Expect: targetClientId, scene payload
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
+            case 'remote_scene_stop':
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
             default:
                 console.log(`⚠️ Unknown message type: ${message.type}`);
         }
@@ -207,6 +214,9 @@ class MouffetteServer {
         // Include senderId for correlation if not present
         if (!message.senderClientId) message.senderClientId = senderId;
         try {
+            if (message.type === 'remote_scene_start' || message.type === 'remote_scene_stop') {
+                console.log(`🎯 Relaying ${message.type} from ${senderId} -> ${targetClientId}`);
+            }
             targetClient.ws.send(JSON.stringify(message));
         } catch (e) {
             console.error('❌ Relay to target failed:', e);
