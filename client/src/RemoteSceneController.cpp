@@ -183,22 +183,28 @@ void RemoteSceneController::scheduleMedia(RemoteMediaItem* item) {
         }
     }
 
-    // Display scheduling
-    int delay = item->autoDisplay ? item->autoDisplayDelayMs : 0;
-    item->displayTimer = new QTimer(this);
-    item->displayTimer->setSingleShot(true);
-    connect(item->displayTimer, &QTimer::timeout, this, [this,item]() { fadeIn(item); });
-    item->displayTimer->start(delay);
-    if (delay == 0) qDebug() << "RemoteSceneController: immediate display for" << item->mediaId;
+    // Display scheduling: only if autoDisplay enabled. Otherwise remain hidden until a future command (not yet implemented).
+    if (item->autoDisplay) {
+        int delay = item->autoDisplayDelayMs;
+        item->displayTimer = new QTimer(this);
+        item->displayTimer->setSingleShot(true);
+        connect(item->displayTimer, &QTimer::timeout, this, [this,item]() { fadeIn(item); });
+        item->displayTimer->start(delay);
+        if (delay == 0) qDebug() << "RemoteSceneController: immediate display for" << item->mediaId;
+    } else {
+        qDebug() << "RemoteSceneController: autoDisplay disabled; media will stay hidden" << item->mediaId;
+    }
 
-    // Play scheduling
-    if (item->player) {
-        int playDelay = item->autoPlay ? item->autoPlayDelayMs : 0;
+    // Play scheduling: only if autoPlay enabled AND we will display (avoid hidden playback)
+    if (item->player && item->autoDisplay && item->autoPlay) {
+        int playDelay = item->autoPlayDelayMs;
         item->playTimer = new QTimer(this);
         item->playTimer->setSingleShot(true);
         connect(item->playTimer, &QTimer::timeout, this, [item]() { if (item->player) item->player->play(); });
         item->playTimer->start(playDelay);
         if (playDelay == 0) qDebug() << "RemoteSceneController: immediate play for" << item->mediaId;
+    } else if (item->player && !item->autoPlay) {
+        qDebug() << "RemoteSceneController: autoPlay disabled; video will not start automatically" << item->mediaId;
     }
 }
 
