@@ -93,9 +93,6 @@ void MediaSettingsPanel::buildUi() {
     m_title->setFont(tf);
     m_title->setStyleSheet("color: white;");
     m_contentLayout->addWidget(m_title);
-    
-    // Add extra spacing after the title
-    m_contentLayout->addSpacing(15);
 
     // Helper to create a small value box label like [1]
     auto makeValueBox = [&](const QString& text = QStringLiteral("1")) {
@@ -193,6 +190,14 @@ void MediaSettingsPanel::buildUi() {
         h->addStretch();
     m_contentLayout->addWidget(m_repeatRow);
     }
+
+    // Element Properties section header
+    m_elementPropertiesTitle = new QLabel("Element Properties");
+    QFont epf = m_elementPropertiesTitle->font();
+    epf.setBold(true);
+    m_elementPropertiesTitle->setFont(epf);
+    m_elementPropertiesTitle->setStyleSheet("color: white;");
+    m_contentLayout->addWidget(m_elementPropertiesTitle);
 
     // 3) Fade in with checkbox format
     {

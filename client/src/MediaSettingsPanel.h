@@ -69,6 +69,7 @@ private:
     QWidget* m_innerContent = nullptr;
     QVBoxLayout* m_contentLayout = nullptr;
     QLabel* m_title = nullptr;
+    QLabel* m_elementPropertiesTitle = nullptr;
 
     QCheckBox* m_autoPlayCheck = nullptr;
     QCheckBox* m_playDelayCheck = nullptr; // New: separate play delay checkbox
