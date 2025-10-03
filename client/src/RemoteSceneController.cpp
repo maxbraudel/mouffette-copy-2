@@ -68,6 +68,12 @@ QWidget* RemoteSceneController::ensureScreenWindow(int screenId, int x, int y, i
     win->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     win->setWindowFlag(Qt::FramelessWindowHint, true);
     win->setWindowFlag(Qt::WindowStaysOnTopHint, true);
+    // On Windows, prevent appearing in taskbar and avoid focus/activation
+#ifdef Q_OS_WIN
+    win->setWindowFlag(Qt::Tool, true);
+    win->setWindowFlag(Qt::WindowDoesNotAcceptFocus, true);
+    win->setAttribute(Qt::WA_ShowWithoutActivating, true);
+#endif
     win->setAttribute(Qt::WA_TranslucentBackground, true);
     win->setObjectName(QString("RemoteScreenWindow_%1").arg(screenId));
     win->setGeometry(x, y, w, h);
