@@ -129,6 +129,11 @@ public:
 protected:
     QSize m_baseSize;
     Handle m_activeHandle = None;
+    // Tracks if the current (or last) midpoint axis resize used Alt (option) for axis-only stretch
+    bool m_lastAxisAltStretch = false;
+    QSize m_axisStretchOriginalBaseSize; // captured at first Alt midpoint movement
+    bool  m_axisStretchOrigCaptured = false;
+    qreal m_axisStretchInitialOffset = 0.0; // initial cursor-to-moving-edge offset
     QPointF m_fixedItemPoint;  // item coords
     QPointF m_fixedScenePoint; // scene coords
     qreal m_initialScale = 1.0;

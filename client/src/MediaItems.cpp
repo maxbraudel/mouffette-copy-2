@@ -327,33 +327,90 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
             targetScale = (std::abs(sFromW - finalScale) <= std::abs(sFromH - finalScale)) ? sFromW : sFromH;
             targetScale = std::clamp<qreal>(targetScale, 0.05, 100.0);
         } else {
-            // Axis-only resize (side midpoint handles) using scene delta for smooth tracking.
-            const bool horizontal = (m_activeHandle == LeftMid || m_activeHandle == RightMid);
-            qreal baseLen = horizontal ? m_baseSize.width() : m_baseSize.height();
-            qreal deltaScene = horizontal ? (event->scenePos().x() - m_fixedScenePoint.x())
-                                          : (event->scenePos().y() - m_fixedScenePoint.y());
-            if (m_activeHandle == LeftMid || m_activeHandle == TopMid) deltaScene = -deltaScene; // normalize direction
+            // Axis-only resize (side midpoint handles). Supports two modes:
+            //  1) Default (no Alt): uniform scaling along both axes derived from movement on one axis.
+            //  2) Alt/Option held: non-uniform stretch along ONLY the active axis (width OR height).
+            const bool horizontalHandle = (m_activeHandle == LeftMid || m_activeHandle == RightMid);
+            const bool altPressed = QGuiApplication::keyboardModifiers().testFlag(Qt::AltModifier);
+            qreal baseLenAxis = horizontalHandle ? m_baseSize.width() : m_baseSize.height();
+            qreal deltaScene = horizontalHandle ? (event->scenePos().x() - m_fixedScenePoint.x())
+                                                : (event->scenePos().y() - m_fixedScenePoint.y());
+            if (m_activeHandle == LeftMid || m_activeHandle == TopMid) deltaScene = -deltaScene; // normalize outward growth
             qreal extent = std::abs(deltaScene);
-            qreal newScale = extent / (baseLen > 0 ? baseLen : 1.0);
-            newScale = std::clamp<qreal>(newScale, 0.05, 100.0);
-            targetScale = newScale;
-            // Only perform axis snap when Shift is held (same modality as corner snap)
-            const bool shiftPressed = QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
-            if (shiftPressed) {
-                if (scene() && !scene()->views().isEmpty()) {
-                    if (auto* scView = qobject_cast<ScreenCanvas*>(scene()->views().first())) {
-                        targetScale = scView->applyAxisSnapWithHysteresis(this, targetScale, m_fixedScenePoint, m_baseSize, m_activeHandle);
+            qreal newScaleAxis = extent / (baseLenAxis > 0 ? baseLenAxis : 1.0);
+            newScaleAxis = std::clamp<qreal>(newScaleAxis, 0.05, 100.0);
+            if (!altPressed) {
+                // Legacy behavior: uniform scale from axis drag
+                targetScale = newScaleAxis;
+                const bool shiftPressed = QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
+                if (shiftPressed) {
+                    if (scene() && !scene()->views().isEmpty()) {
+                        if (auto* scView = qobject_cast<ScreenCanvas*>(scene()->views().first())) {
+                            targetScale = scView->applyAxisSnapWithHysteresis(this, targetScale, m_fixedScenePoint, m_baseSize, m_activeHandle);
+                        }
+                    }
+                } else if (m_axisSnapActive) {
+                    // User released Shift mid-resize: drop snap state
+                    m_axisSnapActive = false; m_axisSnapHandle = None; m_axisSnapTargetScale = 1.0;
+                }
+                m_lastAxisAltStretch = false;
+            } else {
+                // Alt stretch: modify only one dimension by changing base size horizontally or vertically.
+                // We keep overall QGraphicsItem scale() unchanged (targetScale stays current scale) and
+                // update m_baseSize dimension directly for instantaneous non-uniform scaling.
+                m_lastAxisAltStretch = true;
+                if (!m_axisStretchOrigCaptured) {
+                    // First Alt movement in this interaction: bake current uniform scale into base size
+                    qreal s = scale();
+                    if (std::abs(s - 1.0) > 1e-9) {
+                        prepareGeometryChange();
+                        m_baseSize.setWidth(std::max(1, int(std::round(m_baseSize.width() * s))));
+                        m_baseSize.setHeight(std::max(1, int(std::round(m_baseSize.height() * s))));
+                        setScale(1.0); // reset scale so subsequent width math is linear
+                        // Re-evaluate fixed corner scene point after transform change
+                        m_fixedItemPoint = handlePoint(opposite(m_activeHandle));
+                        m_fixedScenePoint = mapToScene(m_fixedItemPoint);
+                    }
+                    // Capture initial cursor offset to preserve relative positioning
+                    QPointF currentMovingEdgeScene = mapToScene(handlePoint(m_activeHandle));
+                    qreal cursorToEdgeDist = horizontalHandle ? (event->scenePos().x() - currentMovingEdgeScene.x())
+                                                              : (event->scenePos().y() - currentMovingEdgeScene.y());
+                    m_axisStretchInitialOffset = cursorToEdgeDist;
+                    m_axisStretchOriginalBaseSize = m_baseSize;
+                    m_axisStretchOrigCaptured = true;
+                }
+                QSize newBase = m_baseSize;
+                if (horizontalHandle) {
+                    // Calculate desired width preserving initial cursor-to-edge offset
+                    qreal desiredFullW = extent - m_axisStretchInitialOffset;
+                    int newW = std::max(1, static_cast<int>(std::round(desiredFullW)));
+                    if (newW != newBase.width()) {
+                        prepareGeometryChange();
+                        newBase.setWidth(newW);
+                        m_baseSize = newBase;
+                    }
+                } else {
+                    qreal desiredFullH = extent - m_axisStretchInitialOffset;
+                    int newH = std::max(1, static_cast<int>(std::round(desiredFullH)));
+                    if (newH != newBase.height()) {
+                        prepareGeometryChange();
+                        newBase.setHeight(newH);
+                        m_baseSize = newBase;
                     }
                 }
-            } else if (m_axisSnapActive) {
-                // User released Shift mid-resize: drop snap state so scaling resumes free-form
-                m_axisSnapActive = false;
-                m_axisSnapHandle = None;
-                m_axisSnapTargetScale = 1.0;
+                // Keep scale unchanged; anchor fixed side: recompute fixed item point once dimension changed
+                m_fixedItemPoint = handlePoint(opposite(m_activeHandle));
+                m_fixedScenePoint = mapToScene(m_fixedItemPoint); // ensure anchor stays correct
+                targetScale = scale();
             }
         }
 
         QPointF snappedPos = m_fixedScenePoint - targetScale * m_fixedItemPoint;
+        if (axisLocked && m_lastAxisAltStretch) {
+            // During Alt axis stretch we changed base size: ensure the fixed midpoint side stays anchored.
+            // Recompute position so that the fixed item point maps exactly to fixedScenePoint.
+            snappedPos = m_fixedScenePoint - targetScale * m_fixedItemPoint;
+        }
         if (!axisLocked) {
             // If corner snapped we may need to translate so moving corner matches target exactly
             if (cornerSnapped && m_activeHandle != None) {
@@ -365,8 +422,8 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                 }
             }
         }
-        setScale(targetScale);
-        setPos(snappedPos);
+    setScale(targetScale);
+    setPos(snappedPos);
         // Explicitly update overlay layout during corner resize so the top anchor tracks
         // width/height changes in real time. This fixes the observed drift where the
         // top panel (filename + buttons) lags behind when resizing from the bottom-right.
@@ -395,7 +452,8 @@ void ResizableMediaBase::mouseReleaseEvent(QGraphicsSceneMouseEvent* event) {
                 setPos(fixedScene - snappedScale * m_fixedItemPoint);
             }
         }
-        m_activeHandle = None;
+    m_activeHandle = None;
+    m_axisStretchOrigCaptured = false; // reset for next interaction
         // One final layout sync after any resize completes to guarantee centering.
         updateOverlayLayout();
         // Clear axis snap hysteresis state after resize interaction ends
@@ -684,12 +742,14 @@ void ResizablePixmapItem::paint(QPainter* painter, const QStyleOptionGraphicsIte
     if (isContentVisible() || m_contentDisplayOpacity > 0.0) {
         qreal effective = contentOpacity() * m_contentDisplayOpacity;
         if (!m_pix.isNull() && effective > 0.0) {
+            QSize target(baseSizePx());
+            QPixmap toDraw = (m_pix.size() == target) ? m_pix : m_pix.scaled(target, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
             if (effective >= 0.999) {
-                painter->drawPixmap(QPointF(0,0), m_pix);
+                painter->drawPixmap(QPointF(0,0), toDraw);
             } else {
                 painter->save();
                 painter->setOpacity(effective);
-                painter->drawPixmap(QPointF(0,0), m_pix);
+                painter->drawPixmap(QPointF(0,0), toDraw);
                 painter->restore();
             }
         }
@@ -919,7 +979,11 @@ bool ResizableVideoItem::handleControlsPressAtItemPos(const QPointF& itemPos) {
 void ResizableVideoItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) {
     Q_UNUSED(option); Q_UNUSED(widget);
     QRectF br(0,0, baseWidth(), baseHeight());
-    auto fitRect = [](const QRectF& bounds, const QSize& imgSz) -> QRectF {
+    auto fitRect = [&](const QRectF& bounds, const QSize& imgSz) -> QRectF {
+        if (m_lastAxisAltStretch) {
+            // Non-uniform stretch requested: fill full bounds ignoring aspect
+            return bounds;
+        }
         if (bounds.isEmpty() || imgSz.isEmpty()) return bounds; qreal brW = bounds.width(); qreal brH = bounds.height(); qreal imgW = imgSz.width(); qreal imgH = imgSz.height(); if (imgW <= 0 || imgH <= 0) return bounds; qreal brAR = brW / brH; qreal imgAR = imgW / imgH; if (imgAR > brAR) { qreal h = brW / imgAR; return QRectF(bounds.left(), bounds.top() + (brH - h)/2.0, brW, h);} else { qreal w = brH * imgAR; return QRectF(bounds.left() + (brW - w)/2.0, bounds.top(), w, brH);} };
     if (isContentVisible() || m_contentDisplayOpacity > 0.0) {
         qreal effective = contentOpacity() * m_contentDisplayOpacity;
