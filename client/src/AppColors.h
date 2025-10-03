@@ -88,6 +88,12 @@ extern QColor gLaunchRemoteSceneBg;
 extern QColor gLaunchRemoteSceneHover;
 extern QColor gLaunchRemoteScenePressed;
 
+// Launch Test Scene button colors
+extern QColor gLaunchTestSceneText;
+extern QColor gLaunchTestSceneBg;
+extern QColor gLaunchTestSceneHover;
+extern QColor gLaunchTestScenePressed;
+
 // ============================================================================
 // OVERLAY COLORS
 // ============================================================================

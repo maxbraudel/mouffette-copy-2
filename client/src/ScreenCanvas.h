@@ -259,6 +259,7 @@ private:
     QVBoxLayout* m_contentLayout = nullptr; // content layout (for media items)
     QWidget* m_overlayHeaderWidget = nullptr; // container for overlay header row (holds upload button)
     QPushButton* m_launchSceneButton = nullptr; // new Launch Remote Scene toggle button
+    QPushButton* m_launchTestSceneButton = nullptr; // new Launch Test Scene toggle button
     QPushButton* m_uploadButton = nullptr; // upload button in media list overlay
     MouseBlockingRoundedRectItem* m_infoBorderRect = nullptr; // graphics rect for info overlay border
     bool m_infoRefreshQueued = false;
@@ -273,7 +274,11 @@ protected:
 
     // Launch Remote Scene toggle state
     bool m_sceneLaunched = false;
+    
+    // Launch Test Scene toggle state
+    bool m_testSceneLaunched = false;
     void updateLaunchSceneButtonStyle();
+    void updateLaunchTestSceneButtonStyle();
 
     // Persistent selection helpers: remember selection at press and restore after drags
     bool m_leftMouseActive = false;

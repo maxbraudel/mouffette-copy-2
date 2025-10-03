@@ -412,7 +412,36 @@ void ScreenCanvas::initInfoOverlay() {
         m_launchSceneButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         vHeaderLayout->addWidget(m_launchSceneButton);
 
-        // Separator between Launch Remote Scene and Upload
+        // Separator between Launch Remote Scene and Launch Test Scene
+        vHeaderLayout->addWidget(createSeparator());
+
+        // Launch Test Scene toggle button
+        m_launchTestSceneButton = new QPushButton("Launch Test Scene", m_overlayHeaderWidget);
+        m_launchTestSceneButton->setCheckable(true);
+        m_launchTestSceneButton->setStyleSheet(
+            "QPushButton { "
+            "    padding: 8px 0px; "
+            "    font-weight: bold; "
+            "    font-size: 12px; "
+            "    color: " + AppColors::colorToCss(AppColors::gOverlayTextColor) + "; "
+            "    background: transparent; "
+            "    border: none; "
+            "    border-radius: 0px; "
+            "} "
+            "QPushButton:hover { "
+            "    color: white; "
+            "    background: rgba(255,255,255,0.05); "
+            "} "
+            "QPushButton:pressed { "
+            "    color: white; "
+            "    background: rgba(255,255,255,0.1); "
+            "}"
+        );
+        m_launchTestSceneButton->setFixedHeight(40);
+        m_launchTestSceneButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        vHeaderLayout->addWidget(m_launchTestSceneButton);
+
+        // Separator between Launch Test Scene and Upload
         vHeaderLayout->addWidget(createSeparator());
 
         // Upload button (kept as before, with no top border)
@@ -449,8 +478,20 @@ void ScreenCanvas::initInfoOverlay() {
             updateLaunchSceneButtonStyle();
         });
 
+        // Wire Launch Test Scene toggle behavior (UI only)
+        connect(m_launchTestSceneButton, &QPushButton::clicked, this, [this]() {
+            m_testSceneLaunched = !m_testSceneLaunched;
+            if (m_launchTestSceneButton->isCheckable()) {
+                m_launchTestSceneButton->setChecked(m_testSceneLaunched);
+            }
+            updateLaunchTestSceneButtonStyle();
+        });
+
         // Initialize Launch Remote Scene style
         updateLaunchSceneButtonStyle();
+        
+        // Initialize Launch Test Scene style
+        updateLaunchTestSceneButtonStyle();
 
         // Do not add header here; refreshInfoOverlay() will place it at the bottom of the panel
         m_infoWidget->hide(); // hidden until first layout
@@ -3369,6 +3410,61 @@ void ScreenCanvas::updateLaunchSceneButtonStyle() {
         m_launchSceneButton->setStyleSheet(idleStyle);
     }
     m_launchSceneButton->setFixedHeight(40);
+}
+
+void ScreenCanvas::updateLaunchTestSceneButtonStyle() {
+    if (!m_launchTestSceneButton) return;
+
+    // Idle (stopped) style: transparent background, overlay text color
+    const QString idleStyle =
+        "QPushButton { "
+        "    padding: 8px 0px; "
+        "    font-weight: bold; "
+        "    font-size: 12px; "
+        "    color: " + AppColors::colorToCss(AppColors::gOverlayTextColor) + "; "
+        "    background: transparent; "
+        "    border: none; "
+        "    border-radius: 0px; "
+        "} "
+        "QPushButton:hover { "
+        "    color: white; "
+        "    background: rgba(255,255,255,0.05); "
+        "} "
+        "QPushButton:pressed { "
+        "    color: white; "
+        "    background: rgba(255,255,255,0.1); "
+        "}";
+
+    // Active (launched) style: magenta tint background + magenta text
+    const QString activeStyle =
+        "QPushButton { "
+        "    padding: 8px 0px; "
+        "    font-weight: bold; "
+        "    font-size: 12px; "
+        "    color: " + AppColors::gLaunchTestSceneText.name() + "; "
+        "    background: " + AppColors::colorToCss(AppColors::gLaunchTestSceneBg) + "; "
+        "    border: none; "
+        "    border-radius: 0px; "
+        "} "
+        "QPushButton:hover { "
+        "    color: " + AppColors::gLaunchTestSceneText.name() + "; "
+        "    background: " + AppColors::colorToCss(AppColors::gLaunchTestSceneHover) + "; "
+        "} "
+        "QPushButton:pressed { "
+        "    color: " + AppColors::gLaunchTestSceneText.name() + "; "
+        "    background: " + AppColors::colorToCss(AppColors::gLaunchTestScenePressed) + "; "
+        "}";
+
+    if (m_testSceneLaunched) {
+        m_launchTestSceneButton->setText("Stop Test Scene");
+        m_launchTestSceneButton->setChecked(true);
+        m_launchTestSceneButton->setStyleSheet(activeStyle);
+    } else {
+        m_launchTestSceneButton->setText("Launch Test Scene");
+        m_launchTestSceneButton->setChecked(false);
+        m_launchTestSceneButton->setStyleSheet(idleStyle);
+    }
+    m_launchTestSceneButton->setFixedHeight(40);
 }
 
 // (Removed legacy duplicate snap indicator drawing functions; SnapGuideItem now handles rendering.)
