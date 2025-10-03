@@ -1,7 +1,9 @@
 // ScreenCanvas implementation (snap guides rendered via dedicated SnapGuideItem)
 #include "ScreenCanvas.h"
+#include <QTimer>
 #include "AppColors.h"
 #include "MediaItems.h"
+#include "MediaSettingsPanel.h" // for settingsPanel() accessor usage
 #include <QGraphicsScene>
 #include <QGraphicsSceneMouseEvent>
 #include <QGraphicsSceneHoverEvent>
@@ -481,9 +483,11 @@ void ScreenCanvas::initInfoOverlay() {
                     }
                 }
                 if (m_launchTestSceneButton) m_launchTestSceneButton->setEnabled(false);
+                startHostSceneState();
             } else {
                 // Re-enable test scene button when stopping remote scene
                 if (m_launchTestSceneButton) m_launchTestSceneButton->setEnabled(true);
+                stopHostSceneState();
             }
             m_sceneLaunched = newState;
             if (m_launchSceneButton->isCheckable()) {
@@ -504,8 +508,10 @@ void ScreenCanvas::initInfoOverlay() {
                     }
                 }
                 if (m_launchSceneButton) m_launchSceneButton->setEnabled(false);
+                startHostSceneState();
             } else {
                 if (m_launchSceneButton) m_launchSceneButton->setEnabled(true);
+                stopHostSceneState();
             }
             m_testSceneLaunched = newState;
             if (m_launchTestSceneButton->isCheckable()) {
@@ -2225,6 +2231,11 @@ void ScreenCanvas::keyReleaseEvent(QKeyEvent* event) {
 }
 
 void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
+    if (m_hostSceneActive) {
+        // Block selection interactions during host scene state
+        event->ignore();
+        return;
+    }
     // Fresh user interaction cancels any momentum ignore state
     if (m_ignorePanMomentum) { m_ignorePanMomentum = false; m_momentumPrimed = false; }
     // When pressing over the overlay, forward event to the overlay widget ONLY if we're not in the middle of drag/resize/pan operations
@@ -3505,3 +3516,99 @@ void ScreenCanvas::updateLaunchTestSceneButtonStyle() {
 }
 
 // (Removed legacy duplicate snap indicator drawing functions; SnapGuideItem now handles rendering.)
+
+void ScreenCanvas::startHostSceneState() {
+    if (m_hostSceneActive) return;
+    m_hostSceneActive = true;
+    // Deselect all media and block further selection by clearing selections.
+    if (m_scene) {
+        for (QGraphicsItem* it : m_scene->selectedItems()) it->setSelected(false);
+    }
+    // Hide all media unless display automatically is enabled AND its settings panel indicates auto-display.
+    // For now we approximate: always hide, then schedule auto-display if any auto-display flags are active per item (future: per-item state).
+    if (m_scene) {
+        for (QGraphicsItem* gi : m_scene->items()) {
+            if (auto* media = dynamic_cast<ResizableMediaBase*>(gi)) {
+                // Decide if it should auto-display immediately
+                bool shouldAutoDisplay = false;
+                int displayDelayMs = 0;
+                if (media->settingsPanel()) {
+                    shouldAutoDisplay = media->settingsPanel()->displayAutomaticallyEnabled();
+                    displayDelayMs = media->settingsPanel()->displayDelayMillis();
+                }
+                media->hideImmediateNoFade();
+                if (shouldAutoDisplay) {
+                    // Schedule per-item display timer if delay > 0, else show now with fade
+                    if (displayDelayMs > 0) {
+                        // Use ScreenCanvas (QObject) as the context for the singleshot lambda since media items are not QObjects.
+                        QTimer::singleShot(displayDelayMs, this, [this, media](){
+                            if (!m_hostSceneActive) return; // host scene no longer active – skip
+                            // NOTE: ResizableMediaBase is not a QObject; we assume it still exists if host scene active.
+                            media->showWithConfiguredFade();
+                        });
+                    } else {
+                        media->showWithConfiguredFade();
+                    }
+                }
+            }
+            if (auto* vid = dynamic_cast<ResizableVideoItem*>(gi)) vid->stopToBeginning();
+        }
+    }
+    // Setup timers (single-shot) for automatic display and playback; placeholder logic uses uniform delay of 1000ms.
+    if (!m_autoDisplayTimer) {
+        m_autoDisplayTimer = new QTimer(this);
+        m_autoDisplayTimer->setSingleShot(true);
+        connect(m_autoDisplayTimer, &QTimer::timeout, this, &ScreenCanvas::handleAutoDisplay);
+    }
+    if (!m_autoPlayTimer) {
+        m_autoPlayTimer = new QTimer(this);
+        m_autoPlayTimer->setSingleShot(true);
+        connect(m_autoPlayTimer, &QTimer::timeout, this, &ScreenCanvas::handleAutoPlayback);
+    }
+    scheduleAutoDisplayAndPlayback();
+}
+
+void ScreenCanvas::stopHostSceneState() {
+    if (!m_hostSceneActive) return;
+    m_hostSceneActive = false;
+    if (m_autoDisplayTimer) m_autoDisplayTimer->stop();
+    if (m_autoPlayTimer) m_autoPlayTimer->stop();
+    // Restore visibility of media items (leave videos stopped).
+    if (m_scene) {
+        for (QGraphicsItem* gi : m_scene->items()) {
+            if (auto* media = dynamic_cast<ResizableMediaBase*>(gi)) media->showImmediateNoFade();
+        }
+    }
+}
+
+void ScreenCanvas::scheduleAutoDisplayAndPlayback() {
+    if (!m_hostSceneActive) return;
+    // Retain legacy batch timer only if some media rely on old path (fallback)
+    if (m_autoDisplayTimer) m_autoDisplayTimer->start(1500);
+    if (m_autoPlayTimer) m_autoPlayTimer->start(1000);
+}
+
+void ScreenCanvas::handleAutoDisplay() {
+    // Legacy batch auto-display no longer needed (per-item scheduling). Retained as safety net if invoked.
+    if (!m_hostSceneActive) return;
+    if (!m_scene) return;
+    for (QGraphicsItem* gi : m_scene->items()) {
+        if (auto* media = dynamic_cast<ResizableMediaBase*>(gi)) {
+            if (media->settingsPanel() && media->settingsPanel()->displayAutomaticallyEnabled()) {
+                media->showWithConfiguredFade();
+            }
+        }
+    }
+}
+
+void ScreenCanvas::handleAutoPlayback() {
+    if (!m_hostSceneActive) return;
+    if (m_scene) {
+        for (QGraphicsItem* gi : m_scene->items()) {
+            if (auto* vid = dynamic_cast<ResizableVideoItem*>(gi)) {
+                // Using existing togglePlayPause if currently paused at start.
+                vid->togglePlayPause();
+            }
+        }
+    }
+}

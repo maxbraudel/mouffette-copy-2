@@ -604,6 +604,82 @@ void ResizableMediaBase::prepareForDeletion() {
     }
 }
 
+void ResizableMediaBase::showWithConfiguredFade() {
+    // Mirror logic from visibility toggle (show branch)
+    double fadeInSeconds = 0.0;
+    if (m_settingsPanel) fadeInSeconds = m_settingsPanel->fadeInSeconds();
+    cancelFade();
+    if (fadeInSeconds > 0.0) {
+        if (m_contentDisplayOpacity <= 0.0) m_contentDisplayOpacity = 0.0;
+        setContentVisible(true);
+        fadeContentIn(fadeInSeconds);
+    } else {
+        setContentVisible(true);
+        m_contentDisplayOpacity = 1.0;
+        update();
+    }
+    // Update overlay visibility toggle button icon/state if present
+    if (m_topPanel) {
+        if (auto el = m_topPanel->findElement("visibility_toggle")) {
+            el->setState(OverlayElement::Toggled);
+            if (auto* btnEl = dynamic_cast<OverlayButtonElement*>(el.get())) {
+                btnEl->setSvgIcon(":/icons/icons/visibility-on.svg");
+            }
+        }
+    }
+}
+
+void ResizableMediaBase::hideWithConfiguredFade() {
+    double fadeOutSeconds = 0.0;
+    if (m_settingsPanel) fadeOutSeconds = m_settingsPanel->fadeOutSeconds();
+    cancelFade();
+    if (fadeOutSeconds > 0.0) {
+        fadeContentOut(fadeOutSeconds);
+    } else {
+        setContentVisible(false);
+        m_contentDisplayOpacity = 0.0;
+        update();
+    }
+    if (m_topPanel) {
+        if (auto el = m_topPanel->findElement("visibility_toggle")) {
+            el->setState(OverlayElement::Normal);
+            if (auto* btnEl = dynamic_cast<OverlayButtonElement*>(el.get())) {
+                btnEl->setSvgIcon(":/icons/icons/visibility-off.svg");
+            }
+        }
+    }
+}
+
+void ResizableMediaBase::showImmediateNoFade() {
+    cancelFade();
+    setContentVisible(true);
+    m_contentDisplayOpacity = 1.0;
+    update();
+    if (m_topPanel) {
+        if (auto el = m_topPanel->findElement("visibility_toggle")) {
+            el->setState(OverlayElement::Toggled);
+            if (auto* btnEl = dynamic_cast<OverlayButtonElement*>(el.get())) {
+                btnEl->setSvgIcon(":/icons/icons/visibility-on.svg");
+            }
+        }
+    }
+}
+
+void ResizableMediaBase::hideImmediateNoFade() {
+    cancelFade();
+    setContentVisible(false);
+    m_contentDisplayOpacity = 0.0;
+    update();
+    if (m_topPanel) {
+        if (auto el = m_topPanel->findElement("visibility_toggle")) {
+            el->setState(OverlayElement::Normal);
+            if (auto* btnEl = dynamic_cast<OverlayButtonElement*>(el.get())) {
+                btnEl->setSvgIcon(":/icons/icons/visibility-off.svg");
+            }
+        }
+    }
+}
+
 void ResizableMediaBase::hoverMoveEvent(QGraphicsSceneHoverEvent* event) { QGraphicsItem::hoverMoveEvent(event); }
 void ResizableMediaBase::hoverLeaveEvent(QGraphicsSceneHoverEvent* event) { QGraphicsItem::hoverLeaveEvent(event); }
 

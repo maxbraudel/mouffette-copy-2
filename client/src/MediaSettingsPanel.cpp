@@ -677,6 +677,32 @@ double MediaSettingsPanel::fadeInSeconds() const {
     bool ok=false; double v = t.toDouble(&ok); if (!ok) return 0.0; return std::clamp(v, 0.0, 3600.0); // clamp to 1 hour max
 }
 
+bool MediaSettingsPanel::displayAutomaticallyEnabled() const {
+    return m_displayAfterCheck && m_displayAfterCheck->isChecked();
+}
+
+int MediaSettingsPanel::displayDelayMillis() const {
+    if (!m_displayDelayCheck || !m_displayAfterCheck) return 0;
+    if (!m_displayDelayCheck->isChecked()) return 0;
+    if (!m_displayAfterBox) return 0;
+    bool ok=false; int v = m_displayAfterBox->text().trimmed().toInt(&ok);
+    if (!ok || v < 0) return 0;
+    return v * 1000;
+}
+
+bool MediaSettingsPanel::playAutomaticallyEnabled() const {
+    return m_autoPlayCheck && m_autoPlayCheck->isChecked();
+}
+
+int MediaSettingsPanel::playDelayMillis() const {
+    if (!m_playDelayCheck || !m_autoPlayCheck) return 0;
+    if (!m_playDelayCheck->isChecked()) return 0;
+    if (!m_autoPlayBox) return 0;
+    bool ok=false; int v = m_autoPlayBox->text().trimmed().toInt(&ok);
+    if (!ok || v < 0) return 0;
+    return v * 1000;
+}
+
 double MediaSettingsPanel::fadeOutSeconds() const {
     if (!m_fadeOutCheck || !m_fadeOutBox) return 0.0;
     if (!m_fadeOutCheck->isChecked()) return 0.0;

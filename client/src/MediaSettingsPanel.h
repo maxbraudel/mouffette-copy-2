@@ -36,6 +36,12 @@ public:
     double fadeInSeconds() const;
     double fadeOutSeconds() const;
 
+    // Scene automation accessors
+    bool displayAutomaticallyEnabled() const;
+    int displayDelayMillis() const; // 0 if disabled or invalid
+    bool playAutomaticallyEnabled() const; // video only, safe if not video
+    int playDelayMillis() const; // 0 if disabled or invalid
+
     // Update absolute position based on the provided view (left-docked with margin).
     // Call whenever zoom/transform/resize occurs.
     void updatePosition(QGraphicsView* view);

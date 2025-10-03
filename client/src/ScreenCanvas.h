@@ -56,6 +56,14 @@ public:
     int screenLabelFontPointSize() const { return m_screenLabelFontPt; }
     void setScreenSpacingPx(int px) { m_screenSpacingPx = qMax(0, px); createScreenItems(); }
     int screenSpacingPx() const { return m_screenSpacingPx; }
+
+    // Host scene lifecycle
+    void startHostSceneState();
+    void stopHostSceneState();
+    bool isHostSceneActive() const { return m_hostSceneActive; }
+    void scheduleAutoDisplayAndPlayback();
+    void handleAutoDisplay();
+    void handleAutoPlayback();
     // Remote cursor style setters
     void setRemoteCursorDiameterPx(int d) { m_remoteCursorDiameterPx = qMax(2, d); if (m_remoteCursorDot) { recreateRemoteCursorItem(); } }
     void setRemoteCursorFillColor(const QColor& c) { m_remoteCursorFill = c; if (m_remoteCursorDot) { m_remoteCursorDot->setBrush(m_remoteCursorFill); } }
@@ -277,6 +285,11 @@ protected:
     
     // Launch Test Scene toggle state
     bool m_testSceneLaunched = false;
+
+    // Unified host scene state (either remote or test scene active)
+    bool m_hostSceneActive = false;
+    QTimer* m_autoDisplayTimer = nullptr;
+    QTimer* m_autoPlayTimer = nullptr;
     void updateLaunchSceneButtonStyle();
     void updateLaunchTestSceneButtonStyle();
 

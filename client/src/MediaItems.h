@@ -68,6 +68,14 @@ public:
     static int  getCornerRadiusOfMediaOverlaysPx();
 
     void requestLabelRelayout();
+
+    // Programmatic visibility control honoring fade settings (used by host scene auto display)
+    void showWithConfiguredFade();
+    void hideWithConfiguredFade();
+    void showImmediateNoFade();
+    void hideImmediateNoFade();
+
+    class MediaSettingsPanel* settingsPanel() const { return m_settingsPanel.get(); }
     bool isOnHandleAtItemPos(const QPointF& itemPos) const; // used by view for cursor decision
     bool beginResizeAtScenePos(const QPointF& scenePos);    // start interactive resize
     Qt::CursorShape cursorForScenePos(const QPointF& scenePos) const;
