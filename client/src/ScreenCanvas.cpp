@@ -280,6 +280,8 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                 m["fadeInSeconds"] = panel->fadeInSeconds();
                 m["fadeOutSeconds"] = panel->fadeOutSeconds();
             }
+            // Always include base content opacity (user configured). Animation multiplier not serialized.
+            m["contentOpacity"] = media->contentOpacity();
             mediaArr.append(m);
         }
     }

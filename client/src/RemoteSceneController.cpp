@@ -108,6 +108,7 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
         item->autoPlayDelayMs = m.value("autoPlayDelayMs").toInt(0);
         item->fadeInSeconds = m.value("fadeInSeconds").toDouble(0.0);
         item->fadeOutSeconds = m.value("fadeOutSeconds").toDouble(0.0);
+        item->contentOpacity = m.value("contentOpacity").toDouble(1.0);
         m_mediaItems.append(item);
         scheduleMedia(item);
     }
@@ -126,6 +127,7 @@ void RemoteSceneController::scheduleMedia(RemoteMediaItem* item) {
     w->hide();
     item->widget = w;
     item->opacity = new QGraphicsOpacityEffect(w);
+    // Start at 0 for fade if autoDisplay enabled otherwise remain hidden; actual target will be contentOpacity
     item->opacity->setOpacity(0.0);
     w->setGraphicsEffect(item->opacity);
 
@@ -212,10 +214,10 @@ void RemoteSceneController::fadeIn(RemoteMediaItem* item) {
     if (!item || !item->widget || !item->opacity) return;
     item->widget->show();
     const int durMs = int(item->fadeInSeconds * 1000.0);
-    if (durMs <= 10) { item->opacity->setOpacity(1.0); return; }
+    if (durMs <= 10) { item->opacity->setOpacity(item->contentOpacity); return; }
     auto* anim = new QVariantAnimation(item->widget);
     anim->setStartValue(0.0);
-    anim->setEndValue(1.0);
+    anim->setEndValue(item->contentOpacity);
     anim->setDuration(durMs);
     anim->setEasingCurve(QEasingCurve::OutCubic);
     connect(anim, &QVariantAnimation::valueChanged, item->widget, [item](const QVariant& v){ if (item->opacity) item->opacity->setOpacity(v.toDouble()); });

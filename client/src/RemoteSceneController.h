@@ -28,6 +28,7 @@ struct RemoteMediaItem {
     int autoPlayDelayMs = 0;
     double fadeInSeconds = 0.0;
     double fadeOutSeconds = 0.0;
+    double contentOpacity = 1.0; // base user-configured opacity
     QWidget* widget = nullptr; // QLabel for image or video surface container
     QGraphicsOpacityEffect* opacity = nullptr;
     QMediaPlayer* player = nullptr; // for video
