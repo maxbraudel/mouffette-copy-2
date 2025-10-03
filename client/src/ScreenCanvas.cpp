@@ -3626,37 +3626,33 @@ void ScreenCanvas::startHostSceneState() {
                         playDelayMs = media->settingsPanel()->playDelayMillis();
                     }
                 }
+                // Always ensure videos are reset to beginning before any scheduling
+                if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
+                    vid->stopToBeginning();
+                }
                 media->hideImmediateNoFade();
+                // 1. Schedule (or immediate) display
                 if (shouldAutoDisplay) {
-                    // Schedule per-item display timer if delay > 0, else show now with fade
                     if (displayDelayMs > 0) {
-                        // Use ScreenCanvas (QObject) as the context for the singleshot lambda since media items are not QObjects.
-                        QTimer::singleShot(displayDelayMs, this, [this, media](){
-                            if (!m_hostSceneActive) return; // host scene no longer active – skip
-                            // NOTE: ResizableMediaBase is not a QObject; we assume it still exists if host scene active.
+                        QTimer::singleShot(displayDelayMs, this, [this, media]() {
+                            if (!m_hostSceneActive) return;
                             media->showWithConfiguredFade();
                         });
                     } else {
                         media->showWithConfiguredFade();
                     }
                 }
-                if (shouldAutoPlay) {
-                    if (playDelayMs > 0) {
-                        QTimer::singleShot(playDelayMs, this, [this, media](){
-                            if (!m_hostSceneActive) return;
-                            if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
-                                // Only start playback if still at beginning / paused
-                                vid->togglePlayPause();
-                            }
-                        });
-                    } else {
+                // 2. Schedule video playback only if BOTH autoDisplay and autoPlay are enabled (play occurs after show completes)
+                if (shouldAutoDisplay && shouldAutoPlay && media->isVideoMedia()) {
+                    int combinedDelay = displayDelayMs + playDelayMs;
+                    QTimer::singleShot(combinedDelay, this, [this, media]() {
+                        if (!m_hostSceneActive) return;
                         if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
                             vid->togglePlayPause();
                         }
-                    }
+                    });
                 }
             }
-            if (auto* vid = dynamic_cast<ResizableVideoItem*>(gi)) vid->stopToBeginning();
         }
     }
     // Dispatch remote scene start (independent of UI toggle race) if a target is set
