@@ -471,20 +471,48 @@ void ScreenCanvas::initInfoOverlay() {
 
         // Wire Launch Remote Scene toggle behavior (UI only)
         connect(m_launchSceneButton, &QPushButton::clicked, this, [this]() {
-            m_sceneLaunched = !m_sceneLaunched;
+            bool newState = !m_sceneLaunched;
+            // If enabling remote scene, disable test scene
+            if (newState) {
+                if (m_testSceneLaunched) {
+                    m_testSceneLaunched = false;
+                    if (m_launchTestSceneButton && m_launchTestSceneButton->isCheckable()) {
+                        m_launchTestSceneButton->setChecked(false);
+                    }
+                }
+                if (m_launchTestSceneButton) m_launchTestSceneButton->setEnabled(false);
+            } else {
+                // Re-enable test scene button when stopping remote scene
+                if (m_launchTestSceneButton) m_launchTestSceneButton->setEnabled(true);
+            }
+            m_sceneLaunched = newState;
             if (m_launchSceneButton->isCheckable()) {
                 m_launchSceneButton->setChecked(m_sceneLaunched);
             }
             updateLaunchSceneButtonStyle();
+            updateLaunchTestSceneButtonStyle();
         });
 
         // Wire Launch Test Scene toggle behavior (UI only)
         connect(m_launchTestSceneButton, &QPushButton::clicked, this, [this]() {
-            m_testSceneLaunched = !m_testSceneLaunched;
+            bool newState = !m_testSceneLaunched;
+            if (newState) {
+                if (m_sceneLaunched) {
+                    m_sceneLaunched = false;
+                    if (m_launchSceneButton && m_launchSceneButton->isCheckable()) {
+                        m_launchSceneButton->setChecked(false);
+                    }
+                }
+                if (m_launchSceneButton) m_launchSceneButton->setEnabled(false);
+            } else {
+                if (m_launchSceneButton) m_launchSceneButton->setEnabled(true);
+            }
+            m_testSceneLaunched = newState;
             if (m_launchTestSceneButton->isCheckable()) {
                 m_launchTestSceneButton->setChecked(m_testSceneLaunched);
             }
             updateLaunchTestSceneButtonStyle();
+            updateLaunchSceneButtonStyle();
         });
 
         // Initialize Launch Remote Scene style
@@ -3409,6 +3437,11 @@ void ScreenCanvas::updateLaunchSceneButtonStyle() {
         m_launchSceneButton->setChecked(false);
         m_launchSceneButton->setStyleSheet(idleStyle);
     }
+    // Greyed style for disabled state
+    if (!m_launchSceneButton->isEnabled()) {
+        m_launchSceneButton->setStyleSheet(
+            "QPushButton { padding:8px 0px; font-weight:bold; font-size:12px; color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.04); border:none; }" );
+    }
     m_launchSceneButton->setFixedHeight(40);
 }
 
@@ -3463,6 +3496,10 @@ void ScreenCanvas::updateLaunchTestSceneButtonStyle() {
         m_launchTestSceneButton->setText("Launch Test Scene");
         m_launchTestSceneButton->setChecked(false);
         m_launchTestSceneButton->setStyleSheet(idleStyle);
+    }
+    if (!m_launchTestSceneButton->isEnabled()) {
+        m_launchTestSceneButton->setStyleSheet(
+            "QPushButton { padding:8px 0px; font-weight:bold; font-size:12px; color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.04); border:none; }" );
     }
     m_launchTestSceneButton->setFixedHeight(40);
 }
