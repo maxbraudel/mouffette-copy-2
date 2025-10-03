@@ -110,7 +110,7 @@ public:
     virtual void prepareForDeletion();
     bool isBeingDeleted() const { return m_beingDeleted; }
     // Visibility toggle (content only; overlays & selection chrome remain)
-    void setContentVisible(bool v) { m_contentVisible = v; update(); if (m_topPanel) m_topPanel->setVisible(true); }
+    void setContentVisible(bool v) { m_contentVisible = v; update();}
     bool isContentVisible() const { return m_contentVisible; }
     void setContentOpacity(qreal op) { m_contentOpacity = std::clamp(op, 0.0, 1.0); update(); }
     qreal contentOpacity() const { return m_contentOpacity; }
