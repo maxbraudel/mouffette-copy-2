@@ -168,6 +168,11 @@ void RemoteSceneController::scheduleMedia(RemoteMediaItem* item) {
         QLabel* videoLabel = new QLabel(w);
         videoLabel->setScaledContents(true);
         videoLabel->setGeometry(0,0,pw,ph);
+    // Make background fully transparent until the first frame is decoded
+    videoLabel->setAttribute(Qt::WA_TranslucentBackground, true);
+    videoLabel->setAutoFillBackground(false);
+    videoLabel->setStyleSheet("background: transparent;");
+    videoLabel->setPixmap(QPixmap()); // ensure no stale content
         QObject::connect(item->videoSink, &QVideoSink::videoFrameChanged, videoLabel, [videoLabel](const QVideoFrame& frame){
             if (!frame.isValid()) return;
             QImage img = frame.toImage();
@@ -176,7 +181,28 @@ void RemoteSceneController::scheduleMedia(RemoteMediaItem* item) {
         item->player->setVideoSink(item->videoSink);
         auto attemptLoadVid = [item]() {
             QString path = FileManager::instance().getFilePathForId(item->fileId);
-            if (!path.isEmpty() && QFileInfo::exists(path)) { item->player->setSource(QUrl::fromLocalFile(path)); return true; }
+            if (!path.isEmpty() && QFileInfo::exists(path)) {
+                item->player->setSource(QUrl::fromLocalFile(path));
+                // Prime first frame (only once) so we show preview before playback timer fires
+                if (!item->primedFirstFrame) {
+                    QObject::connect(item->videoSink, &QVideoSink::videoFrameChanged, item->player, [item](const QVideoFrame& f){
+                        if (!f.isValid()) return;
+                        if (item->primedFirstFrame) return;
+                        item->primedFirstFrame = true;
+                        if (!item->playAuthorized) {
+                            // Hold first frame (paused) until play is authorized
+                            if (item->player && item->player->playbackState() == QMediaPlayer::PlayingState) {
+                                item->player->pause();
+                                item->player->setPosition(0);
+                            }
+                        }
+                        // Disconnect this priming handler; keep frame-to-label connection intact
+                        QObject::disconnect(item->videoSink, nullptr, item->player, nullptr);
+                    });
+                    item->player->play(); // triggers decode of first frame
+                }
+                return true;
+            }
             return false;
         };
         if (!attemptLoadVid()) {
@@ -199,10 +225,13 @@ void RemoteSceneController::scheduleMedia(RemoteMediaItem* item) {
 
     // Play scheduling: only if autoPlay enabled AND we will display (avoid hidden playback)
     if (item->player && item->autoDisplay && item->autoPlay) {
-        int playDelay = item->autoPlayDelayMs;
+        int playDelay = item->autoDisplayDelayMs + item->autoPlayDelayMs; // start after display (host parity)
         item->playTimer = new QTimer(this);
         item->playTimer->setSingleShot(true);
-        connect(item->playTimer, &QTimer::timeout, this, [item]() { if (item->player) item->player->play(); });
+        connect(item->playTimer, &QTimer::timeout, this, [item]() {
+            item->playAuthorized = true;
+            if (item->player) item->player->play();
+        });
         item->playTimer->start(playDelay);
         if (playDelay == 0) qDebug() << "RemoteSceneController: immediate play for" << item->mediaId;
     } else if (item->player && !item->autoPlay) {

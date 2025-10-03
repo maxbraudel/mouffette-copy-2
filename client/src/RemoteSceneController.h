@@ -29,6 +29,8 @@ struct RemoteMediaItem {
     double fadeInSeconds = 0.0;
     double fadeOutSeconds = 0.0;
     double contentOpacity = 1.0; // base user-configured opacity
+    bool primedFirstFrame = false; // whether we've decoded & displayed first frame prior to playback
+    bool playAuthorized = false; // becomes true when scheduled play timer fires
     QWidget* widget = nullptr; // QLabel for image or video surface container
     QGraphicsOpacityEffect* opacity = nullptr;
     QMediaPlayer* player = nullptr; // for video
