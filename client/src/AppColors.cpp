@@ -46,6 +46,12 @@ QColor gButtonPrimaryHover = QColor(74, 144, 226, 56);  // Primary hover (0.22 *
 QColor gButtonPrimaryPressed = QColor(74, 144, 226, 77); // Primary pressed (0.30 * 255 ≈ 77)
 QColor gButtonPrimaryDisabled = QColor(74, 144, 226, 26); // Primary disabled (0.10 * 255 ≈ 26)
 
+// Launch Remote Scene button colors (magenta theme)
+QColor gLaunchRemoteSceneText = QColor(255, 150, 255);     // Magenta text
+QColor gLaunchRemoteSceneBg = QColor(255, 0, 255, 38);   // Magenta background (0.15 * 255 ≈ 38)
+QColor gLaunchRemoteSceneHover = QColor(255, 0, 255, 56); // Magenta hover (0.22 * 255 ≈ 56)
+QColor gLaunchRemoteScenePressed = QColor(255, 0, 255, 77); // Magenta pressed (0.30 * 255 ≈ 77)
+
 // ============================================================================
 // OVERLAY COLORS
 // ============================================================================

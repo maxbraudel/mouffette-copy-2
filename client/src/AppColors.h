@@ -77,10 +77,16 @@ extern QColor gButtonHoverBg;                // Button hover background
 extern QColor gButtonPressedBg;              // Button pressed background
 extern QColor gButtonDisabledBg;             // Button disabled background
 
-extern QColor gButtonPrimaryBg;              // Primary button background
-extern QColor gButtonPrimaryHover;           // Primary button hover
-extern QColor gButtonPrimaryPressed;         // Primary button pressed
-extern QColor gButtonPrimaryDisabled;        // Primary button disabled
+extern QColor gButtonPrimaryBg;
+extern QColor gButtonPrimaryHover;
+extern QColor gButtonPrimaryPressed;
+extern QColor gButtonPrimaryDisabled;
+
+// Launch Remote Scene button colors
+extern QColor gLaunchRemoteSceneText;
+extern QColor gLaunchRemoteSceneBg;
+extern QColor gLaunchRemoteSceneHover;
+extern QColor gLaunchRemoteScenePressed;
 
 // ============================================================================
 // OVERLAY COLORS

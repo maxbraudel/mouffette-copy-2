@@ -366,7 +366,7 @@ void ScreenCanvas::initInfoOverlay() {
         headerLayout->setContentsMargins(0, 0, 0, 0);
         headerLayout->setSpacing(0);
         
-        // Switch header to a vertical stack to host Launch Scene above Upload with separators
+        // Switch header to a vertical stack to host Launch Remote Scene above Upload with separators
         delete headerLayout;
         auto* vHeaderLayout = new QVBoxLayout(m_overlayHeaderWidget);
         vHeaderLayout->setContentsMargins(0, 0, 0, 0);
@@ -386,8 +386,8 @@ void ScreenCanvas::initInfoOverlay() {
         // Top separator
         vHeaderLayout->addWidget(createSeparator());
 
-        // Launch Scene toggle button
-        m_launchSceneButton = new QPushButton("Launch Scene", m_overlayHeaderWidget);
+        // Launch Remote Scene toggle button
+        m_launchSceneButton = new QPushButton("Launch Remote Scene", m_overlayHeaderWidget);
         m_launchSceneButton->setCheckable(true);
         m_launchSceneButton->setStyleSheet(
             "QPushButton { "
@@ -412,7 +412,7 @@ void ScreenCanvas::initInfoOverlay() {
         m_launchSceneButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         vHeaderLayout->addWidget(m_launchSceneButton);
 
-        // Separator between Launch Scene and Upload
+        // Separator between Launch Remote Scene and Upload
         vHeaderLayout->addWidget(createSeparator());
 
         // Upload button (kept as before, with no top border)
@@ -440,7 +440,7 @@ void ScreenCanvas::initInfoOverlay() {
         m_uploadButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         vHeaderLayout->addWidget(m_uploadButton);
 
-        // Wire Launch Scene toggle behavior (UI only)
+        // Wire Launch Remote Scene toggle behavior (UI only)
         connect(m_launchSceneButton, &QPushButton::clicked, this, [this]() {
             m_sceneLaunched = !m_sceneLaunched;
             if (m_launchSceneButton->isCheckable()) {
@@ -449,7 +449,7 @@ void ScreenCanvas::initInfoOverlay() {
             updateLaunchSceneButtonStyle();
         });
 
-        // Initialize Launch Scene style
+        // Initialize Launch Remote Scene style
         updateLaunchSceneButtonStyle();
 
         // Do not add header here; refreshInfoOverlay() will place it at the bottom of the panel
@@ -3339,32 +3339,32 @@ void ScreenCanvas::updateLaunchSceneButtonStyle() {
         "    background: rgba(255,255,255,0.1); "
         "}";
 
-    // Active (launched) style: blue tint background + blue text (matching overlay uploading look)
+    // Active (launched) style: magenta tint background + magenta text
     const QString activeStyle =
         "QPushButton { "
         "    padding: 8px 0px; "
         "    font-weight: bold; "
         "    font-size: 12px; "
-        "    color: " + AppColors::gBrandBlue.name() + "; "
-        "    background: " + AppColors::colorToCss(AppColors::gButtonPrimaryBg) + "; "
+        "    color: " + AppColors::gLaunchRemoteSceneText.name() + "; "
+        "    background: " + AppColors::colorToCss(AppColors::gLaunchRemoteSceneBg) + "; "
         "    border: none; "
         "    border-radius: 0px; "
         "} "
         "QPushButton:hover { "
-        "    color: " + AppColors::gBrandBlue.name() + "; "
-        "    background: " + AppColors::colorToCss(AppColors::gButtonPrimaryHover) + "; "
+        "    color: " + AppColors::gLaunchRemoteSceneText.name() + "; "
+        "    background: " + AppColors::colorToCss(AppColors::gLaunchRemoteSceneHover) + "; "
         "} "
         "QPushButton:pressed { "
-        "    color: " + AppColors::gBrandBlue.name() + "; "
-        "    background: " + AppColors::colorToCss(AppColors::gButtonPrimaryPressed) + "; "
+        "    color: " + AppColors::gLaunchRemoteSceneText.name() + "; "
+        "    background: " + AppColors::colorToCss(AppColors::gLaunchRemoteScenePressed) + "; "
         "}";
 
     if (m_sceneLaunched) {
-        m_launchSceneButton->setText("Stop Scene");
+        m_launchSceneButton->setText("Stop Remote Scene");
         m_launchSceneButton->setChecked(true);
         m_launchSceneButton->setStyleSheet(activeStyle);
     } else {
-        m_launchSceneButton->setText("Launch Scene");
+        m_launchSceneButton->setText("Launch Remote Scene");
         m_launchSceneButton->setChecked(false);
         m_launchSceneButton->setStyleSheet(idleStyle);
     }
