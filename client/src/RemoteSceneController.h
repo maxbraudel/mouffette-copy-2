@@ -1,67 +1,61 @@
-#ifndef REMOTESCENECONTROLLER_H
-#define REMOTESCENECONTROLLER_H
+// RemoteSceneController.h - manages rendering of a host client's scene on a remote client
+#pragma once
 
 #include <QObject>
-#include <QJsonObject>
 #include <QMap>
-#include <QPointer>
+#include <QList>
+#include <QJsonObject>
 #include <QTimer>
-#include <QWidget>
-#include <QLabel>
-#include <QVideoSink>
-#include <QMediaPlayer>
 #include <QGraphicsOpacityEffect>
-#include "WebSocketClient.h"
-#include "FileManager.h"
 
-// Lightweight media holder for remote display
-struct RemoteMediaItem {
-    QString mediaId;
-    QString fileId;
-    QString type; // image | video
-    QString fileName; // original filename (no path)
-    int screenId = -1;
-    double normX = 0, normY = 0, normW = 0, normH = 0; // relative geometry within screen
-    bool autoDisplay = false;
-    int autoDisplayDelayMs = 0;
-    bool autoPlay = false;
-    int autoPlayDelayMs = 0;
-    double fadeInSeconds = 0.0;
-    double fadeOutSeconds = 0.0;
-    double contentOpacity = 1.0; // base user-configured opacity
-    bool primedFirstFrame = false; // whether we've decoded & displayed first frame prior to playback
-    bool playAuthorized = false; // becomes true when scheduled play timer fires
-    QWidget* widget = nullptr; // QLabel for image or video surface container
-    QGraphicsOpacityEffect* opacity = nullptr;
-    QMediaPlayer* player = nullptr; // for video
-    QVideoSink* videoSink = nullptr; // for video frame updates without QVideoWidget
-    QTimer* displayTimer = nullptr;
-    QTimer* playTimer = nullptr;
-};
+class WebSocketClient;
+class QWidget;
+class QMediaPlayer;
+class QVideoSink;
+class QAudioOutput;
 
 class RemoteSceneController : public QObject {
-    Q_OBJECT
+	Q_OBJECT
 public:
-    explicit RemoteSceneController(WebSocketClient* ws, QObject* parent=nullptr);
-    void setActive(bool enabled) { m_enabled = enabled; }
+	explicit RemoteSceneController(WebSocketClient* ws, QObject* parent = nullptr);
+	void setEnabled(bool en) { m_enabled = en; if (!en) clearScene(); }
+	bool isEnabled() const { return m_enabled; }
 
 private slots:
-    void onRemoteSceneStart(const QString& senderClientId, const QJsonObject& scene);
-    void onRemoteSceneStop(const QString& senderClientId);
+	void onRemoteSceneStart(const QString& senderClientId, const QJsonObject& scene);
+	void onRemoteSceneStop(const QString& senderClientId);
 
 private:
-    void clearScene();
-    void buildWindows(const QJsonArray& screensArray);
-    void buildMedia(const QJsonArray& mediaArray);
-    QWidget* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);
-    void scheduleMedia(RemoteMediaItem* item);
-    void fadeIn(RemoteMediaItem* item);
+	struct ScreenWindow {
+		QWidget* window = nullptr; int x=0,y=0,w=0,h=0;
+	};
+	struct RemoteMediaItem {
+		QString mediaId;
+		QString fileId;
+		QString fileName;
+		QString type; // image | video
+		int screenId = -1;
+		double normX=0, normY=0, normW=0, normH=0;
+		bool autoDisplay=false; int autoDisplayDelayMs=0;
+		bool autoPlay=false; int autoPlayDelayMs=0;
+		double fadeInSeconds=0.0; double fadeOutSeconds=0.0; double contentOpacity = 1.0;
+		bool primedFirstFrame = false; bool playAuthorized = false;
+		QWidget* widget = nullptr; QGraphicsOpacityEffect* opacity = nullptr;
+		QTimer* displayTimer = nullptr; QTimer* playTimer = nullptr;
+		// Video only
+		QMediaPlayer* player = nullptr; QVideoSink* videoSink = nullptr; QAudioOutput* audio = nullptr;
+	};
 
-    bool m_enabled = true; // allow external gating later
-    WebSocketClient* m_ws = nullptr;
-    struct ScreenWindow { QWidget* window = nullptr; int x=0; int y=0; int w=0; int h=0; };
-    QMap<int, ScreenWindow> m_screenWindows; // screenId -> window
-    QList<RemoteMediaItem*> m_mediaItems; // owned
+	QWidget* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);
+	void buildWindows(const QJsonArray& screensArray);
+	void buildMedia(const QJsonArray& mediaArray);
+	void scheduleMedia(RemoteMediaItem* item);
+	void fadeIn(RemoteMediaItem* item);
+	void clearScene();
+
+	WebSocketClient* m_ws = nullptr; // not owned
+	bool m_enabled = true;
+	QMap<int, ScreenWindow> m_screenWindows;
+	QList<RemoteMediaItem*> m_mediaItems;
 };
 
-#endif // REMOTESCENECONTROLLER_H

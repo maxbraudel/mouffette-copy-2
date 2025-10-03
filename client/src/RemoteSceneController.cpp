@@ -1,4 +1,5 @@
 #include "RemoteSceneController.h"
+#include "WebSocketClient.h"
 #include <QJsonArray>
 #include <QScreen>
 #include <QGuiApplication>
@@ -9,6 +10,12 @@
 #include <QVideoFrame>
 #include <QVariantAnimation>
 #include <QEasingCurve>
+#include <QWidget>
+#include <QLabel>
+#include <QAudioOutput>
+#include <QMediaPlayer>
+#include <QVideoSink>
+#include "FileManager.h"
 
 RemoteSceneController::RemoteSceneController(WebSocketClient* ws, QObject* parent)
     : QObject(parent), m_ws(ws) {
@@ -42,7 +49,8 @@ void RemoteSceneController::clearScene() {
         if (!item) continue;
         if (item->displayTimer) { item->displayTimer->stop(); item->displayTimer->deleteLater(); }
         if (item->playTimer) { item->playTimer->stop(); item->playTimer->deleteLater(); }
-        if (item->player) { item->player->stop(); item->player->deleteLater(); }
+    if (item->player) { item->player->stop(); item->player->deleteLater(); }
+    if (item->audio) { item->audio->deleteLater(); }
         if (item->widget) { item->widget->deleteLater(); }
         delete item;
     }
@@ -163,7 +171,10 @@ void RemoteSceneController::scheduleMedia(RemoteMediaItem* item) {
             }
         }
     } else if (item->type == "video") {
-        item->player = new QMediaPlayer(w);
+    item->player = new QMediaPlayer(w);
+    item->audio = new QAudioOutput(w);
+    item->audio->setVolume(1.0);
+    item->player->setAudioOutput(item->audio);
         item->videoSink = new QVideoSink(w);
         QLabel* videoLabel = new QLabel(w);
         videoLabel->setScaledContents(true);
@@ -196,8 +207,7 @@ void RemoteSceneController::scheduleMedia(RemoteMediaItem* item) {
                                 item->player->setPosition(0);
                             }
                         }
-                        // Disconnect this priming handler; keep frame-to-label connection intact
-                        QObject::disconnect(item->videoSink, nullptr, item->player, nullptr);
+                        // Leave connection; early-return ensures minimal cost after priming.
                     });
                     item->player->play(); // triggers decode of first frame
                 }
