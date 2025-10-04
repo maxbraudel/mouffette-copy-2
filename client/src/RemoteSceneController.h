@@ -8,7 +8,6 @@
 #include <QTimer>
 #include <QGraphicsOpacityEffect>
 #include <QPixmap>
-#include <QBuffer>
 
 class WebSocketClient;
 class QWidget;
@@ -51,9 +50,7 @@ private:
 		QMediaPlayer* player = nullptr; QVideoSink* videoSink = nullptr; QAudioOutput* audio = nullptr;
 		QMetaObject::Connection deferredStartConn; // one-shot start after load
 		QMetaObject::Connection primingConn; // one-shot first-frame priming when autoPlay=false
-		// Preload buffers to ensure zero-lag playback
-		QBuffer* videoBuffer = nullptr; // owned via QObject parent (widget)
-		QPixmap imagePixmap; // for images
+		// (no RAM preload buffers; we rely on backend file source and priming logic)
 	};
 
 	QWidget* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);

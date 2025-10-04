@@ -17,8 +17,6 @@
 #include <QVideoSink>
 #include "FileManager.h"
 #include "MacWindowManager.h"
-#include <QFile>
-#include <QBuffer>
 #include <algorithm>
 
 RemoteSceneController::RemoteSceneController(WebSocketClient* ws, QObject* parent)
@@ -240,7 +238,7 @@ void RemoteSceneController::scheduleMedia(RemoteMediaItem* item) {
             QString path = FileManager::instance().getFilePathForId(item->fileId);
             qDebug() << "RemoteSceneController: resolving video path for" << item->mediaId << "->" << path;
             if (!path.isEmpty() && QFileInfo::exists(path)) {
-                // Use file URL directly for backend compatibility; avoid full-file RAM warm-up which can cause memory pressure
+                // Use file URL directly for backend compatibility
                 item->player->setSource(QUrl::fromLocalFile(path));
                 // Prime only for preview when autoPlay is disabled: play muted, then pause on first video frame
                 if (!item->autoPlay && !item->primedFirstFrame) {
@@ -322,18 +320,7 @@ void RemoteSceneController::scheduleMedia(RemoteMediaItem* item) {
 void RemoteSceneController::fadeIn(RemoteMediaItem* item) {
     if (!item || !item->widget || !item->opacity) return;
     item->widget->show();
-    // If this is a video and autoPlay is disabled, make absolutely sure we hold on the first frame
-    if (item->player && !item->autoPlay) {
-        item->player->pause();
-        item->player->setPosition(0);
-        // Do it again on the next tick in case the first visible frame lands right after show()
-        QTimer::singleShot(0, item->player, [item]() {
-            if (!item->playAuthorized && item->player) {
-                item->player->pause();
-                item->player->setPosition(0);
-            }
-        });
-    }
+    // Preview enforcement is handled during priming. No extra pause here to avoid fighting playback scheduling.
     const int durMs = int(item->fadeInSeconds * 1000.0);
     if (durMs <= 10) { item->opacity->setOpacity(item->contentOpacity); return; }
     auto* anim = new QVariantAnimation(item->widget);
