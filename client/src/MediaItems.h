@@ -11,6 +11,7 @@
 #include <QVideoFrame>
 #include <QVideoSink>
 #include <QMediaPlayer>
+#include <QAudioOutput>
 #include <QSet>
 #include <QTimer>
 #include <QVariantAnimation>
@@ -257,6 +258,10 @@ public:
     void resetFrameStats();
     void onFrameConversionComplete(QImage convertedImage, quint64 serial); // async callback
     bool handleControlsPressAtItemPos(const QPointF& itemPos); // view-level forwarding
+
+    // Audio state accessors for scene serialization
+    bool isMuted() const { return m_audio ? m_audio->isMuted() : false; }
+    qreal volume() const { return m_audio ? std::clamp<qreal>(m_audio->volume(), 0.0, 1.0) : 1.0; }
 
     // QGraphicsItem
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override;

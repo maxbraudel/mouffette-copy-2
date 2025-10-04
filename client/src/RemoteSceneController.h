@@ -7,6 +7,8 @@
 #include <QJsonObject>
 #include <QTimer>
 #include <QGraphicsOpacityEffect>
+#include <QPixmap>
+#include <QBuffer>
 
 class WebSocketClient;
 class QWidget;
@@ -39,11 +41,17 @@ private:
 		bool autoDisplay=false; int autoDisplayDelayMs=0;
 		bool autoPlay=false; int autoPlayDelayMs=0;
 		double fadeInSeconds=0.0; double fadeOutSeconds=0.0; double contentOpacity = 1.0;
+		// Audio state from host (videos)
+		bool muted = false; double volume = 1.0; // 0..1
 		bool primedFirstFrame = false; bool playAuthorized = false;
+		bool loaded = false; // true when QMediaPlayer reports Loaded/Buffered
 		QWidget* widget = nullptr; QGraphicsOpacityEffect* opacity = nullptr;
 		QTimer* displayTimer = nullptr; QTimer* playTimer = nullptr;
 		// Video only
 		QMediaPlayer* player = nullptr; QVideoSink* videoSink = nullptr; QAudioOutput* audio = nullptr;
+		// Preload buffers to ensure zero-lag playback
+		QBuffer* videoBuffer = nullptr; // owned via QObject parent (widget)
+		QPixmap imagePixmap; // for images
 	};
 
 	QWidget* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);

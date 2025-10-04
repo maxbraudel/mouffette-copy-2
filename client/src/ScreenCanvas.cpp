@@ -276,6 +276,10 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                 if (media->isVideoMedia()) {
                     m["autoPlay"] = panel->playAutomaticallyEnabled();
                     m["autoPlayDelayMs"] = panel->playDelayMillis();
+                    if (auto* v = dynamic_cast<ResizableVideoItem*>(media)) {
+                        m["muted"] = v->isMuted();
+                        m["volume"] = v->volume();
+                    }
                 }
                 m["fadeInSeconds"] = panel->fadeInSeconds();
                 m["fadeOutSeconds"] = panel->fadeOutSeconds();
