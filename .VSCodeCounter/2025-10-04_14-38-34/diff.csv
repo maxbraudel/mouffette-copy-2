@@ -1,0 +1,35 @@
+"filename", "language", "Shell Script", "PowerShell", "Markdown", "CMake", "JSON", "XML", "JavaScript", "comment", "blank", "total"
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/README.md", "Markdown", 0, 0, -133, 0, 0, 0, 0, 0, -40, -173
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/build instructions.md", "Markdown", 0, 0, -5, 0, 0, 0, 0, 0, -4, -9
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/CMakeLists.txt", "CMake", 0, 0, 0, -111, 0, 0, 0, 0, -17, -128
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/PALETTE_SYSTEM.md", "Markdown", 0, 0, -64, 0, 0, 0, 0, 0, -23, -87
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/README.md", "Markdown", 0, 0, -117, 0, 0, 0, 0, 0, -33, -150
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/build.ps1", "PowerShell", 0, -28, 0, 0, 0, 0, 0, -6, -9, -43
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/build.sh", "Shell Script", -23, 0, 0, 0, 0, 0, 0, -6, -7, -36
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/arrow-down.svg", "XML", 0, 0, 0, 0, 0, -1, 0, 0, 0, -1
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/arrow-up.svg", "XML", 0, 0, 0, 0, 0, -1, 0, 0, 0, -1
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/delete.svg", "XML", 0, 0, 0, 0, 0, -1, 0, 0, 0, -1
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/loop.svg", "XML", 0, 0, 0, 0, 0, -1, 0, 0, 0, -1
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/pause.svg", "XML", 0, 0, 0, 0, 0, -1, 0, 0, 0, -1
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/play.svg", "XML", 0, 0, 0, 0, 0, -1, 0, 0, 0, -1
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/settings.svg", "XML", 0, 0, 0, 0, 0, -1, 0, 0, 0, -1
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/stop.svg", "XML", 0, 0, 0, 0, 0, -1, 0, 0, 0, -1
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/close-hover.svg", "XML", 0, 0, 0, 0, 0, -6, 0, 0, -1, -7
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/close-normal.svg", "XML", 0, 0, 0, 0, 0, -4, 0, 0, -1, -5
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/max-hover.svg", "XML", 0, 0, 0, 0, 0, -6, 0, 0, -1, -7
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/max-normal.svg", "XML", 0, 0, 0, 0, 0, -4, 0, 0, -1, -5
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/min-hover.svg", "XML", 0, 0, 0, 0, 0, -5, 0, 0, -1, -6
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/min-normal.svg", "XML", 0, 0, 0, 0, 0, -4, 0, 0, -1, -5
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/no-focus.svg", "XML", 0, 0, 0, 0, 0, -4, 0, 0, -1, -5
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/visibility-off.svg", "XML", 0, 0, 0, 0, 0, -1, 0, 0, 0, -1
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/visibility-on.svg", "XML", 0, 0, 0, 0, 0, -1, 0, 0, 0, -1
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/volume-off.svg", "XML", 0, 0, 0, 0, 0, -1, 0, 0, 0, -1
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/volume-on.svg", "XML", 0, 0, 0, 0, 0, -1, 0, 0, 0, -1
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/run.ps1", "PowerShell", 0, -15, 0, 0, 0, 0, 0, -2, -5, -22
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/run.sh", "Shell Script", -13, 0, 0, 0, 0, 0, 0, -3, -5, -21
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/server/README.md", "Markdown", 0, 0, -82, 0, 0, 0, 0, 0, -21, -103
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/server/package-lock.json", "JSON", 0, 0, 0, 0, -427, 0, 0, 0, -1, -428
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/server/package.json", "JSON", 0, 0, 0, 0, -20, 0, 0, 0, -1, -21
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/server/server.js", "JavaScript", 0, 0, 0, 0, 0, 0, -444, -33, -43, -520
+"/Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/start.sh", "Shell Script", -32, 0, 0, 0, 0, 0, 0, -8, -10, -50
+"Total", "-", -68, -43, -401, -111, -447, -45, -444, -58, -226, -1843

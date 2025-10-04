@@ -1,0 +1,128 @@
+Date : 2025-10-04 14:37:51
+Directory : /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10
+Total : 87 files,  13560 codes, 1753 comments, 1791 blanks, all 17104 lines
+
+Languages
++---------------+------------+------------+------------+------------+------------+
+| language      | files      | code       | comment    | blank      | total      |
++---------------+------------+------------+------------+------------+------------+
+| C++           |         51 |     11,940 |      1,691 |      1,554 |     15,185 |
+| JSON          |          2 |        447 |          0 |          2 |        449 |
+| JavaScript    |          1 |        444 |         33 |         43 |        520 |
+| Markdown      |          5 |        401 |          0 |        121 |        522 |
+| CMake         |          1 |        111 |          0 |         17 |        128 |
+| Shell Script  |          3 |         68 |         17 |         22 |        107 |
+| Objective-C++ |          3 |         61 |          4 |         11 |         76 |
+| XML           |         19 |         45 |          0 |          7 |         52 |
+| PowerShell    |          2 |         43 |          8 |         14 |         65 |
++---------------+------------+------------+------------+------------+------------+
+
+Directories
++---------------------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| path                                                                                                          | files      | code       | comment    | blank      | total      |
++---------------------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| .                                                                                                             |         87 |     13,560 |      1,753 |      1,791 |     17,104 |
+| . (Files)                                                                                                     |          3 |        170 |          8 |         54 |        232 |
+| client                                                                                                        |         80 |     12,417 |      1,712 |      1,671 |     15,800 |
+| client (Files)                                                                                                |          7 |        371 |         17 |         99 |        487 |
+| client/resources                                                                                              |         19 |         45 |          0 |          7 |         52 |
+| client/resources/icons                                                                                        |         19 |         45 |          0 |          7 |         52 |
+| client/resources/icons (Files)                                                                                |         12 |         12 |          0 |          0 |         12 |
+| client/resources/icons/traffic-lights                                                                         |          7 |         33 |          0 |          7 |         40 |
+| client/src                                                                                                    |         54 |     12,001 |      1,695 |      1,565 |     15,261 |
+| server                                                                                                        |          4 |        973 |         33 |         66 |      1,072 |
++---------------------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+
+Files
++---------------------------------------------------------------------------------------------------------------+---------------+------------+------------+------------+------------+
+| filename                                                                                                      | language      | code       | comment    | blank      | total      |
++---------------------------------------------------------------------------------------------------------------+---------------+------------+------------+------------+------------+
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/README.md                                              | Markdown      |        133 |          0 |         40 |        173 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/build instructions.md                                  | Markdown      |          5 |          0 |          4 |          9 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/CMakeLists.txt                                  | CMake         |        111 |          0 |         17 |        128 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/PALETTE_SYSTEM.md                               | Markdown      |         64 |          0 |         23 |         87 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/README.md                                       | Markdown      |        117 |          0 |         33 |        150 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/build.ps1                                       | PowerShell    |         28 |          6 |          9 |         43 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/build.sh                                        | Shell Script  |         23 |          6 |          7 |         36 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/arrow-down.svg                  | XML           |          1 |          0 |          0 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/arrow-up.svg                    | XML           |          1 |          0 |          0 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/delete.svg                      | XML           |          1 |          0 |          0 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/loop.svg                        | XML           |          1 |          0 |          0 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/pause.svg                       | XML           |          1 |          0 |          0 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/play.svg                        | XML           |          1 |          0 |          0 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/settings.svg                    | XML           |          1 |          0 |          0 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/stop.svg                        | XML           |          1 |          0 |          0 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/close-hover.svg  | XML           |          6 |          0 |          1 |          7 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/close-normal.svg | XML           |          4 |          0 |          1 |          5 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/max-hover.svg    | XML           |          6 |          0 |          1 |          7 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/max-normal.svg   | XML           |          4 |          0 |          1 |          5 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/min-hover.svg    | XML           |          5 |          0 |          1 |          6 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/min-normal.svg   | XML           |          4 |          0 |          1 |          5 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/no-focus.svg     | XML           |          4 |          0 |          1 |          5 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/visibility-off.svg              | XML           |          1 |          0 |          0 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/visibility-on.svg               | XML           |          1 |          0 |          0 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/volume-off.svg                  | XML           |          1 |          0 |          0 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/volume-on.svg                   | XML           |          1 |          0 |          0 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/run.ps1                                         | PowerShell    |         15 |          2 |          5 |         22 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/run.sh                                          | Shell Script  |         13 |          3 |          5 |         21 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/AppColors.cpp                               | C++           |         83 |         41 |         33 |        157 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/AppColors.h                                 | C++           |         79 |         65 |         38 |        182 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/ClientInfo.cpp                              | C++           |         92 |          3 |         15 |        110 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/ClientInfo.h                                | C++           |         56 |          4 |         13 |         73 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/FileManager.cpp                             | C++           |        206 |         20 |         60 |        286 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/FileManager.h                               | C++           |         49 |         17 |         21 |         87 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/FileWatcher.cpp                             | C++           |        173 |         22 |         41 |        236 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/FileWatcher.h                               | C++           |         35 |         12 |         17 |         64 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/MacVideoThumbnailer.h                       | C++           |         10 |          2 |          2 |         14 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/MacVideoThumbnailer.mm                      | Objective-C++ |         40 |          1 |          2 |         43 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/MacWindowManager.h                          | C++           |          8 |          0 |          3 |         11 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/MacWindowManager.mm                         | Objective-C++ |         21 |          3 |          8 |         32 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/MainWindow.cpp                              | C++           |      2,481 |        418 |        300 |      3,199 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/MainWindow.h                                | C++           |        223 |         47 |         32 |        302 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/MediaItems.cpp                              | C++           |      1,084 |        119 |        108 |      1,311 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/MediaItems.h                                | C++           |        257 |         41 |         40 |        338 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/MediaPreloader.cpp                          | C++           |          0 |          0 |          1 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/MediaPreloader.h                            | C++           |          0 |          0 |          1 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/MediaSettingsPanel.cpp                      | C++           |        662 |        107 |         76 |        845 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/MediaSettingsPanel.h                        | C++           |         78 |         18 |         21 |        117 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/NativeMenu.h                                | C++           |          0 |          0 |          1 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/NativeMenu.mm                               | Objective-C++ |          0 |          0 |          1 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/OverlayPanels.cpp                           | C++           |        706 |         94 |         85 |        885 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/OverlayPanels.h                             | C++           |        295 |         38 |         27 |        360 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/QtWaitingSpinner.cpp                        | C++           |          0 |          0 |          1 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/QtWaitingSpinner.h                          | C++           |          0 |          0 |          1 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/RemoteSceneController.cpp                   | C++           |        293 |         20 |         14 |        327 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/RemoteSceneController.h                     | C++           |         58 |          4 |          9 |         71 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/ResizableMediaItems.h                       | C++           |          0 |          0 |          1 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/ResponsiveLayoutManager.cpp                 | C++           |        175 |         19 |         44 |        238 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/ResponsiveLayoutManager.h                   | C++           |         48 |          8 |         14 |         70 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/RoundedRectItem.cpp                         | C++           |          0 |          0 |          1 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/RoundedRectItem.h                           | C++           |         45 |          4 |         12 |         61 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/ScreenCanvas.cpp                            | C++           |      3,081 |        389 |        273 |      3,743 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/ScreenCanvas.h                              | C++           |        262 |         39 |         31 |        332 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/ScreenNavigationManager.cpp                 | C++           |        111 |          9 |         23 |        143 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/ScreenNavigationManager.h                   | C++           |         53 |          5 |         13 |         71 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/SelectionIndicators.cpp                     | C++           |          0 |          0 |          1 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/SelectionIndicators.h                       | C++           |          0 |          0 |          1 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/SpinnerWidget.cpp                           | C++           |         60 |          1 |         10 |         71 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/SpinnerWidget.h                             | C++           |         27 |          1 |         10 |         38 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/Theme.cpp                                   | C++           |          5 |          2 |          2 |          9 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/Theme.h                                     | C++           |          6 |          4 |          3 |         13 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/UIManager.cpp                               | C++           |          0 |          0 |          1 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/UIManager.h                                 | C++           |          0 |          0 |          1 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/UploadManager.cpp                           | C++           |        384 |         49 |         39 |        472 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/UploadManager.h                             | C++           |         87 |         24 |         17 |        128 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/VolumeMonitor.cpp                           | C++           |          0 |          0 |          1 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/VolumeMonitor.h                             | C++           |          0 |          0 |          1 |          1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/WatchManager.cpp                            | C++           |         49 |          1 |          8 |         58 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/WatchManager.h                              | C++           |         33 |          6 |         13 |         52 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/WebSocketClient.cpp                         | C++           |        482 |         20 |         52 |        554 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/WebSocketClient.h                           | C++           |         90 |         15 |         16 |        121 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src/main.cpp                                    | C++           |         14 |          3 |          6 |         23 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/server/README.md                                       | Markdown      |         82 |          0 |         21 |        103 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/server/package-lock.json                               | JSON          |        427 |          0 |          1 |        428 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/server/package.json                                    | JSON          |         20 |          0 |          1 |         21 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/server/server.js                                       | JavaScript    |        444 |         33 |         43 |        520 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/start.sh                                               | Shell Script  |         32 |          8 |         10 |         50 |
+| Total                                                                                                         |               |     13,560 |      1,753 |      1,791 |     17,104 |
++---------------------------------------------------------------------------------------------------------------+---------------+------------+------------+------------+------------+

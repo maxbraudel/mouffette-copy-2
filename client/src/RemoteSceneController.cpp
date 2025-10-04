@@ -185,28 +185,25 @@ void RemoteSceneController::scheduleMedia(RemoteMediaItem* item) {
             }
         }
     } else if (item->type == "video") {
-    item->player = new QMediaPlayer(w);
-    item->audio = new QAudioOutput(w);
-    // Apply host audio state before playback
-    item->audio->setMuted(item->muted);
-    item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0));
-    item->player->setAudioOutput(item->audio);
+        item->player = new QMediaPlayer(w);
+        item->audio = new QAudioOutput(w);
+        // Apply host audio state before playback
+        item->audio->setMuted(item->muted);
+        item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0));
+        item->player->setAudioOutput(item->audio);
         item->videoSink = new QVideoSink(w);
         QLabel* videoLabel = new QLabel(w);
         videoLabel->setScaledContents(true);
         videoLabel->setGeometry(0,0,pw,ph);
-    // Make background fully transparent until the first frame is decoded
-    videoLabel->setAttribute(Qt::WA_TranslucentBackground, true);
-    videoLabel->setAutoFillBackground(false);
-    videoLabel->setStyleSheet("background: transparent;");
-    videoLabel->setPixmap(QPixmap()); // ensure no stale content
+        videoLabel->setAttribute(Qt::WA_TranslucentBackground, true);
+        videoLabel->setAutoFillBackground(false);
+        videoLabel->setStyleSheet("background: transparent;");
+    videoLabel->setPixmap(QPixmap());
+    videoLabel->show();
         QObject::connect(item->videoSink, &QVideoSink::videoFrameChanged, videoLabel, [videoLabel,item](const QVideoFrame& frame){
             if (!frame.isValid()) return;
-            QImage img = frame.toImage();
-            if (!img.isNull()) {
-                videoLabel->setPixmap(QPixmap::fromImage(img));
-                static int once = 0; if (!once++) qDebug() << "RemoteSceneController: first frame received for" << item->mediaId;
-            }
+            const QImage img = frame.toImage();
+            if (!img.isNull()) videoLabel->setPixmap(QPixmap::fromImage(img));
         });
         item->player->setVideoSink(item->videoSink);
         QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [item](QMediaPlayer::MediaStatus s){
@@ -218,26 +215,27 @@ void RemoteSceneController::scheduleMedia(RemoteMediaItem* item) {
         QObject::connect(item->player, &QMediaPlayer::playbackStateChanged, item->player, [item](QMediaPlayer::PlaybackState st){
             qDebug() << "RemoteSceneController: playbackState" << int(st) << "for" << item->mediaId;
         });
-        QObject::connect(item->player, &QMediaPlayer::errorChanged, item->player, [item](QMediaPlayer::Error e){
-            if (e != QMediaPlayer::NoError) qWarning() << "RemoteSceneController: player error" << int(e) << "for" << item->mediaId;
+        QObject::connect(item->player, &QMediaPlayer::errorOccurred, item->player, [item](QMediaPlayer::Error e, const QString& err){
+            if (e != QMediaPlayer::NoError) qWarning() << "RemoteSceneController: player error" << int(e) << err << "for" << item->mediaId;
         });
         auto attemptLoadVid = [item]() {
             QString path = FileManager::instance().getFilePathForId(item->fileId);
             qDebug() << "RemoteSceneController: resolving video path for" << item->mediaId << "->" << path;
             if (!path.isEmpty() && QFileInfo::exists(path)) {
-                // Warm OS file cache by reading once (discard result), then use file URL for backend compatibility
-                QFile f(path); if (f.open(QIODevice::ReadOnly)) { (void)f.readAll(); f.close(); }
+                // Use file URL directly for backend compatibility; avoid full-file RAM warm-up which can cause memory pressure
                 item->player->setSource(QUrl::fromLocalFile(path));
-                // Prime first frame (only once) so we show preview before playback timer fires
-                if (!item->primedFirstFrame) {
-                    QObject::connect(item->videoSink, &QVideoSink::videoFrameChanged, item->player, [item](const QVideoFrame& f){
+                // Prime only for preview when autoPlay is disabled: play muted, then pause on first video frame
+                if (!item->autoPlay && !item->primedFirstFrame) {
+                    item->primingConn = QObject::connect(item->videoSink, &QVideoSink::videoFrameChanged, item->player, [item](const QVideoFrame& f){
                         if (!f.isValid()) return;
                         if (item->primedFirstFrame) return;
                         item->primedFirstFrame = true;
-                        // We'll continue buffering and pause at 0 when media is fully loaded if not yet authorized
-                        // Leave connection; early-return ensures minimal cost after priming.
+                        QObject::disconnect(item->primingConn);
+                        if (!item->playAuthorized && item->player) {
+                            item->player->pause();
+                            item->player->setPosition(0);
+                        }
                     });
-                    // Start pre-buffering silently
                     if (item->audio) item->audio->setMuted(true);
                     item->player->play();
                 }
@@ -274,13 +272,21 @@ void RemoteSceneController::scheduleMedia(RemoteMediaItem* item) {
             if (!item->player) return;
             // Apply final audio state from host now
             if (item->audio) { item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0)); }
-            if (item->loaded) { item->player->pause(); item->player->setPosition(0); item->player->play(); }
+            if (item->loaded) {
+                // If we primed, position might already be 0 and paused; just play
+                if (item->player->position() != 0) item->player->setPosition(0);
+                item->player->play();
+            }
             else {
                 // Defer until loaded to avoid starting before buffer is ready
-                QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [item](QMediaPlayer::MediaStatus s){
+                item->deferredStartConn = QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [item](QMediaPlayer::MediaStatus s){
                     if (!item->playAuthorized) return;
                     if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
-                        item->player->pause(); item->player->setPosition(0); item->player->play();
+                        // Disconnect this one-shot handler to avoid multiple resets causing freezes
+                        QObject::disconnect(item->deferredStartConn);
+                        if (item->audio) { item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0)); }
+                        if (item->player->position() != 0) item->player->setPosition(0);
+                        item->player->play();
                     }
                 });
             }
@@ -295,6 +301,18 @@ void RemoteSceneController::scheduleMedia(RemoteMediaItem* item) {
 void RemoteSceneController::fadeIn(RemoteMediaItem* item) {
     if (!item || !item->widget || !item->opacity) return;
     item->widget->show();
+    // If this is a video and autoPlay is disabled, make absolutely sure we hold on the first frame
+    if (item->player && !item->autoPlay) {
+        item->player->pause();
+        item->player->setPosition(0);
+        // Do it again on the next tick in case the first visible frame lands right after show()
+        QTimer::singleShot(0, item->player, [item]() {
+            if (!item->playAuthorized && item->player) {
+                item->player->pause();
+                item->player->setPosition(0);
+            }
+        });
+    }
     const int durMs = int(item->fadeInSeconds * 1000.0);
     if (durMs <= 10) { item->opacity->setOpacity(item->contentOpacity); return; }
     auto* anim = new QVariantAnimation(item->widget);

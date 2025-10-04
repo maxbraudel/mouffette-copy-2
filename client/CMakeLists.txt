@@ -13,7 +13,7 @@ if(APPLE)
 endif()
 
 # Find Qt6
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia Svg SvgWidgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia MultimediaWidgets Svg SvgWidgets)
 
 # Enable Qt MOC
 set(CMAKE_AUTOMOC ON)
@@ -90,6 +90,7 @@ target_link_libraries(MouffetteClient
     Qt6::Network 
     Qt6::WebSockets
     Qt6::Multimedia
+    Qt6::MultimediaWidgets
     Qt6::Svg
     Qt6::SvgWidgets
 )

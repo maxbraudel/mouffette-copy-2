@@ -1,0 +1,72 @@
+Date : 2025-10-04 14:38:34
+Directory : /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/src
+Total : 33 files,  -1559 codes, -58 comments, -226 blanks, all -1843 lines
+
+Languages
++--------------+------------+------------+------------+------------+------------+
+| language     | files      | code       | comment    | blank      | total      |
++--------------+------------+------------+------------+------------+------------+
+| PowerShell   |          2 |        -43 |         -8 |        -14 |        -65 |
+| XML          |         19 |        -45 |          0 |         -7 |        -52 |
+| Shell Script |          3 |        -68 |        -17 |        -22 |       -107 |
+| CMake        |          1 |       -111 |          0 |        -17 |       -128 |
+| Markdown     |          5 |       -401 |          0 |       -121 |       -522 |
+| JavaScript   |          1 |       -444 |        -33 |        -43 |       -520 |
+| JSON         |          2 |       -447 |          0 |         -2 |       -449 |
++--------------+------------+------------+------------+------------+------------+
+
+Directories
++---------------------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| path                                                                                                          | files      | code       | comment    | blank      | total      |
++---------------------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| .                                                                                                             |         33 |     -1,559 |        -58 |       -226 |     -1,843 |
+| ..                                                                                                            |         33 |     -1,559 |        -58 |       -226 |     -1,843 |
+| .. (Files)                                                                                                    |          7 |       -371 |        -17 |        -99 |       -487 |
+| ../..                                                                                                         |          7 |     -1,143 |        -41 |       -120 |     -1,304 |
+| ../.. (Files)                                                                                                 |          3 |       -170 |         -8 |        -54 |       -232 |
+| ../../server                                                                                                  |          4 |       -973 |        -33 |        -66 |     -1,072 |
+| ../resources                                                                                                  |         19 |        -45 |          0 |         -7 |        -52 |
+| ../resources/icons                                                                                            |         19 |        -45 |          0 |         -7 |        -52 |
+| ../resources/icons (Files)                                                                                    |         12 |        -12 |          0 |          0 |        -12 |
+| ../resources/icons/traffic-lights                                                                             |          7 |        -33 |          0 |         -7 |        -40 |
++---------------------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+
+Files
++---------------------------------------------------------------------------------------------------------------+--------------+------------+------------+------------+------------+
+| filename                                                                                                      | language     | code       | comment    | blank      | total      |
++---------------------------------------------------------------------------------------------------------------+--------------+------------+------------+------------+------------+
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/README.md                                              | Markdown     |       -133 |          0 |        -40 |       -173 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/build instructions.md                                  | Markdown     |         -5 |          0 |         -4 |         -9 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/CMakeLists.txt                                  | CMake        |       -111 |          0 |        -17 |       -128 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/PALETTE_SYSTEM.md                               | Markdown     |        -64 |          0 |        -23 |        -87 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/README.md                                       | Markdown     |       -117 |          0 |        -33 |       -150 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/build.ps1                                       | PowerShell   |        -28 |         -6 |         -9 |        -43 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/build.sh                                        | Shell Script |        -23 |         -6 |         -7 |        -36 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/arrow-down.svg                  | XML          |         -1 |          0 |          0 |         -1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/arrow-up.svg                    | XML          |         -1 |          0 |          0 |         -1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/delete.svg                      | XML          |         -1 |          0 |          0 |         -1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/loop.svg                        | XML          |         -1 |          0 |          0 |         -1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/pause.svg                       | XML          |         -1 |          0 |          0 |         -1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/play.svg                        | XML          |         -1 |          0 |          0 |         -1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/settings.svg                    | XML          |         -1 |          0 |          0 |         -1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/stop.svg                        | XML          |         -1 |          0 |          0 |         -1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/close-hover.svg  | XML          |         -6 |          0 |         -1 |         -7 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/close-normal.svg | XML          |         -4 |          0 |         -1 |         -5 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/max-hover.svg    | XML          |         -6 |          0 |         -1 |         -7 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/max-normal.svg   | XML          |         -4 |          0 |         -1 |         -5 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/min-hover.svg    | XML          |         -5 |          0 |         -1 |         -6 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/min-normal.svg   | XML          |         -4 |          0 |         -1 |         -5 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/traffic-lights/no-focus.svg     | XML          |         -4 |          0 |         -1 |         -5 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/visibility-off.svg              | XML          |         -1 |          0 |          0 |         -1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/visibility-on.svg               | XML          |         -1 |          0 |          0 |         -1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/volume-off.svg                  | XML          |         -1 |          0 |          0 |         -1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/resources/icons/volume-on.svg                   | XML          |         -1 |          0 |          0 |         -1 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/run.ps1                                         | PowerShell   |        -15 |         -2 |         -5 |        -22 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/client/run.sh                                          | Shell Script |        -13 |         -3 |         -5 |        -21 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/server/README.md                                       | Markdown     |        -82 |          0 |        -21 |       -103 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/server/package-lock.json                               | JSON         |       -427 |          0 |         -1 |       -428 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/server/package.json                                    | JSON         |        -20 |          0 |         -1 |        -21 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/server/server.js                                       | JavaScript   |       -444 |        -33 |        -43 |       -520 |
+| /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 10/start.sh                                               | Shell Script |        -32 |         -8 |        -10 |        -50 |
+| Total                                                                                                         |              |     -1,559 |        -58 |       -226 |     -1,843 |
++---------------------------------------------------------------------------------------------------------------+--------------+------------+------------+------------+------------+
