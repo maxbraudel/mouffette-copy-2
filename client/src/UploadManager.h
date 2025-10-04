@@ -123,7 +123,9 @@ private:
     IncomingUploadSession m_incoming;
     QSet<QString> m_canceledIncoming; // uploadIds canceled by sender
     // Track next expected chunk index per (uploadId:fileId) on the target side
-    QHash<QString, int> m_expectedChunkIndex; 
+    QHash<QString, int> m_expectedChunkIndex;
+    // Buffer out-of-order chunks per (uploadId:fileId)
+    QHash<QString, QMap<int, QByteArray>> m_chunkBuffers; 
 };
 
 #endif // UPLOADMANAGER_H
