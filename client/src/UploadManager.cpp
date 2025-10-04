@@ -368,47 +368,62 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         
         if (chunkIndex == expected) {
             // This is the next expected chunk - write it immediately
-            qf->seek(qf->size()); // Ensure we're at end for append
             qint64 written = qf->write(data);
             if (written != data.size()) {
                 qWarning() << "UploadManager: Partial write - expected" << data.size() << "wrote" << written;
+                return; // Abort on write failure
             }
-            qf->flush();
             
             m_expectedChunkIndex[key] = expected + 1;
+            m_incoming.received += data.size(); // Count written bytes
             
             // Check if we can now write any buffered chunks in sequence
             QMap<int, QByteArray>& buffer = m_chunkBuffers[key];
             int nextExpected = m_expectedChunkIndex.value(key);
             
-            while (buffer.contains(nextExpected)) {
-                const QByteArray& bufferedData = buffer.value(nextExpected);
+            // Safety: limit consecutive buffer processing to prevent infinite loops
+            int processedFromBuffer = 0;
+            const int maxBufferProcess = 1000; // Reasonable limit
+            
+            while (buffer.contains(nextExpected) && processedFromBuffer < maxBufferProcess) {
+                const QByteArray bufferedData = buffer.take(nextExpected); // take() removes and returns
                 qint64 bufferedWritten = qf->write(bufferedData);
                 if (bufferedWritten != bufferedData.size()) {
                     qWarning() << "UploadManager: Partial buffered write - expected" << bufferedData.size() << "wrote" << bufferedWritten;
+                    break; // Stop processing on write error
                 }
-                qf->flush();
                 
-                buffer.remove(nextExpected);
                 m_expectedChunkIndex[key] = ++nextExpected;
+                m_incoming.received += bufferedData.size(); // Count buffered bytes as they're written
+                processedFromBuffer++;
             }
             
+            qf->flush(); // Single flush after all writes
+            
         } else if (chunkIndex > expected) {
-            // This is a future chunk - buffer it
+            // This is a future chunk - buffer it (with memory protection)
             QMap<int, QByteArray>& buffer = m_chunkBuffers[key];
+            
+            // Memory protection: limit buffer size
+            const int maxBufferedChunks = 100; // ~12.8MB at 128KB per chunk
+            if (buffer.size() >= maxBufferedChunks) {
+                qWarning() << "UploadManager: Buffer overflow protection - dropping chunk" << chunkIndex << "for" << fid;
+                return;
+            }
+            
             if (!buffer.contains(chunkIndex)) {
                 buffer.insert(chunkIndex, data);
                 qDebug() << "UploadManager: Buffered out-of-order chunk" << chunkIndex 
                          << "for" << fid << "(expected" << expected << ")";
             }
+            // Note: Don't count buffered data in m_incoming.received until it's actually written
+            
         } else {
             // This is a duplicate or very old chunk - ignore
             qDebug() << "UploadManager: Ignoring duplicate/old chunk" << chunkIndex 
                      << "for" << fid << "(already processed up to" << (expected - 1) << ")";
+            return; // Don't count ignored chunks
         }
-        qf->flush(); // Ensure data is written immediately
-        
-        m_incoming.received += data.size();
         if (m_incoming.receivedByFile.contains(fid)) {
             qint64 soFar = m_incoming.receivedByFile.value(fid) + data.size();
             m_incoming.receivedByFile[fid] = soFar;
@@ -495,8 +510,9 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             m_ws->notifyAllFilesRemovedToSender(m_incoming.senderId);
         }
         m_incoming = IncomingUploadSession();
-        // Clear all expected indices; treat as a hard reset
+        // Clear all expected indices and buffers; treat as a hard reset
         m_expectedChunkIndex.clear();
+        m_chunkBuffers.clear();
     } else if (type == "connection_lost_cleanup") {
         // Optional: sender notified us to clean any partials; delete cache folder for that sender
         QString senderClientId = message.value("senderClientId").toString();
