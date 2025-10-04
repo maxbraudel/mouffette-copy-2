@@ -206,6 +206,9 @@ protected:
     qreal m_contentOpacity = 1.0; // multiplicative opacity for content only
     qreal m_contentDisplayOpacity = 1.0; // animated multiplier (0..1) for fade in/out
     QVariantAnimation* m_fadeAnimation = nullptr; // owned manually (ResizableMediaBase not QObject)
+    // When true, content fills the item bounds without preserving the source aspect ratio.
+    // This becomes true after an Alt-based non-uniform stretch and stays until explicitly reset.
+    bool m_fillContentWithoutAspect = false;
     // Axis (midpoint) resize snapping state (hysteresis)
     bool m_axisSnapActive = false;
     Handle m_axisSnapHandle = None;

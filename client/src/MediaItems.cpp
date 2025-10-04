@@ -411,6 +411,7 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                 }
                 targetScale = scale(); // keep overall scale (should be 1 after bake)
                 m_lastAxisAltStretch = true; // reuse flag to denote custom base mutation
+                m_fillContentWithoutAspect = true; // persist fill behavior after non-uniform corner stretch
             }
         } else {
             // Axis-only resize (side midpoint handles). Supports two modes:
@@ -440,11 +441,13 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                     m_axisSnapActive = false; m_axisSnapHandle = None; m_axisSnapTargetScale = 1.0;
                 }
                 m_lastAxisAltStretch = false;
+                // Do not reset m_fillContentWithoutAspect here; if user previously non-uniform stretched, keep it
             } else {
                 // Alt stretch: modify only one dimension by changing base size horizontally or vertically.
                 // We keep overall QGraphicsItem scale() unchanged (targetScale stays current scale) and
                 // update m_baseSize dimension directly for instantaneous non-uniform scaling.
                 m_lastAxisAltStretch = true;
+                m_fillContentWithoutAspect = true; // persist fill behavior after non-uniform axis stretch
                 if (!m_axisStretchOrigCaptured) {
                     // First Alt movement in this interaction: bake current uniform scale into base size
                     qreal s = scale();
@@ -1173,7 +1176,7 @@ void ResizableVideoItem::paint(QPainter* painter, const QStyleOptionGraphicsItem
     Q_UNUSED(option); Q_UNUSED(widget);
     QRectF br(0,0, baseWidth(), baseHeight());
     auto fitRect = [&](const QRectF& bounds, const QSize& imgSz) -> QRectF {
-        if (m_lastAxisAltStretch) {
+        if (m_fillContentWithoutAspect) {
             // Non-uniform stretch requested: fill full bounds ignoring aspect
             return bounds;
         }
