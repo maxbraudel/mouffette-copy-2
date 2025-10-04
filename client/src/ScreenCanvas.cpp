@@ -251,24 +251,25 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
             m["baseWidth"] = media->baseSizePx().width();
             m["baseHeight"] = media->baseSizePx().height();
             m["visible"] = media->isContentVisible();
-            // Derive which screen this media belongs to (by center point) and normalized geometry within that screen
-            int screenIdForMedia = -1; QRectF screenRect;
-            QPointF center = br.center();
+            // Derive which screen this media belongs to by maximum intersection area.
+            // This ensures items partially outside a screen still map to that screen and will be clipped on the remote.
+            int screenIdForMedia = -1; QRectF screenRect; qreal bestArea = 0.0;
             for (auto it = m_sceneScreenRects.constBegin(); it != m_sceneScreenRects.constEnd(); ++it) {
-                if (it.value().contains(center)) { screenIdForMedia = it.key(); screenRect = it.value(); break; }
+                const QRectF inter = it.value().intersected(br);
+                const qreal area = inter.width() * inter.height();
+                if (area > bestArea) { bestArea = area; screenIdForMedia = it.key(); screenRect = it.value(); }
             }
             if (screenIdForMedia != -1 && screenRect.width() > 0.0 && screenRect.height() > 0.0) {
-                double normX = (br.x() - screenRect.x()) / screenRect.width();
-                double normY = (br.y() - screenRect.y()) / screenRect.height();
-                double normW = br.width() / screenRect.width();
-                double normH = br.height() / screenRect.height();
-                // Clamp to [0,1] just in case of slight numerical drift
-                auto clamp01 = [](double v){ return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); };
+                // Do NOT clamp; allow negative/overflow so the remote can position partially outside and get clipped by the parent window.
+                const double normX = (br.x() - screenRect.x()) / screenRect.width();
+                const double normY = (br.y() - screenRect.y()) / screenRect.height();
+                const double normW = br.width() / screenRect.width();
+                const double normH = br.height() / screenRect.height();
                 m["screenId"] = screenIdForMedia;
-                m["normX"] = clamp01(normX);
-                m["normY"] = clamp01(normY);
-                m["normW"] = clamp01(normW);
-                m["normH"] = clamp01(normH);
+                m["normX"] = normX;
+                m["normY"] = normY;
+                m["normW"] = normW;
+                m["normH"] = normH;
             }
             if (auto* panel = media->settingsPanel()) {
                 m["autoDisplay"] = panel->displayAutomaticallyEnabled();

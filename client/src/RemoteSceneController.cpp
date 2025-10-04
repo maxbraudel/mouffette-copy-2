@@ -85,6 +85,8 @@ QWidget* RemoteSceneController::ensureScreenWindow(int screenId, int x, int y, i
     win->setAttribute(Qt::WA_ShowWithoutActivating, true);
 #endif
     win->setAttribute(Qt::WA_TranslucentBackground, true);
+    win->setAttribute(Qt::WA_NoSystemBackground, true);
+    win->setAttribute(Qt::WA_OpaquePaintEvent, false);
     win->setObjectName(QString("RemoteScreenWindow_%1").arg(screenId));
     win->setGeometry(x, y, w, h);
     win->setWindowTitle(primary ? "Remote Scene (Primary)" : "Remote Scene");
@@ -161,6 +163,9 @@ void RemoteSceneController::scheduleMedia(RemoteMediaItem* item) {
     QWidget* w = new QWidget(container);
     w->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     w->setAutoFillBackground(false);
+    // Ensure painting is clipped to the screen container; this makes partial off-screen content get cropped as desired
+    w->setAttribute(Qt::WA_NoSystemBackground, true);
+    w->setAttribute(Qt::WA_OpaquePaintEvent, false);
     w->hide();
     item->widget = w;
     item->opacity = new QGraphicsOpacityEffect(w);
