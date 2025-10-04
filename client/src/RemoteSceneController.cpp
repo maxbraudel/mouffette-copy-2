@@ -18,6 +18,15 @@
 #include "FileManager.h"
 #include "MacWindowManager.h"
 #include <algorithm>
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 RemoteSceneController::RemoteSceneController(WebSocketClient* ws, QObject* parent)
     : QObject(parent), m_ws(ws) {
@@ -43,6 +52,19 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
             // Apply overlay behavior after show to avoid Qt resetting native levels on show()
             QTimer::singleShot(0, it.value().window, [w = it.value().window]() {
                 MacWindowManager::setWindowAsGlobalOverlay(w, /*clickThrough*/ true);
+            });
+        }
+#endif
+#ifdef Q_OS_WIN
+        if (it.value().window) {
+            QWidget* w = it.value().window;
+            // Reassert topmost after show to ensure we sit above the taskbar on all monitors
+            QTimer::singleShot(0, w, [w]() {
+                HWND hwnd = reinterpret_cast<HWND>(w->winId());
+                if (hwnd) {
+                    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                }
             });
         }
 #endif
