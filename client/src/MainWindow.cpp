@@ -119,7 +119,7 @@ constexpr qreal Z_SCREENS = -1000.0;
 constexpr qreal Z_MEDIA_BASE = 1.0;
 constexpr qreal Z_REMOTE_CURSOR = 10000.0;
 constexpr qreal Z_SCENE_OVERLAY = 12000.0; // above all scene content
-// (Traffic light constants removed; using native window title bar)
+// Using native window title bar (no custom traffic lights)
 
 // Global window content margins (between all content and window borders)
 int gWindowContentMarginTop = 20;       // Top margin for all window content
@@ -831,7 +831,7 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
         if (ke->key() == Qt::Key_Space) { event->accept(); return true; }
     }
 
-    // No custom window dragging or traffic light hover handling when using native title bar
+    // Native title bar handles window dragging and controls
     return QMainWindow::eventFilter(obj, event);
 }
 
@@ -1162,10 +1162,10 @@ void MainWindow::initializeRemoteClientInfoInTopBar() {
 
 void MainWindow::changeEvent(QEvent* event) {
     QMainWindow::changeEvent(event);
-    // No traffic light state changes
+    // No custom title bar state changes
 }
 
-// Removed updateTrafficLightsIcons; native title bar handles window controls
+    // No updateTrafficLightsIcons; native title bar handles window controls
 
 void MainWindow::showScreenView(const ClientInfo& client) {
     if (!m_navigationManager) return;
@@ -1610,7 +1610,7 @@ void MainWindow::updateStylesheetsForTheme() {
         }
     }
     
-    // Update all buttons that use gAppBorderColorSource (exclude traffic lights and transparent buttons)
+    // Update all buttons that use gAppBorderColorSource
     QList<QPushButton*> buttons = findChildren<QPushButton*>();
     for (QPushButton* button : buttons) {
         if (button && button->styleSheet().contains("border:") && 
@@ -1731,7 +1731,7 @@ void MainWindow::setupUI() {
     m_settingsButton->setFixedWidth(settingsButtonWidth); // Use fixed width to prevent any changes
     connect(m_settingsButton, &QPushButton::clicked, this, &MainWindow::showSettingsDialog);
 
-    // Layout: [traffic-lights][title][back][stretch][local-client-info][connect][settings]
+    // Layout: [title][back][stretch][local-client-info][connect][settings]
     m_connectionLayout->addWidget(m_backButton);
     m_connectionLayout->addStretch();
     m_connectionLayout->addWidget(m_localClientInfoContainer);
@@ -2913,7 +2913,7 @@ void MainWindow::adjustClientListHeight() {
     
     // Calculate available height for the client list container
     const int windowHeight = this->height();
-    const int headerHeight = 60; // Top bar with traffic lights
+    const int headerHeight = 60; // Top bar height
     const int bottomMargin = 40;  // Space for selected client info and padding
     const int maxAvailableHeight = qMax(0, windowHeight - headerHeight - bottomMargin);
     
