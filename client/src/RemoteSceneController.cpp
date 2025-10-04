@@ -16,6 +16,7 @@
 #include <QMediaPlayer>
 #include <QVideoSink>
 #include "FileManager.h"
+#include "MacWindowManager.h"
 #include <QFile>
 #include <QBuffer>
 #include <algorithm>
@@ -39,6 +40,14 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
     // Show windows after populated
     for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
         if (it.value().window) it.value().window->show();
+#ifdef Q_OS_MAC
+        if (it.value().window) {
+            // Apply overlay behavior after show to avoid Qt resetting native levels on show()
+            QTimer::singleShot(0, it.value().window, [w = it.value().window]() {
+                MacWindowManager::setWindowAsGlobalOverlay(w, /*clickThrough*/ true);
+            });
+        }
+#endif
     }
 }
 
@@ -85,6 +94,11 @@ QWidget* RemoteSceneController::ensureScreenWindow(int screenId, int x, int y, i
     layout->setContentsMargins(0,0,0,0);
     layout->setSpacing(0);
     ScreenWindow sw; sw.window = win; sw.x=x; sw.y=y; sw.w=w; sw.h=h; m_screenWindows.insert(screenId, sw);
+
+    // On macOS, elevate this window to a global overlay that spans Spaces and is hidden from Mission Control
+#ifdef Q_OS_MAC
+    MacWindowManager::setWindowAsGlobalOverlay(win, /*clickThrough*/ true);
+#endif
     return win;
 }
 
