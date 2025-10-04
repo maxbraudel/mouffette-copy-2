@@ -293,6 +293,8 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
     const QString type = message.value("type").toString();
     if (type == "upload_start") {
         m_incoming = IncomingUploadSession();
+        // Reset per-session chunk ordering state
+        m_expectedChunkIndex.clear();
         m_incoming.senderId = message.value("senderClientId").toString();
         m_incoming.uploadId = message.value("uploadId").toString();
         m_canceledIncoming.remove(m_incoming.uploadId);
@@ -340,6 +342,8 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             m_incoming.receivedByFile.insert(fileId, 0);
             // Register mapping so remote scene resolution can find this fileId immediately (even before complete)
             FileManager::instance().registerReceivedFilePath(fileId, fullPath);
+            // Initialize expected chunk index for this file to 0
+            m_expectedChunkIndex.insert(m_incoming.uploadId + ":" + fileId, 0);
         }
         if (m_ws && !m_incoming.senderId.isEmpty()) {
             m_ws->notifyUploadProgressToSender(m_incoming.senderId, m_incoming.uploadId, 0, 0, m_incoming.totalFiles, QStringList());
@@ -351,27 +355,25 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         QFile* qf = m_incoming.openFiles.value(fid, nullptr);
         if (!qf) return;
         
-        // CRITICAL FIX: Handle chunk ordering properly
+        // CRITICAL FIX: Handle chunk ordering properly per upload session
         int chunkIndex = message.value("chunkIndex").toInt();
         QByteArray data = QByteArray::fromBase64(message.value("data").toString().toUtf8());
-        
-        // For now, enforce sequential chunk delivery to prevent corruption
-        // TODO: Implement proper out-of-order chunk buffering for better performance
-        static QHash<QString, int> expectedChunkIndex; // fileId -> next expected chunk
-        
-        if (!expectedChunkIndex.contains(fid)) {
-            expectedChunkIndex[fid] = 0;
+
+        const QString key = m_incoming.uploadId + ":" + fid;
+        if (!m_expectedChunkIndex.contains(key)) {
+            m_expectedChunkIndex.insert(key, 0);
         }
-        
-        if (chunkIndex != expectedChunkIndex[fid]) {
-            qWarning() << "UploadManager: Out-of-order chunk for" << fid 
-                       << "- expected" << expectedChunkIndex[fid] 
+        const int expected = m_expectedChunkIndex.value(key);
+        if (chunkIndex != expected) {
+            qWarning() << "UploadManager: Out-of-order chunk for" << fid
+                       << "(upload" << m_incoming.uploadId << ") - expected" << expected
                        << "got" << chunkIndex << "- dropping to prevent corruption";
             return;
         }
-        
-        expectedChunkIndex[fid]++;
-        
+        m_expectedChunkIndex[key] = expected + 1;
+
+        // Ensure we are at end for append (defensive in case of any reuse)
+        qf->seek(qf->size());
         qint64 written = qf->write(data);
         if (written != data.size()) {
             qWarning() << "UploadManager: Partial write - expected" << data.size() << "wrote" << written;
@@ -407,10 +409,11 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
     } else if (type == "upload_complete") {
         if (message.value("uploadId").toString() != m_incoming.uploadId) return;
         
-        // Clean up chunk tracking before closing files
-        static QHash<QString, int> expectedChunkIndex;
-        for (auto it = m_incoming.openFiles.begin(); it != m_incoming.openFiles.end(); ++it) {
-            expectedChunkIndex.remove(it.key());
+        // Clean up chunk tracking before closing files (for this upload)
+        const QString prefix = m_incoming.uploadId + ":";
+        auto itKey = m_expectedChunkIndex.begin();
+        while (itKey != m_expectedChunkIndex.end()) {
+            if (itKey.key().startsWith(prefix)) itKey = m_expectedChunkIndex.erase(itKey); else ++itKey;
         }
         
         for (auto it = m_incoming.openFiles.begin(); it != m_incoming.openFiles.end(); ++it) {
@@ -438,10 +441,11 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         }
         m_incoming.openFiles.clear();
         
-        // Clean up chunk tracking
-        static QHash<QString, int> expectedChunkIndex;
-        for (auto it = m_incoming.openFiles.begin(); it != m_incoming.openFiles.end(); ++it) {
-            expectedChunkIndex.remove(it.key());
+        // Clean up chunk tracking for aborted upload
+        const QString prefix2 = abortedId + ":";
+        auto itKey2 = m_expectedChunkIndex.begin();
+        while (itKey2 != m_expectedChunkIndex.end()) {
+            if (itKey2.key().startsWith(prefix2)) itKey2 = m_expectedChunkIndex.erase(itKey2); else ++itKey2;
         }
         
         if (!m_incoming.cacheDirPath.isEmpty()) { QDir dir(m_incoming.cacheDirPath); dir.removeRecursively(); }
@@ -455,6 +459,8 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             m_ws->notifyAllFilesRemovedToSender(m_incoming.senderId);
         }
         m_incoming = IncomingUploadSession();
+        // Clear all expected indices; treat as a hard reset
+        m_expectedChunkIndex.clear();
     } else if (type == "connection_lost_cleanup") {
         // Optional: sender notified us to clean any partials; delete cache folder for that sender
         QString senderClientId = message.value("senderClientId").toString();
@@ -493,6 +499,9 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
                         qWarning() << "UploadManager: Failed to remove file:" << filePath;
                     }
                 }
+
+                // Clear local mapping for this fileId so future re-uploads can re-register a fresh path
+                FileManager::instance().removeReceivedFileMapping(fileId);
                 
                 // Check if directory is now empty and remove it if so
                 QFileInfoList remainingFiles = dir.entryInfoList(QDir::Files);

@@ -35,6 +35,8 @@ public:
 
     // Register a file path for a fileId when receiving from remote (target side). If already exists, leave unchanged.
     void registerReceivedFilePath(const QString& fileId, const QString& absolutePath);
+    // Remove a previously registered received file mapping on the target side (called when sender asks to delete a file)
+    void removeReceivedFileMapping(const QString& fileId);
     
     // Check if a file ID exists
     bool hasFileId(const QString& fileId) const;

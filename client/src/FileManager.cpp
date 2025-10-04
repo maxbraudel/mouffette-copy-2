@@ -176,6 +176,17 @@ void FileManager::registerReceivedFilePath(const QString& fileId, const QString&
     m_fileIdMeta[fileId] = { info.exists() ? info.size() : 0, info.exists() ? info.lastModified().toSecsSinceEpoch() : 0 };
 }
 
+void FileManager::removeReceivedFileMapping(const QString& fileId) {
+    if (fileId.isEmpty()) return;
+    QString path = m_fileIdToPath.value(fileId);
+    if (!path.isEmpty()) {
+        m_pathToFileId.remove(path);
+    }
+    m_fileIdToPath.remove(fileId);
+    m_fileIdMeta.remove(fileId);
+    // Don't touch media associations here; they are sender-side concepts. Remote just needs path lookup cleared.
+}
+
 QString FileManager::generateFileId(const QString& filePath)
 {
     // Use file path hash + some uniqueness to ensure no collisions

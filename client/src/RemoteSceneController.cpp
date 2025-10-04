@@ -194,7 +194,8 @@ void RemoteSceneController::scheduleMedia(RemoteMediaItem* item) {
             return false;
         };
         if (!attemptLoad()) {
-            lbl->setText(QString("Missing file\n%1").arg(item->fileName.isEmpty()? item->fileId : item->fileName));
+            const QString idOrName = item->fileId.isEmpty() ? item->fileName : item->fileId;
+            lbl->setText(QString("Missing file (id)\n%1\nWaiting for upload...").arg(idOrName));
             // Retry a few times (e.g., if upload arrives slightly after scene start)
             for (int i=1;i<=5;++i) {
                 QTimer::singleShot(i*500, w, [attemptLoad]() { attemptLoad(); });

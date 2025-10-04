@@ -122,6 +122,8 @@ private:
     // Incoming session (target side)
     IncomingUploadSession m_incoming;
     QSet<QString> m_canceledIncoming; // uploadIds canceled by sender
+    // Track next expected chunk index per (uploadId:fileId) on the target side
+    QHash<QString, int> m_expectedChunkIndex; 
 };
 
 #endif // UPLOADMANAGER_H
