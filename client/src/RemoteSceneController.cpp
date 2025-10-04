@@ -107,7 +107,11 @@ void RemoteSceneController::buildWindows(const QJsonArray& screensArray) {
 }
 
 void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
-    for (const auto& v : mediaArray) {
+    // QGraphicsScene::items() (used on host serialization) returns items in descending Z (topmost first) by default.
+    // If we create children in that order, later widgets sit on top of earlier ones, reversing the stack.
+    // Therefore, build from the end to the beginning so the topmost item is created last and remains on top.
+    for (int idx = mediaArray.size() - 1; idx >= 0; --idx) {
+        const auto& v = mediaArray.at(idx);
         QJsonObject m = v.toObject();
         RemoteMediaItem* item = new RemoteMediaItem();
         item->mediaId = m.value("mediaId").toString();
@@ -296,6 +300,9 @@ void RemoteSceneController::scheduleMedia(RemoteMediaItem* item) {
     } else if (item->player && !item->autoPlay) {
         qDebug() << "RemoteSceneController: autoPlay disabled; video will not start automatically" << item->mediaId;
     }
+    // Make sure the most recently scheduled item for this screen is on top to match host stacking
+    // (widgets created later are naturally on top, but explicit raise ensures correctness after reparenting)
+    w->raise();
 }
 
 void RemoteSceneController::fadeIn(RemoteMediaItem* item) {
