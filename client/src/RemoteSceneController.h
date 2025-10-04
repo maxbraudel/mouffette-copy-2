@@ -13,6 +13,7 @@ class QWidget;
 class QMediaPlayer;
 class QVideoSink;
 class QAudioOutput;
+class QLabel;
 
 class RemoteSceneController : public QObject {
 	Q_OBJECT
@@ -34,8 +35,11 @@ private:
 		QString fileId;
 		QString fileName;
 		QString type; // image | video
-		int screenId = -1;
-		double normX=0, normY=0, normW=0, normH=0;
+		// Legacy single-span fields (when spans[] not provided)
+		int screenId = -1; double normX=0, normY=0, normW=0, normH=0;
+		// Multi-screen spans support: each span maps to a screen with its own normalized geom
+		struct Span { int screenId=-1; double nx=0, ny=0, nw=0, nh=0; QWidget* widget=nullptr; QLabel* imageLabel=nullptr; QLabel* videoLabel=nullptr; QVideoSink* videoSink=nullptr; };
+		QList<Span> spans;
 		bool autoDisplay=false; int autoDisplayDelayMs=0;
 		bool autoPlay=false; int autoPlayDelayMs=0;
 		double fadeInSeconds=0.0; double fadeOutSeconds=0.0; double contentOpacity = 1.0;
@@ -43,10 +47,11 @@ private:
 		bool muted = false; double volume = 1.0; // 0..1
 		bool primedFirstFrame = false; bool playAuthorized = false;
 		bool loaded = false; // true when QMediaPlayer reports Loaded/Buffered
+		// For legacy single-span path
 		QWidget* widget = nullptr; QGraphicsOpacityEffect* opacity = nullptr;
 		QTimer* displayTimer = nullptr; QTimer* playTimer = nullptr;
 		// Video only
-		QMediaPlayer* player = nullptr; QVideoSink* videoSink = nullptr; QAudioOutput* audio = nullptr;
+		QMediaPlayer* player = nullptr; QAudioOutput* audio = nullptr;
 		QMetaObject::Connection deferredStartConn; // one-shot start after load
 		QMetaObject::Connection primingConn; // one-shot first-frame priming when autoPlay=false
 	};
@@ -55,6 +60,8 @@ private:
 	void buildWindows(const QJsonArray& screensArray);
 	void buildMedia(const QJsonArray& mediaArray);
 	void scheduleMedia(RemoteMediaItem* item);
+	void scheduleMediaLegacy(RemoteMediaItem* item);
+	void scheduleMediaMulti(RemoteMediaItem* item);
 	void fadeIn(RemoteMediaItem* item);
 	void clearScene();
 

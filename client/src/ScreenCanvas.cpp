@@ -251,25 +251,37 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
             m["baseWidth"] = media->baseSizePx().width();
             m["baseHeight"] = media->baseSizePx().height();
             m["visible"] = media->isContentVisible();
-            // Derive which screen this media belongs to by maximum intersection area.
-            // This ensures items partially outside a screen still map to that screen and will be clipped on the remote.
-            int screenIdForMedia = -1; QRectF screenRect; qreal bestArea = 0.0;
+            // Compute per-screen spans: for every screen intersecting this media, include a span with normalized geometry
+            // relative to that screen. Do NOT clamp; negatives/overflow allow the remote to position and rely on parent clipping.
+            int legacyBestScreenId = -1; QRectF legacyBestScreenRect; qreal legacyBestArea = 0.0;
+            QJsonArray spans;
             for (auto it = m_sceneScreenRects.constBegin(); it != m_sceneScreenRects.constEnd(); ++it) {
-                const QRectF inter = it.value().intersected(br);
-                const qreal area = inter.width() * inter.height();
-                if (area > bestArea) { bestArea = area; screenIdForMedia = it.key(); screenRect = it.value(); }
+                const int sid = it.key();
+                const QRectF srect = it.value();
+                const QRectF inter = srect.intersected(br);
+                const qreal area = std::max<qreal>(0.0, inter.width() * inter.height());
+                if (area <= 0.0 || srect.width() <= 0.0 || srect.height() <= 0.0) continue;
+                // Record as a span
+                QJsonObject span;
+                span["screenId"] = sid;
+                span["normX"] = (br.x() - srect.x()) / srect.width();
+                span["normY"] = (br.y() - srect.y()) / srect.height();
+                span["normW"] = br.width() / srect.width();
+                span["normH"] = br.height() / srect.height();
+                spans.append(span);
+                // Track legacy "best" screen by max intersection area for backward compatibility fields
+                if (area > legacyBestArea) { legacyBestArea = area; legacyBestScreenId = sid; legacyBestScreenRect = srect; }
             }
-            if (screenIdForMedia != -1 && screenRect.width() > 0.0 && screenRect.height() > 0.0) {
-                // Do NOT clamp; allow negative/overflow so the remote can position partially outside and get clipped by the parent window.
-                const double normX = (br.x() - screenRect.x()) / screenRect.width();
-                const double normY = (br.y() - screenRect.y()) / screenRect.height();
-                const double normW = br.width() / screenRect.width();
-                const double normH = br.height() / screenRect.height();
-                m["screenId"] = screenIdForMedia;
-                m["normX"] = normX;
-                m["normY"] = normY;
-                m["normW"] = normW;
-                m["normH"] = normH;
+            if (!spans.isEmpty()) {
+                m["spans"] = spans;
+            }
+            // Backward-compatible single-screen fields (used by older remotes); keep best-overlap mapping
+            if (legacyBestScreenId != -1 && legacyBestScreenRect.width() > 0.0 && legacyBestScreenRect.height() > 0.0) {
+                m["screenId"] = legacyBestScreenId;
+                m["normX"] = (br.x() - legacyBestScreenRect.x()) / legacyBestScreenRect.width();
+                m["normY"] = (br.y() - legacyBestScreenRect.y()) / legacyBestScreenRect.height();
+                m["normW"] = br.width() / legacyBestScreenRect.width();
+                m["normH"] = br.height() / legacyBestScreenRect.height();
             }
             if (auto* panel = media->settingsPanel()) {
                 m["autoDisplay"] = panel->displayAutomaticallyEnabled();
