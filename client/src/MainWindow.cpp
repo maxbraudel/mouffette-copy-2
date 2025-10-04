@@ -119,9 +119,7 @@ constexpr qreal Z_SCREENS = -1000.0;
 constexpr qreal Z_MEDIA_BASE = 1.0;
 constexpr qreal Z_REMOTE_CURSOR = 10000.0;
 constexpr qreal Z_SCENE_OVERLAY = 12000.0; // above all scene content
-// Global UI constants for macOS traffic lights
-constexpr int TL_SIZE_PT = 12;          // traffic light diameter (pt)
-constexpr int TL_GAP_PT = 8;            // gap between traffic lights (pt)
+// (Traffic light constants removed; using native window title bar)
 
 // Global window content margins (between all content and window borders)
 int gWindowContentMarginTop = 20;       // Top margin for all window content
@@ -460,16 +458,11 @@ MainWindow::MainWindow(QWidget* parent)
         m_serverUrlConfig = settings.value("serverUrl", DEFAULT_SERVER_URL).toString();
         m_autoUploadImportedMedia = settings.value("autoUploadImportedMedia", false).toBool();
     }
-    // Frameless window and no menu bar on macOS/Windows
+    // Use standard OS window frame and title bar (no custom frameless window)
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
-    // Configure borderless window that stays on top
-    setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
-    // Disable context menus app-wide for a clean look
+    // Optional: keep a clean look (no menu bar) while using native title bar
     setContextMenuPolicy(Qt::NoContextMenu);
-    // Ensure QMainWindow does not reserve space for a (hidden) menu bar
     setMenuBar(nullptr);
-    // Enable transparent window background so inner container can draw rounded corners
-    setAttribute(Qt::WA_TranslucentBackground);
 #endif
     // Remove any minimum height constraint to allow full flexibility
     setMinimumHeight(0);
@@ -479,9 +472,7 @@ MainWindow::MainWindow(QWidget* parent)
     setWindowState(Qt::WindowMaximized);
     
     setupUI();
-#ifdef Q_OS_MACOS
-    // Ensure macOS app focus to allow transparent overlay windows (remote scene) to appear properly
-#endif
+    // Use standard opaque native title bar; no custom traffic lights
     // Initialize remote scene controller once
     if (!g_remoteSceneController) {
         g_remoteSceneController = new RemoteSceneController(m_webSocketClient, this);
@@ -840,101 +831,7 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
         if (ke->key() == Qt::Key_Space) { event->accept(); return true; }
     }
 
-#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
-    // Enable window dragging on the entire window for frameless window
-    // This allows dragging from the top margin area as well as the connection bar
-    if (obj == m_centralWidget || obj == m_connectionBar) {
-        switch (event->type()) {
-        case QEvent::MouseButtonPress: {
-            QMouseEvent* me = static_cast<QMouseEvent*>(event);
-            if (me->button() == Qt::LeftButton) {
-                // If we're on the connection bar, ignore presses on interactive child widgets (buttons)
-                if (obj == m_connectionBar) {
-                    QWidget* child = m_connectionBar->childAt(me->pos());
-                    if (child && (qobject_cast<QPushButton*>(child))) break;
-                }
-                // If we're on the central widget, only allow dragging from the top margin area
-                // or if there's no interactive widget under the cursor
-                if (obj == m_centralWidget) {
-                    QPoint globalPos = me->globalPosition().toPoint();
-                    QWidget* childAtGlobal = qApp->widgetAt(globalPos);
-                    // Don't drag if clicking on interactive widgets like buttons or list widgets
-                    if (childAtGlobal && (qobject_cast<QPushButton*>(childAtGlobal) || 
-                                         qobject_cast<QListWidget*>(childAtGlobal))) {
-                        break;
-                    }
-                }
-                m_dragging = true;
-                m_dragStartGlobal = me->globalPosition().toPoint();
-                m_windowStartPos = frameGeometry().topLeft();
-                event->accept();
-                return true;
-            }
-            break;
-        }
-        case QEvent::Enter: {
-#ifdef Q_OS_MACOS
-            if (!m_anyTrafficLightHovered) {
-                updateTrafficLightsIcons(TrafficLightsMode::WindowHover);
-            }
-#endif
-            break;
-        }
-        case QEvent::Leave: {
-#ifdef Q_OS_MACOS
-            // If window remains active, keep normal state; otherwise go to no-focus
-            if (isActiveWindow()) {
-                if (!m_anyTrafficLightHovered) updateTrafficLightsIcons(TrafficLightsMode::WindowHover);
-            } else {
-                updateTrafficLightsIcons(TrafficLightsMode::NoFocus);
-            }
-#endif
-            break;
-        }
-        case QEvent::MouseMove: {
-            if (m_dragging) {
-                QMouseEvent* me = static_cast<QMouseEvent*>(event);
-                const QPoint delta = me->globalPosition().toPoint() - m_dragStartGlobal;
-                move(m_windowStartPos + delta);
-                event->accept();
-                return true;
-            }
-            break;
-        }
-        case QEvent::MouseButtonRelease: {
-            if (m_dragging) {
-                m_dragging = false;
-                event->accept();
-                return true;
-            }
-            break;
-        }
-        default: break;
-        }
-    }
-#endif
-
-#ifdef Q_OS_MACOS
-    // macOS traffic lights: group hover logic
-    if (obj == m_btnClose || obj == m_btnMinimize || obj == m_btnMaximize) {
-        if (event->type() == QEvent::Enter) {
-            m_anyTrafficLightHovered = true;
-            updateTrafficLightsIcons(TrafficLightsMode::ButtonHover);
-            return false;
-        } else if (event->type() == QEvent::Leave) {
-            // If still inside the connection bar, show window hover; otherwise no focus
-            m_anyTrafficLightHovered = false;
-            QPoint gpos = QCursor::pos();
-            QPoint local = m_connectionBar->mapFromGlobal(gpos);
-            if (m_connectionBar->rect().contains(local) || isActiveWindow()) {
-                updateTrafficLightsIcons(TrafficLightsMode::WindowHover);
-            } else {
-                updateTrafficLightsIcons(TrafficLightsMode::NoFocus);
-            }
-            return false;
-        }
-    }
-#endif
+    // No custom window dragging or traffic light hover handling when using native title bar
     return QMainWindow::eventFilter(obj, event);
 }
 
@@ -1265,46 +1162,10 @@ void MainWindow::initializeRemoteClientInfoInTopBar() {
 
 void MainWindow::changeEvent(QEvent* event) {
     QMainWindow::changeEvent(event);
-#ifdef Q_OS_MACOS
-    if (event->type() == QEvent::ActivationChange) {
-        if (isActiveWindow()) {
-            if (!m_anyTrafficLightHovered) {
-                updateTrafficLightsIcons(TrafficLightsMode::WindowHover);
-            }
-        } else {
-            updateTrafficLightsIcons(TrafficLightsMode::NoFocus);
-        }
-    }
-#endif
+    // No traffic light state changes
 }
 
-#ifdef Q_OS_MACOS
-void MainWindow::updateTrafficLightsIcons(TrafficLightsMode mode) {
-    if (!m_btnClose || !m_btnMinimize || !m_btnMaximize) return;
-    if (mode == m_trafficLightsMode) return;
-    m_trafficLightsMode = mode;
-    switch (mode) {
-    case TrafficLightsMode::NoFocus:
-        m_btnClose->setIcon(QIcon(":/icons/icons/traffic-lights/no-focus.svg"));
-        m_btnMinimize->setIcon(QIcon(":/icons/icons/traffic-lights/no-focus.svg"));
-        m_btnMaximize->setIcon(QIcon(":/icons/icons/traffic-lights/no-focus.svg"));
-        break;
-    case TrafficLightsMode::WindowHover:
-        m_btnClose->setIcon(QIcon(":/icons/icons/traffic-lights/close-normal.svg"));
-        m_btnMinimize->setIcon(QIcon(":/icons/icons/traffic-lights/min-normal.svg"));
-        m_btnMaximize->setIcon(QIcon(":/icons/icons/traffic-lights/max-normal.svg"));
-        break;
-    case TrafficLightsMode::ButtonHover:
-        m_btnClose->setIcon(QIcon(":/icons/icons/traffic-lights/close-hover.svg"));
-        m_btnMinimize->setIcon(QIcon(":/icons/icons/traffic-lights/min-hover.svg"));
-        m_btnMaximize->setIcon(QIcon(":/icons/icons/traffic-lights/max-hover.svg"));
-        break;
-    }
-    m_btnClose->setIconSize(QSize(TL_SIZE_PT, TL_SIZE_PT));
-    m_btnMinimize->setIconSize(QSize(TL_SIZE_PT, TL_SIZE_PT));
-    m_btnMaximize->setIconSize(QSize(TL_SIZE_PT, TL_SIZE_PT));
-}
-#endif
+// Removed updateTrafficLightsIcons; native title bar handles window controls
 
 void MainWindow::showScreenView(const ClientInfo& client) {
     if (!m_navigationManager) return;
@@ -1634,6 +1495,11 @@ MainWindow::~MainWindow() {
 
 void MainWindow::updateStylesheetsForTheme() {
     // Re-apply stylesheets that use ColorSource to pick up theme changes
+    if (m_centralWidget) {
+        m_centralWidget->setStyleSheet(QString(
+            "QWidget#CentralRoot { background-color: %1; }"
+        ).arg(AppColors::colorSourceToCss(AppColors::gWindowBackgroundColorSource)));
+    }
     if (m_clientListWidget) {
         m_clientListWidget->setStyleSheet(
             QString("QListWidget { "
@@ -1765,25 +1631,23 @@ void MainWindow::updateStylesheetsForTheme() {
 }
 
 void MainWindow::setupUI() {
-    // Use a custom painted container for smooth rounded corners and border
-#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
-    m_centralWidget = new RoundedContainer(this);
-    m_centralWidget->setObjectName("RootContainer");
-#else
+    // Use a standard central widget (native window frame provides chrome)
     m_centralWidget = new QWidget(this);
-#endif
+    m_centralWidget->setObjectName("CentralRoot");
     setCentralWidget(m_centralWidget);
-    
-#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
-    // Install event filter on central widget to enable window dragging from anywhere in the window
-    m_centralWidget->installEventFilter(this);
-#endif
+
     
     m_mainLayout = new QVBoxLayout(m_centralWidget);
     // Use explicit spacer to control gap so it's not affected by any nested margins
     m_mainLayout->setSpacing(0);
-    // Apply global window content margins to wrap all content
-    m_mainLayout->setContentsMargins(gWindowContentMarginLeft, gWindowContentMarginTop, gWindowContentMarginRight, gWindowContentMarginBottom);
+    // Apply global window content margins; no extra top inset needed with native title bar
+    int topMargin = gWindowContentMarginTop;
+    m_mainLayout->setContentsMargins(gWindowContentMarginLeft, topMargin, gWindowContentMarginRight, gWindowContentMarginBottom);
+
+    // Match central background to app window background so macOS title bar (transparent) blends in
+    m_centralWidget->setStyleSheet(QString(
+        "QWidget#CentralRoot { background-color: %1; }"
+    ).arg(AppColors::colorSourceToCss(AppColors::gWindowBackgroundColorSource)));
     
     // Top section with margins
     QWidget* topSection = new QWidget();
@@ -1793,7 +1657,7 @@ void MainWindow::setupUI() {
 #endif
     QVBoxLayout* topLayout = new QVBoxLayout(topSection);
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
-    // Remove all margins around the top section (traffic lights container)
+    // Remove all margins around the top section
     topLayout->setContentsMargins(0, 0, 0, 0);
 #else
     // Remove all margins on non-mac/win as well
@@ -1810,62 +1674,10 @@ void MainWindow::setupUI() {
 #endif
     m_connectionLayout = new QHBoxLayout(m_connectionBar);
     m_connectionLayout->setContentsMargins(0, 0, 0, 0);
-    // Ensure the spacing between traffic lights is controlled solely by TL_GAP_PT
-    m_connectionLayout->setSpacing(TL_GAP_PT);
+    // Standard spacing between items in the connection bar
+    m_connectionLayout->setSpacing(8);
     
-    // Custom window controls on macOS/Windows (top-left)
-#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
-#ifdef Q_OS_MACOS
-    // macOS traffic lights with native-like PNG icons
-    auto makeIconBtn = [](const QString& iconPath) {
-        QPushButton* b = new QPushButton();
-        b->setFixedSize(TL_SIZE_PT, TL_SIZE_PT);
-        b->setIcon(QIcon(iconPath));
-        b->setIconSize(QSize(TL_SIZE_PT, TL_SIZE_PT));
-        b->setFlat(true);
-        // Use default arrow cursor; no hover cursor change for traffic lights
-        b->setCursor(Qt::ArrowCursor);
-        b->setFocusPolicy(Qt::NoFocus);
-        b->setStyleSheet("QPushButton { border: none; background: transparent; padding: 0px; }");
-        return b;
-    };
-    // Note: resources.qrc uses prefix "/icons" and files under "icons/...", so full path is 
-    // ":/icons/icons/traffic-lights/...". Use SVG assets.
-    m_btnClose = makeIconBtn(":/icons/icons/traffic-lights/no-focus.svg");
-    m_btnMinimize = makeIconBtn(":/icons/icons/traffic-lights/no-focus.svg");
-    m_btnMaximize = makeIconBtn(":/icons/icons/traffic-lights/no-focus.svg");
-#else
-    // Windows: small flat buttons with symbols
-    m_btnClose = new QPushButton("×");
-    m_btnMinimize = new QPushButton("–");
-    m_btnMaximize = new QPushButton("□");
-    for (QPushButton* b : {m_btnClose, m_btnMinimize, m_btnMaximize}) {
-        b->setFixedSize(22,18);
-        b->setCursor(Qt::PointingHandCursor);
-        b->setFocusPolicy(Qt::NoFocus);
-        b->setStyleSheet("QPushButton { border: none; background: transparent; font-weight: bold; }"
-                         "QPushButton:hover { background: rgba(255,255,255,0.12); }");
-    }
-#endif
-    connect(m_btnClose, &QPushButton::clicked, this, [this](){ close(); });
-    connect(m_btnMinimize, &QPushButton::clicked, this, [this](){ setWindowState(windowState() | Qt::WindowMinimized); });
-    connect(m_btnMaximize, &QPushButton::clicked, this, [this](){
-        if (isMaximized()) showNormal(); else showMaximized();
-    });
-    
-    // Install hover filters for macOS traffic lights group behavior
-#ifdef Q_OS_MACOS
-    m_btnClose->installEventFilter(this);
-    m_btnMinimize->installEventFilter(this);
-    m_btnMaximize->installEventFilter(this);
-#endif
-    m_connectionLayout->addWidget(m_btnClose);
-    m_connectionLayout->addWidget(m_btnMinimize);
-    m_connectionLayout->addWidget(m_btnMaximize);
-    m_connectionLayout->addSpacing(12);
-#endif
-
-    // Contextual page title next to traffic lights (e.g., "Connected Clients")
+    // Contextual page title
     m_pageTitleLabel = new QLabel("Connected Clients");
     applyTitleText(m_pageTitleLabel);
     // Match hostname styling: same font size, weight, and color
@@ -1926,10 +1738,7 @@ void MainWindow::setupUI() {
     m_connectionLayout->addWidget(m_connectToggleButton);
     m_connectionLayout->addWidget(m_settingsButton);
 
-    // Install dragging on the connection bar for frameless window
-#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
-    m_connectionBar->installEventFilter(this);
-#endif
+    // No custom window dragging; native title bar handles window movement
     topLayout->addWidget(m_connectionBar);
     m_mainLayout->addWidget(topSection);
     // Explicit inner gap between top container and hostname container

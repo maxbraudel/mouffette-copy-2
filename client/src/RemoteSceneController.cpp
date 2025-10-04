@@ -18,15 +18,6 @@
 #include "FileManager.h"
 #include "MacWindowManager.h"
 #include <algorithm>
-#ifdef Q_OS_WIN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#endif
 
 RemoteSceneController::RemoteSceneController(WebSocketClient* ws, QObject* parent)
     : QObject(parent), m_ws(ws) {
@@ -55,19 +46,6 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
             });
         }
 #endif
-#ifdef Q_OS_WIN
-        if (it.value().window) {
-            QWidget* w = it.value().window;
-            // Reassert topmost after show to ensure we sit above the taskbar on all monitors
-            QTimer::singleShot(0, w, [w]() {
-                HWND hwnd = reinterpret_cast<HWND>(w->winId());
-                if (hwnd) {
-                    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-                }
-            });
-        }
-#endif
     }
 }
 
@@ -79,78 +57,24 @@ void RemoteSceneController::onRemoteSceneStop(const QString& senderClientId) {
 void RemoteSceneController::clearScene() {
     for (RemoteMediaItem* item : m_mediaItems) {
         if (!item) continue;
-        
-        // Stop and disconnect timers first
-        if (item->displayTimer) { 
-            item->displayTimer->stop(); 
-            item->displayTimer->disconnect();
-            item->displayTimer->deleteLater(); 
-        }
-        if (item->playTimer) { 
-            item->playTimer->stop(); 
-            item->playTimer->disconnect();
-            item->playTimer->deleteLater(); 
-        }
-        
-        // Disconnect stored connections to prevent dangling pointer access
-        if (item->deferredStartConn) {
-            QObject::disconnect(item->deferredStartConn);
-        }
-        if (item->primingConn) {
-            QObject::disconnect(item->primingConn);
-        }
-        
-        // Stop media player and disconnect all its signals before deletion
-        if (item->player) { 
-            item->player->stop(); 
-            item->player->disconnect(); // Disconnect all signals from this player
-            item->player->deleteLater(); 
-        }
-        if (item->audio) { 
-            item->audio->disconnect();
-            item->audio->deleteLater(); 
-        }
-        
-        // Clean up multi-span widgets
+        if (item->displayTimer) { item->displayTimer->stop(); item->displayTimer->deleteLater(); }
+        if (item->playTimer) { item->playTimer->stop(); item->playTimer->deleteLater(); }
+        if (item->player) { item->player->stop(); item->player->deleteLater(); }
+        if (item->audio) { item->audio->deleteLater(); }
+        // Delete multi-span widgets
         for (auto& s : item->spans) {
-            if (s.videoSink) { 
-                s.videoSink->disconnect();
-                s.videoSink->deleteLater(); 
-            }
-            if (s.videoLabel) { 
-                s.videoLabel->disconnect();
-                s.videoLabel->deleteLater(); 
-            }
-            if (s.imageLabel) { 
-                s.imageLabel->disconnect();
-                s.imageLabel->deleteLater(); 
-            }
-            if (s.widget) { 
-                s.widget->disconnect();
-                s.widget->deleteLater(); 
-            }
+            if (s.videoSink) { s.videoSink->deleteLater(); }
+            if (s.videoLabel) { s.videoLabel->deleteLater(); }
+            if (s.imageLabel) { s.imageLabel->deleteLater(); }
+            if (s.widget) { s.widget->deleteLater(); }
         }
-        
-        // Clean up main widget
-        if (item->widget) { 
-            item->widget->disconnect();
-            item->widget->deleteLater(); 
-        }
-        
-        // Now safe to delete the item struct
+        if (item->widget) { item->widget->deleteLater(); }
         delete item;
     }
     m_mediaItems.clear();
-    
-    // Clean up screen windows safely
     for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
-        if (it.value().window) {
-            QWidget* window = it.value().window;
-            window->hide(); // Hide immediately to prevent flicker
-            window->disconnect(); // Disconnect all signals
-            window->close();
-            window->deleteLater();
-        }
+        if (it.value().window) it.value().window->close();
+        if (it.value().window) it.value().window->deleteLater();
     }
     m_screenWindows.clear();
 }

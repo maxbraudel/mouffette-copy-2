@@ -109,15 +109,7 @@ protected:
     bool eventFilter(QObject* obj, QEvent* event) override;
     void closeEvent(QCloseEvent *event) override;
     void showEvent(QShowEvent* event) override;
-    // Dragging support for frameless window (macOS/Windows)
-    bool m_dragging = false;
-    QPoint m_dragStartGlobal;
-    QPoint m_windowStartPos;
-    // macOS traffic lights state
-    enum class TrafficLightsMode { NoFocus, WindowHover, ButtonHover };
-    void updateTrafficLightsIcons(TrafficLightsMode mode);
-    TrafficLightsMode m_trafficLightsMode = TrafficLightsMode::NoFocus;
-    bool m_anyTrafficLightHovered = false;
+    // No custom frameless dragging or traffic-light states; native title bar is used
 
 private:
     void setupUI();
@@ -207,10 +199,6 @@ private:
     QPushButton* m_uploadButton;
     bool m_uploadButtonInOverlay = false; // Track if upload button is in overlay (uses custom styling)
     QPushButton* m_backButton;
-    // Frameless window custom controls (macOS/Windows)
-    QPushButton* m_btnClose = nullptr;
-    QPushButton* m_btnMinimize = nullptr;
-    QPushButton* m_btnMaximize = nullptr;
     QFont m_uploadButtonDefaultFont;
     // Loader/content animations
     int m_loaderDelayMs = 1000;       // show spinner after this delay
