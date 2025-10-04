@@ -79,24 +79,78 @@ void RemoteSceneController::onRemoteSceneStop(const QString& senderClientId) {
 void RemoteSceneController::clearScene() {
     for (RemoteMediaItem* item : m_mediaItems) {
         if (!item) continue;
-        if (item->displayTimer) { item->displayTimer->stop(); item->displayTimer->deleteLater(); }
-        if (item->playTimer) { item->playTimer->stop(); item->playTimer->deleteLater(); }
-        if (item->player) { item->player->stop(); item->player->deleteLater(); }
-        if (item->audio) { item->audio->deleteLater(); }
-        // Delete multi-span widgets
-        for (auto& s : item->spans) {
-            if (s.videoSink) { s.videoSink->deleteLater(); }
-            if (s.videoLabel) { s.videoLabel->deleteLater(); }
-            if (s.imageLabel) { s.imageLabel->deleteLater(); }
-            if (s.widget) { s.widget->deleteLater(); }
+        
+        // Stop and disconnect timers first
+        if (item->displayTimer) { 
+            item->displayTimer->stop(); 
+            item->displayTimer->disconnect();
+            item->displayTimer->deleteLater(); 
         }
-        if (item->widget) { item->widget->deleteLater(); }
+        if (item->playTimer) { 
+            item->playTimer->stop(); 
+            item->playTimer->disconnect();
+            item->playTimer->deleteLater(); 
+        }
+        
+        // Disconnect stored connections to prevent dangling pointer access
+        if (item->deferredStartConn) {
+            QObject::disconnect(item->deferredStartConn);
+        }
+        if (item->primingConn) {
+            QObject::disconnect(item->primingConn);
+        }
+        
+        // Stop media player and disconnect all its signals before deletion
+        if (item->player) { 
+            item->player->stop(); 
+            item->player->disconnect(); // Disconnect all signals from this player
+            item->player->deleteLater(); 
+        }
+        if (item->audio) { 
+            item->audio->disconnect();
+            item->audio->deleteLater(); 
+        }
+        
+        // Clean up multi-span widgets
+        for (auto& s : item->spans) {
+            if (s.videoSink) { 
+                s.videoSink->disconnect();
+                s.videoSink->deleteLater(); 
+            }
+            if (s.videoLabel) { 
+                s.videoLabel->disconnect();
+                s.videoLabel->deleteLater(); 
+            }
+            if (s.imageLabel) { 
+                s.imageLabel->disconnect();
+                s.imageLabel->deleteLater(); 
+            }
+            if (s.widget) { 
+                s.widget->disconnect();
+                s.widget->deleteLater(); 
+            }
+        }
+        
+        // Clean up main widget
+        if (item->widget) { 
+            item->widget->disconnect();
+            item->widget->deleteLater(); 
+        }
+        
+        // Now safe to delete the item struct
         delete item;
     }
     m_mediaItems.clear();
+    
+    // Clean up screen windows safely
     for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
-        if (it.value().window) it.value().window->close();
-        if (it.value().window) it.value().window->deleteLater();
+        if (it.value().window) {
+            QWidget* window = it.value().window;
+            window->hide(); // Hide immediately to prevent flicker
+            window->disconnect(); // Disconnect all signals
+            window->close();
+            window->deleteLater();
+        }
     }
     m_screenWindows.clear();
 }
