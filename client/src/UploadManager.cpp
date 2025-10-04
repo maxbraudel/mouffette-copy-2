@@ -350,8 +350,34 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         QString fid = message.value("fileId").toString();
         QFile* qf = m_incoming.openFiles.value(fid, nullptr);
         if (!qf) return;
+        
+        // CRITICAL FIX: Handle chunk ordering properly
+        int chunkIndex = message.value("chunkIndex").toInt();
         QByteArray data = QByteArray::fromBase64(message.value("data").toString().toUtf8());
-        qf->write(data);
+        
+        // For now, enforce sequential chunk delivery to prevent corruption
+        // TODO: Implement proper out-of-order chunk buffering for better performance
+        static QHash<QString, int> expectedChunkIndex; // fileId -> next expected chunk
+        
+        if (!expectedChunkIndex.contains(fid)) {
+            expectedChunkIndex[fid] = 0;
+        }
+        
+        if (chunkIndex != expectedChunkIndex[fid]) {
+            qWarning() << "UploadManager: Out-of-order chunk for" << fid 
+                       << "- expected" << expectedChunkIndex[fid] 
+                       << "got" << chunkIndex << "- dropping to prevent corruption";
+            return;
+        }
+        
+        expectedChunkIndex[fid]++;
+        
+        qint64 written = qf->write(data);
+        if (written != data.size()) {
+            qWarning() << "UploadManager: Partial write - expected" << data.size() << "wrote" << written;
+        }
+        qf->flush(); // Ensure data is written immediately
+        
         m_incoming.received += data.size();
         if (m_incoming.receivedByFile.contains(fid)) {
             qint64 soFar = m_incoming.receivedByFile.value(fid) + data.size();
@@ -380,6 +406,13 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         }
     } else if (type == "upload_complete") {
         if (message.value("uploadId").toString() != m_incoming.uploadId) return;
+        
+        // Clean up chunk tracking before closing files
+        static QHash<QString, int> expectedChunkIndex;
+        for (auto it = m_incoming.openFiles.begin(); it != m_incoming.openFiles.end(); ++it) {
+            expectedChunkIndex.remove(it.key());
+        }
+        
         for (auto it = m_incoming.openFiles.begin(); it != m_incoming.openFiles.end(); ++it) {
             if (it.value()) { it.value()->flush(); it.value()->close(); delete it.value(); }
         }
@@ -404,6 +437,13 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             if (it.value()) { it.value()->flush(); it.value()->close(); delete it.value(); }
         }
         m_incoming.openFiles.clear();
+        
+        // Clean up chunk tracking
+        static QHash<QString, int> expectedChunkIndex;
+        for (auto it = m_incoming.openFiles.begin(); it != m_incoming.openFiles.end(); ++it) {
+            expectedChunkIndex.remove(it.key());
+        }
+        
         if (!m_incoming.cacheDirPath.isEmpty()) { QDir dir(m_incoming.cacheDirPath); dir.removeRecursively(); }
         if (m_ws && !m_incoming.senderId.isEmpty()) {
             m_ws->notifyAllFilesRemovedToSender(m_incoming.senderId);
