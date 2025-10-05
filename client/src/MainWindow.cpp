@@ -2763,15 +2763,29 @@ QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
     QList<ScreenInfo> screens;
     QList<QScreen*> screenList = QGuiApplication::screens();
     
+    qDebug() << "=== LOCAL SCREEN INFO COLLECTION DEBUG ===";
+    qDebug() << "Qt reports" << screenList.size() << "screens:";
+    
     for (int i = 0; i < screenList.size(); ++i) {
         QScreen* screen = screenList[i];
         QRect geometry = screen->geometry();
+        QRect availableGeometry = screen->availableGeometry();
         bool isPrimary = (screen == QGuiApplication::primaryScreen());
+        
+        qDebug() << "Qt Screen" << i << ":";
+        qDebug() << "  - Name:" << screen->name();
+        qDebug() << "  - Primary:" << isPrimary;
+        qDebug() << "  - Full geometry:" << geometry;
+        qDebug() << "  - Available geometry:" << availableGeometry;
+        qDebug() << "  - Position (x,y):" << geometry.x() << "," << geometry.y();
+        qDebug() << "  - Size (w,h):" << geometry.width() << "x" << geometry.height();
+        qDebug() << "  - Device pixel ratio:" << screen->devicePixelRatio();
         
         ScreenInfo screenInfo(i, geometry.width(), geometry.height(), geometry.x(), geometry.y(), isPrimary);
         screens.append(screenInfo);
     }
     
+    qDebug() << "=== END LOCAL SCREEN INFO COLLECTION ===";
     return screens;
 }
 
