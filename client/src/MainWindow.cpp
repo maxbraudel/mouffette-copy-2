@@ -836,6 +836,15 @@ MainWindow::MainWindow(QWidget* parent)
     m_reconnectTimer->setSingleShot(true);
     connect(m_reconnectTimer, &QTimer::timeout, this, &MainWindow::attemptReconnect);
 
+    // Initialize toast notification system
+    m_toastSystem = new ToastNotificationSystem(this, this);
+    ToastNotificationSystem::setInstance(m_toastSystem);
+    
+    // Show welcome toast after window initialization
+    QTimer::singleShot(100, this, [this]() {
+        TOAST_SUCCESS("Welcome to Mouffette! Connection system ready.", 3000);
+    });
+
     connectToServer();
 }
 
@@ -2371,6 +2380,7 @@ void MainWindow::onConnected() {
 
     
     // Show tray notification
+    TOAST_SUCCESS("Connected to server", 2000);
 }
 
 void MainWindow::onDisconnected() {
@@ -2391,6 +2401,7 @@ void MainWindow::onDisconnected() {
     }
     
     // Inform upload manager of connection loss to cancel any ongoing upload/finalizing state
+    TOAST_WARNING("Disconnected from server", 3000);
     if (m_uploadManager) {
         m_uploadManager->onConnectionLost();
     }
@@ -2436,6 +2447,7 @@ void MainWindow::onConnectionError(const QString& error) {
     qWarning() << "Failed to connect to server:" << error << "(silent mode, aucune popup)";
     setUIEnabled(false);
     setLocalNetworkStatus("Error");
+    TOAST_ERROR(QString("Connection failed: %1").arg(error), 4000);
 }
 
 void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {

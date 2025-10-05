@@ -28,6 +28,7 @@
 #include <QFont>
 #include "WebSocketClient.h"
 #include "ClientInfo.h"
+#include "ToastNotificationSystem.h"
 
 QT_BEGIN_NAMESPACE
 class QAction;
@@ -277,6 +278,9 @@ private:
     bool m_canvasRevealedForCurrentClient = false;
     // Preserve the current viewport (zoom/pan) across temporary connection losses
     bool m_preserveViewportOnReconnect = false;
+    
+    // Toast notification system
+    ToastNotificationSystem* m_toastSystem = nullptr;
 
 private slots:
     // Upload-specific progress/finish now managed by UploadManager

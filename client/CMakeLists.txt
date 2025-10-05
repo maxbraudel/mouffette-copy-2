@@ -40,6 +40,7 @@ set(SOURCES
     src/Theme.cpp
     src/AppColors.cpp
     src/RemoteSceneController.cpp
+    src/ToastNotificationSystem.cpp
 )
 
 # Platform-specific sources
@@ -68,6 +69,7 @@ set(HEADERS
     src/Theme.h
     src/AppColors.h
     src/RemoteSceneController.h
+    src/ToastNotificationSystem.h
 )
 
 # UI files
