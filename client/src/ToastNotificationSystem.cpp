@@ -321,28 +321,29 @@ void ToastNotificationSystem::repositionNotifications()
     }
 }
 
-QPoint ToastNotificationSystem::calculateNotificationPosition(int index) const
-{
+QPoint ToastNotificationSystem::calculateNotificationPosition(int index) const {
     if (!m_parentWindow) return QPoint(0, 0);
-    
-    // Use the full window geometry, not just the client area
+
+    // Use full window size (local coords)
     QRect parentRect = m_parentWindow->geometry();
-    // Convert to local coordinates (relative to parent window)
     parentRect = QRect(0, 0, parentRect.width(), parentRect.height());
-    int x = 0, y = 0;
-    
-    // Calculate total height of notifications up to this index
-    int totalHeight = 0;
-    for (int i = 0; i <= index && i < m_activeNotifications.size(); ++i) {
-        if (i < m_activeNotifications.size()) {
-            totalHeight += m_activeNotifications[i]->height();
-            if (i < index) {
-                totalHeight += m_config.spacing;
-            }
-        }
+
+    // Bounds check
+    if (index < 0 || index >= m_activeNotifications.size()) return QPoint(0, 0);
+
+    // Compute cumulative heights of previous toasts + spacing
+    int prevHeightSum = 0;
+    for (int i = 0; i < index && i < m_activeNotifications.size(); ++i) {
+        prevHeightSum += m_activeNotifications[i]->height();
     }
-    
-    // Calculate X position based on configured position
+    prevHeightSum += index * m_config.spacing;
+
+    // Current toast size
+    const int curW = m_activeNotifications[index]->width();
+    const int curH = m_activeNotifications[index]->height();
+
+    // X coordinate
+    int x = 0;
     switch (m_config.position) {
         case ToastNotification::Position::TopLeft:
         case ToastNotification::Position::BottomLeft:
@@ -350,36 +351,29 @@ QPoint ToastNotificationSystem::calculateNotificationPosition(int index) const
             break;
         case ToastNotification::Position::TopRight:
         case ToastNotification::Position::BottomRight:
-            if (index < m_activeNotifications.size()) {
-                x = parentRect.width() - m_activeNotifications[index]->width() - m_config.marginFromEdge;
-            }
+            x = parentRect.width() - curW - m_config.marginFromEdge;
             break;
         case ToastNotification::Position::TopCenter:
         case ToastNotification::Position::BottomCenter:
-            if (index < m_activeNotifications.size()) {
-                x = (parentRect.width() - m_activeNotifications[index]->width()) / 2;
-            }
+            x = (parentRect.width() - curW) / 2;
             break;
     }
-    
-    // Calculate Y position based on configured position
+
+    // Y coordinate
+    int y = 0;
     switch (m_config.position) {
         case ToastNotification::Position::TopLeft:
         case ToastNotification::Position::TopRight:
         case ToastNotification::Position::TopCenter:
-            y = m_config.marginFromEdge + (index * (m_activeNotifications[0]->height() + m_config.spacing));
+            y = m_config.marginFromEdge + prevHeightSum;
             break;
         case ToastNotification::Position::BottomLeft:
         case ToastNotification::Position::BottomRight:
         case ToastNotification::Position::BottomCenter:
-            y = parentRect.height() - m_config.marginFromEdge - totalHeight;
-            // Adjust for stacking from bottom
-            for (int i = 0; i < index && i < m_activeNotifications.size(); ++i) {
-                y -= (m_activeNotifications[i]->height() + m_config.spacing);
-            }
+            y = parentRect.height() - m_config.marginFromEdge - curH - prevHeightSum;
             break;
     }
-    
+
     return QPoint(x, y);
 }
 
