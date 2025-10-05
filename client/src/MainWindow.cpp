@@ -58,6 +58,23 @@
 #include <QStyle>
 #include <QtSvgWidgets/QGraphicsSvgItem>
 #include <QtSvg/QSvgRenderer>
+
+#ifdef Q_OS_WIN
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#  include <vector>
+#  include <string>
+// WinAPI monitor enumeration helper
+struct WinMonRect { std::wstring name; RECT rc; bool primary; };
+static BOOL CALLBACK MouffetteEnumMonProc(HMONITOR hMon, HDC, LPRECT, LPARAM lParam) {
+    auto* out = reinterpret_cast<std::vector<WinMonRect>*>(lParam);
+    MONITORINFOEXW mi{}; mi.cbSize = sizeof(mi);
+    if (GetMonitorInfoW(hMon, &mi)) {
+        WinMonRect r; r.name = mi.szDevice; r.rc = mi.rcMonitor; r.primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0; out->push_back(r);
+    }
+    return TRUE;
+}
+#endif
 #include <QPainterPathStroker>
 #include <QFileInfo>
 #include <QFile>
@@ -2715,6 +2732,18 @@ void MainWindow::onWatchStatusChanged(bool watched) {
             m_cursorTimer->setInterval(m_cursorUpdateIntervalMs); // configurable
             connect(m_cursorTimer, &QTimer::timeout, this, [this]() {
                 static int lastX = INT_MIN, lastY = INT_MIN;
+#ifdef Q_OS_WIN
+                POINT pt{0,0};
+                const BOOL ok = GetCursorPos(&pt);
+                const int gx = ok ? static_cast<int>(pt.x) : QCursor::pos().x();
+                const int gy = ok ? static_cast<int>(pt.y) : QCursor::pos().y();
+                if (gx != lastX || gy != lastY) {
+                    lastX = gx; lastY = gy;
+                    if (m_webSocketClient && m_webSocketClient->isConnected() && m_isWatched) {
+                        m_webSocketClient->sendCursorUpdate(gx, gy);
+                    }
+                }
+#else
                 const QPoint p = QCursor::pos();
                 if (p.x() != lastX || p.y() != lastY) {
                     lastX = p.x();
@@ -2723,6 +2752,7 @@ void MainWindow::onWatchStatusChanged(bool watched) {
                         m_webSocketClient->sendCursorUpdate(p.x(), p.y());
                     }
                 }
+#endif
             });
         }
         // Apply any updated interval before starting
@@ -2761,75 +2791,43 @@ void MainWindow::onDataRequestReceived() {
 
 QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
     QList<ScreenInfo> screens;
-    QList<QScreen*> screenList = QGuiApplication::screens();
-
     qDebug() << "=== LOCAL SCREEN INFO COLLECTION DEBUG ===";
-    qDebug() << "Qt reports" << screenList.size() << "screens:";
 
 #ifdef Q_OS_WIN
-    // On Windows 10/11 with per-monitor DPI, QScreen::geometry() is in device-independent pixels (DIPs).
-    // Different DPRs per screen can make edges appear non-contiguous when mixing coordinates across screens.
-    // To ensure a contiguous virtual desktop in our model, convert each screen's geometry to native pixels
-    // using its devicePixelRatio, then normalize to a common origin.
-    struct NativeRect { int id; qreal nx; qreal ny; qreal nw; qreal nh; bool primary; QString name; qreal dpr; QRect geo; QRect avail; };
-    QVector<NativeRect> native;
-    qreal minNX = std::numeric_limits<qreal>::max();
-    qreal minNY = std::numeric_limits<qreal>::max();
-    for (int i = 0; i < screenList.size(); ++i) {
-        QScreen* screen = screenList[i];
-        const QRect g = screen->geometry();
-        const QRect ag = screen->availableGeometry();
-        const bool isPrimary = (screen == QGuiApplication::primaryScreen());
-        const qreal dpr = screen->devicePixelRatio();
-        // Convert this screen's rect into native pixel space local to its DPR
-        const qreal nx = static_cast<qreal>(g.x()) * dpr;
-        const qreal ny = static_cast<qreal>(g.y()) * dpr;
-        const qreal nw = static_cast<qreal>(g.width()) * dpr;
-        const qreal nh = static_cast<qreal>(g.height()) * dpr;
-        native.push_back(NativeRect{ i, nx, ny, nw, nh, isPrimary, screen->name(), dpr, g, ag });
-        minNX = std::min(minNX, nx);
-        minNY = std::min(minNY, ny);
-    }
-
-    qDebug() << "[WIN] Converting to native pixels to remove DPI-induced gaps";
-    for (const auto &n : native) {
-        qDebug() << "Qt Screen" << n.id << ":";
-        qDebug() << "  - Name:" << n.name;
-        qDebug() << "  - Primary:" << n.primary;
-        qDebug() << "  - Full geometry (DIP):" << n.geo << "avail:" << n.avail;
-        qDebug() << "  - DPR:" << n.dpr;
-        qDebug() << "  - Native (px) x,y,w,h:" << n.nx << n.ny << n.nw << n.nh;
-    }
-    qDebug() << "[WIN] Normalization offsets (native px) minNX:" << minNX << "minNY:" << minNY;
-
-    // Build ScreenInfo list in normalized native pixel space (top-left at 0,0)
-    for (const auto &n : native) {
-        const int normX = static_cast<int>(std::llround(n.nx - minNX));
-        const int normY = static_cast<int>(std::llround(n.ny - minNY));
-        const int w     = static_cast<int>(std::llround(n.nw));
-        const int h     = static_cast<int>(std::llround(n.nh));
-        screens.append(ScreenInfo(n.id, w, h, normX, normY, n.primary));
-        qDebug() << "[WIN] Screen" << n.id << "normalized native rect:" << QRect(normX, normY, w, h);
+    // Use WinAPI to enumerate monitors in PHYSICAL pixels with correct origins (no logical gaps)
+    std::vector<WinMonRect> mons; mons.reserve(8);
+    EnumDisplayMonitors(nullptr, nullptr, MouffetteEnumMonProc, reinterpret_cast<LPARAM>(&mons));
+    if (mons.empty()) {
+        qDebug() << "[WIN] EnumDisplayMonitors returned 0 monitors; fallback to Qt screens.";
+        QList<QScreen*> screenList = QGuiApplication::screens();
+        for (int i = 0; i < screenList.size(); ++i) {
+            QScreen* s = screenList[i];
+            const QRect g = s->geometry();
+            screens.append(ScreenInfo(i, g.width(), g.height(), g.x(), g.y(), s == QGuiApplication::primaryScreen()));
+        }
+    } else {
+        // Normalize to top-left origin to keep consistency with canvas layout (we preserve absolute in payload fields)
+        LONG minX = LONG_MAX, minY = LONG_MAX;
+        for (const auto& m : mons) { minX = std::min(minX, m.rc.left); minY = std::min(minY, m.rc.top); }
+        qDebug() << "[WIN] Physical monitors:" << static_cast<int>(mons.size()) << "minX/minY:" << minX << minY;
+        for (size_t i = 0; i < mons.size(); ++i) {
+            const auto& m = mons[i];
+            const int px = m.rc.left; const int py = m.rc.top;
+            const int pw = m.rc.right - m.rc.left; const int ph = m.rc.bottom - m.rc.top;
+            // For ScreenInfo we keep absolute coordinates so that cursor mapping (also physical) matches exactly.
+            screens.append(ScreenInfo(static_cast<int>(i), pw, ph, px, py, m.primary));
+            qDebug() << "[WIN] Mon" << static_cast<int>(i) << "abs phys rect:" << QRect(px, py, pw, ph) << "primary:" << m.primary;
+        }
     }
 #else
-    // Non-Windows: keep using Qt's logical coordinates (DIPs), which are usually contiguous on macOS/Linux.
+    QList<QScreen*> screenList = QGuiApplication::screens();
+    qDebug() << "Qt reports" << screenList.size() << "screens:";
     for (int i = 0; i < screenList.size(); ++i) {
         QScreen* screen = screenList[i];
         QRect geometry = screen->geometry();
-        QRect availableGeometry = screen->availableGeometry();
         bool isPrimary = (screen == QGuiApplication::primaryScreen());
-
-        qDebug() << "Qt Screen" << i << ":";
-        qDebug() << "  - Name:" << screen->name();
-        qDebug() << "  - Primary:" << isPrimary;
-        qDebug() << "  - Full geometry:" << geometry;
-        qDebug() << "  - Available geometry:" << availableGeometry;
-        qDebug() << "  - Position (x,y):" << geometry.x() << "," << geometry.y();
-        qDebug() << "  - Size (w,h):" << geometry.width() << "x" << geometry.height();
-        qDebug() << "  - Device pixel ratio:" << screen->devicePixelRatio();
-
-        ScreenInfo screenInfo(i, geometry.width(), geometry.height(), geometry.x(), geometry.y(), isPrimary);
-        screens.append(screenInfo);
+        screens.append(ScreenInfo(i, geometry.width(), geometry.height(), geometry.x(), geometry.y(), isPrimary));
+        qDebug() << "Qt Screen" << i << "geo:" << geometry << "primary:" << isPrimary;
     }
 #endif
 
