@@ -3070,24 +3070,26 @@ QGraphicsRectItem* ScreenCanvas::createScreenItem(const ScreenInfo& screen, int 
     return item;
 }
 
-QMap<int, QRectF> ScreenCanvas::calculateCompactPositions(double scaleFactor, double hSpacing, double vSpacing) const {
-    QMap<int, QRectF> positions; if (m_screens.isEmpty()) return positions; QList<QPair<int, ScreenInfo>> screenPairs; for (int i=0;i<m_screens.size();++i) screenPairs.append(qMakePair(i, m_screens[i]));
-    std::sort(screenPairs.begin(), screenPairs.end(), [](const QPair<int, ScreenInfo>& a, const QPair<int, ScreenInfo>& b){ if (qAbs(a.second.y - b.second.y) < 100) return a.second.x < b.second.x; return a.second.y < b.second.y; });
-    double currentX = 0, currentY = 0, rowHeight = 0; int lastY = INT_MIN;
-    for (const auto& pair : screenPairs) {
-        int index = pair.first; const ScreenInfo& screen = pair.second;
-        double screenWidth = screen.width * scaleFactor;
-        double screenHeight = screen.height * scaleFactor;
-        if (lastY != INT_MIN && qAbs(screen.y - lastY) > 100) {
-            currentX = 0; currentY += rowHeight + vSpacing; rowHeight = 0;
-        }
-        QRectF rect(currentX, currentY, screenWidth, screenHeight);
-        positions[index] = rect;
-        currentX += screenWidth + hSpacing;
-        rowHeight = qMax(rowHeight, screenHeight);
-        lastY = screen.y;
+QMap<int, QRectF> ScreenCanvas::calculateCompactPositions(double scaleFactor, double /*hSpacing*/, double /*vSpacing*/) const {
+    // Updated: reflect the OS-defined virtual desktop arrangement exactly.
+    // We place screens at their absolute positions relative to the virtual desktop origin (minX/minY normalized to 0).
+    QMap<int, QRectF> positions; if (m_screens.isEmpty()) return positions;
+    // Compute normalization offsets so the top-left of the virtual desktop maps to (0,0) in scene space
+    int minX = std::numeric_limits<int>::max();
+    int minY = std::numeric_limits<int>::max();
+    for (const auto &s : m_screens) { minX = std::min(minX, s.x); minY = std::min(minY, s.y); }
+    if (minX == std::numeric_limits<int>::max()) { minX = 0; }
+    if (minY == std::numeric_limits<int>::max()) { minY = 0; }
+    for (int i = 0; i < m_screens.size(); ++i) {
+        const ScreenInfo& s = m_screens[i];
+        const double px = (static_cast<double>(s.x - minX)) * scaleFactor;
+        const double py = (static_cast<double>(s.y - minY)) * scaleFactor;
+        const double pw = (static_cast<double>(s.width)) * scaleFactor;
+        const double ph = (static_cast<double>(s.height)) * scaleFactor;
+        positions[i] = QRectF(px, py, pw, ph);
     }
-    return positions; }
+    return positions;
+}
 
 QRectF ScreenCanvas::screensBoundingRect() const { QRectF bounds; bool first = true; for (auto* item : m_screenItems) { if (!item) continue; QRectF r = item->sceneBoundingRect(); if (first) { bounds = r; first = false; } else { bounds = bounds.united(r); } } return bounds; }
 
