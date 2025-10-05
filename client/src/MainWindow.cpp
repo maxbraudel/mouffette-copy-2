@@ -2596,11 +2596,37 @@ void MainWindow::syncRegistration() {
 void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
     // Update the canvas only if it matches the currently selected client
     if (!clientInfo.getId().isEmpty() && clientInfo.getId() == m_selectedClient.getId()) {
+        qDebug() << "=== SCREENS INFO RECEIVED DEBUG ===";
         qDebug() << "Updating canvas with fresh screens for" << clientInfo.getMachineName();
+        qDebug() << "Client ID:" << clientInfo.getId();
+        qDebug() << "Platform:" << clientInfo.getPlatform();
+        
         m_selectedClient = clientInfo; // keep selected client in sync
         // Update screen canvas content
         if (m_screenCanvas) {
             const QList<ScreenInfo> scrs = clientInfo.getScreens();
+            
+            qDebug() << "Received" << scrs.size() << "screens:";
+            for (int i = 0; i < scrs.size(); ++i) {
+                const ScreenInfo& s = scrs[i];
+                qDebug() << "Screen" << i << "received data:";
+                qDebug() << "  - ID:" << s.id;
+                qDebug() << "  - Primary:" << s.primary;
+                qDebug() << "  - Position (x,y):" << s.x << "," << s.y;
+                qDebug() << "  - Size (w,h):" << s.width << "x" << s.height;
+                qDebug() << "  - UI Zones count:" << s.uiZones.size();
+                
+                // Check adjacency
+                if (i > 0) {
+                    const ScreenInfo& prev = scrs[i-1];
+                    int gapX = s.x - (prev.x + prev.width);
+                    int gapY = s.y - (prev.y + prev.height);
+                    qDebug() << "  - Gap with previous screen - X:" << gapX << "Y:" << gapY;
+                    qDebug() << "  - Previous screen right edge:" << (prev.x + prev.width);
+                    qDebug() << "  - This screen left edge:" << s.x;
+                }
+            }
+            
             bool anyPerScreenZones = false;
             for (const auto &s : scrs) { if (!s.uiZones.isEmpty()) { anyPerScreenZones = true; break; } }
             m_screenCanvas->setScreens(scrs);

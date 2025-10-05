@@ -45,6 +45,7 @@
 #include <QRegion>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QDebug>
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -2996,16 +2997,29 @@ void ScreenCanvas::createScreenItems() {
     for (auto* it : m_uiZoneItems) { if (it && m_scene) m_scene->removeItem(it); delete it; }
     m_uiZoneItems.clear();
     const double spacing = static_cast<double>(m_screenSpacingPx);
+    
+    qDebug() << "=== CREATE SCREEN ITEMS DEBUG ===";
+    qDebug() << "Screen spacing px:" << m_screenSpacingPx;
+    qDebug() << "Spacing double:" << spacing;
+    
     QMap<int, QRectF> compactPositions = calculateCompactPositions(1.0, spacing, spacing);
     m_sceneScreenRects.clear();
+    
+    qDebug() << "Creating screen graphics items:";
     for (int i = 0; i < m_screens.size(); ++i) {
         const ScreenInfo& s = m_screens[i];
         QRectF pos = compactPositions.value(i);
+        
+        qDebug() << "Creating screen item" << i << "at position:" << pos;
+        
         auto* rect = createScreenItem(s, i, pos);
         rect->setZValue(-1000.0);
         m_scene->addItem(rect);
         m_screenItems << rect;
         m_sceneScreenRects.insert(s.id, pos);
+        
+        qDebug() << "Screen item" << i << "final rect():" << rect->rect();
+        qDebug() << "Screen item" << i << "scene bounding rect:" << rect->sceneBoundingRect();
     }
     // Z-order previously normalized by ensureZOrder(); items now rely on explicit z-values at creation time.
 
@@ -3057,8 +3071,17 @@ void ScreenCanvas::createScreenItems() {
 
 QGraphicsRectItem* ScreenCanvas::createScreenItem(const ScreenInfo& screen, int index, const QRectF& position) {
     const int penWidth = m_screenBorderWidthPx;
+    
+    qDebug() << "Creating screen item" << index << ":";
+    qDebug() << "  - Input position:" << position;
+    qDebug() << "  - Pen width:" << penWidth;
+    qDebug() << "  - Screen border width px:" << m_screenBorderWidthPx;
+    
     // Use the full position rectangle to maintain exact screen positioning without gaps
     QGraphicsRectItem* item = new QGraphicsRectItem(position);
+    
+    qDebug() << "  - Created item rect:" << item->rect();
+    
     if (screen.primary) { item->setBrush(QBrush(QColor(74,144,226,180))); item->setPen(QPen(QColor(74,144,226), penWidth)); }
     else { item->setBrush(QBrush(QColor(80,80,80,180))); item->setPen(QPen(QColor(160,160,160), penWidth)); }
     item->setData(0, index);
@@ -3074,12 +3097,30 @@ QMap<int, QRectF> ScreenCanvas::calculateCompactPositions(double scaleFactor, do
     // Updated: reflect the OS-defined virtual desktop arrangement exactly.
     // We place screens at their absolute positions relative to the virtual desktop origin (minX/minY normalized to 0).
     QMap<int, QRectF> positions; if (m_screens.isEmpty()) return positions;
+    
+    qDebug() << "=== SCREEN POSITION CALCULATION DEBUG ===";
+    qDebug() << "Number of screens:" << m_screens.size();
+    qDebug() << "Scale factor:" << scaleFactor;
+    
+    // Log all screen raw data first
+    for (int i = 0; i < m_screens.size(); ++i) {
+        const ScreenInfo& s = m_screens[i];
+        qDebug() << "Screen" << i << "raw data:";
+        qDebug() << "  - ID:" << s.id;
+        qDebug() << "  - Primary:" << s.primary;
+        qDebug() << "  - Position (x,y):" << s.x << "," << s.y;
+        qDebug() << "  - Size (w,h):" << s.width << "x" << s.height;
+    }
+    
     // Compute normalization offsets so the top-left of the virtual desktop maps to (0,0) in scene space
     int minX = std::numeric_limits<int>::max();
     int minY = std::numeric_limits<int>::max();
     for (const auto &s : m_screens) { minX = std::min(minX, s.x); minY = std::min(minY, s.y); }
     if (minX == std::numeric_limits<int>::max()) { minX = 0; }
     if (minY == std::numeric_limits<int>::max()) { minY = 0; }
+    
+    qDebug() << "Normalization offsets - minX:" << minX << "minY:" << minY;
+    
     for (int i = 0; i < m_screens.size(); ++i) {
         const ScreenInfo& s = m_screens[i];
         const double px = (static_cast<double>(s.x - minX)) * scaleFactor;
@@ -3087,7 +3128,23 @@ QMap<int, QRectF> ScreenCanvas::calculateCompactPositions(double scaleFactor, do
         const double pw = (static_cast<double>(s.width)) * scaleFactor;
         const double ph = (static_cast<double>(s.height)) * scaleFactor;
         positions[i] = QRectF(px, py, pw, ph);
+        
+        qDebug() << "Screen" << i << "calculated position:";
+        qDebug() << "  - Scene position (px,py):" << px << "," << py;
+        qDebug() << "  - Scene size (pw,ph):" << pw << "x" << ph;
+        qDebug() << "  - Resulting QRectF:" << positions[i];
+        
+        // Check for adjacency with previous screen
+        if (i > 0) {
+            QRectF prev = positions[i-1];
+            QRectF curr = positions[i];
+            double gapX = curr.left() - prev.right();
+            double gapY = curr.top() - prev.bottom();
+            qDebug() << "  - Gap with previous screen - X:" << gapX << "Y:" << gapY;
+        }
     }
+    
+    qDebug() << "=== END SCREEN POSITION CALCULATION ===";
     return positions;
 }
 
