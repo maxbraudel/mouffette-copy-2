@@ -109,7 +109,6 @@ protected:
     bool eventFilter(QObject* obj, QEvent* event) override;
     void closeEvent(QCloseEvent *event) override;
     void showEvent(QShowEvent* event) override;
-    // No custom frameless dragging or traffic-light states; native title bar is used
 
 private:
     void setupUI();

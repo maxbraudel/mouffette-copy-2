@@ -13,6 +13,5 @@
     <file>icons/delete.svg</file>
     <file>icons/visibility-on.svg</file>
     <file>icons/visibility-off.svg</file>
-    <!-- Removed custom macOS traffic lights; using native title bar controls -->
     </qresource>
 </RCC>

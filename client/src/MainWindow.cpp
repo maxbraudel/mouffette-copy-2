@@ -119,7 +119,6 @@ constexpr qreal Z_SCREENS = -1000.0;
 constexpr qreal Z_MEDIA_BASE = 1.0;
 constexpr qreal Z_REMOTE_CURSOR = 10000.0;
 constexpr qreal Z_SCENE_OVERLAY = 12000.0; // above all scene content
-// Using native window title bar (no custom traffic lights)
 
 // Global window content margins (between all content and window borders)
 int gWindowContentMarginTop = 20;       // Top margin for all window content
@@ -472,7 +471,6 @@ MainWindow::MainWindow(QWidget* parent)
     setWindowState(Qt::WindowMaximized);
     
     setupUI();
-    // Use standard opaque native title bar; no custom traffic lights
     // Initialize remote scene controller once
     if (!g_remoteSceneController) {
         g_remoteSceneController = new RemoteSceneController(m_webSocketClient, this);
@@ -831,7 +829,6 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
         if (ke->key() == Qt::Key_Space) { event->accept(); return true; }
     }
 
-    // Native title bar handles window dragging and controls
     return QMainWindow::eventFilter(obj, event);
 }
 
@@ -1162,10 +1159,7 @@ void MainWindow::initializeRemoteClientInfoInTopBar() {
 
 void MainWindow::changeEvent(QEvent* event) {
     QMainWindow::changeEvent(event);
-    // No custom title bar state changes
 }
-
-    // No updateTrafficLightsIcons; native title bar handles window controls
 
 void MainWindow::showScreenView(const ClientInfo& client) {
     if (!m_navigationManager) return;
@@ -1738,7 +1732,6 @@ void MainWindow::setupUI() {
     m_connectionLayout->addWidget(m_connectToggleButton);
     m_connectionLayout->addWidget(m_settingsButton);
 
-    // No custom window dragging; native title bar handles window movement
     topLayout->addWidget(m_connectionBar);
     m_mainLayout->addWidget(topSection);
     // Explicit inner gap between top container and hostname container
