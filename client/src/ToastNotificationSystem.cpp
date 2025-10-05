@@ -104,8 +104,12 @@ void ToastNotification::paintEvent(QPaintEvent* event)
     const qreal half = bw / 2.0;
     r.adjust(half, half, -half, -half);
 
-    // Fill background
+    // Fill base with window background color, then overlay tinted background
     p.setPen(Qt::NoPen);
+    const QColor base = AppColors::getCurrentColor(AppColors::gWindowBackgroundColorSource);
+    p.setBrush(base);
+    p.drawRoundedRect(r, m_style.borderRadius, m_style.borderRadius);
+
     p.setBrush(m_style.backgroundColor);
     p.drawRoundedRect(r, m_style.borderRadius, m_style.borderRadius);
 
