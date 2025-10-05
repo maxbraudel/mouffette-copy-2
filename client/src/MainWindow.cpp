@@ -65,12 +65,12 @@
 #  include <vector>
 #  include <string>
 // WinAPI monitor enumeration helper
-struct WinMonRect { std::wstring name; RECT rc; bool primary; };
+struct WinMonRect { std::wstring name; RECT rc; RECT rcWork; bool primary; };
 static BOOL CALLBACK MouffetteEnumMonProc(HMONITOR hMon, HDC, LPRECT, LPARAM lParam) {
     auto* out = reinterpret_cast<std::vector<WinMonRect>*>(lParam);
     MONITORINFOEXW mi{}; mi.cbSize = sizeof(mi);
     if (GetMonitorInfoW(hMon, &mi)) {
-        WinMonRect r; r.name = mi.szDevice; r.rc = mi.rcMonitor; r.primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0; out->push_back(r);
+        WinMonRect r; r.name = mi.szDevice; r.rc = mi.rcMonitor; r.rcWork = mi.rcWork; r.primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0; out->push_back(r);
     }
     return TRUE;
 }
@@ -2558,30 +2558,48 @@ void MainWindow::syncRegistration() {
         screens = getLocalScreenInfo();
         volumePercent = getSystemVolumePercent();
     }
-    // Build per-screen uiZones directly (taskbar/menu/dock) without legacy global structure
+    // Build per-screen uiZones (taskbar/menu/dock)
     if (!screens.isEmpty()) {
+#if defined(Q_OS_WIN)
+        // Build a list of physical monitors (rcMonitor/rcWork) to align with ScreenInfo (physical px)
+        std::vector<WinMonRect> mons; mons.reserve(8);
+        EnumDisplayMonitors(nullptr, nullptr, MouffetteEnumMonProc, reinterpret_cast<LPARAM>(&mons));
+        auto findMatchingMon = [&](const ScreenInfo& s) -> const WinMonRect* {
+            for (const auto &m : mons) {
+                const int mw = m.rc.right - m.rc.left;
+                const int mh = m.rc.bottom - m.rc.top;
+                if (m.rc.left == s.x && m.rc.top == s.y && mw == s.width && mh == s.height) return &m;
+            }
+            return nullptr;
+        };
+        for (auto &screen : screens) {
+            const WinMonRect* mp = findMatchingMon(screen);
+            if (!mp) continue;
+            const auto &m = *mp;
+            const int screenW = m.rc.right - m.rc.left;
+            const int screenH = m.rc.bottom - m.rc.top;
+            const int workW = m.rcWork.right - m.rcWork.left;
+            const int workH = m.rcWork.bottom - m.rcWork.top;
+            // Compute taskbar thickness and side by comparing rcMonitor and rcWork
+            if (workH < screenH) {
+                const int h = screenH - workH; if (h > 0) {
+                    if (m.rcWork.top > m.rc.top) screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("taskbar"), 0, 0, screenW, h});
+                    else screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("taskbar"), 0, screenH - h, screenW, h});
+                }
+            } else if (workW < screenW) {
+                const int w = screenW - workW; if (w > 0) {
+                    if (m.rcWork.left > m.rc.left) screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("taskbar"), 0, 0, w, screenH});
+                    else screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("taskbar"), screenW - w, 0, w, screenH});
+                }
+            }
+        }
+#elif defined(Q_OS_MACOS)
         QList<QScreen*> qScreens = QGuiApplication::screens();
         for (auto &screen : screens) {
             if (screen.id < 0 || screen.id >= qScreens.size()) continue;
             QScreen* qs = qScreens[screen.id]; if (!qs) continue;
             QRect geom = qs->geometry();
             QRect avail = qs->availableGeometry();
-#if defined(Q_OS_WIN)
-            // Detect per-monitor taskbar edges via availableGeometry deltas
-            if (avail.bottom() < geom.bottom()) { // bottom taskbar
-                int h = geom.bottom() - avail.bottom(); if (h>0)
-                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("taskbar"), 0, geom.height()-h, geom.width(), h});
-            } else if (avail.top() > geom.top()) { // top taskbar
-                int h = avail.top() - geom.top(); if (h>0)
-                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("taskbar"), 0, 0, geom.width(), h});
-            } else if (avail.left() > geom.left()) { // left taskbar
-                int w = avail.left() - geom.left(); if (w>0)
-                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("taskbar"), 0, 0, w, geom.height()});
-            } else if (avail.right() < geom.right()) { // right taskbar
-                int w = geom.right() - avail.right(); if (w>0)
-                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("taskbar"), geom.width()-w, 0, w, geom.height()});
-            }
-#elif defined(Q_OS_MACOS)
             // Menu bar
             if (avail.y() > geom.y()) {
                 int h = avail.y() - geom.y(); if (h>0)
@@ -2598,9 +2616,9 @@ void MainWindow::syncRegistration() {
                 int w = geom.right() - avail.right(); if (w>0)
                     screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("dock"), geom.width()-w, 0, w, geom.height()});
             }
-#endif
-            // uiZones prepared during syncRegistration
         }
+#endif
+        // uiZones prepared during syncRegistration
     }
     
     qDebug() << "Sync registration:" << machineName << "on" << platform << "with" << screens.size() << "screens";
@@ -2729,24 +2747,53 @@ void MainWindow::onDataRequestReceived() {
     if (!m_webSocketClient || !m_webSocketClient->isConnected()) return;
     QList<ScreenInfo> screens = getLocalScreenInfo();
     int volumePercent = getSystemVolumePercent();
-    // Build uiZones immediately for snapshot (reuse same logic as syncRegistration)
-    QList<QScreen*> qScreens = QGuiApplication::screens();
-    for (auto &screen : screens) {
-        if (screen.id < 0 || screen.id >= qScreens.size()) continue; QScreen* qs = qScreens[screen.id]; if (!qs) continue;
-        QRect geom = qs->geometry(); QRect avail = qs->availableGeometry();
+    // Build uiZones immediately for snapshot
 #if defined(Q_OS_WIN)
-        if (avail.bottom() < geom.bottom()) { int h = geom.bottom()-avail.bottom(); if (h>0) screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, geom.height()-h, geom.width(), h}); }
-        else if (avail.top() > geom.top()) { int h = avail.top()-geom.top(); if (h>0) screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, 0, geom.width(), h}); }
-        else if (avail.left() > geom.left()) { int w = avail.left()-geom.left(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, 0, w, geom.height()}); }
-        else if (avail.right() < geom.right()) { int w = geom.right()-avail.right(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"taskbar", geom.width()-w, 0, w, geom.height()}); }
-#elif defined(Q_OS_MACOS)
-        if (avail.y() > geom.y()) { int h = avail.y()-geom.y(); if (h>0) screen.uiZones.append(ScreenInfo::UIZone{"menu_bar", 0, 0, geom.width(), h}); }
-        if (avail.bottom() < geom.bottom()) { int h = geom.bottom()-avail.bottom(); if (h>0) screen.uiZones.append(ScreenInfo::UIZone{"dock", 0, geom.height()-h, geom.width(), h}); }
-        else if (avail.x() > geom.x()) { int w = avail.x()-geom.x(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"dock", 0, 0, w, geom.height()}); }
-        else if (avail.right() < geom.right()) { int w = geom.right()-avail.right(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"dock", geom.width()-w, 0, w, geom.height()}); }
-#endif
-    // uiZones collected for snapshot
+    {
+        std::vector<WinMonRect> mons; mons.reserve(8);
+        EnumDisplayMonitors(nullptr, nullptr, MouffetteEnumMonProc, reinterpret_cast<LPARAM>(&mons));
+        auto findMatchingMon = [&](const ScreenInfo& s) -> const WinMonRect* {
+            for (const auto &m : mons) {
+                const int mw = m.rc.right - m.rc.left;
+                const int mh = m.rc.bottom - m.rc.top;
+                if (m.rc.left == s.x && m.rc.top == s.y && mw == s.width && mh == s.height) return &m;
+            }
+            return nullptr;
+        };
+        for (auto &screen : screens) {
+            const WinMonRect* mp = findMatchingMon(screen);
+            if (!mp) continue;
+            const auto &m = *mp;
+            const int screenW = m.rc.right - m.rc.left;
+            const int screenH = m.rc.bottom - m.rc.top;
+            const int workW = m.rcWork.right - m.rcWork.left;
+            const int workH = m.rcWork.bottom - m.rcWork.top;
+            if (workH < screenH) {
+                const int h = screenH - workH; if (h > 0) {
+                    if (m.rcWork.top > m.rc.top) screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, 0, screenW, h});
+                    else screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, screenH - h, screenW, h});
+                }
+            } else if (workW < screenW) {
+                const int w = screenW - workW; if (w > 0) {
+                    if (m.rcWork.left > m.rc.left) screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, 0, w, screenH});
+                    else screen.uiZones.append(ScreenInfo::UIZone{"taskbar", screenW - w, 0, w, screenH});
+                }
+            }
+        }
     }
+#elif defined(Q_OS_MACOS)
+    {
+        QList<QScreen*> qScreens = QGuiApplication::screens();
+        for (auto &screen : screens) {
+            if (screen.id < 0 || screen.id >= qScreens.size()) continue; QScreen* qs = qScreens[screen.id]; if (!qs) continue;
+            QRect geom = qs->geometry(); QRect avail = qs->availableGeometry();
+            if (avail.y() > geom.y()) { int h = avail.y()-geom.y(); if (h>0) screen.uiZones.append(ScreenInfo::UIZone{"menu_bar", 0, 0, geom.width(), h}); }
+            if (avail.bottom() < geom.bottom()) { int h = geom.bottom()-avail.bottom(); if (h>0) screen.uiZones.append(ScreenInfo::UIZone{"dock", 0, geom.height()-h, geom.width(), h}); }
+            else if (avail.x() > geom.x()) { int w = avail.x()-geom.x(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"dock", 0, 0, w, geom.height()}); }
+            else if (avail.right() < geom.right()) { int w = geom.right()-avail.right(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"dock", geom.width()-w, 0, w, geom.height()}); }
+        }
+    }
+#endif
     m_webSocketClient->sendStateSnapshot(screens, volumePercent);
 }
 
