@@ -2996,9 +2996,7 @@ void ScreenCanvas::createScreenItems() {
     // Clear any previous UI overlay rects so we don't accumulate duplicates
     for (auto* it : m_uiZoneItems) { if (it && m_scene) m_scene->removeItem(it); delete it; }
     m_uiZoneItems.clear();
-    const double spacing = static_cast<double>(m_screenSpacingPx);
-    
-    QMap<int, QRectF> compactPositions = calculateCompactPositions(1.0, spacing, spacing);
+    QMap<int, QRectF> compactPositions = calculateCompactPositions(1.0);
     m_sceneScreenRects.clear();
 
     for (int i = 0; i < m_screens.size(); ++i) {
@@ -3076,7 +3074,7 @@ QGraphicsRectItem* ScreenCanvas::createScreenItem(const ScreenInfo& screen, int 
     return item;
 }
 
-QMap<int, QRectF> ScreenCanvas::calculateCompactPositions(double scaleFactor, double /*hSpacing*/, double /*vSpacing*/) const {
+QMap<int, QRectF> ScreenCanvas::calculateCompactPositions(double scaleFactor) const {
     // Reflect the OS-defined virtual desktop arrangement exactly.
     // We place screens at their absolute positions relative to the virtual desktop origin (minX/minY normalized to 0).
     QMap<int, QRectF> positions; if (m_screens.isEmpty()) return positions;

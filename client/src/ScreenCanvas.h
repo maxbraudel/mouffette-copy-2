@@ -54,8 +54,7 @@ public:
     void setScreenBorderWidthPx(int px);
     void setScreenLabelFontPointSize(int pt) { m_screenLabelFontPt = qMax(1, pt); createScreenItems(); }
     int screenLabelFontPointSize() const { return m_screenLabelFontPt; }
-    void setScreenSpacingPx(int px) { m_screenSpacingPx = qMax(0, px); createScreenItems(); }
-    int screenSpacingPx() const { return m_screenSpacingPx; }
+    // Screen spacing no longer used; screens reflect OS layout exactly
 
     // Host scene lifecycle
     void startHostSceneState();
@@ -151,7 +150,7 @@ private:
 
     void createScreenItems();
     QGraphicsRectItem* createScreenItem(const ScreenInfo& screen, int index, const QRectF& position);
-    QMap<int, QRectF> calculateCompactPositions(double scaleFactor, double hSpacing, double vSpacing) const;
+    QMap<int, QRectF> calculateCompactPositions(double scaleFactor) const;
     // Map remote global cursor position (remote screen coords) to scene space using stored screen layout.
     QPointF mapRemoteCursorToScene(int remoteX, int remoteY) const;
     QRectF screensBoundingRect() const;
@@ -222,7 +221,6 @@ private:
     int m_mediaHandleVisualSizePx = 12;
     int m_screenBorderWidthPx = 1;
     int m_screenLabelFontPt = 48;
-    int m_screenSpacingPx = 0; // horizontal & vertical spacing between screens
 
     QGraphicsItem* m_dragPreviewItem = nullptr;
     QSize m_dragPreviewBaseSize;

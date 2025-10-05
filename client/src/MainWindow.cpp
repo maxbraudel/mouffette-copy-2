@@ -2635,8 +2635,6 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
         if (m_screenCanvas) {
             const QList<ScreenInfo> scrs = clientInfo.getScreens();
             
-            bool anyPerScreenZones = false;
-            for (const auto &s : scrs) { if (!s.uiZones.isEmpty()) { anyPerScreenZones = true; break; } }
             m_screenCanvas->setScreens(scrs);
             
             // First-time reveal & recenter logic (improved):
@@ -2644,7 +2642,6 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
             // for the selected client, we always ensure the canvas is revealed and (unless preserving viewport)
             // perform an initial recenter (with a deferred safety pass to handle late layout sizing).
             if (!m_canvasRevealedForCurrentClient) {
-                const bool canvasHidden = (m_canvasStack && m_canvasStack->currentIndex() == 0);
                 if (m_navigationManager) {
                     m_navigationManager->revealCanvas();
                 } else if (m_canvasStack) {
@@ -2813,9 +2810,6 @@ QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
             screens.append(ScreenInfo(i, g.width(), g.height(), g.x(), g.y(), s == QGuiApplication::primaryScreen()));
         }
     } else {
-        // Normalize to top-left origin to keep consistency with canvas layout (we preserve absolute in payload fields)
-        LONG minX = LONG_MAX, minY = LONG_MAX;
-        for (const auto& m : mons) { minX = std::min(minX, m.rc.left); minY = std::min(minY, m.rc.top); }
         for (size_t i = 0; i < mons.size(); ++i) {
             const auto& m = mons[i];
             const int px = m.rc.left; const int py = m.rc.top;
