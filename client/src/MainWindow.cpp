@@ -2762,16 +2762,63 @@ void MainWindow::onDataRequestReceived() {
 QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
     QList<ScreenInfo> screens;
     QList<QScreen*> screenList = QGuiApplication::screens();
-    
+
     qDebug() << "=== LOCAL SCREEN INFO COLLECTION DEBUG ===";
     qDebug() << "Qt reports" << screenList.size() << "screens:";
-    
+
+#ifdef Q_OS_WIN
+    // On Windows 10/11 with per-monitor DPI, QScreen::geometry() is in device-independent pixels (DIPs).
+    // Different DPRs per screen can make edges appear non-contiguous when mixing coordinates across screens.
+    // To ensure a contiguous virtual desktop in our model, convert each screen's geometry to native pixels
+    // using its devicePixelRatio, then normalize to a common origin.
+    struct NativeRect { int id; qreal nx; qreal ny; qreal nw; qreal nh; bool primary; QString name; qreal dpr; QRect geo; QRect avail; };
+    QVector<NativeRect> native;
+    qreal minNX = std::numeric_limits<qreal>::max();
+    qreal minNY = std::numeric_limits<qreal>::max();
+    for (int i = 0; i < screenList.size(); ++i) {
+        QScreen* screen = screenList[i];
+        const QRect g = screen->geometry();
+        const QRect ag = screen->availableGeometry();
+        const bool isPrimary = (screen == QGuiApplication::primaryScreen());
+        const qreal dpr = screen->devicePixelRatio();
+        // Convert this screen's rect into native pixel space local to its DPR
+        const qreal nx = static_cast<qreal>(g.x()) * dpr;
+        const qreal ny = static_cast<qreal>(g.y()) * dpr;
+        const qreal nw = static_cast<qreal>(g.width()) * dpr;
+        const qreal nh = static_cast<qreal>(g.height()) * dpr;
+        native.push_back(NativeRect{ i, nx, ny, nw, nh, isPrimary, screen->name(), dpr, g, ag });
+        minNX = std::min(minNX, nx);
+        minNY = std::min(minNY, ny);
+    }
+
+    qDebug() << "[WIN] Converting to native pixels to remove DPI-induced gaps";
+    for (const auto &n : native) {
+        qDebug() << "Qt Screen" << n.id << ":";
+        qDebug() << "  - Name:" << n.name;
+        qDebug() << "  - Primary:" << n.primary;
+        qDebug() << "  - Full geometry (DIP):" << n.geo << "avail:" << n.avail;
+        qDebug() << "  - DPR:" << n.dpr;
+        qDebug() << "  - Native (px) x,y,w,h:" << n.nx << n.ny << n.nw << n.nh;
+    }
+    qDebug() << "[WIN] Normalization offsets (native px) minNX:" << minNX << "minNY:" << minNY;
+
+    // Build ScreenInfo list in normalized native pixel space (top-left at 0,0)
+    for (const auto &n : native) {
+        const int normX = static_cast<int>(std::llround(n.nx - minNX));
+        const int normY = static_cast<int>(std::llround(n.ny - minNY));
+        const int w     = static_cast<int>(std::llround(n.nw));
+        const int h     = static_cast<int>(std::llround(n.nh));
+        screens.append(ScreenInfo(n.id, w, h, normX, normY, n.primary));
+        qDebug() << "[WIN] Screen" << n.id << "normalized native rect:" << QRect(normX, normY, w, h);
+    }
+#else
+    // Non-Windows: keep using Qt's logical coordinates (DIPs), which are usually contiguous on macOS/Linux.
     for (int i = 0; i < screenList.size(); ++i) {
         QScreen* screen = screenList[i];
         QRect geometry = screen->geometry();
         QRect availableGeometry = screen->availableGeometry();
         bool isPrimary = (screen == QGuiApplication::primaryScreen());
-        
+
         qDebug() << "Qt Screen" << i << ":";
         qDebug() << "  - Name:" << screen->name();
         qDebug() << "  - Primary:" << isPrimary;
@@ -2780,11 +2827,12 @@ QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
         qDebug() << "  - Position (x,y):" << geometry.x() << "," << geometry.y();
         qDebug() << "  - Size (w,h):" << geometry.width() << "x" << geometry.height();
         qDebug() << "  - Device pixel ratio:" << screen->devicePixelRatio();
-        
+
         ScreenInfo screenInfo(i, geometry.width(), geometry.height(), geometry.x(), geometry.y(), isPrimary);
         screens.append(screenInfo);
     }
-    
+#endif
+
     qDebug() << "=== END LOCAL SCREEN INFO COLLECTION ===";
     return screens;
 }
