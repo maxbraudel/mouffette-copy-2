@@ -57,7 +57,8 @@ public:
     // Screen spacing no longer used; screens reflect OS layout exactly
 
     // Host scene lifecycle
-    void startHostSceneState();
+    enum class HostSceneMode { None, Remote, Test };
+    void startHostSceneState(HostSceneMode mode);
     void stopHostSceneState();
     bool isHostSceneActive() const { return m_hostSceneActive; }
     // Serialize current canvas state (screens + media) for remote scene start
@@ -291,6 +292,7 @@ protected:
 
     // Unified host scene state (either remote or test scene active)
     bool m_hostSceneActive = false;
+    HostSceneMode m_hostSceneMode = HostSceneMode::None;
     QTimer* m_autoDisplayTimer = nullptr;
     QTimer* m_autoPlayTimer = nullptr;
     // Remember selection present just before entering host scene so it can be restored afterward (multi-select supported)

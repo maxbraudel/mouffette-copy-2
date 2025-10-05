@@ -563,7 +563,7 @@ void ScreenCanvas::initInfoOverlay() {
         m_uploadButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         vHeaderLayout->addWidget(m_uploadButton);
 
-        // Wire Launch Remote Scene toggle behavior (UI only)
+        // Wire Launch Remote Scene toggle behavior (Remote mode = local + remote)
         connect(m_launchSceneButton, &QPushButton::clicked, this, [this]() {
             bool newState = !m_sceneLaunched;
             // If enabling remote scene, disable test scene
@@ -575,8 +575,8 @@ void ScreenCanvas::initInfoOverlay() {
                     }
                 }
                 if (m_launchTestSceneButton) m_launchTestSceneButton->setEnabled(false);
-                m_sceneLaunched = true; // set before starting so remote start condition (if reintroduced) sees true
-                startHostSceneState();
+                m_sceneLaunched = true; // set before starting
+                startHostSceneState(HostSceneMode::Remote);
             } else {
                 // Re-enable test scene button when stopping remote scene
                 if (m_launchTestSceneButton) m_launchTestSceneButton->setEnabled(true);
@@ -590,7 +590,7 @@ void ScreenCanvas::initInfoOverlay() {
             updateLaunchTestSceneButtonStyle();
         });
 
-        // Wire Launch Test Scene toggle behavior (UI only)
+        // Wire Launch Test Scene toggle behavior (Test mode = local only)
         connect(m_launchTestSceneButton, &QPushButton::clicked, this, [this]() {
             bool newState = !m_testSceneLaunched;
             if (newState) {
@@ -601,7 +601,7 @@ void ScreenCanvas::initInfoOverlay() {
                     }
                 }
                 if (m_launchSceneButton) m_launchSceneButton->setEnabled(false);
-                startHostSceneState();
+                startHostSceneState(HostSceneMode::Test);
             } else {
                 if (m_launchSceneButton) m_launchSceneButton->setEnabled(true);
                 stopHostSceneState();
@@ -3616,9 +3616,10 @@ void ScreenCanvas::updateLaunchTestSceneButtonStyle() {
 
 // (Removed legacy duplicate snap indicator drawing functions; SnapGuideItem now handles rendering.)
 
-void ScreenCanvas::startHostSceneState() {
+void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
     if (m_hostSceneActive) return;
     m_hostSceneActive = true;
+    m_hostSceneMode = mode;
     // Capture current selection (only ResizableMediaBase items) before clearing so we can restore later.
     m_prevSelectionBeforeHostScene.clear();
     m_prevVideoStates.clear();
@@ -3682,8 +3683,8 @@ void ScreenCanvas::startHostSceneState() {
             }
         }
     }
-    // Dispatch remote scene start (independent of UI toggle race) if a target is set
-    if (m_wsClient && !m_remoteSceneTargetClientId.isEmpty()) {
+    // Dispatch remote scene start only for Remote mode
+    if (m_hostSceneMode == HostSceneMode::Remote && m_wsClient && !m_remoteSceneTargetClientId.isEmpty()) {
         QJsonObject sceneObj = serializeSceneState();
         qDebug() << "ScreenCanvas: sending remote_scene_start to" << m_remoteSceneTargetClientId
                  << "mediaCount=" << sceneObj.value("media").toArray().size()
@@ -3695,6 +3696,8 @@ void ScreenCanvas::startHostSceneState() {
 void ScreenCanvas::stopHostSceneState() {
     if (!m_hostSceneActive) return;
     m_hostSceneActive = false;
+    HostSceneMode prevMode = m_hostSceneMode;
+    m_hostSceneMode = HostSceneMode::None;
     if (m_autoDisplayTimer) m_autoDisplayTimer->stop(); // legacy batch timers (may be null if never created)
     if (m_autoPlayTimer) m_autoPlayTimer->stop();
     // Restore visibility of media items (leave videos stopped).
@@ -3718,13 +3721,9 @@ void ScreenCanvas::stopHostSceneState() {
     }
     m_prevVideoStates.clear();
 
-    // Notify remote client to stop scene if applicable (only if we previously launched)
-    if (m_wsClient && !m_remoteSceneTargetClientId.isEmpty()) {
+    // Notify remote client to stop scene only if Remote mode was active
+    if (prevMode == HostSceneMode::Remote && m_wsClient && !m_remoteSceneTargetClientId.isEmpty()) {
         qDebug() << "ScreenCanvas: sending remote_scene_stop to" << m_remoteSceneTargetClientId;
-        m_wsClient->sendRemoteSceneStop(m_remoteSceneTargetClientId);
-    }
-    // Notify remote client scene stop if we were in remote scene mode
-    if (m_sceneLaunched && m_wsClient && !m_remoteSceneTargetClientId.isEmpty()) {
         m_wsClient->sendRemoteSceneStop(m_remoteSceneTargetClientId);
     }
 }
