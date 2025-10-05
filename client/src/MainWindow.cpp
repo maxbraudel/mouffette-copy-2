@@ -2599,9 +2599,7 @@ void MainWindow::syncRegistration() {
                     screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("dock"), geom.width()-w, 0, w, geom.height()});
             }
 #endif
-            for (const auto &z : screen.uiZones) {
-                qDebug() << "syncRegistration uiZone screen" << screen.id << z.type << z.x << z.y << z.width << z.height;
-            }
+            // uiZones prepared during syncRegistration
         }
     }
     
@@ -2613,58 +2611,22 @@ void MainWindow::syncRegistration() {
 void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
     // Update the canvas only if it matches the currently selected client
     if (!clientInfo.getId().isEmpty() && clientInfo.getId() == m_selectedClient.getId()) {
-        qDebug() << "=== SCREENS INFO RECEIVED DEBUG ===";
-        qDebug() << "Updating canvas with fresh screens for" << clientInfo.getMachineName();
-        qDebug() << "Client ID:" << clientInfo.getId();
-        qDebug() << "Platform:" << clientInfo.getPlatform();
         
         m_selectedClient = clientInfo; // keep selected client in sync
         // Update screen canvas content
         if (m_screenCanvas) {
             const QList<ScreenInfo> scrs = clientInfo.getScreens();
             
-            qDebug() << "Received" << scrs.size() << "screens:";
-            for (int i = 0; i < scrs.size(); ++i) {
-                const ScreenInfo& s = scrs[i];
-                qDebug() << "Screen" << i << "received data:";
-                qDebug() << "  - ID:" << s.id;
-                qDebug() << "  - Primary:" << s.primary;
-                qDebug() << "  - Position (x,y):" << s.x << "," << s.y;
-                qDebug() << "  - Size (w,h):" << s.width << "x" << s.height;
-                qDebug() << "  - UI Zones count:" << s.uiZones.size();
-                
-                // Check adjacency
-                if (i > 0) {
-                    const ScreenInfo& prev = scrs[i-1];
-                    int gapX = s.x - (prev.x + prev.width);
-                    int gapY = s.y - (prev.y + prev.height);
-                    qDebug() << "  - Gap with previous screen - X:" << gapX << "Y:" << gapY;
-                    qDebug() << "  - Previous screen right edge:" << (prev.x + prev.width);
-                    qDebug() << "  - This screen left edge:" << s.x;
-                }
-            }
-            
             bool anyPerScreenZones = false;
             for (const auto &s : scrs) { if (!s.uiZones.isEmpty()) { anyPerScreenZones = true; break; } }
             m_screenCanvas->setScreens(scrs);
-            if (anyPerScreenZones) {
-                qDebug() << "Per-screen uiZones received:";
-                for (const auto &s : scrs) {
-                    if (s.uiZones.isEmpty()) continue;
-                    for (const auto &z : s.uiZones) {
-                        qDebug() << " screen" << s.id << "zone" << z.type << "rel(x,y,w,h)=" << z.x << z.y << z.width << z.height;
-                    }
-                }
-            }
+            
             // First-time reveal & recenter logic (improved):
             // We no longer depend on the spinner still being visible; if this is the first batch of screens
             // for the selected client, we always ensure the canvas is revealed and (unless preserving viewport)
             // perform an initial recenter (with a deferred safety pass to handle late layout sizing).
             if (!m_canvasRevealedForCurrentClient) {
                 const bool canvasHidden = (m_canvasStack && m_canvasStack->currentIndex() == 0);
-                qDebug() << "[screensInfo] first batch for selected client. canvasHidden=" << canvasHidden
-                         << "preserveViewportOnReconnect=" << m_preserveViewportOnReconnect
-                         << "screenCount=" << scrs.size();
                 if (m_navigationManager) {
                     m_navigationManager->revealCanvas();
                 } else if (m_canvasStack) {
@@ -2674,10 +2636,9 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
                     // Arm a deferred recenter as a safety net (in case screens visually populate after first paint)
                     m_screenCanvas->requestDeferredInitialRecenter(53);
                     if (!m_preserveViewportOnReconnect) {
-                        qDebug() << "[screensInfo] performing immediate recenter";
                         m_screenCanvas->recenterWithMargin(53);
                     } else {
-                        qDebug() << "[screensInfo] skipping immediate recenter (preserving viewport)";
+                        
                     }
                     m_screenCanvas->setFocus(Qt::OtherFocusReason);
                 }
@@ -2686,7 +2647,7 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
                 m_preserveViewportOnReconnect = false;
                 m_canvasRevealedForCurrentClient = true;
             } else {
-                qDebug() << "[screensInfo] update for already revealed client; no recenter";
+                
             }
         }
 
@@ -2784,21 +2745,20 @@ void MainWindow::onDataRequestReceived() {
         else if (avail.x() > geom.x()) { int w = avail.x()-geom.x(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"dock", 0, 0, w, geom.height()}); }
         else if (avail.right() < geom.right()) { int w = geom.right()-avail.right(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"dock", geom.width()-w, 0, w, geom.height()}); }
 #endif
-        for (const auto &z : screen.uiZones) qDebug() << "snapshot uiZone screen" << screen.id << z.type << z.x << z.y << z.width << z.height;
+    // uiZones collected for snapshot
     }
     m_webSocketClient->sendStateSnapshot(screens, volumePercent);
 }
 
 QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
     QList<ScreenInfo> screens;
-    qDebug() << "=== LOCAL SCREEN INFO COLLECTION DEBUG ===";
+    
 
 #ifdef Q_OS_WIN
     // Use WinAPI to enumerate monitors in PHYSICAL pixels with correct origins (no logical gaps)
     std::vector<WinMonRect> mons; mons.reserve(8);
     EnumDisplayMonitors(nullptr, nullptr, MouffetteEnumMonProc, reinterpret_cast<LPARAM>(&mons));
     if (mons.empty()) {
-        qDebug() << "[WIN] EnumDisplayMonitors returned 0 monitors; fallback to Qt screens.";
         QList<QScreen*> screenList = QGuiApplication::screens();
         for (int i = 0; i < screenList.size(); ++i) {
             QScreen* s = screenList[i];
@@ -2809,29 +2769,24 @@ QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
         // Normalize to top-left origin to keep consistency with canvas layout (we preserve absolute in payload fields)
         LONG minX = LONG_MAX, minY = LONG_MAX;
         for (const auto& m : mons) { minX = std::min(minX, m.rc.left); minY = std::min(minY, m.rc.top); }
-        qDebug() << "[WIN] Physical monitors:" << static_cast<int>(mons.size()) << "minX/minY:" << minX << minY;
         for (size_t i = 0; i < mons.size(); ++i) {
             const auto& m = mons[i];
             const int px = m.rc.left; const int py = m.rc.top;
             const int pw = m.rc.right - m.rc.left; const int ph = m.rc.bottom - m.rc.top;
             // For ScreenInfo we keep absolute coordinates so that cursor mapping (also physical) matches exactly.
             screens.append(ScreenInfo(static_cast<int>(i), pw, ph, px, py, m.primary));
-            qDebug() << "[WIN] Mon" << static_cast<int>(i) << "abs phys rect:" << QRect(px, py, pw, ph) << "primary:" << m.primary;
         }
     }
 #else
     QList<QScreen*> screenList = QGuiApplication::screens();
-    qDebug() << "Qt reports" << screenList.size() << "screens:";
     for (int i = 0; i < screenList.size(); ++i) {
         QScreen* screen = screenList[i];
         QRect geometry = screen->geometry();
         bool isPrimary = (screen == QGuiApplication::primaryScreen());
         screens.append(ScreenInfo(i, geometry.width(), geometry.height(), geometry.x(), geometry.y(), isPrimary));
-        qDebug() << "Qt Screen" << i << "geo:" << geometry << "primary:" << isPrimary;
     }
 #endif
 
-    qDebug() << "=== END LOCAL SCREEN INFO COLLECTION ===";
     return screens;
 }
 
