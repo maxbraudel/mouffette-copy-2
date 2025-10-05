@@ -54,6 +54,7 @@ private:
 		QMediaPlayer* player = nullptr; QAudioOutput* audio = nullptr;
 		QMetaObject::Connection deferredStartConn; // one-shot start after load
 		QMetaObject::Connection primingConn; // one-shot first-frame priming when autoPlay=false
+		quint64 sceneEpoch = 0; // generation token to guard delayed actions
 	};
 
 	QWidget* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);
@@ -69,5 +70,6 @@ private:
 	bool m_enabled = true;
 	QMap<int, ScreenWindow> m_screenWindows;
 	QList<RemoteMediaItem*> m_mediaItems;
+	quint64 m_sceneEpoch = 0; // incremented on each start/stop
 };
 
