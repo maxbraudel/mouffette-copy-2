@@ -11,6 +11,7 @@
 #include <QColor>
 #include <QQueue>
 #include <QEasingCurve>
+#include "AppColors.h"
 
 class ToastNotification : public QWidget
 {
@@ -37,7 +38,9 @@ public:
     struct Style {
         QColor textColor = Qt::white;
         QColor backgroundColor = QColor(50, 50, 50, 230);
+        QColor borderColor = QColor(0, 0, 0, 80);
         int borderRadius = 8;
+        int borderWidth = 1;
         QFont font;
         
         Style() {
@@ -111,25 +114,28 @@ public:
         ToastNotification::Style loadingStyle;
         
         Config() {
-            // Success: Green theme
-            successStyle.backgroundColor = QColor(46, 125, 50, 230);
-            successStyle.textColor = Qt::white;
-            
-            // Error: Red theme
-            errorStyle.backgroundColor = QColor(211, 47, 47, 230);
-            errorStyle.textColor = Qt::white;
-            
-            // Warning: Orange theme
-            warningStyle.backgroundColor = QColor(245, 124, 0, 230);
-            warningStyle.textColor = Qt::white;
-            
-            // Info: Blue theme
-            infoStyle.backgroundColor = QColor(25, 118, 210, 230);
-            infoStyle.textColor = Qt::white;
-            
-            // Loading: Gray theme
-            loadingStyle.backgroundColor = QColor(97, 97, 97, 230);
-            loadingStyle.textColor = Qt::white;
+            // Match global network indicator styling: translucent background + colored text
+            successStyle.backgroundColor = AppColors::gStatusConnectedBg;
+            successStyle.textColor = AppColors::gStatusConnectedText;
+            successStyle.borderColor = AppColors::gStatusConnectedText;
+
+            warningStyle.backgroundColor = AppColors::gStatusWarningBg;
+            warningStyle.textColor = AppColors::gStatusWarningText;
+            warningStyle.borderColor = AppColors::gStatusWarningText;
+
+            errorStyle.backgroundColor = AppColors::gStatusErrorBg;
+            errorStyle.textColor = AppColors::gStatusErrorText;
+            errorStyle.borderColor = AppColors::gStatusErrorText;
+
+            // Info: use brand blue scheme
+            infoStyle.backgroundColor = AppColors::gBrandBlueLight;
+            infoStyle.textColor = AppColors::gBrandBlue;
+            infoStyle.borderColor = AppColors::gBrandBlue;
+
+            // Loading: align to info scheme for consistency
+            loadingStyle.backgroundColor = AppColors::gBrandBlueLight;
+            loadingStyle.textColor = AppColors::gBrandBlue;
+            loadingStyle.borderColor = AppColors::gBrandBlue;
         }
     };
 

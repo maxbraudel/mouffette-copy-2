@@ -30,13 +30,14 @@ ToastNotification::ToastNotification(const QString& text, Type type, QWidget* pa
     // Create the text label
     m_textLabel = new QLabel(text, this);
     m_textLabel->setWordWrap(true);
-    m_textLabel->setFont(m_style.font);
-    m_textLabel->setStyleSheet(QString("color: %1; background: transparent; padding: 12px 16px;")
-                               .arg(m_style.textColor.name()));
+    m_textLabel->setStyleSheet(QString(
+        "QLabel { color: %1; background: transparent; padding: 10px 14px; font-size: 13px; font-weight: bold; }"
+    ).arg(m_style.textColor.name()));
     
     // Layout
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
     layout->addWidget(m_textLabel);
     
     // Set up opacity effect
@@ -73,10 +74,12 @@ void ToastNotification::setStyle(const Style& style)
 {
     m_style = style;
     if (m_textLabel) {
-        m_textLabel->setFont(style.font);
-        m_textLabel->setStyleSheet(QString("color: %1; background: transparent; padding: 12px 16px;")
-                                   .arg(style.textColor.name()));
+        m_textLabel->setStyleSheet(QString(
+            "QLabel { color: %1; background: transparent; padding: 10px 14px; font-size: 13px; font-weight: bold; }"
+        ).arg(style.textColor.name()));
+        m_textLabel->adjustSize();
     }
+    adjustSize();
     update();
 }
 
@@ -91,14 +94,27 @@ void ToastNotification::show()
 void ToastNotification::paintEvent(QPaintEvent* event)
 {
     Q_UNUSED(event)
-    
-    QPainter painter(this);
-    painter.setRenderHint(QPainter::Antialiasing);
-    
-    // Draw rounded rectangle background
-    painter.setBrush(QBrush(m_style.backgroundColor));
-    painter.setPen(Qt::NoPen);
-    painter.drawRoundedRect(rect(), m_style.borderRadius, m_style.borderRadius);
+
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing, true);
+
+    // Inset rect by half border width for crisp stroke
+    const int bw = qMax(1, m_style.borderWidth);
+    QRectF r = rect();
+    const qreal half = bw / 2.0;
+    r.adjust(half, half, -half, -half);
+
+    // Fill background
+    p.setPen(Qt::NoPen);
+    p.setBrush(m_style.backgroundColor);
+    p.drawRoundedRect(r, m_style.borderRadius, m_style.borderRadius);
+
+    // Border
+    QPen pen(m_style.borderColor, bw);
+    pen.setCosmetic(true);
+    p.setPen(pen);
+    p.setBrush(Qt::NoBrush);
+    p.drawRoundedRect(r, m_style.borderRadius, m_style.borderRadius);
 }
 
 void ToastNotification::setupAnimation()
@@ -191,24 +207,10 @@ void ToastNotification::onFadeOutFinished()
 ToastNotification::Style ToastNotification::getDefaultStyleForType(Type type) const
 {
     Style style;
-    
-    switch (type) {
-        case Type::Success:
-            style.backgroundColor = QColor(46, 125, 50, 230);
-            break;
-        case Type::Error:
-            style.backgroundColor = QColor(211, 47, 47, 230);
-            break;
-        case Type::Warning:
-            style.backgroundColor = QColor(245, 124, 0, 230);
-            break;
-        case Type::Info:
-            style.backgroundColor = QColor(25, 118, 210, 230);
-            break;
-        case Type::Loading:
-            style.backgroundColor = QColor(97, 97, 97, 230);
-            break;
-    }
+    // Default style will be overridden by ToastNotificationSystem::Config when shown
+    // Keep a neutral translucent background and white text as a fallback
+    style.backgroundColor = QColor(0, 0, 0, 64);
+    style.textColor = Qt::white;
     
     return style;
 }
