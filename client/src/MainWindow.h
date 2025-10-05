@@ -82,7 +82,6 @@ private slots:
     void onConnectionError(const QString& error);
     void onClientListReceived(const QList<ClientInfo>& clients);
     void onRegistrationConfirmed(const ClientInfo& clientInfo);
-    void onClientSelectionChanged();
     void onClientItemClicked(QListWidgetItem* item);
     void updateConnectionStatus();
     void onEnableDisableClicked();
@@ -172,9 +171,6 @@ private:
     // Client list section
     QLabel* m_clientListLabel;
     QListWidget* m_clientListWidget;
-    
-    // Selected client info
-    QLabel* m_selectedClientLabel;
     
     // Screen view section
     QWidget* m_screenViewWidget;

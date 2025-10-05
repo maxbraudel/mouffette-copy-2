@@ -427,7 +427,6 @@ MainWindow::MainWindow(QWidget* parent)
       m_localNetworkStatusLabel(nullptr),
       m_clientListLabel(nullptr),
       m_clientListWidget(nullptr),
-      m_selectedClientLabel(nullptr),
       m_screenViewWidget(nullptr),
       m_screenViewLayout(nullptr),
       m_clientNameLabel(nullptr),
@@ -456,7 +455,6 @@ MainWindow::MainWindow(QWidget* parent)
       m_reconnectTimer(new QTimer(this)),
       m_reconnectAttempts(0),
       m_maxReconnectDelay(15000),
-      m_ignoreSelectionChange(false),
       m_uploadManager(new UploadManager(this)),
       m_watchManager(new WatchManager(this)),
       m_fileWatcher(new FileWatcher(this)),
@@ -1893,13 +1891,6 @@ void MainWindow::createClientListPage() {
     
     layout->addWidget(m_clientListWidget);
     
-    // Hidden selected client label (legacy, may be removed later)
-    m_selectedClientLabel = new QLabel();
-    m_selectedClientLabel->setStyleSheet("QLabel { background-color: #e8f4fd; padding: 10px; border-radius: 5px; }");
-    m_selectedClientLabel->setWordWrap(true);
-    m_selectedClientLabel->hide();
-    layout->addWidget(m_selectedClientLabel);
-    
     m_stackedWidget->addWidget(m_clientListPage);
 }
 
@@ -2512,31 +2503,6 @@ void MainWindow::onRegistrationConfirmed(const ClientInfo& clientInfo) {
     qDebug() << "Registration confirmed for:" << clientInfo.getMachineName();
 }
 
-void MainWindow::onClientSelectionChanged() {
-    if (m_ignoreSelectionChange) {
-        return;
-    }
-    
-    QListWidgetItem* currentItem = m_clientListWidget->currentItem();
-    
-    if (currentItem) {
-        int index = m_clientListWidget->row(currentItem);
-        if (index >= 0 && index < m_availableClients.size()) {
-            const ClientInfo& client = m_availableClients[index];
-            m_selectedClient = client;
-            
-            // Show the screen view for the selected client
-            showScreenView(client);
-            if (m_webSocketClient && m_webSocketClient->isConnected()) {
-                m_webSocketClient->requestScreens(client.getId());
-            }
-        }
-    } else {
-        m_selectedClientLabel->hide();
-    }
-}
-
-
 void MainWindow::syncRegistration() {
     QString machineName = getMachineName();
     QString platform = getPlatformName();
@@ -2958,8 +2924,6 @@ void MainWindow::updateClientList(const QList<ClientInfo>& clients) {
             m_clientListWidget->addItem(item);
         }
     }
-    
-    m_selectedClientLabel->hide();
 }
 
 void MainWindow::setUIEnabled(bool enabled) {
