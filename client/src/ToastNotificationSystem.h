@@ -101,7 +101,6 @@ public:
         int spacing = 10;
         int marginFromEdge = 20;
         int animationDuration = 300;
-        int slideDistance = 20;
         QEasingCurve::Type easingCurve = QEasingCurve::OutQuad;
         
         // Default styles for each notification type

@@ -839,11 +839,6 @@ MainWindow::MainWindow(QWidget* parent)
     // Initialize toast notification system
     m_toastSystem = new ToastNotificationSystem(this, this);
     ToastNotificationSystem::setInstance(m_toastSystem);
-    
-    // Show welcome toast after window initialization
-    QTimer::singleShot(100, this, [this]() {
-        TOAST_SUCCESS("Welcome to Mouffette! Connection system ready.", 3000);
-    });
 
     connectToServer();
 }
@@ -2401,7 +2396,7 @@ void MainWindow::onDisconnected() {
     }
     
     // Inform upload manager of connection loss to cancel any ongoing upload/finalizing state
-    TOAST_WARNING("Disconnected from server", 3000);
+    TOAST_ERROR("Disconnected from server", 3000);
     if (m_uploadManager) {
         m_uploadManager->onConnectionLost();
     }

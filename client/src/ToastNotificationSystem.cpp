@@ -1,9 +1,6 @@
 #include "ToastNotificationSystem.h"
 #include <QPainter>
 #include <QApplication>
-#include <QScreen>
-#include <QResizeEvent>
-#include <QDebug>
 
 // Static instance for singleton pattern
 ToastNotificationSystem* ToastNotificationSystem::s_instance = nullptr;
