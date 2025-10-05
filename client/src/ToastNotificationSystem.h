@@ -102,7 +102,9 @@ public:
         ToastNotification::Position position = ToastNotification::Position::BottomLeft;
         int maxVisibleToasts = 3;
         int spacing = 10;
-        int marginFromEdge = 20;
+        int marginFromEdge = 20; // generic fallback for edges not covered below
+        int marginLeft = 30;     // specific left margin for container
+        int marginBottom = 30;   // specific bottom margin for container
         int animationDuration = 300;
         QEasingCurve::Type easingCurve = QEasingCurve::OutQuad;
         

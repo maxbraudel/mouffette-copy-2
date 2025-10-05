@@ -25,11 +25,11 @@ QColor gBrandBlueDark = QColor(31, 78, 168);           // #1f4ea8
 // STATUS COLORS
 // ============================================================================
 
-QColor gStatusConnectedText = QColor(46, 125, 50);     // Green text #2E7D32
+QColor gStatusConnectedText = QColor(76, 155, 80);     // Green text #2E7D32
 QColor gStatusConnectedBg = QColor(76, 175, 80, 38);   // Green background with transparency
-QColor gStatusWarningText = QColor(251, 140, 0);       // Orange text #FB8C00
+QColor gStatusWarningText = QColor(255, 160, 0);       // Orange text #FB8C00
 QColor gStatusWarningBg = QColor(255, 152, 0, 38);     // Orange background with transparency
-QColor gStatusErrorText = QColor(229, 57, 53);         // Red text #E53935
+QColor gStatusErrorText = QColor(255, 87, 83);         // Red text #E53935
 QColor gStatusErrorBg = QColor(244, 67, 54, 38);       // Red background with transparency
 
 // ============================================================================

@@ -346,7 +346,7 @@ QPoint ToastNotificationSystem::calculateNotificationPosition(int index) const {
     switch (m_config.position) {
         case ToastNotification::Position::TopLeft:
         case ToastNotification::Position::BottomLeft:
-            x = m_config.marginFromEdge;
+            x = m_config.marginLeft; // specific left margin for left-anchored toasts
             break;
         case ToastNotification::Position::TopRight:
         case ToastNotification::Position::BottomRight:
@@ -369,7 +369,7 @@ QPoint ToastNotificationSystem::calculateNotificationPosition(int index) const {
         case ToastNotification::Position::BottomLeft:
         case ToastNotification::Position::BottomRight:
         case ToastNotification::Position::BottomCenter:
-            y = parentRect.height() - m_config.marginFromEdge - curH - prevHeightSum;
+            y = parentRect.height() - m_config.marginBottom - curH - prevHeightSum; // specific bottom margin
             break;
     }
 
