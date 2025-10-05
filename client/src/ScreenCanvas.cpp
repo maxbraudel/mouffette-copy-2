@@ -3057,8 +3057,8 @@ void ScreenCanvas::createScreenItems() {
 
 QGraphicsRectItem* ScreenCanvas::createScreenItem(const ScreenInfo& screen, int index, const QRectF& position) {
     const int penWidth = m_screenBorderWidthPx;
-    QRectF inner = position.adjusted(penWidth/2.0, penWidth/2.0, -penWidth/2.0, -penWidth/2.0);
-    QGraphicsRectItem* item = new QGraphicsRectItem(inner);
+    // Use the full position rectangle to maintain exact screen positioning without gaps
+    QGraphicsRectItem* item = new QGraphicsRectItem(position);
     if (screen.primary) { item->setBrush(QBrush(QColor(74,144,226,180))); item->setPen(QPen(QColor(74,144,226), penWidth)); }
     else { item->setBrush(QBrush(QColor(80,80,80,180))); item->setPen(QPen(QColor(160,160,160), penWidth)); }
     item->setData(0, index);
