@@ -35,6 +35,9 @@ int main(int argc, char *argv[]) {
     app.setOrganizationName("Mouffette");
     app.setOrganizationDomain("mouffette.app");
     
+    // Disable focus rectangle on all widgets (especially visible on Windows)
+    app.setStyleSheet("* { outline: none; }");
+    
     // Ensure uploads cache is empty on startup
     cleanUploadsFolder();
 
