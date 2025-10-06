@@ -22,6 +22,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QIcon>
 #include <QScrollArea>
 #include <QProgressBar>
 #include <QVariantAnimation>
@@ -37,6 +38,7 @@
 #include <QScreen>
 #include <QStyleHints>
 #include <QCursor>
+#include <QSignalBlocker>
 #include <QRandomGenerator>
 #include <QSizePolicy>
 #include <QMediaPlayer>
@@ -636,12 +638,14 @@ void ScreenCanvas::initInfoOverlay() {
         m_infoBorderRect->setVisible(false);
     }
     
-    // Create global settings panel if not already created (panel has integrated toggle button)
+    // Ensure settings toolbar + detached panel are ready
+    ensureSettingsToolbar();
     if (!m_globalSettingsPanel) {
-    m_globalSettingsPanel = new MediaSettingsPanel(viewport());
+        m_globalSettingsPanel = new MediaSettingsPanel(viewport());
         m_globalSettingsPanel->setVisible(false);
-        m_globalSettingsPanel->updatePosition(); // Initial position
+        m_globalSettingsPanel->updatePosition();
     }
+    updateSettingsToolbarGeometry();
     
     // Initial content and layout
     refreshInfoOverlay();
@@ -1547,6 +1551,7 @@ void ScreenCanvas::showEvent(QShowEvent* event) {
         m_infoBorderRect->setBrush(QBrush(AppColors::gOverlayBackgroundColor));
         QTimer::singleShot(0, [this]() { layoutInfoOverlay(); });
     }
+    QTimer::singleShot(0, this, [this]() { updateSettingsToolbarGeometry(); });
 }
 
 void ScreenCanvas::setScreens(const QList<ScreenInfo>& screens) {
@@ -2840,10 +2845,7 @@ void ScreenCanvas::resizeEvent(QResizeEvent* event) {
     relayoutAllMediaOverlays(m_scene);
     // Fast-path update: adjust overlay height cap in real-time on viewport size changes
     updateInfoOverlayGeometryForViewport();
-    // Update global settings panel position
-    if (m_globalSettingsPanel && m_globalSettingsPanel->isVisible()) {
-        m_globalSettingsPanel->updatePosition();
-    }
+    updateSettingsToolbarGeometry();
 }
 
 void ScreenCanvas::dragEnterEvent(QDragEnterEvent* event) {
@@ -3766,8 +3768,105 @@ void ScreenCanvas::handleAutoPlayback() {
     }
 }
 
+void ScreenCanvas::ensureSettingsToolbar() {
+    if (m_settingsToolbar || !viewport()) return;
+
+    m_settingsToolbar = new QWidget(viewport());
+    m_settingsToolbar->setObjectName("SettingsToolbar");
+    m_settingsToolbar->setAttribute(Qt::WA_StyledBackground, true);
+    m_settingsToolbar->setAttribute(Qt::WA_NoMousePropagation, true);
+    m_settingsToolbar->setAutoFillBackground(false);
+
+    const QString toolbarStyle = QStringLiteral(
+        "#SettingsToolbar {"
+        " background-color: %1;"
+        " border: 1px solid %2;"
+        " border-radius: %3px;"
+        " color: %4;"
+        "}"
+    ).arg(AppColors::colorToCss(AppColors::gOverlayBackgroundColor))
+     .arg(AppColors::colorToCss(AppColors::gOverlayBorderColor))
+     .arg(gOverlayCornerRadiusPx)
+     .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
+    m_settingsToolbar->setStyleSheet(toolbarStyle);
+
+    auto* layout = new QHBoxLayout(m_settingsToolbar);
+    layout->setContentsMargins(12, 8, 12, 8);
+    layout->setSpacing(8);
+
+    m_settingsToggleButton = new QPushButton(QIcon(QStringLiteral(":/icons/settings.svg")), tr("Element settings"), m_settingsToolbar);
+    m_settingsToggleButton->setCheckable(true);
+    m_settingsToggleButton->setEnabled(false);
+    m_settingsToggleButton->setCursor(Qt::PointingHandCursor);
+    m_settingsToggleButton->setIconSize(QSize(18, 18));
+    m_settingsToggleButton->setToolTip(tr("Select a media item to edit settings"));
+
+    const QString textColor = AppColors::colorToCss(AppColors::gOverlayTextColor);
+    const QString hoverColor = QStringLiteral("rgba(255,255,255,0.08)");
+    const QString checkedBg = AppColors::colorToCss(AppColors::gBrandBlue);
+    const QString checkedHoverBg = AppColors::colorToCss(AppColors::gBrandBlueDark);
+
+    m_settingsToggleButton->setStyleSheet(QStringLiteral(
+        "QPushButton {"
+        " color: %1;"
+        " background-color: transparent;"
+        " border: none;"
+        " border-radius: 6px;"
+        " padding: 6px 12px;"
+        " font-size: 13px;"
+        " font-weight: 500;"
+        " text-align: left;"
+        "}"
+        "QPushButton:hover:!disabled:!checked { background-color: %2; }"
+        "QPushButton:checked { background-color: %3; color: white; }"
+        "QPushButton:checked:hover { background-color: %4; }"
+        "QPushButton:disabled { color: rgba(255,255,255,0.35); }"
+    ).arg(textColor, hoverColor, checkedBg, checkedHoverBg));
+
+    layout->addWidget(m_settingsToggleButton);
+    layout->addStretch(1);
+
+    connect(m_settingsToggleButton, &QPushButton::toggled, this, [this](bool checked) {
+        m_settingsPanelPreferredVisible = checked;
+        updateGlobalSettingsPanelVisibility();
+    });
+
+    m_settingsToolbar->show();
+}
+
+void ScreenCanvas::updateSettingsToolbarGeometry() {
+    if (!viewport()) return;
+    ensureSettingsToolbar();
+    if (!m_settingsToolbar) return;
+
+    m_settingsToolbar->adjustSize();
+    const int margin = 16;
+    const int spacing = 10;
+    const int maxWidth = std::max(0, viewport()->width() - 2 * margin);
+    const QSize hint = m_settingsToolbar->sizeHint();
+    const int width = std::min(hint.width(), maxWidth);
+    const int height = hint.height();
+
+    m_settingsToolbar->resize(width, height);
+    m_settingsToolbar->move(margin, margin);
+    m_settingsToolbar->show();
+
+    if (m_globalSettingsPanel) {
+        const int panelTop = margin + height + spacing;
+        const int bottomMargin = margin;
+        m_globalSettingsPanel->setAnchorMargins(margin, panelTop, bottomMargin);
+        const int available = viewport()->height() - panelTop - bottomMargin;
+        m_globalSettingsPanel->updateAvailableHeight(available);
+        if (m_globalSettingsPanel->isVisible()) {
+            m_globalSettingsPanel->updatePosition();
+        }
+    }
+}
+
 void ScreenCanvas::updateGlobalSettingsPanelVisibility() {
     if (!m_globalSettingsPanel) return;
+    ensureSettingsToolbar();
+    updateSettingsToolbarGeometry();
     
     // Find currently selected media item
     ResizableMediaBase* selectedMedia = nullptr;
@@ -3782,13 +3881,36 @@ void ScreenCanvas::updateGlobalSettingsPanelVisibility() {
         }
     }
     
-    if (selectedMedia) {
-        m_globalSettingsPanel->setMediaType(selectedMedia->isVideoMedia());
-        m_globalSettingsPanel->setMediaItem(selectedMedia);
-        m_globalSettingsPanel->setVisible(true);
-        m_globalSettingsPanel->updatePosition();
-    } else {
+    if (!selectedMedia) {
+        if (m_settingsToggleButton) {
+            QSignalBlocker blocker(m_settingsToggleButton);
+            m_settingsToggleButton->setChecked(false);
+            m_settingsToggleButton->setEnabled(false);
+            m_settingsToggleButton->setToolTip(tr("Select a media item to edit settings"));
+        }
         m_globalSettingsPanel->setMediaItem(nullptr);
         m_globalSettingsPanel->setVisible(false);
+        return;
+    }
+
+    m_globalSettingsPanel->setMediaType(selectedMedia->isVideoMedia());
+    m_globalSettingsPanel->setMediaItem(selectedMedia);
+
+    if (m_settingsToggleButton) {
+        if (!m_settingsToggleButton->isEnabled()) {
+            m_settingsToggleButton->setEnabled(true);
+        }
+        const QString tooltip = tr("Edit settings for \"%1\"").arg(selectedMedia->displayName());
+        m_settingsToggleButton->setToolTip(tooltip);
+        if (m_settingsToggleButton->isChecked() != m_settingsPanelPreferredVisible) {
+            QSignalBlocker blocker(m_settingsToggleButton);
+            m_settingsToggleButton->setChecked(m_settingsPanelPreferredVisible);
+        }
+    }
+
+    const bool shouldShowPanel = !m_settingsToggleButton || m_settingsToggleButton->isChecked();
+    m_globalSettingsPanel->setVisible(shouldShowPanel);
+    if (shouldShowPanel) {
+        m_globalSettingsPanel->updatePosition();
     }
 }

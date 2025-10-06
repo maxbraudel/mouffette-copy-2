@@ -6,15 +6,11 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QCheckBox>
-#include <QPushButton>
 #include <QCoreApplication>
 #include <QKeyEvent>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QTimer>
-#include <QCursor>
-#include <QStyle>
-#include <QIcon>
 #include <algorithm>
 #include <cmath>
 #include "MediaItems.h" // for ResizableMediaBase
@@ -62,69 +58,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     m_rootLayout->setSpacing(0);
     m_rootLayout->setSizeConstraint(QLayout::SetNoConstraint);
 
-    // Create header with toggle button (similar to media list overlay structure)
-    m_headerWidget = new QWidget(m_widget);
-    m_headerLayout = new QVBoxLayout(m_headerWidget);
-    m_headerLayout->setContentsMargins(1, 0, 1, 0);
-    m_headerLayout->setSpacing(0);
-
-    // Toggle button
-    m_toggleButton = new QPushButton(QString(), m_headerWidget);
-    m_toggleButton->setCheckable(true);
-    m_toggleButton->setAccessibleName(QStringLiteral("Show settings"));
-    m_toggleButton->installEventFilter(this);
-    m_toggleButton->setContentsMargins(0, 0, 0, 0);
-    m_settingsIcon = QIcon(QStringLiteral(":/icons/icons/settings.svg"));
-    m_toggleButton->setIcon(m_settingsIcon);
-    const QString buttonStyle = QString(
-        "QPushButton { "
-        "    padding: 0px; "
-        "    font-weight: bold; "
-        "    font-size: 12px; "
-        "    color: %1; "
-        "    background-color: transparent; "
-        "    border: none; "
-        "    border-bottom: 1px solid transparent; "
-        "    border-radius: %3px; "
-        "} "
-        "QPushButton:disabled { "
-        "    background-color: transparent; "
-        "    color: %1; "
-        "    border-bottom-color: transparent; "
-        "    border-radius: %3px; "
-        "} "
-        "QPushButton:pressed:enabled { "
-        "    color: white; "
-        "    background-color: rgba(255,255,255,0.1); "
-        "    border-bottom-color: transparent; "
-        "} "
-        "QPushButton:checked { "
-        "    color: white; "
-        "    background-color: transparent; "
-        "    border-bottom-color: %2; "
-        "    border-top-left-radius: %3px; "
-        "    border-top-right-radius: %3px; "
-        "    border-bottom-left-radius: 0px; "
-        "    border-bottom-right-radius: 0px; "
-        "} "
-        "QPushButton:checked:pressed { "
-        "    color: white; "
-        "    background-color: rgba(255,255,255,0.1); "
-        "    border-bottom-color: %2; "
-        "} "
-        "QPushButton:checked:disabled { "
-        "    border-bottom-color: transparent; "
-        "}"
-    ).arg(overlayTextCss).arg(overlayBorderCss).arg(gOverlayCornerRadiusPx);
-    m_toggleButton->setStyleSheet(buttonStyle);
-    connect(m_toggleButton, &QPushButton::clicked, this, [this]() {
-        setExpanded(m_toggleButton->isChecked());
-    });
-    m_headerLayout->addWidget(m_toggleButton);
-
-    m_rootLayout->addWidget(m_headerWidget);
-
-    // Container that holds the scrollable content below the button header
+    // Container that holds the scrollable content
     m_scrollContainer = new QWidget(m_widget);
     m_scrollContainer->setObjectName("MediaSettingsScrollContainer");
     m_scrollContainer->setAttribute(Qt::WA_StyledBackground, true);
@@ -159,8 +93,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     );
     scrollContainerLayout->addWidget(m_scrollArea);
     m_rootLayout->addWidget(m_scrollContainer);
-    // Start collapsed (scroll container hidden)
-    m_scrollContainer->setVisible(false);
+    m_scrollContainer->setVisible(true);
 
     // Inner content widget inside scroll area (with margins like before)
     m_innerContent = new QWidget(m_scrollArea);
@@ -350,8 +283,9 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         QObject::connect(m_opacityCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onOpacityToggled);
         m_contentLayout->addWidget(row);
     }
-    // Widget is now directly parented to viewport, no proxy needed
+    // Widget is now directly parented to toolbar container, no proxy needed
     m_widget->setMouseTracking(true);
+    m_widget->setFixedWidth(m_panelWidthPx);
     
     // Install event filter on the main widget and inner content to catch clicks/wheel
     m_widget->installEventFilter(this);
@@ -424,19 +358,12 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         // Set initial state (play delay disabled by default since play automatically is unchecked)
         onPlayAutomaticallyToggled(m_autoPlayCheck->isChecked());
     }
-    refreshToggleMetrics();
-    updatePanelChrome();
     updatePosition();
 }
 
 void MediaSettingsPanel::setVisible(bool visible) {
     if (!m_widget) return;
     m_widget->setVisible(visible);
-    if (m_toggleButton && visible) {
-        updatePanelChrome();
-        updatePosition();
-    }
-    
     // Clear active box when hiding the panel
     if (!visible) {
         clearActiveBox();
@@ -485,29 +412,29 @@ void MediaSettingsPanel::updatePosition() {
     QWidget* viewport = m_widget->parentWidget();
     if (!viewport) return;
     
-    const int margin = 16;
-    
-    // Position at left edge of viewport with margin
-    m_widget->move(margin, margin);
-    
-    // Clamp panel height to viewport height; enable overflow scroll when needed
-    int maxHeight = viewport->height() - 2*margin;
-    maxHeight = qMax(50, maxHeight); // safety
-    
-    // Calculate total height: header + content (if expanded)
-    int headerH = m_headerWidget ? m_headerWidget->sizeHint().height() : 0;
-    int contentH = 0;
-    if (m_scrollArea && m_scrollArea->isVisible() && m_innerContent) {
-        contentH = m_innerContent->sizeHint().height();
+    const int viewportHeight = viewport->height();
+    const int availableHeight = std::max(50, viewportHeight - m_anchorTopMargin - m_anchorBottomMargin);
+
+    updateAvailableHeight(availableHeight);
+
+    m_widget->adjustSize();
+    const int desiredHeight = m_widget->sizeHint().height();
+    const int boundedHeight = std::min(availableHeight, desiredHeight);
+    const QSize newSize(m_panelWidthPx, boundedHeight);
+    if (m_widget->size() != newSize) {
+        m_widget->resize(newSize);
     }
-    
-    int totalH = headerH + contentH;
-    int panelH = qMin(maxHeight, totalH);
-    
-    // Set widget size
-    m_widget->setFixedHeight(panelH);
-    
+
+    m_widget->move(m_anchorLeftMargin, m_anchorTopMargin);
+
     updateScrollbarGeometry();
+}
+
+void MediaSettingsPanel::setAnchorMargins(int left, int top, int bottom) {
+    m_anchorLeftMargin = std::max(0, left);
+    m_anchorTopMargin = std::max(0, top);
+    m_anchorBottomMargin = std::max(0, bottom);
+    updatePosition();
 }
 
 void MediaSettingsPanel::setBoxActive(QLabel* box, bool active) {
@@ -558,50 +485,23 @@ void MediaSettingsPanel::clearActiveBox() {
 }
 
 bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
-    if (obj == m_toggleButton && m_toggleButton && m_toggleButton->isEnabled()) {
-        if (event->type() == QEvent::Enter) {
-            m_toggleButton->setStyleSheet(m_toggleButton->styleSheet() + 
-                " QPushButton:!pressed { background-color: rgba(255,255,255,0.05) !important; }");
-            m_toggleButton->update();
-        } else if (event->type() == QEvent::Leave) {
-            QString style = m_toggleButton->styleSheet();
-            style.remove(" QPushButton:!pressed { background-color: rgba(255,255,255,0.05) !important; }");
-            m_toggleButton->setStyleSheet(style);
-            m_toggleButton->update();
-        } else if (event->type() == QEvent::MouseButtonRelease) {
-            // After button is clicked and released, check if cursor is still over button
-            QTimer::singleShot(10, this, [this]() {
-                if (!m_toggleButton) return;
-                const QPoint globalPos = QCursor::pos();
-                const QPoint localPos = m_toggleButton->mapFromGlobal(globalPos);
-                const bool stillHovered = m_toggleButton->rect().contains(localPos);
-                QString style = m_toggleButton->styleSheet();
-                style.remove(" QPushButton:!pressed { background-color: rgba(255,255,255,0.05) !important; }");
-                if (stillHovered) {
-                    style += " QPushButton:!pressed { background-color: rgba(255,255,255,0.05) !important; }";
-                }
-                m_toggleButton->setStyleSheet(style);
-                m_toggleButton->update();
-            });
-        }
+    if ((obj == m_scrollContainer || obj == m_widget) && event->type() == QEvent::Resize) {
+        updateScrollbarGeometry();
     }
+
+    const bool withinPanelHierarchy = m_widget && obj && obj->isWidgetType() &&
+        (obj == m_widget || m_widget->isAncestorOf(static_cast<QWidget*>(obj)));
 
     // Block all mouse interactions from reaching canvas when over settings panel
     if (event->type() == QEvent::MouseButtonPress ||
         event->type() == QEvent::MouseButtonRelease ||
         event->type() == QEvent::MouseMove ||
         event->type() == QEvent::MouseButtonDblClick) {
-        // Accept and consume these events to prevent canvas panning/interaction
-        if (obj == m_widget || obj == m_innerContent || obj == m_scrollArea || obj == m_scrollContainer ||
-            (obj->isWidgetType() && static_cast<QWidget*>(obj)->isAncestorOf(m_widget))) {
-            // If this is a mouse press on a non-value-box blank area, clear any active box selection.
+        if (withinPanelHierarchy || obj == m_scrollArea || obj == m_scrollContainer) {
             if (event->type() == QEvent::MouseButtonPress) {
-                // We only want to clear if the object clicked is exactly one of the container surfaces
-                // (value boxes and checkboxes are handled later in the dedicated branch below).
                 clearActiveBox();
             }
-            // Let normal widget handling occur but prevent propagation to canvas
-            return false; // Allow widget to handle, WA_NoMousePropagation blocks further propagation
+            return false; // Allow widget to process; WA_NoMousePropagation stops propagation
         }
     }
     
@@ -698,7 +598,7 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
     // Consume wheel events over the settings panel so canvas doesn't zoom/scroll
     else if (event->type() == QEvent::Wheel) {
         // Only handle if event is within our widget tree
-        if (obj == m_widget || (m_innerContent && obj->isWidgetType())) {
+        if (withinPanelHierarchy || obj == m_scrollContainer || obj == m_scrollArea) {
             // Route to scroll area
             if (m_scrollArea) {
                 QCoreApplication::sendEvent(m_scrollArea->viewport(), event);
@@ -859,50 +759,6 @@ void MediaSettingsPanel::updateScrollbarGeometry() {
     }
 }
 
-void MediaSettingsPanel::refreshToggleMetrics() {
-    int overlaySize = ResizableMediaBase::getHeightOfMediaOverlaysPx();
-    if (overlaySize <= 0) overlaySize = 36;
-    m_collapsedButtonSizePx = overlaySize;
-    int calculatedIcon = static_cast<int>(std::lround(m_collapsedButtonSizePx * 0.6));
-    calculatedIcon = std::clamp(calculatedIcon, 16, m_collapsedButtonSizePx);
-    m_toggleIconSizePx = calculatedIcon;
-    if (m_toggleButton && !m_toggleButton->icon().isNull()) {
-        m_toggleButton->setIconSize(QSize(m_toggleIconSizePx, m_toggleIconSizePx));
-    }
-}
-
-void MediaSettingsPanel::updatePanelChrome() {
-    if (!m_widget || !m_toggleButton) return;
-    refreshToggleMetrics();
-    const bool expanded = m_isExpanded;
-    const int buttonSize = m_collapsedButtonSizePx;
-    int marginW = 0;
-    int marginH = 0;
-    if (m_headerLayout) {
-        const QMargins margins = m_headerLayout->contentsMargins();
-        marginW = margins.left() + margins.right();
-        marginH = margins.top() + margins.bottom();
-    }
-
-    if (expanded) {
-        const int buttonWidth = std::max(buttonSize, m_expandedWidthPx - marginW);
-        m_toggleButton->setFixedSize(buttonWidth, buttonSize);
-        m_toggleButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-        m_widget->setFixedWidth(m_expandedWidthPx);
-        m_widget->setMinimumHeight(buttonSize + marginH);
-        m_widget->setMaximumHeight(QWIDGETSIZE_MAX);
-    } else {
-        m_toggleButton->setFixedSize(buttonSize, buttonSize);
-        m_toggleButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-        const int widgetWidth = buttonSize + marginW;
-        const int widgetHeight = buttonSize + marginH;
-        m_widget->setFixedSize(widgetWidth, widgetHeight);
-    }
-
-    m_widget->adjustSize();
-    m_widget->updateGeometry();
-}
-
 void MediaSettingsPanel::onDisplayAutomaticallyToggled(bool checked) {
     // Enable/disable display delay checkbox and input box based on display automatically state
     const QString activeTextStyle = QStringLiteral("color: %1;")
@@ -1025,45 +881,32 @@ void MediaSettingsPanel::onPlayAutomaticallyToggled(bool checked) {
     }
 }
 
-void MediaSettingsPanel::setExpanded(bool expanded) {
-    m_isExpanded = expanded;
-    
-    // Update button text
-    if (m_toggleButton) {
-        m_toggleButton->setChecked(expanded);
-        if (expanded) {
-            m_toggleButton->setIcon(QIcon());
-            m_toggleButton->setText(QStringLiteral("Hide Settings"));
-            m_toggleButton->setContentsMargins(12, 0, 12, 0);
-        } else {
-            m_toggleButton->setText(QString());
-            m_toggleButton->setIcon(m_settingsIcon);
-            m_toggleButton->setContentsMargins(0, 0, 0, 0);
+void MediaSettingsPanel::updateAvailableHeight(int maxHeightPx) {
+    if (!m_widget) return;
+    if (maxHeightPx <= 0) {
+        m_widget->setMaximumHeight(QWIDGETSIZE_MAX);
+        if (m_scrollArea) {
+            m_scrollArea->setMaximumHeight(QWIDGETSIZE_MAX);
+            m_scrollArea->setMinimumHeight(0);
         }
-        const QString accessibleText = expanded ? QStringLiteral("Hide settings") : QStringLiteral("Show settings");
-        m_toggleButton->setAccessibleName(accessibleText);
+        updateScrollbarGeometry();
+        return;
     }
-    updatePanelChrome();
 
-    // Show/hide the scroll area with options
-    if (m_scrollContainer) {
-        m_scrollContainer->setVisible(expanded);
-    }
+    const int clamped = std::max(50, maxHeightPx);
+    m_widget->setMaximumHeight(clamped);
+    m_widget->setMinimumHeight(0);
+
     if (m_scrollArea) {
-        m_scrollArea->setVisible(expanded);
+        m_scrollArea->setMaximumHeight(clamped);
+        m_scrollArea->setMinimumHeight(0);
     }
-    if (!expanded && m_overlayVScroll) {
-        m_overlayVScroll->hide();
+
+    m_widget->updateGeometry();
+    if (m_scrollArea) {
+        m_scrollArea->updateGeometry();
     }
-    
-    // Update widget geometry to fit new size
-    if (m_widget) {
-        m_widget->adjustSize();
-        m_widget->updateGeometry();
-    }
-    
-    // Recalculate panel height and position after expand/collapse
-    updatePosition();
+    updateScrollbarGeometry();
 }
 
 void MediaSettingsPanel::setMediaItem(ResizableMediaBase* item) {

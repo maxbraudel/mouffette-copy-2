@@ -35,14 +35,9 @@ public:
     int displayDelayMillis() const; // 0 if disabled or invalid
     bool playAutomaticallyEnabled() const; // video only, safe if not video
     int playDelayMillis() const; // 0 if disabled or invalid
-
-    // Update absolute position (left-docked with margin).
-    // Call whenever viewport resize occurs.
+    void updateAvailableHeight(int maxHeightPx);
     void updatePosition();
-
-    // Expand or collapse the settings content (show/hide options)
-    void setExpanded(bool expanded);
-    bool isExpanded() const { return m_isExpanded; }
+    void setAnchorMargins(int leftMarginPx, int topMarginPx, int bottomMarginPx);
 
     // Optional: accessors to later read values (not used yet).
     QWidget* widget() const { return m_widget; }
@@ -61,24 +56,13 @@ private:
     void clearActiveBox();
     bool isValidInputForBox(QLabel* box, QChar character);
     void updateScrollbarGeometry();
-    void refreshToggleMetrics();
-    void updatePanelChrome();
     void pullSettingsFromMedia();
     void pushSettingsToMedia();
 
 private:
     QWidget* m_widget = nullptr; // parented to viewport
-    // Root layout (wraps header and scroll area)
     QVBoxLayout* m_rootLayout = nullptr;
-    // Header with toggle button
-    QWidget* m_headerWidget = nullptr;
-    QVBoxLayout* m_headerLayout = nullptr;
-    class QPushButton* m_toggleButton = nullptr;
-    bool m_isExpanded = false;
-    int m_collapsedButtonSizePx = 36;
-    int m_toggleIconSizePx = 20;
-    const int m_expandedWidthPx = 221;
-    QIcon m_settingsIcon;
+    const int m_panelWidthPx = 221;
     // Scrollable content
     QScrollArea* m_scrollArea = nullptr;
     QWidget* m_scrollContainer = nullptr;
@@ -86,6 +70,9 @@ private:
     QVBoxLayout* m_contentLayout = nullptr;
     QLabel* m_title = nullptr;
     QLabel* m_elementPropertiesTitle = nullptr;
+    int m_anchorLeftMargin = 16;
+    int m_anchorTopMargin = 16;
+    int m_anchorBottomMargin = 16;
 
     QCheckBox* m_autoPlayCheck = nullptr;
     QCheckBox* m_playDelayCheck = nullptr; // New: separate play delay checkbox
