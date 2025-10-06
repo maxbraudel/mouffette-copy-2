@@ -832,9 +832,9 @@ void ResizableMediaBase::initializeOverlays() {
         visibilityBtn->setOnClicked([this, btnRef=visibilityBtn]() {
             if (!btnRef) return;
             const bool currentlyVisible = (btnRef->state() == OverlayElement::Toggled);
-            // TODO: Fade parameters should be stored per-media, not accessed from global panel
-            double fadeInSeconds = 0.0;
-            double fadeOutSeconds = 0.0;
+            // Retrieve fade parameters from per-media settings
+            const double fadeInSeconds = fadeInDurationSeconds();
+            const double fadeOutSeconds = fadeOutDurationSeconds();
             // Always cancel any in-flight fade before starting a new transition or applying an instant change
             cancelFade();
             if (currentlyVisible) {

@@ -25,6 +25,7 @@ class QAudioOutput;
 class QVariantAnimation;
 class QResizeEvent;
 class QPushButton;
+class QToolButton;
 class QScrollArea;
 class QScrollBar;
 
@@ -273,7 +274,7 @@ private:
     QTimer* m_scrollbarHideTimer = nullptr; // timer to auto-hide scrollbar after inactivity
     QVBoxLayout* m_contentLayout = nullptr; // content layout (for media items)
     QWidget* m_overlayHeaderWidget = nullptr; // container for overlay header row (holds upload button)
-    QPushButton* m_settingsToggleButton = nullptr; // toggle to show/hide media settings panel
+    QToolButton* m_settingsToggleButton = nullptr; // toggle to show/hide media settings panel
     bool m_settingsPanelPreferredVisible = false;
     class MediaSettingsPanel* m_globalSettingsPanel = nullptr; // global settings panel driven by toolbar toggle
     QPushButton* m_launchSceneButton = nullptr; // new Launch Remote Scene toggle button
