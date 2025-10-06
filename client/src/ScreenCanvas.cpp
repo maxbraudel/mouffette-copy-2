@@ -3776,7 +3776,6 @@ void ScreenCanvas::ensureSettingsToggleButton() {
     m_settingsToggleButton->setObjectName("SettingsToggleButton");
     m_settingsToggleButton->setCheckable(true);
     m_settingsToggleButton->setEnabled(false);
-    m_settingsToggleButton->setCursor(Qt::PointingHandCursor);
     m_settingsToggleButton->setToolTip(tr("Select a media item to edit settings"));
     m_settingsToggleButton->setAttribute(Qt::WA_NoMousePropagation, true);
     m_settingsToggleButton->setFocusPolicy(Qt::NoFocus);
@@ -3825,6 +3824,9 @@ void ScreenCanvas::updateSettingsToggleButtonGeometry() {
     int buttonSize = ResizableMediaBase::getHeightOfMediaOverlaysPx();
     if (buttonSize <= 0) buttonSize = 36;
     buttonSize = std::max(buttonSize, 24);
+    // Overlay buttons paint a 1px stroke that straddles the rect bounds; compensate so the
+    // visible outer size matches the graphics overlay squares.
+    buttonSize += 2;
 
     int iconSize = static_cast<int>(std::round(buttonSize * 0.6));
     const int maxIcon = std::max(16, buttonSize - 4);
