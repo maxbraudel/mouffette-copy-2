@@ -30,6 +30,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     m_widget->setAttribute(Qt::WA_NoMousePropagation, true);
     // Apply the same background, border, and typography styling as the media list overlay
     const QString overlayTextCss = AppColors::colorToCss(AppColors::gOverlayTextColor);
+    const QString overlayBorderCss = AppColors::colorToCss(AppColors::gOverlayBorderColor);
     const QString overlayTextStyle = QStringLiteral("color: %1;").arg(overlayTextCss);
     const QString widgetStyle = QStringLiteral(
         "#MediaSettingsPanelWidget {"
@@ -44,7 +45,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         "}"
     )
     .arg(AppColors::colorToCss(AppColors::gOverlayBackgroundColor))
-    .arg(AppColors::colorToCss(AppColors::gOverlayBorderColor))
+    .arg(overlayBorderCss)
     .arg(gOverlayCornerRadiusPx)
     .arg(overlayTextCss);
     m_widget->setStyleSheet(widgetStyle);
@@ -62,55 +63,82 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     // Create header with toggle button (similar to media list overlay structure)
     m_headerWidget = new QWidget(m_widget);
     auto* headerLayout = new QVBoxLayout(m_headerWidget);
-    headerLayout->setContentsMargins(0, 0, 0, 0);
+    headerLayout->setContentsMargins(1, 0, 1, 0);
     headerLayout->setSpacing(0);
-
-    // Top separator
-    auto* topSep = new QLabel(m_headerWidget);
-    topSep->setStyleSheet(QString("QLabel { background-color: %1; border: none; }")
-        .arg(AppColors::colorToCss(AppColors::gOverlayBorderColor)));
-    topSep->setAutoFillBackground(true);
-    topSep->setFixedHeight(1);
-    topSep->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    headerLayout->addWidget(topSep);
 
     // Toggle button
     m_toggleButton = new QPushButton("Show Settings", m_headerWidget);
     m_toggleButton->setCheckable(true);
-    m_toggleButton->setStyleSheet(
+    const QString buttonStyle = QString(
         "QPushButton { "
         "    padding: 8px 0px; "
         "    font-weight: bold; "
         "    font-size: 12px; "
-        "    color: " + AppColors::colorToCss(AppColors::gOverlayTextColor) + "; "
-        "    background: transparent; "
+        "    color: %1; "
+        "    background-color: transparent; "
         "    border: none; "
-        "    border-radius: 0px; "
+        "    border-radius: %3px; "
         "} "
-        "QPushButton:hover { "
-        "    color: white; "
-        "    background: rgba(255,255,255,0.05); "
+        "QPushButton:disabled { "
+        "    background-color: transparent; "
+        "    color: %1; "
+        "    border-bottom: none; "
+        "    border-radius: %3px; "
         "} "
-        "QPushButton:pressed, QPushButton:checked { "
+        "QPushButton:disabled:hover { "
+        "    background-color: transparent; "
+        "    color: %1; "
+        "    border-bottom: none; "
+        "    border-radius: %3px; "
+        "} "
+        "QPushButton:hover:enabled { "
         "    color: white; "
-        "    background: rgba(255,255,255,0.1); "
-        "}"
-    );
+        "    background-color: rgba(255,255,255,0.05); "
+        "    border-radius: %3px; "
+        "} "
+        "QPushButton:pressed:enabled { "
+        "    color: white; "
+        "    background-color: rgba(255,255,255,0.1); "
+        "    border-radius: %3px; "
+        "} "
+        "QPushButton:checked { "
+        "    color: white; "
+        "    background-color: transparent; "
+    "    border-bottom: 1px solid %2; "
+    "    border-top-left-radius: %3px; "
+    "    border-top-right-radius: %3px; "
+        "    border-bottom-left-radius: 0px; "
+        "    border-bottom-right-radius: 0px; "
+        "} "
+        "QPushButton:checked:hover { "
+        "    color: white; "
+        "    background-color: rgba(255,255,255,0.05); "
+    "    border-bottom: 1px solid %2; "
+    "    border-top-left-radius: %3px; "
+    "    border-top-right-radius: %3px; "
+        "    border-bottom-left-radius: 0px; "
+        "    border-bottom-right-radius: 0px; "
+        "} "
+        "QPushButton:checked:pressed { "
+        "    color: white; "
+        "    background-color: rgba(255,255,255,0.1); "
+    "    border-bottom: 1px solid %2; "
+    "    border-top-left-radius: %3px; "
+    "    border-top-right-radius: %3px; "
+        "    border-bottom-left-radius: 0px; "
+        "    border-bottom-right-radius: 0px; "
+    "} "
+    "QPushButton:checked:disabled { "
+    "    border-bottom: none; "
+    "}"
+    ).arg(overlayTextCss).arg(overlayBorderCss).arg(gOverlayCornerRadiusPx);
+    m_toggleButton->setStyleSheet(buttonStyle);
     m_toggleButton->setFixedHeight(40);
     m_toggleButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     connect(m_toggleButton, &QPushButton::clicked, this, [this]() {
         setExpanded(m_toggleButton->isChecked());
     });
     headerLayout->addWidget(m_toggleButton);
-
-    // Bottom separator
-    auto* bottomSep = new QLabel(m_headerWidget);
-    bottomSep->setStyleSheet(QString("QLabel { background-color: %1; border: none; }")
-        .arg(AppColors::colorToCss(AppColors::gOverlayBorderColor)));
-    bottomSep->setAutoFillBackground(true);
-    bottomSep->setFixedHeight(1);
-    bottomSep->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    headerLayout->addWidget(bottomSep);
 
     m_rootLayout->addWidget(m_headerWidget);
 
@@ -881,7 +909,7 @@ void MediaSettingsPanel::setExpanded(bool expanded) {
         m_toggleButton->setText(expanded ? "Hide Settings" : "Show Settings");
         m_toggleButton->setChecked(expanded);
     }
-    
+
     // Show/hide the scroll area with options
     if (m_scrollArea) {
         m_scrollArea->setVisible(expanded);
