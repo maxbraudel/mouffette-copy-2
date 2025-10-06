@@ -8,6 +8,7 @@
 #include <QtSvgWidgets/QGraphicsSvgItem>
 #include <QPixmap>
 #include <QImage>
+#include <QString>
 #include <QVideoFrame>
 #include <QVideoSink>
 #include <QMediaPlayer>
@@ -34,6 +35,23 @@ class MediaSettingsPanel;
 // Base resizable media item (image/video) providing selection chrome, resize handles, and overlay panels.
 class ResizableMediaBase : public QGraphicsItem {
 public:
+    struct MediaSettingsState {
+        bool displayAutomatically = false;
+        bool displayDelayEnabled = false;
+        QString displayDelayText = QStringLiteral("1");
+        bool playAutomatically = false;
+        bool playDelayEnabled = false;
+        QString playDelayText = QStringLiteral("1");
+        bool repeatEnabled = false;
+        QString repeatCountText = QStringLiteral("1");
+        bool fadeInEnabled = false;
+        QString fadeInText = QStringLiteral("1");
+        bool fadeOutEnabled = false;
+        QString fadeOutText = QStringLiteral("1");
+        bool opacityOverrideEnabled = false;
+        QString opacityText = QStringLiteral("100");
+    };
+
     enum class UploadState { NotUploaded, Uploading, Uploaded };
     // Resize handles (now public so external helpers like ScreenCanvas can reference them)
     enum Handle { None, TopLeft, TopRight, BottomLeft, BottomRight, LeftMid, RightMid, TopMid, BottomMid };
@@ -121,6 +139,17 @@ public:
     void fadeContentIn(double seconds);
     void fadeContentOut(double seconds);
     void cancelFade();
+
+    const MediaSettingsState& mediaSettingsState() const { return m_mediaSettings; }
+    void setMediaSettingsState(const MediaSettingsState& state);
+    bool autoDisplayEnabled() const;
+    int autoDisplayDelayMs() const;
+    bool autoPlayEnabled() const;
+    int autoPlayDelayMs() const;
+    double fadeInDurationSeconds() const;
+    double fadeOutDurationSeconds() const;
+    bool opacityOverrideEnabled() const;
+    int opacityPercent() const;
 
     // Axis snap hysteresis state accessors (used by ScreenCanvas helper)
     bool isAxisSnapActive() const { return m_axisSnapActive; }
@@ -211,6 +240,7 @@ protected:
     bool m_axisSnapActive = false;
     Handle m_axisSnapHandle = None;
     qreal m_axisSnapTargetScale = 1.0;
+    MediaSettingsState m_mediaSettings;
 };
 
 // Simple pixmap media item

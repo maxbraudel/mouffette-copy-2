@@ -219,6 +219,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_displayDelayCheck = new QCheckBox("Display delay: ", delayRow);
         m_displayDelayCheck->setStyleSheet(overlayTextStyle);
         m_displayDelayCheck->installEventFilter(this);
+    connect(m_displayDelayCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
         m_displayAfterBox = makeValueBox();
         m_displayAfterSecondsLabel = new QLabel("s", delayRow);
         m_displayAfterSecondsLabel->setStyleSheet(overlayTextStyle);
@@ -252,6 +253,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_playDelayCheck = new QCheckBox("Play delay: ", m_playDelayRow);
         m_playDelayCheck->setStyleSheet(overlayTextStyle);
         m_playDelayCheck->installEventFilter(this);
+    connect(m_playDelayCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
         m_autoPlayBox = makeValueBox();
         m_autoPlaySecondsLabel = new QLabel("s", m_playDelayRow);
         m_autoPlaySecondsLabel->setStyleSheet(overlayTextStyle);
@@ -271,6 +273,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_repeatCheck = new QCheckBox("Repeat ", m_repeatRow);
         m_repeatCheck->setStyleSheet(overlayTextStyle);
         m_repeatCheck->installEventFilter(this);
+    connect(m_repeatCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
         m_repeatBox = makeValueBox();
         auto* suffix = new QLabel(" times", m_repeatRow);
         suffix->setStyleSheet(overlayTextStyle);
@@ -298,6 +301,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_fadeInCheck = new QCheckBox("Fade in: ", row);
         m_fadeInCheck->setStyleSheet(overlayTextStyle);
         m_fadeInCheck->installEventFilter(this);
+    connect(m_fadeInCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
         m_fadeInBox = makeValueBox();
         auto* suffix = new QLabel("s", row);
         suffix->setStyleSheet(overlayTextStyle);
@@ -317,6 +321,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_fadeOutCheck = new QCheckBox("Fade out: ", row);
         m_fadeOutCheck->setStyleSheet(overlayTextStyle);
         m_fadeOutCheck->installEventFilter(this);
+    connect(m_fadeOutCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
         m_fadeOutBox = makeValueBox();
         auto* suffix = new QLabel("s", row);
         suffix->setStyleSheet(overlayTextStyle);
@@ -640,11 +645,17 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
         // Backspace clears the box and shows "..."
         else if (keyEvent->key() == Qt::Key_Backspace) {
             m_activeBox->setText("...");
+            if (!m_updatingFromMedia) {
+                pushSettingsToMedia();
+            }
             return true;
         }
         // 'i' key sets infinity symbol
         else if (keyEvent->key() == Qt::Key_I) {
             m_activeBox->setText("∞");
+            if (!m_updatingFromMedia) {
+                pushSettingsToMedia();
+            }
             return true;
         }
         // Handle input based on which box is active
@@ -677,6 +688,9 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
                     m_activeBox->setText("∞");
                 } else {
                     m_activeBox->setText(newText);
+                }
+                if (!m_updatingFromMedia) {
+                    pushSettingsToMedia();
                 }
                 return true;
             }
@@ -729,22 +743,30 @@ bool MediaSettingsPanel::isValidInputForBox(QLabel* box, QChar character) {
 void MediaSettingsPanel::onOpacityToggled(bool checked) {
     Q_UNUSED(checked);
     applyOpacityFromUi();
+    if (!m_updatingFromMedia) {
+        pushSettingsToMedia();
+    }
 }
 
 void MediaSettingsPanel::applyOpacityFromUi() {
     if (!m_mediaItem) return;
+
+    if (m_updatingFromMedia) {
+        const auto state = m_mediaItem->mediaSettingsState();
+        if (state.opacityOverrideEnabled) {
+            bool ok = false;
+            int val = state.opacityText.trimmed().toInt(&ok);
+            if (!ok) val = 100;
+            val = std::clamp(val, 0, 100);
+            m_mediaItem->setContentOpacity(static_cast<qreal>(val) / 100.0);
+        } else {
+            m_mediaItem->setContentOpacity(1.0);
+        }
+        return;
+    }
+
     if (!m_opacityCheck || !m_opacityBox) return;
-    qreal finalOpacity = 1.0;
-    if (m_opacityCheck->isChecked()) {
-        QString t = m_opacityBox->text().trimmed();
-        bool ok = false; int val = t.toInt(&ok); if (!ok) val = 100;
-        val = std::clamp(val, 0, 100);
-        finalOpacity = static_cast<qreal>(val) / 100.0;
-    }
-    // Apply only to media content; we adjust an internal multiplier (add API on media item)
-    if (auto* base = m_mediaItem) {
-        base->setContentOpacity(finalOpacity); // method we will add to ResizableMediaBase
-    }
+    pushSettingsToMedia();
 }
 
 double MediaSettingsPanel::fadeInSeconds() const {
@@ -937,6 +959,10 @@ void MediaSettingsPanel::onDisplayAutomaticallyToggled(bool checked) {
             m_displayAfterSecondsLabel->setStyleSheet(disabledTextStyle); // Gray color for disabled
         }
     }
+
+    if (!m_updatingFromMedia) {
+        pushSettingsToMedia();
+    }
 }
 
 void MediaSettingsPanel::onPlayAutomaticallyToggled(bool checked) {
@@ -994,6 +1020,10 @@ void MediaSettingsPanel::onPlayAutomaticallyToggled(bool checked) {
             m_autoPlaySecondsLabel->setStyleSheet(disabledTextStyle); // Gray color for disabled
         }
     }
+
+    if (!m_updatingFromMedia) {
+        pushSettingsToMedia();
+    }
 }
 
 void MediaSettingsPanel::setExpanded(bool expanded) {
@@ -1036,4 +1066,94 @@ void MediaSettingsPanel::setExpanded(bool expanded) {
     
     // Recalculate panel height and position after expand/collapse
     updatePosition();
+}
+
+void MediaSettingsPanel::setMediaItem(ResizableMediaBase* item) {
+    clearActiveBox();
+    if (m_mediaItem == item) {
+        if (m_mediaItem) {
+            pullSettingsFromMedia();
+        }
+        return;
+    }
+    m_mediaItem = item;
+    pullSettingsFromMedia();
+}
+
+void MediaSettingsPanel::pullSettingsFromMedia() {
+    m_updatingFromMedia = true;
+    if (!m_mediaItem) {
+        m_updatingFromMedia = false;
+        return;
+    }
+
+    const auto state = m_mediaItem->mediaSettingsState();
+
+    auto applyCheckState = [](QCheckBox* box, bool checked) {
+        if (!box) return;
+        const bool prev = box->blockSignals(true);
+        box->setChecked(checked);
+        box->blockSignals(prev);
+    };
+
+    auto applyBoxText = [](QLabel* label, const QString& text, const QString& fallback) {
+        if (!label) return;
+        const QString value = text.isEmpty() ? fallback : text;
+        label->setText(value);
+    };
+
+    applyCheckState(m_displayAfterCheck, state.displayAutomatically);
+    applyCheckState(m_displayDelayCheck, state.displayDelayEnabled);
+    applyCheckState(m_autoPlayCheck, state.playAutomatically);
+    applyCheckState(m_playDelayCheck, state.playDelayEnabled);
+    applyCheckState(m_repeatCheck, state.repeatEnabled);
+    applyCheckState(m_fadeInCheck, state.fadeInEnabled);
+    applyCheckState(m_fadeOutCheck, state.fadeOutEnabled);
+    applyCheckState(m_opacityCheck, state.opacityOverrideEnabled);
+
+    applyBoxText(m_displayAfterBox, state.displayDelayText, QStringLiteral("1"));
+    applyBoxText(m_autoPlayBox, state.playDelayText, QStringLiteral("1"));
+    applyBoxText(m_repeatBox, state.repeatCountText, QStringLiteral("1"));
+    applyBoxText(m_fadeInBox, state.fadeInText, QStringLiteral("1"));
+    applyBoxText(m_fadeOutBox, state.fadeOutText, QStringLiteral("1"));
+    applyBoxText(m_opacityBox, state.opacityText, QStringLiteral("100"));
+
+    // Re-run UI interlock logic without persisting back to the media item
+    onDisplayAutomaticallyToggled(m_displayAfterCheck ? m_displayAfterCheck->isChecked() : false);
+    onPlayAutomaticallyToggled(m_autoPlayCheck ? m_autoPlayCheck->isChecked() : false);
+    onOpacityToggled(m_opacityCheck ? m_opacityCheck->isChecked() : false);
+
+    m_updatingFromMedia = false;
+
+    // Ensure opacity is immediately applied (uses stored state when guard is false)
+    applyOpacityFromUi();
+}
+
+void MediaSettingsPanel::pushSettingsToMedia() {
+    if (m_updatingFromMedia) return;
+    if (!m_mediaItem) return;
+
+    auto trimmedText = [](QLabel* label, const QString& fallback) {
+        if (!label) return fallback;
+        const QString text = label->text().trimmed();
+        return text.isEmpty() ? fallback : text;
+    };
+
+    ResizableMediaBase::MediaSettingsState state = m_mediaItem->mediaSettingsState();
+    state.displayAutomatically = m_displayAfterCheck && m_displayAfterCheck->isChecked();
+    state.displayDelayEnabled = m_displayDelayCheck && m_displayDelayCheck->isChecked();
+    state.displayDelayText = trimmedText(m_displayAfterBox, state.displayDelayText);
+    state.playAutomatically = m_autoPlayCheck && m_autoPlayCheck->isChecked();
+    state.playDelayEnabled = m_playDelayCheck && m_playDelayCheck->isChecked();
+    state.playDelayText = trimmedText(m_autoPlayBox, state.playDelayText);
+    state.repeatEnabled = m_repeatCheck && m_repeatCheck->isChecked();
+    state.repeatCountText = trimmedText(m_repeatBox, state.repeatCountText);
+    state.fadeInEnabled = m_fadeInCheck && m_fadeInCheck->isChecked();
+    state.fadeInText = trimmedText(m_fadeInBox, state.fadeInText);
+    state.fadeOutEnabled = m_fadeOutCheck && m_fadeOutCheck->isChecked();
+    state.fadeOutText = trimmedText(m_fadeOutBox, state.fadeOutText);
+    state.opacityOverrideEnabled = m_opacityCheck && m_opacityCheck->isChecked();
+    state.opacityText = trimmedText(m_opacityBox, state.opacityText);
+
+    m_mediaItem->setMediaSettingsState(state);
 }

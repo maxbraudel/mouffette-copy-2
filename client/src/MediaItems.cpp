@@ -150,6 +150,76 @@ void ResizableMediaBase::fadeContentOut(double seconds) {
     m_fadeAnimation->start();
 }
 
+void ResizableMediaBase::setMediaSettingsState(const MediaSettingsState& state) {
+    m_mediaSettings = state;
+    qreal finalOpacity = 1.0;
+    if (m_mediaSettings.opacityOverrideEnabled) {
+        bool ok = false;
+        int val = m_mediaSettings.opacityText.trimmed().toInt(&ok);
+        if (!ok) val = 100;
+        val = std::clamp(val, 0, 100);
+        finalOpacity = static_cast<qreal>(val) / 100.0;
+    }
+    setContentOpacity(finalOpacity);
+}
+
+bool ResizableMediaBase::autoDisplayEnabled() const {
+    return m_mediaSettings.displayAutomatically;
+}
+
+int ResizableMediaBase::autoDisplayDelayMs() const {
+    if (!autoDisplayEnabled() || !m_mediaSettings.displayDelayEnabled) return 0;
+    bool ok = false;
+    int value = m_mediaSettings.displayDelayText.trimmed().toInt(&ok);
+    if (!ok || value < 0) return 0;
+    return value * 1000;
+}
+
+bool ResizableMediaBase::autoPlayEnabled() const {
+    return m_mediaSettings.playAutomatically;
+}
+
+int ResizableMediaBase::autoPlayDelayMs() const {
+    if (!autoPlayEnabled() || !m_mediaSettings.playDelayEnabled) return 0;
+    bool ok = false;
+    int value = m_mediaSettings.playDelayText.trimmed().toInt(&ok);
+    if (!ok || value < 0) return 0;
+    return value * 1000;
+}
+
+double ResizableMediaBase::fadeInDurationSeconds() const {
+    if (!m_mediaSettings.fadeInEnabled) return 0.0;
+    QString text = m_mediaSettings.fadeInText.trimmed();
+    if (text == QStringLiteral("∞") || text.isEmpty() || text == QStringLiteral("...")) return 0.0;
+    text.replace(',', '.');
+    bool ok = false;
+    double value = text.toDouble(&ok);
+    if (!ok || value < 0.0) return 0.0;
+    return std::clamp(value, 0.0, 3600.0);
+}
+
+double ResizableMediaBase::fadeOutDurationSeconds() const {
+    if (!m_mediaSettings.fadeOutEnabled) return 0.0;
+    QString text = m_mediaSettings.fadeOutText.trimmed();
+    if (text == QStringLiteral("∞") || text.isEmpty() || text == QStringLiteral("...")) return 0.0;
+    text.replace(',', '.');
+    bool ok = false;
+    double value = text.toDouble(&ok);
+    if (!ok || value < 0.0) return 0.0;
+    return std::clamp(value, 0.0, 3600.0);
+}
+
+bool ResizableMediaBase::opacityOverrideEnabled() const {
+    return m_mediaSettings.opacityOverrideEnabled;
+}
+
+int ResizableMediaBase::opacityPercent() const {
+    bool ok = false;
+    int value = m_mediaSettings.opacityText.trimmed().toInt(&ok);
+    if (!ok) value = 100;
+    return std::clamp(value, 0, 100);
+}
+
 void ResizableMediaBase::setSourcePath(const QString& p) {
     m_sourcePath = p;
     
@@ -605,8 +675,7 @@ void ResizableMediaBase::prepareForDeletion() {
 
 void ResizableMediaBase::showWithConfiguredFade() {
     // Mirror logic from visibility toggle (show branch)
-    double fadeInSeconds = 0.0;
-    // TODO: Fade settings should be stored per-media, not accessed from global panel
+    double fadeInSeconds = fadeInDurationSeconds();
     cancelFade();
     if (fadeInSeconds > 0.0) {
         if (m_contentDisplayOpacity <= 0.0) m_contentDisplayOpacity = 0.0;
@@ -629,8 +698,7 @@ void ResizableMediaBase::showWithConfiguredFade() {
 }
 
 void ResizableMediaBase::hideWithConfiguredFade() {
-    double fadeOutSeconds = 0.0;
-    // TODO: Fade settings should be stored per-media, not accessed from global panel
+    double fadeOutSeconds = fadeOutDurationSeconds();
     cancelFade();
     if (fadeOutSeconds > 0.0) {
         fadeContentOut(fadeOutSeconds);

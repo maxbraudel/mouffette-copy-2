@@ -24,7 +24,7 @@ public:
     
     // Configure which options are available based on media type
     void setMediaType(bool isVideo);
-    void setMediaItem(class ResizableMediaBase* item) { m_mediaItem = item; }
+    void setMediaItem(class ResizableMediaBase* item);
     void applyOpacityFromUi(); // make publicly callable
     // Access fade durations (seconds). Returns 0 if disabled or invalid. Infinity symbol => treat as 0 (instant) for now.
     double fadeInSeconds() const;
@@ -63,6 +63,8 @@ private:
     void updateScrollbarGeometry();
     void refreshToggleMetrics();
     void updatePanelChrome();
+    void pullSettingsFromMedia();
+    void pushSettingsToMedia();
 
 private:
     QWidget* m_widget = nullptr; // parented to viewport
@@ -115,6 +117,7 @@ private:
     // Overlay scrollbar to mirror media list behavior
     QScrollBar* m_overlayVScroll = nullptr;
     QTimer* m_scrollbarHideTimer = nullptr;
+    bool m_updatingFromMedia = false;
     
     // Video-only option widgets (for show/hide based on media type)
     QWidget* m_autoPlayRow = nullptr;

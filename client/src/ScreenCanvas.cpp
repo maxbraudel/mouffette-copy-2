@@ -284,22 +284,19 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                 m["normW"] = br.width() / legacyBestScreenRect.width();
                 m["normH"] = br.height() / legacyBestScreenRect.height();
             }
-            // Settings are now global, but we only serialize if this media is currently selected with panel shown
-            if (m_globalSettingsPanel && media->isSelected() && m_globalSettingsPanel->isVisible()) {
-                m["autoDisplay"] = m_globalSettingsPanel->displayAutomaticallyEnabled();
-                m["autoDisplayDelayMs"] = m_globalSettingsPanel->displayDelayMillis();
-                if (media->isVideoMedia()) {
-                    m["autoPlay"] = m_globalSettingsPanel->playAutomaticallyEnabled();
-                    m["autoPlayDelayMs"] = m_globalSettingsPanel->playDelayMillis();
-                    if (auto* v = dynamic_cast<ResizableVideoItem*>(media)) {
-                        m["muted"] = v->isMuted();
-                        m["volume"] = v->volume();
-                    }
+            const bool autoDisplay = media->autoDisplayEnabled();
+            m["autoDisplay"] = autoDisplay;
+            m["autoDisplayDelayMs"] = media->autoDisplayDelayMs();
+            if (media->isVideoMedia()) {
+                m["autoPlay"] = media->autoPlayEnabled();
+                m["autoPlayDelayMs"] = media->autoPlayDelayMs();
+                if (auto* v = dynamic_cast<ResizableVideoItem*>(media)) {
+                    m["muted"] = v->isMuted();
+                    m["volume"] = v->volume();
                 }
-                // TODO: Fade settings should be stored per-media, not in global panel
-                // m["fadeInSeconds"] = panel->fadeInSeconds();
-                // m["fadeOutSeconds"] = panel->fadeOutSeconds();
             }
+            m["fadeInSeconds"] = media->fadeInDurationSeconds();
+            m["fadeOutSeconds"] = media->fadeOutDurationSeconds();
             // Always include base content opacity (user configured). Animation multiplier not serialized.
             m["contentOpacity"] = media->contentOpacity();
             mediaArr.append(m);
@@ -642,7 +639,7 @@ void ScreenCanvas::initInfoOverlay() {
     // Create global settings panel if not already created (panel has integrated toggle button)
     if (!m_globalSettingsPanel) {
     m_globalSettingsPanel = new MediaSettingsPanel(viewport());
-        m_globalSettingsPanel->setVisible(true); // Always visible, but content can be collapsed
+        m_globalSettingsPanel->setVisible(false);
         m_globalSettingsPanel->updatePosition(); // Initial position
     }
     
@@ -3656,20 +3653,10 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
         for (QGraphicsItem* gi : m_scene->items()) {
             if (auto* media = dynamic_cast<ResizableMediaBase*>(gi)) {
                 // Decide if it should auto-display immediately
-                bool shouldAutoDisplay = false;
-                int displayDelayMs = 0;
-                bool shouldAutoPlay = false;
-                int playDelayMs = 0;
-                // TODO: Settings are now global. Auto-display/play settings should be stored per-media
-                // For now, these automation features are disabled until we refactor to store settings in each media item
-                // if (m_globalSettingsPanel) {
-                //     shouldAutoDisplay = m_globalSettingsPanel->displayAutomaticallyEnabled();
-                //     displayDelayMs = m_globalSettingsPanel->displayDelayMillis();
-                //     if (media->isVideoMedia()) {
-                //         shouldAutoPlay = m_globalSettingsPanel->playAutomaticallyEnabled();
-                //         playDelayMs = m_globalSettingsPanel->playDelayMillis();
-                //     }
-                // }
+                bool shouldAutoDisplay = media->autoDisplayEnabled();
+                int displayDelayMs = media->autoDisplayDelayMs();
+                bool shouldAutoPlay = media->autoPlayEnabled();
+                int playDelayMs = media->autoPlayDelayMs();
                 // Snapshot and reset videos
                 if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
                     VideoPreState st; st.video = vid; st.posMs = vid->currentPositionMs(); st.wasPlaying = vid->isPlaying();
@@ -3795,17 +3782,13 @@ void ScreenCanvas::updateGlobalSettingsPanelVisibility() {
         }
     }
     
-    // If media is selected, configure panel for that media
     if (selectedMedia) {
         m_globalSettingsPanel->setMediaType(selectedMedia->isVideoMedia());
         m_globalSettingsPanel->setMediaItem(selectedMedia);
-        
-        // Apply current opacity settings
-        QMetaObject::invokeMethod(m_globalSettingsPanel, [this]() {
-            m_globalSettingsPanel->applyOpacityFromUi();
-        }, Qt::QueuedConnection);
+        m_globalSettingsPanel->setVisible(true);
+        m_globalSettingsPanel->updatePosition();
+    } else {
+        m_globalSettingsPanel->setMediaItem(nullptr);
+        m_globalSettingsPanel->setVisible(false);
     }
-    
-    // Update panel position (it's always visible, just potentially collapsed)
-    m_globalSettingsPanel->updatePosition();
 }
