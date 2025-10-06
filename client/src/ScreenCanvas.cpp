@@ -23,6 +23,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QToolButton>
 #include <QIcon>
 #include <QScrollArea>
 #include <QProgressBar>
@@ -3772,12 +3773,15 @@ void ScreenCanvas::handleAutoPlayback() {
 void ScreenCanvas::ensureSettingsToggleButton() {
     if (m_settingsToggleButton || !viewport()) return;
 
-    m_settingsToggleButton = new QPushButton(QIcon(QStringLiteral(":/icons/icons/settings.svg")), QString(), viewport());
+    m_settingsToggleButton = new QToolButton(viewport());
+    m_settingsToggleButton->setIcon(QIcon(QStringLiteral(":/icons/icons/settings.svg")));
     m_settingsToggleButton->setObjectName("SettingsToggleButton");
     m_settingsToggleButton->setCheckable(true);
     m_settingsToggleButton->setEnabled(false);
     m_settingsToggleButton->setToolTip(tr("Select a media item to edit settings"));
     m_settingsToggleButton->setAttribute(Qt::WA_NoMousePropagation, true);
+    m_settingsToggleButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    m_settingsToggleButton->setAutoRaise(false);
     m_settingsToggleButton->setFocusPolicy(Qt::NoFocus);
     m_settingsToggleButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     m_settingsToggleButton->setAccessibleName(tr("Media settings"));
@@ -3791,22 +3795,22 @@ void ScreenCanvas::ensureSettingsToggleButton() {
 
     const QString cornerRadiusPx = QString::number(gOverlayCornerRadiusPx) + QStringLiteral("px");
     const QString style = QStringLiteral(
-        "QPushButton#SettingsToggleButton {"
+        "QToolButton#SettingsToggleButton {"
         " background-color: %1;"
         " border: 1px solid %2;"
         " border-radius: %3;"
         " padding: 0;"
         " margin: 0;"
         "}"
-        "QPushButton#SettingsToggleButton:hover:!disabled:!checked { background-color: %1; }"
-        "QPushButton#SettingsToggleButton:pressed { background-color: %4; }"
-        "QPushButton#SettingsToggleButton:checked { background-color: %4; }"
-        "QPushButton#SettingsToggleButton:checked:hover { background-color: %4; }"
-        "QPushButton#SettingsToggleButton:disabled { background-color: %5; border: 1px solid %2; }"
+        "QToolButton#SettingsToggleButton:hover:!disabled:!checked { background-color: %1; }"
+        "QToolButton#SettingsToggleButton:pressed { background-color: %4; }"
+        "QToolButton#SettingsToggleButton:checked { background-color: %4; }"
+        "QToolButton#SettingsToggleButton:checked:hover { background-color: %4; }"
+        "QToolButton#SettingsToggleButton:disabled { background-color: %5; border: 1px solid %2; }"
     ).arg(baseBg, borderColor, cornerRadiusPx, activeBg, disabledBg);
     m_settingsToggleButton->setStyleSheet(style);
 
-    connect(m_settingsToggleButton, &QPushButton::toggled, this, [this](bool checked) {
+    connect(m_settingsToggleButton, &QToolButton::toggled, this, [this](bool checked) {
         m_settingsPanelPreferredVisible = checked;
         updateGlobalSettingsPanelVisibility();
     });
