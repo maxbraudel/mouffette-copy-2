@@ -600,17 +600,13 @@ void ResizableMediaBase::prepareForDeletion() {
         panel->clearElements();
     };
     detachPanel(m_topPanel);
-    // Hide and drop settings panel (proxy will be removed from scene by destructor)
-    if (m_settingsPanel) {
-        m_settingsPanel->setVisible(false);
-        m_settingsPanel.reset();
-    }
+    // Settings panel removed - now managed globally by ScreenCanvas
 }
 
 void ResizableMediaBase::showWithConfiguredFade() {
     // Mirror logic from visibility toggle (show branch)
     double fadeInSeconds = 0.0;
-    if (m_settingsPanel) fadeInSeconds = m_settingsPanel->fadeInSeconds();
+    // TODO: Fade settings should be stored per-media, not accessed from global panel
     cancelFade();
     if (fadeInSeconds > 0.0) {
         if (m_contentDisplayOpacity <= 0.0) m_contentDisplayOpacity = 0.0;
@@ -634,7 +630,7 @@ void ResizableMediaBase::showWithConfiguredFade() {
 
 void ResizableMediaBase::hideWithConfiguredFade() {
     double fadeOutSeconds = 0.0;
-    if (m_settingsPanel) fadeOutSeconds = m_settingsPanel->fadeOutSeconds();
+    // TODO: Fade settings should be stored per-media, not accessed from global panel
     cancelFade();
     if (fadeOutSeconds > 0.0) {
         fadeContentOut(fadeOutSeconds);
@@ -759,40 +755,7 @@ void ResizableMediaBase::initializeOverlays() {
         // Subsequent layout logic in OverlayPanel ensures the first row (filename) is widened
         // to match the exact width of the buttons row for a clean vertical stack.
         m_topPanel->newRow();
-        // Add settings toggle button to the right of filename
-        auto settingsBtn = std::make_shared<OverlayButtonElement>(QString(), "settings_toggle");
-        // Resource path follows the same pattern as other media control icons (":/icons/icons/<name>.svg")
-        settingsBtn->setSvgIcon(":/icons/icons/settings.svg");
-        settingsBtn->setToggleOnly(true);
-        // Initial state normal
-        settingsBtn->setState(OverlayElement::Normal);
-        // Toggle logic: cycles Normal <-> Toggled
-        settingsBtn->setOnClicked([this, btnRef=settingsBtn]() {
-            if (!btnRef) return;
-            const bool enabling = (btnRef->state() != OverlayElement::Toggled);
-            btnRef->setState(enabling ? OverlayElement::Toggled : OverlayElement::Normal);
-            // Lazy-create settings panel
-            if (!m_settingsPanel) {
-                m_settingsPanel = std::make_unique<MediaSettingsPanel>();
-                // Configure panel based on media type
-                m_settingsPanel->setMediaType(isVideoMedia());
-                m_settingsPanel->setMediaItem(this);
-            }
-            // Ensure panel is in the scene
-            if (scene()) m_settingsPanel->ensureInScene(scene());
-            // Apply background color similar to overlay style
-            // (Handled inside MediaSettingsPanel using palette/stylesheet defaults)
-            if (scene() && !scene()->views().isEmpty()) {
-                m_settingsPanel->updatePosition(scene()->views().first());
-            }
-            m_settingsPanel->setVisible(enabling);
-            if (enabling) {
-                // Re-apply opacity in case user modified values previously
-                QMetaObject::invokeMethod(m_settingsPanel.get(), [panel=m_settingsPanel.get()](){ panel->applyOpacityFromUi(); }, Qt::QueuedConnection);
-            }
-        });
-        m_topPanel->addElement(settingsBtn);
-
+        
         // Add visibility toggle button (content visibility only)
         auto visibilityBtn = std::make_shared<OverlayButtonElement>(QString(), "visibility_toggle");
         visibilityBtn->setSvgIcon(":/icons/icons/visibility-on.svg"); // start visible
@@ -801,13 +764,9 @@ void ResizableMediaBase::initializeOverlays() {
         visibilityBtn->setOnClicked([this, btnRef=visibilityBtn]() {
             if (!btnRef) return;
             const bool currentlyVisible = (btnRef->state() == OverlayElement::Toggled);
-            // Access fade parameters if settings panel exists
+            // TODO: Fade parameters should be stored per-media, not accessed from global panel
             double fadeInSeconds = 0.0;
             double fadeOutSeconds = 0.0;
-            if (m_settingsPanel) {
-                fadeInSeconds = m_settingsPanel->fadeInSeconds();
-                fadeOutSeconds = m_settingsPanel->fadeOutSeconds();
-            }
             // Always cancel any in-flight fade before starting a new transition or applying an instant change
             cancelFade();
             if (currentlyVisible) {
@@ -889,29 +848,7 @@ void ResizableMediaBase::updateOverlayVisibility() {
     // matching bottom overlay behavior.
     bool shouldShowTop = isSelected() && !m_filename.isEmpty();
     if (m_topPanel) m_topPanel->setVisible(shouldShowTop);
-    // If item is no longer selected, hide settings panel but keep toggle state as-is (so it can restore on reselection)
-    if (!isSelected()) {
-        if (m_settingsPanel && m_settingsPanel->isVisible()) {
-            m_settingsPanel->setVisible(false);
-        }
-    } else {
-        // Item selected: if settings toggle is on, ensure the panel is visible again
-        if (m_topPanel) {
-            auto el = m_topPanel->findElement("settings_toggle");
-            if (el && el->state() == OverlayElement::Toggled) {
-                if (!m_settingsPanel) {
-                    m_settingsPanel = std::make_unique<MediaSettingsPanel>();
-                    // Configure panel based on media type
-                    m_settingsPanel->setMediaType(isVideoMedia());
-                }
-                if (scene()) m_settingsPanel->ensureInScene(scene());
-                if (scene() && !scene()->views().isEmpty()) {
-                    m_settingsPanel->updatePosition(scene()->views().first());
-                }
-                m_settingsPanel->setVisible(true);
-            }
-        }
-    }
+    // Settings panel now managed globally by ScreenCanvas - no per-media panel logic needed
 }
 
 void ResizableMediaBase::updateOverlayLayout() {
@@ -921,8 +858,7 @@ void ResizableMediaBase::updateOverlayLayout() {
     QRectF itemRect(0,0,m_baseSize.width(), m_baseSize.height());
     QPointF topAnchorScene = mapToScene(QPointF(itemRect.center().x(), itemRect.top()));
     if (m_topPanel) m_topPanel->updateLayoutWithAnchor(topAnchorScene, view);
-    // Keep settings panel docked
-    if (m_settingsPanel && m_settingsPanel->isVisible()) m_settingsPanel->updatePosition(view);
+    // Settings panel now managed globally by ScreenCanvas
 }
 
 // ---------------- ResizablePixmapItem -----------------

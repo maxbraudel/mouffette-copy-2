@@ -1,30 +1,23 @@
 #pragma once
 
-#include <QGraphicsProxyWidget>
-#include <QPointer>
 #include <QWidget>
 
 class QVBoxLayout;
 class QLabel;
 class QCheckBox;
-class QGraphicsView;
-class MouseBlockingRoundedRectItem;
 class QScrollArea;
 class QScrollBar;
 class QTimer;
 
 // Floating settings panel shown when a media's settings toggle is enabled.
-// Implemented as a QWidget embedded into the scene via QGraphicsProxyWidget.
+// Implemented as a QWidget parented to the viewport (like info overlay).
 class MediaSettingsPanel : public QObject {
     Q_OBJECT
 public:
-    explicit MediaSettingsPanel(QObject* parent = nullptr);
-    ~MediaSettingsPanel() override;
+    explicit MediaSettingsPanel(QWidget* parentWidget);
+    ~MediaSettingsPanel() override = default;
 
-    // Adds the panel to the given scene (once) and prepares for display.
-    void ensureInScene(QGraphicsScene* scene);
-
-    // Shows or hides the panel; when showing, position near the left edge of the view.
+    // Shows or hides the panel widget
     void setVisible(bool visible);
     bool isVisible() const;
     
@@ -42,9 +35,13 @@ public:
     bool playAutomaticallyEnabled() const; // video only, safe if not video
     int playDelayMillis() const; // 0 if disabled or invalid
 
-    // Update absolute position based on the provided view (left-docked with margin).
-    // Call whenever zoom/transform/resize occurs.
-    void updatePosition(QGraphicsView* view);
+    // Update absolute position (left-docked with margin).
+    // Call whenever viewport resize occurs.
+    void updatePosition();
+
+    // Expand or collapse the settings content (show/hide options)
+    void setExpanded(bool expanded);
+    bool isExpanded() const { return m_isExpanded; }
 
     // Optional: accessors to later read values (not used yet).
     QWidget* widget() const { return m_widget; }
@@ -58,18 +55,20 @@ private slots:
     void onOpacityToggled(bool checked);
 
 private:
-    void buildUi();
+    void buildUi(QWidget* parentWidget);
     void setBoxActive(QLabel* box, bool active);
     void clearActiveBox();
     bool isValidInputForBox(QLabel* box, QChar character);
     void updateScrollbarGeometry();
 
 private:
-    QGraphicsProxyWidget* m_proxy = nullptr;
-    MouseBlockingRoundedRectItem* m_bgRect = nullptr;
-    QWidget* m_widget = nullptr;
-    // Root layout (wraps scroll area)
+    QWidget* m_widget = nullptr; // parented to viewport
+    // Root layout (wraps header and scroll area)
     QVBoxLayout* m_rootLayout = nullptr;
+    // Header with toggle button
+    QWidget* m_headerWidget = nullptr;
+    class QPushButton* m_toggleButton = nullptr;
+    bool m_isExpanded = false;
     // Scrollable content
     QScrollArea* m_scrollArea = nullptr;
     QWidget* m_innerContent = nullptr;

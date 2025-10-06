@@ -77,7 +77,6 @@ public:
     void showImmediateNoFade();
     void hideImmediateNoFade();
 
-    class MediaSettingsPanel* settingsPanel() const { return m_settingsPanel.get(); }
     bool isOnHandleAtItemPos(const QPointF& itemPos) const; // used by view for cursor decision
     bool beginResizeAtScenePos(const QPointF& scenePos);    // start interactive resize
     Qt::CursorShape cursorForScenePos(const QPointF& scenePos) const;
@@ -164,8 +163,6 @@ protected:
     OverlayStyle m_overlayStyle;
     static int heightOfMediaOverlays;
     static int cornerRadiusOfMediaOverlays;
-    // Per-media settings panel (absolute, docked left)
-    std::unique_ptr<MediaSettingsPanel> m_settingsPanel;
 
     // Core paint helpers
     void paintSelectionAndLabel(QPainter* painter);

@@ -166,6 +166,7 @@ private:
     void updateOverlayVScrollVisibilityAndGeometry(); // overlay scrollbar sizing/visibility
     void applyTextEllipsisIfConstrained(bool isWidthConstrained); // apply ellipsis to text labels
     std::pair<int, bool> calculateDesiredWidthAndConstraint(); // calculate desired width and constraint state consistently
+    void updateGlobalSettingsPanelVisibility(); // Update global settings panel based on toggle + selection
     
     void OnSceneChanged();
     // Snap-to-screen helpers
@@ -270,6 +271,7 @@ private:
     QTimer* m_scrollbarHideTimer = nullptr; // timer to auto-hide scrollbar after inactivity
     QVBoxLayout* m_contentLayout = nullptr; // content layout (for media items)
     QWidget* m_overlayHeaderWidget = nullptr; // container for overlay header row (holds upload button)
+    class MediaSettingsPanel* m_globalSettingsPanel = nullptr; // global settings panel with integrated toggle button
     QPushButton* m_launchSceneButton = nullptr; // new Launch Remote Scene toggle button
     QPushButton* m_launchTestSceneButton = nullptr; // new Launch Test Scene toggle button
     QPushButton* m_uploadButton = nullptr; // upload button in media list overlay

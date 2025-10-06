@@ -1,46 +1,54 @@
 #include "MediaSettingsPanel.h"
 #include "Theme.h"
 #include "AppColors.h"
-#include "OverlayPanels.h"
-#include <QGraphicsScene>
-#include <QGraphicsView>
-#include <QGraphicsProxyWidget>
 #include <QWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QCheckBox>
-#include <QPalette>
-#include <QGuiApplication>
+#include <QPushButton>
+#include <QCoreApplication>
+#include <QKeyEvent>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QTimer>
-#include "Theme.h"
-#include "OverlayPanels.h"
 #include "MediaItems.h" // for ResizableMediaBase
 
-MediaSettingsPanel::MediaSettingsPanel(QObject* parent)
-    : QObject(parent)
+MediaSettingsPanel::MediaSettingsPanel(QWidget* parentWidget)
+    : QObject(parentWidget)
 {
-    buildUi();
+    buildUi(parentWidget);
 }
 
-MediaSettingsPanel::~MediaSettingsPanel() {
-    if (m_proxy && m_proxy->scene()) m_proxy->scene()->removeItem(m_proxy);
-    delete m_proxy;
-}
-
-void MediaSettingsPanel::buildUi() {
-    m_widget = new QWidget();
+void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
+    m_widget = new QWidget(parentWidget);
     m_widget->setObjectName("MediaSettingsPanelWidget");
 
-    // Make the QWidget visually transparent; we'll draw an exact rounded background in the scene
+    // Enable styled background so the QWidget can paint the overlay chrome itself
     m_widget->setAttribute(Qt::WA_StyledBackground, true);
     // Ensure overlay blocks mouse events to canvas behind it (like media overlay)
     m_widget->setAttribute(Qt::WA_NoMousePropagation, true);
-    // Apply unified font size to match media filename overlay (OverlayTextElement uses 16px)
-    m_widget->setStyleSheet("background-color: transparent; color: white; font-size: 16px;");
-    m_widget->setAutoFillBackground(false);
+    // Apply the same background, border, and typography styling as the media list overlay
+    const QString overlayTextCss = AppColors::colorToCss(AppColors::gOverlayTextColor);
+    const QString overlayTextStyle = QStringLiteral("color: %1;").arg(overlayTextCss);
+    const QString widgetStyle = QStringLiteral(
+        "#MediaSettingsPanelWidget {"
+        " background-color: %1;"
+        " border: 1px solid %2;"
+        " border-radius: %3px;"
+        " color: %4;"
+        " font-size: 16px;"
+        "}"
+        " #MediaSettingsPanelWidget * {"
+        " background-color: transparent;"
+        "}"
+    )
+    .arg(AppColors::colorToCss(AppColors::gOverlayBackgroundColor))
+    .arg(AppColors::colorToCss(AppColors::gOverlayBorderColor))
+    .arg(gOverlayCornerRadiusPx)
+    .arg(overlayTextCss);
+    m_widget->setStyleSheet(widgetStyle);
+    m_widget->setAutoFillBackground(true);
 
     // Root layout on widget
     m_rootLayout = new QVBoxLayout(m_widget);
@@ -50,6 +58,61 @@ void MediaSettingsPanel::buildUi() {
 
     // Set fixed width of the overlay panel
     m_widget->setFixedWidth(221);
+
+    // Create header with toggle button (similar to media list overlay structure)
+    m_headerWidget = new QWidget(m_widget);
+    auto* headerLayout = new QVBoxLayout(m_headerWidget);
+    headerLayout->setContentsMargins(0, 0, 0, 0);
+    headerLayout->setSpacing(0);
+
+    // Top separator
+    auto* topSep = new QLabel(m_headerWidget);
+    topSep->setStyleSheet(QString("QLabel { background-color: %1; border: none; }")
+        .arg(AppColors::colorToCss(AppColors::gOverlayBorderColor)));
+    topSep->setAutoFillBackground(true);
+    topSep->setFixedHeight(1);
+    topSep->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    headerLayout->addWidget(topSep);
+
+    // Toggle button
+    m_toggleButton = new QPushButton("Show Settings", m_headerWidget);
+    m_toggleButton->setCheckable(true);
+    m_toggleButton->setStyleSheet(
+        "QPushButton { "
+        "    padding: 8px 0px; "
+        "    font-weight: bold; "
+        "    font-size: 12px; "
+        "    color: " + AppColors::colorToCss(AppColors::gOverlayTextColor) + "; "
+        "    background: transparent; "
+        "    border: none; "
+        "    border-radius: 0px; "
+        "} "
+        "QPushButton:hover { "
+        "    color: white; "
+        "    background: rgba(255,255,255,0.05); "
+        "} "
+        "QPushButton:pressed, QPushButton:checked { "
+        "    color: white; "
+        "    background: rgba(255,255,255,0.1); "
+        "}"
+    );
+    m_toggleButton->setFixedHeight(40);
+    m_toggleButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    connect(m_toggleButton, &QPushButton::clicked, this, [this]() {
+        setExpanded(m_toggleButton->isChecked());
+    });
+    headerLayout->addWidget(m_toggleButton);
+
+    // Bottom separator
+    auto* bottomSep = new QLabel(m_headerWidget);
+    bottomSep->setStyleSheet(QString("QLabel { background-color: %1; border: none; }")
+        .arg(AppColors::colorToCss(AppColors::gOverlayBorderColor)));
+    bottomSep->setAutoFillBackground(true);
+    bottomSep->setFixedHeight(1);
+    bottomSep->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    headerLayout->addWidget(bottomSep);
+
+    m_rootLayout->addWidget(m_headerWidget);
 
     // Scroll area for inner content (mirror media overlay)
     m_scrollArea = new QScrollArea(m_widget);
@@ -73,12 +136,15 @@ void MediaSettingsPanel::buildUi() {
         " QScrollArea QScrollBar:vertical { width: 0px; margin: 0; background: transparent; }"
     );
     m_rootLayout->addWidget(m_scrollArea);
+    // Start collapsed (scroll area hidden)
+    m_scrollArea->setVisible(false);
 
     // Inner content widget inside scroll area (with margins like before)
     m_innerContent = new QWidget(m_scrollArea);
     m_innerContent->setAttribute(Qt::WA_StyledBackground, true);
     m_innerContent->setAttribute(Qt::WA_NoMousePropagation, true);
-    m_innerContent->setStyleSheet("background-color: transparent; color: white; font-size: 16px;");
+    m_innerContent->setStyleSheet(QStringLiteral("background-color: transparent; color: %1; font-size: 16px;")
+        .arg(overlayTextCss));
     m_scrollArea->setWidget(m_innerContent);
 
     // Content layout with the previous margins/spacing
@@ -91,7 +157,7 @@ void MediaSettingsPanel::buildUi() {
     QFont tf = m_title->font();
     tf.setBold(true); // keep bold, but do not change size beyond 16px baseline
     m_title->setFont(tf);
-    m_title->setStyleSheet("color: white;");
+    m_title->setStyleSheet(overlayTextStyle);
     m_contentLayout->addWidget(m_title);
 
     // Helper to create a small value box label like [1]
@@ -115,11 +181,11 @@ void MediaSettingsPanel::buildUi() {
         autoLayout->setContentsMargins(0, 0, 0, 0);
         autoLayout->setSpacing(0);
         m_displayAfterCheck = new QCheckBox("Display automatically", autoRow);
-        m_displayAfterCheck->setStyleSheet("color: white;");
+        m_displayAfterCheck->setStyleSheet(overlayTextStyle);
         m_displayAfterCheck->installEventFilter(this);
         autoLayout->addWidget(m_displayAfterCheck);
         autoLayout->addStretch();
-    m_contentLayout->addWidget(autoRow);
+        m_contentLayout->addWidget(autoRow);
         
         // Display delay checkbox with input (separate checkbox)
         auto* delayRow = new QWidget(m_widget);
@@ -127,16 +193,16 @@ void MediaSettingsPanel::buildUi() {
         h->setContentsMargins(0, 0, 0, 0);
         h->setSpacing(0);
         m_displayDelayCheck = new QCheckBox("Display delay: ", delayRow);
-        m_displayDelayCheck->setStyleSheet("color: white;");
+        m_displayDelayCheck->setStyleSheet(overlayTextStyle);
         m_displayDelayCheck->installEventFilter(this);
         m_displayAfterBox = makeValueBox();
         m_displayAfterSecondsLabel = new QLabel("s", delayRow);
-        m_displayAfterSecondsLabel->setStyleSheet("color: white;");
+        m_displayAfterSecondsLabel->setStyleSheet(overlayTextStyle);
         h->addWidget(m_displayDelayCheck);
         h->addWidget(m_displayAfterBox);
         h->addWidget(m_displayAfterSecondsLabel);
         h->addStretch();
-    m_contentLayout->addWidget(delayRow);
+        m_contentLayout->addWidget(delayRow);
     }
 
     // 1) Play automatically as separate widget (video only) - matching display layout
@@ -146,11 +212,11 @@ void MediaSettingsPanel::buildUi() {
         autoLayout->setContentsMargins(0, 0, 0, 0);
         autoLayout->setSpacing(0);
         m_autoPlayCheck = new QCheckBox("Play automatically", m_autoPlayRow);
-        m_autoPlayCheck->setStyleSheet("color: white;");
+        m_autoPlayCheck->setStyleSheet(overlayTextStyle);
         m_autoPlayCheck->installEventFilter(this);
         autoLayout->addWidget(m_autoPlayCheck);
         autoLayout->addStretch();
-    m_contentLayout->addWidget(m_autoPlayRow);
+        m_contentLayout->addWidget(m_autoPlayRow);
     }
     
     // Play delay as a separate widget (video only) - matching display delay layout
@@ -160,16 +226,16 @@ void MediaSettingsPanel::buildUi() {
         h->setContentsMargins(0, 0, 0, 0);
         h->setSpacing(0);
         m_playDelayCheck = new QCheckBox("Play delay: ", m_playDelayRow);
-        m_playDelayCheck->setStyleSheet("color: white;");
+        m_playDelayCheck->setStyleSheet(overlayTextStyle);
         m_playDelayCheck->installEventFilter(this);
         m_autoPlayBox = makeValueBox();
         m_autoPlaySecondsLabel = new QLabel("s", m_playDelayRow);
-        m_autoPlaySecondsLabel->setStyleSheet("color: white;");
+        m_autoPlaySecondsLabel->setStyleSheet(overlayTextStyle);
         h->addWidget(m_playDelayCheck);
         h->addWidget(m_autoPlayBox);
         h->addWidget(m_autoPlaySecondsLabel);
         h->addStretch();
-    m_contentLayout->addWidget(m_playDelayRow);
+        m_contentLayout->addWidget(m_playDelayRow);
     }
 
     // 2) Repeat (video only) - keeping original single checkbox format
@@ -179,16 +245,16 @@ void MediaSettingsPanel::buildUi() {
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
         m_repeatCheck = new QCheckBox("Repeat ", m_repeatRow);
-        m_repeatCheck->setStyleSheet("color: white;");
+        m_repeatCheck->setStyleSheet(overlayTextStyle);
         m_repeatCheck->installEventFilter(this);
         m_repeatBox = makeValueBox();
         auto* suffix = new QLabel(" times", m_repeatRow);
-        suffix->setStyleSheet("color: white;");
+        suffix->setStyleSheet(overlayTextStyle);
         h->addWidget(m_repeatCheck);
         h->addWidget(m_repeatBox);
         h->addWidget(suffix);
         h->addStretch();
-    m_contentLayout->addWidget(m_repeatRow);
+        m_contentLayout->addWidget(m_repeatRow);
     }
 
     // Element Properties section header
@@ -196,7 +262,7 @@ void MediaSettingsPanel::buildUi() {
     QFont epf = m_elementPropertiesTitle->font();
     epf.setBold(true);
     m_elementPropertiesTitle->setFont(epf);
-    m_elementPropertiesTitle->setStyleSheet("color: white;");
+    m_elementPropertiesTitle->setStyleSheet(overlayTextStyle);
     m_contentLayout->addWidget(m_elementPropertiesTitle);
 
     // 3) Fade in with checkbox format
@@ -206,16 +272,16 @@ void MediaSettingsPanel::buildUi() {
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
         m_fadeInCheck = new QCheckBox("Fade in: ", row);
-        m_fadeInCheck->setStyleSheet("color: white;");
+        m_fadeInCheck->setStyleSheet(overlayTextStyle);
         m_fadeInCheck->installEventFilter(this);
         m_fadeInBox = makeValueBox();
         auto* suffix = new QLabel("s", row);
-        suffix->setStyleSheet("color: white;");
+        suffix->setStyleSheet(overlayTextStyle);
         h->addWidget(m_fadeInCheck);
         h->addWidget(m_fadeInBox);
         h->addWidget(suffix);
         h->addStretch();
-    m_contentLayout->addWidget(row);
+        m_contentLayout->addWidget(row);
     }
 
     // 4) Fade out with checkbox format
@@ -225,16 +291,16 @@ void MediaSettingsPanel::buildUi() {
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
         m_fadeOutCheck = new QCheckBox("Fade out: ", row);
-        m_fadeOutCheck->setStyleSheet("color: white;");
+        m_fadeOutCheck->setStyleSheet(overlayTextStyle);
         m_fadeOutCheck->installEventFilter(this);
         m_fadeOutBox = makeValueBox();
         auto* suffix = new QLabel("s", row);
-        suffix->setStyleSheet("color: white;");
+        suffix->setStyleSheet(overlayTextStyle);
         h->addWidget(m_fadeOutCheck);
         h->addWidget(m_fadeOutBox);
         h->addWidget(suffix);
         h->addStretch();
-    m_contentLayout->addWidget(row);
+        m_contentLayout->addWidget(row);
     }
 
     // 5) Opacity with checkbox format
@@ -244,49 +310,19 @@ void MediaSettingsPanel::buildUi() {
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
         m_opacityCheck = new QCheckBox("Opacity: ", row);
-        m_opacityCheck->setStyleSheet("color: white;");
+        m_opacityCheck->setStyleSheet(overlayTextStyle);
         m_opacityCheck->installEventFilter(this);
         m_opacityBox = makeValueBox(QStringLiteral("100")); // Default to 100%
         auto* suffix = new QLabel("%", row);
-        suffix->setStyleSheet("color: white;");
+        suffix->setStyleSheet(overlayTextStyle);
         h->addWidget(m_opacityCheck);
         h->addWidget(m_opacityBox);
         h->addWidget(suffix);
         h->addStretch();
         QObject::connect(m_opacityCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onOpacityToggled);
-    m_contentLayout->addWidget(row);
+        m_contentLayout->addWidget(row);
     }
-
-    // Scene-drawn rounded background behind the widget, matching overlay style
-    m_bgRect = new MouseBlockingRoundedRectItem();
-    m_bgRect->setRadius(gOverlayCornerRadiusPx);
-    applyOverlayBorder(m_bgRect);
-    m_bgRect->setBrush(QBrush(AppColors::gOverlayBackgroundColor));
-    m_bgRect->setZValue(12009.5); // just below proxy
-    m_bgRect->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-    m_bgRect->setData(0, QStringLiteral("blocking-overlay"));
-    
-    // Set initial size for background rect
-    QSize initialSize = m_widget->sizeHint();
-    initialSize.setWidth(221);
-    m_bgRect->setRect(0, 0, initialSize.width(), initialSize.height());
-
-    m_proxy = new QGraphicsProxyWidget();
-    m_proxy->setWidget(m_widget);
-    m_proxy->setZValue(12010.0); // above overlays
-    m_proxy->setOpacity(1.0);
-    // Ignore view scaling (keep absolute pixel size)
-    m_proxy->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-    // Ensure the panel receives mouse events and is treated as a blocking overlay by the canvas
-    m_proxy->setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton | Qt::MiddleButton);
-    m_proxy->setAcceptHoverEvents(true);
-    m_proxy->setData(0, QStringLiteral("blocking-overlay"));
-    
-    // Force the proxy to use our fixed width (height will be set in updatePosition)
-    QSize fixedSize = m_widget->sizeHint();
-    fixedSize.setWidth(221);
-    m_proxy->resize(fixedSize);
-    // Also make underlying widget track mouse (not strictly required for click blocking)
+    // Widget is now directly parented to viewport, no proxy needed
     m_widget->setMouseTracking(true);
     
     // Install event filter on the main widget and inner content to catch clicks/wheel
@@ -360,18 +396,12 @@ void MediaSettingsPanel::buildUi() {
         // Set initial state (play delay disabled by default since play automatically is unchecked)
         onPlayAutomaticallyToggled(m_autoPlayCheck->isChecked());
     }
-}
-
-void MediaSettingsPanel::ensureInScene(QGraphicsScene* scene) {
-    if (!scene || !m_proxy) return;
-    if (m_bgRect && !m_bgRect->scene()) scene->addItem(m_bgRect);
-    if (!m_proxy->scene()) scene->addItem(m_proxy);
+    
 }
 
 void MediaSettingsPanel::setVisible(bool visible) {
-    if (!m_proxy) return;
-    m_proxy->setVisible(visible);
-    if (m_bgRect) m_bgRect->setVisible(visible);
+    if (!m_widget) return;
+    m_widget->setVisible(visible);
     
     // Clear active box when hiding the panel
     if (!visible) {
@@ -380,7 +410,7 @@ void MediaSettingsPanel::setVisible(bool visible) {
 }
 
 bool MediaSettingsPanel::isVisible() const {
-    return m_proxy && m_proxy->isVisible();
+    return m_widget && m_widget->isVisible();
 }
 
 void MediaSettingsPanel::setMediaType(bool isVideo) {
@@ -410,48 +440,40 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
         m_widget->updateGeometry();
         m_widget->adjustSize();
         
-        // Update proxy widget size to match widget's preferred size but enforce fixed width
-        if (m_proxy) {
-            QSize preferredSize = m_widget->sizeHint();
-            preferredSize.setWidth(221); // Enforce our fixed width
-            m_proxy->resize(preferredSize);
-            
-            // Update background rect to match proxy size
-            if (m_bgRect) {
-                m_bgRect->setRect(0, 0, preferredSize.width(), preferredSize.height());
-            }
-        }
+        // Update position to recalculate background rect size
+        updatePosition();
     }
 }
 
-void MediaSettingsPanel::updatePosition(QGraphicsView* view) {
-    if (!view || !m_proxy) return;
+void MediaSettingsPanel::updatePosition() {
+    if (!m_widget) return;
+    
+    QWidget* viewport = m_widget->parentWidget();
+    if (!viewport) return;
+    
     const int margin = 16;
-    // Position at left edge of viewport, vertically near top with margin
-    QPointF topLeftVp(margin, margin);
-    QPointF topLeftScene = view->viewportTransform().inverted().map(topLeftVp);
-    m_proxy->setPos(topLeftScene);
-    // Match background rect to proxy widget geometry
-    if (m_bgRect) {
-        m_bgRect->setPos(topLeftScene);
-        const QSizeF s = m_proxy->size();
-        m_bgRect->setRect(0, 0, s.width(), s.height());
-    }
-
+    
+    // Position at left edge of viewport with margin
+    m_widget->move(margin, margin);
+    
     // Clamp panel height to viewport height; enable overflow scroll when needed
-    if (view) {
-        const int margin = 16;
-        int maxHeight = view->viewport()->height() - 2*margin;
-        maxHeight = qMax(50, maxHeight); // safety
-        // Compute desired content height based on inner content hint
-        int contentH = m_innerContent ? m_innerContent->sizeHint().height() + 0 : 0;
-        int panelH = qMin(maxHeight, contentH);
-        QSize s = m_proxy->size().toSize();
-        s.setHeight(panelH);
-        m_proxy->resize(s);
-        if (m_bgRect) m_bgRect->setRect(0, 0, s.width(), s.height());
-        updateScrollbarGeometry();
+    int maxHeight = viewport->height() - 2*margin;
+    maxHeight = qMax(50, maxHeight); // safety
+    
+    // Calculate total height: header + content (if expanded)
+    int headerH = m_headerWidget ? m_headerWidget->sizeHint().height() : 0;
+    int contentH = 0;
+    if (m_scrollArea && m_scrollArea->isVisible() && m_innerContent) {
+        contentH = m_innerContent->sizeHint().height();
     }
+    
+    int totalH = headerH + contentH;
+    int panelH = qMin(maxHeight, totalH);
+    
+    // Set widget size
+    m_widget->setFixedHeight(panelH);
+    
+    updateScrollbarGeometry();
 }
 
 void MediaSettingsPanel::setBoxActive(QLabel* box, bool active) {
@@ -713,14 +735,14 @@ double MediaSettingsPanel::fadeOutSeconds() const {
 }
 
 void MediaSettingsPanel::updateScrollbarGeometry() {
-    if (!m_overlayVScroll || !m_proxy) return;
-    const QRectF r = m_proxy->boundingRect();
+    if (!m_overlayVScroll || !m_widget) return;
+    const QRect r = m_widget->rect();
     const int margin = 6; // small inset from edge
     const int width = 8;
     const int top = 6;
     const int bottom = 6;
-    const int height = qMax(0, (int)r.height() - top - bottom);
-    const int x = (int)r.width() - width - margin;
+    const int height = qMax(0, r.height() - top - bottom);
+    const int x = r.width() - width - margin;
     const int y = top;
     m_overlayVScroll->setGeometry(x, y, width, height);
     // Update range visibility depending on content - but don't auto-show, only show on interaction
@@ -739,14 +761,18 @@ void MediaSettingsPanel::updateScrollbarGeometry() {
 
 void MediaSettingsPanel::onDisplayAutomaticallyToggled(bool checked) {
     // Enable/disable display delay checkbox and input box based on display automatically state
+    const QString activeTextStyle = QStringLiteral("color: %1;")
+        .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
+    const QString disabledTextStyle = QStringLiteral("color: #808080;");
+    
     if (m_displayDelayCheck) {
         m_displayDelayCheck->setEnabled(checked);
         
         // Update visual styling for disabled state
         if (checked) {
-            m_displayDelayCheck->setStyleSheet("color: white;");
+            m_displayDelayCheck->setStyleSheet(activeTextStyle);
         } else {
-            m_displayDelayCheck->setStyleSheet("color: #808080;"); // Gray color for disabled
+            m_displayDelayCheck->setStyleSheet(disabledTextStyle); // Gray color for disabled
             // Also uncheck the display delay checkbox when disabled
             m_displayDelayCheck->setChecked(false);
         }
@@ -783,23 +809,27 @@ void MediaSettingsPanel::onDisplayAutomaticallyToggled(bool checked) {
     // Also update the "seconds" label styling
     if (m_displayAfterSecondsLabel) {
         if (checked) {
-            m_displayAfterSecondsLabel->setStyleSheet("color: white;");
+            m_displayAfterSecondsLabel->setStyleSheet(activeTextStyle);
         } else {
-            m_displayAfterSecondsLabel->setStyleSheet("color: #808080;"); // Gray color for disabled
+            m_displayAfterSecondsLabel->setStyleSheet(disabledTextStyle); // Gray color for disabled
         }
     }
 }
 
 void MediaSettingsPanel::onPlayAutomaticallyToggled(bool checked) {
     // Enable/disable play delay checkbox and input box based on play automatically state
+    const QString activeTextStyle = QStringLiteral("color: %1;")
+        .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
+    const QString disabledTextStyle = QStringLiteral("color: #808080;");
+
     if (m_playDelayCheck) {
         m_playDelayCheck->setEnabled(checked);
         
         // Update visual styling for disabled state
         if (checked) {
-            m_playDelayCheck->setStyleSheet("color: white;");
+            m_playDelayCheck->setStyleSheet(activeTextStyle);
         } else {
-            m_playDelayCheck->setStyleSheet("color: #808080;"); // Gray color for disabled
+            m_playDelayCheck->setStyleSheet(disabledTextStyle); // Gray color for disabled
             // Also uncheck the play delay checkbox when disabled
             m_playDelayCheck->setChecked(false);
         }
@@ -836,9 +866,33 @@ void MediaSettingsPanel::onPlayAutomaticallyToggled(bool checked) {
     // Also update the "seconds" label styling
     if (m_autoPlaySecondsLabel) {
         if (checked) {
-            m_autoPlaySecondsLabel->setStyleSheet("color: white;");
+            m_autoPlaySecondsLabel->setStyleSheet(activeTextStyle);
         } else {
-            m_autoPlaySecondsLabel->setStyleSheet("color: #808080;"); // Gray color for disabled
+            m_autoPlaySecondsLabel->setStyleSheet(disabledTextStyle); // Gray color for disabled
         }
     }
+}
+
+void MediaSettingsPanel::setExpanded(bool expanded) {
+    m_isExpanded = expanded;
+    
+    // Update button text
+    if (m_toggleButton) {
+        m_toggleButton->setText(expanded ? "Hide Settings" : "Show Settings");
+        m_toggleButton->setChecked(expanded);
+    }
+    
+    // Show/hide the scroll area with options
+    if (m_scrollArea) {
+        m_scrollArea->setVisible(expanded);
+    }
+    
+    // Update widget geometry to fit new size
+    if (m_widget) {
+        m_widget->adjustSize();
+        m_widget->updateGeometry();
+    }
+    
+    // Recalculate panel height and position after expand/collapse
+    updatePosition();
 }
