@@ -141,6 +141,7 @@ private:
     void initializeRemoteClientInfoInTopBar(); // Initialize remote client info in top bar
     void createLocalClientInfoContainer(); // Create grouped container for local client info (You + network status)
     void setLocalNetworkStatus(const QString& status); // Update local network status
+    void updateClientNameDisplay(const ClientInfo& client);
     // Legacy helper removed; ScreenCanvas renders screens directly
     void updateVolumeIndicator();
     void setRemoteConnectionStatus(const QString& status);

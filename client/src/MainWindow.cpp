@@ -1195,6 +1195,7 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     if (m_remoteClientInfoContainer) {
         m_remoteClientInfoContainer->setVisible(true);
     }
+    updateClientNameDisplay(client);
     // While the remote is loading/unloading, remove the volume indicator from layout (display:none)
     removeVolumeIndicatorFromLayout();
     // Also do not show a default remote status; remove it until we know actual state
@@ -1203,6 +1204,28 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     // Update button visibility for screen view page
     if (m_responsiveLayoutManager) {
         m_responsiveLayoutManager->updateResponsiveButtonVisibility();
+    }
+}
+
+void MainWindow::updateClientNameDisplay(const ClientInfo& client) {
+    if (!m_clientNameLabel) return;
+
+    QString name = client.getMachineName().trimmed();
+    QString platform = client.getPlatform().trimmed();
+
+    if (name.isEmpty()) {
+        name = tr("Unknown Machine");
+    }
+
+    QString text = name;
+    if (!platform.isEmpty()) {
+        text = QStringLiteral("%1 (%2)").arg(name, platform);
+    }
+
+    m_clientNameLabel->setText(text);
+
+    if (m_remoteClientInfoContainer) {
+        m_remoteClientInfoContainer->setToolTip(text);
     }
 }
 
@@ -2632,8 +2655,7 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
     addRemoteStatusToLayout();
 
         // Refresh client label
-        if (m_clientNameLabel)
-            m_clientNameLabel->setText(QString("%1 (%2)").arg(clientInfo.getMachineName()).arg(clientInfo.getPlatform()));
+        updateClientNameDisplay(clientInfo);
     }
 }
 
