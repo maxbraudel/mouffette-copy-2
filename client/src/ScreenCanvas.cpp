@@ -3777,8 +3777,7 @@ void ScreenCanvas::ensureSettingsToggleButton() {
     m_settingsToggleButton->setIcon(QIcon(QStringLiteral(":/icons/icons/settings.svg")));
     m_settingsToggleButton->setObjectName("SettingsToggleButton");
     m_settingsToggleButton->setCheckable(true);
-    m_settingsToggleButton->setEnabled(false);
-    m_settingsToggleButton->setToolTip(tr("Select a media item to edit settings"));
+    m_settingsToggleButton->setToolTip(tr("Settings"));
     m_settingsToggleButton->setAttribute(Qt::WA_NoMousePropagation, true);
     m_settingsToggleButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
     m_settingsToggleButton->setAutoRaise(false);
@@ -3872,32 +3871,24 @@ void ScreenCanvas::updateGlobalSettingsPanelVisibility() {
         }
     }
     
-    if (!selectedMedia) {
-        if (m_settingsToggleButton) {
-            QSignalBlocker blocker(m_settingsToggleButton);
-            m_settingsToggleButton->setChecked(false);
-            m_settingsToggleButton->setEnabled(false);
-            m_settingsToggleButton->setToolTip(tr("Select a media item to edit settings"));
-        }
-        m_globalSettingsPanel->setMediaItem(nullptr);
-        m_globalSettingsPanel->setVisible(false);
-        return;
-    }
-
-    m_globalSettingsPanel->setMediaType(selectedMedia->isVideoMedia());
-    m_globalSettingsPanel->setMediaItem(selectedMedia);
-
+    // Update button checked state to match preference
     if (m_settingsToggleButton) {
-        if (!m_settingsToggleButton->isEnabled()) {
-            m_settingsToggleButton->setEnabled(true);
-        }
-        const QString tooltip = tr("Edit settings for \"%1\"").arg(selectedMedia->displayName());
-        m_settingsToggleButton->setToolTip(tooltip);
         if (m_settingsToggleButton->isChecked() != m_settingsPanelPreferredVisible) {
             QSignalBlocker blocker(m_settingsToggleButton);
             m_settingsToggleButton->setChecked(m_settingsPanelPreferredVisible);
         }
     }
+
+    if (!selectedMedia) {
+        // No media selected - hide panel but keep button state
+        m_globalSettingsPanel->setMediaItem(nullptr);
+        m_globalSettingsPanel->setVisible(false);
+        return;
+    }
+
+    // Media selected - show panel if button is checked
+    m_globalSettingsPanel->setMediaType(selectedMedia->isVideoMedia());
+    m_globalSettingsPanel->setMediaItem(selectedMedia);
 
     const bool shouldShowPanel = !m_settingsToggleButton || m_settingsToggleButton->isChecked();
     m_globalSettingsPanel->setVisible(shouldShowPanel);
