@@ -3,6 +3,7 @@
 #include "WebSocketClient.h" // for remote scene start/stop messaging
 #include <QTimer>
 #include "AppColors.h"
+#include "Theme.h"
 #include "MediaItems.h"
 #include "MediaSettingsPanel.h" // for settingsPanel() accessor usage
 #include <QGraphicsScene>
@@ -3771,36 +3772,40 @@ void ScreenCanvas::handleAutoPlayback() {
 void ScreenCanvas::ensureSettingsToggleButton() {
     if (m_settingsToggleButton || !viewport()) return;
 
-    m_settingsToggleButton = new QPushButton(QIcon(QStringLiteral(":/icons/settings.svg")), tr("Element settings"), viewport());
+    m_settingsToggleButton = new QPushButton(QIcon(QStringLiteral(":/icons/icons/settings.svg")), QString(), viewport());
     m_settingsToggleButton->setObjectName("SettingsToggleButton");
     m_settingsToggleButton->setCheckable(true);
     m_settingsToggleButton->setEnabled(false);
     m_settingsToggleButton->setCursor(Qt::PointingHandCursor);
-    m_settingsToggleButton->setIconSize(QSize(18, 18));
     m_settingsToggleButton->setToolTip(tr("Select a media item to edit settings"));
     m_settingsToggleButton->setAttribute(Qt::WA_NoMousePropagation, true);
+    m_settingsToggleButton->setFocusPolicy(Qt::NoFocus);
+    m_settingsToggleButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    m_settingsToggleButton->setAccessibleName(tr("Media settings"));
 
-    const QString textColor = AppColors::colorToCss(AppColors::gOverlayTextColor);
-    const QString hoverColor = QStringLiteral("rgba(255,255,255,0.08)");
-    const QString checkedBg = AppColors::colorToCss(AppColors::gBrandBlue);
-    const QString checkedHoverBg = AppColors::colorToCss(AppColors::gBrandBlueDark);
+    const QString baseBg = AppColors::colorToCss(AppColors::gOverlayBackgroundColor);
+    const QString activeBg = AppColors::colorToCss(AppColors::gOverlayActiveBackgroundColor);
+    const QString borderColor = AppColors::colorToCss(AppColors::gOverlayBorderColor);
+    QColor disabledColor = AppColors::gOverlayBackgroundColor;
+    disabledColor.setAlphaF(std::clamp(disabledColor.alphaF() * 0.35, 0.0, 1.0));
+    const QString disabledBg = AppColors::colorToCss(disabledColor);
 
-    m_settingsToggleButton->setStyleSheet(QStringLiteral(
-        "QPushButton {"
-        " color: %1;"
-        " background-color: transparent;"
-        " border: none;"
-        " border-radius: 6px;"
-        " padding: 6px 12px;"
-        " font-size: 13px;"
-        " font-weight: 500;"
-        " text-align: left;"
+    const QString cornerRadiusPx = QString::number(gOverlayCornerRadiusPx) + QStringLiteral("px");
+    const QString style = QStringLiteral(
+        "QPushButton#SettingsToggleButton {"
+        " background-color: %1;"
+        " border: 1px solid %2;"
+        " border-radius: %3;"
+        " padding: 0;"
+        " margin: 0;"
         "}"
-        "QPushButton:hover:!disabled:!checked { background-color: %2; }"
-        "QPushButton:checked { background-color: %3; color: white; }"
-        "QPushButton:checked:hover { background-color: %4; }"
-        "QPushButton:disabled { color: rgba(255,255,255,0.35); }"
-    ).arg(textColor, hoverColor, checkedBg, checkedHoverBg));
+        "QPushButton#SettingsToggleButton:hover:!disabled:!checked { background-color: %1; }"
+        "QPushButton#SettingsToggleButton:pressed { background-color: %4; }"
+        "QPushButton#SettingsToggleButton:checked { background-color: %4; }"
+        "QPushButton#SettingsToggleButton:checked:hover { background-color: %4; }"
+        "QPushButton#SettingsToggleButton:disabled { background-color: %5; border: 1px solid %2; }"
+    ).arg(baseBg, borderColor, cornerRadiusPx, activeBg, disabledBg);
+    m_settingsToggleButton->setStyleSheet(style);
 
     connect(m_settingsToggleButton, &QPushButton::toggled, this, [this](bool checked) {
         m_settingsPanelPreferredVisible = checked;
@@ -3815,20 +3820,24 @@ void ScreenCanvas::updateSettingsToggleButtonGeometry() {
     ensureSettingsToggleButton();
     if (!m_settingsToggleButton) return;
 
-    m_settingsToggleButton->adjustSize();
     const int margin = 16;
     const int spacing = 10;
-    const int maxWidth = std::max(0, viewport()->width() - 2 * margin);
-    const QSize hint = m_settingsToggleButton->sizeHint();
-    const int width = std::min(hint.width(), maxWidth);
-    const int height = hint.height();
+    int buttonSize = ResizableMediaBase::getHeightOfMediaOverlaysPx();
+    if (buttonSize <= 0) buttonSize = 36;
+    buttonSize = std::max(buttonSize, 24);
 
-    m_settingsToggleButton->resize(width, height);
+    int iconSize = static_cast<int>(std::round(buttonSize * 0.6));
+    const int maxIcon = std::max(16, buttonSize - 4);
+    iconSize = std::clamp(iconSize, 16, maxIcon);
+
+    m_settingsToggleButton->setFixedSize(buttonSize, buttonSize);
+    m_settingsToggleButton->setIconSize(QSize(iconSize, iconSize));
     m_settingsToggleButton->move(margin, margin);
+    m_settingsToggleButton->raise();
     m_settingsToggleButton->show();
 
     if (m_globalSettingsPanel) {
-        const int panelTop = margin + height + spacing;
+        const int panelTop = margin + buttonSize + spacing;
         const int bottomMargin = margin;
         m_globalSettingsPanel->setAnchorMargins(margin, panelTop, bottomMargin);
         const int available = viewport()->height() - panelTop - bottomMargin;
