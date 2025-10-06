@@ -71,7 +71,6 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     // Toggle button
     m_toggleButton = new QPushButton(QString(), m_headerWidget);
     m_toggleButton->setCheckable(true);
-    m_toggleButton->setToolTip(QStringLiteral("Show settings"));
     m_toggleButton->setAccessibleName(QStringLiteral("Show settings"));
     m_toggleButton->installEventFilter(this);
     m_toggleButton->setContentsMargins(0, 0, 0, 0);
@@ -1041,9 +1040,8 @@ void MediaSettingsPanel::setExpanded(bool expanded) {
             m_toggleButton->setIcon(m_settingsIcon);
             m_toggleButton->setContentsMargins(0, 0, 0, 0);
         }
-        const QString tooltip = expanded ? QStringLiteral("Hide settings") : QStringLiteral("Show settings");
-        m_toggleButton->setToolTip(tooltip);
-        m_toggleButton->setAccessibleName(tooltip);
+        const QString accessibleText = expanded ? QStringLiteral("Hide settings") : QStringLiteral("Show settings");
+        m_toggleButton->setAccessibleName(accessibleText);
     }
     updatePanelChrome();
 

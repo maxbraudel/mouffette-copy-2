@@ -2942,7 +2942,6 @@ void MainWindow::updateClientList(const QList<ClientInfo>& clients) {
         // Add client items
         for (const ClientInfo& client : clients) {
             QListWidgetItem* item = new QListWidgetItem(client.getDisplayText());
-            item->setToolTip(QString("ID: %1\nStatus: %2").arg(client.getId()).arg(client.getStatus()));
             m_clientListWidget->addItem(item);
         }
     }
