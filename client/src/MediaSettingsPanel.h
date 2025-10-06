@@ -60,6 +60,8 @@ private:
     void clearActiveBox();
     bool isValidInputForBox(QLabel* box, QChar character);
     void updateScrollbarGeometry();
+    void setToggleHovered(bool hovered);
+    void updateToggleHoverFromCursor();
 
 private:
     QWidget* m_widget = nullptr; // parented to viewport
@@ -69,6 +71,7 @@ private:
     QWidget* m_headerWidget = nullptr;
     class QPushButton* m_toggleButton = nullptr;
     bool m_isExpanded = false;
+    bool m_toggleHovered = false;
     // Scrollable content
     QScrollArea* m_scrollArea = nullptr;
     QWidget* m_innerContent = nullptr;
@@ -103,7 +106,6 @@ private:
     QLabel* m_opacityBox = nullptr;
     QLabel* m_activeBox = nullptr; // currently active box (if any)
     bool m_clearOnFirstType = false; // if true, first keypress replaces previous content
-    bool m_ignoreNextToggleLeave = false; // swallow synthetic leave right after expand/collapse
     // Overlay scrollbar to mirror media list behavior
     QScrollBar* m_overlayVScroll = nullptr;
     QTimer* m_scrollbarHideTimer = nullptr;
