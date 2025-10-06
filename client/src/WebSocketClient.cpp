@@ -35,10 +35,12 @@ void WebSocketClient::onUploadTextMessageReceived(const QString& message) {
 
 WebSocketClient::~WebSocketClient() {
     if (m_webSocket) {
+        m_webSocket->disconnect();  // Disconnect all signals first
         m_webSocket->close();
         m_webSocket->deleteLater();
     }
     if (m_uploadSocket) {
+        m_uploadSocket->disconnect();  // Disconnect all signals first
         m_uploadSocket->close();
         m_uploadSocket->deleteLater();
         m_uploadSocket = nullptr;
