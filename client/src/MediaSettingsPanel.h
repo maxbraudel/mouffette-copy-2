@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QWidget>
+#include <QIcon>
 
 class QVBoxLayout;
 class QLabel;
@@ -60,8 +61,8 @@ private:
     void clearActiveBox();
     bool isValidInputForBox(QLabel* box, QChar character);
     void updateScrollbarGeometry();
-    void setToggleHovered(bool hovered);
-    void updateToggleHoverFromCursor();
+    void refreshToggleMetrics();
+    void updatePanelChrome();
 
 private:
     QWidget* m_widget = nullptr; // parented to viewport
@@ -69,9 +70,13 @@ private:
     QVBoxLayout* m_rootLayout = nullptr;
     // Header with toggle button
     QWidget* m_headerWidget = nullptr;
+    QVBoxLayout* m_headerLayout = nullptr;
     class QPushButton* m_toggleButton = nullptr;
     bool m_isExpanded = false;
-    bool m_toggleHovered = false;
+    int m_collapsedButtonSizePx = 36;
+    int m_toggleIconSizePx = 20;
+    const int m_expandedWidthPx = 221;
+    QIcon m_settingsIcon;
     // Scrollable content
     QScrollArea* m_scrollArea = nullptr;
     QWidget* m_innerContent = nullptr;
