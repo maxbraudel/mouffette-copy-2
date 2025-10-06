@@ -100,7 +100,7 @@ class ToastNotificationSystem : public QObject
 public:
     struct Config {
         ToastNotification::Position position = ToastNotification::Position::BottomLeft;
-        int maxVisibleToasts = 3;
+        int maxVisibleToasts = 10;
         int spacing = 10;
         int marginFromEdge = 20; // generic fallback for edges not covered below
         int marginLeft = 40;     // specific left margin for container

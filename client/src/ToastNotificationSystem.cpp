@@ -334,13 +334,6 @@ QPoint ToastNotificationSystem::calculateNotificationPosition(int index) const {
     // Bounds check
     if (index < 0 || index >= m_activeNotifications.size()) return QPoint(0, 0);
 
-    // Compute cumulative heights of previous toasts + spacing
-    int prevHeightSum = 0;
-    for (int i = 0; i < index && i < m_activeNotifications.size(); ++i) {
-        prevHeightSum += m_activeNotifications[i]->height();
-    }
-    prevHeightSum += index * m_config.spacing;
-
     // Current toast size
     const int curW = m_activeNotifications[index]->width();
     const int curH = m_activeNotifications[index]->height();
@@ -368,12 +361,28 @@ QPoint ToastNotificationSystem::calculateNotificationPosition(int index) const {
         case ToastNotification::Position::TopLeft:
         case ToastNotification::Position::TopRight:
         case ToastNotification::Position::TopCenter:
-            y = m_config.marginFromEdge + prevHeightSum;
+            // Top positions: stack downward (index 0 at top, new toasts below)
+            {
+                int prevHeightSum = 0;
+                for (int i = 0; i < index && i < m_activeNotifications.size(); ++i) {
+                    prevHeightSum += m_activeNotifications[i]->height();
+                }
+                prevHeightSum += index * m_config.spacing;
+                y = m_config.marginFromEdge + prevHeightSum;
+            }
             break;
         case ToastNotification::Position::BottomLeft:
         case ToastNotification::Position::BottomRight:
         case ToastNotification::Position::BottomCenter:
-            y = parentRect.height() - m_config.marginBottom - curH - prevHeightSum; // specific bottom margin
+            // Bottom positions: stack upward (newest toast always at bottom, older ones pushed up)
+            {
+                int nextHeightSum = 0;
+                for (int i = index + 1; i < m_activeNotifications.size(); ++i) {
+                    nextHeightSum += m_activeNotifications[i]->height();
+                }
+                nextHeightSum += (m_activeNotifications.size() - index - 1) * m_config.spacing;
+                y = parentRect.height() - m_config.marginBottom - curH - nextHeightSum;
+            }
             break;
     }
 
