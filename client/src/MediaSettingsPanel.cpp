@@ -9,6 +9,8 @@
 #include <QPushButton>
 #include <QCoreApplication>
 #include <QKeyEvent>
+#include <QHoverEvent>
+#include <QCursor>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QTimer>
@@ -98,43 +100,45 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         "} "
         "QPushButton:pressed:enabled { "
         "    color: white; "
-        "    background-color: rgba(255,255,255,0.1); "
+        "    background-color: rgba(255,255,255,0.05); "
         "    border-radius: %3px; "
         "} "
         "QPushButton:checked { "
         "    color: white; "
         "    background-color: transparent; "
-    "    border-bottom: 1px solid %2; "
-    "    border-top-left-radius: %3px; "
-    "    border-top-right-radius: %3px; "
+        "    border-bottom: 1px solid %2; "
+        "    border-top-left-radius: %3px; "
+        "    border-top-right-radius: %3px; "
         "    border-bottom-left-radius: 0px; "
         "    border-bottom-right-radius: 0px; "
         "} "
         "QPushButton:checked:hover { "
         "    color: white; "
         "    background-color: rgba(255,255,255,0.05); "
-    "    border-bottom: 1px solid %2; "
-    "    border-top-left-radius: %3px; "
-    "    border-top-right-radius: %3px; "
+        "    border-bottom: 1px solid %2; "
+        "    border-top-left-radius: %3px; "
+        "    border-top-right-radius: %3px; "
         "    border-bottom-left-radius: 0px; "
         "    border-bottom-right-radius: 0px; "
         "} "
         "QPushButton:checked:pressed { "
         "    color: white; "
-        "    background-color: rgba(255,255,255,0.1); "
-    "    border-bottom: 1px solid %2; "
-    "    border-top-left-radius: %3px; "
-    "    border-top-right-radius: %3px; "
+        "    background-color: rgba(255,255,255,0.05); "
+        "    border-bottom: 1px solid %2; "
+        "    border-top-left-radius: %3px; "
+        "    border-top-right-radius: %3px; "
         "    border-bottom-left-radius: 0px; "
         "    border-bottom-right-radius: 0px; "
-    "} "
-    "QPushButton:checked:disabled { "
-    "    border-bottom: none; "
-    "}"
+        "} "
+        "QPushButton:checked:disabled { "
+        "    border-bottom: none; "
+        "}"
     ).arg(overlayTextCss).arg(overlayBorderCss).arg(gOverlayCornerRadiusPx);
     m_toggleButton->setStyleSheet(buttonStyle);
     m_toggleButton->setFixedHeight(40);
     m_toggleButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    m_toggleButton->setAttribute(Qt::WA_Hover, true);
+    m_toggleButton->installEventFilter(this);
     connect(m_toggleButton, &QPushButton::clicked, this, [this]() {
         setExpanded(m_toggleButton->isChecked());
     });
@@ -552,6 +556,24 @@ void MediaSettingsPanel::clearActiveBox() {
 }
 
 bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
+    if (obj == m_toggleButton) {
+        if (event->type() == QEvent::Leave || event->type() == QEvent::HoverLeave) {
+            if (m_ignoreNextToggleLeave) {
+                m_ignoreNextToggleLeave = false;
+                QPoint globalPos = QCursor::pos();
+                QPoint localPos = m_toggleButton->mapFromGlobal(globalPos);
+                QRect expandedRect = m_toggleButton->rect().adjusted(0, 0, 0, 1);
+                if (expandedRect.contains(localPos)) {
+                    QEvent enterEvent(QEvent::Enter);
+                    QCoreApplication::sendEvent(m_toggleButton, &enterEvent);
+                    QHoverEvent hoverMove(QEvent::HoverMove, QPointF(localPos), QPointF(localPos), Qt::NoModifier);
+                    QCoreApplication::sendEvent(m_toggleButton, &hoverMove);
+                    return true; // swallow synthetic leave so hover persists
+                }
+            }
+        }
+    }
+
     // Block all mouse interactions from reaching canvas when over settings panel
     if (event->type() == QEvent::MouseButtonPress ||
         event->type() == QEvent::MouseButtonRelease ||
@@ -903,6 +925,7 @@ void MediaSettingsPanel::onPlayAutomaticallyToggled(bool checked) {
 
 void MediaSettingsPanel::setExpanded(bool expanded) {
     m_isExpanded = expanded;
+    m_ignoreNextToggleLeave = true;
     
     // Update button text
     if (m_toggleButton) {
@@ -915,12 +938,13 @@ void MediaSettingsPanel::setExpanded(bool expanded) {
         m_scrollArea->setVisible(expanded);
     }
     
-    // Update widget geometry to fit new size
-    if (m_widget) {
-        m_widget->adjustSize();
-        m_widget->updateGeometry();
-    }
-    
-    // Recalculate panel height and position after expand/collapse
-    updatePosition();
+    // Defer geometry updates to avoid interrupting button hover state
+    // Use QTimer::singleShot to schedule the update after the current event processing
+    QTimer::singleShot(0, this, [this]() {
+        if (m_widget) {
+            m_widget->adjustSize();
+            m_widget->updateGeometry();
+        }
+        updatePosition();
+    });
 }
