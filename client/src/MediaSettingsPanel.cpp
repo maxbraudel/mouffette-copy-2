@@ -527,20 +527,7 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
     const bool withinPanelHierarchy = m_widget && obj && obj->isWidgetType() &&
         (obj == m_widget || m_widget->isAncestorOf(static_cast<QWidget*>(obj)));
 
-    // Block all mouse interactions from reaching canvas when over settings panel
-    if (event->type() == QEvent::MouseButtonPress ||
-        event->type() == QEvent::MouseButtonRelease ||
-        event->type() == QEvent::MouseMove ||
-        event->type() == QEvent::MouseButtonDblClick) {
-        if (withinPanelHierarchy || obj == m_scrollArea || obj == m_scrollContainer) {
-            if (event->type() == QEvent::MouseButtonPress) {
-                clearActiveBox();
-            }
-            return false; // Allow widget to process; WA_NoMousePropagation stops propagation
-        }
-    }
-    
-    // Handle clicks on value boxes
+    // Handle clicks on value boxes FIRST (before general mouse blocking)
     if (event->type() == QEvent::MouseButtonPress) {
         QLabel* box = qobject_cast<QLabel*>(obj);
         if (box && (box == m_displayAfterBox || box == m_autoPlayBox || box == m_repeatBox || 
@@ -561,10 +548,18 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
             m_clearOnFirstType = true;
             return true; // consume the event
         }
-        // Handle clicks on checkboxes or elsewhere in the panel - clear active box
-        else {
-            clearActiveBox();
-            return false; // don't consume, let other widgets handle
+    }
+
+    // Block all mouse interactions from reaching canvas when over settings panel
+    if (event->type() == QEvent::MouseButtonPress ||
+        event->type() == QEvent::MouseButtonRelease ||
+        event->type() == QEvent::MouseMove ||
+        event->type() == QEvent::MouseButtonDblClick) {
+        if (withinPanelHierarchy || obj == m_scrollArea || obj == m_scrollContainer) {
+            if (event->type() == QEvent::MouseButtonPress) {
+                clearActiveBox();
+            }
+            return false; // Allow widget to process; WA_NoMousePropagation stops propagation
         }
     }
     // Handle key presses when a box is active
