@@ -167,8 +167,8 @@ private:
     void applyTextEllipsisIfConstrained(bool isWidthConstrained); // apply ellipsis to text labels
     std::pair<int, bool> calculateDesiredWidthAndConstraint(); // calculate desired width and constraint state consistently
     void updateGlobalSettingsPanelVisibility(); // Update global settings panel based on toggle + selection
-    void ensureSettingsToolbar();
-    void updateSettingsToolbarGeometry();
+    void ensureSettingsToggleButton();
+    void updateSettingsToggleButtonGeometry();
     
     void OnSceneChanged();
     // Snap-to-screen helpers
@@ -273,7 +273,6 @@ private:
     QTimer* m_scrollbarHideTimer = nullptr; // timer to auto-hide scrollbar after inactivity
     QVBoxLayout* m_contentLayout = nullptr; // content layout (for media items)
     QWidget* m_overlayHeaderWidget = nullptr; // container for overlay header row (holds upload button)
-    QWidget* m_settingsToolbar = nullptr; // toolbar hosting settings toggle button(s)
     QPushButton* m_settingsToggleButton = nullptr; // toggle to show/hide media settings panel
     bool m_settingsPanelPreferredVisible = false;
     class MediaSettingsPanel* m_globalSettingsPanel = nullptr; // global settings panel driven by toolbar toggle

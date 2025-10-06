@@ -11,6 +11,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QTimer>
+#include <QSizePolicy>
 #include <algorithm>
 #include <cmath>
 #include "MediaItems.h" // for ResizableMediaBase
@@ -108,6 +109,12 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     m_contentLayout->setContentsMargins(20, 16, 20, 16);
     m_contentLayout->setSpacing(10);
     m_contentLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
+    m_contentLayout->setAlignment(Qt::AlignTop);
+
+    auto configureRow = [](QWidget* row) {
+        if (!row) return;
+        row->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    };
 
     m_title = new QLabel("Scene options");
     QFont tf = m_title->font();
@@ -132,7 +139,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     // 0) Display automatically + Display delay as separate checkboxes
     {
         // Display automatically checkbox with proper alignment
-        auto* autoRow = new QWidget(m_widget);
+    auto* autoRow = new QWidget(m_innerContent);
+    configureRow(autoRow);
         auto* autoLayout = new QHBoxLayout(autoRow);
         autoLayout->setContentsMargins(0, 0, 0, 0);
         autoLayout->setSpacing(0);
@@ -144,7 +152,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_contentLayout->addWidget(autoRow);
         
         // Display delay checkbox with input (separate checkbox)
-        auto* delayRow = new QWidget(m_widget);
+    auto* delayRow = new QWidget(m_innerContent);
+    configureRow(delayRow);
         auto* h = new QHBoxLayout(delayRow);
         h->setContentsMargins(0, 0, 0, 0);
         h->setSpacing(0);
@@ -164,7 +173,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
 
     // 1) Play automatically as separate widget (video only) - matching display layout
     {
-        m_autoPlayRow = new QWidget(m_widget);
+    m_autoPlayRow = new QWidget(m_innerContent);
+    configureRow(m_autoPlayRow);
         auto* autoLayout = new QHBoxLayout(m_autoPlayRow);
         autoLayout->setContentsMargins(0, 0, 0, 0);
         autoLayout->setSpacing(0);
@@ -178,7 +188,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     
     // Play delay as a separate widget (video only) - matching display delay layout
     {
-        m_playDelayRow = new QWidget(m_widget);
+    m_playDelayRow = new QWidget(m_innerContent);
+    configureRow(m_playDelayRow);
         auto* h = new QHBoxLayout(m_playDelayRow);
         h->setContentsMargins(0, 0, 0, 0);
         h->setSpacing(0);
@@ -198,7 +209,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
 
     // 2) Repeat (video only) - keeping original single checkbox format
     {
-        m_repeatRow = new QWidget(m_widget);
+    m_repeatRow = new QWidget(m_innerContent);
+    configureRow(m_repeatRow);
         auto* h = new QHBoxLayout(m_repeatRow);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
@@ -226,7 +238,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
 
     // 3) Fade in with checkbox format
     {
-        auto* row = new QWidget(m_widget);
+    auto* row = new QWidget(m_innerContent);
+    configureRow(row);
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
@@ -246,7 +259,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
 
     // 4) Fade out with checkbox format
     {
-        auto* row = new QWidget(m_widget);
+    auto* row = new QWidget(m_innerContent);
+    configureRow(row);
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
@@ -266,7 +280,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
 
     // 5) Opacity with checkbox format
     {
-        auto* row = new QWidget(m_widget);
+    auto* row = new QWidget(m_innerContent);
+    configureRow(row);
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
@@ -413,13 +428,33 @@ void MediaSettingsPanel::updatePosition() {
     if (!viewport) return;
     
     const int viewportHeight = viewport->height();
-    const int availableHeight = std::max(50, viewportHeight - m_anchorTopMargin - m_anchorBottomMargin);
+    const int availableHeight = std::max(0, viewportHeight - m_anchorTopMargin - m_anchorBottomMargin);
 
     updateAvailableHeight(availableHeight);
 
-    m_widget->adjustSize();
-    const int desiredHeight = m_widget->sizeHint().height();
-    const int boundedHeight = std::min(availableHeight, desiredHeight);
+    int contentHeight = 0;
+    if (m_innerContent) {
+        contentHeight = m_innerContent->sizeHint().height();
+    }
+    if (m_scrollArea) {
+        contentHeight += m_scrollArea->frameWidth() * 2;
+    }
+    if (m_rootLayout) {
+        const QMargins margins = m_rootLayout->contentsMargins();
+        contentHeight += margins.top() + margins.bottom();
+    }
+
+    int desiredHeight = contentHeight;
+    if (desiredHeight <= 0) {
+        desiredHeight = m_widget->sizeHint().height();
+    }
+
+    int boundedHeight = desiredHeight;
+    if (availableHeight > 0) {
+        boundedHeight = std::min(availableHeight, desiredHeight);
+    }
+    boundedHeight = std::max(1, boundedHeight);
+
     const QSize newSize(m_panelWidthPx, boundedHeight);
     if (m_widget->size() != newSize) {
         m_widget->resize(newSize);
