@@ -68,7 +68,7 @@ public:
     void handleAutoDisplay();
     void handleAutoPlayback();
     // Remote scene integration setters
-    void setWebSocketClient(class WebSocketClient* client) { m_wsClient = client; }
+    void setWebSocketClient(class WebSocketClient* client);
     void setRemoteSceneTargetClientId(const QString& id) { m_remoteSceneTargetClientId = id; }
     // Remote cursor style setters
     void setRemoteCursorDiameterPx(int d) { m_remoteCursorDiameterPx = qMax(2, d); if (m_remoteCursorDot) { recreateRemoteCursorItem(); } }
@@ -288,11 +288,22 @@ private:
     // Reverse mapping container widget -> media item (pour clic sélection)
     QHash<QWidget*, ResizableMediaBase*> m_mediaItemByContainer;
 
+private slots:
+    // Remote scene feedback handlers
+    void onRemoteSceneValidationReceived(const QString& targetClientId, bool success, const QString& errorMessage);
+    void onRemoteSceneLaunchedReceived(const QString& targetClientId);
+    void onRemoteSceneLaunchTimeout();
+
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
     // Launch Remote Scene toggle state
     bool m_sceneLaunched = false;
+    bool m_sceneLaunching = false; // Loading state while waiting for remote validation
+    QTimer* m_sceneLaunchTimeoutTimer = nullptr;
+    
+    // Configurable timeout for remote scene launch (milliseconds)
+    static constexpr int REMOTE_SCENE_LAUNCH_TIMEOUT_MS = 10000; // 10 seconds
     
     // Launch Test Scene toggle state
     bool m_testSceneLaunched = false;

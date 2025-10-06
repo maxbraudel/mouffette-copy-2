@@ -51,6 +51,9 @@ public:
     // Remote scene control
     void sendRemoteSceneStart(const QString& targetClientId, const QJsonObject& scenePayload);
     void sendRemoteSceneStop(const QString& targetClientId);
+    // Remote scene validation feedback
+    void sendRemoteSceneValidationResult(const QString& senderClientId, bool success, const QString& errorMessage = QString());
+    void sendRemoteSceneLaunched(const QString& senderClientId);
 
     // Client-side cancel safeguard: mark an uploadId as cancelled to ignore any further chunk sends
     void cancelUploadId(const QString& uploadId) { m_canceledUploads.insert(uploadId); }
@@ -84,6 +87,9 @@ signals:
     // Remote scene inbound events
     void remoteSceneStartReceived(const QString& senderClientId, const QJsonObject& scenePayload);
     void remoteSceneStopReceived(const QString& senderClientId);
+    // Remote scene validation feedback events
+    void remoteSceneValidationReceived(const QString& targetClientId, bool success, const QString& errorMessage);
+    void remoteSceneLaunchedReceived(const QString& targetClientId);
 
 private slots:
     void onConnected();

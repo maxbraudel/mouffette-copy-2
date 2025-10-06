@@ -52,6 +52,10 @@ QColor gLaunchRemoteSceneBg = QColor(255, 0, 255, 38);   // Magenta background (
 QColor gLaunchRemoteSceneHover = QColor(255, 0, 255, 56); // Magenta hover (0.22 * 255 ≈ 56)
 QColor gLaunchRemoteScenePressed = QColor(255, 0, 255, 77); // Magenta pressed (0.30 * 255 ≈ 77)
 
+// Launch Remote Scene loading state colors (blue theme like upload)
+QColor gLaunchRemoteSceneLoadingText = QColor(74, 144, 226); // Blue text
+QColor gLaunchRemoteSceneLoadingBg = QColor(74, 144, 226, 38); // Blue background (0.15 * 255 ≈ 38)
+
 // Launch Test Scene button colors (magenta theme)
 QColor gLaunchTestSceneText = QColor(255, 150, 255);     // Magenta text
 QColor gLaunchTestSceneBg = QColor(255, 0, 255, 38);   // Magenta background (0.15 * 255 ≈ 38)

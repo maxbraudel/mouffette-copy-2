@@ -88,6 +88,10 @@ extern QColor gLaunchRemoteSceneBg;
 extern QColor gLaunchRemoteSceneHover;
 extern QColor gLaunchRemoteScenePressed;
 
+// Launch Remote Scene loading state colors
+extern QColor gLaunchRemoteSceneLoadingText;
+extern QColor gLaunchRemoteSceneLoadingBg;
+
 // Launch Test Scene button colors
 extern QColor gLaunchTestSceneText;
 extern QColor gLaunchTestSceneBg;

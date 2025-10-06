@@ -6,6 +6,7 @@
 #include <QHBoxLayout>
 #include <QPixmap>
 #include <QFileInfo>
+#include <QFile>
 #include <QDebug>
 #include <QVideoFrame>
 #include <QVariantAnimation>
@@ -30,15 +31,68 @@ RemoteSceneController::RemoteSceneController(WebSocketClient* ws, QObject* paren
 }
 
 void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, const QJsonObject& scene) {
-    Q_UNUSED(senderClientId);
     if (!m_enabled) return;
+    
+    // VALIDATION PHASE: Check if all required resources are available
+    const QJsonArray screens = scene.value("screens").toArray();
+    const QJsonArray media = scene.value("media").toArray();
+    
+    // Validate scene structure
+    if (screens.isEmpty()) {
+        QString errorMsg = "Scene has no screen configuration";
+        qWarning() << "RemoteSceneController: validation failed -" << errorMsg;
+        if (m_ws) {
+            m_ws->sendRemoteSceneValidationResult(senderClientId, false, errorMsg);
+        }
+        return;
+    }
+    
+    if (media.isEmpty()) {
+        QString errorMsg = "Scene has no media items";
+        qWarning() << "RemoteSceneController: validation failed -" << errorMsg;
+        if (m_ws) {
+            m_ws->sendRemoteSceneValidationResult(senderClientId, false, errorMsg);
+        }
+        return;
+    }
+    
+    // Validate that all media files exist
+    QStringList missingFiles;
+    for (const QJsonValue& val : media) {
+        const QJsonObject mediaObj = val.toObject();
+        const QString fileId = mediaObj.value("fileId").toString();
+        if (fileId.isEmpty()) {
+            qWarning() << "RemoteSceneController: media item has no fileId";
+            continue;
+        }
+        QString path = FileManager::instance().getFilePathForId(fileId);
+        if (path.isEmpty() || !QFile::exists(path)) {
+            missingFiles.append(fileId);
+        }
+    }
+    
+    // If validation fails, send error feedback and abort
+    if (!missingFiles.isEmpty()) {
+        QString errorMsg = QString("Missing %1 media file(s): %2").arg(missingFiles.size()).arg(missingFiles.join(", "));
+        qWarning() << "RemoteSceneController: validation failed -" << errorMsg;
+        if (m_ws) {
+            m_ws->sendRemoteSceneValidationResult(senderClientId, false, errorMsg);
+        }
+        return;
+    }
+    
+    // Validation successful - send positive feedback
+    qDebug() << "RemoteSceneController: validation successful, launching scene from" << senderClientId;
+    if (m_ws) {
+        m_ws->sendRemoteSceneValidationResult(senderClientId, true);
+    }
+    
     // Bump epoch and clear any previous scene
     ++m_sceneEpoch;
     clearScene();
-    const QJsonArray screens = scene.value("screens").toArray();
-    const QJsonArray media = scene.value("media").toArray();
     buildWindows(screens);
     buildMedia(media);
+    
     // Show windows after populated
     for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
         if (it.value().window) it.value().window->show();
@@ -50,6 +104,11 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
             });
         }
 #endif
+    }
+    
+    // Send final "launched" confirmation after scene is fully set up
+    if (m_ws) {
+        m_ws->sendRemoteSceneLaunched(senderClientId);
     }
 }
 

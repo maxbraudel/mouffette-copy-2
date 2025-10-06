@@ -188,9 +188,18 @@ class MouffetteServer {
                 break;
             case 'remote_scene_start':
                 // Relay to target client (like uploads). Expect: targetClientId, scene payload
+                console.log(`🎬 Received remote_scene_start from ${clientId} to ${message.targetClientId}`);
                 this.relayToTarget(clientId, message.targetClientId, message);
                 break;
             case 'remote_scene_stop':
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
+            case 'remote_scene_validation':
+                // Relay validation result back to sender
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
+            case 'remote_scene_launched':
+                // Relay launched confirmation back to sender
                 this.relayToTarget(clientId, message.targetClientId, message);
                 break;
             default:
