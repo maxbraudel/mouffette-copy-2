@@ -125,8 +125,20 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
 
     m_rootLayout->addWidget(m_headerWidget);
 
+    // Container that holds the scrollable content below the button header
+    m_scrollContainer = new QWidget(m_widget);
+    m_scrollContainer->setObjectName("MediaSettingsScrollContainer");
+    m_scrollContainer->setAttribute(Qt::WA_StyledBackground, true);
+    m_scrollContainer->setAttribute(Qt::WA_NoMousePropagation, true);
+    m_scrollContainer->setAutoFillBackground(false);
+    m_scrollContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    m_scrollContainer->installEventFilter(this);
+    auto* scrollContainerLayout = new QVBoxLayout(m_scrollContainer);
+    scrollContainerLayout->setContentsMargins(0, 0, 0, 0);
+    scrollContainerLayout->setSpacing(0);
+
     // Scroll area for inner content (mirror media overlay)
-    m_scrollArea = new QScrollArea(m_widget);
+    m_scrollArea = new QScrollArea(m_scrollContainer);
     m_scrollArea->setFrameShape(QFrame::NoFrame);
     m_scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -146,9 +158,10 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         " QAbstractScrollArea::corner { background: transparent; }"
         " QScrollArea QScrollBar:vertical { width: 0px; margin: 0; background: transparent; }"
     );
-    m_rootLayout->addWidget(m_scrollArea);
-    // Start collapsed (scroll area hidden)
-    m_scrollArea->setVisible(false);
+    scrollContainerLayout->addWidget(m_scrollArea);
+    m_rootLayout->addWidget(m_scrollContainer);
+    // Start collapsed (scroll container hidden)
+    m_scrollContainer->setVisible(false);
 
     // Inner content widget inside scroll area (with margins like before)
     m_innerContent = new QWidget(m_scrollArea);
@@ -575,7 +588,7 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
         event->type() == QEvent::MouseMove ||
         event->type() == QEvent::MouseButtonDblClick) {
         // Accept and consume these events to prevent canvas panning/interaction
-        if (obj == m_widget || obj == m_innerContent || obj == m_scrollArea ||
+        if (obj == m_widget || obj == m_innerContent || obj == m_scrollArea || obj == m_scrollContainer ||
             (obj->isWidgetType() && static_cast<QWidget*>(obj)->isAncestorOf(m_widget))) {
             // If this is a mouse press on a non-value-box blank area, clear any active box selection.
             if (event->type() == QEvent::MouseButtonPress) {
@@ -780,27 +793,48 @@ double MediaSettingsPanel::fadeOutSeconds() const {
 }
 
 void MediaSettingsPanel::updateScrollbarGeometry() {
-    if (!m_overlayVScroll || !m_widget) return;
-    const QRect r = m_widget->rect();
-    const int margin = 6; // small inset from edge
+    if (!m_overlayVScroll || !m_widget || !m_scrollArea || !m_scrollContainer) return;
+
+    // Hide scrollbar entirely when collapsed or no scrollable content is visible
+    if (!m_scrollContainer->isVisible()) {
+        m_overlayVScroll->hide();
+        return;
+    }
+
+    QScrollBar* sourceScrollBar = m_scrollArea->verticalScrollBar();
+    if (!sourceScrollBar) {
+        m_overlayVScroll->hide();
+        return;
+    }
+
+    const bool needed = sourceScrollBar->maximum() > sourceScrollBar->minimum();
+    if (!needed) {
+        m_overlayVScroll->hide();
+        return;
+    }
+
+    // Align overlay scrollbar with the scroll container so it doesn't overlap the header button
+    const QRect scrollRect = m_scrollContainer->geometry();
+    const int margin = 6; // inset from right edge for visual parity with other overlays
+    const int topMargin = 6;
+    const int bottomMargin = 6;
     const int width = 8;
-    const int top = 6;
-    const int bottom = 6;
-    const int height = qMax(0, r.height() - top - bottom);
-    const int x = r.width() - width - margin;
-    const int y = top;
+    const int height = qMax(0, scrollRect.height() - topMargin - bottomMargin);
+    if (height <= 0) {
+        m_overlayVScroll->hide();
+        return;
+    }
+    const int x = scrollRect.x() + scrollRect.width() - width - margin;
+    const int y = scrollRect.y() + topMargin;
+
+    m_overlayVScroll->setRange(sourceScrollBar->minimum(), sourceScrollBar->maximum());
+    m_overlayVScroll->setPageStep(sourceScrollBar->pageStep());
+    m_overlayVScroll->setValue(sourceScrollBar->value());
     m_overlayVScroll->setGeometry(x, y, width, height);
-    // Update range visibility depending on content - but don't auto-show, only show on interaction
-    if (auto* v = m_scrollArea ? m_scrollArea->verticalScrollBar() : nullptr) {
-        const bool needed = v->maximum() > v->minimum();
-        // Only hide if not needed, but don't auto-show when needed (wait for user interaction)
-        if (!needed) {
-            m_overlayVScroll->hide();
-        }
-        // Ensure pageStep is synchronized for proper thumb sizing
-        if (m_overlayVScroll) {
-            m_overlayVScroll->setPageStep(v->pageStep());
-        }
+
+    // Respect auto-hide timing; only force visibility if timer is already keeping it shown
+    if (!m_scrollbarHideTimer || m_scrollbarHideTimer->isActive()) {
+        m_overlayVScroll->show();
     }
 }
 
@@ -984,8 +1018,14 @@ void MediaSettingsPanel::setExpanded(bool expanded) {
     updatePanelChrome();
 
     // Show/hide the scroll area with options
+    if (m_scrollContainer) {
+        m_scrollContainer->setVisible(expanded);
+    }
     if (m_scrollArea) {
         m_scrollArea->setVisible(expanded);
+    }
+    if (!expanded && m_overlayVScroll) {
+        m_overlayVScroll->hide();
     }
     
     // Update widget geometry to fit new size

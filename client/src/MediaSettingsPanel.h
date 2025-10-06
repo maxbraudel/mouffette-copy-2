@@ -79,6 +79,7 @@ private:
     QIcon m_settingsIcon;
     // Scrollable content
     QScrollArea* m_scrollArea = nullptr;
+    QWidget* m_scrollContainer = nullptr;
     QWidget* m_innerContent = nullptr;
     QVBoxLayout* m_contentLayout = nullptr;
     QLabel* m_title = nullptr;
