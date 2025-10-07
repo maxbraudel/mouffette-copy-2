@@ -1228,16 +1228,26 @@ void MainWindow::changeEvent(QEvent* event) {
 
 void MainWindow::showScreenView(const ClientInfo& client) {
     if (!m_navigationManager) return;
-    // New client selection: reset reveal flag so first incoming screens will fade in once
-    m_canvasRevealedForCurrentClient = false;
+    const bool alreadyOnScreenView = m_navigationManager->isOnScreenView();
+    const QString currentId = alreadyOnScreenView ? m_navigationManager->currentClientId() : QString();
+    const bool alreadyOnThisClient = alreadyOnScreenView && currentId == client.getId() && !client.getId().isEmpty();
+
+    if (!alreadyOnThisClient) {
+        // New client selection: reset reveal flag so first incoming screens will fade in once
+        m_canvasRevealedForCurrentClient = false;
+        m_navigationManager->showScreenView(client);
+    } else {
+        // Same client: refresh subscriptions without resetting UI state
+        m_navigationManager->refreshActiveClientPreservingCanvas(client);
+    }
+
     // Hide top-bar page title and show back button on screen view
     if (m_pageTitleLabel) m_pageTitleLabel->hide();
     if (m_backButton) m_backButton->show();
-    m_navigationManager->showScreenView(client);
+
     // Update upload target
     m_uploadManager->setTargetClientId(client.getId());
-    // Do not set a default DISCONNECTED to avoid flicker; we'll show status when we get a real one
-    
+
     // Show remote client info wrapper when viewing a client
     if (m_remoteClientInfoWrapper) {
         m_remoteClientInfoWrapper->setVisible(true);
@@ -2566,16 +2576,20 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
             if (byName.has_value()) {
                 // Remote reconnected with a new id: switch selection and re-enter screen view for new id
                 m_selectedClient = byName.value();
+                if (m_screenCanvas) {
+                    m_screenCanvas->setRemoteSceneTarget(m_selectedClient.getId(), m_selectedClient.getMachineName());
+                }
                 if (m_uploadManager) m_uploadManager->setTargetClientId(m_selectedClient.getId());
-                // Keep m_canvasRevealedForCurrentClient = true to avoid re-reveal animation
-                // Update the screen view context to the new client id (also ensures loader state is consistent)
-                showScreenView(m_selectedClient);
+                if (m_navigationManager) {
+                    m_navigationManager->refreshActiveClientPreservingCanvas(m_selectedClient);
+                }
+                updateClientNameDisplay(m_selectedClient);
                 setRemoteConnectionStatus("CONNECTING...");
                 addRemoteStatusToLayout();
-                if (m_webSocketClient && m_webSocketClient->isConnected()) {
-                    m_webSocketClient->requestScreens(m_selectedClient.getId());
+                if (m_inlineSpinner && !m_inlineSpinner->isSpinning()) {
+                    m_inlineSpinner->show();
+                    m_inlineSpinner->start();
                 }
-                if (m_watchManager) { m_watchManager->unwatchIfAny(); m_watchManager->toggleWatch(m_selectedClient.getId()); }
             } else {
                 addRemoteStatusToLayout();
                 setRemoteConnectionStatus("DISCONNECTED");

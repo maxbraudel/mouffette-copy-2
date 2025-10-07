@@ -53,6 +53,30 @@ void ScreenNavigationManager::showScreenView(const ClientInfo& client) {
     emit screenViewEntered(id);
 }
 
+void ScreenNavigationManager::refreshActiveClientPreservingCanvas(const ClientInfo& client) {
+    if (!m_w.stack || !m_w.screenViewPage) return;
+    const QString id = client.getId();
+
+    // If we're not already on the screen view, fall back to the full transition
+    if (!isOnScreenView()) {
+        showScreenView(client);
+        return;
+    }
+
+    m_currentClientId = id;
+
+    // Ensure full-screen spinner is stopped and canvas remains visible
+    stopSpinner();
+    if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(1);
+    if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(1.0);
+
+    if (!id.isEmpty()) {
+        emit requestScreens(id);
+        emit watchTargetRequested(id);
+    }
+    emit screenViewEntered(id);
+}
+
 void ScreenNavigationManager::showClientList() {
     if (!m_w.stack || !m_w.clientListPage) return;
     if (m_w.backButton) m_w.backButton->hide();
