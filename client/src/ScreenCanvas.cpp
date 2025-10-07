@@ -4045,3 +4045,23 @@ void ScreenCanvas::onRemoteSceneLaunchTimeout() {
     
     TOAST_ERROR("Scene launch timed out: Remote client did not respond", 5000);
 }
+
+void ScreenCanvas::updateRemoteSceneTargetFromClientList(const QList<ClientInfo>& clients) {
+    // If we have a target machine name set, update the client ID if the machine reconnected
+    if (m_remoteSceneTargetMachineName.isEmpty()) return;
+    
+    for (const ClientInfo& client : clients) {
+        if (client.getMachineName() == m_remoteSceneTargetMachineName) {
+            // Found the same machine - update the ID if it changed
+            if (client.getId() != m_remoteSceneTargetClientId) {
+                qDebug() << "ScreenCanvas: updating remote scene target ID from" << m_remoteSceneTargetClientId
+                         << "to" << client.getId() << "for machine" << m_remoteSceneTargetMachineName;
+                m_remoteSceneTargetClientId = client.getId();
+            }
+            return;
+        }
+    }
+    
+    // Machine not found in current client list - it's disconnected
+    // Keep the stored info in case it reconnects later
+}

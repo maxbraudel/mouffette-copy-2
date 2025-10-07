@@ -70,6 +70,11 @@ public:
     // Remote scene integration setters
     void setWebSocketClient(class WebSocketClient* client);
     void setRemoteSceneTargetClientId(const QString& id) { m_remoteSceneTargetClientId = id; }
+    void setRemoteSceneTarget(const QString& id, const QString& machineName) {
+        m_remoteSceneTargetClientId = id;
+        m_remoteSceneTargetMachineName = machineName;
+    }
+    void updateRemoteSceneTargetFromClientList(const QList<ClientInfo>& clients);
     // Remote cursor style setters
     void setRemoteCursorDiameterPx(int d) { m_remoteCursorDiameterPx = qMax(2, d); if (m_remoteCursorDot) { recreateRemoteCursorItem(); } }
     void setRemoteCursorFillColor(const QColor& c) { m_remoteCursorFill = c; if (m_remoteCursorDot) { m_remoteCursorDot->setBrush(m_remoteCursorFill); } }
@@ -344,6 +349,7 @@ protected:
     // Remote scene networking
     class WebSocketClient* m_wsClient = nullptr; // not owned
     QString m_remoteSceneTargetClientId; // target client to receive remote scene commands
+    QString m_remoteSceneTargetMachineName; // machine name of target (stable across reconnections)
 };
 
 #endif // SCREENCANVAS_H

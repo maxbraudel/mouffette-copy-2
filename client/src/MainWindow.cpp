@@ -1506,8 +1506,8 @@ void MainWindow::onClientItemClicked(QListWidgetItem* item) {
         const ClientInfo& client = m_availableClients[index];
         m_selectedClient = client;
         if (m_screenCanvas) {
-            // Use accessor; ClientInfo does not expose a public clientId member
-            m_screenCanvas->setRemoteSceneTargetClientId(client.getId());
+            // Set both ID and machine name so target can be tracked across reconnections
+            m_screenCanvas->setRemoteSceneTarget(client.getId(), client.getMachineName());
         }
         showScreenView(client);
         // ScreenNavigationManager will request screens; no need to duplicate here
@@ -2443,6 +2443,11 @@ void MainWindow::onConnectionError(const QString& error) {
 
 void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
     qDebug() << "Received client list with" << clients.size() << "clients";
+    
+    // Update remote scene target ID if the target machine reconnected with a new ID
+    if (m_screenCanvas) {
+        m_screenCanvas->updateRemoteSceneTargetFromClientList(clients);
+    }
     
     // Check for new clients
     int previousCount = m_availableClients.size();
