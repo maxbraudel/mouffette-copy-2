@@ -57,7 +57,7 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
     }
     
     // Validate that all media files exist
-    QStringList missingFiles;
+    QStringList missingFileNames;
     for (const QJsonValue& val : media) {
         const QJsonObject mediaObj = val.toObject();
         const QString fileId = mediaObj.value("fileId").toString();
@@ -67,13 +67,25 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
         }
         QString path = FileManager::instance().getFilePathForId(fileId);
         if (path.isEmpty() || !QFile::exists(path)) {
-            missingFiles.append(fileId);
+            // Get the user-friendly filename from the scene data
+            QString fileName = mediaObj.value("fileName").toString();
+            if (fileName.isEmpty()) {
+                // Fallback: use the fileId if fileName is not available
+                fileName = fileId;
+            }
+            missingFileNames.append(fileName);
         }
     }
     
     // If validation fails, send error feedback and abort
-    if (!missingFiles.isEmpty()) {
-        QString errorMsg = QString("Missing %1 media file(s): %2").arg(missingFiles.size()).arg(missingFiles.join(", "));
+    if (!missingFileNames.isEmpty()) {
+        QString fileList = missingFileNames.size() <= 3 
+            ? missingFileNames.join(", ") 
+            : QString("%1, %2, and %3 more").arg(missingFileNames[0]).arg(missingFileNames[1]).arg(missingFileNames.size() - 2);
+        QString errorMsg = QString("Missing %1 file%2: %3")
+            .arg(missingFileNames.size())
+            .arg(missingFileNames.size() > 1 ? "s" : "")
+            .arg(fileList);
         qWarning() << "RemoteSceneController: validation failed -" << errorMsg;
         if (m_ws) {
             m_ws->sendRemoteSceneValidationResult(senderClientId, false, errorMsg);
