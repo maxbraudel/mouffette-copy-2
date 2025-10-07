@@ -23,6 +23,7 @@ SpinnerWidget::SpinnerWidget(QWidget* parent)
 
 void SpinnerWidget::start() { if (!m_timer->isActive()) m_timer->start(); }
 void SpinnerWidget::stop() { if (m_timer->isActive()) m_timer->stop(); }
+bool SpinnerWidget::isSpinning() const { return m_timer && m_timer->isActive(); }
 
 void SpinnerWidget::setRadius(int radiusPx) {
     m_radiusPx = qMax(8, radiusPx);

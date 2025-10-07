@@ -181,6 +181,7 @@ private:
     // Top bar contextual title (e.g., "Connected Clients" on client list page)
     QLabel* m_pageTitleLabel = nullptr;
     QWidget* m_remoteClientInfoContainer = nullptr; // Container for hostname, status, volume
+    QWidget* m_remoteClientInfoWrapper = nullptr;   // Wrapper holding container and inline spinner
     QFrame* m_remoteInfoSep2 = nullptr; // Trailing separator before volume indicator
     QFrame* m_remoteInfoSep1 = nullptr; // Leading separator before remote status
     QWidget* m_localClientInfoContainer = nullptr; // Container for "You" and network status
@@ -272,8 +273,12 @@ private:
     FileWatcher* m_fileWatcher = nullptr; // monitors source files for deletion
     // Canvas reveal state: ensure fade-in/recenter happen only once per selected client
     bool m_canvasRevealedForCurrentClient = false;
+    // Track if canvas content has been loaded at least once (to decide between full-screen vs inline loader)
+    bool m_canvasContentEverLoaded = false;
     // Preserve the current viewport (zoom/pan) across temporary connection losses
     bool m_preserveViewportOnReconnect = false;
+    // Small inline spinner for reconnection (shown in client info container)
+    SpinnerWidget* m_inlineSpinner = nullptr;
     
     // Toast notification system
     ToastNotificationSystem* m_toastSystem = nullptr;

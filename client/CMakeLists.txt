@@ -32,6 +32,7 @@ set(SOURCES
     src/ScreenNavigationManager.cpp
     src/ResponsiveLayoutManager.cpp
     src/SpinnerWidget.cpp
+    src/QtWaitingSpinner.cpp
     src/MediaItems.cpp
     src/ScreenCanvas.cpp
     src/MediaSettingsPanel.cpp
@@ -62,6 +63,7 @@ set(HEADERS
     src/ScreenNavigationManager.h
     src/ResponsiveLayoutManager.h
     src/SpinnerWidget.h
+    src/QtWaitingSpinner.h
     src/ScreenCanvas.h
     src/MediaSettingsPanel.h
     src/FileWatcher.h

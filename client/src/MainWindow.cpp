@@ -1154,10 +1154,57 @@ void MainWindow::initializeRemoteClientInfoInTopBar() {
         createRemoteClientInfoContainer();
     }
     
-    // Initially hide the container (will be shown when viewing a client)
-    m_remoteClientInfoContainer->setVisible(false);
+    // Create wrapper widget to hold container + inline spinner side by side (once)
+    if (!m_remoteClientInfoWrapper) {
+        m_remoteClientInfoWrapper = new QWidget();
+        auto* wrapperLayout = new QHBoxLayout(m_remoteClientInfoWrapper);
+        wrapperLayout->setContentsMargins(0, 0, 0, 0);
+        wrapperLayout->setSpacing(8); // 8px gap between container and spinner
+        wrapperLayout->addWidget(m_remoteClientInfoContainer);
+
+        if (!m_inlineSpinner) {
+            m_inlineSpinner = new SpinnerWidget(m_remoteClientInfoWrapper);
+            const int spinnerSize = gDynamicBoxHeight;
+            m_inlineSpinner->setRadius(qMax(8, spinnerSize / 2 - 2));
+            m_inlineSpinner->setLineWidth(qMax(2, spinnerSize / 6));
+            m_inlineSpinner->setColor(QColor("#4a90e2"));
+            m_inlineSpinner->setFixedSize(spinnerSize, spinnerSize);
+            m_inlineSpinner->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+            m_inlineSpinner->hide();
+        } else {
+            m_inlineSpinner->setParent(m_remoteClientInfoWrapper);
+            m_inlineSpinner->hide();
+        }
+
+        if (m_inlineSpinner) {
+            wrapperLayout->addWidget(m_inlineSpinner, 0, Qt::AlignVCenter);
+        }
+    } else {
+        // Ensure container and spinner belong to the wrapper layout
+        if (m_remoteClientInfoContainer->parent() != m_remoteClientInfoWrapper) {
+            m_remoteClientInfoContainer->setParent(m_remoteClientInfoWrapper);
+        }
+        auto* wrapperLayout = qobject_cast<QHBoxLayout*>(m_remoteClientInfoWrapper->layout());
+        if (wrapperLayout && wrapperLayout->indexOf(m_remoteClientInfoContainer) == -1) {
+            wrapperLayout->insertWidget(0, m_remoteClientInfoContainer);
+        }
+        if (m_inlineSpinner) {
+            if (m_inlineSpinner->parent() != m_remoteClientInfoWrapper) {
+                m_inlineSpinner->setParent(m_remoteClientInfoWrapper);
+            }
+            if (wrapperLayout && wrapperLayout->indexOf(m_inlineSpinner) == -1) {
+                wrapperLayout->addWidget(m_inlineSpinner, 0, Qt::AlignVCenter);
+            }
+            m_inlineSpinner->hide();
+        }
+    }
+
+    // Initially hide the wrapper (and implicitly the container)
+    if (m_remoteClientInfoWrapper) {
+        m_remoteClientInfoWrapper->setVisible(false);
+    }
     
-    // Add container to connection layout after back button permanently
+    // Add wrapper to connection layout after back button permanently
     int backButtonIndex = -1;
     for (int i = 0; i < m_connectionLayout->count(); ++i) {
         if (auto* item = m_connectionLayout->itemAt(i)) {
@@ -1168,8 +1215,8 @@ void MainWindow::initializeRemoteClientInfoInTopBar() {
         }
     }
     
-    if (backButtonIndex >= 0) {
-        m_connectionLayout->insertWidget(backButtonIndex + 1, m_remoteClientInfoContainer);
+    if (backButtonIndex >= 0 && m_remoteClientInfoWrapper) {
+        m_connectionLayout->insertWidget(backButtonIndex + 1, m_remoteClientInfoWrapper);
     }
 }
 
@@ -1191,9 +1238,15 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     m_uploadManager->setTargetClientId(client.getId());
     // Do not set a default DISCONNECTED to avoid flicker; we'll show status when we get a real one
     
-    // Show remote client info container when viewing a client
+    // Show remote client info wrapper when viewing a client
+    if (m_remoteClientInfoWrapper) {
+        m_remoteClientInfoWrapper->setVisible(true);
+    }
     if (m_remoteClientInfoContainer) {
         m_remoteClientInfoContainer->setVisible(true);
+    }
+    if (m_inlineSpinner) {
+        m_inlineSpinner->hide();
     }
     updateClientNameDisplay(client);
     // While the remote is loading/unloading, remove the volume indicator from layout (display:none)
@@ -1236,9 +1289,16 @@ void MainWindow::showClientListView() {
     // Clear remote connection status when leaving screen view
     setRemoteConnectionStatus("DISCONNECTED");
     
-    // Hide remote client info container when on client list
+    // Hide remote client info wrapper when on client list
+    if (m_remoteClientInfoWrapper) {
+        m_remoteClientInfoWrapper->setVisible(false);
+    }
     if (m_remoteClientInfoContainer) {
         m_remoteClientInfoContainer->setVisible(false);
+    }
+    if (m_inlineSpinner) {
+        m_inlineSpinner->stop();
+        m_inlineSpinner->hide();
     }
     // Ensure volume indicator is removed when leaving screen view
     removeVolumeIndicatorFromLayout();
@@ -1820,6 +1880,8 @@ void MainWindow::setupUI() {
         w.spinnerFade = m_spinnerFade;
         w.canvasOpacity = m_canvasOpacity;
         w.canvasFade = m_canvasFade;
+        w.inlineSpinner = m_inlineSpinner;
+        w.canvasContentEverLoaded = &m_canvasContentEverLoaded;
         w.volumeOpacity = m_volumeOpacity;
         w.volumeFade = m_volumeFade;
         w.screenCanvas = m_screenCanvas;
@@ -2383,12 +2445,13 @@ void MainWindow::onDisconnected() {
     // Enter loading state but preserve the current canvas content/viewport; the navigation
     // manager now hides content instead of clearing it. Mark that we should not recenter on reconnect.
     m_preserveViewportOnReconnect = true;
-    m_navigationManager->enterLoadingStateImmediate();
+        // Remove volume indicator FIRST (before showing spinner) to avoid layout shift
+        removeVolumeIndicatorFromLayout();
         // Our local network just dropped; show error state explicitly
         addRemoteStatusToLayout();
         setRemoteConnectionStatus("ERROR");
-        // Remove volume indicator while remote is unavailable
-        removeVolumeIndicatorFromLayout();
+        // Now show the inline spinner after volume is removed
+    m_navigationManager->enterLoadingStateImmediate();
     }
     
     // Inform upload manager of connection loss to cancel any ongoing upload/finalizing state
@@ -2644,6 +2707,13 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
                 // Reset the preservation flag after first reveal
                 m_preserveViewportOnReconnect = false;
                 m_canvasRevealedForCurrentClient = true;
+                m_canvasContentEverLoaded = true; // Mark that content has been loaded at least once
+                
+                // Hide inline spinner if showing
+                if (m_inlineSpinner && m_inlineSpinner->isSpinning()) {
+                    m_inlineSpinner->stop();
+                    m_inlineSpinner->hide();
+                }
             } else {
                 
             }

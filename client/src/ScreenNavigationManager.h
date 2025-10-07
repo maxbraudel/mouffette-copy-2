@@ -27,6 +27,8 @@ public:
         QGraphicsOpacityEffect* volumeOpacity = nullptr;
         QPropertyAnimation* volumeFade = nullptr;
         ScreenCanvas* screenCanvas = nullptr;
+        SpinnerWidget* inlineSpinner = nullptr; // Small spinner for reconnection
+        bool* canvasContentEverLoaded = nullptr; // Pointer to flag tracking if content was loaded
     };
 
     void setWidgets(const Widgets& w); // must be called before usage

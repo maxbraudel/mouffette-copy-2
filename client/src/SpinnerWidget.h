@@ -13,6 +13,7 @@ public:
 
     void start();
     void stop();
+    bool isSpinning() const;
 
     void setRadius(int radiusPx);
     void setLineWidth(int px);
@@ -24,7 +25,7 @@ public:
 
 protected:
     void paintEvent(QPaintEvent* event) override;
-    QSize minimumSizeHint() const override { return QSize(48, 48); }
+    QSize minimumSizeHint() const override { return QSize(18, 18); }
 
 private:
     QTimer* m_timer;

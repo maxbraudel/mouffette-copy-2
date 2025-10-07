@@ -66,6 +66,13 @@ void ScreenNavigationManager::showClientList() {
 void ScreenNavigationManager::revealCanvas() {
     if (!isOnScreenView()) return; // Only if we're still on screen view
     stopSpinner();
+    
+    // Hide inline spinner (in case it was used during reconnection)
+    if (m_w.inlineSpinner && m_w.inlineSpinner->isSpinning()) {
+        m_w.inlineSpinner->stop();
+        m_w.inlineSpinner->hide();
+    }
+    
     if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(1); // show canvas
     
     // Show preserved content after reconnection
@@ -84,19 +91,49 @@ void ScreenNavigationManager::enterLoadingStateImmediate() {
     if (m_w.volumeFade) m_w.volumeFade->stop();
     if (m_w.spinnerFade) m_w.spinnerFade->stop();
 
-    // Hide canvas content but preserve viewport state (do not clear the screen items)
-    if (m_w.screenCanvas) {
-        m_w.screenCanvas->hideContentPreservingState();
+    // Decide between full-screen loader (initial load) or inline loader (reconnection)
+    const bool useInlineLoader = m_w.canvasContentEverLoaded && *m_w.canvasContentEverLoaded;
+    
+    if (useInlineLoader) {
+        // Content already loaded - use inline spinner and keep canvas visible
+        // Hide full-screen spinner if it's showing
+        if (m_w.loadingSpinner) m_w.loadingSpinner->stop();
+        if (m_w.spinnerOpacity) m_w.spinnerOpacity->setOpacity(0.0);
+        
+        // Keep canvas visible with reduced opacity to indicate loading state
+        if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(1); // stay on canvas page
+        if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(0.5); // dim canvas
+        
+        // Show inline spinner in client info container
+        if (m_w.inlineSpinner) {
+            m_w.inlineSpinner->show();
+            m_w.inlineSpinner->start();
+        }
+        
+        // Keep volume overlay visible
+        // (volumeOpacity stays as is)
+    } else {
+        // Initial load - use full-screen blocking loader
+        // Hide canvas content but preserve viewport state (do not clear the screen items)
+        if (m_w.screenCanvas) {
+            m_w.screenCanvas->hideContentPreservingState();
+        }
+        if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(0.0);
+        if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(0); // spinner page
+
+        // Hide volume overlay immediately
+        if (m_w.volumeOpacity) m_w.volumeOpacity->setOpacity(0.0);
+
+        // Show full-screen spinner immediately (no delay)
+        if (m_w.loadingSpinner) m_w.loadingSpinner->start();
+        if (m_w.spinnerOpacity) m_w.spinnerOpacity->setOpacity(1.0);
+        
+        // Hide inline spinner if it was showing
+        if (m_w.inlineSpinner && m_w.inlineSpinner->isSpinning()) {
+            m_w.inlineSpinner->stop();
+            m_w.inlineSpinner->hide();
+        }
     }
-    if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(0.0);
-    if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(0); // spinner page
-
-    // Hide volume overlay immediately
-    if (m_w.volumeOpacity) m_w.volumeOpacity->setOpacity(0.0);
-
-    // Show spinner immediately (no delay)
-    if (m_w.loadingSpinner) m_w.loadingSpinner->start();
-    if (m_w.spinnerOpacity) m_w.spinnerOpacity->setOpacity(1.0);
 }
 
 void ScreenNavigationManager::ensureLoaderTimer() {
