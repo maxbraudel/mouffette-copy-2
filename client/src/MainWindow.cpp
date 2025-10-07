@@ -2567,7 +2567,7 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
                 // Remote reconnected with a new id: switch selection and re-enter screen view for new id
                 m_selectedClient = byName.value();
                 if (m_uploadManager) m_uploadManager->setTargetClientId(m_selectedClient.getId());
-                m_canvasRevealedForCurrentClient = false;
+                // Keep m_canvasRevealedForCurrentClient = true to avoid re-reveal animation
                 // Update the screen view context to the new client id (also ensures loader state is consistent)
                 showScreenView(m_selectedClient);
                 setRemoteConnectionStatus("CONNECTING...");
@@ -2579,10 +2579,14 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
             } else {
                 addRemoteStatusToLayout();
                 setRemoteConnectionStatus("DISCONNECTED");
-                // Remote client went away while on canvas: show loader but preserve viewport
+                // Remote client went away: show inline spinner but DON'T hide screens to avoid flicker
                 m_preserveViewportOnReconnect = true;
-                m_navigationManager->enterLoadingStateImmediate();
-                m_canvasRevealedForCurrentClient = false;
+                // Show inline spinner without hiding canvas content
+                if (m_inlineSpinner) {
+                    m_inlineSpinner->show();
+                    m_inlineSpinner->start();
+                }
+                // Keep canvas revealed and visible
                 removeVolumeIndicatorFromLayout();
             }
         }
@@ -2677,57 +2681,63 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
     if (!clientInfo.getId().isEmpty() && clientInfo.getId() == m_selectedClient.getId()) {
         
         m_selectedClient = clientInfo; // keep selected client in sync
-        // Update screen canvas content
+        const QList<ScreenInfo> scrs = clientInfo.getScreens();
+        const bool hasScreens = !scrs.isEmpty();
+
+        // Update screen canvas content (setScreens handles empty data gracefully)
         if (m_screenCanvas) {
-            const QList<ScreenInfo> scrs = clientInfo.getScreens();
-            
             m_screenCanvas->setScreens(scrs);
-            
-            // First-time reveal & recenter logic (improved):
-            // We no longer depend on the spinner still being visible; if this is the first batch of screens
-            // for the selected client, we always ensure the canvas is revealed and (unless preserving viewport)
-            // perform an initial recenter (with a deferred safety pass to handle late layout sizing).
-            if (!m_canvasRevealedForCurrentClient) {
-                if (m_navigationManager) {
-                    m_navigationManager->revealCanvas();
-                } else if (m_canvasStack) {
-                    m_canvasStack->setCurrentIndex(1);
-                }
-                if (m_screenCanvas) {
-                    // Arm a deferred recenter as a safety net (in case screens visually populate after first paint)
-                    m_screenCanvas->requestDeferredInitialRecenter(53);
-                    if (!m_preserveViewportOnReconnect) {
-                        m_screenCanvas->recenterWithMargin(53);
-                    } else {
-                        
+
+            if (hasScreens) {
+                // First-time reveal & recenter logic (improved):
+                // We no longer depend on the spinner still being visible; if this is the first batch of screens
+                // for the selected client, we always ensure the canvas is revealed and (unless preserving viewport)
+                // perform an initial recenter (with a deferred safety pass to handle late layout sizing).
+                if (!m_canvasRevealedForCurrentClient) {
+                    if (m_navigationManager) {
+                        m_navigationManager->revealCanvas();
+                    } else if (m_canvasStack) {
+                        m_canvasStack->setCurrentIndex(1);
                     }
-                    m_screenCanvas->setFocus(Qt::OtherFocusReason);
+                    if (m_screenCanvas) {
+                        // Arm a deferred recenter as a safety net (in case screens visually populate after first paint)
+                        m_screenCanvas->requestDeferredInitialRecenter(53);
+                        if (!m_preserveViewportOnReconnect) {
+                            m_screenCanvas->recenterWithMargin(53);
+                        } else {
+                            
+                        }
+                        m_screenCanvas->setFocus(Qt::OtherFocusReason);
+                    }
+                    // (Removed older fallback recenter logic; deferred handling is now centralized inside ScreenCanvas)
+                    // Reset the preservation flag after first reveal
+                    m_preserveViewportOnReconnect = false;
+                    m_canvasRevealedForCurrentClient = true;
+                    m_canvasContentEverLoaded = true; // Mark that content has been loaded at least once
+                } else {
+                    // Canvas already revealed - just ensure inline spinner is hidden
+                    // Don't re-reveal to avoid animations/flicker
                 }
-                // (Removed older fallback recenter logic; deferred handling is now centralized inside ScreenCanvas)
-                // Reset the preservation flag after first reveal
-                m_preserveViewportOnReconnect = false;
-                m_canvasRevealedForCurrentClient = true;
-                m_canvasContentEverLoaded = true; // Mark that content has been loaded at least once
                 
-                // Hide inline spinner if showing
+                // Always hide inline spinner when screens arrive
                 if (m_inlineSpinner && m_inlineSpinner->isSpinning()) {
                     m_inlineSpinner->stop();
                     m_inlineSpinner->hide();
                 }
-            } else {
-                
             }
         }
 
         // Update volume UI and re-add it to the layout now that the client is ready
-        if (m_volumeIndicator) {
+        if (hasScreens && m_volumeIndicator) {
             addVolumeIndicatorToLayout();
             updateVolumeIndicator();
         }
 
-    // Remote responded with data: status is connected
-    setRemoteConnectionStatus("CONNECTED");
-    addRemoteStatusToLayout();
+    // Remote responded with data: status is connected when screens received
+    if (!scrs.isEmpty()) {
+        setRemoteConnectionStatus("CONNECTED");
+        addRemoteStatusToLayout();
+    }
 
         // Refresh client label
         updateClientNameDisplay(clientInfo);

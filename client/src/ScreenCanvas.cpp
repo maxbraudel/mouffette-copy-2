@@ -110,6 +110,37 @@ static ResizableMediaBase* toMedia(QGraphicsItem* x) {
     while (x) { if (auto* m = dynamic_cast<ResizableMediaBase*>(x)) return m; x = x->parentItem(); }
     return nullptr;
 }
+
+static bool uiZonesEquivalent(const ScreenInfo::UIZone& a, const ScreenInfo::UIZone& b) {
+    return a.type == b.type && a.x == b.x && a.y == b.y && a.width == b.width && a.height == b.height;
+}
+
+static bool screensEquivalent(const ScreenInfo& a, const ScreenInfo& b) {
+    if (a.id != b.id || a.width != b.width || a.height != b.height || a.x != b.x || a.y != b.y || a.primary != b.primary) {
+        return false;
+    }
+    if (a.uiZones.size() != b.uiZones.size()) {
+        return false;
+    }
+    for (int i = 0; i < a.uiZones.size(); ++i) {
+        if (!uiZonesEquivalent(a.uiZones.at(i), b.uiZones.at(i))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool screenListsEquivalent(const QList<ScreenInfo>& a, const QList<ScreenInfo>& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (int i = 0; i < a.size(); ++i) {
+        if (!screensEquivalent(a.at(i), b.at(i))) {
+            return false;
+        }
+    }
+    return true;
+}
 }
 
 // Dedicated item to render snap guides between scene content and overlays.
@@ -1602,8 +1633,41 @@ void ScreenCanvas::showEvent(QShowEvent* event) {
 }
 
 void ScreenCanvas::setScreens(const QList<ScreenInfo>& screens) {
+    if (screenListsEquivalent(m_screens, screens)) {
+        return;
+    }
+    // Skip updates with empty screens if we already have active screens
+    // This prevents flicker when the remote client temporarily disconnects
+    if (screens.isEmpty() && !m_screens.isEmpty()) {
+        return;
+    }
     m_screens = screens;
-    createScreenItems();
+    
+    // Disable ALL updates during reconstruction to prevent visible intermediate states
+    QWidget* vp = viewport();
+    const bool vpUpdatesEnabled = vp ? vp->updatesEnabled() : true;
+    const bool viewUpdatesEnabled = updatesEnabled();
+    
+    if (vp) vp->setUpdatesEnabled(false);
+    setUpdatesEnabled(false);
+    
+    if (m_scene) {
+        QSignalBlocker blockScene(m_scene);
+        m_scene->setSceneRect(m_scene->sceneRect()); // Force scene to not emit changed
+        createScreenItems();
+    } else {
+        createScreenItems();
+    }
+    
+    // Re-enable updates and trigger single consolidated update
+    if (vp && vpUpdatesEnabled) {
+        vp->setUpdatesEnabled(true);
+    }
+    if (viewUpdatesEnabled) {
+        setUpdatesEnabled(true);
+        // Single update at the end
+        viewport()->update();
+    }
     // If screens just became non-empty, ensure any previously requested deferred recenter triggers
     if (m_pendingInitialRecenter && !m_screens.isEmpty()) {
         QTimer::singleShot(0, this, [this]() {
@@ -1628,8 +1692,17 @@ void ScreenCanvas::clearScreens() {
     // Note: Overlay background persists across screen updates
 }
 
+bool ScreenCanvas::hasActiveScreens() const {
+    if (!m_screens.isEmpty()) return true;
+    for (auto* item : m_screenItems) {
+        if (item) return true;
+    }
+    return false;
+}
+
 void ScreenCanvas::hideContentPreservingState() {
     if (!m_scene) return;
+    if (m_contentHiddenPreservingState) return;
     // Hide screen items and remote cursor without deleting them
     // This preserves the viewport state (zoom/pan position)
     for (auto* r : m_screenItems) {
@@ -1639,12 +1712,24 @@ void ScreenCanvas::hideContentPreservingState() {
     
     // Hide overlays but don't clear them
     if (m_infoWidget) {
+        m_infoWidgetWasVisibleBeforeHide = m_infoWidget->isVisible();
         m_infoWidget->setVisible(false);
+    } else {
+        m_infoWidgetWasVisibleBeforeHide = false;
     }
+    m_contentHiddenPreservingState = true;
 }
 
 void ScreenCanvas::showContentAfterReconnect() {
     if (!m_scene) return;
+    if (!m_contentHiddenPreservingState) {
+        // Nothing was hidden; ensure overlay stays visible without forced refresh
+        if (m_infoWidget && !m_infoWidget->isHidden()) {
+            m_infoWidget->update();
+        }
+        m_infoWidgetWasVisibleBeforeHide = false;
+        return;
+    }
     // Show screen items and overlays again
     // Viewport state (zoom/pan) is automatically preserved
     for (auto* r : m_screenItems) {
@@ -1653,11 +1738,17 @@ void ScreenCanvas::showContentAfterReconnect() {
     
     // Show overlays again
     if (m_infoWidget) {
-        m_infoWidget->setVisible(true);
+        if (m_infoWidgetWasVisibleBeforeHide) {
+            m_infoWidget->setVisible(true);
+        }
     }
     
-    // Refresh overlay content in case it changed during disconnection
-    refreshInfoOverlay();
+    // Only refresh overlay if content actually changed during disconnection
+    // This avoids unnecessary rebuilds that cause flicker
+    // The overlay will be updated by normal mechanisms (maybeRefreshInfoOverlayOnSceneChanged)
+    // refreshInfoOverlay(); // Removed to prevent flicker
+    m_contentHiddenPreservingState = false;
+    m_infoWidgetWasVisibleBeforeHide = false;
 }
 
 void ScreenCanvas::requestDeferredInitialRecenter(int marginPx) {
@@ -3052,26 +3143,95 @@ void ScreenCanvas::onFastVideoThumbnailReady(const QImage& img) {
     if (m_dragPreviewAudio) { m_dragPreviewAudio->deleteLater(); m_dragPreviewAudio = nullptr; }
 }
 
+static void updateScreenItemGeometry(QGraphicsRectItem* item,
+                                     const ScreenInfo& screen,
+                                     int index,
+                                     const QRectF& position,
+                                     int borderWidthPx,
+                                     int labelFontPt) {
+    if (!item) return;
+    item->setRect(position);
+    item->setZValue(-1000.0);
+    item->setData(0, index);
+
+    const QColor fill = screen.primary ? QColor(74,144,226,180) : QColor(80,80,80,180);
+    const QColor border = screen.primary ? QColor(74,144,226) : QColor(160,160,160);
+    item->setBrush(QBrush(fill));
+    QPen pen(border);
+    pen.setWidth(borderWidthPx);
+    item->setPen(pen);
+
+    QGraphicsTextItem* label = nullptr;
+    const QList<QGraphicsItem*> children = item->childItems();
+    for (QGraphicsItem* child : children) {
+        if (auto* text = qgraphicsitem_cast<QGraphicsTextItem*>(child)) {
+            label = text;
+            break;
+        }
+    }
+    if (!label) {
+        label = new QGraphicsTextItem(item);
+    }
+    label->setDefaultTextColor(Qt::white);
+    QFont font("Arial", labelFontPt, QFont::Bold);
+    label->setFont(font);
+    label->setPlainText(QStringLiteral("Screen %1\n%2×%3").arg(index + 1).arg(screen.width).arg(screen.height));
+    QRectF labelRect = label->boundingRect();
+    QRectF screenRect = item->rect();
+    const QPointF labelPos(screenRect.center().x() - labelRect.width() / 2.0,
+                           screenRect.center().y() - labelRect.height() / 2.0);
+    label->setPos(labelPos);
+}
+
 void ScreenCanvas::createScreenItems() {
-    clearScreens();
     if (!m_scene) return;
-    // Clear any previous UI overlay rects so we don't accumulate duplicates
-    for (auto* it : m_uiZoneItems) { if (it && m_scene) m_scene->removeItem(it); delete it; }
+
+    // Incremental update: only rebuild UI zones that changed
+    // Clear ONLY UI zones, keep screen items for update in place
+    for (auto* it : m_uiZoneItems) {
+        if (it && m_scene) {
+            m_scene->removeItem(it);
+        }
+        delete it;
+    }
     m_uiZoneItems.clear();
+
     QMap<int, QRectF> compactPositions = calculateCompactPositions(1.0);
     m_sceneScreenRects.clear();
 
+    // Update existing items in place, only create new ones if needed
+    const int oldCount = m_screenItems.size();
     for (int i = 0; i < m_screens.size(); ++i) {
         const ScreenInfo& s = m_screens[i];
-        QRectF pos = compactPositions.value(i);
+        const QRectF pos = compactPositions.value(i);
 
-        auto* rect = createScreenItem(s, i, pos);
-        rect->setZValue(-1000.0);
-        m_scene->addItem(rect);
-        m_screenItems << rect;
+        QGraphicsRectItem* rect = (i < oldCount) ? m_screenItems.at(i) : nullptr;
+        if (!rect) {
+            // Only create if doesn't exist
+            rect = createScreenItem(s, i, pos);
+            rect->setZValue(-1000.0);
+            m_scene->addItem(rect);
+            if (i < m_screenItems.size()) {
+                m_screenItems[i] = rect;
+            } else {
+                m_screenItems.append(rect);
+            }
+        }
+
+        // Update geometry without recreating
+        updateScreenItemGeometry(rect, s, i, pos, m_screenBorderWidthPx, m_screenLabelFontPt);
+        rect->setVisible(true);
         m_sceneScreenRects.insert(s.id, pos);
     }
-    // Z-order previously normalized by ensureZOrder(); items now rely on explicit z-values at creation time.
+
+    // Remove any excess items when screen count shrinks
+    while (m_screenItems.size() > m_screens.size()) {
+        QGraphicsRectItem* extra = m_screenItems.takeLast();
+        if (extra) {
+            if (m_scene) m_scene->removeItem(extra);
+            delete extra;
+        }
+    }
 
     // Draw per-screen UI zones (new approach superseding global remap logic)
     QColor genericFill(128,128,128,90); // semi-transparent gray for non-taskbar zones

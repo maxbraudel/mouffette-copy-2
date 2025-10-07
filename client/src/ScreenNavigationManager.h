@@ -67,6 +67,7 @@ private:
     int m_loaderDelayMs = 1000;
     int m_loaderFadeDurationMs = 500;
     int m_canvasFadeDurationMs = 50;
+    bool m_usingInlineLoader = false;
 };
 
 #endif // SCREENNAVIGATIONMANAGER_H

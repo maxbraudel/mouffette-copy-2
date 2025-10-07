@@ -75,7 +75,8 @@ void ScreenNavigationManager::revealCanvas() {
     
     if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(1); // show canvas
     
-    // Show preserved content after reconnection
+    // Show preserved content after reconnection (only if it was actually hidden)
+    // This prevents unnecessary overlay refreshes that cause flicker
     if (m_w.screenCanvas) {
         m_w.screenCanvas->showContentAfterReconnect();
     }
@@ -93,6 +94,7 @@ void ScreenNavigationManager::enterLoadingStateImmediate() {
 
     // Decide between full-screen loader (initial load) or inline loader (reconnection)
     const bool useInlineLoader = m_w.canvasContentEverLoaded && *m_w.canvasContentEverLoaded;
+    m_usingInlineLoader = useInlineLoader;
     
     if (useInlineLoader) {
         // Content already loaded - use inline spinner and keep canvas visible
@@ -100,9 +102,9 @@ void ScreenNavigationManager::enterLoadingStateImmediate() {
         if (m_w.loadingSpinner) m_w.loadingSpinner->stop();
         if (m_w.spinnerOpacity) m_w.spinnerOpacity->setOpacity(0.0);
         
-        // Keep canvas visible with reduced opacity to indicate loading state
+        // Keep canvas visible - do NOT hide content to avoid flicker
         if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(1); // stay on canvas page
-        if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(0.5); // dim canvas
+        if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(1.0); // keep canvas fully visible
         
         // Show inline spinner in client info container
         if (m_w.inlineSpinner) {
@@ -112,6 +114,7 @@ void ScreenNavigationManager::enterLoadingStateImmediate() {
         
         // Keep volume overlay visible
         // (volumeOpacity stays as is)
+        // Do NOT call hideContentPreservingState() - keep everything visible
     } else {
         // Initial load - use full-screen blocking loader
         // Hide canvas content but preserve viewport state (do not clear the screen items)
@@ -161,10 +164,25 @@ void ScreenNavigationManager::stopSpinner() {
 void ScreenNavigationManager::fadeInCanvas() {
     if (!m_w.canvasFade || !m_w.canvasOpacity) return;
     m_w.canvasFade->stop();
-    m_w.canvasFade->setDuration(m_canvasFadeDurationMs);
-    m_w.canvasFade->setStartValue(0.0);
-    m_w.canvasFade->setEndValue(1.0);
-    m_w.canvasFade->start();
+    const qreal currentOpacity = m_w.canvasOpacity->opacity();
+    // Always skip animation if using inline loader OR already visible
+    // This prevents flicker during reconnection
+    if (m_usingInlineLoader || currentOpacity >= 0.95) {
+        m_w.canvasOpacity->setOpacity(1.0);
+        m_usingInlineLoader = false;
+        return;
+    }
+    // Only animate from 0 on initial load
+    if (currentOpacity < 0.1) {
+        m_w.canvasFade->setDuration(m_canvasFadeDurationMs);
+        m_w.canvasFade->setStartValue(currentOpacity);
+        m_w.canvasFade->setEndValue(1.0);
+        m_w.canvasFade->start();
+    } else {
+        // Already mostly visible, just snap to 1.0
+        m_w.canvasOpacity->setOpacity(1.0);
+    }
+    m_usingInlineLoader = false;
 }
 
 void ScreenNavigationManager::onLoaderDelayTimeout() {
