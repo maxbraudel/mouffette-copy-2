@@ -3,11 +3,13 @@
 #ifdef Q_OS_MACOS
 #include <QImage>
 #include <QString>
+#include <QSize>
 
 // Synchronous, fast first-frame fetch using AVFoundation.
 // Returns a QImage; null image if failed.
 class MacVideoThumbnailer {
 public:
+    static QSize videoDimensions(const QString& localFilePath);
     static QImage firstFrame(const QString& localFilePath);
 };
 #endif

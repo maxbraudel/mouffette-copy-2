@@ -123,6 +123,9 @@ if(WIN32)
         ole32
         uuid
         windowscodecs
+        mfplat
+        mfreadwrite
+        mfuuid
     )
 endif()
 

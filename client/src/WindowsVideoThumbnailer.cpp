@@ -5,6 +5,9 @@
 #include <wincodec.h>
 #include <shobjidl.h>
 #include <shlwapi.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
 #include <QDir>
 #include <QFile>
 #include <QDebug>
@@ -118,6 +121,49 @@ ComPtr<IWICBitmapSource> captureFirstFrameWithShell(const QString& path) {
 }
 
 } // namespace
+
+QSize WindowsVideoThumbnailer::videoDimensions(const QString& localFilePath) {
+    if (localFilePath.isEmpty()) {
+        return QSize();
+    }
+
+    ComInitializer comGuard;
+    if (!comGuard.initialized()) {
+        return QSize();
+    }
+
+    if (!QFile::exists(localFilePath)) {
+        return QSize();
+    }
+
+    const QString path = QDir::toNativeSeparators(localFilePath);
+
+    // Initialize Media Foundation
+    MFStartup(MF_VERSION);
+
+    ComPtr<IMFSourceReader> reader;
+    if (FAILED(MFCreateSourceReaderFromURL(reinterpret_cast<LPCWSTR>(path.utf16()), nullptr, &reader))) {
+        MFShutdown();
+        return QSize();
+    }
+
+    ComPtr<IMFMediaType> mediaType;
+    if (FAILED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &mediaType))) {
+        MFShutdown();
+        return QSize();
+    }
+
+    UINT32 width = 0, height = 0;
+    MFGetAttributeSize(mediaType.Get(), MF_MT_FRAME_SIZE, &width, &height);
+    
+    MFShutdown();
+    
+    if (width > 0 && height > 0) {
+        return QSize(width, height);
+    }
+    
+    return QSize();
+}
 
 QImage WindowsVideoThumbnailer::firstFrame(const QString& localFilePath) {
     if (localFilePath.isEmpty()) {

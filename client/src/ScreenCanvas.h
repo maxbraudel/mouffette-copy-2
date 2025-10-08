@@ -262,6 +262,7 @@ private:
 
     QGraphicsItem* m_dragPreviewItem = nullptr;
     QSize m_dragPreviewBaseSize;
+    QSize m_dragPreviewVideoSize; // actual video dimensions (if video)
     bool m_dragPreviewIsVideo = false;
     QPixmap m_dragPreviewPixmap;
     bool m_dragCursorHidden = false;

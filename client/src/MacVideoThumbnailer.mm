@@ -6,6 +6,31 @@
 #import <QuickLookThumbnailing/QuickLookThumbnailing.h>
 #include <QByteArray>
 
+QSize MacVideoThumbnailer::videoDimensions(const QString& localFilePath) {
+    @autoreleasepool {
+        QByteArray utf8 = localFilePath.toUtf8();
+        NSString* nsPath = [NSString stringWithUTF8String:utf8.constData()];
+        if (!nsPath) return QSize();
+        NSURL* url = [NSURL fileURLWithPath:nsPath];
+        if (!url) return QSize();
+
+        AVURLAsset* asset = [AVURLAsset URLAssetWithURL:url options:nil];
+        if (!asset) return QSize();
+        
+        NSArray<AVAssetTrack*>* videoTracks = [asset tracksWithMediaType:AVMediaTypeVideo];
+        if (videoTracks.count == 0) return QSize();
+        
+        AVAssetTrack* videoTrack = videoTracks[0];
+        CGSize naturalSize = [videoTrack naturalSize];
+        
+        // Apply transform to get display size (handles rotation)
+        CGAffineTransform transform = [videoTrack preferredTransform];
+        CGSize displaySize = CGSizeApplyAffineTransform(naturalSize, transform);
+        
+        return QSize(std::abs(displaySize.width), std::abs(displaySize.height));
+    }
+}
+
 QImage MacVideoThumbnailer::firstFrame(const QString& localFilePath) {
     @autoreleasepool {
         QByteArray utf8 = localFilePath.toUtf8();
