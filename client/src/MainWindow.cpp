@@ -1861,8 +1861,6 @@ void MainWindow::onUploadButtonClicked() {
 
     const bool managerHasActive = m_uploadManager->hasActiveUpload() &&
         m_uploadManager->activeUploadTargetClientId() == targetClientId;
-    const bool managerRecentlyCleared = !m_uploadManager->lastRemovalClientId().isEmpty() &&
-        m_uploadManager->lastRemovalClientId() == targetClientId;
     const bool sessionHasRemote = upload.remoteFilesPresent;
     const bool hasRemoteFiles = sessionHasRemote || managerHasActive;
     
@@ -1873,7 +1871,6 @@ void MainWindow::onUploadButtonClicked() {
     qDebug() << "managerHasActive:" << managerHasActive;
     qDebug() << "  - hasActiveUpload:" << m_uploadManager->hasActiveUpload();
     qDebug() << "  - activeTargetClientId:" << m_uploadManager->activeUploadTargetClientId();
-    qDebug() << "managerRecentlyCleared:" << managerRecentlyCleared;
     qDebug() << "  - lastRemovalClientId:" << m_uploadManager->lastRemovalClientId();
     qDebug() << "hasRemoteFiles:" << hasRemoteFiles;
 
