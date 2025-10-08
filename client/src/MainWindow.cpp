@@ -51,6 +51,7 @@
 #include <QBrush>
 #include <QUrl>
 #include <QImage>
+#include <QAbstractItemView>
 #include <QPixmap>
 #include <QGraphicsTextItem>
 #include <QGraphicsRectItem>
@@ -378,6 +379,84 @@ void MainWindow::ensureClientListPlaceholder() {
     }
 }
 
+void MainWindow::ensureOngoingScenesPlaceholder() {
+    if (!m_ongoingScenesList) return;
+    if (m_ongoingScenesList->count() == 0) {
+        QListWidgetItem* item = new QListWidgetItem("No current ongoing scenes.");
+        item->setFlags(Qt::NoItemFlags);
+        item->setTextAlignment(Qt::AlignCenter);
+        QFont font = item->font(); font.setItalic(true); font.setPointSize(16); item->setFont(font);
+        item->setForeground(AppColors::gTextMuted);
+        m_ongoingScenesList->addItem(item);
+    }
+}
+
+void MainWindow::applyListWidgetStyle(QListWidget* listWidget) const {
+    if (!listWidget) return;
+    listWidget->setStyleSheet(
+        QString("QListWidget { "
+        "   border: 1px solid %1; "
+        "   border-radius: 5px; "
+        "   padding: 0px; "
+        "   background-color: %2; "
+        "   outline: none; "
+        "}"
+        "QListWidget::item { "
+        "   padding: 10px; "
+        "}"
+        "QListWidget::item:hover { "
+        "   background-color: rgba(74, 144, 226, 28); "
+        "}"
+        "QListWidget::item:selected { "
+        "   background-color: transparent; "
+        "   color: palette(text); "
+        "}"
+        "QListWidget::item:selected:active { "
+        "   background-color: transparent; "
+        "   color: palette(text); "
+        "}"
+        "QListWidget::item:selected:hover { "
+        "   background-color: %3; "
+        "   color: palette(text); "
+        "}")
+            .arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource))
+            .arg(AppColors::colorSourceToCss(AppColors::gInteractionBackgroundColorSource))
+            .arg(AppColors::colorToCss(AppColors::gHoverHighlight))
+    );
+}
+
+void MainWindow::refreshOngoingScenesList() {
+    if (!m_ongoingScenesList) return;
+
+    m_ongoingScenesList->clear();
+
+    for (auto it = m_canvasSessions.constBegin(); it != m_canvasSessions.constEnd(); ++it) {
+        const CanvasSession& session = it.value();
+        ScreenCanvas* canvas = session.canvas;
+        if (!canvas) continue;
+        if (!canvas->isRemoteSceneLaunched()) continue;
+
+        QString display = session.lastClientInfo.getDisplayText();
+        if (display.trimmed().isEmpty()) {
+            display = session.lastClientInfo.getMachineName();
+        }
+        if (display.trimmed().isEmpty()) {
+            display = QStringLiteral("Unnamed client");
+        }
+
+        QString itemText = QStringLiteral("%1 — Scene live").arg(display.trimmed());
+        QListWidgetItem* item = new QListWidgetItem(itemText);
+        item->setFlags(Qt::ItemIsEnabled);
+        item->setData(Qt::UserRole, session.identityKey);
+        item->setData(Qt::UserRole + 1, session.clientId);
+        m_ongoingScenesList->addItem(item);
+    }
+
+    if (m_ongoingScenesList->count() == 0) {
+        ensureOngoingScenesPlaceholder();
+    }
+}
+
 void MainWindow::setRemoteConnectionStatus(const QString& status, bool propagateLoss) {
     if (!m_remoteConnectionStatusLabel) return;
     const QString up = status.toUpper();
@@ -473,6 +552,8 @@ MainWindow::MainWindow(QWidget* parent)
       m_localNetworkStatusLabel(nullptr),
       m_clientListLabel(nullptr),
       m_clientListWidget(nullptr),
+    m_ongoingScenesLabel(nullptr),
+    m_ongoingScenesList(nullptr),
       m_screenViewWidget(nullptr),
       m_screenViewLayout(nullptr),
       m_clientNameLabel(nullptr),
@@ -1373,6 +1454,7 @@ MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& cli
         if (stored.lastClientInfo.isOnline()) {
             stored.remoteContentClearedOnDisconnect = false;
         }
+        refreshOngoingScenesList();
         return stored;
     }
 
@@ -1399,6 +1481,7 @@ MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& cli
             m_canvasHostStack->addWidget(stored.canvas);
         }
     }
+    refreshOngoingScenesList();
     return stored;
 }
 
@@ -1410,6 +1493,10 @@ void MainWindow::configureCanvasSession(CanvasSession& session) {
     session.canvas->setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
     session.canvas->setFocusPolicy(Qt::StrongFocus);
     session.canvas->installEventFilter(this);
+
+    connect(session.canvas, &ScreenCanvas::remoteSceneLaunchStateChanged, this,
+            &MainWindow::onRemoteSceneLaunchStateChanged,
+            Qt::UniqueConnection);
 
     if (session.canvas->viewport()) {
         QWidget* viewport = session.canvas->viewport();
@@ -2181,6 +2268,28 @@ void MainWindow::onClientItemClicked(QListWidgetItem* item) {
     }
 }
 
+void MainWindow::onOngoingSceneItemClicked(QListWidgetItem* item) {
+    if (!item) return;
+    if (item->flags() == Qt::NoItemFlags) return;
+
+    QString identity = item->data(Qt::UserRole).toString();
+    QString clientId = item->data(Qt::UserRole + 1).toString();
+
+    CanvasSession* session = nullptr;
+    if (!identity.isEmpty()) {
+        session = findCanvasSession(identity);
+    }
+    if (!session && !clientId.isEmpty()) {
+        session = findCanvasSessionByClientId(clientId);
+    }
+
+    if (!session) return;
+
+    switchToCanvasSession(session->identityKey);
+    m_selectedClient = session->lastClientInfo;
+    showScreenView(session->lastClientInfo);
+}
+
 // Note: generic message hook removed; we handle specific message types via dedicated slots
 
 
@@ -2326,6 +2435,9 @@ void MainWindow::updateStylesheetsForTheme() {
             }
         }
     }
+
+    applyListWidgetStyle(m_clientListWidget);
+    applyListWidgetStyle(m_ongoingScenesList);
 }
 
 void MainWindow::setupUI() {
@@ -2461,6 +2573,7 @@ void MainWindow::setupUI() {
     createClientListPage();
     // Show placeholder immediately (before any connection) so page isn't empty during CONNECTING state
     ensureClientListPlaceholder();
+    ensureOngoingScenesPlaceholder();
     
     // Create screen view page  
     createScreenViewPage();
@@ -2538,39 +2651,16 @@ void MainWindow::setupUI() {
 void MainWindow::createClientListPage() {
     m_clientListPage = new QWidget();
     QVBoxLayout* layout = new QVBoxLayout(m_clientListPage);
-    layout->setSpacing(0);
+    layout->setSpacing(gInnerContentGap);
     layout->setContentsMargins(0, 0, 0, 0);
     
+    m_clientListLabel = new QLabel("Connected Clients");
+    applyTitleText(m_clientListLabel);
+    layout->addWidget(m_clientListLabel);
+
     // Client list widget - simple and flexible
     m_clientListWidget = new QListWidget();
-    m_clientListWidget->setStyleSheet(
-        QString("QListWidget { "
-        "   border: 1px solid %1; "
-        "   border-radius: 5px; "
-        "   padding: 0px; "
-        "   background-color: %2; "
-        "   outline: none; "
-        "}"
-        "QListWidget::item { "
-        "   padding: 10px; "
-        "}"
-        "QListWidget::item:hover { "
-        "   background-color: rgba(74, 144, 226, 28); "
-        "}"
-        "QListWidget::item:selected { "
-        "   background-color: transparent; "
-        "   color: palette(text); "
-        "}"
-        "QListWidget::item:selected:active { "
-        "   background-color: transparent; "
-        "   color: palette(text); "
-        "}"
-        "QListWidget::item:selected:hover { "
-        "   background-color: " + AppColors::colorToCss(AppColors::gHoverHighlight) + "; "
-        "   color: palette(text); "
-        "}").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource))
-               .arg(AppColors::colorSourceToCss(AppColors::gInteractionBackgroundColorSource))
-    );
+    applyListWidgetStyle(m_clientListWidget);
     
     connect(m_clientListWidget, &QListWidget::itemClicked, this, &MainWindow::onClientItemClicked);
     m_clientListWidget->setFocusPolicy(Qt::NoFocus);
@@ -2584,6 +2674,23 @@ void MainWindow::createClientListPage() {
     m_clientListWidget->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     
     layout->addWidget(m_clientListWidget);
+
+    // Ongoing scenes section mirrors client list styling
+    m_ongoingScenesLabel = new QLabel("Ongoing Scenes");
+    applyTitleText(m_ongoingScenesLabel);
+    layout->addWidget(m_ongoingScenesLabel);
+
+    m_ongoingScenesList = new QListWidget();
+    applyListWidgetStyle(m_ongoingScenesList);
+    m_ongoingScenesList->setFocusPolicy(Qt::NoFocus);
+    m_ongoingScenesList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_ongoingScenesList->setMouseTracking(true);
+    m_ongoingScenesList->setItemDelegate(new ClientListSeparatorDelegate(m_ongoingScenesList));
+    m_ongoingScenesList->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    m_ongoingScenesList->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_ongoingScenesList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    connect(m_ongoingScenesList, &QListWidget::itemClicked, this, &MainWindow::onOngoingSceneItemClicked);
+    layout->addWidget(m_ongoingScenesList);
     
     m_stackedWidget->addWidget(m_clientListPage);
 }
@@ -3559,6 +3666,13 @@ void MainWindow::onDataRequestReceived() {
     m_webSocketClient->sendStateSnapshot(screens, volumePercent);
 }
 
+void MainWindow::onRemoteSceneLaunchStateChanged(bool active, const QString& targetClientId, const QString& targetMachineName) {
+    Q_UNUSED(active);
+    Q_UNUSED(targetClientId);
+    Q_UNUSED(targetMachineName);
+    refreshOngoingScenesList();
+}
+
 QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
     QList<ScreenInfo> screens;
     
@@ -3733,6 +3847,8 @@ void MainWindow::updateClientList(const QList<ClientInfo>& clients) {
             m_clientListWidget->addItem(item);
         }
     }
+
+    refreshOngoingScenesList();
 }
 
 void MainWindow::setUIEnabled(bool enabled) {

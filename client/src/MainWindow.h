@@ -83,6 +83,7 @@ private slots:
     void onClientListReceived(const QList<ClientInfo>& clients);
     void onRegistrationConfirmed(const ClientInfo& clientInfo);
     void onClientItemClicked(QListWidgetItem* item);
+    void onOngoingSceneItemClicked(QListWidgetItem* item);
     void updateConnectionStatus();
     void onEnableDisableClicked();
     void attemptReconnect();
@@ -92,6 +93,7 @@ private slots:
     void onScreensInfoReceived(const ClientInfo& clientInfo);
     void onWatchStatusChanged(bool watched);
     void onDataRequestReceived();
+    void onRemoteSceneLaunchStateChanged(bool active, const QString& targetClientId, const QString& targetMachineName);
     
     // System tray slots
     void onTrayIconActivated(QSystemTrayIcon::ActivationReason reason);
@@ -169,6 +171,7 @@ private:
     void updateVolumeIndicator();
     void setRemoteConnectionStatus(const QString& status, bool propagateLoss = true);
     void ensureClientListPlaceholder();
+    void ensureOngoingScenesPlaceholder();
     void refreshOverlayActionsState(bool remoteConnected, bool propagateLoss = true);
     // watch management handled by WatchManager component now
     // Manage presence of the volume indicator in the top bar layout
@@ -193,6 +196,8 @@ private:
     CanvasSession* sessionForActiveUpload();
     CanvasSession* sessionForUploadId(const QString& uploadId);
     void clearUploadTracking(CanvasSession& session);
+    void refreshOngoingScenesList();
+    void applyListWidgetStyle(QListWidget* listWidget) const;
 
     // UI Components
     QWidget* m_centralWidget;
@@ -212,6 +217,8 @@ private:
     // Client list section
     QLabel* m_clientListLabel;
     QListWidget* m_clientListWidget;
+    QLabel* m_ongoingScenesLabel = nullptr;
+    QListWidget* m_ongoingScenesList = nullptr;
     
     // Screen view section
     QWidget* m_screenViewWidget;

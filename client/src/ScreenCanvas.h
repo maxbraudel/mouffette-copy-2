@@ -81,6 +81,10 @@ public:
         m_remoteSceneTargetMachineName = machineName;
     }
     void updateRemoteSceneTargetFromClientList(const QList<ClientInfo>& clients);
+    bool isRemoteSceneLaunched() const { return m_sceneLaunched; }
+    bool isRemoteSceneLaunching() const { return m_sceneLaunching; }
+    QString remoteSceneTargetClientId() const { return m_remoteSceneTargetClientId; }
+    QString remoteSceneTargetMachineName() const { return m_remoteSceneTargetMachineName; }
     void handleRemoteConnectionLost();
     // Remote cursor style setters
     void setRemoteCursorDiameterPx(int d) { m_remoteCursorDiameterPx = qMax(2, d); if (m_remoteCursorDot) { recreateRemoteCursorItem(); } }
@@ -131,6 +135,7 @@ public:
 signals:
     // Emitted when a new media item is added to the canvas
     void mediaItemAdded(ResizableMediaBase* mediaItem);
+    void remoteSceneLaunchStateChanged(bool active, const QString& targetClientId, const QString& targetMachineName);
 
 protected:
     bool event(QEvent* event) override;
@@ -374,6 +379,7 @@ protected:
     class WebSocketClient* m_wsClient = nullptr; // not owned
     QString m_remoteSceneTargetClientId; // target client to receive remote scene commands
     QString m_remoteSceneTargetMachineName; // machine name of target (stable across reconnections)
+    void emitRemoteSceneLaunchStateChanged();
 };
 
 #endif // SCREENCANVAS_H

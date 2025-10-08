@@ -691,11 +691,15 @@ void ScreenCanvas::initInfoOverlay() {
                 
             } else {
                 // Stop remote scene
+                const bool wasLaunched = m_sceneLaunched;
                 m_sceneLaunched = false;
                 if (m_launchTestSceneButton) m_launchTestSceneButton->setEnabled(true);
                 stopHostSceneState();
                 updateLaunchSceneButtonStyle();
                 updateLaunchTestSceneButtonStyle();
+                if (wasLaunched) {
+                    emitRemoteSceneLaunchStateChanged();
+                }
             }
         });
 
@@ -708,6 +712,7 @@ void ScreenCanvas::initInfoOverlay() {
                     if (m_launchSceneButton && m_launchSceneButton->isCheckable()) {
                         m_launchSceneButton->setChecked(false);
                     }
+                    emitRemoteSceneLaunchStateChanged();
                 }
                 if (m_launchSceneButton) m_launchSceneButton->setEnabled(false);
                 startHostSceneState(HostSceneMode::Test);
@@ -3915,6 +3920,7 @@ void ScreenCanvas::handleRemoteConnectionLost() {
     }
 
     const bool shouldStopHostScene = (m_hostSceneActive && m_hostSceneMode == HostSceneMode::Remote);
+    const bool wasLaunched = m_sceneLaunched;
 
     m_sceneLaunching = false;
     m_sceneLaunched = false;
@@ -3930,6 +3936,10 @@ void ScreenCanvas::handleRemoteConnectionLost() {
 
     updateLaunchSceneButtonStyle();
     updateLaunchTestSceneButtonStyle();
+
+    if (wasLaunched) {
+        emitRemoteSceneLaunchStateChanged();
+    }
 
     TOAST_WARNING("Remote scene stopped: connection lost", 3500);
 }
@@ -4053,9 +4063,16 @@ void ScreenCanvas::stopHostSceneState() {
     m_prevVideoStates.clear();
 
     // Notify remote client to stop scene only if Remote mode was active
-    if (prevMode == HostSceneMode::Remote && m_wsClient && !m_remoteSceneTargetClientId.isEmpty()) {
-        qDebug() << "ScreenCanvas: sending remote_scene_stop to" << m_remoteSceneTargetClientId;
-        m_wsClient->sendRemoteSceneStop(m_remoteSceneTargetClientId);
+    if (prevMode == HostSceneMode::Remote) {
+        bool wasLaunched = m_sceneLaunched;
+        m_sceneLaunched = false;
+        if (wasLaunched) {
+            emitRemoteSceneLaunchStateChanged();
+        }
+        if (m_wsClient && !m_remoteSceneTargetClientId.isEmpty()) {
+            qDebug() << "ScreenCanvas: sending remote_scene_stop to" << m_remoteSceneTargetClientId;
+            m_wsClient->sendRemoteSceneStop(m_remoteSceneTargetClientId);
+        }
     }
 }
 
@@ -4235,6 +4252,11 @@ void ScreenCanvas::setWebSocketClient(WebSocketClient* client) {
     }
 }
 
+void ScreenCanvas::emitRemoteSceneLaunchStateChanged()
+{
+    emit remoteSceneLaunchStateChanged(m_sceneLaunched, m_remoteSceneTargetClientId, m_remoteSceneTargetMachineName);
+}
+
 void ScreenCanvas::onRemoteSceneValidationReceived(const QString& targetClientId, bool success, const QString& errorMessage) {
     // Only handle if this is a response to our request
     if (targetClientId != m_remoteSceneTargetClientId) return;
@@ -4256,6 +4278,7 @@ void ScreenCanvas::onRemoteSceneValidationReceived(const QString& targetClientId
         
         // Validation failed - abort launch
         m_sceneLaunching = false;
+        const bool wasLaunched = m_sceneLaunched;
         m_sceneLaunched = false;
         if (m_launchTestSceneButton) m_launchTestSceneButton->setEnabled(true);
         updateLaunchSceneButtonStyle();
@@ -4263,6 +4286,9 @@ void ScreenCanvas::onRemoteSceneValidationReceived(const QString& targetClientId
         
         // Stop local scene too
         stopHostSceneState();
+        if (wasLaunched) {
+            emitRemoteSceneLaunchStateChanged();
+        }
         
         QString message = errorMessage.isEmpty() ? "Scene validation failed" : errorMessage;
         TOAST_ERROR(QString("Scene launch failed: %1").arg(message), 4000);
@@ -4283,6 +4309,7 @@ void ScreenCanvas::onRemoteSceneLaunchedReceived(const QString& targetClientId) 
     m_sceneLaunching = false;
     m_sceneLaunched = true;
     updateLaunchSceneButtonStyle();
+    emitRemoteSceneLaunchStateChanged();
     
     TOAST_SUCCESS("Remote scene launched successfully!", 3000);
 }
@@ -4294,6 +4321,7 @@ void ScreenCanvas::onRemoteSceneLaunchTimeout() {
     
     // Timeout occurred - abort launch
     m_sceneLaunching = false;
+    const bool wasLaunched = m_sceneLaunched;
     m_sceneLaunched = false;
     if (m_launchTestSceneButton) m_launchTestSceneButton->setEnabled(true);
     updateLaunchSceneButtonStyle();
@@ -4301,6 +4329,9 @@ void ScreenCanvas::onRemoteSceneLaunchTimeout() {
     
     // Stop local scene too
     stopHostSceneState();
+    if (wasLaunched) {
+        emitRemoteSceneLaunchStateChanged();
+    }
     
     TOAST_ERROR("Scene launch timed out: Remote client did not respond", 5000);
 }
