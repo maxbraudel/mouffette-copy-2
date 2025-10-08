@@ -101,6 +101,7 @@ public slots:
 private:
     void startUpload(const QVector<UploadFileInfo>& files);
     void resetToInitial();
+    void cleanupIncomingCacheForConnectionLoss();
 
     QPointer<WebSocketClient> m_ws;
     QString m_targetClientId;

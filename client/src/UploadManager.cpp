@@ -285,35 +285,67 @@ void UploadManager::onAllFilesRemovedRemote() {
 void UploadManager::onConnectionLost() {
     // If we were uploading or finalizing, treat it as an aborted session.
     const bool hadOngoing = m_uploadInProgress || m_finalizing;
-    if (!hadOngoing) return;
 
-    // Cancel local flags immediately
-    m_cancelRequested = true;
-    m_uploadInProgress = false;
-    m_finalizing = false;
+    if (hadOngoing) {
+        // Cancel local flags immediately
+        m_cancelRequested = true;
+        m_uploadInProgress = false;
+        m_finalizing = false;
 
-    // Do not mark anything as uploaded; roll back any optimistic UI
-    // Unmark any files that were part of the outgoing batch but not yet confirmed by onUploadFinished
-    if (!m_uploadTargetClientId.isEmpty()) {
-        for (const auto& f : m_outgoingFiles) {
-            // Only unmark if this file hasn't been confirmed uploaded (conservative: unmark all in batch)
-            FileManager::instance().unmarkFileUploadedToClient(f.fileId, m_uploadTargetClientId);
-            const QList<QString> mediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
-            for (const QString& mediaId : mediaIds) {
-                FileManager::instance().unmarkMediaUploadedToClient(mediaId, m_uploadTargetClientId);
+        // Do not mark anything as uploaded; roll back any optimistic UI
+        // Unmark any files that were part of the outgoing batch but not yet confirmed by onUploadFinished
+        if (!m_uploadTargetClientId.isEmpty()) {
+            for (const auto& f : m_outgoingFiles) {
+                FileManager::instance().unmarkFileUploadedToClient(f.fileId, m_uploadTargetClientId);
+                const QList<QString> mediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
+                for (const QString& mediaId : mediaIds) {
+                    FileManager::instance().unmarkMediaUploadedToClient(mediaId, m_uploadTargetClientId);
+                }
             }
         }
+
+        // Notify UI to recompute button state and progress text
+        emit uiStateChanged();
+
+        // Leave m_uploadActive = false so next click starts a fresh upload.
+        m_uploadActive = false;
+        m_currentUploadId.clear();
+        m_lastPercent = 0;
+        m_filesCompleted = 0;
+        m_totalFiles = 0;
+        m_sentBytes = 0;
+        m_totalBytes = 0;
+        m_remoteProgressReceived = false;
+        m_outgoingFiles.clear();
     }
 
-    // Notify UI to recompute button state and progress text
-    emit uiStateChanged();
+    cleanupIncomingCacheForConnectionLoss();
+}
 
-    // Leave m_uploadActive = false so next click starts a fresh upload.
-    m_uploadActive = false;
-    m_currentUploadId.clear();
-    m_lastPercent = 0;
-    m_filesCompleted = 0;
-    // Keep m_outgoingFiles; they describe the interrupted batch (optional: clear if you prefer)
+void UploadManager::cleanupIncomingCacheForConnectionLoss() {
+    // Reset any active incoming session and associated bookkeeping, then remove cached files on disk.
+    if (!m_incoming.senderId.isEmpty()) {
+        qDebug() << "UploadManager: Clearing incoming upload cache for sender" << m_incoming.senderId << "after connection loss";
+    }
+    m_incoming = IncomingUploadSession();
+    m_expectedChunkIndex.clear();
+    m_canceledIncoming.clear();
+
+    QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (base.isEmpty()) base = QDir::homePath() + "/.cache";
+    const QString uploadsRoot = base + "/Mouffette/Uploads";
+    QDir uploadsDir(uploadsRoot);
+    if (!uploadsDir.exists()) {
+        return;
+    }
+
+    if (!uploadsDir.removeRecursively()) {
+        qWarning() << "UploadManager: Failed to remove uploads cache folder after connection loss:" << uploadsRoot;
+    } else {
+        qDebug() << "UploadManager: Cleared uploads cache folder after connection loss:" << uploadsRoot;
+    }
+
+    FileManager::instance().removeReceivedFileMappingsUnderPathPrefix(uploadsRoot + "/");
 }
 
 // Incoming side (target) - replicate subset of MainWindow logic for assembling files

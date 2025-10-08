@@ -3,6 +3,7 @@
 #include <QFileInfo>
 #include <QCryptographicHash>
 #include <QDebug>
+#include <QSet>
 
 // Static member definition
 std::function<void(const QString& fileId, const QList<QString>& clientIds)> FileManager::s_fileRemovalNotifier;
@@ -294,4 +295,40 @@ void FileManager::unmarkAllForClient(const QString& clientId)
 {
     unmarkAllFilesForClient(clientId);
     unmarkAllMediaForClient(clientId);
+}
+
+void FileManager::removeReceivedFileMappingsUnderPathPrefix(const QString& pathPrefix)
+{
+    if (pathPrefix.isEmpty()) return;
+
+    QList<QString> fileIdsToRemove;
+    fileIdsToRemove.reserve(m_fileIdToPath.size());
+    for (auto it = m_fileIdToPath.cbegin(); it != m_fileIdToPath.cend(); ++it) {
+        if (it.value().startsWith(pathPrefix)) {
+            fileIdsToRemove.append(it.key());
+        }
+    }
+
+    if (fileIdsToRemove.isEmpty()) return;
+
+    QSet<QString> removalSet = QSet<QString>(fileIdsToRemove.cbegin(), fileIdsToRemove.cend());
+
+    for (const QString& fileId : fileIdsToRemove) {
+        const QString path = m_fileIdToPath.take(fileId);
+        if (!path.isEmpty()) {
+            m_pathToFileId.remove(path);
+        }
+        m_fileIdToMediaIds.remove(fileId);
+        m_fileIdToClients.remove(fileId);
+        m_fileIdMeta.remove(fileId);
+    }
+
+    for (auto it = m_mediaIdToFileId.begin(); it != m_mediaIdToFileId.end();) {
+        if (removalSet.contains(it.value())) {
+            m_mediaIdToClients.remove(it.key());
+            it = m_mediaIdToFileId.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }

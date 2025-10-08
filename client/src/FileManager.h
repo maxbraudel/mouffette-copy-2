@@ -6,6 +6,7 @@
 #include <QList>
 #include <QFileInfo>
 #include <QCryptographicHash>
+#include <QSet>
 
 class FileManager
 {
@@ -60,6 +61,9 @@ public:
     void unmarkAllFilesForClient(const QString& clientId);
     void unmarkAllMediaForClient(const QString& clientId);
     void unmarkAllForClient(const QString& clientId);
+
+    // Remove any received-file bookkeeping for paths under the given prefix (used when cleaning cache folders)
+    void removeReceivedFileMappingsUnderPathPrefix(const QString& pathPrefix);
     
     // Set callback for when file should be deleted from remote clients
     static void setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds)> cb);
