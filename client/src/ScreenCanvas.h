@@ -9,6 +9,7 @@
 #include <QMap>
 #include <QPixmap>
 #include <QTimer>
+#include <memory>
 #include "ClientInfo.h" // for ScreenInfo
 #include "MediaItems.h" // for ResizableMediaBase / ResizableVideoItem
 #include <QGestureEvent>
@@ -326,9 +327,18 @@ protected:
     HostSceneMode m_hostSceneMode = HostSceneMode::None;
     QTimer* m_autoDisplayTimer = nullptr;
     QTimer* m_autoPlayTimer = nullptr;
+    struct SavedSelection {
+        ResizableMediaBase* media = nullptr;
+        std::weak_ptr<bool> guard;
+    };
+    struct VideoPreState {
+        ResizableVideoItem* video = nullptr;
+        std::weak_ptr<bool> guard;
+        qint64 posMs = 0;
+        bool wasPlaying = false;
+    };
     // Remember selection present just before entering host scene so it can be restored afterward (multi-select supported)
-    QList<ResizableMediaBase*> m_prevSelectionBeforeHostScene;
-    struct VideoPreState { class ResizableVideoItem* video = nullptr; qint64 posMs = 0; bool wasPlaying = false; };
+    QList<SavedSelection> m_prevSelectionBeforeHostScene;
     QList<VideoPreState> m_prevVideoStates;
     void updateLaunchSceneButtonStyle();
     void updateLaunchTestSceneButtonStyle();

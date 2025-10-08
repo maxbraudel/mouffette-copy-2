@@ -58,6 +58,9 @@ public:
     ~ResizableMediaBase() override;
     explicit ResizableMediaBase(const QSize& baseSizePx, int visualSizePx, int selectionSizePx, const QString& filename = QString());
 
+    // Lifetime guard for external schedulers storing raw pointers (e.g., delayed timers).
+    std::weak_ptr<bool> lifetimeGuard() const;
+
     void setSourcePath(const QString& p);
     QString sourcePath() const { return m_sourcePath; }
     // Stable unique identifier for this media item (persists across uploads)
@@ -241,6 +244,7 @@ protected:
     Handle m_axisSnapHandle = None;
     qreal m_axisSnapTargetScale = 1.0;
     MediaSettingsState m_mediaSettings;
+    std::shared_ptr<bool> m_lifetimeToken;
 };
 
 // Simple pixmap media item

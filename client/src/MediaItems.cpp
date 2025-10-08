@@ -72,6 +72,10 @@ std::function<ResizableMediaBase::ResizeSnapFeedback(qreal, const QPointF&, cons
 }
 
 ResizableMediaBase::~ResizableMediaBase() {
+    if (m_lifetimeToken) {
+        *m_lifetimeToken = false;
+        m_lifetimeToken.reset();
+    }
     // Clean up FileManager associations
     if (!m_mediaId.isEmpty()) {
         qDebug() << "MediaItems: Destructing media" << m_mediaId << "with fileId" << m_fileId;
@@ -81,6 +85,7 @@ ResizableMediaBase::~ResizableMediaBase() {
 
 ResizableMediaBase::ResizableMediaBase(const QSize& baseSizePx, int visualSizePx, int selectionSizePx, const QString& filename)
 {
+    m_lifetimeToken = std::make_shared<bool>(true);
     m_visualSize = qMax(4, visualSizePx);
     m_selectionSize = qMax(m_visualSize, selectionSizePx);
     setFlags(QGraphicsItem::ItemIsMovable | QGraphicsItem::ItemIsSelectable | QGraphicsItem::ItemSendsGeometryChanges);
@@ -92,6 +97,10 @@ ResizableMediaBase::ResizableMediaBase(const QSize& baseSizePx, int visualSizePx
     // Generate a stable unique identifier at creation time (used to disambiguate duplicates)
     m_mediaId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     initializeOverlays();
+}
+
+std::weak_ptr<bool> ResizableMediaBase::lifetimeGuard() const {
+    return m_lifetimeToken;
 }
 
 void ResizableMediaBase::cancelFade() {

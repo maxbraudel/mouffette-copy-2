@@ -3919,7 +3919,10 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
         const auto selectedNow = m_scene->selectedItems();
         for (QGraphicsItem* it : selectedNow) {
             if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-                m_prevSelectionBeforeHostScene.append(media);
+                SavedSelection snapshot;
+                snapshot.media = media;
+                snapshot.guard = media->lifetimeGuard();
+                m_prevSelectionBeforeHostScene.append(snapshot);
             }
         }
     }
@@ -3938,16 +3941,23 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                 int playDelayMs = media->autoPlayDelayMs();
                 // Snapshot and reset videos
                 if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
-                    VideoPreState st; st.video = vid; st.posMs = vid->currentPositionMs(); st.wasPlaying = vid->isPlaying();
+                    VideoPreState st;
+                    st.video = vid;
+                    st.guard = vid->lifetimeGuard();
+                    st.posMs = vid->currentPositionMs();
+                    st.wasPlaying = vid->isPlaying();
                     m_prevVideoStates.append(st);
                     vid->stopToBeginning();
                 }
                 media->hideImmediateNoFade();
                 // 1. Schedule (or immediate) display
                 if (shouldAutoDisplay) {
+                    const auto displayGuard = media->lifetimeGuard();
                     if (displayDelayMs > 0) {
-                        QTimer::singleShot(displayDelayMs, this, [this, media]() {
+                        QTimer::singleShot(displayDelayMs, this, [this, media, displayGuard]() {
                             if (!m_hostSceneActive) return;
+                            if (displayGuard.expired()) return;
+                            if (media->isBeingDeleted()) return;
                             media->showWithConfiguredFade();
                         });
                     } else {
@@ -3957,8 +3967,11 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                 // 2. Schedule video playback only if BOTH autoDisplay and autoPlay are enabled (play occurs after show completes)
                 if (shouldAutoDisplay && shouldAutoPlay && media->isVideoMedia()) {
                     int combinedDelay = displayDelayMs + playDelayMs;
-                    QTimer::singleShot(combinedDelay, this, [this, media]() {
+                    const auto playbackGuard = media->lifetimeGuard();
+                    QTimer::singleShot(combinedDelay, this, [this, media, playbackGuard]() {
                         if (!m_hostSceneActive) return;
+                        if (playbackGuard.expired()) return;
+                        if (media->isBeingDeleted()) return;
                         if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
                             vid->togglePlayPause();
                         }
@@ -3990,16 +4003,22 @@ void ScreenCanvas::stopHostSceneState() {
             if (auto* media = dynamic_cast<ResizableMediaBase*>(gi)) media->showImmediateNoFade();
         }
         // Restore previous selection (only items that still exist in the scene)
-        for (auto* media : std::as_const(m_prevSelectionBeforeHostScene)) {
-            if (media && media->scene() == m_scene) {
-                media->setSelected(true);
+        for (const auto& mediaPtr : std::as_const(m_prevSelectionBeforeHostScene)) {
+            if (!mediaPtr.media) continue;
+            if (mediaPtr.guard.expired()) continue;
+            if (mediaPtr.media->isBeingDeleted()) continue;
+            if (mediaPtr.media->scene() == m_scene) {
+                mediaPtr.media->setSelected(true);
             }
         }
         m_prevSelectionBeforeHostScene.clear();
     }
     // Restore pre-scene video positions (always paused)
     for (const VideoPreState& st : std::as_const(m_prevVideoStates)) {
-        if (st.video && st.video->scene() == m_scene) {
+        if (!st.video) continue;
+        if (st.guard.expired()) continue;
+        if (st.video->isBeingDeleted()) continue;
+        if (st.video->scene() == m_scene) {
             st.video->pauseAndSetPosition(st.posMs);
         }
     }
