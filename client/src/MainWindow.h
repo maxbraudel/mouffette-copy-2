@@ -120,6 +120,17 @@ private:
         ClientInfo lastClientInfo;
         bool connectionsInitialized = false;
         bool remoteContentClearedOnDisconnect = false;
+        struct UploadTracking {
+            QSet<QString> mediaIdsBeingUploaded;
+            QHash<QString, QString> mediaIdByFileId;
+            QHash<QString, QList<ResizableMediaBase*>> itemsByFileId;
+            QStringList currentUploadFileOrder;
+            QSet<QString> serverCompletedFileIds;
+            QSet<QString> serverPerFileProgressActive;
+            bool receivingFilesToastShown = false;
+            QString activeUploadId;
+            bool remoteFilesPresent = false;
+        } upload;
     };
 
     void setupUI();
@@ -179,6 +190,9 @@ private:
     QList<ClientInfo> buildDisplayClientList(const QList<ClientInfo>& connectedClients);
     void markAllSessionsOffline();
     ScreenCanvas* canvasForClientId(const QString& clientId) const;
+    CanvasSession* sessionForActiveUpload();
+    CanvasSession* sessionForUploadId(const QString& uploadId);
+    void clearUploadTracking(CanvasSession& session);
 
     // UI Components
     QWidget* m_centralWidget;
@@ -286,21 +300,9 @@ private:
 
     // Upload feature state
     UploadManager* m_uploadManager;
-    // Track currently uploading media by unique mediaId (no more path/name-based tracking)
-    QSet<QString> m_mediaIdsBeingUploaded;
     bool m_uploadSignalsConnected = false;
-    // Map upload fileId <-> mediaId for per-file progress tracking
-    QHash<QString, QString> m_mediaIdByFileId;
-    // Direct mapping from fileId to media item pointers (multiple media can share same fileId)
-    QHash<QString, QList<ResizableMediaBase*>> m_itemsByFileId;
-    // Deterministic order of files for the current upload session (matches sender streaming order)
-    QStringList m_currentUploadFileOrder;
-    // Files that the server has acknowledged as fully received in the current session
-    QSet<QString> m_serverCompletedFileIds;
-    // Files for which we have received authoritative per-file progress from target; ignore local progress for them
-    QSet<QString> m_serverPerFileProgressActive;
-    // Track if we've shown the "client receiving files" toast for current upload
-    bool m_receivingFilesToastShown = false;
+    QString m_activeUploadSessionIdentity;
+    QHash<QString, QString> m_uploadSessionByUploadId; // uploadId -> session identity
     WatchManager* m_watchManager = nullptr;   // extracted watch logic
     ScreenNavigationManager* m_navigationManager = nullptr; // new navigation component
     FileWatcher* m_fileWatcher = nullptr; // monitors source files for deletion

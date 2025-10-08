@@ -59,23 +59,32 @@ void UploadManager::toggleUpload(const QVector<UploadFileInfo>& files) {
     startUpload(files);
 }
 
+void UploadManager::requestRemoval(const QString& clientId) {
+    if (!m_ws || !m_ws->isConnected() || clientId.isEmpty()) return;
+    // Ensure subsequent all_files_removed callbacks attribute to the correct target
+    m_uploadTargetClientId = clientId;
+    m_lastRemovalClientId = clientId;
+    m_ws->sendRemoveAllFiles(clientId);
+}
+
 void UploadManager::requestUnload() {
-    if (!m_ws || !m_ws->isConnected() || (m_uploadTargetClientId.isEmpty() && m_targetClientId.isEmpty())) return;
-    if (!m_uploadActive) return; // nothing to unload
-    m_ws->sendRemoveAllFiles(m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId);
+    const QString clientId = m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId;
+    if (!m_uploadActive || clientId.isEmpty()) return;
+    requestRemoval(clientId);
     // Don't reset state here - wait for onAllFilesRemovedRemote() callback
     emit uiStateChanged();
 }
 
 void UploadManager::requestCancel() {
-    if (!m_ws || !m_ws->isConnected() || (m_uploadTargetClientId.isEmpty() && m_targetClientId.isEmpty())) return;
+    const QString clientId = m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId;
+    if (!m_ws || !m_ws->isConnected() || clientId.isEmpty()) return;
     if (!m_uploadInProgress) return;
     m_cancelRequested = true;
     if (!m_currentUploadId.isEmpty()) {
-        m_ws->sendUploadAbort(m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId, m_currentUploadId, "User cancelled");
+        m_ws->sendUploadAbort(clientId, m_currentUploadId, "User cancelled");
     }
     // Also request removal of all files to clean remote state
-    m_ws->sendRemoveAllFiles(m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId);
+    requestRemoval(clientId);
     // We'll reset final state upon all_files_removed callback
     emit uiStateChanged();
     // Start fallback timer (3s) in case remote never responds
@@ -206,6 +215,7 @@ void UploadManager::resetToInitial() {
     m_outgoingFiles.clear();
     if (m_cancelFallbackTimer) m_cancelFallbackTimer->stop();
     m_uploadTargetClientId.clear();
+    m_activeSessionIdentity.clear();
     // Close upload channel if open
     if (m_ws) m_ws->closeUploadChannel();
 }
@@ -258,15 +268,16 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
 void UploadManager::onAllFilesRemovedRemote() {
     // Remote side confirmed unload; reset state
     // Clear all uploaded markers for this client so that all items are considered Not uploaded
-    if (!m_uploadTargetClientId.isEmpty()) {
-        FileManager::instance().unmarkAllForClient(m_uploadTargetClientId);
-    } else if (!m_targetClientId.isEmpty()) {
-        FileManager::instance().unmarkAllForClient(m_targetClientId);
+    const QString removedClientId = !m_uploadTargetClientId.isEmpty() ? m_uploadTargetClientId : m_targetClientId;
+    if (!removedClientId.isEmpty()) {
+        FileManager::instance().unmarkAllForClient(removedClientId);
     }
-    
+
     // Now reset state
     resetToInitial();
-    
+
+    m_lastRemovalClientId = removedClientId;
+
     emit allFilesRemoved();
     emit uiStateChanged();
 }

@@ -51,6 +51,11 @@ public:
     void setWebSocketClient(WebSocketClient* client);
     void setTargetClientId(const QString& id);
     QString targetClientId() const { return m_targetClientId; }
+    QString activeUploadTargetClientId() const { return m_uploadTargetClientId; }
+    QString lastRemovalClientId() const { return m_lastRemovalClientId; }
+    void setActiveSessionIdentity(const QString& identity) { m_activeSessionIdentity = identity; }
+    QString activeSessionIdentity() const { return m_activeSessionIdentity; }
+    void clearLastRemovalClientId() { m_lastRemovalClientId.clear(); }
     void forceResetForClient(const QString& clientId = QString());
 
     // Outbound (sender side)
@@ -67,6 +72,7 @@ public:
     void toggleUpload(const QVector<UploadFileInfo>& files);
     void requestUnload();
     void requestCancel();
+    void requestRemoval(const QString& clientId);
 
     // Incoming (target side) handling entry point
     void handleIncomingMessage(const QJsonObject& message);
@@ -100,6 +106,7 @@ private:
     QString m_targetClientId;
     // Captured at startUpload to remain stable across the whole transfer
     QString m_uploadTargetClientId;
+    QString m_activeSessionIdentity;
 
     // Sender side state
     bool m_uploadActive = false;      // true after remote finished (acts as toggle to unload)
@@ -119,6 +126,8 @@ private:
 
     // Sender-side per-file tracking
     QVector<UploadFileInfo> m_outgoingFiles;
+
+    QString m_lastRemovalClientId;
 
     // Incoming session (target side)
     IncomingUploadSession m_incoming;
