@@ -383,6 +383,14 @@ void MainWindow::setRemoteConnectionStatus(const QString& status, bool propagate
     const QString up = status.toUpper();
     m_remoteConnectionStatusLabel->setText(up);
     
+    if (up == "CONNECTED") {
+        m_remoteClientConnected = true;
+    } else if (up == "DISCONNECTED") {
+        m_remoteClientConnected = false;
+    } else if (up.startsWith("CONNECTING") || up == "ERROR") {
+        m_remoteClientConnected = false;
+    }
+
     // Apply same styling as main connection status with colored background
     QString textColor, bgColor;
     if (up == "CONNECTED") {
@@ -1686,6 +1694,8 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     const bool sessionHasStoredScreens = !session.lastClientInfo.getScreens().isEmpty();
     const bool hasCachedContent = sessionHasActiveScreens || sessionHasStoredScreens;
     switchToCanvasSession(session.identityKey);
+    m_activeRemoteClientId = session.clientId;
+    m_remoteClientConnected = false;
     m_selectedClient = session.lastClientInfo;
     ClientInfo effectiveClient = session.lastClientInfo;
     const bool alreadyOnScreenView = m_navigationManager->isOnScreenView();
@@ -1726,13 +1736,16 @@ void MainWindow::showScreenView(const ClientInfo& client) {
         m_inlineSpinner->hide();
     }
     updateClientNameDisplay(effectiveClient);
-    if (!effectiveClient.isOnline()) {
-        setRemoteConnectionStatus("DISCONNECTED");
-        addRemoteStatusToLayout();
-    }
     // While refreshing, start from a clean layout then reapply cached state if available
     removeVolumeIndicatorFromLayout();
     removeRemoteStatusFromLayout();
+
+    addRemoteStatusToLayout();
+    if (effectiveClient.isOnline()) {
+        setRemoteConnectionStatus("CONNECTING...", /*propagateLoss*/ false);
+    } else {
+        setRemoteConnectionStatus("DISCONNECTED");
+    }
 
     if (hasCachedContent) {
         if (session.canvas) {
@@ -1746,8 +1759,6 @@ void MainWindow::showScreenView(const ClientInfo& client) {
             updateVolumeIndicator();
         }
 
-        addRemoteStatusToLayout();
-        setRemoteConnectionStatus(session.lastClientInfo.isOnline() ? "CONNECTED" : "DISCONNECTED");
     }
     
     // Update button visibility for screen view page
@@ -1787,6 +1798,8 @@ void MainWindow::showClientListView() {
     m_uploadManager->setTargetClientId(QString());
     // Clear remote connection status when leaving screen view
     setRemoteConnectionStatus("DISCONNECTED", /*propagateLoss*/ false);
+    m_activeRemoteClientId.clear();
+    m_remoteClientConnected = false;
     
     // Hide remote client info wrapper when on client list
     if (m_remoteClientInfoWrapper) {
@@ -3163,15 +3176,28 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
                     activeSession->canvas->setRemoteSceneTarget(activeSession->clientId, selName);
                 }
                 if (m_uploadManager) m_uploadManager->setTargetClientId(activeSession->clientId);
-                setRemoteConnectionStatus("CONNECTED");
-                addRemoteStatusToLayout();
-                if (m_canvasStack && m_canvasStack->currentIndex() == 0 && m_webSocketClient && m_webSocketClient->isConnected()) {
-                    m_canvasRevealedForCurrentClient = false;
-                    m_webSocketClient->requestScreens(activeSession->clientId);
-                    if (m_watchManager && m_webSocketClient->isConnected()) {
-                        if (m_watchManager->watchedClientId() != activeSession->clientId) {
-                            m_watchManager->unwatchIfAny();
-                            m_watchManager->toggleWatch(activeSession->clientId);
+                const bool isActiveSelection = (activeSession->identityKey == m_activeSessionIdentity);
+                if (isActiveSelection) {
+                    if (m_activeRemoteClientId != activeSession->clientId) {
+                        m_activeRemoteClientId = activeSession->clientId;
+                        m_remoteClientConnected = false;
+                    }
+                    if (!m_remoteClientConnected) {
+                        addRemoteStatusToLayout();
+                        setRemoteConnectionStatus("CONNECTING...", /*propagateLoss*/ false);
+                        if (m_inlineSpinner && !m_inlineSpinner->isSpinning()) {
+                            m_inlineSpinner->show();
+                            m_inlineSpinner->start();
+                        }
+                        if (m_webSocketClient && m_webSocketClient->isConnected()) {
+                            m_canvasRevealedForCurrentClient = false;
+                            m_webSocketClient->requestScreens(activeSession->clientId);
+                            if (m_watchManager) {
+                                if (m_watchManager->watchedClientId() != activeSession->clientId) {
+                                    m_watchManager->unwatchIfAny();
+                                    m_watchManager->toggleWatch(activeSession->clientId);
+                                }
+                            }
                         }
                     }
                 }
@@ -3191,11 +3217,30 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
                         m_navigationManager->refreshActiveClientPreservingCanvas(activeSession->lastClientInfo);
                     }
                     updateClientNameDisplay(activeSession->lastClientInfo);
-                    setRemoteConnectionStatus("CONNECTING...");
-                    addRemoteStatusToLayout();
-                    if (m_inlineSpinner && !m_inlineSpinner->isSpinning()) {
-                        m_inlineSpinner->show();
-                        m_inlineSpinner->start();
+                    const bool isActiveSelection = (activeSession->identityKey == m_activeSessionIdentity);
+                    if (isActiveSelection) {
+                        if (m_activeRemoteClientId != activeSession->clientId) {
+                            m_activeRemoteClientId = activeSession->clientId;
+                            m_remoteClientConnected = false;
+                        }
+                        if (!m_remoteClientConnected) {
+                            setRemoteConnectionStatus("CONNECTING...");
+                            addRemoteStatusToLayout();
+                            if (m_inlineSpinner && !m_inlineSpinner->isSpinning()) {
+                                m_inlineSpinner->show();
+                                m_inlineSpinner->start();
+                            }
+                            if (m_webSocketClient && m_webSocketClient->isConnected()) {
+                                m_canvasRevealedForCurrentClient = false;
+                                m_webSocketClient->requestScreens(activeSession->clientId);
+                                if (m_watchManager) {
+                                    if (m_watchManager->watchedClientId() != activeSession->clientId) {
+                                        m_watchManager->unwatchIfAny();
+                                        m_watchManager->toggleWatch(activeSession->clientId);
+                                    }
+                                }
+                            }
+                        }
                     }
                 } else {
                     if (!activeSession->remoteContentClearedOnDisconnect) {
@@ -3377,7 +3422,7 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
             m_canvasContentEverLoaded = true;
         }
 
-        if (hasScreens && m_inlineSpinner && m_inlineSpinner->isSpinning()) {
+        if (m_inlineSpinner && m_inlineSpinner->isSpinning()) {
             m_inlineSpinner->stop();
             m_inlineSpinner->hide();
         }
@@ -3387,10 +3432,8 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
             updateVolumeIndicator();
         }
 
-        if (hasScreens) {
-            setRemoteConnectionStatus("CONNECTED");
-            addRemoteStatusToLayout();
-        }
+        addRemoteStatusToLayout();
+        setRemoteConnectionStatus(session->lastClientInfo.isOnline() ? "CONNECTED" : "DISCONNECTED");
 
         updateClientNameDisplay(session->lastClientInfo);
     }

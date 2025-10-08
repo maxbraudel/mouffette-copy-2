@@ -314,6 +314,8 @@ private:
     bool m_preserveViewportOnReconnect = false;
     // Small inline spinner for reconnection (shown in client info container)
     SpinnerWidget* m_inlineSpinner = nullptr;
+    QString m_activeRemoteClientId;
+    bool m_remoteClientConnected = false;
     
     // Toast notification system
     ToastNotificationSystem* m_toastSystem = nullptr;
