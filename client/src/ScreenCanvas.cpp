@@ -60,6 +60,9 @@
 #ifdef Q_OS_MACOS
 #include "MacVideoThumbnailer.h"
 #endif
+#ifdef Q_OS_WIN
+#include "WindowsVideoThumbnailer.h"
+#endif
 
 // (Trimmed includes to essentials; further pruning can be done if desired.)
 
@@ -3046,6 +3049,14 @@ void ScreenCanvas::dragLeaveEvent(QDragLeaveEvent* event) {
 }
 
 void ScreenCanvas::dropEvent(QDropEvent* event) {
+    const QTransform originalTransform = transform();
+    QPointF originalCenter;
+    if (viewport()) {
+        originalCenter = mapToScene(viewport()->rect().center());
+    } else {
+        originalCenter = mapToScene(rect().center());
+    }
+
     const QMimeData* mime = event->mimeData(); if (!mime) { event->ignore(); return; }
     QPointF scenePos = mapToScene(event->position().toPoint());
     
@@ -3117,6 +3128,26 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
     clearDragPreview(); if (m_dragCursorHidden) { viewport()->unsetCursor(); m_dragCursorHidden = false; }
     event->acceptProposedAction();
     refreshInfoOverlay();
+
+    QPointF currentCenter;
+    if (viewport()) {
+        currentCenter = mapToScene(viewport()->rect().center());
+    } else {
+        currentCenter = mapToScene(rect().center());
+    }
+    const qreal dx = currentCenter.x() - originalCenter.x();
+    const qreal dy = currentCenter.y() - originalCenter.y();
+    const bool transformChanged = !(transform() == originalTransform);
+    const bool centerShifted = std::hypot(dx, dy) > 0.5;
+    if (transformChanged || centerShifted) {
+        setTransform(originalTransform);
+        centerOn(originalCenter);
+        if (m_scene) {
+            relayoutAllMediaOverlays(m_scene);
+        }
+        layoutInfoOverlay();
+        updateSelectionChrome();
+    }
 }
 
 void ScreenCanvas::ensureDragPreview(const QMimeData* mime) {
@@ -3151,6 +3182,16 @@ void ScreenCanvas::clearDragPreview() {
 void ScreenCanvas::startVideoPreviewProbe(const QString& localFilePath) {
 #ifdef Q_OS_MACOS
     startFastMacThumbnailProbe(localFilePath);
+#elif defined(Q_OS_WIN)
+    if (m_dragPreviewGotFrame) {
+        return;
+    }
+    QImage thumb = WindowsVideoThumbnailer::firstFrame(localFilePath);
+    if (!thumb.isNull()) {
+        onFastVideoThumbnailReady(thumb);
+        return;
+    }
+    startVideoPreviewProbeFallback(localFilePath);
 #else
     startVideoPreviewProbeFallback(localFilePath);
 #endif

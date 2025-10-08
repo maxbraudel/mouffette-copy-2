@@ -49,6 +49,10 @@ if(APPLE)
     list(APPEND SOURCES src/MacVideoThumbnailer.mm src/MacWindowManager.mm)
 endif()
 
+if(WIN32)
+    list(APPEND SOURCES src/WindowsVideoThumbnailer.cpp)
+endif()
+
 # Header files
 set(HEADERS
     src/MainWindow.h
@@ -73,6 +77,10 @@ set(HEADERS
     src/RemoteSceneController.h
     src/ToastNotificationSystem.h
 )
+
+if(WIN32)
+    list(APPEND HEADERS src/WindowsVideoThumbnailer.h)
+endif()
 
 # UI files
 set(UI_FILES
@@ -114,6 +122,7 @@ if(WIN32)
     target_link_libraries(MouffetteClient
         ole32
         uuid
+        windowscodecs
     )
 endif()
 
