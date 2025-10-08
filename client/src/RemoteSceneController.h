@@ -7,6 +7,7 @@
 #include <QJsonObject>
 #include <QTimer>
 #include <QGraphicsOpacityEffect>
+#include <memory>
 
 class WebSocketClient;
 class QWidget;
@@ -19,6 +20,7 @@ class RemoteSceneController : public QObject {
 	Q_OBJECT
 public:
 	explicit RemoteSceneController(WebSocketClient* ws, QObject* parent = nullptr);
+	~RemoteSceneController() override;
 	void setEnabled(bool en) { m_enabled = en; if (!en) clearScene(); }
 	bool isEnabled() const { return m_enabled; }
 
@@ -62,16 +64,16 @@ private:
 	QWidget* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);
 	void buildWindows(const QJsonArray& screensArray);
 	void buildMedia(const QJsonArray& mediaArray);
-	void scheduleMedia(RemoteMediaItem* item);
-	void scheduleMediaLegacy(RemoteMediaItem* item);
-	void scheduleMediaMulti(RemoteMediaItem* item);
-	void fadeIn(RemoteMediaItem* item);
+	void scheduleMedia(const std::shared_ptr<RemoteMediaItem>& item);
+	void scheduleMediaLegacy(const std::shared_ptr<RemoteMediaItem>& item);
+	void scheduleMediaMulti(const std::shared_ptr<RemoteMediaItem>& item);
+	void fadeIn(const std::shared_ptr<RemoteMediaItem>& item);
 	void clearScene();
 
 	WebSocketClient* m_ws = nullptr; // not owned
 	bool m_enabled = true;
 	QMap<int, ScreenWindow> m_screenWindows;
-	QList<RemoteMediaItem*> m_mediaItems;
+	QList<std::shared_ptr<RemoteMediaItem>> m_mediaItems;
 	quint64 m_sceneEpoch = 0; // incremented on each start/stop
 };
 
