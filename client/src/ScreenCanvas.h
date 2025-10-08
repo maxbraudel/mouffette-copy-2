@@ -10,6 +10,7 @@
 #include <QPixmap>
 #include <QTimer>
 #include <memory>
+#include <QSet>
 #include "ClientInfo.h" // for ScreenInfo
 #include "MediaItems.h" // for ResizableMediaBase / ResizableVideoItem
 #include <QGestureEvent>
@@ -150,6 +151,11 @@ protected:
     void drawBackground(QPainter* painter, const QRectF& rect) override; // snap indicators drawn here (below overlays)
 
 private:
+    static QSet<ScreenCanvas*> s_activeCanvases;
+    static void registerCanvas(ScreenCanvas* canvas);
+    static void unregisterCanvas(ScreenCanvas* canvas);
+    static void dispatchUploadStateChanged();
+
     bool gestureEvent(QGestureEvent* event);
     void ensureDragPreview(const QMimeData* mime);
     void updateDragPreviewPos(const QPointF& scenePos);

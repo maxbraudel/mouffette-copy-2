@@ -69,6 +69,36 @@ protected:
     }
 };
 
+QSet<ScreenCanvas*> ScreenCanvas::s_activeCanvases;
+
+void ScreenCanvas::registerCanvas(ScreenCanvas* canvas) {
+    if (!canvas) return;
+    const bool wasEmpty = s_activeCanvases.isEmpty();
+    s_activeCanvases.insert(canvas);
+    if (wasEmpty) {
+        ResizableMediaBase::setUploadChangedNotifier([]() {
+            ScreenCanvas::dispatchUploadStateChanged();
+        });
+    }
+}
+
+void ScreenCanvas::unregisterCanvas(ScreenCanvas* canvas) {
+    if (!canvas) return;
+    s_activeCanvases.remove(canvas);
+    if (s_activeCanvases.isEmpty()) {
+        ResizableMediaBase::setUploadChangedNotifier(nullptr);
+    }
+}
+
+void ScreenCanvas::dispatchUploadStateChanged() {
+    const auto canvases = s_activeCanvases;
+    for (ScreenCanvas* canvas : canvases) {
+        if (canvas) {
+            canvas->scheduleInfoOverlayRefresh();
+        }
+    }
+}
+
 void ScreenCanvas::drawBackground(QPainter* painter, const QRectF& rect) {
     QGraphicsView::drawBackground(painter, rect);
 }
@@ -240,7 +270,7 @@ void ScreenCanvas::updateSnapIndicators(const QVector<QLineF>& lines) {
 
 ScreenCanvas::~ScreenCanvas() {
     // Prevent any further UI refresh callbacks after this view is destroyed
-    ResizableMediaBase::setUploadChangedNotifier(nullptr);
+    unregisterCanvas(this);
     if (m_scene) {
         disconnect(m_scene, nullptr, this, nullptr);
     }
@@ -1210,10 +1240,8 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     initInfoOverlay();
     m_lastOverlayLayoutTimer.start();
 
-    // Refresh overlay when any media upload state changes (coalesce multiple changes)
-    ResizableMediaBase::setUploadChangedNotifier([this]() {
-        scheduleInfoOverlayRefresh();
-    });
+    // Register for global upload state callbacks
+    registerCanvas(this);
 }
 
 QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const QRectF& mediaBounds, bool shiftPressed, ResizableMediaBase* movingItem) const {
