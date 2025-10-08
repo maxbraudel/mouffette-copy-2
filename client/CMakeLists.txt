@@ -13,7 +13,7 @@ if(APPLE)
 endif()
 
 # Find Qt6
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia Svg SvgWidgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia Svg SvgWidgets Concurrent)
 
 # Enable Qt MOC
 set(CMAKE_AUTOMOC ON)
@@ -96,6 +96,7 @@ target_link_libraries(MouffetteClient
     Qt6::Multimedia
     Qt6::Svg
     Qt6::SvgWidgets
+    Qt6::Concurrent
 )
 
 # Include directories
@@ -122,7 +123,7 @@ if(APPLE)
         MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/Info.plist
     )
     # Link with macOS frameworks used by native integrations
-    target_link_libraries(MouffetteClient "-framework AppKit" "-framework AVFoundation" "-framework CoreMedia" "-framework CoreGraphics")
+    target_link_libraries(MouffetteClient "-framework AppKit" "-framework AVFoundation" "-framework CoreMedia" "-framework CoreGraphics" "-framework QuickLookThumbnailing")
     
     # Set Objective-C++ properties for .mm files
     set_source_files_properties(src/MacVideoThumbnailer.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")

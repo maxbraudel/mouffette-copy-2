@@ -44,6 +44,8 @@
 #include <QSignalBlocker>
 #include <QRandomGenerator>
 #include <QSizePolicy>
+#include <QFutureWatcher>
+#include <QtConcurrent/QtConcurrentRun>
 #include <QMediaPlayer>
 #include <QAudioOutput>
 #include <QVideoSink>
@@ -54,6 +56,10 @@
 #include <cmath>
 #include <algorithm>
 #include <limits>
+
+#ifdef Q_OS_MACOS
+#include "MacVideoThumbnailer.h"
+#endif
 
 // (Trimmed includes to essentials; further pruning can be done if desired.)
 
@@ -3144,9 +3150,10 @@ void ScreenCanvas::clearDragPreview() {
 
 void ScreenCanvas::startVideoPreviewProbe(const QString& localFilePath) {
 #ifdef Q_OS_MACOS
-    // Fast macOS thumbnail path (if available) could be wired here later; currently fallback.
-#endif
+    startFastMacThumbnailProbe(localFilePath);
+#else
     startVideoPreviewProbeFallback(localFilePath);
+#endif
 }
 
 void ScreenCanvas::startVideoPreviewProbeFallback(const QString& localFilePath) {
@@ -3155,7 +3162,74 @@ void ScreenCanvas::startVideoPreviewProbeFallback(const QString& localFilePath) 
     m_dragPreviewPlayer->play();
 }
 
+#ifdef Q_OS_MACOS
+void ScreenCanvas::startFastMacThumbnailProbe(const QString& localFilePath) {
+    cancelFastMacThumbnailProbe();
+    m_dragPreviewPendingVideoPath = localFilePath;
+
+    auto* watcher = new QFutureWatcher<QImage>(this);
+    m_dragPreviewThumbnailWatcher = watcher;
+
+    connect(watcher, &QFutureWatcher<QImage>::finished, this, [this, watcher]() {
+        QImage img = watcher->result();
+        watcher->deleteLater();
+        m_dragPreviewThumbnailWatcher = nullptr;
+
+        if (m_dragPreviewFallbackDelayTimer) {
+            m_dragPreviewFallbackDelayTimer->stop();
+        }
+
+        if (!img.isNull()) {
+            onFastVideoThumbnailReady(img);
+        } else if (!m_dragPreviewPlayer && !m_dragPreviewPendingVideoPath.isEmpty()) {
+            startVideoPreviewProbeFallback(m_dragPreviewPendingVideoPath);
+        }
+
+        m_dragPreviewPendingVideoPath.clear();
+    });
+
+    watcher->setFuture(QtConcurrent::run([path = localFilePath]() {
+        return MacVideoThumbnailer::firstFrame(path);
+    }));
+
+    if (!m_dragPreviewFallbackDelayTimer) {
+        m_dragPreviewFallbackDelayTimer = new QTimer(this);
+        m_dragPreviewFallbackDelayTimer->setSingleShot(true);
+        connect(m_dragPreviewFallbackDelayTimer, &QTimer::timeout, this, [this]() {
+            if (m_dragPreviewPlayer || m_dragPreviewGotFrame) {
+                return;
+            }
+            if (m_dragPreviewPendingVideoPath.isEmpty()) {
+                return;
+            }
+            startVideoPreviewProbeFallback(m_dragPreviewPendingVideoPath);
+        });
+    }
+
+    m_dragPreviewFallbackDelayTimer->start(250);
+}
+
+void ScreenCanvas::cancelFastMacThumbnailProbe() {
+    if (m_dragPreviewThumbnailWatcher) {
+        disconnect(m_dragPreviewThumbnailWatcher, nullptr, this, nullptr);
+        m_dragPreviewThumbnailWatcher->cancel();
+        m_dragPreviewThumbnailWatcher->deleteLater();
+        m_dragPreviewThumbnailWatcher = nullptr;
+    }
+    if (m_dragPreviewFallbackDelayTimer) {
+        m_dragPreviewFallbackDelayTimer->stop();
+    }
+    m_dragPreviewPendingVideoPath.clear();
+}
+#endif
+
 void ScreenCanvas::stopVideoPreviewProbe() {
+#ifdef Q_OS_MACOS
+    cancelFastMacThumbnailProbe();
+    if (m_dragPreviewFallbackDelayTimer) {
+        m_dragPreviewFallbackDelayTimer->stop();
+    }
+#endif
     if (m_dragPreviewFallbackTimer) { m_dragPreviewFallbackTimer->stop(); m_dragPreviewFallbackTimer->deleteLater(); m_dragPreviewFallbackTimer = nullptr; }
     if (m_dragPreviewPlayer) { m_dragPreviewPlayer->stop(); m_dragPreviewPlayer->deleteLater(); m_dragPreviewPlayer = nullptr; }
     if (m_dragPreviewSink) { m_dragPreviewSink->deleteLater(); m_dragPreviewSink = nullptr; }
@@ -3170,6 +3244,12 @@ void ScreenCanvas::stopDragPreviewFade() { if (m_dragPreviewFadeAnim) { m_dragPr
 
 void ScreenCanvas::onFastVideoThumbnailReady(const QImage& img) {
     if (img.isNull()) return; if (m_dragPreviewGotFrame) return; m_dragPreviewGotFrame = true; QPixmap pm = QPixmap::fromImage(img); if (pm.isNull()) return; m_dragPreviewPixmap = pm; m_dragPreviewBaseSize = pm.size(); if (!m_dragPreviewItem) { auto* pmItem = new QGraphicsPixmapItem(m_dragPreviewPixmap); pmItem->setOpacity(0.0); pmItem->setZValue(5000.0); pmItem->setScale(m_scaleFactor); if (m_scene) m_scene->addItem(pmItem); m_dragPreviewItem = pmItem; updateDragPreviewPos(m_dragPreviewLastScenePos); startDragPreviewFadeIn(); } else if (auto* pix = qgraphicsitem_cast<QGraphicsPixmapItem*>(m_dragPreviewItem)) { pix->setPixmap(m_dragPreviewPixmap); updateDragPreviewPos(m_dragPreviewLastScenePos); }
+#ifdef Q_OS_MACOS
+    if (m_dragPreviewFallbackDelayTimer) {
+        m_dragPreviewFallbackDelayTimer->stop();
+    }
+    m_dragPreviewPendingVideoPath.clear();
+#endif
     if (m_dragPreviewFallbackTimer) { m_dragPreviewFallbackTimer->stop(); m_dragPreviewFallbackTimer->deleteLater(); m_dragPreviewFallbackTimer = nullptr; }
     if (m_dragPreviewPlayer) { m_dragPreviewPlayer->stop(); m_dragPreviewPlayer->deleteLater(); m_dragPreviewPlayer = nullptr; }
     if (m_dragPreviewSink) { m_dragPreviewSink->deleteLater(); m_dragPreviewSink = nullptr; }

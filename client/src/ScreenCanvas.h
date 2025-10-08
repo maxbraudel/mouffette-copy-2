@@ -15,6 +15,10 @@
 #include "MediaItems.h" // for ResizableMediaBase / ResizableVideoItem
 #include <QGestureEvent>
 #include <QPinchGesture>
+#include <QString>
+#ifdef Q_OS_MACOS
+template<typename T> class QFutureWatcher;
+#endif
 class QLabel;
 class QVBoxLayout;
 class MouseBlockingRoundedRectItem;
@@ -171,6 +175,10 @@ private:
     void startDragPreviewFadeIn();
     void stopDragPreviewFade();
     void onFastVideoThumbnailReady(const QImage& img);
+#ifdef Q_OS_MACOS
+    void startFastMacThumbnailProbe(const QString& localFilePath);
+    void cancelFastMacThumbnailProbe();
+#endif
 
     void createScreenItems();
     QGraphicsRectItem* createScreenItem(const ScreenInfo& screen, int index, const QRectF& position);
@@ -267,6 +275,11 @@ private:
     QAudioOutput* m_dragPreviewAudio = nullptr;
     bool m_dragPreviewGotFrame = false;
     QTimer* m_dragPreviewFallbackTimer = nullptr;
+#ifdef Q_OS_MACOS
+    QFutureWatcher<QImage>* m_dragPreviewThumbnailWatcher = nullptr;
+    QString m_dragPreviewPendingVideoPath;
+    QTimer* m_dragPreviewFallbackDelayTimer = nullptr;
+#endif
     
     // Snap-to-screen settings
     int m_snapDistancePx = 10; // pixels within which snapping occurs
