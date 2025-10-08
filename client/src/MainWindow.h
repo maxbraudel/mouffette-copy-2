@@ -299,6 +299,8 @@ private:
     QSet<QString> m_serverCompletedFileIds;
     // Files for which we have received authoritative per-file progress from target; ignore local progress for them
     QSet<QString> m_serverPerFileProgressActive;
+    // Track if we've shown the "client receiving files" toast for current upload
+    bool m_receivingFilesToastShown = false;
     WatchManager* m_watchManager = nullptr;   // extracted watch logic
     ScreenNavigationManager* m_navigationManager = nullptr; // new navigation component
     FileWatcher* m_fileWatcher = nullptr; // monitors source files for deletion

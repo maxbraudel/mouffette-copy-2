@@ -1774,7 +1774,11 @@ void MainWindow::updateVolumeIndicator() {
 
 void MainWindow::onUploadButtonClicked() {
     if (!m_uploadManager) return;
-    if (m_uploadManager->isUploading()) { m_uploadManager->requestCancel(); return; }
+    if (m_uploadManager->isUploading()) { 
+        m_uploadManager->requestCancel(); 
+        TOAST_WARNING("Upload cancelled");
+        return; 
+    }
     // If we have an active upload, we may either unload or upload newly added files
     const QString targetClient = m_uploadManager->targetClientId();
     const bool hasActive = m_uploadManager->hasActiveUpload();
@@ -1855,6 +1859,7 @@ void MainWindow::onUploadButtonClicked() {
         // Refresh overlay if items were removed
         if (!mediaItemsToRemove.isEmpty()) {
             m_screenCanvas->refreshInfoOverlay();
+            TOAST_WARNING(QString("%1 media item(s) removed - source files not found").arg(mediaItemsToRemove.size()));
         }
     }
     if (files.isEmpty()) {
@@ -1878,11 +1883,13 @@ void MainWindow::onUploadButtonClicked() {
             }
             if (promotedAny) {
                 if (m_uploadManager) emit m_uploadManager->uiStateChanged();
+                TOAST_SUCCESS("All media already synchronized with remote client");
                 return;
             }
             // No new media to mark; treat click as unload
             m_uploadManager->requestUnload();
         } else {
+            TOAST_INFO("No new media to upload");
             qDebug() << "Upload skipped: aucun média local nouveau (popup supprimée).";
         }
         return;
@@ -1890,6 +1897,7 @@ void MainWindow::onUploadButtonClicked() {
 
     // Initialize per-media upload state using ALL mediaIds that share the uploaded fileIds
     m_mediaIdsBeingUploaded.clear();
+    m_receivingFilesToastShown = false; // Reset for new upload
     for (const auto& f : files) {
         // Get ALL media IDs for this file ID from FileManager
         QList<QString> allMediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
@@ -1937,6 +1945,18 @@ void MainWindow::onUploadButtonClicked() {
         connect(m_webSocketClient, &WebSocketClient::uploadPerFileProgressReceived, this, [this](const QString& uploadId, const QHash<QString,int>& filePercents){
             Q_UNUSED(uploadId);
             if (!m_screenCanvas || !m_screenCanvas->scene()) return;
+            
+            // Show toast on first progress update from server (client has started receiving)
+            if (!m_receivingFilesToastShown && !filePercents.isEmpty()) {
+                QString clientName = m_uploadManager->targetClientId();
+                if (!clientName.isEmpty()) {
+                    TOAST_INFO(QString("Remote client %1 is receiving files...").arg(clientName));
+                } else {
+                    TOAST_INFO("Remote client is receiving files...");
+                }
+                m_receivingFilesToastShown = true;
+            }
+            
             for (auto it = filePercents.constBegin(); it != filePercents.constEnd(); ++it) {
                 const QString& fid = it.key();
                 int p = std::clamp(it.value(), 0, 100);
@@ -1952,6 +1972,14 @@ void MainWindow::onUploadButtonClicked() {
         });
         // Do not mark Uploaded on local fileUploadFinished; wait for server confirmation in updateIndividualProgressFromServer
         connect(m_uploadManager, &UploadManager::uploadFinished, this, [this](){
+            // Show success toast when upload completes
+            QString clientName = m_uploadManager->targetClientId();
+            if (!clientName.isEmpty()) {
+                TOAST_SUCCESS(QString("Upload completed successfully to %1").arg(clientName));
+            } else {
+                TOAST_SUCCESS("Upload completed successfully");
+            }
+            
             // Clear tracking data (fileUploadFinished already handled state updates)
             m_mediaIdsBeingUploaded.clear();
             m_mediaIdByFileId.clear();
@@ -1959,6 +1987,7 @@ void MainWindow::onUploadButtonClicked() {
             m_currentUploadFileOrder.clear();
             m_serverCompletedFileIds.clear();
             m_serverPerFileProgressActive.clear();
+            m_receivingFilesToastShown = false; // Reset for next upload
         });
         // Mark specific items uploaded when target reports completed fileIds
         connect(m_uploadManager, &UploadManager::uploadCompletedFileIds, this, [this](const QStringList& fileIds){
@@ -1974,6 +2003,13 @@ void MainWindow::onUploadButtonClicked() {
         });
         connect(m_uploadManager, &UploadManager::allFilesRemoved, this, [this](){
             // Reset to NotUploaded when all files are removed
+            QString clientName = m_uploadManager->targetClientId();
+            if (!clientName.isEmpty()) {
+                TOAST_INFO(QString("All files removed from %1").arg(clientName));
+            } else {
+                TOAST_INFO("All files removed from remote client");
+            }
+            
             if (!m_screenCanvas || !m_screenCanvas->scene()) return;
             const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
             for (QGraphicsItem* it : allItems) {
@@ -1992,6 +2028,14 @@ void MainWindow::onUploadButtonClicked() {
             m_serverPerFileProgressActive.clear();
         });
         m_uploadSignalsConnected = true;
+    }
+
+    // Show toast notification when starting upload
+    QString clientName = m_uploadManager->targetClientId();
+    if (!clientName.isEmpty()) {
+        TOAST_INFO(QString("Starting upload of %1 file(s) to %2...").arg(files.size()).arg(clientName));
+    } else {
+        TOAST_INFO(QString("Starting upload of %1 file(s)...").arg(files.size()));
     }
 
     m_uploadManager->toggleUpload(files);
@@ -2884,9 +2928,16 @@ void MainWindow::onDisconnected() {
     }
     
     // Inform upload manager of connection loss to cancel any ongoing upload/finalizing state
-    TOAST_ERROR("Disconnected from server", 3000);
+    bool hadUploadInProgress = false;
     if (m_uploadManager) {
+        hadUploadInProgress = m_uploadManager->isUploading() || m_uploadManager->isFinalizing();
         m_uploadManager->onConnectionLost();
+    }
+    
+    if (hadUploadInProgress) {
+        TOAST_ERROR("Upload interrupted - connection lost", 3000);
+    } else {
+        TOAST_ERROR("Disconnected from server", 3000);
     }
 
     // Start smart reconnection if client is enabled and not manually disconnected
