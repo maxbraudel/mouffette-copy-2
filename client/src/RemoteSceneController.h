@@ -25,6 +25,8 @@ public:
 private slots:
 	void onRemoteSceneStart(const QString& senderClientId, const QJsonObject& scene);
 	void onRemoteSceneStop(const QString& senderClientId);
+	void onConnectionLost();
+	void onConnectionError(const QString& errorMessage);
 
 private:
 	struct ScreenWindow {

@@ -3878,6 +3878,34 @@ void ScreenCanvas::setOverlayActionsEnabled(bool enabled) {
     }
 }
 
+void ScreenCanvas::handleRemoteConnectionLost() {
+    const bool remoteFlowActive = m_sceneLaunching || m_sceneLaunched || (m_hostSceneActive && m_hostSceneMode == HostSceneMode::Remote);
+    if (!remoteFlowActive) return;
+
+    if (m_sceneLaunchTimeoutTimer && m_sceneLaunchTimeoutTimer->isActive()) {
+        m_sceneLaunchTimeoutTimer->stop();
+    }
+
+    const bool shouldStopHostScene = (m_hostSceneActive && m_hostSceneMode == HostSceneMode::Remote);
+
+    m_sceneLaunching = false;
+    m_sceneLaunched = false;
+
+    if (m_launchSceneButton) {
+        QSignalBlocker blocker(m_launchSceneButton);
+        m_launchSceneButton->setChecked(false);
+    }
+
+    if (shouldStopHostScene) {
+        stopHostSceneState();
+    }
+
+    updateLaunchSceneButtonStyle();
+    updateLaunchTestSceneButtonStyle();
+
+    TOAST_WARNING("Remote scene stopped: connection lost", 3500);
+}
+
 // (Removed legacy duplicate snap indicator drawing functions; SnapGuideItem now handles rendering.)
 
 void ScreenCanvas::startHostSceneState(HostSceneMode mode) {

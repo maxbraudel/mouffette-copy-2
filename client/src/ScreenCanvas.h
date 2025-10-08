@@ -79,6 +79,7 @@ public:
         m_remoteSceneTargetMachineName = machineName;
     }
     void updateRemoteSceneTargetFromClientList(const QList<ClientInfo>& clients);
+    void handleRemoteConnectionLost();
     // Remote cursor style setters
     void setRemoteCursorDiameterPx(int d) { m_remoteCursorDiameterPx = qMax(2, d); if (m_remoteCursorDot) { recreateRemoteCursorItem(); } }
     void setRemoteCursorFillColor(const QColor& c) { m_remoteCursorFill = c; if (m_remoteCursorDot) { m_remoteCursorDot->setBrush(m_remoteCursorFill); } }

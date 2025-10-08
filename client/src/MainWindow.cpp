@@ -425,6 +425,9 @@ void MainWindow::refreshOverlayActionsState(bool remoteConnected) {
     m_remoteOverlayActionsEnabled = remoteConnected;
 
     if (m_screenCanvas) {
+        if (!remoteConnected) {
+            m_screenCanvas->handleRemoteConnectionLost();
+        }
         m_screenCanvas->setOverlayActionsEnabled(remoteConnected);
     }
 

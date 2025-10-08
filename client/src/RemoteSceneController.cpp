@@ -1,5 +1,6 @@
 #include "RemoteSceneController.h"
 #include "WebSocketClient.h"
+#include "ToastNotificationSystem.h"
 #include <QJsonArray>
 #include <QScreen>
 #include <QGuiApplication>
@@ -27,6 +28,8 @@ RemoteSceneController::RemoteSceneController(WebSocketClient* ws, QObject* paren
     if (m_ws) {
         connect(m_ws, &WebSocketClient::remoteSceneStartReceived, this, &RemoteSceneController::onRemoteSceneStart);
         connect(m_ws, &WebSocketClient::remoteSceneStopReceived, this, &RemoteSceneController::onRemoteSceneStop);
+        connect(m_ws, &WebSocketClient::disconnected, this, &RemoteSceneController::onConnectionLost);
+        connect(m_ws, &WebSocketClient::connectionError, this, &RemoteSceneController::onConnectionError);
     }
 }
 
@@ -128,6 +131,20 @@ void RemoteSceneController::onRemoteSceneStop(const QString& senderClientId) {
     Q_UNUSED(senderClientId);
     ++m_sceneEpoch;
     clearScene();
+}
+
+void RemoteSceneController::onConnectionLost() {
+    const bool hadScene = !m_mediaItems.isEmpty() || !m_screenWindows.isEmpty();
+    ++m_sceneEpoch;
+    clearScene();
+    if (hadScene) {
+        TOAST_WARNING("Remote scene stopped: server connection lost", 3500);
+    }
+}
+
+void RemoteSceneController::onConnectionError(const QString& errorMessage) {
+    Q_UNUSED(errorMessage);
+    onConnectionLost();
 }
 
 void RemoteSceneController::clearScene() {
