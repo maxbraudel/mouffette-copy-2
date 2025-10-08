@@ -1433,14 +1433,9 @@ void MainWindow::configureCanvasSession(CanvasSession& session) {
 }
 
 void MainWindow::switchToCanvasSession(const QString& identityKey) {
-    if (!m_activeSessionIdentity.isEmpty() && m_activeSessionIdentity != identityKey) {
-        if (CanvasSession* previous = findCanvasSession(m_activeSessionIdentity)) {
-            if (!previous->remoteContentClearedOnDisconnect) {
-                unloadUploadsForSession(*previous, true);
-            }
-        }
-    }
-
+    // Navigation between clients should NOT trigger unload - uploads persist per session
+    // Unload only happens when explicitly requested via button or when remote disconnects
+    
     CanvasSession* session = findCanvasSession(identityKey);
     if (!session || !session->canvas) return;
 
@@ -1460,6 +1455,11 @@ void MainWindow::switchToCanvasSession(const QString& identityKey) {
     session->canvas->setFocus(Qt::OtherFocusReason);
     if (!session->clientId.isEmpty()) {
         session->canvas->setRemoteSceneTarget(session->clientId, session->lastClientInfo.getMachineName());
+    }
+
+    // Set upload manager target to restore per-session upload state
+    if (m_uploadManager) {
+        m_uploadManager->setTargetClientId(session->clientId);
     }
 
     updateUploadButtonForSession(*session);
@@ -1722,14 +1722,9 @@ void MainWindow::updateClientNameDisplay(const ClientInfo& client) {
 }
 
 void MainWindow::showClientListView() {
-    if (!m_activeSessionIdentity.isEmpty()) {
-        if (CanvasSession* activeSession = findCanvasSession(m_activeSessionIdentity)) {
-            if (!activeSession->remoteContentClearedOnDisconnect) {
-                unloadUploadsForSession(*activeSession, true);
-            }
-        }
-    }
-
+    // Do NOT unload when navigating back to client list - uploads persist per session
+    // Each client maintains its own upload state that should survive navigation
+    
     if (m_navigationManager) m_navigationManager->showClientList();
     if (m_uploadButton) m_uploadButton->setText("Upload to Client");
     m_uploadManager->setTargetClientId(QString());
@@ -2339,13 +2334,8 @@ void MainWindow::setupUI() {
             if (m_watchManager && m_webSocketClient && m_webSocketClient->isConnected()) m_watchManager->toggleWatch(id);
         });
     connect(m_navigationManager, &ScreenNavigationManager::clientListEntered, this, [this](){
-            if (!m_activeSessionIdentity.isEmpty()) {
-                if (CanvasSession* activeSession = findCanvasSession(m_activeSessionIdentity)) {
-                    if (!activeSession->remoteContentClearedOnDisconnect) {
-                        unloadUploadsForSession(*activeSession, true);
-                    }
-                }
-            }
+            // Do NOT unload uploads when navigating back to client list
+            // Uploads should persist per session and only be cleared on disconnect or explicit unload
             if (m_watchManager) m_watchManager->unwatchIfAny();
             if (m_screenCanvas) m_screenCanvas->hideRemoteCursor();
         });
