@@ -417,6 +417,34 @@ void MainWindow::setRemoteConnectionStatus(const QString& status) {
     if (up == "CONNECTING" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
         ensureClientListPlaceholder();
     }
+
+    refreshOverlayActionsState(up == "CONNECTED");
+}
+
+void MainWindow::refreshOverlayActionsState(bool remoteConnected) {
+    m_remoteOverlayActionsEnabled = remoteConnected;
+
+    if (m_screenCanvas) {
+        m_screenCanvas->setOverlayActionsEnabled(remoteConnected);
+    }
+
+    if (!m_uploadButton) return;
+
+    if (m_uploadButtonInOverlay) {
+        if (!remoteConnected) {
+            m_uploadButton->setEnabled(false);
+            m_uploadButton->setCheckable(false);
+            m_uploadButton->setChecked(false);
+            m_uploadButton->setStyleSheet(ScreenCanvas::overlayDisabledButtonStyle());
+            m_uploadButton->setFixedHeight(40);
+        } else if (m_uploadManager) {
+            QTimer::singleShot(0, this, [this]() {
+                if (m_uploadManager) emit m_uploadManager->uiStateChanged();
+            });
+        }
+    } else {
+        m_uploadButton->setEnabled(remoteConnected);
+    }
 }
 
 MainWindow::MainWindow(QWidget* parent)
@@ -630,6 +658,14 @@ MainWindow::MainWindow(QWidget* parent)
         
         // If button is in overlay, use custom overlay styling
         if (m_uploadButtonInOverlay) {
+            if (!m_remoteOverlayActionsEnabled) {
+                m_uploadButton->setEnabled(false);
+                m_uploadButton->setCheckable(false);
+                m_uploadButton->setChecked(false);
+                m_uploadButton->setStyleSheet(ScreenCanvas::overlayDisabledButtonStyle());
+                m_uploadButton->setFixedHeight(40);
+                return;
+            }
             const QString overlayIdleStyle = 
                 "QPushButton { "
                 "    padding: 0px 20px; "
@@ -726,6 +762,13 @@ MainWindow::MainWindow(QWidget* parent)
             return;
         }
         
+        if (!m_remoteOverlayActionsEnabled) {
+            m_uploadButton->setEnabled(false);
+            m_uploadButton->setCheckable(false);
+            m_uploadButton->setChecked(false);
+            return;
+        }
+
         // Base style strings using gDynamicBox configuration for regular buttons
         const QString greyStyle = QString(
             "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; background-color: %4; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
@@ -1417,6 +1460,8 @@ void MainWindow::switchToCanvasSession(const QString& identityKey) {
     }
 
     updateUploadButtonForSession(*session);
+
+    refreshOverlayActionsState(session->lastClientInfo.isOnline());
 }
 
 void MainWindow::updateUploadButtonForSession(CanvasSession& session) {

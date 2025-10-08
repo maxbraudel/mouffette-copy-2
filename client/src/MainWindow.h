@@ -158,6 +158,7 @@ private:
     void updateVolumeIndicator();
     void setRemoteConnectionStatus(const QString& status);
     void ensureClientListPlaceholder();
+    void refreshOverlayActionsState(bool remoteConnected);
     // watch management handled by WatchManager component now
     // Manage presence of the volume indicator in the top bar layout
     void removeVolumeIndicatorFromLayout();
@@ -223,6 +224,7 @@ private:
     bool m_uploadButtonInOverlay = false; // Track if upload button is in overlay (uses custom styling)
     QPushButton* m_backButton;
     QFont m_uploadButtonDefaultFont;
+    bool m_remoteOverlayActionsEnabled = false;
     // Loader/content animations
     int m_loaderDelayMs = 1000;       // show spinner after this delay
     int m_loaderFadeDurationMs = 500; // fade-in duration for spinner (loader)

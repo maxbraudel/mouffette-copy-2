@@ -38,6 +38,9 @@ public:
     
     // Access to upload button in media list overlay
     QPushButton* getUploadButton() const { return m_uploadButton; }
+    void setOverlayActionsEnabled(bool enabled);
+    bool overlayActionsEnabled() const { return m_overlayActionsEnabled; }
+    static QString overlayDisabledButtonStyle();
     void setScreens(const QList<ScreenInfo>& screens);
     void clearScreens();
     bool hasActiveScreens() const;
@@ -204,6 +207,7 @@ private:
     bool m_infoWidgetWasVisibleBeforeHide = false;
     bool m_pendingInitialRecenter = false;
     int m_pendingInitialRecenterMargin = 53;
+    bool m_overlayActionsEnabled = true;
     // Mapping screen id -> scene rect (inner content rect used when drawing label)
     QHash<int, QRectF> m_sceneScreenRects;
     bool m_panning = false;

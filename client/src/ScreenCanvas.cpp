@@ -3778,19 +3778,18 @@ void ScreenCanvas::updateLaunchSceneButtonStyle() {
         m_launchSceneButton->setStyleSheet(loadingStyle);
     } else if (m_sceneLaunched) {
         m_launchSceneButton->setText("Stop Remote Scene");
-        m_launchSceneButton->setEnabled(true);
         m_launchSceneButton->setChecked(true);
         m_launchSceneButton->setStyleSheet(activeStyle);
+        m_launchSceneButton->setEnabled(m_overlayActionsEnabled);
     } else {
         m_launchSceneButton->setText("Launch Remote Scene");
-        m_launchSceneButton->setEnabled(true);
         m_launchSceneButton->setChecked(false);
         m_launchSceneButton->setStyleSheet(idleStyle);
+        m_launchSceneButton->setEnabled(m_overlayActionsEnabled);
     }
-    // Greyed style for disabled state (test scene active)
+    // Greyed style for disabled state (offline, test scene, or other locks)
     if (!m_sceneLaunching && !m_launchSceneButton->isEnabled()) {
-        m_launchSceneButton->setStyleSheet(
-            "QPushButton { padding:8px 0px; font-weight:bold; font-size:12px; color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.04); border:none; }" );
+        m_launchSceneButton->setStyleSheet(overlayDisabledButtonStyle());
     }
     m_launchSceneButton->setFixedHeight(40);
 }
@@ -3846,12 +3845,37 @@ void ScreenCanvas::updateLaunchTestSceneButtonStyle() {
         m_launchTestSceneButton->setChecked(false);
         m_launchTestSceneButton->setStyleSheet(idleStyle);
     }
+    bool allow = m_overlayActionsEnabled && (!m_sceneLaunching || m_testSceneLaunched);
+    m_launchTestSceneButton->setEnabled(allow);
     if (!m_launchTestSceneButton->isEnabled()) {
-        m_launchTestSceneButton->setStyleSheet(
-            "QPushButton { padding:8px 0px; font-weight:bold; font-size:12px; color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.04); border:none; }" );
+        m_launchTestSceneButton->setStyleSheet(overlayDisabledButtonStyle());
     }
     m_launchTestSceneButton->setFixedHeight(40);
 
+}
+
+QString ScreenCanvas::overlayDisabledButtonStyle() {
+    static const QString style = QStringLiteral(
+        "QPushButton { padding:8px 0px; font-weight:bold; font-size:12px; color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.04); border:none; }"
+    );
+    return style;
+}
+
+void ScreenCanvas::setOverlayActionsEnabled(bool enabled) {
+    m_overlayActionsEnabled = enabled;
+
+    updateLaunchSceneButtonStyle();
+    updateLaunchTestSceneButtonStyle();
+
+    if (!m_uploadButton) return;
+
+    if (!m_overlayActionsEnabled) {
+        m_uploadButton->setEnabled(false);
+        m_uploadButton->setCheckable(false);
+        m_uploadButton->setChecked(false);
+        m_uploadButton->setStyleSheet(overlayDisabledButtonStyle());
+        m_uploadButton->setFixedHeight(40);
+    }
 }
 
 // (Removed legacy duplicate snap indicator drawing functions; SnapGuideItem now handles rendering.)
