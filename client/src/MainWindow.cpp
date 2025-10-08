@@ -388,6 +388,12 @@ void MainWindow::setRemoteConnectionStatus(const QString& status) {
     if (up == "CONNECTED") {
         textColor = AppColors::colorToCss(AppColors::gStatusConnectedText);
         bgColor = AppColors::colorToCss(AppColors::gStatusConnectedBg);
+        if (m_inlineSpinner && m_inlineSpinner->isSpinning()) {
+            m_inlineSpinner->stop();
+            m_inlineSpinner->hide();
+        } else if (m_inlineSpinner) {
+            m_inlineSpinner->hide();
+        }
     } else if (up == "ERROR" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
         textColor = AppColors::colorToCss(AppColors::gStatusWarningText);
         bgColor = AppColors::colorToCss(AppColors::gStatusWarningBg);
