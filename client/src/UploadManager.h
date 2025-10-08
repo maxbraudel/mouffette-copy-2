@@ -51,6 +51,7 @@ public:
     void setWebSocketClient(WebSocketClient* client);
     void setTargetClientId(const QString& id);
     QString targetClientId() const { return m_targetClientId; }
+    void forceResetForClient(const QString& clientId = QString());
 
     // Outbound (sender side)
     bool hasActiveUpload() const { return m_uploadActive; }

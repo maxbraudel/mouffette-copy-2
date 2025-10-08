@@ -20,6 +20,19 @@ UploadManager::UploadManager(QObject* parent) : QObject(parent) {}
 void UploadManager::setWebSocketClient(WebSocketClient* client) { m_ws = client; }
 void UploadManager::setTargetClientId(const QString& id) { m_targetClientId = id; }
 
+void UploadManager::forceResetForClient(const QString& clientId) {
+    if (!clientId.isEmpty()) {
+        const bool matchesUploadTarget = (!m_uploadTargetClientId.isEmpty() && m_uploadTargetClientId == clientId);
+        const bool matchesCurrentTarget = (!m_targetClientId.isEmpty() && m_targetClientId == clientId);
+        if (!matchesUploadTarget && !matchesCurrentTarget && !m_uploadActive && !m_uploadInProgress && !m_finalizing) {
+            return;
+        }
+    }
+
+    resetToInitial();
+    emit uiStateChanged();
+}
+
 void UploadManager::toggleUpload(const QVector<UploadFileInfo>& files) {
     if (!m_ws || !m_ws->isConnected() || m_targetClientId.isEmpty()) {
         qWarning() << "UploadManager: Not connected or no target set";
@@ -187,6 +200,10 @@ void UploadManager::resetToInitial() {
     m_lastPercent = 0;
     m_filesCompleted = 0;
     m_totalFiles = 0;
+    m_sentBytes = 0;
+    m_totalBytes = 0;
+    m_remoteProgressReceived = false;
+    m_outgoingFiles.clear();
     if (m_cancelFallbackTimer) m_cancelFallbackTimer->stop();
     m_uploadTargetClientId.clear();
     // Close upload channel if open

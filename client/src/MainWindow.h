@@ -119,6 +119,7 @@ private:
         QFont uploadButtonDefaultFont;
         ClientInfo lastClientInfo;
         bool connectionsInitialized = false;
+        bool remoteContentClearedOnDisconnect = false;
     };
 
     void setupUI();
@@ -173,6 +174,7 @@ private:
     void configureCanvasSession(CanvasSession& session);
     void switchToCanvasSession(const QString& identityKey);
     void updateUploadButtonForSession(CanvasSession& session);
+    void unloadUploadsForSession(CanvasSession& session, bool attemptRemote);
     QList<ClientInfo> buildDisplayClientList(const QList<ClientInfo>& connectedClients);
     void markAllSessionsOffline();
     ScreenCanvas* canvasForClientId(const QString& clientId) const;

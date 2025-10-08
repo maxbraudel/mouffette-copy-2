@@ -7,6 +7,7 @@
 #include "FileWatcher.h"
 #include "SpinnerWidget.h"
 #include "ScreenCanvas.h"
+#include "MediaItems.h"
 #include "MediaSettingsPanel.h"
 #include "OverlayPanels.h"
 #include "Theme.h"
@@ -1283,6 +1284,7 @@ MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& cli
         session.lastClientInfo.setIdentityKey(identity);
         session.lastClientInfo.setFromMemory(true);
         session.lastClientInfo.setOnline(client.isOnline());
+    session.remoteContentClearedOnDisconnect = !client.isOnline();
     session.canvas = new ScreenCanvas(m_canvasHostStack);
         session.canvas->setWebSocketClient(m_webSocketClient);
         auto inserted = m_canvasSessions.insert(identity, session);
@@ -1296,6 +1298,9 @@ MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& cli
                 stored.canvas->setRemoteSceneTarget(stored.clientId, stored.lastClientInfo.getMachineName());
             }
         }
+        if (stored.lastClientInfo.isOnline()) {
+            stored.remoteContentClearedOnDisconnect = false;
+        }
         return stored;
     }
 
@@ -1305,6 +1310,9 @@ MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& cli
     stored.lastClientInfo.setIdentityKey(identity);
     stored.lastClientInfo.setFromMemory(true);
     stored.lastClientInfo.setOnline(client.isOnline());
+    if (client.isOnline()) {
+        stored.remoteContentClearedOnDisconnect = false;
+    }
     if (!stored.canvas) {
         stored.canvas = new ScreenCanvas(m_canvasHostStack);
         stored.canvas->setWebSocketClient(m_webSocketClient);
@@ -1373,6 +1381,14 @@ void MainWindow::configureCanvasSession(CanvasSession& session) {
 }
 
 void MainWindow::switchToCanvasSession(const QString& identityKey) {
+    if (!m_activeSessionIdentity.isEmpty() && m_activeSessionIdentity != identityKey) {
+        if (CanvasSession* previous = findCanvasSession(m_activeSessionIdentity)) {
+            if (!previous->remoteContentClearedOnDisconnect) {
+                unloadUploadsForSession(*previous, true);
+            }
+        }
+    }
+
     CanvasSession* session = findCanvasSession(identityKey);
     if (!session || !session->canvas) return;
 
@@ -1408,6 +1424,75 @@ void MainWindow::updateUploadButtonForSession(CanvasSession& session) {
     }
 }
 
+void MainWindow::unloadUploadsForSession(CanvasSession& session, bool attemptRemote) {
+    if (!m_uploadManager) return;
+    const QString targetId = session.clientId;
+    if (targetId.isEmpty()) {
+        session.remoteContentClearedOnDisconnect = true;
+        return;
+    }
+
+    m_uploadManager->setTargetClientId(targetId);
+
+    if (attemptRemote && m_webSocketClient && m_webSocketClient->isConnected()) {
+        bool issuedCommand = false;
+        if (m_uploadManager->isUploading() || m_uploadManager->isFinalizing()) {
+            m_uploadManager->requestCancel();
+            issuedCommand = true;
+        } else if (m_uploadManager->hasActiveUpload()) {
+            m_uploadManager->requestUnload();
+            issuedCommand = true;
+        }
+
+        if (!issuedCommand) {
+            m_webSocketClient->sendRemoveAllFiles(targetId);
+        }
+
+        m_webSocketClient->sendRemoteSceneStop(targetId);
+    }
+
+    FileManager::instance().unmarkAllForClient(targetId);
+
+    if (session.canvas && session.canvas->scene()) {
+        const QList<QGraphicsItem*> items = session.canvas->scene()->items();
+        for (QGraphicsItem* item : items) {
+            if (auto* media = dynamic_cast<ResizableMediaBase*>(item)) {
+                media->setUploadNotUploaded();
+            }
+        }
+    }
+
+    session.remoteContentClearedOnDisconnect = true;
+
+    if (m_uploadManager) {
+        QPushButton* previousButton = m_uploadButton;
+        bool previousOverlayFlag = m_uploadButtonInOverlay;
+        QFont previousDefaultFont = m_uploadButtonDefaultFont;
+
+        const bool hasSessionButton = (session.uploadButton != nullptr);
+        const bool pointerAlreadySession = hasSessionButton && (m_uploadButton == session.uploadButton);
+
+        if (hasSessionButton && !pointerAlreadySession) {
+            m_uploadButton = session.uploadButton;
+            m_uploadButtonInOverlay = session.uploadButtonInOverlay;
+            if (session.uploadButtonDefaultFont != QFont()) {
+                m_uploadButtonDefaultFont = session.uploadButtonDefaultFont;
+            }
+        }
+
+        m_uploadManager->forceResetForClient(targetId);
+
+        if (hasSessionButton && !pointerAlreadySession) {
+            m_uploadButton = previousButton;
+            m_uploadButtonInOverlay = previousOverlayFlag;
+            m_uploadButtonDefaultFont = previousDefaultFont;
+            if (m_uploadManager && previousButton) {
+                emit m_uploadManager->uiStateChanged();
+            }
+        }
+    }
+}
+
 void MainWindow::markAllSessionsOffline() {
     for (auto it = m_canvasSessions.begin(); it != m_canvasSessions.end(); ++it) {
         CanvasSession& session = it.value();
@@ -1433,6 +1518,7 @@ QList<ClientInfo> MainWindow::buildDisplayClientList(const QList<ClientInfo>& co
             session->lastClientInfo.setIdentityKey(identity);
             session->lastClientInfo.setFromMemory(true);
             session->lastClientInfo.setOnline(true);
+            session->remoteContentClearedOnDisconnect = false;
             if (session->canvas && !session->clientId.isEmpty()) {
                 session->canvas->setRemoteSceneTarget(session->clientId, session->lastClientInfo.getMachineName());
             }
@@ -1557,6 +1643,14 @@ void MainWindow::updateClientNameDisplay(const ClientInfo& client) {
 }
 
 void MainWindow::showClientListView() {
+    if (!m_activeSessionIdentity.isEmpty()) {
+        if (CanvasSession* activeSession = findCanvasSession(m_activeSessionIdentity)) {
+            if (!activeSession->remoteContentClearedOnDisconnect) {
+                unloadUploadsForSession(*activeSession, true);
+            }
+        }
+    }
+
     if (m_navigationManager) m_navigationManager->showClientList();
     if (m_uploadButton) m_uploadButton->setText("Upload to Client");
     m_uploadManager->setTargetClientId(QString());
@@ -2165,7 +2259,14 @@ void MainWindow::setupUI() {
         connect(m_navigationManager, &ScreenNavigationManager::watchTargetRequested, this, [this](const QString& id){
             if (m_watchManager && m_webSocketClient && m_webSocketClient->isConnected()) m_watchManager->toggleWatch(id);
         });
-        connect(m_navigationManager, &ScreenNavigationManager::clientListEntered, this, [this](){
+    connect(m_navigationManager, &ScreenNavigationManager::clientListEntered, this, [this](){
+            if (!m_activeSessionIdentity.isEmpty()) {
+                if (CanvasSession* activeSession = findCanvasSession(m_activeSessionIdentity)) {
+                    if (!activeSession->remoteContentClearedOnDisconnect) {
+                        unloadUploadsForSession(*activeSession, true);
+                    }
+                }
+            }
             if (m_watchManager) m_watchManager->unwatchIfAny();
             if (m_screenCanvas) m_screenCanvas->hideRemoteCursor();
         });
@@ -2425,6 +2526,11 @@ void MainWindow::createScreenViewPage() {
 
     // Ensure watch session stops if application quits via menu/shortcut
     connect(qApp, &QCoreApplication::aboutToQuit, this, [this]() {
+        if (!m_activeSessionIdentity.isEmpty()) {
+            if (CanvasSession* activeSession = findCanvasSession(m_activeSessionIdentity)) {
+                unloadUploadsForSession(*activeSession, true);
+            }
+        }
         if (m_watchManager) m_watchManager->unwatchIfAny();
     });
 }
@@ -2829,6 +2935,7 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
                 activeSession->clientId = byId->getId();
                 activeSession->lastClientInfo = byId.value();
                 activeSession->lastClientInfo.setIdentityKey(m_activeSessionIdentity);
+                activeSession->remoteContentClearedOnDisconnect = false;
                 m_selectedClient = activeSession->lastClientInfo;
                 if (activeSession->canvas && !activeSession->clientId.isEmpty()) {
                     activeSession->canvas->setRemoteSceneTarget(activeSession->clientId, selName);
@@ -2852,6 +2959,7 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
                     activeSession->clientId = byName->getId();
                     activeSession->lastClientInfo = byName.value();
                     activeSession->lastClientInfo.setIdentityKey(m_activeSessionIdentity);
+                    activeSession->remoteContentClearedOnDisconnect = false;
                     m_selectedClient = activeSession->lastClientInfo;
                     if (activeSession->canvas && !activeSession->clientId.isEmpty()) {
                         activeSession->canvas->setRemoteSceneTarget(activeSession->clientId, selName);
@@ -2868,6 +2976,9 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
                         m_inlineSpinner->start();
                     }
                 } else {
+                    if (!activeSession->remoteContentClearedOnDisconnect) {
+                        unloadUploadsForSession(*activeSession, true);
+                    }
                     addRemoteStatusToLayout();
                     setRemoteConnectionStatus("DISCONNECTED");
                     m_preserveViewportOnReconnect = true;
