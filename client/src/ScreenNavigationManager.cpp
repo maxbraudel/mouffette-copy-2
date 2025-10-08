@@ -20,6 +20,10 @@ void ScreenNavigationManager::setDurations(int loaderDelayMs, int loaderFadeMs, 
     m_canvasFadeDurationMs = qMax(0, canvasFadeMs);
 }
 
+void ScreenNavigationManager::setActiveCanvas(ScreenCanvas* canvas) {
+    m_w.screenCanvas = canvas;
+}
+
 bool ScreenNavigationManager::isOnScreenView() const {
     return m_w.stack && m_w.screenViewPage && m_w.stack->currentWidget() == m_w.screenViewPage;
 }
@@ -27,6 +31,7 @@ bool ScreenNavigationManager::isOnScreenView() const {
 void ScreenNavigationManager::showScreenView(const ClientInfo& client) {
     if (!m_w.stack || !m_w.screenViewPage) return;
     const QString id = client.getId();
+    const bool isOnline = client.isOnline();
     m_currentClientId = id;
 
     // Switch UI early
@@ -44,9 +49,15 @@ void ScreenNavigationManager::showScreenView(const ClientInfo& client) {
     if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(0.0);
 
     // Start a delayed spinner: if data arrives quickly, we'll reveal the canvas and never show it
-    startSpinnerDelayed();
+    if (isOnline && !id.isEmpty()) {
+        startSpinnerDelayed();
+    } else {
+        stopSpinner();
+        if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(1);
+        if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(1.0);
+    }
 
-    if (!id.isEmpty()) {
+    if (isOnline && !id.isEmpty()) {
         emit requestScreens(id);
         emit watchTargetRequested(id);
     }
@@ -56,6 +67,7 @@ void ScreenNavigationManager::showScreenView(const ClientInfo& client) {
 void ScreenNavigationManager::refreshActiveClientPreservingCanvas(const ClientInfo& client) {
     if (!m_w.stack || !m_w.screenViewPage) return;
     const QString id = client.getId();
+    const bool isOnline = client.isOnline();
 
     // If we're not already on the screen view, fall back to the full transition
     if (!isOnScreenView()) {
@@ -70,7 +82,7 @@ void ScreenNavigationManager::refreshActiveClientPreservingCanvas(const ClientIn
     if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(1);
     if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(1.0);
 
-    if (!id.isEmpty()) {
+    if (isOnline && !id.isEmpty()) {
         emit requestScreens(id);
         emit watchTargetRequested(id);
     }

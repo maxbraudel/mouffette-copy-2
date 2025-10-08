@@ -110,6 +110,17 @@ protected:
     void showEvent(QShowEvent* event) override;
 
 private:
+    struct CanvasSession {
+        QString identityKey;
+        QString clientId; // last known server-assigned id (may be empty if offline)
+        ScreenCanvas* canvas = nullptr;
+        QPushButton* uploadButton = nullptr;
+        bool uploadButtonInOverlay = false;
+        QFont uploadButtonDefaultFont;
+        ClientInfo lastClientInfo;
+        bool connectionsInitialized = false;
+    };
+
     void setupUI();
     void setupTrayIcon();
     void setupConnections();
@@ -153,6 +164,18 @@ private:
     // Manage presence of the remote status (and its leading separator) in the top bar layout
     void removeRemoteStatusFromLayout();
     void addRemoteStatusToLayout();
+    QString makeIdentityKey(const QString& machineName, const QString& platform) const;
+    CanvasSession& ensureCanvasSession(const ClientInfo& client);
+    CanvasSession* findCanvasSession(const QString& identityKey);
+    const CanvasSession* findCanvasSession(const QString& identityKey) const;
+    CanvasSession* findCanvasSessionByClientId(const QString& clientId);
+    const CanvasSession* findCanvasSessionByClientId(const QString& clientId) const;
+    void configureCanvasSession(CanvasSession& session);
+    void switchToCanvasSession(const QString& identityKey);
+    void updateUploadButtonForSession(CanvasSession& session);
+    QList<ClientInfo> buildDisplayClientList(const QList<ClientInfo>& connectedClients);
+    void markAllSessionsOffline();
+    ScreenCanvas* canvasForClientId(const QString& clientId) const;
 
     // UI Components
     QWidget* m_centralWidget;
@@ -190,6 +213,7 @@ private:
     // Canvas container keeps border visible; inside we switch between spinner and canvas
     QWidget* m_canvasContainer;
     QStackedWidget* m_canvasStack;
+    QStackedWidget* m_canvasHostStack = nullptr;
     ScreenCanvas* m_screenCanvas;
     QLabel* m_volumeIndicator;
     SpinnerWidget* m_loadingSpinner;
@@ -226,6 +250,9 @@ private:
     // Backend
     WebSocketClient* m_webSocketClient;
     QList<ClientInfo> m_availableClients;
+    int m_lastConnectedClientCount = 0;
+    QHash<QString, CanvasSession> m_canvasSessions;
+    QString m_activeSessionIdentity;
     ClientInfo m_thisClient;
     ClientInfo m_selectedClient;
     QTimer* m_statusUpdateTimer;

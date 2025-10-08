@@ -32,11 +32,11 @@ ScreenInfo ScreenInfo::fromJson(const QJsonObject& json) {
 }
 
 // ClientInfo implementation
-ClientInfo::ClientInfo() : m_status("unknown") {
+ClientInfo::ClientInfo() : m_status("unknown"), m_fromMemory(false), m_isOnline(false) {
 }
 
 ClientInfo::ClientInfo(const QString& id, const QString& machineName, const QString& platform)
-    : m_id(id), m_machineName(machineName), m_platform(platform), m_status("connected") {
+    : m_id(id), m_machineName(machineName), m_platform(platform), m_status("connected"), m_fromMemory(false), m_isOnline(true) {
 }
 
 QJsonObject ClientInfo::toJson() const {
@@ -83,6 +83,8 @@ ClientInfo ClientInfo::fromJson(const QJsonObject& json) {
     client.m_platform = json["platform"].toString();
     client.m_status = json["status"].toString();
     client.m_volumePercent = json.contains("volumePercent") ? json["volumePercent"].toInt(-1) : -1;
+    client.m_fromMemory = false;
+    client.m_isOnline = true;
     
     QJsonArray screensArray = json["screens"].toArray();
     for (const auto& screenValue : screensArray) {
@@ -105,5 +107,13 @@ QString ClientInfo::getDisplayText() const {
     }
 
     // Show only platform icon and machine name; omit screens/volume to avoid stale info
-    return QString("%1 %2").arg(platformIcon).arg(m_machineName);
+    QString text = QString("%1 %2").arg(platformIcon, m_machineName);
+    if (!m_isOnline) {
+        if (m_fromMemory) {
+            text += QStringLiteral(" (from memory – active instance)");
+        } else {
+            text += QStringLiteral(" (offline)");
+        }
+    }
+    return text;
 }

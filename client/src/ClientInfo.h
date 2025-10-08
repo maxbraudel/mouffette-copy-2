@@ -43,6 +43,12 @@ public:
     QString getStatus() const { return m_status; }
     QList<ScreenInfo> getScreens() const { return m_screens; }
     int getVolumePercent() const { return m_volumePercent; }
+    bool isFromMemory() const { return m_fromMemory; }
+    void setFromMemory(bool fromMemory) { m_fromMemory = fromMemory; }
+    bool isOnline() const { return m_isOnline; }
+    void setOnline(bool online) { m_isOnline = online; }
+    QString identityKey() const { return m_identityKey; }
+    void setIdentityKey(const QString& key) { m_identityKey = key; }
     
     // Setters
     void setId(const QString& id) { m_id = id; }
@@ -67,6 +73,9 @@ private:
     QString m_status;
     QList<ScreenInfo> m_screens;
     int m_volumePercent = -1; // 0-100, -1 when unknown
+    bool m_fromMemory = false;
+    bool m_isOnline = true;
+    QString m_identityKey;
 };
 
 #endif // CLIENTINFO_H

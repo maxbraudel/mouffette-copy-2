@@ -33,6 +33,7 @@ public:
 
     void setWidgets(const Widgets& w); // must be called before usage
     void setDurations(int loaderDelayMs, int loaderFadeMs, int canvasFadeMs);
+    void setActiveCanvas(ScreenCanvas* canvas);
 
     void showScreenView(const ClientInfo& client); // triggers requestScreens + watch
     void refreshActiveClientPreservingCanvas(const ClientInfo& client); // update client id without UI reset

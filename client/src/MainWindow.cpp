@@ -1220,6 +1220,262 @@ void MainWindow::initializeRemoteClientInfoInTopBar() {
     }
 }
 
+QString MainWindow::makeIdentityKey(const QString& machineName, const QString& platform) const {
+    QString normalizedName = machineName.trimmed().toLower();
+    if (normalizedName.isEmpty()) normalizedName = QStringLiteral("unknown");
+    QString normalizedPlatform = platform.trimmed().toLower();
+    if (normalizedPlatform.isEmpty()) normalizedPlatform = QStringLiteral("unknown");
+    return normalizedName + QStringLiteral("|") + normalizedPlatform;
+}
+
+MainWindow::CanvasSession* MainWindow::findCanvasSession(const QString& identityKey) {
+    auto it = m_canvasSessions.find(identityKey);
+    if (it == m_canvasSessions.end()) {
+        return nullptr;
+    }
+    return &it.value();
+}
+
+const MainWindow::CanvasSession* MainWindow::findCanvasSession(const QString& identityKey) const {
+    auto it = m_canvasSessions.constFind(identityKey);
+    if (it == m_canvasSessions.constEnd()) {
+        return nullptr;
+    }
+    return &it.value();
+}
+
+MainWindow::CanvasSession* MainWindow::findCanvasSessionByClientId(const QString& clientId) {
+    if (clientId.isEmpty()) {
+        return nullptr;
+    }
+
+    for (auto it = m_canvasSessions.begin(); it != m_canvasSessions.end(); ++it) {
+        if (it.value().clientId == clientId) {
+            return &it.value();
+        }
+    }
+
+    return nullptr;
+}
+
+const MainWindow::CanvasSession* MainWindow::findCanvasSessionByClientId(const QString& clientId) const {
+    if (clientId.isEmpty()) {
+        return nullptr;
+    }
+
+    for (auto it = m_canvasSessions.constBegin(); it != m_canvasSessions.constEnd(); ++it) {
+        if (it.value().clientId == clientId) {
+            return &it.value();
+        }
+    }
+
+    return nullptr;
+}
+
+MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& client) {
+    QString identity = !client.identityKey().isEmpty() ? client.identityKey() : makeIdentityKey(client.getMachineName(), client.getPlatform());
+    CanvasSession* existing = findCanvasSession(identity);
+    if (!existing) {
+        CanvasSession session;
+        session.identityKey = identity;
+        session.clientId = client.getId();
+        session.lastClientInfo = client;
+        session.lastClientInfo.setIdentityKey(identity);
+        session.lastClientInfo.setFromMemory(true);
+        session.lastClientInfo.setOnline(client.isOnline());
+    session.canvas = new ScreenCanvas(m_canvasHostStack);
+        session.canvas->setWebSocketClient(m_webSocketClient);
+        auto inserted = m_canvasSessions.insert(identity, session);
+        CanvasSession& stored = inserted.value();
+        configureCanvasSession(stored);
+        if (stored.canvas) {
+            if (m_canvasHostStack && m_canvasHostStack->indexOf(stored.canvas) == -1) {
+                m_canvasHostStack->addWidget(stored.canvas);
+            }
+            if (!stored.clientId.isEmpty()) {
+                stored.canvas->setRemoteSceneTarget(stored.clientId, stored.lastClientInfo.getMachineName());
+            }
+        }
+        return stored;
+    }
+
+    CanvasSession& stored = *existing;
+    stored.clientId = client.getId();
+    stored.lastClientInfo = client;
+    stored.lastClientInfo.setIdentityKey(identity);
+    stored.lastClientInfo.setFromMemory(true);
+    stored.lastClientInfo.setOnline(client.isOnline());
+    if (!stored.canvas) {
+        stored.canvas = new ScreenCanvas(m_canvasHostStack);
+        stored.canvas->setWebSocketClient(m_webSocketClient);
+        stored.connectionsInitialized = false;
+    }
+    configureCanvasSession(stored);
+    if (stored.canvas) {
+        if (!stored.clientId.isEmpty()) {
+            stored.canvas->setRemoteSceneTarget(stored.clientId, stored.lastClientInfo.getMachineName());
+        }
+        if (m_canvasHostStack && m_canvasHostStack->indexOf(stored.canvas) == -1) {
+            m_canvasHostStack->addWidget(stored.canvas);
+        }
+    }
+    return stored;
+}
+
+void MainWindow::configureCanvasSession(CanvasSession& session) {
+    if (!session.canvas) return;
+
+    session.canvas->setWebSocketClient(m_webSocketClient);
+    session.canvas->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    session.canvas->setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
+    session.canvas->setFocusPolicy(Qt::StrongFocus);
+    session.canvas->installEventFilter(this);
+
+    if (session.canvas->viewport()) {
+        QWidget* viewport = session.canvas->viewport();
+        viewport->setAttribute(Qt::WA_StyledBackground, true);
+        viewport->setAutoFillBackground(true);
+        viewport->setStyleSheet("background: palette(base); border: none; border-radius: 5px;");
+        viewport->installEventFilter(this);
+    }
+
+    if (!session.connectionsInitialized) {
+        connect(session.canvas, &ScreenCanvas::mediaItemAdded, this,
+                [this, identity=session.identityKey](ResizableMediaBase* mediaItem) {
+                    if (m_fileWatcher && mediaItem && !mediaItem->sourcePath().isEmpty()) {
+                        m_fileWatcher->watchMediaItem(mediaItem);
+                        qDebug() << "MainWindow: Added media item to file watcher:" << mediaItem->sourcePath();
+                    }
+                    auto it = m_canvasSessions.find(identity);
+                    if (it != m_canvasSessions.end()) {
+                        it->lastClientInfo.setFromMemory(true);
+                    }
+                    if (m_autoUploadImportedMedia && m_uploadManager && !m_uploadManager->isUploading() && !m_uploadManager->isCancelling()) {
+                        QTimer::singleShot(0, this, [this]() { onUploadButtonClicked(); });
+                    }
+                });
+    }
+
+    if (QPushButton* overlayBtn = session.canvas->getUploadButton()) {
+        if (session.uploadButton != overlayBtn) {
+            connect(overlayBtn, &QPushButton::clicked, this, &MainWindow::onUploadButtonClicked, Qt::UniqueConnection);
+        }
+        session.uploadButton = overlayBtn;
+        session.uploadButtonInOverlay = true;
+        session.uploadButtonDefaultFont = overlayBtn->font();
+    } else {
+        session.uploadButton = nullptr;
+        session.uploadButtonInOverlay = false;
+        session.uploadButtonDefaultFont = QFont();
+    }
+
+    session.connectionsInitialized = true;
+}
+
+void MainWindow::switchToCanvasSession(const QString& identityKey) {
+    CanvasSession* session = findCanvasSession(identityKey);
+    if (!session || !session->canvas) return;
+
+    m_activeSessionIdentity = identityKey;
+    m_screenCanvas = session->canvas;
+    if (m_navigationManager) {
+        m_navigationManager->setActiveCanvas(m_screenCanvas);
+    }
+
+    if (m_canvasHostStack) {
+        if (m_canvasHostStack->indexOf(session->canvas) == -1) {
+            m_canvasHostStack->addWidget(session->canvas);
+        }
+        m_canvasHostStack->setCurrentWidget(session->canvas);
+    }
+
+    session->canvas->setFocus(Qt::OtherFocusReason);
+    if (!session->clientId.isEmpty()) {
+        session->canvas->setRemoteSceneTarget(session->clientId, session->lastClientInfo.getMachineName());
+    }
+
+    updateUploadButtonForSession(*session);
+}
+
+void MainWindow::updateUploadButtonForSession(CanvasSession& session) {
+    m_uploadButton = session.uploadButton;
+    m_uploadButtonInOverlay = session.uploadButtonInOverlay;
+    if (session.uploadButtonDefaultFont != QFont()) {
+        m_uploadButtonDefaultFont = session.uploadButtonDefaultFont;
+    }
+    if (m_uploadManager) {
+        emit m_uploadManager->uiStateChanged();
+    }
+}
+
+void MainWindow::markAllSessionsOffline() {
+    for (auto it = m_canvasSessions.begin(); it != m_canvasSessions.end(); ++it) {
+        CanvasSession& session = it.value();
+        session.lastClientInfo.setIdentityKey(session.identityKey);
+        session.lastClientInfo.setFromMemory(true);
+        session.lastClientInfo.setOnline(false);
+    }
+}
+
+QList<ClientInfo> MainWindow::buildDisplayClientList(const QList<ClientInfo>& connectedClients) {
+    QList<ClientInfo> result;
+    markAllSessionsOffline();
+    QSet<QString> identitiesSeen;
+
+    for (ClientInfo client : connectedClients) {
+        QString identity = !client.identityKey().isEmpty() ? client.identityKey() : makeIdentityKey(client.getMachineName(), client.getPlatform());
+        client.setIdentityKey(identity);
+        client.setOnline(true);
+
+        if (CanvasSession* session = findCanvasSession(identity)) {
+            session->clientId = client.getId();
+            session->lastClientInfo = client;
+            session->lastClientInfo.setIdentityKey(identity);
+            session->lastClientInfo.setFromMemory(true);
+            session->lastClientInfo.setOnline(true);
+            if (session->canvas && !session->clientId.isEmpty()) {
+                session->canvas->setRemoteSceneTarget(session->clientId, session->lastClientInfo.getMachineName());
+            }
+            client.setFromMemory(true);
+            client.setId(session->clientId);
+        } else {
+            client.setFromMemory(false);
+        }
+
+        identitiesSeen.insert(identity);
+        result.append(client);
+    }
+
+    for (auto it = m_canvasSessions.constBegin(); it != m_canvasSessions.constEnd(); ++it) {
+        const CanvasSession& session = it.value();
+        if (identitiesSeen.contains(session.identityKey)) continue;
+        ClientInfo info = session.lastClientInfo;
+        info.setIdentityKey(session.identityKey);
+        if (!session.clientId.isEmpty()) {
+            info.setId(session.clientId);
+        }
+        info.setOnline(false);
+        info.setFromMemory(true);
+        result.append(info);
+    }
+
+    return result;
+}
+
+ScreenCanvas* MainWindow::canvasForClientId(const QString& clientId) const {
+    if (clientId.isEmpty()) {
+        const CanvasSession* active = findCanvasSession(m_activeSessionIdentity);
+        return active ? active->canvas : nullptr;
+    }
+    for (auto it = m_canvasSessions.constBegin(); it != m_canvasSessions.constEnd(); ++it) {
+        const CanvasSession& session = it.value();
+        if (session.clientId == clientId) {
+            return session.canvas;
+        }
+    }
+    return nullptr;
+}
+
 
 
 void MainWindow::changeEvent(QEvent* event) {
@@ -1228,17 +1484,21 @@ void MainWindow::changeEvent(QEvent* event) {
 
 void MainWindow::showScreenView(const ClientInfo& client) {
     if (!m_navigationManager) return;
+    CanvasSession& session = ensureCanvasSession(client);
+    switchToCanvasSession(session.identityKey);
+    m_selectedClient = session.lastClientInfo;
+    ClientInfo effectiveClient = session.lastClientInfo;
     const bool alreadyOnScreenView = m_navigationManager->isOnScreenView();
     const QString currentId = alreadyOnScreenView ? m_navigationManager->currentClientId() : QString();
-    const bool alreadyOnThisClient = alreadyOnScreenView && currentId == client.getId() && !client.getId().isEmpty();
+    const bool alreadyOnThisClient = alreadyOnScreenView && currentId == effectiveClient.getId() && !effectiveClient.getId().isEmpty();
 
     if (!alreadyOnThisClient) {
         // New client selection: reset reveal flag so first incoming screens will fade in once
         m_canvasRevealedForCurrentClient = false;
-        m_navigationManager->showScreenView(client);
+        m_navigationManager->showScreenView(effectiveClient);
     } else {
         // Same client: refresh subscriptions without resetting UI state
-        m_navigationManager->refreshActiveClientPreservingCanvas(client);
+        m_navigationManager->refreshActiveClientPreservingCanvas(effectiveClient);
     }
 
     // Hide top-bar page title and show back button on screen view
@@ -1246,7 +1506,7 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     if (m_backButton) m_backButton->show();
 
     // Update upload target
-    m_uploadManager->setTargetClientId(client.getId());
+    m_uploadManager->setTargetClientId(session.clientId);
 
     // Show remote client info wrapper when viewing a client
     if (m_remoteClientInfoWrapper) {
@@ -1258,7 +1518,11 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     if (m_inlineSpinner) {
         m_inlineSpinner->hide();
     }
-    updateClientNameDisplay(client);
+    updateClientNameDisplay(effectiveClient);
+    if (!effectiveClient.isOnline()) {
+        setRemoteConnectionStatus("DISCONNECTED");
+        addRemoteStatusToLayout();
+    }
     // While the remote is loading/unloading, remove the volume indicator from layout (display:none)
     removeVolumeIndicatorFromLayout();
     // Also do not show a default remote status; remove it until we know actual state
@@ -1573,13 +1837,11 @@ void MainWindow::onClientItemClicked(QListWidgetItem* item) {
     if (!item) return;
     int index = m_clientListWidget->row(item);
     if (index >=0 && index < m_availableClients.size()) {
-        const ClientInfo& client = m_availableClients[index];
-        m_selectedClient = client;
-        if (m_screenCanvas) {
-            // Set both ID and machine name so target can be tracked across reconnections
-            m_screenCanvas->setRemoteSceneTarget(client.getId(), client.getMachineName());
-        }
-        showScreenView(client);
+        ClientInfo client = m_availableClients[index];
+        CanvasSession& session = ensureCanvasSession(client);
+        switchToCanvasSession(session.identityKey);
+        m_selectedClient = session.lastClientInfo;
+        showScreenView(session.lastClientInfo);
         // ScreenNavigationManager will request screens; no need to duplicate here
     }
 }
@@ -1894,7 +2156,7 @@ void MainWindow::setupUI() {
         w.canvasContentEverLoaded = &m_canvasContentEverLoaded;
         w.volumeOpacity = m_volumeOpacity;
         w.volumeFade = m_volumeFade;
-        w.screenCanvas = m_screenCanvas;
+    w.screenCanvas = nullptr;
         m_navigationManager->setWidgets(w);
         m_navigationManager->setDurations(m_loaderDelayMs, m_loaderFadeDurationMs, m_fadeDurationMs);
         connect(m_navigationManager, &ScreenNavigationManager::requestScreens, this, [this](const QString& id){
@@ -2086,38 +2348,20 @@ void MainWindow::createScreenViewPage() {
     QVBoxLayout* canvasLayout = new QVBoxLayout(canvasPage);
     canvasLayout->setContentsMargins(0,0,0,0);
     canvasLayout->setSpacing(0);
-    m_screenCanvas = new ScreenCanvas();
-    if (m_screenCanvas && m_webSocketClient) {
-        m_screenCanvas->setWebSocketClient(m_webSocketClient);
-    }
-    
-    // Connect ScreenCanvas signals for file watching
-    connect(m_screenCanvas, &ScreenCanvas::mediaItemAdded, this, [this](ResizableMediaBase* mediaItem) {
-        // Add the new media item to file watching
-        if (m_fileWatcher && mediaItem && !mediaItem->sourcePath().isEmpty()) {
-            m_fileWatcher->watchMediaItem(mediaItem);
-            qDebug() << "MainWindow: Added media item to file watcher:" << mediaItem->sourcePath();
-        }
-        // Auto-upload logic: if enabled and not currently streaming/cancelling
-        if (m_autoUploadImportedMedia && m_uploadManager && !m_uploadManager->isUploading() && !m_uploadManager->isCancelling()) {
-            // Defer to allow item to fully initialize and overlay to refresh
-            QTimer::singleShot(0, this, [this]() { onUploadButtonClicked(); });
-        }
-    });
-    
-    // Remove minimum height to allow flexible window resizing
-    // Ensure the viewport background matches and is rounded
-    if (m_screenCanvas->viewport()) {
-        m_screenCanvas->viewport()->setAttribute(Qt::WA_StyledBackground, true);
-        m_screenCanvas->viewport()->setAutoFillBackground(true);
-        // Keep viewport visually seamless inside white container while allowing scene clearing to white
-    m_screenCanvas->viewport()->setStyleSheet("background: palette(base); border: none; border-radius: 5px;");
-    }
-    m_screenCanvas->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    // Full updates avoid ghosting when moving scene-level overlays with ItemIgnoresTransformations
-    m_screenCanvas->setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
-    // Screens are not clickable; canvas supports panning and media placement
-    canvasLayout->addWidget(m_screenCanvas);
+
+    m_canvasHostStack = new QStackedWidget();
+    m_canvasHostStack->setObjectName("CanvasHostStack");
+    m_canvasHostStack->setStyleSheet(
+        "QStackedWidget { "
+        "   background-color: transparent; "
+        "   border: none; "
+        "}"
+    );
+    canvasLayout->addWidget(m_canvasHostStack);
+
+    QWidget* emptyCanvasPlaceholder = new QWidget();
+    m_canvasHostStack->addWidget(emptyCanvasPlaceholder);
+    m_canvasHostStack->setCurrentWidget(emptyCanvasPlaceholder);
     // Canvas/content opacity effect & animation (apply to the page, not the QGraphicsView viewport to avoid heavy repaints)
     m_canvasOpacity = new QGraphicsOpacityEffect(canvasPage);
     canvasPage->setGraphicsEffect(m_canvasOpacity);
@@ -2134,23 +2378,23 @@ void MainWindow::createScreenViewPage() {
     m_screenViewLayout->addWidget(m_canvasContainer, 1);
     // Clip container and viewport to rounded corners
     m_canvasContainer->installEventFilter(this);
-    if (m_screenCanvas && m_screenCanvas->viewport()) m_screenCanvas->viewport()->installEventFilter(this);
 
-    // Ensure focus is on canvas, and block stray key events
+    // Ensure focus routing is configured even before a canvas is attached
     m_screenViewWidget->installEventFilter(this);
-    m_screenCanvas->setFocusPolicy(Qt::StrongFocus);
-    m_screenCanvas->installEventFilter(this);
     
     // Connect upload button in media list overlay to upload functionality
-    if (QPushButton* overlayUploadBtn = m_screenCanvas->getUploadButton()) {
-        m_uploadButton = overlayUploadBtn; // Use the overlay button as our upload button
-        m_uploadButtonInOverlay = true; // Flag that this button uses overlay styling
-        m_uploadButtonDefaultFont = m_uploadButton->font();
-        connect(m_uploadButton, &QPushButton::clicked, this, &MainWindow::onUploadButtonClicked);
-        // Apply initial style state machine
-        QTimer::singleShot(0, [this]() {
-            emit m_uploadManager->uiStateChanged();
-        });
+
+    if (m_screenCanvas) {
+        if (QPushButton* overlayUploadBtn = m_screenCanvas->getUploadButton()) {
+            m_uploadButton = overlayUploadBtn; // Use the overlay button as our upload button
+            m_uploadButtonInOverlay = true; // Flag that this button uses overlay styling
+            m_uploadButtonDefaultFont = m_uploadButton->font();
+            connect(m_uploadButton, &QPushButton::clicked, this, &MainWindow::onUploadButtonClicked);
+            // Apply initial style state machine
+            QTimer::singleShot(0, [this]() {
+                emit m_uploadManager->uiStateChanged();
+            });
+        }
     }
 
     // When a new media item is added to the canvas, re-evaluate the upload button state immediately
@@ -2522,14 +2766,27 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
         m_screenCanvas->updateRemoteSceneTargetFromClientList(clients);
     }
     
-    // Check for new clients
-    int previousCount = m_availableClients.size();
-    m_availableClients = clients;
-    updateClientList(clients);
-    
-    // Show notification if new clients appeared
-    if (clients.size() > previousCount && previousCount >= 0) {
-        int newClients = clients.size() - previousCount;
+    QList<ClientInfo> displayList = buildDisplayClientList(clients);
+
+    int previousDisplayCount = m_availableClients.size();
+    int previousConnectedCount = m_lastConnectedClientCount;
+    m_lastConnectedClientCount = clients.size();
+
+    m_availableClients = displayList;
+    updateClientList(m_availableClients);
+
+    if (!m_activeSessionIdentity.isEmpty()) {
+        if (CanvasSession* activeSession = findCanvasSession(m_activeSessionIdentity)) {
+            m_selectedClient = activeSession->lastClientInfo;
+            if (activeSession->canvas && !activeSession->clientId.isEmpty()) {
+                activeSession->canvas->setRemoteSceneTarget(activeSession->clientId, activeSession->lastClientInfo.getMachineName());
+            }
+        }
+    }
+
+    // Show notification if new connected clients appeared
+    if (clients.size() > previousConnectedCount && previousConnectedCount >= 0) {
+        int newClients = clients.size() - previousConnectedCount;
         if (newClients > 0) {
             QString message = QString("%1 new client%2 available for sharing")
                 .arg(newClients)
@@ -2545,63 +2802,87 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
     // 2) Else, try to match by machineName (and platform). If found -> treat as same device, switch selection to new id,
     //    reset reveal flag, show screen view for it, request screens + watch.
     // 3) Else -> mark DISCONNECTED and keep loader.
-    if (m_navigationManager && m_navigationManager->isOnScreenView() && !m_selectedClient.getId().isEmpty()) {
-        const QString selId = m_selectedClient.getId();
-        const QString selName = m_selectedClient.getMachineName();
-        const QString selPlatform = m_selectedClient.getPlatform();
+    if (m_navigationManager && m_navigationManager->isOnScreenView() && !m_activeSessionIdentity.isEmpty()) {
+        CanvasSession* activeSession = findCanvasSession(m_activeSessionIdentity);
+        if (activeSession) {
+            const QString selId = activeSession->clientId;
+            const QString selName = activeSession->lastClientInfo.getMachineName();
+            const QString selPlatform = activeSession->lastClientInfo.getPlatform();
 
-        const auto findById = [&clients](const QString& id) -> std::optional<ClientInfo> {
-            for (const auto& c : clients) { if (c.getId() == id) return c; }
-            return std::nullopt;
-        };
-        const auto findByNamePlatform = [&clients](const QString& name, const QString& platform) -> std::optional<ClientInfo> {
-            for (const auto& c : clients) {
-                if (c.getMachineName().compare(name, Qt::CaseInsensitive) == 0 && c.getPlatform() == platform) return c;
-            }
-            return std::nullopt;
-        };
+            const auto findById = [&clients](const QString& id) -> std::optional<ClientInfo> {
+                for (const auto& c : clients) { if (c.getId() == id) return c; }
+                return std::nullopt;
+            };
+            const auto findByNamePlatform = [&clients](const QString& name, const QString& platform) -> std::optional<ClientInfo> {
+                for (const auto& c : clients) {
+                    if (c.getMachineName().compare(name, Qt::CaseInsensitive) == 0 && c.getPlatform() == platform) return c;
+                }
+                return std::nullopt;
+            };
 
-        auto byId = findById(selId);
-        if (byId.has_value()) {
-            setRemoteConnectionStatus("CONNECTED");
-            addRemoteStatusToLayout();
-            // Only force a refresh if the canvas is currently in loader state.
-            if (m_canvasStack && m_canvasStack->currentIndex() == 0 && m_webSocketClient && m_webSocketClient->isConnected()) {
-                m_canvasRevealedForCurrentClient = false;
-                m_webSocketClient->requestScreens(selId);
-                if (m_watchManager) { m_watchManager->unwatchIfAny(); m_watchManager->toggleWatch(selId); }
+            std::optional<ClientInfo> byId;
+            if (!selId.isEmpty()) {
+                byId = findById(selId);
             }
-        } else {
-            auto byName = findByNamePlatform(selName, selPlatform);
-            if (byName.has_value()) {
-                // Remote reconnected with a new id: switch selection and re-enter screen view for new id
-                m_selectedClient = byName.value();
-                if (m_screenCanvas) {
-                    m_screenCanvas->setRemoteSceneTarget(m_selectedClient.getId(), m_selectedClient.getMachineName());
+
+            if (byId.has_value()) {
+                activeSession->clientId = byId->getId();
+                activeSession->lastClientInfo = byId.value();
+                activeSession->lastClientInfo.setIdentityKey(m_activeSessionIdentity);
+                m_selectedClient = activeSession->lastClientInfo;
+                if (activeSession->canvas && !activeSession->clientId.isEmpty()) {
+                    activeSession->canvas->setRemoteSceneTarget(activeSession->clientId, selName);
                 }
-                if (m_uploadManager) m_uploadManager->setTargetClientId(m_selectedClient.getId());
-                if (m_navigationManager) {
-                    m_navigationManager->refreshActiveClientPreservingCanvas(m_selectedClient);
-                }
-                updateClientNameDisplay(m_selectedClient);
-                setRemoteConnectionStatus("CONNECTING...");
+                if (m_uploadManager) m_uploadManager->setTargetClientId(activeSession->clientId);
+                setRemoteConnectionStatus("CONNECTED");
                 addRemoteStatusToLayout();
-                if (m_inlineSpinner && !m_inlineSpinner->isSpinning()) {
-                    m_inlineSpinner->show();
-                    m_inlineSpinner->start();
+                if (m_canvasStack && m_canvasStack->currentIndex() == 0 && m_webSocketClient && m_webSocketClient->isConnected()) {
+                    m_canvasRevealedForCurrentClient = false;
+                    m_webSocketClient->requestScreens(activeSession->clientId);
+                    if (m_watchManager && m_webSocketClient->isConnected()) {
+                        if (m_watchManager->watchedClientId() != activeSession->clientId) {
+                            m_watchManager->unwatchIfAny();
+                            m_watchManager->toggleWatch(activeSession->clientId);
+                        }
+                    }
                 }
             } else {
-                addRemoteStatusToLayout();
-                setRemoteConnectionStatus("DISCONNECTED");
-                // Remote client went away: show inline spinner but DON'T hide screens to avoid flicker
-                m_preserveViewportOnReconnect = true;
-                // Show inline spinner without hiding canvas content
-                if (m_inlineSpinner) {
-                    m_inlineSpinner->show();
-                    m_inlineSpinner->start();
+                auto byName = findByNamePlatform(selName, selPlatform);
+                if (byName.has_value()) {
+                    activeSession->clientId = byName->getId();
+                    activeSession->lastClientInfo = byName.value();
+                    activeSession->lastClientInfo.setIdentityKey(m_activeSessionIdentity);
+                    m_selectedClient = activeSession->lastClientInfo;
+                    if (activeSession->canvas && !activeSession->clientId.isEmpty()) {
+                        activeSession->canvas->setRemoteSceneTarget(activeSession->clientId, selName);
+                    }
+                    if (m_uploadManager) m_uploadManager->setTargetClientId(activeSession->clientId);
+                    if (m_navigationManager) {
+                        m_navigationManager->refreshActiveClientPreservingCanvas(activeSession->lastClientInfo);
+                    }
+                    updateClientNameDisplay(activeSession->lastClientInfo);
+                    setRemoteConnectionStatus("CONNECTING...");
+                    addRemoteStatusToLayout();
+                    if (m_inlineSpinner && !m_inlineSpinner->isSpinning()) {
+                        m_inlineSpinner->show();
+                        m_inlineSpinner->start();
+                    }
+                } else {
+                    addRemoteStatusToLayout();
+                    setRemoteConnectionStatus("DISCONNECTED");
+                    m_preserveViewportOnReconnect = true;
+                    if (m_inlineSpinner) {
+                        m_inlineSpinner->show();
+                        m_inlineSpinner->start();
+                    }
+                    if (m_uploadManager) {
+                        m_uploadManager->setTargetClientId(QString());
+                    }
+                    if (m_watchManager) {
+                        m_watchManager->unwatchIfAny();
+                    }
+                    removeVolumeIndicatorFromLayout();
                 }
-                // Keep canvas revealed and visible
-                removeVolumeIndicatorFromLayout();
             }
         }
     }
@@ -2691,70 +2972,88 @@ void MainWindow::syncRegistration() {
 }
 
 void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
-    // Update the canvas only if it matches the currently selected client
-    if (!clientInfo.getId().isEmpty() && clientInfo.getId() == m_selectedClient.getId()) {
-        
-        m_selectedClient = clientInfo; // keep selected client in sync
-        const QList<ScreenInfo> scrs = clientInfo.getScreens();
-        const bool hasScreens = !scrs.isEmpty();
+    QString identity = !clientInfo.identityKey().isEmpty()
+        ? clientInfo.identityKey()
+        : makeIdentityKey(clientInfo.getMachineName(), clientInfo.getPlatform());
 
-        // Update screen canvas content (setScreens handles empty data gracefully)
-        if (m_screenCanvas) {
-            m_screenCanvas->setScreens(scrs);
+    CanvasSession* session = findCanvasSession(identity);
+    if (!session && !clientInfo.getId().isEmpty()) {
+        session = findCanvasSessionByClientId(clientInfo.getId());
+    }
 
-            if (hasScreens) {
-                // First-time reveal & recenter logic (improved):
-                // We no longer depend on the spinner still being visible; if this is the first batch of screens
-                // for the selected client, we always ensure the canvas is revealed and (unless preserving viewport)
-                // perform an initial recenter (with a deferred safety pass to handle late layout sizing).
-                if (!m_canvasRevealedForCurrentClient) {
-                    if (m_navigationManager) {
-                        m_navigationManager->revealCanvas();
-                    } else if (m_canvasStack) {
-                        m_canvasStack->setCurrentIndex(1);
-                    }
-                    if (m_screenCanvas) {
-                        // Arm a deferred recenter as a safety net (in case screens visually populate after first paint)
-                        m_screenCanvas->requestDeferredInitialRecenter(53);
-                        if (!m_preserveViewportOnReconnect) {
-                            m_screenCanvas->recenterWithMargin(53);
-                        } else {
-                            
-                        }
-                        m_screenCanvas->setFocus(Qt::OtherFocusReason);
-                    }
-                    // (Removed older fallback recenter logic; deferred handling is now centralized inside ScreenCanvas)
-                    // Reset the preservation flag after first reveal
-                    m_preserveViewportOnReconnect = false;
-                    m_canvasRevealedForCurrentClient = true;
-                    m_canvasContentEverLoaded = true; // Mark that content has been loaded at least once
-                } else {
-                    // Canvas already revealed - just ensure inline spinner is hidden
-                    // Don't re-reveal to avoid animations/flicker
-                }
-                
-                // Always hide inline spinner when screens arrive
-                if (m_inlineSpinner && m_inlineSpinner->isSpinning()) {
-                    m_inlineSpinner->stop();
-                    m_inlineSpinner->hide();
-                }
+    if (!session) {
+        session = &ensureCanvasSession(clientInfo);
+    } else {
+        session->clientId = clientInfo.getId();
+        session->lastClientInfo = clientInfo;
+        session->lastClientInfo.setIdentityKey(identity);
+        session->lastClientInfo.setFromMemory(true);
+        session->lastClientInfo.setOnline(true);
+    }
+
+    if (!session->canvas) {
+        session->canvas = new ScreenCanvas(m_canvasHostStack);
+        session->canvas->setWebSocketClient(m_webSocketClient);
+        session->connectionsInitialized = false;
+        if (m_canvasHostStack && m_canvasHostStack->indexOf(session->canvas) == -1) {
+            m_canvasHostStack->addWidget(session->canvas);
+        }
+        configureCanvasSession(*session);
+    }
+
+    const QList<ScreenInfo> screens = clientInfo.getScreens();
+    const bool hasScreens = !screens.isEmpty();
+
+    if (session->canvas) {
+        if (!session->clientId.isEmpty()) {
+            session->canvas->setRemoteSceneTarget(session->clientId, session->lastClientInfo.getMachineName());
+        }
+        session->canvas->setScreens(screens);
+    }
+
+    const bool isActiveSession = (session->identityKey == m_activeSessionIdentity);
+    if (isActiveSession) {
+        m_screenCanvas = session->canvas;
+        m_selectedClient = session->lastClientInfo;
+    }
+
+    session->lastClientInfo.setScreens(screens);
+
+    if (isActiveSession && session->canvas) {
+        if (!m_canvasRevealedForCurrentClient && hasScreens) {
+            if (m_navigationManager) {
+                m_navigationManager->revealCanvas();
+            } else if (m_canvasStack) {
+                m_canvasStack->setCurrentIndex(1);
             }
+
+            session->canvas->requestDeferredInitialRecenter(53);
+            if (!m_preserveViewportOnReconnect) {
+                session->canvas->recenterWithMargin(53);
+            }
+            session->canvas->setFocus(Qt::OtherFocusReason);
+
+            m_preserveViewportOnReconnect = false;
+            m_canvasRevealedForCurrentClient = true;
+            m_canvasContentEverLoaded = true;
         }
 
-        // Update volume UI and re-add it to the layout now that the client is ready
+        if (hasScreens && m_inlineSpinner && m_inlineSpinner->isSpinning()) {
+            m_inlineSpinner->stop();
+            m_inlineSpinner->hide();
+        }
+
         if (hasScreens && m_volumeIndicator) {
             addVolumeIndicatorToLayout();
             updateVolumeIndicator();
         }
 
-    // Remote responded with data: status is connected when screens received
-    if (!scrs.isEmpty()) {
-        setRemoteConnectionStatus("CONNECTED");
-        addRemoteStatusToLayout();
-    }
+        if (hasScreens) {
+            setRemoteConnectionStatus("CONNECTED");
+            addRemoteStatusToLayout();
+        }
 
-        // Refresh client label
-        updateClientNameDisplay(clientInfo);
+        updateClientNameDisplay(session->lastClientInfo);
     }
 }
 
@@ -3084,8 +3383,12 @@ int MainWindow::getInnerContentGap() const
 }
 
 bool MainWindow::hasUnuploadedFilesForTarget(const QString& targetClientId) const {
-    if (!m_screenCanvas || !m_screenCanvas->scene() || targetClientId.isEmpty()) return false;
-    const QList<QGraphicsItem*> allItems = m_screenCanvas->scene()->items();
+    ScreenCanvas* canvas = canvasForClientId(targetClientId);
+    if (!canvas && targetClientId.isEmpty()) {
+        canvas = m_screenCanvas;
+    }
+    if (!canvas || !canvas->scene()) return false;
+    const QList<QGraphicsItem*> allItems = canvas->scene()->items();
     for (QGraphicsItem* it : allItems) {
         if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
             const QString mediaId = media->mediaId();
