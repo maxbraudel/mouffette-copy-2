@@ -378,7 +378,7 @@ void MainWindow::ensureClientListPlaceholder() {
     }
 }
 
-void MainWindow::setRemoteConnectionStatus(const QString& status) {
+void MainWindow::setRemoteConnectionStatus(const QString& status, bool propagateLoss) {
     if (!m_remoteConnectionStatusLabel) return;
     const QString up = status.toUpper();
     m_remoteConnectionStatusLabel->setText(up);
@@ -418,14 +418,14 @@ void MainWindow::setRemoteConnectionStatus(const QString& status) {
         ensureClientListPlaceholder();
     }
 
-    refreshOverlayActionsState(up == "CONNECTED");
+    refreshOverlayActionsState(up == "CONNECTED", propagateLoss);
 }
 
-void MainWindow::refreshOverlayActionsState(bool remoteConnected) {
+void MainWindow::refreshOverlayActionsState(bool remoteConnected, bool propagateLoss) {
     m_remoteOverlayActionsEnabled = remoteConnected;
 
     if (m_screenCanvas) {
-        if (!remoteConnected) {
+        if (!remoteConnected && propagateLoss) {
             m_screenCanvas->handleRemoteConnectionLost();
         }
         m_screenCanvas->setOverlayActionsEnabled(remoteConnected);
@@ -1786,7 +1786,7 @@ void MainWindow::showClientListView() {
     if (m_uploadButton) m_uploadButton->setText("Upload to Client");
     m_uploadManager->setTargetClientId(QString());
     // Clear remote connection status when leaving screen view
-    setRemoteConnectionStatus("DISCONNECTED");
+    setRemoteConnectionStatus("DISCONNECTED", /*propagateLoss*/ false);
     
     // Hide remote client info wrapper when on client list
     if (m_remoteClientInfoWrapper) {

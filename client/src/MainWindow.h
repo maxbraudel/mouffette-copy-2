@@ -167,9 +167,9 @@ private:
     void updateClientNameDisplay(const ClientInfo& client);
     // Legacy helper removed; ScreenCanvas renders screens directly
     void updateVolumeIndicator();
-    void setRemoteConnectionStatus(const QString& status);
+    void setRemoteConnectionStatus(const QString& status, bool propagateLoss = true);
     void ensureClientListPlaceholder();
-    void refreshOverlayActionsState(bool remoteConnected);
+    void refreshOverlayActionsState(bool remoteConnected, bool propagateLoss = true);
     // watch management handled by WatchManager component now
     // Manage presence of the volume indicator in the top bar layout
     void removeVolumeIndicatorFromLayout();
