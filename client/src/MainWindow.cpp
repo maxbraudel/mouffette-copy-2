@@ -1710,6 +1710,11 @@ void MainWindow::showScreenView(const ClientInfo& client) {
         // New client selection: reset reveal flag so first incoming screens will fade in once
         m_canvasRevealedForCurrentClient = false;
         m_navigationManager->showScreenView(effectiveClient, hasCachedContent);
+        if (session.canvas) {
+            session.canvas->resetTransform();
+            session.canvas->requestDeferredInitialRecenter(53);
+            session.canvas->recenterWithMargin(53);
+        }
     } else {
         // Same client: refresh subscriptions without resetting UI state
         m_navigationManager->refreshActiveClientPreservingCanvas(effectiveClient);
@@ -1750,6 +1755,9 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     if (hasCachedContent) {
         if (session.canvas) {
             session.canvas->showContentAfterReconnect();
+            session.canvas->resetTransform();
+            session.canvas->recenterWithMargin(53);
+            session.canvas->requestDeferredInitialRecenter(53);
         }
         m_canvasRevealedForCurrentClient = true;
         m_canvasContentEverLoaded = true;
