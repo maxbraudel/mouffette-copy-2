@@ -1571,6 +1571,9 @@ void MainWindow::changeEvent(QEvent* event) {
 void MainWindow::showScreenView(const ClientInfo& client) {
     if (!m_navigationManager) return;
     CanvasSession& session = ensureCanvasSession(client);
+    const bool sessionHasActiveScreens = session.canvas && session.canvas->hasActiveScreens();
+    const bool sessionHasStoredScreens = !session.lastClientInfo.getScreens().isEmpty();
+    const bool hasCachedContent = sessionHasActiveScreens || sessionHasStoredScreens;
     switchToCanvasSession(session.identityKey);
     m_selectedClient = session.lastClientInfo;
     ClientInfo effectiveClient = session.lastClientInfo;
@@ -1578,13 +1581,20 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     const QString currentId = alreadyOnScreenView ? m_navigationManager->currentClientId() : QString();
     const bool alreadyOnThisClient = alreadyOnScreenView && currentId == effectiveClient.getId() && !effectiveClient.getId().isEmpty();
 
+    if (hasCachedContent) {
+        m_canvasContentEverLoaded = true;
+    }
+
     if (!alreadyOnThisClient) {
         // New client selection: reset reveal flag so first incoming screens will fade in once
         m_canvasRevealedForCurrentClient = false;
-        m_navigationManager->showScreenView(effectiveClient);
+        m_navigationManager->showScreenView(effectiveClient, hasCachedContent);
     } else {
         // Same client: refresh subscriptions without resetting UI state
         m_navigationManager->refreshActiveClientPreservingCanvas(effectiveClient);
+        if (hasCachedContent && effectiveClient.isOnline()) {
+            m_navigationManager->enterLoadingStateImmediate();
+        }
     }
 
     // Hide top-bar page title and show back button on screen view
@@ -1609,10 +1619,25 @@ void MainWindow::showScreenView(const ClientInfo& client) {
         setRemoteConnectionStatus("DISCONNECTED");
         addRemoteStatusToLayout();
     }
-    // While the remote is loading/unloading, remove the volume indicator from layout (display:none)
+    // While refreshing, start from a clean layout then reapply cached state if available
     removeVolumeIndicatorFromLayout();
-    // Also do not show a default remote status; remove it until we know actual state
     removeRemoteStatusFromLayout();
+
+    if (hasCachedContent) {
+        if (session.canvas) {
+            session.canvas->showContentAfterReconnect();
+        }
+        m_canvasRevealedForCurrentClient = true;
+        m_canvasContentEverLoaded = true;
+
+        if (session.lastClientInfo.getVolumePercent() >= 0) {
+            addVolumeIndicatorToLayout();
+            updateVolumeIndicator();
+        }
+
+        addRemoteStatusToLayout();
+        setRemoteConnectionStatus(session.lastClientInfo.isOnline() ? "CONNECTED" : "DISCONNECTED");
+    }
     
     // Update button visibility for screen view page
     if (m_responsiveLayoutManager) {
@@ -2992,7 +3017,13 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
                     if (m_watchManager) {
                         m_watchManager->unwatchIfAny();
                     }
-                    removeVolumeIndicatorFromLayout();
+                    if (activeSession->lastClientInfo.getVolumePercent() >= 0) {
+                        m_selectedClient = activeSession->lastClientInfo;
+                        addVolumeIndicatorToLayout();
+                        updateVolumeIndicator();
+                    } else {
+                        removeVolumeIndicatorFromLayout();
+                    }
                 }
             }
         }

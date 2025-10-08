@@ -28,33 +28,55 @@ bool ScreenNavigationManager::isOnScreenView() const {
     return m_w.stack && m_w.screenViewPage && m_w.stack->currentWidget() == m_w.screenViewPage;
 }
 
-void ScreenNavigationManager::showScreenView(const ClientInfo& client) {
+void ScreenNavigationManager::showScreenView(const ClientInfo& client, bool hasCachedContent) {
     if (!m_w.stack || !m_w.screenViewPage) return;
     const QString id = client.getId();
     const bool isOnline = client.isOnline();
+    const bool useCachedContent = hasCachedContent;
     m_currentClientId = id;
 
     // Switch UI early
     m_w.stack->setCurrentWidget(m_w.screenViewPage);
     if (m_w.backButton) m_w.backButton->show();
 
-    // Reset spinner/canvas states
-    if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(0); // assume 0 = spinner container
+    // Stop any pending spinner state before we decide how to present content
+    stopSpinner();
     if (m_w.loadingSpinner) m_w.loadingSpinner->stop();
     if (m_w.spinnerFade) m_w.spinnerFade->stop();
-    if (m_w.spinnerOpacity) m_w.spinnerOpacity->setOpacity(0.0);
+    if (m_w.inlineSpinner) {
+        m_w.inlineSpinner->stop();
+        m_w.inlineSpinner->hide();
+    }
     if (m_w.volumeFade) m_w.volumeFade->stop();
-    if (m_w.volumeOpacity) m_w.volumeOpacity->setOpacity(0.0);
     if (m_w.canvasFade) m_w.canvasFade->stop();
-    if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(0.0);
 
-    // Start a delayed spinner: if data arrives quickly, we'll reveal the canvas and never show it
-    if (isOnline && !id.isEmpty()) {
-        startSpinnerDelayed();
-    } else {
-        stopSpinner();
+    if (useCachedContent) {
         if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(1);
         if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(1.0);
+        if (m_w.screenCanvas) {
+            m_w.screenCanvas->showContentAfterReconnect();
+        }
+        if (m_w.canvasContentEverLoaded) {
+            *m_w.canvasContentEverLoaded = true;
+        }
+        // Show inline spinner while waiting for fresh data from an online client
+        if (isOnline && !id.isEmpty() && m_w.inlineSpinner) {
+            m_w.inlineSpinner->show();
+            m_w.inlineSpinner->start();
+        }
+    } else {
+        // No cached content: fall back to full-screen loader behavior
+        if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(0.0);
+        if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(0); // spinner page
+        if (m_w.volumeOpacity) m_w.volumeOpacity->setOpacity(0.0);
+
+        if (isOnline && !id.isEmpty()) {
+            startSpinnerDelayed();
+        } else {
+            // Offline or unknown id: show whatever cached scene remains immediately
+            if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(1);
+            if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(1.0);
+        }
     }
 
     if (isOnline && !id.isEmpty()) {

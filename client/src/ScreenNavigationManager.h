@@ -35,7 +35,7 @@ public:
     void setDurations(int loaderDelayMs, int loaderFadeMs, int canvasFadeMs);
     void setActiveCanvas(ScreenCanvas* canvas);
 
-    void showScreenView(const ClientInfo& client); // triggers requestScreens + watch
+    void showScreenView(const ClientInfo& client, bool hasCachedContent = false); // triggers requestScreens + watch
     void refreshActiveClientPreservingCanvas(const ClientInfo& client); // update client id without UI reset
     void showClientList();
     // Called when screens data has arrived and we can display the canvas
