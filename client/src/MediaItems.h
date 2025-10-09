@@ -32,10 +32,10 @@ class MediaSettingsPanel;
 class ResizableMediaBase : public QGraphicsItem {
 public:
     struct MediaSettingsState {
-        bool displayAutomatically = false;
+        bool displayAutomatically = true;
         bool displayDelayEnabled = false;
         QString displayDelayText = QStringLiteral("1");
-        bool playAutomatically = false;
+        bool playAutomatically = true;
         bool playDelayEnabled = false;
         QString playDelayText = QStringLiteral("1");
         bool repeatEnabled = false;
