@@ -1113,7 +1113,19 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
                 m_expectedPlayingState = true;
                 updatePlayPauseIconState(true);
             } else {
-                m_holdLastFrameAtEnd = true; if (m_durationMs > 0) m_positionMs = m_durationMs; m_smoothProgressRatio = 1.0; updateProgressBar(); if (m_progressTimer) m_progressTimer->stop(); updateControlsLayout(); update(); if (m_player) m_player->pause();
+                m_holdLastFrameAtEnd = true;
+                m_seamlessLoopJumpPending = false;
+                m_lastSeamlessLoopTriggerMs = 0;
+                if (m_durationMs > 0) m_positionMs = m_durationMs;
+                m_smoothProgressRatio = 1.0;
+                updateProgressBar();
+                if (m_progressTimer) m_progressTimer->stop();
+                if (m_player) {
+                    m_player->pause();
+                    m_player->setPosition(0);
+                }
+                updateControlsLayout();
+                update();
                 m_expectedPlayingState = false;
                 updatePlayPauseIconState(false);
             }
@@ -1202,8 +1214,20 @@ void ResizableVideoItem::togglePlayPause() {
         if (m_progressTimer) m_progressTimer->stop();
         nowPlaying = false;
     } else {
-        if (m_holdLastFrameAtEnd) {
+        bool nearEnd = false;
+        if (m_durationMs > 0) {
+            const qint64 endThreshold = std::clamp<qint64>(m_durationMs / 64, 15LL, 250LL);
+            const qint64 playerPos = m_player ? m_player->position() : m_positionMs;
+            const qint64 effectivePos = (m_positionMs > 0) ? m_positionMs : playerPos;
+            if (effectivePos >= (m_durationMs - endThreshold)) {
+                nearEnd = true;
+            }
+        }
+
+        if (m_holdLastFrameAtEnd || nearEnd) {
             m_holdLastFrameAtEnd = false;
+            m_seamlessLoopJumpPending = false;
+            m_lastSeamlessLoopTriggerMs = 0;
             m_positionMs = 0;
             m_player->setPosition(0);
             m_smoothProgressRatio = 0.0;
