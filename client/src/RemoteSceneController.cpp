@@ -19,6 +19,9 @@
 #include <QAudioOutput>
 #include <QMediaPlayer>
 #include <QVideoSink>
+#include <QMetaObject>
+#include <QUrl>
+#include <QThread>
 #include "FileManager.h"
 #include "MacWindowManager.h"
 #include <algorithm>
@@ -153,33 +156,13 @@ void RemoteSceneController::onConnectionError(const QString& errorMessage) {
 }
 
 void RemoteSceneController::clearScene() {
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, [this]() { clearScene(); }, Qt::QueuedConnection);
+        return;
+    }
     // Defensive teardown to handle rapid start/stop without use-after-free
     for (const auto& item : m_mediaItems) {
-        if (!item) continue;
-        // Stop and delete timers synchronously
-        if (item->displayTimer) { item->displayTimer->stop(); QObject::disconnect(item->displayTimer, nullptr, nullptr, nullptr); delete item->displayTimer; item->displayTimer = nullptr; }
-        if (item->playTimer) { item->playTimer->stop(); QObject::disconnect(item->playTimer, nullptr, nullptr, nullptr); delete item->playTimer; item->playTimer = nullptr; }
-        // Disconnect one-shot connections
-        QObject::disconnect(item->deferredStartConn);
-        QObject::disconnect(item->primingConn);
-        // Detach video sink before deleting labels/sinks
-        if (item->player) {
-            item->player->setVideoSink(nullptr);
-            QObject::disconnect(item->player, nullptr, nullptr, nullptr);
-            item->player->stop();
-        }
-        if (item->audio) {
-            QObject::disconnect(item->audio, nullptr, nullptr, nullptr);
-        }
-        for (auto& s : item->spans) {
-            if (s.videoSink) { QObject::disconnect(s.videoSink, nullptr, nullptr, nullptr); s.videoSink->deleteLater(); s.videoSink = nullptr; }
-            if (s.videoLabel) { s.videoLabel->deleteLater(); s.videoLabel = nullptr; }
-            if (s.imageLabel) { s.imageLabel->deleteLater(); s.imageLabel = nullptr; }
-            if (s.widget) { s.widget->deleteLater(); s.widget = nullptr; }
-        }
-        if (item->widget) { item->widget->deleteLater(); item->widget = nullptr; }
-        if (item->player) { item->player->deleteLater(); item->player = nullptr; }
-        if (item->audio) { item->audio->deleteLater(); item->audio = nullptr; }
+        teardownMediaItem(item);
     }
     m_mediaItems.clear();
     // Close and delete screen windows
@@ -188,6 +171,99 @@ void RemoteSceneController::clearScene() {
         if (it.value().window) it.value().window->deleteLater();
     }
     m_screenWindows.clear();
+}
+
+void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaItem>& item) {
+    if (!item) return;
+
+    auto stopAndDeleteTimer = [](QTimer*& timer) {
+        if (!timer) return;
+        timer->stop();
+        QObject::disconnect(timer, nullptr, nullptr, nullptr);
+        timer->deleteLater();
+        timer = nullptr;
+    };
+
+    stopAndDeleteTimer(item->displayTimer);
+    stopAndDeleteTimer(item->playTimer);
+
+    QObject::disconnect(item->deferredStartConn);
+    QObject::disconnect(item->primingConn);
+
+    if (item->player) {
+        QMediaPlayer* player = item->player;
+        QObject::disconnect(player, nullptr, nullptr, nullptr);
+        if (player->playbackState() != QMediaPlayer::StoppedState) {
+            player->stop();
+        }
+        player->setVideoSink(nullptr);
+        player->setSource(QUrl());
+    }
+
+    if (item->audio) {
+        QObject::disconnect(item->audio, nullptr, nullptr, nullptr);
+        item->audio->setMuted(true);
+    }
+
+    if (item->videoSinkSingle) {
+        QObject::disconnect(item->videoSinkSingle, nullptr, nullptr, nullptr);
+        item->videoSinkSingle->setParent(nullptr);
+        item->videoSinkSingle->deleteLater();
+        item->videoSinkSingle = nullptr;
+    }
+    if (item->videoLabelSingle) {
+        item->videoLabelSingle->clear();
+        item->videoLabelSingle->deleteLater();
+        item->videoLabelSingle = nullptr;
+    }
+
+    for (auto& span : item->spans) {
+        if (span.videoSink) {
+            QObject::disconnect(span.videoSink, nullptr, nullptr, nullptr);
+            span.videoSink->setParent(nullptr);
+            span.videoSink->deleteLater();
+            span.videoSink = nullptr;
+        }
+        if (span.videoLabel) {
+            span.videoLabel->clear();
+            span.videoLabel->deleteLater();
+            span.videoLabel = nullptr;
+        }
+        if (span.imageLabel) {
+            span.imageLabel->clear();
+            span.imageLabel->deleteLater();
+            span.imageLabel = nullptr;
+        }
+        if (span.widget) {
+            span.widget->hide();
+            span.widget->deleteLater();
+            span.widget = nullptr;
+        }
+    }
+    item->spans.clear();
+
+    if (item->widget) {
+        item->widget->hide();
+        item->widget->deleteLater();
+        item->widget = nullptr;
+    }
+    if (item->opacity) {
+        item->opacity->deleteLater();
+        item->opacity = nullptr;
+    }
+
+    if (item->player) {
+        item->player->deleteLater();
+        item->player = nullptr;
+    }
+    if (item->audio) {
+        item->audio->deleteLater();
+        item->audio = nullptr;
+    }
+
+    item->loaded = false;
+    item->primedFirstFrame = false;
+    item->playAuthorized = false;
 }
 
 QWidget* RemoteSceneController::ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary) {
@@ -353,8 +429,10 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
         item->audio->setMuted(item->muted);
         item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0));
         item->player->setAudioOutput(item->audio);
-    QVideoSink* videoSink = new QVideoSink(w);
+        QVideoSink* videoSink = new QVideoSink(w);
+        item->videoSinkSingle = videoSink;
         QLabel* videoLabel = new QLabel(w);
+        item->videoLabelSingle = videoLabel;
         videoLabel->setScaledContents(true);
         videoLabel->setGeometry(0,0,pw,ph);
         videoLabel->setAttribute(Qt::WA_TranslucentBackground, true);

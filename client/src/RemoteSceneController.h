@@ -53,6 +53,7 @@ private:
 		bool loaded = false; // true when QMediaPlayer reports Loaded/Buffered
 		// For legacy single-span path
 		QWidget* widget = nullptr; QGraphicsOpacityEffect* opacity = nullptr;
+		QLabel* videoLabelSingle = nullptr; QVideoSink* videoSinkSingle = nullptr;
 		QTimer* displayTimer = nullptr; QTimer* playTimer = nullptr;
 		// Video only
 		QMediaPlayer* player = nullptr; QAudioOutput* audio = nullptr;
@@ -69,6 +70,7 @@ private:
 	void scheduleMediaMulti(const std::shared_ptr<RemoteMediaItem>& item);
 	void fadeIn(const std::shared_ptr<RemoteMediaItem>& item);
 	void clearScene();
+    void teardownMediaItem(const std::shared_ptr<RemoteMediaItem>& item);
 
 	WebSocketClient* m_ws = nullptr; // not owned
 	bool m_enabled = true;
