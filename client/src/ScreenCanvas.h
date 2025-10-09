@@ -102,6 +102,8 @@ public:
     void setRemoteCursorFixedSize(bool fixed) { m_remoteCursorFixedSize = fixed; if (m_remoteCursorDot) recreateRemoteCursorItem(); }
     bool remoteCursorFixedSize() const { return m_remoteCursorFixedSize; }
 
+    static void setAllCanvasesSuspended(bool suspended);
+
     // Snap-to-screen configuration
     void setSnapDistancePx(int px) { m_snapDistancePx = qMax(1, px); }
     int snapDistancePx() const { return m_snapDistancePx; }
@@ -161,9 +163,11 @@ protected:
 
 private:
     static QSet<ScreenCanvas*> s_activeCanvases;
+    static bool s_applicationSuspended;
     static void registerCanvas(ScreenCanvas* canvas);
     static void unregisterCanvas(ScreenCanvas* canvas);
     static void dispatchUploadStateChanged();
+    void applyApplicationSuspended(bool suspended);
 
     bool gestureEvent(QGestureEvent* event);
     void ensureDragPreview(const QMimeData* mime);
@@ -259,6 +263,7 @@ private:
     int m_mediaHandleVisualSizePx = 12;
     int m_screenBorderWidthPx = 1;
     int m_screenLabelFontPt = 48;
+    bool m_applicationSuspended = false;
 
     QGraphicsItem* m_dragPreviewItem = nullptr;
     QSize m_dragPreviewBaseSize;

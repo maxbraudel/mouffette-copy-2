@@ -1098,6 +1098,8 @@ void MainWindow::removeRemoteStatusFromLayout() {
                 m_remoteInfoSep1->hide();
             }
         }
+
+            updateApplicationSuspendedState(false);
     }
 }
 
@@ -1769,8 +1771,26 @@ void MainWindow::clearUploadTracking(CanvasSession& session) {
 
 
 
+void MainWindow::updateApplicationSuspendedState(bool suspended) {
+    if (m_applicationSuspended == suspended) {
+        return;
+    }
+    m_applicationSuspended = suspended;
+    ScreenCanvas::setAllCanvasesSuspended(suspended);
+}
+
+
 void MainWindow::changeEvent(QEvent* event) {
     QMainWindow::changeEvent(event);
+    if (event->type() == QEvent::WindowStateChange) {
+        const bool minimized = (windowState() & Qt::WindowMinimized);
+        updateApplicationSuspendedState(minimized || isHidden());
+    }
+}
+
+void MainWindow::handleApplicationStateChanged(Qt::ApplicationState state) {
+    const bool suspended = (state == Qt::ApplicationHidden || state == Qt::ApplicationSuspended);
+    updateApplicationSuspendedState(suspended);
 }
 
 void MainWindow::showScreenView(const ClientInfo& client) {
@@ -2940,6 +2960,12 @@ void MainWindow::showEvent(QShowEvent* event) {
             m_webSocketClient->requestScreens(selId);
         }
     }
+    updateApplicationSuspendedState(windowState() & Qt::WindowMinimized);
+}
+
+void MainWindow::hideEvent(QHideEvent* event) {
+    QMainWindow::hideEvent(event);
+    updateApplicationSuspendedState(true);
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {

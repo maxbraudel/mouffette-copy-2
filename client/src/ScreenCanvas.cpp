@@ -79,6 +79,7 @@ protected:
 };
 
 QSet<ScreenCanvas*> ScreenCanvas::s_activeCanvases;
+bool ScreenCanvas::s_applicationSuspended = false;
 
 void ScreenCanvas::registerCanvas(ScreenCanvas* canvas) {
     if (!canvas) return;
@@ -88,6 +89,9 @@ void ScreenCanvas::registerCanvas(ScreenCanvas* canvas) {
         ResizableMediaBase::setUploadChangedNotifier([]() {
             ScreenCanvas::dispatchUploadStateChanged();
         });
+    }
+    if (s_applicationSuspended) {
+        canvas->applyApplicationSuspended(true);
     }
 }
 
@@ -104,6 +108,35 @@ void ScreenCanvas::dispatchUploadStateChanged() {
     for (ScreenCanvas* canvas : canvases) {
         if (canvas) {
             canvas->scheduleInfoOverlayRefresh();
+        }
+    }
+}
+
+void ScreenCanvas::setAllCanvasesSuspended(bool suspended) {
+    if (s_applicationSuspended == suspended) {
+        return;
+    }
+    s_applicationSuspended = suspended;
+    const auto canvases = s_activeCanvases;
+    for (ScreenCanvas* canvas : canvases) {
+        if (canvas) {
+            canvas->applyApplicationSuspended(suspended);
+        }
+    }
+}
+
+void ScreenCanvas::applyApplicationSuspended(bool suspended) {
+    if (m_applicationSuspended == suspended) {
+        return;
+    }
+    m_applicationSuspended = suspended;
+    if (!m_scene) {
+        return;
+    }
+    const QList<QGraphicsItem*> items = m_scene->items();
+    for (QGraphicsItem* gi : items) {
+        if (auto* video = dynamic_cast<ResizableVideoItem*>(gi)) {
+            video->setApplicationSuspended(suspended);
         }
     }
 }
@@ -3076,6 +3109,9 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                 if (isVideo) {
                     // Use default handle sizes similar to previous inline defaults (visual 12, selection 30)
                     auto* v = new ResizableVideoItem(localPath, 12, 30, fi.fileName(), m_videoControlsFadeMs);
+                    if (m_applicationSuspended) {
+                        v->setApplicationSuspended(true);
+                    }
                     // Record original file path for later upload manifest collection
                     v->setSourcePath(localPath);
                     // Preserve global canvas media scale (so video size matches screens & images 1:1)

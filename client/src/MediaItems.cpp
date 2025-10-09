@@ -8,15 +8,15 @@
 #include <QGraphicsSceneMouseEvent>
 #include <QGraphicsSceneHoverEvent>
 #include <QGuiApplication>
-#include <QPainter>
 #include <QStyleOptionGraphicsItem>
 #include <QWidget>
 #include <QTimer>
-#include <QMutexLocker>
+#include <QVideoFrame>
+#include <QVideoFrameFormat>
+#include <algorithm>
 #include <QDebug>
 #include "MediaSettingsPanel.h"
 #include <cmath>
-#include <numeric>
 #include <QVariantAnimation>
 #include <QtSvgWidgets/QGraphicsSvgItem>
 #include <QtSvg/QSvgRenderer>
@@ -25,8 +25,6 @@
 #include <QAudioOutput>
 #include <QVideoSink>
 #include <QMediaMetaData>
-#include <QThreadPool>
-#include <QRunnable>
 #include <QApplication>
 #include "AppColors.h"
 #include <QDateTime>
@@ -963,37 +961,11 @@ void ResizablePixmapItem::paint(QPainter* painter, const QStyleOptionGraphicsIte
     paintSelectionAndLabel(painter);
 }
 
-// ---------------- FrameConversionWorker -----------------
-
-class ResizableVideoItem; // already declared in header but keep for clarity
-
-QSet<uintptr_t> FrameConversionWorker::s_activeItems;
-
-FrameConversionWorker::FrameConversionWorker(ResizableVideoItem* item, QVideoFrame frame, quint64 serial)
-    : m_itemPtr(reinterpret_cast<uintptr_t>(item)), m_frame(frame), m_serial(serial) { setAutoDelete(true); }
-
-void FrameConversionWorker::registerItem(ResizableVideoItem* item) { s_activeItems.insert(reinterpret_cast<uintptr_t>(item)); }
-void FrameConversionWorker::unregisterItem(ResizableVideoItem* item) { s_activeItems.remove(reinterpret_cast<uintptr_t>(item)); }
-
-void FrameConversionWorker::run() {
-    if (!m_frame.isValid()) return;
-    QImage img = m_frame.toImage(); if (img.isNull()) return;
-    QImage converted = img.convertToFormat(QImage::Format_ARGB32_Premultiplied); if (converted.isNull()) return;
-    uintptr_t itemPtr = m_itemPtr; quint64 serial = m_serial;
-    QMetaObject::invokeMethod(qApp, [itemPtr, converted = std::move(converted), serial]() mutable {
-        if (FrameConversionWorker::s_activeItems.contains(itemPtr)) {
-            auto* item = reinterpret_cast<ResizableVideoItem*>(itemPtr);
-            item->onFrameConversionComplete(std::move(converted), serial);
-        }
-    }, Qt::QueuedConnection);
-}
-
 // ---------------- ResizableVideoItem -----------------
 
 ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx, int selectionSizePx, const QString& filename, int controlsFadeMs)
     : ResizableMediaBase(QSize(640,360), visualSizePx, selectionSizePx, filename)
 {
-    FrameConversionWorker::registerItem(this);
     m_controlsFadeMs = std::max(0, controlsFadeMs);
     m_player = new QMediaPlayer();
     m_audio = new QAudioOutput();
@@ -1005,31 +977,57 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
 
     QObject::connect(m_sink, &QVideoSink::videoFrameChanged, m_player, [this](const QVideoFrame& f){
         ++m_framesReceived;
+        if (m_appSuspended) {
+            ++m_framesSkipped;
+            return;
+        }
         if (!m_holdLastFrameAtEnd && f.isValid()) {
-            if (!isVisibleInAnyView()) { ++m_framesSkipped; logFrameStats(); return; }
-            {
-                QMutexLocker locker(&m_frameMutex);
-                m_pendingFrame = f;
-            }
-            if (!m_conversionBusy.exchange(true)) {
-                quint64 serial = ++m_frameSerial;
-                auto* worker = new FrameConversionWorker(this, f, serial);
-                QThreadPool::globalInstance()->start(worker);
-                ++m_conversionsStarted; ++m_framesProcessed;
-            } else {
+            if (!isVisibleInAnyView()) {
                 ++m_framesSkipped;
+                logFrameStats();
+                return;
             }
-            m_lastFrame = f; maybeAdoptFrameSize(f);
-            if (m_primingFirstFrame && !m_firstFramePrimed) {
-                m_firstFramePrimed = true; m_primingFirstFrame = false;
-                if (m_player) { m_player->pause(); m_player->setPosition(0); }
-                if (m_audio) m_audio->setMuted(m_savedMuted);
-                m_controlsLockedUntilReady = false; m_controlsDidInitialFade = false;
-                if (isSelected()) { setControlsVisible(true); updateControlsLayout(); m_lastRepaintMs = 0; update(); return; }
+
+            QImage converted = convertFrameToImage(f);
+            if (converted.isNull()) {
+                ++m_framesDropped;
+                ++m_conversionFailures;
+                if (m_conversionFailures <= 5 || (m_conversionFailures % 25) == 0) {
+                    qWarning() << "ResizableVideoItem: frame conversion failed"
+                               << "handleType=" << f.handleType()
+                               << "pixelFormat=" << f.pixelFormat()
+                               << "surface=" << f.surfaceFormat().pixelFormat();
+                }
+            } else {
+                m_conversionFailures = 0;
+                maybeAdoptFrameSize(f);
+                m_lastFrameImage = std::move(converted);
+                ++m_framesProcessed;
+                if (m_primingFirstFrame && !m_firstFramePrimed) {
+                    m_firstFramePrimed = true;
+                    m_primingFirstFrame = false;
+                    if (m_player) {
+                        m_player->pause();
+                        m_player->setPosition(0);
+                    }
+                    if (m_audio) m_audio->setMuted(m_savedMuted);
+                    m_controlsLockedUntilReady = false;
+                    m_controlsDidInitialFade = false;
+                    if (isSelected()) {
+                        setControlsVisible(true);
+                        updateControlsLayout();
+                        m_lastRepaintMs = 0;
+                        update();
+                        return;
+                    }
+                }
             }
             logFrameStats();
         }
-        if (shouldRepaint()) { m_lastRepaintMs = QDateTime::currentMSecsSinceEpoch(); update(); }
+        if (shouldRepaint()) {
+            m_lastRepaintMs = QDateTime::currentMSecsSinceEpoch();
+            update();
+        }
     });
 
     // Floating controls (absolute px background + children) created after sink connection
@@ -1123,7 +1121,6 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
 }
 
 ResizableVideoItem::~ResizableVideoItem() {
-    FrameConversionWorker::unregisterItem(this);
     if (m_player) QObject::disconnect(m_player, nullptr, nullptr, nullptr);
     if (m_sink) QObject::disconnect(m_sink, nullptr, nullptr, nullptr);
     delete m_player; delete m_audio; delete m_sink; delete m_controlsFadeAnim;
@@ -1159,19 +1156,71 @@ void ResizableVideoItem::updateDragWithScenePos(const QPointF& scenePos) {
 
 void ResizableVideoItem::endDrag() { if (m_draggingProgress || m_draggingVolume) { m_draggingProgress = false; m_draggingVolume = false; ungrabMouse(); updateControlsLayout(); update(); } }
 
+void ResizableVideoItem::setApplicationSuspended(bool suspended) {
+    if (m_appSuspended == suspended) return;
+    m_appSuspended = suspended;
+    if (m_appSuspended) {
+        m_wasPlayingBeforeSuspend = m_player && m_player->playbackState() == QMediaPlayer::PlayingState;
+        m_resumePositionMs = m_player ? m_player->position() : m_positionMs;
+        m_needsReprimeAfterResume = !m_firstFramePrimed;
+        if (m_player) {
+            if (m_wasPlayingBeforeSuspend) {
+                m_player->pause();
+            }
+            if (!m_sinkDetached) {
+                m_player->setVideoSink(nullptr);
+                m_sinkDetached = true;
+            }
+        }
+        if (m_progressTimer) {
+            m_progressTimer->stop();
+        }
+    } else {
+        if (m_player) {
+            if (m_sinkDetached) {
+                m_player->setVideoSink(m_sink);
+                m_sinkDetached = false;
+            }
+            if (m_needsReprimeAfterResume) {
+                restartPrimingSequence();
+            } else {
+                if (m_resumePositionMs > 0) {
+                    m_player->setPosition(m_resumePositionMs);
+                    m_positionMs = m_resumePositionMs;
+                    m_smoothProgressRatio = (m_durationMs > 0) ? std::clamp<qreal>(qreal(m_positionMs) / qreal(m_durationMs), 0.0, 1.0) : 0.0;
+                    updateProgressBar();
+                }
+                if (m_wasPlayingBeforeSuspend) {
+                    m_player->play();
+                }
+            }
+        }
+        if (m_progressTimer && m_player && m_player->playbackState() == QMediaPlayer::PlayingState) {
+            m_progressTimer->start();
+        }
+        m_wasPlayingBeforeSuspend = false;
+        m_needsReprimeAfterResume = false;
+        m_resumePositionMs = 0;
+        update();
+    }
+}
+
 void ResizableVideoItem::getFrameStats(int& received, int& processed, int& skipped) const { received = m_framesReceived; processed = m_framesProcessed; skipped = m_framesSkipped; }
 
-void ResizableVideoItem::getFrameStatsExtended(int& received, int& processed, int& skipped, int& dropped, int& conversionsStarted, int& conversionsCompleted) const { received = m_framesReceived; processed = m_framesProcessed; skipped = m_framesSkipped; dropped = m_framesDropped; conversionsStarted = m_conversionsStarted; conversionsCompleted = m_conversionsCompleted; }
+void ResizableVideoItem::getFrameStatsExtended(int& received, int& processed, int& skipped, int& dropped, int& conversionFailures) const {
+    received = m_framesReceived;
+    processed = m_framesProcessed;
+    skipped = m_framesSkipped;
+    dropped = m_framesDropped;
+    conversionFailures = m_conversionFailures;
+}
 
-void ResizableVideoItem::resetFrameStats() { m_framesReceived = m_framesProcessed = m_framesSkipped = 0; m_framesDropped = m_conversionsStarted = m_conversionsCompleted = 0; m_frameSerial = m_lastProcessedSerial = 0; }
-
-void ResizableVideoItem::onFrameConversionComplete(QImage convertedImage, quint64 serial) {
-    if (m_beingDeleted) return; // ignore late callbacks after deletion begun
-    if (serial <= m_lastProcessedSerial) { ++m_framesDropped; return; }
-    m_lastProcessedSerial = serial; m_lastFrameImage = std::move(convertedImage); ++m_conversionsCompleted; m_conversionBusy.store(false);
-    if (m_conversionsCompleted % 30 == 0) qDebug() << "Frame conversion completed serial" << serial;
-    { QMutexLocker locker(&m_frameMutex); if (m_pendingFrame.isValid() && !m_conversionBusy.exchange(true)) { quint64 newSerial = ++m_frameSerial; auto* worker = new FrameConversionWorker(this, m_pendingFrame, newSerial); QThreadPool::globalInstance()->start(worker); ++m_conversionsStarted; m_pendingFrame = QVideoFrame(); } }
-    if (shouldRepaint()) { m_lastRepaintMs = QDateTime::currentMSecsSinceEpoch(); update(); }
+void ResizableVideoItem::resetFrameStats() {
+    m_framesReceived = 0;
+    m_framesProcessed = 0;
+    m_framesSkipped = 0;
+    m_framesDropped = 0;
+    m_conversionFailures = 0;
 }
 
 bool ResizableVideoItem::handleControlsPressAtItemPos(const QPointF& itemPos) {
@@ -1197,9 +1246,8 @@ void ResizableVideoItem::paint(QPainter* painter, const QStyleOptionGraphicsItem
     if (isContentVisible() || m_contentDisplayOpacity > 0.0) {
         qreal effective = contentOpacity() * m_contentDisplayOpacity;
         auto drawImg = [&](const QImage& img){ if (img.isNull() || effective <= 0.0) return; QRectF dst = fitRect(br, img.size()); if (effective >= 0.999) { painter->drawImage(dst, img); } else { painter->save(); painter->setOpacity(effective); painter->drawImage(dst, img); painter->restore(); } };
-        if (!m_lastFrameImage.isNull()) { drawImg(m_lastFrameImage); }
-        else if (m_lastFrame.isValid()) { QImage img = m_lastFrame.toImage(); if (!img.isNull()) { drawImg(img); } else if (m_posterImageSet && !m_posterImage.isNull()) { drawImg(m_posterImage); } }
-        else if (m_posterImageSet && !m_posterImage.isNull()) { drawImg(m_posterImage); }
+    if (!m_lastFrameImage.isNull()) { drawImg(m_lastFrameImage); }
+    else if (m_posterImageSet && !m_posterImage.isNull()) { drawImg(m_posterImage); }
     }
     paintSelectionAndLabel(painter);
 }
@@ -1293,7 +1341,14 @@ void ResizableVideoItem::prepareForDeletion() {
     }
 }
 
-void ResizableVideoItem::maybeAdoptFrameSize(const QVideoFrame& f) { if (m_adoptedSize) return; if (!f.isValid()) return; QImage img = f.toImage(); if (img.isNull()) return; const QSize sz = img.size(); if (sz.isEmpty()) return; adoptBaseSize(sz); }
+void ResizableVideoItem::maybeAdoptFrameSize(const QVideoFrame& f) {
+    if (m_adoptedSize) return;
+    if (!f.isValid()) return;
+    const int w = f.width();
+    const int h = f.height();
+    if (w <= 0 || h <= 0) return;
+    adoptBaseSize(QSize(w, h));
+}
 
 void ResizableVideoItem::adoptBaseSize(const QSize& sz) { if (m_adoptedSize) return; if (sz.isEmpty()) return; m_adoptedSize = true; const QRectF oldRect(0,0, baseWidth(), baseHeight()); const QPointF oldCenterScene = mapToScene(oldRect.center()); prepareGeometryChange(); m_baseSize = sz; setScale(m_initialScaleFactor); const QPointF newTopLeftScene = oldCenterScene - QPointF(sz.width()*m_initialScaleFactor/2.0, sz.height()*m_initialScaleFactor/2.0); setPos(newTopLeftScene); update(); }
 
@@ -1319,5 +1374,83 @@ void ResizableVideoItem::updateControlsLayout() {
 
 bool ResizableVideoItem::isVisibleInAnyView() const { if (!scene() || scene()->views().isEmpty()) return false; auto *view = scene()->views().first(); if (!view || !view->viewport()) return false; QRectF viewportRect = view->viewport()->rect(); QRectF sceneRect = view->mapToScene(viewportRect.toRect()).boundingRect(); QRectF itemSceneRect = mapToScene(boundingRect()).boundingRect(); return sceneRect.intersects(itemSceneRect); }
 bool ResizableVideoItem::shouldRepaint() const { const qint64 now = QDateTime::currentMSecsSinceEpoch(); return (now - m_lastRepaintMs) >= m_repaintBudgetMs; }
-void ResizableVideoItem::logFrameStats() const { if (m_framesReceived > 0 && m_framesReceived % 120 == 0) { float processRatio = float(m_framesProcessed)/float(m_framesReceived); float skipRatio = float(m_framesSkipped)/float(m_framesReceived); float dropRatio = float(m_framesDropped)/float(m_framesReceived); float conversionEfficiency = (m_conversionsStarted > 0) ? float(m_conversionsCompleted)/float(m_conversionsStarted) : 0.0f; qDebug() << "VideoItem frame stats: received=" << m_framesReceived << "processed=" << m_framesProcessed << "(" << (processRatio*100.0f) << "%)" << "skipped=" << m_framesSkipped << "(" << (skipRatio*100.0f) << "%)" << "dropped=" << m_framesDropped << "(" << (dropRatio*100.0f) << "%)" << "conversions=" << m_conversionsStarted << "/" << m_conversionsCompleted << "(" << (conversionEfficiency*100.0f) << "% efficiency)"; } }
+void ResizableVideoItem::logFrameStats() const {
+    if (m_framesReceived > 0 && m_framesReceived % 120 == 0) {
+        const float processRatio = float(m_framesProcessed) / float(m_framesReceived);
+        const float skipRatio = float(m_framesSkipped) / float(m_framesReceived);
+        const float dropRatio = float(m_framesDropped) / float(m_framesReceived);
+        const float failureRatio = float(m_conversionFailures) / float(m_framesReceived);
+        qDebug() << "VideoItem frame stats: received=" << m_framesReceived
+                 << "processed=" << m_framesProcessed << "(" << (processRatio * 100.0f) << "% )"
+                 << "skipped=" << m_framesSkipped << "(" << (skipRatio * 100.0f) << "% )"
+                 << "dropped=" << m_framesDropped << "(" << (dropRatio * 100.0f) << "% )"
+                 << "conversionFailures=" << m_conversionFailures << "(" << (failureRatio * 100.0f) << "% )";
+    }
+}
 void ResizableVideoItem::updateProgressBar() { if (!m_progressFillRectItem) return; const qreal margin = 1.0; const QRectF bgRect = m_progressBgRectItem ? m_progressBgRectItem->rect() : QRectF(); const qreal progWpx = bgRect.width(); const qreal rowH = bgRect.height(); m_progressFillRectItem->setRect(margin, margin, (progWpx - 2*margin) * m_smoothProgressRatio, rowH - 2*margin); }
+
+QImage ResizableVideoItem::convertFrameToImage(const QVideoFrame& frame) const {
+    if (!frame.isValid()) {
+        return {};
+    }
+
+    QImage image = frame.toImage();
+    if (!image.isNull()) {
+        if (image.format() != QImage::Format_RGBA8888 && image.format() != QImage::Format_ARGB32_Premultiplied) {
+            image = image.convertToFormat(QImage::Format_RGBA8888);
+        }
+        return image;
+    }
+
+    QVideoFrame copy(frame);
+    if (!copy.isValid()) {
+        return {};
+    }
+
+    if (!copy.map(QVideoFrame::ReadOnly)) {
+        return {};
+    }
+
+    QImage mapped;
+    const QVideoFrameFormat format = copy.surfaceFormat();
+    const int width = format.frameWidth();
+    const int height = format.frameHeight();
+    const int stride = copy.bytesPerLine(0);
+    const QImage::Format imgFormat = QVideoFrameFormat::imageFormatFromPixelFormat(format.pixelFormat());
+    if (imgFormat != QImage::Format_Invalid && width > 0 && height > 0 && stride > 0) {
+        mapped = QImage(copy.bits(0), width, height, stride, imgFormat).copy();
+    }
+
+    copy.unmap();
+
+    if (!mapped.isNull() && mapped.format() != QImage::Format_RGBA8888 && mapped.format() != QImage::Format_ARGB32_Premultiplied) {
+        mapped = mapped.convertToFormat(QImage::Format_RGBA8888);
+    }
+
+    return mapped;
+}
+
+void ResizableVideoItem::restartPrimingSequence() {
+    if (!m_player) {
+        return;
+    }
+
+    m_firstFramePrimed = false;
+    m_primingFirstFrame = false;
+    m_holdLastFrameAtEnd = false;
+    m_lastFrameImage = QImage();
+    m_smoothProgressRatio = 0.0;
+    m_positionMs = 0;
+    if (m_progressTimer) {
+        m_progressTimer->stop();
+    }
+    m_controlsLockedUntilReady = true;
+    m_controlsDidInitialFade = false;
+    m_savedMuted = m_audio ? m_audio->isMuted() : false;
+    if (m_audio) {
+        m_audio->setMuted(true);
+    }
+    m_primingFirstFrame = true;
+    m_player->setPosition(0);
+    m_player->play();
+}

@@ -15,6 +15,7 @@
 #include <QSystemTrayIcon>
 #include <QCloseEvent>
 #include <QResizeEvent>
+#include <QHideEvent>
 #include <QScrollArea>
 #include <QWidget>
 #include <QEvent>
@@ -76,6 +77,9 @@ public:
     QPushButton* getSettingsButton() const { return m_settingsButton; }
     int getInnerContentGap() const;
 
+public slots:
+    void handleApplicationStateChanged(Qt::ApplicationState state);
+
 private slots:
     void onConnected();
     void onDisconnected();
@@ -110,6 +114,7 @@ protected:
     bool eventFilter(QObject* obj, QEvent* event) override;
     void closeEvent(QCloseEvent *event) override;
     void showEvent(QShowEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
 
 private:
     struct CanvasSession {
@@ -198,6 +203,7 @@ private:
     void clearUploadTracking(CanvasSession& session);
     void refreshOngoingScenesList();
     void applyListWidgetStyle(QListWidget* listWidget) const;
+    void updateApplicationSuspendedState(bool suspended);
 
     // UI Components
     QWidget* m_centralWidget;
@@ -323,6 +329,7 @@ private:
     SpinnerWidget* m_inlineSpinner = nullptr;
     QString m_activeRemoteClientId;
     bool m_remoteClientConnected = false;
+    bool m_applicationSuspended = false;
     
     // Toast notification system
     ToastNotificationSystem* m_toastSystem = nullptr;

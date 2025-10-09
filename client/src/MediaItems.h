@@ -16,10 +16,6 @@
 #include <QSet>
 #include <QTimer>
 #include <QVariantAnimation>
-#include <QMutex>
-#include <QAtomicInteger>
-#include <QRunnable>
-#include <atomic>
 #include <memory>
 #include <cmath>
 #include <functional>
@@ -256,9 +252,6 @@ private:
     QPixmap m_pix;
 };
 
-// Forward declaration for async worker
-class FrameConversionWorker;
-
 // Video media item with in-item controls overlays & performance instrumentation
 class ResizableVideoItem : public ResizableMediaBase {
 public:
@@ -281,13 +274,13 @@ public:
     void updateDragWithScenePos(const QPointF& scenePos);
     void endDrag();
     void requestOverlayRelayout() { updateControlsLayout(); }
+    void setApplicationSuspended(bool suspended);
 
     // Performance / diagnostics
     void setRepaintBudget(int ms) { m_repaintBudgetMs = std::max(1, ms); }
     void getFrameStats(int& received, int& processed, int& skipped) const;
-    void getFrameStatsExtended(int& received, int& processed, int& skipped, int& dropped, int& conversionsStarted, int& conversionsCompleted) const;
+    void getFrameStatsExtended(int& received, int& processed, int& skipped, int& dropped, int& conversionFailures) const;
     void resetFrameStats();
-    void onFrameConversionComplete(QImage convertedImage, quint64 serial); // async callback
     bool handleControlsPressAtItemPos(const QPointF& itemPos); // view-level forwarding
 
     // Audio state accessors for scene serialization
@@ -321,6 +314,8 @@ private:
     bool shouldRepaint() const;
     void logFrameStats() const;
     void updateProgressBar();
+    QImage convertFrameToImage(const QVideoFrame& frame) const;
+    void restartPrimingSequence();
 
     qreal baseWidth() const { return static_cast<qreal>(m_baseSize.width()); }
     qreal baseHeight() const { return static_cast<qreal>(m_baseSize.height()); }
@@ -328,7 +323,6 @@ private:
     QMediaPlayer* m_player = nullptr;
     QAudioOutput* m_audio = nullptr;
     QVideoSink* m_sink = nullptr;
-    QVideoFrame m_lastFrame;
     QImage m_lastFrameImage;
     qint64 m_durationMs = 0;
     qint64 m_positionMs = 0;
@@ -351,18 +345,8 @@ private:
     bool m_controlsLockedUntilReady = true; int m_controlsFadeMs = 140; QVariantAnimation* m_controlsFadeAnim = nullptr; bool m_controlsDidInitialFade = false;
     qint64 m_lastRepaintMs = 0; int m_repaintBudgetMs = 16;
     mutable int m_framesReceived = 0; mutable int m_framesProcessed = 0; mutable int m_framesSkipped = 0;
-    std::atomic<bool> m_conversionBusy{false}; QVideoFrame m_pendingFrame; QMutex m_frameMutex; std::atomic<quint64> m_frameSerial{0}; quint64 m_lastProcessedSerial = 0;
-    mutable int m_framesDropped = 0; mutable int m_conversionsStarted = 0; mutable int m_conversionsCompleted = 0;
+    mutable int m_framesDropped = 0; mutable int m_conversionFailures = 0;
+    bool m_appSuspended = false; bool m_wasPlayingBeforeSuspend = false;
+    bool m_sinkDetached = false; qint64 m_resumePositionMs = 0; bool m_needsReprimeAfterResume = false;
 };
 
-// Worker used for asynchronous frame conversion to ARGB images; posts back to main thread.
-class FrameConversionWorker : public QRunnable {
-public:
-    FrameConversionWorker(ResizableVideoItem* item, QVideoFrame frame, quint64 serial);
-    void run() override;
-    static void registerItem(ResizableVideoItem* item);
-    static void unregisterItem(ResizableVideoItem* item);
-    static QSet<uintptr_t> s_activeItems;
-private:
-    uintptr_t m_itemPtr; QVideoFrame m_frame; quint64 m_serial;
-};

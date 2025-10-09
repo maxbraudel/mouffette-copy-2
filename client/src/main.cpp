@@ -48,6 +48,7 @@ int main(int argc, char *argv[]) {
     app.setQuitOnLastWindowClosed(false);
 
     MainWindow window;
+    QObject::connect(&app, &QGuiApplication::applicationStateChanged, &window, &MainWindow::handleApplicationStateChanged);
     window.show(); // Explicitly show main window since tray UX removed
     return app.exec();
 }
