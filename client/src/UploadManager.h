@@ -104,6 +104,13 @@ private:
     void cleanupIncomingCacheForConnectionLoss();
     void finalizeLocalCancelState();
     void cleanupIncomingSession(bool deleteDiskContents, bool notifySender, const QString& senderOverride = QString(), const QString& cacheDirOverride = QString(), const QString& uploadIdOverride = QString());
+    void resetProgressTracking();
+    void updateLocalProgress(int percent, int filesCompleted);
+    void updateRemoteProgress(int percent, int filesCompleted);
+    void emitEffectiveProgressIfChanged();
+    void updatePerFileLocalProgress(const QString& fileId, int percent);
+    void updatePerFileRemoteProgress(const QString& fileId, int percent);
+    void emitEffectivePerFileProgress(const QString& fileId);
 
     QPointer<WebSocketClient> m_ws;
     QString m_targetClientId;
@@ -127,9 +134,18 @@ private:
     qint64 m_sentBytes = 0;
     // Prefer remote (target-reported) progress when available to avoid early 100%
     bool m_remoteProgressReceived = false;
+    int m_lastLocalPercent = 0;
+    int m_lastLocalFilesCompleted = 0;
+    int m_lastRemotePercent = 0;
+    int m_lastRemoteFilesCompleted = 0;
+    int m_effectivePercent = -1;
+    int m_effectiveFilesCompleted = -1;
 
     // Sender-side per-file tracking
     QVector<UploadFileInfo> m_outgoingFiles;
+    QHash<QString, int> m_localFilePercents;
+    QHash<QString, int> m_remoteFilePercents;
+    QHash<QString, int> m_effectiveFilePercents;
 
     QString m_lastRemovalClientId;
 

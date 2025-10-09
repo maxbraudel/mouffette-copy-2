@@ -12,6 +12,8 @@
 #include <QEventLoop>
 #include <QTimer>
 #include <QDebug>
+#include <algorithm>
+#include <cmath>
 
 // Removed dependency on ResizableMediaBase / scene scanning.
 
@@ -108,8 +110,8 @@ void UploadManager::requestCancel() {
 
 void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
     if (m_ws) {
-        // Open the dedicated upload channel to avoid blocking control messages
-        m_ws->ensureUploadChannel();
+        // Prepare the dedicated upload channel to avoid blocking control messages
+        m_ws->beginUploadSession(true);
     }
     // Capture stable target id for the entire upload session
     m_uploadTargetClientId = m_targetClientId;
@@ -124,6 +126,7 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
     m_sentBytes = 0;
     m_remoteProgressReceived = false;
     emit uiStateChanged();
+    resetProgressTracking();
 
     // Build manifest with file deduplication info
     QJsonArray manifest;
@@ -168,29 +171,33 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
             m_sentBytes += chunk.size();
             if (f.size > 0) {
                 int p = static_cast<int>(std::round(sentForFile * 100.0 / static_cast<double>(f.size)));
-                p = std::clamp(p, 0, 100);
-                emit fileUploadProgress(f.fileId, p);
+                updatePerFileLocalProgress(f.fileId, p);
             }
             // Emit weighted global progress based on bytes, but do not exceed 99%
-            if (!m_remoteProgressReceived && m_totalBytes > 0) {
+            if (m_totalBytes > 0) {
                 int globalPercent = static_cast<int>(std::round(m_sentBytes * 100.0 / static_cast<double>(m_totalBytes)));
                 globalPercent = std::clamp(globalPercent, 0, 99); // keep <100 until remote confirms
                 int filesCompletedLocal = m_filesCompleted + (file.atEnd() ? 1 : 0);
-                emit uploadProgress(globalPercent, filesCompletedLocal, m_totalFiles);
+                updateLocalProgress(globalPercent, filesCompletedLocal);
             }
             // Yield briefly
             QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
         }
         file.close();
-        if (!m_cancelRequested) emit fileUploadFinished(f.fileId);
+        if (!m_cancelRequested) {
+            updatePerFileLocalProgress(f.fileId, 99);
+            emit fileUploadFinished(f.fileId);
+        }
         if (m_cancelRequested) break;
         // After a file is fully sent, update local filesCompleted
-        if (!m_cancelRequested && !m_remoteProgressReceived) {
+        if (!m_cancelRequested) {
             m_filesCompleted = std::min(m_filesCompleted + 1, m_totalFiles);
             if (m_totalBytes > 0) {
                 int globalPercent = static_cast<int>(std::round(m_sentBytes * 100.0 / static_cast<double>(m_totalBytes)));
                 globalPercent = std::clamp(globalPercent, 0, 99);
-                emit uploadProgress(globalPercent, m_filesCompleted, m_totalFiles);
+                updateLocalProgress(globalPercent, m_filesCompleted);
+            } else {
+                updateLocalProgress(m_lastLocalPercent, m_filesCompleted);
             }
         }
     }
@@ -222,11 +229,11 @@ void UploadManager::resetToInitial() {
     m_totalBytes = 0;
     m_remoteProgressReceived = false;
     m_outgoingFiles.clear();
+    resetProgressTracking();
     if (m_cancelFallbackTimer) m_cancelFallbackTimer->stop();
     m_uploadTargetClientId.clear();
     m_activeSessionIdentity.clear();
-    // Close upload channel if open
-    if (m_ws) m_ws->closeUploadChannel();
+    if (m_ws) m_ws->endUploadSession();
 }
 
 void UploadManager::finalizeLocalCancelState() {
@@ -242,6 +249,93 @@ void UploadManager::finalizeLocalCancelState() {
     }
     emit allFilesRemoved();
     emit uiStateChanged();
+}
+
+void UploadManager::resetProgressTracking() {
+    m_lastLocalPercent = 0;
+    m_lastLocalFilesCompleted = 0;
+    m_lastRemotePercent = 0;
+    m_lastRemoteFilesCompleted = 0;
+    m_effectivePercent = -1;
+    m_effectiveFilesCompleted = -1;
+    m_localFilePercents.clear();
+    m_remoteFilePercents.clear();
+    m_effectiveFilePercents.clear();
+}
+
+void UploadManager::updateLocalProgress(int percent, int filesCompleted) {
+    if (m_totalFiles <= 0) return;
+    percent = std::clamp(percent, 0, 99);
+    filesCompleted = std::clamp(filesCompleted, 0, m_totalFiles);
+    if (percent > m_lastLocalPercent) {
+        m_lastLocalPercent = percent;
+    }
+    if (filesCompleted > m_lastLocalFilesCompleted) {
+        m_lastLocalFilesCompleted = filesCompleted;
+    }
+    emitEffectiveProgressIfChanged();
+}
+
+void UploadManager::updateRemoteProgress(int percent, int filesCompleted) {
+    if (m_totalFiles <= 0) m_totalFiles = std::max(0, filesCompleted);
+    percent = std::clamp(percent, 0, 100);
+    filesCompleted = std::clamp(filesCompleted, 0, std::max(1, m_totalFiles));
+    if (percent > m_lastRemotePercent) {
+        m_lastRemotePercent = percent;
+    }
+    if (filesCompleted > m_lastRemoteFilesCompleted) {
+        m_lastRemoteFilesCompleted = filesCompleted;
+    }
+    m_remoteProgressReceived = true;
+    emitEffectiveProgressIfChanged();
+}
+
+void UploadManager::emitEffectiveProgressIfChanged() {
+    if (m_totalFiles <= 0) return;
+    const int effectivePercent = std::clamp(std::max(m_lastLocalPercent, m_lastRemotePercent), 0, m_remoteProgressReceived ? 100 : 99);
+    const int effectiveFilesCompleted = std::clamp(m_remoteProgressReceived ? std::max(m_lastLocalFilesCompleted, m_lastRemoteFilesCompleted)
+                                                                          : m_lastLocalFilesCompleted,
+                                                  0,
+                                                  m_totalFiles);
+    if (effectivePercent == m_effectivePercent && effectiveFilesCompleted == m_effectiveFilesCompleted) {
+        return;
+    }
+    m_effectivePercent = effectivePercent;
+    m_effectiveFilesCompleted = effectiveFilesCompleted;
+    emit uploadProgress(m_effectivePercent, m_effectiveFilesCompleted, m_totalFiles);
+}
+
+void UploadManager::updatePerFileLocalProgress(const QString& fileId, int percent) {
+    if (fileId.isEmpty()) return;
+    percent = std::clamp(percent, 0, 99);
+    int& localEntry = m_localFilePercents[fileId];
+    if (percent <= localEntry) return;
+    localEntry = percent;
+    emitEffectivePerFileProgress(fileId);
+}
+
+void UploadManager::updatePerFileRemoteProgress(const QString& fileId, int percent) {
+    if (fileId.isEmpty()) return;
+    percent = std::clamp(percent, 0, 100);
+    int& remoteEntry = m_remoteFilePercents[fileId];
+    if (percent <= remoteEntry) return;
+    remoteEntry = percent;
+    emitEffectivePerFileProgress(fileId);
+}
+
+void UploadManager::emitEffectivePerFileProgress(const QString& fileId) {
+    const int local = m_localFilePercents.value(fileId, 0);
+    const int remote = m_remoteFilePercents.value(fileId, 0);
+    int effective = std::max(local, remote);
+    if (remote >= 100) {
+        effective = 100;
+    } else {
+        effective = std::clamp(effective, 0, 99);
+    }
+    int& cached = m_effectiveFilePercents[fileId];
+    if (effective == cached) return;
+    cached = effective;
+    emit fileUploadProgress(fileId, effective);
 }
 
 void UploadManager::cleanupIncomingSession(bool deleteDiskContents, bool notifySender, const QString& senderOverride, const QString& cacheDirOverride, const QString& uploadIdOverride) {
@@ -335,11 +429,12 @@ void UploadManager::onUploadProgress(const QString& uploadId, int percent, int f
     if (uploadId != m_currentUploadId) return;
     if (m_cancelRequested) return;
     // Always accept target-side progress; it's authoritative
-    m_remoteProgressReceived = true;
     m_lastPercent = percent;
     m_filesCompleted = filesCompleted;
-    m_totalFiles = totalFiles;
-    emit uploadProgress(percent, filesCompleted, totalFiles);
+    if (totalFiles > 0) {
+        m_totalFiles = totalFiles;
+    }
+    updateRemoteProgress(percent, filesCompleted);
 }
 
 void UploadManager::onUploadCompletedFileIds(const QString& uploadId, const QStringList& fileIds) {
@@ -347,11 +442,15 @@ void UploadManager::onUploadCompletedFileIds(const QString& uploadId, const QStr
     if (m_cancelRequested) return;
     if (fileIds.isEmpty()) return;
     emit uploadCompletedFileIds(fileIds);
+    for (const QString& fid : fileIds) {
+        updatePerFileRemoteProgress(fid, 100);
+    }
 }
 
 void UploadManager::onUploadFinished(const QString& uploadId) {
     if (uploadId != m_currentUploadId) return;
     if (m_cancelRequested) return;
+    updateRemoteProgress(100, m_totalFiles > 0 ? m_totalFiles : m_filesCompleted);
     // Switch to finalizing for a brief moment to align UI state, then finish
     m_uploadInProgress = false;
     m_finalizing = true;
@@ -372,7 +471,7 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
     m_finalizing = false; // finalization complete
     emit uploadFinished();
     emit uiStateChanged();
-    if (m_ws) m_ws->closeUploadChannel();
+    if (m_ws) m_ws->endUploadSession();
 }
 
 void UploadManager::onAllFilesRemovedRemote() {
@@ -434,6 +533,10 @@ void UploadManager::onConnectionLost() {
         m_totalBytes = 0;
         m_remoteProgressReceived = false;
         m_outgoingFiles.clear();
+    }
+
+    if (m_ws) {
+        m_ws->endUploadSession();
     }
 
     cleanupIncomingCacheForConnectionLoss();

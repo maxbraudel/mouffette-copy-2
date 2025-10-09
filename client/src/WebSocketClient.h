@@ -26,6 +26,9 @@ public:
     bool ensureUploadChannel(); // opens m_uploadSocket if needed (async); returns true if already connected or opening
     void closeUploadChannel();  // closes m_uploadSocket if open
     bool isUploadChannelConnected() const;
+    bool prepareUploadChannel(int timeoutMs = 1500);
+    void beginUploadSession(bool preferUploadChannel);
+    void endUploadSession();
     
     // Client registration
     void registerClient(const QString& machineName, const QString& platform, const QList<ScreenInfo>& screens, int volumePercent);
@@ -119,6 +122,8 @@ private:
     QTimer* m_reconnectTimer;
     int m_reconnectAttempts;
     bool m_userInitiatedDisconnect = false;
+    bool m_uploadSessionActive = false;
+    bool m_useUploadSocketForSession = false;
     static const int MAX_RECONNECT_ATTEMPTS = 5;
     static const int RECONNECT_INTERVAL = 3000; // 3 seconds
 };

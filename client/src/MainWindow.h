@@ -133,7 +133,7 @@ private:
             QHash<QString, QList<ResizableMediaBase*>> itemsByFileId;
             QStringList currentUploadFileOrder;
             QSet<QString> serverCompletedFileIds;
-            QSet<QString> serverPerFileProgressActive;
+            QHash<QString, int> perFileProgress;
             bool receivingFilesToastShown = false;
             QString activeUploadId;
             bool remoteFilesPresent = false;

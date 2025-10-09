@@ -2,6 +2,9 @@
 #include <QJsonArray>
 #include <QDebug>
 #include <QUrlQuery>
+#include <QElapsedTimer>
+#include <QCoreApplication>
+#include <QThread>
 
 WebSocketClient::WebSocketClient(QObject *parent)
     : QObject(parent)
@@ -113,17 +116,101 @@ bool WebSocketClient::isUploadChannelConnected() const {
     return m_uploadSocket && m_uploadSocket->state() == QAbstractSocket::ConnectedState;
 }
 
+bool WebSocketClient::prepareUploadChannel(int timeoutMs) {
+    if (isUploadChannelConnected()) {
+        return true;
+    }
+
+    if (!ensureUploadChannel()) {
+        return false;
+    }
+
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < timeoutMs) {
+        if (isUploadChannelConnected()) {
+            return true;
+        }
+        QCoreApplication::processEvents();
+        QThread::msleep(20);
+    }
+
+    qWarning() << "Upload channel did not connect within timeout";
+    return false;
+}
+
+void WebSocketClient::beginUploadSession(bool preferUploadChannel) {
+    if (m_uploadSessionActive) {
+        if (preferUploadChannel && !m_useUploadSocketForSession) {
+            if (prepareUploadChannel()) {
+                m_useUploadSocketForSession = true;
+            }
+        }
+        return;
+    }
+
+    m_uploadSessionActive = true;
+    m_useUploadSocketForSession = false;
+
+    if (!preferUploadChannel) {
+        return;
+    }
+
+    static QElapsedTimer throttleTimer;
+    static bool timerInitialized = false;
+    if (!timerInitialized) {
+        throttleTimer.start();
+        timerInitialized = true;
+    }
+
+    if (!isUploadChannelConnected()) {
+        if (!ensureUploadChannel()) {
+            qWarning() << "Failed to initiate dedicated upload channel";
+        }
+    }
+
+    if (prepareUploadChannel()) {
+        m_useUploadSocketForSession = true;
+    } else {
+        if (!timerInitialized || throttleTimer.elapsed() > 2000) {
+            qWarning() << "Falling back to control channel for this upload session";
+            throttleTimer.restart();
+        }
+    }
+}
+
+void WebSocketClient::endUploadSession() {
+    m_uploadSessionActive = false;
+    m_useUploadSocketForSession = false;
+    closeUploadChannel();
+}
+
 bool WebSocketClient::ensureUploadChannel() {
-    if (isUploadChannelConnected()) return true;
+    if (isUploadChannelConnected()) {
+        return true;
+    }
+
+    if (!isConnected()) {
+        qWarning() << "Cannot open upload channel without control connection";
+        return false;
+    }
+
     if (!m_uploadSocket) {
         m_uploadSocket = new QWebSocket();
         connect(m_uploadSocket, &QWebSocket::connected, this, &WebSocketClient::onUploadConnected);
         connect(m_uploadSocket, &QWebSocket::disconnected, this, &WebSocketClient::onUploadDisconnected);
         connect(m_uploadSocket, &QWebSocket::errorOccurred, this, &WebSocketClient::onUploadError);
-        // Use a dedicated slot so the upload channel's 'welcome' doesn't override m_clientId
         connect(m_uploadSocket, &QWebSocket::textMessageReceived, this, &WebSocketClient::onUploadTextMessageReceived);
     }
-    // Open same server URL with a hint that this is upload channel
+
+    if (m_uploadSocket->state() == QAbstractSocket::ConnectingState) {
+        return true;
+    }
+
+    if (m_uploadSocket->state() == QAbstractSocket::ConnectedState) {
+        return true;
+    }
+
     QUrl url(m_serverUrl);
     QUrlQuery q(url);
     q.addQueryItem("channel", "upload");
@@ -133,10 +220,14 @@ bool WebSocketClient::ensureUploadChannel() {
 }
 
 void WebSocketClient::closeUploadChannel() {
-    if (!m_uploadSocket) return;
-    if (m_uploadSocket->state() == QAbstractSocket::ConnectedState || m_uploadSocket->state() == QAbstractSocket::ConnectingState) {
+    if (!m_uploadSocket) {
+        return;
+    }
+    if (m_uploadSocket->state() != QAbstractSocket::UnconnectedState) {
         m_uploadSocket->close();
     }
+    m_uploadSocket->deleteLater();
+    m_uploadSocket = nullptr;
 }
 
 void WebSocketClient::registerClient(const QString& machineName, const QString& platform, const QList<ScreenInfo>& screens, int volumePercent) {
@@ -567,15 +658,33 @@ void WebSocketClient::sendMessage(const QJsonObject& message) {
 }
 
 void WebSocketClient::sendMessageUpload(const QJsonObject& message) {
-    // Prefer upload channel if connected; otherwise use control channel as fallback
-    if (isUploadChannelConnected()) {
-        QJsonDocument doc(message);
-        QString jsonString = doc.toJson(QJsonDocument::Compact);
-        m_uploadSocket->sendTextMessage(jsonString);
+    const QString type = message.value("type").toString();
+    QWebSocket* channel = nullptr;
+    bool attemptedUploadChannel = false;
+
+    if (m_useUploadSocketForSession) {
+        attemptedUploadChannel = true;
+        if (isUploadChannelConnected()) {
+            channel = m_uploadSocket;
+        }
+    }
+
+    if (!channel && isConnected()) {
+        channel = m_webSocket;
+        if (attemptedUploadChannel) {
+            qWarning() << "Falling back to control channel for upload session";
+            m_useUploadSocketForSession = false;
+            closeUploadChannel();
+        }
+    }
+
+    if (!channel || channel->state() != QAbstractSocket::ConnectedState) {
+        qWarning() << "Cannot send upload message: no connected websocket available";
         return;
     }
-    // Fallback
-    sendMessage(message);
+
+    QJsonDocument doc(message);
+    channel->sendTextMessage(doc.toJson(QJsonDocument::Compact));
 }
 
 void WebSocketClient::setConnectionStatus(const QString& status) {

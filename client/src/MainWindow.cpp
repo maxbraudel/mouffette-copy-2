@@ -1755,7 +1755,7 @@ void MainWindow::clearUploadTracking(CanvasSession& session) {
     session.upload.itemsByFileId.clear();
     session.upload.currentUploadFileOrder.clear();
     session.upload.serverCompletedFileIds.clear();
-    session.upload.serverPerFileProgressActive.clear();
+    session.upload.perFileProgress.clear();
     session.upload.receivingFilesToastShown = false;
     if (!session.upload.activeUploadId.isEmpty()) {
         m_uploadSessionByUploadId.remove(session.upload.activeUploadId);
@@ -2006,7 +2006,7 @@ void MainWindow::onUploadButtonClicked() {
     upload.currentUploadFileOrder.clear();
     upload.mediaIdsBeingUploaded.clear();
     upload.serverCompletedFileIds.clear();
-    upload.serverPerFileProgressActive.clear();
+    upload.perFileProgress.clear();
     upload.receivingFilesToastShown = false;
 
     QVector<UploadFileInfo> files;
@@ -2137,6 +2137,7 @@ void MainWindow::onUploadButtonClicked() {
         connect(m_uploadManager, &UploadManager::fileUploadStarted, this, [this](const QString& fileId) {
             if (CanvasSession* session = sessionForActiveUpload()) {
                 if (!session->canvas || !session->canvas->scene()) return;
+                session->upload.perFileProgress[fileId] = 0;
                 const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
                 for (ResizableMediaBase* item : items) {
                     if (item && item->uploadState() != ResizableMediaBase::UploadState::Uploaded) {
@@ -2148,11 +2149,23 @@ void MainWindow::onUploadButtonClicked() {
         connect(m_uploadManager, &UploadManager::fileUploadProgress, this, [this](const QString& fileId, int percent) {
             if (CanvasSession* session = sessionForActiveUpload()) {
                 if (!session->canvas || !session->canvas->scene()) return;
-                if (session->upload.serverPerFileProgressActive.contains(fileId)) return;
+                if (percent >= 100) {
+                    session->upload.perFileProgress[fileId] = 100;
+                    const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
+                    for (ResizableMediaBase* item : items) {
+                        if (item) item->setUploadUploaded();
+                    }
+                    session->upload.serverCompletedFileIds.insert(fileId);
+                    return;
+                }
+                int clamped = std::clamp(percent, 0, 99);
+                int previous = session->upload.perFileProgress.value(fileId, -1);
+                if (previous >= 100 || clamped <= previous) return;
+                session->upload.perFileProgress[fileId] = clamped;
                 const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
                 for (ResizableMediaBase* item : items) {
                     if (item && item->uploadState() != ResizableMediaBase::UploadState::Uploaded) {
-                        item->setUploadUploading(qMin(99, percent));
+                        item->setUploadUploading(clamped);
                     }
                 }
             }
@@ -2173,7 +2186,9 @@ void MainWindow::onUploadButtonClicked() {
             for (auto it = filePercents.constBegin(); it != filePercents.constEnd(); ++it) {
                 const QString& fid = it.key();
                 const int p = std::clamp(it.value(), 0, 100);
-                session->upload.serverPerFileProgressActive.insert(fid);
+                int previous = session->upload.perFileProgress.value(fid, -1);
+                if (p <= previous && p < 100) continue;
+                session->upload.perFileProgress[fid] = std::max(previous, p);
                 const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fid);
                 for (ResizableMediaBase* item : items) {
                     if (!item) continue;
