@@ -204,6 +204,7 @@ protected:
 
     // Subclass hook for live geometry changes (resize/drag) to keep overlays glued
     virtual void onInteractiveGeometryChanged() {}
+    virtual void onMediaSettingsChanged();
 
     // QGraphicsItem overrides
     QRectF boundingRect() const override;
@@ -319,6 +320,13 @@ private:
     QImage convertFrameToImage(const QVideoFrame& frame) const;
     void restartPrimingSequence();
     void teardownPlayback();
+    void onMediaSettingsChanged() override;
+    void initializeSettingsRepeatSessionForPlaybackStart();
+    void cancelSettingsRepeatSession();
+    bool settingsRepeatAvailable() const;
+    bool shouldAutoRepeat() const;
+    bool consumeAutoRepeatOpportunity();
+    qint64 nearStartThresholdMs() const;
 
     qreal baseWidth() const { return static_cast<qreal>(m_baseSize.width()); }
     qreal baseHeight() const { return static_cast<qreal>(m_baseSize.height()); }
@@ -355,5 +363,9 @@ private:
     bool m_expectedPlayingState = false;
     bool m_seamlessLoopJumpPending = false;
     qint64 m_lastSeamlessLoopTriggerMs = 0;
+    bool m_settingsRepeatEnabled = false;
+    int m_settingsRepeatLoopCount = 0;
+    int m_settingsRepeatLoopsRemaining = 0;
+    bool m_settingsRepeatSessionActive = false;
 };
 

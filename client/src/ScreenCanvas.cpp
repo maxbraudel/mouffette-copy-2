@@ -401,6 +401,17 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                 if (auto* v = dynamic_cast<ResizableVideoItem*>(media)) {
                     m["muted"] = v->isMuted();
                     m["volume"] = v->volume();
+                    const auto& settings = media->mediaSettingsState();
+                    m["repeatEnabled"] = settings.repeatEnabled;
+                    int repeatCount = 0;
+                    if (settings.repeatEnabled) {
+                        bool ok = false;
+                        int value = settings.repeatCountText.trimmed().toInt(&ok);
+                        if (ok && value > 0) {
+                            repeatCount = value;
+                        }
+                    }
+                    m["repeatCount"] = repeatCount;
                 }
             }
             m["fadeInSeconds"] = media->fadeInDurationSeconds();

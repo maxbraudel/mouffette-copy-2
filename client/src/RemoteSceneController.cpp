@@ -349,6 +349,10 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
         item->fadeInSeconds = m.value("fadeInSeconds").toDouble(0.0);
         item->fadeOutSeconds = m.value("fadeOutSeconds").toDouble(0.0);
         item->contentOpacity = m.value("contentOpacity").toDouble(1.0);
+        item->repeatEnabled = m.value("repeatEnabled").toBool(false);
+        item->repeatCount = std::max(0, m.value("repeatCount").toInt(0));
+        item->repeatRemaining = 0;
+        item->repeatActive = false;
         if (item->type == "video") {
             item->muted = m.value("muted").toBool(false);
             item->volume = m.value("volume").toDouble(1.0);
@@ -457,6 +461,18 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
                 item->loaded = true;
             }
+            if (s == QMediaPlayer::EndOfMedia) {
+                if (item->repeatActive && item->repeatRemaining > 0) {
+                    --item->repeatRemaining;
+                    if (item->player) {
+                        item->player->setPosition(0);
+                        item->player->play();
+                    }
+                    return;
+                }
+                item->repeatActive = false;
+                item->repeatRemaining = 0;
+            }
         });
         QObject::connect(item->player, &QMediaPlayer::playbackStateChanged, item->player, [this,epoch,weakItem](QMediaPlayer::PlaybackState st){
             auto item = weakItem.lock();
@@ -533,6 +549,13 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             if (epoch != m_sceneEpoch) return;
             item->playAuthorized = true;
             if (!item->player) return;
+            if (item->repeatEnabled && item->repeatCount > 0) {
+                item->repeatActive = true;
+                item->repeatRemaining = item->repeatCount;
+            } else {
+                item->repeatActive = false;
+                item->repeatRemaining = 0;
+            }
             // Apply final audio state from host now
             if (item->audio) { item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0)); }
             if (item->loaded) {
@@ -661,7 +684,26 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 for (auto& ref : labelRefs) { if (ref) ref->setPixmap(pm); }
             });
         }
-        QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus s){ auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch) return; if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) item->loaded = true; });
+        QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus s){
+            auto item = weakItem.lock();
+            if (!item) return;
+            if (epoch != m_sceneEpoch) return;
+            if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
+                item->loaded = true;
+            }
+            if (s == QMediaPlayer::EndOfMedia) {
+                if (item->repeatActive && item->repeatRemaining > 0) {
+                    --item->repeatRemaining;
+                    if (item->player) {
+                        item->player->setPosition(0);
+                        item->player->play();
+                    }
+                    return;
+                }
+                item->repeatActive = false;
+                item->repeatRemaining = 0;
+            }
+        });
         QObject::connect(item->player, &QMediaPlayer::errorOccurred, item->player, [this,epoch,weakItem](QMediaPlayer::Error e, const QString& err){ auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch) return; if (e != QMediaPlayer::NoError) qWarning() << "RemoteSceneController: player error" << int(e) << err << "for" << item->mediaId; });
         auto attemptLoadVid = [this, epoch, weakItem]() {
             auto item = weakItem.lock();
@@ -710,7 +752,15 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             auto item = weakItem.lock();
             if (!item) return;
             if (epoch != m_sceneEpoch) return;
-            item->playAuthorized = true; if (!item->player) return; if (item->audio) { item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0)); }
+            item->playAuthorized = true; if (!item->player) return;
+            if (item->repeatEnabled && item->repeatCount > 0) {
+                item->repeatActive = true;
+                item->repeatRemaining = item->repeatCount;
+            } else {
+                item->repeatActive = false;
+                item->repeatRemaining = 0;
+            }
+            if (item->audio) { item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0)); }
             if (item->loaded) { if (item->player->position() != 0) item->player->setPosition(0); item->player->play(); }
             else {
                 item->deferredStartConn = QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus s){ auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch || !item->playAuthorized) return; if (s==QMediaPlayer::LoadedMedia || s==QMediaPlayer::BufferedMedia) { QObject::disconnect(item->deferredStartConn); if (item->audio) { item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0)); } if (item->player->position() != 0) item->player->setPosition(0); item->player->play(); } });
