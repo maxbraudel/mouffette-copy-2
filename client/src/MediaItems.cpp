@@ -1120,7 +1120,56 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
         }
     });
     QObject::connect(m_player, &QMediaPlayer::durationChanged, m_player, [this](qint64 d){ m_durationMs = d; update(); });
-    QObject::connect(m_player, &QMediaPlayer::positionChanged, m_player, [this](qint64 p){ if (m_holdLastFrameAtEnd) return; m_positionMs = p; });
+    QObject::connect(m_player, &QMediaPlayer::positionChanged, m_player, [this](qint64 p){
+        if (m_holdLastFrameAtEnd) {
+            return;
+        }
+
+        const bool playing = (m_player && m_player->playbackState() == QMediaPlayer::PlayingState);
+        if (m_repeatEnabled && playing && !m_seeking && !m_draggingProgress && m_durationMs > 0) {
+            const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+            qint64 leadMargin = std::clamp<qint64>(m_durationMs / 48, 15LL, 120LL); // aim for ~20ms-120ms early seek
+            if (leadMargin >= m_durationMs) {
+                leadMargin = std::max<qint64>(m_durationMs / 4, 1LL);
+                if (leadMargin >= m_durationMs) {
+                    leadMargin = std::max<qint64>(m_durationMs - 1, 1LL);
+                }
+            }
+
+            if (!m_seamlessLoopJumpPending && p >= (m_durationMs - leadMargin)) {
+                m_seamlessLoopJumpPending = true;
+                m_lastSeamlessLoopTriggerMs = nowMs;
+                m_positionMs = 0;
+                m_smoothProgressRatio = 0.0;
+                updateProgressBar();
+                if (m_progressTimer && !m_progressTimer->isActive()) {
+                    m_progressTimer->start();
+                }
+                if (m_player) {
+                    m_player->setPosition(0);
+                    if (m_player->playbackState() != QMediaPlayer::PlayingState) {
+                        m_player->play();
+                    }
+                }
+                m_expectedPlayingState = true;
+                updatePlayPauseIconState(true);
+                updateControlsLayout();
+                update();
+                return;
+            }
+
+            if (m_seamlessLoopJumpPending) {
+                const qint64 settleMargin = std::clamp<qint64>(leadMargin, 15LL, 200LL);
+                if (p <= settleMargin || (nowMs - m_lastSeamlessLoopTriggerMs) > 500) {
+                    m_seamlessLoopJumpPending = false;
+                }
+            }
+        } else {
+            m_seamlessLoopJumpPending = false;
+        }
+
+        m_positionMs = p;
+    });
     
     // Connect to error signals to detect missing/corrupted source files
     QObject::connect(m_player, &QMediaPlayer::errorOccurred, m_player, [this](QMediaPlayer::Error error, const QString& errorString) {
@@ -1145,6 +1194,8 @@ ResizableVideoItem::~ResizableVideoItem() {
 
 void ResizableVideoItem::togglePlayPause() {
     if (!m_player) return;
+    m_seamlessLoopJumpPending = false;
+    m_lastSeamlessLoopTriggerMs = 0;
     bool nowPlaying = false;
     if (m_player->playbackState() == QMediaPlayer::PlayingState) {
         m_player->pause();
@@ -1167,17 +1218,62 @@ void ResizableVideoItem::togglePlayPause() {
     updateControlsLayout(); update();
 }
 
-void ResizableVideoItem::toggleRepeat() { m_repeatEnabled = !m_repeatEnabled; updateControlsLayout(); update(); }
+void ResizableVideoItem::toggleRepeat() {
+    m_repeatEnabled = !m_repeatEnabled;
+    m_seamlessLoopJumpPending = false;
+    m_lastSeamlessLoopTriggerMs = 0;
+    updateControlsLayout();
+    update();
+}
 
 void ResizableVideoItem::toggleMute() { if (!m_audio) return; m_audio->setMuted(!m_audio->isMuted()); bool muted = m_audio->isMuted(); updateControlsLayout(); update(); }
 
-void ResizableVideoItem::stopToBeginning() { if (!m_player) return; m_holdLastFrameAtEnd = false; m_player->pause(); m_player->setPosition(0); m_positionMs = 0; m_smoothProgressRatio = 0.0; updateProgressBar(); if (m_progressTimer) m_progressTimer->stop(); m_expectedPlayingState = false; updatePlayPauseIconState(false); updateControlsLayout(); update(); }
+void ResizableVideoItem::stopToBeginning() {
+    if (!m_player) return;
+    m_seamlessLoopJumpPending = false;
+    m_lastSeamlessLoopTriggerMs = 0;
+    m_holdLastFrameAtEnd = false;
+    m_player->pause(); m_player->setPosition(0);
+    m_positionMs = 0; m_smoothProgressRatio = 0.0; updateProgressBar();
+    if (m_progressTimer) m_progressTimer->stop();
+    m_expectedPlayingState = false; updatePlayPauseIconState(false);
+    updateControlsLayout(); update();
+}
 
 void ResizableVideoItem::seekToRatio(qreal r) {
-    if (!m_player || m_durationMs <= 0) return; r = std::clamp<qreal>(r, 0.0, 1.0); m_holdLastFrameAtEnd = false; m_seeking = true; if (m_progressTimer) m_progressTimer->stop(); m_smoothProgressRatio = r; m_positionMs = static_cast<qint64>(r * m_durationMs); updateProgressBar(); updateControlsLayout(); update(); const qint64 pos = m_positionMs; m_player->setPosition(pos); QTimer::singleShot(30, [this]() { m_seeking = false; if (m_progressTimer && m_player && m_player->playbackState() == QMediaPlayer::PlayingState) m_progressTimer->start(); }); }
+    if (!m_player || m_durationMs <= 0) return;
+    m_seamlessLoopJumpPending = false;
+    m_lastSeamlessLoopTriggerMs = 0;
+    r = std::clamp<qreal>(r, 0.0, 1.0);
+    m_holdLastFrameAtEnd = false;
+    m_seeking = true;
+    if (m_progressTimer) m_progressTimer->stop();
+    m_smoothProgressRatio = r;
+    m_positionMs = static_cast<qint64>(r * m_durationMs);
+    updateProgressBar(); updateControlsLayout(); update();
+    const qint64 pos = m_positionMs; m_player->setPosition(pos);
+    QTimer::singleShot(30, [this]() {
+        m_seeking = false;
+        if (m_progressTimer && m_player && m_player->playbackState() == QMediaPlayer::PlayingState) m_progressTimer->start();
+    });
+}
 
 void ResizableVideoItem::pauseAndSetPosition(qint64 posMs) {
-    if (!m_player) return; if (posMs < 0) posMs = 0; if (m_durationMs > 0 && posMs > m_durationMs) posMs = m_durationMs; m_holdLastFrameAtEnd = false; m_player->pause(); if (m_progressTimer) m_progressTimer->stop(); m_player->setPosition(posMs); m_positionMs = posMs; m_smoothProgressRatio = (m_durationMs > 0 ? double(posMs)/double(m_durationMs) : 0.0); updateProgressBar(); m_expectedPlayingState = false; updatePlayPauseIconState(false); updateControlsLayout(); update(); }
+    if (!m_player) return;
+    if (posMs < 0) posMs = 0;
+    if (m_durationMs > 0 && posMs > m_durationMs) posMs = m_durationMs;
+    m_seamlessLoopJumpPending = false;
+    m_lastSeamlessLoopTriggerMs = 0;
+    m_holdLastFrameAtEnd = false;
+    m_player->pause();
+    if (m_progressTimer) m_progressTimer->stop();
+    m_player->setPosition(posMs);
+    m_positionMs = posMs;
+    m_smoothProgressRatio = (m_durationMs > 0 ? double(posMs)/double(m_durationMs) : 0.0);
+    updateProgressBar();
+    m_expectedPlayingState = false; updatePlayPauseIconState(false);
+    updateControlsLayout(); update();
+}
 
 void ResizableVideoItem::setExternalPosterImage(const QImage& img) { if (!img.isNull()) { m_posterImage = img; m_posterImageSet = true; if (!m_adoptedSize) adoptBaseSize(img.size()); update(); } }
 
@@ -1192,6 +1288,8 @@ void ResizableVideoItem::endDrag() { if (m_draggingProgress || m_draggingVolume)
 void ResizableVideoItem::setApplicationSuspended(bool suspended) {
     if (m_appSuspended == suspended) return;
     m_appSuspended = suspended;
+    m_seamlessLoopJumpPending = false;
+    m_lastSeamlessLoopTriggerMs = 0;
     if (m_appSuspended) {
         m_wasPlayingBeforeSuspend = m_player && m_player->playbackState() == QMediaPlayer::PlayingState;
         m_resumePositionMs = m_player ? m_player->position() : m_positionMs;

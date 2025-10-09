@@ -353,5 +353,7 @@ private:
     bool m_sinkDetached = false; qint64 m_resumePositionMs = 0; bool m_needsReprimeAfterResume = false;
     bool m_playbackTornDown = false;
     bool m_expectedPlayingState = false;
+    bool m_seamlessLoopJumpPending = false;
+    qint64 m_lastSeamlessLoopTriggerMs = 0;
 };
 
