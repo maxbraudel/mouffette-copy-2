@@ -111,6 +111,8 @@ private:
     void updatePerFileLocalProgress(const QString& fileId, int percent);
     void updatePerFileRemoteProgress(const QString& fileId, int percent);
     void emitEffectivePerFileProgress(const QString& fileId);
+    bool canAcceptNewAction() const;
+    void scheduleActionDebounce();
 
     QPointer<WebSocketClient> m_ws;
     QString m_targetClientId;
@@ -154,6 +156,13 @@ private:
     QSet<QString> m_canceledIncoming; // uploadIds canceled by sender
     // Track next expected chunk index per (uploadId:fileId) on the target side
     QHash<QString, int> m_expectedChunkIndex; 
+
+    // Anti-spam protection
+    QTimer* m_actionDebounceTimer = nullptr;
+    QElapsedTimer m_lastActionTime;
+    bool m_actionInProgress = false;
+    static constexpr int ACTION_DEBOUNCE_MS = 500;
+    static constexpr int MIN_ACTION_INTERVAL_MS = 300;
 };
 
 #endif // UPLOADMANAGER_H

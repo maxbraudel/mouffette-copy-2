@@ -11,13 +11,23 @@
 #include <QCoreApplication>
 #include <QEventLoop>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QDebug>
 #include <algorithm>
 #include <cmath>
 
 // Removed dependency on ResizableMediaBase / scene scanning.
 
-UploadManager::UploadManager(QObject* parent) : QObject(parent) {}
+UploadManager::UploadManager(QObject* parent) : QObject(parent) {
+    m_lastActionTime.start();
+    
+    // Setup debounce timer for action throttling
+    m_actionDebounceTimer = new QTimer(this);
+    m_actionDebounceTimer->setSingleShot(true);
+    connect(m_actionDebounceTimer, &QTimer::timeout, this, [this]() {
+        m_actionInProgress = false;
+    });
+}
 
 void UploadManager::setWebSocketClient(WebSocketClient* client) { m_ws = client; }
 void UploadManager::setTargetClientId(const QString& id) { m_targetClientId = id; }
@@ -40,10 +50,24 @@ void UploadManager::toggleUpload(const QVector<UploadFileInfo>& files) {
         qWarning() << "UploadManager: Not connected or no target set";
         return;
     }
+    
+    // Anti-spam protection: check if we can accept a new action
+    if (!canAcceptNewAction()) {
+        qInfo() << "UploadManager: Action ignored due to rate limiting";
+        return;
+    }
+    
     if (m_cancelFinalizePending) {
         qInfo() << "UploadManager: Cancellation cleanup pending; toggle ignored";
         return;
     }
+    
+    // Block new actions while a critical operation is in progress
+    if (m_actionInProgress) {
+        qInfo() << "UploadManager: Action in progress, toggle ignored";
+        return;
+    }
+    
     if (m_uploadActive) {
         // If active state but we are provided with additional files, start a new upload for them
         if (!files.isEmpty()) {
@@ -76,6 +100,10 @@ void UploadManager::requestRemoval(const QString& clientId) {
 void UploadManager::requestUnload() {
     const QString clientId = m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId;
     if (!m_uploadActive || clientId.isEmpty()) return;
+    
+    // Mark action in progress to prevent spam
+    scheduleActionDebounce();
+    
     requestRemoval(clientId);
     // Don't reset state here - wait for onAllFilesRemovedRemote() callback
     emit uiStateChanged();
@@ -86,6 +114,10 @@ void UploadManager::requestCancel() {
     if (!m_ws || !m_ws->isConnected() || clientId.isEmpty()) return;
     if (!m_uploadInProgress) return;
     if (m_cancelRequested) return;
+    
+    // Mark action in progress to prevent spam
+    scheduleActionDebounce();
+    
     m_cancelRequested = true;
     m_cancelFinalizePending = true;
     if (!m_currentUploadId.isEmpty()) {
@@ -109,6 +141,15 @@ void UploadManager::requestCancel() {
 }
 
 void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
+    // Prevent concurrent uploads
+    if (m_uploadInProgress || m_finalizing) {
+        qWarning() << "UploadManager: Upload already in progress, ignoring new start request";
+        return;
+    }
+    
+    // Mark action in progress to prevent spam
+    scheduleActionDebounce();
+    
     if (m_ws) {
         // Prepare the dedicated upload channel to avoid blocking control messages
         m_ws->beginUploadSession(true);
@@ -210,6 +251,13 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
     // Enter finalizing only when we stop sending and await remote ack
     m_uploadInProgress = true;
     m_finalizing = false;
+    
+    // Clear action lock since upload streaming is complete
+    m_actionInProgress = false;
+    if (m_actionDebounceTimer) {
+        m_actionDebounceTimer->stop();
+    }
+    
     emit uiStateChanged();
 }
 
@@ -221,6 +269,7 @@ void UploadManager::resetToInitial() {
     m_cancelRequested = false;
     m_finalizing = false;
     m_cancelFinalizePending = false;
+    m_actionInProgress = false;
     m_currentUploadId.clear();
     m_lastPercent = 0;
     m_filesCompleted = 0;
@@ -231,6 +280,7 @@ void UploadManager::resetToInitial() {
     m_outgoingFiles.clear();
     resetProgressTracking();
     if (m_cancelFallbackTimer) m_cancelFallbackTimer->stop();
+    if (m_actionDebounceTimer) m_actionDebounceTimer->stop();
     m_uploadTargetClientId.clear();
     m_activeSessionIdentity.clear();
     if (m_ws) m_ws->endUploadSession();
@@ -469,6 +519,7 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
     m_uploadActive = true; // switch to active state
     m_uploadInProgress = false;
     m_finalizing = false; // finalization complete
+    m_actionInProgress = false; // Clear action lock
     emit uploadFinished();
     emit uiStateChanged();
     if (m_ws) m_ws->endUploadSession();
@@ -493,6 +544,7 @@ void UploadManager::onAllFilesRemovedRemote() {
     resetToInitial();
 
     m_lastRemovalClientId = removedClientId;
+    m_actionInProgress = false; // Clear action lock after removal confirmed
 
     emit allFilesRemoved();
     emit uiStateChanged();
@@ -805,5 +857,29 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
                 }
             }
         }
+    }
+}
+
+bool UploadManager::canAcceptNewAction() const {
+    // Check minimum time interval between actions
+    if (m_lastActionTime.isValid() && m_lastActionTime.elapsed() < MIN_ACTION_INTERVAL_MS) {
+        return false;
+    }
+    
+    // Check if an action is currently in progress
+    if (m_actionInProgress) {
+        return false;
+    }
+    
+    return true;
+}
+
+void UploadManager::scheduleActionDebounce() {
+    m_actionInProgress = true;
+    m_lastActionTime.restart();
+    
+    if (m_actionDebounceTimer) {
+        m_actionDebounceTimer->stop();
+        m_actionDebounceTimer->start(ACTION_DEBOUNCE_MS);
     }
 }
