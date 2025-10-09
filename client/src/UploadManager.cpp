@@ -292,11 +292,17 @@ void UploadManager::updateRemoteProgress(int percent, int filesCompleted) {
 
 void UploadManager::emitEffectiveProgressIfChanged() {
     if (m_totalFiles <= 0) return;
-    const int effectivePercent = std::clamp(std::max(m_lastLocalPercent, m_lastRemotePercent), 0, m_remoteProgressReceived ? 100 : 99);
-    const int effectiveFilesCompleted = std::clamp(m_remoteProgressReceived ? std::max(m_lastLocalFilesCompleted, m_lastRemoteFilesCompleted)
-                                                                          : m_lastLocalFilesCompleted,
-                                                  0,
-                                                  m_totalFiles);
+    int effectivePercent = 0;
+    int effectiveFilesCompleted = 0;
+
+    if (m_remoteProgressReceived) {
+        effectivePercent = std::clamp(m_lastRemotePercent, 0, 100);
+        effectiveFilesCompleted = std::clamp(m_lastRemoteFilesCompleted, 0, m_totalFiles);
+    } else {
+        effectivePercent = std::clamp(m_lastLocalPercent, 0, 99);
+        effectiveFilesCompleted = std::clamp(m_lastLocalFilesCompleted, 0, m_totalFiles);
+    }
+
     if (effectivePercent == m_effectivePercent && effectiveFilesCompleted == m_effectiveFilesCompleted) {
         return;
     }
@@ -326,12 +332,18 @@ void UploadManager::updatePerFileRemoteProgress(const QString& fileId, int perce
 void UploadManager::emitEffectivePerFileProgress(const QString& fileId) {
     const int local = m_localFilePercents.value(fileId, 0);
     const int remote = m_remoteFilePercents.value(fileId, 0);
-    int effective = std::max(local, remote);
-    if (remote >= 100) {
-        effective = 100;
+    int effective = 0;
+
+    if (m_remoteProgressReceived) {
+        if (remote >= 100) {
+            effective = 100;
+        } else {
+            effective = std::clamp(remote, 0, 99);
+        }
     } else {
-        effective = std::clamp(effective, 0, 99);
+        effective = std::clamp(local, 0, 99);
     }
+
     int& cached = m_effectiveFilePercents[fileId];
     if (effective == cached) return;
     cached = effective;
