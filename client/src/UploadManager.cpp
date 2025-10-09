@@ -38,6 +38,10 @@ void UploadManager::toggleUpload(const QVector<UploadFileInfo>& files) {
         qWarning() << "UploadManager: Not connected or no target set";
         return;
     }
+    if (m_cancelFinalizePending) {
+        qInfo() << "UploadManager: Cancellation cleanup pending; toggle ignored";
+        return;
+    }
     if (m_uploadActive) {
         // If active state but we are provided with additional files, start a new upload for them
         if (!files.isEmpty()) {
@@ -79,7 +83,9 @@ void UploadManager::requestCancel() {
     const QString clientId = m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId;
     if (!m_ws || !m_ws->isConnected() || clientId.isEmpty()) return;
     if (!m_uploadInProgress) return;
+    if (m_cancelRequested) return;
     m_cancelRequested = true;
+    m_cancelFinalizePending = true;
     if (!m_currentUploadId.isEmpty()) {
         m_ws->sendUploadAbort(clientId, m_currentUploadId, "User cancelled");
     }
@@ -92,9 +98,8 @@ void UploadManager::requestCancel() {
         m_cancelFallbackTimer = new QTimer(this);
         m_cancelFallbackTimer->setSingleShot(true);
         connect(m_cancelFallbackTimer, &QTimer::timeout, this, [this]() {
-            if (m_cancelRequested) {
-                resetToInitial();
-                emit uiStateChanged();
+            if (m_cancelFinalizePending) {
+                finalizeLocalCancelState();
             }
         });
     }
@@ -189,7 +194,10 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
             }
         }
     }
-    if (m_cancelRequested) return; // completion suppressed
+    if (m_cancelRequested) {
+        finalizeLocalCancelState();
+        return;
+    }
     m_ws->sendUploadComplete(m_uploadTargetClientId, m_currentUploadId);
     // We have sent all bytes; remain in uploading state until remote finishes
     // Enter finalizing only when we stop sending and await remote ack
@@ -205,6 +213,7 @@ void UploadManager::resetToInitial() {
     m_uploadInProgress = false;
     m_cancelRequested = false;
     m_finalizing = false;
+    m_cancelFinalizePending = false;
     m_currentUploadId.clear();
     m_lastPercent = 0;
     m_filesCompleted = 0;
@@ -218,6 +227,107 @@ void UploadManager::resetToInitial() {
     m_activeSessionIdentity.clear();
     // Close upload channel if open
     if (m_ws) m_ws->closeUploadChannel();
+}
+
+void UploadManager::finalizeLocalCancelState() {
+    if (!m_cancelFinalizePending) return;
+    const QString targetId = !m_lastRemovalClientId.isEmpty()
+                               ? m_lastRemovalClientId
+                               : (!m_uploadTargetClientId.isEmpty() ? m_uploadTargetClientId : m_targetClientId);
+    m_cancelFinalizePending = false;
+    resetToInitial();
+    m_lastRemovalClientId = targetId;
+    if (!targetId.isEmpty()) {
+        FileManager::instance().unmarkAllForClient(targetId);
+    }
+    emit allFilesRemoved();
+    emit uiStateChanged();
+}
+
+void UploadManager::cleanupIncomingSession(bool deleteDiskContents, bool notifySender, const QString& senderOverride, const QString& cacheDirOverride, const QString& uploadIdOverride) {
+    auto dropChunkTracking = [this](const QString& uploadId) {
+        if (uploadId.isEmpty()) return;
+        const QString prefix = uploadId + ":";
+        auto it = m_expectedChunkIndex.begin();
+        while (it != m_expectedChunkIndex.end()) {
+            if (it.key().startsWith(prefix)) {
+                it = m_expectedChunkIndex.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        m_canceledIncoming.remove(uploadId);
+    };
+
+    QString senderId = senderOverride;
+    QString cacheDirPath = cacheDirOverride;
+    QString uploadId = uploadIdOverride;
+    QStringList fileIds;
+    bool matchesActiveSession = false;
+
+    if (!m_incoming.senderId.isEmpty()) {
+        if (senderId.isEmpty() || senderId == m_incoming.senderId) {
+            matchesActiveSession = true;
+            senderId = m_incoming.senderId;
+        }
+    }
+
+    if (matchesActiveSession) {
+        if (uploadId.isEmpty()) uploadId = m_incoming.uploadId;
+        if (cacheDirPath.isEmpty()) cacheDirPath = m_incoming.cacheDirPath;
+
+        for (auto it = m_incoming.openFiles.begin(); it != m_incoming.openFiles.end(); ++it) {
+            if (it.value()) {
+                it.value()->flush();
+                it.value()->close();
+                delete it.value();
+            }
+        }
+        m_incoming.openFiles.clear();
+        fileIds = m_incoming.expectedSizes.keys();
+
+        dropChunkTracking(uploadId);
+
+        m_incoming = IncomingUploadSession();
+    } else {
+        if (cacheDirPath.isEmpty() && !senderId.isEmpty()) {
+            QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+            if (base.isEmpty()) base = QDir::homePath() + "/.cache";
+            cacheDirPath = base + "/Mouffette/Uploads/" + senderId;
+        }
+        if (uploadId.isEmpty()) uploadId = uploadIdOverride;
+    }
+
+    if (!uploadIdOverride.isEmpty() && uploadIdOverride != uploadId) {
+        dropChunkTracking(uploadIdOverride);
+    }
+
+    if (!cacheDirPath.isEmpty()) {
+        FileManager::instance().removeReceivedFileMappingsUnderPathPrefix(cacheDirPath + "/");
+    } else if (!fileIds.isEmpty()) {
+        for (const QString& fid : fileIds) {
+            FileManager::instance().removeReceivedFileMapping(fid);
+        }
+    }
+
+    if (deleteDiskContents && !cacheDirPath.isEmpty()) {
+        QDir dir(cacheDirPath);
+        if (dir.exists()) {
+            if (!dir.removeRecursively()) {
+                qWarning() << "UploadManager: Failed to remove cache directory during cleanup:" << cacheDirPath;
+            } else {
+                qDebug() << "UploadManager: Removed cache directory during cleanup:" << cacheDirPath;
+            }
+        }
+    }
+
+    if (notifySender && m_ws && !senderId.isEmpty()) {
+        m_ws->notifyAllFilesRemovedToSender(senderId);
+    }
+
+    if (!matchesActiveSession && !uploadId.isEmpty()) {
+        dropChunkTracking(uploadId);
+    }
 }
 
 // Slots forwarded from WebSocketClient (sender side)
@@ -266,9 +376,16 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
 }
 
 void UploadManager::onAllFilesRemovedRemote() {
+    if (m_cancelFinalizePending) {
+        finalizeLocalCancelState();
+        return;
+    }
+
     // Remote side confirmed unload; reset state
     // Clear all uploaded markers for this client so that all items are considered Not uploaded
-    const QString removedClientId = !m_uploadTargetClientId.isEmpty() ? m_uploadTargetClientId : m_targetClientId;
+    const QString removedClientId = !m_lastRemovalClientId.isEmpty()
+                                        ? m_lastRemovalClientId
+                                        : (!m_uploadTargetClientId.isEmpty() ? m_uploadTargetClientId : m_targetClientId);
     if (!removedClientId.isEmpty()) {
         FileManager::instance().unmarkAllForClient(removedClientId);
     }
@@ -495,30 +612,39 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         }
     } else if (type == "upload_abort") {
         const QString abortedId = message.value("uploadId").toString();
-        if (!abortedId.isEmpty()) m_canceledIncoming.insert(abortedId);
-        for (auto it = m_incoming.openFiles.begin(); it != m_incoming.openFiles.end(); ++it) {
-            if (it.value()) { it.value()->flush(); it.value()->close(); delete it.value(); }
+        const QString senderClientId = message.value("senderClientId").toString();
+        if (!abortedId.isEmpty()) {
+            m_canceledIncoming.insert(abortedId);
         }
-        m_incoming.openFiles.clear();
-        
-        // Clean up chunk tracking for aborted upload
-        const QString prefix2 = abortedId + ":";
-        auto itKey2 = m_expectedChunkIndex.begin();
-        while (itKey2 != m_expectedChunkIndex.end()) {
-            if (itKey2.key().startsWith(prefix2)) itKey2 = m_expectedChunkIndex.erase(itKey2); else ++itKey2;
+
+        QString ackTarget = !m_incoming.senderId.isEmpty() ? m_incoming.senderId : senderClientId;
+        if (m_ws && !ackTarget.isEmpty()) {
+            m_ws->notifyAllFilesRemovedToSender(ackTarget);
         }
-        
-        if (!m_incoming.cacheDirPath.isEmpty()) { QDir dir(m_incoming.cacheDirPath); dir.removeRecursively(); }
-        if (m_ws && !m_incoming.senderId.isEmpty()) {
-            m_ws->notifyAllFilesRemovedToSender(m_incoming.senderId);
+
+        QString cacheOverride = m_incoming.cacheDirPath;
+        if (cacheOverride.isEmpty() && !ackTarget.isEmpty()) {
+            QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+            if (base.isEmpty()) base = QDir::homePath() + "/.cache";
+            cacheOverride = base + "/Mouffette/Uploads/" + ackTarget;
         }
-        m_incoming = IncomingUploadSession();
+
+        cleanupIncomingSession(true, false, ackTarget, cacheOverride, abortedId);
     } else if (type == "remove_all_files") {
-        if (!m_incoming.cacheDirPath.isEmpty()) { QDir dir(m_incoming.cacheDirPath); dir.removeRecursively(); }
-        if (m_ws && !m_incoming.senderId.isEmpty()) {
-            m_ws->notifyAllFilesRemovedToSender(m_incoming.senderId);
+        const QString senderClientId = message.value("senderClientId").toString();
+        QString ackTarget = !senderClientId.isEmpty() ? senderClientId : m_incoming.senderId;
+        if (m_ws && !ackTarget.isEmpty()) {
+            m_ws->notifyAllFilesRemovedToSender(ackTarget);
         }
-        m_incoming = IncomingUploadSession();
+
+        QString cacheOverride = m_incoming.cacheDirPath;
+        if (cacheOverride.isEmpty() && !ackTarget.isEmpty()) {
+            QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+            if (base.isEmpty()) base = QDir::homePath() + "/.cache";
+            cacheOverride = base + "/Mouffette/Uploads/" + ackTarget;
+        }
+
+        cleanupIncomingSession(true, false, ackTarget, cacheOverride, QString());
         // Clear all expected indices; treat as a hard reset
         m_expectedChunkIndex.clear();
     } else if (type == "connection_lost_cleanup") {

@@ -102,6 +102,8 @@ private:
     void startUpload(const QVector<UploadFileInfo>& files);
     void resetToInitial();
     void cleanupIncomingCacheForConnectionLoss();
+    void finalizeLocalCancelState();
+    void cleanupIncomingSession(bool deleteDiskContents, bool notifySender, const QString& senderOverride = QString(), const QString& cacheDirOverride = QString(), const QString& uploadIdOverride = QString());
 
     QPointer<WebSocketClient> m_ws;
     QString m_targetClientId;
@@ -114,6 +116,7 @@ private:
     bool m_uploadInProgress = false;  // true while streaming chunks
     bool m_cancelRequested = false;   // user pressed cancel mid-stream
     bool m_finalizing = false;        // true after all bytes sent, awaiting server ack
+    bool m_cancelFinalizePending = false; // true while local cancellation cleanup is outstanding
     QString m_currentUploadId;        // uuid
     int m_lastPercent = 0;
     int m_filesCompleted = 0;
