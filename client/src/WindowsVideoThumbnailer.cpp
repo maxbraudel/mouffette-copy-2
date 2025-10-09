@@ -8,6 +8,7 @@
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
+#include <mferror.h>
 #include <QDir>
 #include <QFile>
 #include <QDebug>
