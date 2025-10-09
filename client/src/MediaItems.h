@@ -314,6 +314,8 @@ private:
     bool shouldRepaint() const;
     void logFrameStats() const;
     void updateProgressBar();
+    void updatePlayPauseIconState(bool playing);
+    bool isEffectivelyPlayingForControls() const;
     QImage convertFrameToImage(const QVideoFrame& frame) const;
     void restartPrimingSequence();
     void teardownPlayback();
@@ -350,5 +352,6 @@ private:
     bool m_appSuspended = false; bool m_wasPlayingBeforeSuspend = false;
     bool m_sinkDetached = false; qint64 m_resumePositionMs = 0; bool m_needsReprimeAfterResume = false;
     bool m_playbackTornDown = false;
+    bool m_expectedPlayingState = false;
 };
 
