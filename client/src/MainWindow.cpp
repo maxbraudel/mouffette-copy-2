@@ -826,17 +826,30 @@ MainWindow::MainWindow(QWidget* parent)
                 if (m_uploadManager->isCancelling()) {
                     m_uploadButton->setText("Cancelling…");
                     m_uploadButton->setEnabled(false);
+                    m_uploadButton->setFont(m_uploadButtonDefaultFont);
                 } else {
                     if (m_uploadButton->text() == "Upload") {
                         m_uploadButton->setText("Preparing");
                     }
                     m_uploadButton->setEnabled(true);
+                    // Switch to monospace font for stable width while showing progress
+#ifdef Q_OS_MACOS
+                    QFont mono("Menlo");
+#else
+                    QFont mono("Courier New");
+#endif
+                    if (m_uploadButtonDefaultFont.pointSize() > 0) {
+                        mono.setPointSize(m_uploadButtonDefaultFont.pointSize());
+                    }
+                    mono.setBold(true);
+                    m_uploadButton->setFont(mono);
                 }
                 m_uploadButton->setStyleSheet(overlayUploadingStyle);
             } else if (m_uploadManager->isFinalizing()) {
                 m_uploadButton->setText("Finalizing…");
                 m_uploadButton->setEnabled(false);
                 m_uploadButton->setStyleSheet(overlayUploadingStyle);
+                m_uploadButton->setFont(m_uploadButtonDefaultFont);
             } else if (remoteActive) {
                 // If there are newly added items not yet uploaded to the target, switch back to Upload
                 const bool hasUnuploaded = hasUnuploadedFilesForTarget(target);
@@ -845,15 +858,18 @@ MainWindow::MainWindow(QWidget* parent)
                     m_uploadButton->setText("Upload");
                     m_uploadButton->setEnabled(true);
                     m_uploadButton->setStyleSheet(overlayIdleStyle);
+                    m_uploadButton->setFont(m_uploadButtonDefaultFont);
                 } else {
                     m_uploadButton->setText("Unload");
                     m_uploadButton->setEnabled(true);
                     m_uploadButton->setStyleSheet(overlayUnloadStyle);
+                    m_uploadButton->setFont(m_uploadButtonDefaultFont);
                 }
             } else {
                 m_uploadButton->setText("Upload");
                 m_uploadButton->setEnabled(true);
                 m_uploadButton->setStyleSheet(overlayIdleStyle);
+                m_uploadButton->setFont(m_uploadButtonDefaultFont);
             }
             m_uploadButton->setFixedHeight(40);
             return;
