@@ -550,7 +550,6 @@ MainWindow::MainWindow(QWidget* parent)
       m_localClientInfoContainer(nullptr),
       m_localClientTitleLabel(nullptr),
       m_localNetworkStatusLabel(nullptr),
-      m_clientListLabel(nullptr),
       m_clientListWidget(nullptr),
     m_ongoingScenesLabel(nullptr),
     m_ongoingScenesList(nullptr),
@@ -2653,10 +2652,6 @@ void MainWindow::createClientListPage() {
     QVBoxLayout* layout = new QVBoxLayout(m_clientListPage);
     layout->setSpacing(gInnerContentGap);
     layout->setContentsMargins(0, 0, 0, 0);
-    
-    m_clientListLabel = new QLabel("Connected Clients");
-    applyTitleText(m_clientListLabel);
-    layout->addWidget(m_clientListLabel);
 
     // Client list widget - simple and flexible
     m_clientListWidget = new QListWidget();

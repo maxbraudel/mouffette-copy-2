@@ -11,6 +11,10 @@
 #include <QDir>
 #include <QFile>
 #include <QDebug>
+
+#ifndef MFSTARTUP_LITE
+#define MFSTARTUP_LITE 0x1
+#endif
 using Microsoft::WRL::ComPtr;
 
 namespace {
@@ -28,6 +32,34 @@ public:
     }
 private:
     HRESULT m_hr;
+};
+
+class MediaFoundationGuard {
+public:
+    static MediaFoundationGuard& instance() {
+        static MediaFoundationGuard guard;
+        return guard;
+    }
+
+    bool ok() const { return m_ok; }
+
+private:
+    MediaFoundationGuard() {
+        HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
+        if (FAILED(hr)) {
+            if (hr == MF_E_ALREADY_INITIALIZED) {
+                m_ok = true;
+            } else {
+                m_ok = false;
+            }
+        } else {
+            m_ok = true;
+        }
+    }
+
+    ~MediaFoundationGuard() = default;
+
+    bool m_ok = false;
 };
 
 QImage convertBitmapSourceToImage(IWICBitmapSource* source) {
@@ -138,25 +170,22 @@ QSize WindowsVideoThumbnailer::videoDimensions(const QString& localFilePath) {
 
     const QString path = QDir::toNativeSeparators(localFilePath);
 
-    // Initialize Media Foundation
-    MFStartup(MF_VERSION);
+    if (!MediaFoundationGuard::instance().ok()) {
+        return QSize();
+    }
 
     ComPtr<IMFSourceReader> reader;
     if (FAILED(MFCreateSourceReaderFromURL(reinterpret_cast<LPCWSTR>(path.utf16()), nullptr, &reader))) {
-        MFShutdown();
         return QSize();
     }
 
     ComPtr<IMFMediaType> mediaType;
     if (FAILED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &mediaType))) {
-        MFShutdown();
         return QSize();
     }
 
     UINT32 width = 0, height = 0;
     MFGetAttributeSize(mediaType.Get(), MF_MT_FRAME_SIZE, &width, &height);
-    
-    MFShutdown();
     
     if (width > 0 && height > 0) {
         return QSize(width, height);
@@ -172,10 +201,11 @@ QImage WindowsVideoThumbnailer::firstFrame(const QString& localFilePath) {
 
     ComInitializer comGuard;
 
-    if (!QFile::exists(localFilePath)) {
     if (!comGuard.initialized()) {
         return QImage();
     }
+
+    if (!QFile::exists(localFilePath)) {
         return QImage();
     }
 
