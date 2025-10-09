@@ -2443,14 +2443,9 @@ void ScreenCanvas::keyPressEvent(QKeyEvent* event) {
                 const QList<QGraphicsItem*> sel = m_scene->selectedItems();
                 for (QGraphicsItem* it : sel) {
                     if (auto* base = dynamic_cast<ResizableMediaBase*>(it)) {
-                        base->prepareForDeletion();
-                        // Remove from scene first so it stops receiving events.
-                        m_scene->removeItem(base);
-                        // Now that prepareForDeletion performs full detachment, we can delete immediately.
-                        delete base;
+                        deleteMediaItem(base);
                     }
                 }
-                refreshInfoOverlay();
             }
             event->accept();
             return;
@@ -2541,6 +2536,73 @@ void ScreenCanvas::keyPressEvent(QKeyEvent* event) {
             break;
     }
     QGraphicsView::keyPressEvent(event);
+}
+
+void ScreenCanvas::deleteMediaItem(ResizableMediaBase* item) {
+    if (!item) return;
+
+    item->setVisible(false);
+    item->setEnabled(false);
+    item->prepareForDeletion();
+
+    clearSelectionChromeFor(item);
+    if (item->isSelected()) item->setSelected(false);
+
+    if (QWidget* container = m_mediaContainerByItem.take(item)) {
+        m_mediaItemByContainer.remove(container);
+        container->hide();
+        container->deleteLater();
+    } else {
+        // Ensure reverse map doesn't retain the pointer if it wasn't registered in the hash yet
+        for (auto it = m_mediaItemByContainer.begin(); it != m_mediaItemByContainer.end();) {
+            if (it.value() == item) {
+                if (QWidget* w = it.key()) {
+                    w->hide();
+                    w->deleteLater();
+                }
+                it = m_mediaItemByContainer.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    // Drop any cached host-scene selection references
+    for (int i = m_prevSelectionBeforeHostScene.size() - 1; i >= 0; --i) {
+        if (m_prevSelectionBeforeHostScene[i].media == item) {
+            m_prevSelectionBeforeHostScene.removeAt(i);
+        }
+    }
+    if (auto* video = dynamic_cast<ResizableVideoItem*>(item)) {
+        for (int i = m_prevVideoStates.size() - 1; i >= 0; --i) {
+            if (m_prevVideoStates[i].video == video) {
+                m_prevVideoStates.removeAt(i);
+            }
+        }
+    }
+
+    QGraphicsScene* owningScene = item->scene();
+    if (!owningScene && m_scene) {
+        owningScene = m_scene;
+    }
+    if (owningScene) {
+        owningScene->removeItem(item);
+        owningScene->update();
+    }
+
+    delete item;
+
+    refreshInfoOverlay();
+    layoutInfoOverlay();
+
+    if (viewport()) viewport()->update();
+}
+
+void ScreenCanvas::requestMediaDeletion(ScreenCanvas* canvas, ResizableMediaBase* item) {
+    if (!canvas) {
+        return;
+    }
+    canvas->deleteMediaItem(item);
 }
 
 void ScreenCanvas::keyReleaseEvent(QKeyEvent* event) {

@@ -316,6 +316,7 @@ private:
     void updateProgressBar();
     QImage convertFrameToImage(const QVideoFrame& frame) const;
     void restartPrimingSequence();
+    void teardownPlayback();
 
     qreal baseWidth() const { return static_cast<qreal>(m_baseSize.width()); }
     qreal baseHeight() const { return static_cast<qreal>(m_baseSize.height()); }
@@ -348,5 +349,6 @@ private:
     mutable int m_framesDropped = 0; mutable int m_conversionFailures = 0;
     bool m_appSuspended = false; bool m_wasPlayingBeforeSuspend = false;
     bool m_sinkDetached = false; qint64 m_resumePositionMs = 0; bool m_needsReprimeAfterResume = false;
+    bool m_playbackTornDown = false;
 };
 

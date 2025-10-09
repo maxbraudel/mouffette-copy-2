@@ -113,6 +113,8 @@ public:
     // Z-order management for media items (public interface)
     void moveMediaUp(QGraphicsItem* item);
     void moveMediaDown(QGraphicsItem* item);
+    void deleteMediaItem(ResizableMediaBase* item);
+    static void requestMediaDeletion(ScreenCanvas* canvas, ResizableMediaBase* item);
     
     // Media list overlay management
     void refreshInfoOverlay();

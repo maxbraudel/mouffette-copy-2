@@ -26,6 +26,7 @@
 #include <QVideoSink>
 #include <QMediaMetaData>
 #include <QApplication>
+#include <QUrl>
 #include "AppColors.h"
 #include <QDateTime>
 
@@ -669,6 +670,11 @@ void ResizableMediaBase::prepareForDeletion() {
     m_beingDeleted = true;
     // Cancel any active resize interaction.
     if (m_activeHandle != None) { m_activeHandle = None; ungrabMouse(); }
+    cancelFade();
+    setContentVisible(false);
+    m_contentDisplayOpacity = 0.0;
+    setVisible(false);
+    update();
     // Fully detach overlay panels: remove their background graphics items from the scene so no further relayout occurs.
     auto detachPanel = [&](std::unique_ptr<OverlayPanel>& panel){
         if (!panel) return;
@@ -907,12 +913,17 @@ void ResizableMediaBase::initializeOverlays() {
         deleteBtn->setToggleOnly(false);
         deleteBtn->setState(OverlayElement::Normal);
         deleteBtn->setOnClicked([this]() {
-            // Defer deletion to the event loop to avoid re-entrancy issues
-            QTimer::singleShot(0, [itemPtr=this]() {
-                itemPtr->prepareForDeletion();
-                if (itemPtr->scene()) itemPtr->scene()->removeItem(itemPtr);
-                delete itemPtr;
-            });
+            if (scene() && !scene()->views().isEmpty()) {
+                if (auto* screenCanvas = qobject_cast<ScreenCanvas*>(scene()->views().first())) {
+                    ScreenCanvas::requestMediaDeletion(screenCanvas, this);
+                    return;
+                }
+            }
+            setVisible(false);
+            setEnabled(false);
+            prepareForDeletion();
+            if (scene()) scene()->removeItem(this);
+            delete this;
         });
         m_topPanel->addElement(deleteBtn);
     }
@@ -1121,6 +1132,7 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
 }
 
 ResizableVideoItem::~ResizableVideoItem() {
+    teardownPlayback();
     if (m_player) QObject::disconnect(m_player, nullptr, nullptr, nullptr);
     if (m_sink) QObject::disconnect(m_sink, nullptr, nullptr, nullptr);
     delete m_player; delete m_audio; delete m_sink; delete m_controlsFadeAnim;
@@ -1334,6 +1346,7 @@ void ResizableVideoItem::prepareForDeletion() {
     if (m_progressTimer) m_progressTimer->stop();
     if (m_controlsFadeAnim) m_controlsFadeAnim->stop();
     m_draggingProgress = m_draggingVolume = false; m_seeking = false;
+    teardownPlayback();
     // Hide controls background & children (safer than deleting here; destructor will clean up if needed).
     if (m_controlsBg) {
         if (m_controlsBg->scene()) m_controlsBg->scene()->removeItem(m_controlsBg);
@@ -1453,4 +1466,39 @@ void ResizableVideoItem::restartPrimingSequence() {
     m_primingFirstFrame = true;
     m_player->setPosition(0);
     m_player->play();
+}
+
+void ResizableVideoItem::teardownPlayback() {
+    if (m_playbackTornDown) {
+        return;
+    }
+    m_playbackTornDown = true;
+
+    if (m_progressTimer) {
+        m_progressTimer->stop();
+    }
+
+    if (m_player) {
+        // Stop playback synchronously and detach sinks/audio so Media Foundation tears down immediately
+        m_player->pause();
+        m_player->stop();
+        m_player->setSource(QUrl());
+        if (m_audio) {
+            m_player->setAudioOutput(nullptr);
+        }
+        if (!m_sinkDetached) {
+            m_player->setVideoSink(nullptr);
+            m_sinkDetached = true;
+        }
+    }
+
+    if (m_sink) {
+        QObject::disconnect(m_sink, nullptr, nullptr, nullptr);
+        m_sink->setVideoFrame(QVideoFrame());
+    }
+
+    if (m_audio) {
+        QObject::disconnect(m_audio, nullptr, nullptr, nullptr);
+        m_audio->setMuted(true);
+    }
 }
