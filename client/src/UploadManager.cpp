@@ -13,8 +13,21 @@
 #include <QTimer>
 #include <QElapsedTimer>
 #include <QDebug>
+#include <QSet>
 #include <algorithm>
 #include <cmath>
+
+namespace {
+bool isVideoExtension(const QString& extension) {
+    static const QSet<QString> kVideoExtensions = {
+        QStringLiteral("mp4"), QStringLiteral("mov"), QStringLiteral("m4v"), QStringLiteral("mkv"),
+        QStringLiteral("webm"), QStringLiteral("avi"), QStringLiteral("wmv"), QStringLiteral("flv"),
+        QStringLiteral("mpg"), QStringLiteral("mpeg"), QStringLiteral("3gp"), QStringLiteral("3g2"),
+        QStringLiteral("ts"), QStringLiteral("m2ts"), QStringLiteral("mts")
+    };
+    return kVideoExtensions.contains(extension.trimmed().toLower());
+}
+}
 
 // Removed dependency on ResizableMediaBase / scene scanning.
 
@@ -650,6 +663,11 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             QJsonArray mediaIdsArray = f.value("mediaIds").toArray();
             qint64 size = static_cast<qint64>(f.value("sizeBytes").toDouble());
             m_incoming.totalSize += qMax<qint64>(0, size);
+            if (!extension.isEmpty()) {
+                m_incoming.fileIdToExtension.insert(fileId, extension.toLower());
+            } else {
+                m_incoming.fileIdToExtension.insert(fileId, QString());
+            }
             
             // Store all mediaIds for this fileId
             QStringList mediaIdsList;
@@ -752,6 +770,16 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             if (it.value()) { it.value()->flush(); it.value()->close(); delete it.value(); }
         }
         m_incoming.openFiles.clear();
+
+        // Preload completed video files into RAM for low-latency playback
+        for (auto it = m_incoming.fileIdToExtension.constBegin(); it != m_incoming.fileIdToExtension.constEnd(); ++it) {
+            const QString& fileId = it.key();
+            const QString& ext = it.value();
+            if (isVideoExtension(ext)) {
+                FileManager::instance().preloadFileIntoMemory(fileId);
+            }
+        }
+        m_incoming.fileIdToExtension.clear();
         // Send a final 100% progress update to the sender to ensure UI reaches 100 only when target is fully done
         if (m_ws && !m_incoming.senderId.isEmpty()) {
             const int finalPercent = 100;

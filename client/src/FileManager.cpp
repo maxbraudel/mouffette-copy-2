@@ -4,6 +4,7 @@
 #include <QCryptographicHash>
 #include <QDebug>
 #include <QSet>
+#include <QIODevice>
 
 // Static member definition
 std::function<void(const QString& fileId, const QList<QString>& clientIds)> FileManager::s_fileRemovalNotifier;
@@ -33,6 +34,7 @@ QString FileManager::getOrCreateFileId(const QString& filePath)
         QString newId = generateFileId(normalizedPath);
         m_pathToFileId[normalizedPath] = newId;
         m_fileIdToPath.remove(existingId);
+        releaseFileMemory(existingId);
         m_fileIdToPath[newId] = normalizedPath;
         m_fileIdToMediaIds[newId] = m_fileIdToMediaIds.take(existingId); // move media associations
         // Update reverse media -> file map
@@ -86,24 +88,16 @@ void FileManager::associateMediaWithFile(const QString& mediaId, const QString& 
 
 void FileManager::removeMediaAssociation(const QString& mediaId)
 {
-    
-    
     if (!m_mediaIdToFileId.contains(mediaId)) {
-        
         return;
     }
-    
-    QString fileId = m_mediaIdToFileId[mediaId];
-    
+
+    const QString fileId = m_mediaIdToFileId.value(mediaId);
     m_fileIdToMediaIds[fileId].removeAll(mediaId);
     m_mediaIdToFileId.remove(mediaId);
-    
-    
-    
-    // Clean up file if no more media references it  
+
+    // Clean up file if no more media references it
     removeFileIfUnused(fileId);
-    
-    
 }
 
 QString FileManager::getFileIdForMedia(const QString& mediaId) const
@@ -133,38 +127,28 @@ bool FileManager::hasFileId(const QString& fileId) const
 
 void FileManager::removeFileIfUnused(const QString& fileId)
 {
-    
-    
     if (!m_fileIdToMediaIds.contains(fileId)) {
-        
         return;
     }
-    
-    if (m_fileIdToMediaIds[fileId].isEmpty()) {
-        QString filePath = m_fileIdToPath.value(fileId);
-        QList<QString> clientsWithFile = m_fileIdToClients.value(fileId);
-        
-        
-        
-        // Notify that file should be removed from remote clients
-        if (!clientsWithFile.isEmpty() && s_fileRemovalNotifier) {
-            
-            s_fileRemovalNotifier(fileId, clientsWithFile);
-        } else {
-            
-        }
-        
-        // Clean up local tracking data
-        m_fileIdToPath.remove(fileId);
-        m_pathToFileId.remove(filePath);
-        m_fileIdToMediaIds.remove(fileId);
-        m_fileIdToClients.remove(fileId);
-        m_fileIdMeta.remove(fileId);
-        
-        
-    } else {
-        
+
+    if (!m_fileIdToMediaIds.value(fileId).isEmpty()) {
+        return;
     }
+
+    const QString filePath = m_fileIdToPath.value(fileId);
+    const QList<QString> clientsWithFile = m_fileIdToClients.value(fileId);
+
+    if (!clientsWithFile.isEmpty() && s_fileRemovalNotifier) {
+        s_fileRemovalNotifier(fileId, clientsWithFile);
+    }
+
+    // Clean up local tracking data
+    releaseFileMemory(fileId);
+    m_fileIdToPath.remove(fileId);
+    m_pathToFileId.remove(filePath);
+    m_fileIdToMediaIds.remove(fileId);
+    m_fileIdToClients.remove(fileId);
+    m_fileIdMeta.remove(fileId);
 }
 
 void FileManager::registerReceivedFilePath(const QString& fileId, const QString& absolutePath) {
@@ -175,6 +159,7 @@ void FileManager::registerReceivedFilePath(const QString& fileId, const QString&
     if (!m_fileIdToMediaIds.contains(fileId)) m_fileIdToMediaIds[fileId] = QList<QString>();
     QFileInfo info(absolutePath);
     m_fileIdMeta[fileId] = { info.exists() ? info.size() : 0, info.exists() ? info.lastModified().toSecsSinceEpoch() : 0 };
+    releaseFileMemory(fileId);
 }
 
 void FileManager::removeReceivedFileMapping(const QString& fileId) {
@@ -185,7 +170,48 @@ void FileManager::removeReceivedFileMapping(const QString& fileId) {
     }
     m_fileIdToPath.remove(fileId);
     m_fileIdMeta.remove(fileId);
+    releaseFileMemory(fileId);
     // Don't touch media associations here; they are sender-side concepts. Remote just needs path lookup cleared.
+}
+
+void FileManager::preloadFileIntoMemory(const QString& fileId) {
+    if (fileId.isEmpty()) return;
+    getFileBytes(fileId, true);
+}
+
+QSharedPointer<QByteArray> FileManager::getFileBytes(const QString& fileId, bool forceReload) {
+    if (fileId.isEmpty()) return {};
+    if (!forceReload) {
+        const auto existing = m_fileMemoryCache.value(fileId);
+        if (!existing.isNull() && !existing->isEmpty()) {
+            return existing;
+        }
+    }
+
+    const QString path = m_fileIdToPath.value(fileId);
+    if (path.isEmpty()) {
+        return {};
+    }
+
+    QFile file(path);
+    if (!file.exists()) {
+        return {};
+    }
+    if (!file.open(QIODevice::ReadOnly)) {
+        qWarning() << "FileManager: Failed to open" << path << "for preloading";
+        return {};
+    }
+    QByteArray bytes = file.readAll();
+    file.close();
+
+    auto shared = QSharedPointer<QByteArray>::create(std::move(bytes));
+    m_fileMemoryCache.insert(fileId, shared);
+    return shared;
+}
+
+void FileManager::releaseFileMemory(const QString& fileId) {
+    if (fileId.isEmpty()) return;
+    m_fileMemoryCache.remove(fileId);
 }
 
 QString FileManager::generateFileId(const QString& filePath)
@@ -244,7 +270,6 @@ void FileManager::markMediaUploadedToClient(const QString& mediaId, const QStrin
         qDebug() << "FileManager: Marked media" << mediaId << "as uploaded to client" << clientId;
     }
 }
-
 bool FileManager::isMediaUploadedToClient(const QString& mediaId, const QString& clientId) const
 {
     const QList<QString> clients = m_mediaIdToClients.value(mediaId);
@@ -321,6 +346,7 @@ void FileManager::removeReceivedFileMappingsUnderPathPrefix(const QString& pathP
         m_fileIdToMediaIds.remove(fileId);
         m_fileIdToClients.remove(fileId);
         m_fileIdMeta.remove(fileId);
+        releaseFileMemory(fileId);
     }
 
     for (auto it = m_mediaIdToFileId.begin(); it != m_mediaIdToFileId.end();) {

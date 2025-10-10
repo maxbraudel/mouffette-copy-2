@@ -6,6 +6,7 @@
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QPixmap>
+#include <QBuffer>
 #include <QFileInfo>
 #include <QFile>
 #include <QDebug>
@@ -22,6 +23,7 @@
 #include <QMetaObject>
 #include <QUrl>
 #include <QThread>
+#include <QIODevice>
 #include "FileManager.h"
 #include "MacWindowManager.h"
 #include <algorithm>
@@ -198,6 +200,11 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
         }
         player->setVideoSink(nullptr);
         player->setSource(QUrl());
+        if (item->memoryBuffer) {
+            item->memoryBuffer->close();
+            item->memoryBuffer->deleteLater();
+            item->memoryBuffer = nullptr;
+        }
     }
 
     if (item->audio) {
@@ -261,6 +268,10 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
         item->audio = nullptr;
     }
 
+    item->memoryBytes.reset();
+    item->usingMemoryBuffer = false;
+    item->frameThrottle.invalidate();
+    item->cachedPixmap = QPixmap();
     item->loaded = false;
     item->primedFirstFrame = false;
     item->playAuthorized = false;
@@ -356,6 +367,8 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
         if (item->type == "video") {
             item->muted = m.value("muted").toBool(false);
             item->volume = m.value("volume").toDouble(1.0);
+            item->frameBudgetMs = 33; // ~30 FPS pacing to reduce CPU use
+            FileManager::instance().preloadFileIntoMemory(item->fileId);
         }
         m_mediaItems.append(item);
         scheduleMedia(item);
@@ -418,6 +431,7 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                 QPixmap pm;
                 if (pm.load(path)) { lbl->setPixmap(pm); return true; }
             }
+            qWarning() << "RemoteSceneController: video path not available yet for" << item->mediaId << ", will retry";
             return false;
         };
         if (!attemptLoad()) {
@@ -449,8 +463,20 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             auto item = weakItem.lock();
             if (!item) return;
             if (!frame.isValid()) return;
+            if (item->frameBudgetMs > 0) {
+                if (!item->frameThrottle.isValid()) {
+                    item->frameThrottle.start();
+                } else if (item->frameThrottle.elapsed() < item->frameBudgetMs) {
+                    return;
+                }
+            }
             const QImage img = frame.toImage();
-            if (!img.isNull()) videoLabel->setPixmap(QPixmap::fromImage(img));
+            if (img.isNull()) return;
+            item->cachedPixmap = QPixmap::fromImage(img);
+            videoLabel->setPixmap(item->cachedPixmap);
+            if (item->frameBudgetMs > 0) {
+                item->frameThrottle.restart();
+            }
         });
         item->player->setVideoSink(videoSink);
         QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus s){
@@ -460,18 +486,6 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             qDebug() << "RemoteSceneController: mediaStatus" << int(s) << "for" << item->mediaId;
             if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
                 item->loaded = true;
-            }
-            if (s == QMediaPlayer::EndOfMedia) {
-                if (item->repeatActive && item->repeatRemaining > 0) {
-                    --item->repeatRemaining;
-                    if (item->player) {
-                        item->player->setPosition(0);
-                        item->player->play();
-                    }
-                    return;
-                }
-                item->repeatActive = false;
-                item->repeatRemaining = 0;
             }
         });
         QObject::connect(item->player, &QMediaPlayer::playbackStateChanged, item->player, [this,epoch,weakItem](QMediaPlayer::PlaybackState st){
@@ -493,10 +507,30 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             QString path = FileManager::instance().getFilePathForId(item->fileId);
             qDebug() << "RemoteSceneController: resolving video path for" << item->mediaId << "->" << path;
             if (!path.isEmpty() && QFileInfo::exists(path)) {
-                // Use file URL directly for backend compatibility
-                item->player->setSource(QUrl::fromLocalFile(path));
-                // Prime only for preview when autoPlay is disabled: play muted, then pause on first video frame
-                if (!item->autoPlay && !item->primedFirstFrame) {
+                auto bytes = FileManager::instance().getFileBytes(item->fileId);
+                if (!bytes.isNull() && !bytes->isEmpty()) {
+                    item->memoryBytes = bytes;
+                    if (item->memoryBuffer) {
+                        item->memoryBuffer->close();
+                        item->memoryBuffer->deleteLater();
+                    }
+                    item->memoryBuffer = new QBuffer(item->memoryBytes.data(), item->player);
+                    if (!item->memoryBuffer->isOpen()) {
+                        item->memoryBuffer->open(QIODevice::ReadOnly);
+                    }
+                    item->player->setSourceDevice(item->memoryBuffer, !path.isEmpty() ? QUrl::fromLocalFile(path) : QUrl());
+                    item->usingMemoryBuffer = true;
+                } else {
+                    item->player->setSource(QUrl::fromLocalFile(path));
+                    item->usingMemoryBuffer = false;
+                }
+
+                const int loops = (item->repeatEnabled && item->repeatCount > 0)
+                                      ? (item->repeatCount + 1)
+                                      : 1;
+                item->player->setLoops(loops);
+
+                if (!item->primedFirstFrame) {
                     item->primingConn = QObject::connect(videoSink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem](const QVideoFrame& f){
                         auto item = weakItem.lock();
                         if (!item) return;
@@ -549,13 +583,8 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             if (epoch != m_sceneEpoch) return;
             item->playAuthorized = true;
             if (!item->player) return;
-            if (item->repeatEnabled && item->repeatCount > 0) {
-                item->repeatActive = true;
-                item->repeatRemaining = item->repeatCount;
-            } else {
-                item->repeatActive = false;
-                item->repeatRemaining = 0;
-            }
+            item->repeatActive = false;
+            item->repeatRemaining = 0;
             // Apply final audio state from host now
             if (item->audio) { item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0)); }
             if (item->loaded) {
@@ -662,9 +691,27 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
         // Connect all span sinks to mirror frames into labels
         for (auto& s : item->spans) {
             if (!s.videoSink || !s.videoLabel) continue;
-            QLabel* targetLabel = s.videoLabel;
-            QObject::connect(s.videoSink, &QVideoSink::videoFrameChanged, targetLabel, [this,epoch,targetLabel,weakItem](const QVideoFrame& frame){
-                if (epoch != m_sceneEpoch) return; auto item = weakItem.lock(); if (!item) return; if (!frame.isValid()) return; const QImage img = frame.toImage(); if (!img.isNull() && targetLabel) targetLabel->setPixmap(QPixmap::fromImage(img));
+            QObject::connect(s.videoSink, &QVideoSink::videoFrameChanged, s.videoSink, [this, epoch, weakItem](const QVideoFrame& frame){
+                if (epoch != m_sceneEpoch) return;
+                auto item = weakItem.lock();
+                if (!item) return;
+                if (!frame.isValid()) return;
+                if (item->frameBudgetMs > 0) {
+                    if (!item->frameThrottle.isValid()) {
+                        item->frameThrottle.start();
+                    } else if (item->frameThrottle.elapsed() < item->frameBudgetMs) {
+                        return;
+                    }
+                }
+                const QImage img = frame.toImage();
+                if (img.isNull()) return;
+                item->cachedPixmap = QPixmap::fromImage(img);
+                for (auto& spanRef : item->spans) {
+                    if (spanRef.videoLabel) spanRef.videoLabel->setPixmap(item->cachedPixmap);
+                }
+                if (item->frameBudgetMs > 0) {
+                    item->frameThrottle.restart();
+                }
             });
         }
         // We'll direct the player's sink dynamically; Qt supports only one sink at a time.
@@ -673,35 +720,12 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
         // Alternative approach: use one sink and share the QImage across labels in the slot above.
         QVideoSink* sharedSink = nullptr; if (!item->spans.isEmpty()) sharedSink = item->spans.first().videoSink;
         if (sharedSink) item->player->setVideoSink(sharedSink);
-        // Additionally, mirror frames from shared sink to all other labels
-        if (sharedSink) {
-            // Build weak refs to labels so we don't need to access item after scheduling
-            QVector<QPointer<QLabel>> labelRefs;
-            labelRefs.reserve(item->spans.size());
-            for (auto& s : item->spans) { if (s.videoLabel) labelRefs.push_back(QPointer<QLabel>(s.videoLabel)); }
-            QObject::connect(sharedSink, &QVideoSink::videoFrameChanged, sharedSink, [this,epoch,labelRefs,weakItem](const QVideoFrame& f) mutable {
-                if (epoch != m_sceneEpoch) return; if (!f.isValid()) return; auto item = weakItem.lock(); if (!item) return; const QImage img = f.toImage(); if (img.isNull()) return; QPixmap pm = QPixmap::fromImage(img);
-                for (auto& ref : labelRefs) { if (ref) ref->setPixmap(pm); }
-            });
-        }
         QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus s){
             auto item = weakItem.lock();
             if (!item) return;
             if (epoch != m_sceneEpoch) return;
             if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
                 item->loaded = true;
-            }
-            if (s == QMediaPlayer::EndOfMedia) {
-                if (item->repeatActive && item->repeatRemaining > 0) {
-                    --item->repeatRemaining;
-                    if (item->player) {
-                        item->player->setPosition(0);
-                        item->player->play();
-                    }
-                    return;
-                }
-                item->repeatActive = false;
-                item->repeatRemaining = 0;
             }
         });
         QObject::connect(item->player, &QMediaPlayer::errorOccurred, item->player, [this,epoch,weakItem](QMediaPlayer::Error e, const QString& err){ auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch) return; if (e != QMediaPlayer::NoError) qWarning() << "RemoteSceneController: player error" << int(e) << err << "for" << item->mediaId; });
@@ -711,18 +735,38 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             if (epoch != m_sceneEpoch) return false;
             QString path = FileManager::instance().getFilePathForId(item->fileId);
             if (!path.isEmpty() && QFileInfo::exists(path)) {
-                item->player->setSource(QUrl::fromLocalFile(path));
-                if (!item->autoPlay && !item->primedFirstFrame) {
-                    // Prime using shared sink since that's where frames will arrive
-                    QVideoSink* sink = nullptr; if (!item->spans.isEmpty()) sink = item->spans.first().videoSink;
-                    if (sink) {
-                        item->primingConn = QObject::connect(sink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem](const QVideoFrame& f){
-                            auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch) return; if (!f.isValid()) return; if (item->primedFirstFrame) return; item->primedFirstFrame = true; QObject::disconnect(item->primingConn); if (!item->playAuthorized && item->player) { item->player->pause(); item->player->setPosition(0); }
-                        });
+                auto bytes = FileManager::instance().getFileBytes(item->fileId);
+                if (!bytes.isNull() && !bytes->isEmpty()) {
+                    item->memoryBytes = bytes;
+                    if (item->memoryBuffer) {
+                        item->memoryBuffer->close();
+                        item->memoryBuffer->deleteLater();
                     }
-                    if (item->audio) item->audio->setMuted(true);
-                    item->player->play();
+                    item->memoryBuffer = new QBuffer(item->memoryBytes.data(), item->player);
+                    if (!item->memoryBuffer->isOpen()) {
+                        item->memoryBuffer->open(QIODevice::ReadOnly);
+                    }
+                    item->player->setSourceDevice(item->memoryBuffer, !path.isEmpty() ? QUrl::fromLocalFile(path) : QUrl());
+                    item->usingMemoryBuffer = true;
+                } else {
+                    item->player->setSource(QUrl::fromLocalFile(path));
+                    item->usingMemoryBuffer = false;
                 }
+
+                const int loops = (item->repeatEnabled && item->repeatCount > 0)
+                                      ? (item->repeatCount + 1)
+                                      : 1;
+                item->player->setLoops(loops);
+
+                // Prime using shared sink since that's where frames will arrive
+                QVideoSink* sink = nullptr; if (!item->spans.isEmpty()) sink = item->spans.first().videoSink;
+                if (sink && !item->primedFirstFrame) {
+                    item->primingConn = QObject::connect(sink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem](const QVideoFrame& f){
+                        auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch) return; if (!f.isValid()) return; if (item->primedFirstFrame) return; item->primedFirstFrame = true; QObject::disconnect(item->primingConn); if (!item->playAuthorized && item->player) { item->player->pause(); item->player->setPosition(0); }
+                    });
+                }
+                if (item->audio) item->audio->setMuted(true);
+                item->player->play();
                 return true;
             }
             return false;
@@ -753,13 +797,8 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             if (!item) return;
             if (epoch != m_sceneEpoch) return;
             item->playAuthorized = true; if (!item->player) return;
-            if (item->repeatEnabled && item->repeatCount > 0) {
-                item->repeatActive = true;
-                item->repeatRemaining = item->repeatCount;
-            } else {
-                item->repeatActive = false;
-                item->repeatRemaining = 0;
-            }
+            item->repeatActive = false;
+            item->repeatRemaining = 0;
             if (item->audio) { item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0)); }
             if (item->loaded) { if (item->player->position() != 0) item->player->setPosition(0); item->player->play(); }
             else {

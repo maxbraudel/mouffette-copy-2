@@ -7,6 +7,8 @@
 #include <QFileInfo>
 #include <QCryptographicHash>
 #include <QSet>
+#include <QSharedPointer>
+#include <QByteArray>
 
 class FileManager
 {
@@ -38,6 +40,13 @@ public:
     void registerReceivedFilePath(const QString& fileId, const QString& absolutePath);
     // Remove a previously registered received file mapping on the target side (called when sender asks to delete a file)
     void removeReceivedFileMapping(const QString& fileId);
+
+    // Ensure file bytes are resident in memory for low-latency playback.
+    void preloadFileIntoMemory(const QString& fileId);
+    // Retrieve a shared QByteArray for a file. Loads from disk on first access unless already cached.
+    QSharedPointer<QByteArray> getFileBytes(const QString& fileId, bool forceReload = false);
+    // Release any resident memory for the given fileId (used when file is deleted remotely).
+    void releaseFileMemory(const QString& fileId);
     
     // Check if a file ID exists
     bool hasFileId(const QString& fileId) const;
@@ -86,6 +95,7 @@ private:
     QHash<QString, QList<QString>> m_fileIdToClients; // fileId -> [clientId1, clientId2, ...]
     QHash<QString, QList<QString>> m_mediaIdToClients; // mediaId -> [clientId1, clientId2, ...]
     QHash<QString, FileMeta> m_fileIdMeta;         // fileId -> size/mtime captured at id creation
+    QHash<QString, QSharedPointer<QByteArray>> m_fileMemoryCache; // fileId -> in-memory bytes
     
     static std::function<void(const QString& fileId, const QList<QString>& clientIds)> s_fileRemovalNotifier;
 };

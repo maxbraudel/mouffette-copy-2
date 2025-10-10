@@ -7,6 +7,10 @@
 #include <QJsonObject>
 #include <QTimer>
 #include <QGraphicsOpacityEffect>
+#include <QElapsedTimer>
+#include <QPixmap>
+#include <QSharedPointer>
+#include <QByteArray>
 #include <memory>
 
 class WebSocketClient;
@@ -15,6 +19,7 @@ class QMediaPlayer;
 class QVideoSink;
 class QAudioOutput;
 class QLabel;
+class QBuffer;
 
 class RemoteSceneController : public QObject {
 	Q_OBJECT
@@ -61,6 +66,14 @@ private:
 		QMetaObject::Connection deferredStartConn; // one-shot start after load
 		QMetaObject::Connection primingConn; // one-shot first-frame priming when autoPlay=false
 		quint64 sceneEpoch = 0; // generation token to guard delayed actions
+		// Frame pacing and caching
+		int frameBudgetMs = 0;
+		QElapsedTimer frameThrottle;
+		QPixmap cachedPixmap;
+		// In-memory source support
+		QSharedPointer<QByteArray> memoryBytes;
+		QBuffer* memoryBuffer = nullptr;
+		bool usingMemoryBuffer = false;
 	};
 
 	QWidget* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);
