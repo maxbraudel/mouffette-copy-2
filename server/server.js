@@ -18,6 +18,51 @@ class MouffetteServer {
         console.log(`🎯 Mouffette Server started on ws://0.0.0.0:${this.port}`);
         
         this.wss.on('connection', (ws, req) => {
+            // Parse query parameters to detect upload channel connections
+            const url = new URL(req.url || '/', 'ws://dummy');
+            const channel = url.searchParams.get('channel');
+            const isUploadChannel = (channel === 'upload');
+            
+            if (isUploadChannel) {
+                // Upload channel: send welcome but don't register as new client
+                // Client will identify itself via messages, we'll route through existing client entry
+                const tempId = uuidv4(); // Temporary ID for this socket connection tracking
+                console.log(`📤 Upload channel connected (temp ID: ${tempId})`);
+                
+                ws.send(JSON.stringify({
+                    type: 'welcome',
+                    clientId: tempId, // Client uses this to track which socket received the response
+                    message: 'Upload channel ready'
+                }));
+                
+                // Handle messages from upload channel - they should contain senderClientId
+                ws.on('message', (data) => {
+                    try {
+                        const message = JSON.parse(data.toString());
+                        // Extract the real client ID from the message
+                        const realClientId = message.senderClientId;
+                        if (realClientId) {
+                            // Forward to handleMessage with the real client ID
+                            this.handleMessage(realClientId, message);
+                        }
+                    } catch (error) {
+                        console.error('❌ Error parsing upload channel message:', error);
+                    }
+                });
+                
+                ws.on('close', () => {
+                    console.log(`📤 Upload channel disconnected (temp ID: ${tempId})`);
+                });
+                
+                ws.on('error', (error) => {
+                    console.error(`❌ Upload channel error (temp ID: ${tempId}):`, error);
+                });
+                
+                // Don't add to clients map or broadcast client list
+                return;
+            }
+            
+            // Regular control channel connection
             const clientId = uuidv4();
             const clientInfo = {
                 id: clientId,
