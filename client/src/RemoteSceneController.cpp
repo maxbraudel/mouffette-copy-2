@@ -540,7 +540,17 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                 item->loaded = true;
             } else if (s == QMediaPlayer::EndOfMedia) {
                 if (!item->player) return;
-                if (!item->repeatEnabled || item->repeatRemaining <= 0) {
+                const bool canRepeat = item->repeatEnabled && item->repeatRemaining > 0 && item->playAuthorized;
+                if (canRepeat) {
+                    --item->repeatRemaining;
+                    item->pausedAtEnd = false;
+                    if (item->audio) {
+                        item->audio->setMuted(item->muted);
+                        item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0));
+                    }
+                    item->player->setPosition(0);
+                    item->player->play();
+                } else {
                     item->pausedAtEnd = true;
                     if (item->audio) item->audio->setMuted(true);
                     qint64 dur = item->player->duration();
@@ -875,7 +885,17 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
                 item->loaded = true;
             } else if (s == QMediaPlayer::EndOfMedia && item->player) {
-                if (!item->repeatEnabled || item->repeatRemaining <= 0) {
+                const bool canRepeat = item->repeatEnabled && item->repeatRemaining > 0 && item->playAuthorized;
+                if (canRepeat) {
+                    --item->repeatRemaining;
+                    item->pausedAtEnd = false;
+                    if (item->audio) {
+                        item->audio->setMuted(item->muted);
+                        item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0));
+                    }
+                    item->player->setPosition(0);
+                    item->player->play();
+                } else {
                     item->pausedAtEnd = true;
                     if (item->audio) item->audio->setMuted(true);
                     qint64 dur = item->player->duration();
