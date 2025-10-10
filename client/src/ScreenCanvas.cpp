@@ -352,7 +352,14 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                 }
             }
             m["type"] = media->isVideoMedia() ? "video" : "image";
-            QRectF br = media->sceneBoundingRect();
+            QRectF br;
+            const QSize baseSize = media->baseSizePx();
+            if (baseSize.width() > 0 && baseSize.height() > 0) {
+                br = media->mapRectToScene(QRectF(QPointF(0, 0), QSizeF(baseSize)));
+            } else {
+                br = media->sceneBoundingRect();
+            }
+            br = br.normalized();
             m["x"] = br.x();
             m["y"] = br.y();
             m["width"] = br.width();
