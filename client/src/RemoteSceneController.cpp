@@ -538,18 +538,18 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             qDebug() << "RemoteSceneController: mediaStatus" << int(s) << "for" << item->mediaId;
             if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
                 item->loaded = true;
-            }
-        });
-        QObject::connect(item->player, &QMediaPlayer::positionChanged, item->player, [this,epoch,weakItem](qint64 pos){
-            auto item = weakItem.lock();
-            if (!item) return;
-            if (epoch != m_sceneEpoch) return;
-            if (item->pausedAtEnd) return;
-            qint64 dur = item->player->duration();
-            if (dur > 0 && pos > 0 && (dur - pos) < 100) {
-                item->pausedAtEnd = true;
-                if (item->audio) item->audio->setMuted(true);
-                item->player->pause();
+            } else if (s == QMediaPlayer::EndOfMedia) {
+                if (!item->player) return;
+                if (!item->repeatEnabled || item->repeatRemaining <= 0) {
+                    item->pausedAtEnd = true;
+                    if (item->audio) item->audio->setMuted(true);
+                    qint64 dur = item->player->duration();
+                    qint64 finalPos = dur > 0 ? std::max<qint64>(0, dur - 1) : 0;
+                    item->player->pause();
+                    if (finalPos != item->player->position()) {
+                        item->player->setPosition(finalPos);
+                    }
+                }
             }
         });
         QObject::connect(item->player, &QMediaPlayer::playbackStateChanged, item->player, [this,epoch,weakItem](QMediaPlayer::PlaybackState st){
@@ -557,6 +557,42 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             if (!item) return;
             if (epoch != m_sceneEpoch) return;
             qDebug() << "RemoteSceneController: playbackState" << int(st) << "for" << item->mediaId;
+        });
+        QObject::connect(item->player, &QMediaPlayer::positionChanged, item->player, [this,epoch,weakItem](qint64 pos){
+            auto item = weakItem.lock();
+            if (!item) return;
+            if (epoch != m_sceneEpoch) return;
+            if (!item->player) return;
+
+            qint64 dur = item->player->duration();
+            if (dur <= 0 || pos <= 0) return;
+
+            constexpr qint64 repeatWindowMs = 120;
+            if (item->repeatEnabled && item->repeatRemaining > 0) {
+                if (!item->repeatActive && (dur - pos) < repeatWindowMs) {
+                    item->repeatActive = true;
+                    item->pausedAtEnd = false;
+                    if (item->audio) {
+                        item->audio->setMuted(item->muted);
+                        item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0));
+                    }
+                    item->player->setPosition(0);
+                    item->player->play();
+                    --item->repeatRemaining;
+                    item->repeatActive = false;
+                }
+                return;
+            }
+
+            if (item->pausedAtEnd) return;
+            if ((dur - pos) < 100) {
+                item->pausedAtEnd = true;
+                if (item->audio) item->audio->setMuted(true);
+                item->player->pause();
+                if (dur > 1) {
+                    item->player->setPosition(std::max<qint64>(0, dur - 1));
+                }
+            }
         });
         QObject::connect(item->player, &QMediaPlayer::errorOccurred, item->player, [this,epoch,weakItem](QMediaPlayer::Error e, const QString& err){
             auto item = weakItem.lock();
@@ -590,10 +626,10 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                     item->usingMemoryBuffer = false;
                 }
 
-                const int loops = (item->repeatEnabled && item->repeatCount > 0)
-                                      ? (item->repeatCount + 1)
-                                      : 1;
-                item->player->setLoops(loops);
+                item->player->setLoops(QMediaPlayer::Once);
+                item->repeatRemaining = (item->repeatEnabled && item->repeatCount > 0)
+                                             ? item->repeatCount
+                                             : 0;
 
                 // Prime the first frame if not already done
                 if (!item->primedFirstFrame) {
@@ -661,19 +697,19 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
     // Play scheduling: only if autoPlay enabled AND we will display (avoid hidden playback)
     if (item->player && item->autoDisplay && item->autoPlay) {
         int playDelay = item->autoDisplayDelayMs + item->autoPlayDelayMs; // start after display (host parity)
-        item->playTimer = new QTimer(this);
+    item->playTimer = new QTimer(this);
         item->playTimer->setSingleShot(true);
         connect(item->playTimer, &QTimer::timeout, this, [this,epoch,weakItem]() {
             auto item = weakItem.lock();
             if (!item) return;
             if (epoch != m_sceneEpoch) return;
             item->playAuthorized = true;
-            if (!item->player) return;
-            item->repeatActive = false;
-            item->repeatRemaining = 0;
             // Apply final audio state from host now
             if (item->audio) { item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0)); }
             item->pausedAtEnd = false;
+            item->repeatRemaining = (item->repeatEnabled && item->repeatCount > 0)
+                                        ? item->repeatCount
+                                        : 0;
             if (item->loaded) {
                 // If we primed, position might already be 0 and paused; just play
                 if (item->player->position() != 0) item->player->setPosition(0);
@@ -691,6 +727,9 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                         if (item->audio) { item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0)); }
                         if (item->player->position() != 0) item->player->setPosition(0);
                         item->pausedAtEnd = false;
+                        item->repeatRemaining = (item->repeatEnabled && item->repeatCount > 0)
+                                                     ? item->repeatCount
+                                                     : 0;
                         item->player->play();
                     }
                 });
@@ -819,18 +858,53 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             if (epoch != m_sceneEpoch) return;
             if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
                 item->loaded = true;
+            } else if (s == QMediaPlayer::EndOfMedia && item->player) {
+                if (!item->repeatEnabled || item->repeatRemaining <= 0) {
+                    item->pausedAtEnd = true;
+                    if (item->audio) item->audio->setMuted(true);
+                    qint64 dur = item->player->duration();
+                    qint64 finalPos = dur > 0 ? std::max<qint64>(0, dur - 1) : 0;
+                    item->player->pause();
+                    if (finalPos != item->player->position()) {
+                        item->player->setPosition(finalPos);
+                    }
+                }
             }
         });
         QObject::connect(item->player, &QMediaPlayer::positionChanged, item->player, [this,epoch,weakItem](qint64 pos){
             auto item = weakItem.lock();
             if (!item) return;
             if (epoch != m_sceneEpoch) return;
-            if (item->pausedAtEnd) return;
+            if (!item->player) return;
+
             qint64 dur = item->player->duration();
-            if (dur > 0 && pos > 0 && (dur - pos) < 100) {
+            if (dur <= 0 || pos <= 0) return;
+
+            constexpr qint64 repeatWindowMs = 120;
+            if (item->repeatEnabled && item->repeatRemaining > 0) {
+                if (!item->repeatActive && (dur - pos) < repeatWindowMs) {
+                    item->repeatActive = true;
+                    item->pausedAtEnd = false;
+                    if (item->audio) {
+                        item->audio->setMuted(item->muted);
+                        item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0));
+                    }
+                    item->player->setPosition(0);
+                    item->player->play();
+                    --item->repeatRemaining;
+                    item->repeatActive = false;
+                }
+                return;
+            }
+
+            if (item->pausedAtEnd) return;
+            if ((dur - pos) < 100) {
                 item->pausedAtEnd = true;
                 if (item->audio) item->audio->setMuted(true);
                 item->player->pause();
+                if (dur > 1) {
+                    item->player->setPosition(std::max<qint64>(0, dur - 1));
+                }
             }
         });
         QObject::connect(item->player, &QMediaPlayer::errorOccurred, item->player, [this,epoch,weakItem](QMediaPlayer::Error e, const QString& err){ auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch) return; if (e != QMediaPlayer::NoError) qWarning() << "RemoteSceneController: player error" << int(e) << err << "for" << item->mediaId; });
@@ -859,10 +933,10 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                     item->usingMemoryBuffer = false;
                 }
 
-                const int loops = (item->repeatEnabled && item->repeatCount > 0)
-                                      ? (item->repeatCount + 1)
-                                      : 1;
-                item->player->setLoops(loops);
+                item->player->setLoops(QMediaPlayer::Once);
+                item->repeatRemaining = (item->repeatEnabled && item->repeatCount > 0)
+                                             ? item->repeatCount
+                                             : 0;
 
                 // Prime the first frame if not already done
                 if (!item->primedFirstFrame) {
@@ -928,12 +1002,16 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             if (epoch != m_sceneEpoch) return;
             item->playAuthorized = true; if (!item->player) return;
             item->repeatActive = false;
-            item->repeatRemaining = 0;
+            item->repeatRemaining = (item->repeatEnabled && item->repeatCount > 0)
+                                        ? item->repeatCount
+                                        : 0;
             if (item->audio) { item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0)); }
             item->pausedAtEnd = false;
             if (item->loaded) { if (item->player->position() != 0) item->player->setPosition(0); item->player->play(); }
             else {
-                item->deferredStartConn = QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus s){ auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch || !item->playAuthorized) return; if (s==QMediaPlayer::LoadedMedia || s==QMediaPlayer::BufferedMedia) { QObject::disconnect(item->deferredStartConn); if (item->audio) { item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0)); } if (item->player->position() != 0) item->player->setPosition(0); item->pausedAtEnd = false; item->player->play(); } });
+                item->deferredStartConn = QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus s){ auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch || !item->playAuthorized) return; if (s==QMediaPlayer::LoadedMedia || s==QMediaPlayer::BufferedMedia) { QObject::disconnect(item->deferredStartConn); if (item->audio) { item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0)); } if (item->player->position() != 0) item->player->setPosition(0); item->pausedAtEnd = false; item->repeatRemaining = (item->repeatEnabled && item->repeatCount > 0)
+                                                     ? item->repeatCount
+                                                     : 0; item->player->play(); } });
             }
         });
         item->playTimer->start(playDelay);
