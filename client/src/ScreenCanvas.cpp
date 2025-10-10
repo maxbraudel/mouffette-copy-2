@@ -2612,6 +2612,9 @@ void ScreenCanvas::deleteMediaItem(ResizableMediaBase* item) {
         owningScene->update();
     }
 
+    // Emit signal before deleting so handlers can still access item data
+    emit mediaItemRemoved(item);
+
     delete item;
 
     refreshInfoOverlay();

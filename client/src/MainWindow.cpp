@@ -1537,8 +1537,20 @@ void MainWindow::configureCanvasSession(CanvasSession& session) {
                     if (it != m_canvasSessions.end()) {
                         it->lastClientInfo.setFromMemory(true);
                     }
+                    // Update upload button state immediately when media is added
+                    if (m_uploadManager) {
+                        emit m_uploadManager->uiStateChanged();
+                    }
                     if (m_autoUploadImportedMedia && m_uploadManager && !m_uploadManager->isUploading() && !m_uploadManager->isCancelling()) {
                         QTimer::singleShot(0, this, [this]() { onUploadButtonClicked(); });
+                    }
+                });
+        
+        connect(session.canvas, &ScreenCanvas::mediaItemRemoved, this,
+                [this](ResizableMediaBase*) {
+                    // Update upload button state immediately when media is removed
+                    if (m_uploadManager) {
+                        emit m_uploadManager->uiStateChanged();
                     }
                 });
     }

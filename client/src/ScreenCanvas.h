@@ -144,6 +144,8 @@ public:
 signals:
     // Emitted when a new media item is added to the canvas
     void mediaItemAdded(ResizableMediaBase* mediaItem);
+    // Emitted when a media item is removed from the canvas
+    void mediaItemRemoved(ResizableMediaBase* mediaItem);
     void remoteSceneLaunchStateChanged(bool active, const QString& targetClientId, const QString& targetMachineName);
 
 protected:
