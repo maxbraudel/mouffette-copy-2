@@ -541,24 +541,18 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             qDebug() << "RemoteSceneController: mediaStatus" << int(s) << "for" << item->mediaId;
             if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
                 item->loaded = true;
-            } else if (s == QMediaPlayer::EndOfMedia) {
-                if (!item->pausedAtEnd) {
-                    item->pausedAtEnd = true;
-                    QTimer::singleShot(0, item->player, [this, epoch, weakItem]() {
-                        auto item = weakItem.lock();
-                        if (!item) return;
-                        if (epoch != m_sceneEpoch) return;
-                        if (!item->player) return;
-                        if (item->player->playbackState() == QMediaPlayer::StoppedState) {
-                            if (item->audio) item->audio->setMuted(true);
-                            qint64 dur = item->player->duration();
-                            if (dur > 0) item->player->setPosition(dur);
-                            item->player->pause();
-                        } else {
-                            item->pausedAtEnd = false;
-                        }
-                    });
-                }
+            }
+        });
+        QObject::connect(item->player, &QMediaPlayer::positionChanged, item->player, [this,epoch,weakItem](qint64 pos){
+            auto item = weakItem.lock();
+            if (!item) return;
+            if (epoch != m_sceneEpoch) return;
+            if (item->pausedAtEnd) return;
+            qint64 dur = item->player->duration();
+            if (dur > 0 && pos > 0 && (dur - pos) < 100) {
+                item->pausedAtEnd = true;
+                if (item->audio) item->audio->setMuted(true);
+                item->player->pause();
             }
         });
         QObject::connect(item->player, &QMediaPlayer::playbackStateChanged, item->player, [this,epoch,weakItem](QMediaPlayer::PlaybackState st){
@@ -843,24 +837,18 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             if (epoch != m_sceneEpoch) return;
             if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
                 item->loaded = true;
-            } else if (s == QMediaPlayer::EndOfMedia) {
-                if (!item->pausedAtEnd) {
-                    item->pausedAtEnd = true;
-                    QTimer::singleShot(0, item->player, [this, epoch, weakItem]() {
-                        auto item = weakItem.lock();
-                        if (!item) return;
-                        if (epoch != m_sceneEpoch) return;
-                        if (!item->player) return;
-                        if (item->player->playbackState() == QMediaPlayer::StoppedState) {
-                            if (item->audio) item->audio->setMuted(true);
-                            qint64 dur = item->player->duration();
-                            if (dur > 0) item->player->setPosition(dur);
-                            item->player->pause();
-                        } else {
-                            item->pausedAtEnd = false;
-                        }
-                    });
-                }
+            }
+        });
+        QObject::connect(item->player, &QMediaPlayer::positionChanged, item->player, [this,epoch,weakItem](qint64 pos){
+            auto item = weakItem.lock();
+            if (!item) return;
+            if (epoch != m_sceneEpoch) return;
+            if (item->pausedAtEnd) return;
+            qint64 dur = item->player->duration();
+            if (dur > 0 && pos > 0 && (dur - pos) < 100) {
+                item->pausedAtEnd = true;
+                if (item->audio) item->audio->setMuted(true);
+                item->player->pause();
             }
         });
         QObject::connect(item->player, &QMediaPlayer::errorOccurred, item->player, [this,epoch,weakItem](QMediaPlayer::Error e, const QString& err){ auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch) return; if (e != QMediaPlayer::NoError) qWarning() << "RemoteSceneController: player error" << int(e) << err << "for" << item->mediaId; });
