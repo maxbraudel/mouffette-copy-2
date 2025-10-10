@@ -1457,6 +1457,7 @@ MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& cli
     session.remoteContentClearedOnDisconnect = !client.isOnline();
     session.canvas = new ScreenCanvas(m_canvasHostStack);
         session.canvas->setWebSocketClient(m_webSocketClient);
+        session.canvas->setUploadManager(m_uploadManager);
         auto inserted = m_canvasSessions.insert(identity, session);
         CanvasSession& stored = inserted.value();
         configureCanvasSession(stored);
@@ -1487,6 +1488,7 @@ MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& cli
     if (!stored.canvas) {
         stored.canvas = new ScreenCanvas(m_canvasHostStack);
         stored.canvas->setWebSocketClient(m_webSocketClient);
+        stored.canvas->setUploadManager(m_uploadManager);
         stored.connectionsInitialized = false;
     }
     configureCanvasSession(stored);
@@ -1506,6 +1508,7 @@ void MainWindow::configureCanvasSession(CanvasSession& session) {
     if (!session.canvas) return;
 
     session.canvas->setWebSocketClient(m_webSocketClient);
+    session.canvas->setUploadManager(m_uploadManager);
     session.canvas->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     session.canvas->setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
     session.canvas->setFocusPolicy(Qt::StrongFocus);
@@ -3545,6 +3548,7 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
     if (!session->canvas) {
         session->canvas = new ScreenCanvas(m_canvasHostStack);
         session->canvas->setWebSocketClient(m_webSocketClient);
+        session->canvas->setUploadManager(m_uploadManager);
         session->connectionsInitialized = false;
         if (m_canvasHostStack && m_canvasHostStack->indexOf(session->canvas) == -1) {
             m_canvasHostStack->addWidget(session->canvas);

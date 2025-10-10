@@ -1,6 +1,7 @@
 // ScreenCanvas implementation (snap guides rendered via dedicated SnapGuideItem)
 #include "ScreenCanvas.h"
 #include "WebSocketClient.h" // for remote scene start/stop messaging
+#include "UploadManager.h" // for upload state checking
 #include <QTimer>
 #include "AppColors.h"
 #include "Theme.h"
@@ -731,11 +732,11 @@ void ScreenCanvas::initInfoOverlay() {
                         m_launchTestSceneButton->setChecked(false);
                     }
                 }
-                if (m_launchTestSceneButton) m_launchTestSceneButton->setEnabled(false);
                 
                 // Enter loading state
                 m_sceneLaunching = true;
                 updateLaunchSceneButtonStyle();
+                updateLaunchTestSceneButtonStyle(); // Update test scene button (will be disabled)
                 TOAST_INFO("Sending scene to remote client...", 2000);
                 
                 // Start timeout timer
@@ -759,10 +760,9 @@ void ScreenCanvas::initInfoOverlay() {
                 // Stop remote scene
                 const bool wasLaunched = m_sceneLaunched;
                 m_sceneLaunched = false;
-                if (m_launchTestSceneButton) m_launchTestSceneButton->setEnabled(true);
                 stopHostSceneState();
                 updateLaunchSceneButtonStyle();
-                updateLaunchTestSceneButtonStyle();
+                updateLaunchTestSceneButtonStyle(); // Update test scene button (will be re-enabled)
                 if (wasLaunched) {
                     emitRemoteSceneLaunchStateChanged();
                 }
@@ -780,10 +780,8 @@ void ScreenCanvas::initInfoOverlay() {
                     }
                     emitRemoteSceneLaunchStateChanged();
                 }
-                if (m_launchSceneButton) m_launchSceneButton->setEnabled(false);
                 startHostSceneState(HostSceneMode::Test);
             } else {
-                if (m_launchSceneButton) m_launchSceneButton->setEnabled(true);
                 stopHostSceneState();
             }
             m_testSceneLaunched = newState;
@@ -791,7 +789,7 @@ void ScreenCanvas::initInfoOverlay() {
                 m_launchTestSceneButton->setChecked(m_testSceneLaunched);
             }
             updateLaunchTestSceneButtonStyle();
-            updateLaunchSceneButtonStyle();
+            updateLaunchSceneButtonStyle(); // Update remote scene button (will be enabled/disabled)
         });
 
         // Initialize Launch Remote Scene style
@@ -4166,6 +4164,11 @@ void ScreenCanvas::updateLaunchSceneButtonStyle() {
         "    background: " + AppColors::colorToCss(AppColors::gLaunchRemoteScenePressed) + "; "
         "}";
 
+    // Check if upload is in progress
+    bool uploadInProgress = m_uploadManager && (m_uploadManager->isUploading() || m_uploadManager->isFinalizing());
+    // Check if test scene is active (mutual exclusion)
+    bool testSceneActive = m_testSceneLaunched;
+    
     if (m_sceneLaunching) {
         m_launchSceneButton->setText("Launching Remote Scene...");
         m_launchSceneButton->setEnabled(false); // Disable during loading
@@ -4174,14 +4177,14 @@ void ScreenCanvas::updateLaunchSceneButtonStyle() {
         m_launchSceneButton->setText("Stop Remote Scene");
         m_launchSceneButton->setChecked(true);
         m_launchSceneButton->setStyleSheet(activeStyle);
-        m_launchSceneButton->setEnabled(m_overlayActionsEnabled);
+        m_launchSceneButton->setEnabled(m_overlayActionsEnabled && !uploadInProgress);
     } else {
         m_launchSceneButton->setText("Launch Remote Scene");
         m_launchSceneButton->setChecked(false);
         m_launchSceneButton->setStyleSheet(idleStyle);
-        m_launchSceneButton->setEnabled(m_overlayActionsEnabled);
+        m_launchSceneButton->setEnabled(m_overlayActionsEnabled && !uploadInProgress && !testSceneActive);
     }
-    // Greyed style for disabled state (offline, test scene, or other locks)
+    // Greyed style for disabled state (offline, test scene active, upload in progress, or other locks)
     if (!m_sceneLaunching && !m_launchSceneButton->isEnabled()) {
         m_launchSceneButton->setStyleSheet(overlayDisabledButtonStyle());
     }
@@ -4230,17 +4233,23 @@ void ScreenCanvas::updateLaunchTestSceneButtonStyle() {
         "    background: " + AppColors::colorToCss(AppColors::gLaunchTestScenePressed) + "; "
         "}";
 
+    // Check if upload is in progress
+    bool uploadInProgress = m_uploadManager && (m_uploadManager->isUploading() || m_uploadManager->isFinalizing());
+    // Check if remote scene is active (mutual exclusion)
+    bool remoteSceneActive = m_sceneLaunched || m_sceneLaunching;
+    
     if (m_testSceneLaunched) {
         m_launchTestSceneButton->setText("Stop Test Scene");
         m_launchTestSceneButton->setChecked(true);
         m_launchTestSceneButton->setStyleSheet(activeStyle);
+        m_launchTestSceneButton->setEnabled(m_overlayActionsEnabled && !uploadInProgress);
     } else {
         m_launchTestSceneButton->setText("Launch Test Scene");
         m_launchTestSceneButton->setChecked(false);
         m_launchTestSceneButton->setStyleSheet(idleStyle);
+        m_launchTestSceneButton->setEnabled(m_overlayActionsEnabled && !uploadInProgress && !remoteSceneActive);
     }
-    bool allow = m_overlayActionsEnabled && (!m_sceneLaunching || m_testSceneLaunched);
-    m_launchTestSceneButton->setEnabled(allow);
+    // Greyed style for disabled state (offline, remote scene active, upload in progress, or other locks)
     if (!m_launchTestSceneButton->isEnabled()) {
         m_launchTestSceneButton->setStyleSheet(overlayDisabledButtonStyle());
     }
@@ -4605,6 +4614,20 @@ void ScreenCanvas::setWebSocketClient(WebSocketClient* client) {
     }
 }
 
+void ScreenCanvas::setUploadManager(UploadManager* manager) {
+    // Disconnect old manager if any
+    if (m_uploadManager) {
+        disconnect(m_uploadManager, &UploadManager::uiStateChanged, this, &ScreenCanvas::updateLaunchSceneButtonStyle);
+    }
+    
+    m_uploadManager = manager;
+    
+    // Connect new manager signals
+    if (m_uploadManager) {
+        connect(m_uploadManager, &UploadManager::uiStateChanged, this, &ScreenCanvas::updateLaunchSceneButtonStyle);
+    }
+}
+
 void ScreenCanvas::emitRemoteSceneLaunchStateChanged()
 {
     emit remoteSceneLaunchStateChanged(m_sceneLaunched, m_remoteSceneTargetClientId, m_remoteSceneTargetMachineName);
@@ -4665,6 +4688,7 @@ void ScreenCanvas::onRemoteSceneLaunchedReceived(const QString& targetClientId) 
     m_sceneLaunching = false;
     m_sceneLaunched = true;
     updateLaunchSceneButtonStyle();
+    updateLaunchTestSceneButtonStyle(); // Update test scene button (remains disabled while remote scene is active)
     emitRemoteSceneLaunchStateChanged();
     
     TOAST_SUCCESS("Remote scene launched successfully!", 3000);

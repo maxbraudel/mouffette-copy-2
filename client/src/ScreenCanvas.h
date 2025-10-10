@@ -79,6 +79,7 @@ public:
     void handleAutoPlayback();
     // Remote scene integration setters
     void setWebSocketClient(class WebSocketClient* client);
+    void setUploadManager(class UploadManager* manager);
     void setRemoteSceneTargetClientId(const QString& id) { m_remoteSceneTargetClientId = id; }
     void setRemoteSceneTarget(const QString& id, const QString& machineName) {
         m_remoteSceneTargetClientId = id;
@@ -398,6 +399,7 @@ protected:
 
     // Remote scene networking
     class WebSocketClient* m_wsClient = nullptr; // not owned
+    class UploadManager* m_uploadManager = nullptr; // not owned
     QString m_remoteSceneTargetClientId; // target client to receive remote scene commands
     QString m_remoteSceneTargetMachineName; // machine name of target (stable across reconnections)
     void emitRemoteSceneLaunchStateChanged();
