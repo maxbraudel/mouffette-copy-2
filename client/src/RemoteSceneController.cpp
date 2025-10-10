@@ -197,6 +197,9 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
 
     QObject::disconnect(item->deferredStartConn);
     QObject::disconnect(item->primingConn);
+    QObject::disconnect(item->frameCacheConn);
+    item->frameCacheAttached = false;
+    item->hasLastVideoFrame = false;
 
     if (item->player) {
         QMediaPlayer* player = item->player;
@@ -543,6 +546,12 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             if (!item) return;
             if (epoch != m_sceneEpoch) return;
             qDebug() << "RemoteSceneController: playbackState" << int(st) << "for" << item->mediaId;
+            if (st == QMediaPlayer::StoppedState) {
+                QVideoSink* sink = item->videoItemSingle ? item->videoItemSingle->videoSink() : nullptr;
+                if (sink && item->hasLastVideoFrame && item->lastVideoFrame.isValid()) {
+                    sink->setVideoFrame(item->lastVideoFrame);
+                }
+            }
         });
         QObject::connect(item->player, &QMediaPlayer::errorOccurred, item->player, [this,epoch,weakItem](QMediaPlayer::Error e, const QString& err){
             auto item = weakItem.lock();
@@ -557,6 +566,7 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             QString path = FileManager::instance().getFilePathForId(item->fileId);
             qDebug() << "RemoteSceneController: resolving video path for" << item->mediaId << "->" << path;
             if (!path.isEmpty() && QFileInfo::exists(path)) {
+                item->hasLastVideoFrame = false;
                 auto bytes = FileManager::instance().getFileBytes(item->fileId);
                 if (!bytes.isNull() && !bytes->isEmpty()) {
                     item->memoryBytes = bytes;
@@ -581,8 +591,21 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                 item->player->setLoops(loops);
 
                 // Prime the first frame if not already done
+                QVideoSink* sink = item->videoItemSingle ? item->videoItemSingle->videoSink() : nullptr;
+                if (sink && !item->frameCacheAttached) {
+                    item->frameCacheConn = QObject::connect(sink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem](const QVideoFrame& frame){
+                        if (!frame.isValid()) {
+                            return;
+                        }
+                        auto item = weakItem.lock();
+                        if (!item) return;
+                        if (epoch != m_sceneEpoch) return;
+                        item->lastVideoFrame = frame;
+                        item->hasLastVideoFrame = true;
+                    });
+                    item->frameCacheAttached = true;
+                }
                 if (!item->primedFirstFrame) {
-                    QVideoSink* sink = item->videoItemSingle ? item->videoItemSingle->videoSink() : nullptr;
                     if (sink) {
                         item->primingConn = QObject::connect(sink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem,sink](const QVideoFrame& frame){
                             if (!frame.isValid()) {
@@ -802,6 +825,17 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 item->loaded = true;
             }
         });
+        QObject::connect(item->player, &QMediaPlayer::playbackStateChanged, item->player, [this,epoch,weakItem,primaryVideoItem](QMediaPlayer::PlaybackState st){
+            auto item = weakItem.lock();
+            if (!item) return;
+            if (epoch != m_sceneEpoch) return;
+            if (st == QMediaPlayer::StoppedState) {
+                QVideoSink* sink = primaryVideoItem ? primaryVideoItem->videoSink() : nullptr;
+                if (sink && item->hasLastVideoFrame && item->lastVideoFrame.isValid()) {
+                    sink->setVideoFrame(item->lastVideoFrame);
+                }
+            }
+        });
         QObject::connect(item->player, &QMediaPlayer::errorOccurred, item->player, [this,epoch,weakItem](QMediaPlayer::Error e, const QString& err){ auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch) return; if (e != QMediaPlayer::NoError) qWarning() << "RemoteSceneController: player error" << int(e) << err << "for" << item->mediaId; });
     auto attemptLoadVid = [this, epoch, weakItem, primaryVideoItem]() {
             auto item = weakItem.lock();
@@ -809,6 +843,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             if (epoch != m_sceneEpoch) return false;
             QString path = FileManager::instance().getFilePathForId(item->fileId);
             if (!path.isEmpty() && QFileInfo::exists(path)) {
+                item->hasLastVideoFrame = false;
                 auto bytes = FileManager::instance().getFileBytes(item->fileId);
                 if (!bytes.isNull() && !bytes->isEmpty()) {
                     item->memoryBytes = bytes;
@@ -833,8 +868,21 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 item->player->setLoops(loops);
 
                 // Prime the first frame if not already done
+                QVideoSink* sink = primaryVideoItem ? primaryVideoItem->videoSink() : nullptr;
+                if (sink && !item->frameCacheAttached) {
+                    item->frameCacheConn = QObject::connect(sink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem](const QVideoFrame& frame){
+                        if (!frame.isValid()) {
+                            return;
+                        }
+                        auto item = weakItem.lock();
+                        if (!item) return;
+                        if (epoch != m_sceneEpoch) return;
+                        item->lastVideoFrame = frame;
+                        item->hasLastVideoFrame = true;
+                    });
+                    item->frameCacheAttached = true;
+                }
                 if (!item->primedFirstFrame) {
-                    QVideoSink* sink = primaryVideoItem ? primaryVideoItem->videoSink() : nullptr;
                     if (sink) {
                         item->primingConn = QObject::connect(sink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem,sink](const QVideoFrame& frame){
                             if (!frame.isValid()) {
