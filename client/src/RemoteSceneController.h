@@ -70,6 +70,7 @@ private:
 		bool muted = false; double volume = 1.0; // 0..1
 		bool repeatEnabled = false; int repeatCount = 0; int repeatRemaining = 0; bool repeatActive = false;
 		bool primedFirstFrame = false; bool playAuthorized = false;
+		bool displayReady = false; bool displayStarted = false;
 		bool loaded = false; // true when QMediaPlayer reports Loaded/Buffered
 		// For legacy single-span path
 		QWidget* widget = nullptr; QGraphicsOpacityEffect* opacity = nullptr;

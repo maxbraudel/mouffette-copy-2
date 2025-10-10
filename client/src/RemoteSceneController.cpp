@@ -584,7 +584,7 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                 if (!item->primedFirstFrame) {
                     QVideoSink* sink = item->videoItemSingle ? item->videoItemSingle->videoSink() : nullptr;
                     if (sink) {
-                        item->primingConn = QObject::connect(sink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem](const QVideoFrame& frame){
+                        item->primingConn = QObject::connect(sink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem,sink](const QVideoFrame& frame){
                             if (!frame.isValid()) {
                                 return;
                             }
@@ -597,6 +597,12 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                             if (!item->playAuthorized && item->player) {
                                 item->player->pause();
                                 item->player->setPosition(0);
+                            }
+                            if (sink) {
+                                sink->setVideoFrame(frame);
+                            }
+                            if (item->displayReady && !item->displayStarted) {
+                                fadeIn(item);
                             }
                         });
                     } else {
@@ -627,6 +633,7 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             auto item = weakItem.lock();
             if (!item) return;
             if (epoch != m_sceneEpoch) return;
+            item->displayReady = true;
             fadeIn(item);
         });
         item->displayTimer->start(delay);
@@ -829,7 +836,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 if (!item->primedFirstFrame) {
                     QVideoSink* sink = primaryVideoItem ? primaryVideoItem->videoSink() : nullptr;
                     if (sink) {
-                        item->primingConn = QObject::connect(sink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem](const QVideoFrame& frame){
+                        item->primingConn = QObject::connect(sink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem,sink](const QVideoFrame& frame){
                             if (!frame.isValid()) {
                                 return;
                             }
@@ -842,6 +849,12 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                             if (!item->playAuthorized && item->player) {
                                 item->player->pause();
                                 item->player->setPosition(0);
+                            }
+                            if (sink) {
+                                sink->setVideoFrame(frame);
+                            }
+                            if (item->displayReady && !item->displayStarted) {
+                                fadeIn(item);
                             }
                         });
                     } else {
@@ -868,6 +881,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             auto item = weakItem.lock();
             if (!item) return;
             if (epoch != m_sceneEpoch) return;
+            item->displayReady = true;
             fadeIn(item);
         });
         item->displayTimer->start(delay);
@@ -894,6 +908,9 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
 
 void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item) {
     if (!item) return;
+    if (item->displayStarted) return;
+    item->displayStarted = true;
+    item->displayReady = true;
     const int durMs = int(item->fadeInSeconds * 1000.0);
     // Multi-span path - now uses QGraphicsItem opacity
     if (!item->spans.isEmpty()) {
