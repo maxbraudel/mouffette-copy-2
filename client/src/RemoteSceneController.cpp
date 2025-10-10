@@ -24,10 +24,48 @@
 #include <QUrl>
 #include <QThread>
 #include <QIODevice>
+#include <cmath>
 #include "FileManager.h"
 #include "MacWindowManager.h"
 #include <algorithm>
 #include <memory>
+
+namespace {
+constexpr double kMinAdaptiveBudgetMs = 4.0;
+constexpr double kMaxAdaptiveBudgetMs = 90.0;
+}
+
+void RemoteSceneController::updateAdaptiveFrameBudget(RemoteMediaItem& item, qint64 intervalMs) {
+    if (intervalMs <= 0) {
+        return;
+    }
+    if (intervalMs > 500) {
+        item.frameIntervalEstimateMs = 0.0;
+        item.frameIntervalSamples = 0;
+        item.frameArrivalTimer.invalidate();
+        return;
+    }
+
+    if (item.frameIntervalSamples < 12) {
+        const double total = item.frameIntervalEstimateMs * item.frameIntervalSamples + intervalMs;
+        item.frameIntervalSamples += 1;
+        item.frameIntervalEstimateMs = total / static_cast<double>(item.frameIntervalSamples);
+    } else {
+        item.frameIntervalEstimateMs = (item.frameIntervalEstimateMs * 0.85) + (intervalMs * 0.15);
+    }
+
+    if (item.frameIntervalEstimateMs > 0.0 && item.frameIntervalEstimateMs <= 25.0) {
+        item.frameBudgetMs = 0;
+        if (item.frameThrottle.isValid()) {
+            item.frameThrottle.invalidate();
+        }
+        return;
+    }
+
+    double target = item.frameIntervalEstimateMs * 0.85;
+    target = std::clamp(target, kMinAdaptiveBudgetMs, kMaxAdaptiveBudgetMs);
+    item.frameBudgetMs = static_cast<int>(std::round(target));
+}
 
 RemoteSceneController::RemoteSceneController(WebSocketClient* ws, QObject* parent)
     : QObject(parent), m_ws(ws) {
@@ -441,7 +479,13 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             for (int i=1;i<=5;++i) QTimer::singleShot(i*500, w, [attemptLoad]() { attemptLoad(); });
         }
     } else if (item->type == "video") {
-        item->player = new QMediaPlayer(w);
+    item->frameBudgetMs = 0;
+    item->frameThrottle.invalidate();
+    item->frameArrivalTimer.invalidate();
+    item->frameIntervalEstimateMs = 0.0;
+    item->frameIntervalSamples = 0;
+
+    item->player = new QMediaPlayer(w);
         item->audio = new QAudioOutput(w);
         // Apply host audio state before playback
         item->audio->setMuted(item->muted);
@@ -463,18 +507,29 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             auto item = weakItem.lock();
             if (!item) return;
             if (!frame.isValid()) return;
-            if (item->frameBudgetMs > 0) {
+            if (!item->frameArrivalTimer.isValid()) {
+                item->frameArrivalTimer.start();
+            } else {
+                const qint64 interval = item->frameArrivalTimer.elapsed();
+                item->frameArrivalTimer.restart();
+                updateAdaptiveFrameBudget(*item, interval);
+            }
+
+            const bool shouldThrottle = item->frameBudgetMs > 0;
+            if (shouldThrottle) {
                 if (!item->frameThrottle.isValid()) {
                     item->frameThrottle.start();
                 } else if (item->frameThrottle.elapsed() < item->frameBudgetMs) {
                     return;
                 }
+            } else if (item->frameThrottle.isValid()) {
+                item->frameThrottle.invalidate();
             }
             const QImage img = frame.toImage();
             if (img.isNull()) return;
             item->cachedPixmap = QPixmap::fromImage(img);
             videoLabel->setPixmap(item->cachedPixmap);
-            if (item->frameBudgetMs > 0) {
+            if (shouldThrottle) {
                 item->frameThrottle.restart();
             }
         });
@@ -683,7 +738,12 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
     } else if (item->type == "video") {
         // Single shared player/audio for all spans
         // Parent the player/audio to the first available span widget if possible, else nullptr
-        QWidget* parentForAv = nullptr; if (!item->spans.isEmpty()) parentForAv = item->spans.first().widget;
+    QWidget* parentForAv = nullptr; if (!item->spans.isEmpty()) parentForAv = item->spans.first().widget;
+    item->frameBudgetMs = 0;
+    item->frameThrottle.invalidate();
+    item->frameArrivalTimer.invalidate();
+    item->frameIntervalEstimateMs = 0.0;
+    item->frameIntervalSamples = 0;
         item->player = new QMediaPlayer(parentForAv);
         item->audio = new QAudioOutput(parentForAv);
         item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0));
@@ -696,12 +756,23 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 auto item = weakItem.lock();
                 if (!item) return;
                 if (!frame.isValid()) return;
-                if (item->frameBudgetMs > 0) {
+                if (!item->frameArrivalTimer.isValid()) {
+                    item->frameArrivalTimer.start();
+                } else {
+                    const qint64 interval = item->frameArrivalTimer.elapsed();
+                    item->frameArrivalTimer.restart();
+                    updateAdaptiveFrameBudget(*item, interval);
+                }
+
+                const bool shouldThrottle = item->frameBudgetMs > 0;
+                if (shouldThrottle) {
                     if (!item->frameThrottle.isValid()) {
                         item->frameThrottle.start();
                     } else if (item->frameThrottle.elapsed() < item->frameBudgetMs) {
                         return;
                     }
+                } else if (item->frameThrottle.isValid()) {
+                    item->frameThrottle.invalidate();
                 }
                 const QImage img = frame.toImage();
                 if (img.isNull()) return;
@@ -709,7 +780,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 for (auto& spanRef : item->spans) {
                     if (spanRef.videoLabel) spanRef.videoLabel->setPixmap(item->cachedPixmap);
                 }
-                if (item->frameBudgetMs > 0) {
+                if (shouldThrottle) {
                     item->frameThrottle.restart();
                 }
             });

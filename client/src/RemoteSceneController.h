@@ -69,6 +69,9 @@ private:
 		// Frame pacing and caching
 		int frameBudgetMs = 0;
 		QElapsedTimer frameThrottle;
+		QElapsedTimer frameArrivalTimer;
+		double frameIntervalEstimateMs = 0.0;
+		int frameIntervalSamples = 0;
 		QPixmap cachedPixmap;
 		// In-memory source support
 		QSharedPointer<QByteArray> memoryBytes;
@@ -85,6 +88,7 @@ private:
 	void fadeIn(const std::shared_ptr<RemoteMediaItem>& item);
 	void clearScene();
     void teardownMediaItem(const std::shared_ptr<RemoteMediaItem>& item);
+    static void updateAdaptiveFrameBudget(RemoteMediaItem& item, qint64 intervalMs);
 
 	WebSocketClient* m_ws = nullptr; // not owned
 	bool m_enabled = true;
