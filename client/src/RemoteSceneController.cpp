@@ -851,6 +851,22 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
         QGraphicsVideoItem* primaryVideoItem = (!item->spans.isEmpty()) ? item->spans.first().videoItem : nullptr;
         if (primaryVideoItem) {
             item->player->setVideoOutput(primaryVideoItem);
+            if (QVideoSink* mirrorSink = primaryVideoItem->videoSink()) {
+                QObject::connect(mirrorSink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem](const QVideoFrame& frame){
+                    if (!frame.isValid()) return;
+                    auto item = weakItem.lock();
+                    if (!item) return;
+                    if (epoch != m_sceneEpoch) return;
+                    for (int idx = 1; idx < item->spans.size(); ++idx) {
+                        auto& span = item->spans[idx];
+                        if (span.videoItem) {
+                            if (QVideoSink* spanSink = span.videoItem->videoSink()) {
+                                spanSink->setVideoFrame(frame);
+                            }
+                        }
+                    }
+                });
+            }
         }
         QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus s){
             auto item = weakItem.lock();
@@ -958,6 +974,14 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                             }
                             if (sink) {
                                 sink->setVideoFrame(frame);
+                            }
+                            for (int idx = 1; idx < item->spans.size(); ++idx) {
+                                auto& span = item->spans[idx];
+                                if (span.videoItem) {
+                                    if (QVideoSink* spanSink = span.videoItem->videoSink()) {
+                                        spanSink->setVideoFrame(frame);
+                                    }
+                                }
                             }
                             if (item->displayReady && !item->displayStarted) {
                                 fadeIn(item);
