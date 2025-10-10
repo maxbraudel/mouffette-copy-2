@@ -4294,23 +4294,21 @@ void ScreenCanvas::updateLaunchTestSceneButtonStyle() {
         "    background: " + AppColors::colorToCss(AppColors::gLaunchTestScenePressed) + "; "
         "}";
 
-    // Check if upload is in progress
-    bool uploadInProgress = m_uploadManager && (m_uploadManager->isUploading() || m_uploadManager->isFinalizing());
-    // Check if remote scene is active (mutual exclusion)
+    // Check if remote scene is active (mutual exclusion with test scene)
     bool remoteSceneActive = m_sceneLaunched || m_sceneLaunching;
     
     if (m_testSceneLaunched) {
         m_launchTestSceneButton->setText("Stop Test Scene");
         m_launchTestSceneButton->setChecked(true);
         m_launchTestSceneButton->setStyleSheet(activeStyle);
-        m_launchTestSceneButton->setEnabled(m_overlayActionsEnabled && !uploadInProgress);
+        m_launchTestSceneButton->setEnabled(m_overlayActionsEnabled);
     } else {
         m_launchTestSceneButton->setText("Launch Test Scene");
         m_launchTestSceneButton->setChecked(false);
         m_launchTestSceneButton->setStyleSheet(idleStyle);
-        m_launchTestSceneButton->setEnabled(m_overlayActionsEnabled && !uploadInProgress && !remoteSceneActive);
+        m_launchTestSceneButton->setEnabled(m_overlayActionsEnabled && !remoteSceneActive);
     }
-    // Greyed style for disabled state (offline, remote scene active, upload in progress, or other locks)
+    // Greyed style for disabled state (offline or remote scene active)
     if (!m_launchTestSceneButton->isEnabled()) {
         m_launchTestSceneButton->setStyleSheet(overlayDisabledButtonStyle());
     }
