@@ -1967,6 +1967,10 @@ void ScreenCanvas::updateSelectionChrome() {
     // Mettre à jour le style de surbrillance dans l'overlay sans forcer un rebuild complet
     const QString selectedBg = "rgba(255,255,255,0.10)";
     const QString hoverBg = "rgba(255,255,255,0.05)";
+    const QString disabledBg = "rgba(255,255,255,0.03)"; // Very subtle grey for disabled state
+    
+    bool remoteSceneActive = m_sceneLaunched || m_sceneLaunching;
+    
     for (auto it = m_mediaContainerByItem.begin(); it != m_mediaContainerByItem.end(); ++it) {
         ResizableMediaBase* media = it.key(); QWidget* w = it.value(); if (!w) continue;
         bool sel = stillSelected.contains(media);
@@ -1974,10 +1978,20 @@ void ScreenCanvas::updateSelectionChrome() {
         w->setAutoFillBackground(true);
         w->setAttribute(Qt::WA_TranslucentBackground, false);
         // Pleine largeur: pas de border-radius pour que le fond touche les séparateurs
-        // Priority: Selected > Hovered > Transparent
-        QString bgColor = sel ? selectedBg : (hovered ? hoverBg : "transparent");
-        w->setStyleSheet(QString("QWidget { background-color: %1; }")
-                         .arg(bgColor));
+        // Priority: Remote Scene Disabled > Selected > Hovered > Transparent
+        QString bgColor;
+        QString opacity;
+        if (remoteSceneActive) {
+            // When remote scene is active, apply disabled appearance
+            bgColor = disabledBg;
+            opacity = "0.4"; // Make text/labels less prominent
+            w->setStyleSheet(QString("QWidget { background-color: %1; } QLabel { opacity: %2; }")
+                             .arg(bgColor).arg(opacity));
+        } else {
+            bgColor = sel ? selectedBg : (hovered ? hoverBg : "transparent");
+            w->setStyleSheet(QString("QWidget { background-color: %1; }")
+                             .arg(bgColor));
+        }
         w->update();
     }
 }
@@ -2320,11 +2334,18 @@ ScreenCanvas::CornerAltSnapResult ScreenCanvas::applyCornerAltSnapWithHysteresis
 }
 
 bool ScreenCanvas::eventFilter(QObject* watched, QEvent* event) {
+    // Disable media container interactions when remote scene is active
+    bool remoteSceneActive = m_sceneLaunched || m_sceneLaunching;
+    
     // Handle clicks on media container widgets to select the associated scene media item
     if (event->type() == QEvent::MouseButtonPress) {
         if (auto* w = qobject_cast<QWidget*>(watched)) {
             auto it = m_mediaItemByContainer.find(w);
             if (it != m_mediaItemByContainer.end()) {
+                // Block selection when remote scene is active
+                if (remoteSceneActive) {
+                    return true; // consume event without selecting
+                }
                 if (ResizableMediaBase* media = it.value()) {
                     if (m_scene) {
                         // Clear existing selection unless multi-select with modifier could be added later
@@ -2339,6 +2360,10 @@ bool ScreenCanvas::eventFilter(QObject* watched, QEvent* event) {
     } else if (event->type() == QEvent::Enter) {
         if (auto* w = qobject_cast<QWidget*>(watched)) {
             if (m_mediaItemByContainer.contains(w)) {
+                // Disable hover effect when remote scene is active
+                if (remoteSceneActive) {
+                    return false; // don't track hover
+                }
                 // Track hovered item and apply hover feedback
                 ResizableMediaBase* media = m_mediaItemByContainer.value(w);
                 m_hoveredMediaItem = media;
