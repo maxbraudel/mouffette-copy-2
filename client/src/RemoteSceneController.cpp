@@ -168,15 +168,50 @@ void RemoteSceneController::clearScene() {
         QMetaObject::invokeMethod(this, [this]() { clearScene(); }, Qt::QueuedConnection);
         return;
     }
+    
+    // CRITICAL: Stop all fade animations first to prevent accessing deleted graphics items
+    // Find all QVariantAnimation children and stop them immediately
+    QList<QVariantAnimation*> animations = findChildren<QVariantAnimation*>();
+    for (QVariantAnimation* anim : animations) {
+        if (anim) {
+            anim->stop();
+            QObject::disconnect(anim, nullptr, nullptr, nullptr);
+            anim->deleteLater();
+        }
+    }
+    
     // Defensive teardown to handle rapid start/stop without use-after-free
     for (const auto& item : m_mediaItems) {
         teardownMediaItem(item);
     }
     m_mediaItems.clear();
-    // Close and delete screen windows
+    
+    // Close and schedule deletion of screen windows
+    // We MUST use deleteLater for all QObjects to avoid Qt event system crashes
     for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
-        if (it.value().window) it.value().window->close();
-        if (it.value().window) it.value().window->deleteLater();
+        QWidget* window = it.value().window;
+        if (!window) continue;
+        
+        // Disconnect all signals to avoid callbacks during destruction
+        QObject::disconnect(window, nullptr, nullptr, nullptr);
+        
+        // Hide window first to prevent visual artifacts
+        window->hide();
+        
+        // Clear scene items and disconnect before deletion
+        if (it.value().scene) {
+            QObject::disconnect(it.value().scene, nullptr, nullptr, nullptr);
+            it.value().scene->clear();
+            it.value().scene->deleteLater();
+        }
+        if (it.value().graphicsView) {
+            QObject::disconnect(it.value().graphicsView, nullptr, nullptr, nullptr);
+            it.value().graphicsView->setScene(nullptr);
+            it.value().graphicsView->deleteLater();
+        }
+        
+        // Schedule window deletion (must use deleteLater for QObjects)
+        window->deleteLater();
     }
     m_screenWindows.clear();
 }
