@@ -4667,6 +4667,10 @@ void ScreenCanvas::setUploadManager(UploadManager* manager) {
 void ScreenCanvas::emitRemoteSceneLaunchStateChanged()
 {
     emit remoteSceneLaunchStateChanged(m_sceneLaunched, m_remoteSceneTargetClientId, m_remoteSceneTargetMachineName);
+    // Trigger upload button update to reflect remote scene state (disabled when scene is active)
+    if (m_uploadManager) {
+        emit m_uploadManager->uiStateChanged();
+    }
 }
 
 void ScreenCanvas::onRemoteSceneValidationReceived(const QString& targetClientId, bool success, const QString& errorMessage) {

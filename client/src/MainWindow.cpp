@@ -821,6 +821,16 @@ MainWindow::MainWindow(QWidget* parent)
             const bool managerHasActiveForTarget = m_uploadManager->hasActiveUpload() &&
                                                    m_uploadManager->activeUploadTargetClientId() == target;
             const bool remoteActive = sessionHasRemote || managerHasActiveForTarget;
+            
+            // Check if remote scene is launched on the canvas that owns this upload button
+            bool remoteSceneLaunched = false;
+            for (auto it = m_canvasSessions.constBegin(); it != m_canvasSessions.constEnd(); ++it) {
+                const CanvasSession& session = it.value();
+                if (session.uploadButton == m_uploadButton && session.canvas) {
+                    remoteSceneLaunched = session.canvas->isRemoteSceneLaunched();
+                    break;
+                }
+            }
 
             if (m_uploadManager->isUploading()) {
                 if (m_uploadManager->isCancelling()) {
@@ -856,19 +866,19 @@ MainWindow::MainWindow(QWidget* parent)
                 // If target is unknown for any reason, default to offering Upload rather than Unload
                 if (target.isEmpty() || hasUnuploaded) {
                     m_uploadButton->setText("Upload");
-                    m_uploadButton->setEnabled(true);
-                    m_uploadButton->setStyleSheet(overlayIdleStyle);
+                    m_uploadButton->setEnabled(!remoteSceneLaunched); // Disable if remote scene is active
+                    m_uploadButton->setStyleSheet(remoteSceneLaunched ? ScreenCanvas::overlayDisabledButtonStyle() : overlayIdleStyle);
                     m_uploadButton->setFont(m_uploadButtonDefaultFont);
                 } else {
                     m_uploadButton->setText("Unload");
-                    m_uploadButton->setEnabled(true);
-                    m_uploadButton->setStyleSheet(overlayUnloadStyle);
+                    m_uploadButton->setEnabled(!remoteSceneLaunched); // Disable if remote scene is active
+                    m_uploadButton->setStyleSheet(remoteSceneLaunched ? ScreenCanvas::overlayDisabledButtonStyle() : overlayUnloadStyle);
                     m_uploadButton->setFont(m_uploadButtonDefaultFont);
                 }
             } else {
                 m_uploadButton->setText("Upload");
-                m_uploadButton->setEnabled(true);
-                m_uploadButton->setStyleSheet(overlayIdleStyle);
+                m_uploadButton->setEnabled(!remoteSceneLaunched); // Disable if remote scene is active
+                m_uploadButton->setStyleSheet(remoteSceneLaunched ? ScreenCanvas::overlayDisabledButtonStyle() : overlayIdleStyle);
                 m_uploadButton->setFont(m_uploadButtonDefaultFont);
             }
             m_uploadButton->setFixedHeight(40);
