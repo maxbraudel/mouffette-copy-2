@@ -582,21 +582,26 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
 
                 // Prime the first frame if not already done
                 if (!item->primedFirstFrame) {
-                    item->primingConn = QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus status){
-                        auto item = weakItem.lock();
-                        if (!item) return;
-                        if (epoch != m_sceneEpoch) return;
-                        if (status == QMediaPlayer::LoadedMedia || status == QMediaPlayer::BufferedMedia) {
-                            if (!item->primedFirstFrame) {
-                                item->primedFirstFrame = true;
-                                QObject::disconnect(item->primingConn);
-                                if (!item->playAuthorized && item->player) {
-                                    item->player->pause();
-                                    item->player->setPosition(0);
-                                }
+                    QVideoSink* sink = item->videoItemSingle ? item->videoItemSingle->videoSink() : nullptr;
+                    if (sink) {
+                        item->primingConn = QObject::connect(sink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem](const QVideoFrame& frame){
+                            if (!frame.isValid()) {
+                                return;
                             }
-                        }
-                    });
+                            auto item = weakItem.lock();
+                            if (!item) return;
+                            if (epoch != m_sceneEpoch) return;
+                            if (item->primedFirstFrame) return;
+                            item->primedFirstFrame = true;
+                            QObject::disconnect(item->primingConn);
+                            if (!item->playAuthorized && item->player) {
+                                item->player->pause();
+                                item->player->setPosition(0);
+                            }
+                        });
+                    } else {
+                        qWarning() << "RemoteSceneController: video sink unavailable for priming" << item->mediaId;
+                    }
                     if (item->audio) item->audio->setMuted(true);
                     item->player->play();
                 }
@@ -778,8 +783,9 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
         item->player->setAudioOutput(item->audio);
         
         // Set video output to first span's video item (Qt only supports one output)
-        if (!item->spans.isEmpty() && item->spans.first().videoItem) {
-            item->player->setVideoOutput(item->spans.first().videoItem);
+        QGraphicsVideoItem* primaryVideoItem = (!item->spans.isEmpty()) ? item->spans.first().videoItem : nullptr;
+        if (primaryVideoItem) {
+            item->player->setVideoOutput(primaryVideoItem);
         }
         QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus s){
             auto item = weakItem.lock();
@@ -821,21 +827,26 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
 
                 // Prime the first frame if not already done
                 if (!item->primedFirstFrame) {
-                    item->primingConn = QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus status){
-                        auto item = weakItem.lock();
-                        if (!item) return;
-                        if (epoch != m_sceneEpoch) return;
-                        if (status == QMediaPlayer::LoadedMedia || status == QMediaPlayer::BufferedMedia) {
-                            if (!item->primedFirstFrame) {
-                                item->primedFirstFrame = true;
-                                QObject::disconnect(item->primingConn);
-                                if (!item->playAuthorized && item->player) {
-                                    item->player->pause();
-                                    item->player->setPosition(0);
-                                }
+                    QVideoSink* sink = primaryVideoItem ? primaryVideoItem->videoSink() : nullptr;
+                    if (sink) {
+                        item->primingConn = QObject::connect(sink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem](const QVideoFrame& frame){
+                            if (!frame.isValid()) {
+                                return;
                             }
-                        }
-                    });
+                            auto item = weakItem.lock();
+                            if (!item) return;
+                            if (epoch != m_sceneEpoch) return;
+                            if (item->primedFirstFrame) return;
+                            item->primedFirstFrame = true;
+                            QObject::disconnect(item->primingConn);
+                            if (!item->playAuthorized && item->player) {
+                                item->player->pause();
+                                item->player->setPosition(0);
+                            }
+                        });
+                    } else {
+                        qWarning() << "RemoteSceneController: primary video sink unavailable for priming" << item->mediaId;
+                    }
                     if (item->audio) item->audio->setMuted(true);
                     item->player->play();
                 }
