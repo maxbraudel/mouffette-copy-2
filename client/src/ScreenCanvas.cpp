@@ -152,6 +152,18 @@ void ScreenCanvas::drawForeground(QPainter* painter, const QRectF& rect) {
 
 // Local lightweight ClippedContainer for viewport overlay clipping.
 
+// ================================================================================================
+// Z-ORDER HIERARCHY (QGraphicsScene Z-value ranges)
+// ================================================================================================
+// Media items:          1.0 - 9999.0   (user-controlled Z-order via Bring to Front/Send to Back)
+// Remote cursor:        11500.0        (always visible above all media, not in media Z-group)
+// Selection chrome:     11998.0 - 11999.5 (selection borders and resize handles)
+// Overlays & UI:        ≥12000.0       (info panel background, snap guides, etc.)
+//
+// This separation ensures the remote cursor cannot be obscured by media items when users
+// repeatedly bring items to front, while selection chrome remains visible above the cursor.
+// ================================================================================================
+
 // Configuration constants
 static const int gMediaListItemSpacing = 3; // Spacing between media list items (name, status, details)
 static const int gScrollbarAutoHideDelayMs = 500; // Time in milliseconds before scrollbar auto-hides after scroll inactivity
@@ -1929,7 +1941,8 @@ void ScreenCanvas::updateSelectionChrome() {
         if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
             stillSelected.insert(media);
             SelectionChrome sc = m_selectionChromeMap.value(media);
-            const qreal zBorderWhite = 11998.0; // below overlay (>=12000), above any media (<10000 used)
+            // Z-order hierarchy: Media (1-9999) < Remote Cursor (11500) < Selection Chrome (11998-11999.5) < Overlays (≥12000)
+            const qreal zBorderWhite = 11998.0;
             const qreal zBorderBlue  = 11999.0;
             const qreal zHandle      = 11999.5;
             auto ensurePath = [&](QGraphicsPathItem*& p, const QColor& color, qreal z, Qt::PenStyle style, qreal dashOffset){
@@ -3769,7 +3782,9 @@ void ScreenCanvas::recreateRemoteCursorItem() {
         pen.setCosmetic(false);
     }
     m_remoteCursorDot->setPen(pen);
-    m_remoteCursorDot->setZValue(4000.0);
+    // Z-order hierarchy: Media (1-9999) < Remote Cursor (11500) < Selection Chrome (11998-11999.5) < Overlays (≥12000)
+    // Remote cursor must stay above all media items regardless of bring-to-front operations
+    m_remoteCursorDot->setZValue(11500.0);
     if (m_remoteCursorFixedSize) {
         m_remoteCursorDot->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     } else {
@@ -4059,6 +4074,10 @@ ScreenCanvas::ResizeSnapResult ScreenCanvas::snapResizeToScreenBorders(qreal cur
 // Z-order management methods
 void ScreenCanvas::assignNextZValue(QGraphicsItem* item) {
     if (!item) return;
+    // Cap media Z-values at 9999 to keep them below remote cursor (11500) and selection chrome (11998+)
+    if (m_nextMediaZValue >= 10000.0) {
+        m_nextMediaZValue = 1.0; // Wrap around if limit reached (very unlikely in practice)
+    }
     item->setZValue(m_nextMediaZValue);
     m_nextMediaZValue += 1.0;
 }
