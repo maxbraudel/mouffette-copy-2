@@ -520,6 +520,7 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
         // Create QGraphicsVideoItem for GPU-accelerated playback
         QGraphicsVideoItem* videoItem = new QGraphicsVideoItem();
         videoItem->setSize(QSizeF(pw, ph));
+    videoItem->setAspectRatioMode(Qt::IgnoreAspectRatio);
         videoItem->setPos(px, py);
         videoItem->setOpacity(0.0); // Start hidden for fade-in
         scene->addItem(videoItem);
@@ -757,6 +758,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             // Create QGraphicsVideoItem for GPU-accelerated video
             QGraphicsVideoItem* videoItem = new QGraphicsVideoItem();
             videoItem->setSize(QSizeF(pw, ph));
+            videoItem->setAspectRatioMode(Qt::IgnoreAspectRatio);
             videoItem->setPos(px, py);
             videoItem->setOpacity(0.0);
             scene->addItem(videoItem);
