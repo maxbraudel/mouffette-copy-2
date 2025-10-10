@@ -1953,14 +1953,18 @@ void ScreenCanvas::updateSelectionChrome() {
 
     // Mettre à jour le style de surbrillance dans l'overlay sans forcer un rebuild complet
     const QString selectedBg = "rgba(255,255,255,0.10)";
+    const QString hoverBg = "rgba(255,255,255,0.05)";
     for (auto it = m_mediaContainerByItem.begin(); it != m_mediaContainerByItem.end(); ++it) {
         ResizableMediaBase* media = it.key(); QWidget* w = it.value(); if (!w) continue;
         bool sel = stillSelected.contains(media);
+        bool hovered = (m_hoveredMediaItem == media);
         w->setAutoFillBackground(true);
         w->setAttribute(Qt::WA_TranslucentBackground, false);
         // Pleine largeur: pas de border-radius pour que le fond touche les séparateurs
+        // Priority: Selected > Hovered > Transparent
+        QString bgColor = sel ? selectedBg : (hovered ? hoverBg : "transparent");
         w->setStyleSheet(QString("QWidget { background-color: %1; }")
-                         .arg(sel ? selectedBg : "transparent"));
+                         .arg(bgColor));
         w->update();
     }
 }
@@ -2322,21 +2326,23 @@ bool ScreenCanvas::eventFilter(QObject* watched, QEvent* event) {
     } else if (event->type() == QEvent::Enter) {
         if (auto* w = qobject_cast<QWidget*>(watched)) {
             if (m_mediaItemByContainer.contains(w)) {
-                // Subtle hover feedback (light background) only if not already selected
+                // Track hovered item and apply hover feedback
                 ResizableMediaBase* media = m_mediaItemByContainer.value(w);
-                if (media && !media->isSelected()) {
-                    w->setStyleSheet("QWidget { background-color: rgba(255,255,255,0.05); }");
-                }
+                m_hoveredMediaItem = media;
+                // Update style through updateSelectionChrome to maintain consistency
+                updateSelectionChrome();
             }
         }
     } else if (event->type() == QEvent::Leave) {
         if (auto* w = qobject_cast<QWidget*>(watched)) {
             if (m_mediaItemByContainer.contains(w)) {
                 ResizableMediaBase* media = m_mediaItemByContainer.value(w);
-                const QString selectedBg = "rgba(255,255,255,0.10)";
-                bool sel = media && media->isSelected();
-                w->setStyleSheet(QString("QWidget { background-color: %1; }")
-                                  .arg(sel ? selectedBg : "transparent"));
+                // Clear hover tracking if leaving the currently hovered item
+                if (m_hoveredMediaItem == media) {
+                    m_hoveredMediaItem = nullptr;
+                }
+                // Update style through updateSelectionChrome to maintain consistency
+                updateSelectionChrome();
             }
         }
     }
@@ -4069,6 +4075,10 @@ void ScreenCanvas::moveMediaUp(QGraphicsItem* item) {
         qreal tempZ = item->zValue();
         item->setZValue(itemAbove->zValue());
         itemAbove->setZValue(tempZ);
+        
+        // Refresh overlay to reflect new Z-order
+        refreshInfoOverlay();
+        layoutInfoOverlay();
     }
 }
 
@@ -4084,6 +4094,10 @@ void ScreenCanvas::moveMediaDown(QGraphicsItem* item) {
         qreal tempZ = item->zValue();
         item->setZValue(itemBelow->zValue());
         itemBelow->setZValue(tempZ);
+        
+        // Refresh overlay to reflect new Z-order
+        refreshInfoOverlay();
+        layoutInfoOverlay();
     }
 }
 

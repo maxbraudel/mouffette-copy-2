@@ -336,6 +336,8 @@ private:
     QHash<ResizableMediaBase*, QWidget*> m_mediaContainerByItem;
     // Reverse mapping container widget -> media item (pour clic sélection)
     QHash<QWidget*, ResizableMediaBase*> m_mediaItemByContainer;
+    // Track currently hovered media item for hover effect persistence
+    ResizableMediaBase* m_hoveredMediaItem = nullptr;
 
 private slots:
     // Remote scene feedback handlers
