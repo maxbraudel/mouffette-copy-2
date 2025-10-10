@@ -550,7 +550,7 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             if (epoch != m_sceneEpoch) return;
             if (e != QMediaPlayer::NoError) qWarning() << "RemoteSceneController: player error" << int(e) << err << "for" << item->mediaId;
         });
-        auto attemptLoadVid = [this, epoch, weakItem]() {
+    auto attemptLoadVid = [this, epoch, weakItem]() {
             auto item = weakItem.lock();
             if (!item) return false;
             if (epoch != m_sceneEpoch) return false;
@@ -796,7 +796,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             }
         });
         QObject::connect(item->player, &QMediaPlayer::errorOccurred, item->player, [this,epoch,weakItem](QMediaPlayer::Error e, const QString& err){ auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch) return; if (e != QMediaPlayer::NoError) qWarning() << "RemoteSceneController: player error" << int(e) << err << "for" << item->mediaId; });
-        auto attemptLoadVid = [this, epoch, weakItem]() {
+    auto attemptLoadVid = [this, epoch, weakItem, primaryVideoItem]() {
             auto item = weakItem.lock();
             if (!item) return false;
             if (epoch != m_sceneEpoch) return false;
