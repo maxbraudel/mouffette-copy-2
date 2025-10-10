@@ -740,8 +740,14 @@ void ScreenCanvas::initInfoOverlay() {
                 m_sceneLaunchTimeoutTimer->start(REMOTE_SCENE_LAUNCH_TIMEOUT_MS);
                 
                 // Send scene data (validation will happen on remote side)
-                startHostSceneState(HostSceneMode::Remote);
-                
+                if (m_wsClient) {
+                    QJsonObject sceneObj = serializeSceneState();
+                    qDebug() << "ScreenCanvas: sending remote_scene_start to" << m_remoteSceneTargetClientId
+                             << "mediaCount=" << sceneObj.value("media").toArray().size()
+                             << "screenCount=" << sceneObj.value("screens").toArray().size();
+                    m_wsClient->sendRemoteSceneStart(m_remoteSceneTargetClientId, sceneObj);
+                }
+
             } else {
                 // Stop remote scene
                 const bool wasLaunched = m_sceneLaunched;
@@ -4366,14 +4372,6 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
             }
         }
     }
-    // Dispatch remote scene start only for Remote mode
-    if (m_hostSceneMode == HostSceneMode::Remote && m_wsClient && !m_remoteSceneTargetClientId.isEmpty()) {
-        QJsonObject sceneObj = serializeSceneState();
-        qDebug() << "ScreenCanvas: sending remote_scene_start to" << m_remoteSceneTargetClientId
-                 << "mediaCount=" << sceneObj.value("media").toArray().size()
-                 << "screenCount=" << sceneObj.value("screens").toArray().size();
-        m_wsClient->sendRemoteSceneStart(m_remoteSceneTargetClientId, sceneObj);
-    }
 }
 
 void ScreenCanvas::stopHostSceneState() {
@@ -4613,6 +4611,9 @@ void ScreenCanvas::onRemoteSceneValidationReceived(const QString& targetClientId
     if (success) {
         // Validation successful - scene is being prepared on remote
         TOAST_SUCCESS("Remote client validated scene successfully", 2000);
+        if (!m_hostSceneActive) {
+            startHostSceneState(HostSceneMode::Remote);
+        }
         // Keep loading state - wait for final "launched" confirmation
         // Restart timeout for the launch phase
         if (m_sceneLaunchTimeoutTimer && m_sceneLaunchTimeoutTimer->isActive()) {
