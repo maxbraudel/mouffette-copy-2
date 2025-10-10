@@ -20,6 +20,9 @@ class QVideoSink;
 class QAudioOutput;
 class QLabel;
 class QBuffer;
+class QGraphicsView;
+class QGraphicsVideoItem;
+class QGraphicsScene;
 
 class RemoteSceneController : public QObject {
 	Q_OBJECT
@@ -37,7 +40,10 @@ private slots:
 
 private:
 	struct ScreenWindow {
-		QWidget* window = nullptr; int x=0,y=0,w=0,h=0;
+		QWidget* window = nullptr;
+		QGraphicsView* graphicsView = nullptr;
+		QGraphicsScene* scene = nullptr;
+		int x=0,y=0,w=0,h=0;
 	};
 	struct RemoteMediaItem {
 		QString mediaId;
@@ -47,7 +53,15 @@ private:
 		// Legacy single-span fields (when spans[] not provided)
 		int screenId = -1; double normX=0, normY=0, normW=0, normH=0;
 		// Multi-screen spans support: each span maps to a screen with its own normalized geom
-		struct Span { int screenId=-1; double nx=0, ny=0, nw=0, nh=0; QWidget* widget=nullptr; QLabel* imageLabel=nullptr; QLabel* videoLabel=nullptr; QVideoSink* videoSink=nullptr; };
+		struct Span { 
+			int screenId=-1; 
+			double nx=0, ny=0, nw=0, nh=0; 
+			QWidget* widget=nullptr; 
+			QGraphicsView* graphicsView=nullptr;
+			QGraphicsScene* scene=nullptr;
+			QLabel* imageLabel=nullptr; 
+			QGraphicsVideoItem* videoItem=nullptr;
+		};
 		QList<Span> spans;
 		bool autoDisplay=false; int autoDisplayDelayMs=0;
 		bool autoPlay=false; int autoPlayDelayMs=0;
@@ -59,20 +73,16 @@ private:
 		bool loaded = false; // true when QMediaPlayer reports Loaded/Buffered
 		// For legacy single-span path
 		QWidget* widget = nullptr; QGraphicsOpacityEffect* opacity = nullptr;
-		QLabel* videoLabelSingle = nullptr; QVideoSink* videoSinkSingle = nullptr;
+		QGraphicsView* graphicsViewSingle = nullptr;
+		QGraphicsScene* sceneSingle = nullptr;
+		QGraphicsVideoItem* videoItemSingle = nullptr;
+		QLabel* imageLabelSingle = nullptr;
 		QTimer* displayTimer = nullptr; QTimer* playTimer = nullptr;
 		// Video only
 		QMediaPlayer* player = nullptr; QAudioOutput* audio = nullptr;
 		QMetaObject::Connection deferredStartConn; // one-shot start after load
 		QMetaObject::Connection primingConn; // one-shot first-frame priming when autoPlay=false
 		quint64 sceneEpoch = 0; // generation token to guard delayed actions
-		// Frame pacing and caching
-		int frameBudgetMs = 0;
-		QElapsedTimer frameThrottle;
-		QElapsedTimer frameArrivalTimer;
-		double frameIntervalEstimateMs = 0.0;
-		int frameIntervalSamples = 0;
-		QPixmap cachedPixmap;
 		// In-memory source support
 		QSharedPointer<QByteArray> memoryBytes;
 		QBuffer* memoryBuffer = nullptr;
@@ -88,7 +98,6 @@ private:
 	void fadeIn(const std::shared_ptr<RemoteMediaItem>& item);
 	void clearScene();
     void teardownMediaItem(const std::shared_ptr<RemoteMediaItem>& item);
-    static void updateAdaptiveFrameBudget(RemoteMediaItem& item, qint64 intervalMs);
 
 	WebSocketClient* m_ws = nullptr; // not owned
 	bool m_enabled = true;

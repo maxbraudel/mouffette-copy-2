@@ -24,57 +24,16 @@
 #include <QUrl>
 #include <QThread>
 #include <QIODevice>
+#include <QGraphicsView>
+#include <QGraphicsVideoItem>
+#include <QGraphicsScene>
 #include <cmath>
 #include "FileManager.h"
 #include "MacWindowManager.h"
 #include <algorithm>
 #include <memory>
 
-namespace {
-constexpr double kMinAdaptiveBudgetMs = 4.0;
-constexpr double kMaxAdaptiveBudgetMs = 90.0;
-constexpr int kAdaptiveWarmupSamples = 6;
-}
-
-void RemoteSceneController::updateAdaptiveFrameBudget(RemoteMediaItem& item, qint64 intervalMs) {
-    if (intervalMs <= 0) {
-        return;
-    }
-    if (intervalMs > 500) {
-        item.frameIntervalEstimateMs = 0.0;
-        item.frameIntervalSamples = 0;
-        item.frameArrivalTimer.invalidate();
-        return;
-    }
-
-    if (item.frameIntervalSamples < 12) {
-        const double total = item.frameIntervalEstimateMs * item.frameIntervalSamples + intervalMs;
-        item.frameIntervalSamples += 1;
-        item.frameIntervalEstimateMs = total / static_cast<double>(item.frameIntervalSamples);
-    } else {
-        item.frameIntervalEstimateMs = (item.frameIntervalEstimateMs * 0.85) + (intervalMs * 0.15);
-    }
-
-    if (item.frameIntervalSamples < kAdaptiveWarmupSamples) {
-        item.frameBudgetMs = 0;
-        if (item.frameThrottle.isValid()) {
-            item.frameThrottle.invalidate();
-        }
-        return;
-    }
-
-    if (item.frameIntervalEstimateMs > 0.0 && item.frameIntervalEstimateMs <= 25.0) {
-        item.frameBudgetMs = 0;
-        if (item.frameThrottle.isValid()) {
-            item.frameThrottle.invalidate();
-        }
-        return;
-    }
-
-    double target = item.frameIntervalEstimateMs * 0.85;
-    target = std::clamp(target, kMinAdaptiveBudgetMs, kMaxAdaptiveBudgetMs);
-    item.frameBudgetMs = static_cast<int>(std::round(target));
-}
+// GPU-direct rendering via QGraphicsVideoItem eliminates need for frame throttling
 
 RemoteSceneController::RemoteSceneController(WebSocketClient* ws, QObject* parent)
     : QObject(parent), m_ws(ws) {
@@ -259,34 +218,53 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
         item->audio->setMuted(true);
     }
 
-    if (item->videoSinkSingle) {
-        QObject::disconnect(item->videoSinkSingle, nullptr, nullptr, nullptr);
-        item->videoSinkSingle->setParent(nullptr);
-        item->videoSinkSingle->deleteLater();
-        item->videoSinkSingle = nullptr;
+    if (item->videoItemSingle) {
+        if (item->videoItemSingle->scene()) {
+            item->videoItemSingle->scene()->removeItem(item->videoItemSingle);
+        }
+        delete item->videoItemSingle;
+        item->videoItemSingle = nullptr;
     }
-    if (item->videoLabelSingle) {
-        item->videoLabelSingle->clear();
-        item->videoLabelSingle->deleteLater();
-        item->videoLabelSingle = nullptr;
+    if (item->imageLabelSingle) {
+        QGraphicsPixmapItem* pixmapItem = reinterpret_cast<QGraphicsPixmapItem*>(item->imageLabelSingle);
+        if (pixmapItem && pixmapItem->scene()) {
+            pixmapItem->scene()->removeItem(pixmapItem);
+        }
+        delete pixmapItem;
+        item->imageLabelSingle = nullptr;
+    }
+    if (item->sceneSingle) {
+        delete item->sceneSingle;
+        item->sceneSingle = nullptr;
+    }
+    if (item->graphicsViewSingle) {
+        delete item->graphicsViewSingle;
+        item->graphicsViewSingle = nullptr;
     }
 
     for (auto& span : item->spans) {
-        if (span.videoSink) {
-            QObject::disconnect(span.videoSink, nullptr, nullptr, nullptr);
-            span.videoSink->setParent(nullptr);
-            span.videoSink->deleteLater();
-            span.videoSink = nullptr;
-        }
-        if (span.videoLabel) {
-            span.videoLabel->clear();
-            span.videoLabel->deleteLater();
-            span.videoLabel = nullptr;
+        if (span.videoItem) {
+            if (span.videoItem->scene()) {
+                span.videoItem->scene()->removeItem(span.videoItem);
+            }
+            delete span.videoItem;
+            span.videoItem = nullptr;
         }
         if (span.imageLabel) {
-            span.imageLabel->clear();
-            span.imageLabel->deleteLater();
+            QGraphicsPixmapItem* pixmapItem = reinterpret_cast<QGraphicsPixmapItem*>(span.imageLabel);
+            if (pixmapItem && pixmapItem->scene()) {
+                pixmapItem->scene()->removeItem(pixmapItem);
+            }
+            delete pixmapItem;
             span.imageLabel = nullptr;
+        }
+        if (span.scene) {
+            delete span.scene;
+            span.scene = nullptr;
+        }
+        if (span.graphicsView) {
+            delete span.graphicsView;
+            span.graphicsView = nullptr;
         }
         if (span.widget) {
             span.widget->hide();
@@ -317,8 +295,6 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
 
     item->memoryBytes.reset();
     item->usingMemoryBuffer = false;
-    item->frameThrottle.invalidate();
-    item->cachedPixmap = QPixmap();
     item->loaded = false;
     item->primedFirstFrame = false;
     item->playAuthorized = false;
@@ -342,10 +318,35 @@ QWidget* RemoteSceneController::ensureScreenWindow(int screenId, int x, int y, i
     win->setObjectName(QString("RemoteScreenWindow_%1").arg(screenId));
     win->setGeometry(x, y, w, h);
     win->setWindowTitle(primary ? "Remote Scene (Primary)" : "Remote Scene");
+    
+    // Create QGraphicsView for GPU-accelerated rendering
+    QGraphicsView* view = new QGraphicsView(win);
+    QGraphicsScene* scene = new QGraphicsScene(view);
+    scene->setSceneRect(0, 0, w, h);
+    view->setScene(scene);
+    view->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    view->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    view->setFrameStyle(QFrame::NoFrame);
+    view->setAttribute(Qt::WA_TranslucentBackground, true);
+    view->setStyleSheet("background: transparent;");
+    view->setRenderHint(QPainter::Antialiasing, true);
+    view->setRenderHint(QPainter::SmoothPixmapTransform, true);
+    if (view->viewport()) {
+        view->viewport()->setAutoFillBackground(false);
+        view->viewport()->setAttribute(Qt::WA_TranslucentBackground, true);
+    }
+    
     auto* layout = new QHBoxLayout(win);
     layout->setContentsMargins(0,0,0,0);
     layout->setSpacing(0);
-    ScreenWindow sw; sw.window = win; sw.x=x; sw.y=y; sw.w=w; sw.h=h; m_screenWindows.insert(screenId, sw);
+    layout->addWidget(view);
+    
+    ScreenWindow sw; 
+    sw.window = win; 
+    sw.graphicsView = view;
+    sw.scene = scene;
+    sw.x=x; sw.y=y; sw.w=w; sw.h=h; 
+    m_screenWindows.insert(screenId, sw);
 
     // On macOS, elevate this window to a global overlay that spans Spaces and is hidden from Mission Control
 #ifdef Q_OS_MAC
@@ -414,7 +415,6 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
         if (item->type == "video") {
             item->muted = m.value("muted").toBool(false);
             item->volume = m.value("volume").toDouble(1.0);
-            item->frameBudgetMs = 33; // ~30 FPS pacing to reduce CPU use
             FileManager::instance().preloadFileIntoMemory(item->fileId);
         }
         m_mediaItems.append(item);
@@ -464,85 +464,71 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
     std::weak_ptr<RemoteMediaItem> weakItem = item;
 
     if (item->type == "image") {
-        QLabel* lbl = new QLabel(w);
-        lbl->setScaledContents(true);
-        lbl->setAlignment(Qt::AlignCenter);
-        lbl->setGeometry(0,0,pw,ph);
-        auto attemptLoad = [this, epoch, lbl, weakItem]() {
+        auto winIt = m_screenWindows.find(item->screenId);
+        if (winIt == m_screenWindows.end() || !winIt.value().scene) {
+            qWarning() << "RemoteSceneController: no scene for screenId" << item->screenId;
+            return;
+        }
+        
+        QGraphicsScene* scene = winIt.value().scene;
+        
+        // Create QGraphicsPixmapItem for GPU-accelerated image display
+        QGraphicsPixmapItem* pixmapItem = new QGraphicsPixmapItem();
+        pixmapItem->setPos(px, py);
+        pixmapItem->setOpacity(0.0); // Start hidden for fade-in
+        pixmapItem->setTransformationMode(Qt::SmoothTransformation);
+        scene->addItem(pixmapItem);
+        item->imageLabelSingle = reinterpret_cast<QLabel*>(pixmapItem); // Store as label pointer for compatibility
+        
+        auto attemptLoad = [this, epoch, pixmapItem, pw, ph, weakItem]() {
             auto item = weakItem.lock();
             if (!item) return false;
             if (epoch != m_sceneEpoch) return false;
             QString path = FileManager::instance().getFilePathForId(item->fileId);
             if (!path.isEmpty() && QFileInfo::exists(path)) {
-                // Preload fully into RAM to avoid disk IO at show time
                 QPixmap pm;
-                if (pm.load(path)) { lbl->setPixmap(pm); return true; }
+                if (pm.load(path)) {
+                    // Scale pixmap to target size
+                    QPixmap scaled = pm.scaled(QSize(pw, ph), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                    pixmapItem->setPixmap(scaled);
+                    return true;
+                }
             }
-            qWarning() << "RemoteSceneController: video path not available yet for" << item->mediaId << ", will retry";
+            qWarning() << "RemoteSceneController: image path not available yet for" << item->mediaId << ", will retry";
             return false;
         };
         if (!attemptLoad()) {
-            const QString idOrName = item->fileId.isEmpty() ? item->fileName : item->fileId;
-            lbl->setText(QString("Missing file (id)\n%1\nWaiting for upload...").arg(idOrName));
             // Retry a few times (e.g., if upload arrives slightly after scene start)
             for (int i=1;i<=5;++i) QTimer::singleShot(i*500, w, [attemptLoad]() { attemptLoad(); });
         }
+        
+        // Hide the widget container since image renders directly in scene
+        w->hide();
     } else if (item->type == "video") {
-    item->frameBudgetMs = 0;
-    item->frameThrottle.invalidate();
-    item->frameArrivalTimer.invalidate();
-    item->frameIntervalEstimateMs = 0.0;
-    item->frameIntervalSamples = 0;
-
-    item->player = new QMediaPlayer(w);
+        // Use GPU-direct rendering via QGraphicsVideoItem
+        auto winIt = m_screenWindows.find(item->screenId);
+        if (winIt == m_screenWindows.end() || !winIt.value().scene) {
+            qWarning() << "RemoteSceneController: no scene for screenId" << item->screenId;
+            return;
+        }
+        
+        QGraphicsScene* scene = winIt.value().scene;
+        
+        // Create QGraphicsVideoItem for GPU-accelerated playback
+        QGraphicsVideoItem* videoItem = new QGraphicsVideoItem();
+        videoItem->setSize(QSizeF(pw, ph));
+        videoItem->setPos(px, py);
+        videoItem->setOpacity(0.0); // Start hidden for fade-in
+        scene->addItem(videoItem);
+        item->videoItemSingle = videoItem;
+        
+        // Create media player and connect to video item
+        item->player = new QMediaPlayer(w);
         item->audio = new QAudioOutput(w);
-        // Apply host audio state before playback
         item->audio->setMuted(item->muted);
         item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0));
         item->player->setAudioOutput(item->audio);
-        QVideoSink* videoSink = new QVideoSink(w);
-        item->videoSinkSingle = videoSink;
-        QLabel* videoLabel = new QLabel(w);
-        item->videoLabelSingle = videoLabel;
-        videoLabel->setScaledContents(true);
-        videoLabel->setGeometry(0,0,pw,ph);
-        videoLabel->setAttribute(Qt::WA_TranslucentBackground, true);
-        videoLabel->setAutoFillBackground(false);
-        videoLabel->setStyleSheet("background: transparent;");
-    videoLabel->setPixmap(QPixmap());
-    videoLabel->show();
-        QObject::connect(videoSink, &QVideoSink::videoFrameChanged, videoLabel, [this,epoch,videoLabel,weakItem](const QVideoFrame& frame){
-            if (epoch != m_sceneEpoch) return;
-            auto item = weakItem.lock();
-            if (!item) return;
-            if (!frame.isValid()) return;
-            if (!item->frameArrivalTimer.isValid()) {
-                item->frameArrivalTimer.start();
-            } else {
-                const qint64 interval = item->frameArrivalTimer.elapsed();
-                item->frameArrivalTimer.restart();
-                updateAdaptiveFrameBudget(*item, interval);
-            }
-
-            const bool shouldThrottle = item->frameBudgetMs > 0;
-            if (shouldThrottle) {
-                if (!item->frameThrottle.isValid()) {
-                    item->frameThrottle.start();
-                } else if (item->frameThrottle.elapsed() < item->frameBudgetMs) {
-                    return;
-                }
-            } else if (item->frameThrottle.isValid()) {
-                item->frameThrottle.invalidate();
-            }
-            const QImage img = frame.toImage();
-            if (img.isNull()) return;
-            item->cachedPixmap = QPixmap::fromImage(img);
-            videoLabel->setPixmap(item->cachedPixmap);
-            if (shouldThrottle) {
-                item->frameThrottle.restart();
-            }
-        });
-        item->player->setVideoSink(videoSink);
+        item->player->setVideoOutput(videoItem); // Direct GPU rendering!
         QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus s){
             auto item = weakItem.lock();
             if (!item) return;
@@ -564,7 +550,7 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             if (epoch != m_sceneEpoch) return;
             if (e != QMediaPlayer::NoError) qWarning() << "RemoteSceneController: player error" << int(e) << err << "for" << item->mediaId;
         });
-        auto attemptLoadVid = [this, epoch, weakItem, videoSink]() {
+        auto attemptLoadVid = [this, epoch, weakItem]() {
             auto item = weakItem.lock();
             if (!item) return false;
             if (epoch != m_sceneEpoch) return false;
@@ -594,18 +580,21 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                                       : 1;
                 item->player->setLoops(loops);
 
+                // Prime the first frame if not already done
                 if (!item->primedFirstFrame) {
-                    item->primingConn = QObject::connect(videoSink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem](const QVideoFrame& f){
+                    item->primingConn = QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus status){
                         auto item = weakItem.lock();
                         if (!item) return;
                         if (epoch != m_sceneEpoch) return;
-                        if (!f.isValid()) return;
-                        if (item->primedFirstFrame) return;
-                        item->primedFirstFrame = true;
-                        QObject::disconnect(item->primingConn);
-                        if (!item->playAuthorized && item->player) {
-                            item->player->pause();
-                            item->player->setPosition(0);
+                        if (status == QMediaPlayer::LoadedMedia || status == QMediaPlayer::BufferedMedia) {
+                            if (!item->primedFirstFrame) {
+                                item->primedFirstFrame = true;
+                                QObject::disconnect(item->primingConn);
+                                if (!item->playAuthorized && item->player) {
+                                    item->player->pause();
+                                    item->player->setPosition(0);
+                                }
+                            }
                         }
                     });
                     if (item->audio) item->audio->setMuted(true);
@@ -616,7 +605,12 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             qWarning() << "RemoteSceneController: video path not available yet for" << item->mediaId << ", will retry";
             return false;
         };
-        if (!attemptLoadVid()) { for (int i=1;i<=5;++i) QTimer::singleShot(i*500, w, [attemptLoadVid]() { attemptLoadVid(); }); }
+        if (!attemptLoadVid()) { 
+            for (int i=1;i<=5;++i) QTimer::singleShot(i*500, w, [attemptLoadVid]() { attemptLoadVid(); }); 
+        }
+        
+        // Hide the widget container since video renders directly in scene
+        w->hide();
     }
 
     // Display scheduling: only if autoDisplay enabled. Otherwise remain hidden until a future command (not yet implemented).
@@ -711,12 +705,29 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
         eff->setOpacity(0.0);
         w->setGraphicsEffect(eff);
         s.widget = w; spanWidgets.append(w); spanEffects.append(eff);
+        
+        // Get the scene for this screen
+        QGraphicsScene* scene = winIt.value().scene;
+        if (!scene) continue;
+        
         if (item->type == "image") {
-            QLabel* lbl = new QLabel(w); lbl->setScaledContents(true); lbl->setAlignment(Qt::AlignCenter); lbl->setGeometry(0,0,pw,ph); s.imageLabel = lbl;
+            // Create QGraphicsPixmapItem for GPU-accelerated image display
+            QGraphicsPixmapItem* pixmapItem = new QGraphicsPixmapItem();
+            pixmapItem->setPos(px, py);
+            pixmapItem->setOpacity(0.0);
+            pixmapItem->setTransformationMode(Qt::SmoothTransformation);
+            scene->addItem(pixmapItem);
+            s.imageLabel = reinterpret_cast<QLabel*>(pixmapItem);
         } else if (item->type == "video") {
-            QLabel* vLbl = new QLabel(w); vLbl->setScaledContents(true); vLbl->setGeometry(0,0,pw,ph); vLbl->setAttribute(Qt::WA_TranslucentBackground, true); vLbl->setAutoFillBackground(false); vLbl->setStyleSheet("background: transparent;"); vLbl->setPixmap(QPixmap()); vLbl->show(); s.videoLabel = vLbl;
-            s.videoSink = new QVideoSink(w);
+            // Create QGraphicsVideoItem for GPU-accelerated video
+            QGraphicsVideoItem* videoItem = new QGraphicsVideoItem();
+            videoItem->setSize(QSizeF(pw, ph));
+            videoItem->setPos(px, py);
+            videoItem->setOpacity(0.0);
+            scene->addItem(videoItem);
+            s.videoItem = videoItem;
         }
+        w->hide(); // Hide widget container since items render in scene
         w->raise();
     }
 
@@ -730,8 +741,18 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             if (epoch != m_sceneEpoch) return false;
             QString path = FileManager::instance().getFilePathForId(item->fileId);
             if (!path.isEmpty() && QFileInfo::exists(path)) {
-                QPixmap pm; if (pm.load(path)) {
-                    for (auto& s : item->spans) { if (s.imageLabel) s.imageLabel->setPixmap(pm); if (s.widget) s.widget->update(); }
+                QPixmap pm; 
+                if (pm.load(path)) {
+                    for (auto& s : item->spans) { 
+                        if (s.imageLabel) {
+                            QGraphicsPixmapItem* pixmapItem = reinterpret_cast<QGraphicsPixmapItem*>(s.imageLabel);
+                            // Scale to span size
+                            int pw = int(s.nw * (s.widget ? s.widget->parentWidget()->width() : 100));
+                            int ph = int(s.nh * (s.widget ? s.widget->parentWidget()->height() : 100));
+                            QPixmap scaled = pm.scaled(QSize(pw, ph), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                            pixmapItem->setPixmap(scaled);
+                        }
+                    }
                     return true;
                 }
             }
@@ -745,61 +766,21 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             }
         }
     } else if (item->type == "video") {
-        // Single shared player/audio for all spans
-        // Parent the player/audio to the first available span widget if possible, else nullptr
-    QWidget* parentForAv = nullptr; if (!item->spans.isEmpty()) parentForAv = item->spans.first().widget;
-    item->frameBudgetMs = 0;
-    item->frameThrottle.invalidate();
-    item->frameArrivalTimer.invalidate();
-    item->frameIntervalEstimateMs = 0.0;
-    item->frameIntervalSamples = 0;
+        // GPU-direct rendering with QGraphicsVideoItem
+        // Use first span's video item as the primary output
+        QWidget* parentForAv = nullptr; 
+        if (!item->spans.isEmpty()) parentForAv = item->spans.first().widget;
+        
         item->player = new QMediaPlayer(parentForAv);
         item->audio = new QAudioOutput(parentForAv);
-        item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0));
+        item->audio->setMuted(item->muted); 
+        item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0));
         item->player->setAudioOutput(item->audio);
-        // Connect all span sinks to mirror frames into labels
-        for (auto& s : item->spans) {
-            if (!s.videoSink || !s.videoLabel) continue;
-            QObject::connect(s.videoSink, &QVideoSink::videoFrameChanged, s.videoSink, [this, epoch, weakItem](const QVideoFrame& frame){
-                if (epoch != m_sceneEpoch) return;
-                auto item = weakItem.lock();
-                if (!item) return;
-                if (!frame.isValid()) return;
-                if (!item->frameArrivalTimer.isValid()) {
-                    item->frameArrivalTimer.start();
-                } else {
-                    const qint64 interval = item->frameArrivalTimer.elapsed();
-                    item->frameArrivalTimer.restart();
-                    updateAdaptiveFrameBudget(*item, interval);
-                }
-
-                const bool shouldThrottle = item->frameBudgetMs > 0;
-                if (shouldThrottle) {
-                    if (!item->frameThrottle.isValid()) {
-                        item->frameThrottle.start();
-                    } else if (item->frameThrottle.elapsed() < item->frameBudgetMs) {
-                        return;
-                    }
-                } else if (item->frameThrottle.isValid()) {
-                    item->frameThrottle.invalidate();
-                }
-                const QImage img = frame.toImage();
-                if (img.isNull()) return;
-                item->cachedPixmap = QPixmap::fromImage(img);
-                for (auto& spanRef : item->spans) {
-                    if (spanRef.videoLabel) spanRef.videoLabel->setPixmap(item->cachedPixmap);
-                }
-                if (shouldThrottle) {
-                    item->frameThrottle.restart();
-                }
-            });
+        
+        // Set video output to first span's video item (Qt only supports one output)
+        if (!item->spans.isEmpty() && item->spans.first().videoItem) {
+            item->player->setVideoOutput(item->spans.first().videoItem);
         }
-        // We'll direct the player's sink dynamically; Qt supports only one sink at a time.
-        // Strategy: keep player's sink set to the first span's sink; we still forward frames to other labels via the same sink signal connections above.
-        // Note: QMediaPlayer emits frames only to its current sink; so we can't get frames for other sinks automatically.
-        // Alternative approach: use one sink and share the QImage across labels in the slot above.
-        QVideoSink* sharedSink = nullptr; if (!item->spans.isEmpty()) sharedSink = item->spans.first().videoSink;
-        if (sharedSink) item->player->setVideoSink(sharedSink);
         QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus s){
             auto item = weakItem.lock();
             if (!item) return;
@@ -838,15 +819,26 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                                       : 1;
                 item->player->setLoops(loops);
 
-                // Prime using shared sink since that's where frames will arrive
-                QVideoSink* sink = nullptr; if (!item->spans.isEmpty()) sink = item->spans.first().videoSink;
-                if (sink && !item->primedFirstFrame) {
-                    item->primingConn = QObject::connect(sink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem](const QVideoFrame& f){
-                        auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch) return; if (!f.isValid()) return; if (item->primedFirstFrame) return; item->primedFirstFrame = true; QObject::disconnect(item->primingConn); if (!item->playAuthorized && item->player) { item->player->pause(); item->player->setPosition(0); }
+                // Prime the first frame if not already done
+                if (!item->primedFirstFrame) {
+                    item->primingConn = QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus status){
+                        auto item = weakItem.lock();
+                        if (!item) return;
+                        if (epoch != m_sceneEpoch) return;
+                        if (status == QMediaPlayer::LoadedMedia || status == QMediaPlayer::BufferedMedia) {
+                            if (!item->primedFirstFrame) {
+                                item->primedFirstFrame = true;
+                                QObject::disconnect(item->primingConn);
+                                if (!item->playAuthorized && item->player) {
+                                    item->player->pause();
+                                    item->player->setPosition(0);
+                                }
+                            }
+                        }
                     });
+                    if (item->audio) item->audio->setMuted(true);
+                    item->player->play();
                 }
-                if (item->audio) item->audio->setMuted(true);
-                item->player->play();
                 return true;
             }
             return false;
@@ -892,38 +884,59 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
 void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item) {
     if (!item) return;
     const int durMs = int(item->fadeInSeconds * 1000.0);
-    // Multi-span path
+    // Multi-span path - now uses QGraphicsItem opacity
     if (!item->spans.isEmpty()) {
         if (durMs <= 10) {
             for (auto& s : item->spans) {
-                if (!s.widget) continue; s.widget->show();
-                if (auto* eff = qobject_cast<QGraphicsOpacityEffect*>(s.widget->graphicsEffect())) eff->setOpacity(item->contentOpacity);
+                QGraphicsItem* graphicsItem = nullptr;
+                if (s.videoItem) graphicsItem = s.videoItem;
+                else if (s.imageLabel) graphicsItem = reinterpret_cast<QGraphicsPixmapItem*>(s.imageLabel);
+                if (graphicsItem) graphicsItem->setOpacity(item->contentOpacity);
             }
             return;
         }
         for (auto& s : item->spans) {
-            if (!s.widget) continue; s.widget->show();
-            auto* anim = new QVariantAnimation(s.widget);
+            QGraphicsItem* graphicsItem = nullptr;
+            if (s.videoItem) graphicsItem = s.videoItem;
+            else if (s.imageLabel) graphicsItem = reinterpret_cast<QGraphicsPixmapItem*>(s.imageLabel);
+            if (!graphicsItem) continue;
+            
+            auto* anim = new QVariantAnimation(this);
             anim->setStartValue(0.0);
             anim->setEndValue(item->contentOpacity);
             anim->setDuration(durMs);
             anim->setEasingCurve(QEasingCurve::OutCubic);
-            connect(anim, &QVariantAnimation::valueChanged, s.widget, [&s](const QVariant& v){ if (auto* eff = qobject_cast<QGraphicsOpacityEffect*>(s.widget->graphicsEffect())) eff->setOpacity(v.toDouble()); });
-            connect(anim, &QVariantAnimation::finished, s.widget, [anim](){ anim->deleteLater(); });
+            connect(anim, &QVariantAnimation::valueChanged, this, [graphicsItem](const QVariant& v){ 
+                if (graphicsItem) graphicsItem->setOpacity(v.toDouble()); 
+            });
+            connect(anim, &QVariantAnimation::finished, anim, [anim](){ anim->deleteLater(); });
             anim->start();
         }
         return;
     }
-    // Legacy single-span path
-    if (!item->widget || !item->opacity) return;
-    item->widget->show();
-    if (durMs <= 10) { item->opacity->setOpacity(item->contentOpacity); return; }
-    auto* anim = new QVariantAnimation(item->widget);
+    // Legacy single-span path - now uses QGraphicsItem opacity
+    QGraphicsItem* graphicsItem = nullptr;
+    if (item->videoItemSingle) {
+        graphicsItem = item->videoItemSingle;
+    } else if (item->imageLabelSingle) {
+        graphicsItem = reinterpret_cast<QGraphicsPixmapItem*>(item->imageLabelSingle);
+    }
+    
+    if (!graphicsItem) return;
+    
+    if (durMs <= 10) { 
+        graphicsItem->setOpacity(item->contentOpacity); 
+        return; 
+    }
+    
+    auto* anim = new QVariantAnimation(this);
     anim->setStartValue(0.0);
     anim->setEndValue(item->contentOpacity);
     anim->setDuration(durMs);
     anim->setEasingCurve(QEasingCurve::OutCubic);
-    connect(anim, &QVariantAnimation::valueChanged, item->widget, [item](const QVariant& v){ if (item->opacity) item->opacity->setOpacity(v.toDouble()); });
-    connect(anim, &QVariantAnimation::finished, item->widget, [item,anim](){ anim->deleteLater(); });
+    connect(anim, &QVariantAnimation::valueChanged, this, [graphicsItem](const QVariant& v){ 
+        if (graphicsItem) graphicsItem->setOpacity(v.toDouble()); 
+    });
+    connect(anim, &QVariantAnimation::finished, anim, [anim](){ anim->deleteLater(); });
     anim->start();
 }
