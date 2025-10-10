@@ -73,6 +73,7 @@ private:
 		bool primedFirstFrame = false; bool playAuthorized = false;
 		bool displayReady = false; bool displayStarted = false;
 		bool hasLastVideoFrame = false; bool frameCacheAttached = false;
+		bool pausedAtEnd = false;
 		QVideoFrame lastVideoFrame;
 		QMetaObject::Connection frameCacheConn;
 		bool loaded = false; // true when QMediaPlayer reports Loaded/Buffered
