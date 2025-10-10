@@ -33,6 +33,7 @@
 namespace {
 constexpr double kMinAdaptiveBudgetMs = 4.0;
 constexpr double kMaxAdaptiveBudgetMs = 90.0;
+constexpr int kAdaptiveWarmupSamples = 6;
 }
 
 void RemoteSceneController::updateAdaptiveFrameBudget(RemoteMediaItem& item, qint64 intervalMs) {
@@ -52,6 +53,14 @@ void RemoteSceneController::updateAdaptiveFrameBudget(RemoteMediaItem& item, qin
         item.frameIntervalEstimateMs = total / static_cast<double>(item.frameIntervalSamples);
     } else {
         item.frameIntervalEstimateMs = (item.frameIntervalEstimateMs * 0.85) + (intervalMs * 0.15);
+    }
+
+    if (item.frameIntervalSamples < kAdaptiveWarmupSamples) {
+        item.frameBudgetMs = 0;
+        if (item.frameThrottle.isValid()) {
+            item.frameThrottle.invalidate();
+        }
+        return;
     }
 
     if (item.frameIntervalEstimateMs > 0.0 && item.frameIntervalEstimateMs <= 25.0) {
