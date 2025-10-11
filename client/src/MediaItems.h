@@ -46,6 +46,9 @@ public:
         QString fadeOutText = QStringLiteral("1");
         bool opacityOverrideEnabled = false;
         QString opacityText = QStringLiteral("100");
+        bool hideDelayEnabled = false;
+        QString hideDelayText = QStringLiteral("1");
+        bool hideWhenVideoEnds = false;
     };
 
     enum class UploadState { NotUploaded, Uploading, Uploaded };
@@ -145,6 +148,9 @@ public:
     int autoDisplayDelayMs() const;
     bool autoPlayEnabled() const;
     int autoPlayDelayMs() const;
+    bool autoHideEnabled() const;
+    int autoHideDelayMs() const;
+    bool hideWhenVideoEnds() const;
     double fadeInDurationSeconds() const;
     double fadeOutDurationSeconds() const;
     bool opacityOverrideEnabled() const;
@@ -276,6 +282,7 @@ public:
     void endDrag();
     void requestOverlayRelayout() { updateControlsLayout(); }
     void setApplicationSuspended(bool suspended);
+    QMediaPlayer* mediaPlayer() const { return m_player; }
 
     // Performance / diagnostics
     void setRepaintBudget(int ms) { m_repaintBudgetMs = std::max(1, ms); }

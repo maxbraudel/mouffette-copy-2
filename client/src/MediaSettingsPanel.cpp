@@ -278,7 +278,44 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_contentLayout->addWidget(row);
     }
 
-    // 5) Opacity with checkbox format
+    // 5) Hide delay with checkbox format
+    {
+    m_hideDelayRow = new QWidget(m_innerContent);
+    configureRow(m_hideDelayRow);
+        auto* h = new QHBoxLayout(m_hideDelayRow);
+        h->setContentsMargins(0,0,0,0);
+        h->setSpacing(0);
+        m_hideDelayCheck = new QCheckBox("Hide delay: ", m_hideDelayRow);
+        m_hideDelayCheck->setStyleSheet(overlayTextStyle);
+        m_hideDelayCheck->installEventFilter(this);
+        connect(m_hideDelayCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onHideDelayToggled);
+        m_hideDelayBox = makeValueBox();
+        m_hideDelaySecondsLabel = new QLabel("s", m_hideDelayRow);
+        m_hideDelaySecondsLabel->setStyleSheet(overlayTextStyle);
+        h->addWidget(m_hideDelayCheck);
+        h->addWidget(m_hideDelayBox);
+        h->addWidget(m_hideDelaySecondsLabel);
+        h->addStretch();
+        m_contentLayout->addWidget(m_hideDelayRow);
+    }
+
+    // 6) Hide when video ends (video only)
+    {
+    m_hideWhenEndsRow = new QWidget(m_innerContent);
+    configureRow(m_hideWhenEndsRow);
+        auto* h = new QHBoxLayout(m_hideWhenEndsRow);
+        h->setContentsMargins(0,0,0,0);
+        h->setSpacing(0);
+        m_hideWhenVideoEndsCheck = new QCheckBox("Hide when video ends", m_hideWhenEndsRow);
+        m_hideWhenVideoEndsCheck->setStyleSheet(overlayTextStyle);
+        m_hideWhenVideoEndsCheck->installEventFilter(this);
+        connect(m_hideWhenVideoEndsCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
+        h->addWidget(m_hideWhenVideoEndsCheck);
+        h->addStretch();
+        m_contentLayout->addWidget(m_hideWhenEndsRow);
+    }
+
+    // 7) Opacity with checkbox format
     {
     auto* row = new QWidget(m_innerContent);
     configureRow(row);
@@ -373,6 +410,13 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         // Set initial state (play delay disabled by default since play automatically is unchecked)
         onPlayAutomaticallyToggled(m_autoPlayCheck->isChecked());
     }
+
+    if (m_hideDelayCheck) {
+        onHideDelayToggled(m_hideDelayCheck->isChecked());
+    }
+    if (m_hideWhenEndsRow) {
+        m_hideWhenEndsRow->setVisible(false); // default hidden until media type provided
+    }
     updatePosition();
 }
 
@@ -399,6 +443,14 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
     }
     if (m_repeatRow) {
         m_repeatRow->setVisible(isVideo);
+    }
+    if (m_hideWhenEndsRow) {
+        m_hideWhenEndsRow->setVisible(isVideo);
+    }
+    if (!isVideo && m_hideWhenVideoEndsCheck) {
+        const bool prev = m_hideWhenVideoEndsCheck->blockSignals(true);
+        m_hideWhenVideoEndsCheck->setChecked(false);
+        m_hideWhenVideoEndsCheck->blockSignals(prev);
     }
     
     // Clear active box if it belongs to a hidden video-only option
@@ -530,8 +582,8 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
     // Handle clicks on value boxes FIRST (before general mouse blocking)
     if (event->type() == QEvent::MouseButtonPress) {
         QLabel* box = qobject_cast<QLabel*>(obj);
-        if (box && (box == m_displayAfterBox || box == m_autoPlayBox || box == m_repeatBox || 
-                   box == m_fadeInBox || box == m_fadeOutBox || box == m_opacityBox)) {
+    if (box && (box == m_displayAfterBox || box == m_autoPlayBox || box == m_repeatBox || 
+           box == m_fadeInBox || box == m_fadeOutBox || box == m_hideDelayBox || box == m_opacityBox)) {
             // Don't allow interaction with disabled boxes
             if (!box->isEnabled()) {
                 return true; // consume the event but don't activate
@@ -639,7 +691,7 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
                 }
                 // For display delay, play delay, fade in, fade out: block infinity (cap at 99999)
                 else if (m_activeBox == m_displayAfterBox || m_activeBox == m_autoPlayBox || 
-                         m_activeBox == m_fadeInBox || m_activeBox == m_fadeOutBox) {
+                         m_activeBox == m_fadeInBox || m_activeBox == m_fadeOutBox || m_activeBox == m_hideDelayBox) {
                     if (digitCount > 5) {
                         // Don't convert to infinity, just ignore the extra digit
                         return true; // consume but don't apply
@@ -693,6 +745,10 @@ bool MediaSettingsPanel::isValidInputForBox(QLabel* box, QChar character) {
     }
     else if (box == m_fadeOutBox) {
         // Fade out: numbers, dots, commas
+        return character.isDigit() || character == '.' || character == ',';
+    }
+    else if (box == m_hideDelayBox) {
+        // Hide delay: numbers, dots, commas
         return character.isDigit() || character == '.' || character == ',';
     }
     else if (box == m_opacityBox) {
@@ -945,6 +1001,46 @@ void MediaSettingsPanel::onPlayAutomaticallyToggled(bool checked) {
     }
 }
 
+void MediaSettingsPanel::onHideDelayToggled(bool checked) {
+    const QString activeTextStyle = QStringLiteral("color: %1;")
+        .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
+    const QString disabledTextStyle = QStringLiteral("color: #808080;");
+
+    if (m_hideDelayCheck) {
+        m_hideDelayCheck->setStyleSheet(checked ? activeTextStyle : disabledTextStyle);
+    }
+
+    if (m_hideDelayBox) {
+        m_hideDelayBox->setEnabled(checked);
+        if (checked) {
+            setBoxActive(m_hideDelayBox, m_activeBox == m_hideDelayBox);
+        } else {
+            m_hideDelayBox->setStyleSheet(
+                "QLabel {"
+                "  background-color: #404040;"
+                "  border: 1px solid #606060;"
+                "  border-radius: 6px;"
+                "  padding: 2px 10px;"
+                "  margin-left: 4px;"
+                "  margin-right: 0px;"
+                "  color: #808080;"
+                "}"
+            );
+            if (m_activeBox == m_hideDelayBox) {
+                clearActiveBox();
+            }
+        }
+    }
+
+    if (m_hideDelaySecondsLabel) {
+        m_hideDelaySecondsLabel->setStyleSheet(checked ? activeTextStyle : disabledTextStyle);
+    }
+
+    if (!m_updatingFromMedia) {
+        pushSettingsToMedia();
+    }
+}
+
 void MediaSettingsPanel::updateAvailableHeight(int maxHeightPx) {
     if (!m_widget) return;
     if (maxHeightPx <= 0) {
@@ -1015,18 +1111,22 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     applyCheckState(m_fadeInCheck, state.fadeInEnabled);
     applyCheckState(m_fadeOutCheck, state.fadeOutEnabled);
     applyCheckState(m_opacityCheck, state.opacityOverrideEnabled);
+    applyCheckState(m_hideDelayCheck, state.hideDelayEnabled);
+    applyCheckState(m_hideWhenVideoEndsCheck, state.hideWhenVideoEnds);
 
     applyBoxText(m_displayAfterBox, state.displayDelayText, QStringLiteral("1"));
     applyBoxText(m_autoPlayBox, state.playDelayText, QStringLiteral("1"));
     applyBoxText(m_repeatBox, state.repeatCountText, QStringLiteral("1"));
     applyBoxText(m_fadeInBox, state.fadeInText, QStringLiteral("1"));
     applyBoxText(m_fadeOutBox, state.fadeOutText, QStringLiteral("1"));
+    applyBoxText(m_hideDelayBox, state.hideDelayText, QStringLiteral("1"));
     applyBoxText(m_opacityBox, state.opacityText, QStringLiteral("100"));
 
     // Re-run UI interlock logic without persisting back to the media item
     onDisplayAutomaticallyToggled(m_displayAfterCheck ? m_displayAfterCheck->isChecked() : false);
     onPlayAutomaticallyToggled(m_autoPlayCheck ? m_autoPlayCheck->isChecked() : false);
     onOpacityToggled(m_opacityCheck ? m_opacityCheck->isChecked() : false);
+    onHideDelayToggled(m_hideDelayCheck ? m_hideDelayCheck->isChecked() : false);
 
     m_updatingFromMedia = false;
 
@@ -1059,6 +1159,9 @@ void MediaSettingsPanel::pushSettingsToMedia() {
     state.fadeOutText = trimmedText(m_fadeOutBox, state.fadeOutText);
     state.opacityOverrideEnabled = m_opacityCheck && m_opacityCheck->isChecked();
     state.opacityText = trimmedText(m_opacityBox, state.opacityText);
+    state.hideDelayEnabled = m_hideDelayCheck && m_hideDelayCheck->isChecked();
+    state.hideDelayText = trimmedText(m_hideDelayBox, state.hideDelayText);
+    state.hideWhenVideoEnds = m_hideWhenVideoEndsCheck && m_hideWhenVideoEndsCheck->isChecked();
 
     m_mediaItem->setMediaSettingsState(state);
 }

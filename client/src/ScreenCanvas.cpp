@@ -415,6 +415,10 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
             const bool autoDisplay = media->autoDisplayEnabled();
             m["autoDisplay"] = autoDisplay;
             m["autoDisplayDelayMs"] = media->autoDisplayDelayMs();
+            const bool autoHide = media->autoHideEnabled();
+            m["autoHide"] = autoHide;
+            m["autoHideDelayMs"] = media->autoHideDelayMs();
+            m["hideWhenVideoEnds"] = media->hideWhenVideoEnds();
             if (media->isVideoMedia()) {
                 m["autoPlay"] = media->autoPlayEnabled();
                 m["autoPlayDelayMs"] = media->autoPlayDelayMs();
@@ -4402,10 +4406,12 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
         for (QGraphicsItem* gi : m_scene->items()) {
             if (auto* media = dynamic_cast<ResizableMediaBase*>(gi)) {
                 // Decide if it should auto-display immediately
-                bool shouldAutoDisplay = media->autoDisplayEnabled();
-                int displayDelayMs = media->autoDisplayDelayMs();
-                bool shouldAutoPlay = media->autoPlayEnabled();
-                int playDelayMs = media->autoPlayDelayMs();
+                const bool shouldAutoDisplay = media->autoDisplayEnabled();
+                const int displayDelayMs = media->autoDisplayDelayMs();
+                const bool shouldAutoPlay = media->autoPlayEnabled();
+                const int playDelayMs = media->autoPlayDelayMs();
+                const bool shouldAutoHide = media->autoHideEnabled();
+                const int hideDelayMs = media->autoHideDelayMs();
                 // Snapshot and reset videos
                 if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
                     VideoPreState st;
@@ -4413,6 +4419,17 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                     st.guard = vid->lifetimeGuard();
                     st.posMs = vid->currentPositionMs();
                     st.wasPlaying = vid->isPlaying();
+                    if (vid->hideWhenVideoEnds()) {
+                        if (QMediaPlayer* player = vid->mediaPlayer()) {
+                            st.hideOnEndConnection = QObject::connect(player, &QMediaPlayer::mediaStatusChanged, this, [this, media, guard = st.guard](QMediaPlayer::MediaStatus status){
+                                if (!m_hostSceneActive) return;
+                                if (status != QMediaPlayer::EndOfMedia) return;
+                                if (guard.expired()) return;
+                                if (!media || media->isBeingDeleted()) return;
+                                media->hideWithConfiguredFade();
+                            });
+                        }
+                    }
                     m_prevVideoStates.append(st);
                     vid->stopToBeginning();
                 }
@@ -4421,14 +4438,32 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                 if (shouldAutoDisplay) {
                     const auto displayGuard = media->lifetimeGuard();
                     if (displayDelayMs > 0) {
-                        QTimer::singleShot(displayDelayMs, this, [this, media, displayGuard]() {
+                        QTimer::singleShot(displayDelayMs, this, [this, media, displayGuard, shouldAutoHide, hideDelayMs]() {
                             if (!m_hostSceneActive) return;
                             if (displayGuard.expired()) return;
                             if (media->isBeingDeleted()) return;
                             media->showWithConfiguredFade();
+                            if (shouldAutoHide) {
+                                const auto hideGuard = media->lifetimeGuard();
+                                QTimer::singleShot(std::max(0, hideDelayMs), this, [this, media, hideGuard]() {
+                                    if (!m_hostSceneActive) return;
+                                    if (hideGuard.expired()) return;
+                                    if (!media || media->isBeingDeleted()) return;
+                                    media->hideWithConfiguredFade();
+                                });
+                            }
                         });
                     } else {
                         media->showWithConfiguredFade();
+                        if (shouldAutoHide) {
+                            const auto hideGuard = media->lifetimeGuard();
+                            QTimer::singleShot(std::max(0, hideDelayMs), this, [this, media, hideGuard]() {
+                                if (!m_hostSceneActive) return;
+                                if (hideGuard.expired()) return;
+                                if (!media || media->isBeingDeleted()) return;
+                                media->hideWithConfiguredFade();
+                            });
+                        }
                     }
                 }
                 // 2. Schedule video playback if autoPlay is enabled; allow playback even while hidden
@@ -4480,11 +4515,15 @@ void ScreenCanvas::stopHostSceneState() {
         m_prevSelectionBeforeHostScene.clear();
     }
     // Restore pre-scene video positions (always paused)
-    for (const VideoPreState& st : std::as_const(m_prevVideoStates)) {
+    for (VideoPreState& st : m_prevVideoStates) {
         if (!st.video) continue;
         if (st.guard.expired()) continue;
         if (st.video->isBeingDeleted()) continue;
         if (st.video->scene() == m_scene) {
+            if (st.hideOnEndConnection) {
+                QObject::disconnect(st.hideOnEndConnection);
+                st.hideOnEndConnection = QMetaObject::Connection();
+            }
             st.video->pauseAndSetPosition(st.posMs);
         }
     }

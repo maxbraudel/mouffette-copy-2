@@ -9,6 +9,7 @@
 #include <QMap>
 #include <QPixmap>
 #include <QTimer>
+#include <QObject>
 #include <memory>
 #include <QSet>
 #include "ClientInfo.h" // for ScreenInfo
@@ -373,6 +374,7 @@ protected:
         std::weak_ptr<bool> guard;
         qint64 posMs = 0;
         bool wasPlaying = false;
+        QMetaObject::Connection hideOnEndConnection;
     };
     // Remember selection present just before entering host scene so it can be restored afterward (multi-select supported)
     QList<SavedSelection> m_prevSelectionBeforeHostScene;

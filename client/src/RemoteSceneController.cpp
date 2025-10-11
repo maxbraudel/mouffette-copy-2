@@ -229,6 +229,7 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
 
     stopAndDeleteTimer(item->displayTimer);
     stopAndDeleteTimer(item->playTimer);
+    stopAndDeleteTimer(item->hideTimer);
 
     QObject::disconnect(item->deferredStartConn);
     QObject::disconnect(item->primingConn);
@@ -334,6 +335,7 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     item->loaded = false;
     item->primedFirstFrame = false;
     item->playAuthorized = false;
+    item->hiding = false;
 }
 
 QWidget* RemoteSceneController::ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary) {
@@ -441,6 +443,9 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
         item->autoDisplayDelayMs = m.value("autoDisplayDelayMs").toInt(0);
         item->autoPlay = m.value("autoPlay").toBool(false);
         item->autoPlayDelayMs = m.value("autoPlayDelayMs").toInt(0);
+    item->autoHide = m.value("autoHide").toBool(false);
+    item->autoHideDelayMs = m.value("autoHideDelayMs").toInt(0);
+    item->hideWhenVideoEnds = m.value("hideWhenVideoEnds").toBool(false);
         item->fadeInSeconds = m.value("fadeInSeconds").toDouble(0.0);
         item->fadeOutSeconds = m.value("fadeOutSeconds").toDouble(0.0);
         item->contentOpacity = m.value("contentOpacity").toDouble(1.0);
@@ -469,6 +474,10 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
     if (winIt == m_screenWindows.end()) return;
     QWidget* container = winIt.value().window;
     if (!container) return;
+    item->hiding = false;
+    if (item->hideTimer) {
+        item->hideTimer->stop();
+    }
     // Create widget hidden initially
     QWidget* w = new QWidget(container);
     w->setAttribute(Qt::WA_TransparentForMouseEvents, true);
@@ -594,6 +603,9 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                     if (finalPos != item->player->position()) {
                         item->player->setPosition(finalPos);
                     }
+                    if (item->hideWhenVideoEnds) {
+                        fadeOutAndHide(item);
+                    }
                 }
             }
         });
@@ -636,6 +648,9 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                 item->player->pause();
                 if (dur > 1) {
                     item->player->setPosition(std::max<qint64>(0, dur - 1));
+                }
+                if (item->hideWhenVideoEnds) {
+                    fadeOutAndHide(item);
                 }
             }
         });
@@ -793,6 +808,10 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
 void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMediaItem>& item) {
     if (item->spans.isEmpty()) return;
     const quint64 epoch = item->sceneEpoch;
+    item->hiding = false;
+    if (item->hideTimer) {
+        item->hideTimer->stop();
+    }
     // Create per-span widgets under corresponding screen windows
     QList<QWidget*> spanWidgets;
     QList<QGraphicsOpacityEffect*> spanEffects;
@@ -939,6 +958,9 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                     if (finalPos != item->player->position()) {
                         item->player->setPosition(finalPos);
                     }
+                    if (item->hideWhenVideoEnds) {
+                        fadeOutAndHide(item);
+                    }
                 }
             }
         });
@@ -975,6 +997,9 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 item->player->pause();
                 if (dur > 1) {
                     item->player->setPosition(std::max<qint64>(0, dur - 1));
+                }
+                if (item->hideWhenVideoEnds) {
+                    fadeOutAndHide(item);
                 }
             }
         });
@@ -1102,7 +1127,26 @@ void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item)
     if (item->displayStarted) return;
     item->displayStarted = true;
     item->displayReady = true;
+    item->hiding = false;
+    if (item->hideTimer) {
+        item->hideTimer->stop();
+    }
     const int durMs = int(item->fadeInSeconds * 1000.0);
+    std::weak_ptr<RemoteMediaItem> weakItem = item;
+    auto scheduleHideAfterFade = [this, weakItem, durMs]() {
+        auto locked = weakItem.lock();
+        if (!locked) return;
+        if (!locked->autoHide) return;
+        if (durMs <= 10) {
+            scheduleHideTimer(locked);
+        } else {
+            QTimer::singleShot(durMs, this, [this, weakItem]() {
+                auto lockedInner = weakItem.lock();
+                if (!lockedInner) return;
+                scheduleHideTimer(lockedInner);
+            });
+        }
+    };
     // Multi-span path - now uses QGraphicsItem opacity
     if (!item->spans.isEmpty()) {
         if (durMs <= 10) {
@@ -1112,6 +1156,7 @@ void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item)
                 else if (s.imageLabel) graphicsItem = reinterpret_cast<QGraphicsPixmapItem*>(s.imageLabel);
                 if (graphicsItem) graphicsItem->setOpacity(item->contentOpacity);
             }
+            scheduleHideAfterFade();
             return;
         }
         for (auto& s : item->spans) {
@@ -1131,6 +1176,7 @@ void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item)
             connect(anim, &QVariantAnimation::finished, anim, [anim](){ anim->deleteLater(); });
             anim->start();
         }
+        scheduleHideAfterFade();
         return;
     }
     // Legacy single-span path - now uses QGraphicsItem opacity
@@ -1145,6 +1191,7 @@ void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item)
     
     if (durMs <= 10) { 
         graphicsItem->setOpacity(item->contentOpacity); 
+        scheduleHideAfterFade();
         return; 
     }
     
@@ -1157,5 +1204,126 @@ void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item)
         if (graphicsItem) graphicsItem->setOpacity(v.toDouble()); 
     });
     connect(anim, &QVariantAnimation::finished, anim, [anim](){ anim->deleteLater(); });
+    anim->start();
+    scheduleHideAfterFade();
+}
+
+void RemoteSceneController::scheduleHideTimer(const std::shared_ptr<RemoteMediaItem>& item) {
+    if (!item) return;
+    if (!item->autoHide) return;
+    if (item->hiding) return;
+    const int delayMs = std::max(0, item->autoHideDelayMs);
+    if (delayMs == 0) {
+        fadeOutAndHide(item);
+        return;
+    }
+    if (!item->hideTimer) {
+        item->hideTimer = new QTimer(this);
+        item->hideTimer->setSingleShot(true);
+        std::weak_ptr<RemoteMediaItem> weakItem = item;
+        connect(item->hideTimer, &QTimer::timeout, this, [this, weakItem]() {
+            auto locked = weakItem.lock();
+            if (!locked) return;
+            fadeOutAndHide(locked);
+        });
+    }
+    if (!item->hideTimer) return;
+    item->hideTimer->stop();
+    item->hideTimer->start(delayMs);
+}
+
+void RemoteSceneController::fadeOutAndHide(const std::shared_ptr<RemoteMediaItem>& item) {
+    if (!item) return;
+    if (item->hiding) return;
+    item->hiding = true;
+    if (item->hideTimer) {
+        item->hideTimer->stop();
+    }
+    const int durMs = int(std::max(0.0, item->fadeOutSeconds) * 1000.0);
+    auto finalize = [item]() {
+        item->displayStarted = false;
+        item->displayReady = false;
+        item->hiding = false;
+        if (item->widget) item->widget->hide();
+        for (auto& span : item->spans) {
+            if (span.widget) span.widget->hide();
+        }
+        if (item->opacity) item->opacity->setOpacity(0.0);
+        if (item->videoItemSingle) item->videoItemSingle->setOpacity(0.0);
+        if (item->imageLabelSingle) {
+            auto* pixmapItem = reinterpret_cast<QGraphicsPixmapItem*>(item->imageLabelSingle);
+            if (pixmapItem) pixmapItem->setOpacity(0.0);
+        }
+        for (auto& span : item->spans) {
+            if (span.videoItem) span.videoItem->setOpacity(0.0);
+            if (span.imageLabel) {
+                auto* pixmapItem = reinterpret_cast<QGraphicsPixmapItem*>(span.imageLabel);
+                if (pixmapItem) pixmapItem->setOpacity(0.0);
+            }
+        }
+    };
+
+    if (!item->spans.isEmpty()) {
+        if (durMs <= 10) {
+            finalize();
+            return;
+        }
+        auto remaining = std::make_shared<int>(0);
+        for (auto& span : item->spans) {
+            QGraphicsItem* graphicsItem = nullptr;
+            if (span.videoItem) graphicsItem = span.videoItem;
+            else if (span.imageLabel) graphicsItem = reinterpret_cast<QGraphicsPixmapItem*>(span.imageLabel);
+            if (!graphicsItem) continue;
+            ++(*remaining);
+            auto* anim = new QVariantAnimation(this);
+            anim->setStartValue(graphicsItem->opacity());
+            anim->setEndValue(0.0);
+            anim->setDuration(durMs);
+            anim->setEasingCurve(QEasingCurve::OutCubic);
+            connect(anim, &QVariantAnimation::valueChanged, this, [graphicsItem](const QVariant& v) {
+                if (graphicsItem) graphicsItem->setOpacity(v.toDouble());
+            });
+            connect(anim, &QVariantAnimation::finished, anim, [anim]() { anim->deleteLater(); });
+            connect(anim, &QVariantAnimation::finished, this, [remaining, finalize]() mutable {
+                if (!remaining) return;
+                if (--(*remaining) == 0) {
+                    finalize();
+                }
+            });
+            anim->start();
+        }
+        if (*remaining == 0) {
+            finalize();
+        }
+        return;
+    }
+
+    QGraphicsItem* graphicsItem = nullptr;
+    if (item->videoItemSingle) graphicsItem = item->videoItemSingle;
+    else if (item->imageLabelSingle) graphicsItem = reinterpret_cast<QGraphicsPixmapItem*>(item->imageLabelSingle);
+
+    if (!graphicsItem) {
+        finalize();
+        return;
+    }
+
+    if (durMs <= 10) {
+        graphicsItem->setOpacity(0.0);
+        finalize();
+        return;
+    }
+
+    auto* anim = new QVariantAnimation(this);
+    anim->setStartValue(graphicsItem->opacity());
+    anim->setEndValue(0.0);
+    anim->setDuration(durMs);
+    anim->setEasingCurve(QEasingCurve::OutCubic);
+    connect(anim, &QVariantAnimation::valueChanged, this, [graphicsItem](const QVariant& v) {
+        if (graphicsItem) graphicsItem->setOpacity(v.toDouble());
+    });
+    connect(anim, &QVariantAnimation::finished, anim, [anim]() { anim->deleteLater(); });
+    connect(anim, &QVariantAnimation::finished, this, [finalize]() mutable {
+        finalize();
+    });
     anim->start();
 }

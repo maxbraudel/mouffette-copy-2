@@ -65,12 +65,15 @@ private:
 		QList<Span> spans;
 		bool autoDisplay=false; int autoDisplayDelayMs=0;
 		bool autoPlay=false; int autoPlayDelayMs=0;
+		bool autoHide=false; int autoHideDelayMs=0;
+		bool hideWhenVideoEnds=false;
 		double fadeInSeconds=0.0; double fadeOutSeconds=0.0; double contentOpacity = 1.0;
 		// Audio state from host (videos)
 		bool muted = false; double volume = 1.0; // 0..1
 		bool repeatEnabled = false; int repeatCount = 0; int repeatRemaining = 0; bool repeatActive = false;
 		bool primedFirstFrame = false; bool playAuthorized = false;
 		bool displayReady = false; bool displayStarted = false;
+		bool hiding = false;
 		bool pausedAtEnd = false;
 		bool loaded = false; // true when QMediaPlayer reports Loaded/Buffered
 		// For legacy single-span path
@@ -79,7 +82,7 @@ private:
 		QGraphicsScene* sceneSingle = nullptr;
 		QGraphicsVideoItem* videoItemSingle = nullptr;
 		QLabel* imageLabelSingle = nullptr;
-		QTimer* displayTimer = nullptr; QTimer* playTimer = nullptr;
+		QTimer* displayTimer = nullptr; QTimer* playTimer = nullptr; QTimer* hideTimer = nullptr;
 		// Video only
 		QMediaPlayer* player = nullptr; QAudioOutput* audio = nullptr;
 		QMetaObject::Connection deferredStartConn; // one-shot start after load
@@ -98,6 +101,8 @@ private:
 	void scheduleMediaLegacy(const std::shared_ptr<RemoteMediaItem>& item);
 	void scheduleMediaMulti(const std::shared_ptr<RemoteMediaItem>& item);
 	void fadeIn(const std::shared_ptr<RemoteMediaItem>& item);
+	void fadeOutAndHide(const std::shared_ptr<RemoteMediaItem>& item);
+	void scheduleHideTimer(const std::shared_ptr<RemoteMediaItem>& item);
 	void clearScene();
     void teardownMediaItem(const std::shared_ptr<RemoteMediaItem>& item);
 

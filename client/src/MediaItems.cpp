@@ -198,6 +198,22 @@ int ResizableMediaBase::autoPlayDelayMs() const {
     return value * 1000;
 }
 
+bool ResizableMediaBase::autoHideEnabled() const {
+    return m_mediaSettings.hideDelayEnabled;
+}
+
+int ResizableMediaBase::autoHideDelayMs() const {
+    if (!autoHideEnabled()) return 0;
+    bool ok = false;
+    int value = m_mediaSettings.hideDelayText.trimmed().toInt(&ok);
+    if (!ok || value < 0) return 0;
+    return value * 1000;
+}
+
+bool ResizableMediaBase::hideWhenVideoEnds() const {
+    return m_mediaSettings.hideWhenVideoEnds;
+}
+
 double ResizableMediaBase::fadeInDurationSeconds() const {
     if (!m_mediaSettings.fadeInEnabled) return 0.0;
     QString text = m_mediaSettings.fadeInText.trimmed();

@@ -49,6 +49,7 @@ private slots:
     void onDisplayAutomaticallyToggled(bool checked);
     void onPlayAutomaticallyToggled(bool checked);
     void onOpacityToggled(bool checked);
+    void onHideDelayToggled(bool checked);
 
 private:
     void buildUi(QWidget* parentWidget);
@@ -86,6 +87,9 @@ private:
 
     QCheckBox* m_fadeOutCheck = nullptr;
 
+    QCheckBox* m_hideDelayCheck = nullptr;
+    QCheckBox* m_hideWhenVideoEndsCheck = nullptr;
+
     // Value box widgets for click handling
     QLabel* m_autoPlayBox = nullptr;
     QLabel* m_autoPlaySecondsLabel = nullptr; // "seconds" text after the play delay input box
@@ -96,6 +100,7 @@ private:
     QLabel* m_repeatBox = nullptr;
     QLabel* m_fadeInBox = nullptr;
     QLabel* m_fadeOutBox = nullptr;
+    QLabel* m_hideDelayBox = nullptr;
     // New: set opacity to [x]%
     QCheckBox* m_opacityCheck = nullptr;
     QLabel* m_opacityBox = nullptr;
@@ -110,5 +115,9 @@ private:
     QWidget* m_autoPlayRow = nullptr;
     QWidget* m_playDelayRow = nullptr;
     QWidget* m_repeatRow = nullptr;
+    QWidget* m_hideDelayRow = nullptr;
+    QWidget* m_hideWhenEndsRow = nullptr;
+
+    QLabel* m_hideDelaySecondsLabel = nullptr;
     class ResizableMediaBase* m_mediaItem = nullptr; // not owning
 };
