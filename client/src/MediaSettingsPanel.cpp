@@ -778,6 +778,10 @@ bool MediaSettingsPanel::isValidInputForBox(QLabel* box, QChar character) {
         // Hide delay: numbers, dots, commas
         return character.isDigit() || character == '.' || character == ',';
     }
+    else if (box == m_pauseDelayBox) {
+        // Pause delay: numbers, dots, commas
+        return character.isDigit() || character == '.' || character == ',';
+    }
     else if (box == m_opacityBox) {
         // Opacity: digits only
         return character.isDigit();

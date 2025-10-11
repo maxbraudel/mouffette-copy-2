@@ -278,6 +278,7 @@ public:
     qint64 currentPositionMs() const { return m_positionMs; }
     bool isPlaying() const { return m_player && m_player->playbackState() == QMediaPlayer::PlayingState; }
     void pauseAndSetPosition(qint64 posMs);
+    void setPendingSceneStartPosition(qint64 posMs);
     void setInitialScaleFactor(qreal f) { m_initialScaleFactor = f; }
     void setExternalPosterImage(const QImage& img);
     bool isDraggingProgress() const { return m_draggingProgress; }
@@ -374,6 +375,7 @@ private:
     bool m_expectedPlayingState = false;
     bool m_seamlessLoopJumpPending = false;
     qint64 m_lastSeamlessLoopTriggerMs = 0;
+    qint64 m_pendingSceneStartPositionMs = -1;
     bool m_settingsRepeatEnabled = false;
     int m_settingsRepeatLoopCount = 0;
     int m_settingsRepeatLoopsRemaining = 0;

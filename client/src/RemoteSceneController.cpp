@@ -459,6 +459,7 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
         if (item->type == "video") {
             item->muted = m.value("muted").toBool(false);
             item->volume = m.value("volume").toDouble(1.0);
+            item->startPositionMs = m.value("startPositionMs").toInt(0);
             FileManager::instance().preloadFileIntoMemory(item->fileId);
         }
         m_mediaItems.append(item);
@@ -710,7 +711,7 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                             QObject::disconnect(item->primingConn);
                             if (!item->playAuthorized && item->player) {
                                 item->player->pause();
-                                item->player->setPosition(0);
+                                item->player->setPosition(item->startPositionMs);
                             }
                             if (sink) {
                                 sink->setVideoFrame(frame);
@@ -724,6 +725,7 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                     }
                     if (item->audio) item->audio->setMuted(true);
                     item->pausedAtEnd = false;
+                    item->player->setPosition(item->startPositionMs);
                     item->player->play();
                 }
                 return true;
@@ -774,8 +776,8 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                                         ? item->repeatCount
                                         : 0;
             if (item->loaded) {
-                // If we primed, position might already be 0 and paused; just play
-                if (item->player->position() != 0) item->player->setPosition(0);
+                // Set to host's start position before playing
+                item->player->setPosition(item->startPositionMs);
                 item->player->play();
             }
             else {
@@ -788,7 +790,8 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                         // Disconnect this one-shot handler to avoid multiple resets causing freezes
                         QObject::disconnect(item->deferredStartConn);
                         if (item->audio) { item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0)); }
-                        if (item->player->position() != 0) item->player->setPosition(0);
+                        // Set to host's start position before playing
+                        item->player->setPosition(item->startPositionMs);
                         item->pausedAtEnd = false;
                         item->repeatRemaining = (item->repeatEnabled && item->repeatCount > 0)
                                                      ? item->repeatCount
@@ -1072,7 +1075,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                             QObject::disconnect(item->primingConn);
                             if (!item->playAuthorized && item->player) {
                                 item->player->pause();
-                                item->player->setPosition(0);
+                                item->player->setPosition(item->startPositionMs);
                             }
                             if (sink) {
                                 sink->setVideoFrame(frame);
@@ -1094,6 +1097,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                     }
                     if (item->audio) item->audio->setMuted(true);
                     item->pausedAtEnd = false;
+                    item->player->setPosition(item->startPositionMs);
                     item->player->play();
                 }
                 return true;
@@ -1133,9 +1137,9 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                                         : 0;
             if (item->audio) { item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0)); }
             item->pausedAtEnd = false;
-            if (item->loaded) { if (item->player->position() != 0) item->player->setPosition(0); item->player->play(); }
+            if (item->loaded) { item->player->setPosition(item->startPositionMs); item->player->play(); }
             else {
-                item->deferredStartConn = QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus s){ auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch || !item->playAuthorized) return; if (s==QMediaPlayer::LoadedMedia || s==QMediaPlayer::BufferedMedia) { QObject::disconnect(item->deferredStartConn); if (item->audio) { item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0)); } if (item->player->position() != 0) item->player->setPosition(0); item->pausedAtEnd = false; item->repeatRemaining = (item->repeatEnabled && item->repeatCount > 0)
+                item->deferredStartConn = QObject::connect(item->player, &QMediaPlayer::mediaStatusChanged, item->player, [this,epoch,weakItem](QMediaPlayer::MediaStatus s){ auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch || !item->playAuthorized) return; if (s==QMediaPlayer::LoadedMedia || s==QMediaPlayer::BufferedMedia) { QObject::disconnect(item->deferredStartConn); if (item->audio) { item->audio->setMuted(item->muted); item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0)); } item->player->setPosition(item->startPositionMs); item->pausedAtEnd = false; item->repeatRemaining = (item->repeatEnabled && item->repeatCount > 0)
                                                      ? item->repeatCount
                                                      : 0; item->player->play(); } });
             }

@@ -1272,6 +1272,14 @@ void ResizableVideoItem::togglePlayPause() {
         if (m_progressTimer) m_progressTimer->stop();
         nowPlaying = false;
     } else {
+        if (m_pendingSceneStartPositionMs >= 0) {
+            const qint64 pending = m_pendingSceneStartPositionMs;
+            m_pendingSceneStartPositionMs = -1;
+            m_player->setPosition(pending);
+            m_positionMs = pending;
+            m_smoothProgressRatio = (m_durationMs > 0 ? double(pending) / double(m_durationMs) : 0.0);
+            updateProgressBar();
+        }
         const qint64 startThreshold = nearStartThresholdMs();
         const qint64 playerPos = m_player ? m_player->position() : m_positionMs;
         const qint64 effectivePos = (m_positionMs > 0) ? m_positionMs : playerPos;
@@ -1367,6 +1375,12 @@ void ResizableVideoItem::pauseAndSetPosition(qint64 posMs) {
     cancelSettingsRepeatSession();
     m_expectedPlayingState = false; updatePlayPauseIconState(false);
     updateControlsLayout(); update();
+}
+
+void ResizableVideoItem::setPendingSceneStartPosition(qint64 posMs) {
+    if (posMs < 0) posMs = 0;
+    if (m_durationMs > 0 && posMs > m_durationMs) posMs = m_durationMs;
+    m_pendingSceneStartPositionMs = posMs;
 }
 
 void ResizableVideoItem::setExternalPosterImage(const QImage& img) { if (!img.isNull()) { m_posterImage = img; m_posterImageSet = true; if (!m_adoptedSize) adoptBaseSize(img.size()); update(); } }

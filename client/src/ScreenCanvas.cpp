@@ -427,6 +427,7 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                 if (auto* v = dynamic_cast<ResizableVideoItem*>(media)) {
                     m["muted"] = v->isMuted();
                     m["volume"] = v->volume();
+                    m["startPositionMs"] = v->currentPositionMs();
                     const auto& settings = media->mediaSettingsState();
                     m["repeatEnabled"] = settings.repeatEnabled;
                     int repeatCount = 0;
@@ -4433,7 +4434,8 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                         }
                     }
                     m_prevVideoStates.append(st);
-                    vid->stopToBeginning();
+                    vid->pauseAndSetPosition(st.posMs);
+                    vid->setPendingSceneStartPosition(st.posMs);
                 }
                 media->hideImmediateNoFade();
                 // 1. Schedule (or immediate) display
