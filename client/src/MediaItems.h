@@ -38,6 +38,8 @@ public:
         bool playAutomatically = true;
         bool playDelayEnabled = false;
         QString playDelayText = QStringLiteral("1");
+        bool pauseDelayEnabled = false;
+        QString pauseDelayText = QStringLiteral("1");
         bool repeatEnabled = false;
         QString repeatCountText = QStringLiteral("1");
         bool fadeInEnabled = false;
@@ -148,6 +150,8 @@ public:
     int autoDisplayDelayMs() const;
     bool autoPlayEnabled() const;
     int autoPlayDelayMs() const;
+    bool autoPauseEnabled() const;
+    int autoPauseDelayMs() const;
     bool autoHideEnabled() const;
     int autoHideDelayMs() const;
     bool hideWhenVideoEnds() const;

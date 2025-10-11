@@ -198,6 +198,18 @@ int ResizableMediaBase::autoPlayDelayMs() const {
     return value * 1000;
 }
 
+bool ResizableMediaBase::autoPauseEnabled() const {
+    return m_mediaSettings.pauseDelayEnabled;
+}
+
+int ResizableMediaBase::autoPauseDelayMs() const {
+    if (!autoPauseEnabled()) return 0;
+    bool ok = false;
+    int value = m_mediaSettings.pauseDelayText.trimmed().toInt(&ok);
+    if (!ok || value < 0) return 0;
+    return value * 1000;
+}
+
 bool ResizableMediaBase::autoHideEnabled() const {
     return m_mediaSettings.hideDelayEnabled;
 }

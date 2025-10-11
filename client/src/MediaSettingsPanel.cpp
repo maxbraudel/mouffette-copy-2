@@ -244,6 +244,27 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_contentLayout->addWidget(m_playDelayRow);
     }
 
+    // Pause delay (video only)
+    {
+        m_pauseDelayRow = new QWidget(m_innerContent);
+        configureRow(m_pauseDelayRow);
+        auto* h = new QHBoxLayout(m_pauseDelayRow);
+        h->setContentsMargins(0,0,0,0);
+        h->setSpacing(0);
+        m_pauseDelayCheck = new QCheckBox("Pause delay: ", m_pauseDelayRow);
+        m_pauseDelayCheck->setStyleSheet(overlayTextStyle);
+        m_pauseDelayCheck->installEventFilter(this);
+        connect(m_pauseDelayCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onPauseDelayToggled);
+        m_pauseDelayBox = makeValueBox();
+        m_pauseDelaySecondsLabel = new QLabel("s", m_pauseDelayRow);
+        m_pauseDelaySecondsLabel->setStyleSheet(overlayTextStyle);
+        h->addWidget(m_pauseDelayCheck);
+        h->addWidget(m_pauseDelayBox);
+        h->addWidget(m_pauseDelaySecondsLabel);
+        h->addStretch();
+        m_contentLayout->addWidget(m_pauseDelayRow);
+    }
+
     // 2) Repeat (video only) - keeping original single checkbox format
     {
     m_repeatRow = new QWidget(m_innerContent);
@@ -413,6 +434,10 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     if (m_hideDelayCheck) {
         onHideDelayToggled(m_hideDelayCheck->isChecked());
     }
+    if (m_pauseDelayCheck) {
+        connect(m_pauseDelayCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onPauseDelayToggled);
+        onPauseDelayToggled(m_pauseDelayCheck->isChecked());
+    }
     if (m_hideWhenEndsRow) {
         m_hideWhenEndsRow->setVisible(false); // default hidden until media type provided
     }
@@ -440,6 +465,9 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
     if (m_playDelayRow) {
         m_playDelayRow->setVisible(isVideo);
     }
+    if (m_pauseDelayRow) {
+        m_pauseDelayRow->setVisible(isVideo);
+    }
     if (m_repeatRow) {
         m_repeatRow->setVisible(isVideo);
     }
@@ -453,7 +481,7 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
     }
     
     // Clear active box if it belongs to a hidden video-only option
-    if (!isVideo && m_activeBox && (m_activeBox == m_autoPlayBox || m_activeBox == m_repeatBox)) {
+    if (!isVideo && m_activeBox && (m_activeBox == m_autoPlayBox || m_activeBox == m_pauseDelayBox || m_activeBox == m_repeatBox)) {
         clearActiveBox();
     }
     
@@ -581,7 +609,7 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
     // Handle clicks on value boxes FIRST (before general mouse blocking)
     if (event->type() == QEvent::MouseButtonPress) {
         QLabel* box = qobject_cast<QLabel*>(obj);
-    if (box && (box == m_displayAfterBox || box == m_autoPlayBox || box == m_repeatBox || 
+    if (box && (box == m_displayAfterBox || box == m_autoPlayBox || box == m_pauseDelayBox || box == m_repeatBox || 
            box == m_fadeInBox || box == m_fadeOutBox || box == m_hideDelayBox || box == m_opacityBox)) {
             // Don't allow interaction with disabled boxes
             if (!box->isEnabled()) {
@@ -1024,6 +1052,30 @@ void MediaSettingsPanel::onHideDelayToggled(bool checked) {
     }
 }
 
+void MediaSettingsPanel::onPauseDelayToggled(bool checked) {
+    const QString textStyle = QStringLiteral("color: %1;")
+        .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
+
+    if (m_pauseDelayCheck) {
+        m_pauseDelayCheck->setStyleSheet(textStyle);
+    }
+
+    if (m_pauseDelayBox) {
+        if (!checked && m_activeBox == m_pauseDelayBox) {
+            clearActiveBox();
+        }
+        setBoxActive(m_pauseDelayBox, m_activeBox == m_pauseDelayBox);
+    }
+
+    if (m_pauseDelaySecondsLabel) {
+        m_pauseDelaySecondsLabel->setStyleSheet(textStyle);
+    }
+
+    if (!m_updatingFromMedia) {
+        pushSettingsToMedia();
+    }
+}
+
 void MediaSettingsPanel::updateAvailableHeight(int maxHeightPx) {
     if (!m_widget) return;
     if (maxHeightPx <= 0) {
@@ -1090,6 +1142,7 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     applyCheckState(m_displayDelayCheck, state.displayDelayEnabled);
     applyCheckState(m_autoPlayCheck, state.playAutomatically);
     applyCheckState(m_playDelayCheck, state.playDelayEnabled);
+    applyCheckState(m_pauseDelayCheck, state.pauseDelayEnabled);
     applyCheckState(m_repeatCheck, state.repeatEnabled);
     applyCheckState(m_fadeInCheck, state.fadeInEnabled);
     applyCheckState(m_fadeOutCheck, state.fadeOutEnabled);
@@ -1099,6 +1152,7 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
 
     applyBoxText(m_displayAfterBox, state.displayDelayText, QStringLiteral("1"));
     applyBoxText(m_autoPlayBox, state.playDelayText, QStringLiteral("1"));
+    applyBoxText(m_pauseDelayBox, state.pauseDelayText, QStringLiteral("1"));
     applyBoxText(m_repeatBox, state.repeatCountText, QStringLiteral("1"));
     applyBoxText(m_fadeInBox, state.fadeInText, QStringLiteral("1"));
     applyBoxText(m_fadeOutBox, state.fadeOutText, QStringLiteral("1"));
@@ -1110,6 +1164,7 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     onPlayAutomaticallyToggled(m_autoPlayCheck ? m_autoPlayCheck->isChecked() : false);
     onOpacityToggled(m_opacityCheck ? m_opacityCheck->isChecked() : false);
     onHideDelayToggled(m_hideDelayCheck ? m_hideDelayCheck->isChecked() : false);
+    onPauseDelayToggled(m_pauseDelayCheck ? m_pauseDelayCheck->isChecked() : false);
 
     m_updatingFromMedia = false;
 
@@ -1134,6 +1189,8 @@ void MediaSettingsPanel::pushSettingsToMedia() {
     state.playAutomatically = m_autoPlayCheck && m_autoPlayCheck->isChecked();
     state.playDelayEnabled = m_playDelayCheck && m_playDelayCheck->isChecked();
     state.playDelayText = trimmedText(m_autoPlayBox, state.playDelayText);
+    state.pauseDelayEnabled = m_pauseDelayCheck && m_pauseDelayCheck->isChecked();
+    state.pauseDelayText = trimmedText(m_pauseDelayBox, state.pauseDelayText);
     state.repeatEnabled = m_repeatCheck && m_repeatCheck->isChecked();
     state.repeatCountText = trimmedText(m_repeatBox, state.repeatCountText);
     state.fadeInEnabled = m_fadeInCheck && m_fadeInCheck->isChecked();

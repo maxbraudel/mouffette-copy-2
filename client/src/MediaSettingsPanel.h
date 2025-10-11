@@ -50,6 +50,7 @@ private slots:
     void onPlayAutomaticallyToggled(bool checked);
     void onOpacityToggled(bool checked);
     void onHideDelayToggled(bool checked);
+    void onPauseDelayToggled(bool checked);
 
 private:
     void buildUi(QWidget* parentWidget);
@@ -77,6 +78,7 @@ private:
 
     QCheckBox* m_autoPlayCheck = nullptr;
     QCheckBox* m_playDelayCheck = nullptr; // New: separate play delay checkbox
+    QCheckBox* m_pauseDelayCheck = nullptr; // New: pause delay checkbox
 
     QCheckBox* m_repeatCheck = nullptr;
     
@@ -114,10 +116,13 @@ private:
     // Video-only option widgets (for show/hide based on media type)
     QWidget* m_autoPlayRow = nullptr;
     QWidget* m_playDelayRow = nullptr;
+    QWidget* m_pauseDelayRow = nullptr;
     QWidget* m_repeatRow = nullptr;
     QWidget* m_hideDelayRow = nullptr;
     QWidget* m_hideWhenEndsRow = nullptr;
 
     QLabel* m_hideDelaySecondsLabel = nullptr;
+    QLabel* m_pauseDelayBox = nullptr;
+    QLabel* m_pauseDelaySecondsLabel = nullptr;
     class ResizableMediaBase* m_mediaItem = nullptr; // not owning
 };

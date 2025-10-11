@@ -65,6 +65,7 @@ private:
 		QList<Span> spans;
 		bool autoDisplay=false; int autoDisplayDelayMs=0;
 		bool autoPlay=false; int autoPlayDelayMs=0;
+		bool autoPause=false; int autoPauseDelayMs=0;
 		bool autoHide=false; int autoHideDelayMs=0;
 		bool hideWhenVideoEnds=false;
 		double fadeInSeconds=0.0; double fadeOutSeconds=0.0; double contentOpacity = 1.0;
@@ -82,7 +83,7 @@ private:
 		QGraphicsScene* sceneSingle = nullptr;
 		QGraphicsVideoItem* videoItemSingle = nullptr;
 		QLabel* imageLabelSingle = nullptr;
-		QTimer* displayTimer = nullptr; QTimer* playTimer = nullptr; QTimer* hideTimer = nullptr;
+		QTimer* displayTimer = nullptr; QTimer* playTimer = nullptr; QTimer* pauseTimer = nullptr; QTimer* hideTimer = nullptr;
 		// Video only
 		QMediaPlayer* player = nullptr; QAudioOutput* audio = nullptr;
 		QMetaObject::Connection deferredStartConn; // one-shot start after load

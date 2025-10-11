@@ -422,6 +422,8 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
             if (media->isVideoMedia()) {
                 m["autoPlay"] = media->autoPlayEnabled();
                 m["autoPlayDelayMs"] = media->autoPlayDelayMs();
+                m["autoPause"] = media->autoPauseEnabled();
+                m["autoPauseDelayMs"] = media->autoPauseDelayMs();
                 if (auto* v = dynamic_cast<ResizableVideoItem*>(media)) {
                     m["muted"] = v->isMuted();
                     m["volume"] = v->volume();
@@ -4470,13 +4472,29 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                 if (shouldAutoPlay && media->isVideoMedia()) {
                     const auto playbackGuard = media->lifetimeGuard();
                     const int playbackDelay = std::max(0, playDelayMs);
-                    auto startPlayback = [this, media, playbackGuard]() {
+                    const bool shouldAutoPause = media->autoPauseEnabled();
+                    const int pauseDelayMs = media->autoPauseDelayMs();
+                    auto startPlayback = [this, media, playbackGuard, shouldAutoPause, pauseDelayMs]() {
                         if (!m_hostSceneActive) return;
                         if (playbackGuard.expired()) return;
                         if (media->isBeingDeleted()) return;
                         if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
                             if (!vid->isPlaying()) {
                                 vid->togglePlayPause();
+                                // Schedule pause if enabled
+                                if (shouldAutoPause) {
+                                    const auto pauseGuard = media->lifetimeGuard();
+                                    QTimer::singleShot(std::max(0, pauseDelayMs), this, [this, media, pauseGuard]() {
+                                        if (!m_hostSceneActive) return;
+                                        if (pauseGuard.expired()) return;
+                                        if (!media || media->isBeingDeleted()) return;
+                                        if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
+                                            if (vid->isPlaying()) {
+                                                vid->togglePlayPause();
+                                            }
+                                        }
+                                    });
+                                }
                             }
                         }
                     };

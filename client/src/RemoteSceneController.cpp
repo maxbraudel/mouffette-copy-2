@@ -229,6 +229,7 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
 
     stopAndDeleteTimer(item->displayTimer);
     stopAndDeleteTimer(item->playTimer);
+    stopAndDeleteTimer(item->pauseTimer);
     stopAndDeleteTimer(item->hideTimer);
 
     QObject::disconnect(item->deferredStartConn);
@@ -443,9 +444,11 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
         item->autoDisplayDelayMs = m.value("autoDisplayDelayMs").toInt(0);
         item->autoPlay = m.value("autoPlay").toBool(false);
         item->autoPlayDelayMs = m.value("autoPlayDelayMs").toInt(0);
-    item->autoHide = m.value("autoHide").toBool(false);
-    item->autoHideDelayMs = m.value("autoHideDelayMs").toInt(0);
-    item->hideWhenVideoEnds = m.value("hideWhenVideoEnds").toBool(false);
+        item->autoPause = m.value("autoPause").toBool(false);
+        item->autoPauseDelayMs = m.value("autoPauseDelayMs").toInt(0);
+        item->autoHide = m.value("autoHide").toBool(false);
+        item->autoHideDelayMs = m.value("autoHideDelayMs").toInt(0);
+        item->hideWhenVideoEnds = m.value("hideWhenVideoEnds").toBool(false);
         item->fadeInSeconds = m.value("fadeInSeconds").toDouble(0.0);
         item->fadeOutSeconds = m.value("fadeOutSeconds").toDouble(0.0);
         item->contentOpacity = m.value("contentOpacity").toDouble(1.0);
@@ -797,6 +800,25 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
         });
         item->playTimer->start(playDelay);
         if (playDelay == 0) qDebug() << "RemoteSceneController: immediate play for" << item->mediaId;
+        
+        // Pause scheduling: pause video after configured delay if autoPause enabled
+        if (item->autoPause) {
+            int pauseDelay = item->autoPauseDelayMs;
+            item->pauseTimer = new QTimer(this);
+            item->pauseTimer->setSingleShot(true);
+            connect(item->pauseTimer, &QTimer::timeout, this, [this,epoch,weakItem]() {
+                auto item = weakItem.lock();
+                if (!item) return;
+                if (epoch != m_sceneEpoch) return;
+                if (!item->player) return;
+                if (item->player->playbackState() == QMediaPlayer::PlayingState) {
+                    item->player->pause();
+                    qDebug() << "RemoteSceneController: auto-paused video" << item->mediaId;
+                }
+            });
+            item->pauseTimer->start(pauseDelay);
+            if (pauseDelay == 0) qDebug() << "RemoteSceneController: immediate pause scheduled for" << item->mediaId;
+        }
     } else if (item->player && !item->autoPlay) {
         qDebug() << "RemoteSceneController: autoPlay disabled; video will not start automatically" << item->mediaId;
     }
@@ -1119,6 +1141,25 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             }
         });
         item->playTimer->start(std::max(0, playDelay));
+        
+        // Pause scheduling: pause video after configured delay if autoPause enabled
+        if (item->autoPause) {
+            int pauseDelay = item->autoPauseDelayMs;
+            item->pauseTimer = new QTimer(this);
+            item->pauseTimer->setSingleShot(true);
+            connect(item->pauseTimer, &QTimer::timeout, this, [this,epoch,weakItem]() {
+                auto item = weakItem.lock();
+                if (!item) return;
+                if (epoch != m_sceneEpoch) return;
+                if (!item->player) return;
+                if (item->player->playbackState() == QMediaPlayer::PlayingState) {
+                    item->player->pause();
+                    qDebug() << "RemoteSceneController: auto-paused video (multi-span)" << item->mediaId;
+                }
+            });
+            item->pauseTimer->start(std::max(0, pauseDelay));
+            if (pauseDelay == 0) qDebug() << "RemoteSceneController: immediate pause scheduled for (multi-span)" << item->mediaId;
+        }
     }
 }
 
