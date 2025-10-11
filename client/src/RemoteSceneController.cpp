@@ -706,21 +706,26 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                             auto item = weakItem.lock();
                             if (!item) return;
                             if (epoch != m_sceneEpoch) return;
+                            const bool shouldAutoPlay = item->autoPlay;
+                            const bool startPosNonZero = (item->startPositionMs > 0);
+
                             if (!item->primedFirstFrame) {
                                 item->primedFirstFrame = true;
-                                const bool needSeekFrame = (!item->playAuthorized && item->startPositionMs > 0);
-                                if (needSeekFrame && item->player) {
+                                if (startPosNonZero && item->player) {
                                     item->awaitingSeekFrame = true;
                                     item->player->pause();
                                     item->player->setPosition(item->startPositionMs);
-                                    item->player->play();
+                                    // Only play to fetch a frame if we need autoplay behavior. For paused clips we'll stay paused and rely on next frameChanged emission.
+                                    if (shouldAutoPlay) {
+                                        item->player->play();
+                                    }
                                     return;
                                 }
                             }
 
                             if (item->awaitingSeekFrame) {
                                 item->awaitingSeekFrame = false;
-                                if (item->player) {
+                                if (item->player && !item->playAuthorized) {
                                     item->player->pause();
                                 }
                                 if (sink) {
@@ -729,11 +734,15 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                                 if (item->displayReady && !item->displayStarted) {
                                     fadeIn(item);
                                 }
+                                if (!shouldAutoPlay && item->player) {
+                                    item->player->pause();
+                                    item->player->setPosition(item->startPositionMs);
+                                }
                                 QObject::disconnect(item->primingConn);
                                 return;
                             }
 
-                            if (!item->playAuthorized && item->player) {
+                            if (!item->playAuthorized && (!shouldAutoPlay || startPosNonZero) && item->player) {
                                 item->player->pause();
                                 item->player->setPosition(item->startPositionMs);
                             }
@@ -1095,27 +1104,63 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                             auto item = weakItem.lock();
                             if (!item) return;
                             if (epoch != m_sceneEpoch) return;
-                            if (item->primedFirstFrame) return;
-                            item->primedFirstFrame = true;
-                            QObject::disconnect(item->primingConn);
-                            if (!item->playAuthorized && item->player) {
+
+                            auto pushFrameToSinks = [&]() {
+                                if (sink) {
+                                    sink->setVideoFrame(frame);
+                                }
+                                for (int idx = 1; idx < item->spans.size(); ++idx) {
+                                    auto& span = item->spans[idx];
+                                    if (span.videoItem) {
+                                        if (QVideoSink* spanSink = span.videoItem->videoSink()) {
+                                            spanSink->setVideoFrame(frame);
+                                        }
+                                    }
+                                }
+                            };
+
+                            const bool shouldAutoPlay = item->autoPlay;
+                            const bool startPosNonZero = (item->startPositionMs > 0);
+
+                            if (!item->primedFirstFrame) {
+                                item->primedFirstFrame = true;
+                                if (startPosNonZero && item->player) {
+                                    item->awaitingSeekFrame = true;
+                                    item->player->pause();
+                                    item->player->setPosition(item->startPositionMs);
+                                    if (shouldAutoPlay) {
+                                        item->player->play();
+                                    }
+                                    return;
+                                }
+                            }
+
+                            if (item->awaitingSeekFrame) {
+                                item->awaitingSeekFrame = false;
+                                if (item->player && !item->playAuthorized) {
+                                    item->player->pause();
+                                }
+                                pushFrameToSinks();
+                                if (item->displayReady && !item->displayStarted) {
+                                    fadeIn(item);
+                                }
+                                if (!shouldAutoPlay && item->player) {
+                                    item->player->pause();
+                                    item->player->setPosition(item->startPositionMs);
+                                }
+                                QObject::disconnect(item->primingConn);
+                                return;
+                            }
+
+                            if (!item->playAuthorized && (!shouldAutoPlay || startPosNonZero) && item->player) {
                                 item->player->pause();
                                 item->player->setPosition(item->startPositionMs);
                             }
-                            if (sink) {
-                                sink->setVideoFrame(frame);
-                            }
-                            for (int idx = 1; idx < item->spans.size(); ++idx) {
-                                auto& span = item->spans[idx];
-                                if (span.videoItem) {
-                                    if (QVideoSink* spanSink = span.videoItem->videoSink()) {
-                                        spanSink->setVideoFrame(frame);
-                                    }
-                                }
-                            }
+                            pushFrameToSinks();
                             if (item->displayReady && !item->displayStarted) {
                                 fadeIn(item);
                             }
+                            QObject::disconnect(item->primingConn);
                         });
                     } else {
                         qWarning() << "RemoteSceneController: primary video sink unavailable for priming" << item->mediaId;
@@ -1144,7 +1189,9 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             if (!item) return;
             if (epoch != m_sceneEpoch) return;
             item->displayReady = true;
-            fadeIn(item);
+            if (!item->player || (item->primedFirstFrame && !item->awaitingSeekFrame)) {
+                fadeIn(item);
+            }
         });
         item->displayTimer->start(delay);
     }
