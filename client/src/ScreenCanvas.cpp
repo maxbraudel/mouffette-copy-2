@@ -4422,6 +4422,9 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                     st.guard = vid->lifetimeGuard();
                     st.posMs = vid->currentPositionMs();
                     st.wasPlaying = vid->isPlaying();
+                    st.repeatEnabled = vid->repeatEnabled();
+                    st.repeatSessionActive = vid->settingsRepeatSessionActive();
+                    st.repeatLoopsRemaining = vid->settingsRepeatLoopsRemaining();
                     if (vid->hideWhenVideoEnds()) {
                         if (QMediaPlayer* player = vid->mediaPlayer()) {
                             st.hideOnEndConnection = QObject::connect(player, &QMediaPlayer::mediaStatusChanged, this, [this, media, guard = st.guard](QMediaPlayer::MediaStatus status){
@@ -4436,6 +4439,7 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                     m_prevVideoStates.append(st);
                     vid->pauseAndSetPosition(st.posMs);
                     vid->setPendingSceneStartPosition(st.posMs);
+                    vid->initializeRepeatStateForSceneStart();
                 }
                 media->hideImmediateNoFade();
                 // 1. Schedule (or immediate) display
@@ -4545,6 +4549,7 @@ void ScreenCanvas::stopHostSceneState() {
                 st.hideOnEndConnection = QMetaObject::Connection();
             }
             st.video->pauseAndSetPosition(st.posMs);
+            st.video->restoreRepeatStateAfterScene(st.repeatEnabled, st.repeatSessionActive, st.repeatLoopsRemaining);
         }
     }
     m_prevVideoStates.clear();

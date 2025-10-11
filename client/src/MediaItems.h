@@ -279,6 +279,11 @@ public:
     bool isPlaying() const { return m_player && m_player->playbackState() == QMediaPlayer::PlayingState; }
     void pauseAndSetPosition(qint64 posMs);
     void setPendingSceneStartPosition(qint64 posMs);
+    bool repeatEnabled() const { return m_repeatEnabled; }
+    bool settingsRepeatSessionActive() const { return m_settingsRepeatSessionActive; }
+    int settingsRepeatLoopsRemaining() const { return m_settingsRepeatLoopsRemaining; }
+    void initializeRepeatStateForSceneStart();
+    void restoreRepeatStateAfterScene(bool repeatEnabled, bool settingsSessionActive, int settingsLoopsRemaining);
     void setInitialScaleFactor(qreal f) { m_initialScaleFactor = f; }
     void setExternalPosterImage(const QImage& img);
     bool isDraggingProgress() const { return m_draggingProgress; }

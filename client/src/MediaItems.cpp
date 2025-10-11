@@ -1721,6 +1721,25 @@ bool ResizableVideoItem::consumeAutoRepeatOpportunity() {
     return false;
 }
 
+void ResizableVideoItem::initializeRepeatStateForSceneStart() {
+    if (m_repeatEnabled) {
+        return;
+    }
+    initializeSettingsRepeatSessionForPlaybackStart();
+}
+
+void ResizableVideoItem::restoreRepeatStateAfterScene(bool repeatEnabled, bool settingsSessionActive, int settingsLoopsRemaining) {
+    m_repeatEnabled = repeatEnabled;
+    if (m_settingsRepeatEnabled) {
+        m_settingsRepeatSessionActive = settingsSessionActive && settingsLoopsRemaining > 0;
+        m_settingsRepeatLoopsRemaining = std::clamp(settingsLoopsRemaining, 0, m_settingsRepeatLoopCount);
+    } else {
+        m_settingsRepeatSessionActive = false;
+        m_settingsRepeatLoopsRemaining = 0;
+    }
+    updateControlsLayout();
+}
+
 qint64 ResizableVideoItem::nearStartThresholdMs() const {
     if (m_durationMs <= 0) {
         return 250;

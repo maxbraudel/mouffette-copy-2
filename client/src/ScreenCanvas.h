@@ -375,6 +375,9 @@ protected:
         qint64 posMs = 0;
         bool wasPlaying = false;
         QMetaObject::Connection hideOnEndConnection;
+        bool repeatEnabled = false;
+        bool repeatSessionActive = false;
+        int repeatLoopsRemaining = 0;
     };
     // Remember selection present just before entering host scene so it can be restored afterward (multi-select supported)
     QList<SavedSelection> m_prevSelectionBeforeHostScene;
