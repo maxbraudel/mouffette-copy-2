@@ -579,13 +579,19 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
             }
             return true;
         }
-        // 'i' key sets infinity symbol
+        // 'i' key sets infinity symbol (only for repeat box)
         else if (keyEvent->key() == Qt::Key_I) {
-            m_activeBox->setText("∞");
-            if (!m_updatingFromMedia) {
-                pushSettingsToMedia();
+            // Infinity is only allowed for repeat box
+            if (m_activeBox == m_repeatBox) {
+                m_activeBox->setText("∞");
+                if (!m_updatingFromMedia) {
+                    pushSettingsToMedia();
+                }
+                return true;
+            } else {
+                // Block infinity for display delay, play delay, fade in, fade out, and opacity
+                return true; // consume the event but don't apply
             }
-            return true;
         }
         // Handle input based on which box is active
         else {
@@ -607,17 +613,45 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
                     newText = currentText + text;
                 }
                 
-                // Check if we have more than 5 digits - if so, show infinity symbol
+                // Check if we have more than 5 digits - handle differently based on box type
                 int digitCount = 0;
                 for (QChar c : newText) {
                     if (c.isDigit()) digitCount++;
                 }
                 
-                if (digitCount > 5) {
-                    m_activeBox->setText("∞");
-                } else {
+                // For opacity box: cap at 100
+                if (m_activeBox == m_opacityBox) {
+                    bool ok = false;
+                    int val = newText.toInt(&ok);
+                    if (ok && val > 100) {
+                        m_activeBox->setText("100");
+                    } else {
+                        m_activeBox->setText(newText);
+                    }
+                }
+                // For repeat box: allow infinity conversion (>5 digits)
+                else if (m_activeBox == m_repeatBox) {
+                    if (digitCount > 5) {
+                        m_activeBox->setText("∞");
+                    } else {
+                        m_activeBox->setText(newText);
+                    }
+                }
+                // For display delay, play delay, fade in, fade out: block infinity (cap at 99999)
+                else if (m_activeBox == m_displayAfterBox || m_activeBox == m_autoPlayBox || 
+                         m_activeBox == m_fadeInBox || m_activeBox == m_fadeOutBox) {
+                    if (digitCount > 5) {
+                        // Don't convert to infinity, just ignore the extra digit
+                        return true; // consume but don't apply
+                    } else {
+                        m_activeBox->setText(newText);
+                    }
+                }
+                else {
+                    // Default behavior for any other boxes
                     m_activeBox->setText(newText);
                 }
+                
                 if (!m_updatingFromMedia) {
                     pushSettingsToMedia();
                 }
