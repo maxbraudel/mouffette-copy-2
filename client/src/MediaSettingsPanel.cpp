@@ -171,6 +171,43 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_contentLayout->addWidget(delayRow);
     }
 
+    // Hide delay directly below display delay
+    {
+        m_hideDelayRow = new QWidget(m_innerContent);
+        configureRow(m_hideDelayRow);
+        auto* h = new QHBoxLayout(m_hideDelayRow);
+        h->setContentsMargins(0,0,0,0);
+        h->setSpacing(0);
+        m_hideDelayCheck = new QCheckBox("Hide delay: ", m_hideDelayRow);
+        m_hideDelayCheck->setStyleSheet(overlayTextStyle);
+        m_hideDelayCheck->installEventFilter(this);
+        connect(m_hideDelayCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onHideDelayToggled);
+        m_hideDelayBox = makeValueBox();
+        m_hideDelaySecondsLabel = new QLabel("s", m_hideDelayRow);
+        m_hideDelaySecondsLabel->setStyleSheet(overlayTextStyle);
+        h->addWidget(m_hideDelayCheck);
+        h->addWidget(m_hideDelayBox);
+        h->addWidget(m_hideDelaySecondsLabel);
+        h->addStretch();
+        m_contentLayout->addWidget(m_hideDelayRow);
+    }
+
+    // Hide when video ends (video only)
+    {
+        m_hideWhenEndsRow = new QWidget(m_innerContent);
+        configureRow(m_hideWhenEndsRow);
+        auto* h = new QHBoxLayout(m_hideWhenEndsRow);
+        h->setContentsMargins(0,0,0,0);
+        h->setSpacing(0);
+        m_hideWhenVideoEndsCheck = new QCheckBox("Hide when video ends", m_hideWhenEndsRow);
+        m_hideWhenVideoEndsCheck->setStyleSheet(overlayTextStyle);
+        m_hideWhenVideoEndsCheck->installEventFilter(this);
+        connect(m_hideWhenVideoEndsCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
+        h->addWidget(m_hideWhenVideoEndsCheck);
+        h->addStretch();
+        m_contentLayout->addWidget(m_hideWhenEndsRow);
+    }
+
     // 1) Play automatically as separate widget (video only) - matching display layout
     {
     m_autoPlayRow = new QWidget(m_innerContent);
@@ -277,45 +314,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         h->addStretch();
         m_contentLayout->addWidget(row);
     }
-
-    // 5) Hide delay with checkbox format
-    {
-    m_hideDelayRow = new QWidget(m_innerContent);
-    configureRow(m_hideDelayRow);
-        auto* h = new QHBoxLayout(m_hideDelayRow);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
-        m_hideDelayCheck = new QCheckBox("Hide delay: ", m_hideDelayRow);
-        m_hideDelayCheck->setStyleSheet(overlayTextStyle);
-        m_hideDelayCheck->installEventFilter(this);
-        connect(m_hideDelayCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onHideDelayToggled);
-        m_hideDelayBox = makeValueBox();
-        m_hideDelaySecondsLabel = new QLabel("s", m_hideDelayRow);
-        m_hideDelaySecondsLabel->setStyleSheet(overlayTextStyle);
-        h->addWidget(m_hideDelayCheck);
-        h->addWidget(m_hideDelayBox);
-        h->addWidget(m_hideDelaySecondsLabel);
-        h->addStretch();
-        m_contentLayout->addWidget(m_hideDelayRow);
-    }
-
-    // 6) Hide when video ends (video only)
-    {
-    m_hideWhenEndsRow = new QWidget(m_innerContent);
-    configureRow(m_hideWhenEndsRow);
-        auto* h = new QHBoxLayout(m_hideWhenEndsRow);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
-        m_hideWhenVideoEndsCheck = new QCheckBox("Hide when video ends", m_hideWhenEndsRow);
-        m_hideWhenVideoEndsCheck->setStyleSheet(overlayTextStyle);
-        m_hideWhenVideoEndsCheck->installEventFilter(this);
-        connect(m_hideWhenVideoEndsCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
-        h->addWidget(m_hideWhenVideoEndsCheck);
-        h->addStretch();
-        m_contentLayout->addWidget(m_hideWhenEndsRow);
-    }
-
-    // 7) Opacity with checkbox format
+    // 5) Opacity with checkbox format
     {
     auto* row = new QWidget(m_innerContent);
     configureRow(row);
@@ -1002,38 +1001,22 @@ void MediaSettingsPanel::onPlayAutomaticallyToggled(bool checked) {
 }
 
 void MediaSettingsPanel::onHideDelayToggled(bool checked) {
-    const QString activeTextStyle = QStringLiteral("color: %1;")
+    const QString textStyle = QStringLiteral("color: %1;")
         .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
-    const QString disabledTextStyle = QStringLiteral("color: #808080;");
 
     if (m_hideDelayCheck) {
-        m_hideDelayCheck->setStyleSheet(checked ? activeTextStyle : disabledTextStyle);
+        m_hideDelayCheck->setStyleSheet(textStyle);
     }
 
     if (m_hideDelayBox) {
-        m_hideDelayBox->setEnabled(checked);
-        if (checked) {
-            setBoxActive(m_hideDelayBox, m_activeBox == m_hideDelayBox);
-        } else {
-            m_hideDelayBox->setStyleSheet(
-                "QLabel {"
-                "  background-color: #404040;"
-                "  border: 1px solid #606060;"
-                "  border-radius: 6px;"
-                "  padding: 2px 10px;"
-                "  margin-left: 4px;"
-                "  margin-right: 0px;"
-                "  color: #808080;"
-                "}"
-            );
-            if (m_activeBox == m_hideDelayBox) {
-                clearActiveBox();
-            }
+        if (!checked && m_activeBox == m_hideDelayBox) {
+            clearActiveBox();
         }
+        setBoxActive(m_hideDelayBox, m_activeBox == m_hideDelayBox);
     }
 
     if (m_hideDelaySecondsLabel) {
-        m_hideDelaySecondsLabel->setStyleSheet(checked ? activeTextStyle : disabledTextStyle);
+        m_hideDelaySecondsLabel->setStyleSheet(textStyle);
     }
 
     if (!m_updatingFromMedia) {
