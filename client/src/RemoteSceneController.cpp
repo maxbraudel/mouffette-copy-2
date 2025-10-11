@@ -706,9 +706,33 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                             auto item = weakItem.lock();
                             if (!item) return;
                             if (epoch != m_sceneEpoch) return;
-                            if (item->primedFirstFrame) return;
-                            item->primedFirstFrame = true;
-                            QObject::disconnect(item->primingConn);
+                            if (!item->primedFirstFrame) {
+                                item->primedFirstFrame = true;
+                                const bool needSeekFrame = (!item->playAuthorized && item->startPositionMs > 0);
+                                if (needSeekFrame && item->player) {
+                                    item->awaitingSeekFrame = true;
+                                    item->player->pause();
+                                    item->player->setPosition(item->startPositionMs);
+                                    item->player->play();
+                                    return;
+                                }
+                            }
+
+                            if (item->awaitingSeekFrame) {
+                                item->awaitingSeekFrame = false;
+                                if (item->player) {
+                                    item->player->pause();
+                                }
+                                if (sink) {
+                                    sink->setVideoFrame(frame);
+                                }
+                                if (item->displayReady && !item->displayStarted) {
+                                    fadeIn(item);
+                                }
+                                QObject::disconnect(item->primingConn);
+                                return;
+                            }
+
                             if (!item->playAuthorized && item->player) {
                                 item->player->pause();
                                 item->player->setPosition(item->startPositionMs);
@@ -719,6 +743,7 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                             if (item->displayReady && !item->displayStarted) {
                                 fadeIn(item);
                             }
+                            QObject::disconnect(item->primingConn);
                         });
                     } else {
                         qWarning() << "RemoteSceneController: video sink unavailable for priming" << item->mediaId;

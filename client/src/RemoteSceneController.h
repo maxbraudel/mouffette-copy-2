@@ -78,6 +78,7 @@ private:
 		bool hiding = false;
 		bool pausedAtEnd = false;
 		bool loaded = false; // true when QMediaPlayer reports Loaded/Buffered
+		bool awaitingSeekFrame = false;
 		// For legacy single-span path
 		QWidget* widget = nullptr; QGraphicsOpacityEffect* opacity = nullptr;
 		QGraphicsView* graphicsViewSingle = nullptr;
