@@ -4431,18 +4431,25 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                         media->showWithConfiguredFade();
                     }
                 }
-                // 2. Schedule video playback only if BOTH autoDisplay and autoPlay are enabled (play occurs after show completes)
-                if (shouldAutoDisplay && shouldAutoPlay && media->isVideoMedia()) {
-                    int combinedDelay = displayDelayMs + playDelayMs;
+                // 2. Schedule video playback if autoPlay is enabled; allow playback even while hidden
+                if (shouldAutoPlay && media->isVideoMedia()) {
                     const auto playbackGuard = media->lifetimeGuard();
-                    QTimer::singleShot(combinedDelay, this, [this, media, playbackGuard]() {
+                    const int playbackDelay = std::max(0, playDelayMs);
+                    auto startPlayback = [this, media, playbackGuard]() {
                         if (!m_hostSceneActive) return;
                         if (playbackGuard.expired()) return;
                         if (media->isBeingDeleted()) return;
                         if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
-                            vid->togglePlayPause();
+                            if (!vid->isPlaying()) {
+                                vid->togglePlayPause();
+                            }
                         }
-                    });
+                    };
+                    if (playbackDelay > 0) {
+                        QTimer::singleShot(playbackDelay, this, startPlayback);
+                    } else {
+                        startPlayback();
+                    }
                 }
             }
         }

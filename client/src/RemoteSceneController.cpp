@@ -739,10 +739,10 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
         qDebug() << "RemoteSceneController: autoDisplay disabled; media will stay hidden" << item->mediaId;
     }
 
-    // Play scheduling: only if autoPlay enabled AND we will display (avoid hidden playback)
-    if (item->player && item->autoDisplay && item->autoPlay) {
-        int playDelay = item->autoDisplayDelayMs + item->autoPlayDelayMs; // start after display (host parity)
-    item->playTimer = new QTimer(this);
+    // Play scheduling: allow playback timing independent from display timing
+    if (item->player && item->autoPlay) {
+        int playDelay = item->autoPlayDelayMs;
+        item->playTimer = new QTimer(this);
         item->playTimer->setSingleShot(true);
         connect(item->playTimer, &QTimer::timeout, this, [this,epoch,weakItem]() {
             auto item = weakItem.lock();
@@ -1072,8 +1072,8 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
         });
         item->displayTimer->start(delay);
     }
-    if (item->player && item->autoDisplay && item->autoPlay) {
-        int playDelay = item->autoDisplayDelayMs + item->autoPlayDelayMs;
+    if (item->player && item->autoPlay) {
+        int playDelay = item->autoPlayDelayMs;
         item->playTimer = new QTimer(this); item->playTimer->setSingleShot(true);
         connect(item->playTimer, &QTimer::timeout, this, [this,epoch,weakItem]() {
             auto item = weakItem.lock();
@@ -1093,7 +1093,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                                                      : 0; item->player->play(); } });
             }
         });
-        item->playTimer->start(playDelay);
+        item->playTimer->start(std::max(0, playDelay));
     }
 }
 
