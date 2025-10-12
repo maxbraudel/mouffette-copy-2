@@ -438,6 +438,8 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                         }
                     }
                     m["repeatCount"] = repeatCount;
+                    const qint64 currentPos = std::max<qint64>(0, v->currentPositionMs());
+                    m["startPositionMs"] = static_cast<double>(currentPos);
                 }
             }
             m["fadeInSeconds"] = media->fadeInDurationSeconds();
@@ -4433,7 +4435,7 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                         }
                     }
                     m_prevVideoStates.append(st);
-                    vid->stopToBeginning();
+                    vid->pauseAndSetPosition(st.posMs);
                 }
                 media->hideImmediateNoFade();
                 // 1. Schedule (or immediate) display

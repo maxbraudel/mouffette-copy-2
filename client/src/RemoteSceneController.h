@@ -11,6 +11,7 @@
 #include <QPixmap>
 #include <QSharedPointer>
 #include <QByteArray>
+#include <QVideoFrame>
 #include <memory>
 
 class WebSocketClient;
@@ -79,6 +80,9 @@ private:
 		bool loaded = false; // true when QMediaPlayer reports Loaded/Buffered
 		bool readyNotified = false; // true after controller counts this media as ready
 		bool fadeInPending = false; // true when fade requested before global activation
+		qint64 startPositionMs = 0; bool hasStartPosition = false;
+	bool awaitingStartFrame = false;
+	QVideoFrame primedFrame;
 		// For legacy single-span path
 		QWidget* widget = nullptr; QGraphicsOpacityEffect* opacity = nullptr;
 		QGraphicsView* graphicsViewSingle = nullptr;
@@ -90,6 +94,7 @@ private:
 		QMediaPlayer* player = nullptr; QAudioOutput* audio = nullptr;
 		QMetaObject::Connection deferredStartConn; // one-shot start after load
 		QMetaObject::Connection primingConn; // one-shot first-frame priming when autoPlay=false
+		QMetaObject::Connection mirrorConn; // multi-span frame mirroring
 		quint64 sceneEpoch = 0; // generation token to guard delayed actions
 		// In-memory source support
 		QSharedPointer<QByteArray> memoryBytes;
@@ -98,6 +103,8 @@ private:
 		int pendingDisplayDelayMs = -1;
 		int pendingPlayDelayMs = -1;
 		int pendingPauseDelayMs = -1;
+		QVideoSink* primingSink = nullptr;
+		bool videoOutputsAttached = false;
 	};
 
 	QWidget* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);
@@ -118,6 +125,13 @@ private:
     void startDeferredTimers();
     void handleSceneReadyTimeout();
     void resetSceneSynchronization();
+    void seekToConfiguredStart(const std::shared_ptr<RemoteMediaItem>& item);
+    qint64 effectiveStartPosition(const std::shared_ptr<RemoteMediaItem>& item) const;
+	void startPendingPauseTimerIfEligible(const std::shared_ptr<RemoteMediaItem>& item);
+	void triggerAutoPlayNow(const std::shared_ptr<RemoteMediaItem>& item, quint64 epoch);
+	void applyPrimedFrameToSinks(const std::shared_ptr<RemoteMediaItem>& item);
+	void clearVideoSinks(const std::shared_ptr<RemoteMediaItem>& item);
+	void ensureVideoOutputsAttached(const std::shared_ptr<RemoteMediaItem>& item);
 
 	WebSocketClient* m_ws = nullptr; // not owned
 	bool m_enabled = true;
