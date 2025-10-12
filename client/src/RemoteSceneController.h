@@ -6,8 +6,6 @@
 #include <QList>
 #include <QJsonObject>
 #include <QTimer>
-#include <QGraphicsOpacityEffect>
-#include <QElapsedTimer>
 #include <QPixmap>
 #include <QSharedPointer>
 #include <QByteArray>
@@ -19,11 +17,11 @@ class QWidget;
 class QMediaPlayer;
 class QVideoSink;
 class QAudioOutput;
-class QLabel;
 class QBuffer;
 class QGraphicsView;
 class QGraphicsVideoItem;
 class QGraphicsScene;
+class QGraphicsPixmapItem;
 
 class RemoteSceneController : public QObject {
 	Q_OBJECT
@@ -51,17 +49,13 @@ private:
 		QString fileId;
 		QString fileName;
 		QString type; // image | video
-		// Legacy single-span fields (when spans[] not provided)
-		int screenId = -1; double normX=0, normY=0, normW=0, normH=0;
 		// Multi-screen spans support: each span maps to a screen with its own normalized geom
-		struct Span { 
-			int screenId=-1; 
-			double nx=0, ny=0, nw=0, nh=0; 
-			QWidget* widget=nullptr; 
-			QGraphicsView* graphicsView=nullptr;
-			QGraphicsScene* scene=nullptr;
-			QLabel* imageLabel=nullptr; 
-			QGraphicsVideoItem* videoItem=nullptr;
+		struct Span {
+			int screenId = -1;
+			double nx = 0, ny = 0, nw = 0, nh = 0;
+			QWidget* widget = nullptr;
+			QGraphicsPixmapItem* imageItem = nullptr;
+			QGraphicsVideoItem* videoItem = nullptr;
 		};
 		QList<Span> spans;
 		bool autoDisplay=false; int autoDisplayDelayMs=0;
@@ -82,14 +76,8 @@ private:
 		bool fadeInPending = false; // true when fade requested before global activation
 		qint64 startPositionMs = 0; bool hasStartPosition = false;
 		qint64 displayTimestampMs = -1; bool hasDisplayTimestamp = false;
-	bool awaitingStartFrame = false;
-	QVideoFrame primedFrame;
-		// For legacy single-span path
-		QWidget* widget = nullptr; QGraphicsOpacityEffect* opacity = nullptr;
-		QGraphicsView* graphicsViewSingle = nullptr;
-		QGraphicsScene* sceneSingle = nullptr;
-		QGraphicsVideoItem* videoItemSingle = nullptr;
-		QLabel* imageLabelSingle = nullptr;
+		bool awaitingStartFrame = false;
+		QVideoFrame primedFrame;
 		QTimer* displayTimer = nullptr; QTimer* playTimer = nullptr; QTimer* pauseTimer = nullptr; QTimer* hideTimer = nullptr;
 		// Video only
 		QMediaPlayer* player = nullptr; QAudioOutput* audio = nullptr;
@@ -112,7 +100,6 @@ private:
 	void buildWindows(const QJsonArray& screensArray);
 	void buildMedia(const QJsonArray& mediaArray);
 	void scheduleMedia(const std::shared_ptr<RemoteMediaItem>& item);
-	void scheduleMediaLegacy(const std::shared_ptr<RemoteMediaItem>& item);
 	void scheduleMediaMulti(const std::shared_ptr<RemoteMediaItem>& item);
 	void fadeIn(const std::shared_ptr<RemoteMediaItem>& item);
 	void fadeOutAndHide(const std::shared_ptr<RemoteMediaItem>& item);
