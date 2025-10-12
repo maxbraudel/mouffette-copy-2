@@ -276,6 +276,7 @@ public:
     void stopToBeginning();
     void seekToRatio(qreal r);
     qint64 currentPositionMs() const { return m_positionMs; }
+    qint64 displayedFrameTimestampMs() const { return m_lastFrameTimestampMs; }
     bool isPlaying() const { return m_player && m_player->playbackState() == QMediaPlayer::PlayingState; }
     void pauseAndSetPosition(qint64 posMs);
     void setInitialScaleFactor(qreal f) { m_initialScaleFactor = f; }
@@ -346,6 +347,7 @@ private:
     QAudioOutput* m_audio = nullptr;
     QVideoSink* m_sink = nullptr;
     QImage m_lastFrameImage;
+    qint64 m_lastFrameTimestampMs = -1;
     qint64 m_durationMs = 0;
     qint64 m_positionMs = 0;
     bool m_primingFirstFrame = false;

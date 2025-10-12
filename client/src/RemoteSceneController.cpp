@@ -37,6 +37,7 @@
 
 namespace {
 constexpr qint64 kStartPositionToleranceMs = 120;
+constexpr qint64 kDisplayFrameToleranceMs = 45;
 
 qint64 frameTimestampMs(const QVideoFrame& frame) {
     if (!frame.isValid()) {
@@ -99,21 +100,20 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
     const QJsonArray screens = scene.value("screens").toArray();
     const QJsonArray media = scene.value("media").toArray();
 
-    if (screens.isEmpty()) {
-        QString errorMsg = "Scene has no screen configuration";
+    auto failWithMessage = [&](const QString& errorMsg) {
         qWarning() << "RemoteSceneController: validation failed -" << errorMsg;
         if (m_ws) {
             m_ws->sendRemoteSceneValidationResult(senderClientId, false, errorMsg);
         }
+    };
+
+    if (screens.isEmpty()) {
+        failWithMessage(QStringLiteral("Scene has no screen configuration"));
         return;
     }
 
     if (media.isEmpty()) {
-        QString errorMsg = "Scene has no media items";
-        qWarning() << "RemoteSceneController: validation failed -" << errorMsg;
-        if (m_ws) {
-            m_ws->sendRemoteSceneValidationResult(senderClientId, false, errorMsg);
-        }
+        failWithMessage(QStringLiteral("Scene has no media items"));
         return;
     }
 
@@ -125,7 +125,7 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
             qWarning() << "RemoteSceneController: media item has no fileId";
             continue;
         }
-        QString path = FileManager::instance().getFilePathForId(fileId);
+        const QString path = FileManager::instance().getFilePathForId(fileId);
         if (path.isEmpty() || !QFile::exists(path)) {
             QString fileName = mediaObj.value("fileName").toString();
             if (fileName.isEmpty()) {
@@ -136,17 +136,16 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
     }
 
     if (!missingFileNames.isEmpty()) {
-        QString fileList = missingFileNames.size() <= 3
-                               ? missingFileNames.join(", ")
-                               : QString("%1, %2, and %3 more").arg(missingFileNames[0]).arg(missingFileNames[1]).arg(missingFileNames.size() - 2);
-        QString errorMsg = QString("Missing %1 file%2: %3")
-                               .arg(missingFileNames.size())
-                               .arg(missingFileNames.size() > 1 ? "s" : "")
-                               .arg(fileList);
-        qWarning() << "RemoteSceneController: validation failed -" << errorMsg;
-        if (m_ws) {
-            m_ws->sendRemoteSceneValidationResult(senderClientId, false, errorMsg);
-        }
+        const QString fileList = missingFileNames.size() <= 3
+                                     ? missingFileNames.join(", ")
+                                     : QString("%1, %2, and %3 more")
+                                           .arg(missingFileNames[0])
+                                           .arg(missingFileNames[1])
+                                           .arg(missingFileNames.size() - 2);
+        failWithMessage(QStringLiteral("Missing %1 file%2: %3")
+                            .arg(missingFileNames.size())
+                            .arg(missingFileNames.size() > 1 ? "s" : "")
+                            .arg(fileList));
         return;
     }
 
@@ -172,13 +171,13 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
     buildMedia(media);
 
     for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
-        if (it.value().window) it.value().window->show();
+        QWidget* window = it.value().window;
+        if (!window) continue;
+        window->show();
 #ifdef Q_OS_MAC
-        if (it.value().window) {
-            QTimer::singleShot(0, it.value().window, [w = it.value().window]() {
-                MacWindowManager::setWindowAsGlobalOverlay(w, /*clickThrough*/ true);
-            });
-        }
+        QTimer::singleShot(0, window, [w = window]() {
+            MacWindowManager::setWindowAsGlobalOverlay(w, /*clickThrough*/ true);
+        });
 #endif
     }
 
@@ -396,6 +395,8 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     item->pendingPauseDelayMs = -1;
     item->startPositionMs = 0;
     item->hasStartPosition = false;
+    item->displayTimestampMs = -1;
+    item->hasDisplayTimestamp = false;
     item->awaitingStartFrame = false;
     item->videoOutputsAttached = false;
 }
@@ -657,6 +658,21 @@ qint64 RemoteSceneController::effectiveStartPosition(const std::shared_ptr<Remot
     return target;
 }
 
+qint64 RemoteSceneController::targetDisplayTimestamp(const std::shared_ptr<RemoteMediaItem>& item) const {
+    if (!item) return 0;
+    if (item->hasDisplayTimestamp && item->displayTimestampMs >= 0) {
+        qint64 ts = item->displayTimestampMs;
+        if (item->player) {
+            const qint64 dur = item->player->duration();
+            if (dur > 0 && ts >= dur) {
+                ts = std::max<qint64>(qint64(0), dur - 1);
+            }
+        }
+        return std::max<qint64>(0, ts);
+    }
+    return effectiveStartPosition(item);
+}
+
 void RemoteSceneController::seekToConfiguredStart(const std::shared_ptr<RemoteMediaItem>& item) {
     if (!item) return;
     if (!item->player) return;
@@ -666,6 +682,10 @@ void RemoteSceneController::seekToConfiguredStart(const std::shared_ptr<RemoteMe
     if (needsSeek) {
         item->awaitingStartFrame = item->hasStartPosition && target > 0;
         item->player->setPosition(target);
+        qDebug() << "RemoteSceneController: seekToConfiguredStart" << item->mediaId
+                 << "target" << target
+                 << "current" << current
+                 << "awaiting" << item->awaitingStartFrame;
     } else {
         item->awaitingStartFrame = false;
         if (current != target) {
@@ -806,6 +826,13 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
                 item->startPositionMs = 0;
                 item->hasStartPosition = false;
                 item->awaitingStartFrame = false;
+            }
+            if (m.contains("displayedFrameTimestampMs")) {
+                const qint64 displayTs = static_cast<qint64>(std::llround(m.value("displayedFrameTimestampMs").toDouble(-1.0)));
+                if (displayTs >= 0) {
+                    item->displayTimestampMs = displayTs;
+                    item->hasDisplayTimestamp = true;
+                }
             }
             FileManager::instance().preloadFileIntoMemory(item->fileId);
         }
@@ -1068,48 +1095,68 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                             if (epoch != m_sceneEpoch) return;
                             if (item->primedFirstFrame) return;
 
-                            const qint64 desired = effectiveStartPosition(item);
+                            if (item->player && item->player->playbackState() == QMediaPlayer::PlayingState) {
+                                item->player->pause();
+                            }
+
+                            const qint64 desired = targetDisplayTimestamp(item);
+                            const qint64 frameTime = frameTimestampMs(frame);
+                            const bool hasFrameTimestamp = frameTime >= 0;
+                            const qint64 playerPos = item->player ? item->player->position() : -1;
+                            const qint64 reference = hasFrameTimestamp ? frameTime : playerPos;
+
+                            auto logDecision = [&](const QString& stage, const QString& reason, bool accepted) {
+                                qDebug() << "RemoteSceneController: priming(single)" << stage
+                                         << "media" << item->mediaId
+                                         << "reason" << reason
+                                         << "desired" << desired
+                                         << "frameTs" << (hasFrameTimestamp ? frameTime : qint64(-1))
+                                         << "playerPos" << playerPos
+                                         << "delta" << ((desired >= 0 && (hasFrameTimestamp || playerPos >= 0)) ? ((hasFrameTimestamp ? frameTime : playerPos) - desired) : qint64(0))
+                                         << "displayTs" << (item->hasDisplayTimestamp ? item->displayTimestampMs : qint64(-1))
+                                         << "startMs" << (item->hasStartPosition ? item->startPositionMs : qint64(-1))
+                                         << "awaiting" << item->awaitingStartFrame
+                                         << "accepted" << accepted;
+                            };
+
                             bool frameReady = true;
                             bool overshoot = false;
                             if (item->awaitingStartFrame && desired >= 0) {
-                                const qint64 frameTime = frameTimestampMs(frame);
-                                if (frameTime >= 0) {
-                                    if (frameTime < desired - kStartPositionToleranceMs) {
-                                        frameReady = false;
-                                    } else if (frameTime > desired + kStartPositionToleranceMs) {
-                                        frameReady = false;
-                                        overshoot = true;
-                                    }
-                                } else if (item->player) {
-                                    const qint64 current = item->player->position();
-                                    if (current < desired - kStartPositionToleranceMs) {
-                                        frameReady = false;
-                                    } else if (current > desired + kStartPositionToleranceMs) {
-                                        frameReady = false;
-                                        overshoot = true;
-                                    }
+                                if (reference < 0) {
+                                    frameReady = false;
+                                } else if (reference < desired - kDisplayFrameToleranceMs) {
+                                    frameReady = false;
+                                } else if (reference > desired + kDisplayFrameToleranceMs) {
+                                    frameReady = false;
+                                    overshoot = true;
                                 }
+
                                 if (!frameReady) {
+                                    logDecision(QStringLiteral("reject"), overshoot ? QStringLiteral("overshoot") : QStringLiteral("pre-start"), false);
                                     if (item->player) {
-                                        if (overshoot) {
-                                            item->player->pause();
-                                            item->player->setPosition(desired);
-                                        }
-                                        if (item->player->playbackState() != QMediaPlayer::PlayingState) {
-                                            item->player->play();
-                                        }
+                                        const qint64 seekTarget = overshoot
+                                                                      ? std::max<qint64>(0, desired)
+                                                                      : std::min<qint64>(desired, reference >= 0 ? reference + kDisplayFrameToleranceMs : desired);
+                                        item->player->setPosition(seekTarget);
+                                        item->player->play();
                                     }
-                                    item->primedFrame = QVideoFrame();
-                                    clearVideoSinks(item);
-                                    item->primedFrame = QVideoFrame();
-                                    clearVideoSinks(item);
+                                    if (overshoot) {
+                                        item->primedFrame = QVideoFrame();
+                                        clearVideoSinks(item);
+                                    }
                                     return;
                                 }
                             }
 
+                            logDecision(QStringLiteral("accept"), QStringLiteral("frame within tolerance"), true);
+
                             item->awaitingStartFrame = false;
                             item->primedFirstFrame = true;
                             item->primedFrame = frame;
+                            if (hasFrameTimestamp) {
+                                item->displayTimestampMs = frameTime;
+                                item->hasDisplayTimestamp = true;
+                            }
                             QObject::disconnect(item->primingConn);
                             if (item->primingSink) {
                                 QObject::disconnect(item->primingSink, nullptr, nullptr, nullptr);
@@ -1468,6 +1515,10 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                         item->videoOutputsAttached = false;
                     }
                     if (sink) {
+                        qDebug() << "RemoteSceneController: start priming(multi)" << item->mediaId
+                                 << "startMs" << (item->hasStartPosition ? item->startPositionMs : qint64(-1))
+                                 << "displayTs" << (item->hasDisplayTimestamp ? item->displayTimestampMs : qint64(-1))
+                                 << "awaitingStart" << item->awaitingStartFrame;
                         item->primingConn = QObject::connect(sink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem,primaryVideoItem](const QVideoFrame& frame){
                             if (!frame.isValid()) {
                                 return;
@@ -1477,28 +1528,39 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                             if (epoch != m_sceneEpoch) return;
                             if (item->primedFirstFrame) return;
 
-                            const qint64 desired = effectiveStartPosition(item);
+                            const qint64 desired = targetDisplayTimestamp(item);
+                            const qint64 frameTime = frameTimestampMs(frame);
+                            const bool hasFrameTimestamp = frameTime >= 0;
+                            const qint64 playerPos = item->player ? item->player->position() : -1;
+
+                            auto logDecision = [&](const QString& stage, const QString& reason, bool accepted) {
+                                qDebug() << "RemoteSceneController: priming(multi)" << stage
+                                         << "media" << item->mediaId
+                                         << "reason" << reason
+                                         << "desired" << desired
+                                         << "frameTs" << (hasFrameTimestamp ? frameTime : qint64(-1))
+                                         << "playerPos" << playerPos
+                                         << "delta" << ((desired >= 0 && (hasFrameTimestamp || playerPos >= 0)) ? ((hasFrameTimestamp ? frameTime : playerPos) - desired) : qint64(0))
+                                         << "displayTs" << (item->hasDisplayTimestamp ? item->displayTimestampMs : qint64(-1))
+                                         << "startMs" << (item->hasStartPosition ? item->startPositionMs : qint64(-1))
+                                         << "awaiting" << item->awaitingStartFrame
+                                         << "accepted" << accepted;
+                            };
+
                             bool frameReady = true;
                             bool overshoot = false;
                             if (item->awaitingStartFrame && desired >= 0) {
-                                const qint64 frameTime = frameTimestampMs(frame);
-                                if (frameTime >= 0) {
-                                    if (frameTime < desired - kStartPositionToleranceMs) {
+                                const qint64 reference = hasFrameTimestamp ? frameTime : playerPos;
+                                if (reference >= 0) {
+                                    if (reference < desired - kStartPositionToleranceMs) {
                                         frameReady = false;
-                                    } else if (frameTime > desired + kStartPositionToleranceMs) {
-                                        frameReady = false;
-                                        overshoot = true;
-                                    }
-                                } else if (item->player) {
-                                    const qint64 current = item->player->position();
-                                    if (current < desired - kStartPositionToleranceMs) {
-                                        frameReady = false;
-                                    } else if (current > desired + kStartPositionToleranceMs) {
+                                    } else if (reference > desired + kStartPositionToleranceMs) {
                                         frameReady = false;
                                         overshoot = true;
                                     }
                                 }
                                 if (!frameReady) {
+                                    logDecision(QStringLiteral("reject"), overshoot ? QStringLiteral("overshoot") : QStringLiteral("pre-start"), false);
                                     if (item->player) {
                                         if (overshoot) {
                                             item->player->pause();
@@ -1514,9 +1576,15 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                                 }
                             }
 
+                            logDecision(QStringLiteral("accept"), QStringLiteral("frame within tolerance"), true);
+
                             item->awaitingStartFrame = false;
                             item->primedFirstFrame = true;
                             item->primedFrame = frame;
+                            if (hasFrameTimestamp) {
+                                item->displayTimestampMs = frameTime;
+                                item->hasDisplayTimestamp = true;
+                            }
                             QObject::disconnect(item->primingConn);
                             if (item->primingSink) {
                                 QObject::disconnect(item->primingSink, nullptr, nullptr, nullptr);

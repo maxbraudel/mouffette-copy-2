@@ -81,6 +81,7 @@ private:
 		bool readyNotified = false; // true after controller counts this media as ready
 		bool fadeInPending = false; // true when fade requested before global activation
 		qint64 startPositionMs = 0; bool hasStartPosition = false;
+		qint64 displayTimestampMs = -1; bool hasDisplayTimestamp = false;
 	bool awaitingStartFrame = false;
 	QVideoFrame primedFrame;
 		// For legacy single-span path
@@ -132,6 +133,7 @@ private:
 	void applyPrimedFrameToSinks(const std::shared_ptr<RemoteMediaItem>& item);
 	void clearVideoSinks(const std::shared_ptr<RemoteMediaItem>& item);
 	void ensureVideoOutputsAttached(const std::shared_ptr<RemoteMediaItem>& item);
+    qint64 targetDisplayTimestamp(const std::shared_ptr<RemoteMediaItem>& item) const;
 
 	WebSocketClient* m_ws = nullptr; // not owned
 	bool m_enabled = true;

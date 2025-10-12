@@ -439,7 +439,13 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                     }
                     m["repeatCount"] = repeatCount;
                     const qint64 currentPos = std::max<qint64>(0, v->currentPositionMs());
-                    m["startPositionMs"] = static_cast<double>(currentPos);
+                    const qint64 displayedTimestamp = v->displayedFrameTimestampMs();
+                    if (displayedTimestamp >= 0) {
+                        m["startPositionMs"] = static_cast<double>(displayedTimestamp);
+                        m["displayedFrameTimestampMs"] = static_cast<double>(displayedTimestamp);
+                    } else {
+                        m["startPositionMs"] = static_cast<double>(currentPos);
+                    }
                 }
             }
             m["fadeInSeconds"] = media->fadeInDurationSeconds();

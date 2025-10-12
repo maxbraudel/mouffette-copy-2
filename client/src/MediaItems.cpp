@@ -1005,6 +1005,34 @@ void ResizablePixmapItem::paint(QPainter* painter, const QStyleOptionGraphicsIte
 
 // ---------------- ResizableVideoItem -----------------
 
+namespace {
+qint64 frameTimestampMs(const QVideoFrame& frame) {
+    if (!frame.isValid()) {
+        return -1;
+    }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    const qint64 startTimeUs = frame.startTime();
+    if (startTimeUs >= 0) {
+        return startTimeUs / 1000;
+    }
+#else
+    const qint64 startTimeUs = frame.startTime();
+    if (startTimeUs >= 0) {
+        return startTimeUs / 1000;
+    }
+    const QVariant metaTimestamp = frame.metaData(QVideoFrame::StartTime);
+    if (metaTimestamp.isValid()) {
+        bool ok = false;
+        const qint64 micro = metaTimestamp.toLongLong(&ok);
+        if (ok) {
+            return micro / 1000;
+        }
+    }
+#endif
+    return -1;
+}
+}
+
 ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx, int selectionSizePx, const QString& filename, int controlsFadeMs)
     : ResizableMediaBase(QSize(640,360), visualSizePx, selectionSizePx, filename)
 {
@@ -1044,6 +1072,12 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
                 m_conversionFailures = 0;
                 maybeAdoptFrameSize(f);
                 m_lastFrameImage = std::move(converted);
+                const qint64 ts = frameTimestampMs(f);
+                if (ts >= 0) {
+                    m_lastFrameTimestampMs = ts;
+                } else if (m_player) {
+                    m_lastFrameTimestampMs = m_player->position();
+                }
                 ++m_framesProcessed;
                 if (m_primingFirstFrame && !m_firstFramePrimed) {
                     m_firstFramePrimed = true;
@@ -1787,6 +1821,7 @@ void ResizableVideoItem::restartPrimingSequence() {
     m_primingFirstFrame = false;
     m_holdLastFrameAtEnd = false;
     m_lastFrameImage = QImage();
+    m_lastFrameTimestampMs = -1;
     m_smoothProgressRatio = 0.0;
     m_positionMs = 0;
     cancelSettingsRepeatSession();
@@ -1833,6 +1868,8 @@ void ResizableVideoItem::teardownPlayback() {
         QObject::disconnect(m_sink, nullptr, nullptr, nullptr);
         m_sink->setVideoFrame(QVideoFrame());
     }
+
+    m_lastFrameTimestampMs = -1;
 
     if (m_audio) {
         QObject::disconnect(m_audio, nullptr, nullptr, nullptr);
