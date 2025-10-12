@@ -718,7 +718,8 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
                 }
                 // For display delay, play delay, fade in, fade out: block infinity (cap at 99999)
                 else if (m_activeBox == m_displayAfterBox || m_activeBox == m_autoPlayBox || 
-                         m_activeBox == m_fadeInBox || m_activeBox == m_fadeOutBox || m_activeBox == m_hideDelayBox) {
+                         m_activeBox == m_fadeInBox || m_activeBox == m_fadeOutBox || m_activeBox == m_hideDelayBox ||
+                         m_activeBox == m_pauseDelayBox) {
                     if (digitCount > 5) {
                         // Don't convert to infinity, just ignore the extra digit
                         return true; // consume but don't apply
@@ -781,6 +782,10 @@ bool MediaSettingsPanel::isValidInputForBox(QLabel* box, QChar character) {
     else if (box == m_opacityBox) {
         // Opacity: digits only
         return character.isDigit();
+    }
+    else if (box == m_pauseDelayBox) {
+        // Pause delay: numbers, dots, commas
+        return character.isDigit() || character == '.' || character == ',';
     }
     
     return false; // Unknown box, reject input
