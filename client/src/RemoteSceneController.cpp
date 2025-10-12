@@ -49,6 +49,21 @@ RemoteSceneController::~RemoteSceneController() {
 	clearScene();
 }
 
+void RemoteSceneController::resetSceneSynchronization() {
+    if (m_sceneReadyTimeout) {
+        m_sceneReadyTimeout->stop();
+        QObject::disconnect(m_sceneReadyTimeout, nullptr, this, nullptr);
+        m_sceneReadyTimeout->deleteLater();
+        m_sceneReadyTimeout = nullptr;
+    }
+    m_pendingSenderClientId.clear();
+    m_totalMediaToPrime = 0;
+    m_mediaReadyCount = 0;
+    m_sceneActivationRequested = false;
+    m_sceneActivated = false;
+    m_pendingActivationEpoch = 0;
+}
+
 void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, const QJsonObject& scene) {
     if (!m_enabled) return;
     
@@ -112,15 +127,25 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
         return;
     }
     
-    // Validation successful - send positive feedback
-    qDebug() << "RemoteSceneController: validation successful, launching scene from" << senderClientId;
-    if (m_ws) {
-        m_ws->sendRemoteSceneValidationResult(senderClientId, true);
-    }
+    qDebug() << "RemoteSceneController: validation successful, preparing scene from" << senderClientId;
     
     // Bump epoch and clear any previous scene
     ++m_sceneEpoch;
     clearScene();
+
+        m_pendingSenderClientId = senderClientId;
+    m_totalMediaToPrime = media.size();
+    m_mediaReadyCount = 0;
+    m_sceneActivationRequested = false;
+    m_sceneActivated = false;
+
+    if (!m_sceneReadyTimeout) {
+        m_sceneReadyTimeout = new QTimer(this);
+        m_sceneReadyTimeout->setSingleShot(true);
+        connect(m_sceneReadyTimeout, &QTimer::timeout, this, &RemoteSceneController::handleSceneReadyTimeout);
+    }
+    m_sceneReadyTimeout->start(11000);
+
     buildWindows(screens);
     buildMedia(media);
     
@@ -137,10 +162,7 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
 #endif
     }
     
-    // Send final "launched" confirmation after scene is fully set up
-    if (m_ws) {
-        m_ws->sendRemoteSceneLaunched(senderClientId);
-    }
+    startSceneActivationIfReady();
 }
 
 void RemoteSceneController::onRemoteSceneStop(const QString& senderClientId) {
@@ -168,6 +190,8 @@ void RemoteSceneController::clearScene() {
         QMetaObject::invokeMethod(this, [this]() { clearScene(); }, Qt::QueuedConnection);
         return;
     }
+
+    resetSceneSynchronization();
     
     // CRITICAL: Stop all fade animations first to prevent accessing deleted graphics items
     // Find all QVariantAnimation children and stop them immediately
@@ -337,6 +361,107 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     item->primedFirstFrame = false;
     item->playAuthorized = false;
     item->hiding = false;
+    item->readyNotified = false;
+    item->fadeInPending = false;
+    item->pendingDisplayDelayMs = -1;
+    item->pendingPlayDelayMs = -1;
+    item->pendingPauseDelayMs = -1;
+}
+
+void RemoteSceneController::markItemReady(const std::shared_ptr<RemoteMediaItem>& item) {
+    if (!item) return;
+    if (item->readyNotified) return;
+    item->readyNotified = true;
+    ++m_mediaReadyCount;
+    qDebug() << "RemoteSceneController: media primed" << item->mediaId << "(" << m_mediaReadyCount << "/" << m_totalMediaToPrime << ")";
+    startSceneActivationIfReady();
+}
+
+void RemoteSceneController::evaluateItemReadiness(const std::shared_ptr<RemoteMediaItem>& item) {
+    if (!item) return;
+    if (item->readyNotified) return;
+    bool ready = false;
+    if (item->type == "image") {
+        ready = item->loaded;
+    } else if (item->type == "video") {
+        ready = item->loaded && item->primedFirstFrame;
+    } else {
+        ready = true;
+    }
+    if (ready) {
+        markItemReady(item);
+    }
+}
+
+void RemoteSceneController::startSceneActivationIfReady() {
+    if (m_sceneActivated || m_sceneActivationRequested) return;
+    const quint64 epoch = m_sceneEpoch;
+    m_pendingActivationEpoch = epoch;
+    if (m_totalMediaToPrime <= 0) {
+        m_sceneActivationRequested = true;
+        QMetaObject::invokeMethod(this, [this, epoch]() {
+            if (epoch != m_pendingActivationEpoch) return;
+            activateScene();
+        }, Qt::QueuedConnection);
+        return;
+    }
+    if (m_mediaReadyCount < m_totalMediaToPrime) return;
+    m_sceneActivationRequested = true;
+    QMetaObject::invokeMethod(this, [this, epoch]() {
+        if (epoch != m_pendingActivationEpoch) return;
+        activateScene();
+    }, Qt::QueuedConnection);
+}
+
+void RemoteSceneController::startDeferredTimers() {
+    for (const auto& item : m_mediaItems) {
+        if (!item) continue;
+        if (item->displayTimer && item->pendingDisplayDelayMs >= 0) {
+            item->displayTimer->start(item->pendingDisplayDelayMs);
+            item->pendingDisplayDelayMs = -1;
+        }
+        if (item->playTimer && item->pendingPlayDelayMs >= 0) {
+            item->playTimer->start(item->pendingPlayDelayMs);
+            item->pendingPlayDelayMs = -1;
+        }
+        if (item->pauseTimer && item->pendingPauseDelayMs >= 0) {
+            item->pauseTimer->start(item->pendingPauseDelayMs);
+            item->pendingPauseDelayMs = -1;
+        }
+        if (item->fadeInPending && item->displayReady && !item->displayStarted) {
+            fadeIn(item);
+        }
+    }
+}
+
+void RemoteSceneController::activateScene() {
+    if (m_sceneActivated) return;
+    m_sceneActivated = true;
+    m_sceneActivationRequested = false;
+    m_pendingActivationEpoch = 0;
+
+    if (m_sceneReadyTimeout) {
+        m_sceneReadyTimeout->stop();
+    }
+
+    startDeferredTimers();
+
+    const QString sender = m_pendingSenderClientId;
+    if (m_ws && !sender.isEmpty()) {
+        m_ws->sendRemoteSceneValidationResult(sender, true);
+        m_ws->sendRemoteSceneLaunched(sender);
+    }
+    m_pendingSenderClientId.clear();
+}
+
+void RemoteSceneController::handleSceneReadyTimeout() {
+    const QString sender = m_pendingSenderClientId;
+    qWarning() << "RemoteSceneController: timed out waiting for remote media to load" << sender;
+    if (m_ws && !sender.isEmpty()) {
+        m_ws->sendRemoteSceneValidationResult(sender, false, "Timed out waiting for remote media to load");
+    }
+    ++m_sceneEpoch;
+    clearScene();
 }
 
 QWidget* RemoteSceneController::ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary) {
@@ -464,6 +589,8 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
         m_mediaItems.append(item);
         scheduleMedia(item);
     }
+
+    m_totalMediaToPrime = m_mediaItems.size();
 }
 
 void RemoteSceneController::scheduleMedia(const std::shared_ptr<RemoteMediaItem>& item) {
@@ -539,6 +666,8 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                     // Scale pixmap to target size
                     QPixmap scaled = pm.scaled(QSize(pw, ph), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
                     pixmapItem->setPixmap(scaled);
+                    item->loaded = true;
+                    evaluateItemReadiness(item);
                     return true;
                 }
             }
@@ -585,6 +714,7 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             qDebug() << "RemoteSceneController: mediaStatus" << int(s) << "for" << item->mediaId;
             if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
                 item->loaded = true;
+                evaluateItemReadiness(item);
             } else if (s == QMediaPlayer::EndOfMedia) {
                 if (!item->player) return;
                 const bool canRepeat = item->repeatEnabled && item->repeatRemaining > 0 && item->playAuthorized;
@@ -715,6 +845,7 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                             if (sink) {
                                 sink->setVideoFrame(frame);
                             }
+                            evaluateItemReadiness(item);
                             if (item->displayReady && !item->displayStarted) {
                                 fadeIn(item);
                             }
@@ -741,7 +872,7 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
 
     // Display scheduling: only if autoDisplay enabled. Otherwise remain hidden until a future command (not yet implemented).
     if (item->autoDisplay) {
-        int delay = item->autoDisplayDelayMs;
+        int delay = std::max(0, item->autoDisplayDelayMs);
         item->displayTimer = new QTimer(this);
         item->displayTimer->setSingleShot(true);
         connect(item->displayTimer, &QTimer::timeout, this, [this,epoch,weakItem]() {
@@ -751,15 +882,22 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
             item->displayReady = true;
             fadeIn(item);
         });
-        item->displayTimer->start(delay);
-        if (delay == 0) qDebug() << "RemoteSceneController: immediate display for" << item->mediaId;
+        item->pendingDisplayDelayMs = delay;
+        if (m_sceneActivated) {
+            item->displayTimer->start(delay);
+            if (delay == 0) qDebug() << "RemoteSceneController: immediate display for" << item->mediaId;
+            item->pendingDisplayDelayMs = -1;
+        } else {
+            qDebug() << "RemoteSceneController: queued display for" << item->mediaId << "delay" << delay;
+        }
     } else {
+        item->pendingDisplayDelayMs = -1;
         qDebug() << "RemoteSceneController: autoDisplay disabled; media will stay hidden" << item->mediaId;
     }
 
     // Play scheduling: allow playback timing independent from display timing
     if (item->player && item->autoPlay) {
-        int playDelay = item->autoPlayDelayMs;
+        int playDelay = std::max(0, item->autoPlayDelayMs);
         item->playTimer = new QTimer(this);
         item->playTimer->setSingleShot(true);
         connect(item->playTimer, &QTimer::timeout, this, [this,epoch,weakItem]() {
@@ -798,12 +936,18 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                 });
             }
         });
-        item->playTimer->start(playDelay);
-        if (playDelay == 0) qDebug() << "RemoteSceneController: immediate play for" << item->mediaId;
+        item->pendingPlayDelayMs = playDelay;
+        if (m_sceneActivated) {
+            item->playTimer->start(playDelay);
+            if (playDelay == 0) qDebug() << "RemoteSceneController: immediate play for" << item->mediaId;
+            item->pendingPlayDelayMs = -1;
+        } else {
+            qDebug() << "RemoteSceneController: queued play for" << item->mediaId << "delay" << playDelay;
+        }
         
         // Pause scheduling: pause video after configured delay if autoPause enabled
         if (item->autoPause) {
-            int pauseDelay = item->autoPauseDelayMs;
+            int pauseDelay = std::max(0, item->autoPauseDelayMs);
             item->pauseTimer = new QTimer(this);
             item->pauseTimer->setSingleShot(true);
             connect(item->pauseTimer, &QTimer::timeout, this, [this,epoch,weakItem]() {
@@ -816,15 +960,27 @@ void RemoteSceneController::scheduleMediaLegacy(const std::shared_ptr<RemoteMedi
                     qDebug() << "RemoteSceneController: auto-paused video" << item->mediaId;
                 }
             });
-            item->pauseTimer->start(pauseDelay);
-            if (pauseDelay == 0) qDebug() << "RemoteSceneController: immediate pause scheduled for" << item->mediaId;
+            item->pendingPauseDelayMs = pauseDelay;
+            if (m_sceneActivated) {
+                item->pauseTimer->start(pauseDelay);
+                if (pauseDelay == 0) qDebug() << "RemoteSceneController: immediate pause scheduled for" << item->mediaId;
+                item->pendingPauseDelayMs = -1;
+            } else {
+                qDebug() << "RemoteSceneController: queued pause for" << item->mediaId << "delay" << pauseDelay;
+            }
+        } else {
+            item->pendingPauseDelayMs = -1;
         }
     } else if (item->player && !item->autoPlay) {
         qDebug() << "RemoteSceneController: autoPlay disabled; video will not start automatically" << item->mediaId;
+        item->pendingPlayDelayMs = -1;
+        item->pendingPauseDelayMs = -1;
     }
     // Make sure the most recently scheduled item for this screen is on top to match host stacking
     // (widgets created later are naturally on top, but explicit raise ensures correctness after reparenting)
     w->raise();
+
+    evaluateItemReadiness(item);
 }
 
 void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMediaItem>& item) {
@@ -909,6 +1065,8 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                             pixmapItem->setPixmap(scaled);
                         }
                     }
+                    item->loaded = true;
+                    evaluateItemReadiness(item);
                     return true;
                 }
             }
@@ -960,6 +1118,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             if (epoch != m_sceneEpoch) return;
             if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
                 item->loaded = true;
+                evaluateItemReadiness(item);
             } else if (s == QMediaPlayer::EndOfMedia && item->player) {
                 const bool canRepeat = item->repeatEnabled && item->repeatRemaining > 0 && item->playAuthorized;
                 if (canRepeat) {
@@ -1085,6 +1244,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                                     }
                                 }
                             }
+                            evaluateItemReadiness(item);
                             if (item->displayReady && !item->displayStarted) {
                                 fadeIn(item);
                             }
@@ -1108,7 +1268,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
 
     // Display/play scheduling
     if (item->autoDisplay) {
-        int delay = item->autoDisplayDelayMs;
+        int delay = std::max(0, item->autoDisplayDelayMs);
         item->displayTimer = new QTimer(this); item->displayTimer->setSingleShot(true);
         connect(item->displayTimer, &QTimer::timeout, this, [this,epoch,weakItem]() {
             auto item = weakItem.lock();
@@ -1117,10 +1277,16 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             item->displayReady = true;
             fadeIn(item);
         });
-        item->displayTimer->start(delay);
+        item->pendingDisplayDelayMs = delay;
+        if (m_sceneActivated) {
+            item->displayTimer->start(delay);
+            item->pendingDisplayDelayMs = -1;
+        }
+    } else {
+        item->pendingDisplayDelayMs = -1;
     }
     if (item->player && item->autoPlay) {
-        int playDelay = item->autoPlayDelayMs;
+        int playDelay = std::max(0, item->autoPlayDelayMs);
         item->playTimer = new QTimer(this); item->playTimer->setSingleShot(true);
         connect(item->playTimer, &QTimer::timeout, this, [this,epoch,weakItem]() {
             auto item = weakItem.lock();
@@ -1140,11 +1306,15 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                                                      : 0; item->player->play(); } });
             }
         });
-        item->playTimer->start(std::max(0, playDelay));
+        item->pendingPlayDelayMs = playDelay;
+        if (m_sceneActivated) {
+            item->playTimer->start(playDelay);
+            item->pendingPlayDelayMs = -1;
+        }
         
         // Pause scheduling: pause video after configured delay if autoPause enabled
         if (item->autoPause) {
-            int pauseDelay = item->autoPauseDelayMs;
+            int pauseDelay = std::max(0, item->autoPauseDelayMs);
             item->pauseTimer = new QTimer(this);
             item->pauseTimer->setSingleShot(true);
             connect(item->pauseTimer, &QTimer::timeout, this, [this,epoch,weakItem]() {
@@ -1157,15 +1327,32 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                     qDebug() << "RemoteSceneController: auto-paused video (multi-span)" << item->mediaId;
                 }
             });
-            item->pauseTimer->start(std::max(0, pauseDelay));
-            if (pauseDelay == 0) qDebug() << "RemoteSceneController: immediate pause scheduled for (multi-span)" << item->mediaId;
+            item->pendingPauseDelayMs = pauseDelay;
+            if (m_sceneActivated) {
+                item->pauseTimer->start(pauseDelay);
+                if (pauseDelay == 0) qDebug() << "RemoteSceneController: immediate pause scheduled for (multi-span)" << item->mediaId;
+                item->pendingPauseDelayMs = -1;
+            }
+        } else {
+            item->pendingPauseDelayMs = -1;
         }
+    } else {
+        item->pendingPlayDelayMs = -1;
+        item->pendingPauseDelayMs = -1;
     }
+
+    evaluateItemReadiness(item);
 }
 
 void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item) {
     if (!item) return;
+    if (!m_sceneActivated) {
+        item->fadeInPending = true;
+        item->displayReady = true;
+        return;
+    }
     if (item->displayStarted) return;
+    item->fadeInPending = false;
     item->displayStarted = true;
     item->displayReady = true;
     item->hiding = false;

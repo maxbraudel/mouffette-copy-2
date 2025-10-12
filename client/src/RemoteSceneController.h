@@ -77,6 +77,8 @@ private:
 		bool hiding = false;
 		bool pausedAtEnd = false;
 		bool loaded = false; // true when QMediaPlayer reports Loaded/Buffered
+		bool readyNotified = false; // true after controller counts this media as ready
+		bool fadeInPending = false; // true when fade requested before global activation
 		// For legacy single-span path
 		QWidget* widget = nullptr; QGraphicsOpacityEffect* opacity = nullptr;
 		QGraphicsView* graphicsViewSingle = nullptr;
@@ -93,6 +95,9 @@ private:
 		QSharedPointer<QByteArray> memoryBytes;
 		QBuffer* memoryBuffer = nullptr;
 		bool usingMemoryBuffer = false;
+		int pendingDisplayDelayMs = -1;
+		int pendingPlayDelayMs = -1;
+		int pendingPauseDelayMs = -1;
 	};
 
 	QWidget* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);
@@ -106,11 +111,25 @@ private:
 	void scheduleHideTimer(const std::shared_ptr<RemoteMediaItem>& item);
 	void clearScene();
     void teardownMediaItem(const std::shared_ptr<RemoteMediaItem>& item);
+    void markItemReady(const std::shared_ptr<RemoteMediaItem>& item);
+    void evaluateItemReadiness(const std::shared_ptr<RemoteMediaItem>& item);
+    void startSceneActivationIfReady();
+    void activateScene();
+    void startDeferredTimers();
+    void handleSceneReadyTimeout();
+    void resetSceneSynchronization();
 
 	WebSocketClient* m_ws = nullptr; // not owned
 	bool m_enabled = true;
 	QMap<int, ScreenWindow> m_screenWindows;
 	QList<std::shared_ptr<RemoteMediaItem>> m_mediaItems;
 	quint64 m_sceneEpoch = 0; // incremented on each start/stop
+	QString m_pendingSenderClientId;
+	int m_totalMediaToPrime = 0;
+	int m_mediaReadyCount = 0;
+	bool m_sceneActivationRequested = false;
+	bool m_sceneActivated = false;
+	quint64 m_pendingActivationEpoch = 0;
+	QTimer* m_sceneReadyTimeout = nullptr;
 };
 
