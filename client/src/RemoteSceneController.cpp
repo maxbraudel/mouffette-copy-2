@@ -35,7 +35,9 @@
 
 namespace {
 constexpr qint64 kStartPositionToleranceMs = 120;
-constexpr qint64 kDisplayFrameToleranceMs = 45;
+constexpr qint64 kDisplayFrameToleranceMs = 33;
+constexpr qint64 kDecoderSyncToleranceMs = 25;
+constexpr int kLivePlaybackWarmupFrames = 2;
 
 qint64 frameTimestampMs(const QVideoFrame& frame) {
     if (!frame.isValid()) {
@@ -341,10 +343,20 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     item->loaded = false;
     item->primedFirstFrame = false;
     item->primedFrame = QVideoFrame();
+    item->primedFrameSticky = false;
     item->playAuthorized = false;
     item->hiding = false;
     item->readyNotified = false;
     item->fadeInPending = false;
+                                item->livePlaybackStarted = false;
+                                item->lastLiveFrameTimestampMs = -1;
+                                if (item->autoPlay) {
+                                    item->awaitingLivePlayback = true;
+                                    item->liveWarmupFramesRemaining = kLivePlaybackWarmupFrames;
+                                } else {
+                                    item->awaitingLivePlayback = false;
+                                    item->liveWarmupFramesRemaining = 0;
+                                }
     item->pendingDisplayDelayMs = -1;
     item->pendingPlayDelayMs = -1;
     item->pendingPauseDelayMs = -1;
@@ -353,6 +365,12 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     item->displayTimestampMs = -1;
     item->hasDisplayTimestamp = false;
     item->awaitingStartFrame = false;
+    item->awaitingDecoderSync = false;
+    item->decoderSyncTargetMs = -1;
+    item->awaitingLivePlayback = false;
+    item->livePlaybackStarted = false;
+    item->liveWarmupFramesRemaining = 0;
+    item->lastLiveFrameTimestampMs = -1;
     item->videoOutputsAttached = false;
 }
 
@@ -431,6 +449,8 @@ void RemoteSceneController::startPendingPauseTimerIfEligible(const std::shared_p
     if (item->pendingPauseDelayMs < 0) return;
     if (!m_sceneActivated) return;
     if (item->awaitingStartFrame) return;
+    if (item->awaitingDecoderSync) return;
+    if (item->awaitingLivePlayback && !item->livePlaybackStarted) return;
 
     item->pauseTimer->start(item->pendingPauseDelayMs);
     item->pendingPauseDelayMs = -1;
@@ -449,15 +469,33 @@ void RemoteSceneController::triggerAutoPlayNow(const std::shared_ptr<RemoteMedia
     }
     item->pausedAtEnd = false;
     item->repeatRemaining = (item->repeatEnabled && item->repeatCount > 0) ? item->repeatCount : 0;
+    item->awaitingLivePlayback = true;
+    item->livePlaybackStarted = false;
+    item->liveWarmupFramesRemaining = kLivePlaybackWarmupFrames;
+    item->lastLiveFrameTimestampMs = -1;
 
     if (item->loaded) {
         const qint64 startPos = item->hasStartPosition ? effectiveStartPosition(item) : 0;
         if (item->player->position() != startPos) {
             item->player->setPosition(startPos);
         }
-        ensureVideoOutputsAttached(item);
-        if (item->primedFrame.isValid()) {
-            applyPrimedFrameToSinks(item);
+
+        const bool canGate = item->primedFirstFrame && item->primingSink;
+        if (canGate) {
+            item->awaitingDecoderSync = true;
+            if (item->decoderSyncTargetMs < 0) {
+                item->decoderSyncTargetMs = targetDisplayTimestamp(item);
+            }
+            item->player->setVideoOutput(item->primingSink);
+            item->videoOutputsAttached = false;
+            if (item->primedFrame.isValid()) {
+                applyPrimedFrameToSinks(item);
+            }
+        } else {
+            ensureVideoOutputsAttached(item);
+            if (item->primedFrame.isValid()) {
+                applyPrimedFrameToSinks(item);
+            }
         }
         item->player->play();
         return;
@@ -480,9 +518,26 @@ void RemoteSceneController::triggerAutoPlayNow(const std::shared_ptr<RemoteMedia
                 if (item->player->position() != startPos) {
                     item->player->setPosition(startPos);
                 }
-                ensureVideoOutputsAttached(item);
-                if (item->primedFrame.isValid()) {
-                    applyPrimedFrameToSinks(item);
+                    item->awaitingLivePlayback = true;
+                    item->livePlaybackStarted = false;
+                    item->liveWarmupFramesRemaining = kLivePlaybackWarmupFrames;
+                    item->lastLiveFrameTimestampMs = -1;
+                const bool canGate = item->primedFirstFrame && item->primingSink;
+                if (canGate) {
+                    item->awaitingDecoderSync = true;
+                    if (item->decoderSyncTargetMs < 0) {
+                        item->decoderSyncTargetMs = targetDisplayTimestamp(item);
+                    }
+                    item->player->setVideoOutput(item->primingSink);
+                    item->videoOutputsAttached = false;
+                    if (item->primedFrame.isValid()) {
+                        applyPrimedFrameToSinks(item);
+                    }
+                } else {
+                    ensureVideoOutputsAttached(item);
+                    if (item->primedFrame.isValid()) {
+                        applyPrimedFrameToSinks(item);
+                    }
                 }
                 item->player->play();
             }
@@ -495,6 +550,7 @@ void RemoteSceneController::triggerAutoPlayNow(const std::shared_ptr<RemoteMedia
 void RemoteSceneController::applyPrimedFrameToSinks(const std::shared_ptr<RemoteMediaItem>& item) {
     if (!item) return;
     if (!item->primedFrame.isValid()) return;
+    if (!item->primedFrameSticky) return;
 
     auto pushFrame = [](QGraphicsVideoItem* videoItem, const QVideoFrame& frame) {
         if (!videoItem) return;
@@ -502,6 +558,7 @@ void RemoteSceneController::applyPrimedFrameToSinks(const std::shared_ptr<Remote
             sink->setVideoFrame(frame);
         }
     };
+    if (item->awaitingLivePlayback && !item->livePlaybackStarted) return;
 
     for (auto& span : item->spans) {
         pushFrame(span.videoItem, item->primedFrame);
@@ -510,6 +567,7 @@ void RemoteSceneController::applyPrimedFrameToSinks(const std::shared_ptr<Remote
 
 void RemoteSceneController::clearVideoSinks(const std::shared_ptr<RemoteMediaItem>& item) {
     if (!item) return;
+    if (item->awaitingLivePlayback && !item->livePlaybackStarted) return;
 
     auto clearFrame = [](QGraphicsVideoItem* videoItem) {
         if (!videoItem) return;
@@ -544,6 +602,23 @@ void RemoteSceneController::ensureVideoOutputsAttached(const std::shared_ptr<Rem
             auto item = weakItem.lock();
             if (!item) return;
             if (epoch != m_sceneEpoch) return;
+            item->primedFrame = frame;
+            const qint64 ts = frameTimestampMs(frame);
+            if (item->awaitingLivePlayback && !item->livePlaybackStarted) {
+                bool advancedFrame = false;
+                if (ts >= 0 && ts != item->lastLiveFrameTimestampMs) {
+                    item->lastLiveFrameTimestampMs = ts;
+                    advancedFrame = true;
+                } else if (ts < 0) {
+                    advancedFrame = true;
+                }
+                if (advancedFrame && item->liveWarmupFramesRemaining > 0) {
+                    --item->liveWarmupFramesRemaining;
+                }
+                if (item->liveWarmupFramesRemaining <= 0) {
+                    finalizeLivePlaybackStart(item, frame);
+                }
+            }
             for (int idx = 1; idx < item->spans.size(); ++idx) {
                 auto& span = item->spans[idx];
                 if (!span.videoItem) continue;
@@ -556,6 +631,30 @@ void RemoteSceneController::ensureVideoOutputsAttached(const std::shared_ptr<Rem
 
     item->videoOutputsAttached = true;
     applyPrimedFrameToSinks(item);
+}
+
+void RemoteSceneController::finalizeLivePlaybackStart(const std::shared_ptr<RemoteMediaItem>& item, const QVideoFrame& frame) {
+    if (!item) return;
+    if (item->livePlaybackStarted) return;
+    item->awaitingLivePlayback = false;
+    item->livePlaybackStarted = true;
+    item->liveWarmupFramesRemaining = 0;
+    if (frame.isValid()) {
+        item->primedFrame = frame;
+        item->primedFrameSticky = true;
+        const qint64 ts = frameTimestampMs(frame);
+        if (ts >= 0) {
+            item->displayTimestampMs = ts;
+            item->hasDisplayTimestamp = true;
+            item->lastLiveFrameTimestampMs = ts;
+        }
+    }
+    if (item->fadeInPending && item->displayReady && !item->displayStarted) {
+        fadeIn(item);
+    } else if (!item->displayStarted && item->displayReady) {
+        fadeIn(item);
+    }
+    startPendingPauseTimerIfEligible(item);
 }
 
 void RemoteSceneController::activateScene() {
@@ -1034,12 +1133,11 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                             auto item = weakItem.lock();
                             if (!item) return;
                             if (epoch != m_sceneEpoch) return;
-                            if (item->primedFirstFrame) return;
-
                             const qint64 desired = targetDisplayTimestamp(item);
                             const qint64 frameTime = frameTimestampMs(frame);
                             const bool hasFrameTimestamp = frameTime >= 0;
                             const qint64 playerPos = item->player ? item->player->position() : -1;
+                            const qint64 reference = hasFrameTimestamp ? frameTime : playerPos;
 
                             auto logDecision = [&](const QString& stage, const QString& reason, bool accepted) {
                                 qDebug() << "RemoteSceneController: priming(multi)" << stage
@@ -1055,65 +1153,108 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                                          << "accepted" << accepted;
                             };
 
-                            bool frameReady = true;
-                            bool overshoot = false;
-                            if (item->awaitingStartFrame && desired >= 0) {
-                                const qint64 reference = hasFrameTimestamp ? frameTime : playerPos;
-                                if (reference >= 0) {
-                                    if (reference < desired - kStartPositionToleranceMs) {
-                                        frameReady = false;
-                                    } else if (reference > desired + kStartPositionToleranceMs) {
-                                        frameReady = false;
-                                        overshoot = true;
-                                    }
-                                }
-                                if (!frameReady) {
-                                    logDecision(QStringLiteral("reject"), overshoot ? QStringLiteral("overshoot") : QStringLiteral("pre-start"), false);
-                                    if (item->player) {
-                                        if (overshoot) {
-                                            item->player->pause();
-                                            item->player->setPosition(desired);
-                                        }
-                                        if (item->player->playbackState() != QMediaPlayer::PlayingState) {
-                                            item->player->play();
+                            if (!item->primedFirstFrame) {
+                                bool frameReady = true;
+                                bool overshoot = false;
+                                if (item->awaitingStartFrame && desired >= 0) {
+                                    if (reference >= 0) {
+                                        if (reference < desired - kStartPositionToleranceMs) {
+                                            frameReady = false;
+                                        } else if (reference > desired + kStartPositionToleranceMs) {
+                                            frameReady = false;
+                                            overshoot = true;
                                         }
                                     }
-                                    item->primedFrame = QVideoFrame();
-                                    clearVideoSinks(item);
-                                    return;
+                                    if (!frameReady) {
+                                        logDecision(QStringLiteral("reject"), overshoot ? QStringLiteral("overshoot") : QStringLiteral("pre-start"), false);
+                                        if (item->player) {
+                                            if (overshoot) {
+                                                item->player->pause();
+                                                item->player->setPosition(desired);
+                                            }
+                                            if (item->player->playbackState() != QMediaPlayer::PlayingState) {
+                                                item->player->play();
+                                            }
+                                        }
+                                        item->primedFrame = QVideoFrame();
+                                        item->primedFrameSticky = false;
+                                        clearVideoSinks(item);
+                                        return;
+                                    }
                                 }
+
+                                logDecision(QStringLiteral("accept"), QStringLiteral("frame within tolerance"), true);
+
+                                item->awaitingStartFrame = false;
+                                item->primedFirstFrame = true;
+                                item->primedFrame = frame;
+                                item->primedFrameSticky = true;
+                                if (hasFrameTimestamp) {
+                                    item->displayTimestampMs = frameTime;
+                                    item->hasDisplayTimestamp = true;
+                                }
+                                item->decoderSyncTargetMs = desired;
+                                item->livePlaybackStarted = false;
+                                item->lastLiveFrameTimestampMs = -1;
+                                if (item->autoPlay) {
+                                    item->awaitingLivePlayback = true;
+                                    item->liveWarmupFramesRemaining = kLivePlaybackWarmupFrames;
+                                } else {
+                                    item->awaitingLivePlayback = false;
+                                    item->liveWarmupFramesRemaining = 0;
+                                }
+                                if (item->player) {
+                                    item->player->pause();
+                                    if (item->player->position() != desired) {
+                                        item->player->setPosition(desired >= 0 ? desired : 0);
+                                    }
+                                }
+                                applyPrimedFrameToSinks(item);
+                                evaluateItemReadiness(item);
+                                if (item->displayReady && !item->displayStarted) {
+                                    fadeIn(item);
+                                }
+                                return;
                             }
 
-                            logDecision(QStringLiteral("accept"), QStringLiteral("frame within tolerance"), true);
+                            if (!item->awaitingDecoderSync) {
+                                return;
+                            }
 
-                            item->awaitingStartFrame = false;
-                            item->primedFirstFrame = true;
-                            item->primedFrame = frame;
-                            if (hasFrameTimestamp) {
-                                item->displayTimestampMs = frameTime;
-                                item->hasDisplayTimestamp = true;
+                            const qint64 target = (item->decoderSyncTargetMs >= 0) ? item->decoderSyncTargetMs : desired;
+                            if (target < 0) {
+                                return;
                             }
-                            QObject::disconnect(item->primingConn);
-                            if (item->primingSink) {
-                                QObject::disconnect(item->primingSink, nullptr, nullptr, nullptr);
-                            }
-                            if (!item->playAuthorized && item->player) {
-                                item->player->pause();
-                                if (item->player->position() != desired) {
-                                    item->player->setPosition(desired);
+                            const qint64 gateReference = reference;
+                            if (gateReference >= 0 && gateReference >= target - kDecoderSyncToleranceMs) {
+                                qDebug() << "RemoteSceneController: decoder sync reached" << item->mediaId
+                                         << "target" << target
+                                         << "frameTs" << (hasFrameTimestamp ? frameTime : qint64(-1))
+                                         << "playerPos" << playerPos;
+                                item->awaitingDecoderSync = false;
+                                item->decoderSyncTargetMs = -1;
+                                if (hasFrameTimestamp) {
+                                    item->displayTimestampMs = frameTime;
+                                    item->hasDisplayTimestamp = true;
                                 }
-                            }
-                            if (item->player) {
-                                item->player->setVideoOutput(nullptr);
-                            }
-                            if (item->primingSink) {
-                                item->primingSink->deleteLater();
-                                item->primingSink = nullptr;
-                            }
-                            applyPrimedFrameToSinks(item);
-                            evaluateItemReadiness(item);
-                            if (item->displayReady && !item->displayStarted) {
-                                fadeIn(item);
+                                item->primedFrame = frame;
+                                item->primedFrameSticky = false;
+                                QObject::disconnect(item->primingConn);
+                                item->primingConn = {};
+                                if (item->primingSink) {
+                                    QObject::disconnect(item->primingSink, nullptr, nullptr, nullptr);
+                                    auto* sinkToDelete = item->primingSink;
+                                    item->primingSink = nullptr;
+                                    sinkToDelete->deleteLater();
+                                }
+                                if (item->liveWarmupFramesRemaining <= 0) {
+                                    item->liveWarmupFramesRemaining = kLivePlaybackWarmupFrames;
+                                }
+                                ensureVideoOutputsAttached(item);
+                                if (item->player && item->player->playbackState() != QMediaPlayer::PlayingState) {
+                                    item->player->play();
+                                }
+                                startPendingPauseTimerIfEligible(item);
                             }
                         });
                     } else {
@@ -1215,6 +1356,10 @@ void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item)
     if (!m_sceneActivated) {
         item->fadeInPending = true;
         item->displayReady = true;
+        return;
+    }
+    if (item->awaitingLivePlayback && !item->livePlaybackStarted) {
+        item->fadeInPending = true;
         return;
     }
     if (item->displayStarted) return;

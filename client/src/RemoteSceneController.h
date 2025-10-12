@@ -78,6 +78,12 @@ private:
 		qint64 displayTimestampMs = -1; bool hasDisplayTimestamp = false;
 		bool awaitingStartFrame = false;
 		QVideoFrame primedFrame;
+		bool awaitingDecoderSync = false;
+		qint64 decoderSyncTargetMs = -1;
+		bool awaitingLivePlayback = false;
+		bool livePlaybackStarted = false;
+		int liveWarmupFramesRemaining = 0;
+		qint64 lastLiveFrameTimestampMs = -1;
 		QTimer* displayTimer = nullptr; QTimer* playTimer = nullptr; QTimer* pauseTimer = nullptr; QTimer* hideTimer = nullptr;
 		// Video only
 		QMediaPlayer* player = nullptr; QAudioOutput* audio = nullptr;
@@ -94,6 +100,7 @@ private:
 		int pendingPauseDelayMs = -1;
 		QVideoSink* primingSink = nullptr;
 		bool videoOutputsAttached = false;
+		bool primedFrameSticky = false;
 	};
 
 	QWidget* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);
@@ -120,6 +127,7 @@ private:
 	void applyPrimedFrameToSinks(const std::shared_ptr<RemoteMediaItem>& item);
 	void clearVideoSinks(const std::shared_ptr<RemoteMediaItem>& item);
 	void ensureVideoOutputsAttached(const std::shared_ptr<RemoteMediaItem>& item);
+	void finalizeLivePlaybackStart(const std::shared_ptr<RemoteMediaItem>& item, const QVideoFrame& frame);
     qint64 targetDisplayTimestamp(const std::shared_ptr<RemoteMediaItem>& item) const;
 
 	WebSocketClient* m_ws = nullptr; // not owned
