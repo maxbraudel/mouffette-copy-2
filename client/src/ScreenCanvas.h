@@ -210,6 +210,7 @@ private:
     void updateGlobalSettingsPanelVisibility(); // Update global settings panel based on toggle + selection
     void ensureSettingsToggleButton();
     void updateSettingsToggleButtonGeometry();
+    void syncVolumeSettingsPanel();
     
     void OnSceneChanged();
     // Snap-to-screen helpers
