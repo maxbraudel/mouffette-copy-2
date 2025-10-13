@@ -440,6 +440,9 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                     m["repeatCount"] = repeatCount;
                     m["autoUnmute"] = media->autoUnmuteEnabled();
                     m["autoUnmuteDelayMs"] = media->autoUnmuteDelayMs();
+                    m["autoMute"] = media->autoMuteEnabled();
+                    m["autoMuteDelayMs"] = media->autoMuteDelayMs();
+                    m["muteWhenVideoEnds"] = media->muteWhenVideoEnds();
                     const qint64 currentPos = std::max<qint64>(0, v->currentPositionMs());
                     const qint64 displayedTimestamp = v->displayedFrameTimestampMs();
                     if (displayedTimestamp >= 0) {
@@ -4432,22 +4435,33 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                     st.posMs = vid->currentPositionMs();
                     st.wasPlaying = vid->isPlaying();
                     st.wasMuted = vid->isMuted();
-                    if (vid->hideWhenVideoEnds()) {
-                        if (QMediaPlayer* player = vid->mediaPlayer()) {
-                            st.hideOnEndConnection = QObject::connect(player, &QMediaPlayer::mediaStatusChanged, this, [this, media, guard = st.guard](QMediaPlayer::MediaStatus status){
-                                if (!m_hostSceneActive) return;
-                                if (status != QMediaPlayer::EndOfMedia) return;
-                                if (guard.expired()) return;
-                                if (!media || media->isBeingDeleted()) return;
+                    const bool hideOnEnd = vid->hideWhenVideoEnds();
+                    const bool muteOnEnd = media->muteWhenVideoEnds();
+                    if ((hideOnEnd || muteOnEnd) && vid->mediaPlayer()) {
+                        ResizableVideoItem* videoForEnd = vid;
+                        st.endOfMediaConnection = QObject::connect(vid->mediaPlayer(), &QMediaPlayer::mediaStatusChanged, this, [this, media, videoForEnd, guard = st.guard, hideOnEnd, muteOnEnd](QMediaPlayer::MediaStatus status){
+                            if (!m_hostSceneActive) return;
+                            if (status != QMediaPlayer::EndOfMedia) return;
+                            if (guard.expired()) return;
+                            if (!media || media->isBeingDeleted()) return;
+                            if (hideOnEnd) {
                                 media->hideWithConfiguredFade();
-                            });
-                        }
+                            }
+                            if (muteOnEnd && videoForEnd) {
+                                const auto state = videoForEnd->mediaSettingsState();
+                                if (state.muteWhenVideoEnds) {
+                                    videoForEnd->setMuted(true);
+                                }
+                            }
+                        });
                     }
                     m_prevVideoStates.append(st);
                     vid->pauseAndSetPosition(st.posMs);
 
                     const bool shouldAutoUnmute = media->autoUnmuteEnabled();
                     const int unmuteDelayMs = media->autoUnmuteDelayMs();
+                    const bool shouldAutoMute = media->autoMuteEnabled();
+                    const int muteDelayMs = media->autoMuteDelayMs();
                     vid->setMuted(true);
                     if (shouldAutoUnmute) {
                         const auto unmuteGuard = vid->lifetimeGuard();
@@ -4465,6 +4479,19 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                         } else {
                             QTimer::singleShot(0, this, unmuteNow);
                         }
+                    }
+                    if (shouldAutoMute) {
+                        const auto muteGuard = vid->lifetimeGuard();
+                        ResizableVideoItem* videoPtr = vid;
+                        const int delay = std::max(0, muteDelayMs);
+                        QTimer::singleShot(delay, this, [this, videoPtr, muteGuard]() {
+                            if (!m_hostSceneActive) return;
+                            if (muteGuard.expired()) return;
+                            if (!videoPtr || videoPtr->isBeingDeleted()) return;
+                            const auto state = videoPtr->mediaSettingsState();
+                            if (!state.muteDelayEnabled) return;
+                            videoPtr->setMuted(true);
+                        });
                     }
                 }
                 media->hideImmediateNoFade();
@@ -4570,9 +4597,9 @@ void ScreenCanvas::stopHostSceneState() {
         if (st.guard.expired()) continue;
         if (st.video->isBeingDeleted()) continue;
         if (st.video->scene() == m_scene) {
-            if (st.hideOnEndConnection) {
-                QObject::disconnect(st.hideOnEndConnection);
-                st.hideOnEndConnection = QMetaObject::Connection();
+            if (st.endOfMediaConnection) {
+                QObject::disconnect(st.endOfMediaConnection);
+                st.endOfMediaConnection = QMetaObject::Connection();
             }
             st.video->pauseAndSetPosition(st.posMs);
             st.video->setMuted(st.wasMuted);

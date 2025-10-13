@@ -60,6 +60,9 @@ public:
         bool hideDelayEnabled = false;
         QString hideDelayText = QStringLiteral("1");
         bool hideWhenVideoEnds = false;
+        bool muteDelayEnabled = false;
+        QString muteDelayText = QStringLiteral("1");
+        bool muteWhenVideoEnds = false;
     };
 
     enum class UploadState { NotUploaded, Uploading, Uploaded };
@@ -166,6 +169,9 @@ public:
     bool autoHideEnabled() const;
     int autoHideDelayMs() const;
     bool hideWhenVideoEnds() const;
+    bool autoMuteEnabled() const;
+    int autoMuteDelayMs() const;
+    bool muteWhenVideoEnds() const;
     double fadeInDurationSeconds() const;
     double fadeOutDurationSeconds() const;
     double audioFadeInDurationSeconds() const;

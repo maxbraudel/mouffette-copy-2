@@ -254,6 +254,25 @@ bool ResizableMediaBase::hideWhenVideoEnds() const {
     return m_mediaSettings.hideWhenVideoEnds;
 }
 
+bool ResizableMediaBase::autoMuteEnabled() const {
+    return m_mediaSettings.muteDelayEnabled;
+}
+
+int ResizableMediaBase::autoMuteDelayMs() const {
+    if (!autoMuteEnabled()) return 0;
+    QString text = m_mediaSettings.muteDelayText.trimmed();
+    if (text.isEmpty() || text == QStringLiteral("...")) return 0;
+    text.replace(',', '.');
+    bool ok = false;
+    double value = text.toDouble(&ok);
+    if (!ok || value < 0.0) return 0;
+    return static_cast<int>(std::lround(value * 1000.0));
+}
+
+bool ResizableMediaBase::muteWhenVideoEnds() const {
+    return m_mediaSettings.muteWhenVideoEnds;
+}
+
 double ResizableMediaBase::fadeInDurationSeconds() const {
     if (!m_mediaSettings.fadeInEnabled) return 0.0;
     QString text = m_mediaSettings.fadeInText.trimmed();

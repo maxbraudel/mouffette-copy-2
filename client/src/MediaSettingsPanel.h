@@ -52,6 +52,7 @@ private slots:
     void onPlayAutomaticallyToggled(bool checked);
     void onOpacityToggled(bool checked);
     void onHideDelayToggled(bool checked);
+    void onMuteDelayToggled(bool checked);
     void onPauseDelayToggled(bool checked);
     void onVolumeToggled(bool checked);
 
@@ -98,6 +99,8 @@ private:
 
     QCheckBox* m_hideDelayCheck = nullptr;
     QCheckBox* m_hideWhenVideoEndsCheck = nullptr;
+    QCheckBox* m_muteDelayCheck = nullptr;
+    QCheckBox* m_muteWhenVideoEndsCheck = nullptr;
 
     // Value box widgets for click handling
     QLabel* m_autoPlayBox = nullptr;
@@ -112,6 +115,7 @@ private:
     QLabel* m_audioFadeInBox = nullptr;
     QLabel* m_audioFadeOutBox = nullptr;
     QLabel* m_hideDelayBox = nullptr;
+    QLabel* m_muteDelayBox = nullptr;
     // New: set opacity to [x]%
     QCheckBox* m_opacityCheck = nullptr;
     QLabel* m_opacityBox = nullptr;
@@ -137,11 +141,14 @@ private:
     QWidget* m_audioFadeOutRow = nullptr;
     QWidget* m_hideDelayRow = nullptr;
     QWidget* m_hideWhenEndsRow = nullptr;
+    QWidget* m_muteDelayRow = nullptr;
+    QWidget* m_muteWhenEndsRow = nullptr;
     QWidget* m_volumeRow = nullptr;
     QWidget* m_unmuteRow = nullptr;
     QWidget* m_unmuteDelayRow = nullptr;
 
     QLabel* m_hideDelaySecondsLabel = nullptr;
+    QLabel* m_muteDelaySecondsLabel = nullptr;
     QLabel* m_pauseDelayBox = nullptr;
     QLabel* m_pauseDelaySecondsLabel = nullptr;
     QLabel* m_audioFadeInSecondsLabel = nullptr;

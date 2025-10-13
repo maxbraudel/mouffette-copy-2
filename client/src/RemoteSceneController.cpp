@@ -274,6 +274,7 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     stopAndDeleteTimer(item->playTimer);
     stopAndDeleteTimer(item->pauseTimer);
     stopAndDeleteTimer(item->hideTimer);
+    stopAndDeleteTimer(item->muteTimer);
 
     QObject::disconnect(item->deferredStartConn);
     QObject::disconnect(item->primingConn);
@@ -693,6 +694,12 @@ void RemoteSceneController::activateScene() {
                 QTimer::singleShot(0, this, unmuteCallback);
             }
         }
+
+        if (item->autoMute) {
+            scheduleMuteTimer(item);
+        } else if (item->muteTimer) {
+            item->muteTimer->stop();
+        }
     }
 
     startDeferredTimers();
@@ -899,6 +906,9 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
             item->volume = m.value("volume").toDouble(1.0);
             item->autoUnmute = m.value("autoUnmute").toBool(false);
             item->autoUnmuteDelayMs = m.value("autoUnmuteDelayMs").toInt(0);
+            item->autoMute = m.value("autoMute").toBool(false);
+            item->autoMuteDelayMs = m.value("autoMuteDelayMs").toInt(0);
+            item->muteWhenVideoEnds = m.value("muteWhenVideoEnds").toBool(false);
             if (m.contains("startPositionMs")) {
                 const qint64 startPos = static_cast<qint64>(std::llround(m.value("startPositionMs").toDouble(0.0)));
                 item->startPositionMs = std::max<qint64>(0, startPos);
@@ -1059,7 +1069,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                     item->player->play();
                 } else {
                     item->pausedAtEnd = true;
-                    if (item->audio) item->audio->setMuted(true);
+                    if (item->audio && item->muteWhenVideoEnds) item->audio->setMuted(true);
                     qint64 dur = item->player->duration();
                     qint64 finalPos = dur > 0 ? std::max<qint64>(0, dur - 1) : 0;
                     item->player->pause();
@@ -1101,7 +1111,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             if (item->pausedAtEnd) return;
             if ((dur - pos) < 100) {
                 item->pausedAtEnd = true;
-                if (item->audio) item->audio->setMuted(true);
+                if (item->audio && item->muteWhenVideoEnds) item->audio->setMuted(true);
                 item->player->pause();
                 if (dur > 1) {
                     item->player->setPosition(std::max<qint64>(0, dur - 1));
@@ -1470,6 +1480,33 @@ void RemoteSceneController::scheduleHideTimer(const std::shared_ptr<RemoteMediaI
     if (!item->hideTimer) return;
     item->hideTimer->stop();
     item->hideTimer->start(delayMs);
+}
+
+void RemoteSceneController::scheduleMuteTimer(const std::shared_ptr<RemoteMediaItem>& item) {
+    if (!item) return;
+    if (!item->autoMute) return;
+    if (!item->audio) return;
+    const int delayMs = std::max(0, item->autoMuteDelayMs);
+    if (item->muteTimer) {
+        item->muteTimer->stop();
+    }
+    if (delayMs == 0) {
+        item->audio->setMuted(true);
+        return;
+    }
+    if (!item->muteTimer) {
+        item->muteTimer = new QTimer(this);
+        item->muteTimer->setSingleShot(true);
+        std::weak_ptr<RemoteMediaItem> weakItem = item;
+        connect(item->muteTimer, &QTimer::timeout, this, [this, weakItem]() {
+            auto locked = weakItem.lock();
+            if (!locked) return;
+            if (locked->sceneEpoch != m_sceneEpoch) return;
+            if (!locked->audio) return;
+            locked->audio->setMuted(true);
+        });
+    }
+    item->muteTimer->start(delayMs);
 }
 
 void RemoteSceneController::fadeOutAndHide(const std::shared_ptr<RemoteMediaItem>& item) {

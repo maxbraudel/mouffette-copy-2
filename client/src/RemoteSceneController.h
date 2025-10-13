@@ -63,6 +63,8 @@ private:
 		bool autoPause=false; int autoPauseDelayMs=0;
 		bool autoHide=false; int autoHideDelayMs=0;
 		bool hideWhenVideoEnds=false;
+	bool autoMute=false; int autoMuteDelayMs=0;
+	bool muteWhenVideoEnds=false;
 		double fadeInSeconds=0.0; double fadeOutSeconds=0.0; double contentOpacity = 1.0;
 		// Audio state from host (videos)
 		bool muted = false; double volume = 1.0; // 0..1
@@ -102,6 +104,7 @@ private:
 		QVideoSink* primingSink = nullptr;
 		bool videoOutputsAttached = false;
 		bool primedFrameSticky = false;
+		QTimer* muteTimer = nullptr;
 	};
 
 	QWidget* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);
@@ -112,6 +115,7 @@ private:
 	void fadeIn(const std::shared_ptr<RemoteMediaItem>& item);
 	void fadeOutAndHide(const std::shared_ptr<RemoteMediaItem>& item);
 	void scheduleHideTimer(const std::shared_ptr<RemoteMediaItem>& item);
+	void scheduleMuteTimer(const std::shared_ptr<RemoteMediaItem>& item);
 	void clearScene();
     void teardownMediaItem(const std::shared_ptr<RemoteMediaItem>& item);
     void markItemReady(const std::shared_ptr<RemoteMediaItem>& item);

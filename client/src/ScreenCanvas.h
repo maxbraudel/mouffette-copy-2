@@ -374,8 +374,8 @@ protected:
         std::weak_ptr<bool> guard;
         qint64 posMs = 0;
         bool wasPlaying = false;
-            bool wasMuted = false;
-        QMetaObject::Connection hideOnEndConnection;
+        bool wasMuted = false;
+        QMetaObject::Connection endOfMediaConnection;
     };
     // Remember selection present just before entering host scene so it can be restored afterward (multi-select supported)
     QList<SavedSelection> m_prevSelectionBeforeHostScene;

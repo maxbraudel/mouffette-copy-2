@@ -245,6 +245,43 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_contentLayout->addWidget(m_hideWhenEndsRow);
     }
 
+    // Mute delay (video only)
+    {
+        m_muteDelayRow = new QWidget(m_innerContent);
+        configureRow(m_muteDelayRow);
+        auto* h = new QHBoxLayout(m_muteDelayRow);
+        h->setContentsMargins(0,0,0,0);
+        h->setSpacing(0);
+        m_muteDelayCheck = new QCheckBox("Mute delay: ", m_muteDelayRow);
+        m_muteDelayCheck->setStyleSheet(overlayTextStyle);
+        m_muteDelayCheck->installEventFilter(this);
+        connect(m_muteDelayCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onMuteDelayToggled);
+        m_muteDelayBox = makeValueBox(QStringLiteral("1"));
+        m_muteDelaySecondsLabel = new QLabel("s", m_muteDelayRow);
+        m_muteDelaySecondsLabel->setStyleSheet(overlayTextStyle);
+        h->addWidget(m_muteDelayCheck);
+        h->addWidget(m_muteDelayBox);
+        h->addWidget(m_muteDelaySecondsLabel);
+        h->addStretch();
+        m_contentLayout->addWidget(m_muteDelayRow);
+    }
+
+    // Mute when video ends (video only)
+    {
+        m_muteWhenEndsRow = new QWidget(m_innerContent);
+        configureRow(m_muteWhenEndsRow);
+        auto* h = new QHBoxLayout(m_muteWhenEndsRow);
+        h->setContentsMargins(0,0,0,0);
+        h->setSpacing(0);
+        m_muteWhenVideoEndsCheck = new QCheckBox("Mute when video ends", m_muteWhenEndsRow);
+        m_muteWhenVideoEndsCheck->setStyleSheet(overlayTextStyle);
+        m_muteWhenVideoEndsCheck->installEventFilter(this);
+        connect(m_muteWhenVideoEndsCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
+        h->addWidget(m_muteWhenVideoEndsCheck);
+        h->addStretch();
+        m_contentLayout->addWidget(m_muteWhenEndsRow);
+    }
+
     // 1) Play automatically as separate widget (video only) - matching display layout
     {
     m_autoPlayRow = new QWidget(m_innerContent);
@@ -538,12 +575,21 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     if (m_hideDelayCheck) {
         onHideDelayToggled(m_hideDelayCheck->isChecked());
     }
+    if (m_muteDelayCheck) {
+        onMuteDelayToggled(m_muteDelayCheck->isChecked());
+    }
     if (m_pauseDelayCheck) {
         connect(m_pauseDelayCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onPauseDelayToggled);
         onPauseDelayToggled(m_pauseDelayCheck->isChecked());
     }
     if (m_hideWhenEndsRow) {
         m_hideWhenEndsRow->setVisible(false); // default hidden until media type provided
+    }
+    if (m_muteDelayRow) {
+        m_muteDelayRow->setVisible(false);
+    }
+    if (m_muteWhenEndsRow) {
+        m_muteWhenEndsRow->setVisible(false);
     }
     updatePosition();
 }
@@ -590,6 +636,12 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
     if (m_hideWhenEndsRow) {
         m_hideWhenEndsRow->setVisible(isVideo);
     }
+    if (m_muteDelayRow) {
+        m_muteDelayRow->setVisible(isVideo);
+    }
+    if (m_muteWhenEndsRow) {
+        m_muteWhenEndsRow->setVisible(isVideo);
+    }
     if (m_volumeRow) {
         m_volumeRow->setVisible(isVideo);
     }
@@ -597,6 +649,16 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
         const bool prev = m_hideWhenVideoEndsCheck->blockSignals(true);
         m_hideWhenVideoEndsCheck->setChecked(false);
         m_hideWhenVideoEndsCheck->blockSignals(prev);
+    }
+    if (!isVideo && m_muteDelayCheck) {
+        const bool prev = m_muteDelayCheck->blockSignals(true);
+        m_muteDelayCheck->setChecked(false);
+        m_muteDelayCheck->blockSignals(prev);
+    }
+    if (!isVideo && m_muteWhenVideoEndsCheck) {
+        const bool prev = m_muteWhenVideoEndsCheck->blockSignals(true);
+        m_muteWhenVideoEndsCheck->setChecked(false);
+        m_muteWhenVideoEndsCheck->blockSignals(prev);
     }
     if (!isVideo && m_unmuteCheck) {
         const bool prev = m_unmuteCheck->blockSignals(true);
@@ -626,7 +688,7 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
     }
     
     // Clear active box if it belongs to a hidden video-only option
-    if (!isVideo && m_activeBox && (m_activeBox == m_autoPlayBox || m_activeBox == m_pauseDelayBox || m_activeBox == m_repeatBox || m_activeBox == m_volumeBox || m_activeBox == m_unmuteDelayBox || m_activeBox == m_audioFadeInBox || m_activeBox == m_audioFadeOutBox)) {
+    if (!isVideo && m_activeBox && (m_activeBox == m_autoPlayBox || m_activeBox == m_pauseDelayBox || m_activeBox == m_repeatBox || m_activeBox == m_volumeBox || m_activeBox == m_unmuteDelayBox || m_activeBox == m_audioFadeInBox || m_activeBox == m_audioFadeOutBox || m_activeBox == m_muteDelayBox)) {
         clearActiveBox();
     }
     
@@ -760,7 +822,7 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
     if (event->type() == QEvent::MouseButtonPress) {
         QLabel* box = qobject_cast<QLabel*>(obj);
     if (box && (box == m_displayAfterBox || box == m_unmuteDelayBox || box == m_autoPlayBox || box == m_pauseDelayBox || box == m_repeatBox || 
-        box == m_fadeInBox || box == m_fadeOutBox || box == m_audioFadeInBox || box == m_audioFadeOutBox || box == m_hideDelayBox || box == m_opacityBox || box == m_volumeBox)) {
+        box == m_fadeInBox || box == m_fadeOutBox || box == m_audioFadeInBox || box == m_audioFadeOutBox || box == m_hideDelayBox || box == m_muteDelayBox || box == m_opacityBox || box == m_volumeBox)) {
             // Don't allow interaction with disabled boxes
             if (!box->isEnabled()) {
                 return true; // consume the event but don't activate
@@ -934,7 +996,8 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
 
 bool MediaSettingsPanel::boxSupportsDecimal(QLabel* box) const {
     return box == m_displayAfterBox || box == m_unmuteDelayBox || box == m_autoPlayBox || box == m_fadeInBox ||
-           box == m_fadeOutBox || box == m_audioFadeInBox || box == m_audioFadeOutBox || box == m_hideDelayBox || box == m_pauseDelayBox;
+           box == m_fadeOutBox || box == m_audioFadeInBox || box == m_audioFadeOutBox || box == m_hideDelayBox || box == m_pauseDelayBox ||
+           box == m_muteDelayBox;
 }
 
 bool MediaSettingsPanel::isValidInputForBox(QLabel* box, QChar character) {
@@ -1313,6 +1376,30 @@ void MediaSettingsPanel::onHideDelayToggled(bool checked) {
     }
 }
 
+void MediaSettingsPanel::onMuteDelayToggled(bool checked) {
+    const QString textStyle = QStringLiteral("color: %1;")
+        .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
+
+    if (m_muteDelayCheck) {
+        m_muteDelayCheck->setStyleSheet(textStyle);
+    }
+
+    if (m_muteDelayBox) {
+        if (!checked && m_activeBox == m_muteDelayBox) {
+            clearActiveBox();
+        }
+        setBoxActive(m_muteDelayBox, m_activeBox == m_muteDelayBox);
+    }
+
+    if (m_muteDelaySecondsLabel) {
+        m_muteDelaySecondsLabel->setStyleSheet(textStyle);
+    }
+
+    if (!m_updatingFromMedia) {
+        pushSettingsToMedia();
+    }
+}
+
 void MediaSettingsPanel::onPauseDelayToggled(bool checked) {
     const QString textStyle = QStringLiteral("color: %1;")
         .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
@@ -1441,6 +1528,8 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     applyCheckState(m_unmuteDelayCheck, state.unmuteDelayEnabled);
     applyCheckState(m_hideDelayCheck, state.hideDelayEnabled);
     applyCheckState(m_hideWhenVideoEndsCheck, state.hideWhenVideoEnds);
+    applyCheckState(m_muteDelayCheck, state.muteDelayEnabled);
+    applyCheckState(m_muteWhenVideoEndsCheck, state.muteWhenVideoEnds);
 
     applyBoxText(m_displayAfterBox, state.displayDelayText, QStringLiteral("1"), true);
     applyBoxText(m_autoPlayBox, state.playDelayText, QStringLiteral("1"), true);
@@ -1451,6 +1540,7 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     applyBoxText(m_audioFadeInBox, state.audioFadeInText, QStringLiteral("1"), true);
     applyBoxText(m_audioFadeOutBox, state.audioFadeOutText, QStringLiteral("1"), true);
     applyBoxText(m_hideDelayBox, state.hideDelayText, QStringLiteral("1"), true);
+    applyBoxText(m_muteDelayBox, state.muteDelayText, QStringLiteral("1"), true);
     applyBoxText(m_opacityBox, state.opacityText, QStringLiteral("100"));
     applyBoxText(m_volumeBox, state.volumeText, QStringLiteral("100"));
     applyBoxText(m_unmuteDelayBox, state.unmuteDelayText, QStringLiteral("1"), true);
@@ -1462,6 +1552,7 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     onOpacityToggled(m_opacityCheck ? m_opacityCheck->isChecked() : false);
     onVolumeToggled(m_volumeCheck ? m_volumeCheck->isChecked() : false);
     onHideDelayToggled(m_hideDelayCheck ? m_hideDelayCheck->isChecked() : false);
+    onMuteDelayToggled(m_muteDelayCheck ? m_muteDelayCheck->isChecked() : false);
     onPauseDelayToggled(m_pauseDelayCheck ? m_pauseDelayCheck->isChecked() : false);
 
     m_updatingFromMedia = false;
@@ -1552,6 +1643,9 @@ void MediaSettingsPanel::pushSettingsToMedia() {
     state.hideDelayEnabled = m_hideDelayCheck && m_hideDelayCheck->isChecked();
     state.hideDelayText = trimmedDecimalText(m_hideDelayBox, state.hideDelayText);
     state.hideWhenVideoEnds = m_hideWhenVideoEndsCheck && m_hideWhenVideoEndsCheck->isChecked();
+    state.muteDelayEnabled = m_muteDelayCheck && m_muteDelayCheck->isChecked();
+    state.muteDelayText = trimmedDecimalText(m_muteDelayBox, state.muteDelayText);
+    state.muteWhenVideoEnds = m_muteWhenVideoEndsCheck && m_muteWhenVideoEndsCheck->isChecked();
 
     m_mediaItem->setMediaSettingsState(state);
 }
