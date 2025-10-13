@@ -26,6 +26,7 @@ public:
     void setMediaType(bool isVideo);
     void setMediaItem(class ResizableMediaBase* item);
     void applyOpacityFromUi(); // make publicly callable
+    void applyVolumeFromUi();
     // Access fade durations (seconds). Returns 0 if disabled or invalid. Infinity symbol => treat as 0 (instant) for now.
     double fadeInSeconds() const;
     double fadeOutSeconds() const;
@@ -38,6 +39,7 @@ public:
     void updateAvailableHeight(int maxHeightPx);
     void updatePosition();
     void setAnchorMargins(int leftMarginPx, int topMarginPx, int bottomMarginPx);
+    void syncVolumeFromMedia();
 
     // Optional: accessors to later read values (not used yet).
     QWidget* widget() const { return m_widget; }
@@ -51,6 +53,7 @@ private slots:
     void onOpacityToggled(bool checked);
     void onHideDelayToggled(bool checked);
     void onPauseDelayToggled(bool checked);
+    void onVolumeToggled(bool checked);
 
 private:
     void buildUi(QWidget* parentWidget);
@@ -107,6 +110,8 @@ private:
     // New: set opacity to [x]%
     QCheckBox* m_opacityCheck = nullptr;
     QLabel* m_opacityBox = nullptr;
+    QCheckBox* m_volumeCheck = nullptr;
+    QLabel* m_volumeBox = nullptr;
     QLabel* m_activeBox = nullptr; // currently active box (if any)
     bool m_clearOnFirstType = false; // if true, first keypress replaces previous content
     bool m_pendingDecimalInsertion = false; // awaiting first fractional digit after a decimal point
@@ -122,6 +127,7 @@ private:
     QWidget* m_repeatRow = nullptr;
     QWidget* m_hideDelayRow = nullptr;
     QWidget* m_hideWhenEndsRow = nullptr;
+    QWidget* m_volumeRow = nullptr;
 
     QLabel* m_hideDelaySecondsLabel = nullptr;
     QLabel* m_pauseDelayBox = nullptr;

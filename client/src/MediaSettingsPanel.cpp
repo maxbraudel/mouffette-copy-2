@@ -12,6 +12,7 @@
 #include <QScrollBar>
 #include <QTimer>
 #include <QSizePolicy>
+#include <QSignalBlocker>
 #include <algorithm>
 #include <cmath>
 #include "MediaItems.h" // for ResizableMediaBase
@@ -355,6 +356,26 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         QObject::connect(m_opacityCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onOpacityToggled);
         m_contentLayout->addWidget(row);
     }
+    // 6) Volume with checkbox format (video only)
+    {
+    m_volumeRow = new QWidget(m_innerContent);
+    configureRow(m_volumeRow);
+        auto* h = new QHBoxLayout(m_volumeRow);
+        h->setContentsMargins(0,0,0,0);
+        h->setSpacing(0);
+        m_volumeCheck = new QCheckBox("Volume: ", m_volumeRow);
+        m_volumeCheck->setStyleSheet(overlayTextStyle);
+        m_volumeCheck->installEventFilter(this);
+        m_volumeBox = makeValueBox(QStringLiteral("100"));
+        auto* suffix = new QLabel("%", m_volumeRow);
+        suffix->setStyleSheet(overlayTextStyle);
+        h->addWidget(m_volumeCheck);
+        h->addWidget(m_volumeBox);
+        h->addWidget(suffix);
+        h->addStretch();
+        QObject::connect(m_volumeCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onVolumeToggled);
+        m_contentLayout->addWidget(m_volumeRow);
+    }
     // Widget is now directly parented to toolbar container, no proxy needed
     m_widget->setMouseTracking(true);
     m_widget->setFixedWidth(m_panelWidthPx);
@@ -474,14 +495,22 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
     if (m_hideWhenEndsRow) {
         m_hideWhenEndsRow->setVisible(isVideo);
     }
+    if (m_volumeRow) {
+        m_volumeRow->setVisible(isVideo);
+    }
     if (!isVideo && m_hideWhenVideoEndsCheck) {
         const bool prev = m_hideWhenVideoEndsCheck->blockSignals(true);
         m_hideWhenVideoEndsCheck->setChecked(false);
         m_hideWhenVideoEndsCheck->blockSignals(prev);
     }
+    if (!isVideo && m_volumeCheck) {
+        const bool prev = m_volumeCheck->blockSignals(true);
+        m_volumeCheck->setChecked(false);
+        m_volumeCheck->blockSignals(prev);
+    }
     
     // Clear active box if it belongs to a hidden video-only option
-    if (!isVideo && m_activeBox && (m_activeBox == m_autoPlayBox || m_activeBox == m_pauseDelayBox || m_activeBox == m_repeatBox)) {
+    if (!isVideo && m_activeBox && (m_activeBox == m_autoPlayBox || m_activeBox == m_pauseDelayBox || m_activeBox == m_repeatBox || m_activeBox == m_volumeBox)) {
         clearActiveBox();
     }
     
@@ -587,6 +616,7 @@ void MediaSettingsPanel::clearActiveBox() {
     if (m_activeBox) {
         QLabel* was = m_activeBox;
         bool wasOpacityBox = (was == m_opacityBox);
+        bool wasVolumeBox = (was == m_volumeBox);
         setBoxActive(m_activeBox, false);
         m_activeBox = nullptr;
         // Reset first-type-clears flag when deactivating
@@ -595,6 +625,9 @@ void MediaSettingsPanel::clearActiveBox() {
         // If user just finished editing opacity and option is enabled, apply it now
         if (wasOpacityBox && m_opacityCheck && m_opacityCheck->isChecked()) {
             applyOpacityFromUi();
+        }
+        if (wasVolumeBox && m_volumeCheck && m_volumeCheck->isChecked()) {
+            applyVolumeFromUi();
         }
     }
 }
@@ -611,7 +644,7 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
     if (event->type() == QEvent::MouseButtonPress) {
         QLabel* box = qobject_cast<QLabel*>(obj);
     if (box && (box == m_displayAfterBox || box == m_autoPlayBox || box == m_pauseDelayBox || box == m_repeatBox || 
-           box == m_fadeInBox || box == m_fadeOutBox || box == m_hideDelayBox || box == m_opacityBox)) {
+        box == m_fadeInBox || box == m_fadeOutBox || box == m_hideDelayBox || box == m_opacityBox || box == m_volumeBox)) {
             // Don't allow interaction with disabled boxes
             if (!box->isEnabled()) {
                 return true; // consume the event but don't activate
@@ -738,7 +771,7 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
                         }
                     }
 
-                    if (m_activeBox == m_opacityBox) {
+                    if (m_activeBox == m_opacityBox || m_activeBox == m_volumeBox) {
                         bool ok = false;
                         int val = newText.toInt(&ok);
                         if (ok && val > 100) {
@@ -796,7 +829,7 @@ bool MediaSettingsPanel::isValidInputForBox(QLabel* box, QChar character) {
         return character.isDigit() && character != '0';
     }
 
-    if (box == m_opacityBox) {
+    if (box == m_opacityBox || box == m_volumeBox) {
         return character.isDigit();
     }
 
@@ -834,6 +867,64 @@ void MediaSettingsPanel::applyOpacityFromUi() {
 
     if (!m_opacityCheck || !m_opacityBox) return;
     pushSettingsToMedia();
+}
+
+void MediaSettingsPanel::onVolumeToggled(bool checked) {
+    Q_UNUSED(checked);
+    applyVolumeFromUi();
+    if (!m_updatingFromMedia) {
+        pushSettingsToMedia();
+    }
+}
+
+void MediaSettingsPanel::applyVolumeFromUi() {
+    if (!m_mediaItem) return;
+    auto* videoItem = dynamic_cast<ResizableVideoItem*>(m_mediaItem);
+    if (!videoItem) return;
+
+    if (m_updatingFromMedia) {
+        videoItem->applyVolumeOverrideFromState();
+        return;
+    }
+
+    if (!m_volumeCheck || !m_volumeBox) return;
+    pushSettingsToMedia();
+}
+
+void MediaSettingsPanel::syncVolumeFromMedia() {
+    if (!m_mediaItem || !m_volumeBox) return;
+    auto* videoItem = dynamic_cast<ResizableVideoItem*>(m_mediaItem);
+    if (!videoItem) return;
+
+    const bool previousUpdating = m_updatingFromMedia;
+    m_updatingFromMedia = true;
+
+    const auto state = m_mediaItem->mediaSettingsState();
+    const bool overrideEnabled = state.volumeOverrideEnabled;
+
+    if (m_volumeCheck) {
+        QSignalBlocker blocker(m_volumeCheck);
+        m_volumeCheck->setChecked(overrideEnabled);
+    }
+
+    if (m_activeBox != m_volumeBox) {
+        int percent = std::clamp<int>(static_cast<int>(std::lround(videoItem->volume() * 100.0)), 0, 100);
+        QString text = overrideEnabled ? state.volumeText.trimmed() : QString::number(percent);
+        if (text.isEmpty() || text == QStringLiteral("...")) {
+            text = QString::number(percent);
+        }
+        bool ok = false;
+        int parsed = text.toInt(&ok);
+        if (!ok) {
+            parsed = percent;
+        }
+        parsed = std::clamp(parsed, 0, 100);
+        const QString sanitized = QString::number(parsed);
+        QSignalBlocker blocker(m_volumeBox);
+        m_volumeBox->setText(sanitized);
+    }
+
+    m_updatingFromMedia = previousUpdating;
 }
 
 double MediaSettingsPanel::fadeInSeconds() const {
@@ -1202,6 +1293,7 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     applyCheckState(m_fadeInCheck, state.fadeInEnabled);
     applyCheckState(m_fadeOutCheck, state.fadeOutEnabled);
     applyCheckState(m_opacityCheck, state.opacityOverrideEnabled);
+    applyCheckState(m_volumeCheck, state.volumeOverrideEnabled);
     applyCheckState(m_hideDelayCheck, state.hideDelayEnabled);
     applyCheckState(m_hideWhenVideoEndsCheck, state.hideWhenVideoEnds);
 
@@ -1213,11 +1305,13 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     applyBoxText(m_fadeOutBox, state.fadeOutText, QStringLiteral("1"), true);
     applyBoxText(m_hideDelayBox, state.hideDelayText, QStringLiteral("1"), true);
     applyBoxText(m_opacityBox, state.opacityText, QStringLiteral("100"));
+    applyBoxText(m_volumeBox, state.volumeText, QStringLiteral("100"));
 
     // Re-run UI interlock logic without persisting back to the media item
     onDisplayAutomaticallyToggled(m_displayAfterCheck ? m_displayAfterCheck->isChecked() : false);
     onPlayAutomaticallyToggled(m_autoPlayCheck ? m_autoPlayCheck->isChecked() : false);
     onOpacityToggled(m_opacityCheck ? m_opacityCheck->isChecked() : false);
+    onVolumeToggled(m_volumeCheck ? m_volumeCheck->isChecked() : false);
     onHideDelayToggled(m_hideDelayCheck ? m_hideDelayCheck->isChecked() : false);
     onPauseDelayToggled(m_pauseDelayCheck ? m_pauseDelayCheck->isChecked() : false);
 
@@ -1225,6 +1319,7 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
 
     // Ensure opacity is immediately applied (uses stored state when guard is false)
     applyOpacityFromUi();
+    applyVolumeFromUi();
 }
 
 void MediaSettingsPanel::pushSettingsToMedia() {
@@ -1267,6 +1362,17 @@ void MediaSettingsPanel::pushSettingsToMedia() {
         return value;
     };
 
+    auto trimmedPercentText = [&](QLabel* label, const QString& fallback) {
+        QString value = trimmedText(label, fallback);
+        bool ok = false;
+        int percent = value.toInt(&ok);
+        if (!ok) {
+            percent = fallback.toInt(&ok) ? fallback.toInt(&ok) : 100;
+        }
+        percent = std::clamp(percent, 0, 100);
+        return QString::number(percent);
+    };
+
     ResizableMediaBase::MediaSettingsState state = m_mediaItem->mediaSettingsState();
     state.displayAutomatically = m_displayAfterCheck && m_displayAfterCheck->isChecked();
     state.displayDelayEnabled = m_displayDelayCheck && m_displayDelayCheck->isChecked();
@@ -1284,6 +1390,9 @@ void MediaSettingsPanel::pushSettingsToMedia() {
     state.fadeOutText = trimmedDecimalText(m_fadeOutBox, state.fadeOutText);
     state.opacityOverrideEnabled = m_opacityCheck && m_opacityCheck->isChecked();
     state.opacityText = trimmedText(m_opacityBox, state.opacityText);
+    const QString volumeFallback = state.volumeText.isEmpty() ? QStringLiteral("100") : state.volumeText;
+    state.volumeOverrideEnabled = m_volumeCheck && m_volumeCheck->isChecked();
+    state.volumeText = trimmedPercentText(m_volumeBox, volumeFallback);
     state.hideDelayEnabled = m_hideDelayCheck && m_hideDelayCheck->isChecked();
     state.hideDelayText = trimmedDecimalText(m_hideDelayBox, state.hideDelayText);
     state.hideWhenVideoEnds = m_hideWhenVideoEndsCheck && m_hideWhenVideoEndsCheck->isChecked();

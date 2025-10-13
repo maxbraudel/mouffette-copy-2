@@ -2756,7 +2756,7 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
         if (m_scene) {
             const QPointF scenePosEarly = mapToScene(event->pos());
             const QList<QGraphicsItem*> selEarly = m_scene->selectedItems();
-            for (QGraphicsItem* it : selEarly) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) { if (v->handleControlsPressAtItemPos(v->mapFromScene(scenePosEarly))) { m_overlayMouseDown = true; event->accept(); return; } }
+            for (QGraphicsItem* it : selEarly) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) { if (v->handleControlsPressAtItemPos(v->mapFromScene(scenePosEarly))) { if (m_globalSettingsPanel) { m_globalSettingsPanel->syncVolumeFromMedia(); } m_overlayMouseDown = true; event->accept(); return; } }
         }
         // Space+drag always pans
         if (spaceHeld) { m_panning = true; m_lastPanPoint = event->pos(); event->accept(); return; }
@@ -2801,13 +2801,13 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
             }
             if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaHit)) {
                 const QPointF itemPos = v->mapFromScene(mapToScene(event->pos()));
-                if (v->handleControlsPressAtItemPos(itemPos)) { event->accept(); return; }
+                if (v->handleControlsPressAtItemPos(itemPos)) { if (m_globalSettingsPanel) { m_globalSettingsPanel->syncVolumeFromMedia(); } event->accept(); return; }
             }
             QMouseEvent synthetic(event->type(), event->position(), event->scenePosition(), event->globalPosition(), event->button(), event->buttons(), Qt::NoModifier);
             QGraphicsView::mousePressEvent(&synthetic);
             return;
         }
-        for (QGraphicsItem* it : scene()->selectedItems()) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) { const QPointF itemPos = v->mapFromScene(mapToScene(event->pos())); if (v->handleControlsPressAtItemPos(itemPos)) { event->accept(); return; } }
+        for (QGraphicsItem* it : scene()->selectedItems()) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) { const QPointF itemPos = v->mapFromScene(mapToScene(event->pos())); if (v->handleControlsPressAtItemPos(itemPos)) { if (m_globalSettingsPanel) { m_globalSettingsPanel->syncVolumeFromMedia(); } event->accept(); return; } }
     if (m_scene) m_scene->clearSelection();
         // Start panning when clicking empty space: capture precise anchor so the scene point under
         // the cursor stays under the cursor during the entire drag.
@@ -2864,7 +2864,7 @@ void ScreenCanvas::mouseDoubleClickEvent(QMouseEvent* event) {
         if (m_scene) {
             const QPointF scenePosSel = mapToScene(event->pos());
             const QList<QGraphicsItem*> sel = m_scene->selectedItems();
-            for (QGraphicsItem* it : sel) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) if (v->handleControlsPressAtItemPos(v->mapFromScene(scenePosSel))) { m_overlayMouseDown = true; event->accept(); return; }
+            for (QGraphicsItem* it : sel) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) if (v->handleControlsPressAtItemPos(v->mapFromScene(scenePosSel))) { if (m_globalSettingsPanel) m_globalSettingsPanel->syncVolumeFromMedia(); m_overlayMouseDown = true; event->accept(); return; }
             // Prefer the already-selected item under the cursor, even if occluded
             for (QGraphicsItem* it : sel) {
                 if (auto* m = dynamic_cast<ResizableMediaBase*>(it)) {
@@ -2883,7 +2883,7 @@ void ScreenCanvas::mouseDoubleClickEvent(QMouseEvent* event) {
             if (scene() && !mediaHit->isSelected()) { scene()->clearSelection(); mediaHit->setSelected(true); }
             if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaHit)) {
                 const QPointF itemPos = v->mapFromScene(mapToScene(event->pos()));
-                if (v->handleControlsPressAtItemPos(itemPos)) { event->accept(); return; }
+                if (v->handleControlsPressAtItemPos(itemPos)) { if (m_globalSettingsPanel) m_globalSettingsPanel->syncVolumeFromMedia(); event->accept(); return; }
             }
             QGraphicsView::mouseDoubleClickEvent(event);
             // Re-assert selection of mediaHit (or keep previous selection)
@@ -2926,7 +2926,7 @@ void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
         }
     }
     if (m_overlayMouseDown) {
-        if (m_scene) { const QList<QGraphicsItem*> sel = m_scene->selectedItems(); for (QGraphicsItem* it : sel) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) { if (v->isDraggingProgress() || v->isDraggingVolume()) { v->updateDragWithScenePos(mapToScene(event->pos())); event->accept(); return; } } }
+    if (m_scene) { const QList<QGraphicsItem*> sel = m_scene->selectedItems(); for (QGraphicsItem* it : sel) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) { if (v->isDraggingProgress() || v->isDraggingVolume()) { v->updateDragWithScenePos(mapToScene(event->pos())); if (v->isDraggingVolume() && m_globalSettingsPanel) { m_globalSettingsPanel->syncVolumeFromMedia(); } event->accept(); return; } } }
         event->accept(); return;
     }
     m_lastMousePos = event->pos();
@@ -2946,7 +2946,7 @@ void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
             event->accept();
             return;
         }
-        for (QGraphicsItem* it : sel) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) if (v->isSelected() && (v->isDraggingProgress() || v->isDraggingVolume())) { v->updateDragWithScenePos(mapToScene(event->pos())); event->accept(); return; }
+    for (QGraphicsItem* it : sel) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) if (v->isSelected() && (v->isDraggingProgress() || v->isDraggingVolume())) { v->updateDragWithScenePos(mapToScene(event->pos())); if (v->isDraggingVolume() && m_globalSettingsPanel) { m_globalSettingsPanel->syncVolumeFromMedia(); } event->accept(); return; }
     const QList<QGraphicsItem*> hitItems = items(event->pos()); bool hitMedia = false; for (QGraphicsItem* it : hitItems) if (toMedia(it)) { hitMedia = true; break; } if (hitMedia) { QGraphicsView::mouseMoveEvent(event); return; }
         if (m_panning) {
             // Compute where the original anchor scene point currently appears in view coordinates
@@ -3016,10 +3016,10 @@ void ScreenCanvas::mouseReleaseEvent(QMouseEvent* event) {
         bool hasBlockingOverlay = false; for (QGraphicsItem* hi : hitItems) if (hi->data(0).toString() == QLatin1String("blocking-overlay")) { hasBlockingOverlay = true; break; }
         if (hasBlockingOverlay) { QGraphicsView::mouseReleaseEvent(event); return; }
         if (m_overlayMouseDown) {
-            if (m_scene) { const QList<QGraphicsItem*> sel = m_scene->selectedItems(); for (QGraphicsItem* it : sel) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) if (v->isDraggingProgress() || v->isDraggingVolume()) v->endDrag(); }
+            if (m_scene) { const QList<QGraphicsItem*> sel = m_scene->selectedItems(); for (QGraphicsItem* it : sel) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) { if (v->isDraggingProgress() || v->isDraggingVolume()) { v->endDrag(); if (m_globalSettingsPanel) { m_globalSettingsPanel->syncVolumeFromMedia(); } } } }
             m_overlayMouseDown = false; event->accept(); return;
         }
-        for (QGraphicsItem* it : m_scene->items()) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) if (v->isSelected() && (v->isDraggingProgress() || v->isDraggingVolume())) { v->endDrag(); event->accept(); return; }
+    for (QGraphicsItem* it : m_scene->items()) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) if (v->isSelected() && (v->isDraggingProgress() || v->isDraggingVolume())) { v->endDrag(); if (m_globalSettingsPanel) { m_globalSettingsPanel->syncVolumeFromMedia(); } event->accept(); return; }
         if (m_panning) { m_panning = false; event->accept(); return; }
         bool wasResizing = false; for (QGraphicsItem* it : m_scene->items()) if (auto* rp = dynamic_cast<ResizableMediaBase*>(it)) if (rp->isActivelyResizing()) { wasResizing = true; break; }
         if (wasResizing) viewport()->unsetCursor();

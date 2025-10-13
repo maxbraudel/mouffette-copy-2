@@ -48,6 +48,8 @@ public:
         QString fadeOutText = QStringLiteral("1");
         bool opacityOverrideEnabled = false;
         QString opacityText = QStringLiteral("100");
+        bool volumeOverrideEnabled = false;
+        QString volumeText = QStringLiteral("100");
         bool hideDelayEnabled = false;
         QString hideDelayText = QStringLiteral("1");
         bool hideWhenVideoEnds = false;
@@ -288,6 +290,7 @@ public:
     void requestOverlayRelayout() { updateControlsLayout(); }
     void setApplicationSuspended(bool suspended);
     QMediaPlayer* mediaPlayer() const { return m_player; }
+    void applyVolumeOverrideFromState();
 
     // Performance / diagnostics
     void setRepaintBudget(int ms) { m_repaintBudgetMs = std::max(1, ms); }
@@ -339,6 +342,9 @@ private:
     bool shouldAutoRepeat() const;
     bool consumeAutoRepeatOpportunity();
     qint64 nearStartThresholdMs() const;
+    void setVolumeFromControl(qreal ratio, bool fromSettings);
+    void applyVolumeRatio(qreal ratio);
+    qreal volumeFromSettingsState() const;
 
     qreal baseWidth() const { return static_cast<qreal>(m_baseSize.width()); }
     qreal baseHeight() const { return static_cast<qreal>(m_baseSize.height()); }
@@ -380,5 +386,6 @@ private:
     int m_settingsRepeatLoopCount = 0;
     int m_settingsRepeatLoopsRemaining = 0;
     bool m_settingsRepeatSessionActive = false;
+    bool m_volumeChangeFromSettings = false;
 };
 

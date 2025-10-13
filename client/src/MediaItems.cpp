@@ -1056,6 +1056,17 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
     m_player->setVideoSink(m_sink);
     m_player->setSource(QUrl::fromLocalFile(filePath));
 
+    QObject::connect(m_audio, &QAudioOutput::volumeChanged, m_player, [this](qreal v){
+        v = std::clamp<qreal>(v, 0.0, 1.0);
+        if (!m_volumeChangeFromSettings) {
+            const int percent = std::clamp<int>(static_cast<int>(std::lround(v * 100.0)), 0, 100);
+            const QString text = QString::number(percent);
+            if (m_mediaSettings.volumeText != text) {
+                m_mediaSettings.volumeText = text;
+            }
+        }
+    });
+
 
     QObject::connect(m_sink, &QVideoSink::videoFrameChanged, m_player, [this](const QVideoFrame& f){
         ++m_framesReceived;
@@ -1420,7 +1431,7 @@ void ResizableVideoItem::setExternalPosterImage(const QImage& img) { if (!img.is
 void ResizableVideoItem::updateDragWithScenePos(const QPointF& scenePos) {
     QPointF p = mapFromScene(scenePos);
     if (m_draggingProgress) { qreal r = (p.x() - m_progRectItemCoords.left()) / m_progRectItemCoords.width(); r = std::clamp<qreal>(r, 0.0, 1.0); m_holdLastFrameAtEnd = false; seekToRatio(r); if (m_durationMs > 0) m_positionMs = static_cast<qint64>(r * m_durationMs); updateControlsLayout(); update(); }
-    else if (m_draggingVolume) { qreal r = (p.x() - m_volumeRectItemCoords.left()) / m_volumeRectItemCoords.width(); r = std::clamp<qreal>(r, 0.0, 1.0); if (m_audio) m_audio->setVolume(r); updateControlsLayout(); update(); }
+    else if (m_draggingVolume) { qreal r = (p.x() - m_volumeRectItemCoords.left()) / m_volumeRectItemCoords.width(); r = std::clamp<qreal>(r, 0.0, 1.0); setVolumeFromControl(r, false); updateControlsLayout(); update(); }
 }
 
 void ResizableVideoItem::endDrag() { if (m_draggingProgress || m_draggingVolume) { m_draggingProgress = false; m_draggingVolume = false; ungrabMouse(); updateControlsLayout(); update(); } }
@@ -1504,7 +1515,7 @@ bool ResizableVideoItem::handleControlsPressAtItemPos(const QPointF& itemPos) {
     if (m_repeatBtnRectItemCoords.contains(itemPos)) { toggleRepeat(); return true; }
     if (m_muteBtnRectItemCoords.contains(itemPos)) { toggleMute(); return true; }
     if (m_progRectItemCoords.contains(itemPos)) { qreal r = (itemPos.x() - m_progRectItemCoords.left()) / m_progRectItemCoords.width(); m_holdLastFrameAtEnd = false; seekToRatio(r); m_draggingProgress = true; grabMouse(); return true; }
-    if (m_volumeRectItemCoords.contains(itemPos)) { qreal r = (itemPos.x() - m_volumeRectItemCoords.left()) / m_volumeRectItemCoords.width(); r = std::clamp<qreal>(r, 0.0, 1.0); if (m_audio) m_audio->setVolume(r); updateControlsLayout(); m_draggingVolume = true; grabMouse(); return true; }
+    if (m_volumeRectItemCoords.contains(itemPos)) { qreal r = (itemPos.x() - m_volumeRectItemCoords.left()) / m_volumeRectItemCoords.width(); r = std::clamp<qreal>(r, 0.0, 1.0); setVolumeFromControl(r, false); updateControlsLayout(); m_draggingVolume = true; grabMouse(); return true; }
     return false;
 }
 
@@ -1564,7 +1575,7 @@ void ResizableVideoItem::mousePressEvent(QGraphicsSceneMouseEvent* event) {
     if (!m_controlsLockedUntilReady && isSelected() && m_repeatBtnRectItemCoords.contains(event->pos())) { toggleRepeat(); event->accept(); return; }
     if (!m_controlsLockedUntilReady && isSelected() && m_muteBtnRectItemCoords.contains(event->pos())) { toggleMute(); event->accept(); return; }
     if (!m_controlsLockedUntilReady && isSelected() && m_progRectItemCoords.contains(event->pos())) { qreal r = (event->pos().x() - m_progRectItemCoords.left()) / m_progRectItemCoords.width(); m_seeking = true; if (m_progressTimer) m_progressTimer->stop(); seekToRatio(r); m_draggingProgress = true; grabMouse(); event->accept(); return; }
-    if (!m_controlsLockedUntilReady && isSelected() && m_volumeRectItemCoords.contains(event->pos())) { qreal r = (event->pos().x() - m_volumeRectItemCoords.left()) / m_volumeRectItemCoords.width(); r = std::clamp<qreal>(r, 0.0, 1.0); if (m_audio) m_audio->setVolume(r); updateControlsLayout(); m_draggingVolume = true; grabMouse(); event->accept(); return; }
+    if (!m_controlsLockedUntilReady && isSelected() && m_volumeRectItemCoords.contains(event->pos())) { qreal r = (event->pos().x() - m_volumeRectItemCoords.left()) / m_volumeRectItemCoords.width(); r = std::clamp<qreal>(r, 0.0, 1.0); setVolumeFromControl(r, false); updateControlsLayout(); m_draggingVolume = true; grabMouse(); event->accept(); return; }
     ResizableMediaBase::mousePressEvent(event);
 }
 
@@ -1575,7 +1586,7 @@ void ResizableVideoItem::mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event) 
         if (m_repeatBtnRectItemCoords.contains(event->pos())) { toggleRepeat(); event->accept(); return; }
         if (m_muteBtnRectItemCoords.contains(event->pos())) { toggleMute(); event->accept(); return; }
         if (m_progRectItemCoords.contains(event->pos())) { qreal r = (event->pos().x() - m_progRectItemCoords.left()) / m_progRectItemCoords.width(); seekToRatio(r); event->accept(); return; }
-        if (m_volumeRectItemCoords.contains(event->pos())) { qreal r = (event->pos().x() - m_volumeRectItemCoords.left()) / m_volumeRectItemCoords.width(); r = std::clamp<qreal>(r, 0.0, 1.0); if (m_audio) m_audio->setVolume(r); event->accept(); return; }
+    if (m_volumeRectItemCoords.contains(event->pos())) { qreal r = (event->pos().x() - m_volumeRectItemCoords.left()) / m_volumeRectItemCoords.width(); r = std::clamp<qreal>(r, 0.0, 1.0); setVolumeFromControl(r, false); event->accept(); return; }
     }
     ResizableMediaBase::mouseDoubleClickEvent(event);
 }
@@ -1595,7 +1606,7 @@ void ResizableVideoItem::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
     if (m_activeHandle != None) { ResizableMediaBase::mouseMoveEvent(event); return; }
     if (event->buttons() & Qt::LeftButton) {
         if (m_draggingProgress) { qreal r = (event->pos().x() - m_progRectItemCoords.left()) / m_progRectItemCoords.width(); r = std::clamp<qreal>(r, 0.0, 1.0); seekToRatio(r); updateControlsLayout(); update(); event->accept(); return; }
-        if (m_draggingVolume) { qreal r = (event->pos().x() - m_volumeRectItemCoords.left()) / m_volumeRectItemCoords.width(); r = std::clamp<qreal>(r, 0.0, 1.0); if (m_audio) m_audio->setVolume(r); updateControlsLayout(); update(); event->accept(); return; }
+    if (m_draggingVolume) { qreal r = (event->pos().x() - m_volumeRectItemCoords.left()) / m_volumeRectItemCoords.width(); r = std::clamp<qreal>(r, 0.0, 1.0); setVolumeFromControl(r, false); updateControlsLayout(); update(); event->accept(); return; }
     }
     ResizableMediaBase::mouseMoveEvent(event);
 }
@@ -1664,6 +1675,61 @@ void ResizableVideoItem::updateControlsLayout() {
     bool muted = m_audio && m_audio->isMuted(); if (m_muteIcon && m_muteSlashIcon) { m_muteIcon->setVisible(!muted); m_muteSlashIcon->setVisible(muted); placeSvg(m_muteIcon, muteWpx, rowHpx); placeSvg(m_muteSlashIcon, muteWpx, rowHpx);} const qreal rowHItem = toItemLengthFromPixels(rowHpx); const qreal playWItem = toItemLengthFromPixels(playWpx); const qreal stopWItem = toItemLengthFromPixels(stopWpx); const qreal repeatWItem = toItemLengthFromPixels(repeatWpx); const qreal muteWItem = toItemLengthFromPixels(muteWpx); const qreal volumeWItem = toItemLengthFromPixels(volumeWpx); const qreal progWItem = toItemLengthFromPixels(progWpx); const qreal gapItem = toItemLengthFromPixels(gapPx); const qreal x0Item = toItemLengthFromPixels(int(std::round(x0))); const qreal x1Item = toItemLengthFromPixels(int(std::round(x1))); const qreal x2Item = toItemLengthFromPixels(int(std::round(x2))); const qreal x3Item = toItemLengthFromPixels(int(std::round(x3))); const qreal x4Item = toItemLengthFromPixels(int(std::round(x4))); m_playBtnRectItemCoords = QRectF(ctrlTopLeftItem.x()+x0Item, ctrlTopLeftItem.y()+0, playWItem,rowHItem); m_stopBtnRectItemCoords = QRectF(ctrlTopLeftItem.x()+x1Item, ctrlTopLeftItem.y()+0, stopWItem,rowHItem); m_repeatBtnRectItemCoords = QRectF(ctrlTopLeftItem.x()+x2Item, ctrlTopLeftItem.y()+0, repeatWItem,rowHItem); m_muteBtnRectItemCoords = QRectF(ctrlTopLeftItem.x()+x3Item, ctrlTopLeftItem.y()+0, muteWItem,rowHItem); m_volumeRectItemCoords = QRectF(ctrlTopLeftItem.x()+x4Item, ctrlTopLeftItem.y()+0, volumeWItem,rowHItem); m_progRectItemCoords = QRectF(ctrlTopLeftItem.x()+0, ctrlTopLeftItem.y()+rowHItem+gapItem, progWItem,rowHItem);
 }
 
+qreal ResizableVideoItem::volumeFromSettingsState() const {
+    const MediaSettingsState& state = mediaSettingsState();
+    QString text = state.volumeText.trimmed();
+    if (text.isEmpty() || text == QStringLiteral("...")) {
+        text = QStringLiteral("100");
+    }
+    bool ok = false;
+    int percent = text.toInt(&ok);
+    if (!ok) {
+        percent = 100;
+    }
+    percent = std::clamp(percent, 0, 100);
+    return static_cast<qreal>(percent) / 100.0;
+}
+
+void ResizableVideoItem::applyVolumeRatio(qreal ratio) {
+    ratio = std::clamp<qreal>(ratio, 0.0, 1.0);
+    const bool previousGuard = m_volumeChangeFromSettings;
+    m_volumeChangeFromSettings = true;
+    if (m_audio) {
+        m_audio->setVolume(ratio);
+    }
+    m_volumeChangeFromSettings = previousGuard;
+}
+
+void ResizableVideoItem::setVolumeFromControl(qreal ratio, bool fromSettings) {
+    ratio = std::clamp<qreal>(ratio, 0.0, 1.0);
+
+    if (fromSettings) {
+        applyVolumeRatio(ratio);
+        return;
+    }
+
+    const int percent = std::clamp<int>(static_cast<int>(std::lround(ratio * 100.0)), 0, 100);
+    const QString text = QString::number(percent);
+
+    if (!m_mediaSettings.volumeOverrideEnabled) {
+        m_mediaSettings.volumeOverrideEnabled = true;
+    }
+    if (m_mediaSettings.volumeText != text) {
+        m_mediaSettings.volumeText = text;
+    }
+
+    applyVolumeRatio(static_cast<qreal>(percent) / 100.0);
+}
+
+void ResizableVideoItem::applyVolumeOverrideFromState() {
+    const MediaSettingsState& state = mediaSettingsState();
+    qreal ratio = 1.0;
+    if (state.volumeOverrideEnabled) {
+        ratio = volumeFromSettingsState();
+    }
+    applyVolumeRatio(ratio);
+}
+
 bool ResizableVideoItem::isVisibleInAnyView() const { if (!scene() || scene()->views().isEmpty()) return false; auto *view = scene()->views().first(); if (!view || !view->viewport()) return false; QRectF viewportRect = view->viewport()->rect(); QRectF sceneRect = view->mapToScene(viewportRect.toRect()).boundingRect(); QRectF itemSceneRect = mapToScene(boundingRect()).boundingRect(); return sceneRect.intersects(itemSceneRect); }
 bool ResizableVideoItem::shouldRepaint() const { const qint64 now = QDateTime::currentMSecsSinceEpoch(); return (now - m_lastRepaintMs) >= m_repaintBudgetMs; }
 void ResizableVideoItem::logFrameStats() const {
@@ -1717,6 +1783,7 @@ void ResizableVideoItem::onMediaSettingsChanged() {
         m_settingsRepeatLoopsRemaining = std::clamp(m_settingsRepeatLoopsRemaining, 0, m_settingsRepeatLoopCount);
     }
 
+    applyVolumeOverrideFromState();
     updateControlsLayout();
 }
 
