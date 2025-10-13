@@ -180,10 +180,13 @@ bool ResizableMediaBase::autoDisplayEnabled() const {
 
 int ResizableMediaBase::autoDisplayDelayMs() const {
     if (!autoDisplayEnabled() || !m_mediaSettings.displayDelayEnabled) return 0;
+    QString text = m_mediaSettings.displayDelayText.trimmed();
+    if (text.isEmpty() || text == QStringLiteral("...")) return 0;
+    text.replace(',', '.');
     bool ok = false;
-    int value = m_mediaSettings.displayDelayText.trimmed().toInt(&ok);
-    if (!ok || value < 0) return 0;
-    return value * 1000;
+    double value = text.toDouble(&ok);
+    if (!ok || value < 0.0) return 0;
+    return static_cast<int>(std::lround(value * 1000.0));
 }
 
 bool ResizableMediaBase::autoPlayEnabled() const {
@@ -192,10 +195,13 @@ bool ResizableMediaBase::autoPlayEnabled() const {
 
 int ResizableMediaBase::autoPlayDelayMs() const {
     if (!autoPlayEnabled() || !m_mediaSettings.playDelayEnabled) return 0;
+    QString text = m_mediaSettings.playDelayText.trimmed();
+    if (text.isEmpty() || text == QStringLiteral("...")) return 0;
+    text.replace(',', '.');
     bool ok = false;
-    int value = m_mediaSettings.playDelayText.trimmed().toInt(&ok);
-    if (!ok || value < 0) return 0;
-    return value * 1000;
+    double value = text.toDouble(&ok);
+    if (!ok || value < 0.0) return 0;
+    return static_cast<int>(std::lround(value * 1000.0));
 }
 
 bool ResizableMediaBase::autoPauseEnabled() const {
@@ -204,10 +210,13 @@ bool ResizableMediaBase::autoPauseEnabled() const {
 
 int ResizableMediaBase::autoPauseDelayMs() const {
     if (!autoPauseEnabled()) return 0;
+    QString text = m_mediaSettings.pauseDelayText.trimmed();
+    if (text.isEmpty() || text == QStringLiteral("...")) return 0;
+    text.replace(',', '.');
     bool ok = false;
-    int value = m_mediaSettings.pauseDelayText.trimmed().toInt(&ok);
-    if (!ok || value < 0) return 0;
-    return value * 1000;
+    double value = text.toDouble(&ok);
+    if (!ok || value < 0.0) return 0;
+    return static_cast<int>(std::lround(value * 1000.0));
 }
 
 bool ResizableMediaBase::autoHideEnabled() const {
@@ -216,10 +225,13 @@ bool ResizableMediaBase::autoHideEnabled() const {
 
 int ResizableMediaBase::autoHideDelayMs() const {
     if (!autoHideEnabled()) return 0;
+    QString text = m_mediaSettings.hideDelayText.trimmed();
+    if (text.isEmpty() || text == QStringLiteral("...")) return 0;
+    text.replace(',', '.');
     bool ok = false;
-    int value = m_mediaSettings.hideDelayText.trimmed().toInt(&ok);
-    if (!ok || value < 0) return 0;
-    return value * 1000;
+    double value = text.toDouble(&ok);
+    if (!ok || value < 0.0) return 0;
+    return static_cast<int>(std::lround(value * 1000.0));
 }
 
 bool ResizableMediaBase::hideWhenVideoEnds() const {

@@ -591,6 +591,7 @@ void MediaSettingsPanel::clearActiveBox() {
         m_activeBox = nullptr;
         // Reset first-type-clears flag when deactivating
         m_clearOnFirstType = false;
+        m_pendingDecimalInsertion = false;
         // If user just finished editing opacity and option is enabled, apply it now
         if (wasOpacityBox && m_opacityCheck && m_opacityCheck->isChecked()) {
             applyOpacityFromUi();
@@ -625,6 +626,7 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
             box->setFocus();
             // Enable one-shot clear-on-type behavior
             m_clearOnFirstType = true;
+            m_pendingDecimalInsertion = false;
             return true; // consume the event
         }
     }
@@ -653,6 +655,7 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
         // Backspace clears the box and shows "..."
         else if (keyEvent->key() == Qt::Key_Backspace) {
             m_activeBox->setText("...");
+            m_pendingDecimalInsertion = false;
             if (!m_updatingFromMedia) {
                 pushSettingsToMedia();
             }
@@ -663,6 +666,7 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
             // Infinity is only allowed for repeat box
             if (m_activeBox == m_repeatBox) {
                 m_activeBox->setText("∞");
+                m_pendingDecimalInsertion = false;
                 if (!m_updatingFromMedia) {
                     pushSettingsToMedia();
                 }
@@ -676,66 +680,91 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
         else {
             QString text = keyEvent->text();
             if (!text.isEmpty() && isValidInputForBox(m_activeBox, text[0])) {
-                QString currentText = m_activeBox->text();
-                QString newText;
-                
-                // On first key after selection, replace entire content
-                if (m_clearOnFirstType) {
-                    newText = text;
-                    m_clearOnFirstType = false;
+                const QChar ch = text[0];
+
+                // Handle decimal separator explicitly
+                if (ch == '.') {
+                    if (!boxSupportsDecimal(m_activeBox)) {
+                        return true;
+                    }
+                    QString currentText = m_activeBox->text();
+                    QString effectiveText = currentText;
+                    const bool replaceAll = m_clearOnFirstType || effectiveText == "..." || effectiveText == "∞";
+                    if (replaceAll) {
+                        effectiveText.clear();
+                        m_clearOnFirstType = false;
+                    }
+                    if (effectiveText.isEmpty()) {
+                        return true; // dot cannot be first character
+                    }
+                    if (effectiveText.contains('.')) {
+                        return true; // only one dot allowed
+                    }
+                    if (m_pendingDecimalInsertion) {
+                        return true;
+                    }
+                    // Append decimal point immediately so the user sees it, but remember that a digit must follow
+                    effectiveText.append('.');
+                    m_activeBox->setText(effectiveText);
+                    m_pendingDecimalInsertion = true;
+                    if (!m_updatingFromMedia) {
+                        // Avoid propagating a trailing decimal to the media; wait until a digit is entered
+                        // If the user finishes editing without adding a digit, the later validation will reset the value
+                    }
+                    return true;
                 }
-                else if (currentText == "..." || currentText == "∞") {
-                    // If current text is cleared state or infinity symbol, replace it
-                    newText = text;
-                } else {
-                    // Append to existing text
-                    newText = currentText + text;
-                }
-                
-                // Check if we have more than 5 digits - handle differently based on box type
-                int digitCount = 0;
-                for (QChar c : newText) {
-                    if (c.isDigit()) digitCount++;
-                }
-                
-                // For opacity box: cap at 100
-                if (m_activeBox == m_opacityBox) {
-                    bool ok = false;
-                    int val = newText.toInt(&ok);
-                    if (ok && val > 100) {
-                        m_activeBox->setText("100");
+
+                if (ch.isDigit()) {
+                    QString currentText = m_activeBox->text();
+                    const bool replaceAll = m_clearOnFirstType || currentText == "..." || currentText == "∞";
+                    QString baseText = replaceAll ? QString() : currentText;
+                    if (replaceAll) {
+                        m_clearOnFirstType = false;
+                    }
+
+                    if (m_pendingDecimalInsertion) {
+                        if (boxSupportsDecimal(m_activeBox) && !baseText.contains('.') && !baseText.isEmpty()) {
+                            baseText.append('.');
+                        }
+                        m_pendingDecimalInsertion = false;
+                    }
+
+                    QString newText = baseText + ch;
+
+                    int digitCount = 0;
+                    for (QChar c : newText) {
+                        if (c.isDigit()) {
+                            ++digitCount;
+                        }
+                    }
+
+                    if (m_activeBox == m_opacityBox) {
+                        bool ok = false;
+                        int val = newText.toInt(&ok);
+                        if (ok && val > 100) {
+                            newText = QStringLiteral("100");
+                        }
+                        m_activeBox->setText(newText);
+                    } else if (m_activeBox == m_repeatBox) {
+                        if (digitCount > 5) {
+                            m_activeBox->setText(QStringLiteral("∞"));
+                        } else {
+                            m_activeBox->setText(newText);
+                        }
+                    } else if (boxSupportsDecimal(m_activeBox)) {
+                        if (digitCount > 5) {
+                            return true;
+                        }
+                        m_activeBox->setText(newText);
                     } else {
                         m_activeBox->setText(newText);
                     }
-                }
-                // For repeat box: allow infinity conversion (>5 digits)
-                else if (m_activeBox == m_repeatBox) {
-                    if (digitCount > 5) {
-                        m_activeBox->setText("∞");
-                    } else {
-                        m_activeBox->setText(newText);
+
+                    if (!m_updatingFromMedia) {
+                        pushSettingsToMedia();
                     }
+                    return true;
                 }
-                // For display delay, play delay, fade in, fade out: block infinity (cap at 99999)
-                else if (m_activeBox == m_displayAfterBox || m_activeBox == m_autoPlayBox || 
-                         m_activeBox == m_fadeInBox || m_activeBox == m_fadeOutBox || m_activeBox == m_hideDelayBox ||
-                         m_activeBox == m_pauseDelayBox) {
-                    if (digitCount > 5) {
-                        // Don't convert to infinity, just ignore the extra digit
-                        return true; // consume but don't apply
-                    } else {
-                        m_activeBox->setText(newText);
-                    }
-                }
-                else {
-                    // Default behavior for any other boxes
-                    m_activeBox->setText(newText);
-                }
-                
-                if (!m_updatingFromMedia) {
-                    pushSettingsToMedia();
-                }
-                return true;
             }
         }
     }
@@ -754,41 +783,28 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
     return QObject::eventFilter(obj, event);
 }
 
+bool MediaSettingsPanel::boxSupportsDecimal(QLabel* box) const {
+    return box == m_displayAfterBox || box == m_autoPlayBox || box == m_fadeInBox ||
+           box == m_fadeOutBox || box == m_hideDelayBox || box == m_pauseDelayBox;
+}
+
 bool MediaSettingsPanel::isValidInputForBox(QLabel* box, QChar character) {
-    if (box == m_displayAfterBox) {
-        // Display automatically: numbers, dots, commas
-        return character.isDigit() || character == '.' || character == ',';
-    }
-    else if (box == m_autoPlayBox) {
-        // Play automatically: numbers, dots, commas
-        return character.isDigit() || character == '.' || character == ',';
-    }
-    else if (box == m_repeatBox) {
+    if (!box) return false;
+
+    if (box == m_repeatBox) {
         // Repeat: numbers only (excluding 0)
         return character.isDigit() && character != '0';
     }
-    else if (box == m_fadeInBox) {
-        // Fade in: numbers, dots, commas
-        return character.isDigit() || character == '.' || character == ',';
-    }
-    else if (box == m_fadeOutBox) {
-        // Fade out: numbers, dots, commas
-        return character.isDigit() || character == '.' || character == ',';
-    }
-    else if (box == m_hideDelayBox) {
-        // Hide delay: numbers, dots, commas
-        return character.isDigit() || character == '.' || character == ',';
-    }
-    else if (box == m_opacityBox) {
-        // Opacity: digits only
+
+    if (box == m_opacityBox) {
         return character.isDigit();
     }
-    else if (box == m_pauseDelayBox) {
-        // Pause delay: numbers, dots, commas
-        return character.isDigit() || character == '.' || character == ',';
+
+    if (boxSupportsDecimal(box)) {
+        return character.isDigit() || character == '.';
     }
-    
-    return false; // Unknown box, reject input
+
+    return character.isDigit();
 }
 
 void MediaSettingsPanel::onOpacityToggled(bool checked) {
@@ -838,9 +854,13 @@ int MediaSettingsPanel::displayDelayMillis() const {
     if (!m_displayDelayCheck || !m_displayAfterCheck) return 0;
     if (!m_displayDelayCheck->isChecked()) return 0;
     if (!m_displayAfterBox) return 0;
-    bool ok=false; int v = m_displayAfterBox->text().trimmed().toInt(&ok);
-    if (!ok || v < 0) return 0;
-    return v * 1000;
+    QString text = m_displayAfterBox->text().trimmed();
+    if (text.isEmpty() || text == QStringLiteral("...")) return 0;
+    text.replace(',', '.');
+    bool ok = false;
+    const double seconds = text.toDouble(&ok);
+    if (!ok || seconds < 0.0) return 0;
+    return static_cast<int>(std::lround(seconds * 1000.0));
 }
 
 bool MediaSettingsPanel::playAutomaticallyEnabled() const {
@@ -851,9 +871,13 @@ int MediaSettingsPanel::playDelayMillis() const {
     if (!m_playDelayCheck || !m_autoPlayCheck) return 0;
     if (!m_playDelayCheck->isChecked()) return 0;
     if (!m_autoPlayBox) return 0;
-    bool ok=false; int v = m_autoPlayBox->text().trimmed().toInt(&ok);
-    if (!ok || v < 0) return 0;
-    return v * 1000;
+    QString text = m_autoPlayBox->text().trimmed();
+    if (text.isEmpty() || text == QStringLiteral("...")) return 0;
+    text.replace(',', '.');
+    bool ok = false;
+    const double seconds = text.toDouble(&ok);
+    if (!ok || seconds < 0.0) return 0;
+    return static_cast<int>(std::lround(seconds * 1000.0));
 }
 
 double MediaSettingsPanel::fadeOutSeconds() const {
@@ -1137,9 +1161,35 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
         box->blockSignals(prev);
     };
 
-    auto applyBoxText = [](QLabel* label, const QString& text, const QString& fallback) {
+    auto applyBoxText = [&](QLabel* label, const QString& text, const QString& fallback, bool normalizeDecimal = false) {
         if (!label) return;
-        const QString value = text.isEmpty() ? fallback : text;
+        QString value = text.isEmpty() ? fallback : text;
+        if (normalizeDecimal) {
+            value.replace(',', '.');
+            if (value.startsWith('.')) {
+                value.remove(0, 1);
+            }
+            if (value.endsWith('.')) {
+                value.chop(1);
+            }
+            if (value.count('.') > 1) {
+                // retain only the first decimal point
+                int first = value.indexOf('.');
+                QString digitsOnly;
+                digitsOnly.reserve(value.size());
+                for (int i = 0; i < value.size(); ++i) {
+                    if (value[i].isDigit()) {
+                        digitsOnly.append(value[i]);
+                    } else if (value[i] == '.' && i == first) {
+                        digitsOnly.append('.');
+                    }
+                }
+                value = digitsOnly;
+            }
+            if (value.isEmpty()) {
+                value = fallback;
+            }
+        }
         label->setText(value);
     };
 
@@ -1155,13 +1205,13 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     applyCheckState(m_hideDelayCheck, state.hideDelayEnabled);
     applyCheckState(m_hideWhenVideoEndsCheck, state.hideWhenVideoEnds);
 
-    applyBoxText(m_displayAfterBox, state.displayDelayText, QStringLiteral("1"));
-    applyBoxText(m_autoPlayBox, state.playDelayText, QStringLiteral("1"));
-    applyBoxText(m_pauseDelayBox, state.pauseDelayText, QStringLiteral("1"));
+    applyBoxText(m_displayAfterBox, state.displayDelayText, QStringLiteral("1"), true);
+    applyBoxText(m_autoPlayBox, state.playDelayText, QStringLiteral("1"), true);
+    applyBoxText(m_pauseDelayBox, state.pauseDelayText, QStringLiteral("1"), true);
     applyBoxText(m_repeatBox, state.repeatCountText, QStringLiteral("1"));
-    applyBoxText(m_fadeInBox, state.fadeInText, QStringLiteral("1"));
-    applyBoxText(m_fadeOutBox, state.fadeOutText, QStringLiteral("1"));
-    applyBoxText(m_hideDelayBox, state.hideDelayText, QStringLiteral("1"));
+    applyBoxText(m_fadeInBox, state.fadeInText, QStringLiteral("1"), true);
+    applyBoxText(m_fadeOutBox, state.fadeOutText, QStringLiteral("1"), true);
+    applyBoxText(m_hideDelayBox, state.hideDelayText, QStringLiteral("1"), true);
     applyBoxText(m_opacityBox, state.opacityText, QStringLiteral("100"));
 
     // Re-run UI interlock logic without persisting back to the media item
@@ -1187,25 +1237,55 @@ void MediaSettingsPanel::pushSettingsToMedia() {
         return text.isEmpty() ? fallback : text;
     };
 
+    auto trimmedDecimalText = [&](QLabel* label, const QString& fallback) {
+        QString fallbackValue = fallback;
+        fallbackValue.replace(',', '.');
+        QString value = trimmedText(label, fallbackValue);
+        value.replace(',', '.');
+        if (value.startsWith('.')) {
+            value.remove(0, 1);
+        }
+        if (value.endsWith('.')) {
+            value.chop(1);
+        }
+        if (value.count('.') > 1) {
+            int first = value.indexOf('.');
+            QString digitsOnly;
+            digitsOnly.reserve(value.size());
+            for (int i = 0; i < value.size(); ++i) {
+                if (value[i].isDigit()) {
+                    digitsOnly.append(value[i]);
+                } else if (value[i] == '.' && i == first) {
+                    digitsOnly.append('.');
+                }
+            }
+            value = digitsOnly;
+        }
+        if (value.isEmpty()) {
+            value = fallbackValue;
+        }
+        return value;
+    };
+
     ResizableMediaBase::MediaSettingsState state = m_mediaItem->mediaSettingsState();
     state.displayAutomatically = m_displayAfterCheck && m_displayAfterCheck->isChecked();
     state.displayDelayEnabled = m_displayDelayCheck && m_displayDelayCheck->isChecked();
-    state.displayDelayText = trimmedText(m_displayAfterBox, state.displayDelayText);
+    state.displayDelayText = trimmedDecimalText(m_displayAfterBox, state.displayDelayText);
     state.playAutomatically = m_autoPlayCheck && m_autoPlayCheck->isChecked();
     state.playDelayEnabled = m_playDelayCheck && m_playDelayCheck->isChecked();
-    state.playDelayText = trimmedText(m_autoPlayBox, state.playDelayText);
+    state.playDelayText = trimmedDecimalText(m_autoPlayBox, state.playDelayText);
     state.pauseDelayEnabled = m_pauseDelayCheck && m_pauseDelayCheck->isChecked();
-    state.pauseDelayText = trimmedText(m_pauseDelayBox, state.pauseDelayText);
+    state.pauseDelayText = trimmedDecimalText(m_pauseDelayBox, state.pauseDelayText);
     state.repeatEnabled = m_repeatCheck && m_repeatCheck->isChecked();
     state.repeatCountText = trimmedText(m_repeatBox, state.repeatCountText);
     state.fadeInEnabled = m_fadeInCheck && m_fadeInCheck->isChecked();
-    state.fadeInText = trimmedText(m_fadeInBox, state.fadeInText);
+    state.fadeInText = trimmedDecimalText(m_fadeInBox, state.fadeInText);
     state.fadeOutEnabled = m_fadeOutCheck && m_fadeOutCheck->isChecked();
-    state.fadeOutText = trimmedText(m_fadeOutBox, state.fadeOutText);
+    state.fadeOutText = trimmedDecimalText(m_fadeOutBox, state.fadeOutText);
     state.opacityOverrideEnabled = m_opacityCheck && m_opacityCheck->isChecked();
     state.opacityText = trimmedText(m_opacityBox, state.opacityText);
     state.hideDelayEnabled = m_hideDelayCheck && m_hideDelayCheck->isChecked();
-    state.hideDelayText = trimmedText(m_hideDelayBox, state.hideDelayText);
+    state.hideDelayText = trimmedDecimalText(m_hideDelayBox, state.hideDelayText);
     state.hideWhenVideoEnds = m_hideWhenVideoEndsCheck && m_hideWhenVideoEndsCheck->isChecked();
 
     m_mediaItem->setMediaSettingsState(state);
