@@ -18,6 +18,7 @@
 #include "MediaSettingsPanel.h"
 #include <cmath>
 #include <QVariantAnimation>
+#include <QEasingCurve>
 #include <QtSvgWidgets/QGraphicsSvgItem>
 #include <QtSvg/QSvgRenderer>
 #include <QFileInfo>
@@ -267,6 +268,28 @@ double ResizableMediaBase::fadeInDurationSeconds() const {
 double ResizableMediaBase::fadeOutDurationSeconds() const {
     if (!m_mediaSettings.fadeOutEnabled) return 0.0;
     QString text = m_mediaSettings.fadeOutText.trimmed();
+    if (text == QStringLiteral("∞") || text.isEmpty() || text == QStringLiteral("...")) return 0.0;
+    text.replace(',', '.');
+    bool ok = false;
+    double value = text.toDouble(&ok);
+    if (!ok || value < 0.0) return 0.0;
+    return std::clamp(value, 0.0, 3600.0);
+}
+
+double ResizableMediaBase::audioFadeInDurationSeconds() const {
+    if (!m_mediaSettings.audioFadeInEnabled) return 0.0;
+    QString text = m_mediaSettings.audioFadeInText.trimmed();
+    if (text == QStringLiteral("∞") || text.isEmpty() || text == QStringLiteral("...")) return 0.0;
+    text.replace(',', '.');
+    bool ok = false;
+    double value = text.toDouble(&ok);
+    if (!ok || value < 0.0) return 0.0;
+    return std::clamp(value, 0.0, 3600.0);
+}
+
+double ResizableMediaBase::audioFadeOutDurationSeconds() const {
+    if (!m_mediaSettings.audioFadeOutEnabled) return 0.0;
+    QString text = m_mediaSettings.audioFadeOutText.trimmed();
     if (text == QStringLiteral("∞") || text.isEmpty() || text == QStringLiteral("...")) return 0.0;
     text.replace(',', '.');
     bool ok = false;
@@ -1071,13 +1094,27 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
     m_player->setVideoSink(m_sink);
     m_player->setSource(QUrl::fromLocalFile(filePath));
 
+    const qreal initialVolume = m_audio ? std::clamp<qreal>(m_audio->volume(), 0.0, 1.0) : 1.0;
+    m_effectiveMuted = m_audio ? m_audio->isMuted() : false;
+    m_userVolumeRatio = initialVolume;
+    m_audioFadeTargetVolume = initialVolume;
+    m_lastUserVolumeBeforeMute = initialVolume;
+
     QObject::connect(m_audio, &QAudioOutput::volumeChanged, m_player, [this](qreal v){
         v = std::clamp<qreal>(v, 0.0, 1.0);
-        if (!m_volumeChangeFromSettings) {
+        if (!m_volumeChangeFromSettings && !m_volumeChangeFromAudioFade) {
+            m_userVolumeRatio = v;
+            if (!m_effectiveMuted && v > 0.0) {
+                m_lastUserVolumeBeforeMute = v;
+            }
             const int percent = std::clamp<int>(static_cast<int>(std::lround(v * 100.0)), 0, 100);
             const QString text = QString::number(percent);
             if (m_mediaSettings.volumeText != text) {
                 m_mediaSettings.volumeText = text;
+            }
+            if (isSelected()) {
+                updateControlsLayout();
+                update();
             }
         }
     });
@@ -1124,7 +1161,16 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
                         m_player->pause();
                         m_player->setPosition(0);
                     }
-                    if (m_audio) m_audio->setMuted(m_savedMuted);
+                    if (m_audio) {
+                        m_audio->setMuted(m_savedMuted);
+                        if (!m_savedMuted) {
+                            const bool guardPrev = m_volumeChangeFromSettings;
+                            m_volumeChangeFromSettings = true;
+                            m_audio->setVolume(m_userVolumeRatio);
+                            m_volumeChangeFromSettings = guardPrev;
+                        }
+                        m_effectiveMuted = m_savedMuted;
+                    }
                     m_controlsLockedUntilReady = false;
                     m_controlsDidInitialFade = false;
                     if (isSelected()) {
@@ -1205,7 +1251,7 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
                 }
             }
             if (!m_firstFramePrimed && !m_primingFirstFrame) {
-                m_holdLastFrameAtEnd = false; m_savedMuted = m_audio ? m_audio->isMuted() : false; if (m_audio) m_audio->setMuted(true); m_primingFirstFrame = true; if (m_player) m_player->play();
+                m_holdLastFrameAtEnd = false; m_savedMuted = m_effectiveMuted; m_effectiveMuted = true; if (m_audio) m_audio->setMuted(true); m_primingFirstFrame = true; if (m_player) m_player->play();
             }
         }
         if (s == QMediaPlayer::EndOfMedia) {
@@ -1389,13 +1435,71 @@ void ResizableVideoItem::toggleRepeat() {
     update();
 }
 
-void ResizableVideoItem::toggleMute() { if (!m_audio) return; m_audio->setMuted(!m_audio->isMuted()); bool muted = m_audio->isMuted(); updateControlsLayout(); update(); }
+void ResizableVideoItem::toggleMute() {
+    if (!m_audio) return;
+    setMuted(!m_effectiveMuted);
+}
 
 void ResizableVideoItem::setMuted(bool muted) {
     if (!m_audio) return;
-    if (m_audio->isMuted() == muted) return;
-    m_audio->setMuted(muted);
-    m_savedMuted = muted;
+
+    // Cancel any in-flight fade before applying new state
+    stopAudioFadeAnimation(true);
+
+    const bool targetMuted = muted;
+    const bool alreadyMuted = (m_effectiveMuted == targetMuted) && !m_audioFadeAnimation;
+    if (alreadyMuted) {
+        // Ensure hardware mute state matches logical state
+        m_audio->setMuted(targetMuted);
+        if (targetMuted) {
+            const bool prevGuard = m_volumeChangeFromAudioFade;
+            m_volumeChangeFromAudioFade = true;
+            m_audio->setVolume(0.0);
+            m_volumeChangeFromAudioFade = prevGuard;
+        }
+        updateControlsLayout();
+        update();
+        return;
+    }
+
+    m_effectiveMuted = targetMuted;
+    m_savedMuted = targetMuted;
+
+    const double fadeSeconds = targetMuted ? audioFadeOutDurationSeconds() : audioFadeInDurationSeconds();
+    const qreal currentVolume = m_audio ? std::clamp<qreal>(m_audio->volume(), 0.0, 1.0) : 0.0;
+    const qreal desiredVolume = targetMuted ? 0.0 : volumeFromSettingsState();
+
+    if (!targetMuted) {
+        // Ensure we capture latest intended playback volume
+        if (desiredVolume > 0.0) {
+            m_lastUserVolumeBeforeMute = desiredVolume;
+        }
+    }
+
+    if (fadeSeconds <= 0.0) {
+        const bool prevGuard = m_volumeChangeFromAudioFade;
+        m_volumeChangeFromAudioFade = true;
+        m_audio->setMuted(false);
+        m_audio->setVolume(desiredVolume);
+        m_volumeChangeFromAudioFade = prevGuard;
+        m_audio->setMuted(targetMuted);
+        if (targetMuted) {
+            const bool guard = m_volumeChangeFromAudioFade;
+            m_volumeChangeFromAudioFade = true;
+            m_audio->setVolume(0.0);
+            m_volumeChangeFromAudioFade = guard;
+        }
+        updateControlsLayout();
+        update();
+        return;
+    }
+
+    const qreal startVolume = targetMuted ? currentVolume : 0.0;
+    const qreal endVolume = targetMuted ? 0.0 : desiredVolume;
+    if (targetMuted) {
+        m_lastUserVolumeBeforeMute = (currentVolume > 0.0) ? currentVolume : desiredVolume;
+    }
+    startAudioFade(startVolume, endVolume, fadeSeconds, targetMuted);
     updateControlsLayout();
     update();
 }
@@ -1667,7 +1771,7 @@ void ResizableVideoItem::adoptBaseSize(const QSize& sz) { if (m_adoptedSize) ret
 
 void ResizableVideoItem::setControlsVisible(bool show) {
      if (!m_controlsBg) return; bool allow = show && !m_controlsLockedUntilReady;
-    auto setChildrenVisible = [&](bool vis){ if (m_playBtnRectItem) m_playBtnRectItem->setVisible(vis); if (m_stopBtnRectItem) m_stopBtnRectItem->setVisible(vis); if (m_stopIcon) m_stopIcon->setVisible(vis); if (m_repeatBtnRectItem) m_repeatBtnRectItem->setVisible(vis); if (m_repeatIcon) m_repeatIcon->setVisible(vis); if (m_muteBtnRectItem) m_muteBtnRectItem->setVisible(vis); if (m_muteIcon) m_muteIcon->setVisible(vis); if (m_muteSlashIcon) m_muteSlashIcon->setVisible(vis && m_audio && m_audio->isMuted()); if (m_volumeBgRectItem) m_volumeBgRectItem->setVisible(vis); if (m_volumeFillRectItem) m_volumeFillRectItem->setVisible(vis); if (m_progressBgRectItem) m_progressBgRectItem->setVisible(vis); if (m_progressFillRectItem) m_progressFillRectItem->setVisible(vis); };
+    auto setChildrenVisible = [&](bool vis){ if (m_playBtnRectItem) m_playBtnRectItem->setVisible(vis); if (m_stopBtnRectItem) m_stopBtnRectItem->setVisible(vis); if (m_stopIcon) m_stopIcon->setVisible(vis); if (m_repeatBtnRectItem) m_repeatBtnRectItem->setVisible(vis); if (m_repeatIcon) m_repeatIcon->setVisible(vis); if (m_muteBtnRectItem) m_muteBtnRectItem->setVisible(vis); if (m_muteIcon) m_muteIcon->setVisible(vis); if (m_muteSlashIcon) m_muteSlashIcon->setVisible(vis && m_effectiveMuted); if (m_volumeBgRectItem) m_volumeBgRectItem->setVisible(vis); if (m_volumeFillRectItem) m_volumeFillRectItem->setVisible(vis); if (m_progressBgRectItem) m_progressBgRectItem->setVisible(vis); if (m_progressFillRectItem) m_progressFillRectItem->setVisible(vis); };
      if (allow) { m_controlsBg->setVisible(true); m_controlsBg->setZValue(12000.0); setChildrenVisible(true); if (!m_controlsDidInitialFade) { if (!m_controlsFadeAnim) { m_controlsFadeAnim = new QVariantAnimation(); m_controlsFadeAnim->setEasingCurve(QEasingCurve::OutCubic); QObject::connect(m_controlsFadeAnim, &QVariantAnimation::valueChanged, [this](const QVariant& v){ if (m_controlsBg) m_controlsBg->setOpacity(v.toReal()); }); } m_controlsFadeAnim->stop(); m_controlsFadeAnim->setDuration(m_controlsFadeMs); m_controlsFadeAnim->setStartValue(0.0); m_controlsFadeAnim->setEndValue(1.0); m_controlsDidInitialFade = true; m_controlsFadeAnim->start(); } else { if (m_controlsFadeAnim) m_controlsFadeAnim->stop(); m_controlsBg->setOpacity(1.0); } }
     else { if (m_controlsFadeAnim) m_controlsFadeAnim->stop(); m_controlsBg->setOpacity(0.0); m_controlsBg->setVisible(false); setChildrenVisible(false); }
     if (allow) {
@@ -1685,7 +1789,7 @@ void ResizableVideoItem::updateControlsLayout() {
     QPointF bottomCenterItem(baseWidth()/2.0, baseHeight()); QPointF bottomCenterScene = mapToScene(bottomCenterItem); QPointF bottomCenterView = v->viewportTransform().map(bottomCenterScene); QPointF ctrlTopLeftView = bottomCenterView + QPointF(-totalWpx/2.0, gapPx); QPointF ctrlTopLeftScene = v->viewportTransform().inverted().map(ctrlTopLeftView); QPointF ctrlTopLeftItem = mapFromScene(ctrlTopLeftScene);
     if (m_controlsBg) { m_controlsBg->setRect(0,0,totalWpx, rowHpx*2 + gapPx); m_controlsBg->setPos(ctrlTopLeftScene); }
     const qreal x0=0; const qreal x1=x0+playWpx+buttonGapPx; const qreal x2=x1+stopWpx+buttonGapPx; const qreal x3=x2+repeatWpx+buttonGapPx; const qreal x4=x3+muteWpx+buttonGapPx; auto appliedCornerRadius = m_overlayStyle.cornerRadius;
-    if (m_playBtnRectItem) { m_playBtnRectItem->setRect(0,0,playWpx,rowHpx); m_playBtnRectItem->setPos(x0,0); m_playBtnRectItem->setRadius(appliedCornerRadius); m_playBtnRectItem->setBrush(baseBrush);} if (m_stopBtnRectItem) { m_stopBtnRectItem->setRect(0,0,stopWpx,rowHpx); m_stopBtnRectItem->setPos(x1,0); m_stopBtnRectItem->setRadius(appliedCornerRadius); m_stopBtnRectItem->setBrush(baseBrush);} if (m_repeatBtnRectItem) { m_repeatBtnRectItem->setRect(0,0,repeatWpx,rowHpx); m_repeatBtnRectItem->setPos(x2,0); m_repeatBtnRectItem->setRadius(appliedCornerRadius); m_repeatBtnRectItem->setBrush((m_repeatEnabled || m_settingsRepeatEnabled) ? activeBrush : baseBrush);} if (m_muteBtnRectItem) { m_muteBtnRectItem->setRect(0,0,muteWpx,rowHpx); m_muteBtnRectItem->setPos(x3,0); m_muteBtnRectItem->setRadius(appliedCornerRadius); bool muted = m_audio && m_audio->isMuted(); m_muteBtnRectItem->setBrush(muted ? activeBrush : baseBrush);} if (m_volumeBgRectItem) { m_volumeBgRectItem->setRect(0,0,volumeWpx,rowHpx); m_volumeBgRectItem->setPos(x4,0);} if (m_volumeFillRectItem) { const qreal margin=1.0; qreal vol = m_audio ? std::clamp<qreal>(m_audio->volume(),0.0,1.0):0.0; const qreal innerW = std::max<qreal>(0.0, volumeWpx - 2*margin); m_volumeFillRectItem->setRect(margin,margin, innerW*vol, rowHpx - 2*margin);} if (m_progressBgRectItem) { m_progressBgRectItem->setRect(0,0,progWpx,rowHpx); m_progressBgRectItem->setPos(0,rowHpx+gapPx);} if (m_progressFillRectItem) { if (!m_draggingProgress) { updateProgressBar(); } else { qreal ratio = (m_durationMs>0) ? (qreal(m_positionMs)/m_durationMs) : 0.0; ratio = std::clamp<qreal>(ratio,0.0,1.0); const qreal margin=1.0; m_progressFillRectItem->setRect(margin,margin,(progWpx-2*margin)*ratio,rowHpx-2*margin);} }
+    if (m_playBtnRectItem) { m_playBtnRectItem->setRect(0,0,playWpx,rowHpx); m_playBtnRectItem->setPos(x0,0); m_playBtnRectItem->setRadius(appliedCornerRadius); m_playBtnRectItem->setBrush(baseBrush);} if (m_stopBtnRectItem) { m_stopBtnRectItem->setRect(0,0,stopWpx,rowHpx); m_stopBtnRectItem->setPos(x1,0); m_stopBtnRectItem->setRadius(appliedCornerRadius); m_stopBtnRectItem->setBrush(baseBrush);} if (m_repeatBtnRectItem) { m_repeatBtnRectItem->setRect(0,0,repeatWpx,rowHpx); m_repeatBtnRectItem->setPos(x2,0); m_repeatBtnRectItem->setRadius(appliedCornerRadius); m_repeatBtnRectItem->setBrush((m_repeatEnabled || m_settingsRepeatEnabled) ? activeBrush : baseBrush);} if (m_muteBtnRectItem) { m_muteBtnRectItem->setRect(0,0,muteWpx,rowHpx); m_muteBtnRectItem->setPos(x3,0); m_muteBtnRectItem->setRadius(appliedCornerRadius); bool muted = m_effectiveMuted; m_muteBtnRectItem->setBrush(muted ? activeBrush : baseBrush);} if (m_volumeBgRectItem) { m_volumeBgRectItem->setRect(0,0,volumeWpx,rowHpx); m_volumeBgRectItem->setPos(x4,0);} if (m_volumeFillRectItem) { const qreal margin=1.0; const qreal vol = std::clamp<qreal>(m_userVolumeRatio, 0.0, 1.0); const qreal innerW = std::max<qreal>(0.0, volumeWpx - 2*margin); m_volumeFillRectItem->setRect(margin,margin, innerW*vol, rowHpx - 2*margin);} if (m_progressBgRectItem) { m_progressBgRectItem->setRect(0,0,progWpx,rowHpx); m_progressBgRectItem->setPos(0,rowHpx+gapPx);} if (m_progressFillRectItem) { if (!m_draggingProgress) { updateProgressBar(); } else { qreal ratio = (m_durationMs>0) ? (qreal(m_positionMs)/m_durationMs) : 0.0; ratio = std::clamp<qreal>(ratio,0.0,1.0); const qreal margin=1.0; m_progressFillRectItem->setRect(margin,margin,(progWpx-2*margin)*ratio,rowHpx-2*margin);} }
     auto placeSvg = [](QGraphicsSvgItem* svg, qreal targetW, qreal targetH){ if (!svg) return; QSizeF nat = svg->renderer() ? svg->renderer()->defaultSize() : QSizeF(24,24); if (nat.width()<=0||nat.height()<=0) nat = svg->boundingRect().size(); if (nat.width()<=0||nat.height()<=0) nat = QSizeF(24,24); qreal scale = std::min(targetW/nat.width(), targetH/nat.height())*0.6; svg->setScale(scale); qreal x = (targetW - nat.width()*scale)/2.0; qreal y=(targetH - nat.height()*scale)/2.0; svg->setPos(x,y); };
     bool isPlaying = isEffectivelyPlayingForControls();
     if (!isPlaying && m_expectedPlayingState) {
@@ -1696,7 +1800,7 @@ void ResizableVideoItem::updateControlsLayout() {
     if (m_pauseIcon) placeSvg(m_pauseIcon, playWpx, rowHpx);
     placeSvg(m_stopIcon, stopWpx, rowHpx);
     placeSvg(m_repeatIcon, repeatWpx, rowHpx);
-    bool muted = m_audio && m_audio->isMuted(); if (m_muteIcon && m_muteSlashIcon) { m_muteIcon->setVisible(!muted); m_muteSlashIcon->setVisible(muted); placeSvg(m_muteIcon, muteWpx, rowHpx); placeSvg(m_muteSlashIcon, muteWpx, rowHpx);} const qreal rowHItem = toItemLengthFromPixels(rowHpx); const qreal playWItem = toItemLengthFromPixels(playWpx); const qreal stopWItem = toItemLengthFromPixels(stopWpx); const qreal repeatWItem = toItemLengthFromPixels(repeatWpx); const qreal muteWItem = toItemLengthFromPixels(muteWpx); const qreal volumeWItem = toItemLengthFromPixels(volumeWpx); const qreal progWItem = toItemLengthFromPixels(progWpx); const qreal gapItem = toItemLengthFromPixels(gapPx); const qreal x0Item = toItemLengthFromPixels(int(std::round(x0))); const qreal x1Item = toItemLengthFromPixels(int(std::round(x1))); const qreal x2Item = toItemLengthFromPixels(int(std::round(x2))); const qreal x3Item = toItemLengthFromPixels(int(std::round(x3))); const qreal x4Item = toItemLengthFromPixels(int(std::round(x4))); m_playBtnRectItemCoords = QRectF(ctrlTopLeftItem.x()+x0Item, ctrlTopLeftItem.y()+0, playWItem,rowHItem); m_stopBtnRectItemCoords = QRectF(ctrlTopLeftItem.x()+x1Item, ctrlTopLeftItem.y()+0, stopWItem,rowHItem); m_repeatBtnRectItemCoords = QRectF(ctrlTopLeftItem.x()+x2Item, ctrlTopLeftItem.y()+0, repeatWItem,rowHItem); m_muteBtnRectItemCoords = QRectF(ctrlTopLeftItem.x()+x3Item, ctrlTopLeftItem.y()+0, muteWItem,rowHItem); m_volumeRectItemCoords = QRectF(ctrlTopLeftItem.x()+x4Item, ctrlTopLeftItem.y()+0, volumeWItem,rowHItem); m_progRectItemCoords = QRectF(ctrlTopLeftItem.x()+0, ctrlTopLeftItem.y()+rowHItem+gapItem, progWItem,rowHItem);
+    bool muted = m_effectiveMuted; if (m_muteIcon && m_muteSlashIcon) { m_muteIcon->setVisible(!muted); m_muteSlashIcon->setVisible(muted); placeSvg(m_muteIcon, muteWpx, rowHpx); placeSvg(m_muteSlashIcon, muteWpx, rowHpx);} const qreal rowHItem = toItemLengthFromPixels(rowHpx); const qreal playWItem = toItemLengthFromPixels(playWpx); const qreal stopWItem = toItemLengthFromPixels(stopWpx); const qreal repeatWItem = toItemLengthFromPixels(repeatWpx); const qreal muteWItem = toItemLengthFromPixels(muteWpx); const qreal volumeWItem = toItemLengthFromPixels(volumeWpx); const qreal progWItem = toItemLengthFromPixels(progWpx); const qreal gapItem = toItemLengthFromPixels(gapPx); const qreal x0Item = toItemLengthFromPixels(int(std::round(x0))); const qreal x1Item = toItemLengthFromPixels(int(std::round(x1))); const qreal x2Item = toItemLengthFromPixels(int(std::round(x2))); const qreal x3Item = toItemLengthFromPixels(int(std::round(x3))); const qreal x4Item = toItemLengthFromPixels(int(std::round(x4))); m_playBtnRectItemCoords = QRectF(ctrlTopLeftItem.x()+x0Item, ctrlTopLeftItem.y()+0, playWItem,rowHItem); m_stopBtnRectItemCoords = QRectF(ctrlTopLeftItem.x()+x1Item, ctrlTopLeftItem.y()+0, stopWItem,rowHItem); m_repeatBtnRectItemCoords = QRectF(ctrlTopLeftItem.x()+x2Item, ctrlTopLeftItem.y()+0, repeatWItem,rowHItem); m_muteBtnRectItemCoords = QRectF(ctrlTopLeftItem.x()+x3Item, ctrlTopLeftItem.y()+0, muteWItem,rowHItem); m_volumeRectItemCoords = QRectF(ctrlTopLeftItem.x()+x4Item, ctrlTopLeftItem.y()+0, volumeWItem,rowHItem); m_progRectItemCoords = QRectF(ctrlTopLeftItem.x()+0, ctrlTopLeftItem.y()+rowHItem+gapItem, progWItem,rowHItem);
 }
 
 qreal ResizableVideoItem::volumeFromSettingsState() const {
@@ -1716,12 +1820,20 @@ qreal ResizableVideoItem::volumeFromSettingsState() const {
 
 void ResizableVideoItem::applyVolumeRatio(qreal ratio) {
     ratio = std::clamp<qreal>(ratio, 0.0, 1.0);
+    m_userVolumeRatio = ratio;
     const bool previousGuard = m_volumeChangeFromSettings;
     m_volumeChangeFromSettings = true;
     if (m_audio) {
         m_audio->setVolume(ratio);
     }
     m_volumeChangeFromSettings = previousGuard;
+    if (!m_effectiveMuted && ratio > 0.0) {
+        m_lastUserVolumeBeforeMute = ratio;
+    }
+    if (isSelected()) {
+        updateControlsLayout();
+        update();
+    }
 }
 
 void ResizableVideoItem::setVolumeFromControl(qreal ratio, bool fromSettings) {
@@ -1752,6 +1864,112 @@ void ResizableVideoItem::applyVolumeOverrideFromState() {
         ratio = volumeFromSettingsState();
     }
     applyVolumeRatio(ratio);
+}
+
+void ResizableVideoItem::ensureAudioFadeAnimation() {
+    if (m_audioFadeAnimation) {
+        QObject::disconnect(m_audioFadeAnimation, nullptr, nullptr, nullptr);
+        m_audioFadeAnimation->stop();
+        m_audioFadeAnimation->deleteLater();
+    }
+    m_audioFadeAnimation = new QVariantAnimation();
+}
+
+void ResizableVideoItem::stopAudioFadeAnimation(bool resetVolumeGuard) {
+    if (!m_audioFadeAnimation) {
+        if (resetVolumeGuard) {
+            m_volumeChangeFromAudioFade = false;
+        }
+        return;
+    }
+    QVariantAnimation* anim = m_audioFadeAnimation;
+    m_audioFadeAnimation = nullptr;
+    QObject::disconnect(anim, nullptr, nullptr, nullptr);
+    anim->stop();
+    anim->deleteLater();
+    if (resetVolumeGuard) {
+        m_volumeChangeFromAudioFade = false;
+    }
+}
+
+void ResizableVideoItem::startAudioFade(qreal startVolume, qreal endVolume, double durationSeconds, bool targetMuted) {
+    if (!m_audio) {
+        m_effectiveMuted = targetMuted;
+        return;
+    }
+    startVolume = std::clamp<qreal>(startVolume, 0.0, 1.0);
+    endVolume = std::clamp<qreal>(endVolume, 0.0, 1.0);
+
+    stopAudioFadeAnimation(false);
+    ensureAudioFadeAnimation();
+    if (!m_audioFadeAnimation) {
+        m_effectiveMuted = targetMuted;
+        m_volumeChangeFromAudioFade = false;
+        return;
+    }
+
+    m_pendingMuteTarget = targetMuted;
+    m_audioFadeStartVolume = startVolume;
+    m_audioFadeTargetVolume = endVolume;
+    m_volumeChangeFromAudioFade = true;
+
+    m_audio->setMuted(false);
+    m_audio->setVolume(startVolume);
+
+    m_audioFadeAnimation->setStartValue(startVolume);
+    m_audioFadeAnimation->setEndValue(endVolume);
+    m_audioFadeAnimation->setDuration(std::max(1, static_cast<int>(durationSeconds * 1000.0)));
+    m_audioFadeAnimation->setEasingCurve(QEasingCurve::Linear);
+
+    QObject::connect(m_audioFadeAnimation, &QVariantAnimation::valueChanged, [this, targetMuted](const QVariant& value) {
+        Q_UNUSED(targetMuted);
+        if (!m_audio) {
+            return;
+        }
+        const qreal vol = std::clamp<qreal>(value.toDouble(), 0.0, 1.0);
+        m_audio->setVolume(vol);
+        if (!m_effectiveMuted && vol > 0.0) {
+            m_lastUserVolumeBeforeMute = vol;
+        }
+        if (isSelected()) {
+            updateControlsLayout();
+        }
+        update();
+    });
+
+    QObject::connect(m_audioFadeAnimation, &QVariantAnimation::finished, [this]() {
+        finalizeAudioFade(m_pendingMuteTarget);
+    });
+
+    m_audioFadeAnimation->start();
+}
+
+void ResizableVideoItem::finalizeAudioFade(bool targetMuted) {
+    QVariantAnimation* anim = m_audioFadeAnimation;
+    m_audioFadeAnimation = nullptr;
+    if (anim) {
+        QObject::disconnect(anim, nullptr, nullptr, nullptr);
+        anim->stop();
+        anim->deleteLater();
+    }
+
+    if (!m_audio) {
+        m_volumeChangeFromAudioFade = false;
+        return;
+    }
+
+    const qreal finalVolume = std::clamp<qreal>(m_audioFadeTargetVolume, 0.0, 1.0);
+    m_audio->setMuted(false);
+    m_audio->setVolume(finalVolume);
+    m_audio->setMuted(targetMuted);
+    if (!targetMuted && finalVolume > 0.0) {
+        m_lastUserVolumeBeforeMute = finalVolume;
+    }
+    m_volumeChangeFromAudioFade = false;
+    if (isSelected()) {
+        updateControlsLayout();
+    }
+    update();
 }
 
 bool ResizableVideoItem::isVisibleInAnyView() const { if (!scene() || scene()->views().isEmpty()) return false; auto *view = scene()->views().first(); if (!view || !view->viewport()) return false; QRectF viewportRect = view->viewport()->rect(); QRectF sceneRect = view->mapToScene(viewportRect.toRect()).boundingRect(); QRectF itemSceneRect = mapToScene(boundingRect()).boundingRect(); return sceneRect.intersects(itemSceneRect); }
@@ -1933,10 +2151,11 @@ void ResizableVideoItem::restartPrimingSequence() {
     }
     m_controlsLockedUntilReady = true;
     m_controlsDidInitialFade = false;
-    m_savedMuted = m_audio ? m_audio->isMuted() : false;
+    m_savedMuted = m_effectiveMuted;
     if (m_audio) {
         m_audio->setMuted(true);
     }
+    m_effectiveMuted = true;
     m_primingFirstFrame = true;
     m_player->setPosition(0);
     m_player->play();

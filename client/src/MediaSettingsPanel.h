@@ -93,6 +93,8 @@ private:
     QCheckBox* m_fadeInCheck = nullptr;
 
     QCheckBox* m_fadeOutCheck = nullptr;
+    QCheckBox* m_audioFadeInCheck = nullptr;
+    QCheckBox* m_audioFadeOutCheck = nullptr;
 
     QCheckBox* m_hideDelayCheck = nullptr;
     QCheckBox* m_hideWhenVideoEndsCheck = nullptr;
@@ -107,6 +109,8 @@ private:
     QLabel* m_repeatBox = nullptr;
     QLabel* m_fadeInBox = nullptr;
     QLabel* m_fadeOutBox = nullptr;
+    QLabel* m_audioFadeInBox = nullptr;
+    QLabel* m_audioFadeOutBox = nullptr;
     QLabel* m_hideDelayBox = nullptr;
     // New: set opacity to [x]%
     QCheckBox* m_opacityCheck = nullptr;
@@ -129,6 +133,8 @@ private:
     QWidget* m_playDelayRow = nullptr;
     QWidget* m_pauseDelayRow = nullptr;
     QWidget* m_repeatRow = nullptr;
+    QWidget* m_audioFadeInRow = nullptr;
+    QWidget* m_audioFadeOutRow = nullptr;
     QWidget* m_hideDelayRow = nullptr;
     QWidget* m_hideWhenEndsRow = nullptr;
     QWidget* m_volumeRow = nullptr;
@@ -138,5 +144,7 @@ private:
     QLabel* m_hideDelaySecondsLabel = nullptr;
     QLabel* m_pauseDelayBox = nullptr;
     QLabel* m_pauseDelaySecondsLabel = nullptr;
+    QLabel* m_audioFadeInSecondsLabel = nullptr;
+    QLabel* m_audioFadeOutSecondsLabel = nullptr;
     class ResizableMediaBase* m_mediaItem = nullptr; // not owning
 };

@@ -331,14 +331,14 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     m_elementPropertiesTitle->setStyleSheet(overlayTextStyle);
     m_contentLayout->addWidget(m_elementPropertiesTitle);
 
-    // 3) Fade in with checkbox format
+    // 3) Image fade in with checkbox format
     {
     auto* row = new QWidget(m_innerContent);
     configureRow(row);
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
-        m_fadeInCheck = new QCheckBox("Fade in: ", row);
+        m_fadeInCheck = new QCheckBox("Image fade in: ", row);
         m_fadeInCheck->setStyleSheet(overlayTextStyle);
         m_fadeInCheck->installEventFilter(this);
     connect(m_fadeInCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
@@ -352,14 +352,14 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_contentLayout->addWidget(row);
     }
 
-    // 4) Fade out with checkbox format
+    // 4) Image fade out with checkbox format
     {
     auto* row = new QWidget(m_innerContent);
     configureRow(row);
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
-        m_fadeOutCheck = new QCheckBox("Fade out: ", row);
+        m_fadeOutCheck = new QCheckBox("Image fade out: ", row);
         m_fadeOutCheck->setStyleSheet(overlayTextStyle);
         m_fadeOutCheck->installEventFilter(this);
     connect(m_fadeOutCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
@@ -371,6 +371,48 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         h->addWidget(suffix);
         h->addStretch();
         m_contentLayout->addWidget(row);
+    }
+
+    // Audio fade in (video only)
+    {
+    m_audioFadeInRow = new QWidget(m_innerContent);
+    configureRow(m_audioFadeInRow);
+        auto* h = new QHBoxLayout(m_audioFadeInRow);
+        h->setContentsMargins(0,0,0,0);
+        h->setSpacing(0);
+        m_audioFadeInCheck = new QCheckBox("Audio fade in: ", m_audioFadeInRow);
+        m_audioFadeInCheck->setStyleSheet(overlayTextStyle);
+        m_audioFadeInCheck->installEventFilter(this);
+        connect(m_audioFadeInCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
+        m_audioFadeInBox = makeValueBox();
+        m_audioFadeInSecondsLabel = new QLabel("s", m_audioFadeInRow);
+        m_audioFadeInSecondsLabel->setStyleSheet(overlayTextStyle);
+        h->addWidget(m_audioFadeInCheck);
+        h->addWidget(m_audioFadeInBox);
+        h->addWidget(m_audioFadeInSecondsLabel);
+        h->addStretch();
+        m_contentLayout->addWidget(m_audioFadeInRow);
+    }
+
+    // Audio fade out (video only)
+    {
+    m_audioFadeOutRow = new QWidget(m_innerContent);
+    configureRow(m_audioFadeOutRow);
+        auto* h = new QHBoxLayout(m_audioFadeOutRow);
+        h->setContentsMargins(0,0,0,0);
+        h->setSpacing(0);
+        m_audioFadeOutCheck = new QCheckBox("Audio fade out: ", m_audioFadeOutRow);
+        m_audioFadeOutCheck->setStyleSheet(overlayTextStyle);
+        m_audioFadeOutCheck->installEventFilter(this);
+        connect(m_audioFadeOutCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
+        m_audioFadeOutBox = makeValueBox();
+        m_audioFadeOutSecondsLabel = new QLabel("s", m_audioFadeOutRow);
+        m_audioFadeOutSecondsLabel->setStyleSheet(overlayTextStyle);
+        h->addWidget(m_audioFadeOutCheck);
+        h->addWidget(m_audioFadeOutBox);
+        h->addWidget(m_audioFadeOutSecondsLabel);
+        h->addStretch();
+        m_contentLayout->addWidget(m_audioFadeOutRow);
     }
     // 5) Opacity with checkbox format
     {
@@ -533,6 +575,12 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
     if (m_repeatRow) {
         m_repeatRow->setVisible(isVideo);
     }
+    if (m_audioFadeInRow) {
+        m_audioFadeInRow->setVisible(isVideo);
+    }
+    if (m_audioFadeOutRow) {
+        m_audioFadeOutRow->setVisible(isVideo);
+    }
     if (m_unmuteRow) {
         m_unmuteRow->setVisible(isVideo);
     }
@@ -566,9 +614,19 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
         m_volumeCheck->setChecked(false);
         m_volumeCheck->blockSignals(prev);
     }
+    if (!isVideo && m_audioFadeInCheck) {
+        const bool prev = m_audioFadeInCheck->blockSignals(true);
+        m_audioFadeInCheck->setChecked(false);
+        m_audioFadeInCheck->blockSignals(prev);
+    }
+    if (!isVideo && m_audioFadeOutCheck) {
+        const bool prev = m_audioFadeOutCheck->blockSignals(true);
+        m_audioFadeOutCheck->setChecked(false);
+        m_audioFadeOutCheck->blockSignals(prev);
+    }
     
     // Clear active box if it belongs to a hidden video-only option
-    if (!isVideo && m_activeBox && (m_activeBox == m_autoPlayBox || m_activeBox == m_pauseDelayBox || m_activeBox == m_repeatBox || m_activeBox == m_volumeBox || m_activeBox == m_unmuteDelayBox)) {
+    if (!isVideo && m_activeBox && (m_activeBox == m_autoPlayBox || m_activeBox == m_pauseDelayBox || m_activeBox == m_repeatBox || m_activeBox == m_volumeBox || m_activeBox == m_unmuteDelayBox || m_activeBox == m_audioFadeInBox || m_activeBox == m_audioFadeOutBox)) {
         clearActiveBox();
     }
     
@@ -702,7 +760,7 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
     if (event->type() == QEvent::MouseButtonPress) {
         QLabel* box = qobject_cast<QLabel*>(obj);
     if (box && (box == m_displayAfterBox || box == m_unmuteDelayBox || box == m_autoPlayBox || box == m_pauseDelayBox || box == m_repeatBox || 
-        box == m_fadeInBox || box == m_fadeOutBox || box == m_hideDelayBox || box == m_opacityBox || box == m_volumeBox)) {
+        box == m_fadeInBox || box == m_fadeOutBox || box == m_audioFadeInBox || box == m_audioFadeOutBox || box == m_hideDelayBox || box == m_opacityBox || box == m_volumeBox)) {
             // Don't allow interaction with disabled boxes
             if (!box->isEnabled()) {
                 return true; // consume the event but don't activate
@@ -876,7 +934,7 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
 
 bool MediaSettingsPanel::boxSupportsDecimal(QLabel* box) const {
     return box == m_displayAfterBox || box == m_unmuteDelayBox || box == m_autoPlayBox || box == m_fadeInBox ||
-           box == m_fadeOutBox || box == m_hideDelayBox || box == m_pauseDelayBox;
+           box == m_fadeOutBox || box == m_audioFadeInBox || box == m_audioFadeOutBox || box == m_hideDelayBox || box == m_pauseDelayBox;
 }
 
 bool MediaSettingsPanel::isValidInputForBox(QLabel* box, QChar character) {
@@ -1375,6 +1433,8 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     applyCheckState(m_repeatCheck, state.repeatEnabled);
     applyCheckState(m_fadeInCheck, state.fadeInEnabled);
     applyCheckState(m_fadeOutCheck, state.fadeOutEnabled);
+    applyCheckState(m_audioFadeInCheck, state.audioFadeInEnabled);
+    applyCheckState(m_audioFadeOutCheck, state.audioFadeOutEnabled);
     applyCheckState(m_opacityCheck, state.opacityOverrideEnabled);
     applyCheckState(m_volumeCheck, state.volumeOverrideEnabled);
     applyCheckState(m_unmuteCheck, state.unmuteAutomatically);
@@ -1388,6 +1448,8 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     applyBoxText(m_repeatBox, state.repeatCountText, QStringLiteral("1"));
     applyBoxText(m_fadeInBox, state.fadeInText, QStringLiteral("1"), true);
     applyBoxText(m_fadeOutBox, state.fadeOutText, QStringLiteral("1"), true);
+    applyBoxText(m_audioFadeInBox, state.audioFadeInText, QStringLiteral("1"), true);
+    applyBoxText(m_audioFadeOutBox, state.audioFadeOutText, QStringLiteral("1"), true);
     applyBoxText(m_hideDelayBox, state.hideDelayText, QStringLiteral("1"), true);
     applyBoxText(m_opacityBox, state.opacityText, QStringLiteral("100"));
     applyBoxText(m_volumeBox, state.volumeText, QStringLiteral("100"));
@@ -1475,6 +1537,10 @@ void MediaSettingsPanel::pushSettingsToMedia() {
     state.fadeInText = trimmedDecimalText(m_fadeInBox, state.fadeInText);
     state.fadeOutEnabled = m_fadeOutCheck && m_fadeOutCheck->isChecked();
     state.fadeOutText = trimmedDecimalText(m_fadeOutBox, state.fadeOutText);
+    state.audioFadeInEnabled = m_audioFadeInCheck && m_audioFadeInCheck->isChecked();
+    state.audioFadeInText = trimmedDecimalText(m_audioFadeInBox, state.audioFadeInText);
+    state.audioFadeOutEnabled = m_audioFadeOutCheck && m_audioFadeOutCheck->isChecked();
+    state.audioFadeOutText = trimmedDecimalText(m_audioFadeOutBox, state.audioFadeOutText);
     state.opacityOverrideEnabled = m_opacityCheck && m_opacityCheck->isChecked();
     state.opacityText = trimmedText(m_opacityBox, state.opacityText);
     const QString volumeFallback = state.volumeText.isEmpty() ? QStringLiteral("100") : state.volumeText;

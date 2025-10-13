@@ -47,8 +47,12 @@ public:
         QString repeatCountText = QStringLiteral("1");
         bool fadeInEnabled = false;
         QString fadeInText = QStringLiteral("1");
-        bool fadeOutEnabled = false;
-        QString fadeOutText = QStringLiteral("1");
+    bool fadeOutEnabled = false;
+    QString fadeOutText = QStringLiteral("1");
+    bool audioFadeInEnabled = false;
+    QString audioFadeInText = QStringLiteral("1");
+    bool audioFadeOutEnabled = false;
+    QString audioFadeOutText = QStringLiteral("1");
         bool opacityOverrideEnabled = false;
         QString opacityText = QStringLiteral("100");
         bool volumeOverrideEnabled = false;
@@ -164,6 +168,8 @@ public:
     bool hideWhenVideoEnds() const;
     double fadeInDurationSeconds() const;
     double fadeOutDurationSeconds() const;
+    double audioFadeInDurationSeconds() const;
+    double audioFadeOutDurationSeconds() const;
     bool opacityOverrideEnabled() const;
     int opacityPercent() const;
 
@@ -306,8 +312,8 @@ public:
     bool handleControlsPressAtItemPos(const QPointF& itemPos); // view-level forwarding
 
     // Audio state accessors for scene serialization
-    bool isMuted() const { return m_audio ? m_audio->isMuted() : false; }
-    qreal volume() const { return m_audio ? std::clamp<qreal>(m_audio->volume(), 0.0, 1.0) : 1.0; }
+    bool isMuted() const { return m_effectiveMuted; }
+    qreal volume() const { return m_userVolumeRatio; }
 
     // QGraphicsItem
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override;
@@ -351,6 +357,10 @@ private:
     void setVolumeFromControl(qreal ratio, bool fromSettings);
     void applyVolumeRatio(qreal ratio);
     qreal volumeFromSettingsState() const;
+    void ensureAudioFadeAnimation();
+    void stopAudioFadeAnimation(bool resetVolumeGuard);
+    void startAudioFade(qreal startVolume, qreal endVolume, double durationSeconds, bool targetMuted);
+    void finalizeAudioFade(bool targetMuted);
 
     qreal baseWidth() const { return static_cast<qreal>(m_baseSize.width()); }
     qreal baseHeight() const { return static_cast<qreal>(m_baseSize.height()); }
@@ -365,6 +375,14 @@ private:
     bool m_primingFirstFrame = false;
     bool m_firstFramePrimed = false;
     bool m_savedMuted = false;
+    bool m_effectiveMuted = false;
+    bool m_pendingMuteTarget = false;
+    QVariantAnimation* m_audioFadeAnimation = nullptr;
+    bool m_volumeChangeFromAudioFade = false;
+    qreal m_audioFadeStartVolume = 1.0;
+    qreal m_audioFadeTargetVolume = 1.0;
+    qreal m_lastUserVolumeBeforeMute = 1.0;
+    qreal m_userVolumeRatio = 1.0;
     QImage m_posterImage; bool m_posterImageSet = false;
     QGraphicsRectItem* m_controlsBg = nullptr;
     RoundedRectItem* m_playBtnRectItem = nullptr; QGraphicsSvgItem* m_playIcon = nullptr; QGraphicsSvgItem* m_pauseIcon = nullptr;
