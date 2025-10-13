@@ -35,6 +35,9 @@ public:
         bool displayAutomatically = true;
         bool displayDelayEnabled = false;
         QString displayDelayText = QStringLiteral("1");
+    bool unmuteAutomatically = true;
+    bool unmuteDelayEnabled = false;
+    QString unmuteDelayText = QStringLiteral("0");
         bool playAutomatically = true;
         bool playDelayEnabled = false;
         QString playDelayText = QStringLiteral("1");
@@ -150,6 +153,8 @@ public:
     void setMediaSettingsState(const MediaSettingsState& state);
     bool autoDisplayEnabled() const;
     int autoDisplayDelayMs() const;
+    bool autoUnmuteEnabled() const;
+    int autoUnmuteDelayMs() const;
     bool autoPlayEnabled() const;
     int autoPlayDelayMs() const;
     bool autoPauseEnabled() const;
@@ -275,6 +280,7 @@ public:
     void togglePlayPause();
     void toggleRepeat();
     void toggleMute();
+    void setMuted(bool muted);
     void stopToBeginning();
     void seekToRatio(qreal r);
     qint64 currentPositionMs() const { return m_positionMs; }

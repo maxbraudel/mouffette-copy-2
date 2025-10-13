@@ -172,6 +172,42 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_contentLayout->addWidget(delayRow);
     }
 
+    // Unmute automatically (video only)
+    {
+    m_unmuteRow = new QWidget(m_innerContent);
+    configureRow(m_unmuteRow);
+        auto* h = new QHBoxLayout(m_unmuteRow);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->setSpacing(0);
+        m_unmuteCheck = new QCheckBox("Unmute automatically", m_unmuteRow);
+        m_unmuteCheck->setStyleSheet(overlayTextStyle);
+        m_unmuteCheck->installEventFilter(this);
+        h->addWidget(m_unmuteCheck);
+        h->addStretch();
+        m_contentLayout->addWidget(m_unmuteRow);
+    }
+
+    // Unmute delay (video only)
+    {
+    m_unmuteDelayRow = new QWidget(m_innerContent);
+    configureRow(m_unmuteDelayRow);
+        auto* h = new QHBoxLayout(m_unmuteDelayRow);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->setSpacing(0);
+        m_unmuteDelayCheck = new QCheckBox("Unmute delay: ", m_unmuteDelayRow);
+        m_unmuteDelayCheck->setStyleSheet(overlayTextStyle);
+        m_unmuteDelayCheck->installEventFilter(this);
+        connect(m_unmuteDelayCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
+        m_unmuteDelayBox = makeValueBox(QStringLiteral("0"));
+        m_unmuteDelaySecondsLabel = new QLabel("s", m_unmuteDelayRow);
+        m_unmuteDelaySecondsLabel->setStyleSheet(overlayTextStyle);
+        h->addWidget(m_unmuteDelayCheck);
+        h->addWidget(m_unmuteDelayBox);
+        h->addWidget(m_unmuteDelaySecondsLabel);
+        h->addStretch();
+        m_contentLayout->addWidget(m_unmuteDelayRow);
+    }
+
     // Hide delay directly below display delay
     {
         m_hideDelayRow = new QWidget(m_innerContent);
@@ -444,6 +480,11 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         // Set initial state (display delay disabled by default since display automatically is unchecked)
         onDisplayAutomaticallyToggled(m_displayAfterCheck->isChecked());
     }
+
+    if (m_unmuteCheck) {
+        connect(m_unmuteCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onUnmuteAutomaticallyToggled);
+        onUnmuteAutomaticallyToggled(m_unmuteCheck->isChecked());
+    }
     
     // Connect play automatically checkbox to enable/disable play delay controls
     if (m_autoPlayCheck) {
@@ -492,6 +533,12 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
     if (m_repeatRow) {
         m_repeatRow->setVisible(isVideo);
     }
+    if (m_unmuteRow) {
+        m_unmuteRow->setVisible(isVideo);
+    }
+    if (m_unmuteDelayRow) {
+        m_unmuteDelayRow->setVisible(isVideo);
+    }
     if (m_hideWhenEndsRow) {
         m_hideWhenEndsRow->setVisible(isVideo);
     }
@@ -503,6 +550,17 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
         m_hideWhenVideoEndsCheck->setChecked(false);
         m_hideWhenVideoEndsCheck->blockSignals(prev);
     }
+    if (!isVideo && m_unmuteCheck) {
+        const bool prev = m_unmuteCheck->blockSignals(true);
+        m_unmuteCheck->setChecked(false);
+        m_unmuteCheck->blockSignals(prev);
+        onUnmuteAutomaticallyToggled(false);
+    }
+    if (!isVideo && m_unmuteDelayCheck) {
+        const bool prev = m_unmuteDelayCheck->blockSignals(true);
+        m_unmuteDelayCheck->setChecked(false);
+        m_unmuteDelayCheck->blockSignals(prev);
+    }
     if (!isVideo && m_volumeCheck) {
         const bool prev = m_volumeCheck->blockSignals(true);
         m_volumeCheck->setChecked(false);
@@ -510,7 +568,7 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
     }
     
     // Clear active box if it belongs to a hidden video-only option
-    if (!isVideo && m_activeBox && (m_activeBox == m_autoPlayBox || m_activeBox == m_pauseDelayBox || m_activeBox == m_repeatBox || m_activeBox == m_volumeBox)) {
+    if (!isVideo && m_activeBox && (m_activeBox == m_autoPlayBox || m_activeBox == m_pauseDelayBox || m_activeBox == m_repeatBox || m_activeBox == m_volumeBox || m_activeBox == m_unmuteDelayBox)) {
         clearActiveBox();
     }
     
@@ -643,7 +701,7 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
     // Handle clicks on value boxes FIRST (before general mouse blocking)
     if (event->type() == QEvent::MouseButtonPress) {
         QLabel* box = qobject_cast<QLabel*>(obj);
-    if (box && (box == m_displayAfterBox || box == m_autoPlayBox || box == m_pauseDelayBox || box == m_repeatBox || 
+    if (box && (box == m_displayAfterBox || box == m_unmuteDelayBox || box == m_autoPlayBox || box == m_pauseDelayBox || box == m_repeatBox || 
         box == m_fadeInBox || box == m_fadeOutBox || box == m_hideDelayBox || box == m_opacityBox || box == m_volumeBox)) {
             // Don't allow interaction with disabled boxes
             if (!box->isEnabled()) {
@@ -817,7 +875,7 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
 }
 
 bool MediaSettingsPanel::boxSupportsDecimal(QLabel* box) const {
-    return box == m_displayAfterBox || box == m_autoPlayBox || box == m_fadeInBox ||
+    return box == m_displayAfterBox || box == m_unmuteDelayBox || box == m_autoPlayBox || box == m_fadeInBox ||
            box == m_fadeOutBox || box == m_hideDelayBox || box == m_pauseDelayBox;
 }
 
@@ -1087,6 +1145,67 @@ void MediaSettingsPanel::onDisplayAutomaticallyToggled(bool checked) {
     }
 }
 
+void MediaSettingsPanel::onUnmuteAutomaticallyToggled(bool checked) {
+    // Enable/disable unmute delay checkbox and input box based on unmute automatically state
+    const QString activeTextStyle = QStringLiteral("color: %1;")
+        .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
+    const QString disabledTextStyle = QStringLiteral("color: #808080;");
+
+    if (m_unmuteDelayCheck) {
+        m_unmuteDelayCheck->setEnabled(checked);
+        
+        // Update visual styling for disabled state
+        if (checked) {
+            m_unmuteDelayCheck->setStyleSheet(activeTextStyle);
+        } else {
+            m_unmuteDelayCheck->setStyleSheet(disabledTextStyle); // Gray color for disabled
+            // Also uncheck the unmute delay checkbox when disabled
+            m_unmuteDelayCheck->setChecked(false);
+        }
+    }
+    
+    if (m_unmuteDelayBox) {
+        m_unmuteDelayBox->setEnabled(checked);
+        
+        // Update visual styling for the input box
+        if (checked) {
+            // Reset to normal styling when enabled
+            setBoxActive(m_unmuteDelayBox, m_activeBox == m_unmuteDelayBox);
+        } else {
+            // Apply disabled styling
+            m_unmuteDelayBox->setStyleSheet(
+                "QLabel {"
+                "  background-color: #404040;"
+                "  border: 1px solid #606060;"
+                "  border-radius: 6px;"
+                "  padding: 2px 10px;"
+                "  margin-left: 4px;"
+                "  margin-right: 0px;"
+                "  color: #808080;"
+                "}"
+            );
+            
+            // Clear active state if this box was active
+            if (m_activeBox == m_unmuteDelayBox) {
+                clearActiveBox();
+            }
+        }
+    }
+    
+    // Also update the "seconds" label styling
+    if (m_unmuteDelaySecondsLabel) {
+        if (checked) {
+            m_unmuteDelaySecondsLabel->setStyleSheet(activeTextStyle);
+        } else {
+            m_unmuteDelaySecondsLabel->setStyleSheet(disabledTextStyle); // Gray color for disabled
+        }
+    }
+
+    if (!m_updatingFromMedia) {
+        pushSettingsToMedia();
+    }
+}
+
 void MediaSettingsPanel::onPlayAutomaticallyToggled(bool checked) {
     // Enable/disable play delay checkbox and input box based on play automatically state
     const QString activeTextStyle = QStringLiteral("color: %1;")
@@ -1294,6 +1413,8 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     applyCheckState(m_fadeOutCheck, state.fadeOutEnabled);
     applyCheckState(m_opacityCheck, state.opacityOverrideEnabled);
     applyCheckState(m_volumeCheck, state.volumeOverrideEnabled);
+    applyCheckState(m_unmuteCheck, state.unmuteAutomatically);
+    applyCheckState(m_unmuteDelayCheck, state.unmuteDelayEnabled);
     applyCheckState(m_hideDelayCheck, state.hideDelayEnabled);
     applyCheckState(m_hideWhenVideoEndsCheck, state.hideWhenVideoEnds);
 
@@ -1306,10 +1427,12 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     applyBoxText(m_hideDelayBox, state.hideDelayText, QStringLiteral("1"), true);
     applyBoxText(m_opacityBox, state.opacityText, QStringLiteral("100"));
     applyBoxText(m_volumeBox, state.volumeText, QStringLiteral("100"));
+    applyBoxText(m_unmuteDelayBox, state.unmuteDelayText, QStringLiteral("1"), true);
 
     // Re-run UI interlock logic without persisting back to the media item
     onDisplayAutomaticallyToggled(m_displayAfterCheck ? m_displayAfterCheck->isChecked() : false);
     onPlayAutomaticallyToggled(m_autoPlayCheck ? m_autoPlayCheck->isChecked() : false);
+    onUnmuteAutomaticallyToggled(m_unmuteCheck ? m_unmuteCheck->isChecked() : false);
     onOpacityToggled(m_opacityCheck ? m_opacityCheck->isChecked() : false);
     onVolumeToggled(m_volumeCheck ? m_volumeCheck->isChecked() : false);
     onHideDelayToggled(m_hideDelayCheck ? m_hideDelayCheck->isChecked() : false);
@@ -1393,6 +1516,9 @@ void MediaSettingsPanel::pushSettingsToMedia() {
     const QString volumeFallback = state.volumeText.isEmpty() ? QStringLiteral("100") : state.volumeText;
     state.volumeOverrideEnabled = m_volumeCheck && m_volumeCheck->isChecked();
     state.volumeText = trimmedPercentText(m_volumeBox, volumeFallback);
+    state.unmuteAutomatically = m_unmuteCheck && m_unmuteCheck->isChecked();
+    state.unmuteDelayEnabled = m_unmuteDelayCheck && m_unmuteDelayCheck->isChecked();
+    state.unmuteDelayText = trimmedDecimalText(m_unmuteDelayBox, state.unmuteDelayText);
     state.hideDelayEnabled = m_hideDelayCheck && m_hideDelayCheck->isChecked();
     state.hideDelayText = trimmedDecimalText(m_hideDelayBox, state.hideDelayText);
     state.hideWhenVideoEnds = m_hideWhenVideoEndsCheck && m_hideWhenVideoEndsCheck->isChecked();

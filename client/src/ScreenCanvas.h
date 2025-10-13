@@ -375,6 +375,7 @@ protected:
         std::weak_ptr<bool> guard;
         qint64 posMs = 0;
         bool wasPlaying = false;
+            bool wasMuted = false;
         QMetaObject::Connection hideOnEndConnection;
     };
     // Remember selection present just before entering host scene so it can be restored afterward (multi-select supported)

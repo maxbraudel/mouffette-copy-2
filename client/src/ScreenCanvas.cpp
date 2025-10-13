@@ -4429,6 +4429,7 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                     st.guard = vid->lifetimeGuard();
                     st.posMs = vid->currentPositionMs();
                     st.wasPlaying = vid->isPlaying();
+                    st.wasMuted = vid->isMuted();
                     if (vid->hideWhenVideoEnds()) {
                         if (QMediaPlayer* player = vid->mediaPlayer()) {
                             st.hideOnEndConnection = QObject::connect(player, &QMediaPlayer::mediaStatusChanged, this, [this, media, guard = st.guard](QMediaPlayer::MediaStatus status){
@@ -4442,6 +4443,27 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                     }
                     m_prevVideoStates.append(st);
                     vid->pauseAndSetPosition(st.posMs);
+
+                    const bool shouldAutoUnmute = media->autoUnmuteEnabled();
+                    const int unmuteDelayMs = media->autoUnmuteDelayMs();
+                    vid->setMuted(true);
+                    if (shouldAutoUnmute) {
+                        const auto unmuteGuard = vid->lifetimeGuard();
+                        ResizableVideoItem* videoPtr = vid;
+                        auto unmuteNow = [this, videoPtr, unmuteGuard]() {
+                            if (!m_hostSceneActive) return;
+                            if (unmuteGuard.expired()) return;
+                            if (!videoPtr || videoPtr->isBeingDeleted()) return;
+                            const auto state = videoPtr->mediaSettingsState();
+                            if (!state.unmuteAutomatically) return;
+                            videoPtr->setMuted(false);
+                        };
+                        if (unmuteDelayMs > 0) {
+                            QTimer::singleShot(unmuteDelayMs, this, unmuteNow);
+                        } else {
+                            QTimer::singleShot(0, this, unmuteNow);
+                        }
+                    }
                 }
                 media->hideImmediateNoFade();
                 // 1. Schedule (or immediate) display
@@ -4551,6 +4573,7 @@ void ScreenCanvas::stopHostSceneState() {
                 st.hideOnEndConnection = QMetaObject::Connection();
             }
             st.video->pauseAndSetPosition(st.posMs);
+            st.video->setMuted(st.wasMuted);
         }
     }
     m_prevVideoStates.clear();

@@ -189,6 +189,21 @@ int ResizableMediaBase::autoDisplayDelayMs() const {
     return static_cast<int>(std::lround(value * 1000.0));
 }
 
+bool ResizableMediaBase::autoUnmuteEnabled() const {
+    return m_mediaSettings.unmuteAutomatically;
+}
+
+int ResizableMediaBase::autoUnmuteDelayMs() const {
+    if (!autoUnmuteEnabled() || !m_mediaSettings.unmuteDelayEnabled) return 0;
+    QString text = m_mediaSettings.unmuteDelayText.trimmed();
+    if (text.isEmpty() || text == QStringLiteral("...")) return 0;
+    text.replace(',', '.');
+    bool ok = false;
+    double value = text.toDouble(&ok);
+    if (!ok || value < 0.0) return 0;
+    return static_cast<int>(std::lround(value * 1000.0));
+}
+
 bool ResizableMediaBase::autoPlayEnabled() const {
     return m_mediaSettings.playAutomatically;
 }
@@ -1375,6 +1390,15 @@ void ResizableVideoItem::toggleRepeat() {
 }
 
 void ResizableVideoItem::toggleMute() { if (!m_audio) return; m_audio->setMuted(!m_audio->isMuted()); bool muted = m_audio->isMuted(); updateControlsLayout(); update(); }
+
+void ResizableVideoItem::setMuted(bool muted) {
+    if (!m_audio) return;
+    if (m_audio->isMuted() == muted) return;
+    m_audio->setMuted(muted);
+    m_savedMuted = muted;
+    updateControlsLayout();
+    update();
+}
 
 void ResizableVideoItem::stopToBeginning() {
     if (!m_player) return;

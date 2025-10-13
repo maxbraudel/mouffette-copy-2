@@ -49,6 +49,7 @@ protected:
 
 private slots:
     void onDisplayAutomaticallyToggled(bool checked);
+    void onUnmuteAutomaticallyToggled(bool checked);
     void onPlayAutomaticallyToggled(bool checked);
     void onOpacityToggled(bool checked);
     void onHideDelayToggled(bool checked);
@@ -88,6 +89,7 @@ private:
     
     // Display delay checkbox (separate from display automatically)
     QCheckBox* m_displayDelayCheck = nullptr;
+    QCheckBox* m_unmuteDelayCheck = nullptr;
 
     QCheckBox* m_fadeInCheck = nullptr;
 
@@ -112,6 +114,9 @@ private:
     QLabel* m_opacityBox = nullptr;
     QCheckBox* m_volumeCheck = nullptr;
     QLabel* m_volumeBox = nullptr;
+    QCheckBox* m_unmuteCheck = nullptr;
+    QLabel* m_unmuteDelayBox = nullptr;
+    QLabel* m_unmuteDelaySecondsLabel = nullptr;
     QLabel* m_activeBox = nullptr; // currently active box (if any)
     bool m_clearOnFirstType = false; // if true, first keypress replaces previous content
     bool m_pendingDecimalInsertion = false; // awaiting first fractional digit after a decimal point
@@ -128,6 +133,8 @@ private:
     QWidget* m_hideDelayRow = nullptr;
     QWidget* m_hideWhenEndsRow = nullptr;
     QWidget* m_volumeRow = nullptr;
+    QWidget* m_unmuteRow = nullptr;
+    QWidget* m_unmuteDelayRow = nullptr;
 
     QLabel* m_hideDelaySecondsLabel = nullptr;
     QLabel* m_pauseDelayBox = nullptr;
