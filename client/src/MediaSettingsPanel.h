@@ -39,7 +39,6 @@ public:
     void updateAvailableHeight(int maxHeightPx);
     void updatePosition();
     void setAnchorMargins(int leftMarginPx, int topMarginPx, int bottomMarginPx);
-    void syncVolumeFromMedia();
 
     // Optional: accessors to later read values (not used yet).
     QWidget* widget() const { return m_widget; }

@@ -949,42 +949,6 @@ void MediaSettingsPanel::applyVolumeFromUi() {
     pushSettingsToMedia();
 }
 
-void MediaSettingsPanel::syncVolumeFromMedia() {
-    if (!m_mediaItem || !m_volumeBox) return;
-    auto* videoItem = dynamic_cast<ResizableVideoItem*>(m_mediaItem);
-    if (!videoItem) return;
-
-    const bool previousUpdating = m_updatingFromMedia;
-    m_updatingFromMedia = true;
-
-    const auto state = m_mediaItem->mediaSettingsState();
-    const bool overrideEnabled = state.volumeOverrideEnabled;
-
-    if (m_volumeCheck) {
-        QSignalBlocker blocker(m_volumeCheck);
-        m_volumeCheck->setChecked(overrideEnabled);
-    }
-
-    if (m_activeBox != m_volumeBox) {
-        int percent = std::clamp<int>(static_cast<int>(std::lround(videoItem->volume() * 100.0)), 0, 100);
-        QString text = overrideEnabled ? state.volumeText.trimmed() : QString::number(percent);
-        if (text.isEmpty() || text == QStringLiteral("...")) {
-            text = QString::number(percent);
-        }
-        bool ok = false;
-        int parsed = text.toInt(&ok);
-        if (!ok) {
-            parsed = percent;
-        }
-        parsed = std::clamp(parsed, 0, 100);
-        const QString sanitized = QString::number(parsed);
-        QSignalBlocker blocker(m_volumeBox);
-        m_volumeBox->setText(sanitized);
-    }
-
-    m_updatingFromMedia = previousUpdating;
-}
-
 double MediaSettingsPanel::fadeInSeconds() const {
     if (!m_fadeInCheck || !m_fadeInBox) return 0.0;
     if (!m_fadeInCheck->isChecked()) return 0.0;
