@@ -66,6 +66,7 @@ private:
 		double fadeInSeconds=0.0; double fadeOutSeconds=0.0; double contentOpacity = 1.0;
 		// Audio state from host (videos)
 		bool muted = false; double volume = 1.0; // 0..1
+		bool autoUnmute = false; int autoUnmuteDelayMs = 0;
 		bool repeatEnabled = false; int repeatCount = 0; int repeatRemaining = 0; bool repeatActive = false;
 		bool primedFirstFrame = false; bool playAuthorized = false;
 		bool displayReady = false; bool displayStarted = false;

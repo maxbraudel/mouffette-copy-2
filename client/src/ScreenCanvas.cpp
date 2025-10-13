@@ -438,6 +438,8 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                         }
                     }
                     m["repeatCount"] = repeatCount;
+                    m["autoUnmute"] = media->autoUnmuteEnabled();
+                    m["autoUnmuteDelayMs"] = media->autoUnmuteDelayMs();
                     const qint64 currentPos = std::max<qint64>(0, v->currentPositionMs());
                     const qint64 displayedTimestamp = v->displayedFrameTimestampMs();
                     if (displayedTimestamp >= 0) {

@@ -464,7 +464,8 @@ void RemoteSceneController::triggerAutoPlayNow(const std::shared_ptr<RemoteMedia
     item->playAuthorized = true;
     item->repeatActive = false;
     if (item->audio) {
-        item->audio->setMuted(item->muted);
+        // Don't override mute state - it's managed by scene activation and unmute automation
+        // Only set volume here
         item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0));
     }
     item->pausedAtEnd = false;
@@ -665,6 +666,33 @@ void RemoteSceneController::activateScene() {
 
     if (m_sceneReadyTimeout) {
         m_sceneReadyTimeout->stop();
+    }
+
+    // Mute all videos at scene start and schedule automatic unmute if enabled
+    const quint64 epoch = m_sceneEpoch;
+    for (const auto& item : m_mediaItems) {
+        if (!item || item->type != "video") continue;
+        if (!item->audio) continue;
+        
+        // Mute immediately at scene start
+        item->audio->setMuted(true);
+        
+        // Schedule automatic unmute if enabled
+        if (item->autoUnmute) {
+            const int unmuteDelayMs = std::max(0, item->autoUnmuteDelayMs);
+            auto unmuteCallback = [this, item, epoch]() {
+                if (epoch != m_sceneEpoch) return; // Scene changed
+                if (!item || !item->audio) return; // Item deleted
+                if (!m_sceneActivated) return; // Scene stopped
+                item->audio->setMuted(false);
+            };
+            
+            if (unmuteDelayMs > 0) {
+                QTimer::singleShot(unmuteDelayMs, this, unmuteCallback);
+            } else {
+                QTimer::singleShot(0, this, unmuteCallback);
+            }
+        }
     }
 
     startDeferredTimers();
@@ -869,6 +897,8 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
         if (item->type == "video") {
             item->muted = m.value("muted").toBool(false);
             item->volume = m.value("volume").toDouble(1.0);
+            item->autoUnmute = m.value("autoUnmute").toBool(false);
+            item->autoUnmuteDelayMs = m.value("autoUnmuteDelayMs").toInt(0);
             if (m.contains("startPositionMs")) {
                 const qint64 startPos = static_cast<qint64>(std::llround(m.value("startPositionMs").toDouble(0.0)));
                 item->startPositionMs = std::max<qint64>(0, startPos);
@@ -1021,7 +1051,8 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                     --item->repeatRemaining;
                     item->pausedAtEnd = false;
                     if (item->audio) {
-                        item->audio->setMuted(item->muted);
+                        // Don't override current mute state on repeat - it's managed by unmute automation
+                        // Only update volume
                         item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0));
                     }
                     item->player->setPosition(0);
