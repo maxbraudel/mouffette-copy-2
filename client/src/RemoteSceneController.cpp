@@ -691,8 +691,10 @@ void RemoteSceneController::activateScene() {
         if (!item || item->type != "video") continue;
         if (!item->audio) continue;
         
-        // Mute immediately at scene start
-        item->audio->setMuted(true);
+        // Only mute at scene start if NOT using mute-when-video-ends automation
+        if (!item->muteWhenVideoEnds) {
+            item->audio->setMuted(true);
+        }
         
         // Schedule automatic unmute if enabled
         if (item->autoUnmute) {
