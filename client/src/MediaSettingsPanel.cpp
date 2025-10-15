@@ -925,6 +925,38 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
                     return true;
                 }
 
+                if (ch == '-' && (m_activeBox == m_hideDelayBox || m_activeBox == m_muteDelayBox)) {
+                    QString currentText = m_activeBox->text();
+                    QString baseText = (m_clearOnFirstType || currentText == "..." || currentText == "∞")
+                        ? QString()
+                        : currentText;
+
+                    if (m_clearOnFirstType) {
+                        m_clearOnFirstType = false;
+                    }
+
+                    if (baseText.startsWith('-')) {
+                        return true;
+                    }
+
+                    if (m_pendingDecimalInsertion) {
+                        m_pendingDecimalInsertion = false;
+                    }
+
+                    baseText.remove('-');
+                    baseText.prepend('-');
+
+                    if (baseText.isEmpty()) {
+                        baseText = QStringLiteral("-");
+                    }
+
+                    m_activeBox->setText(baseText);
+                    if (!m_updatingFromMedia) {
+                        pushSettingsToMedia();
+                    }
+                    return true;
+                }
+
                 if (ch.isDigit()) {
                     QString currentText = m_activeBox->text();
                     const bool replaceAll = m_clearOnFirstType || currentText == "..." || currentText == "∞";
@@ -1013,7 +1045,14 @@ bool MediaSettingsPanel::isValidInputForBox(QLabel* box, QChar character) {
     }
 
     if (boxSupportsDecimal(box)) {
-        return character.isDigit() || character == '.';
+        if (character == '.') {
+            return true;
+        }
+        if ((box == m_hideDelayBox || box == m_muteDelayBox) && character == '-') {
+            const QString current = box->text();
+            return !current.contains('-');
+        }
+        return character.isDigit();
     }
 
     return character.isDigit();
@@ -1484,6 +1523,10 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
         if (!label) return;
         QString value = text.isEmpty() ? fallback : text;
         if (normalizeDecimal) {
+            bool negative = value.startsWith('-');
+            if (negative) {
+                value.remove(0, 1);
+            }
             value.replace(',', '.');
             if (value.startsWith('.')) {
                 value.remove(0, 1);
@@ -1507,6 +1550,9 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
             }
             if (value.isEmpty()) {
                 value = fallback;
+            }
+            if (negative && value != QStringLiteral("...")) {
+                value.prepend('-');
             }
         }
         label->setText(value);
@@ -1577,6 +1623,10 @@ void MediaSettingsPanel::pushSettingsToMedia() {
         fallbackValue.replace(',', '.');
         QString value = trimmedText(label, fallbackValue);
         value.replace(',', '.');
+        bool negative = value.startsWith('-');
+        if (negative) {
+            value.remove(0, 1);
+        }
         if (value.startsWith('.')) {
             value.remove(0, 1);
         }
@@ -1598,6 +1648,9 @@ void MediaSettingsPanel::pushSettingsToMedia() {
         }
         if (value.isEmpty()) {
             value = fallbackValue;
+        }
+        if (negative && value != QStringLiteral("...")) {
+            value.prepend('-');
         }
         return value;
     };

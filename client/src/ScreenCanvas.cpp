@@ -4427,41 +4427,135 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                 const int playDelayMs = media->autoPlayDelayMs();
                 const bool shouldAutoHide = media->autoHideEnabled();
                 const int hideDelayMs = media->autoHideDelayMs();
+                const bool hideOnEnd = media->hideWhenVideoEnds();
+                const bool muteOnEnd = media->muteWhenVideoEnds();
+                const bool scheduleHideFromDisplay = shouldAutoHide && !hideOnEnd;
                 // Snapshot and reset videos
                 if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
-                    VideoPreState st;
-                    st.video = vid;
-                    st.guard = vid->lifetimeGuard();
-                    st.posMs = vid->currentPositionMs();
-                    st.wasPlaying = vid->isPlaying();
-                    st.wasMuted = vid->isMuted();
-                    const bool hideOnEnd = vid->hideWhenVideoEnds();
-                    const bool muteOnEnd = media->muteWhenVideoEnds();
-                    if ((hideOnEnd || muteOnEnd) && vid->mediaPlayer()) {
-                        ResizableVideoItem* videoForEnd = vid;
-                        st.endOfMediaConnection = QObject::connect(vid->mediaPlayer(), &QMediaPlayer::mediaStatusChanged, this, [this, media, videoForEnd, guard = st.guard, hideOnEnd, muteOnEnd](QMediaPlayer::MediaStatus status){
-                            if (!m_hostSceneActive) return;
-                            if (status != QMediaPlayer::EndOfMedia) return;
-                            if (guard.expired()) return;
-                            if (!media || media->isBeingDeleted()) return;
-                            if (hideOnEnd) {
-                                media->hideWithConfiguredFade();
-                            }
-                            if (muteOnEnd && videoForEnd) {
-                                const auto state = videoForEnd->mediaSettingsState();
-                                if (state.muteWhenVideoEnds) {
-                                    videoForEnd->setMuted(true);
-                                }
-                            }
-                        });
-                    }
-                    m_prevVideoStates.append(st);
-                    vid->pauseAndSetPosition(st.posMs);
+                    m_prevVideoStates.append(VideoPreState{});
+                    VideoPreState& videoState = m_prevVideoStates.last();
+                    videoState.video = vid;
+                    videoState.guard = vid->lifetimeGuard();
+                    videoState.posMs = vid->currentPositionMs();
+                    videoState.wasPlaying = vid->isPlaying();
+                    videoState.wasMuted = vid->isMuted();
 
-                    const bool shouldAutoUnmute = media->autoUnmuteEnabled();
-                    const int unmuteDelayMs = media->autoUnmuteDelayMs();
                     const bool shouldAutoMute = media->autoMuteEnabled();
                     const int muteDelayMs = media->autoMuteDelayMs();
+                    const bool shouldAutoUnmute = media->autoUnmuteEnabled();
+                    const int unmuteDelayMs = media->autoUnmuteDelayMs();
+                    QMediaPlayer* player = vid->mediaPlayer();
+
+                    if ((hideOnEnd || muteOnEnd) && player) {
+                        auto hideTriggered = std::make_shared<bool>(false);
+                        auto triggerHide = [this, media, guard = videoState.guard, hideTriggered]() {
+                            if (*hideTriggered) return;
+                            if (!m_hostSceneActive) return;
+                            if (guard.expired()) return;
+                            if (!media || media->isBeingDeleted()) return;
+                            const auto currentState = media->mediaSettingsState();
+                            if (!currentState.hideWhenVideoEnds) return;
+                            *hideTriggered = true;
+                            media->hideWithConfiguredFade();
+                        };
+
+                        QTimer* hideAfterEndTimer = nullptr;
+                        if (hideOnEnd && shouldAutoHide && hideDelayMs > 0) {
+                            hideAfterEndTimer = new QTimer(this);
+                            hideAfterEndTimer->setSingleShot(true);
+                            videoState.hideDelayTimer = hideAfterEndTimer;
+                            connect(hideAfterEndTimer, &QTimer::timeout, this, [triggerHide]() { triggerHide(); });
+                        }
+                        QPointer<QTimer> hideTimerPtr = hideAfterEndTimer;
+
+                        if (hideOnEnd) {
+                            videoState.hideOnEndConnection = QObject::connect(player, &QMediaPlayer::mediaStatusChanged, this,
+                                [this, triggerHide, hideTimerPtr, hideDelayMs, shouldAutoHide](QMediaPlayer::MediaStatus status) {
+                                    if (!m_hostSceneActive) return;
+                                    if (status != QMediaPlayer::EndOfMedia) return;
+                                    if (shouldAutoHide && hideDelayMs > 0 && hideTimerPtr) {
+                                        hideTimerPtr->stop();
+                                        hideTimerPtr->start(hideDelayMs);
+                                    } else {
+                                        triggerHide();
+                                    }
+                                });
+
+                            if (shouldAutoHide && hideDelayMs < 0) {
+                                const qint64 offsetMs = -static_cast<qint64>(hideDelayMs);
+                                QPointer<QMediaPlayer> playerPtr(player);
+                                auto preEndHideCheck = [this, playerPtr, triggerHide, offsetMs]() {
+                                    if (!m_hostSceneActive) return;
+                                    if (!playerPtr) return;
+                                    const qint64 duration = playerPtr->duration();
+                                    if (duration <= 0) return;
+                                    const qint64 position = playerPtr->position();
+                                    if (position < 0) return;
+                                    if ((duration - position) <= offsetMs) {
+                                        triggerHide();
+                                    }
+                                };
+                                videoState.hidePreEndPositionConnection = QObject::connect(player, &QMediaPlayer::positionChanged, this, [preEndHideCheck](qint64) { preEndHideCheck(); });
+                                videoState.hidePreEndDurationConnection = QObject::connect(player, &QMediaPlayer::durationChanged, this, [preEndHideCheck](qint64) { preEndHideCheck(); });
+                            }
+                        }
+
+                        auto muteTriggered = std::make_shared<bool>(false);
+                        auto triggerMute = [this, videoPtr = vid, guard = videoState.guard, muteTriggered]() {
+                            if (*muteTriggered) return;
+                            if (!m_hostSceneActive) return;
+                            if (guard.expired()) return;
+                            if (!videoPtr || videoPtr->isBeingDeleted()) return;
+                            const auto currentState = videoPtr->mediaSettingsState();
+                            if (!currentState.muteWhenVideoEnds) return;
+                            *muteTriggered = true;
+                            videoPtr->setMuted(true);
+                        };
+
+                        QTimer* muteAfterEndTimer = nullptr;
+                        if (muteOnEnd && shouldAutoMute && muteDelayMs > 0) {
+                            muteAfterEndTimer = new QTimer(this);
+                            muteAfterEndTimer->setSingleShot(true);
+                            videoState.muteDelayTimer = muteAfterEndTimer;
+                            connect(muteAfterEndTimer, &QTimer::timeout, this, [triggerMute]() { triggerMute(); });
+                        }
+                        QPointer<QTimer> muteTimerPtr = muteAfterEndTimer;
+
+                        if (muteOnEnd) {
+                            videoState.muteOnEndConnection = QObject::connect(player, &QMediaPlayer::mediaStatusChanged, this,
+                                [this, triggerMute, muteTimerPtr, muteDelayMs, shouldAutoMute](QMediaPlayer::MediaStatus status) {
+                                    if (!m_hostSceneActive) return;
+                                    if (status != QMediaPlayer::EndOfMedia) return;
+                                    if (shouldAutoMute && muteDelayMs > 0 && muteTimerPtr) {
+                                        muteTimerPtr->stop();
+                                        muteTimerPtr->start(muteDelayMs);
+                                    } else {
+                                        triggerMute();
+                                    }
+                                });
+
+                            if (shouldAutoMute && muteDelayMs < 0) {
+                                const qint64 offsetMs = -static_cast<qint64>(muteDelayMs);
+                                QPointer<QMediaPlayer> playerPtr(player);
+                                auto preEndMuteCheck = [this, playerPtr, triggerMute, offsetMs]() {
+                                    if (!m_hostSceneActive) return;
+                                    if (!playerPtr) return;
+                                    const qint64 duration = playerPtr->duration();
+                                    if (duration <= 0) return;
+                                    const qint64 position = playerPtr->position();
+                                    if (position < 0) return;
+                                    if ((duration - position) <= offsetMs) {
+                                        triggerMute();
+                                    }
+                                };
+                                videoState.mutePreEndPositionConnection = QObject::connect(player, &QMediaPlayer::positionChanged, this, [preEndMuteCheck](qint64) { preEndMuteCheck(); });
+                                videoState.mutePreEndDurationConnection = QObject::connect(player, &QMediaPlayer::durationChanged, this, [preEndMuteCheck](qint64) { preEndMuteCheck(); });
+                            }
+                        }
+                    }
+
+                    vid->pauseAndSetPosition(videoState.posMs);
+
                     vid->setMuted(true);
                     if (shouldAutoUnmute) {
                         const auto unmuteGuard = vid->lifetimeGuard();
@@ -4480,7 +4574,8 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                             QTimer::singleShot(0, this, unmuteNow);
                         }
                     }
-                    if (shouldAutoMute) {
+
+                    if (shouldAutoMute && !muteOnEnd) {
                         const auto muteGuard = vid->lifetimeGuard();
                         ResizableVideoItem* videoPtr = vid;
                         const int delay = std::max(0, muteDelayMs);
@@ -4499,12 +4594,12 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                 if (shouldAutoDisplay) {
                     const auto displayGuard = media->lifetimeGuard();
                     if (displayDelayMs > 0) {
-                        QTimer::singleShot(displayDelayMs, this, [this, media, displayGuard, shouldAutoHide, hideDelayMs]() {
+                        QTimer::singleShot(displayDelayMs, this, [this, media, displayGuard, scheduleHideFromDisplay, hideDelayMs]() {
                             if (!m_hostSceneActive) return;
                             if (displayGuard.expired()) return;
                             if (media->isBeingDeleted()) return;
                             media->showWithConfiguredFade();
-                            if (shouldAutoHide) {
+                            if (scheduleHideFromDisplay) {
                                 const auto hideGuard = media->lifetimeGuard();
                                 QTimer::singleShot(std::max(0, hideDelayMs), this, [this, media, hideGuard]() {
                                     if (!m_hostSceneActive) return;
@@ -4516,7 +4611,7 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                         });
                     } else {
                         media->showWithConfiguredFade();
-                        if (shouldAutoHide) {
+                        if (scheduleHideFromDisplay) {
                             const auto hideGuard = media->lifetimeGuard();
                             QTimer::singleShot(std::max(0, hideDelayMs), this, [this, media, hideGuard]() {
                                 if (!m_hostSceneActive) return;
@@ -4593,13 +4688,43 @@ void ScreenCanvas::stopHostSceneState() {
     }
     // Restore pre-scene video positions (always paused)
     for (VideoPreState& st : m_prevVideoStates) {
+        if (st.hideDelayTimer) {
+            st.hideDelayTimer->stop();
+            st.hideDelayTimer->deleteLater();
+            st.hideDelayTimer = nullptr;
+        }
+        if (st.muteDelayTimer) {
+            st.muteDelayTimer->stop();
+            st.muteDelayTimer->deleteLater();
+            st.muteDelayTimer = nullptr;
+        }
         if (!st.video) continue;
         if (st.guard.expired()) continue;
         if (st.video->isBeingDeleted()) continue;
         if (st.video->scene() == m_scene) {
-            if (st.endOfMediaConnection) {
-                QObject::disconnect(st.endOfMediaConnection);
-                st.endOfMediaConnection = QMetaObject::Connection();
+            if (st.hideOnEndConnection) {
+                QObject::disconnect(st.hideOnEndConnection);
+                st.hideOnEndConnection = QMetaObject::Connection();
+            }
+            if (st.hidePreEndPositionConnection) {
+                QObject::disconnect(st.hidePreEndPositionConnection);
+                st.hidePreEndPositionConnection = QMetaObject::Connection();
+            }
+            if (st.hidePreEndDurationConnection) {
+                QObject::disconnect(st.hidePreEndDurationConnection);
+                st.hidePreEndDurationConnection = QMetaObject::Connection();
+            }
+            if (st.muteOnEndConnection) {
+                QObject::disconnect(st.muteOnEndConnection);
+                st.muteOnEndConnection = QMetaObject::Connection();
+            }
+            if (st.mutePreEndPositionConnection) {
+                QObject::disconnect(st.mutePreEndPositionConnection);
+                st.mutePreEndPositionConnection = QMetaObject::Connection();
+            }
+            if (st.mutePreEndDurationConnection) {
+                QObject::disconnect(st.mutePreEndDurationConnection);
+                st.mutePreEndDurationConnection = QMetaObject::Connection();
             }
             st.video->pauseAndSetPosition(st.posMs);
             st.video->setMuted(st.wasMuted);

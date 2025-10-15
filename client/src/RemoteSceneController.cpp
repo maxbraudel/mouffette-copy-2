@@ -275,11 +275,27 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     stopAndDeleteTimer(item->pauseTimer);
     stopAndDeleteTimer(item->hideTimer);
     stopAndDeleteTimer(item->muteTimer);
+    stopAndDeleteTimer(item->hideEndDelayTimer);
+    stopAndDeleteTimer(item->muteEndDelayTimer);
 
     QObject::disconnect(item->deferredStartConn);
     QObject::disconnect(item->primingConn);
     QObject::disconnect(item->mirrorConn);
+    QObject::disconnect(item->hideOnEndConnection);
+    QObject::disconnect(item->hidePreEndPositionConnection);
+    QObject::disconnect(item->hidePreEndDurationConnection);
+    QObject::disconnect(item->muteOnEndConnection);
+    QObject::disconnect(item->mutePreEndPositionConnection);
+    QObject::disconnect(item->mutePreEndDurationConnection);
     item->pausedAtEnd = false;
+    item->hideEndTriggered = false;
+    item->muteEndTriggered = false;
+    item->hideOnEndConnection = QMetaObject::Connection();
+    item->hidePreEndPositionConnection = QMetaObject::Connection();
+    item->hidePreEndDurationConnection = QMetaObject::Connection();
+    item->muteOnEndConnection = QMetaObject::Connection();
+    item->mutePreEndPositionConnection = QMetaObject::Connection();
+    item->mutePreEndDurationConnection = QMetaObject::Connection();
 
     if (item->primingSink) {
         QObject::disconnect(item->primingSink, nullptr, nullptr, nullptr);
@@ -695,7 +711,10 @@ void RemoteSceneController::activateScene() {
             }
         }
 
-        if (item->autoMute) {
+        item->hideEndTriggered = false;
+        item->muteEndTriggered = false;
+
+        if (item->autoMute && !item->muteWhenVideoEnds) {
             scheduleMuteTimer(item);
         } else if (item->muteTimer) {
             item->muteTimer->stop();
@@ -1069,15 +1088,56 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                     item->player->play();
                 } else {
                     item->pausedAtEnd = true;
-                    if (item->audio && item->muteWhenVideoEnds) item->audio->setMuted(true);
+                    
+                    // Handle mute-on-end with delay
+                    if (item->muteWhenVideoEnds && item->audio) {
+                        const int muteDelayMs = item->autoMuteDelayMs;
+                        if (muteDelayMs > 0 && !item->muteEndTriggered) {
+                            if (!item->muteEndDelayTimer) {
+                                item->muteEndDelayTimer = new QTimer(this);
+                                item->muteEndDelayTimer->setSingleShot(true);
+                                QObject::connect(item->muteEndDelayTimer, &QTimer::timeout, this, [this, weakItem]() {
+                                    auto locked = weakItem.lock();
+                                    if (!locked || !locked->audio) return;
+                                    if (locked->sceneEpoch != m_sceneEpoch) return;
+                                    locked->audio->setMuted(true);
+                                    locked->muteEndTriggered = true;
+                                });
+                            }
+                            item->muteEndDelayTimer->start(muteDelayMs);
+                        } else if (!item->muteEndTriggered) {
+                            item->audio->setMuted(true);
+                            item->muteEndTriggered = true;
+                        }
+                    }
+                    
                     qint64 dur = item->player->duration();
                     qint64 finalPos = dur > 0 ? std::max<qint64>(0, dur - 1) : 0;
                     item->player->pause();
                     if (finalPos != item->player->position()) {
                         item->player->setPosition(finalPos);
                     }
+                    
+                    // Handle hide-on-end with delay
                     if (item->hideWhenVideoEnds) {
-                        fadeOutAndHide(item);
+                        const int hideDelayMs = item->autoHideDelayMs;
+                        if (hideDelayMs > 0 && !item->hideEndTriggered) {
+                            if (!item->hideEndDelayTimer) {
+                                item->hideEndDelayTimer = new QTimer(this);
+                                item->hideEndDelayTimer->setSingleShot(true);
+                                QObject::connect(item->hideEndDelayTimer, &QTimer::timeout, this, [this, weakItem]() {
+                                    auto locked = weakItem.lock();
+                                    if (!locked) return;
+                                    if (locked->sceneEpoch != m_sceneEpoch) return;
+                                    locked->hideEndTriggered = true;
+                                    fadeOutAndHide(locked);
+                                });
+                            }
+                            item->hideEndDelayTimer->start(hideDelayMs);
+                        } else if (!item->hideEndTriggered) {
+                            item->hideEndTriggered = true;
+                            fadeOutAndHide(item);
+                        }
                     }
                 }
             }
@@ -1108,16 +1168,75 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 return;
             }
 
+            // Handle pre-end mute trigger for negative delays
+            if (item->muteWhenVideoEnds && !item->muteEndTriggered && item->autoMuteDelayMs < 0 && item->audio) {
+                const qint64 offsetMs = -static_cast<qint64>(item->autoMuteDelayMs);
+                if ((dur - pos) <= offsetMs) {
+                    item->audio->setMuted(true);
+                    item->muteEndTriggered = true;
+                }
+            }
+
+            // Handle pre-end hide trigger for negative delays
+            if (item->hideWhenVideoEnds && !item->hideEndTriggered && item->autoHideDelayMs < 0) {
+                const qint64 offsetMs = -static_cast<qint64>(item->autoHideDelayMs);
+                if ((dur - pos) <= offsetMs) {
+                    item->hideEndTriggered = true;
+                    fadeOutAndHide(item);
+                }
+            }
+
             if (item->pausedAtEnd) return;
             if ((dur - pos) < 100) {
                 item->pausedAtEnd = true;
-                if (item->audio && item->muteWhenVideoEnds) item->audio->setMuted(true);
+                
+                // Handle mute-on-end with delay
+                if (item->muteWhenVideoEnds && item->audio) {
+                    const int muteDelayMs = item->autoMuteDelayMs;
+                    if (muteDelayMs > 0 && !item->muteEndTriggered) {
+                        if (!item->muteEndDelayTimer) {
+                            item->muteEndDelayTimer = new QTimer(this);
+                            item->muteEndDelayTimer->setSingleShot(true);
+                            QObject::connect(item->muteEndDelayTimer, &QTimer::timeout, this, [this, weakItem]() {
+                                auto locked = weakItem.lock();
+                                if (!locked || !locked->audio) return;
+                                if (locked->sceneEpoch != m_sceneEpoch) return;
+                                locked->audio->setMuted(true);
+                                locked->muteEndTriggered = true;
+                            });
+                        }
+                        item->muteEndDelayTimer->start(muteDelayMs);
+                    } else if (!item->muteEndTriggered) {
+                        item->audio->setMuted(true);
+                        item->muteEndTriggered = true;
+                    }
+                }
+                
                 item->player->pause();
                 if (dur > 1) {
                     item->player->setPosition(std::max<qint64>(0, dur - 1));
                 }
+                
+                // Handle hide-on-end with delay
                 if (item->hideWhenVideoEnds) {
-                    fadeOutAndHide(item);
+                    const int hideDelayMs = item->autoHideDelayMs;
+                    if (hideDelayMs > 0 && !item->hideEndTriggered) {
+                        if (!item->hideEndDelayTimer) {
+                            item->hideEndDelayTimer = new QTimer(this);
+                            item->hideEndDelayTimer->setSingleShot(true);
+                            QObject::connect(item->hideEndDelayTimer, &QTimer::timeout, this, [this, weakItem]() {
+                                auto locked = weakItem.lock();
+                                if (!locked) return;
+                                if (locked->sceneEpoch != m_sceneEpoch) return;
+                                locked->hideEndTriggered = true;
+                                fadeOutAndHide(locked);
+                            });
+                        }
+                        item->hideEndDelayTimer->start(hideDelayMs);
+                    } else if (!item->hideEndTriggered) {
+                        item->hideEndTriggered = true;
+                        fadeOutAndHide(item);
+                    }
                 }
             }
         });
@@ -1417,6 +1536,7 @@ void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item)
         auto locked = weakItem.lock();
         if (!locked) return;
         if (!locked->autoHide) return;
+        if (locked->hideWhenVideoEnds) return;
         if (durMs <= 10) {
             scheduleHideTimer(locked);
         } else {
@@ -1461,6 +1581,7 @@ void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item)
 void RemoteSceneController::scheduleHideTimer(const std::shared_ptr<RemoteMediaItem>& item) {
     if (!item) return;
     if (!item->autoHide) return;
+    if (item->hideWhenVideoEnds) return;
     if (item->hiding) return;
     const int delayMs = std::max(0, item->autoHideDelayMs);
     if (delayMs == 0) {
@@ -1485,6 +1606,7 @@ void RemoteSceneController::scheduleHideTimer(const std::shared_ptr<RemoteMediaI
 void RemoteSceneController::scheduleMuteTimer(const std::shared_ptr<RemoteMediaItem>& item) {
     if (!item) return;
     if (!item->autoMute) return;
+    if (item->muteWhenVideoEnds) return;
     if (!item->audio) return;
     const int delayMs = std::max(0, item->autoMuteDelayMs);
     if (item->muteTimer) {

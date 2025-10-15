@@ -375,7 +375,14 @@ protected:
         qint64 posMs = 0;
         bool wasPlaying = false;
         bool wasMuted = false;
-        QMetaObject::Connection endOfMediaConnection;
+        QMetaObject::Connection hideOnEndConnection;
+        QMetaObject::Connection hidePreEndPositionConnection;
+        QMetaObject::Connection hidePreEndDurationConnection;
+        QMetaObject::Connection muteOnEndConnection;
+        QMetaObject::Connection mutePreEndPositionConnection;
+        QMetaObject::Connection mutePreEndDurationConnection;
+        QTimer* hideDelayTimer = nullptr;
+        QTimer* muteDelayTimer = nullptr;
     };
     // Remember selection present just before entering host scene so it can be restored afterward (multi-select supported)
     QList<SavedSelection> m_prevSelectionBeforeHostScene;

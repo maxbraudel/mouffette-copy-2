@@ -246,7 +246,7 @@ int ResizableMediaBase::autoHideDelayMs() const {
     text.replace(',', '.');
     bool ok = false;
     double value = text.toDouble(&ok);
-    if (!ok || value < 0.0) return 0;
+    if (!ok) return 0;
     return static_cast<int>(std::lround(value * 1000.0));
 }
 
@@ -265,7 +265,7 @@ int ResizableMediaBase::autoMuteDelayMs() const {
     text.replace(',', '.');
     bool ok = false;
     double value = text.toDouble(&ok);
-    if (!ok || value < 0.0) return 0;
+    if (!ok) return 0;
     return static_cast<int>(std::lround(value * 1000.0));
 }
 
