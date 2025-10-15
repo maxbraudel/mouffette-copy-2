@@ -27,6 +27,7 @@ public:
     void setMediaItem(class ResizableMediaBase* item);
     void applyOpacityFromUi(); // make publicly callable
     void applyVolumeFromUi();
+    void refreshVolumeDisplay(); // Update volume display from media item state (for real-time slider sync)
     // Access fade durations (seconds). Returns 0 if disabled or invalid. Infinity symbol => treat as 0 (instant) for now.
     double fadeInSeconds() const;
     double fadeOutSeconds() const;

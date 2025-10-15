@@ -120,6 +120,7 @@ public:
     
     // Media list overlay management
     void refreshInfoOverlay();
+    void refreshSettingsPanelVolumeDisplay(); // Update volume display in settings panel (for real-time slider sync)
 
     // Snapping support for side (midpoint) resize handles: clamps scale so the moving edge
     // sticks to nearby screen borders when within snap distance.

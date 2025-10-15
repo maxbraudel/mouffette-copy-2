@@ -1608,6 +1608,21 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     applyVolumeFromUi();
 }
 
+void MediaSettingsPanel::refreshVolumeDisplay() {
+    if (m_updatingFromMedia) return;
+    if (!m_mediaItem) return;
+    if (!m_volumeBox) return;
+
+    const auto state = m_mediaItem->mediaSettingsState();
+    const QString fallback = QStringLiteral("100");
+    const QString value = state.volumeText.isEmpty() ? fallback : state.volumeText;
+    
+    // Block signals to avoid recursive updates
+    const bool prev = m_volumeBox->blockSignals(true);
+    m_volumeBox->setText(value);
+    m_volumeBox->blockSignals(prev);
+}
+
 void MediaSettingsPanel::pushSettingsToMedia() {
     if (m_updatingFromMedia) return;
     if (!m_mediaItem) return;

@@ -1874,6 +1874,13 @@ void ResizableVideoItem::setVolumeFromControl(qreal ratio, bool fromSettings) {
     }
 
     applyVolumeRatio(static_cast<qreal>(percent) / 100.0);
+    
+    // Notify settings panel to update its display in real-time
+    if (scene() && !scene()->views().isEmpty()) {
+        if (auto* screenCanvas = qobject_cast<ScreenCanvas*>(scene()->views().first())) {
+            screenCanvas->refreshSettingsPanelVolumeDisplay();
+        }
+    }
 }
 
 void ResizableVideoItem::applyVolumeOverrideFromState() {

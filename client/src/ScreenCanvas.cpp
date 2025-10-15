@@ -4912,6 +4912,12 @@ void ScreenCanvas::updateGlobalSettingsPanelVisibility() {
     }
 }
 
+void ScreenCanvas::refreshSettingsPanelVolumeDisplay() {
+    if (m_globalSettingsPanel && m_globalSettingsPanel->isVisible()) {
+        m_globalSettingsPanel->refreshVolumeDisplay();
+    }
+}
+
 void ScreenCanvas::setWebSocketClient(WebSocketClient* client) {
     // Disconnect old client if any
     if (m_wsClient) {
