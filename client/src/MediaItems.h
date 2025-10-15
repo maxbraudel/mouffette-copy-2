@@ -320,6 +320,12 @@ public:
     // Audio state accessors for scene serialization
     bool isMuted() const { return m_effectiveMuted; }
     qreal volume() const { return m_userVolumeRatio; }
+    
+    // Repeat session management (public for host scene automation)
+    void initializeSettingsRepeatSessionForPlaybackStart();
+    void cancelSettingsRepeatSession();
+    bool settingsRepeatAvailable() const;
+    bool shouldAutoRepeat() const;
 
     // QGraphicsItem
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override;
@@ -354,10 +360,6 @@ private:
     void restartPrimingSequence();
     void teardownPlayback();
     void onMediaSettingsChanged() override;
-    void initializeSettingsRepeatSessionForPlaybackStart();
-    void cancelSettingsRepeatSession();
-    bool settingsRepeatAvailable() const;
-    bool shouldAutoRepeat() const;
     bool consumeAutoRepeatOpportunity();
     qint64 nearStartThresholdMs() const;
     void setVolumeFromControl(qreal ratio, bool fromSettings);

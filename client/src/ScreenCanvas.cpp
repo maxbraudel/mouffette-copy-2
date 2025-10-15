@@ -4448,13 +4448,15 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
 
                     if ((hideOnEnd || muteOnEnd) && player) {
                         auto hideTriggered = std::make_shared<bool>(false);
-                        auto triggerHide = [this, media, guard = videoState.guard, hideTriggered]() {
+                        auto triggerHide = [this, media, videoPtr = vid, guard = videoState.guard, hideTriggered]() {
                             if (*hideTriggered) return;
                             if (!m_hostSceneActive) return;
                             if (guard.expired()) return;
                             if (!media || media->isBeingDeleted()) return;
                             const auto currentState = media->mediaSettingsState();
                             if (!currentState.hideWhenVideoEnds) return;
+                            // Don't hide if repeats are still pending
+                            if (videoPtr && videoPtr->settingsRepeatAvailable()) return;
                             *hideTriggered = true;
                             media->hideWithConfiguredFade();
                         };
@@ -4508,6 +4510,8 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                             if (!videoPtr || videoPtr->isBeingDeleted()) return;
                             const auto currentState = videoPtr->mediaSettingsState();
                             if (!currentState.muteWhenVideoEnds) return;
+                            // Don't mute if repeats are still pending
+                            if (videoPtr->settingsRepeatAvailable()) return;
                             *muteTriggered = true;
                             videoPtr->setMuted(true);
                         };
@@ -4634,6 +4638,8 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                         if (media->isBeingDeleted()) return;
                         if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
                             if (!vid->isPlaying()) {
+                                // Initialize repeat session before starting playback
+                                vid->initializeSettingsRepeatSessionForPlaybackStart();
                                 vid->togglePlayPause();
                                 // Schedule pause if enabled
                                 if (shouldAutoPause) {
