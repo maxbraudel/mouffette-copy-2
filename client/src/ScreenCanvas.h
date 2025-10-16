@@ -75,9 +75,6 @@ public:
     bool isHostSceneActive() const { return m_hostSceneActive; }
     // Serialize current canvas state (screens + media) for remote scene start
     QJsonObject serializeSceneState() const;
-    void scheduleAutoDisplayAndPlayback();
-    void handleAutoDisplay();
-    void handleAutoPlayback();
     // Remote scene integration setters
     void setWebSocketClient(class WebSocketClient* client);
     void setUploadManager(class UploadManager* manager);
@@ -364,8 +361,6 @@ protected:
     // Unified host scene state (either remote or test scene active)
     bool m_hostSceneActive = false;
     HostSceneMode m_hostSceneMode = HostSceneMode::None;
-    QTimer* m_autoDisplayTimer = nullptr;
-    QTimer* m_autoPlayTimer = nullptr;
     struct SavedSelection {
         ResizableMediaBase* media = nullptr;
         std::weak_ptr<bool> guard;

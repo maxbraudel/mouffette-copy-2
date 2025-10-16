@@ -882,11 +882,6 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
     item->type = m.value("type").toString();
     item->fileName = m.value("fileName").toString();
     item->sceneEpoch = m_sceneEpoch;
-    const int legacyScreenId = m.value("screenId").toInt(-1);
-    const double legacyNormX = m.value("normX").toDouble();
-    const double legacyNormY = m.value("normY").toDouble();
-    const double legacyNormW = m.value("normW").toDouble();
-    const double legacyNormH = m.value("normH").toDouble();
         // Parse spans if present
         if (m.contains("spans") && m.value("spans").isArray()) {
             const QJsonArray spans = m.value("spans").toArray();
@@ -897,14 +892,8 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
                 item->spans.append(s);
             }
         }
-        if (item->spans.isEmpty() && legacyScreenId != -1) {
-            RemoteMediaItem::Span fallback;
-            fallback.screenId = legacyScreenId;
-            fallback.nx = legacyNormX;
-            fallback.ny = legacyNormY;
-            fallback.nw = legacyNormW;
-            fallback.nh = legacyNormH;
-            item->spans.append(fallback);
+        if (item->spans.isEmpty()) {
+            qWarning() << "RemoteSceneController: media item" << item->mediaId << "missing spans; skipping placement";
         }
         item->autoDisplay = m.value("autoDisplay").toBool(false);
         item->autoDisplayDelayMs = m.value("autoDisplayDelayMs").toInt(0);

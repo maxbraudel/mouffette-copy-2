@@ -382,7 +382,7 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
             m["visible"] = media->isContentVisible();
             // Compute per-screen spans: for every screen intersecting this media, include a span with normalized geometry
             // relative to that screen. Do NOT clamp; negatives/overflow allow the remote to position and rely on parent clipping.
-            int legacyBestScreenId = -1; QRectF legacyBestScreenRect; qreal legacyBestArea = 0.0;
+            int bestScreenId = -1; QRectF bestScreenRect; qreal bestArea = 0.0;
             QJsonArray spans;
             for (auto it = m_sceneScreenRects.constBegin(); it != m_sceneScreenRects.constEnd(); ++it) {
                 const int sid = it.key();
@@ -398,19 +398,20 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                 span["normW"] = br.width() / srect.width();
                 span["normH"] = br.height() / srect.height();
                 spans.append(span);
-                // Track legacy "best" screen by max intersection area for backward compatibility fields
-                if (area > legacyBestArea) { legacyBestArea = area; legacyBestScreenId = sid; legacyBestScreenRect = srect; }
+                // Track best-overlap screen for potential fallback span creation
+                if (area > bestArea) { bestArea = area; bestScreenId = sid; bestScreenRect = srect; }
+            }
+            if (spans.isEmpty() && bestScreenId != -1 && bestScreenRect.width() > 0.0 && bestScreenRect.height() > 0.0) {
+                QJsonObject span;
+                span["screenId"] = bestScreenId;
+                span["normX"] = (br.x() - bestScreenRect.x()) / bestScreenRect.width();
+                span["normY"] = (br.y() - bestScreenRect.y()) / bestScreenRect.height();
+                span["normW"] = br.width() / bestScreenRect.width();
+                span["normH"] = br.height() / bestScreenRect.height();
+                spans.append(span);
             }
             if (!spans.isEmpty()) {
                 m["spans"] = spans;
-            }
-            // Backward-compatible single-screen fields (used by older remotes); keep best-overlap mapping
-            if (legacyBestScreenId != -1 && legacyBestScreenRect.width() > 0.0 && legacyBestScreenRect.height() > 0.0) {
-                m["screenId"] = legacyBestScreenId;
-                m["normX"] = (br.x() - legacyBestScreenRect.x()) / legacyBestScreenRect.width();
-                m["normY"] = (br.y() - legacyBestScreenRect.y()) / legacyBestScreenRect.height();
-                m["normW"] = br.width() / legacyBestScreenRect.width();
-                m["normH"] = br.height() / legacyBestScreenRect.height();
             }
             const bool autoDisplay = media->autoDisplayEnabled();
             m["autoDisplay"] = autoDisplay;
@@ -4674,8 +4675,6 @@ void ScreenCanvas::stopHostSceneState() {
     m_hostSceneActive = false;
     HostSceneMode prevMode = m_hostSceneMode;
     m_hostSceneMode = HostSceneMode::None;
-    if (m_autoDisplayTimer) m_autoDisplayTimer->stop(); // legacy batch timers (may be null if never created)
-    if (m_autoPlayTimer) m_autoPlayTimer->stop();
     // Restore visibility of media items (leave videos stopped).
     if (m_scene) {
         for (QGraphicsItem* gi : m_scene->items()) {
@@ -4748,39 +4747,6 @@ void ScreenCanvas::stopHostSceneState() {
         if (m_wsClient && !m_remoteSceneTargetClientId.isEmpty()) {
             qDebug() << "ScreenCanvas: sending remote_scene_stop to" << m_remoteSceneTargetClientId;
             m_wsClient->sendRemoteSceneStop(m_remoteSceneTargetClientId);
-        }
-    }
-}
-
-void ScreenCanvas::scheduleAutoDisplayAndPlayback() {
-    if (!m_hostSceneActive) return;
-    // Retain legacy batch timer only if some media rely on old path (fallback)
-    if (m_autoDisplayTimer) m_autoDisplayTimer->start(1500);
-    if (m_autoPlayTimer) m_autoPlayTimer->start(1000);
-}
-
-void ScreenCanvas::handleAutoDisplay() {
-    // Legacy batch auto-display no longer needed (per-item scheduling). Retained as safety net if invoked.
-    // TODO: Auto-display settings should be stored per-media, not in global panel
-    if (!m_hostSceneActive) return;
-    if (!m_scene) return;
-    // for (QGraphicsItem* gi : m_scene->items()) {
-    //     if (auto* media = dynamic_cast<ResizableMediaBase*>(gi)) {
-    //         if (m_globalSettingsPanel && m_globalSettingsPanel->displayAutomaticallyEnabled()) {
-    //             media->showWithConfiguredFade();
-    //         }
-    //     }
-    // }
-}
-
-void ScreenCanvas::handleAutoPlayback() {
-    if (!m_hostSceneActive) return;
-    if (m_scene) {
-        for (QGraphicsItem* gi : m_scene->items()) {
-            if (auto* vid = dynamic_cast<ResizableVideoItem*>(gi)) {
-                // Using existing togglePlayPause if currently paused at start.
-                vid->togglePlayPause();
-            }
         }
     }
 }
