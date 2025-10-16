@@ -1459,7 +1459,7 @@ void ResizableVideoItem::toggleMute() {
     setMuted(!m_effectiveMuted);
 }
 
-void ResizableVideoItem::setMuted(bool muted) {
+void ResizableVideoItem::setMuted(bool muted, bool skipFade) {
     if (!m_audio) return;
 
     // Cancel any in-flight fade before applying new state
@@ -1484,7 +1484,7 @@ void ResizableVideoItem::setMuted(bool muted) {
     m_effectiveMuted = targetMuted;
     m_savedMuted = targetMuted;
 
-    const double fadeSeconds = targetMuted ? audioFadeOutDurationSeconds() : audioFadeInDurationSeconds();
+    const double fadeSeconds = skipFade ? 0.0 : (targetMuted ? audioFadeOutDurationSeconds() : audioFadeInDurationSeconds());
     const qreal currentVolume = m_audio ? std::clamp<qreal>(m_audio->volume(), 0.0, 1.0) : 0.0;
     const qreal desiredVolume = targetMuted ? 0.0 : volumeFromSettingsState();
 

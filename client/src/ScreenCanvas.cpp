@@ -4561,7 +4561,7 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
 
                     vid->pauseAndSetPosition(videoState.posMs);
 
-                    vid->setMuted(true);
+                    vid->setMuted(true, true);
                     if (shouldAutoUnmute) {
                         const auto unmuteGuard = vid->lifetimeGuard();
                         ResizableVideoItem* videoPtr = vid;

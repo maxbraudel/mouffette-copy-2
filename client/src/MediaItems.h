@@ -292,7 +292,7 @@ public:
     void togglePlayPause();
     void toggleRepeat();
     void toggleMute();
-    void setMuted(bool muted);
+    void setMuted(bool muted, bool skipFade = false);
     void stopToBeginning();
     void seekToRatio(qreal r);
     qint64 currentPositionMs() const { return m_positionMs; }
