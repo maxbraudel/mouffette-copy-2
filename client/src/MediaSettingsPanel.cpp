@@ -1609,18 +1609,27 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
 }
 
 void MediaSettingsPanel::refreshVolumeDisplay() {
-    if (m_updatingFromMedia) return;
-    if (!m_mediaItem) return;
-    if (!m_volumeBox) return;
+    if (!m_mediaItem || !m_volumeBox || !m_volumeCheck) {
+        return;
+    }
 
     const auto state = m_mediaItem->mediaSettingsState();
-    const QString fallback = QStringLiteral("100");
-    const QString value = state.volumeText.isEmpty() ? fallback : state.volumeText;
-    
-    // Block signals to avoid recursive updates
-    const bool prev = m_volumeBox->blockSignals(true);
-    m_volumeBox->setText(value);
-    m_volumeBox->blockSignals(prev);
+    const QString stored = state.volumeText.isEmpty() ? QStringLiteral("100") : state.volumeText;
+    const QString displayText = state.volumeOverrideEnabled ? stored : QStringLiteral("100");
+
+    QSignalBlocker checkBlocker(m_volumeCheck);
+    QSignalBlocker boxBlocker(m_volumeBox);
+
+    const bool previousGuard = m_updatingFromMedia;
+    m_updatingFromMedia = true;
+
+    m_volumeCheck->setChecked(state.volumeOverrideEnabled);
+    m_volumeBox->setText(displayText);
+    setBoxActive(m_volumeBox, state.volumeOverrideEnabled);
+
+    applyVolumeFromUi();
+
+    m_updatingFromMedia = previousGuard;
 }
 
 void MediaSettingsPanel::pushSettingsToMedia() {
@@ -1704,7 +1713,11 @@ void MediaSettingsPanel::pushSettingsToMedia() {
     state.opacityText = trimmedText(m_opacityBox, state.opacityText);
     const QString volumeFallback = state.volumeText.isEmpty() ? QStringLiteral("100") : state.volumeText;
     state.volumeOverrideEnabled = m_volumeCheck && m_volumeCheck->isChecked();
-    state.volumeText = trimmedPercentText(m_volumeBox, volumeFallback);
+    if (state.volumeOverrideEnabled) {
+        state.volumeText = trimmedPercentText(m_volumeBox, volumeFallback);
+    } else {
+        state.volumeText = QStringLiteral("100");
+    }
     state.unmuteAutomatically = m_unmuteCheck && m_unmuteCheck->isChecked();
     state.unmuteDelayEnabled = m_unmuteDelayCheck && m_unmuteDelayCheck->isChecked();
     state.unmuteDelayText = trimmedDecimalText(m_unmuteDelayBox, state.unmuteDelayText);

@@ -1866,6 +1866,7 @@ void ResizableVideoItem::setVolumeFromControl(qreal ratio, bool fromSettings) {
     const int percent = std::clamp<int>(static_cast<int>(std::lround(ratio * 100.0)), 0, 100);
     const QString text = QString::number(percent);
 
+    // Update settings state (slider controls the settings, settings control the volume)
     if (!m_mediaSettings.volumeOverrideEnabled) {
         m_mediaSettings.volumeOverrideEnabled = true;
     }
@@ -1873,7 +1874,8 @@ void ResizableVideoItem::setVolumeFromControl(qreal ratio, bool fromSettings) {
         m_mediaSettings.volumeText = text;
     }
 
-    applyVolumeRatio(static_cast<qreal>(percent) / 100.0);
+    // Apply volume from settings state (instead of directly) to ensure settings are the source of truth
+    applyVolumeOverrideFromState();
     
     // Notify settings panel to update its display in real-time
     if (scene() && !scene()->views().isEmpty()) {
