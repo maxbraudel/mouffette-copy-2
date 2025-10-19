@@ -239,6 +239,9 @@ class MouffetteServer {
             case 'remote_scene_stop':
                 this.relayToTarget(clientId, message.targetClientId, message);
                 break;
+            case 'remote_scene_stopped':
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
             case 'remote_scene_validation':
                 // Relay validation result back to sender
                 this.relayToTarget(clientId, message.targetClientId, message);

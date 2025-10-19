@@ -440,6 +440,19 @@ void WebSocketClient::sendRemoteSceneStop(const QString& targetClientId) {
     sendMessage(msg);
 }
 
+void WebSocketClient::sendRemoteSceneStopResult(const QString& senderClientId, bool success, const QString& errorMessage) {
+    if (!isConnected()) return;
+    QJsonObject msg;
+    msg["type"] = "remote_scene_stopped";
+    msg["targetClientId"] = senderClientId;
+    msg["success"] = success;
+    if (!success && !errorMessage.isEmpty()) {
+        msg["error"] = errorMessage;
+    }
+    if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
+    sendMessage(msg);
+}
+
 void WebSocketClient::sendRemoteSceneValidationResult(const QString& senderClientId, bool success, const QString& errorMessage) {
     if (!isConnected()) return;
     QJsonObject msg;
@@ -629,6 +642,12 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
     else if (type == "remote_scene_stop") {
         const QString sender = message.value("senderClientId").toString();
         emit remoteSceneStopReceived(sender);
+    }
+    else if (type == "remote_scene_stopped") {
+        const QString sender = message.value("senderClientId").toString();
+        const bool success = message.value("success").toBool(false);
+        const QString error = message.value("error").toString();
+        emit remoteSceneStoppedReceived(sender, success, error);
     }
     else if (type == "remote_scene_validation") {
         const QString sender = message.value("senderClientId").toString();

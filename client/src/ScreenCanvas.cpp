@@ -723,12 +723,10 @@ void ScreenCanvas::initInfoOverlay() {
 
         // Wire Launch Remote Scene toggle behavior (Remote mode = local + remote)
         connect(m_launchSceneButton, &QPushButton::clicked, this, [this]() {
-            // If currently launching, ignore clicks
-            if (m_sceneLaunching) return;
-            
-            bool newState = !m_sceneLaunched;
-            // If enabling remote scene, enter loading state
-            if (newState) {
+            // Ignore clicks while launch/stop handshake in progress
+            if (m_sceneLaunching || m_sceneStopping) return;
+
+            if (!m_sceneLaunched) {
                 // Early error detection: check prerequisites before starting
                 if (!m_wsClient) {
                     TOAST_ERROR("Cannot launch scene: Not connected to server", 3000);
@@ -789,14 +787,29 @@ void ScreenCanvas::initInfoOverlay() {
                 }
 
             } else {
-                // Stop remote scene
-                const bool wasLaunched = m_sceneLaunched;
-                m_sceneLaunched = false;
-                stopHostSceneState();
+                if (!m_wsClient || !m_wsClient->isConnected()) {
+                    TOAST_WARNING("Connection lost while stopping scene; cleaning up locally", 3500);
+                    stopHostSceneState();
+                    updateLaunchSceneButtonStyle();
+                    updateLaunchTestSceneButtonStyle();
+                    return;
+                }
+
+                m_sceneStopping = true;
                 updateLaunchSceneButtonStyle();
-                updateLaunchTestSceneButtonStyle(); // Update test scene button (will be re-enabled)
-                if (wasLaunched) {
-                    emitRemoteSceneLaunchStateChanged();
+                updateLaunchTestSceneButtonStyle();
+
+                if (!m_sceneStopTimeoutTimer) {
+                    m_sceneStopTimeoutTimer = new QTimer(this);
+                    m_sceneStopTimeoutTimer->setSingleShot(true);
+                    connect(m_sceneStopTimeoutTimer, &QTimer::timeout, this, &ScreenCanvas::onRemoteSceneStopTimeout);
+                }
+                m_sceneStopTimeoutTimer->start(REMOTE_SCENE_STOP_TIMEOUT_MS);
+
+                TOAST_INFO("Requesting remote scene stop...", 2000);
+                if (m_wsClient) {
+                    qDebug() << "ScreenCanvas: requesting remote_scene_stop from" << m_remoteSceneTargetClientId;
+                    m_wsClient->sendRemoteSceneStop(m_remoteSceneTargetClientId);
                 }
             }
         });
@@ -1989,7 +2002,7 @@ void ScreenCanvas::updateSelectionChrome() {
     const QString hoverBg = "rgba(255,255,255,0.05)";
     const QString disabledBg = "rgba(255,255,255,0.03)"; // Very subtle grey for disabled state
     
-    bool remoteSceneActive = m_sceneLaunched || m_sceneLaunching;
+    bool remoteSceneActive = m_sceneLaunched || m_sceneLaunching || m_sceneStopping;
     
     for (auto it = m_mediaContainerByItem.begin(); it != m_mediaContainerByItem.end(); ++it) {
         ResizableMediaBase* media = it.key(); QWidget* w = it.value(); if (!w) continue;
@@ -4250,7 +4263,12 @@ void ScreenCanvas::updateLaunchSceneButtonStyle() {
     // Check if test scene is active (mutual exclusion)
     bool testSceneActive = m_testSceneLaunched;
     
-    if (m_sceneLaunching) {
+    if (m_sceneStopping) {
+        m_launchSceneButton->setText("Stopping Remote Scene...");
+        m_launchSceneButton->setChecked(true);
+        m_launchSceneButton->setEnabled(false);
+        m_launchSceneButton->setStyleSheet(loadingStyle);
+    } else if (m_sceneLaunching) {
         m_launchSceneButton->setText("Launching Remote Scene...");
         m_launchSceneButton->setEnabled(false); // Disable during loading
         m_launchSceneButton->setStyleSheet(loadingStyle);
@@ -4266,7 +4284,7 @@ void ScreenCanvas::updateLaunchSceneButtonStyle() {
         m_launchSceneButton->setEnabled(m_overlayActionsEnabled && !uploadInProgress && !testSceneActive);
     }
     // Greyed style for disabled state (offline, test scene active, upload in progress, or other locks)
-    if (!m_sceneLaunching && !m_launchSceneButton->isEnabled()) {
+    if (!m_sceneLaunching && !m_sceneStopping && !m_launchSceneButton->isEnabled()) {
         m_launchSceneButton->setStyleSheet(overlayDisabledButtonStyle());
     }
     m_launchSceneButton->setFixedHeight(40);
@@ -4367,12 +4385,16 @@ void ScreenCanvas::handleRemoteConnectionLost() {
     if (m_sceneLaunchTimeoutTimer && m_sceneLaunchTimeoutTimer->isActive()) {
         m_sceneLaunchTimeoutTimer->stop();
     }
+    if (m_sceneStopTimeoutTimer && m_sceneStopTimeoutTimer->isActive()) {
+        m_sceneStopTimeoutTimer->stop();
+    }
 
     const bool shouldStopHostScene = (m_hostSceneActive && m_hostSceneMode == HostSceneMode::Remote);
     const bool wasLaunched = m_sceneLaunched;
 
     m_sceneLaunching = false;
     m_sceneLaunched = false;
+    m_sceneStopping = false;
 
     if (m_launchSceneButton) {
         QSignalBlocker blocker(m_launchSceneButton);
@@ -4399,6 +4421,7 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
     if (m_hostSceneActive) return;
     m_hostSceneActive = true;
     m_hostSceneMode = mode;
+    m_sceneStopping = false;
     // Capture current selection (only ResizableMediaBase items) before clearing so we can restore later.
     m_prevSelectionBeforeHostScene.clear();
     m_prevVideoStates.clear();
@@ -4670,7 +4693,12 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
     }
 }
 
-void ScreenCanvas::stopHostSceneState() {
+void ScreenCanvas::stopHostSceneState(bool notifyRemote) {
+    if (m_sceneStopTimeoutTimer) {
+        m_sceneStopTimeoutTimer->stop();
+    }
+    m_sceneStopping = false;
+
     if (!m_hostSceneActive) return;
     m_hostSceneActive = false;
     HostSceneMode prevMode = m_hostSceneMode;
@@ -4744,7 +4772,7 @@ void ScreenCanvas::stopHostSceneState() {
         if (wasLaunched) {
             emitRemoteSceneLaunchStateChanged();
         }
-        if (m_wsClient && !m_remoteSceneTargetClientId.isEmpty()) {
+        if (notifyRemote && m_wsClient && !m_remoteSceneTargetClientId.isEmpty()) {
             qDebug() << "ScreenCanvas: sending remote_scene_stop to" << m_remoteSceneTargetClientId;
             m_wsClient->sendRemoteSceneStop(m_remoteSceneTargetClientId);
         }
@@ -4889,6 +4917,7 @@ void ScreenCanvas::setWebSocketClient(WebSocketClient* client) {
     if (m_wsClient) {
         disconnect(m_wsClient, &WebSocketClient::remoteSceneValidationReceived, this, &ScreenCanvas::onRemoteSceneValidationReceived);
         disconnect(m_wsClient, &WebSocketClient::remoteSceneLaunchedReceived, this, &ScreenCanvas::onRemoteSceneLaunchedReceived);
+        disconnect(m_wsClient, &WebSocketClient::remoteSceneStoppedReceived, this, &ScreenCanvas::onRemoteSceneStoppedReceived);
     }
     
     m_wsClient = client;
@@ -4897,6 +4926,7 @@ void ScreenCanvas::setWebSocketClient(WebSocketClient* client) {
     if (m_wsClient) {
         connect(m_wsClient, &WebSocketClient::remoteSceneValidationReceived, this, &ScreenCanvas::onRemoteSceneValidationReceived);
         connect(m_wsClient, &WebSocketClient::remoteSceneLaunchedReceived, this, &ScreenCanvas::onRemoteSceneLaunchedReceived);
+        connect(m_wsClient, &WebSocketClient::remoteSceneStoppedReceived, this, &ScreenCanvas::onRemoteSceneStoppedReceived);
     }
 }
 
@@ -5004,6 +5034,48 @@ void ScreenCanvas::onRemoteSceneLaunchTimeout() {
     }
     
     TOAST_ERROR("Scene launch timed out: Remote client did not respond", 5000);
+}
+
+void ScreenCanvas::onRemoteSceneStoppedReceived(const QString& targetClientId, bool success, const QString& errorMessage) {
+    if (targetClientId != m_remoteSceneTargetClientId) return;
+
+    if (m_sceneStopTimeoutTimer) {
+        m_sceneStopTimeoutTimer->stop();
+    }
+
+    const bool wasStopping = m_sceneStopping;
+    m_sceneStopping = false;
+
+    if (!success) {
+        const QString message = errorMessage.isEmpty() ? QStringLiteral("Remote client failed to stop the scene") : errorMessage;
+        TOAST_ERROR(message, 4000);
+        updateLaunchSceneButtonStyle();
+        updateLaunchTestSceneButtonStyle();
+        return;
+    }
+
+    // Ensure local host scene halts without sending another stop request
+    stopHostSceneState(false);
+    if (!m_hostSceneActive && m_sceneLaunched) {
+        m_sceneLaunched = false;
+        emitRemoteSceneLaunchStateChanged();
+    }
+    updateLaunchSceneButtonStyle();
+    updateLaunchTestSceneButtonStyle();
+
+    if (wasStopping) {
+        TOAST_SUCCESS("Remote scene stopped successfully", 3000);
+    } else {
+        TOAST_INFO("Remote scene stopped", 2500);
+    }
+}
+
+void ScreenCanvas::onRemoteSceneStopTimeout() {
+    if (!m_sceneStopping) return;
+    m_sceneStopping = false;
+    TOAST_ERROR("Scene stop timed out: Remote client did not respond", 5000);
+    updateLaunchSceneButtonStyle();
+    updateLaunchTestSceneButtonStyle();
 }
 
 void ScreenCanvas::updateRemoteSceneTargetFromClientList(const QList<ClientInfo>& clients) {

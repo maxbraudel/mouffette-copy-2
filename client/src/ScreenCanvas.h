@@ -71,7 +71,7 @@ public:
     // Host scene lifecycle
     enum class HostSceneMode { None, Remote, Test };
     void startHostSceneState(HostSceneMode mode);
-    void stopHostSceneState();
+    void stopHostSceneState(bool notifyRemote = true);
     bool isHostSceneActive() const { return m_hostSceneActive; }
     // Serialize current canvas state (screens + media) for remote scene start
     QJsonObject serializeSceneState() const;
@@ -343,6 +343,8 @@ private slots:
     void onRemoteSceneValidationReceived(const QString& targetClientId, bool success, const QString& errorMessage);
     void onRemoteSceneLaunchedReceived(const QString& targetClientId);
     void onRemoteSceneLaunchTimeout();
+    void onRemoteSceneStoppedReceived(const QString& targetClientId, bool success, const QString& errorMessage);
+    void onRemoteSceneStopTimeout();
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -350,10 +352,13 @@ protected:
     // Launch Remote Scene toggle state
     bool m_sceneLaunched = false;
     bool m_sceneLaunching = false; // Loading state while waiting for remote validation
+    bool m_sceneStopping = false; // Waiting for remote confirmation to stop
     QTimer* m_sceneLaunchTimeoutTimer = nullptr;
+    QTimer* m_sceneStopTimeoutTimer = nullptr;
     
     // Configurable timeout for remote scene launch (milliseconds)
     static constexpr int REMOTE_SCENE_LAUNCH_TIMEOUT_MS = 10000; // 10 seconds
+    static constexpr int REMOTE_SCENE_STOP_TIMEOUT_MS = 10000; // 10 seconds
     
     // Launch Test Scene toggle state
     bool m_testSceneLaunched = false;

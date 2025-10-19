@@ -54,6 +54,7 @@ public:
     // Remote scene control
     void sendRemoteSceneStart(const QString& targetClientId, const QJsonObject& scenePayload);
     void sendRemoteSceneStop(const QString& targetClientId);
+    void sendRemoteSceneStopResult(const QString& senderClientId, bool success, const QString& errorMessage = QString());
     // Remote scene validation feedback
     void sendRemoteSceneValidationResult(const QString& senderClientId, bool success, const QString& errorMessage = QString());
     void sendRemoteSceneLaunched(const QString& senderClientId);
@@ -90,6 +91,7 @@ signals:
     // Remote scene inbound events
     void remoteSceneStartReceived(const QString& senderClientId, const QJsonObject& scenePayload);
     void remoteSceneStopReceived(const QString& senderClientId);
+    void remoteSceneStoppedReceived(const QString& targetClientId, bool success, const QString& errorMessage);
     // Remote scene validation feedback events
     void remoteSceneValidationReceived(const QString& targetClientId, bool success, const QString& errorMessage);
     void remoteSceneLaunchedReceived(const QString& targetClientId);

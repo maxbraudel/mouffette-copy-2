@@ -185,9 +185,17 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
 }
 
 void RemoteSceneController::onRemoteSceneStop(const QString& senderClientId) {
-    Q_UNUSED(senderClientId);
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, [this, senderClientId]() { onRemoteSceneStop(senderClientId); }, Qt::QueuedConnection);
+        return;
+    }
+
     ++m_sceneEpoch;
     clearScene();
+
+    if (m_ws) {
+        m_ws->sendRemoteSceneStopResult(senderClientId, true);
+    }
 }
 
 void RemoteSceneController::onConnectionLost() {
