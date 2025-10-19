@@ -444,6 +444,8 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                     m["autoMute"] = media->autoMuteEnabled();
                     m["autoMuteDelayMs"] = media->autoMuteDelayMs();
                     m["muteWhenVideoEnds"] = media->muteWhenVideoEnds();
+                    m["audioFadeInSeconds"] = media->audioFadeInDurationSeconds();
+                    m["audioFadeOutSeconds"] = media->audioFadeOutDurationSeconds();
                     const qint64 currentPos = std::max<qint64>(0, v->currentPositionMs());
                     const qint64 displayedTimestamp = v->displayedFrameTimestampMs();
                     if (displayedTimestamp >= 0) {

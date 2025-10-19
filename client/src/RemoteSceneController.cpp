@@ -286,6 +286,8 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     stopAndDeleteTimer(item->hideEndDelayTimer);
     stopAndDeleteTimer(item->muteEndDelayTimer);
 
+    cancelAudioFade(item, false);
+
     QObject::disconnect(item->deferredStartConn);
     QObject::disconnect(item->primingConn);
     QObject::disconnect(item->mirrorConn);
@@ -329,7 +331,9 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     if (item->audio) {
         QObject::disconnect(item->audio, nullptr, nullptr, nullptr);
         item->audio->setMuted(true);
+        item->audio->setVolume(0.0);
     }
+    item->muted = true;
 
     for (auto& span : item->spans) {
         if (span.videoItem) {
@@ -701,7 +705,7 @@ void RemoteSceneController::activateScene() {
         
         // Only mute at scene start if NOT using mute-when-video-ends automation
         if (!item->muteWhenVideoEnds) {
-            item->audio->setMuted(true);
+            applyAudioMuteState(item, true, true);
         }
         
         // Schedule automatic unmute if enabled
@@ -711,7 +715,7 @@ void RemoteSceneController::activateScene() {
                 if (epoch != m_sceneEpoch) return; // Scene changed
                 if (!item || !item->audio) return; // Item deleted
                 if (!m_sceneActivated) return; // Scene stopped
-                item->audio->setMuted(false);
+                applyAudioMuteState(item, false);
             };
             
             if (unmuteDelayMs > 0) {
@@ -927,6 +931,8 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
             item->autoMute = m.value("autoMute").toBool(false);
             item->autoMuteDelayMs = m.value("autoMuteDelayMs").toInt(0);
             item->muteWhenVideoEnds = m.value("muteWhenVideoEnds").toBool(false);
+            item->audioFadeInSeconds = std::max(0.0, m.value("audioFadeInSeconds").toDouble(0.0));
+            item->audioFadeOutSeconds = std::max(0.0, m.value("audioFadeOutSeconds").toDouble(0.0));
             if (m.contains("startPositionMs")) {
                 const qint64 startPos = static_cast<qint64>(std::llround(m.value("startPositionMs").toDouble(0.0)));
                 item->startPositionMs = std::max<qint64>(0, startPos);
@@ -1099,13 +1105,13 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                                     auto locked = weakItem.lock();
                                     if (!locked || !locked->audio) return;
                                     if (locked->sceneEpoch != m_sceneEpoch) return;
-                                    locked->audio->setMuted(true);
+                                    applyAudioMuteState(locked, true);
                                     locked->muteEndTriggered = true;
                                 });
                             }
                             item->muteEndDelayTimer->start(muteDelayMs);
                         } else if (!item->muteEndTriggered) {
-                            item->audio->setMuted(true);
+                            applyAudioMuteState(item, true);
                             item->muteEndTriggered = true;
                         }
                     }
@@ -1171,7 +1177,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             if (item->muteWhenVideoEnds && !item->muteEndTriggered && item->autoMuteDelayMs < 0 && item->audio) {
                 const qint64 offsetMs = -static_cast<qint64>(item->autoMuteDelayMs);
                 if ((dur - pos) <= offsetMs) {
-                    item->audio->setMuted(true);
+                    applyAudioMuteState(item, true);
                     item->muteEndTriggered = true;
                 }
             }
@@ -1200,13 +1206,13 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                                 auto locked = weakItem.lock();
                                 if (!locked || !locked->audio) return;
                                 if (locked->sceneEpoch != m_sceneEpoch) return;
-                                locked->audio->setMuted(true);
+                                applyAudioMuteState(locked, true);
                                 locked->muteEndTriggered = true;
                             });
                         }
                         item->muteEndDelayTimer->start(muteDelayMs);
                     } else if (!item->muteEndTriggered) {
-                        item->audio->setMuted(true);
+                        applyAudioMuteState(item, true);
                         item->muteEndTriggered = true;
                     }
                 }
@@ -1419,7 +1425,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                     } else {
                         qWarning() << "RemoteSceneController: primary video sink unavailable for priming" << item->mediaId;
                     }
-                    if (item->audio) item->audio->setMuted(true);
+                    if (item->audio) applyAudioMuteState(item, true, true);
                     item->pausedAtEnd = false;
                     if (item->player && item->player->playbackState() != QMediaPlayer::PlayingState) {
                         item->player->play();
@@ -1602,6 +1608,94 @@ void RemoteSceneController::scheduleHideTimer(const std::shared_ptr<RemoteMediaI
     item->hideTimer->start(delayMs);
 }
 
+void RemoteSceneController::cancelAudioFade(const std::shared_ptr<RemoteMediaItem>& item, bool applyFinalState) {
+    if (!item) return;
+    if (!item->audioFadeAnimation) return;
+    QVariantAnimation* anim = item->audioFadeAnimation.data();
+    QObject::disconnect(anim, nullptr, this, nullptr);
+    anim->stop();
+    anim->deleteLater();
+    item->audioFadeAnimation = nullptr;
+    if (applyFinalState && item->audio) {
+        const qreal targetVolume = item->muted ? 0.0 : std::clamp<qreal>(item->volume, 0.0, 1.0);
+        item->audio->setMuted(item->muted);
+        item->audio->setVolume(targetVolume);
+    }
+}
+
+void RemoteSceneController::applyAudioMuteState(const std::shared_ptr<RemoteMediaItem>& item, bool muted, bool skipFade) {
+    if (!item) return;
+    if (!item->audio) return;
+
+    const qreal clampedTargetVolume = muted ? 0.0 : std::clamp<qreal>(item->volume, 0.0, 1.0);
+    const double fadeSeconds = skipFade ? 0.0 : (muted ? item->audioFadeOutSeconds : item->audioFadeInSeconds);
+
+    if (muted == item->muted && !item->audioFadeAnimation) {
+        item->audio->setMuted(muted);
+        item->audio->setVolume(clampedTargetVolume);
+        return;
+    }
+
+    cancelAudioFade(item, false);
+
+    if (fadeSeconds <= 0.0) {
+        item->audio->setMuted(muted);
+        item->audio->setVolume(clampedTargetVolume);
+        item->muted = muted;
+        return;
+    }
+
+    const qreal startVolume = std::clamp<qreal>(item->audio->volume(), 0.0, 1.0);
+    const qreal endVolume = muted ? 0.0 : clampedTargetVolume;
+
+    if (std::abs(startVolume - endVolume) < 0.0001) {
+        item->audio->setMuted(muted);
+        item->audio->setVolume(endVolume);
+        item->muted = muted;
+        return;
+    }
+
+    item->audio->setMuted(false);
+    item->audio->setVolume(startVolume);
+
+    std::weak_ptr<RemoteMediaItem> weakItem = item;
+    auto* anim = new QVariantAnimation(this);
+    anim->setDuration(static_cast<int>(fadeSeconds * 1000.0));
+    anim->setStartValue(startVolume);
+    anim->setEndValue(endVolume);
+    anim->setEasingCurve(QEasingCurve::OutCubic);
+    connect(anim, &QVariantAnimation::valueChanged, this, [weakItem](const QVariant& v) {
+        auto locked = weakItem.lock();
+        if (!locked || !locked->audio) return;
+        const qreal value = std::clamp<qreal>(v.toDouble(), 0.0, 1.0);
+        locked->audio->setVolume(value);
+    });
+    connect(anim, &QVariantAnimation::finished, this, [weakItem, muted, endVolume, anim]() {
+        auto locked = weakItem.lock();
+        if (!locked || !locked->audio) {
+            anim->deleteLater();
+            return;
+        }
+        locked->audio->setMuted(muted);
+        locked->audio->setVolume(endVolume);
+        if (locked->audioFadeAnimation == anim) {
+            locked->audioFadeAnimation = nullptr;
+        }
+        anim->deleteLater();
+    });
+    connect(anim, &QObject::destroyed, this, [weakItem, anim]() {
+        auto locked = weakItem.lock();
+        if (!locked) return;
+        if (locked->audioFadeAnimation == anim) {
+            locked->audioFadeAnimation = nullptr;
+        }
+    });
+
+    item->audioFadeAnimation = anim;
+    item->muted = muted;
+    anim->start();
+}
+
 void RemoteSceneController::scheduleMuteTimer(const std::shared_ptr<RemoteMediaItem>& item) {
     if (!item) return;
     if (!item->autoMute) return;
@@ -1612,7 +1706,7 @@ void RemoteSceneController::scheduleMuteTimer(const std::shared_ptr<RemoteMediaI
         item->muteTimer->stop();
     }
     if (delayMs == 0) {
-        item->audio->setMuted(true);
+        applyAudioMuteState(item, true);
         return;
     }
     if (!item->muteTimer) {
@@ -1624,7 +1718,7 @@ void RemoteSceneController::scheduleMuteTimer(const std::shared_ptr<RemoteMediaI
             if (!locked) return;
             if (locked->sceneEpoch != m_sceneEpoch) return;
             if (!locked->audio) return;
-            locked->audio->setMuted(true);
+            applyAudioMuteState(locked, true);
         });
     }
     item->muteTimer->start(delayMs);

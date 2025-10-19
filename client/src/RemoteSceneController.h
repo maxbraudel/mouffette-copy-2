@@ -10,6 +10,7 @@
 #include <QSharedPointer>
 #include <QByteArray>
 #include <QVideoFrame>
+#include <QPointer>
 #include <memory>
 
 class WebSocketClient;
@@ -22,6 +23,7 @@ class QGraphicsView;
 class QGraphicsVideoItem;
 class QGraphicsScene;
 class QGraphicsPixmapItem;
+class QVariantAnimation;
 
 class RemoteSceneController : public QObject {
 	Q_OBJECT
@@ -69,6 +71,8 @@ private:
 		// Audio state from host (videos)
 		bool muted = false; double volume = 1.0; // 0..1
 		bool autoUnmute = false; int autoUnmuteDelayMs = 0;
+		double audioFadeInSeconds = 0.0; double audioFadeOutSeconds = 0.0;
+		QPointer<QVariantAnimation> audioFadeAnimation;
 		bool repeatEnabled = false; int repeatCount = 0; int repeatRemaining = 0; bool repeatActive = false;
 		bool primedFirstFrame = false; bool playAuthorized = false;
 		bool displayReady = false; bool displayStarted = false;
@@ -126,6 +130,8 @@ private:
 	void fadeOutAndHide(const std::shared_ptr<RemoteMediaItem>& item);
 	void scheduleHideTimer(const std::shared_ptr<RemoteMediaItem>& item);
 	void scheduleMuteTimer(const std::shared_ptr<RemoteMediaItem>& item);
+	void cancelAudioFade(const std::shared_ptr<RemoteMediaItem>& item, bool applyFinalState);
+	void applyAudioMuteState(const std::shared_ptr<RemoteMediaItem>& item, bool muted, bool skipFade = false);
 	void clearScene();
     void teardownMediaItem(const std::shared_ptr<RemoteMediaItem>& item);
     void markItemReady(const std::shared_ptr<RemoteMediaItem>& item);
