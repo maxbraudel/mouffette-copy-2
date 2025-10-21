@@ -4404,7 +4404,8 @@ void ScreenCanvas::handleRemoteConnectionLost() {
     }
 
     if (shouldStopHostScene) {
-        stopHostSceneState();
+        // Skip the remote notification so the client keeps its last frame during transient loss.
+        stopHostSceneState(false);
     }
 
     updateLaunchSceneButtonStyle();
