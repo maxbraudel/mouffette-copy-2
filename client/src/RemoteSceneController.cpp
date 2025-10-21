@@ -492,6 +492,7 @@ void RemoteSceneController::triggerAutoPlayNow(const std::shared_ptr<RemoteMedia
 
     item->playAuthorized = true;
     item->repeatActive = false;
+    restoreVideoOutput(item);
     if (item->audio) {
         // Don't override mute state - it's managed by scene activation and unmute automation
         // Only set volume here
@@ -632,7 +633,20 @@ void RemoteSceneController::ensureVideoOutputsAttached(const std::shared_ptr<Rem
             auto item = weakItem.lock();
             if (!item) return;
             if (epoch != m_sceneEpoch) return;
+            
+            // Always save the latest frame as primedFrame
+            if (item->holdLastFrameAtEnd) {
+                return;
+            }
+
+            if (item->awaitingFinalFrame) {
+                item->primedFrame = frame;
+                freezeVideoOutput(item);
+                return;
+            }
+
             item->primedFrame = frame;
+
             const qint64 ts = frameTimestampMs(frame);
             if (item->awaitingLivePlayback && !item->livePlaybackStarted) {
                 bool advancedFrame = false;
@@ -782,6 +796,116 @@ qint64 RemoteSceneController::targetDisplayTimestamp(const std::shared_ptr<Remot
         return std::max<qint64>(0, ts);
     }
     return effectiveStartPosition(item);
+}
+
+void RemoteSceneController::freezeVideoOutput(const std::shared_ptr<RemoteMediaItem>& item) {
+    if (!item || item->type != "video") return;
+    if (item->holdLastFrameAtEnd) return;
+    if (!item->primedFrame.isValid()) {
+        item->awaitingFinalFrame = false;
+        return;
+    }
+
+    QVideoFrame frameCopy(item->primedFrame);
+    QImage image = frameCopy.toImage();
+    if (image.isNull()) {
+        qWarning() << "RemoteSceneController: unable to convert final video frame for" << item->mediaId;
+    } else {
+        item->lastFrameImage = image;
+    }
+
+    item->holdLastFrameAtEnd = true;
+
+    const QPixmap lastPixmap = item->lastFrameImage.isNull() ? QPixmap() : QPixmap::fromImage(item->lastFrameImage);
+
+    for (auto& span : item->spans) {
+        if (!span.videoItem) continue;
+
+        if (!lastPixmap.isNull() && span.imageItem) {
+            const QSizeF targetSize = span.videoItem->boundingRect().size();
+            QPixmap scaled = lastPixmap;
+            if (!targetSize.isEmpty()) {
+                scaled = lastPixmap.scaled(targetSize.toSize(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            }
+            span.imageItem->setPixmap(scaled);
+            span.imageItem->setPos(span.videoItem->pos());
+            span.imageItem->setScale(span.videoItem->scale());
+            span.imageItem->setTransform(span.videoItem->transform());
+            span.imageItem->setTransformOriginPoint(span.videoItem->transformOriginPoint());
+            span.imageItem->setOpacity(span.videoItem->opacity());
+            span.imageItem->setVisible(true);
+        }
+        if (!lastPixmap.isNull()) {
+            span.videoItem->setVisible(false);
+        }
+    }
+
+    item->awaitingFinalFrame = false;
+
+    // Handle mute-on-end with optional delay
+    if (item->muteWhenVideoEnds && item->audio && !item->muteEndTriggered) {
+        const int muteDelayMs = item->autoMuteDelayMs;
+        if (muteDelayMs > 0) {
+            if (!item->muteEndDelayTimer) {
+                item->muteEndDelayTimer = new QTimer(this);
+                item->muteEndDelayTimer->setSingleShot(true);
+                std::weak_ptr<RemoteMediaItem> weakItem = item;
+                QObject::connect(item->muteEndDelayTimer, &QTimer::timeout, this, [this, weakItem]() {
+                    auto locked = weakItem.lock();
+                    if (!locked || !locked->audio) return;
+                    if (locked->sceneEpoch != m_sceneEpoch) return;
+                    applyAudioMuteState(locked, true);
+                    locked->muteEndTriggered = true;
+                });
+            }
+            item->muteEndDelayTimer->start(muteDelayMs);
+        } else {
+            applyAudioMuteState(item, true);
+            item->muteEndTriggered = true;
+        }
+    }
+
+    // Handle hide-on-end with optional delay
+    if (item->hideWhenVideoEnds && !item->hideEndTriggered) {
+        const int hideDelayMs = item->autoHideDelayMs;
+        if (hideDelayMs > 0) {
+            if (!item->hideEndDelayTimer) {
+                item->hideEndDelayTimer = new QTimer(this);
+                item->hideEndDelayTimer->setSingleShot(true);
+                std::weak_ptr<RemoteMediaItem> weakItem = item;
+                QObject::connect(item->hideEndDelayTimer, &QTimer::timeout, this, [this, weakItem]() {
+                    auto locked = weakItem.lock();
+                    if (!locked) return;
+                    if (locked->sceneEpoch != m_sceneEpoch) return;
+                    locked->hideEndTriggered = true;
+                    fadeOutAndHide(locked);
+                });
+            }
+            item->hideEndDelayTimer->start(hideDelayMs);
+        } else {
+            item->hideEndTriggered = true;
+            fadeOutAndHide(item);
+        }
+    }
+}
+
+void RemoteSceneController::restoreVideoOutput(const std::shared_ptr<RemoteMediaItem>& item) {
+    if (!item || item->type != "video") return;
+
+    item->holdLastFrameAtEnd = false;
+    item->lastFrameImage = QImage();
+    item->awaitingFinalFrame = false;
+
+    for (auto& span : item->spans) {
+        if (span.imageItem) {
+            span.imageItem->setVisible(false);
+            span.imageItem->setOpacity(item->contentOpacity);
+            span.imageItem->setPixmap(QPixmap());
+        }
+        if (span.videoItem) {
+            span.videoItem->setVisible(true);
+        }
+    }
 }
 
 void RemoteSceneController::seekToConfiguredStart(const std::shared_ptr<RemoteMediaItem>& item) {
@@ -1016,6 +1140,16 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             videoItem->setOpacity(0.0);
             scene->addItem(videoItem);
             s.videoItem = videoItem;
+
+            // Create a hidden pixmap item we can use to freeze the final frame
+            QGraphicsPixmapItem* freezeItem = new QGraphicsPixmapItem();
+            freezeItem->setPos(px, py);
+            freezeItem->setOpacity(0.0);
+            freezeItem->setVisible(false);
+            freezeItem->setTransformationMode(Qt::SmoothTransformation);
+            freezeItem->setZValue(videoItem->zValue() + 0.001);
+            scene->addItem(freezeItem);
+            s.imageItem = freezeItem;
         }
         w->hide(); // Hide widget container since items render in scene
         w->raise();
@@ -1080,70 +1214,24 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 seekToConfiguredStart(item);
                 evaluateItemReadiness(item);
             } else if (s == QMediaPlayer::EndOfMedia && item->player) {
+                // EndOfMedia reached: ensure we freeze on the final frame when not looping.
                 const bool canRepeat = item->repeatEnabled && item->repeatRemaining > 0 && item->playAuthorized;
                 if (canRepeat) {
                     --item->repeatRemaining;
                     item->pausedAtEnd = false;
+                    item->holdLastFrameAtEnd = false;
                     if (item->audio) {
-                        // Don't override current mute state on repeat - it's managed by unmute automation
-                        // Only update volume
                         item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0));
                     }
+                    restoreVideoOutput(item);
                     item->player->setPosition(0);
                     item->player->play();
                 } else {
-                    item->pausedAtEnd = true;
-                    
-                    // Handle mute-on-end with delay
-                    if (item->muteWhenVideoEnds && item->audio) {
-                        const int muteDelayMs = item->autoMuteDelayMs;
-                        if (muteDelayMs > 0 && !item->muteEndTriggered) {
-                            if (!item->muteEndDelayTimer) {
-                                item->muteEndDelayTimer = new QTimer(this);
-                                item->muteEndDelayTimer->setSingleShot(true);
-                                QObject::connect(item->muteEndDelayTimer, &QTimer::timeout, this, [this, weakItem]() {
-                                    auto locked = weakItem.lock();
-                                    if (!locked || !locked->audio) return;
-                                    if (locked->sceneEpoch != m_sceneEpoch) return;
-                                    applyAudioMuteState(locked, true);
-                                    locked->muteEndTriggered = true;
-                                });
-                            }
-                            item->muteEndDelayTimer->start(muteDelayMs);
-                        } else if (!item->muteEndTriggered) {
-                            applyAudioMuteState(item, true);
-                            item->muteEndTriggered = true;
-                        }
+                    if (!item->pausedAtEnd) {
+                        item->pausedAtEnd = true;
+                        item->player->pause();
                     }
-                    
-                    qint64 dur = item->player->duration();
-                    qint64 finalPos = dur > 0 ? std::max<qint64>(0, dur - 1) : 0;
-                    item->player->pause();
-                    if (finalPos != item->player->position()) {
-                        item->player->setPosition(finalPos);
-                    }
-                    
-                    // Handle hide-on-end with delay
-                    if (item->hideWhenVideoEnds) {
-                        const int hideDelayMs = item->autoHideDelayMs;
-                        if (hideDelayMs > 0 && !item->hideEndTriggered) {
-                            if (!item->hideEndDelayTimer) {
-                                item->hideEndDelayTimer = new QTimer(this);
-                                item->hideEndDelayTimer->setSingleShot(true);
-                                QObject::connect(item->hideEndDelayTimer, &QTimer::timeout, this, [this, weakItem]() {
-                                    auto locked = weakItem.lock();
-                                    if (!locked) return;
-                                    if (locked->sceneEpoch != m_sceneEpoch) return;
-                                    locked->hideEndTriggered = true;
-                                    fadeOutAndHide(locked);
-                                });
-                            }
-                            item->hideEndDelayTimer->start(hideDelayMs);
-                        } else if (!item->hideEndTriggered) {
-                            item->hideEndTriggered = true;
-                            fadeOutAndHide(item);
-                        }
-                    }
+                    freezeVideoOutput(item);
                 }
             }
         });
@@ -1192,57 +1280,15 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             }
 
             if (item->pausedAtEnd) return;
-            if ((dur - pos) < 100) {
+
+            // When we're within 80ms of the end, pause and request the final frame.
+            if (!item->awaitingFinalFrame && (dur - pos) < 80) {
                 item->pausedAtEnd = true;
-                
-                // Handle mute-on-end with delay
-                if (item->muteWhenVideoEnds && item->audio) {
-                    const int muteDelayMs = item->autoMuteDelayMs;
-                    if (muteDelayMs > 0 && !item->muteEndTriggered) {
-                        if (!item->muteEndDelayTimer) {
-                            item->muteEndDelayTimer = new QTimer(this);
-                            item->muteEndDelayTimer->setSingleShot(true);
-                            QObject::connect(item->muteEndDelayTimer, &QTimer::timeout, this, [this, weakItem]() {
-                                auto locked = weakItem.lock();
-                                if (!locked || !locked->audio) return;
-                                if (locked->sceneEpoch != m_sceneEpoch) return;
-                                applyAudioMuteState(locked, true);
-                                locked->muteEndTriggered = true;
-                            });
-                        }
-                        item->muteEndDelayTimer->start(muteDelayMs);
-                    } else if (!item->muteEndTriggered) {
-                        applyAudioMuteState(item, true);
-                        item->muteEndTriggered = true;
-                    }
-                }
-                
+                item->awaitingFinalFrame = true;
                 item->player->pause();
-                if (dur > 1) {
-                    item->player->setPosition(std::max<qint64>(0, dur - 1));
-                }
-                
-                // Handle hide-on-end with delay
-                if (item->hideWhenVideoEnds) {
-                    const int hideDelayMs = item->autoHideDelayMs;
-                    if (hideDelayMs > 0 && !item->hideEndTriggered) {
-                        if (!item->hideEndDelayTimer) {
-                            item->hideEndDelayTimer = new QTimer(this);
-                            item->hideEndDelayTimer->setSingleShot(true);
-                            QObject::connect(item->hideEndDelayTimer, &QTimer::timeout, this, [this, weakItem]() {
-                                auto locked = weakItem.lock();
-                                if (!locked) return;
-                                if (locked->sceneEpoch != m_sceneEpoch) return;
-                                locked->hideEndTriggered = true;
-                                fadeOutAndHide(locked);
-                            });
-                        }
-                        item->hideEndDelayTimer->start(hideDelayMs);
-                    } else if (!item->hideEndTriggered) {
-                        item->hideEndTriggered = true;
-                        fadeOutAndHide(item);
-                    }
-                }
+                const qint64 finalPos = std::max<qint64>(0, dur - 1);
+                item->player->setPosition(finalPos);
+                return;
             }
         });
         QObject::connect(item->player, &QMediaPlayer::errorOccurred, item->player, [this,epoch,weakItem](QMediaPlayer::Error e, const QString& err){ auto item = weakItem.lock(); if (!item) return; if (epoch != m_sceneEpoch) return; if (e != QMediaPlayer::NoError) qWarning() << "RemoteSceneController: player error" << int(e) << err << "for" << item->mediaId; });

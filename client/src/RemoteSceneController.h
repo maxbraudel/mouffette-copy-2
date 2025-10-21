@@ -10,6 +10,7 @@
 #include <QSharedPointer>
 #include <QByteArray>
 #include <QVideoFrame>
+#include <QImage>
 #include <QPointer>
 #include <memory>
 
@@ -119,6 +120,9 @@ private:
 		QTimer* muteEndDelayTimer = nullptr;
 		bool hideEndTriggered = false;
 		bool muteEndTriggered = false;
+		bool holdLastFrameAtEnd = false;
+		QImage lastFrameImage;
+		bool awaitingFinalFrame = false;
 	};
 
 	QWidget* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);
@@ -150,6 +154,8 @@ private:
 	void ensureVideoOutputsAttached(const std::shared_ptr<RemoteMediaItem>& item);
 	void finalizeLivePlaybackStart(const std::shared_ptr<RemoteMediaItem>& item, const QVideoFrame& frame);
     qint64 targetDisplayTimestamp(const std::shared_ptr<RemoteMediaItem>& item) const;
+	void freezeVideoOutput(const std::shared_ptr<RemoteMediaItem>& item);
+	void restoreVideoOutput(const std::shared_ptr<RemoteMediaItem>& item);
 
 	WebSocketClient* m_ws = nullptr; // not owned
 	bool m_enabled = true;
