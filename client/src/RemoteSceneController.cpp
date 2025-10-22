@@ -413,19 +413,12 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     item->primedFirstFrame = false;
     item->primedFrame = QVideoFrame();
     item->primedFrameSticky = false;
+    item->lastFrameImage = QImage();
+    item->lastFramePixmap = QPixmap();
     item->playAuthorized = false;
     item->hiding = false;
     item->readyNotified = false;
     item->fadeInPending = false;
-                                item->livePlaybackStarted = false;
-                                item->lastLiveFrameTimestampMs = -1;
-                                if (item->autoPlay) {
-                                    item->awaitingLivePlayback = true;
-                                    item->liveWarmupFramesRemaining = kLivePlaybackWarmupFrames;
-                                } else {
-                                    item->awaitingLivePlayback = false;
-                                    item->liveWarmupFramesRemaining = 0;
-                                }
     item->pendingDisplayDelayMs = -1;
     item->pendingPlayDelayMs = -1;
     item->pendingPauseDelayMs = -1;
@@ -618,6 +611,18 @@ void RemoteSceneController::triggerAutoPlayNow(const std::shared_ptr<RemoteMedia
     });
 }
 
+void RemoteSceneController::applyPixmapToSpans(const std::shared_ptr<RemoteMediaItem>& item, const QPixmap& pixmap) const {
+    if (!item) return;
+    if (pixmap.isNull()) return;
+
+    for (auto& span : item->spans) {
+        if (!span.imageItem) continue;
+        const int targetW = span.widget ? std::max(1, span.widget->width()) : std::max(1, pixmap.width());
+        const int targetH = span.widget ? std::max(1, span.widget->height()) : std::max(1, pixmap.height());
+        span.imageItem->setPixmap(pixmap.scaled(QSize(targetW, targetH), Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+    }
+}
+
 void RemoteSceneController::applyPrimedFrameToSinks(const std::shared_ptr<RemoteMediaItem>& item) {
     if (!item) return;
     if (!item->primedFrame.isValid()) return;
@@ -629,21 +634,16 @@ void RemoteSceneController::applyPrimedFrameToSinks(const std::shared_ptr<Remote
     if (image.isNull()) return;
 
     item->lastFrameImage = image;
-    const QPixmap pixmap = QPixmap::fromImage(image);
-
-    for (auto& span : item->spans) {
-        if (!span.imageItem) continue;
-        const int targetW = span.widget ? std::max(1, span.widget->width()) : std::max(1, pixmap.width());
-        const int targetH = span.widget ? std::max(1, span.widget->height()) : std::max(1, pixmap.height());
-        span.imageItem->setPixmap(pixmap.scaled(QSize(targetW, targetH), Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
-    }
+    item->lastFramePixmap = QPixmap::fromImage(image);
+    applyPixmapToSpans(item, item->lastFramePixmap);
 }
 
-void RemoteSceneController::clearVideoSinks(const std::shared_ptr<RemoteMediaItem>& item) {
+void RemoteSceneController::clearRenderedFrames(const std::shared_ptr<RemoteMediaItem>& item) {
     if (!item) return;
     if (item->awaitingLivePlayback && !item->livePlaybackStarted) return;
 
     item->lastFrameImage = QImage();
+    item->lastFramePixmap = QPixmap();
 
     for (auto& span : item->spans) {
         if (span.imageItem) {
@@ -685,6 +685,7 @@ void RemoteSceneController::ensureVideoOutputsAttached(const std::shared_ptr<Rem
             QImage converted = convertFrameToImage(frame);
             if (!converted.isNull()) {
                 item->lastFrameImage = converted;
+                item->lastFramePixmap = QPixmap::fromImage(converted);
             }
 
             const qint64 ts = frameTimestampMs(frame);
@@ -704,14 +705,8 @@ void RemoteSceneController::ensureVideoOutputsAttached(const std::shared_ptr<Rem
                 }
             }
 
-            if (!item->lastFrameImage.isNull()) {
-                const QPixmap pixmap = QPixmap::fromImage(item->lastFrameImage);
-                for (auto& span : item->spans) {
-                    if (!span.imageItem) continue;
-                    const int targetW = span.widget ? std::max(1, span.widget->width()) : std::max(1, pixmap.width());
-                    const int targetH = span.widget ? std::max(1, span.widget->height()) : std::max(1, pixmap.height());
-                    span.imageItem->setPixmap(pixmap.scaled(QSize(targetW, targetH), Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
-                }
+            if (!item->lastFramePixmap.isNull()) {
+                applyPixmapToSpans(item, item->lastFramePixmap);
             }
         });
     }
@@ -853,17 +848,15 @@ void RemoteSceneController::freezeVideoOutput(const std::shared_ptr<RemoteMediaI
         qWarning() << "RemoteSceneController: unable to convert final video frame for" << item->mediaId;
     } else {
         item->lastFrameImage = image;
+        item->lastFramePixmap = QPixmap::fromImage(image);
     }
 
     item->holdLastFrameAtEnd = true;
 
-    if (!item->lastFrameImage.isNull()) {
-        const QPixmap lastPixmap = QPixmap::fromImage(item->lastFrameImage);
+    if (!item->lastFramePixmap.isNull()) {
+        applyPixmapToSpans(item, item->lastFramePixmap);
         for (auto& span : item->spans) {
             if (!span.imageItem) continue;
-            const int targetW = span.widget ? std::max(1, span.widget->width()) : std::max(1, lastPixmap.width());
-            const int targetH = span.widget ? std::max(1, span.widget->height()) : std::max(1, lastPixmap.height());
-            span.imageItem->setPixmap(lastPixmap.scaled(QSize(targetW, targetH), Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
             span.imageItem->setOpacity(item->contentOpacity);
             span.imageItem->setVisible(true);
         }
@@ -964,7 +957,7 @@ QWidget* RemoteSceneController::ensureScreenWindow(int screenId, int x, int y, i
     win->setGeometry(x, y, w, h);
     win->setWindowTitle(primary ? "Remote Scene (Primary)" : "Remote Scene");
     
-    // Create QGraphicsView for GPU-accelerated rendering
+    // Create a QGraphicsView to host overlay scenes across the remote screens
     QGraphicsView* view = new QGraphicsView(win);
     QGraphicsScene* scene = new QGraphicsScene(view);
     scene->setSceneRect(0, 0, w, h);
@@ -1137,7 +1130,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
         if (!scene) continue;
         
         if (item->type == "image") {
-            // Create QGraphicsPixmapItem for GPU-accelerated image display
+            // Create a pixmap item for host-provided still images
             QGraphicsPixmapItem* pixmapItem = new QGraphicsPixmapItem();
             pixmapItem->setPos(px, py);
             pixmapItem->setOpacity(0.0);
@@ -1379,7 +1372,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                                         }
                                         item->primedFrame = QVideoFrame();
                                         item->primedFrameSticky = false;
-                                        clearVideoSinks(item);
+                                        clearRenderedFrames(item);
                                         return;
                                     }
                                 }
