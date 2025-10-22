@@ -21,7 +21,6 @@ class QVideoSink;
 class QAudioOutput;
 class QBuffer;
 class QGraphicsView;
-class QGraphicsVideoItem;
 class QGraphicsScene;
 class QGraphicsPixmapItem;
 class QVariantAnimation;
@@ -58,7 +57,6 @@ private:
 			double nx = 0, ny = 0, nw = 0, nh = 0;
 			QWidget* widget = nullptr;
 			QGraphicsPixmapItem* imageItem = nullptr;
-			QGraphicsVideoItem* videoItem = nullptr;
 		};
 		QList<Span> spans;
 		bool autoDisplay=false; int autoDisplayDelayMs=0;
@@ -113,6 +111,7 @@ private:
 		int pendingPlayDelayMs = -1;
 		int pendingPauseDelayMs = -1;
 		QVideoSink* primingSink = nullptr;
+		QVideoSink* liveSink = nullptr;
 		bool videoOutputsAttached = false;
 		bool primedFrameSticky = false;
 		QTimer* muteTimer = nullptr;
@@ -122,7 +121,6 @@ private:
 		bool muteEndTriggered = false;
 		bool holdLastFrameAtEnd = false;
 		QImage lastFrameImage;
-		bool awaitingFinalFrame = false;
 	};
 
 	QWidget* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);
