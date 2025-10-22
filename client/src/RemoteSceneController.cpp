@@ -1661,10 +1661,15 @@ void RemoteSceneController::applyAudioMuteState(const std::shared_ptr<RemoteMedi
     const qreal clampedTargetVolume = muted ? 0.0 : std::clamp<qreal>(item->volume, 0.0, 1.0);
     const double fadeSeconds = skipFade ? 0.0 : (muted ? item->audioFadeOutSeconds : item->audioFadeInSeconds);
 
+    const bool deviceMuted = item->audio->isMuted();
+    const qreal deviceVolume = std::clamp<qreal>(item->audio->volume(), 0.0, 1.0);
+
     if (muted == item->muted && !item->audioFadeAnimation) {
-        item->audio->setMuted(muted);
-        item->audio->setVolume(clampedTargetVolume);
-        return;
+        if (deviceMuted == muted && std::abs(deviceVolume - clampedTargetVolume) < 0.0001) {
+            item->audio->setMuted(muted);
+            item->audio->setVolume(clampedTargetVolume);
+            return;
+        }
     }
 
     cancelAudioFade(item, false);
@@ -1676,7 +1681,10 @@ void RemoteSceneController::applyAudioMuteState(const std::shared_ptr<RemoteMedi
         return;
     }
 
-    const qreal startVolume = std::clamp<qreal>(item->audio->volume(), 0.0, 1.0);
+    qreal startVolume = deviceVolume;
+    if (!muted && (deviceMuted || item->muted)) {
+        startVolume = 0.0;
+    }
     const qreal endVolume = muted ? 0.0 : clampedTargetVolume;
 
     if (std::abs(startVolume - endVolume) < 0.0001) {
