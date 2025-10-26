@@ -604,6 +604,8 @@ void RemoteSceneController::applyPixmapToSpans(const std::shared_ptr<RemoteMedia
 
     for (auto& span : item->spans) {
         if (!span.imageItem) continue;
+        // Safety check: verify scene still contains the item before updating pixmap
+        if (span.imageItem->scene() == nullptr) continue;
         const int targetW = span.widget ? std::max(1, span.widget->width()) : std::max(1, pixmap.width());
         const int targetH = span.widget ? std::max(1, span.widget->height()) : std::max(1, pixmap.height());
         span.imageItem->setPixmap(pixmap.scaled(QSize(targetW, targetH), Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
@@ -659,11 +661,13 @@ void RemoteSceneController::ensureVideoOutputsAttached(const std::shared_ptr<Rem
     if (item->liveSink) {
         std::weak_ptr<RemoteMediaItem> weakItem = item;
         const quint64 epoch = item->sceneEpoch;
-        item->mirrorConn = QObject::connect(item->liveSink, &QVideoSink::videoFrameChanged, item->player, [this, epoch, weakItem](const QVideoFrame& frame) {
+        item->mirrorConn = QObject::connect(item->liveSink, &QVideoSink::videoFrameChanged, item->liveSink, [this, epoch, weakItem](const QVideoFrame& frame) {
             if (!frame.isValid()) return;
             auto item = weakItem.lock();
             if (!item) return;
             if (epoch != m_sceneEpoch) return;
+            // Safety check: verify live sink still exists
+            if (!item->liveSink) return;
 
             if (item->holdLastFrameAtEnd) {
                 return;
@@ -1309,13 +1313,17 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                                  << "startMs" << (item->hasStartPosition ? item->startPositionMs : qint64(-1))
                                  << "displayTs" << (item->hasDisplayTimestamp ? item->displayTimestampMs : qint64(-1))
                                  << "awaitingStart" << item->awaitingStartFrame;
-                        item->primingConn = QObject::connect(sink, &QVideoSink::videoFrameChanged, item->player, [this,epoch,weakItem](const QVideoFrame& frame){
+                        item->primingConn = QObject::connect(sink, &QVideoSink::videoFrameChanged, sink, [this,epoch,weakItem](const QVideoFrame& frame){
                             if (!frame.isValid()) {
                                 return;
                             }
                             auto item = weakItem.lock();
                             if (!item) return;
                             if (epoch != m_sceneEpoch) return;
+                            // Safety check: verify priming sink still exists
+                            if (!item->primingSink) return;
+                            // Safety check: verify player still exists
+                            if (!item->player) return;
                             const qint64 desired = targetDisplayTimestamp(item);
                             const qint64 frameTime = frameTimestampMs(frame);
                             const bool hasFrameTimestamp = frameTime >= 0;
