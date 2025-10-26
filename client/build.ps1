@@ -6,6 +6,8 @@ $ErrorActionPreference = 'Stop'
 
 Write-Host "Building Mouffette Client (Windows)" -ForegroundColor Cyan
 
+Remove-Item -Path (Join-Path $PSScriptRoot "build") -Recurse -Force
+
 # 1) Ensure MSYS2 UCRT64 toolchain (Qt6) is available
 $msysRoot = 'C:\msys64'
 $ucrtBin  = Join-Path $msysRoot 'ucrt64\bin'

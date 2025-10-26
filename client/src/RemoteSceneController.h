@@ -96,12 +96,6 @@ private:
 		QMetaObject::Connection deferredStartConn; // one-shot start after load
 		QMetaObject::Connection primingConn; // one-shot first-frame priming when autoPlay=false
 		QMetaObject::Connection mirrorConn; // multi-span frame mirroring
-		QMetaObject::Connection hideOnEndConnection;
-		QMetaObject::Connection hidePreEndPositionConnection;
-		QMetaObject::Connection hidePreEndDurationConnection;
-		QMetaObject::Connection muteOnEndConnection;
-		QMetaObject::Connection mutePreEndPositionConnection;
-		QMetaObject::Connection mutePreEndDurationConnection;
 		quint64 sceneEpoch = 0; // generation token to guard delayed actions
 		// In-memory source support
 		QSharedPointer<QByteArray> memoryBytes;

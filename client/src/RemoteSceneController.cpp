@@ -35,7 +35,6 @@
 
 namespace {
 constexpr qint64 kStartPositionToleranceMs = 120;
-constexpr qint64 kDisplayFrameToleranceMs = 33;
 constexpr qint64 kDecoderSyncToleranceMs = 25;
 constexpr int kLivePlaybackWarmupFrames = 2;
 
@@ -332,21 +331,9 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     QObject::disconnect(item->deferredStartConn);
     QObject::disconnect(item->primingConn);
     QObject::disconnect(item->mirrorConn);
-    QObject::disconnect(item->hideOnEndConnection);
-    QObject::disconnect(item->hidePreEndPositionConnection);
-    QObject::disconnect(item->hidePreEndDurationConnection);
-    QObject::disconnect(item->muteOnEndConnection);
-    QObject::disconnect(item->mutePreEndPositionConnection);
-    QObject::disconnect(item->mutePreEndDurationConnection);
     item->pausedAtEnd = false;
     item->hideEndTriggered = false;
     item->muteEndTriggered = false;
-    item->hideOnEndConnection = QMetaObject::Connection();
-    item->hidePreEndPositionConnection = QMetaObject::Connection();
-    item->hidePreEndDurationConnection = QMetaObject::Connection();
-    item->muteOnEndConnection = QMetaObject::Connection();
-    item->mutePreEndPositionConnection = QMetaObject::Connection();
-    item->mutePreEndDurationConnection = QMetaObject::Connection();
 
     if (item->primingSink) {
         QObject::disconnect(item->primingSink, nullptr, nullptr, nullptr);
@@ -628,7 +615,9 @@ void RemoteSceneController::applyPrimedFrameToSinks(const std::shared_ptr<Remote
     if (!item->primedFrame.isValid()) return;
     if (!item->primedFrameSticky) return;
 
-    if (item->awaitingLivePlayback && !item->livePlaybackStarted) return;
+    // Only block applying primed frame if awaiting playback AND autoDisplay is false
+    // (autoDisplay videos should show their primed frame immediately)
+    if (item->awaitingLivePlayback && !item->livePlaybackStarted && !item->autoDisplay) return;
 
     QImage image = convertFrameToImage(item->primedFrame);
     if (image.isNull()) return;
@@ -1405,7 +1394,8 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                                 }
                                 applyPrimedFrameToSinks(item);
                                 evaluateItemReadiness(item);
-                                if (item->displayReady && !item->displayStarted) {
+                                // Allow display even if awaiting live playback, so autoDisplay works immediately
+                                if (item->autoDisplay && item->displayReady && !item->displayStarted) {
                                     fadeIn(item);
                                 }
                                 return;
@@ -1473,12 +1463,13 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
     // Display/play scheduling
     if (item->autoDisplay) {
         int delay = std::max(0, item->autoDisplayDelayMs);
+        // Mark displayReady immediately so primed frame can be shown
+        item->displayReady = true;
         item->displayTimer = new QTimer(this); item->displayTimer->setSingleShot(true);
         connect(item->displayTimer, &QTimer::timeout, this, [this,epoch,weakItem]() {
             auto item = weakItem.lock();
             if (!item) return;
             if (epoch != m_sceneEpoch) return;
-            item->displayReady = true;
             fadeIn(item);
         });
         item->pendingDisplayDelayMs = delay;
@@ -1552,7 +1543,9 @@ void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item)
         item->displayReady = true;
         return;
     }
-    if (item->awaitingLivePlayback && !item->livePlaybackStarted) {
+    // Only block fade-in if awaiting live playback AND autoDisplay is false
+    // (autoDisplay=true should show primed frame immediately, even before play starts)
+    if (item->awaitingLivePlayback && !item->livePlaybackStarted && !item->autoDisplay) {
         item->fadeInPending = true;
         return;
     }
