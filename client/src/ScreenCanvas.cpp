@@ -4857,8 +4857,6 @@ void ScreenCanvas::updateSettingsToggleButtonGeometry() {
         const int panelTop = margin + buttonSize + spacing;
         const int bottomMargin = margin;
         m_globalSettingsPanel->setAnchorMargins(margin, panelTop, bottomMargin);
-        const int available = viewport()->height() - panelTop - bottomMargin;
-        m_globalSettingsPanel->updateAvailableHeight(available);
         if (m_globalSettingsPanel->isVisible()) {
             m_globalSettingsPanel->updatePosition();
         }

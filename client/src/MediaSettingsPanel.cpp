@@ -808,9 +808,28 @@ void MediaSettingsPanel::updatePosition() {
     if (!viewport) return;
     
     const int viewportHeight = viewport->height();
-    const int availableHeight = std::max(0, viewportHeight - m_anchorTopMargin - m_anchorBottomMargin);
+    const int rawAvailableHeight = viewportHeight - m_anchorTopMargin - m_anchorBottomMargin;
+    const int availableHeight = std::max(0, rawAvailableHeight);
 
-    updateAvailableHeight(availableHeight);
+    if (rawAvailableHeight <= 0) {
+        m_widget->setMaximumHeight(QWIDGETSIZE_MAX);
+        m_widget->setMinimumHeight(0);
+        if (m_scrollContainer) {
+            m_scrollContainer->setMinimumHeight(0);
+            m_scrollContainer->setMaximumHeight(QWIDGETSIZE_MAX);
+            m_scrollContainer->updateGeometry();
+        }
+        if (m_scrollArea) {
+            m_scrollArea->setMinimumHeight(0);
+            m_scrollArea->setMaximumHeight(QWIDGETSIZE_MAX);
+            m_scrollArea->updateGeometry();
+        }
+        updateScrollbarGeometry();
+        return;
+    }
+
+    m_widget->setMaximumHeight(std::max(50, availableHeight));
+    m_widget->setMinimumHeight(0);
 
     auto effectiveChromeHeight = [](QWidget* widget) {
         if (!widget || !widget->isVisible()) {
@@ -840,10 +859,7 @@ void MediaSettingsPanel::updatePosition() {
         desiredHeight = m_widget->sizeHint().height();
     }
 
-    int boundedHeight = desiredHeight;
-    if (availableHeight > 0) {
-        boundedHeight = std::min(availableHeight, desiredHeight);
-    }
+    int boundedHeight = std::min(availableHeight, desiredHeight);
     boundedHeight = std::max(1, boundedHeight);
 
     const QSize newSize(m_panelWidthPx, boundedHeight);
@@ -1578,28 +1594,6 @@ void MediaSettingsPanel::onPauseDelayToggled(bool checked) {
     if (!m_updatingFromMedia) {
         pushSettingsToMedia();
     }
-}
-
-void MediaSettingsPanel::updateAvailableHeight(int maxHeightPx) {
-    if (!m_widget) return;
-    if (maxHeightPx <= 0) {
-        m_widget->setMaximumHeight(QWIDGETSIZE_MAX);
-        m_widget->setMinimumHeight(0);
-        if (m_scrollContainer) {
-            m_scrollContainer->setMinimumHeight(0);
-            m_scrollContainer->setMaximumHeight(QWIDGETSIZE_MAX);
-        }
-        if (m_scrollArea) {
-            m_scrollArea->setMaximumHeight(QWIDGETSIZE_MAX);
-            m_scrollArea->setMinimumHeight(0);
-        }
-        updateScrollbarGeometry();
-        return;
-    }
-
-    const int clamped = std::max(50, maxHeightPx);
-    m_widget->setMaximumHeight(clamped);
-    m_widget->setMinimumHeight(0);
 }
 
 void MediaSettingsPanel::setMediaItem(ResizableMediaBase* item) {

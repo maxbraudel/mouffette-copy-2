@@ -37,7 +37,6 @@ public:
     int displayDelayMillis() const; // 0 if disabled or invalid
     bool playAutomaticallyEnabled() const; // video only, safe if not video
     int playDelayMillis() const; // 0 if disabled or invalid
-    void updateAvailableHeight(int maxHeightPx);
     void updatePosition();
     void setAnchorMargins(int leftMarginPx, int topMarginPx, int bottomMarginPx);
 
