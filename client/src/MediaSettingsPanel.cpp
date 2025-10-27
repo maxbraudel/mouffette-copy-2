@@ -24,8 +24,7 @@ QString tabButtonStyle(bool active, const QString& overlayTextCss) {
         return QStringLiteral(
             "QPushButton {"
             " padding: 8px 0px;"
-            " font-weight: bold;"
-            " font-size: 12px;"
+            " font-size: 16px;"
             " color: white;"
             " background: rgba(255,255,255,0.1);"
             " border: none;"
@@ -42,8 +41,7 @@ QString tabButtonStyle(bool active, const QString& overlayTextCss) {
     return QStringLiteral(
         "QPushButton {"
         " padding: 8px 0px;"
-        " font-weight: bold;"
-        " font-size: 12px;"
+        " font-size: 16px;"
         " color: %1;"
         " background: transparent;"
         " border: none;"
@@ -115,6 +113,13 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     
     m_sceneTabButton = new QPushButton("Scene", m_tabSwitcherContainer);
     m_elementTabButton = new QPushButton("Element", m_tabSwitcherContainer);
+    
+    // Apply bold font to tab buttons to match section headers
+    QFont tabFont = m_sceneTabButton->font();
+    tabFont.setBold(true);
+    m_sceneTabButton->setFont(tabFont);
+    m_elementTabButton->setFont(tabFont);
+    
     m_sceneTabButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_elementTabButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_sceneTabButton->setFixedHeight(40);
@@ -1868,9 +1873,17 @@ void MediaSettingsPanel::updateActiveTabUi() {
 
     if (m_sceneTabButton) {
         m_sceneTabButton->setStyleSheet(tabButtonStyle(sceneActive, overlayTextCss));
+        // Reapply bold font after stylesheet to ensure font size inherits from system default
+        QFont tabFont = m_sceneTabButton->font();
+        tabFont.setBold(true);
+        m_sceneTabButton->setFont(tabFont);
     }
     if (m_elementTabButton) {
         m_elementTabButton->setStyleSheet(tabButtonStyle(!sceneActive, overlayTextCss));
+        // Reapply bold font after stylesheet to ensure font size inherits from system default
+        QFont tabFont = m_elementTabButton->font();
+        tabFont.setBold(true);
+        m_elementTabButton->setFont(tabFont);
     }
     if (m_sceneOptionsContainer) {
         m_sceneOptionsContainer->setVisible(sceneActive);
