@@ -9,6 +9,7 @@ class QCheckBox;
 class QScrollArea;
 class QScrollBar;
 class QTimer;
+class QPushButton;
 
 // Floating settings panel shown when a media's settings toggle is enabled.
 // Implemented as a QWidget parented to the viewport (like info overlay).
@@ -56,6 +57,8 @@ private slots:
     void onMuteDelayToggled(bool checked);
     void onPauseDelayToggled(bool checked);
     void onVolumeToggled(bool checked);
+    void onSceneTabClicked();
+    void onElementTabClicked();
 
 private:
     void buildUi(QWidget* parentWidget);
@@ -81,6 +84,16 @@ private:
     int m_anchorLeftMargin = 16;
     int m_anchorTopMargin = 16;
     int m_anchorBottomMargin = 16;
+    
+    // Tab system
+    QPushButton* m_sceneTabButton = nullptr;
+    QPushButton* m_elementTabButton = nullptr;
+    QWidget* m_sceneOptionsContainer = nullptr;
+    QWidget* m_elementPropertiesContainer = nullptr;
+    QVBoxLayout* m_sceneOptionsLayout = nullptr;
+    QVBoxLayout* m_elementPropertiesLayout = nullptr;
+    enum class ActiveTab { Scene, Element };
+    ActiveTab m_activeTab = ActiveTab::Scene;
 
     QCheckBox* m_autoPlayCheck = nullptr;
     QCheckBox* m_playDelayCheck = nullptr; // New: separate play delay checkbox
