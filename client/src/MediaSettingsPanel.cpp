@@ -18,6 +18,50 @@
 #include <cmath>
 #include "MediaItems.h" // for ResizableMediaBase
 
+namespace {
+QString tabButtonStyle(bool active, const QString& overlayTextCss) {
+    if (active) {
+        return QStringLiteral(
+            "QPushButton {"
+            " padding: 8px 0px;"
+            " font-weight: bold;"
+            " font-size: 12px;"
+            " color: white;"
+            " background: rgba(255,255,255,0.1);"
+            " border: none;"
+            " border-radius: 0px;"
+            " margin: 0px;"
+            "}"
+            "QPushButton:hover {"
+            " color: white;"
+            " background: rgba(255,255,255,0.15);"
+            "}"
+        );
+    }
+
+    return QStringLiteral(
+        "QPushButton {"
+        " padding: 8px 0px;"
+        " font-weight: bold;"
+        " font-size: 12px;"
+        " color: %1;"
+        " background: transparent;"
+        " border: none;"
+        " border-radius: 0px;"
+        " margin: 0px;"
+        "}"
+        "QPushButton:hover {"
+        " color: white;"
+        " background: rgba(255,255,255,0.05);"
+        "}"
+        "QPushButton:pressed {"
+        " color: white;"
+        " background: rgba(255,255,255,0.1);"
+        "}"
+    ).arg(overlayTextCss);
+}
+}
+
 MediaSettingsPanel::MediaSettingsPanel(QWidget* parentWidget)
     : QObject(parentWidget)
 {
@@ -69,50 +113,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     tabSwitcherLayout->setContentsMargins(0, 0, 0, 0);
     tabSwitcherLayout->setSpacing(0);
     
-    // Common button style matching upload button
-    const QString tabButtonBaseStyle = QStringLiteral(
-        "QPushButton {"
-        " padding: 8px 0px;"
-        " font-weight: bold;"
-        " font-size: 12px;"
-        " color: %1;"
-        " background: transparent;"
-        " border: none;"
-        " border-radius: 0px;"
-        " margin: 0px;"
-        "}"
-        "QPushButton:hover {"
-        " color: white;"
-        " background: rgba(255,255,255,0.05);"
-        "}"
-        "QPushButton:pressed {"
-        " color: white;"
-        " background: rgba(255,255,255,0.1);"
-        "}"
-    ).arg(overlayTextCss);
-    
-    const QString activeTabButtonStyle = QStringLiteral(
-        "QPushButton {"
-        " padding: 8px 0px;"
-        " font-weight: bold;"
-        " font-size: 12px;"
-        " color: white;"
-        " background: rgba(255,255,255,0.1);"
-        " border: none;"
-        " border-radius: 0px;"
-        " margin: 0px;"
-        "}"
-        "QPushButton:hover {"
-        " color: white;"
-        " background: rgba(255,255,255,0.15);"
-        "}"
-    );
-    
     m_sceneTabButton = new QPushButton("Scene", m_tabSwitcherContainer);
     m_elementTabButton = new QPushButton("Element", m_tabSwitcherContainer);
-    
-    m_sceneTabButton->setStyleSheet(activeTabButtonStyle);
-    m_elementTabButton->setStyleSheet(tabButtonBaseStyle);
     m_sceneTabButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_elementTabButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_sceneTabButton->setFixedHeight(40);
@@ -453,8 +455,6 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     m_elementPropertiesLayout->setSpacing(10);
     m_elementPropertiesLayout->setAlignment(Qt::AlignTop);
     m_contentLayout->addWidget(m_elementPropertiesContainer);
-    m_elementPropertiesContainer->setVisible(false); // Start with scene tab active
-
     // Element Properties section header
     m_elementPropertiesTitle = new QLabel("Element Properties");
     QFont epf = m_elementPropertiesTitle->font();
@@ -674,7 +674,6 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         onMuteDelayToggled(m_muteDelayCheck->isChecked());
     }
     if (m_pauseDelayCheck) {
-        QObject::connect(m_pauseDelayCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onPauseDelayToggled);
         onPauseDelayToggled(m_pauseDelayCheck->isChecked());
     }
     if (m_hideWhenEndsRow) {
@@ -686,6 +685,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     if (m_muteWhenEndsRow) {
         m_muteWhenEndsRow->setVisible(false);
     }
+    updateActiveTabUi();
     updatePosition();
 }
 
@@ -1562,6 +1562,11 @@ void MediaSettingsPanel::updateAvailableHeight(int maxHeightPx) {
     if (!m_widget) return;
     if (maxHeightPx <= 0) {
         m_widget->setMaximumHeight(QWIDGETSIZE_MAX);
+        m_widget->setMinimumHeight(0);
+        if (m_scrollContainer) {
+            m_scrollContainer->setMinimumHeight(0);
+            m_scrollContainer->setMaximumHeight(QWIDGETSIZE_MAX);
+        }
         if (m_scrollArea) {
             m_scrollArea->setMaximumHeight(QWIDGETSIZE_MAX);
             m_scrollArea->setMinimumHeight(0);
@@ -1847,110 +1852,34 @@ void MediaSettingsPanel::pushSettingsToMedia() {
     m_mediaItem->setMediaSettingsState(state);
 }
 
+void MediaSettingsPanel::updateActiveTabUi() {
+    const QString overlayTextCss = AppColors::colorToCss(AppColors::gOverlayTextColor);
+    const bool sceneActive = (m_activeTab == ActiveTab::Scene);
+
+    if (m_sceneTabButton) {
+        m_sceneTabButton->setStyleSheet(tabButtonStyle(sceneActive, overlayTextCss));
+    }
+    if (m_elementTabButton) {
+        m_elementTabButton->setStyleSheet(tabButtonStyle(!sceneActive, overlayTextCss));
+    }
+    if (m_sceneOptionsContainer) {
+        m_sceneOptionsContainer->setVisible(sceneActive);
+    }
+    if (m_elementPropertiesContainer) {
+        m_elementPropertiesContainer->setVisible(!sceneActive);
+    }
+}
+
 void MediaSettingsPanel::onSceneTabClicked() {
     if (m_activeTab == ActiveTab::Scene) return; // Already on this tab
     
     m_activeTab = ActiveTab::Scene;
-    
-    // Update button styles
-    const QString overlayTextCss = AppColors::colorToCss(AppColors::gOverlayTextColor);
-    
-    const QString activeTabButtonStyle = QStringLiteral(
-        "QPushButton {"
-        " padding: 8px 0px;"
-        " font-weight: bold;"
-        " font-size: 12px;"
-        " color: white;"
-        " background: rgba(255,255,255,0.1);"
-        " border: none;"
-        " border-radius: 0px;"
-        " margin: 0px;"
-        "}"
-        "QPushButton:hover {"
-        " color: white;"
-        " background: rgba(255,255,255,0.15);"
-        "}"
-    );
-    
-    const QString inactiveTabButtonStyle = QStringLiteral(
-        "QPushButton {"
-        " padding: 8px 0px;"
-        " font-weight: bold;"
-        " font-size: 12px;"
-        " color: %1;"
-        " background: transparent;"
-        " border: none;"
-        " border-radius: 0px;"
-        " margin: 0px;"
-        "}"
-        "QPushButton:hover {"
-        " color: white;"
-        " background: rgba(255,255,255,0.05);"
-        "}"
-        "QPushButton:pressed {"
-        " color: white;"
-        " background: rgba(255,255,255,0.1);"
-        "}"
-    ).arg(overlayTextCss);
-    
-    m_sceneTabButton->setStyleSheet(activeTabButtonStyle);
-    m_elementTabButton->setStyleSheet(inactiveTabButtonStyle);
-    
-    // Show scene container, hide element container
-    if (m_sceneOptionsContainer) m_sceneOptionsContainer->setVisible(true);
-    if (m_elementPropertiesContainer) m_elementPropertiesContainer->setVisible(false);
+    updateActiveTabUi();
 }
 
 void MediaSettingsPanel::onElementTabClicked() {
     if (m_activeTab == ActiveTab::Element) return; // Already on this tab
     
     m_activeTab = ActiveTab::Element;
-    
-    // Update button styles
-    const QString overlayTextCss = AppColors::colorToCss(AppColors::gOverlayTextColor);
-    
-    const QString activeTabButtonStyle = QStringLiteral(
-        "QPushButton {"
-        " padding: 8px 0px;"
-        " font-weight: bold;"
-        " font-size: 12px;"
-        " color: white;"
-        " background: rgba(255,255,255,0.1);"
-        " border: none;"
-        " border-radius: 0px;"
-        " margin: 0px;"
-        "}"
-        "QPushButton:hover {"
-        " color: white;"
-        " background: rgba(255,255,255,0.15);"
-        "}"
-    );
-    
-    const QString inactiveTabButtonStyle = QStringLiteral(
-        "QPushButton {"
-        " padding: 8px 0px;"
-        " font-weight: bold;"
-        " font-size: 12px;"
-        " color: %1;"
-        " background: transparent;"
-        " border: none;"
-        " border-radius: 0px;"
-        " margin: 0px;"
-        "}"
-        "QPushButton:hover {"
-        " color: white;"
-        " background: rgba(255,255,255,0.05);"
-        "}"
-        "QPushButton:pressed {"
-        " color: white;"
-        " background: rgba(255,255,255,0.1);"
-        "}"
-    ).arg(overlayTextCss);
-    
-    m_sceneTabButton->setStyleSheet(inactiveTabButtonStyle);
-    m_elementTabButton->setStyleSheet(activeTabButtonStyle);
-    
-    // Hide scene container, show element container
-    if (m_sceneOptionsContainer) m_sceneOptionsContainer->setVisible(false);
-    if (m_elementPropertiesContainer) m_elementPropertiesContainer->setVisible(true);
+    updateActiveTabUi();
 }

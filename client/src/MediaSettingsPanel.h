@@ -1,7 +1,6 @@
 #pragma once
 
 #include <QWidget>
-#include <QIcon>
 
 class QVBoxLayout;
 class QLabel;
@@ -69,6 +68,7 @@ private:
     void updateScrollbarGeometry();
     void pullSettingsFromMedia();
     void pushSettingsToMedia();
+    void updateActiveTabUi();
 
 private:
     QWidget* m_widget = nullptr; // parented to viewport
