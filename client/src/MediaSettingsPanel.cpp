@@ -158,6 +158,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     m_scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_scrollArea->setWidgetResizable(true);
+    m_scrollArea->setAlignment(Qt::AlignTop);
     // Ensure scroll area blocks mouse propagation
     m_scrollArea->setAttribute(Qt::WA_NoMousePropagation, true);
     if (auto* hBar = m_scrollArea->horizontalScrollBar()) { hBar->setEnabled(false); hBar->hide(); }
@@ -169,7 +170,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     if (auto* vBar = m_scrollArea->verticalScrollBar()) vBar->hide();
     m_scrollArea->setStyleSheet(
         "QAbstractScrollArea { background: transparent; border: none; }"
-        " QAbstractScrollArea > QWidget#qt_scrollarea_viewport { background: transparent; }"
+        " QAbstractScrollArea > QWidget#qt_scrollarea_viewport { background: transparent; margin: 0; }"
         " QAbstractScrollArea::corner { background: transparent; }"
         " QScrollArea QScrollBar:vertical { width: 0px; margin: 0; background: transparent; }"
     );
@@ -187,8 +188,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
 
     // Content layout with the previous margins/spacing
     m_contentLayout = new QVBoxLayout(m_innerContent);
-    m_contentLayout->setContentsMargins(20, 16, 20, 16);
-    m_contentLayout->setSpacing(10);
+    m_contentLayout->setContentsMargins(0, 0, 0, 0);
     m_contentLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
     m_contentLayout->setAlignment(Qt::AlignTop);
 
@@ -200,8 +200,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     // Create Scene Options container
     m_sceneOptionsContainer = new QWidget(m_innerContent);
     m_sceneOptionsLayout = new QVBoxLayout(m_sceneOptionsContainer);
-    m_sceneOptionsLayout->setContentsMargins(0, 10, 0, 0);
-    m_sceneOptionsLayout->setSpacing(10);
+    m_sceneOptionsLayout->setContentsMargins(0, 0, 0, 0);
     m_sceneOptionsLayout->setAlignment(Qt::AlignTop);
     m_contentLayout->addWidget(m_sceneOptionsContainer);
     
@@ -451,7 +450,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     // Create Element Properties container
     m_elementPropertiesContainer = new QWidget(m_innerContent);
     m_elementPropertiesLayout = new QVBoxLayout(m_elementPropertiesContainer);
-    m_elementPropertiesLayout->setContentsMargins(0, 10, 0, 0);
+    m_elementPropertiesLayout->setContentsMargins(0, 0, 0, 0);
     m_elementPropertiesLayout->setSpacing(10);
     m_elementPropertiesLayout->setAlignment(Qt::AlignTop);
     m_contentLayout->addWidget(m_elementPropertiesContainer);
@@ -813,6 +812,17 @@ void MediaSettingsPanel::updatePosition() {
 
     updateAvailableHeight(availableHeight);
 
+    auto effectiveChromeHeight = [](QWidget* widget) {
+        if (!widget || !widget->isVisible()) {
+            return 0;
+        }
+        const int current = widget->height();
+        return current > 0 ? current : widget->sizeHint().height();
+    };
+
+    const int chromeHeight = effectiveChromeHeight(m_tabSwitcherContainer) +
+                             effectiveChromeHeight(m_tabSwitcherSeparator);
+
     int contentHeight = 0;
     if (m_innerContent) {
         contentHeight = m_innerContent->sizeHint().height();
@@ -825,7 +835,7 @@ void MediaSettingsPanel::updatePosition() {
         contentHeight += margins.top() + margins.bottom();
     }
 
-    int desiredHeight = contentHeight;
+    int desiredHeight = chromeHeight + contentHeight;
     if (desiredHeight <= 0) {
         desiredHeight = m_widget->sizeHint().height();
     }
@@ -839,6 +849,18 @@ void MediaSettingsPanel::updatePosition() {
     const QSize newSize(m_panelWidthPx, boundedHeight);
     if (m_widget->size() != newSize) {
         m_widget->resize(newSize);
+    }
+
+    const int viewportTarget = std::max(0, m_widget->height() - chromeHeight);
+    if (m_scrollContainer) {
+        m_scrollContainer->setMinimumHeight(viewportTarget);
+        m_scrollContainer->setMaximumHeight(viewportTarget);
+        m_scrollContainer->updateGeometry();
+    }
+    if (m_scrollArea) {
+        m_scrollArea->setMinimumHeight(viewportTarget);
+        m_scrollArea->setMaximumHeight(viewportTarget);
+        m_scrollArea->updateGeometry();
     }
 
     m_widget->move(m_anchorLeftMargin, m_anchorTopMargin);
@@ -1578,38 +1600,6 @@ void MediaSettingsPanel::updateAvailableHeight(int maxHeightPx) {
     const int clamped = std::max(50, maxHeightPx);
     m_widget->setMaximumHeight(clamped);
     m_widget->setMinimumHeight(0);
-
-    int chromeHeight = 0;
-    if (m_tabSwitcherContainer) {
-        const int h = m_tabSwitcherContainer->isVisible() && m_tabSwitcherContainer->height() > 0
-                          ? m_tabSwitcherContainer->height()
-                          : m_tabSwitcherContainer->sizeHint().height();
-        chromeHeight += h;
-    }
-    if (m_tabSwitcherSeparator) {
-        const int h = m_tabSwitcherSeparator->isVisible() && m_tabSwitcherSeparator->height() > 0
-                          ? m_tabSwitcherSeparator->height()
-                          : m_tabSwitcherSeparator->sizeHint().height();
-        chromeHeight += h;
-    }
-
-    const int scrollViewport = std::max(0, clamped - chromeHeight);
-
-    if (m_scrollContainer) {
-        m_scrollContainer->setMinimumHeight(scrollViewport);
-        m_scrollContainer->setMaximumHeight(scrollViewport);
-    }
-
-    if (m_scrollArea) {
-        m_scrollArea->setMinimumHeight(scrollViewport);
-        m_scrollArea->setMaximumHeight(scrollViewport);
-    }
-
-    m_widget->updateGeometry();
-    if (m_scrollArea) {
-        m_scrollArea->updateGeometry();
-    }
-    updateScrollbarGeometry();
 }
 
 void MediaSettingsPanel::setMediaItem(ResizableMediaBase* item) {
