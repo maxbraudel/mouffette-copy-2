@@ -1755,7 +1755,8 @@ void MediaSettingsPanel::refreshVolumeDisplay() {
 
     m_volumeCheck->setChecked(state.volumeOverrideEnabled);
     m_volumeBox->setText(displayText);
-    setBoxActive(m_volumeBox, state.volumeOverrideEnabled);
+    const bool volumeBoxManuallyActive = (m_activeBox == m_volumeBox); // Keep highlight only for explicit user focus
+    setBoxActive(m_volumeBox, volumeBoxManuallyActive);
 
     applyVolumeFromUi();
 
