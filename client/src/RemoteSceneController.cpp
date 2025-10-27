@@ -216,18 +216,22 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
     buildWindows(screens);
     buildMedia(media);
 
-    for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
-        QWidget* window = it.value().window;
-        if (!window) continue;
-        window->show();
+    // Defer window shows until the event loop flushes deferred deletes to avoid crashing
+    // macOS accessibility on stale QWidget instances when scenes rapidly restart.
+    QTimer::singleShot(0, this, [this]() {
+        for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
+            QWidget* window = it.value().window;
+            if (!window) continue;
+            window->show();
 #ifdef Q_OS_MAC
-        QTimer::singleShot(0, window, [w = window]() {
-            MacWindowManager::setWindowAsGlobalOverlay(w, /*clickThrough*/ true);
-        });
+            QTimer::singleShot(0, window, [w = window]() {
+                MacWindowManager::setWindowAsGlobalOverlay(w, /*clickThrough*/ true);
+            });
 #endif
-    }
+        }
 
-    startSceneActivationIfReady();
+        startSceneActivationIfReady();
+    });
 }
 
 void RemoteSceneController::onRemoteSceneStop(const QString& senderClientId) {
