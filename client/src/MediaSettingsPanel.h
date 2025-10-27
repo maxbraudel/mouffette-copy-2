@@ -78,8 +78,6 @@ private:
     QWidget* m_scrollContainer = nullptr;
     QWidget* m_innerContent = nullptr;
     QVBoxLayout* m_contentLayout = nullptr;
-    QLabel* m_title = nullptr;
-    QLabel* m_elementPropertiesTitle = nullptr;
     int m_anchorLeftMargin = 16;
     int m_anchorTopMargin = 16;
     int m_anchorBottomMargin = 16;

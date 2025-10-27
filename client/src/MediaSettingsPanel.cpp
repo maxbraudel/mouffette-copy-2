@@ -188,7 +188,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
 
     // Content layout with the previous margins/spacing
     m_contentLayout = new QVBoxLayout(m_innerContent);
-    m_contentLayout->setContentsMargins(0, 0, 0, 0);
+    m_contentLayout->setContentsMargins(15, 10, 15, 10);
     m_contentLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
     m_contentLayout->setAlignment(Qt::AlignTop);
 
@@ -197,19 +197,27 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         row->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     };
     
-    // Create Scene Options container
+    // Create Scene Options container grouped by category
     m_sceneOptionsContainer = new QWidget(m_innerContent);
     m_sceneOptionsLayout = new QVBoxLayout(m_sceneOptionsContainer);
     m_sceneOptionsLayout->setContentsMargins(0, 0, 0, 0);
+    m_sceneOptionsLayout->setSpacing(6);
     m_sceneOptionsLayout->setAlignment(Qt::AlignTop);
     m_contentLayout->addWidget(m_sceneOptionsContainer);
-    
-    m_title = new QLabel("Scene options");
-    QFont tf = m_title->font();
-    tf.setBold(true);
-    m_title->setFont(tf);
-    m_title->setStyleSheet(overlayTextStyle);
-    m_sceneOptionsLayout->addWidget(m_title);
+
+    bool sceneFirstSection = true;
+    auto addSceneSectionHeader = [&](const QString& text) {
+        if (!sceneFirstSection) {
+            m_sceneOptionsLayout->addSpacing(8);
+        }
+        sceneFirstSection = false;
+        auto* header = new QLabel(text, m_sceneOptionsContainer);
+        QFont font = header->font();
+        font.setBold(true);
+        header->setFont(font);
+        header->setStyleSheet(overlayTextStyle);
+        m_sceneOptionsLayout->addWidget(header);
+    };
 
     // Helper to create a small value box label like [1]
     auto makeValueBox = [&](const QString& text = QStringLiteral("1")) {
@@ -224,11 +232,12 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         return box;
     };
 
-    // 0) Display automatically + Display delay as separate checkboxes
+    addSceneSectionHeader("Image");
+
+    // Display automatically + Display delay controls
     {
-        // Display automatically checkbox with proper alignment
-    auto* autoRow = new QWidget(m_sceneOptionsContainer);
-    configureRow(autoRow);
+        auto* autoRow = new QWidget(m_sceneOptionsContainer);
+        configureRow(autoRow);
         auto* autoLayout = new QHBoxLayout(autoRow);
         autoLayout->setContentsMargins(0, 0, 0, 0);
         autoLayout->setSpacing(0);
@@ -238,17 +247,16 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         autoLayout->addWidget(m_displayAfterCheck);
         autoLayout->addStretch();
         m_sceneOptionsLayout->addWidget(autoRow);
-        
-        // Display delay checkbox with input (separate checkbox)
-    auto* delayRow = new QWidget(m_sceneOptionsContainer);
-    configureRow(delayRow);
+
+        auto* delayRow = new QWidget(m_sceneOptionsContainer);
+        configureRow(delayRow);
         auto* h = new QHBoxLayout(delayRow);
         h->setContentsMargins(0, 0, 0, 0);
         h->setSpacing(0);
         m_displayDelayCheck = new QCheckBox("Display delay: ", delayRow);
         m_displayDelayCheck->setStyleSheet(overlayTextStyle);
         m_displayDelayCheck->installEventFilter(this);
-    QObject::connect(m_displayDelayCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
+        QObject::connect(m_displayDelayCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
         m_displayAfterBox = makeValueBox();
         m_displayAfterSecondsLabel = new QLabel("s", delayRow);
         m_displayAfterSecondsLabel->setStyleSheet(overlayTextStyle);
@@ -259,43 +267,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_sceneOptionsLayout->addWidget(delayRow);
     }
 
-    // Unmute automatically (video only)
-    {
-    m_unmuteRow = new QWidget(m_sceneOptionsContainer);
-    configureRow(m_unmuteRow);
-        auto* h = new QHBoxLayout(m_unmuteRow);
-        h->setContentsMargins(0, 0, 0, 0);
-        h->setSpacing(0);
-        m_unmuteCheck = new QCheckBox("Unmute automatically", m_unmuteRow);
-        m_unmuteCheck->setStyleSheet(overlayTextStyle);
-        m_unmuteCheck->installEventFilter(this);
-        h->addWidget(m_unmuteCheck);
-        h->addStretch();
-        m_sceneOptionsLayout->addWidget(m_unmuteRow);
-    }
-
-    // Unmute delay (video only)
-    {
-    m_unmuteDelayRow = new QWidget(m_sceneOptionsContainer);
-    configureRow(m_unmuteDelayRow);
-        auto* h = new QHBoxLayout(m_unmuteDelayRow);
-        h->setContentsMargins(0, 0, 0, 0);
-        h->setSpacing(0);
-        m_unmuteDelayCheck = new QCheckBox("Unmute delay: ", m_unmuteDelayRow);
-        m_unmuteDelayCheck->setStyleSheet(overlayTextStyle);
-        m_unmuteDelayCheck->installEventFilter(this);
-        QObject::connect(m_unmuteDelayCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
-        m_unmuteDelayBox = makeValueBox(QStringLiteral("0"));
-        m_unmuteDelaySecondsLabel = new QLabel("s", m_unmuteDelayRow);
-        m_unmuteDelaySecondsLabel->setStyleSheet(overlayTextStyle);
-        h->addWidget(m_unmuteDelayCheck);
-        h->addWidget(m_unmuteDelayBox);
-        h->addWidget(m_unmuteDelaySecondsLabel);
-        h->addStretch();
-        m_sceneOptionsLayout->addWidget(m_unmuteDelayRow);
-    }
-
-    // Hide delay directly below display delay
+    // Hide delay controls for the image section
     {
         m_hideDelayRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_hideDelayRow);
@@ -330,6 +302,44 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         h->addWidget(m_hideWhenVideoEndsCheck);
         h->addStretch();
         m_sceneOptionsLayout->addWidget(m_hideWhenEndsRow);
+    }
+
+    addSceneSectionHeader("Audio");
+
+    // Unmute automatically (video only)
+    {
+        m_unmuteRow = new QWidget(m_sceneOptionsContainer);
+        configureRow(m_unmuteRow);
+        auto* h = new QHBoxLayout(m_unmuteRow);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->setSpacing(0);
+        m_unmuteCheck = new QCheckBox("Unmute automatically", m_unmuteRow);
+        m_unmuteCheck->setStyleSheet(overlayTextStyle);
+        m_unmuteCheck->installEventFilter(this);
+        h->addWidget(m_unmuteCheck);
+        h->addStretch();
+        m_sceneOptionsLayout->addWidget(m_unmuteRow);
+    }
+
+    // Unmute delay (video only)
+    {
+        m_unmuteDelayRow = new QWidget(m_sceneOptionsContainer);
+        configureRow(m_unmuteDelayRow);
+        auto* h = new QHBoxLayout(m_unmuteDelayRow);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->setSpacing(0);
+        m_unmuteDelayCheck = new QCheckBox("Unmute delay: ", m_unmuteDelayRow);
+        m_unmuteDelayCheck->setStyleSheet(overlayTextStyle);
+        m_unmuteDelayCheck->installEventFilter(this);
+        QObject::connect(m_unmuteDelayCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
+        m_unmuteDelayBox = makeValueBox(QStringLiteral("0"));
+        m_unmuteDelaySecondsLabel = new QLabel("s", m_unmuteDelayRow);
+        m_unmuteDelaySecondsLabel->setStyleSheet(overlayTextStyle);
+        h->addWidget(m_unmuteDelayCheck);
+        h->addWidget(m_unmuteDelayBox);
+        h->addWidget(m_unmuteDelaySecondsLabel);
+        h->addStretch();
+        m_sceneOptionsLayout->addWidget(m_unmuteDelayRow);
     }
 
     // Mute delay (video only)
@@ -369,10 +379,12 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_sceneOptionsLayout->addWidget(m_muteWhenEndsRow);
     }
 
+    addSceneSectionHeader("Video");
+
     // 1) Play automatically as separate widget (video only) - matching display layout
     {
-    m_autoPlayRow = new QWidget(m_sceneOptionsContainer);
-    configureRow(m_autoPlayRow);
+        m_autoPlayRow = new QWidget(m_sceneOptionsContainer);
+        configureRow(m_autoPlayRow);
         auto* autoLayout = new QHBoxLayout(m_autoPlayRow);
         autoLayout->setContentsMargins(0, 0, 0, 0);
         autoLayout->setSpacing(0);
@@ -386,15 +398,15 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     
     // Play delay as a separate widget (video only) - matching display delay layout
     {
-    m_playDelayRow = new QWidget(m_sceneOptionsContainer);
-    configureRow(m_playDelayRow);
+        m_playDelayRow = new QWidget(m_sceneOptionsContainer);
+        configureRow(m_playDelayRow);
         auto* h = new QHBoxLayout(m_playDelayRow);
         h->setContentsMargins(0, 0, 0, 0);
         h->setSpacing(0);
         m_playDelayCheck = new QCheckBox("Play delay: ", m_playDelayRow);
         m_playDelayCheck->setStyleSheet(overlayTextStyle);
         m_playDelayCheck->installEventFilter(this);
-    QObject::connect(m_playDelayCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
+        QObject::connect(m_playDelayCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
         m_autoPlayBox = makeValueBox();
         m_autoPlaySecondsLabel = new QLabel("s", m_playDelayRow);
         m_autoPlaySecondsLabel->setStyleSheet(overlayTextStyle);
@@ -428,15 +440,15 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
 
     // 2) Repeat (video only) - keeping original single checkbox format
     {
-    m_repeatRow = new QWidget(m_sceneOptionsContainer);
-    configureRow(m_repeatRow);
+        m_repeatRow = new QWidget(m_sceneOptionsContainer);
+        configureRow(m_repeatRow);
         auto* h = new QHBoxLayout(m_repeatRow);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
         m_repeatCheck = new QCheckBox("Repeat ", m_repeatRow);
         m_repeatCheck->setStyleSheet(overlayTextStyle);
         m_repeatCheck->installEventFilter(this);
-    QObject::connect(m_repeatCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
+        QObject::connect(m_repeatCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
         m_repeatBox = makeValueBox();
         auto* suffix = new QLabel(" times", m_repeatRow);
         suffix->setStyleSheet(overlayTextStyle);
@@ -447,32 +459,41 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_sceneOptionsLayout->addWidget(m_repeatRow);
     }
 
-    // Create Element Properties container
+    // Create Element Properties container grouped by category
     m_elementPropertiesContainer = new QWidget(m_innerContent);
     m_elementPropertiesLayout = new QVBoxLayout(m_elementPropertiesContainer);
     m_elementPropertiesLayout->setContentsMargins(0, 0, 0, 0);
-    m_elementPropertiesLayout->setSpacing(10);
+    m_elementPropertiesLayout->setSpacing(6);
     m_elementPropertiesLayout->setAlignment(Qt::AlignTop);
     m_contentLayout->addWidget(m_elementPropertiesContainer);
-    // Element Properties section header
-    m_elementPropertiesTitle = new QLabel("Element Properties");
-    QFont epf = m_elementPropertiesTitle->font();
-    epf.setBold(true);
-    m_elementPropertiesTitle->setFont(epf);
-    m_elementPropertiesTitle->setStyleSheet(overlayTextStyle);
-    m_elementPropertiesLayout->addWidget(m_elementPropertiesTitle);
 
-    // 3) Image fade in with checkbox format
+    bool elementFirstSection = true;
+    auto addElementSectionHeader = [&](const QString& text) {
+        if (!elementFirstSection) {
+            m_elementPropertiesLayout->addSpacing(8);
+        }
+        elementFirstSection = false;
+        auto* header = new QLabel(text, m_elementPropertiesContainer);
+        QFont font = header->font();
+        font.setBold(true);
+        header->setFont(font);
+        header->setStyleSheet(overlayTextStyle);
+        m_elementPropertiesLayout->addWidget(header);
+    };
+
+    addElementSectionHeader("Image");
+
+    // Image fade in with checkbox format
     {
-    auto* row = new QWidget(m_elementPropertiesContainer);
-    configureRow(row);
+        auto* row = new QWidget(m_elementPropertiesContainer);
+        configureRow(row);
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
         m_fadeInCheck = new QCheckBox("Image fade in: ", row);
         m_fadeInCheck->setStyleSheet(overlayTextStyle);
         m_fadeInCheck->installEventFilter(this);
-    QObject::connect(m_fadeInCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
+        QObject::connect(m_fadeInCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
         m_fadeInBox = makeValueBox();
         auto* suffix = new QLabel("s", row);
         suffix->setStyleSheet(overlayTextStyle);
@@ -483,17 +504,17 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_elementPropertiesLayout->addWidget(row);
     }
 
-    // 4) Image fade out with checkbox format
+    // Image fade out with checkbox format
     {
-    auto* row = new QWidget(m_elementPropertiesContainer);
-    configureRow(row);
+        auto* row = new QWidget(m_elementPropertiesContainer);
+        configureRow(row);
         auto* h = new QHBoxLayout(row);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
         m_fadeOutCheck = new QCheckBox("Image fade out: ", row);
         m_fadeOutCheck->setStyleSheet(overlayTextStyle);
         m_fadeOutCheck->installEventFilter(this);
-    QObject::connect(m_fadeOutCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
+        QObject::connect(m_fadeOutCheck, &QCheckBox::toggled, this, [this](bool){ if (!m_updatingFromMedia) pushSettingsToMedia(); });
         m_fadeOutBox = makeValueBox();
         auto* suffix = new QLabel("s", row);
         suffix->setStyleSheet(overlayTextStyle);
@@ -504,10 +525,54 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_elementPropertiesLayout->addWidget(row);
     }
 
+    // Opacity with checkbox format
+    {
+        auto* row = new QWidget(m_elementPropertiesContainer);
+        configureRow(row);
+        auto* h = new QHBoxLayout(row);
+        h->setContentsMargins(0,0,0,0);
+        h->setSpacing(0);
+        m_opacityCheck = new QCheckBox("Opacity: ", row);
+        m_opacityCheck->setStyleSheet(overlayTextStyle);
+        m_opacityCheck->installEventFilter(this);
+        m_opacityBox = makeValueBox(QStringLiteral("100")); // Default to 100%
+        auto* suffix = new QLabel("%", row);
+        suffix->setStyleSheet(overlayTextStyle);
+        h->addWidget(m_opacityCheck);
+        h->addWidget(m_opacityBox);
+        h->addWidget(suffix);
+        h->addStretch();
+        QObject::connect(m_opacityCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onOpacityToggled);
+        m_elementPropertiesLayout->addWidget(row);
+    }
+
+    addElementSectionHeader("Audio");
+
+    // Volume with checkbox format (video only)
+    {
+        m_volumeRow = new QWidget(m_elementPropertiesContainer);
+        configureRow(m_volumeRow);
+        auto* h = new QHBoxLayout(m_volumeRow);
+        h->setContentsMargins(0,0,0,0);
+        h->setSpacing(0);
+        m_volumeCheck = new QCheckBox("Volume: ", m_volumeRow);
+        m_volumeCheck->setStyleSheet(overlayTextStyle);
+        m_volumeCheck->installEventFilter(this);
+        m_volumeBox = makeValueBox(QStringLiteral("100"));
+        auto* suffix = new QLabel("%", m_volumeRow);
+        suffix->setStyleSheet(overlayTextStyle);
+        h->addWidget(m_volumeCheck);
+        h->addWidget(m_volumeBox);
+        h->addWidget(suffix);
+        h->addStretch();
+        QObject::connect(m_volumeCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onVolumeToggled);
+        m_elementPropertiesLayout->addWidget(m_volumeRow);
+    }
+
     // Audio fade in (video only)
     {
-    m_audioFadeInRow = new QWidget(m_elementPropertiesContainer);
-    configureRow(m_audioFadeInRow);
+        m_audioFadeInRow = new QWidget(m_elementPropertiesContainer);
+        configureRow(m_audioFadeInRow);
         auto* h = new QHBoxLayout(m_audioFadeInRow);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
@@ -527,8 +592,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
 
     // Audio fade out (video only)
     {
-    m_audioFadeOutRow = new QWidget(m_elementPropertiesContainer);
-    configureRow(m_audioFadeOutRow);
+        m_audioFadeOutRow = new QWidget(m_elementPropertiesContainer);
+        configureRow(m_audioFadeOutRow);
         auto* h = new QHBoxLayout(m_audioFadeOutRow);
         h->setContentsMargins(0,0,0,0);
         h->setSpacing(0);
@@ -544,46 +609,6 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         h->addWidget(m_audioFadeOutSecondsLabel);
         h->addStretch();
         m_elementPropertiesLayout->addWidget(m_audioFadeOutRow);
-    }
-    // 5) Opacity with checkbox format
-    {
-    auto* row = new QWidget(m_elementPropertiesContainer);
-    configureRow(row);
-        auto* h = new QHBoxLayout(row);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
-        m_opacityCheck = new QCheckBox("Opacity: ", row);
-        m_opacityCheck->setStyleSheet(overlayTextStyle);
-        m_opacityCheck->installEventFilter(this);
-        m_opacityBox = makeValueBox(QStringLiteral("100")); // Default to 100%
-        auto* suffix = new QLabel("%", row);
-        suffix->setStyleSheet(overlayTextStyle);
-        h->addWidget(m_opacityCheck);
-        h->addWidget(m_opacityBox);
-        h->addWidget(suffix);
-        h->addStretch();
-        QObject::connect(m_opacityCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onOpacityToggled);
-        m_elementPropertiesLayout->addWidget(row);
-    }
-    // 6) Volume with checkbox format (video only)
-    {
-    m_volumeRow = new QWidget(m_elementPropertiesContainer);
-    configureRow(m_volumeRow);
-        auto* h = new QHBoxLayout(m_volumeRow);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
-        m_volumeCheck = new QCheckBox("Volume: ", m_volumeRow);
-        m_volumeCheck->setStyleSheet(overlayTextStyle);
-        m_volumeCheck->installEventFilter(this);
-        m_volumeBox = makeValueBox(QStringLiteral("100"));
-        auto* suffix = new QLabel("%", m_volumeRow);
-        suffix->setStyleSheet(overlayTextStyle);
-        h->addWidget(m_volumeCheck);
-        h->addWidget(m_volumeBox);
-        h->addWidget(suffix);
-        h->addStretch();
-        QObject::connect(m_volumeCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onVolumeToggled);
-        m_elementPropertiesLayout->addWidget(m_volumeRow);
     }
     // Widget is now directly parented to toolbar container, no proxy needed
     m_widget->setMouseTracking(true);
