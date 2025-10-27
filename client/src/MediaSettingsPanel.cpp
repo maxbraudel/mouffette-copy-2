@@ -1868,6 +1868,15 @@ void MediaSettingsPanel::updateActiveTabUi() {
     if (m_elementPropertiesContainer) {
         m_elementPropertiesContainer->setVisible(!sceneActive);
     }
+
+    if (m_contentLayout) {
+        m_contentLayout->invalidate();
+        m_contentLayout->activate();
+    }
+    if (m_innerContent) {
+        m_innerContent->adjustSize();
+    }
+    updatePosition();
 }
 
 void MediaSettingsPanel::onSceneTabClicked() {
