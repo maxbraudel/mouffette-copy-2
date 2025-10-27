@@ -1188,8 +1188,8 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
                             m_audio->setVolume(m_userVolumeRatio);
                             m_volumeChangeFromSettings = guardPrev;
                         }
-                        m_effectiveMuted = m_savedMuted;
                     }
+                    m_effectiveMuted = m_savedMuted;
                     m_controlsLockedUntilReady = false;
                     m_controlsDidInitialFade = false;
                     if (isSelected()) {
@@ -1270,7 +1270,14 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
                 }
             }
             if (!m_firstFramePrimed && !m_primingFirstFrame) {
-                m_holdLastFrameAtEnd = false; m_savedMuted = m_effectiveMuted; m_effectiveMuted = true; if (m_audio) m_audio->setMuted(true); m_primingFirstFrame = true; if (m_player) m_player->play();
+                m_holdLastFrameAtEnd = false;
+                m_savedMuted = m_effectiveMuted;
+                m_effectiveMuted = true;
+                if (m_audio) {
+                    m_audio->setMuted(true);
+                }
+                m_primingFirstFrame = true;
+                if (m_player) m_player->play();
             }
         }
         if (s == QMediaPlayer::EndOfMedia) {
