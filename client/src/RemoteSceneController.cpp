@@ -25,6 +25,8 @@
 #include <QGraphicsPixmapItem>
 #include <QGraphicsScene>
 #include <QVariant>
+#include <QCoreApplication>
+#include <QEvent>
 #include <cmath>
 #include "FileManager.h"
 #include "MacWindowManager.h"
@@ -193,6 +195,10 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
 
     ++m_sceneEpoch;
     clearScene();
+    // Flush deferred deletions so any widgets scheduled by clearScene() are destroyed
+    // before we create replacement windows. This prevents Qt accessibility from holding
+    // stale pointers that can crash when new overlays are shown.
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 
     m_pendingSenderClientId = senderClientId;
     m_totalMediaToPrime = media.size();
