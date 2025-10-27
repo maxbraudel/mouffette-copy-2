@@ -92,6 +92,8 @@ private:
     QWidget* m_elementPropertiesContainer = nullptr;
     QVBoxLayout* m_sceneOptionsLayout = nullptr;
     QVBoxLayout* m_elementPropertiesLayout = nullptr;
+    QWidget* m_tabSwitcherContainer = nullptr;
+    QWidget* m_tabSwitcherSeparator = nullptr;
     enum class ActiveTab { Scene, Element };
     ActiveTab m_activeTab = ActiveTab::Scene;
 

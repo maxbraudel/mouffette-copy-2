@@ -62,10 +62,10 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     m_rootLayout->setSizeConstraint(QLayout::SetNoConstraint);
 
     // Create fused double-button tab switcher at the top
-    auto* tabSwitcherContainer = new QWidget(m_widget);
-    tabSwitcherContainer->setFixedHeight(40);
-    tabSwitcherContainer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    auto* tabSwitcherLayout = new QHBoxLayout(tabSwitcherContainer);
+    m_tabSwitcherContainer = new QWidget(m_widget);
+    m_tabSwitcherContainer->setFixedHeight(40);
+    m_tabSwitcherContainer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    auto* tabSwitcherLayout = new QHBoxLayout(m_tabSwitcherContainer);
     tabSwitcherLayout->setContentsMargins(0, 0, 0, 0);
     tabSwitcherLayout->setSpacing(0);
     
@@ -108,8 +108,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         "}"
     );
     
-    m_sceneTabButton = new QPushButton("Scene", tabSwitcherContainer);
-    m_elementTabButton = new QPushButton("Element", tabSwitcherContainer);
+    m_sceneTabButton = new QPushButton("Scene", m_tabSwitcherContainer);
+    m_elementTabButton = new QPushButton("Element", m_tabSwitcherContainer);
     
     m_sceneTabButton->setStyleSheet(activeTabButtonStyle);
     m_elementTabButton->setStyleSheet(tabButtonBaseStyle);
@@ -120,19 +120,19 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     
     tabSwitcherLayout->addWidget(m_sceneTabButton);
     // Add vertical separator line between buttons
-    auto* separator = new QWidget(tabSwitcherContainer);
+    auto* separator = new QWidget(m_tabSwitcherContainer);
     separator->setFixedWidth(1);
     separator->setStyleSheet(QStringLiteral("background-color: %1;").arg(overlayBorderCss));
     tabSwitcherLayout->addWidget(separator);
     tabSwitcherLayout->addWidget(m_elementTabButton);
     
-    m_rootLayout->addWidget(tabSwitcherContainer);
+    m_rootLayout->addWidget(m_tabSwitcherContainer);
     
     // Add bottom separator for the tab switcher
-    auto* bottomSeparator = new QWidget(m_widget);
-    bottomSeparator->setFixedHeight(1);
-    bottomSeparator->setStyleSheet(QStringLiteral("background-color: %1;").arg(overlayBorderCss));
-    m_rootLayout->addWidget(bottomSeparator);
+    m_tabSwitcherSeparator = new QWidget(m_widget);
+    m_tabSwitcherSeparator->setFixedHeight(1);
+    m_tabSwitcherSeparator->setStyleSheet(QStringLiteral("background-color: %1;").arg(overlayBorderCss));
+    m_rootLayout->addWidget(m_tabSwitcherSeparator);
     
     // Connect tab buttons
     QObject::connect(m_sceneTabButton, &QPushButton::clicked, this, &MediaSettingsPanel::onSceneTabClicked);
@@ -1574,9 +1574,30 @@ void MediaSettingsPanel::updateAvailableHeight(int maxHeightPx) {
     m_widget->setMaximumHeight(clamped);
     m_widget->setMinimumHeight(0);
 
+    int chromeHeight = 0;
+    if (m_tabSwitcherContainer) {
+        const int h = m_tabSwitcherContainer->isVisible() && m_tabSwitcherContainer->height() > 0
+                          ? m_tabSwitcherContainer->height()
+                          : m_tabSwitcherContainer->sizeHint().height();
+        chromeHeight += h;
+    }
+    if (m_tabSwitcherSeparator) {
+        const int h = m_tabSwitcherSeparator->isVisible() && m_tabSwitcherSeparator->height() > 0
+                          ? m_tabSwitcherSeparator->height()
+                          : m_tabSwitcherSeparator->sizeHint().height();
+        chromeHeight += h;
+    }
+
+    const int scrollViewport = std::max(0, clamped - chromeHeight);
+
+    if (m_scrollContainer) {
+        m_scrollContainer->setMinimumHeight(scrollViewport);
+        m_scrollContainer->setMaximumHeight(scrollViewport);
+    }
+
     if (m_scrollArea) {
-        m_scrollArea->setMaximumHeight(clamped);
-        m_scrollArea->setMinimumHeight(0);
+        m_scrollArea->setMinimumHeight(scrollViewport);
+        m_scrollArea->setMaximumHeight(scrollViewport);
     }
 
     m_widget->updateGeometry();
