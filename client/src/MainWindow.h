@@ -50,6 +50,7 @@ class WatchManager;  // new component for watch/unwatch feature
 class ScreenNavigationManager; // manages page switching & loader UX
 class ResponsiveLayoutManager; // manages responsive layout behavior
 class FileWatcher; // monitors source files and removes media when files are deleted
+class SessionManager; // Phase 4.1: manages canvas session lifecycle
 // using QStackedWidget for canvas container switching
 class QFrame; // forward declare for separators in remote info container
 
@@ -278,6 +279,9 @@ private:
     
     // Responsive layout manager
     ResponsiveLayoutManager* m_responsiveLayoutManager = nullptr;
+    
+    // Phase 4.1: Session manager (will progressively replace m_canvasSessions)
+    SessionManager* m_sessionManager = nullptr;
 
     // Menu and actions
     QMenu* m_fileMenu;

@@ -14,6 +14,7 @@
 #include "AppColors.h"
 #include "FileManager.h"
 #include "RemoteSceneController.h"
+#include "SessionManager.h"
 #include <QMenuBar>
 #include <QHostInfo>
 #include "ClientInfo.h"
@@ -596,7 +597,8 @@ MainWindow::MainWindow(QWidget* parent)
       m_watchManager(new WatchManager(this)),
       m_fileWatcher(new FileWatcher(this)),
       m_navigationManager(nullptr),
-      m_responsiveLayoutManager(new ResponsiveLayoutManager(this))
+      m_responsiveLayoutManager(new ResponsiveLayoutManager(this)),
+      m_sessionManager(new SessionManager(this))
 {
     setWindowTitle("Mouffette");
 #if defined(Q_OS_WIN)
@@ -1507,6 +1509,8 @@ void MainWindow::initializeRemoteClientInfoInTopBar() {
     }
 }
 
+// Phase 4.1: findCanvasSession now uses m_canvasSessions directly
+// SessionManager will be used for other operations once fully migrated
 MainWindow::CanvasSession* MainWindow::findCanvasSession(const QString& persistentClientId) {
     auto it = m_canvasSessions.find(persistentClientId);
     if (it == m_canvasSessions.end()) {

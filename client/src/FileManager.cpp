@@ -1,4 +1,7 @@
 #include "FileManager.h"
+#include "LocalFileRepository.h"
+#include "RemoteFileTracker.h"
+#include "FileMemoryCache.h"
 #include <QFile>
 #include <QFileInfo>
 #include <QCryptographicHash>
@@ -6,6 +9,13 @@
 #include <QIODevice>
 #include <QSet>
 #include <QByteArrayView>
+
+// Phase 4.2: FileManager transitioning to use specialized services
+// TODO: Progressively migrate internal storage to services
+// - LocalFileRepository for fileId ↔ filePath
+// - RemoteFileTracker for client & ideaId tracking
+// - FileMemoryCache for memory caching
+// Current implementation still uses internal maps for compatibility
 
 // Static member definition
 std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds)> FileManager::s_fileRemovalNotifier;

@@ -42,6 +42,10 @@ set(SOURCES
     src/AppColors.cpp
     src/RemoteSceneController.cpp
     src/ToastNotificationSystem.cpp
+    src/SessionManager.cpp
+    src/LocalFileRepository.cpp
+    src/RemoteFileTracker.cpp
+    src/FileMemoryCache.cpp
 )
 
 # Platform-specific sources
@@ -76,6 +80,10 @@ set(HEADERS
     src/AppColors.h
     src/RemoteSceneController.h
     src/ToastNotificationSystem.h
+    src/SessionManager.h
+    src/LocalFileRepository.h
+    src/RemoteFileTracker.h
+    src/FileMemoryCache.h
 )
 
 if(WIN32)

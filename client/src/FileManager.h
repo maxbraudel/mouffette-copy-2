@@ -10,6 +10,21 @@
 #include <QSharedPointer>
 #include <QByteArray>
 
+// Phase 4.2: Forward declarations of specialized services
+class LocalFileRepository;
+class RemoteFileTracker;
+class FileMemoryCache;
+
+/**
+ * FileManager - Façade orchestrating file operations
+ * 
+ * Phase 4.2 Refactor: Delegates to 3 specialized services:
+ * - LocalFileRepository: fileId ↔ filePath mapping
+ * - RemoteFileTracker: remote client & ideaId tracking
+ * - FileMemoryCache: memory caching for performance
+ * 
+ * Maintains backward-compatible API while internally using services.
+ */
 class FileManager
 {
 public:
