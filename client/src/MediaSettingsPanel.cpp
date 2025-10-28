@@ -21,24 +21,6 @@
 
 namespace {
 
-class ScopedWidgetUpdateBlocker {
-public:
-    explicit ScopedWidgetUpdateBlocker(QWidget* widget)
-        : m_widget(widget), m_blocked(widget && widget->updatesEnabled()) {
-        if (m_blocked) {
-            m_widget->setUpdatesEnabled(false);
-        }
-    }
-    ~ScopedWidgetUpdateBlocker() {
-        if (m_blocked) {
-            m_widget->setUpdatesEnabled(true);
-        }
-    }
-private:
-    QWidget* m_widget = nullptr;
-    bool m_blocked = false;
-};
-
 QString tabButtonStyle(bool active, const QString& overlayTextCss) {
     const QString fontCss = AppColors::canvasButtonFontCss();
     if (active) {
@@ -215,7 +197,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     ).arg(overlayTextCss, AppColors::canvasMediaSettingsOptionsFontCss()));
     m_scrollArea->setWidget(m_innerContent);
 
-    // Content layout with the previous margins/spacing
+    // Content layout
     m_contentLayout = new QVBoxLayout(m_innerContent);
     m_contentLayout->setContentsMargins(15, 10, 15, 10);
     m_contentLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
@@ -640,11 +622,12 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         h->addStretch();
         m_elementPropertiesLayout->addWidget(m_audioFadeOutRow);
     }
-    // Widget is now directly parented to toolbar container, no proxy needed
+    
+    // Configure widget dimensions and event handling
     m_widget->setMouseTracking(true);
     m_widget->setFixedWidth(m_panelWidthPx);
     
-    // Install event filter on the main widget and inner content to catch clicks/wheel
+    // Install event filter to catch clicks and wheel events
     m_widget->installEventFilter(this);
     if (m_innerContent) m_innerContent->installEventFilter(this);
     
@@ -746,9 +729,9 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
 void MediaSettingsPanel::setVisible(bool visible) {
     if (!m_widget) return;
     if (visible) {
-        // CRITICAL: Finalize ALL geometry BEFORE making widget visible to prevent first-frame flicker
+        // Finalize all geometry BEFORE making widget visible to prevent first-frame flicker
         
-        // Step 1: Force complete layout calculation while widget is still hidden
+        // Force complete layout calculation while widget is hidden
         if (m_rootLayout) {
             m_rootLayout->invalidate();
             m_rootLayout->activate();
@@ -758,7 +741,7 @@ void MediaSettingsPanel::setVisible(bool visible) {
             m_contentLayout->activate();
         }
         
-        // Step 2: Force style polish on all widgets to ensure Qt has computed final sizes
+        // Ensure Qt has computed final sizes for all widgets
         if (m_tabSwitcherContainer) {
             m_tabSwitcherContainer->ensurePolished();
         }
@@ -776,10 +759,10 @@ void MediaSettingsPanel::setVisible(bool visible) {
         }
         m_widget->ensurePolished();
         
-        // Step 3: Compute final geometry with all sizes available
+        // Compute final geometry
         updatePosition();
         
-        // Step 4: Force immediate geometry updates to take effect
+        // Force geometry updates to take effect
         if (m_widget) {
             m_widget->updateGeometry();
         }
@@ -790,18 +773,17 @@ void MediaSettingsPanel::setVisible(bool visible) {
             m_scrollArea->updateGeometry();
         }
         
-        // Step 5: Process any pending layout events to ensure everything is final
+        // Process pending layout events to ensure everything is finalized
         QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
         
-        // Step 6: NOW make widget visible - geometry is 100% finalized
+        // NOW make widget visible with geometry 100% finalized
         m_widget->setVisible(true);
         
-        // Step 7: One final position update to handle any post-visibility adjustments
+        // Final position update for any post-visibility adjustments
         updatePosition();
         return;
     }
 
-    ScopedWidgetUpdateBlocker updatesGuard(m_widget);
     m_widget->setVisible(false);
     clearActiveBox();
 }
@@ -811,9 +793,6 @@ bool MediaSettingsPanel::isVisible() const {
 }
 
 void MediaSettingsPanel::setMediaType(bool isVideo) {
-    // Block updates during the entire visibility toggle operation to prevent intermediate repaints
-    ScopedWidgetUpdateBlocker updatesGuard(m_widget);
-    
     // Show/hide video-only options (this changes layout significantly for video media)
     if (m_autoPlayRow) {
         m_autoPlayRow->setVisible(isVideo);
@@ -851,6 +830,8 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
     if (m_volumeRow) {
         m_volumeRow->setVisible(isVideo);
     }
+    
+    // Reset video-only checkboxes when switching to image
     if (!isVideo && m_hideWhenVideoEndsCheck) {
         const bool prev = m_hideWhenVideoEndsCheck->blockSignals(true);
         m_hideWhenVideoEndsCheck->setChecked(false);
@@ -898,7 +879,7 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
         clearActiveBox();
     }
     
-    // Force complete layout recalculation after visibility changes
+    // Force layout recalculation after visibility changes
     if (m_contentLayout) {
         m_contentLayout->invalidate();
         m_contentLayout->activate();
@@ -912,17 +893,13 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
         m_elementPropertiesLayout->activate();
     }
     
-    // Ensure all widgets are polished with new layout
+    // Polish widgets with new layout
     if (m_innerContent) {
         m_innerContent->ensurePolished();
     }
     if (m_widget) {
         m_widget->ensurePolished();
-        m_widget->updateGeometry();
     }
-    
-    // DON'T call updatePosition() here - let setVisible() handle it with proper timing
-    // This prevents double-calculation and ensures geometry is final before widget shows
 }
 
 void MediaSettingsPanel::updatePosition() {
@@ -955,26 +932,14 @@ void MediaSettingsPanel::updatePosition() {
     m_widget->setMaximumHeight(std::max(50, availableHeight));
     m_widget->setMinimumHeight(0);
 
-    // Calculate chrome height - use actual widget dimensions if available, fallback to known fixed sizes
-    int tabHeight = 0;
+    // Calculate chrome height (tab + separator)
+    int chromeHeight = 0;
     if (m_tabSwitcherContainer) {
-        tabHeight = m_tabSwitcherContainer->height();
-        if (tabHeight <= 0) {
-            // Tab container has fixed height of 40px (set in buildUi)
-            tabHeight = 40;
-        }
+        chromeHeight += m_tabSwitcherContainer->height();
     }
-
-    int separatorHeight = 0;
     if (m_tabSwitcherSeparator) {
-        separatorHeight = m_tabSwitcherSeparator->height();
-        if (separatorHeight <= 0) {
-            // Separator has fixed height of 1px (set in buildUi)
-            separatorHeight = 1;
-        }
+        chromeHeight += m_tabSwitcherSeparator->height();
     }
-
-    const int chromeHeight = tabHeight + separatorHeight;
 
     int contentHeight = 0;
     if (m_innerContent) {
@@ -1744,7 +1709,6 @@ void MediaSettingsPanel::setMediaItem(ResizableMediaBase* item) {
 }
 
 void MediaSettingsPanel::pullSettingsFromMedia() {
-    ScopedWidgetUpdateBlocker updatesGuard(m_widget);
     m_updatingFromMedia = true;
     if (!m_mediaItem) {
         m_updatingFromMedia = false;
