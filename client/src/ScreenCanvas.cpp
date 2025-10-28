@@ -724,6 +724,8 @@ void ScreenCanvas::initInfoOverlay() {
             "}"
         ).arg(canvasFontCss, AppColors::colorToCss(AppColors::gOverlayTextColor)));
         m_uploadButton->setFixedHeight(40);
+        m_uploadButton->setMinimumWidth(0);
+        m_uploadButton->setMaximumWidth(200); // Prevent button from expanding overlay width
         m_uploadButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         vHeaderLayout->addWidget(m_uploadButton);
 
@@ -4407,6 +4409,7 @@ void ScreenCanvas::setOverlayActionsEnabled(bool enabled) {
         m_uploadButton->setChecked(false);
         m_uploadButton->setStyleSheet(overlayDisabledButtonStyle());
         m_uploadButton->setFixedHeight(40);
+        m_uploadButton->setMinimumWidth(0);
     } else {
         // Restore normal upload button style when re-enabled
         m_uploadButton->setEnabled(true);
@@ -4429,6 +4432,7 @@ void ScreenCanvas::setOverlayActionsEnabled(bool enabled) {
             "}"
         );
         m_uploadButton->setFixedHeight(40);
+        m_uploadButton->setMinimumWidth(0);
     }
 }
 
