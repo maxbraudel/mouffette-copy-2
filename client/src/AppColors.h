@@ -4,6 +4,7 @@
 #include <QColor>
 #include <QString>
 #include <QPalette>
+#include <QFont>
 
 /**
  * @brief Centralized color management for Mouffette Client
@@ -81,6 +82,18 @@ extern QColor gButtonPrimaryBg;
 extern QColor gButtonPrimaryHover;
 extern QColor gButtonPrimaryPressed;
 extern QColor gButtonPrimaryDisabled;
+
+// Canvas overlay button typography
+extern int gCanvasButtonFontSizePx;          // Pixel size for canvas overlay buttons
+extern int gCanvasButtonFontWeight;          // CSS weight (100-900) for canvas overlay buttons
+
+// Media settings overlay options typography
+extern int gCanvasMediaSettingsOptionsFontSizePx;   // Pixel size for settings overlay option text
+extern int gCanvasMediaSettingsOptionsFontWeightPx; // CSS weight for settings overlay option text
+
+// Media settings overlay section header typography
+extern int gCanvasMediaSettingsSectionHeadersFontSizePx;   // Pixel size for section headers
+extern int gCanvasMediaSettingsSectionHeadersFontWeightPx; // CSS weight for section headers
 
 // Launch Remote Scene button colors
 extern QColor gLaunchRemoteSceneText;
@@ -179,6 +192,66 @@ QString colorToCss(const QColor& color);
  * @brief Get CSS string for a ColorSource (resolves dynamically)
  */
 QString colorSourceToCss(const ColorSource& source);
+
+/**
+ * @brief Convert the configured canvas button font weight (CSS) to the closest Qt enum value.
+ */
+QFont::Weight canvasButtonQtWeight();
+
+/**
+ * @brief Returns true if the configured canvas button font weight should be treated as bold.
+ */
+bool canvasButtonFontIsBold();
+
+/**
+ * @brief Returns concatenated CSS for canvas button font size and weight (e.g. "font-weight: 600; font-size: 15px;").
+ */
+QString canvasButtonFontCss();
+
+/**
+ * @brief Applies the configured canvas button typography to a QFont instance.
+ */
+void applyCanvasButtonFont(QFont& font);
+
+/**
+ * @brief Convert the configured settings options font weight to Qt enum value.
+ */
+QFont::Weight canvasMediaSettingsOptionsQtWeight();
+
+/**
+ * @brief Returns true if the configured settings options font weight should be bold.
+ */
+bool canvasMediaSettingsOptionsFontIsBold();
+
+/**
+ * @brief Returns concatenated CSS for settings options font size and weight.
+ */
+QString canvasMediaSettingsOptionsFontCss();
+
+/**
+ * @brief Applies the configured settings options typography to a QFont instance.
+ */
+void applyCanvasMediaSettingsOptionsFont(QFont& font);
+
+/**
+ * @brief Convert the configured section header font weight to Qt enum value.
+ */
+QFont::Weight canvasMediaSettingsSectionHeadersQtWeight();
+
+/**
+ * @brief Returns true if the configured section header font weight should be bold.
+ */
+bool canvasMediaSettingsSectionHeadersFontIsBold();
+
+/**
+ * @brief Returns concatenated CSS for section header font size and weight.
+ */
+QString canvasMediaSettingsSectionHeadersFontCss();
+
+/**
+ * @brief Applies the configured section header typography to a QFont instance.
+ */
+void applyCanvasMediaSettingsSectionHeadersFont(QFont& font);
 
 } // namespace AppColors
 

@@ -7,6 +7,7 @@
 #include <QLabel>
 #include <QCheckBox>
 #include <QPushButton>
+#include <QFont>
 #include <QCoreApplication>
 #include <QKeyEvent>
 #include <QScrollArea>
@@ -20,11 +21,12 @@
 
 namespace {
 QString tabButtonStyle(bool active, const QString& overlayTextCss) {
+    const QString fontCss = AppColors::canvasButtonFontCss();
     if (active) {
-        return QStringLiteral(
+        return QString(
             "QPushButton {"
             " padding: 8px 0px;"
-            " font-size: 16px;"
+            " %1 "
             " color: white;"
             " background: rgba(255,255,255,0.1);"
             " border: none;"
@@ -35,14 +37,14 @@ QString tabButtonStyle(bool active, const QString& overlayTextCss) {
             " color: white;"
             " background: rgba(255,255,255,0.15);"
             "}"
-        );
+        ).arg(fontCss);
     }
 
-    return QStringLiteral(
+    return QString(
         "QPushButton {"
         " padding: 8px 0px;"
-        " font-size: 16px;"
-        " color: %1;"
+        " %1 "
+        " color: %2;"
         " background: transparent;"
         " border: none;"
         " border-radius: 0px;"
@@ -56,7 +58,7 @@ QString tabButtonStyle(bool active, const QString& overlayTextCss) {
         " color: white;"
         " background: rgba(255,255,255,0.1);"
         "}"
-    ).arg(overlayTextCss);
+    ).arg(fontCss, overlayTextCss);
 }
 }
 
@@ -78,13 +80,13 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     const QString overlayTextCss = AppColors::colorToCss(AppColors::gOverlayTextColor);
     const QString overlayBorderCss = AppColors::colorToCss(AppColors::gOverlayBorderColor);
     const QString overlayTextStyle = QStringLiteral("color: %1;").arg(overlayTextCss);
-    const QString widgetStyle = QStringLiteral(
+    const QString widgetStyle = QString(
         "#MediaSettingsPanelWidget {"
         " background-color: %1;"
         " border: 1px solid %2;"
         " border-radius: %3px;"
         " color: %4;"
-        " font-size: 16px;"
+        " %5 "
         "}"
         " #MediaSettingsPanelWidget * {"
         " background-color: transparent;"
@@ -92,8 +94,9 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     )
     .arg(AppColors::colorToCss(AppColors::gOverlayBackgroundColor))
     .arg(overlayBorderCss)
-    .arg(gOverlayCornerRadiusPx)
-    .arg(overlayTextCss);
+    .arg(QString::number(gOverlayCornerRadiusPx))
+    .arg(overlayTextCss)
+    .arg(AppColors::canvasMediaSettingsOptionsFontCss());
     m_widget->setStyleSheet(widgetStyle);
     m_widget->setAutoFillBackground(true);
 
@@ -116,7 +119,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     
     // Apply bold font to tab buttons to match section headers
     QFont tabFont = m_sceneTabButton->font();
-    tabFont.setBold(true);
+    AppColors::applyCanvasButtonFont(tabFont);
     m_sceneTabButton->setFont(tabFont);
     m_elementTabButton->setFont(tabFont);
     
@@ -187,8 +190,9 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     m_innerContent = new QWidget(m_scrollArea);
     m_innerContent->setAttribute(Qt::WA_StyledBackground, true);
     m_innerContent->setAttribute(Qt::WA_NoMousePropagation, true);
-    m_innerContent->setStyleSheet(QStringLiteral("background-color: transparent; color: %1; font-size: 16px;")
-        .arg(overlayTextCss));
+    m_innerContent->setStyleSheet(QString(
+        "background-color: transparent; color: %1; %2"
+    ).arg(overlayTextCss, AppColors::canvasMediaSettingsOptionsFontCss()));
     m_scrollArea->setWidget(m_innerContent);
 
     // Content layout with the previous margins/spacing
@@ -218,9 +222,9 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         sceneFirstSection = false;
         auto* header = new QLabel(text, m_sceneOptionsContainer);
         QFont font = header->font();
-        font.setBold(true);
+        AppColors::applyCanvasMediaSettingsSectionHeadersFont(font);
         header->setFont(font);
-        header->setStyleSheet(overlayTextStyle);
+        header->setStyleSheet(QString("%1 %2").arg(overlayTextStyle, AppColors::canvasMediaSettingsSectionHeadersFontCss()));
         m_sceneOptionsLayout->addWidget(header);
     };
 
@@ -480,9 +484,9 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         elementFirstSection = false;
         auto* header = new QLabel(text, m_elementPropertiesContainer);
         QFont font = header->font();
-        font.setBold(true);
+        AppColors::applyCanvasMediaSettingsSectionHeadersFont(font);
         header->setFont(font);
-        header->setStyleSheet(overlayTextStyle);
+        header->setStyleSheet(QString("%1 %2").arg(overlayTextStyle, AppColors::canvasMediaSettingsSectionHeadersFontCss()));
         m_elementPropertiesLayout->addWidget(header);
     };
 

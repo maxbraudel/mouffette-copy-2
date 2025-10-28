@@ -526,6 +526,8 @@ void MainWindow::refreshOverlayActionsState(bool remoteConnected, bool propagate
             m_uploadButton->setCheckable(false);
             m_uploadButton->setChecked(false);
             m_uploadButton->setStyleSheet(ScreenCanvas::overlayDisabledButtonStyle());
+            AppColors::applyCanvasButtonFont(m_uploadButtonDefaultFont);
+            m_uploadButton->setFont(m_uploadButtonDefaultFont);
             m_uploadButton->setFixedHeight(40);
         } else if (m_uploadManager) {
             QTimer::singleShot(0, this, [this]() {
@@ -745,24 +747,26 @@ MainWindow::MainWindow(QWidget* parent)
     auto applyUploadButtonStyle = [this]() {
         if (!m_uploadButton) return;
         
+        // Recalculate stored default font so runtime changes to typography propagate.
+        AppColors::applyCanvasButtonFont(m_uploadButtonDefaultFont);
+        const QString canvasFontCss = AppColors::canvasButtonFontCss();
         
-        
-        // If button is in overlay, use custom overlay styling
+    // If button is in overlay, use custom overlay styling
         if (m_uploadButtonInOverlay) {
             if (!m_remoteOverlayActionsEnabled) {
                 m_uploadButton->setEnabled(false);
                 m_uploadButton->setCheckable(false);
                 m_uploadButton->setChecked(false);
                 m_uploadButton->setStyleSheet(ScreenCanvas::overlayDisabledButtonStyle());
+                m_uploadButton->setFont(m_uploadButtonDefaultFont);
                 m_uploadButton->setFixedHeight(40);
                 return;
             }
-            const QString overlayIdleStyle = 
+            const QString overlayIdleStyle = QString(
                 "QPushButton { "
                 "    padding: 0px 20px; "
-                "    font-weight: bold; "
-                "    font-size: 16px; "
-                "    color: " + AppColors::colorToCss(AppColors::gOverlayTextColor) + "; "
+                "    %1 "
+                "    color: %2; "
                 "    background: transparent; "
                 "    border: none; "
                 "    border-radius: 0px; "
@@ -775,45 +779,52 @@ MainWindow::MainWindow(QWidget* parent)
                 "QPushButton:pressed { "
                 "    color: white; "
                 "    background: rgba(255,255,255,0.1); "
-                "}";
-            const QString overlayUploadingStyle = 
+                "}"
+            ).arg(canvasFontCss, AppColors::colorToCss(AppColors::gOverlayTextColor));
+            const QString overlayUploadingStyle = QString(
                 "QPushButton { "
                 "    padding: 0px 20px; "
-                "    font-weight: bold; "
-                "    font-size: 16px; "
-                "    color: " + AppColors::gBrandBlue.name() + "; "
-                "    background: " + AppColors::colorToCss(AppColors::gButtonPrimaryBg) + "; "
+                "    %1 "
+                "    color: %2; "
+                "    background: %3; "
                 "    border: none; "
                 "    border-radius: 0px; "
                 "    text-align: center; "
                 "} "
                 "QPushButton:hover { "
-                "    color: " + AppColors::gBrandBlue.name() + "; "
-                "    background: " + AppColors::colorToCss(AppColors::gButtonPrimaryHover) + "; "
+                "    color: %2; "
+                "    background: %4; "
                 "} "
                 "QPushButton:pressed { "
-                "    color: " + AppColors::gBrandBlue.name() + "; "
-                "    background: " + AppColors::colorToCss(AppColors::gButtonPrimaryPressed) + "; "
-                "}";
-            const QString overlayUnloadStyle = 
+                "    color: %2; "
+                "    background: %5; "
+                "}"
+            ).arg(canvasFontCss,
+                  AppColors::gBrandBlue.name(),
+                  AppColors::colorToCss(AppColors::gButtonPrimaryBg),
+                  AppColors::colorToCss(AppColors::gButtonPrimaryHover),
+                  AppColors::colorToCss(AppColors::gButtonPrimaryPressed));
+            const QString overlayUnloadStyle = QString(
                 "QPushButton { "
                 "    padding: 0px 20px; "
-                "    font-weight: bold; "
-                "    font-size: 16px; "
-                "    color: " + AppColors::colorToCss(AppColors::gMediaUploadedColor) + "; "
-                "    background: " + AppColors::colorToCss(AppColors::gStatusConnectedBg) + "; "
+                "    %1 "
+                "    color: %2; "
+                "    background: %3; "
                 "    border: none; "
                 "    border-radius: 0px; "
                 "    text-align: center; "
                 "} "
                 "QPushButton:hover { "
-                "    color: " + AppColors::colorToCss(AppColors::gMediaUploadedColor) + "; "
+                "    color: %2; "
                 "    background: rgba(76, 175, 80, 56); "
                 "} "
                 "QPushButton:pressed { "
-                "    color: " + AppColors::colorToCss(AppColors::gMediaUploadedColor) + "; "
+                "    color: %2; "
                 "    background: rgba(76, 175, 80, 77); "
-                "}";
+                "}"
+            ).arg(canvasFontCss,
+                  AppColors::colorToCss(AppColors::gMediaUploadedColor),
+                  AppColors::colorToCss(AppColors::gStatusConnectedBg));
             
             const QString target = m_uploadManager->targetClientId();
             const CanvasSession* targetSession = findCanvasSessionByClientId(target);
@@ -848,10 +859,7 @@ MainWindow::MainWindow(QWidget* parent)
 #else
                     QFont mono("Courier New");
 #endif
-                    if (m_uploadButtonDefaultFont.pointSize() > 0) {
-                        mono.setPointSize(m_uploadButtonDefaultFont.pointSize());
-                    }
-                    mono.setBold(true);
+                    AppColors::applyCanvasButtonFont(mono);
                     m_uploadButton->setFont(mono);
                 }
                 m_uploadButton->setStyleSheet(overlayUploadingStyle);
@@ -935,8 +943,7 @@ MainWindow::MainWindow(QWidget* parent)
 #else
             QFont mono("Courier New");
 #endif
-            mono.setPointSize(m_uploadButtonDefaultFont.pointSize());
-            mono.setBold(true);
+            AppColors::applyCanvasButtonFont(mono);
             m_uploadButton->setFont(mono);
         } else if (m_uploadManager->isFinalizing()) {
             // Waiting for server to ack upload_finished
@@ -1645,6 +1652,7 @@ void MainWindow::unloadUploadsForSession(CanvasSession& session, bool attemptRem
         } else {
             m_uploadManager->requestRemoval(targetId);
         }
+                m_uploadButton->setFont(m_uploadButtonDefaultFont);
 
         m_webSocketClient->sendRemoteSceneStop(targetId);
     }

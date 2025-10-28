@@ -26,6 +26,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QToolButton>
+#include <QFont>
 #include <QIcon>
 #include <QScrollArea>
 #include <QProgressBar>
@@ -632,6 +633,8 @@ void ScreenCanvas::initInfoOverlay() {
             return sep;
         };
 
+        const QString canvasFontCss = AppColors::canvasButtonFontCss();
+
         // Top separator
         vHeaderLayout->addWidget(createSeparator());
 
@@ -639,12 +642,13 @@ void ScreenCanvas::initInfoOverlay() {
         m_launchSceneButton = new QPushButton("Launch Remote Scene", m_overlayHeaderWidget);
         m_launchSceneButton->setCheckable(true);
         QFont launchSceneFont = m_launchSceneButton->font();
-        launchSceneFont.setBold(true);
+        AppColors::applyCanvasButtonFont(launchSceneFont);
         m_launchSceneButton->setFont(launchSceneFont);
-        m_launchSceneButton->setStyleSheet(
+        m_launchSceneButton->setStyleSheet(QString(
             "QPushButton { "
             "    padding: 8px 0px; "
-            "    color: " + AppColors::colorToCss(AppColors::gOverlayTextColor) + "; "
+            "    %1 "
+            "    color: %2; "
             "    background: transparent; "
             "    border: none; "
             "    border-radius: 0px; "
@@ -657,7 +661,7 @@ void ScreenCanvas::initInfoOverlay() {
             "    color: white; "
             "    background: rgba(255,255,255,0.1); "
             "}"
-        );
+        ).arg(canvasFontCss, AppColors::colorToCss(AppColors::gOverlayTextColor)));
         m_launchSceneButton->setFixedHeight(40);
         m_launchSceneButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         vHeaderLayout->addWidget(m_launchSceneButton);
@@ -669,12 +673,13 @@ void ScreenCanvas::initInfoOverlay() {
         m_launchTestSceneButton = new QPushButton("Launch Test Scene", m_overlayHeaderWidget);
         m_launchTestSceneButton->setCheckable(true);
         QFont launchTestSceneFont = m_launchTestSceneButton->font();
-        launchTestSceneFont.setBold(true);
+        AppColors::applyCanvasButtonFont(launchTestSceneFont);
         m_launchTestSceneButton->setFont(launchTestSceneFont);
-        m_launchTestSceneButton->setStyleSheet(
+        m_launchTestSceneButton->setStyleSheet(QString(
             "QPushButton { "
             "    padding: 8px 0px; "
-            "    color: " + AppColors::colorToCss(AppColors::gOverlayTextColor) + "; "
+            "    %1 "
+            "    color: %2; "
             "    background: transparent; "
             "    border: none; "
             "    border-radius: 0px; "
@@ -687,7 +692,7 @@ void ScreenCanvas::initInfoOverlay() {
             "    color: white; "
             "    background: rgba(255,255,255,0.1); "
             "}"
-        );
+        ).arg(canvasFontCss, AppColors::colorToCss(AppColors::gOverlayTextColor)));
         m_launchTestSceneButton->setFixedHeight(40);
         m_launchTestSceneButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         vHeaderLayout->addWidget(m_launchTestSceneButton);
@@ -698,13 +703,13 @@ void ScreenCanvas::initInfoOverlay() {
         // Upload button (kept as before, with no top border)
         m_uploadButton = new QPushButton("Upload", m_overlayHeaderWidget);
         QFont uploadFont = m_uploadButton->font();
-        uploadFont.setBold(true);
-        uploadFont.setPixelSize(16);
+        AppColors::applyCanvasButtonFont(uploadFont);
         m_uploadButton->setFont(uploadFont);
-        m_uploadButton->setStyleSheet(
+        m_uploadButton->setStyleSheet(QString(
             "QPushButton { "
             "    padding: 8px 0px; "
-            "    color: " + AppColors::colorToCss(AppColors::gOverlayTextColor) + "; "
+            "    %1 "
+            "    color: %2; "
             "    background: transparent; "
             "    border: none; "
             "    border-radius: 0px; "
@@ -717,7 +722,7 @@ void ScreenCanvas::initInfoOverlay() {
             "    color: white; "
             "    background: rgba(255,255,255,0.1); "
             "}"
-        );
+        ).arg(canvasFontCss, AppColors::colorToCss(AppColors::gOverlayTextColor)));
         m_uploadButton->setFixedHeight(40);
         m_uploadButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         vHeaderLayout->addWidget(m_uploadButton);
@@ -4207,12 +4212,18 @@ QList<QGraphicsItem*> ScreenCanvas::getMediaItemsSortedByZ() const {
 void ScreenCanvas::updateLaunchSceneButtonStyle() {
     if (!m_launchSceneButton) return;
 
+    const QString canvasFontCss = AppColors::canvasButtonFontCss();
+
+    QFont launchSceneFont = m_launchSceneButton->font();
+    AppColors::applyCanvasButtonFont(launchSceneFont);
+    m_launchSceneButton->setFont(launchSceneFont);
+
     // Idle (stopped) style: transparent background, overlay text color
-    const QString idleStyle =
+    const QString idleStyle = QString(
         "QPushButton { "
         "    padding: 8px 0px; "
-        "    font-weight: bold; "
-        "    color: " + AppColors::colorToCss(AppColors::gOverlayTextColor) + "; "
+        "    %1 "
+        "    color: %2; "
         "    background: transparent; "
         "    border: none; "
         "    border-radius: 0px; "
@@ -4224,37 +4235,46 @@ void ScreenCanvas::updateLaunchSceneButtonStyle() {
         "QPushButton:pressed { "
         "    color: white; "
         "    background: rgba(255,255,255,0.1); "
-        "}";
+        "}"
+    ).arg(canvasFontCss, AppColors::colorToCss(AppColors::gOverlayTextColor));
 
     // Loading style: blue tint background + blue text (like upload button)
-    const QString loadingStyle =
+    const QString loadingStyle = QString(
         "QPushButton { "
         "    padding: 8px 0px; "
-        "    font-weight: bold; "
-        "    color: " + AppColors::gLaunchRemoteSceneLoadingText.name() + "; "
-        "    background: " + AppColors::colorToCss(AppColors::gLaunchRemoteSceneLoadingBg) + "; "
+        "    %1 "
+        "    color: %2; "
+        "    background: %3; "
         "    border: none; "
         "    border-radius: 0px; "
-        "}";
+        "}"
+    ).arg(canvasFontCss,
+          AppColors::gLaunchRemoteSceneLoadingText.name(),
+          AppColors::colorToCss(AppColors::gLaunchRemoteSceneLoadingBg));
 
     // Active (launched) style: magenta tint background + magenta text
-    const QString activeStyle =
+    const QString activeStyle = QString(
         "QPushButton { "
         "    padding: 8px 0px; "
-        "    font-weight: bold; "
-        "    color: " + AppColors::gLaunchRemoteSceneText.name() + "; "
-        "    background: " + AppColors::colorToCss(AppColors::gLaunchRemoteSceneBg) + "; "
+        "    %1 "
+        "    color: %2; "
+        "    background: %3; "
         "    border: none; "
         "    border-radius: 0px; "
         "} "
         "QPushButton:hover { "
-        "    color: " + AppColors::gLaunchRemoteSceneText.name() + "; "
-        "    background: " + AppColors::colorToCss(AppColors::gLaunchRemoteSceneHover) + "; "
+        "    color: %2; "
+        "    background: %4; "
         "} "
         "QPushButton:pressed { "
-        "    color: " + AppColors::gLaunchRemoteSceneText.name() + "; "
-        "    background: " + AppColors::colorToCss(AppColors::gLaunchRemoteScenePressed) + "; "
-        "}";
+        "    color: %2; "
+        "    background: %5; "
+        "}"
+    ).arg(canvasFontCss,
+          AppColors::gLaunchRemoteSceneText.name(),
+          AppColors::colorToCss(AppColors::gLaunchRemoteSceneBg),
+          AppColors::colorToCss(AppColors::gLaunchRemoteSceneHover),
+          AppColors::colorToCss(AppColors::gLaunchRemoteScenePressed));
 
     // Check if upload is in progress
     bool uploadInProgress = m_uploadManager && (m_uploadManager->isUploading() || m_uploadManager->isFinalizing());
@@ -4290,12 +4310,18 @@ void ScreenCanvas::updateLaunchSceneButtonStyle() {
 
 void ScreenCanvas::updateLaunchTestSceneButtonStyle() {
     if (!m_launchTestSceneButton) return;
+
+    const QString canvasFontCss = AppColors::canvasButtonFontCss();
+
+    QFont launchTestSceneFont = m_launchTestSceneButton->font();
+    AppColors::applyCanvasButtonFont(launchTestSceneFont);
+    m_launchTestSceneButton->setFont(launchTestSceneFont);
     // Idle (stopped) style: transparent background, overlay text color
-    const QString idleStyle =
+    const QString idleStyle = QString(
         "QPushButton { "
         "    padding: 8px 0px; "
-        "    font-weight: bold; "
-        "    color: " + AppColors::colorToCss(AppColors::gOverlayTextColor) + "; "
+        "    %1 "
+        "    color: %2; "
         "    background: transparent; "
         "    border: none; "
         "    border-radius: 0px; "
@@ -4307,26 +4333,32 @@ void ScreenCanvas::updateLaunchTestSceneButtonStyle() {
         "QPushButton:pressed { "
         "    color: white; "
         "    background: rgba(255,255,255,0.1); "
-        "}";
+        "}"
+    ).arg(canvasFontCss, AppColors::colorToCss(AppColors::gOverlayTextColor));
 
     // Active (launched) style: test scene magenta variant
-    const QString activeStyle =
+    const QString activeStyle = QString(
         "QPushButton { "
         "    padding: 8px 0px; "
-        "    font-weight: bold; "
-        "    color: " + AppColors::gLaunchTestSceneText.name() + "; "
-        "    background: " + AppColors::colorToCss(AppColors::gLaunchTestSceneBg) + "; "
+        "    %1 "
+        "    color: %2; "
+        "    background: %3; "
         "    border: none; "
         "    border-radius: 0px; "
         "} "
         "QPushButton:hover { "
-        "    color: " + AppColors::gLaunchTestSceneText.name() + "; "
-        "    background: " + AppColors::colorToCss(AppColors::gLaunchTestSceneHover) + "; "
+        "    color: %2; "
+        "    background: %4; "
         "} "
         "QPushButton:pressed { "
-        "    color: " + AppColors::gLaunchTestSceneText.name() + "; "
-        "    background: " + AppColors::colorToCss(AppColors::gLaunchTestScenePressed) + "; "
-        "}";
+        "    color: %2; "
+        "    background: %5; "
+        "}"
+    ).arg(canvasFontCss,
+          AppColors::gLaunchTestSceneText.name(),
+          AppColors::colorToCss(AppColors::gLaunchTestSceneBg),
+          AppColors::colorToCss(AppColors::gLaunchTestSceneHover),
+          AppColors::colorToCss(AppColors::gLaunchTestScenePressed));
 
     // Check if remote scene is active (mutual exclusion with test scene)
     bool remoteSceneActive = m_sceneLaunched || m_sceneLaunching;
@@ -4351,10 +4383,9 @@ void ScreenCanvas::updateLaunchTestSceneButtonStyle() {
 }
 
 QString ScreenCanvas::overlayDisabledButtonStyle() {
-    static const QString style = QStringLiteral(
-        "QPushButton { padding:8px 0px; font-weight:bold; font-size:16px; color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.04); border:none; }"
-    );
-    return style;
+    return QString(
+        "QPushButton { padding:8px 0px; %1 color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.04); border:none; }"
+    ).arg(AppColors::canvasButtonFontCss());
 }
 
 void ScreenCanvas::setOverlayActionsEnabled(bool enabled) {
@@ -4367,8 +4398,7 @@ void ScreenCanvas::setOverlayActionsEnabled(bool enabled) {
 
     // Ensure upload button keeps bold weight without resetting font size applied via stylesheet
     QFont uploadFont = m_uploadButton->font();
-    uploadFont.setBold(true);
-    uploadFont.setPixelSize(16);
+    AppColors::applyCanvasButtonFont(uploadFont);
     m_uploadButton->setFont(uploadFont);
 
     if (!m_overlayActionsEnabled) {
@@ -4383,7 +4413,7 @@ void ScreenCanvas::setOverlayActionsEnabled(bool enabled) {
         m_uploadButton->setStyleSheet(
             "QPushButton { "
             "    padding: 8px 0px; "
-            "    font-size: 16px; "
+            "    " + AppColors::canvasButtonFontCss() + " "
             "    color: " + AppColors::colorToCss(AppColors::gOverlayTextColor) + "; "
             "    background: transparent; "
             "    border: none; "

@@ -2,6 +2,32 @@
 #include <QApplication>
 #include <QPalette>
 
+namespace {
+
+QFont::Weight cssWeightToQt(int cssWeight) {
+    if (cssWeight >= 900) return QFont::Black;
+    if (cssWeight >= 800) return QFont::ExtraBold;
+    if (cssWeight >= 700) return QFont::Bold;
+    if (cssWeight >= 600) return QFont::DemiBold;
+    if (cssWeight >= 500) return QFont::Medium;
+    if (cssWeight >= 400) return QFont::Normal;
+    if (cssWeight >= 300) return QFont::Light;
+    if (cssWeight >= 200) return QFont::ExtraLight;
+    return QFont::Thin;
+}
+
+bool cssWeightIsBold(int cssWeight) {
+    return cssWeight >= 600;
+}
+
+QString fontCssString(int weight, int sizePx) {
+    return QString("font-weight: %1; font-size: %2px;")
+        .arg(weight)
+        .arg(sizePx);
+}
+
+} // namespace
+
 namespace AppColors {
 
 // ============================================================================
@@ -45,6 +71,15 @@ QColor gButtonPrimaryBg = QColor(74, 144, 226, 38);     // Primary button (0.15 
 QColor gButtonPrimaryHover = QColor(74, 144, 226, 56);  // Primary hover (0.22 * 255 ≈ 56)
 QColor gButtonPrimaryPressed = QColor(74, 144, 226, 77); // Primary pressed (0.30 * 255 ≈ 77)
 QColor gButtonPrimaryDisabled = QColor(74, 144, 226, 26); // Primary disabled (0.10 * 255 ≈ 26)
+
+int gCanvasButtonFontSizePx = 14;                       // Default canvas button font size
+int gCanvasButtonFontWeight = 700;                      // Default canvas button font weight (bold)
+
+int gCanvasMediaSettingsOptionsFontSizePx = 14;         // Default options font size
+int gCanvasMediaSettingsOptionsFontWeightPx = 500;      // Default options font weight (medium)
+
+int gCanvasMediaSettingsSectionHeadersFontSizePx = 14;  // Default section header font size
+int gCanvasMediaSettingsSectionHeadersFontWeightPx = 800; // Default section header font weight (semi-bold)
 
 // Launch Remote Scene button colors (magenta theme)
 QColor gLaunchRemoteSceneText = QColor(255, 150, 255);     // Magenta text
@@ -155,6 +190,66 @@ QString colorToCss(const QColor& color) {
 
 QString colorSourceToCss(const ColorSource& source) {
     return colorToCss(getCurrentColor(source));
+}
+
+QFont::Weight canvasButtonQtWeight() {
+    return cssWeightToQt(gCanvasButtonFontWeight);
+}
+
+bool canvasButtonFontIsBold() {
+    return cssWeightIsBold(gCanvasButtonFontWeight);
+}
+
+QString canvasButtonFontCss() {
+    return fontCssString(gCanvasButtonFontWeight, gCanvasButtonFontSizePx);
+}
+
+void applyCanvasButtonFont(QFont& font) {
+    font.setBold(canvasButtonFontIsBold());
+    font.setWeight(canvasButtonQtWeight());
+    if (gCanvasButtonFontSizePx > 0) {
+        font.setPixelSize(gCanvasButtonFontSizePx);
+    }
+}
+
+QFont::Weight canvasMediaSettingsOptionsQtWeight() {
+    return cssWeightToQt(gCanvasMediaSettingsOptionsFontWeightPx);
+}
+
+bool canvasMediaSettingsOptionsFontIsBold() {
+    return cssWeightIsBold(gCanvasMediaSettingsOptionsFontWeightPx);
+}
+
+QString canvasMediaSettingsOptionsFontCss() {
+    return fontCssString(gCanvasMediaSettingsOptionsFontWeightPx, gCanvasMediaSettingsOptionsFontSizePx);
+}
+
+void applyCanvasMediaSettingsOptionsFont(QFont& font) {
+    font.setBold(canvasMediaSettingsOptionsFontIsBold());
+    font.setWeight(canvasMediaSettingsOptionsQtWeight());
+    if (gCanvasMediaSettingsOptionsFontSizePx > 0) {
+        font.setPixelSize(gCanvasMediaSettingsOptionsFontSizePx);
+    }
+}
+
+QFont::Weight canvasMediaSettingsSectionHeadersQtWeight() {
+    return cssWeightToQt(gCanvasMediaSettingsSectionHeadersFontWeightPx);
+}
+
+bool canvasMediaSettingsSectionHeadersFontIsBold() {
+    return cssWeightIsBold(gCanvasMediaSettingsSectionHeadersFontWeightPx);
+}
+
+QString canvasMediaSettingsSectionHeadersFontCss() {
+    return fontCssString(gCanvasMediaSettingsSectionHeadersFontWeightPx, gCanvasMediaSettingsSectionHeadersFontSizePx);
+}
+
+void applyCanvasMediaSettingsSectionHeadersFont(QFont& font) {
+    font.setBold(canvasMediaSettingsSectionHeadersFontIsBold());
+    font.setWeight(canvasMediaSettingsSectionHeadersQtWeight());
+    if (gCanvasMediaSettingsSectionHeadersFontSizePx > 0) {
+        font.setPixelSize(gCanvasMediaSettingsSectionHeadersFontSizePx);
+    }
 }
 
 } // namespace AppColors
