@@ -20,6 +20,25 @@
 #include "MediaItems.h" // for ResizableMediaBase
 
 namespace {
+
+class ScopedWidgetUpdateBlocker {
+public:
+    explicit ScopedWidgetUpdateBlocker(QWidget* widget)
+        : m_widget(widget), m_blocked(widget && widget->updatesEnabled()) {
+        if (m_blocked) {
+            m_widget->setUpdatesEnabled(false);
+        }
+    }
+    ~ScopedWidgetUpdateBlocker() {
+        if (m_blocked) {
+            m_widget->setUpdatesEnabled(true);
+        }
+    }
+private:
+    QWidget* m_widget = nullptr;
+    bool m_blocked = false;
+};
+
 QString tabButtonStyle(bool active, const QString& overlayTextCss) {
     const QString fontCss = AppColors::canvasButtonFontCss();
     if (active) {
@@ -60,7 +79,8 @@ QString tabButtonStyle(bool active, const QString& overlayTextCss) {
         "}"
     ).arg(fontCss, overlayTextCss);
 }
-}
+
+} // anonymous namespace
 
 MediaSettingsPanel::MediaSettingsPanel(QWidget* parentWidget)
     : QObject(parentWidget)
@@ -475,6 +495,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     m_elementPropertiesLayout->setSpacing(6);
     m_elementPropertiesLayout->setAlignment(Qt::AlignTop);
     m_contentLayout->addWidget(m_elementPropertiesContainer);
+    m_elementPropertiesContainer->setVisible(false);
 
     bool elementFirstSection = true;
     auto addElementSectionHeader = [&](const QString& text) {
@@ -724,11 +745,65 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
 
 void MediaSettingsPanel::setVisible(bool visible) {
     if (!m_widget) return;
-    m_widget->setVisible(visible);
-    // Clear active box when hiding the panel
-    if (!visible) {
-        clearActiveBox();
+    if (visible) {
+        // CRITICAL: Finalize ALL geometry BEFORE making widget visible to prevent first-frame flicker
+        
+        // Step 1: Force complete layout calculation while widget is still hidden
+        if (m_rootLayout) {
+            m_rootLayout->invalidate();
+            m_rootLayout->activate();
+        }
+        if (m_contentLayout) {
+            m_contentLayout->invalidate();
+            m_contentLayout->activate();
+        }
+        
+        // Step 2: Force style polish on all widgets to ensure Qt has computed final sizes
+        if (m_tabSwitcherContainer) {
+            m_tabSwitcherContainer->ensurePolished();
+        }
+        if (m_tabSwitcherSeparator) {
+            m_tabSwitcherSeparator->ensurePolished();
+        }
+        if (m_innerContent) {
+            m_innerContent->ensurePolished();
+        }
+        if (m_scrollContainer) {
+            m_scrollContainer->ensurePolished();
+        }
+        if (m_scrollArea) {
+            m_scrollArea->ensurePolished();
+        }
+        m_widget->ensurePolished();
+        
+        // Step 3: Compute final geometry with all sizes available
+        updatePosition();
+        
+        // Step 4: Force immediate geometry updates to take effect
+        if (m_widget) {
+            m_widget->updateGeometry();
+        }
+        if (m_scrollContainer) {
+            m_scrollContainer->updateGeometry();
+        }
+        if (m_scrollArea) {
+            m_scrollArea->updateGeometry();
+        }
+        
+        // Step 5: Process any pending layout events to ensure everything is final
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        
+        // Step 6: NOW make widget visible - geometry is 100% finalized
+        m_widget->setVisible(true);
+        
+        // Step 7: One final position update to handle any post-visibility adjustments
+        updatePosition();
+        return;
     }
+
+    ScopedWidgetUpdateBlocker updatesGuard(m_widget);
+    m_widget->setVisible(false);
+    clearActiveBox();
 }
 
 bool MediaSettingsPanel::isVisible() const {
@@ -736,7 +811,10 @@ bool MediaSettingsPanel::isVisible() const {
 }
 
 void MediaSettingsPanel::setMediaType(bool isVideo) {
-    // Show/hide video-only options
+    // Block updates during the entire visibility toggle operation to prevent intermediate repaints
+    ScopedWidgetUpdateBlocker updatesGuard(m_widget);
+    
+    // Show/hide video-only options (this changes layout significantly for video media)
     if (m_autoPlayRow) {
         m_autoPlayRow->setVisible(isVideo);
     }
@@ -820,19 +898,31 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
         clearActiveBox();
     }
     
-    // Force layout update to recalculate size
-    if (m_widget && m_contentLayout) {
-        // Force layout to recalculate
+    // Force complete layout recalculation after visibility changes
+    if (m_contentLayout) {
         m_contentLayout->invalidate();
         m_contentLayout->activate();
-        
-        // Update widget geometry
-        m_widget->updateGeometry();
-        m_widget->adjustSize();
-        
-        // Update position to recalculate background rect size
-        updatePosition();
     }
+    if (m_sceneOptionsLayout) {
+        m_sceneOptionsLayout->invalidate();
+        m_sceneOptionsLayout->activate();
+    }
+    if (m_elementPropertiesLayout) {
+        m_elementPropertiesLayout->invalidate();
+        m_elementPropertiesLayout->activate();
+    }
+    
+    // Ensure all widgets are polished with new layout
+    if (m_innerContent) {
+        m_innerContent->ensurePolished();
+    }
+    if (m_widget) {
+        m_widget->ensurePolished();
+        m_widget->updateGeometry();
+    }
+    
+    // DON'T call updatePosition() here - let setVisible() handle it with proper timing
+    // This prevents double-calculation and ensures geometry is final before widget shows
 }
 
 void MediaSettingsPanel::updatePosition() {
@@ -865,16 +955,26 @@ void MediaSettingsPanel::updatePosition() {
     m_widget->setMaximumHeight(std::max(50, availableHeight));
     m_widget->setMinimumHeight(0);
 
-    auto effectiveChromeHeight = [](QWidget* widget) {
-        if (!widget || !widget->isVisible()) {
-            return 0;
+    // Calculate chrome height - use actual widget dimensions if available, fallback to known fixed sizes
+    int tabHeight = 0;
+    if (m_tabSwitcherContainer) {
+        tabHeight = m_tabSwitcherContainer->height();
+        if (tabHeight <= 0) {
+            // Tab container has fixed height of 40px (set in buildUi)
+            tabHeight = 40;
         }
-        const int current = widget->height();
-        return current > 0 ? current : widget->sizeHint().height();
-    };
+    }
 
-    const int chromeHeight = effectiveChromeHeight(m_tabSwitcherContainer) +
-                             effectiveChromeHeight(m_tabSwitcherSeparator);
+    int separatorHeight = 0;
+    if (m_tabSwitcherSeparator) {
+        separatorHeight = m_tabSwitcherSeparator->height();
+        if (separatorHeight <= 0) {
+            // Separator has fixed height of 1px (set in buildUi)
+            separatorHeight = 1;
+        }
+    }
+
+    const int chromeHeight = tabHeight + separatorHeight;
 
     int contentHeight = 0;
     if (m_innerContent) {
@@ -927,9 +1027,8 @@ void MediaSettingsPanel::setAnchorMargins(int left, int top, int bottom) {
 
 void MediaSettingsPanel::setBoxActive(QLabel* box, bool active) {
     if (!box) return;
-    
+
     if (active) {
-        // Active state: use the same blue tint as enabled settings button (74,144,226)
         box->setStyleSheet(
             QString("QLabel {"
             "  background-color: %1;"
@@ -942,7 +1041,6 @@ void MediaSettingsPanel::setBoxActive(QLabel* box, bool active) {
             "}").arg(AppColors::gMediaPanelActiveBg.name())
         );
     } else {
-        // Inactive state: subtle translucent box with rounded corners; white text to match panel
         box->setStyleSheet(
             QString("QLabel {"
             "  background-color: %1;"
@@ -958,22 +1056,25 @@ void MediaSettingsPanel::setBoxActive(QLabel* box, bool active) {
 }
 
 void MediaSettingsPanel::clearActiveBox() {
-    if (m_activeBox) {
-        QLabel* was = m_activeBox;
-        bool wasOpacityBox = (was == m_opacityBox);
-        bool wasVolumeBox = (was == m_volumeBox);
-        setBoxActive(m_activeBox, false);
-        m_activeBox = nullptr;
-        // Reset first-type-clears flag when deactivating
-        m_clearOnFirstType = false;
-        m_pendingDecimalInsertion = false;
-        // If user just finished editing opacity and option is enabled, apply it now
-        if (wasOpacityBox && m_opacityCheck && m_opacityCheck->isChecked()) {
-            applyOpacityFromUi();
-        }
-        if (wasVolumeBox && m_volumeCheck && m_volumeCheck->isChecked()) {
-            applyVolumeFromUi();
-        }
+    if (!m_activeBox) return;
+
+    QLabel* previous = m_activeBox;
+    m_activeBox = nullptr;
+
+    const bool wasOpacityBox = (previous == m_opacityBox);
+    const bool wasVolumeBox = (previous == m_volumeBox);
+
+    setBoxActive(previous, false);
+    previous->clearFocus();
+
+    m_clearOnFirstType = false;
+    m_pendingDecimalInsertion = false;
+
+    if (wasOpacityBox && m_opacityCheck && m_opacityCheck->isChecked()) {
+        applyOpacityFromUi();
+    }
+    if (wasVolumeBox && m_volumeCheck && m_volumeCheck->isChecked()) {
+        applyVolumeFromUi();
     }
 }
 
@@ -1643,6 +1744,7 @@ void MediaSettingsPanel::setMediaItem(ResizableMediaBase* item) {
 }
 
 void MediaSettingsPanel::pullSettingsFromMedia() {
+    ScopedWidgetUpdateBlocker updatesGuard(m_widget);
     m_updatingFromMedia = true;
     if (!m_mediaItem) {
         m_updatingFromMedia = false;
@@ -1745,6 +1847,17 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     // Ensure opacity is immediately applied (uses stored state when guard is false)
     applyOpacityFromUi();
     applyVolumeFromUi();
+
+    if (m_widget && m_contentLayout) {
+        m_contentLayout->invalidate();
+        m_contentLayout->activate();
+    }
+    if (m_widget) {
+        m_widget->ensurePolished();
+        m_widget->updateGeometry();
+        m_widget->adjustSize();
+    }
+    updatePosition();
 }
 
 void MediaSettingsPanel::refreshVolumeDisplay() {
