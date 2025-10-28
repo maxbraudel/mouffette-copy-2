@@ -5,10 +5,13 @@
 #include <QHash>
 #include <QSet>
 #include <QString>
+#include <QFont>
+#include <QList>
 #include "ClientInfo.h"
 
 class ScreenCanvas;
 class QPushButton;
+class ResizableMediaBase;
 
 /**
  * Phase 4.1: SessionManager
@@ -20,22 +23,22 @@ class QPushButton;
  * 
  * Extracted from MainWindow to improve testability and separation of concerns.
  * 
- * MIGRATION STATUS (Phase 4.1 - 10%):
- * - [✓] Class created with core data structure
- * - [✓] Lookup functions implemented (findSession, findByIdeaId, findByServerClientId)
- * - [✓] CRUD operations (getOrCreate, delete, clear)
- * - [✓] Bulk operations (markOffline, clearRemoteContent)
- * - [ ] MainWindow integration (m_canvasSessions migration pending)
- * - [ ] UI extension handling (uploadButton, upload tracking)
+ * MIGRATION STATUS (Phase 4.1 - ✅ COMPLETE):
+ * - [✅] Class created with core data structure
+ * - [✅] Lookup functions implemented (findSession, findByIdeaId, findByServerClientId)
+ * - [✅] CRUD operations (getOrCreate, delete, clear)
+ * - [✅] Bulk operations (markOffline, clearRemoteContent)
+ * - [✅] MainWindow integration (m_canvasSessions fully migrated)
+ * - [✅] All iteration loops migrated to getAllSessions()
+ * - [✅] IdeaId generation integrated into SessionManager
  * 
- * NEXT STEPS:
- * 1. Create MainWindowSession : public SessionManager::CanvasSession { UI fields }
- * 2. Migrate m_canvasSessions Map<QString, MainWindowSession> 
- * 3. Replace findCanvas* functions to use SessionManager
- * 4. Move bulk operations (onDisconnected) to SessionManager
+ * RESULTS:
+ * - Removed QHash<QString, CanvasSession> m_canvasSessions from MainWindow
+ * - All session access now goes through SessionManager
+ * - ~150 lines of duplicate session management code eliminated
+ * - Single source of truth for session data
  * 
- * NOTE: SessionManager is currently initialized but not yet actively used.
- *       Full migration will occur after FileManager split (Phase 4.2).
+ * NEXT PHASE: Phase 4.2 - FileManager split into 3 services
  */
 class SessionManager : public QObject {
     Q_OBJECT
@@ -47,11 +50,24 @@ public:
         QString ideaId;
         ScreenCanvas* canvas = nullptr;
         QPushButton* uploadButton = nullptr;
+        bool uploadButtonInOverlay = false;
+        QFont uploadButtonDefaultFont;
         ClientInfo lastClientInfo;
-        QSet<QString> knownRemoteFileIds;        // Files we've successfully sent to this target
-        QSet<QString> expectedIdeaFileIds;       // Files that should exist for this ideaId
-        bool remoteContentClearedOnDisconnect = false;
         bool connectionsInitialized = false;
+        bool remoteContentClearedOnDisconnect = false;
+        QSet<QString> expectedIdeaFileIds; // latest scene files present on canvas
+        QSet<QString> knownRemoteFileIds;   // files we believe reside on the remote for current idea
+        struct UploadTracking {
+            QSet<QString> mediaIdsBeingUploaded;
+            QHash<QString, QString> mediaIdByFileId;
+            QHash<QString, QList<ResizableMediaBase*>> itemsByFileId;
+            QStringList currentUploadFileOrder;
+            QSet<QString> serverCompletedFileIds;
+            QHash<QString, int> perFileProgress;
+            bool receivingFilesToastShown = false;
+            QString activeUploadId;
+            bool remoteFilesPresent = false;
+        } upload;
     };
 
     explicit SessionManager(QObject *parent = nullptr);

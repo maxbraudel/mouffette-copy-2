@@ -30,6 +30,7 @@
 #include "WebSocketClient.h"
 #include "ClientInfo.h"
 #include "ToastNotificationSystem.h"
+#include "SessionManager.h"
 
 QT_BEGIN_NAMESPACE
 class QAction;
@@ -118,31 +119,8 @@ protected:
     void hideEvent(QHideEvent* event) override;
 
 private:
-    struct CanvasSession {
-        QString persistentClientId; // stable client ID persisted across sessions
-        QString serverAssignedId;   // temporary server session ID (for local lookup only, send persistentClientId to server)
-        QString ideaId;
-        ScreenCanvas* canvas = nullptr;
-        QPushButton* uploadButton = nullptr;
-        bool uploadButtonInOverlay = false;
-        QFont uploadButtonDefaultFont;
-        ClientInfo lastClientInfo;
-        bool connectionsInitialized = false;
-        bool remoteContentClearedOnDisconnect = false;
-        QSet<QString> expectedIdeaFileIds; // latest scene files present on canvas
-        QSet<QString> knownRemoteFileIds;   // files we believe reside on the remote for current idea
-        struct UploadTracking {
-            QSet<QString> mediaIdsBeingUploaded;
-            QHash<QString, QString> mediaIdByFileId;
-            QHash<QString, QList<ResizableMediaBase*>> itemsByFileId;
-            QStringList currentUploadFileOrder;
-            QSet<QString> serverCompletedFileIds;
-            QHash<QString, int> perFileProgress;
-            bool receivingFilesToastShown = false;
-            QString activeUploadId;
-            bool remoteFilesPresent = false;
-        } upload;
-    };
+    // Phase 4.1: Use SessionManager's CanvasSession structure
+    using CanvasSession = SessionManager::CanvasSession;
 
     void setupUI();
     void setupTrayIcon();
@@ -280,7 +258,7 @@ private:
     // Responsive layout manager
     ResponsiveLayoutManager* m_responsiveLayoutManager = nullptr;
     
-    // Phase 4.1: Session manager (will progressively replace m_canvasSessions)
+    // Phase 4.1: Session manager (COMPLETED - replaced m_canvasSessions)
     SessionManager* m_sessionManager = nullptr;
 
     // Menu and actions
@@ -296,7 +274,6 @@ private:
     WebSocketClient* m_webSocketClient;
     QList<ClientInfo> m_availableClients;
     int m_lastConnectedClientCount = 0;
-    QHash<QString, CanvasSession> m_canvasSessions;
     QString m_activeSessionIdentity;
     ClientInfo m_thisClient;
     ClientInfo m_selectedClient;

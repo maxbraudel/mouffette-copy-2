@@ -103,9 +103,10 @@ SessionManager::CanvasSession& SessionManager::getOrCreateSession(const QString&
     newSession.serverAssignedId = clientInfo.getId();
     newSession.remoteContentClearedOnDisconnect = false;
     newSession.connectionsInitialized = false;
+    newSession.ideaId = QUuid::createUuid().toString(QUuid::WithoutBraces); // Generate ideaId
 
     m_sessions.insert(persistentClientId, newSession);
-    qDebug() << "SessionManager: Created new session for client" << persistentClientId;
+    qDebug() << "SessionManager: Created new session for client" << persistentClientId << "with ideaId" << newSession.ideaId;
     
     emit sessionCreated(persistentClientId);
     return m_sessions[persistentClientId];
