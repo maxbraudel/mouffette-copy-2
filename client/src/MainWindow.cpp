@@ -53,6 +53,10 @@
 #include <QImage>
 #include <QAbstractItemView>
 #include <QPixmap>
+#include <QCoreApplication>
+#include <QCryptographicHash>
+#include <QRegularExpression>
+#include <QSysInfo>
 #include <QGraphicsTextItem>
 #include <QGraphicsRectItem>
 #include <QGraphicsPathItem>
@@ -451,8 +455,8 @@ void MainWindow::refreshOngoingScenesList() {
         QString itemText = QStringLiteral("%1 — Scene live").arg(display.trimmed());
         QListWidgetItem* item = new QListWidgetItem(itemText);
         item->setFlags(Qt::ItemIsEnabled);
-        item->setData(Qt::UserRole, session.identityKey);
-        item->setData(Qt::UserRole + 1, session.clientId);
+        item->setData(Qt::UserRole, session.persistentClientId);
+        item->setData(Qt::UserRole + 1, session.serverAssignedId);
         m_ongoingScenesList->addItem(item);
     }
 
@@ -598,11 +602,66 @@ MainWindow::MainWindow(QWidget* parent)
 #if defined(Q_OS_WIN)
     setWindowIcon(QIcon(":/icons/appicon.ico"));
 #endif
-    // Load persisted settings (server URL, auto-upload)
+    // Load persisted settings (server URL, auto-upload, persistent client ID)
     {
         QSettings settings("Mouffette", "Client");
         m_serverUrlConfig = settings.value("serverUrl", DEFAULT_SERVER_URL).toString();
         m_autoUploadImportedMedia = settings.value("autoUploadImportedMedia", false).toBool();
+        
+        // NEW: Generate or load persistent client ID
+        QString machineId = QSysInfo::machineUniqueId();
+        if (machineId.isEmpty()) {
+            machineId = QHostInfo::localHostName();
+        }
+        if (machineId.isEmpty()) {
+            machineId = QStringLiteral("unknown-machine");
+        }
+        QString sanitizedMachineId = machineId;
+        sanitizedMachineId.replace(QRegularExpression("[^A-Za-z0-9_]"), "_");
+
+        QString instanceSuffix = qEnvironmentVariable("MOUFFETTE_INSTANCE_SUFFIX");
+        if (instanceSuffix.isEmpty()) {
+            const QStringList args = QCoreApplication::arguments();
+            for (int i = 1; i < args.size(); ++i) {
+                const QString& arg = args.at(i);
+                if (arg.startsWith("--instance-suffix=")) {
+                    instanceSuffix = arg.section('=', 1);
+                    break;
+                }
+                if (arg == "--instance-suffix" && (i + 1) < args.size()) {
+                    instanceSuffix = args.at(i + 1);
+                    break;
+                }
+            }
+        }
+        QString sanitizedInstanceSuffix = instanceSuffix;
+        sanitizedInstanceSuffix.replace(QRegularExpression("[^A-Za-z0-9_]"), "_");
+
+        const QByteArray installHashBytes = QCryptographicHash::hash(QCoreApplication::applicationDirPath().toUtf8(), QCryptographicHash::Sha1);
+        QString installFingerprint = QString::fromUtf8(installHashBytes.toHex());
+        if (installFingerprint.isEmpty()) {
+            installFingerprint = QStringLiteral("unknowninstall");
+        }
+        installFingerprint = installFingerprint.left(16); // keep key compact
+
+        QString settingsKey = QStringLiteral("persistentClientId_%1_%2").arg(sanitizedMachineId, installFingerprint);
+        if (!sanitizedInstanceSuffix.isEmpty()) {
+            settingsKey += QStringLiteral("_%1").arg(sanitizedInstanceSuffix);
+        }
+
+        QString persistentClientId = settings.value(settingsKey).toString();
+        if (persistentClientId.isEmpty()) {
+            persistentClientId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            settings.setValue(settingsKey, persistentClientId);
+            qDebug() << "MainWindow: Generated new persistent client ID:" << persistentClientId
+                     << "using key" << settingsKey << "machineId:" << machineId
+                     << "instanceSuffix:" << sanitizedInstanceSuffix;
+        } else {
+            qDebug() << "MainWindow: Loaded persistent client ID:" << persistentClientId
+                     << "using key" << settingsKey << "machineId:" << machineId
+                     << "instanceSuffix:" << sanitizedInstanceSuffix;
+        }
+        m_webSocketClient->setPersistentClientId(persistentClientId);
     }
     // Use standard OS window frame and title bar (no custom frameless window)
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
@@ -648,6 +707,12 @@ MainWindow::MainWindow(QWidget* parent)
     // Unused generic message hook removed; specific handlers are wired explicitly
     // Forward all generic messages to UploadManager so it can handle incoming upload_* and remove_all_files when we are the target
     connect(m_webSocketClient, &WebSocketClient::messageReceived, m_uploadManager, &UploadManager::handleIncomingMessage);
+    // PHASE 2: Handle state_sync messages from server
+    connect(m_webSocketClient, &WebSocketClient::messageReceived, this, [this](const QJsonObject& message) {
+        if (message.value("type").toString() == "state_sync") {
+            handleStateSyncFromServer(message);
+        }
+    });
     // Upload progress forwards
     connect(m_webSocketClient, &WebSocketClient::uploadProgressReceived, m_uploadManager, &UploadManager::onUploadProgress);
     connect(m_webSocketClient, &WebSocketClient::uploadFinishedReceived, m_uploadManager, &UploadManager::onUploadFinished);
@@ -660,15 +725,37 @@ MainWindow::MainWindow(QWidget* parent)
     m_watchManager->setWebSocketClient(m_webSocketClient);
     
     // FileManager: configure callback to send file removal commands to remote clients
-    FileManager::setFileRemovalNotifier([this](const QString& fileId, const QList<QString>& clientIds) {
-        qDebug() << "MainWindow: FileManager requested removal of file" << fileId << "from clients:" << clientIds;
+    // Phase 3: ideaId is now MANDATORY - only send removal if we have valid ideaIds
+    FileManager::setFileRemovalNotifier([this](const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds) {
+        qDebug() << "MainWindow: FileManager requested removal of file" << fileId
+                 << "from clients:" << clientIds << "ideas:" << ideaIds;
         if (!m_webSocketClient) {
             qWarning() << "MainWindow: No WebSocket client available for file removal";
             return;
         }
-        for (const QString& clientId : clientIds) {
-            qDebug() << "MainWindow: Sending remove_file command for" << fileId << "to" << clientId;
-            m_webSocketClient->sendRemoveFile(clientId, fileId);
+        
+        // Phase 3: Reject operations without valid ideaId
+        if (ideaIds.isEmpty()) {
+            qWarning() << "MainWindow: Cannot remove file" << fileId << "- no ideaIds provided (Phase 3 requires ideaId)";
+            return;
+        }
+        
+        for (const QString& ideaId : ideaIds) {
+            if (ideaId.isEmpty()) {
+                qWarning() << "MainWindow: Skipping empty ideaId for file removal" << fileId;
+                continue;
+            }
+            
+            for (const QString& clientId : clientIds) {
+                qDebug() << "MainWindow: Sending remove_file command for" << fileId
+                         << "to" << clientId << "ideaId" << ideaId;
+                m_webSocketClient->sendRemoveFile(clientId, ideaId, fileId);
+            }
+            
+            if (CanvasSession* session = findCanvasSessionByIdeaId(ideaId)) {
+                session->knownRemoteFileIds.remove(fileId);
+                session->expectedIdeaFileIds.remove(fileId);
+            }
         }
     });
     
@@ -833,7 +920,7 @@ MainWindow::MainWindow(QWidget* parent)
                   AppColors::colorToCss(AppColors::gStatusConnectedBg));
             
             const QString target = m_uploadManager->targetClientId();
-            const CanvasSession* targetSession = findCanvasSessionByClientId(target);
+            const CanvasSession* targetSession = findCanvasSessionByServerClientId(target);
             const bool sessionHasRemote = targetSession && targetSession->upload.remoteFilesPresent;
             const bool managerHasActiveForTarget = m_uploadManager->hasActiveUpload() &&
                                                    m_uploadManager->activeUploadTargetClientId() == target;
@@ -922,7 +1009,7 @@ MainWindow::MainWindow(QWidget* parent)
         ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx).arg(AppColors::colorToCss(AppColors::gButtonGreenBg)).arg(AppColors::colorToCss(AppColors::gButtonGreenPressed));
 
     const QString target = m_uploadManager->targetClientId();
-    const CanvasSession* targetSession = findCanvasSessionByClientId(target);
+    const CanvasSession* targetSession = findCanvasSessionByServerClientId(target);
     const bool sessionHasRemote = targetSession && targetSession->upload.remoteFilesPresent;
     const bool managerHasActiveForTarget = m_uploadManager->hasActiveUpload() &&
                            m_uploadManager->activeUploadTargetClientId() == target;
@@ -1420,37 +1507,29 @@ void MainWindow::initializeRemoteClientInfoInTopBar() {
     }
 }
 
-QString MainWindow::makeIdentityKey(const QString& machineName, const QString& platform) const {
-    QString normalizedName = machineName.trimmed().toLower();
-    if (normalizedName.isEmpty()) normalizedName = QStringLiteral("unknown");
-    QString normalizedPlatform = platform.trimmed().toLower();
-    if (normalizedPlatform.isEmpty()) normalizedPlatform = QStringLiteral("unknown");
-    return normalizedName + QStringLiteral("|") + normalizedPlatform;
-}
-
-MainWindow::CanvasSession* MainWindow::findCanvasSession(const QString& identityKey) {
-    auto it = m_canvasSessions.find(identityKey);
+MainWindow::CanvasSession* MainWindow::findCanvasSession(const QString& persistentClientId) {
+    auto it = m_canvasSessions.find(persistentClientId);
     if (it == m_canvasSessions.end()) {
         return nullptr;
     }
     return &it.value();
 }
 
-const MainWindow::CanvasSession* MainWindow::findCanvasSession(const QString& identityKey) const {
-    auto it = m_canvasSessions.constFind(identityKey);
+const MainWindow::CanvasSession* MainWindow::findCanvasSession(const QString& persistentClientId) const {
+    auto it = m_canvasSessions.constFind(persistentClientId);
     if (it == m_canvasSessions.constEnd()) {
         return nullptr;
     }
     return &it.value();
 }
 
-MainWindow::CanvasSession* MainWindow::findCanvasSessionByClientId(const QString& clientId) {
-    if (clientId.isEmpty()) {
+MainWindow::CanvasSession* MainWindow::findCanvasSessionByServerClientId(const QString& serverClientId) {
+    if (serverClientId.isEmpty()) {
         return nullptr;
     }
 
     for (auto it = m_canvasSessions.begin(); it != m_canvasSessions.end(); ++it) {
-        if (it.value().clientId == clientId) {
+        if (it.value().serverAssignedId == serverClientId) {
             return &it.value();
         }
     }
@@ -1458,13 +1537,27 @@ MainWindow::CanvasSession* MainWindow::findCanvasSessionByClientId(const QString
     return nullptr;
 }
 
-const MainWindow::CanvasSession* MainWindow::findCanvasSessionByClientId(const QString& clientId) const {
-    if (clientId.isEmpty()) {
+const MainWindow::CanvasSession* MainWindow::findCanvasSessionByServerClientId(const QString& serverClientId) const {
+    if (serverClientId.isEmpty()) {
         return nullptr;
     }
 
     for (auto it = m_canvasSessions.constBegin(); it != m_canvasSessions.constEnd(); ++it) {
-        if (it.value().clientId == clientId) {
+        if (it.value().serverAssignedId == serverClientId) {
+            return &it.value();
+        }
+    }
+
+    return nullptr;
+}
+
+MainWindow::CanvasSession* MainWindow::findCanvasSessionByIdeaId(const QString& ideaId) {
+    if (ideaId.isEmpty()) {
+        return nullptr;
+    }
+
+    for (auto it = m_canvasSessions.begin(); it != m_canvasSessions.end(); ++it) {
+        if (it.value().ideaId == ideaId) {
             return &it.value();
         }
     }
@@ -1473,29 +1566,37 @@ const MainWindow::CanvasSession* MainWindow::findCanvasSessionByClientId(const Q
 }
 
 MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& client) {
-    QString identity = !client.identityKey().isEmpty() ? client.identityKey() : makeIdentityKey(client.getMachineName(), client.getPlatform());
-    CanvasSession* existing = findCanvasSession(identity);
+    QString persistentId = client.clientId();
+    if (persistentId.isEmpty()) {
+        qWarning() << "MainWindow::ensureCanvasSession: client has no persistentClientId, this should not happen";
+        // Fallback: use temporary server ID (this path should never execute in new architecture)
+        persistentId = client.getId();
+    }
+    
+    CanvasSession* existing = findCanvasSession(persistentId);
     if (!existing) {
         CanvasSession session;
-        session.identityKey = identity;
-        session.clientId = client.getId();
+        session.persistentClientId = persistentId;
+        session.serverAssignedId = client.getId();
         session.lastClientInfo = client;
-        session.lastClientInfo.setIdentityKey(identity);
+        session.lastClientInfo.setClientId(persistentId);
         session.lastClientInfo.setFromMemory(true);
         session.lastClientInfo.setOnline(client.isOnline());
-    session.remoteContentClearedOnDisconnect = !client.isOnline();
-    session.canvas = new ScreenCanvas(m_canvasHostStack);
+        session.remoteContentClearedOnDisconnect = !client.isOnline();
+        session.ideaId = createIdeaId();
+        session.canvas = new ScreenCanvas(m_canvasHostStack);
         session.canvas->setWebSocketClient(m_webSocketClient);
         session.canvas->setUploadManager(m_uploadManager);
-        auto inserted = m_canvasSessions.insert(identity, session);
+        session.canvas->setActiveIdeaId(session.ideaId);
+        auto inserted = m_canvasSessions.insert(persistentId, session);
         CanvasSession& stored = inserted.value();
         configureCanvasSession(stored);
         if (stored.canvas) {
             if (m_canvasHostStack && m_canvasHostStack->indexOf(stored.canvas) == -1) {
                 m_canvasHostStack->addWidget(stored.canvas);
             }
-            if (!stored.clientId.isEmpty()) {
-                stored.canvas->setRemoteSceneTarget(stored.clientId, stored.lastClientInfo.getMachineName());
+            if (!stored.serverAssignedId.isEmpty()) {
+                stored.canvas->setRemoteSceneTarget(stored.serverAssignedId, stored.lastClientInfo.getMachineName());
             }
         }
         if (stored.lastClientInfo.isOnline()) {
@@ -1506,11 +1607,14 @@ MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& cli
     }
 
     CanvasSession& stored = *existing;
-    stored.clientId = client.getId();
+    stored.serverAssignedId = client.getId();
     stored.lastClientInfo = client;
-    stored.lastClientInfo.setIdentityKey(identity);
+    stored.lastClientInfo.setClientId(persistentId);
     stored.lastClientInfo.setFromMemory(true);
     stored.lastClientInfo.setOnline(client.isOnline());
+    if (stored.ideaId.isEmpty()) {
+        stored.ideaId = createIdeaId();
+    }
     if (client.isOnline()) {
         stored.remoteContentClearedOnDisconnect = false;
     }
@@ -1520,10 +1624,13 @@ MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& cli
         stored.canvas->setUploadManager(m_uploadManager);
         stored.connectionsInitialized = false;
     }
+    if (stored.canvas) {
+        stored.canvas->setActiveIdeaId(stored.ideaId);
+    }
     configureCanvasSession(stored);
     if (stored.canvas) {
-        if (!stored.clientId.isEmpty()) {
-            stored.canvas->setRemoteSceneTarget(stored.clientId, stored.lastClientInfo.getMachineName());
+        if (!stored.serverAssignedId.isEmpty()) {
+            stored.canvas->setRemoteSceneTarget(stored.serverAssignedId, stored.lastClientInfo.getMachineName());
         }
         if (m_canvasHostStack && m_canvasHostStack->indexOf(stored.canvas) == -1) {
             m_canvasHostStack->addWidget(stored.canvas);
@@ -1536,6 +1643,7 @@ MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& cli
 void MainWindow::configureCanvasSession(CanvasSession& session) {
     if (!session.canvas) return;
 
+    session.canvas->setActiveIdeaId(session.ideaId);
     session.canvas->setWebSocketClient(m_webSocketClient);
     session.canvas->setUploadManager(m_uploadManager);
     session.canvas->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
@@ -1557,12 +1665,12 @@ void MainWindow::configureCanvasSession(CanvasSession& session) {
 
     if (!session.connectionsInitialized) {
         connect(session.canvas, &ScreenCanvas::mediaItemAdded, this,
-                [this, identity=session.identityKey](ResizableMediaBase* mediaItem) {
+                [this, persistentId=session.persistentClientId](ResizableMediaBase* mediaItem) {
                     if (m_fileWatcher && mediaItem && !mediaItem->sourcePath().isEmpty()) {
                         m_fileWatcher->watchMediaItem(mediaItem);
                         qDebug() << "MainWindow: Added media item to file watcher:" << mediaItem->sourcePath();
                     }
-                    auto it = m_canvasSessions.find(identity);
+                    auto it = m_canvasSessions.find(persistentId);
                     if (it != m_canvasSessions.end()) {
                         it->lastClientInfo.setFromMemory(true);
                     }
@@ -1600,14 +1708,14 @@ void MainWindow::configureCanvasSession(CanvasSession& session) {
     session.connectionsInitialized = true;
 }
 
-void MainWindow::switchToCanvasSession(const QString& identityKey) {
+void MainWindow::switchToCanvasSession(const QString& persistentClientId) {
     // Navigation between clients should NOT trigger unload - uploads persist per session
     // Unload only happens when explicitly requested via button or when remote disconnects
     
-    CanvasSession* session = findCanvasSession(identityKey);
+    CanvasSession* session = findCanvasSession(persistentClientId);
     if (!session || !session->canvas) return;
 
-    m_activeSessionIdentity = identityKey;
+    m_activeSessionIdentity = persistentClientId;
     m_screenCanvas = session->canvas;
     if (m_navigationManager) {
         m_navigationManager->setActiveCanvas(m_screenCanvas);
@@ -1621,15 +1729,15 @@ void MainWindow::switchToCanvasSession(const QString& identityKey) {
     }
 
     session->canvas->setFocus(Qt::OtherFocusReason);
-    if (!session->clientId.isEmpty()) {
-        session->canvas->setRemoteSceneTarget(session->clientId, session->lastClientInfo.getMachineName());
+    if (!session->serverAssignedId.isEmpty()) {
+        session->canvas->setRemoteSceneTarget(session->serverAssignedId, session->lastClientInfo.getMachineName());
     }
 
     // Set upload manager target to restore per-session upload state
     if (m_uploadManager) {
-        m_uploadManager->setTargetClientId(session->clientId);
+        m_uploadManager->setTargetClientId(session->serverAssignedId);
+        m_uploadManager->setActiveIdeaId(session->ideaId);
     }
-
     updateUploadButtonForSession(*session);
 
     refreshOverlayActionsState(session->lastClientInfo.isOnline());
@@ -1648,13 +1756,14 @@ void MainWindow::updateUploadButtonForSession(CanvasSession& session) {
 
 void MainWindow::unloadUploadsForSession(CanvasSession& session, bool attemptRemote) {
     if (!m_uploadManager) return;
-    const QString targetId = session.clientId;
+    const QString targetId = session.serverAssignedId;
     if (targetId.isEmpty()) {
         session.remoteContentClearedOnDisconnect = true;
         return;
     }
 
     m_uploadManager->setTargetClientId(targetId);
+    m_uploadManager->setActiveIdeaId(session.ideaId);
 
     if (attemptRemote && m_webSocketClient && m_webSocketClient->isConnected()) {
         if (m_uploadManager->isUploading() || m_uploadManager->isFinalizing()) {
@@ -1711,10 +1820,98 @@ void MainWindow::unloadUploadsForSession(CanvasSession& session, bool attemptRem
     }
 }
 
+QString MainWindow::createIdeaId() const {
+    return QUuid::createUuid().toString(QUuid::WithoutBraces);
+}
+
+void MainWindow::rotateSessionIdea(CanvasSession& session) {
+    const QString oldIdeaId = session.ideaId;
+    session.ideaId = createIdeaId();
+    session.expectedIdeaFileIds.clear();
+    session.knownRemoteFileIds.clear();
+    if (session.canvas) {
+        session.canvas->setActiveIdeaId(session.ideaId);
+    }
+    FileManager::instance().removeIdeaAssociations(oldIdeaId);
+
+    if (m_uploadManager) {
+        if (m_activeSessionIdentity == session.persistentClientId) {
+            m_uploadManager->setActiveIdeaId(session.ideaId);
+        }
+    }
+}
+
+void MainWindow::reconcileRemoteFilesForSession(CanvasSession& session, const QSet<QString>& currentFileIds) {
+    session.expectedIdeaFileIds = currentFileIds;
+    FileManager::instance().replaceIdeaFileSet(session.ideaId, currentFileIds);
+
+    if (!session.serverAssignedId.isEmpty()) {
+        if (m_webSocketClient && m_webSocketClient->isConnected()) {
+            const QSet<QString> toRemove = session.knownRemoteFileIds - currentFileIds;
+            for (const QString& fileId : toRemove) {
+                m_webSocketClient->sendRemoveFile(session.serverAssignedId, session.ideaId, fileId);
+                session.knownRemoteFileIds.remove(fileId);
+            }
+        }
+        session.knownRemoteFileIds.intersect(currentFileIds);
+    }
+}
+
+void MainWindow::handleStateSyncFromServer(const QJsonObject& message) {
+    // PHASE 2: Process state_sync message from server after reconnection
+    const QJsonArray ideas = message.value("ideas").toArray();
+    
+    if (ideas.isEmpty()) {
+        qDebug() << "MainWindow: Received empty state_sync";
+        return;
+    }
+    
+    qDebug() << "MainWindow: Processing state_sync with" << ideas.size() << "idea(s)";
+    
+    for (const QJsonValue& ideaValue : ideas) {
+        const QJsonObject ideaObj = ideaValue.toObject();
+        const QString ideaId = ideaObj.value("ideaId").toString();
+        const QJsonArray fileIdsArray = ideaObj.value("fileIds").toArray();
+        
+        if (ideaId.isEmpty() || fileIdsArray.isEmpty()) continue;
+        
+        QSet<QString> fileIds;
+        for (const QJsonValue& fidValue : fileIdsArray) {
+            const QString fid = fidValue.toString();
+            if (!fid.isEmpty()) {
+                fileIds.insert(fid);
+            }
+        }
+        
+        qDebug() << "MainWindow: Syncing idea" << ideaId << "with" << fileIds.size() << "file(s)";
+        
+        // Find session with this ideaId and mark files as uploaded
+        CanvasSession* session = findCanvasSessionByIdeaId(ideaId);
+        if (session && !session->serverAssignedId.isEmpty()) {
+            session->knownRemoteFileIds = fileIds;
+            
+            // Mark files as uploaded in FileManager
+            for (const QString& fileId : fileIds) {
+                FileManager::instance().markFileUploadedToClient(fileId, session->serverAssignedId);
+            }
+            
+            qDebug() << "MainWindow: Restored upload state for session" << session->persistentClientId
+                     << "server client" << session->serverAssignedId << "idea" << ideaId;
+            
+            // Refresh UI if this is the active session
+            if (m_activeSessionIdentity == session->persistentClientId && m_uploadManager) {
+                emit m_uploadManager->uiStateChanged();
+            }
+        } else {
+            qDebug() << "MainWindow: No matching session found for idea" << ideaId;
+        }
+    }
+}
+
 void MainWindow::markAllSessionsOffline() {
     for (auto it = m_canvasSessions.begin(); it != m_canvasSessions.end(); ++it) {
         CanvasSession& session = it.value();
-        session.lastClientInfo.setIdentityKey(session.identityKey);
+        session.lastClientInfo.setClientId(session.persistentClientId);
         session.lastClientInfo.setFromMemory(true);
         session.lastClientInfo.setOnline(false);
     }
@@ -1726,37 +1923,41 @@ QList<ClientInfo> MainWindow::buildDisplayClientList(const QList<ClientInfo>& co
     QSet<QString> identitiesSeen;
 
     for (ClientInfo client : connectedClients) {
-        QString identity = !client.identityKey().isEmpty() ? client.identityKey() : makeIdentityKey(client.getMachineName(), client.getPlatform());
-        client.setIdentityKey(identity);
+        QString persistentId = client.clientId();
+        if (persistentId.isEmpty()) {
+            qWarning() << "MainWindow::buildDisplayClientList: client has no persistentClientId";
+            continue;
+        }
+        client.setClientId(persistentId);
         client.setOnline(true);
 
-        if (CanvasSession* session = findCanvasSession(identity)) {
-            session->clientId = client.getId();
+        if (CanvasSession* session = findCanvasSession(persistentId)) {
+            session->serverAssignedId = client.getId();
             session->lastClientInfo = client;
-            session->lastClientInfo.setIdentityKey(identity);
+            session->lastClientInfo.setClientId(persistentId);
             session->lastClientInfo.setFromMemory(true);
             session->lastClientInfo.setOnline(true);
             session->remoteContentClearedOnDisconnect = false;
-            if (session->canvas && !session->clientId.isEmpty()) {
-                session->canvas->setRemoteSceneTarget(session->clientId, session->lastClientInfo.getMachineName());
+            if (session->canvas && !session->serverAssignedId.isEmpty()) {
+                session->canvas->setRemoteSceneTarget(session->serverAssignedId, session->lastClientInfo.getMachineName());
             }
             client.setFromMemory(true);
-            client.setId(session->clientId);
+            client.setId(session->serverAssignedId);
         } else {
             client.setFromMemory(false);
         }
 
-        identitiesSeen.insert(identity);
+        identitiesSeen.insert(persistentId);
         result.append(client);
     }
 
     for (auto it = m_canvasSessions.constBegin(); it != m_canvasSessions.constEnd(); ++it) {
         const CanvasSession& session = it.value();
-        if (identitiesSeen.contains(session.identityKey)) continue;
+        if (identitiesSeen.contains(session.persistentClientId)) continue;
         ClientInfo info = session.lastClientInfo;
-        info.setIdentityKey(session.identityKey);
-        if (!session.clientId.isEmpty()) {
-            info.setId(session.clientId);
+        info.setClientId(session.persistentClientId);
+        if (!session.serverAssignedId.isEmpty()) {
+            info.setId(session.serverAssignedId);
         }
         info.setOnline(false);
         info.setFromMemory(true);
@@ -1773,7 +1974,7 @@ ScreenCanvas* MainWindow::canvasForClientId(const QString& clientId) const {
     }
     for (auto it = m_canvasSessions.constBegin(); it != m_canvasSessions.constEnd(); ++it) {
         const CanvasSession& session = it.value();
-        if (session.clientId == clientId) {
+        if (session.serverAssignedId == clientId) {
             return session.canvas;
         }
     }
@@ -1790,7 +1991,7 @@ MainWindow::CanvasSession* MainWindow::sessionForActiveUpload() {
     if (m_uploadManager) {
         const QString clientId = m_uploadManager->activeUploadTargetClientId();
         if (!clientId.isEmpty()) {
-            if (CanvasSession* session = findCanvasSessionByClientId(clientId)) {
+            if (CanvasSession* session = findCanvasSessionByServerClientId(clientId)) {
                 return session;
             }
         }
@@ -1822,10 +2023,10 @@ void MainWindow::clearUploadTracking(CanvasSession& session) {
         m_uploadSessionByUploadId.remove(session.upload.activeUploadId);
         session.upload.activeUploadId.clear();
     }
-    if (m_activeUploadSessionIdentity == session.identityKey) {
+    if (m_activeUploadSessionIdentity == session.persistentClientId) {
         m_activeUploadSessionIdentity.clear();
     }
-    if (m_uploadManager && m_uploadManager->activeSessionIdentity() == session.identityKey) {
+    if (m_uploadManager && m_uploadManager->activeSessionIdentity() == session.persistentClientId) {
         m_uploadManager->setActiveSessionIdentity(QString());
     }
 }
@@ -1860,8 +2061,8 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     const bool sessionHasActiveScreens = session.canvas && session.canvas->hasActiveScreens();
     const bool sessionHasStoredScreens = !session.lastClientInfo.getScreens().isEmpty();
     const bool hasCachedContent = sessionHasActiveScreens || sessionHasStoredScreens;
-    switchToCanvasSession(session.identityKey);
-    m_activeRemoteClientId = session.clientId;
+    switchToCanvasSession(session.persistentClientId);
+    m_activeRemoteClientId = session.serverAssignedId;
     m_remoteClientConnected = false;
     m_selectedClient = session.lastClientInfo;
     ClientInfo effectiveClient = session.lastClientInfo;
@@ -1895,7 +2096,7 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     if (m_backButton) m_backButton->show();
 
     // Update upload target
-    m_uploadManager->setTargetClientId(session.clientId);
+    m_uploadManager->setTargetClientId(session.serverAssignedId);
 
     // Show remote client info wrapper when viewing a client
     if (m_remoteClientInfoWrapper) {
@@ -2027,7 +2228,7 @@ void MainWindow::onUploadButtonClicked() {
     auto& upload = session->upload;
 
     if (m_uploadManager->isUploading()) {
-        if (m_activeUploadSessionIdentity == session->identityKey) {
+        if (m_activeUploadSessionIdentity == session->persistentClientId) {
             m_uploadManager->requestCancel();
             TOAST_WARNING("Upload cancelled");
         } else {
@@ -2036,12 +2237,13 @@ void MainWindow::onUploadButtonClicked() {
         return;
     }
 
-    const QString targetClientId = session->clientId;
+    const QString targetClientId = session->serverAssignedId;
     if (targetClientId.isEmpty()) {
         TOAST_ERROR("No remote client selected for upload");
         return;
     }
     m_uploadManager->setTargetClientId(targetClientId);
+    m_uploadManager->setActiveIdeaId(session->ideaId);
 
     const QString clientLabel = session->lastClientInfo.getDisplayText().isEmpty()
         ? targetClientId
@@ -2073,6 +2275,7 @@ void MainWindow::onUploadButtonClicked() {
     QVector<UploadFileInfo> files;
     QList<ResizableMediaBase*> mediaItemsToRemove;
     QSet<QString> processedFileIds;
+    QSet<QString> currentFileIds;
 
     if (canvas->scene()) {
         const QList<QGraphicsItem*> allItems = canvas->scene()->items();
@@ -2094,6 +2297,9 @@ void MainWindow::onUploadButtonClicked() {
                 qWarning() << "MainWindow: Media item has no fileId, skipping:" << media->mediaId();
                 continue;
             }
+
+            currentFileIds.insert(fileId);
+            FileManager::instance().associateFileWithIdea(fileId, session->ideaId);
 
             const bool alreadyOnTarget = FileManager::instance().isFileUploadedToClient(fileId, targetClientId);
             if (!processedFileIds.contains(fileId) && !alreadyOnTarget) {
@@ -2131,6 +2337,8 @@ void MainWindow::onUploadButtonClicked() {
         TOAST_WARNING(QString("%1 media item(s) removed - source files not found").arg(mediaItemsToRemove.size()));
     }
 
+    reconcileRemoteFilesForSession(*session, currentFileIds);
+
     if (files.isEmpty()) {
         if (hasRemoteFiles) {
             bool promotedAny = false;
@@ -2155,8 +2363,8 @@ void MainWindow::onUploadButtonClicked() {
             }
 
             if (sessionHasRemote) {
-                qDebug() << "Requesting remote removal for" << targetClientId << "(session" << session->identityKey << ")";
-                m_uploadManager->setActiveSessionIdentity(session->identityKey);
+                qDebug() << "Requesting remote removal for" << targetClientId << "(session" << session->persistentClientId << ")";
+                m_uploadManager->setActiveSessionIdentity(session->persistentClientId);
                 m_uploadManager->requestRemoval(targetClientId);
                 TOAST_INFO(QString("Requesting remote removal from %1…").arg(clientLabel));
                 return;
@@ -2238,7 +2446,7 @@ void MainWindow::onUploadButtonClicked() {
 
             if (!session->upload.receivingFilesToastShown && !filePercents.isEmpty()) {
                 const QString label = session->lastClientInfo.getDisplayText().isEmpty()
-                    ? session->clientId
+                    ? session->serverAssignedId
                     : session->lastClientInfo.getDisplayText();
                 TOAST_INFO(QString("Remote client %1 is receiving files...").arg(label));
                 session->upload.receivingFilesToastShown = true;
@@ -2262,10 +2470,11 @@ void MainWindow::onUploadButtonClicked() {
         connect(m_uploadManager, &UploadManager::uploadFinished, this, [this]() {
             if (CanvasSession* session = sessionForActiveUpload()) {
                 const QString label = session->lastClientInfo.getDisplayText().isEmpty()
-                    ? session->clientId
+                    ? session->serverAssignedId
                     : session->lastClientInfo.getDisplayText();
                 TOAST_SUCCESS(QString("Upload completed successfully to %1").arg(label));
                 session->upload.remoteFilesPresent = true;
+                session->knownRemoteFileIds.unite(session->expectedIdeaFileIds);
                 clearUploadTracking(*session);
             } else {
                 TOAST_SUCCESS("Upload completed successfully");
@@ -2295,13 +2504,13 @@ void MainWindow::onUploadButtonClicked() {
             if (!session) {
                 const QString lastClientId = m_uploadManager->lastRemovalClientId();
                 if (!lastClientId.isEmpty()) {
-                    session = findCanvasSessionByClientId(lastClientId);
+                    session = findCanvasSessionByServerClientId(lastClientId);
                 }
             }
 
             if (session) {
                 const QString label = session->lastClientInfo.getDisplayText().isEmpty()
-                    ? session->clientId
+                    ? session->serverAssignedId
                     : session->lastClientInfo.getDisplayText();
                 TOAST_INFO(QString("All files removed from %1").arg(label));
 
@@ -2325,22 +2534,23 @@ void MainWindow::onUploadButtonClicked() {
             }
         });
         m_uploadSignalsConnected = true;
+                rotateSessionIdea(*session);
     }
 
     TOAST_INFO(QString("Starting upload of %1 file(s) to %2...").arg(files.size()).arg(clientLabel));
 
     upload.remoteFilesPresent = false;
-    m_activeUploadSessionIdentity = session->identityKey;
-    m_uploadManager->setActiveSessionIdentity(session->identityKey);
+    m_activeUploadSessionIdentity = session->persistentClientId;
+    m_uploadManager->setActiveSessionIdentity(session->persistentClientId);
 
     m_uploadManager->toggleUpload(files);
 
     if (m_uploadManager->isUploading()) {
         upload.activeUploadId = m_uploadManager->currentUploadId();
         if (!upload.activeUploadId.isEmpty()) {
-            m_uploadSessionByUploadId.insert(upload.activeUploadId, session->identityKey);
+            m_uploadSessionByUploadId.insert(upload.activeUploadId, session->persistentClientId);
         }
-    } else if (m_activeUploadSessionIdentity == session->identityKey) {
+    } else if (m_activeUploadSessionIdentity == session->persistentClientId) {
         m_activeUploadSessionIdentity.clear();
         m_uploadManager->setActiveSessionIdentity(QString());
     }
@@ -2356,7 +2566,7 @@ void MainWindow::onClientItemClicked(QListWidgetItem* item) {
     if (index >=0 && index < m_availableClients.size()) {
         ClientInfo client = m_availableClients[index];
         CanvasSession& session = ensureCanvasSession(client);
-        switchToCanvasSession(session.identityKey);
+        switchToCanvasSession(session.persistentClientId);
         m_selectedClient = session.lastClientInfo;
         showScreenView(session.lastClientInfo);
         // ScreenNavigationManager will request screens; no need to duplicate here
@@ -2375,12 +2585,12 @@ void MainWindow::onOngoingSceneItemClicked(QListWidgetItem* item) {
         session = findCanvasSession(identity);
     }
     if (!session && !clientId.isEmpty()) {
-        session = findCanvasSessionByClientId(clientId);
+        session = findCanvasSessionByServerClientId(clientId);
     }
 
     if (!session) return;
 
-    switchToCanvasSession(session->identityKey);
+    switchToCanvasSession(session->persistentClientId);
     m_selectedClient = session->lastClientInfo;
     showScreenView(session->lastClientInfo);
 }
@@ -3331,8 +3541,8 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
     if (!m_activeSessionIdentity.isEmpty()) {
         if (CanvasSession* activeSession = findCanvasSession(m_activeSessionIdentity)) {
             m_selectedClient = activeSession->lastClientInfo;
-            if (activeSession->canvas && !activeSession->clientId.isEmpty()) {
-                activeSession->canvas->setRemoteSceneTarget(activeSession->clientId, activeSession->lastClientInfo.getMachineName());
+            if (activeSession->canvas && !activeSession->serverAssignedId.isEmpty()) {
+                activeSession->canvas->setRemoteSceneTarget(activeSession->serverAssignedId, activeSession->lastClientInfo.getMachineName());
             }
         }
     }
@@ -3358,7 +3568,7 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
     if (m_navigationManager && m_navigationManager->isOnScreenView() && !m_activeSessionIdentity.isEmpty()) {
         CanvasSession* activeSession = findCanvasSession(m_activeSessionIdentity);
         if (activeSession) {
-            const QString selId = activeSession->clientId;
+            const QString selId = activeSession->serverAssignedId;
             const QString selName = activeSession->lastClientInfo.getMachineName();
             const QString selPlatform = activeSession->lastClientInfo.getPlatform();
 
@@ -3379,19 +3589,19 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
             }
 
             if (byId.has_value()) {
-                activeSession->clientId = byId->getId();
+                activeSession->serverAssignedId = byId->getId();
                 activeSession->lastClientInfo = byId.value();
-                activeSession->lastClientInfo.setIdentityKey(m_activeSessionIdentity);
+                activeSession->lastClientInfo.setClientId(m_activeSessionIdentity);
                 activeSession->remoteContentClearedOnDisconnect = false;
                 m_selectedClient = activeSession->lastClientInfo;
-                if (activeSession->canvas && !activeSession->clientId.isEmpty()) {
-                    activeSession->canvas->setRemoteSceneTarget(activeSession->clientId, selName);
+                if (activeSession->canvas && !activeSession->serverAssignedId.isEmpty()) {
+                    activeSession->canvas->setRemoteSceneTarget(activeSession->serverAssignedId, selName);
                 }
-                if (m_uploadManager) m_uploadManager->setTargetClientId(activeSession->clientId);
-                const bool isActiveSelection = (activeSession->identityKey == m_activeSessionIdentity);
+                if (m_uploadManager) m_uploadManager->setTargetClientId(activeSession->serverAssignedId);
+                const bool isActiveSelection = (activeSession->persistentClientId == m_activeSessionIdentity);
                 if (isActiveSelection) {
-                    if (m_activeRemoteClientId != activeSession->clientId) {
-                        m_activeRemoteClientId = activeSession->clientId;
+                    if (m_activeRemoteClientId != activeSession->serverAssignedId) {
+                        m_activeRemoteClientId = activeSession->serverAssignedId;
                         m_remoteClientConnected = false;
                     }
                     if (!m_remoteClientConnected) {
@@ -3403,11 +3613,11 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
                         }
                         if (m_webSocketClient && m_webSocketClient->isConnected()) {
                             m_canvasRevealedForCurrentClient = false;
-                            m_webSocketClient->requestScreens(activeSession->clientId);
+                            m_webSocketClient->requestScreens(activeSession->serverAssignedId);
                             if (m_watchManager) {
-                                if (m_watchManager->watchedClientId() != activeSession->clientId) {
+                                if (m_watchManager->watchedClientId() != activeSession->serverAssignedId) {
                                     m_watchManager->unwatchIfAny();
-                                    m_watchManager->toggleWatch(activeSession->clientId);
+                                    m_watchManager->toggleWatch(activeSession->serverAssignedId);
                                 }
                             }
                         }
@@ -3416,23 +3626,23 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
             } else {
                 auto byName = findByNamePlatform(selName, selPlatform);
                 if (byName.has_value()) {
-                    activeSession->clientId = byName->getId();
+                    activeSession->serverAssignedId = byName->getId();
                     activeSession->lastClientInfo = byName.value();
-                    activeSession->lastClientInfo.setIdentityKey(m_activeSessionIdentity);
+                    activeSession->lastClientInfo.setClientId(m_activeSessionIdentity);
                     activeSession->remoteContentClearedOnDisconnect = false;
                     m_selectedClient = activeSession->lastClientInfo;
-                    if (activeSession->canvas && !activeSession->clientId.isEmpty()) {
-                        activeSession->canvas->setRemoteSceneTarget(activeSession->clientId, selName);
+                    if (activeSession->canvas && !activeSession->serverAssignedId.isEmpty()) {
+                        activeSession->canvas->setRemoteSceneTarget(activeSession->serverAssignedId, selName);
                     }
-                    if (m_uploadManager) m_uploadManager->setTargetClientId(activeSession->clientId);
+                    if (m_uploadManager) m_uploadManager->setTargetClientId(activeSession->serverAssignedId);
                     if (m_navigationManager) {
                         m_navigationManager->refreshActiveClientPreservingCanvas(activeSession->lastClientInfo);
                     }
                     updateClientNameDisplay(activeSession->lastClientInfo);
-                    const bool isActiveSelection = (activeSession->identityKey == m_activeSessionIdentity);
+                    const bool isActiveSelection = (activeSession->persistentClientId == m_activeSessionIdentity);
                     if (isActiveSelection) {
-                        if (m_activeRemoteClientId != activeSession->clientId) {
-                            m_activeRemoteClientId = activeSession->clientId;
+                        if (m_activeRemoteClientId != activeSession->serverAssignedId) {
+                            m_activeRemoteClientId = activeSession->serverAssignedId;
                             m_remoteClientConnected = false;
                         }
                         if (!m_remoteClientConnected) {
@@ -3444,11 +3654,11 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
                             }
                             if (m_webSocketClient && m_webSocketClient->isConnected()) {
                                 m_canvasRevealedForCurrentClient = false;
-                                m_webSocketClient->requestScreens(activeSession->clientId);
+                                m_webSocketClient->requestScreens(activeSession->serverAssignedId);
                                 if (m_watchManager) {
-                                    if (m_watchManager->watchedClientId() != activeSession->clientId) {
+                                    if (m_watchManager->watchedClientId() != activeSession->serverAssignedId) {
                                         m_watchManager->unwatchIfAny();
-                                        m_watchManager->toggleWatch(activeSession->clientId);
+                                        m_watchManager->toggleWatch(activeSession->serverAssignedId);
                                     }
                                 }
                             }
@@ -3568,21 +3778,23 @@ void MainWindow::syncRegistration() {
 }
 
 void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
-    QString identity = !clientInfo.identityKey().isEmpty()
-        ? clientInfo.identityKey()
-        : makeIdentityKey(clientInfo.getMachineName(), clientInfo.getPlatform());
+    QString persistentId = clientInfo.clientId();
+    if (persistentId.isEmpty()) {
+        qWarning() << "MainWindow::onScreensInfoReceived: client has no persistentClientId";
+        return;
+    }
 
-    CanvasSession* session = findCanvasSession(identity);
+    CanvasSession* session = findCanvasSession(persistentId);
     if (!session && !clientInfo.getId().isEmpty()) {
-        session = findCanvasSessionByClientId(clientInfo.getId());
+        session = findCanvasSessionByServerClientId(clientInfo.getId());
     }
 
     if (!session) {
         session = &ensureCanvasSession(clientInfo);
     } else {
-        session->clientId = clientInfo.getId();
+        session->serverAssignedId = clientInfo.getId();
         session->lastClientInfo = clientInfo;
-        session->lastClientInfo.setIdentityKey(identity);
+        session->lastClientInfo.setClientId(persistentId);
         session->lastClientInfo.setFromMemory(true);
         session->lastClientInfo.setOnline(true);
     }
@@ -3602,13 +3814,13 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
     const bool hasScreens = !screens.isEmpty();
 
     if (session->canvas) {
-        if (!session->clientId.isEmpty()) {
-            session->canvas->setRemoteSceneTarget(session->clientId, session->lastClientInfo.getMachineName());
+        if (!session->serverAssignedId.isEmpty()) {
+            session->canvas->setRemoteSceneTarget(session->serverAssignedId, session->lastClientInfo.getMachineName());
         }
         session->canvas->setScreens(screens);
     }
 
-    const bool isActiveSession = (session->identityKey == m_activeSessionIdentity);
+    const bool isActiveSession = (session->persistentClientId == m_activeSessionIdentity);
     if (isActiveSession) {
         m_screenCanvas = session->canvas;
         m_selectedClient = session->lastClientInfo;

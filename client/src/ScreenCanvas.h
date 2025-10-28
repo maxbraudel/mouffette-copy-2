@@ -77,6 +77,8 @@ public:
     bool isHostSceneActive() const { return m_hostSceneActive; }
     // Serialize current canvas state (screens + media) for remote scene start
     QJsonObject serializeSceneState() const;
+    void setActiveIdeaId(const QString& ideaId);
+    QString activeIdeaId() const { return m_activeIdeaId; }
     // Remote scene integration setters
     void setWebSocketClient(class WebSocketClient* client);
     void setUploadManager(class UploadManager* manager);
@@ -263,6 +265,7 @@ private:
     QColor m_remoteCursorBorder = QColor(0,0,0,230);
     qreal m_remoteCursorBorderWidth = 2;
     bool m_remoteCursorFixedSize = false; // when false, cursor scales with zoom
+    QString m_activeIdeaId;
     // Global initial media scale: set to 1.0 for 1:1 pixel parity between screens and imported media
     double m_scaleFactor = 1.0;
     int m_mediaHandleSelectionSizePx = 30;

@@ -118,8 +118,9 @@ protected:
 
 private:
     struct CanvasSession {
-        QString identityKey;
-        QString clientId; // last known server-assigned id (may be empty if offline)
+        QString persistentClientId; // stable client ID persisted across sessions
+        QString serverAssignedId;   // temporary server-assigned id (legacy, will be phased out)
+        QString ideaId;
         ScreenCanvas* canvas = nullptr;
         QPushButton* uploadButton = nullptr;
         bool uploadButtonInOverlay = false;
@@ -127,6 +128,8 @@ private:
         ClientInfo lastClientInfo;
         bool connectionsInitialized = false;
         bool remoteContentClearedOnDisconnect = false;
+        QSet<QString> expectedIdeaFileIds; // latest scene files present on canvas
+        QSet<QString> knownRemoteFileIds;   // files we believe reside on the remote for current idea
         struct UploadTracking {
             QSet<QString> mediaIdsBeingUploaded;
             QHash<QString, QString> mediaIdByFileId;
@@ -185,16 +188,23 @@ private:
     // Manage presence of the remote status (and its leading separator) in the top bar layout
     void removeRemoteStatusFromLayout();
     void addRemoteStatusToLayout();
-    QString makeIdentityKey(const QString& machineName, const QString& platform) const;
     CanvasSession& ensureCanvasSession(const ClientInfo& client);
-    CanvasSession* findCanvasSession(const QString& identityKey);
-    const CanvasSession* findCanvasSession(const QString& identityKey) const;
-    CanvasSession* findCanvasSessionByClientId(const QString& clientId);
-    const CanvasSession* findCanvasSessionByClientId(const QString& clientId) const;
+    CanvasSession* findCanvasSession(const QString& persistentClientId);
+    const CanvasSession* findCanvasSession(const QString& persistentClientId) const;
+    CanvasSession* findCanvasSessionByServerClientId(const QString& serverClientId);
+    const CanvasSession* findCanvasSessionByServerClientId(const QString& serverClientId) const;
+    CanvasSession* findCanvasSessionByIdeaId(const QString& ideaId);
     void configureCanvasSession(CanvasSession& session);
-    void switchToCanvasSession(const QString& identityKey);
+    void switchToCanvasSession(const QString& persistentClientId);
     void updateUploadButtonForSession(CanvasSession& session);
+    
+    // PHASE 2: State synchronization after reconnection
+    void handleStateSyncFromServer(const QJsonObject& message);
+
     void unloadUploadsForSession(CanvasSession& session, bool attemptRemote);
+    QString createIdeaId() const;
+    void rotateSessionIdea(CanvasSession& session);
+    void reconcileRemoteFilesForSession(CanvasSession& session, const QSet<QString>& currentFileIds);
     QList<ClientInfo> buildDisplayClientList(const QList<ClientInfo>& connectedClients);
     void markAllSessionsOffline();
     ScreenCanvas* canvasForClientId(const QString& clientId) const;

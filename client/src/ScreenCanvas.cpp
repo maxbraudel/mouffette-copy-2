@@ -344,6 +344,9 @@ ScreenCanvas::~ScreenCanvas() {
 
 QJsonObject ScreenCanvas::serializeSceneState() const {
     QJsonObject root;
+    if (!m_activeIdeaId.isEmpty()) {
+        root["ideaId"] = m_activeIdeaId;
+    }
     // Screens
     QJsonArray screensArr;
     for (const ScreenInfo& si : m_screens) {
@@ -467,6 +470,13 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
     }
     root["media"] = mediaArr;
     return root;
+}
+
+void ScreenCanvas::setActiveIdeaId(const QString& ideaId) {
+    if (m_activeIdeaId == ideaId) {
+        return;
+    }
+    m_activeIdeaId = ideaId;
 }
 
 void ScreenCanvas::maybeRefreshInfoOverlayOnSceneChanged() {

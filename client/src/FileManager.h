@@ -66,6 +66,14 @@ public:
     void markMediaUploadedToClient(const QString& mediaId, const QString& clientId);
     bool isMediaUploadedToClient(const QString& mediaId, const QString& clientId) const;
     void unmarkMediaUploadedToClient(const QString& mediaId, const QString& clientId);
+    // Associate/de-associate files with logical idea IDs (scenes/projects)
+    void associateFileWithIdea(const QString& fileId, const QString& ideaId);
+    void dissociateFileFromIdea(const QString& fileId, const QString& ideaId);
+    QSet<QString> getIdeaIdsForFile(const QString& fileId) const;
+    QSet<QString> getFileIdsForIdea(const QString& ideaId) const;
+    void replaceIdeaFileSet(const QString& ideaId, const QSet<QString>& fileIds);
+    void removeIdeaAssociations(const QString& ideaId);
+
     // Clear all uploaded markers for a given client across all files and media
     void unmarkAllFilesForClient(const QString& clientId);
     void unmarkAllMediaForClient(const QString& clientId);
@@ -75,7 +83,7 @@ public:
     void removeReceivedFileMappingsUnderPathPrefix(const QString& pathPrefix);
     
     // Set callback for when file should be deleted from remote clients
-    static void setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds)> cb);
+    static void setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds)> cb);
 
 private:
     FileManager() = default;
@@ -93,11 +101,12 @@ private:
     QHash<QString, QList<QString>> m_fileIdToMediaIds; // fileId -> [mediaId1, mediaId2, ...]
     QHash<QString, QString> m_mediaIdToFileId;     // mediaId -> fileId
     QHash<QString, QList<QString>> m_fileIdToClients; // fileId -> [clientId1, clientId2, ...]
-    QHash<QString, QList<QString>> m_mediaIdToClients; // mediaId -> [clientId1, clientId2, ...]
+    QHash<QString, QSet<QString>> m_fileIdToIdeaIds; // fileId -> {ideaId1, ...}
+    QHash<QString, QSet<QString>> m_ideaIdToFileIds; // ideaId -> {fileId1, ...}
     QHash<QString, FileMeta> m_fileIdMeta;         // fileId -> size/mtime captured at id creation
     QHash<QString, QSharedPointer<QByteArray>> m_fileMemoryCache; // fileId -> in-memory bytes
     
-    static std::function<void(const QString& fileId, const QList<QString>& clientIds)> s_fileRemovalNotifier;
+    static std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds)> s_fileRemovalNotifier;
 };
 
 #endif // FILEMANAGER_H

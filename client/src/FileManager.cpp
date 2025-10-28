@@ -3,11 +3,12 @@
 #include <QFileInfo>
 #include <QCryptographicHash>
 #include <QDebug>
-#include <QSet>
 #include <QIODevice>
+#include <QSet>
+#include <QByteArrayView>
 
 // Static member definition
-std::function<void(const QString& fileId, const QList<QString>& clientIds)> FileManager::s_fileRemovalNotifier;
+std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds)> FileManager::s_fileRemovalNotifier;
 
 FileManager& FileManager::instance()
 {
@@ -137,9 +138,10 @@ void FileManager::removeFileIfUnused(const QString& fileId)
 
     const QString filePath = m_fileIdToPath.value(fileId);
     const QList<QString> clientsWithFile = m_fileIdToClients.value(fileId);
+    const QList<QString> ideaList = m_fileIdToIdeaIds.value(fileId).values();
 
-    if (!clientsWithFile.isEmpty() && s_fileRemovalNotifier) {
-        s_fileRemovalNotifier(fileId, clientsWithFile);
+    if (s_fileRemovalNotifier && (!clientsWithFile.isEmpty() || !ideaList.isEmpty())) {
+        s_fileRemovalNotifier(fileId, clientsWithFile, ideaList);
     }
 
     // Clean up local tracking data
@@ -149,6 +151,16 @@ void FileManager::removeFileIfUnused(const QString& fileId)
     m_fileIdToMediaIds.remove(fileId);
     m_fileIdToClients.remove(fileId);
     m_fileIdMeta.remove(fileId);
+    if (m_fileIdToIdeaIds.contains(fileId)) {
+        const QSet<QString> ideas = m_fileIdToIdeaIds.take(fileId);
+        for (const QString& ideaId : ideas) {
+            QSet<QString>& files = m_ideaIdToFileIds[ideaId];
+            files.remove(fileId);
+            if (files.isEmpty()) {
+                m_ideaIdToFileIds.remove(ideaId);
+            }
+        }
+    }
 }
 
 void FileManager::registerReceivedFilePath(const QString& fileId, const QString& absolutePath) {
@@ -171,6 +183,16 @@ void FileManager::removeReceivedFileMapping(const QString& fileId) {
     m_fileIdToPath.remove(fileId);
     m_fileIdMeta.remove(fileId);
     releaseFileMemory(fileId);
+    if (m_fileIdToIdeaIds.contains(fileId)) {
+        const QSet<QString> ideas = m_fileIdToIdeaIds.take(fileId);
+        for (const QString& ideaId : ideas) {
+            QSet<QString>& files = m_ideaIdToFileIds[ideaId];
+            files.remove(fileId);
+            if (files.isEmpty()) {
+                m_ideaIdToFileIds.remove(ideaId);
+            }
+        }
+    }
     // Don't touch media associations here; they are sender-side concepts. Remote just needs path lookup cleared.
 }
 
@@ -216,19 +238,35 @@ void FileManager::releaseFileMemory(const QString& fileId) {
 
 QString FileManager::generateFileId(const QString& filePath)
 {
-    // Use file path hash + some uniqueness to ensure no collisions
     QCryptographicHash hash(QCryptographicHash::Sha256);
-    hash.addData(filePath.toUtf8());
-    
-    // Add file size and modification time for better uniqueness
-    QFileInfo info(filePath);
-    if (info.exists()) {
-        hash.addData(QString::number(info.size()).toUtf8());
-        hash.addData(QString::number(info.lastModified().toSecsSinceEpoch()).toUtf8());
+    QFile file(filePath);
+    if (file.open(QIODevice::ReadOnly)) {
+        constexpr qint64 kChunkSize = 1 << 16; // 64 KiB
+        QByteArray buffer;
+        buffer.resize(static_cast<int>(kChunkSize));
+        while (true) {
+            const qint64 bytesRead = file.read(buffer.data(), kChunkSize);
+            if (bytesRead <= 0) break;
+            hash.addData(QByteArrayView(buffer.constData(), static_cast<qsizetype>(bytesRead)));
+        }
+        file.close();
+    } else {
+        // Fallback to metadata-based hash if file cannot be opened (should be rare)
+        hash.addData(filePath.toUtf8());
+        QFileInfo info(filePath);
+        if (info.exists()) {
+            hash.addData(QString::number(info.size()).toUtf8());
+            hash.addData(QString::number(info.lastModified().toSecsSinceEpoch()).toUtf8());
+        }
     }
-    
-    QString result = hash.result().toHex().left(16); // Use first 16 chars of hash
-    return result; // Remove "file_" prefix
+
+    const QByteArray digest = hash.result();
+    if (digest.isEmpty()) {
+        // As a final fallback, hash the path string itself
+        return QString::fromUtf8(QCryptographicHash::hash(filePath.toUtf8(), QCryptographicHash::Sha256).toHex().left(32));
+    }
+
+    return QString::fromUtf8(digest.toHex().left(32));
 }
 
 void FileManager::markFileUploadedToClient(const QString& fileId, const QString& clientId)
@@ -262,29 +300,31 @@ void FileManager::unmarkFileUploadedToClient(const QString& fileId, const QStrin
 
 void FileManager::markMediaUploadedToClient(const QString& mediaId, const QString& clientId)
 {
-    if (!m_mediaIdToClients.contains(mediaId)) {
-        m_mediaIdToClients[mediaId] = QList<QString>();
-    }
-    if (!m_mediaIdToClients[mediaId].contains(clientId)) {
-        m_mediaIdToClients[mediaId].append(clientId);
-        qDebug() << "FileManager: Marked media" << mediaId << "as uploaded to client" << clientId;
+    // Use fileId tracking instead of mediaId tracking
+    QString fileId = m_mediaIdToFileId.value(mediaId);
+    if (!fileId.isEmpty()) {
+        markFileUploadedToClient(fileId, clientId);
     }
 }
+
 bool FileManager::isMediaUploadedToClient(const QString& mediaId, const QString& clientId) const
 {
-    const QList<QString> clients = m_mediaIdToClients.value(mediaId);
-    return clients.contains(clientId);
+    // Use fileId tracking instead of mediaId tracking
+    QString fileId = m_mediaIdToFileId.value(mediaId);
+    if (fileId.isEmpty()) return false;
+    return isFileUploadedToClient(fileId, clientId);
 }
 
 void FileManager::unmarkMediaUploadedToClient(const QString& mediaId, const QString& clientId)
 {
-    if (!m_mediaIdToClients.contains(mediaId)) return;
-    QList<QString>& clients = m_mediaIdToClients[mediaId];
-    clients.removeAll(clientId);
-    qDebug() << "FileManager: Unmarked media" << mediaId << "from client" << clientId;
+    // Use fileId tracking instead of mediaId tracking
+    QString fileId = m_mediaIdToFileId.value(mediaId);
+    if (!fileId.isEmpty()) {
+        unmarkFileUploadedToClient(fileId, clientId);
+    }
 }
 
-void FileManager::setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds)> cb)
+void FileManager::setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds)> cb)
 {
     s_fileRemovalNotifier = std::move(cb);
 }
@@ -305,15 +345,8 @@ void FileManager::unmarkAllFilesForClient(const QString& clientId)
 
 void FileManager::unmarkAllMediaForClient(const QString& clientId)
 {
-    if (clientId.isEmpty()) return;
-    const QList<QString> mediaIds = m_mediaIdToClients.keys();
-    for (const QString& mid : mediaIds) {
-        QList<QString>& clients = m_mediaIdToClients[mid];
-        clients.removeAll(clientId);
-        if (clients.isEmpty()) {
-            // keep entry; optional cleanup
-        }
-    }
+    // Redirect to file-based unmark (mediaId tracking removed)
+    unmarkAllFilesForClient(clientId);
 }
 
 void FileManager::unmarkAllForClient(const QString& clientId)
@@ -347,14 +380,99 @@ void FileManager::removeReceivedFileMappingsUnderPathPrefix(const QString& pathP
         m_fileIdToClients.remove(fileId);
         m_fileIdMeta.remove(fileId);
         releaseFileMemory(fileId);
+        if (m_fileIdToIdeaIds.contains(fileId)) {
+            const QSet<QString> ideas = m_fileIdToIdeaIds.take(fileId);
+            for (const QString& ideaId : ideas) {
+                QSet<QString>& files = m_ideaIdToFileIds[ideaId];
+                files.remove(fileId);
+                if (files.isEmpty()) {
+                    m_ideaIdToFileIds.remove(ideaId);
+                }
+            }
+        }
     }
 
     for (auto it = m_mediaIdToFileId.begin(); it != m_mediaIdToFileId.end();) {
         if (removalSet.contains(it.value())) {
-            m_mediaIdToClients.remove(it.key());
             it = m_mediaIdToFileId.erase(it);
         } else {
             ++it;
+        }
+    }
+}
+
+void FileManager::associateFileWithIdea(const QString& fileId, const QString& ideaId)
+{
+    if (fileId.isEmpty() || ideaId.isEmpty()) return;
+    m_fileIdToIdeaIds[fileId].insert(ideaId);
+    m_ideaIdToFileIds[ideaId].insert(fileId);
+}
+
+void FileManager::dissociateFileFromIdea(const QString& fileId, const QString& ideaId)
+{
+    if (fileId.isEmpty() || ideaId.isEmpty()) return;
+    auto fileIt = m_fileIdToIdeaIds.find(fileId);
+    if (fileIt != m_fileIdToIdeaIds.end()) {
+        fileIt->remove(ideaId);
+        if (fileIt->isEmpty()) {
+            m_fileIdToIdeaIds.erase(fileIt);
+        }
+    }
+    auto ideaIt = m_ideaIdToFileIds.find(ideaId);
+    if (ideaIt != m_ideaIdToFileIds.end()) {
+        ideaIt->remove(fileId);
+        if (ideaIt->isEmpty()) {
+            m_ideaIdToFileIds.erase(ideaIt);
+        }
+    }
+}
+
+QSet<QString> FileManager::getIdeaIdsForFile(const QString& fileId) const
+{
+    return m_fileIdToIdeaIds.value(fileId);
+}
+
+QSet<QString> FileManager::getFileIdsForIdea(const QString& ideaId) const
+{
+    return m_ideaIdToFileIds.value(ideaId);
+}
+
+void FileManager::replaceIdeaFileSet(const QString& ideaId, const QSet<QString>& fileIds)
+{
+    if (ideaId.isEmpty()) return;
+
+    const QSet<QString> previous = m_ideaIdToFileIds.value(ideaId);
+    const QSet<QString> toRemove = previous - fileIds;
+
+    for (const QString& fid : toRemove) {
+        QSet<QString>& ideas = m_fileIdToIdeaIds[fid];
+        ideas.remove(ideaId);
+        if (ideas.isEmpty()) {
+            m_fileIdToIdeaIds.remove(fid);
+        }
+    }
+
+    QSet<QString>& dest = m_ideaIdToFileIds[ideaId];
+    dest = fileIds;
+    if (dest.isEmpty()) {
+        m_ideaIdToFileIds.remove(ideaId);
+    }
+
+    for (const QString& fid : fileIds) {
+        if (fid.isEmpty()) continue;
+        m_fileIdToIdeaIds[fid].insert(ideaId);
+    }
+}
+
+void FileManager::removeIdeaAssociations(const QString& ideaId)
+{
+    if (ideaId.isEmpty()) return;
+    const QSet<QString> files = m_ideaIdToFileIds.take(ideaId);
+    for (const QString& fid : files) {
+        QSet<QString>& ideas = m_fileIdToIdeaIds[fid];
+        ideas.remove(ideaId);
+        if (ideas.isEmpty()) {
+            m_fileIdToIdeaIds.remove(fid);
         }
     }
 }

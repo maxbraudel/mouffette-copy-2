@@ -5,6 +5,7 @@
 #include <QElapsedTimer>
 #include <QCoreApplication>
 #include <QThread>
+#include <QUuid>
 
 WebSocketClient::WebSocketClient(QObject *parent)
     : QObject(parent)
@@ -12,9 +13,12 @@ WebSocketClient::WebSocketClient(QObject *parent)
     , m_connectionStatus("Disconnected")
     , m_reconnectTimer(new QTimer(this))
     , m_reconnectAttempts(0)
+    , m_sessionId(QUuid::createUuid().toString(QUuid::WithoutBraces))
 {
     m_reconnectTimer->setSingleShot(true);
     connect(m_reconnectTimer, &QTimer::timeout, this, &WebSocketClient::attemptReconnect);
+    m_clientId = m_sessionId;
+    qDebug() << "WebSocketClient: Initialized sessionId" << m_sessionId;
 }
 
 void WebSocketClient::onUploadTextMessageReceived(const QString& message) {
@@ -241,6 +245,12 @@ void WebSocketClient::registerClient(const QString& machineName, const QString& 
     message["machineName"] = machineName;
     message["platform"] = platform;
     if (volumePercent >= 0) message["volumePercent"] = volumePercent;
+    message["sessionId"] = m_sessionId;
+    
+    // NEW: Send persistent client ID for stable identification across reconnections
+    if (!m_persistentClientId.isEmpty()) {
+        message["clientId"] = m_persistentClientId;
+    }
     
     if (!screens.isEmpty()) {
         QJsonArray screensArray;
@@ -252,7 +262,7 @@ void WebSocketClient::registerClient(const QString& machineName, const QString& 
     // Legacy systemUI field removed; per-screen uiZones now embedded in screens
     
     sendMessage(message);
-    qDebug() << "Registering client:" << machineName << "(" << platform << ")";
+    qDebug() << "Registering client:" << machineName << "(" << platform << ") with persistentId:" << m_persistentClientId;
 }
 
 void WebSocketClient::requestScreens(const QString& targetClientId) {
@@ -311,20 +321,35 @@ void WebSocketClient::sendCursorUpdate(int globalX, int globalY) {
     sendMessage(msg);
 }
 
-void WebSocketClient::sendUploadStart(const QString& targetClientId, const QJsonArray& filesManifest, const QString& uploadId) {
+void WebSocketClient::sendUploadStart(const QString& targetClientId, const QJsonArray& filesManifest, const QString& uploadId, const QString& ideaId) {
     if (!(isConnected() || isUploadChannelConnected())) return;
+    
+    // Phase 3: ideaId is MANDATORY
+    if (ideaId.isEmpty()) {
+        qWarning() << "WebSocketClient::sendUploadStart - ideaId is required (Phase 3), rejecting upload" << uploadId;
+        return;
+    }
+    
     QJsonObject msg;
     msg["type"] = "upload_start";
     msg["targetClientId"] = targetClientId;
     msg["uploadId"] = uploadId;
     msg["files"] = filesManifest;
+    msg["ideaId"] = ideaId; // now mandatory
     if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
     sendMessageUpload(msg);
 }
 
-void WebSocketClient::sendUploadChunk(const QString& targetClientId, const QString& uploadId, const QString& fileId, int chunkIndex, const QByteArray& dataBase64) {
+void WebSocketClient::sendUploadChunk(const QString& targetClientId, const QString& uploadId, const QString& fileId, int chunkIndex, const QByteArray& dataBase64, const QString& ideaId) {
     if (!(isConnected() || isUploadChannelConnected())) return;
     if (m_canceledUploads.contains(uploadId)) return; // drop silently
+    
+    // Phase 3: ideaId is MANDATORY
+    if (ideaId.isEmpty()) {
+        qWarning() << "WebSocketClient::sendUploadChunk - ideaId is required (Phase 3), dropping chunk" << uploadId << fileId << chunkIndex;
+        return;
+    }
+    
     QJsonObject msg;
     msg["type"] = "upload_chunk";
     msg["targetClientId"] = targetClientId;
@@ -338,49 +363,82 @@ void WebSocketClient::sendUploadChunk(const QString& targetClientId, const QStri
         payload = payload.toBase64();
     }
     msg["data"] = QString::fromUtf8(payload);
+    msg["ideaId"] = ideaId; // now mandatory
     if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
     sendMessageUpload(msg);
 }
 
-void WebSocketClient::sendUploadComplete(const QString& targetClientId, const QString& uploadId) {
+void WebSocketClient::sendUploadComplete(const QString& targetClientId, const QString& uploadId, const QString& ideaId) {
     if (!(isConnected() || isUploadChannelConnected())) return;
     if (m_canceledUploads.contains(uploadId)) return; // already canceled
+    
+    // Phase 3: ideaId is MANDATORY
+    if (ideaId.isEmpty()) {
+        qWarning() << "WebSocketClient::sendUploadComplete - ideaId is required (Phase 3), rejecting" << uploadId;
+        return;
+    }
+    
     QJsonObject msg;
     msg["type"] = "upload_complete";
     msg["targetClientId"] = targetClientId;
     msg["uploadId"] = uploadId;
+    msg["ideaId"] = ideaId; // now mandatory
     if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
     sendMessageUpload(msg);
 }
 
-void WebSocketClient::sendUploadAbort(const QString& targetClientId, const QString& uploadId, const QString& reason) {
+void WebSocketClient::sendUploadAbort(const QString& targetClientId, const QString& uploadId, const QString& reason, const QString& ideaId) {
     if (!(isConnected() || isUploadChannelConnected())) return;
     m_canceledUploads.insert(uploadId);
+    
+    // Phase 3: ideaId is MANDATORY
+    if (ideaId.isEmpty()) {
+        qWarning() << "WebSocketClient::sendUploadAbort - ideaId is required (Phase 3), rejecting" << uploadId;
+        return;
+    }
+    
     QJsonObject msg;
     msg["type"] = "upload_abort";
     msg["targetClientId"] = targetClientId;
     msg["uploadId"] = uploadId;
+    msg["ideaId"] = ideaId; // now mandatory
     if (!reason.isEmpty()) msg["reason"] = reason;
     if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
     sendMessageUpload(msg);
 }
 
-void WebSocketClient::sendRemoveAllFiles(const QString& targetClientId) {
+void WebSocketClient::sendRemoveAllFiles(const QString& targetClientId, const QString& ideaId) {
     if (!isConnected()) return;
+    
+    // Phase 3: ideaId is MANDATORY
+    if (ideaId.isEmpty()) {
+        qWarning() << "WebSocketClient::sendRemoveAllFiles - ideaId is required (Phase 3), rejecting";
+        return;
+    }
+    
     QJsonObject msg;
     msg["type"] = "remove_all_files";
     msg["targetClientId"] = targetClientId;
+    msg["ideaId"] = ideaId; // now mandatory
     sendMessage(msg);
 }
 
-void WebSocketClient::sendRemoveFile(const QString& targetClientId, const QString& fileId) {
+void WebSocketClient::sendRemoveFile(const QString& targetClientId, const QString& ideaId, const QString& fileId) {
     if (!isConnected()) return;
+    
+    // Phase 3: ideaId is MANDATORY
+    if (ideaId.isEmpty()) {
+        qWarning() << "WebSocketClient::sendRemoveFile - ideaId is required (Phase 3), rejecting fileId:" << fileId;
+        return;
+    }
+    
     QJsonObject msg;
     msg["type"] = "remove_file";
     msg["targetClientId"] = targetClientId;
     msg["fileId"] = fileId;
+    msg["ideaId"] = ideaId; // now mandatory
     if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
-    qDebug() << "Sending remove_file command for fileId:" << fileId << "to client:" << targetClientId;
+    qDebug() << "Sending remove_file command for fileId:" << fileId << "idea:" << ideaId << "to client:" << targetClientId;
     sendMessage(msg);
 }
 
@@ -560,16 +618,22 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
     }
     
     if (type == "welcome") {
-        m_clientId = message["clientId"].toString();
-        qDebug() << "Received client ID:" << m_clientId;
+        m_socketClientId = message["clientId"].toString();
+        qDebug() << "Received welcome with socket ID:" << m_socketClientId;
     }
     else if (type == "error") {
         const QString err = message.value("message").toString();
-        qWarning() << "Server error:" << err;
+        qWarning() << "❌ Server error:" << err;
+        // Emit signal so UI can show the error to user
+        emit connectionError(err);
     }
     else if (type == "registration_confirmed") {
         QJsonObject clientInfoObj = message["clientInfo"].toObject();
         ClientInfo clientInfo = ClientInfo::fromJson(clientInfoObj);
+        if (!clientInfo.getId().isEmpty()) {
+            m_clientId = clientInfo.getId();
+        }
+        qDebug() << "Registration confirmed for session" << m_clientId << "persistent" << clientInfo.clientId();
         emit registrationConfirmed(clientInfo);
     }
     else if (type == "client_list") {
@@ -658,6 +722,12 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
     else if (type == "remote_scene_launched") {
         const QString sender = message.value("senderClientId").toString();
         emit remoteSceneLaunchedReceived(sender);
+    }
+    else if (type == "state_sync") {
+        // PHASE 2: Handle server state synchronization after reconnection
+        qDebug() << "WebSocketClient: Received state_sync from server";
+        // Forward to MainWindow for processing
+        emit messageReceived(message);
     }
     else {
         // Forward unknown messages

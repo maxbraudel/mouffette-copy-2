@@ -47,8 +47,8 @@ public:
     void setFromMemory(bool fromMemory) { m_fromMemory = fromMemory; }
     bool isOnline() const { return m_isOnline; }
     void setOnline(bool online) { m_isOnline = online; }
-    QString identityKey() const { return m_identityKey; }
-    void setIdentityKey(const QString& key) { m_identityKey = key; }
+    QString clientId() const { return m_clientId; }
+    void setClientId(const QString& id) { m_clientId = id; }
     
     // Setters
     void setId(const QString& id) { m_id = id; }
@@ -75,7 +75,7 @@ private:
     int m_volumePercent = -1; // 0-100, -1 when unknown
     bool m_fromMemory = false;
     bool m_isOnline = true;
-    QString m_identityKey;
+    QString m_clientId;
 };
 
 #endif // CLIENTINFO_H

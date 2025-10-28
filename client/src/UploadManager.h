@@ -27,6 +27,7 @@ struct UploadFileInfo {
 struct IncomingUploadSession {
     QString senderId;
     QString uploadId;
+    QString ideaId;
     QString cacheDirPath;
     QHash<QString, QFile*> openFiles;          // fileId -> QFile*
     QHash<QString, qint64> expectedSizes;      // fileId -> total bytes
@@ -54,6 +55,7 @@ public:
     QString targetClientId() const { return m_targetClientId; }
     QString activeUploadTargetClientId() const { return m_uploadTargetClientId; }
     QString lastRemovalClientId() const { return m_lastRemovalClientId; }
+    void setActiveIdeaId(const QString& ideaId) { m_activeIdeaId = ideaId; }
     void setActiveSessionIdentity(const QString& identity) { m_activeSessionIdentity = identity; }
     QString activeSessionIdentity() const { return m_activeSessionIdentity; }
     void clearLastRemovalClientId() { m_lastRemovalClientId.clear(); }
@@ -104,7 +106,12 @@ private:
     void resetToInitial();
     void cleanupIncomingCacheForConnectionLoss();
     void finalizeLocalCancelState();
-    void cleanupIncomingSession(bool deleteDiskContents, bool notifySender, const QString& senderOverride = QString(), const QString& cacheDirOverride = QString(), const QString& uploadIdOverride = QString());
+    void cleanupIncomingSession(bool deleteDiskContents,
+                                bool notifySender,
+                                const QString& senderOverride = QString(),
+                                const QString& cacheDirOverride = QString(),
+                                const QString& uploadIdOverride = QString(),
+                                const QString& ideaOverride = QString());
     void resetProgressTracking();
     void updateLocalProgress(int percent, int filesCompleted);
     void updateRemoteProgress(int percent, int filesCompleted);
@@ -120,6 +127,7 @@ private:
     // Captured at startUpload to remain stable across the whole transfer
     QString m_uploadTargetClientId;
     QString m_activeSessionIdentity;
+    QString m_activeIdeaId;
 
     // Sender side state
     bool m_uploadActive = false;      // true after remote finished (acts as toggle to unload)

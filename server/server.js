@@ -4,11 +4,16 @@ const { v4: uuidv4 } = require('uuid');
 class MouffetteServer {
     constructor(port = 8080) {
         this.port = port;
-        this.clients = new Map(); // clientId -> client info
+        this.clients = new Map(); // sessionId -> client info
         this.wss = null;
-    // Watching relations: targetId -> Set of watcherIds, and watcherId -> targetId
-    this.watchersByTarget = new Map();
-    this.watchingByWatcher = new Map();
+        // Watching relations: targetId -> Set of watcherIds, and watcherId -> targetId
+        this.watchersByTarget = new Map();
+        this.watchingByWatcher = new Map();
+        
+        // PHASE 2: Server-side state tracking
+        this.uploads = new Map();        // uploadId -> { sender, target, ideaId, startTime, files: [fileIds] }
+        this.clientFiles = new Map();    // persistentClientId -> Map(ideaId -> Set(fileId))
+        this.sessionsByPersistent = new Map(); // persistentClientId -> Set(sessionId)
     }
 
     start() {
@@ -66,13 +71,16 @@ class MouffetteServer {
             const clientId = uuidv4();
             const clientInfo = {
                 id: clientId,
+                sessionId: clientId,
+                persistentId: null,
                 ws: ws,
                 machineName: null,
                 screens: [],
                 systemUI: [], // array of system UI element rects
                 volumePercent: -1,
                 status: 'connected',
-                connectedAt: new Date().toISOString()
+                connectedAt: new Date().toISOString(),
+                socketLabel: clientId
             };
             
             this.clients.set(clientId, clientInfo);
@@ -88,7 +96,8 @@ class MouffetteServer {
             ws.on('message', (data) => {
                 try {
                     const message = JSON.parse(data.toString());
-                    this.handleMessage(clientId, message);
+                    // Always route using the client's current ID (session reassignment can occur during register)
+                    this.handleMessage(clientInfo.id, message);
                 } catch (error) {
                     console.error('❌ Error parsing message:', error);
                     ws.send(JSON.stringify({
@@ -99,14 +108,18 @@ class MouffetteServer {
             });
             
             ws.on('close', () => {
-                console.log(`📱 Client disconnected: ${clientId}`);
+                if (clientInfo.replaced) {
+                    return;
+                }
+                const finalId = clientInfo.id;
+                console.log(`📱 Client disconnected: ${finalId}`);
                 // Clean up watching relationships
-                const targetId = this.watchingByWatcher.get(clientId);
+                const targetId = this.watchingByWatcher.get(finalId);
                 if (targetId) {
-                    this.watchingByWatcher.delete(clientId);
+                    this.watchingByWatcher.delete(finalId);
                     const set = this.watchersByTarget.get(targetId);
                     if (set) {
-                        set.delete(clientId);
+                        set.delete(finalId);
                         if (set.size === 0) {
                             this.watchersByTarget.delete(targetId);
                             // Notify target they are no longer watched
@@ -118,28 +131,35 @@ class MouffetteServer {
                     }
                 }
                 // Also remove as target from any watchers set
-                const watchers = this.watchersByTarget.get(clientId);
+                const watchers = this.watchersByTarget.get(finalId);
                 if (watchers) {
-                    this.watchersByTarget.delete(clientId);
+                    this.watchersByTarget.delete(finalId);
                     // Notify this (now targetless) client it's no longer watched
-                    const targetClient = this.clients.get(clientId);
+                    const targetClient = this.clients.get(finalId);
                     if (targetClient && targetClient.ws) {
                         targetClient.ws.send(JSON.stringify({ type: 'watch_status', watched: false }));
                     }
                 }
-                this.clients.delete(clientId);
+                if (clientInfo.persistentId) {
+                    this.unregisterSessionForPersistent(clientInfo.persistentId, clientInfo.sessionId || finalId);
+                }
+                this.clients.delete(finalId);
                 this.broadcastClientList();
             });
             
             ws.on('error', (error) => {
-                console.error(`❌ WebSocket error for client ${clientId}:`, error);
+                if (clientInfo.replaced) {
+                    return;
+                }
+                const finalId = clientInfo.id;
+                console.error(`❌ WebSocket error for client ${finalId}:`, error);
                 // Similar cleanup on error
-                const targetId = this.watchingByWatcher.get(clientId);
+                const targetId = this.watchingByWatcher.get(finalId);
                 if (targetId) {
-                    this.watchingByWatcher.delete(clientId);
+                    this.watchingByWatcher.delete(finalId);
                     const set = this.watchersByTarget.get(targetId);
                     if (set) {
-                        set.delete(clientId);
+                        set.delete(finalId);
                         if (set.size === 0) {
                             this.watchersByTarget.delete(targetId);
                             const targetClient = this.clients.get(targetId);
@@ -149,15 +169,18 @@ class MouffetteServer {
                         }
                     }
                 }
-                const watchers = this.watchersByTarget.get(clientId);
+                const watchers = this.watchersByTarget.get(finalId);
                 if (watchers) {
-                    this.watchersByTarget.delete(clientId);
-                    const targetClient = this.clients.get(clientId);
+                    this.watchersByTarget.delete(finalId);
+                    const targetClient = this.clients.get(finalId);
                     if (targetClient && targetClient.ws) {
                         targetClient.ws.send(JSON.stringify({ type: 'watch_status', watched: false }));
                     }
                 }
-                this.clients.delete(clientId);
+                if (clientInfo.persistentId) {
+                    this.unregisterSessionForPersistent(clientInfo.persistentId, clientInfo.sessionId || finalId);
+                }
+                this.clients.delete(finalId);
                 this.broadcastClientList();
             });
             
@@ -190,24 +213,24 @@ class MouffetteServer {
             case 'unwatch_screens':
                 this.handleUnwatchScreens(clientId, message);
                 break;
-            // Upload flow: pure relay between sender and target
+            // Upload flow: track state and relay
             case 'upload_start':
-                this.relayToTarget(clientId, message.targetClientId, message);
+                this.handleUploadStart(clientId, message);
                 break;
             case 'upload_chunk':
                 this.relayToTarget(clientId, message.targetClientId, message);
                 break;
             case 'upload_complete':
-                this.relayToTarget(clientId, message.targetClientId, message);
+                this.handleUploadComplete(clientId, message);
                 break;
             case 'upload_abort':
-                this.relayToTarget(clientId, message.targetClientId, message);
+                this.handleUploadAbort(clientId, message);
                 break;
             case 'remove_all_files':
-                this.relayToTarget(clientId, message.targetClientId, message);
+                this.handleRemoveAllFiles(clientId, message);
                 break;
             case 'remove_file':
-                this.relayToTarget(clientId, message.targetClientId, message);
+                this.handleRemoveFile(clientId, message);
                 break;
             // Progress/status notifications from target back to sender
             case 'upload_progress':
@@ -292,6 +315,56 @@ class MouffetteServer {
         }
     }
 
+    getPersistentId(clientId) {
+        const client = this.clients.get(clientId);
+        return client && client.persistentId ? client.persistentId : clientId;
+    }
+
+    registerSessionForPersistent(persistentId, sessionId) {
+        if (!persistentId || !sessionId) return;
+        let sessions = this.sessionsByPersistent.get(persistentId);
+        if (!sessions) {
+            sessions = new Set();
+            this.sessionsByPersistent.set(persistentId, sessions);
+        }
+        sessions.add(sessionId);
+    }
+
+    unregisterSessionForPersistent(persistentId, sessionId) {
+        if (!persistentId || !sessionId) return;
+        const sessions = this.sessionsByPersistent.get(persistentId);
+        if (!sessions) return;
+        sessions.delete(sessionId);
+        if (sessions.size === 0) {
+            this.sessionsByPersistent.delete(persistentId);
+        }
+    }
+
+    cleanupWatcherReferences(oldId, newId) {
+        if (!oldId || !newId || oldId === newId) return;
+        if (this.watchersByTarget.has(oldId)) {
+            const watchers = this.watchersByTarget.get(oldId);
+            this.watchersByTarget.delete(oldId);
+            if (this.watchersByTarget.has(newId)) {
+                const merged = this.watchersByTarget.get(newId);
+                watchers.forEach(watcher => merged.add(watcher));
+            } else {
+                this.watchersByTarget.set(newId, watchers);
+            }
+        }
+        for (const [targetId, watchers] of this.watchersByTarget.entries()) {
+            if (watchers.has(oldId)) {
+                watchers.delete(oldId);
+                watchers.add(newId);
+            }
+        }
+        if (this.watchingByWatcher.has(oldId)) {
+            const target = this.watchingByWatcher.get(oldId);
+            this.watchingByWatcher.delete(oldId);
+            this.watchingByWatcher.set(newId, target);
+        }
+    }
+
     handleRequestScreens(requesterId, message) {
         const targetId = message.targetClientId;
         const requester = this.clients.get(requesterId);
@@ -304,11 +377,21 @@ class MouffetteServer {
             }));
             return;
         }
+        if (!target.persistentId) {
+            console.warn(`⚠️ request_screens target ${targetId} missing persistentId`);
+            requester.ws.send(JSON.stringify({
+                type: 'error',
+                message: 'Target client missing persistent identity'
+            }));
+            return;
+        }
         // Reply with current known screens info for the target
         requester.ws.send(JSON.stringify({
             type: 'screens_info',
             clientInfo: {
                 id: target.id,
+                sessionId: target.sessionId || target.id,
+                persistentClientId: target.persistentId,
                 machineName: target.machineName,
                 platform: target.platform,
                 screens: target.screens,
@@ -321,12 +404,68 @@ class MouffetteServer {
     handleRegister(clientId, message) {
         const client = this.clients.get(clientId);
         if (!client) return;
-        
+    const requestedPersistentId = (typeof message.clientId === 'string') ? message.clientId.trim() : '';
+    const requestedSessionId = (typeof message.sessionId === 'string') ? message.sessionId.trim() : '';
+    const previousPersistentId = client.persistentId;
+    const persistentId = requestedPersistentId || previousPersistentId;
+    if (!persistentId) {
+        console.warn(`⚠️ register missing clientId for socket ${clientId} - machine: ${message.machineName || 'unknown'}`);
+        if (client.ws && client.ws.readyState === WebSocket.OPEN) {
+            client.ws.send(JSON.stringify({
+                type: 'error',
+                message: 'clientId is required for register'
+            }));
+        }
+        return;
+    }
+    const sessionId = requestedSessionId || client.sessionId || client.id;
+
+        client.socketLabel = client.socketLabel || clientId;
+
+        // Detect reconnection of the same logical session
+        const existingSession = this.clients.get(sessionId);
+        if (existingSession && existingSession !== client) {
+            console.log(`🔄 Client session reconnecting: ${persistentId} (session ${sessionId}, old socket: ${existingSession.socketLabel || existingSession.id})`);
+            client.machineName = existingSession.machineName;
+            client.platform = existingSession.platform;
+            client.screens = existingSession.screens;
+            client.systemUI = existingSession.systemUI || [];
+            client.volumePercent = existingSession.volumePercent;
+            client.status = existingSession.status;
+            client.connectedAt = existingSession.connectedAt;
+            client.persistentId = existingSession.persistentId || persistentId;
+            if (existingSession.persistentId) {
+                this.unregisterSessionForPersistent(existingSession.persistentId, sessionId);
+            }
+            this.clients.delete(existingSession.id);
+            existingSession.replaced = true;
+            existingSession.id = `${sessionId}::replaced::${Date.now()}`;
+            if (existingSession.ws && existingSession.ws.readyState === WebSocket.OPEN) {
+                existingSession.ws.close();
+            }
+        }
+
+        if (client.id !== sessionId) {
+            this.cleanupWatcherReferences(client.id, sessionId);
+            this.clients.delete(client.id);
+            client.id = sessionId;
+            client.sessionId = sessionId;
+            this.clients.set(sessionId, client);
+        } else {
+            client.sessionId = sessionId;
+        }
+
+        client.persistentId = persistentId;
+        if (previousPersistentId && previousPersistentId !== persistentId) {
+            this.unregisterSessionForPersistent(previousPersistentId, sessionId);
+        }
+        this.registerSessionForPersistent(persistentId, sessionId);
+
         // Only update fields that are explicitly provided to avoid clobbering identity on partial updates
         if (Object.prototype.hasOwnProperty.call(message, 'machineName')) {
-            client.machineName = message.machineName || `Client-${clientId.slice(0, 8)}`;
+            client.machineName = message.machineName || `Client-${client.id.slice(0, 8)}`;
         } else if (!client.machineName) {
-            client.machineName = `Client-${clientId.slice(0, 8)}`;
+            client.machineName = `Client-${client.id.slice(0, 8)}`;
         }
         if (Object.prototype.hasOwnProperty.call(message, 'screens')) {
             client.screens = message.screens || [];
@@ -343,25 +482,49 @@ class MouffetteServer {
             client.platform = 'unknown';
         }
         
-        console.log(`✅ Client registered: ${client.machineName} (${client.platform}) with ${client.screens.length} screen(s)`);
+    console.log(`✅ Client registered: ${client.machineName} (${client.platform}) with ${client.screens.length} screen(s) [session: ${client.sessionId}] [persistent: ${client.persistentId}]`);
         
-        // Send confirmation
+        // Send confirmation (use actual client.id which may have changed to persistent ID)
         client.ws.send(JSON.stringify({
             type: 'registration_confirmed',
             clientInfo: {
-                id: clientId,
+                id: client.id,  // Send the actual (possibly persistent) ID
                 machineName: client.machineName,
                 screens: client.screens,
                 platform: client.platform,
                 systemUI: client.systemUI || [],
-                volumePercent: client.volumePercent
+                volumePercent: client.volumePercent,
+                persistentClientId: client.persistentId
             }
         }));
+        
+        // PHASE 2: Send state sync if client has known files
+        const stateKey = client.persistentId;
+        if (this.clientFiles.has(stateKey)) {
+            const clientIdeas = this.clientFiles.get(stateKey);
+            const ideas = [];
+            for (const [ideaId, fileIds] of clientIdeas.entries()) {
+                if (fileIds.size > 0) {
+                    ideas.push({
+                        ideaId: ideaId,
+                        fileIds: Array.from(fileIds)
+                    });
+                }
+            }
+            
+            if (ideas.length > 0) {
+                console.log(`🔄 Sending state_sync to ${client.id}: ${ideas.length} idea(s), ${ideas.reduce((sum, i) => sum + i.fileIds.length, 0)} file(s)`);
+                client.ws.send(JSON.stringify({
+                    type: 'state_sync',
+                    ideas: ideas
+                }));
+            }
+        }
         
         // Broadcast updated client list
         this.broadcastClientList();
     // Notify watchers of this target with fresh screens
-    this.notifyWatchersOfTarget(clientId);
+    this.notifyWatchersOfTarget(client.id);  // Use actual client.id
     }
     
     sendClientList(clientId) {
@@ -369,9 +532,11 @@ class MouffetteServer {
         if (!client) return;
         
         const clientList = Array.from(this.clients.values())
-            .filter(c => c.id !== clientId && c.machineName) // Don't include self and only registered clients
+            .filter(c => c.id !== clientId && c.machineName && c.persistentId) // Don't include self and only registered clients with stable identity
             .map(c => ({
                 id: c.id,
+                sessionId: c.sessionId || c.id,
+                persistentClientId: c.persistentId,
                 machineName: c.machineName,
                 screens: c.screens,
                 platform: c.platform,
@@ -391,6 +556,137 @@ class MouffetteServer {
             if (client.machineName) { // Only send to registered clients
                 this.sendClientList(clientId);
             }
+        }
+    }
+    
+    // PHASE 2: Upload state tracking methods
+    handleUploadStart(senderId, message) {
+        const { targetClientId, uploadId, ideaId, files } = message;
+        
+        // Validation
+        if (!targetClientId || !uploadId || !ideaId) {
+            console.warn(`⚠️ upload_start missing required fields from ${senderId}`);
+            return this.sendError(senderId, 'Missing targetClientId, uploadId, or ideaId');
+        }
+        
+        const targetPersistentId = this.getPersistentId(targetClientId);
+        const senderPersistentId = this.getPersistentId(senderId);
+        // Track upload state
+        const fileIds = Array.isArray(files) ? files.map(f => f.fileId).filter(Boolean) : [];
+        this.uploads.set(uploadId, {
+            senderSession: senderId,
+            senderPersistent: senderPersistentId,
+            targetSession: targetClientId,
+            targetPersistent: targetPersistentId,
+            ideaId,
+            startTime: Date.now(),
+            files: fileIds
+        });
+        
+        console.log(`📤 Upload started: ${senderPersistentId}/${senderId} -> ${targetPersistentId}/${targetClientId} [${uploadId}] idea:${ideaId} files:${fileIds.length}`);
+        
+        // Relay to target
+        this.relayToTarget(senderId, targetClientId, message);
+    }
+    
+    handleUploadComplete(senderId, message) {
+        const { targetClientId, uploadId, ideaId } = message;
+        const upload = this.uploads.get(uploadId);
+        
+        if (!upload) {
+            console.warn(`⚠️ upload_complete for unknown uploadId: ${uploadId}`);
+            // Still relay (backward compatibility)
+            return this.relayToTarget(senderId, targetClientId, message);
+        }
+        if (!ideaId) {
+            console.warn(`⚠️ upload_complete missing ideaId for ${uploadId}`);
+            return this.sendError(senderId, 'Missing ideaId in upload_complete');
+        }
+        // Track files received by target
+        const effectiveTarget = upload.targetPersistent;
+        const effectiveIdea = upload.ideaId;
+        
+        if (!this.clientFiles.has(effectiveTarget)) {
+            this.clientFiles.set(effectiveTarget, new Map());
+        }
+        const targetIdeas = this.clientFiles.get(effectiveTarget);
+        if (!targetIdeas.has(effectiveIdea)) {
+            targetIdeas.set(effectiveIdea, new Set());
+        }
+        
+        const ideaFiles = targetIdeas.get(effectiveIdea);
+        upload.files.forEach(fileId => ideaFiles.add(fileId));
+        
+        const duration = ((Date.now() - upload.startTime) / 1000).toFixed(1);
+        console.log(`✅ Upload complete: ${uploadId} (${duration}s) - ${upload.files.length} files to ${effectiveTarget}:${effectiveIdea}`);
+        
+        // Cleanup upload tracking
+        this.uploads.delete(uploadId);
+        
+        // Relay to target
+        this.relayToTarget(senderId, targetClientId, message);
+    }
+    
+    handleUploadAbort(senderId, message) {
+        const { uploadId } = message;
+        if (uploadId && this.uploads.has(uploadId)) {
+            console.log(`❌ Upload aborted: ${uploadId}`);
+            this.uploads.delete(uploadId);
+        }
+        this.relayToTarget(senderId, message.targetClientId, message);
+    }
+    
+    handleRemoveAllFiles(senderId, message) {
+        const { targetClientId, ideaId } = message;
+        const targetPersistentId = this.getPersistentId(targetClientId);
+        if (!targetClientId || !ideaId) {
+            console.warn(`⚠️ remove_all_files missing required fields from ${senderId}`);
+            return this.sendError(senderId, 'Missing targetClientId or ideaId');
+        }
+
+        const targetFiles = this.clientFiles.get(targetPersistentId);
+        if (targetFiles && targetFiles.has(ideaId)) {
+            const count = targetFiles.get(ideaId).size;
+            targetFiles.delete(ideaId);
+            console.log(`🗑️  Removed ${count} files from ${targetPersistentId}:${ideaId}`);
+        }
+        
+        this.relayToTarget(senderId, targetClientId, message);
+    }
+    
+    handleRemoveFile(senderId, message) {
+        const { targetClientId, ideaId, fileId } = message;
+        
+        if (!targetClientId || !fileId || !ideaId) {
+            console.warn(`⚠️ remove_file missing required fields from ${senderId}`);
+            return this.sendError(senderId, 'Missing targetClientId, ideaId, or fileId');
+        }
+        
+        const targetPersistentId = this.getPersistentId(targetClientId);
+        const targetFiles = this.clientFiles.get(targetPersistentId);
+        if (targetFiles) {
+            const ideaFiles = targetFiles.get(ideaId);
+            if (ideaFiles && ideaFiles.has(fileId)) {
+                ideaFiles.delete(fileId);
+                console.log(`🗑️  Removed file ${fileId} from ${targetPersistentId}:${ideaId}`);
+                
+                // Cleanup empty idea sets
+                if (ideaFiles.size === 0) {
+                    targetFiles.delete(ideaId);
+                }
+            }
+        }
+        
+        this.relayToTarget(senderId, targetClientId, message);
+    }
+    
+    sendError(clientId, errorMessage) {
+        const client = this.clients.get(clientId);
+        if (client && client.ws) {
+            client.ws.send(JSON.stringify({
+                type: 'error',
+                message: errorMessage
+            }));
         }
     }
     
@@ -534,6 +830,8 @@ class MouffetteServer {
                 type: 'screens_info',
                 clientInfo: {
                     id: target.id,
+                    sessionId: target.sessionId || target.id,
+                    persistentClientId: target.persistentId || target.id,
                     machineName: target.machineName,
                     platform: target.platform,
                     screens: target.screens,

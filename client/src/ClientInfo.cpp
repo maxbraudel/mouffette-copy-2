@@ -85,6 +85,9 @@ ClientInfo ClientInfo::fromJson(const QJsonObject& json) {
     client.m_volumePercent = json.contains("volumePercent") ? json["volumePercent"].toInt(-1) : -1;
     client.m_fromMemory = false;
     client.m_isOnline = true;
+    if (json.contains("persistentClientId")) {
+        client.m_clientId = json.value("persistentClientId").toString();
+    }
     
     QJsonArray screensArray = json["screens"].toArray();
     for (const auto& screenValue : screensArray) {
