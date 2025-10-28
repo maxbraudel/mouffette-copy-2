@@ -103,9 +103,6 @@ public:
 private:
     FileManager();
     
-    // Generate unique file ID based on file path and content hash
-    QString generateFileId(const QString& filePath);
-    
     // Phase 4.2: Service references (initialized in constructor)
     LocalFileRepository* m_repository;
     RemoteFileTracker* m_tracker;

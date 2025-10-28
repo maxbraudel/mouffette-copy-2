@@ -2,13 +2,7 @@
 #include "LocalFileRepository.h"
 #include "RemoteFileTracker.h"
 #include "FileMemoryCache.h"
-#include <QFile>
-#include <QFileInfo>
-#include <QCryptographicHash>
 #include <QDebug>
-#include <QIODevice>
-#include <QSet>
-#include <QByteArrayView>
 
 // Phase 4.2: FileManager delegates to specialized services
 // - LocalFileRepository for fileId ↔ filePath
@@ -165,39 +159,6 @@ QSharedPointer<QByteArray> FileManager::getFileBytes(const QString& fileId, bool
 void FileManager::releaseFileMemory(const QString& fileId) {
     // Delegate to FileMemoryCache
     m_cache->releaseFileMemory(fileId);
-}
-
-QString FileManager::generateFileId(const QString& filePath)
-{
-    QCryptographicHash hash(QCryptographicHash::Sha256);
-    QFile file(filePath);
-    if (file.open(QIODevice::ReadOnly)) {
-        constexpr qint64 kChunkSize = 1 << 16; // 64 KiB
-        QByteArray buffer;
-        buffer.resize(static_cast<int>(kChunkSize));
-        while (true) {
-            const qint64 bytesRead = file.read(buffer.data(), kChunkSize);
-            if (bytesRead <= 0) break;
-            hash.addData(QByteArrayView(buffer.constData(), static_cast<qsizetype>(bytesRead)));
-        }
-        file.close();
-    } else {
-        // Fallback to metadata-based hash if file cannot be opened (should be rare)
-        hash.addData(filePath.toUtf8());
-        QFileInfo info(filePath);
-        if (info.exists()) {
-            hash.addData(QString::number(info.size()).toUtf8());
-            hash.addData(QString::number(info.lastModified().toSecsSinceEpoch()).toUtf8());
-        }
-    }
-
-    const QByteArray digest = hash.result();
-    if (digest.isEmpty()) {
-        // As a final fallback, hash the path string itself
-        return QString::fromUtf8(QCryptographicHash::hash(filePath.toUtf8(), QCryptographicHash::Sha256).toHex().left(32));
-    }
-
-    return QString::fromUtf8(digest.toHex().left(32));
 }
 
 void FileManager::markFileUploadedToClient(const QString& fileId, const QString& clientId)
