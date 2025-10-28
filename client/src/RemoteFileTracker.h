@@ -26,15 +26,21 @@ public:
     // Remote client tracking
     void markFileUploadedToClient(const QString& fileId, const QString& clientId);
     void unmarkFileUploadedToClient(const QString& fileId, const QString& clientId);
+    void unmarkAllFilesForClient(const QString& clientId);
     QList<QString> getClientsWithFile(const QString& fileId) const;
+    bool isFileUploadedToClient(const QString& fileId, const QString& clientId) const;
     bool isFileUploadedToAnyClient(const QString& fileId) const;
     
     // IdeaId association
     void associateFileWithIdea(const QString& fileId, const QString& ideaId);
     void dissociateFileFromIdea(const QString& fileId, const QString& ideaId);
-    QSet<QString> getFilesForIdea(const QString& ideaId) const;
-    QList<QString> getIdeasForFile(const QString& fileId) const;
+    QSet<QString> getFileIdsForIdea(const QString& ideaId) const;
+    QSet<QString> getIdeaIdsForFile(const QString& fileId) const;
     void replaceIdeaFileSet(const QString& ideaId, const QSet<QString>& fileIds);
+    void removeIdeaAssociations(const QString& ideaId);
+    
+    // Remove all tracking data for a specific file
+    void removeAllTrackingForFile(const QString& fileId);
     
     // File removal notification callback
     using FileRemovalNotifier = std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds)>;

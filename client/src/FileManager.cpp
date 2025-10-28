@@ -10,15 +10,26 @@
 #include <QSet>
 #include <QByteArrayView>
 
-// Phase 4.2: FileManager transitioning to use specialized services
-// TODO: Progressively migrate internal storage to services
+// Phase 4.2: FileManager delegates to specialized services
 // - LocalFileRepository for fileId ↔ filePath
 // - RemoteFileTracker for client & ideaId tracking
 // - FileMemoryCache for memory caching
-// Current implementation still uses internal maps for compatibility
 
 // Static member definition
 std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds)> FileManager::s_fileRemovalNotifier;
+
+FileManager::FileManager()
+    : m_repository(&LocalFileRepository::instance())
+    , m_tracker(&RemoteFileTracker::instance())
+    , m_cache(&FileMemoryCache::instance())
+{
+    // Initialize removal callback for tracker
+    m_tracker->setFileRemovalNotifier([this](const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds) {
+        if (s_fileRemovalNotifier) {
+            s_fileRemovalNotifier(fileId, clientIds, ideaIds);
+        }
+    });
+}
 
 FileManager& FileManager::instance()
 {
@@ -28,56 +39,13 @@ FileManager& FileManager::instance()
 
 QString FileManager::getOrCreateFileId(const QString& filePath)
 {
-    // Normalize the path
-    QString normalizedPath = QFileInfo(filePath).absoluteFilePath();
-    
-    // Check if we already have this path and whether the file has changed since the id was created
-    if (m_pathToFileId.contains(normalizedPath)) {
-        const QString existingId = m_pathToFileId[normalizedPath];
-        QFileInfo info(normalizedPath);
-        const qint64 curSize = info.exists() ? info.size() : 0;
-        const qint64 curMtime = info.exists() ? info.lastModified().toSecsSinceEpoch() : 0;
-        const FileMeta meta = m_fileIdMeta.value(existingId);
-        if (meta.size == curSize && meta.mtimeSecs == curMtime) {
-            return existingId;
-        }
-        // File content changed at same path: generate a new id and re-point mappings
-        QString newId = generateFileId(normalizedPath);
-        m_pathToFileId[normalizedPath] = newId;
-        m_fileIdToPath.remove(existingId);
-        releaseFileMemory(existingId);
-        m_fileIdToPath[newId] = normalizedPath;
-        m_fileIdToMediaIds[newId] = m_fileIdToMediaIds.take(existingId); // move media associations
-        // Update reverse media -> file map
-        for (const QString& mediaId : m_fileIdToMediaIds[newId]) {
-            m_mediaIdToFileId[mediaId] = newId;
-        }
-        // Clients association does not carry over: treat as not uploaded anywhere yet
-        m_fileIdToClients.remove(existingId);
-        // Record new meta
-        m_fileIdMeta[newId] = { curSize, curMtime };
-        
-        return newId;
-    }
-    
-    // Generate new file ID
-    QString fileId = generateFileId(normalizedPath);
-    
-    // Store mappings
-    m_pathToFileId[normalizedPath] = fileId;
-    m_fileIdToPath[fileId] = normalizedPath;
-    m_fileIdToMediaIds[fileId] = QList<QString>(); // Initialize empty list
-    // Capture file metadata for change detection
-    QFileInfo info(normalizedPath);
-    m_fileIdMeta[fileId] = { info.exists() ? info.size() : 0, info.exists() ? info.lastModified().toSecsSinceEpoch() : 0 };
-    
-    
-    return fileId;
+    // Delegate to LocalFileRepository
+    return m_repository->getOrCreateFileId(filePath);
 }
 
 void FileManager::associateMediaWithFile(const QString& mediaId, const QString& fileId)
 {
-    if (!m_fileIdToPath.contains(fileId)) {
+    if (!m_repository->hasFileId(fileId)) {
         qWarning() << "Cannot associate media" << mediaId << "with unknown file ID" << fileId;
         return;
     }
@@ -123,17 +91,20 @@ QList<QString> FileManager::getMediaIdsForFile(const QString& fileId) const
 
 QString FileManager::getFilePathForId(const QString& fileId) const
 {
-    return m_fileIdToPath.value(fileId);
+    // Delegate to LocalFileRepository
+    return m_repository->getFilePathForId(fileId);
 }
 
 QList<QString> FileManager::getAllFileIds() const
 {
-    return m_fileIdToPath.keys();
+    // Delegate to LocalFileRepository
+    return m_repository->getAllFileIds();
 }
 
 bool FileManager::hasFileId(const QString& fileId) const
 {
-    return m_fileIdToPath.contains(fileId);
+    // Delegate to LocalFileRepository
+    return m_repository->hasFileId(fileId);
 }
 
 void FileManager::removeFileIfUnused(const QString& fileId)
@@ -146,104 +117,54 @@ void FileManager::removeFileIfUnused(const QString& fileId)
         return;
     }
 
-    const QString filePath = m_fileIdToPath.value(fileId);
-    const QList<QString> clientsWithFile = m_fileIdToClients.value(fileId);
-    const QList<QString> ideaList = m_fileIdToIdeaIds.value(fileId).values();
+    // Use RemoteFileTracker callback to notify before removal
+    m_tracker->checkAndNotifyIfUnused(fileId);
 
-    if (s_fileRemovalNotifier && (!clientsWithFile.isEmpty() || !ideaList.isEmpty())) {
-        s_fileRemovalNotifier(fileId, clientsWithFile, ideaList);
-    }
-
-    // Clean up local tracking data
-    releaseFileMemory(fileId);
-    m_fileIdToPath.remove(fileId);
-    m_pathToFileId.remove(filePath);
+    // Clean up local media associations
     m_fileIdToMediaIds.remove(fileId);
-    m_fileIdToClients.remove(fileId);
-    m_fileIdMeta.remove(fileId);
-    if (m_fileIdToIdeaIds.contains(fileId)) {
-        const QSet<QString> ideas = m_fileIdToIdeaIds.take(fileId);
-        for (const QString& ideaId : ideas) {
-            QSet<QString>& files = m_ideaIdToFileIds[ideaId];
-            files.remove(fileId);
-            if (files.isEmpty()) {
-                m_ideaIdToFileIds.remove(ideaId);
-            }
-        }
-    }
+    
+    // Clean up service-managed data
+    m_repository->removeFileMapping(fileId);
+    m_tracker->removeAllTrackingForFile(fileId);
+    m_cache->releaseFileMemory(fileId);
 }
 
 void FileManager::registerReceivedFilePath(const QString& fileId, const QString& absolutePath) {
-    if (fileId.isEmpty() || absolutePath.isEmpty()) return;
-    if (m_fileIdToPath.contains(fileId)) return; // already known (sender side)
-    m_fileIdToPath.insert(fileId, absolutePath);
-    m_pathToFileId.insert(absolutePath, fileId);
-    if (!m_fileIdToMediaIds.contains(fileId)) m_fileIdToMediaIds[fileId] = QList<QString>();
-    QFileInfo info(absolutePath);
-    m_fileIdMeta[fileId] = { info.exists() ? info.size() : 0, info.exists() ? info.lastModified().toSecsSinceEpoch() : 0 };
-    releaseFileMemory(fileId);
+    // Delegate to LocalFileRepository
+    m_repository->registerReceivedFilePath(fileId, absolutePath);
 }
 
 void FileManager::removeReceivedFileMapping(const QString& fileId) {
     if (fileId.isEmpty()) return;
-    QString path = m_fileIdToPath.value(fileId);
-    if (!path.isEmpty()) {
-        m_pathToFileId.remove(path);
-    }
-    m_fileIdToPath.remove(fileId);
-    m_fileIdMeta.remove(fileId);
-    releaseFileMemory(fileId);
-    if (m_fileIdToIdeaIds.contains(fileId)) {
-        const QSet<QString> ideas = m_fileIdToIdeaIds.take(fileId);
-        for (const QString& ideaId : ideas) {
-            QSet<QString>& files = m_ideaIdToFileIds[ideaId];
-            files.remove(fileId);
-            if (files.isEmpty()) {
-                m_ideaIdToFileIds.remove(ideaId);
-            }
-        }
-    }
-    // Don't touch media associations here; they are sender-side concepts. Remote just needs path lookup cleared.
+    
+    // Clean up local cache and repository
+    m_cache->releaseFileMemory(fileId);
+    m_repository->removeFileMapping(fileId);
+    
+    // Clean up tracker data
+    m_tracker->removeAllTrackingForFile(fileId);
 }
 
 void FileManager::preloadFileIntoMemory(const QString& fileId) {
-    if (fileId.isEmpty()) return;
-    getFileBytes(fileId, true);
+    // Delegate to FileMemoryCache
+    QString filePath = m_repository->getFilePathForId(fileId);
+    if (!filePath.isEmpty()) {
+        m_cache->preloadFileIntoMemory(fileId, filePath);
+    }
 }
 
 QSharedPointer<QByteArray> FileManager::getFileBytes(const QString& fileId, bool forceReload) {
-    if (fileId.isEmpty()) return {};
-    if (!forceReload) {
-        const auto existing = m_fileMemoryCache.value(fileId);
-        if (!existing.isNull() && !existing->isEmpty()) {
-            return existing;
-        }
-    }
-
-    const QString path = m_fileIdToPath.value(fileId);
-    if (path.isEmpty()) {
+    // Delegate to FileMemoryCache
+    QString filePath = m_repository->getFilePathForId(fileId);
+    if (filePath.isEmpty()) {
         return {};
     }
-
-    QFile file(path);
-    if (!file.exists()) {
-        return {};
-    }
-    if (!file.open(QIODevice::ReadOnly)) {
-        qWarning() << "FileManager: Failed to open" << path << "for preloading";
-        return {};
-    }
-    QByteArray bytes = file.readAll();
-    file.close();
-
-    auto shared = QSharedPointer<QByteArray>::create(std::move(bytes));
-    m_fileMemoryCache.insert(fileId, shared);
-    return shared;
+    return m_cache->getFileBytes(fileId, filePath, forceReload);
 }
 
 void FileManager::releaseFileMemory(const QString& fileId) {
-    if (fileId.isEmpty()) return;
-    m_fileMemoryCache.remove(fileId);
+    // Delegate to FileMemoryCache
+    m_cache->releaseFileMemory(fileId);
 }
 
 QString FileManager::generateFileId(const QString& filePath)
@@ -281,31 +202,26 @@ QString FileManager::generateFileId(const QString& filePath)
 
 void FileManager::markFileUploadedToClient(const QString& fileId, const QString& clientId)
 {
-    if (!m_fileIdToClients.contains(fileId)) {
-        m_fileIdToClients[fileId] = QList<QString>();
-    }
-    if (!m_fileIdToClients[fileId].contains(clientId)) {
-        m_fileIdToClients[fileId].append(clientId);
-        
-    }
+    // Delegate to RemoteFileTracker
+    m_tracker->markFileUploadedToClient(fileId, clientId);
 }
 
 QList<QString> FileManager::getClientsWithFile(const QString& fileId) const
 {
-    return m_fileIdToClients.value(fileId);
+    // Delegate to RemoteFileTracker
+    return m_tracker->getClientsWithFile(fileId);
 }
 
 bool FileManager::isFileUploadedToClient(const QString& fileId, const QString& clientId) const
 {
-    const QList<QString> clients = m_fileIdToClients.value(fileId);
-    return clients.contains(clientId);
+    // Delegate to RemoteFileTracker
+    return m_tracker->isFileUploadedToClient(fileId, clientId);
 }
 
 void FileManager::unmarkFileUploadedToClient(const QString& fileId, const QString& clientId)
 {
-    if (!m_fileIdToClients.contains(fileId)) return;
-    QList<QString>& clients = m_fileIdToClients[fileId];
-    clients.removeAll(clientId);
+    // Delegate to RemoteFileTracker
+    m_tracker->unmarkFileUploadedToClient(fileId, clientId);
 }
 
 void FileManager::markMediaUploadedToClient(const QString& mediaId, const QString& clientId)
@@ -341,67 +257,40 @@ void FileManager::setFileRemovalNotifier(std::function<void(const QString& fileI
 
 void FileManager::unmarkAllFilesForClient(const QString& clientId)
 {
-    if (clientId.isEmpty()) return;
-    // Iterate copy of keys to allow modification during iteration
-    const QList<QString> fileIds = m_fileIdToClients.keys();
-    for (const QString& fid : fileIds) {
-        QList<QString>& clients = m_fileIdToClients[fid];
-        clients.removeAll(clientId);
-        if (clients.isEmpty()) {
-            // keep entry; removal not strictly necessary here
-        }
-    }
+    // Delegate to RemoteFileTracker
+    m_tracker->unmarkAllFilesForClient(clientId);
 }
 
 void FileManager::unmarkAllMediaForClient(const QString& clientId)
 {
-    // Redirect to file-based unmark (mediaId tracking removed)
+    // Redirect to file-based unmark (media tracking is file-based)
     unmarkAllFilesForClient(clientId);
 }
 
 void FileManager::unmarkAllForClient(const QString& clientId)
 {
     unmarkAllFilesForClient(clientId);
-    unmarkAllMediaForClient(clientId);
 }
 
 void FileManager::removeReceivedFileMappingsUnderPathPrefix(const QString& pathPrefix)
 {
     if (pathPrefix.isEmpty()) return;
 
-    QList<QString> fileIdsToRemove;
-    fileIdsToRemove.reserve(m_fileIdToPath.size());
-    for (auto it = m_fileIdToPath.cbegin(); it != m_fileIdToPath.cend(); ++it) {
-        if (it.value().startsWith(pathPrefix)) {
-            fileIdsToRemove.append(it.key());
-        }
-    }
-
+    // Get affected fileIds from repository
+    QList<QString> fileIdsToRemove = m_repository->getFileIdsUnderPathPrefix(pathPrefix);
     if (fileIdsToRemove.isEmpty()) return;
 
     QSet<QString> removalSet = QSet<QString>(fileIdsToRemove.cbegin(), fileIdsToRemove.cend());
 
+    // Clean up repository, tracker, and cache
     for (const QString& fileId : fileIdsToRemove) {
-        const QString path = m_fileIdToPath.take(fileId);
-        if (!path.isEmpty()) {
-            m_pathToFileId.remove(path);
-        }
+        m_repository->removeFileMapping(fileId);
+        m_tracker->removeAllTrackingForFile(fileId);
+        m_cache->releaseFileMemory(fileId);
         m_fileIdToMediaIds.remove(fileId);
-        m_fileIdToClients.remove(fileId);
-        m_fileIdMeta.remove(fileId);
-        releaseFileMemory(fileId);
-        if (m_fileIdToIdeaIds.contains(fileId)) {
-            const QSet<QString> ideas = m_fileIdToIdeaIds.take(fileId);
-            for (const QString& ideaId : ideas) {
-                QSet<QString>& files = m_ideaIdToFileIds[ideaId];
-                files.remove(fileId);
-                if (files.isEmpty()) {
-                    m_ideaIdToFileIds.remove(ideaId);
-                }
-            }
-        }
     }
 
+    // Clean up media associations
     for (auto it = m_mediaIdToFileId.begin(); it != m_mediaIdToFileId.end();) {
         if (removalSet.contains(it.value())) {
             it = m_mediaIdToFileId.erase(it);
@@ -413,76 +302,36 @@ void FileManager::removeReceivedFileMappingsUnderPathPrefix(const QString& pathP
 
 void FileManager::associateFileWithIdea(const QString& fileId, const QString& ideaId)
 {
-    if (fileId.isEmpty() || ideaId.isEmpty()) return;
-    m_fileIdToIdeaIds[fileId].insert(ideaId);
-    m_ideaIdToFileIds[ideaId].insert(fileId);
+    // Delegate to RemoteFileTracker
+    m_tracker->associateFileWithIdea(fileId, ideaId);
 }
 
 void FileManager::dissociateFileFromIdea(const QString& fileId, const QString& ideaId)
 {
-    if (fileId.isEmpty() || ideaId.isEmpty()) return;
-    auto fileIt = m_fileIdToIdeaIds.find(fileId);
-    if (fileIt != m_fileIdToIdeaIds.end()) {
-        fileIt->remove(ideaId);
-        if (fileIt->isEmpty()) {
-            m_fileIdToIdeaIds.erase(fileIt);
-        }
-    }
-    auto ideaIt = m_ideaIdToFileIds.find(ideaId);
-    if (ideaIt != m_ideaIdToFileIds.end()) {
-        ideaIt->remove(fileId);
-        if (ideaIt->isEmpty()) {
-            m_ideaIdToFileIds.erase(ideaIt);
-        }
-    }
+    // Delegate to RemoteFileTracker
+    m_tracker->dissociateFileFromIdea(fileId, ideaId);
 }
 
 QSet<QString> FileManager::getIdeaIdsForFile(const QString& fileId) const
 {
-    return m_fileIdToIdeaIds.value(fileId);
+    // Delegate to RemoteFileTracker
+    return m_tracker->getIdeaIdsForFile(fileId);
 }
 
 QSet<QString> FileManager::getFileIdsForIdea(const QString& ideaId) const
 {
-    return m_ideaIdToFileIds.value(ideaId);
+    // Delegate to RemoteFileTracker
+    return m_tracker->getFileIdsForIdea(ideaId);
 }
 
 void FileManager::replaceIdeaFileSet(const QString& ideaId, const QSet<QString>& fileIds)
 {
-    if (ideaId.isEmpty()) return;
-
-    const QSet<QString> previous = m_ideaIdToFileIds.value(ideaId);
-    const QSet<QString> toRemove = previous - fileIds;
-
-    for (const QString& fid : toRemove) {
-        QSet<QString>& ideas = m_fileIdToIdeaIds[fid];
-        ideas.remove(ideaId);
-        if (ideas.isEmpty()) {
-            m_fileIdToIdeaIds.remove(fid);
-        }
-    }
-
-    QSet<QString>& dest = m_ideaIdToFileIds[ideaId];
-    dest = fileIds;
-    if (dest.isEmpty()) {
-        m_ideaIdToFileIds.remove(ideaId);
-    }
-
-    for (const QString& fid : fileIds) {
-        if (fid.isEmpty()) continue;
-        m_fileIdToIdeaIds[fid].insert(ideaId);
-    }
+    // Delegate to RemoteFileTracker
+    m_tracker->replaceIdeaFileSet(ideaId, fileIds);
 }
 
 void FileManager::removeIdeaAssociations(const QString& ideaId)
 {
-    if (ideaId.isEmpty()) return;
-    const QSet<QString> files = m_ideaIdToFileIds.take(ideaId);
-    for (const QString& fid : files) {
-        QSet<QString>& ideas = m_fileIdToIdeaIds[fid];
-        ideas.remove(ideaId);
-        if (ideas.isEmpty()) {
-            m_fileIdToIdeaIds.remove(fid);
-        }
-    }
+    // Delegate to RemoteFileTracker
+    m_tracker->removeIdeaAssociations(ideaId);
 }

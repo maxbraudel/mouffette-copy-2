@@ -34,8 +34,26 @@ QList<QString> RemoteFileTracker::getClientsWithFile(const QString& fileId) cons
     return m_fileIdToClients.value(fileId).values();
 }
 
+bool RemoteFileTracker::isFileUploadedToClient(const QString& fileId, const QString& clientId) const {
+    return m_fileIdToClients.value(fileId).contains(clientId);
+}
+
 bool RemoteFileTracker::isFileUploadedToAnyClient(const QString& fileId) const {
     return m_fileIdToClients.contains(fileId) && !m_fileIdToClients.value(fileId).isEmpty();
+}
+
+void RemoteFileTracker::unmarkAllFilesForClient(const QString& clientId) {
+    if (clientId.isEmpty()) return;
+    
+    for (auto it = m_fileIdToClients.begin(); it != m_fileIdToClients.end(); ) {
+        it.value().remove(clientId);
+        if (it.value().isEmpty()) {
+            it = m_fileIdToClients.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    qDebug() << "RemoteFileTracker: Unmarked all files for client" << clientId;
 }
 
 void RemoteFileTracker::associateFileWithIdea(const QString& fileId, const QString& ideaId) {
@@ -72,12 +90,12 @@ void RemoteFileTracker::dissociateFileFromIdea(const QString& fileId, const QStr
     qDebug() << "RemoteFileTracker: File" << fileId << "dissociated from idea" << ideaId;
 }
 
-QSet<QString> RemoteFileTracker::getFilesForIdea(const QString& ideaId) const {
+QSet<QString> RemoteFileTracker::getFileIdsForIdea(const QString& ideaId) const {
     return m_ideaIdToFileIds.value(ideaId);
 }
 
-QList<QString> RemoteFileTracker::getIdeasForFile(const QString& fileId) const {
-    return m_fileIdToIdeaIds.value(fileId).values();
+QSet<QString> RemoteFileTracker::getIdeaIdsForFile(const QString& fileId) const {
+    return m_fileIdToIdeaIds.value(fileId);
 }
 
 void RemoteFileTracker::replaceIdeaFileSet(const QString& ideaId, const QSet<QString>& fileIds) {
@@ -106,6 +124,39 @@ void RemoteFileTracker::replaceIdeaFileSet(const QString& ideaId, const QSet<QSt
     qDebug() << "RemoteFileTracker: Replaced file set for idea" << ideaId << "with" << fileIds.size() << "files";
 }
 
+void RemoteFileTracker::removeIdeaAssociations(const QString& ideaId) {
+    if (ideaId.isEmpty()) return;
+    
+    const QSet<QString> files = m_ideaIdToFileIds.take(ideaId);
+    for (const QString& fid : files) {
+        QSet<QString>& ideas = m_fileIdToIdeaIds[fid];
+        ideas.remove(ideaId);
+        if (ideas.isEmpty()) {
+            m_fileIdToIdeaIds.remove(fid);
+        }
+    }
+    qDebug() << "RemoteFileTracker: Removed all associations for idea" << ideaId;
+}
+
+void RemoteFileTracker::removeAllTrackingForFile(const QString& fileId) {
+    if (fileId.isEmpty()) return;
+    
+    // Remove from client tracking
+    m_fileIdToClients.remove(fileId);
+    
+    // Remove from idea tracking
+    QSet<QString> ideas = m_fileIdToIdeaIds.take(fileId);
+    for (const QString& ideaId : ideas) {
+        auto& files = m_ideaIdToFileIds[ideaId];
+        files.remove(fileId);
+        if (files.isEmpty()) {
+            m_ideaIdToFileIds.remove(ideaId);
+        }
+    }
+    
+    qDebug() << "RemoteFileTracker: Removed all tracking for file" << fileId;
+}
+
 void RemoteFileTracker::setFileRemovalNotifier(FileRemovalNotifier callback) {
     m_fileRemovalNotifier = std::move(callback);
 }
@@ -127,7 +178,8 @@ void RemoteFileTracker::checkAndNotifyIfUnused(const QString& fileId) {
     // File is in use somewhere, notify for potential removal
     if (m_fileRemovalNotifier) {
         QList<QString> clientIds = getClientsWithFile(fileId);
-        QList<QString> ideaIds = getIdeasForFile(fileId);
+        QSet<QString> ideaSet = getIdeaIdsForFile(fileId);
+        QList<QString> ideaIds = ideaSet.values();
         
         if (!clientIds.isEmpty() || !ideaIds.isEmpty()) {
             qDebug() << "RemoteFileTracker: Notifying removal for file" << fileId 
@@ -137,16 +189,7 @@ void RemoteFileTracker::checkAndNotifyIfUnused(const QString& fileId) {
     }
     
     // Clean up local tracking
-    m_fileIdToClients.remove(fileId);
-    
-    QSet<QString> ideas = m_fileIdToIdeaIds.take(fileId);
-    for (const QString& ideaId : ideas) {
-        auto& files = m_ideaIdToFileIds[ideaId];
-        files.remove(fileId);
-        if (files.isEmpty()) {
-            m_ideaIdToFileIds.remove(ideaId);
-        }
-    }
+    removeAllTrackingForFile(fileId);
 }
 
 void RemoteFileTracker::clear() {

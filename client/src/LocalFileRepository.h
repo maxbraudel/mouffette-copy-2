@@ -40,6 +40,12 @@ public:
     // Remove a received file mapping (when remote sender deletes)
     void removeReceivedFileMapping(const QString& fileId);
     
+    // Remove a file mapping completely
+    void removeFileMapping(const QString& fileId);
+    
+    // Get all fileIds whose paths start with given prefix
+    QList<QString> getFileIdsUnderPathPrefix(const QString& pathPrefix) const;
+    
     // Clear all mappings (for cleanup/reset)
     void clear();
 

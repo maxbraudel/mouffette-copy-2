@@ -89,6 +89,25 @@ void LocalFileRepository::removeReceivedFileMapping(const QString& fileId) {
     qDebug() << "LocalFileRepository: Removed mapping for fileId" << fileId;
 }
 
+void LocalFileRepository::removeFileMapping(const QString& fileId) {
+    QString path = m_fileIdToPath.value(fileId);
+    if (!path.isEmpty()) {
+        m_pathToFileId.remove(path);
+    }
+    m_fileIdToPath.remove(fileId);
+    qDebug() << "LocalFileRepository: Removed mapping for fileId" << fileId;
+}
+
+QList<QString> LocalFileRepository::getFileIdsUnderPathPrefix(const QString& pathPrefix) const {
+    QList<QString> result;
+    for (auto it = m_fileIdToPath.constBegin(); it != m_fileIdToPath.constEnd(); ++it) {
+        if (it.value().startsWith(pathPrefix)) {
+            result.append(it.key());
+        }
+    }
+    return result;
+}
+
 void LocalFileRepository::clear() {
     qDebug() << "LocalFileRepository: Clearing all mappings";
     m_fileIdToPath.clear();
