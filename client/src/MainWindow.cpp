@@ -202,6 +202,10 @@ inline void applyTitleText(QLabel* l) {
     ).arg(gTitleTextFontSize).arg(gTitleTextHeight));
     l->setFixedHeight(gTitleTextHeight);
 }
+
+inline int uploadButtonMaxWidth() {
+    return (gMediaListOverlayAbsoluteMaxWidthPx > 0) ? gMediaListOverlayAbsoluteMaxWidthPx : INT_MAX;
+}
 inline void applyPrimaryBtn(QPushButton* b) {
     if (!b) return;
     // Avoid platform default/autoDefault enlarging the control on macOS
@@ -529,7 +533,7 @@ void MainWindow::refreshOverlayActionsState(bool remoteConnected, bool propagate
             AppColors::applyCanvasButtonFont(m_uploadButtonDefaultFont);
             m_uploadButton->setFont(m_uploadButtonDefaultFont);
             m_uploadButton->setFixedHeight(40);
-            m_uploadButton->setMaximumWidth(200);
+            m_uploadButton->setMaximumWidth(uploadButtonMaxWidth());
         } else if (m_uploadManager) {
             QTimer::singleShot(0, this, [this]() {
                 if (m_uploadManager) emit m_uploadManager->uiStateChanged();
@@ -761,7 +765,7 @@ MainWindow::MainWindow(QWidget* parent)
                 m_uploadButton->setStyleSheet(ScreenCanvas::overlayDisabledButtonStyle());
                 m_uploadButton->setFont(m_uploadButtonDefaultFont);
                 m_uploadButton->setFixedHeight(40);
-                m_uploadButton->setMaximumWidth(200);
+                m_uploadButton->setMaximumWidth(uploadButtonMaxWidth());
                 return;
             }
             const QString overlayIdleStyle = QString(
@@ -892,7 +896,7 @@ MainWindow::MainWindow(QWidget* parent)
                 m_uploadButton->setFont(m_uploadButtonDefaultFont);
             }
             m_uploadButton->setFixedHeight(40);
-            m_uploadButton->setMaximumWidth(200);
+            m_uploadButton->setMaximumWidth(uploadButtonMaxWidth());
             return;
         }
         
@@ -940,7 +944,7 @@ MainWindow::MainWindow(QWidget* parent)
             m_uploadButton->setChecked(true);
             m_uploadButton->setStyleSheet(blueStyle);
             m_uploadButton->setFixedHeight(gDynamicBoxHeight);
-            m_uploadButton->setMaximumWidth(200);
+            m_uploadButton->setMaximumWidth(uploadButtonMaxWidth());
             // Monospace font for stability
 #ifdef Q_OS_MACOS
             QFont mono("Menlo");
@@ -957,7 +961,7 @@ MainWindow::MainWindow(QWidget* parent)
             m_uploadButton->setText("Finalizing…");
             m_uploadButton->setStyleSheet(blueStyle);
             m_uploadButton->setFixedHeight(gDynamicBoxHeight);
-            m_uploadButton->setMaximumWidth(200);
+            m_uploadButton->setMaximumWidth(uploadButtonMaxWidth());
             m_uploadButton->setFont(m_uploadButtonDefaultFont);
         } else if (remoteActive) {
             // If there are new unuploaded files, return to Upload state; otherwise offer unload
@@ -969,7 +973,7 @@ MainWindow::MainWindow(QWidget* parent)
                 m_uploadButton->setText("Upload to Client");
                 m_uploadButton->setStyleSheet(greyStyle);
                 m_uploadButton->setFixedHeight(gDynamicBoxHeight);
-                m_uploadButton->setMaximumWidth(200);
+                m_uploadButton->setMaximumWidth(uploadButtonMaxWidth());
                 m_uploadButton->setFont(m_uploadButtonDefaultFont);
             } else {
                 // Uploaded & resident on target: allow unload
@@ -979,7 +983,7 @@ MainWindow::MainWindow(QWidget* parent)
                 m_uploadButton->setText("Remove all files");
                 m_uploadButton->setStyleSheet(greenStyle);
                 m_uploadButton->setFixedHeight(gDynamicBoxHeight);
-                m_uploadButton->setMaximumWidth(200);
+                m_uploadButton->setMaximumWidth(uploadButtonMaxWidth());
                 m_uploadButton->setFont(m_uploadButtonDefaultFont);
             }
         } else {
@@ -990,7 +994,7 @@ MainWindow::MainWindow(QWidget* parent)
             m_uploadButton->setText("Upload to Client");
             m_uploadButton->setStyleSheet(greyStyle);
             m_uploadButton->setFixedHeight(gDynamicBoxHeight);
-            m_uploadButton->setMaximumWidth(200);
+            m_uploadButton->setMaximumWidth(uploadButtonMaxWidth());
             m_uploadButton->setFont(m_uploadButtonDefaultFont);
         }
     };

@@ -726,10 +726,12 @@ void ScreenCanvas::initInfoOverlay() {
         ).arg(canvasFontCss, AppColors::colorToCss(AppColors::gOverlayTextColor)));
         m_uploadButton->setFixedHeight(40);
         m_uploadButton->setMinimumWidth(0);
-        m_uploadButton->setMaximumWidth(200); // Prevent button from expanding overlay width
-    m_uploadButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    vHeaderLayout->addWidget(m_uploadButton);
-    vHeaderLayout->setAlignment(m_uploadButton, Qt::AlignHCenter);
+        const int uploadButtonMaxWidth = (gMediaListOverlayAbsoluteMaxWidthPx > 0)
+            ? gMediaListOverlayAbsoluteMaxWidthPx
+            : std::numeric_limits<int>::max();
+        m_uploadButton->setMaximumWidth(uploadButtonMaxWidth);
+        m_uploadButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        vHeaderLayout->addWidget(m_uploadButton);
 
         // Wire Launch Remote Scene toggle behavior (Remote mode = local + remote)
         connect(m_launchSceneButton, &QPushButton::clicked, this, [this]() {
