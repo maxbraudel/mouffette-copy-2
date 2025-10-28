@@ -167,6 +167,8 @@ void ScreenCanvas::drawForeground(QPainter* painter, const QRectF& rect) {
 
 // Configuration constants
 static const int gMediaListItemSpacing = 3; // Spacing between media list items (name, status, details)
+int gMediaListFilenameMinWidthPx = 30;     // Minimum width (px) for filename labels in media list overlay
+int gMediaListOverlayAbsoluteMaxWidthPx = 220; // Absolute width cap (px) for media list overlay; 0 disables the cap
 static const int gScrollbarAutoHideDelayMs = 500; // Time in milliseconds before scrollbar auto-hides after scroll inactivity
 
 // Helper: relayout overlays for all media items so absolute panels (settings) stay pinned
@@ -726,8 +728,9 @@ void ScreenCanvas::initInfoOverlay() {
         m_uploadButton->setFixedHeight(40);
         m_uploadButton->setMinimumWidth(0);
         m_uploadButton->setMaximumWidth(200); // Prevent button from expanding overlay width
-        m_uploadButton->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-        vHeaderLayout->addWidget(m_uploadButton);
+    m_uploadButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    vHeaderLayout->addWidget(m_uploadButton);
+    vHeaderLayout->setAlignment(m_uploadButton, Qt::AlignHCenter);
 
         // Wire Launch Remote Scene toggle behavior (Remote mode = local + remote)
         connect(m_launchSceneButton, &QPushButton::clicked, this, [this]() {
@@ -971,7 +974,7 @@ void ScreenCanvas::refreshInfoOverlay() {
         mediaLayout->setSpacing(gMediaListItemSpacing);
         
         // Row: name
-        auto* nameLbl = new QLabel(name, mediaContainer);
+    auto* nameLbl = new QLabel(name, mediaContainer);
         nameLbl->setStyleSheet("color: white; background: transparent;");
         nameLbl->setAutoFillBackground(false);
         nameLbl->setAttribute(Qt::WA_TranslucentBackground, true);
@@ -981,6 +984,7 @@ void ScreenCanvas::refreshInfoOverlay() {
         nameLbl->setFixedHeight(18); // Exact height to prevent any extra spacing
         nameLbl->setContentsMargins(0, 0, 0, 0); // Force zero margins
         nameLbl->setAlignment(Qt::AlignLeft | Qt::AlignTop); // Align text to top
+    nameLbl->setMinimumWidth(std::max(0, gMediaListFilenameMinWidthPx)); // Use configurable minimum width to stabilize layout
         nameLbl->setProperty("originalText", name); // Store original text for ellipsis
         mediaLayout->addWidget(nameLbl);
         
@@ -1260,7 +1264,7 @@ void ScreenCanvas::updateOverlayVScrollVisibilityAndGeometry() {
 void ScreenCanvas::applyTextEllipsisIfConstrained(bool isWidthConstrained) {
     if (!m_contentWidget || !m_infoWidget) return;
     
-    const int availableTextWidth = m_infoWidget->width() - 40; // 20px margins on each side
+    const int availableTextWidth = std::max(0, m_infoWidget->width() - 40); // 20px margins on each side
     
     for (QLabel* label : m_contentWidget->findChildren<QLabel*>()) {
         const QVariant originalTextProp = label->property("originalText");
@@ -1295,12 +1299,23 @@ std::pair<int, bool> ScreenCanvas::calculateDesiredWidthAndConstraint() {
     const QSize headerHint = m_overlayHeaderWidget ? m_overlayHeaderWidget->sizeHint() : QSize(0,0);
     const int contentWithMargins = measuredContentW + 40; // 20px margins on each side
     int desiredW = std::max({contentWithMargins, headerHint.width(), m_infoWidget->minimumWidth()});
-    
-    // Apply 50% viewport constraint
-    const int capW = static_cast<int>(viewport()->width() * 0.5);
-    const bool isWidthConstrained = (desiredW > capW);
-    
-    return {std::min(desiredW, capW), isWidthConstrained};
+
+    // Apply relative (50% viewport) and absolute caps
+    const int viewportCap = static_cast<int>(viewport()->width() * 0.5);
+    int effectiveCap = viewportCap;
+    if (gMediaListOverlayAbsoluteMaxWidthPx > 0) {
+        effectiveCap = (effectiveCap > 0)
+            ? std::min(effectiveCap, gMediaListOverlayAbsoluteMaxWidthPx)
+            : gMediaListOverlayAbsoluteMaxWidthPx;
+    }
+
+    // If viewportCap is zero (e.g., viewport not yet sized) and no absolute cap, skip constraining
+    if (effectiveCap <= 0) {
+        return {desiredW, false};
+    }
+
+    const bool isWidthConstrained = desiredW > effectiveCap;
+    return {isWidthConstrained ? effectiveCap : desiredW, isWidthConstrained};
 }
 
 ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
