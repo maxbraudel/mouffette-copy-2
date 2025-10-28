@@ -456,7 +456,7 @@ void MainWindow::refreshOngoingScenesList() {
         QListWidgetItem* item = new QListWidgetItem(itemText);
         item->setFlags(Qt::ItemIsEnabled);
         item->setData(Qt::UserRole, session.persistentClientId);
-        item->setData(Qt::UserRole + 1, session.serverAssignedId);
+        item->setData(Qt::UserRole + 1, session.persistentClientId);
         m_ongoingScenesList->addItem(item);
     }
 
@@ -1595,8 +1595,9 @@ MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& cli
             if (m_canvasHostStack && m_canvasHostStack->indexOf(stored.canvas) == -1) {
                 m_canvasHostStack->addWidget(stored.canvas);
             }
-            if (!stored.serverAssignedId.isEmpty()) {
-                stored.canvas->setRemoteSceneTarget(stored.serverAssignedId, stored.lastClientInfo.getMachineName());
+            // Phase 3: Use persistentClientId for server communication
+            if (!stored.persistentClientId.isEmpty()) {
+                stored.canvas->setRemoteSceneTarget(stored.persistentClientId, stored.lastClientInfo.getMachineName());
             }
         }
         if (stored.lastClientInfo.isOnline()) {
@@ -1629,8 +1630,9 @@ MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& cli
     }
     configureCanvasSession(stored);
     if (stored.canvas) {
-        if (!stored.serverAssignedId.isEmpty()) {
-            stored.canvas->setRemoteSceneTarget(stored.serverAssignedId, stored.lastClientInfo.getMachineName());
+        // Phase 3: Use persistentClientId for server communication
+        if (!stored.persistentClientId.isEmpty()) {
+            stored.canvas->setRemoteSceneTarget(stored.persistentClientId, stored.lastClientInfo.getMachineName());
         }
         if (m_canvasHostStack && m_canvasHostStack->indexOf(stored.canvas) == -1) {
             m_canvasHostStack->addWidget(stored.canvas);
@@ -1729,13 +1731,14 @@ void MainWindow::switchToCanvasSession(const QString& persistentClientId) {
     }
 
     session->canvas->setFocus(Qt::OtherFocusReason);
-    if (!session->serverAssignedId.isEmpty()) {
-        session->canvas->setRemoteSceneTarget(session->serverAssignedId, session->lastClientInfo.getMachineName());
+    // Phase 3: Use persistentClientId for server communication
+    if (!session->persistentClientId.isEmpty()) {
+        session->canvas->setRemoteSceneTarget(session->persistentClientId, session->lastClientInfo.getMachineName());
     }
 
     // Set upload manager target to restore per-session upload state
     if (m_uploadManager) {
-        m_uploadManager->setTargetClientId(session->serverAssignedId);
+        m_uploadManager->setTargetClientId(session->persistentClientId);
         m_uploadManager->setActiveIdeaId(session->ideaId);
     }
     updateUploadButtonForSession(*session);
@@ -1756,7 +1759,8 @@ void MainWindow::updateUploadButtonForSession(CanvasSession& session) {
 
 void MainWindow::unloadUploadsForSession(CanvasSession& session, bool attemptRemote) {
     if (!m_uploadManager) return;
-    const QString targetId = session.serverAssignedId;
+    // Phase 3: Use persistentClientId for server communication
+    const QString targetId = session.persistentClientId;
     if (targetId.isEmpty()) {
         session.remoteContentClearedOnDisconnect = true;
         return;
@@ -1845,11 +1849,12 @@ void MainWindow::reconcileRemoteFilesForSession(CanvasSession& session, const QS
     session.expectedIdeaFileIds = currentFileIds;
     FileManager::instance().replaceIdeaFileSet(session.ideaId, currentFileIds);
 
-    if (!session.serverAssignedId.isEmpty()) {
+    // Phase 3: Use persistentClientId for server communication
+    if (!session.persistentClientId.isEmpty()) {
         if (m_webSocketClient && m_webSocketClient->isConnected()) {
             const QSet<QString> toRemove = session.knownRemoteFileIds - currentFileIds;
             for (const QString& fileId : toRemove) {
-                m_webSocketClient->sendRemoveFile(session.serverAssignedId, session.ideaId, fileId);
+                m_webSocketClient->sendRemoveFile(session.persistentClientId, session.ideaId, fileId);
                 session.knownRemoteFileIds.remove(fileId);
             }
         }
@@ -1886,17 +1891,18 @@ void MainWindow::handleStateSyncFromServer(const QJsonObject& message) {
         qDebug() << "MainWindow: Syncing idea" << ideaId << "with" << fileIds.size() << "file(s)";
         
         // Find session with this ideaId and mark files as uploaded
+        // Phase 3: Use persistentClientId for consistency
         CanvasSession* session = findCanvasSessionByIdeaId(ideaId);
-        if (session && !session->serverAssignedId.isEmpty()) {
+        if (session && !session->persistentClientId.isEmpty()) {
             session->knownRemoteFileIds = fileIds;
             
             // Mark files as uploaded in FileManager
             for (const QString& fileId : fileIds) {
-                FileManager::instance().markFileUploadedToClient(fileId, session->serverAssignedId);
+                FileManager::instance().markFileUploadedToClient(fileId, session->persistentClientId);
             }
             
             qDebug() << "MainWindow: Restored upload state for session" << session->persistentClientId
-                     << "server client" << session->serverAssignedId << "idea" << ideaId;
+                     << "idea" << ideaId;
             
             // Refresh UI if this is the active session
             if (m_activeSessionIdentity == session->persistentClientId && m_uploadManager) {
@@ -1932,14 +1938,15 @@ QList<ClientInfo> MainWindow::buildDisplayClientList(const QList<ClientInfo>& co
         client.setOnline(true);
 
         if (CanvasSession* session = findCanvasSession(persistentId)) {
-            session->serverAssignedId = client.getId();
+            session->serverAssignedId = client.getId(); // Keep for local lookup
             session->lastClientInfo = client;
             session->lastClientInfo.setClientId(persistentId);
             session->lastClientInfo.setFromMemory(true);
             session->lastClientInfo.setOnline(true);
             session->remoteContentClearedOnDisconnect = false;
-            if (session->canvas && !session->serverAssignedId.isEmpty()) {
-                session->canvas->setRemoteSceneTarget(session->serverAssignedId, session->lastClientInfo.getMachineName());
+            // Phase 3: Use persistentClientId for server communication
+            if (session->canvas && !session->persistentClientId.isEmpty()) {
+                session->canvas->setRemoteSceneTarget(session->persistentClientId, session->lastClientInfo.getMachineName());
             }
             client.setFromMemory(true);
             client.setId(session->serverAssignedId);

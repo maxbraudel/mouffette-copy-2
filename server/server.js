@@ -279,8 +279,26 @@ class MouffetteServer {
     }
 
     // Helper to relay a message from sender -> target
+    // Phase 3 cleanup: resolve targetClientId (accepts both sessionId and persistentId)
+    resolveClientId(targetClientId) {
+        // Try direct lookup (sessionId)
+        if (this.clients.has(targetClientId)) {
+            return targetClientId;
+        }
+        // Try persistent → session lookup
+        for (const [sessionId, clientInfo] of this.clients.entries()) {
+            if (clientInfo.persistentId === targetClientId) {
+                return sessionId;
+            }
+        }
+        return null; // not found
+    }
+
     relayToTarget(senderId, targetClientId, message) {
-        const targetClient = this.clients.get(targetClientId);
+        // Phase 3: resolve targetClientId (can be sessionId or persistentId)
+        const resolvedId = this.resolveClientId(targetClientId);
+        const targetClient = resolvedId ? this.clients.get(resolvedId) : null;
+        
         if (!targetClient || !targetClient.ws) {
             const senderClient = this.clients.get(senderId);
             if (senderClient && senderClient.ws) {

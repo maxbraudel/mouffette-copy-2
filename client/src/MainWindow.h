@@ -119,7 +119,7 @@ protected:
 private:
     struct CanvasSession {
         QString persistentClientId; // stable client ID persisted across sessions
-        QString serverAssignedId;   // temporary server-assigned id (legacy, will be phased out)
+        QString serverAssignedId;   // temporary server session ID (for local lookup only, send persistentClientId to server)
         QString ideaId;
         ScreenCanvas* canvas = nullptr;
         QPushButton* uploadButton = nullptr;
