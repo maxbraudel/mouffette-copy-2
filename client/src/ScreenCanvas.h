@@ -36,7 +36,6 @@ class QToolButton;
 class QScrollArea;
 class QScrollBar;
 
-extern int gMediaListFilenameMinWidthPx;      // Minimum width (px) for filename labels in media overlay
 extern int gMediaListOverlayAbsoluteMaxWidthPx; // Absolute width cap (px) for media list overlay; 0 disables cap
 
 // Extracted canvas that manages screen layout, zoom/pan, drag&drop previews, and media interaction.

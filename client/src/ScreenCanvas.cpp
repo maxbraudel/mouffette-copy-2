@@ -167,8 +167,7 @@ void ScreenCanvas::drawForeground(QPainter* painter, const QRectF& rect) {
 
 // Configuration constants
 static const int gMediaListItemSpacing = 3; // Spacing between media list items (name, status, details)
-int gMediaListFilenameMinWidthPx = 30;     // Minimum width (px) for filename labels in media list overlay
-int gMediaListOverlayAbsoluteMaxWidthPx = 220; // Absolute width cap (px) for media list overlay; 0 disables the cap
+int gMediaListOverlayAbsoluteMaxWidthPx = 420; // Absolute width cap (px) for media list overlay; 0 disables the cap
 static const int gScrollbarAutoHideDelayMs = 500; // Time in milliseconds before scrollbar auto-hides after scroll inactivity
 
 // Helper: relayout overlays for all media items so absolute panels (settings) stay pinned
@@ -984,7 +983,6 @@ void ScreenCanvas::refreshInfoOverlay() {
         nameLbl->setFixedHeight(18); // Exact height to prevent any extra spacing
         nameLbl->setContentsMargins(0, 0, 0, 0); // Force zero margins
         nameLbl->setAlignment(Qt::AlignLeft | Qt::AlignTop); // Align text to top
-    nameLbl->setMinimumWidth(std::max(0, gMediaListFilenameMinWidthPx)); // Use configurable minimum width to stabilize layout
         nameLbl->setProperty("originalText", name); // Store original text for ellipsis
         mediaLayout->addWidget(nameLbl);
         
