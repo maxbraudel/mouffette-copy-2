@@ -62,6 +62,7 @@ set(SOURCES
     src/handlers/ScreenEventHandler.cpp
     src/handlers/ClientListEventHandler.cpp
     src/handlers/UploadEventHandler.cpp
+    src/controllers/CanvasSessionController.cpp
 )
 
 # Platform-specific sources
@@ -117,6 +118,7 @@ set(HEADERS
     src/handlers/ScreenEventHandler.h
     src/handlers/ClientListEventHandler.h
     src/handlers/UploadEventHandler.h
+    src/controllers/CanvasSessionController.h
 )
 
 if(WIN32)

@@ -64,6 +64,7 @@ class WebSocketMessageHandler; // Phase 7.1: manages WebSocket message routing
 class ScreenEventHandler; // Phase 7.2: manages screen events and registration
 class ClientListEventHandler; // Phase 7.3: manages client list events and connection state
 class UploadEventHandler; // Phase 7.4: manages upload events and file transfers
+class CanvasSessionController; // Phase 8: manages canvas sessions lifecycle
 // using QStackedWidget for canvas container switching
 class QFrame; // forward declare for separators in remote info container
 
@@ -165,9 +166,25 @@ public:
     bool areUploadSignalsConnected() const { return m_uploadSignalsConnected; }
     void connectUploadSignals();
     void setUploadSessionByUploadId(const QString& uploadId, const QString& sessionIdentity);
+    QString getUploadSessionByUploadId(const QString& uploadId) const { return m_uploadSessionByUploadId.value(uploadId); }
+    void removeUploadSessionByUploadId(const QString& uploadId) { m_uploadSessionByUploadId.remove(uploadId); }
+    
+    // [Phase 8] Additional accessor methods for CanvasSessionController
+    SessionManager* getSessionManager() const { return m_sessionManager; }
+    void setActiveSessionIdentity(const QString& identity) { m_activeSessionIdentity = identity; }
+    QPushButton* getUploadButton() const { return m_uploadButton; }
+    void setUploadButton(QPushButton* button) { m_uploadButton = button; }
+    bool getUploadButtonInOverlay() const { return m_uploadButtonInOverlay; }
+    void setUploadButtonInOverlay(bool inOverlay) { m_uploadButtonInOverlay = inOverlay; }
+    QFont getUploadButtonDefaultFont() const { return m_uploadButtonDefaultFont; }
+    void setUploadButtonDefaultFont(const QFont& font) { m_uploadButtonDefaultFont = font; }
+    bool getAutoUploadImportedMedia() const { return m_autoUploadImportedMedia; }
+    QString createIdeaId() const;
+    void refreshOverlayActionsState(bool remoteConnected, bool propagateLoss = true);
 
 public slots:
     void handleApplicationStateChanged(Qt::ApplicationState state);
+    void onUploadButtonClicked();  // Made public for CanvasSessionController
 
 private slots:
     void onConnected();
@@ -198,7 +215,6 @@ private slots:
     void onMenuQuitRequested();
     void onMenuAboutRequested();
     
-    void onUploadButtonClicked();
     void showSettingsDialog();
     
     // Helper methods
@@ -240,7 +256,7 @@ private:
     // [Phase 7.2] updateClientNameDisplay, updateVolumeIndicator, addVolumeIndicatorToLayout moved to public
     // Legacy helper removed; ScreenCanvas renders screens directly
     // [Phase 7.1] setRemoteConnectionStatus, removeVolumeIndicatorFromLayout, addRemoteStatusToLayout moved to public
-    void refreshOverlayActionsState(bool remoteConnected, bool propagateLoss = true);
+    // [Phase 8] refreshOverlayActionsState moved to public
     // watch management handled by WatchManager component now
     // Manage presence of the remote status (and its leading separator) in the top bar layout
     void removeRemoteStatusFromLayout();
@@ -254,7 +270,6 @@ private:
     // PHASE 2: State synchronization after reconnection
     void handleStateSyncFromServer(const QJsonObject& message);
 
-    QString createIdeaId() const;
     void rotateSessionIdea(CanvasSession& session);
     void markAllSessionsOffline();
     ScreenCanvas* canvasForClientId(const QString& clientId) const;
@@ -345,6 +360,9 @@ private:
     
     // Phase 7.4: Upload event handler
     UploadEventHandler* m_uploadEventHandler = nullptr;
+    
+    // Phase 8: Canvas session controller
+    CanvasSessionController* m_canvasSessionController = nullptr;
     
     // Backend
     WebSocketClient* m_webSocketClient = nullptr;
