@@ -215,6 +215,42 @@ void MainWindow::setRemoteConnectionStatus(const QString& status, bool propagate
     if (m_canvasViewPage) {
         m_canvasViewPage->setRemoteConnectionStatus(status, propagateLoss);
     }
+
+    // Mirror the status in the top-bar remote client container
+    if (m_remoteClientInfoManager) {
+        if (QLabel* statusLabel = m_remoteClientInfoManager->getRemoteConnectionStatusLabel()) {
+            const QString upStatus = status.toUpper();
+            statusLabel->setText(upStatus);
+
+            QString textColor;
+            QString bgColor;
+            if (upStatus == "CONNECTED") {
+                textColor = AppColors::colorToCss(AppColors::gStatusConnectedText);
+                bgColor = AppColors::colorToCss(AppColors::gStatusConnectedBg);
+            } else if (upStatus == "ERROR" || upStatus.startsWith("CONNECTING") || upStatus.startsWith("RECONNECTING")) {
+                textColor = AppColors::colorToCss(AppColors::gStatusWarningText);
+                bgColor = AppColors::colorToCss(AppColors::gStatusWarningBg);
+            } else {
+                textColor = AppColors::colorToCss(AppColors::gStatusErrorText);
+                bgColor = AppColors::colorToCss(AppColors::gStatusErrorBg);
+            }
+
+            statusLabel->setStyleSheet(
+                QString("QLabel { "
+                        "    color: %1; "
+                        "    background-color: %2; "
+                        "    border: none; "
+                        "    border-radius: 0px; "
+                        "    padding: 0px %4px; "
+                        "    font-size: %3px; "
+                        "    font-weight: bold; "
+                        "}")
+                    .arg(textColor)
+                    .arg(bgColor)
+                    .arg(gDynamicBoxFontPx)
+                    .arg(gRemoteClientContainerPadding));
+        }
+    }
     
     // Update MainWindow state
     const QString up = status.toUpper();
