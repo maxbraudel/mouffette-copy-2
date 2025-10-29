@@ -23,6 +23,9 @@
 #include "managers/ThemeManager.h"
 #include "managers/RemoteClientInfoManager.h"
 #include "managers/SystemMonitor.h"
+#include "managers/TopBarManager.h"
+#include "managers/SystemTrayManager.h"
+#include "managers/MenuBarManager.h"
 #include <QMenuBar>
 #include <QHostInfo>
 #include "ClientInfo.h"
@@ -281,12 +284,10 @@ MainWindow::MainWindow(QWidget* parent)
       m_settingsButton(nullptr),
       m_connectToggleButton(nullptr),
       m_connectionStatusLabel(nullptr),
-      m_localClientInfoContainer(nullptr),
-      m_localClientTitleLabel(nullptr),
-      m_localNetworkStatusLabel(nullptr),
       m_backButton(nullptr),
       m_remoteClientInfoManager(new RemoteClientInfoManager(this)), // Phase 5
       m_systemMonitor(new SystemMonitor(this)), // Phase 3
+      m_topBarManager(new TopBarManager(this)), // Phase 6.1
       m_remoteClientInfoWrapper(nullptr),
       m_screenCanvas(nullptr),
       m_uploadButton(nullptr),
@@ -294,11 +295,8 @@ MainWindow::MainWindow(QWidget* parent)
       m_remoteOverlayActionsEnabled(false),
       m_responsiveLayoutManager(new ResponsiveLayoutManager(this)),
       m_cursorTimer(nullptr),
-      m_fileMenu(nullptr),
-      m_helpMenu(nullptr),
-      m_exitAction(nullptr),
-      m_aboutAction(nullptr),
-      m_trayIcon(nullptr),
+      m_menuBarManager(new MenuBarManager(this, this)), // Phase 6.3
+      m_systemTrayManager(new SystemTrayManager(this)), // Phase 6.2
       m_webSocketClient(new WebSocketClient(this)),
       m_statusUpdateTimer(new QTimer(this)),
       m_displaySyncTimer(new QTimer(this)),
@@ -400,9 +398,19 @@ MainWindow::MainWindow(QWidget* parent)
     }
 #endif
 #if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)
-    setupMenuBar();
+    // [PHASE 6.3] Setup menu bar
+    if (m_menuBarManager) {
+        m_menuBarManager->setup();
+        connect(m_menuBarManager, &MenuBarManager::quitRequested, this, &MainWindow::onMenuQuitRequested);
+        connect(m_menuBarManager, &MenuBarManager::aboutRequested, this, &MainWindow::onMenuAboutRequested);
+    }
 #endif
-    setupSystemTray();
+    
+    // [PHASE 6.2] Setup system tray
+    if (m_systemTrayManager) {
+        m_systemTrayManager->setup();
+        connect(m_systemTrayManager, &SystemTrayManager::activated, this, &MainWindow::onTrayIconActivated);
+    }
     
     // [PHASE 3] Start system monitoring
     if (m_systemMonitor) {
@@ -896,101 +904,19 @@ void MainWindow::addVolumeIndicatorToLayout() {
     }
 }
 
+// [PHASE 6.1] Delegate to TopBarManager
 void MainWindow::createLocalClientInfoContainer() {
-    if (m_localClientInfoContainer) {
-        return; // Already created
+    if (m_topBarManager) {
+        m_topBarManager->createLocalClientInfoContainer();
     }
-    
-    // Create "You" title label first
-    m_localClientTitleLabel = new QLabel("You");
-    m_localClientTitleLabel->setStyleSheet(
-        QString("QLabel { "
-        "    background: transparent; "
-        "    border: none; "
-        "    padding: 0px %1px; "
-        "    font-size: 16px; "
-        "    font-weight: bold; "
-        "    color: palette(text); "
-        "}").arg(gRemoteClientContainerPadding)
-    );
-    m_localClientTitleLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    
-    // Create network status label
-    m_localNetworkStatusLabel = new QLabel("DISCONNECTED");
-    // Make status label non-shrinkable with fixed width
-    m_localNetworkStatusLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    m_localNetworkStatusLabel->setFixedWidth(120); // Fixed width for consistency
-    m_localNetworkStatusLabel->setAlignment(Qt::AlignCenter); // Center the text
-    // Note: Color and font styling will be applied by setLocalNetworkStatus()
-    
-    // Create container widget with same styling as remote client container and proper clipping
-    m_localClientInfoContainer = new ClippedContainer();
-    
-    // Apply same dynamic box styling as remote container with clipping
-    const QString containerStyle = QString(
-        "QWidget { "
-        "    background-color: transparent; "
-        "    color: palette(button-text); "
-        "    border: 1px solid %3; "
-        "    border-radius: %1px; "
-        "    min-height: %2px; "
-        "    max-height: %2px; "
-        "}"
-    ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource));
-    
-    m_localClientInfoContainer->setStyleSheet(containerStyle);
-    m_localClientInfoContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    m_localClientInfoContainer->setMinimumWidth(120); // Same minimum as remote container
-    
-    // Create horizontal layout for the container
-    QHBoxLayout* containerLayout = new QHBoxLayout(m_localClientInfoContainer);
-    containerLayout->setContentsMargins(0, 0, 0, 0); // No padding at all
-    containerLayout->setSpacing(0); // We'll add separators manually
-    
-    // Add "You" title (same styling as hostname in remote container)
-    containerLayout->addWidget(m_localClientTitleLabel);
-    
-    // Add vertical separator
-    QFrame* separator = new QFrame();
-    separator->setFrameShape(QFrame::VLine);
-    separator->setFrameShadow(QFrame::Sunken);
-    separator->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
-    separator->setFixedWidth(1);
-    containerLayout->addWidget(separator);
-    
-    // Add network status (styling will be applied by setLocalNetworkStatus())
-    containerLayout->addWidget(m_localNetworkStatusLabel);
 }
 
+// [PHASE 6.1] Delegate to TopBarManager
+// [PHASE 6.1] Delegate to TopBarManager
 void MainWindow::setLocalNetworkStatus(const QString& status) {
-    if (!m_localNetworkStatusLabel) return;
-    const QString up = status.toUpper();
-    m_localNetworkStatusLabel->setText(up);
-    
-    // Apply same styling as remote connection status
-    QString textColor, bgColor;
-    if (up == "CONNECTED") {
-        textColor = AppColors::colorToCss(AppColors::gStatusConnectedText);
-        bgColor = AppColors::colorToCss(AppColors::gStatusConnectedBg);
-    } else if (up == "ERROR" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
-        textColor = AppColors::colorToCss(AppColors::gStatusWarningText);
-        bgColor = AppColors::colorToCss(AppColors::gStatusWarningBg);
-    } else {
-        textColor = AppColors::colorToCss(AppColors::gStatusErrorText);
-        bgColor = AppColors::colorToCss(AppColors::gStatusErrorBg);
+    if (m_topBarManager) {
+        m_topBarManager->setLocalNetworkStatus(status);
     }
-    
-    m_localNetworkStatusLabel->setStyleSheet(
-        QString("QLabel { "
-        "    color: %1; "
-        "    background-color: %2; "
-        "    border: none; "
-        "    border-radius: 0px; "
-        "    padding: 0px %4px; "
-        "    font-size: %3px; "
-        "    font-weight: bold; "
-        "}").arg(textColor).arg(bgColor).arg(gDynamicBoxFontPx).arg(gRemoteClientContainerPadding)
-    );
 }
 
 // [PHASE 5] Updated to use RemoteClientInfoManager
@@ -2158,8 +2084,9 @@ void MainWindow::updateStylesheetsForTheme() {
         }
     }
     
-    // Update local client info container border
-    if (m_localClientInfoContainer) {
+    // [PHASE 6.1] Update local client info container border via TopBarManager
+    QWidget* localContainer = m_topBarManager ? m_topBarManager->getLocalClientInfoContainer() : nullptr;
+    if (localContainer) {
         const QString containerStyle = QString(
             "QWidget { "
             "    background-color: transparent; "
@@ -2169,11 +2096,11 @@ void MainWindow::updateStylesheetsForTheme() {
             "    min-height: %2px; "
             "}"
         ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource));
-        m_localClientInfoContainer->setStyleSheet(containerStyle);
+        localContainer->setStyleSheet(containerStyle);
     }
     
     // Update separators in local client info
-    QList<QFrame*> localSeparators = m_localClientInfoContainer ? m_localClientInfoContainer->findChildren<QFrame*>() : QList<QFrame*>();
+    QList<QFrame*> localSeparators = localContainer ? localContainer->findChildren<QFrame*>() : QList<QFrame*>();
     for (QFrame* separator : localSeparators) {
         if (separator && separator->frameShape() == QFrame::VLine) {
             separator->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
@@ -2299,10 +2226,15 @@ void MainWindow::setupUI() {
     m_settingsButton->setFixedWidth(settingsButtonWidth); // Use fixed width to prevent any changes
     connect(m_settingsButton, &QPushButton::clicked, this, &MainWindow::showSettingsDialog);
 
+    // [PHASE 6.1] Get local client info container from TopBarManager
+    QWidget* localClientContainer = m_topBarManager ? m_topBarManager->getLocalClientInfoContainer() : nullptr;
+    
     // Layout: [title][back][stretch][local-client-info][connect][settings]
     m_connectionLayout->addWidget(m_backButton);
     m_connectionLayout->addStretch();
-    m_connectionLayout->addWidget(m_localClientInfoContainer);
+    if (localClientContainer) {
+        m_connectionLayout->addWidget(localClientContainer);
+    }
     m_connectionLayout->addWidget(m_connectToggleButton);
     m_connectionLayout->addWidget(m_settingsButton);
 
@@ -2413,52 +2345,31 @@ void MainWindow::setupUI() {
 
 // [PHASE 1.2] Canvas view page creation moved to CanvasViewPage class (~183 lines removed)
 
+// [PHASE 6.3] Delegate to MenuBarManager
 void MainWindow::setupMenuBar() {
-    // File menu
-    m_fileMenu = menuBar()->addMenu("File");
-    
-    m_exitAction = new QAction("Quit Mouffette", this);
-    m_exitAction->setShortcut(QKeySequence::Quit);
-    connect(m_exitAction, &QAction::triggered, this, [this]() {
-        if (m_webSocketClient->isConnected()) {
-            m_webSocketClient->disconnect();
-        }
-        QApplication::quit();
-    });
-    m_fileMenu->addAction(m_exitAction);
-    
-    // Help menu
-    m_helpMenu = menuBar()->addMenu("Help");
-    
-    m_aboutAction = new QAction("About", this);
-    connect(m_aboutAction, &QAction::triggered, this, [this]() {
-        qDebug() << "About dialog suppressed (no popup mode).";
-    });
-    m_helpMenu->addAction(m_aboutAction);
+    if (m_menuBarManager) {
+        m_menuBarManager->setup();
+    }
 }
 
-void MainWindow::setupSystemTray() {
-    // Create tray icon (no context menu, just click handling)
-    m_trayIcon = new QSystemTrayIcon(this);
-    
-    // Set icon - try to load from resources, fallback to simple icon
-    QIcon trayIconIcon(":/icons/mouffette.png");
-    if (trayIconIcon.isNull()) {
-        // Fallback to simple colored icon
-        QPixmap pixmap(16, 16);
-        pixmap.fill(Qt::blue);
-        trayIconIcon = QIcon(pixmap);
+// [PHASE 6.3] Handle quit request from menu
+void MainWindow::onMenuQuitRequested() {
+    if (m_webSocketClient && m_webSocketClient->isConnected()) {
+        m_webSocketClient->disconnect();
     }
-    m_trayIcon->setIcon(trayIconIcon);
-    
-    // Set tooltip
-    m_trayIcon->setToolTip("Mouffette - Media Sharing");
-    
-    // Connect tray icon activation for non-context menu clicks
-    connect(m_trayIcon, &QSystemTrayIcon::activated, this, &MainWindow::onTrayIconActivated);
-    
-    // Show the tray icon
-    m_trayIcon->show();
+    QApplication::quit();
+}
+
+// [PHASE 6.3] Handle about request from menu
+void MainWindow::onMenuAboutRequested() {
+    qDebug() << "About dialog suppressed (no popup mode).";
+}
+
+// [PHASE 6.2] Delegate to SystemTrayManager
+void MainWindow::setupSystemTray() {
+    if (m_systemTrayManager) {
+        m_systemTrayManager->setup();
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
@@ -3315,6 +3226,11 @@ int MainWindow::getInnerContentGap() const
 // Phase 5: Delegate to RemoteClientInfoManager
 QWidget* MainWindow::getRemoteClientInfoContainer() const {
     return m_remoteClientInfoManager ? m_remoteClientInfoManager->getContainer() : nullptr;
+}
+
+// Phase 6.1: Delegate to TopBarManager
+QWidget* MainWindow::getLocalClientInfoContainer() const {
+    return m_topBarManager ? m_topBarManager->getLocalClientInfoContainer() : nullptr;
 }
 
 QPushButton* MainWindow::getBackButton() const {

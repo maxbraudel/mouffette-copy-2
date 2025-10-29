@@ -55,6 +55,9 @@ set(SOURCES
     src/managers/ConnectionManager.cpp
     src/managers/RemoteClientInfoManager.cpp
     src/managers/SystemMonitor.cpp
+    src/managers/TopBarManager.cpp
+    src/managers/SystemTrayManager.cpp
+    src/managers/MenuBarManager.cpp
 )
 
 # Platform-specific sources
@@ -103,6 +106,9 @@ set(HEADERS
     src/managers/ConnectionManager.h
     src/managers/RemoteClientInfoManager.h
     src/managers/SystemMonitor.h
+    src/managers/TopBarManager.h
+    src/managers/SystemTrayManager.h
+    src/managers/MenuBarManager.h
 )
 
 if(WIN32)

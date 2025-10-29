@@ -57,6 +57,9 @@ class ClientListPage; // Phase 1.1: extracted client list page
 class CanvasViewPage; // Phase 1.2: extracted canvas view page
 class RemoteClientInfoManager; // Phase 5: manages remote client info container
 class SystemMonitor; // Phase 3: system monitoring (volume, screens, platform)
+class TopBarManager; // Phase 6.1: manages top bar UI (local client info)
+class SystemTrayManager; // Phase 6.2: manages system tray icon
+class MenuBarManager; // Phase 6.3: manages menu bar (File, Help menus)
 // using QStackedWidget for canvas container switching
 class QFrame; // forward declare for separators in remote info container
 
@@ -72,7 +75,7 @@ public:
     
     // Accessor methods for ResponsiveLayoutManager
     QWidget* getRemoteClientInfoContainer() const;
-    QWidget* getLocalClientInfoContainer() const { return m_localClientInfoContainer; }
+    QWidget* getLocalClientInfoContainer() const; // Phase 6.1: Delegate to TopBarManager
     QHBoxLayout* getConnectionLayout() const { return m_connectionLayout; }
     QVBoxLayout* getMainLayout() const { return m_mainLayout; }
     QStackedWidget* getStackedWidget() const { return m_stackedWidget; }
@@ -111,6 +114,11 @@ private slots:
     
     // System tray slots
     void onTrayIconActivated(QSystemTrayIcon::ActivationReason reason);
+    
+    // Menu bar slots [Phase 6.3]
+    void onMenuQuitRequested();
+    void onMenuAboutRequested();
+    
     void onUploadButtonClicked();
     void showSettingsDialog();
     
@@ -218,9 +226,6 @@ private:
     
     // Top bar components (managed by ResponsiveLayoutManager)
     QLabel* m_pageTitleLabel = nullptr;
-    QWidget* m_localClientInfoContainer = nullptr; // Container for "You" and network status
-    QLabel* m_localClientTitleLabel = nullptr; // "You" label in local client container
-    QLabel* m_localNetworkStatusLabel = nullptr; // Network status in local client container
     QPushButton* m_backButton = nullptr;
     
     // Phase 5: Remote client info manager (extracted)
@@ -228,6 +233,9 @@ private:
     
     // Phase 3: System monitor (volume, screens, platform info)
     SystemMonitor* m_systemMonitor = nullptr;
+    
+    // Phase 6.1: Top bar manager (local client info)
+    TopBarManager* m_topBarManager = nullptr;
     
     // Remote client info container wrapper (managed dynamically)
     QWidget* m_remoteClientInfoWrapper = nullptr;
@@ -261,14 +269,11 @@ private:
     int m_loaderFadeDurationMs = 150;
     int m_fadeDurationMs = 200;
 
-    // Menu and actions
-    QMenu* m_fileMenu;
-    QMenu* m_helpMenu;
-    QAction* m_exitAction;
-    QAction* m_aboutAction;
+    // Menu and actions [Phase 6.3: Now managed by MenuBarManager]
+    MenuBarManager* m_menuBarManager = nullptr;
     
-    // System tray
-    QSystemTrayIcon* m_trayIcon = nullptr; // deprecated; retained pointer to avoid widespread removal
+    // Phase 6.2: System tray manager
+    SystemTrayManager* m_systemTrayManager = nullptr;
     
     // Backend
     WebSocketClient* m_webSocketClient;
