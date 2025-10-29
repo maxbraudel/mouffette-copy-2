@@ -10,6 +10,8 @@ ClippedContainer::ClippedContainer(QWidget* parent)
     : QWidget(parent),
       m_lastMaskSize()
 {
+    // Ensure style sheets (including borders) are painted for this widget
+    setAttribute(Qt::WA_StyledBackground, true);
 }
 
 void ClippedContainer::showEvent(QShowEvent* event)

@@ -29,6 +29,7 @@
 #include "handlers/WebSocketMessageHandler.h"
 #include "handlers/ScreenEventHandler.h"
 #include "handlers/ClientListEventHandler.h"
+#include "handlers/UploadEventHandler.h"
 #include <QMenuBar>
 #include <QHostInfo>
 #include "ClientInfo.h"
@@ -303,6 +304,7 @@ MainWindow::MainWindow(QWidget* parent)
       m_webSocketClient(new WebSocketClient(this)),
       m_webSocketMessageHandler(new WebSocketMessageHandler(this, this)), // Phase 7.1
       m_screenEventHandler(new ScreenEventHandler(this, this)), // Phase 7.2
+      m_uploadEventHandler(new UploadEventHandler(this, this)), // Phase 7.4
       m_clientListEventHandler(new ClientListEventHandler(this, m_webSocketClient, this)), // Phase 7.3
       m_statusUpdateTimer(new QTimer(this)),
       m_displaySyncTimer(new QTimer(this)),
@@ -1336,6 +1338,150 @@ void MainWindow::reconcileRemoteFilesForSession(CanvasSession& session, const QS
     }
 }
 
+// [PHASE 7.4] Upload signal connections
+void MainWindow::connectUploadSignals() {
+    if (m_uploadSignalsConnected || !m_uploadManager) return;
+    
+    connect(m_uploadManager, &UploadManager::fileUploadStarted, this, [this](const QString& fileId) {
+        if (CanvasSession* session = sessionForActiveUpload()) {
+            if (!session->canvas || !session->canvas->scene()) return;
+            session->upload.perFileProgress[fileId] = 0;
+            const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
+            for (ResizableMediaBase* item : items) {
+                if (item && item->uploadState() != ResizableMediaBase::UploadState::Uploaded) {
+                    item->setUploadUploading(0);
+                }
+            }
+        }
+    });
+    
+    connect(m_uploadManager, &UploadManager::fileUploadProgress, this, [this](const QString& fileId, int percent) {
+        if (CanvasSession* session = sessionForActiveUpload()) {
+            if (!session->canvas || !session->canvas->scene()) return;
+            if (percent >= 100) {
+                session->upload.perFileProgress[fileId] = 100;
+                const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
+                for (ResizableMediaBase* item : items) {
+                    if (item) item->setUploadUploaded();
+                }
+                session->upload.serverCompletedFileIds.insert(fileId);
+                return;
+            }
+            int clamped = std::clamp(percent, 0, 99);
+            int previous = session->upload.perFileProgress.value(fileId, -1);
+            if (previous >= 100 || clamped <= previous) return;
+            session->upload.perFileProgress[fileId] = clamped;
+            const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
+            for (ResizableMediaBase* item : items) {
+                if (item && item->uploadState() != ResizableMediaBase::UploadState::Uploaded) {
+                    item->setUploadUploading(clamped);
+                }
+            }
+        }
+    });
+    
+    connect(m_webSocketClient, &WebSocketClient::uploadPerFileProgressReceived, this,
+            [this](const QString& uploadId, const QHash<QString, int>& filePercents) {
+        CanvasSession* session = sessionForUploadId(uploadId);
+        if (!session || !session->canvas || !session->canvas->scene()) return;
+
+        if (!session->upload.receivingFilesToastShown && !filePercents.isEmpty()) {
+            const QString label = session->lastClientInfo.getDisplayText().isEmpty()
+                ? session->serverAssignedId
+                : session->lastClientInfo.getDisplayText();
+            TOAST_INFO(QString("Remote client %1 is receiving files...").arg(label));
+            session->upload.receivingFilesToastShown = true;
+        }
+
+        for (auto it = filePercents.constBegin(); it != filePercents.constEnd(); ++it) {
+            const QString& fid = it.key();
+            const int p = std::clamp(it.value(), 0, 100);
+            int previous = session->upload.perFileProgress.value(fid, -1);
+            if (p <= previous && p < 100) continue;
+            session->upload.perFileProgress[fid] = std::max(previous, p);
+            const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fid);
+            for (ResizableMediaBase* item : items) {
+                if (!item) continue;
+                if (p >= 100) item->setUploadUploaded();
+                else item->setUploadUploading(p);
+            }
+            if (p >= 100) session->upload.serverCompletedFileIds.insert(fid);
+        }
+    });
+    
+    connect(m_uploadManager, &UploadManager::uploadFinished, this, [this]() {
+        if (CanvasSession* session = sessionForActiveUpload()) {
+            const QString label = session->lastClientInfo.getDisplayText().isEmpty()
+                ? session->serverAssignedId
+                : session->lastClientInfo.getDisplayText();
+            TOAST_SUCCESS(QString("Upload completed successfully to %1").arg(label));
+            session->upload.remoteFilesPresent = true;
+            session->knownRemoteFileIds.unite(session->expectedIdeaFileIds);
+            clearUploadTracking(*session);
+        } else {
+            TOAST_SUCCESS("Upload completed successfully");
+        }
+    });
+    
+    connect(m_uploadManager, &UploadManager::uploadCompletedFileIds, this, [this](const QStringList& fileIds) {
+        if (CanvasSession* session = sessionForActiveUpload()) {
+            if (!session->canvas || !session->canvas->scene()) return;
+            for (const QString& fileId : fileIds) {
+                if (session->upload.serverCompletedFileIds.contains(fileId)) continue;
+                const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
+                for (ResizableMediaBase* item : items) {
+                    if (item) item->setUploadUploaded();
+                }
+                session->upload.serverCompletedFileIds.insert(fileId);
+            }
+        }
+    });
+    
+    connect(m_uploadManager, &UploadManager::allFilesRemoved, this, [this]() {
+        CanvasSession* session = sessionForActiveUpload();
+        if (!session) {
+            const QString activeIdentity = m_uploadManager->activeSessionIdentity();
+            if (!activeIdentity.isEmpty()) {
+                session = findCanvasSession(activeIdentity);
+            }
+        }
+        if (!session) {
+            const QString lastClientId = m_uploadManager->lastRemovalClientId();
+            if (!lastClientId.isEmpty()) {
+                session = findCanvasSessionByServerClientId(lastClientId);
+            }
+        }
+
+        if (session) {
+            const QString label = session->lastClientInfo.getDisplayText().isEmpty()
+                ? session->serverAssignedId
+                : session->lastClientInfo.getDisplayText();
+            TOAST_INFO(QString("All files removed from %1").arg(label));
+
+            session->upload.remoteFilesPresent = false;
+            if (session->canvas && session->canvas->scene()) {
+                const QList<QGraphicsItem*> allItems = session->canvas->scene()->items();
+                for (QGraphicsItem* it : allItems) {
+                    if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
+                        media->setUploadNotUploaded();
+                    }
+                }
+            }
+            clearUploadTracking(*session);
+            m_uploadManager->clearLastRemovalClientId();
+        } else {
+            TOAST_INFO("All files removed from remote client");
+            m_uploadManager->clearLastRemovalClientId();
+        }
+    });
+    
+    m_uploadSignalsConnected = true;
+}
+
+void MainWindow::setUploadSessionByUploadId(const QString& uploadId, const QString& sessionIdentity) {
+    m_uploadSessionByUploadId.insert(uploadId, sessionIdentity);
+}
+
 // [PHASE 7.1] Simplified - delegates to WebSocketMessageHandler
 void MainWindow::handleStateSyncFromServer(const QJsonObject& message) {
     if (m_webSocketMessageHandler) {
@@ -1640,339 +1786,9 @@ void MainWindow::updateVolumeIndicator() {
 }
 
 void MainWindow::onUploadButtonClicked() {
-    if (!m_uploadManager) return;
-
-    CanvasSession* session = findCanvasSession(m_activeSessionIdentity);
-    if (!session || !session->canvas) return;
-
-    ScreenCanvas* canvas = session->canvas;
-    auto& upload = session->upload;
-
-    if (m_uploadManager->isUploading()) {
-        if (m_activeUploadSessionIdentity == session->persistentClientId) {
-            m_uploadManager->requestCancel();
-            TOAST_WARNING("Upload cancelled");
-        } else {
-            TOAST_WARNING("Another client upload is currently in progress. Please wait for it to finish.");
-        }
-        return;
-    }
-
-    const QString targetClientId = session->serverAssignedId;
-    if (targetClientId.isEmpty()) {
-        TOAST_ERROR("No remote client selected for upload");
-        return;
-    }
-    m_uploadManager->setTargetClientId(targetClientId);
-    m_uploadManager->setActiveIdeaId(session->canvasSessionId);
-
-    const QString clientLabel = session->lastClientInfo.getDisplayText().isEmpty()
-        ? targetClientId
-        : session->lastClientInfo.getDisplayText();
-
-    const bool managerHasActive = m_uploadManager->hasActiveUpload() &&
-        m_uploadManager->activeUploadTargetClientId() == targetClientId;
-    const bool sessionHasRemote = upload.remoteFilesPresent;
-    const bool hasRemoteFiles = sessionHasRemote || managerHasActive;
-    
-    qDebug() << "=== Upload Button Clicked Debug ===";
-    qDebug() << "Target:" << targetClientId;
-    qDebug() << "upload.remoteFilesPresent:" << upload.remoteFilesPresent;
-    qDebug() << "sessionHasRemote:" << sessionHasRemote;
-    qDebug() << "managerHasActive:" << managerHasActive;
-    qDebug() << "  - hasActiveUpload:" << m_uploadManager->hasActiveUpload();
-    qDebug() << "  - activeTargetClientId:" << m_uploadManager->activeUploadTargetClientId();
-    qDebug() << "  - lastRemovalClientId:" << m_uploadManager->lastRemovalClientId();
-    qDebug() << "hasRemoteFiles:" << hasRemoteFiles;
-
-    upload.itemsByFileId.clear();
-    // Removed mediaIdByFileId.clear() - no longer exists
-    upload.currentUploadFileOrder.clear();
-    // Removed mediaIdsBeingUploaded.clear() - no longer exists
-    upload.serverCompletedFileIds.clear();
-    upload.perFileProgress.clear();
-    upload.receivingFilesToastShown = false;
-
-    QVector<UploadFileInfo> files;
-    QList<ResizableMediaBase*> mediaItemsToRemove;
-    QSet<QString> processedFileIds;
-    QSet<QString> currentFileIds;
-
-    if (canvas->scene()) {
-        const QList<QGraphicsItem*> allItems = canvas->scene()->items();
-        for (QGraphicsItem* it : allItems) {
-            auto* media = dynamic_cast<ResizableMediaBase*>(it);
-            if (!media) continue;
-
-            const QString path = media->sourcePath();
-            if (path.isEmpty()) continue;
-
-            QFileInfo fi(path);
-            if (!fi.exists() || !fi.isFile()) {
-                mediaItemsToRemove.append(media);
-                continue;
-            }
-
-            const QString fileId = media->fileId();
-            if (fileId.isEmpty()) {
-                qWarning() << "MainWindow: Media item has no fileId, skipping:" << media->mediaId();
-                continue;
-            }
-
-            currentFileIds.insert(fileId);
-            m_fileManager->associateFileWithIdea(fileId, session->canvasSessionId);
-
-            const bool alreadyOnTarget = m_fileManager->isFileUploadedToClient(fileId, targetClientId);
-            if (!processedFileIds.contains(fileId) && !alreadyOnTarget) {
-                UploadFileInfo info;
-                info.fileId = fileId;
-                info.mediaId = media->mediaId();
-                info.path = fi.absoluteFilePath();
-                info.name = fi.fileName();
-                info.extension = fi.suffix();
-                info.size = fi.size();
-                files.push_back(info);
-                processedFileIds.insert(fileId);
-                upload.currentUploadFileOrder.append(fileId);
-            }
-
-            if (!alreadyOnTarget) {
-                upload.itemsByFileId[fileId].append(media);
-            }
-        }
-    }
-
-    for (ResizableMediaBase* mediaItem : mediaItemsToRemove) {
-        if (m_fileWatcher) {
-            m_fileWatcher->unwatchMediaItem(mediaItem);
-        }
-        QTimer::singleShot(0, [itemPtr = mediaItem]() {
-            itemPtr->prepareForDeletion();
-            if (itemPtr->scene()) itemPtr->scene()->removeItem(itemPtr);
-            delete itemPtr;
-        });
-    }
-
-    if (!mediaItemsToRemove.isEmpty()) {
-        canvas->refreshInfoOverlay();
-        TOAST_WARNING(QString("%1 media item(s) removed - source files not found").arg(mediaItemsToRemove.size()));
-    }
-
-    reconcileRemoteFilesForSession(*session, currentFileIds);
-
-    if (files.isEmpty()) {
-        if (hasRemoteFiles) {
-            bool promotedAny = false;
-            if (canvas->scene()) {
-                const QList<QGraphicsItem*> allItems = canvas->scene()->items();
-                for (QGraphicsItem* it : allItems) {
-                    if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-                        const QString fileId = media->fileId();
-                        if (fileId.isEmpty()) continue;
-                        if (!m_fileManager->isFileUploadedToClient(fileId, targetClientId)) {
-                            m_fileManager->markFileUploadedToClient(fileId, targetClientId);
-                            media->setUploadUploaded();
-                            promotedAny = true;
-                        }
-                    }
-                }
-            }
-            if (promotedAny) {
-                emit m_uploadManager->uiStateChanged();
-                TOAST_SUCCESS("All media already synchronized with remote client");
-                return;
-            }
-
-            if (sessionHasRemote) {
-                qDebug() << "Requesting remote removal for" << targetClientId << "(session" << session->persistentClientId << ")";
-                m_uploadManager->setActiveSessionIdentity(session->persistentClientId);
-                m_uploadManager->requestRemoval(targetClientId);
-                TOAST_INFO(QString("Requesting remote removal from %1…").arg(clientLabel));
-                return;
-            }
-
-            if (managerHasActive) {
-                m_uploadManager->requestUnload();
-            } else {
-                TOAST_INFO("Remote media already cleared");
-            }
-        } else {
-            TOAST_INFO("No new media to upload");
-            qDebug() << "Upload skipped: aucun média local nouveau (popup supprimée).";
-        }
-        return;
-    }
-
-    // Track which fileIds are being uploaded to update UI state
-    QSet<QString> fileIdsBeingUploaded;
-    for (const auto& f : files) {
-        fileIdsBeingUploaded.insert(f.fileId);
-    }
-
-    m_uploadManager->clearLastRemovalClientId();
-
-    if (canvas->scene()) {
-        const QList<QGraphicsItem*> allItems = canvas->scene()->items();
-        for (QGraphicsItem* it : allItems) {
-            if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-                // Check if this media's file is being uploaded
-                const QString fileId = m_fileManager->getFileIdForMedia(media->mediaId());
-                if (!fileId.isEmpty() && fileIdsBeingUploaded.contains(fileId)) {
-                    media->setUploadUploading(0);
-                }
-            }
-        }
-    }
-
-    if (m_uploadManager && !m_uploadSignalsConnected) {
-        connect(m_uploadManager, &UploadManager::fileUploadStarted, this, [this](const QString& fileId) {
-            if (CanvasSession* session = sessionForActiveUpload()) {
-                if (!session->canvas || !session->canvas->scene()) return;
-                session->upload.perFileProgress[fileId] = 0;
-                const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
-                for (ResizableMediaBase* item : items) {
-                    if (item && item->uploadState() != ResizableMediaBase::UploadState::Uploaded) {
-                        item->setUploadUploading(0);
-                    }
-                }
-            }
-        });
-        connect(m_uploadManager, &UploadManager::fileUploadProgress, this, [this](const QString& fileId, int percent) {
-            if (CanvasSession* session = sessionForActiveUpload()) {
-                if (!session->canvas || !session->canvas->scene()) return;
-                if (percent >= 100) {
-                    session->upload.perFileProgress[fileId] = 100;
-                    const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
-                    for (ResizableMediaBase* item : items) {
-                        if (item) item->setUploadUploaded();
-                    }
-                    session->upload.serverCompletedFileIds.insert(fileId);
-                    return;
-                }
-                int clamped = std::clamp(percent, 0, 99);
-                int previous = session->upload.perFileProgress.value(fileId, -1);
-                if (previous >= 100 || clamped <= previous) return;
-                session->upload.perFileProgress[fileId] = clamped;
-                const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
-                for (ResizableMediaBase* item : items) {
-                    if (item && item->uploadState() != ResizableMediaBase::UploadState::Uploaded) {
-                        item->setUploadUploading(clamped);
-                    }
-                }
-            }
-        });
-        connect(m_webSocketClient, &WebSocketClient::uploadPerFileProgressReceived, this,
-                [this](const QString& uploadId, const QHash<QString, int>& filePercents) {
-            CanvasSession* session = sessionForUploadId(uploadId);
-            if (!session || !session->canvas || !session->canvas->scene()) return;
-
-            if (!session->upload.receivingFilesToastShown && !filePercents.isEmpty()) {
-                const QString label = session->lastClientInfo.getDisplayText().isEmpty()
-                    ? session->serverAssignedId
-                    : session->lastClientInfo.getDisplayText();
-                TOAST_INFO(QString("Remote client %1 is receiving files...").arg(label));
-                session->upload.receivingFilesToastShown = true;
-            }
-
-            for (auto it = filePercents.constBegin(); it != filePercents.constEnd(); ++it) {
-                const QString& fid = it.key();
-                const int p = std::clamp(it.value(), 0, 100);
-                int previous = session->upload.perFileProgress.value(fid, -1);
-                if (p <= previous && p < 100) continue;
-                session->upload.perFileProgress[fid] = std::max(previous, p);
-                const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fid);
-                for (ResizableMediaBase* item : items) {
-                    if (!item) continue;
-                    if (p >= 100) item->setUploadUploaded();
-                    else item->setUploadUploading(p);
-                }
-                if (p >= 100) session->upload.serverCompletedFileIds.insert(fid);
-            }
-        });
-        connect(m_uploadManager, &UploadManager::uploadFinished, this, [this]() {
-            if (CanvasSession* session = sessionForActiveUpload()) {
-                const QString label = session->lastClientInfo.getDisplayText().isEmpty()
-                    ? session->serverAssignedId
-                    : session->lastClientInfo.getDisplayText();
-                TOAST_SUCCESS(QString("Upload completed successfully to %1").arg(label));
-                session->upload.remoteFilesPresent = true;
-                session->knownRemoteFileIds.unite(session->expectedIdeaFileIds);
-                clearUploadTracking(*session);
-            } else {
-                TOAST_SUCCESS("Upload completed successfully");
-            }
-        });
-        connect(m_uploadManager, &UploadManager::uploadCompletedFileIds, this, [this](const QStringList& fileIds) {
-            if (CanvasSession* session = sessionForActiveUpload()) {
-                if (!session->canvas || !session->canvas->scene()) return;
-                for (const QString& fileId : fileIds) {
-                    if (session->upload.serverCompletedFileIds.contains(fileId)) continue;
-                    const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
-                    for (ResizableMediaBase* item : items) {
-                        if (item) item->setUploadUploaded();
-                    }
-                    session->upload.serverCompletedFileIds.insert(fileId);
-                }
-            }
-        });
-        connect(m_uploadManager, &UploadManager::allFilesRemoved, this, [this]() {
-            CanvasSession* session = sessionForActiveUpload();
-            if (!session) {
-                const QString activeIdentity = m_uploadManager->activeSessionIdentity();
-                if (!activeIdentity.isEmpty()) {
-                    session = findCanvasSession(activeIdentity);
-                }
-            }
-            if (!session) {
-                const QString lastClientId = m_uploadManager->lastRemovalClientId();
-                if (!lastClientId.isEmpty()) {
-                    session = findCanvasSessionByServerClientId(lastClientId);
-                }
-            }
-
-            if (session) {
-                const QString label = session->lastClientInfo.getDisplayText().isEmpty()
-                    ? session->serverAssignedId
-                    : session->lastClientInfo.getDisplayText();
-                TOAST_INFO(QString("All files removed from %1").arg(label));
-
-                session->upload.remoteFilesPresent = false;
-                if (session->canvas && session->canvas->scene()) {
-                    const QList<QGraphicsItem*> allItems = session->canvas->scene()->items();
-                    for (QGraphicsItem* it : allItems) {
-                        if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-                            // Reset upload state for all items (no longer tracking specific mediaIds)
-                            media->setUploadNotUploaded();
-                        }
-                    }
-                }
-                clearUploadTracking(*session);
-                m_uploadManager->clearLastRemovalClientId();
-            } else {
-                TOAST_INFO("All files removed from remote client");
-                m_uploadManager->clearLastRemovalClientId();
-            }
-        });
-        m_uploadSignalsConnected = true;
-                rotateSessionIdea(*session);
-    }
-
-    TOAST_INFO(QString("Starting upload of %1 file(s) to %2...").arg(files.size()).arg(clientLabel));
-
-    upload.remoteFilesPresent = false;
-    m_activeUploadSessionIdentity = session->persistentClientId;
-    m_uploadManager->setActiveSessionIdentity(session->persistentClientId);
-
-    m_uploadManager->toggleUpload(files);
-
-    if (m_uploadManager->isUploading()) {
-        upload.activeUploadId = m_uploadManager->currentUploadId();
-        if (!upload.activeUploadId.isEmpty()) {
-            m_uploadSessionByUploadId.insert(upload.activeUploadId, session->persistentClientId);
-        }
-    } else if (m_activeUploadSessionIdentity == session->persistentClientId) {
-        m_activeUploadSessionIdentity.clear();
-        m_uploadManager->setActiveSessionIdentity(QString());
+    // [PHASE 7.4] Delegate to UploadEventHandler
+    if (m_uploadEventHandler) {
+        m_uploadEventHandler->onUploadButtonClicked();
     }
 }
 
@@ -2262,6 +2078,9 @@ void MainWindow::setupUI() {
     // Phase 1.2: Create CanvasViewPage
     m_canvasViewPage = new CanvasViewPage(this);
     m_stackedWidget->addWidget(m_canvasViewPage);
+    
+    // Initialize remote client info in top bar (must be done after CanvasViewPage exists)
+    initializeRemoteClientInfoInTopBar();
     
     // Start with client list page
     m_stackedWidget->setCurrentWidget(m_clientListPage);

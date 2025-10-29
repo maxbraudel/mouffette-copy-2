@@ -63,6 +63,7 @@ class MenuBarManager; // Phase 6.3: manages menu bar (File, Help menus)
 class WebSocketMessageHandler; // Phase 7.1: manages WebSocket message routing
 class ScreenEventHandler; // Phase 7.2: manages screen events and registration
 class ClientListEventHandler; // Phase 7.3: manages client list events and connection state
+class UploadEventHandler; // Phase 7.4: manages upload events and file transfers
 // using QStackedWidget for canvas container switching
 class QFrame; // forward declare for separators in remote info container
 
@@ -155,6 +156,15 @@ public:
     void showInlineSpinner();
     void startInlineSpinner();
     void unloadUploadsForSession(CanvasSession& session, bool clearFlag);
+    
+    // [Phase 7.4] Accessor methods for UploadEventHandler
+    QString getActiveUploadSessionIdentity() const { return m_activeUploadSessionIdentity; }
+    void setActiveUploadSessionIdentity(const QString& identity) { m_activeUploadSessionIdentity = identity; }
+    FileWatcher* getFileWatcher() const { return m_fileWatcher; }
+    void reconcileRemoteFilesForSession(CanvasSession& session, const QSet<QString>& currentFileIds);
+    bool areUploadSignalsConnected() const { return m_uploadSignalsConnected; }
+    void connectUploadSignals();
+    void setUploadSessionByUploadId(const QString& uploadId, const QString& sessionIdentity);
 
 public slots:
     void handleApplicationStateChanged(Qt::ApplicationState state);
@@ -246,7 +256,6 @@ private:
 
     QString createIdeaId() const;
     void rotateSessionIdea(CanvasSession& session);
-    void reconcileRemoteFilesForSession(CanvasSession& session, const QSet<QString>& currentFileIds);
     void markAllSessionsOffline();
     ScreenCanvas* canvasForClientId(const QString& clientId) const;
     CanvasSession* sessionForActiveUpload();
@@ -334,8 +343,11 @@ private:
     // Phase 7.3: Client list event handler
     ClientListEventHandler* m_clientListEventHandler = nullptr;
     
+    // Phase 7.4: Upload event handler
+    UploadEventHandler* m_uploadEventHandler = nullptr;
+    
     // Backend
-    WebSocketClient* m_webSocketClient;
+    WebSocketClient* m_webSocketClient = nullptr;
     int m_lastConnectedClientCount = 0;
     QString m_activeSessionIdentity;
     ClientInfo m_thisClient;

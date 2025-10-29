@@ -61,6 +61,7 @@ set(SOURCES
     src/handlers/WebSocketMessageHandler.cpp
     src/handlers/ScreenEventHandler.cpp
     src/handlers/ClientListEventHandler.cpp
+    src/handlers/UploadEventHandler.cpp
 )
 
 # Platform-specific sources
@@ -115,6 +116,7 @@ set(HEADERS
     src/handlers/WebSocketMessageHandler.h
     src/handlers/ScreenEventHandler.h
     src/handlers/ClientListEventHandler.h
+    src/handlers/UploadEventHandler.h
 )
 
 if(WIN32)
