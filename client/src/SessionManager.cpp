@@ -30,48 +30,50 @@ const SessionManager::CanvasSession* SessionManager::findSession(const QString& 
     return (it != m_sessions.constEnd()) ? &it.value() : nullptr;
 }
 
-// Session lookup by ideaId
+// Session lookup by ideaId - PHASE 1 OPTIMIZED: O(1) with secondary index
 SessionManager::CanvasSession* SessionManager::findSessionByIdeaId(const QString& ideaId) {
-    for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it) {
-        if (it.value().ideaId == ideaId) {
-            return &it.value();
-        }
+    if (ideaId.isEmpty()) {
+        return nullptr;
     }
-    return nullptr;
+    QString persistentClientId = m_ideaIdToClientId.value(ideaId);
+    if (persistentClientId.isEmpty()) {
+        return nullptr;
+    }
+    return findSession(persistentClientId);
 }
 
 const SessionManager::CanvasSession* SessionManager::findSessionByIdeaId(const QString& ideaId) const {
-    for (auto it = m_sessions.constBegin(); it != m_sessions.constEnd(); ++it) {
-        if (it.value().ideaId == ideaId) {
-            return &it.value();
-        }
+    if (ideaId.isEmpty()) {
+        return nullptr;
     }
-    return nullptr;
+    QString persistentClientId = m_ideaIdToClientId.value(ideaId);
+    if (persistentClientId.isEmpty()) {
+        return nullptr;
+    }
+    return findSession(persistentClientId);
 }
 
-// Session lookup by server-assigned session ID (for incoming messages)
+// Session lookup by server-assigned session ID (for incoming messages) - PHASE 1 OPTIMIZED: O(1) with secondary index
 SessionManager::CanvasSession* SessionManager::findSessionByServerClientId(const QString& serverClientId) {
     if (serverClientId.isEmpty()) {
         return nullptr;
     }
-    for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it) {
-        if (it.value().serverAssignedId == serverClientId) {
-            return &it.value();
-        }
+    QString persistentClientId = m_serverIdToClientId.value(serverClientId);
+    if (persistentClientId.isEmpty()) {
+        return nullptr;
     }
-    return nullptr;
+    return findSession(persistentClientId);
 }
 
 const SessionManager::CanvasSession* SessionManager::findSessionByServerClientId(const QString& serverClientId) const {
     if (serverClientId.isEmpty()) {
         return nullptr;
     }
-    for (auto it = m_sessions.constBegin(); it != m_sessions.constEnd(); ++it) {
-        if (it.value().serverAssignedId == serverClientId) {
-            return &it.value();
-        }
+    QString persistentClientId = m_serverIdToClientId.value(serverClientId);
+    if (persistentClientId.isEmpty()) {
+        return nullptr;
     }
-    return nullptr;
+    return findSession(persistentClientId);
 }
 
 // Get or create session
@@ -101,6 +103,11 @@ SessionManager::CanvasSession& SessionManager::getOrCreateSession(const QString&
     newSession.ideaId = DEFAULT_IDEA_ID;
 
     m_sessions.insert(persistentClientId, newSession);
+    
+    // PHASE 1: Update secondary indexes
+    m_ideaIdToClientId[newSession.ideaId] = persistentClientId;
+    m_serverIdToClientId[newSession.serverAssignedId] = persistentClientId;
+    
     qDebug() << "SessionManager: Created new session for client" << persistentClientId << "with ideaId" << newSession.ideaId;
     
     emit sessionCreated(persistentClientId);
@@ -124,6 +131,9 @@ void SessionManager::deleteSession(const QString& persistentClientId) {
 
     qDebug() << "SessionManager: Deleting session for client" << persistentClientId;
     
+    // PHASE 1: Remove from secondary indexes
+    removeFromIndexes(persistentClientId);
+    
     // Note: Canvas and uploadButton cleanup is handled by MainWindow
     // (ownership may be with layouts/parent widgets)
     
@@ -134,6 +144,10 @@ void SessionManager::deleteSession(const QString& persistentClientId) {
 void SessionManager::clearAllSessions() {
     qDebug() << "SessionManager: Clearing all sessions";
     m_sessions.clear();
+    
+    // PHASE 1: Clear secondary indexes
+    m_ideaIdToClientId.clear();
+    m_serverIdToClientId.clear();
 }
 
 // Session enumeration
@@ -174,5 +188,71 @@ void SessionManager::clearRemoteContentForOfflineSessions() {
             it.value().remoteContentClearedOnDisconnect = true;
             emit sessionModified(it.key());
         }
+    }
+}
+
+// PHASE 1: Public methods to update IDs and maintain indexes
+void SessionManager::updateSessionIdeaId(const QString& persistentClientId, const QString& newIdeaId) {
+    auto* session = findSession(persistentClientId);
+    if (!session) {
+        qWarning() << "SessionManager::updateSessionIdeaId: Session not found for" << persistentClientId;
+        return;
+    }
+    
+    QString oldIdeaId = session->ideaId;
+    if (oldIdeaId == newIdeaId) {
+        return; // No change
+    }
+    
+    session->ideaId = newIdeaId;
+    updateIdeaIdIndex(persistentClientId, oldIdeaId, newIdeaId);
+    emit sessionModified(persistentClientId);
+}
+
+void SessionManager::updateSessionServerId(const QString& persistentClientId, const QString& newServerId) {
+    auto* session = findSession(persistentClientId);
+    if (!session) {
+        qWarning() << "SessionManager::updateSessionServerId: Session not found for" << persistentClientId;
+        return;
+    }
+    
+    QString oldServerId = session->serverAssignedId;
+    if (oldServerId == newServerId) {
+        return; // No change
+    }
+    
+    session->serverAssignedId = newServerId;
+    updateServerIdIndex(persistentClientId, oldServerId, newServerId);
+    emit sessionModified(persistentClientId);
+}
+
+// PHASE 1: Index maintenance helpers
+void SessionManager::updateIdeaIdIndex(const QString& persistentClientId, const QString& oldIdeaId, const QString& newIdeaId) {
+    if (!oldIdeaId.isEmpty()) {
+        m_ideaIdToClientId.remove(oldIdeaId);
+    }
+    if (!newIdeaId.isEmpty()) {
+        m_ideaIdToClientId[newIdeaId] = persistentClientId;
+    }
+    qDebug() << "SessionManager: Updated ideaId index:" << persistentClientId << "from" << oldIdeaId << "to" << newIdeaId;
+}
+
+void SessionManager::updateServerIdIndex(const QString& persistentClientId, const QString& oldServerId, const QString& newServerId) {
+    if (!oldServerId.isEmpty()) {
+        m_serverIdToClientId.remove(oldServerId);
+    }
+    if (!newServerId.isEmpty()) {
+        m_serverIdToClientId[newServerId] = persistentClientId;
+    }
+    qDebug() << "SessionManager: Updated serverSessionId index:" << persistentClientId << "from" << oldServerId << "to" << newServerId;
+}
+
+void SessionManager::removeFromIndexes(const QString& persistentClientId) {
+    auto it = m_sessions.find(persistentClientId);
+    if (it != m_sessions.end()) {
+        const auto& session = it.value();
+        m_ideaIdToClientId.remove(session.ideaId);
+        m_serverIdToClientId.remove(session.serverAssignedId);
+        qDebug() << "SessionManager: Removed from indexes:" << persistentClientId;
     }
 }

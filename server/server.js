@@ -14,6 +14,13 @@ class MouffetteServer {
         this.uploads = new Map();        // uploadId -> { sender, target, ideaId, startTime, files: [fileIds] }
         this.clientFiles = new Map();    // persistentClientId -> Map(ideaId -> Set(fileId))
         this.sessionsByPersistent = new Map(); // persistentClientId -> Set(sessionId)
+        
+        // PHASE 2: Active canvas tracking (CRITICAL for ideaId validation)
+        this.activeCanvases = new Map(); // persistentClientId -> Set(ideaId)
+        
+        // PHASE 1: Upload timeout configuration
+        this.UPLOAD_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+        this.uploadCleanupInterval = null;
     }
 
     start() {
@@ -21,6 +28,12 @@ class MouffetteServer {
         this.wss = new WebSocket.Server({ port: this.port, host: '0.0.0.0' });
         
         console.log(`🎯 Mouffette Server started on ws://0.0.0.0:${this.port}`);
+        
+        // PHASE 1: Start upload cleanup interval (every minute)
+        this.uploadCleanupInterval = setInterval(() => {
+            this.cleanupStalledUploads();
+        }, 60000); // 1 minute
+        console.log(`🧹 Upload timeout cleanup started (timeout: ${this.UPLOAD_TIMEOUT_MS}ms)`);
         
         this.wss.on('connection', (ws, req) => {
             // Parse query parameters to detect upload channel connections
@@ -218,7 +231,11 @@ class MouffetteServer {
                 this.handleUploadStart(clientId, message);
                 break;
             case 'upload_chunk':
-                this.relayToTarget(clientId, message.targetClientId, message);
+                // PHASE 2: Extract targetClientId with fallback
+                {
+                    const targetClientId = message.targetPersistentClientId || message.targetClientId;
+                    this.relayToTarget(clientId, targetClientId, message);
+                }
                 break;
             case 'upload_complete':
                 this.handleUploadComplete(clientId, message);
@@ -231,6 +248,13 @@ class MouffetteServer {
                 break;
             case 'remove_file':
                 this.handleRemoveFile(clientId, message);
+                break;
+            // PHASE 2: Canvas lifecycle tracking (CRITICAL for ideaId validation)
+            case 'canvas_created':
+                this.handleCanvasCreated(clientId, message);
+                break;
+            case 'canvas_deleted':
+                this.handleCanvasDeleted(clientId, message);
                 break;
             // Progress/status notifications from target back to sender
             case 'upload_progress':
@@ -422,16 +446,23 @@ class MouffetteServer {
     handleRegister(clientId, message) {
         const client = this.clients.get(clientId);
         if (!client) return;
-    const requestedPersistentId = (typeof message.clientId === 'string') ? message.clientId.trim() : '';
+    
+    // PHASE 2: Read persistentClientId (new explicit field) with fallback to clientId (legacy)
+    const requestedPersistentId = (typeof message.persistentClientId === 'string') 
+        ? message.persistentClientId.trim() 
+        : (typeof message.clientId === 'string') 
+            ? message.clientId.trim() 
+            : '';
+    
     const requestedSessionId = (typeof message.sessionId === 'string') ? message.sessionId.trim() : '';
     const previousPersistentId = client.persistentId;
     const persistentId = requestedPersistentId || previousPersistentId;
     if (!persistentId) {
-        console.warn(`⚠️ register missing clientId for socket ${clientId} - machine: ${message.machineName || 'unknown'}`);
+        console.warn(`⚠️ register missing persistentClientId/clientId for socket ${clientId} - machine: ${message.machineName || 'unknown'}`);
         if (client.ws && client.ws.readyState === WebSocket.OPEN) {
             client.ws.send(JSON.stringify({
                 type: 'error',
-                message: 'clientId is required for register'
+                message: 'persistentClientId is required for register'
             }));
         }
         return;
@@ -579,7 +610,9 @@ class MouffetteServer {
     
     // PHASE 2: Upload state tracking methods
     handleUploadStart(senderId, message) {
-        const { targetClientId, uploadId, ideaId, files } = message;
+        // PHASE 2: Read targetPersistentClientId (new) with fallback to targetClientId (legacy)
+        const targetClientId = message.targetPersistentClientId || message.targetClientId;
+        const { uploadId, ideaId, files } = message;
         
         // Validation
         if (!targetClientId || !uploadId || !ideaId) {
@@ -589,6 +622,26 @@ class MouffetteServer {
         
         const targetPersistentId = this.getPersistentId(targetClientId);
         const senderPersistentId = this.getPersistentId(senderId);
+        
+        // PHASE 2: Validate ideaId exists for target client (CRITICAL)
+        const targetCanvases = this.activeCanvases.get(targetPersistentId);
+        if (!targetCanvases || !targetCanvases.has(ideaId)) {
+            console.warn(`⚠️ upload_start rejected: ideaId ${ideaId} not found for target ${targetPersistentId}`);
+            console.warn(`   Active canvases:`, targetCanvases ? Array.from(targetCanvases) : 'none');
+            
+            // Send error back to sender
+            const sender = this.clients.get(senderId);
+            if (sender && sender.ws && sender.ws.readyState === WebSocket.OPEN) {
+                sender.ws.send(JSON.stringify({
+                    type: 'upload_error',
+                    uploadId: uploadId,
+                    errorCode: 'INVALID_IDEA_ID',
+                    message: `Canvas with ideaId ${ideaId} does not exist on target client ${targetPersistentId}`
+                }));
+            }
+            return;
+        }
+        
         // Track upload state
         const fileIds = Array.isArray(files) ? files.map(f => f.fileId).filter(Boolean) : [];
         this.uploads.set(uploadId, {
@@ -608,7 +661,9 @@ class MouffetteServer {
     }
     
     handleUploadComplete(senderId, message) {
-        const { targetClientId, uploadId, ideaId } = message;
+        // PHASE 2: Read targetPersistentClientId (new) with fallback to targetClientId (legacy)
+        const targetClientId = message.targetPersistentClientId || message.targetClientId;
+        const { uploadId, ideaId } = message;
         const upload = this.uploads.get(uploadId);
         
         if (!upload) {
@@ -651,11 +706,50 @@ class MouffetteServer {
             console.log(`❌ Upload aborted: ${uploadId}`);
             this.uploads.delete(uploadId);
         }
-        this.relayToTarget(senderId, message.targetClientId, message);
+        // PHASE 2: Extract targetClientId with fallback
+        const targetClientId = message.targetPersistentClientId || message.targetClientId;
+        this.relayToTarget(senderId, targetClientId, message);
+    }
+    
+    // PHASE 1: Cleanup stalled uploads (called periodically)
+    cleanupStalledUploads() {
+        const now = Date.now();
+        let cleanedCount = 0;
+        
+        for (const [uploadId, upload] of this.uploads) {
+            const age = now - upload.startTime;
+            if (age > this.UPLOAD_TIMEOUT_MS) {
+                console.warn(`⏱️  Upload ${uploadId} timed out after ${(age / 1000).toFixed(1)}s`);
+                
+                // Notify sender if still connected
+                const senderPersistent = upload.senderPersistent;
+                const senderSessions = this.sessionsByPersistent.get(senderPersistent);
+                if (senderSessions && senderSessions.size > 0) {
+                    const senderSessionId = [...senderSessions][0]; // First active session
+                    const senderClient = this.clients.get(senderSessionId);
+                    if (senderClient && senderClient.ws.readyState === WebSocket.OPEN) {
+                        senderClient.ws.send(JSON.stringify({
+                            type: 'upload_timeout',
+                            uploadId: uploadId,
+                            message: `Upload timed out after ${this.UPLOAD_TIMEOUT_MS / 1000}s`
+                        }));
+                    }
+                }
+                
+                this.uploads.delete(uploadId);
+                cleanedCount++;
+            }
+        }
+        
+        if (cleanedCount > 0) {
+            console.log(`🧹 Cleaned up ${cleanedCount} stalled upload(s)`);
+        }
     }
     
     handleRemoveAllFiles(senderId, message) {
-        const { targetClientId, ideaId } = message;
+        // PHASE 2: Extract targetClientId with fallback
+        const targetClientId = message.targetPersistentClientId || message.targetClientId;
+        const { ideaId } = message;
         const targetPersistentId = this.getPersistentId(targetClientId);
         if (!targetClientId || !ideaId) {
             console.warn(`⚠️ remove_all_files missing required fields from ${senderId}`);
@@ -673,7 +767,9 @@ class MouffetteServer {
     }
     
     handleRemoveFile(senderId, message) {
-        const { targetClientId, ideaId, fileId } = message;
+        // PHASE 2: Extract targetClientId with fallback
+        const targetClientId = message.targetPersistentClientId || message.targetClientId;
+        const { ideaId, fileId } = message;
         
         if (!targetClientId || !fileId || !ideaId) {
             console.warn(`⚠️ remove_file missing required fields from ${senderId}`);
@@ -696,6 +792,46 @@ class MouffetteServer {
         }
         
         this.relayToTarget(senderId, targetClientId, message);
+    }
+    
+    // PHASE 2: Canvas lifecycle tracking handlers
+    handleCanvasCreated(senderId, message) {
+        const { persistentClientId, ideaId } = message;
+        
+        if (!persistentClientId || !ideaId) {
+            console.warn(`⚠️ canvas_created missing required fields from ${senderId}`);
+            return this.sendError(senderId, 'Missing persistentClientId or ideaId');
+        }
+        
+        // Track active canvas
+        if (!this.activeCanvases.has(persistentClientId)) {
+            this.activeCanvases.set(persistentClientId, new Set());
+        }
+        this.activeCanvases.get(persistentClientId).add(ideaId);
+        
+        console.log(`🎨 Canvas created: ${persistentClientId}:${ideaId}`);
+        console.log(`   Active canvases for ${persistentClientId}:`, Array.from(this.activeCanvases.get(persistentClientId)));
+    }
+    
+    handleCanvasDeleted(senderId, message) {
+        const { persistentClientId, ideaId } = message;
+        
+        if (!persistentClientId || !ideaId) {
+            console.warn(`⚠️ canvas_deleted missing required fields from ${senderId}`);
+            return this.sendError(senderId, 'Missing persistentClientId or ideaId');
+        }
+        
+        // Remove canvas from tracking
+        const canvases = this.activeCanvases.get(persistentClientId);
+        if (canvases) {
+            canvases.delete(ideaId);
+            console.log(`🗑️  Canvas deleted: ${persistentClientId}:${ideaId}`);
+            
+            // Cleanup empty sets
+            if (canvases.size === 0) {
+                this.activeCanvases.delete(persistentClientId);
+            }
+        }
     }
     
     sendError(clientId, errorMessage) {
@@ -881,6 +1017,13 @@ setInterval(() => {
 // Graceful shutdown
 process.on('SIGINT', () => {
     console.log('\n🛑 Shutting down Mouffette Server...');
+    
+    // PHASE 1: Clear upload cleanup interval
+    if (server.uploadCleanupInterval) {
+        clearInterval(server.uploadCleanupInterval);
+        console.log('🧹 Upload cleanup interval stopped');
+    }
+    
     if (server.wss) {
         server.wss.close(() => {
             console.log('✅ Server closed gracefully');

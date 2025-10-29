@@ -247,9 +247,11 @@ void WebSocketClient::registerClient(const QString& machineName, const QString& 
     if (volumePercent >= 0) message["volumePercent"] = volumePercent;
     message["sessionId"] = m_sessionId;
     
-    // NEW: Send persistent client ID for stable identification across reconnections
+    // PHASE 2: Send persistent client ID with explicit field name for clarity
+    // Keep "clientId" for backward compatibility
     if (!m_persistentClientId.isEmpty()) {
-        message["clientId"] = m_persistentClientId;
+        message["clientId"] = m_persistentClientId;           // Legacy field (backward compat)
+        message["persistentClientId"] = m_persistentClientId;  // New explicit field (PHASE 2)
     }
     
     if (!screens.isEmpty()) {
@@ -326,11 +328,15 @@ void WebSocketClient::sendUploadStart(const QString& targetClientId, const QJson
     
     QJsonObject msg;
     msg["type"] = "upload_start";
-    msg["targetClientId"] = targetClientId;
+    msg["targetClientId"] = targetClientId;           // PHASE 2: Still called targetClientId (refers to persistentClientId)
+    msg["targetPersistentClientId"] = targetClientId;  // PHASE 2: Explicit field name for clarity
     msg["uploadId"] = uploadId;
     msg["files"] = filesManifest;
     msg["ideaId"] = ideaId;
-    if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
+    if (!m_clientId.isEmpty()) {
+        msg["senderClientId"] = m_clientId;           // Legacy (backward compat)
+        msg["senderPersistentClientId"] = m_clientId;  // PHASE 2: Explicit field
+    }
     sendMessageUpload(msg);
 }
 
@@ -340,7 +346,8 @@ void WebSocketClient::sendUploadChunk(const QString& targetClientId, const QStri
     
     QJsonObject msg;
     msg["type"] = "upload_chunk";
-    msg["targetClientId"] = targetClientId;
+    msg["targetClientId"] = targetClientId;           // Legacy (backward compat)
+    msg["targetPersistentClientId"] = targetClientId;  // PHASE 2: Explicit field
     msg["uploadId"] = uploadId;
     msg["fileId"] = fileId;
     msg["chunkIndex"] = chunkIndex;
@@ -352,7 +359,10 @@ void WebSocketClient::sendUploadChunk(const QString& targetClientId, const QStri
     }
     msg["data"] = QString::fromUtf8(payload);
     msg["ideaId"] = ideaId; // now mandatory
-    if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
+    if (!m_clientId.isEmpty()) {
+        msg["senderClientId"] = m_clientId;           // Legacy (backward compat)
+        msg["senderPersistentClientId"] = m_clientId;  // PHASE 2: Explicit field
+    }
     sendMessageUpload(msg);
 }
 
@@ -362,10 +372,14 @@ void WebSocketClient::sendUploadComplete(const QString& targetClientId, const QS
     
     QJsonObject msg;
     msg["type"] = "upload_complete";
-    msg["targetClientId"] = targetClientId;
+    msg["targetClientId"] = targetClientId;           // Legacy (backward compat)
+    msg["targetPersistentClientId"] = targetClientId;  // PHASE 2: Explicit field
     msg["uploadId"] = uploadId;
     msg["ideaId"] = ideaId;
-    if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
+    if (!m_clientId.isEmpty()) {
+        msg["senderClientId"] = m_clientId;           // Legacy (backward compat)
+        msg["senderPersistentClientId"] = m_clientId;  // PHASE 2: Explicit field
+    }
     sendMessageUpload(msg);
 }
 
@@ -375,11 +389,15 @@ void WebSocketClient::sendUploadAbort(const QString& targetClientId, const QStri
     
     QJsonObject msg;
     msg["type"] = "upload_abort";
-    msg["targetClientId"] = targetClientId;
+    msg["targetClientId"] = targetClientId;           // Legacy (backward compat)
+    msg["targetPersistentClientId"] = targetClientId;  // PHASE 2: Explicit field
     msg["uploadId"] = uploadId;
     msg["ideaId"] = ideaId;
     if (!reason.isEmpty()) msg["reason"] = reason;
-    if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
+    if (!m_clientId.isEmpty()) {
+        msg["senderClientId"] = m_clientId;           // Legacy (backward compat)
+        msg["senderPersistentClientId"] = m_clientId;  // PHASE 2: Explicit field
+    }
     sendMessageUpload(msg);
 }
 
@@ -388,7 +406,8 @@ void WebSocketClient::sendRemoveAllFiles(const QString& targetClientId, const QS
     
     QJsonObject msg;
     msg["type"] = "remove_all_files";
-    msg["targetClientId"] = targetClientId;
+    msg["targetClientId"] = targetClientId;           // Legacy (backward compat)
+    msg["targetPersistentClientId"] = targetClientId;  // PHASE 2: Explicit field
     msg["ideaId"] = ideaId;
     sendMessage(msg);
 }
@@ -398,12 +417,41 @@ void WebSocketClient::sendRemoveFile(const QString& targetClientId, const QStrin
     
     QJsonObject msg;
     msg["type"] = "remove_file";
-    msg["targetClientId"] = targetClientId;
+    msg["targetClientId"] = targetClientId;           // Legacy (backward compat)
+    msg["targetPersistentClientId"] = targetClientId;  // PHASE 2: Explicit field
     msg["fileId"] = fileId;
     msg["ideaId"] = ideaId;
-    if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
+    if (!m_clientId.isEmpty()) {
+        msg["senderClientId"] = m_clientId;           // Legacy (backward compat)
+        msg["senderPersistentClientId"] = m_clientId;  // PHASE 2: Explicit field
+    }
     qDebug() << "Sending remove_file command for fileId:" << fileId << "idea:" << ideaId << "to client:" << targetClientId;
     sendMessage(msg);
+}
+
+// PHASE 2: Canvas lifecycle notifications (CRITICAL for ideaId validation)
+void WebSocketClient::sendCanvasCreated(const QString& persistentClientId, const QString& ideaId) {
+    if (!isConnected()) return;
+    
+    QJsonObject msg;
+    msg["type"] = "canvas_created";
+    msg["persistentClientId"] = persistentClientId;
+    msg["ideaId"] = ideaId;
+    
+    sendMessage(msg);
+    qDebug() << "Notified server: canvas created for client:" << persistentClientId << "ideaId:" << ideaId;
+}
+
+void WebSocketClient::sendCanvasDeleted(const QString& persistentClientId, const QString& ideaId) {
+    if (!isConnected()) return;
+    
+    QJsonObject msg;
+    msg["type"] = "canvas_deleted";
+    msg["persistentClientId"] = persistentClientId;
+    msg["ideaId"] = ideaId;
+    
+    sendMessage(msg);
+    qDebug() << "Notified server: canvas deleted for client:" << persistentClientId << "ideaId:" << ideaId;
 }
 
 void WebSocketClient::notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent, int filesCompleted, int totalFiles, const QStringList& completedFileIds, const QJsonArray& perFileProgress) {
@@ -541,30 +589,61 @@ void WebSocketClient::onTextMessageReceived(const QString& message) {
 
 void WebSocketClient::onError(QAbstractSocket::SocketError error) {
     QString errorString;
+    int reconnectDelayMs = 5000; // Default 5 seconds
+    
+    // PHASE 1: Differentiated error handling with appropriate retry strategies
     switch (error) {
         case QAbstractSocket::ConnectionRefusedError:
             errorString = "Connection refused";
+            reconnectDelayMs = 10000; // Server down, retry after 10 seconds
             break;
+            
         case QAbstractSocket::RemoteHostClosedError:
             errorString = "Remote host closed connection";
+            reconnectDelayMs = 3000; // Quick retry, might be server restart
             break;
+            
         case QAbstractSocket::HostNotFoundError:
             errorString = "Host not found";
+            reconnectDelayMs = 2000; // DNS issue, quick retry
             break;
+            
         case QAbstractSocket::SocketTimeoutError:
             errorString = "Connection timeout";
+            reconnectDelayMs = 5000; // Network issue, moderate retry
             break;
+            
+        case QAbstractSocket::NetworkError:
+            errorString = "Network error";
+            reconnectDelayMs = 2000; // Temporary network issue, quick retry
+            break;
+            
+        case QAbstractSocket::SslHandshakeFailedError:
+            errorString = "SSL handshake failed";
+            reconnectDelayMs = -1; // Fatal error, don't retry automatically
+            emit fatalError("SSL/TLS error - check certificates");
+            break;
+            
         default:
             errorString = QString("Socket error: %1").arg(error);
+            reconnectDelayMs = 5000;
     }
+    
     // Suppress error status if this is a user-initiated disconnect flow
     if (m_userInitiatedDisconnect) {
         qDebug() << "Ignoring socket error due to user-initiated disconnect:" << errorString;
         return;
     }
+    
     qWarning() << "WebSocket error:" << errorString;
     setConnectionStatus("Error: " + errorString);
     emit connectionError(errorString);
+    
+    // PHASE 1: Schedule reconnection with appropriate delay (if not fatal)
+    if (reconnectDelayMs > 0 && !m_reconnectTimer->isActive()) {
+        qDebug() << "Will retry connection in" << reconnectDelayMs << "ms";
+        m_reconnectTimer->start(reconnectDelayMs);
+    }
 }
 
 void WebSocketClient::attemptReconnect() {

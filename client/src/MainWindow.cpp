@@ -726,6 +726,15 @@ MainWindow::MainWindow(QWidget* parent)
     m_uploadManager->setWebSocketClient(m_webSocketClient);
     m_watchManager->setWebSocketClient(m_webSocketClient);
     
+    // PHASE 2: SessionManager signal connections (canvas lifecycle tracking)
+    connect(m_sessionManager, &SessionManager::sessionDeleted, this, [this](const QString& persistentClientId) {
+        // Notify server when canvas is deleted
+        CanvasSession* session = m_sessionManager->findSession(persistentClientId);
+        if (session && m_webSocketClient) {
+            m_webSocketClient->sendCanvasDeleted(persistentClientId, session->ideaId);
+        }
+    });
+    
     // FileManager: configure callback to send file removal commands to remote clients
     // Phase 3: ideaId is MANDATORY - always present from SessionManager
     FileManager::setFileRemovalNotifier([this](const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds) {
@@ -1528,8 +1537,16 @@ MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& cli
         persistentId = client.getId();
     }
     
+    // Check if session already exists
+    bool isNewSession = !m_sessionManager->hasSession(persistentId);
+    
     // Phase 4.1: Use SessionManager (creates ideaId automatically)
     CanvasSession& session = m_sessionManager->getOrCreateSession(persistentId, client);
+    
+    // PHASE 2: Notify server of canvas creation (CRITICAL for ideaId validation)
+    if (isNewSession && m_webSocketClient) {
+        m_webSocketClient->sendCanvasCreated(persistentId, session.ideaId);
+    }
     
     // Initialize canvas if needed (UI-specific responsibility)
     if (!session.canvas) {
@@ -1743,6 +1760,12 @@ QString MainWindow::createIdeaId() const {
 
 void MainWindow::rotateSessionIdea(CanvasSession& session) {
     const QString oldIdeaId = session.ideaId;
+    
+    // PHASE 2: Notify server of canvas deletion before rotation (CRITICAL)
+    if (m_webSocketClient && !session.persistentClientId.isEmpty()) {
+        m_webSocketClient->sendCanvasDeleted(session.persistentClientId, oldIdeaId);
+    }
+    
     session.ideaId = createIdeaId();
     session.expectedIdeaFileIds.clear();
     session.knownRemoteFileIds.clear();
@@ -1755,6 +1778,11 @@ void MainWindow::rotateSessionIdea(CanvasSession& session) {
         if (m_activeSessionIdentity == session.persistentClientId) {
             m_uploadManager->setActiveIdeaId(session.ideaId);
         }
+    }
+    
+    // PHASE 2: Notify server of new canvas creation after rotation (CRITICAL)
+    if (m_webSocketClient && !session.persistentClientId.isEmpty()) {
+        m_webSocketClient->sendCanvasCreated(session.persistentClientId, session.ideaId);
     }
 }
 

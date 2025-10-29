@@ -46,6 +46,11 @@ public:
     void sendUploadAbort(const QString& targetClientId, const QString& uploadId, const QString& reason, const QString& ideaId);
     void sendRemoveAllFiles(const QString& targetClientId, const QString& ideaId);
     void sendRemoveFile(const QString& targetClientId, const QString& ideaId, const QString& fileId);
+    
+    // PHASE 2: Canvas lifecycle notifications (CRITICAL for ideaId validation)
+    void sendCanvasCreated(const QString& persistentClientId, const QString& ideaId);
+    void sendCanvasDeleted(const QString& persistentClientId, const QString& ideaId);
+    
     // Target -> Sender notifications
     void notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent, int filesCompleted, int totalFiles, const QStringList& completedFileIds = QStringList(), const QJsonArray& perFileProgress = QJsonArray());
     void notifyUploadFinishedToSender(const QString& senderClientId, const QString& uploadId);
@@ -75,6 +80,7 @@ signals:
     void connected();
     void disconnected();
     void connectionError(const QString& error);
+    void fatalError(const QString& error); // PHASE 1: Non-recoverable errors (e.g., SSL handshake failure)
     void connectionStatusChanged(const QString& status); // emitted whenever textual connection status updates
     void clientListReceived(const QList<ClientInfo>& clients);
     void registrationConfirmed(const ClientInfo& clientInfo);

@@ -103,6 +103,10 @@ public:
     // Bulk operations
     void markAllSessionsOffline();
     void clearRemoteContentForOfflineSessions();
+    
+    // PHASE 1: Index maintenance (call when updating ideaId or serverAssignedId)
+    void updateSessionIdeaId(const QString& persistentClientId, const QString& newIdeaId);
+    void updateSessionServerId(const QString& persistentClientId, const QString& newServerId);
 
 signals:
     void sessionCreated(const QString& persistentClientId);
@@ -110,7 +114,15 @@ signals:
     void sessionModified(const QString& persistentClientId);
 
 private:
-    QHash<QString, CanvasSession> m_sessions; // persistentClientId → CanvasSession
+    // PHASE 1 OPTIMIZATION: Secondary indexes for O(1) lookups
+    QHash<QString, CanvasSession> m_sessions; // persistentClientId → CanvasSession (primary storage)
+    QHash<QString, QString> m_ideaIdToClientId;       // ideaId → persistentClientId (secondary index)
+    QHash<QString, QString> m_serverIdToClientId;     // serverSessionId → persistentClientId (secondary index)
+    
+    // Index maintenance helpers
+    void updateIdeaIdIndex(const QString& persistentClientId, const QString& oldIdeaId, const QString& newIdeaId);
+    void updateServerIdIndex(const QString& persistentClientId, const QString& oldServerId, const QString& newServerId);
+    void removeFromIndexes(const QString& persistentClientId);
 };
 
 #endif // SESSIONMANAGER_H
