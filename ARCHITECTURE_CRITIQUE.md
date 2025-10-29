@@ -283,8 +283,8 @@ QString getOrCreateFileId(const QString& filePath) {
 // Lookup #1 : Par persistentClientId
 CanvasSession* session = m_sessionManager->findSession(persistentClientId);
 
-// Lookup #2 : Par ideaId
-CanvasSession* session = m_sessionManager->findSessionByIdeaId(ideaId);
+// Lookup #2 : Par canvasSessionId
+CanvasSession* session = m_sessionManager->findSessionByIdeaId(canvasSessionId);
 
 // Lookup #3 : Par serverSessionId
 CanvasSession* session = m_sessionManager->findSessionByServerClientId(serverSessionId);
@@ -301,9 +301,9 @@ class SessionManager {
 };
 
 // findSessionByIdeaId - INEFFICACE
-CanvasSession* SessionManager::findSessionByIdeaId(const QString& ideaId) {
+CanvasSession* SessionManager::findSessionByIdeaId(const QString& canvasSessionId) {
     for (auto& session : m_sessions) {  // ← O(n) linear scan !
-        if (session.ideaId == ideaId) {
+        if (session.canvasSessionId == canvasSessionId) {
             return &session;
         }
     }
@@ -326,12 +326,12 @@ private:
     QHash<QString, CanvasSession> m_sessions;  // Key: persistentClientId
     
     // Secondary indexes (O(1) lookups)
-    QHash<QString, QString> m_ideaIdToClientId;       // ideaId → persistentClientId
+    QHash<QString, QString> m_canvasSessionIdToClientId;       // canvasSessionId → persistentClientId
     QHash<QString, QString> m_serverIdToClientId;     // serverSessionId → persistentClientId
     
 public:
-    CanvasSession* findSessionByIdeaId(const QString& ideaId) {
-        QString persistentId = m_ideaIdToClientId.value(ideaId);
+    CanvasSession* findSessionByIdeaId(const QString& canvasSessionId) {
+        QString persistentId = m_canvasSessionIdToClientId.value(canvasSessionId);
         if (persistentId.isEmpty()) return nullptr;
         return findSession(persistentId);  // O(1) + O(1) = O(1)
     }
@@ -339,8 +339,8 @@ public:
     void updateSessionIdeaId(const QString& persistentId, 
                              const QString& oldIdeaId, 
                              const QString& newIdeaId) {
-        m_ideaIdToClientId.remove(oldIdeaId);
-        m_ideaIdToClientId[newIdeaId] = persistentId;
+        m_canvasSessionIdToClientId.remove(oldIdeaId);
+        m_canvasSessionIdToClientId[newIdeaId] = persistentId;
     }
 };
 ```
@@ -359,17 +359,17 @@ public:
 ```javascript
 // server.js - handleUploadStart
 handleUploadStart(senderId, message) {
-    const { targetClientId, uploadId, ideaId, filesManifest } = message;
+    const { targetClientId, uploadId, canvasSessionId, filesManifest } = message;
     
-    // ⚠️ AUCUNE validation que ideaId existe pour ce targetClientId !
+    // ⚠️ AUCUNE validation que canvasSessionId existe pour ce targetClientId !
     
     if (!this.clientFiles.has(targetClientId)) {
         this.clientFiles.set(targetClientId, new Map());
     }
     const filesByIdea = this.clientFiles.get(targetClientId);
     
-    if (!filesByIdea.has(ideaId)) {
-        filesByIdea.set(ideaId, new Set());  // ← Crée silencieusement !
+    if (!filesByIdea.has(canvasSessionId)) {
+        filesByIdea.set(canvasSessionId, new Set());  // ← Crée silencieusement !
     }
     // ...
 }
@@ -379,10 +379,10 @@ handleUploadStart(senderId, message) {
 
 **Scénario A : IdeaId typo**
 ```javascript
-// Client envoie ideaId avec typo
+// Client envoie canvasSessionId avec typo
 {
   targetClientId: "aaa111",
-  ideaId: "idea-001-TYPO",  // ← Erreur de frappe
+  canvasSessionId: "idea-001-TYPO",  // ← Erreur de frappe
   filesManifest: [...]
 }
 
@@ -394,9 +394,9 @@ clientFiles.get("aaa111").set("idea-001-TYPO", new Set());
 
 **Scénario B : Canvas supprimé mais upload en cours**
 ```
-1. Client A supprime canvas (ideaId: "idea-001")
+1. Client A supprime canvas (canvasSessionId: "idea-001")
 2. Upload déjà en cours pour ce canvas
-3. Chunks continuent d'arriver avec ideaId: "idea-001"
+3. Chunks continuent d'arriver avec canvasSessionId: "idea-001"
 4. Serveur accepte et stocke les fichiers
 5. État incohérent : fichiers pour un canvas qui n'existe plus
 ```
@@ -406,34 +406,34 @@ clientFiles.get("aaa111").set("idea-001-TYPO", new Set());
 ```javascript
 class MouffetteServer {
     // Nouvelle structure : track canvas actifs
-    activeCanvases = new Map();  // clientId → Set(ideaIds)
+    activeCanvases = new Map();  // clientId → Set(canvasSessionIds)
     
-    handleCanvasCreated(clientId, ideaId) {
+    handleCanvasCreated(clientId, canvasSessionId) {
         if (!this.activeCanvases.has(clientId)) {
             this.activeCanvases.set(clientId, new Set());
         }
-        this.activeCanvases.get(clientId).add(ideaId);
+        this.activeCanvases.get(clientId).add(canvasSessionId);
     }
     
-    handleCanvasDeleted(clientId, ideaId) {
+    handleCanvasDeleted(clientId, canvasSessionId) {
         const ideas = this.activeCanvases.get(clientId);
         if (ideas) {
-            ideas.delete(ideaId);
+            ideas.delete(canvasSessionId);
             // Cleanup fichiers
-            this.clientFiles.get(clientId)?.delete(ideaId);
+            this.clientFiles.get(clientId)?.delete(canvasSessionId);
         }
     }
     
     handleUploadStart(senderId, message) {
-        const { targetClientId, ideaId, uploadId, filesManifest } = message;
+        const { targetClientId, canvasSessionId, uploadId, filesManifest } = message;
         
         // ✅ VALIDATION
-        if (!this.activeCanvases.get(targetClientId)?.has(ideaId)) {
+        if (!this.activeCanvases.get(targetClientId)?.has(canvasSessionId)) {
             this.sendError(senderId, {
                 type: "upload_error",
                 uploadId,
                 error: "INVALID_IDEA_ID",
-                message: `Canvas ${ideaId} does not exist for client ${targetClientId}`
+                message: `Canvas ${canvasSessionId} does not exist for client ${targetClientId}`
             });
             return;
         }
@@ -448,12 +448,12 @@ class MouffetteServer {
 // Client → Server
 {
   type: "canvas_created",
-  ideaId: "idea-001"
+  canvasSessionId: "idea-001"
 }
 
 {
   type: "canvas_deleted",
-  ideaId: "idea-001"
+  canvasSessionId: "idea-001"
 }
 
 // Server → Client (erreur)
@@ -599,7 +599,7 @@ class MouffetteServer {
    - Impact : Clarté code +80%
    - **CRITIQUE pour maintenabilité**
 
-5. **⚠️ Validation ideaId serveur** (Problème #4)
+5. **⚠️ Validation canvasSessionId serveur** (Problème #4)
    - Effort : 1 jour
    - Impact : Robustesse +50%
 
@@ -766,7 +766,7 @@ if (percent - lastReportedPercent >= 5.0 ||
 
 ### Semaine 2 : Refactoring Critique
 - [ ] **Renommer "clientId" → "persistentClientId" dans protocole**
-- [ ] Ajouter validation ideaId côté serveur
+- [ ] Ajouter validation canvasSessionId côté serveur
 - [ ] Ajouter messages canvas_created/deleted
 
 ### Semaine 3 : Optimisations

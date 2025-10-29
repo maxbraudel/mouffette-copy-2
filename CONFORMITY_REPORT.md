@@ -10,7 +10,7 @@
 |-------|----------|------------|-------|
 | **Phase 1** | ID Client unique stable | ✅ **CONFORME** | 100% |
 | **Phase 2** | Suppression tracking mediaId | ✅ **CONFORME** | 100% |
-| **Phase 3** | ideaId obligatoire | ✅ **CONFORME** | 100% |
+| **Phase 3** | canvasSessionId obligatoire | ✅ **CONFORME** | 100% |
 | **Phase 4.1** | SessionManager extraction | ✅ **CONFORME** | 100% |
 | **Phase 4.2** | FileManager décomposition | ✅ **CONFORME** | 100% |
 | **Phase 4.3** | Dependency Injection | ✅ **CONFORME** | 100% |
@@ -93,14 +93,14 @@ void unmarkFileUploadedToClient(const QString& fileId, const QString& clientId);
 
 ---
 
-## ✅ PHASE 3: ideaId OBLIGATOIRE
+## ✅ PHASE 3: canvasSessionId OBLIGATOIRE
 
 ### Problème identifié
-> `ideaId` optionnel partout: 93 vérifications `!ideaId.isEmpty()`.  
+> `canvasSessionId` optionnel partout: 93 vérifications `!canvasSessionId.isEmpty()`.  
 > Code complexe avec branches "avec/sans idea".
 
 ### Solution proposée
-- ideaId **TOUJOURS PRÉSENT**
+- canvasSessionId **TOUJOURS PRÉSENT**
 - Valeur conventionnelle `"default"` si pas d'idea
 - Suppression de toutes les vérifications `isEmpty()`
 
@@ -112,25 +112,25 @@ void unmarkFileUploadedToClient(const QString& fileId, const QString& clientId);
 inline const QString DEFAULT_IDEA_ID = QStringLiteral("default");
 
 // SessionManager.cpp - Génération avec valeur par défaut
-newSession.ideaId = DEFAULT_IDEA_ID;
+newSession.canvasSessionId = DEFAULT_IDEA_ID;
 
 // UploadManager.cpp - Comparaison au lieu de isEmpty()
-if (ideaId.isEmpty()) {
-    ideaId = m_incoming.ideaId.isEmpty() ? DEFAULT_IDEA_ID : m_incoming.ideaId;
+if (canvasSessionId.isEmpty()) {
+    canvasSessionId = m_incoming.canvasSessionId.isEmpty() ? DEFAULT_IDEA_ID : m_incoming.canvasSessionId;
 }
-const bool ideaScoped = (ideaId != DEFAULT_IDEA_ID);
-if (m_incoming.ideaId != DEFAULT_IDEA_ID) {
-    m_fileManager->associateFileWithIdea(fileId, m_incoming.ideaId);
+const bool ideaScoped = (canvasSessionId != DEFAULT_IDEA_ID);
+if (m_incoming.canvasSessionId != DEFAULT_IDEA_ID) {
+    m_fileManager->associateFileWithIdea(fileId, m_incoming.canvasSessionId);
 }
 
 // ScreenCanvas.cpp - Exclusion du manifest si DEFAULT
 if (m_activeIdeaId != DEFAULT_IDEA_ID) {
-    root["ideaId"] = m_activeIdeaId;
+    root["canvasSessionId"] = m_activeIdeaId;
 }
 
 // RemoteFileTracker.cpp - Warnings défensifs
-if (ideaId.isEmpty()) {
-    qWarning() << "RemoteFileTracker: ideaId should never be empty";
+if (canvasSessionId.isEmpty()) {
+    qWarning() << "RemoteFileTracker: canvasSessionId should never be empty";
     return;
 }
 ```
@@ -145,12 +145,12 @@ if (ideaId.isEmpty()) {
 - ✅ **Includes ajoutés** dans UploadManager.cpp et ScreenCanvas.cpp
 
 **Logique métier préservée:**
-- Uploads "globaux" : `ideaId == DEFAULT_IDEA_ID` → pas d'association idea
-- Uploads "scopés" : `ideaId != DEFAULT_IDEA_ID` → association avec idea spécifique
+- Uploads "globaux" : `canvasSessionId == DEFAULT_IDEA_ID` → pas d'association idea
+- Uploads "scopés" : `canvasSessionId != DEFAULT_IDEA_ID` → association avec idea spécifique
 - Manifest optimisé : DEFAULT_IDEA_ID non sérialisé (économie bande passante)
 
 **Verdict:** ✅ **100% CONFORME**
-- ✅ ideaId toujours présent (jamais vide)
+- ✅ canvasSessionId toujours présent (jamais vide)
 - ✅ Valeur conventionnelle `"default"` utilisée
 - ✅ Toutes les vérifications `isEmpty()` remplacées
 - ✅ Code plus simple et uniforme
@@ -166,7 +166,7 @@ if (ideaId.isEmpty()) {
 
 ### Solution proposée
 - Extraire classe **SessionManager** dédiée
-- Responsabilités: CRUD sessions, lookup par ID/ideaId
+- Responsabilités: CRUD sessions, lookup par ID/canvasSessionId
 - Réduire couplage MainWindow
 
 ### ✅ IMPLÉMENTATION ACTUELLE
@@ -185,7 +185,7 @@ class SessionManager : public QObject {
     
     // Lookups
     CanvasSession* findSession(const QString& persistentClientId);
-    CanvasSession* findSessionByIdeaId(const QString& ideaId);
+    CanvasSession* findSessionByIdeaId(const QString& canvasSessionId);
     CanvasSession* findSessionByServerAssignedId(const QString& serverSessionId);
     
     // Queries
@@ -219,7 +219,7 @@ CanvasSession* MainWindow::findCanvasSession(const QString& persistentClientId) 
 - ✅ Encapsulation des sessions dans QHash privé
 - ✅ API CRUD complète avec signals Qt
 - ✅ MainWindow délègue (lignes 1504, 1509, 1527)
-- ✅ Lookup par `persistentClientId`, `ideaId`, `serverAssignedId`
+- ✅ Lookup par `persistentClientId`, `canvasSessionId`, `serverAssignedId`
 
 **Verdict:** ✅ **100% CONFORME**
 
@@ -234,7 +234,7 @@ CanvasSession* MainWindow::findCanvasSession(const QString& persistentClientId) 
 ### Solution proposée
 Séparer en **3 services**:
 1. **LocalFileRepository** - fileId ↔ filePath mapping
-2. **RemoteFileTracker** - clients & ideaId tracking
+2. **RemoteFileTracker** - clients & canvasSessionId tracking
 3. **FileMemoryCache** - memory management
 
 ### ✅ IMPLÉMENTATION ACTUELLE
@@ -261,13 +261,13 @@ class RemoteFileTracker {
     void unmarkAllFilesForClient(const QString& clientId);
     
     // IdeaId associations
-    void associateFileWithIdea(const QString& fileId, const QString& ideaId);
-    QSet<QString> getFileIdsForIdea(const QString& ideaId) const;
-    void replaceIdeaFileSet(const QString& ideaId, const QSet<QString>& fileIds);
+    void associateFileWithIdea(const QString& fileId, const QString& canvasSessionId);
+    QSet<QString> getFileIdsForIdea(const QString& canvasSessionId) const;
+    void replaceIdeaFileSet(const QString& canvasSessionId, const QSet<QString>& fileIds);
 private:
     QHash<QString, QSet<QString>> m_fileIdToClients;
     QHash<QString, QSet<QString>> m_fileIdToIdeas;
-    QHash<QString, QSet<QString>> m_ideaIdToFiles;
+    QHash<QString, QSet<QString>> m_canvasSessionIdToFiles;
 };
 ```
 
@@ -294,7 +294,7 @@ public:
     
     // Délègue à RemoteFileTracker
     void markFileUploadedToClient(const QString& fileId, const QString& clientId);
-    void associateFileWithIdea(const QString& fileId, const QString& ideaId);
+    void associateFileWithIdea(const QString& fileId, const QString& canvasSessionId);
     
     // Délègue à FileMemoryCache
     void preloadFileIntoMemory(const QString& fileId);
@@ -428,8 +428,8 @@ private:
 | **Singleton calls** | 200+ | 0 | **-100%** |
 | **mediaId tracking** | 3 méthodes | 0 | **Supprimé** |
 | **identityKey refs** | 50+ | 0 | **Supprimé** |
-| **ideaId isEmpty()** | 93 | 0 | **-100%** |
-| **ideaId avec DEFAULT** | 0 | Oui | **DEFAULT_IDEA_ID** |
+| **canvasSessionId isEmpty()** | 93 | 0 | **-100%** |
+| **canvasSessionId avec DEFAULT** | 0 | Oui | **DEFAULT_IDEA_ID** |
 | **Testabilité** | ❌ Impossible | ✅ Possible | DI activé |
 
 ---
@@ -484,11 +484,11 @@ private:
 
 ## ⚠️ POINTS D'ATTENTION
 
-### 1. ideaId encore optionnel (Phase 3)
+### 1. canvasSessionId encore optionnel (Phase 3)
 **Impact:** Faible  
 **Raison:** Les 10 checks restants sont **légitimes**:
 - UploadManager distingue uploads globaux vs scopés
-- ScreenCanvas évite de sérialiser ideaId vide
+- ScreenCanvas évite de sérialiser canvasSessionId vide
 
 **Recommandation:** Acceptable en l'état. Migration vers valeur `"default"` possible ultérieurement.
 
@@ -521,7 +521,7 @@ m_cache = &FileMemoryCache::instance();
 #### Points forts (100% conformes):
 ✅ **Phase 1**: ID unique stable (`persistentClientId`)  
 ✅ **Phase 2**: Suppression tracking `mediaId`  
-✅ **Phase 3**: `ideaId` obligatoire avec valeur `DEFAULT_IDEA_ID`  
+✅ **Phase 3**: `canvasSessionId` obligatoire avec valeur `DEFAULT_IDEA_ID`  
 ✅ **Phase 4.1**: Extraction `SessionManager`  
 ✅ **Phase 4.2**: Décomposition `FileManager` en 3 services  
 ✅ **Phase 4.3**: Dependency Injection complète

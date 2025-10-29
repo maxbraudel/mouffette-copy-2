@@ -18,7 +18,7 @@
 ```cpp
 // SessionManager.h
 QHash<QString, CanvasSession> m_sessions;           // Primary storage (unchanged)
-QHash<QString, QString> m_ideaIdToClientId;        // NEW: ideaId → persistentClientId
+QHash<QString, QString> m_canvasSessionIdToClientId;        // NEW: canvasSessionId → persistentClientId
 QHash<QString, QString> m_serverIdToClientId;      // NEW: serverSessionId → persistentClientId
 ```
 
@@ -26,9 +26,9 @@ QHash<QString, QString> m_serverIdToClientId;      // NEW: serverSessionId → p
 
 **Avant** (O(n) linear scan) :
 ```cpp
-SessionManager::CanvasSession* SessionManager::findSessionByIdeaId(const QString& ideaId) {
+SessionManager::CanvasSession* SessionManager::findSessionByIdeaId(const QString& canvasSessionId) {
     for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it) {  // ← O(n)
-        if (it.value().ideaId == ideaId) {
+        if (it.value().canvasSessionId == canvasSessionId) {
             return &it.value();
         }
     }
@@ -38,8 +38,8 @@ SessionManager::CanvasSession* SessionManager::findSessionByIdeaId(const QString
 
 **Après** (O(1) hash lookup) :
 ```cpp
-SessionManager::CanvasSession* SessionManager::findSessionByIdeaId(const QString& ideaId) {
-    QString persistentClientId = m_ideaIdToClientId.value(ideaId);  // ← O(1)
+SessionManager::CanvasSession* SessionManager::findSessionByIdeaId(const QString& canvasSessionId) {
+    QString persistentClientId = m_canvasSessionIdToClientId.value(canvasSessionId);  // ← O(1)
     return findSession(persistentClientId);  // ← O(1)
 }
 ```
@@ -240,7 +240,7 @@ signals:
 
 | Métrique | Avant | Après | Amélioration |
 |----------|-------|-------|--------------|
-| **Lookup session par ideaId** | O(n) | O(1) | **500x-5000x** (100-1000 clients) |
+| **Lookup session par canvasSessionId** | O(n) | O(1) | **500x-5000x** (100-1000 clients) |
 | **Lookup session par serverId** | O(n) | O(1) | **500x-5000x** (100-1000 clients) |
 | **Memory leak uploads** | ∞ | 0 | **100% fixed** |
 | **Retry aveugle** | Oui | Non | **Stratégies adaptées** |
@@ -276,7 +276,7 @@ for (int i = 0; i < 100; i++) {
 // Mesurer temps de lookup
 QElapsedTimer timer;
 timer.start();
-auto* session = sessionManager->findSessionByIdeaId(ideaId);
+auto* session = sessionManager->findSessionByIdeaId(canvasSessionId);
 qint64 elapsed = timer.nsecsElapsed();
 // Attendu : < 100 µs (avant : ~1000 µs)
 ```
@@ -329,7 +329,7 @@ node server.js
 ### Points d'attention
 
 ⚠️ **Index maintenance** : 
-- Toujours appeler `updateSessionIdeaId()` si vous modifiez `session.ideaId` manuellement
+- Toujours appeler `updateSessionIdeaId()` si vous modifiez `session.canvasSessionId` manuellement
 - Toujours appeler `updateSessionServerId()` si vous modifiez `session.serverAssignedId`
 
 ⚠️ **Timeout configuration** :
@@ -358,7 +358,7 @@ node server.js
 
 Voir `PHASE2_PLAN.md` pour :
 1. Renommer IDs dans protocole (confusion clientId)
-2. Validation ideaId côté serveur
+2. Validation canvasSessionId côté serveur
 3. Messages canvas_created/deleted
 
 **Estimation Phase 2** : 1 semaine

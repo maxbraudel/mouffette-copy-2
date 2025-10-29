@@ -106,9 +106,9 @@ void UploadManager::toggleUpload(const QVector<UploadFileInfo>& files) {
 
 void UploadManager::requestRemoval(const QString& clientId) {
     if (!m_ws || !m_ws->isConnected() || clientId.isEmpty()) return;
-    // Phase 3: ideaId is MANDATORY - always set to DEFAULT_IDEA_ID at minimum
+    // Phase 3: canvasSessionId is MANDATORY - always set to DEFAULT_IDEA_ID at minimum
     if (m_activeIdeaId.isEmpty()) {
-        qWarning() << "UploadManager: requestRemoval has empty ideaId (should never happen), using DEFAULT_IDEA_ID";
+        qWarning() << "UploadManager: requestRemoval has empty canvasSessionId (should never happen), using DEFAULT_IDEA_ID";
         m_activeIdeaId = DEFAULT_IDEA_ID;
     }
     // Ensure subsequent all_files_removed callbacks attribute to the correct target
@@ -120,9 +120,9 @@ void UploadManager::requestRemoval(const QString& clientId) {
 void UploadManager::requestUnload() {
     const QString clientId = m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId;
     if (!m_uploadActive || clientId.isEmpty()) return;
-    // Phase 3: ideaId is MANDATORY - always set to DEFAULT_IDEA_ID at minimum
+    // Phase 3: canvasSessionId is MANDATORY - always set to DEFAULT_IDEA_ID at minimum
     if (m_activeIdeaId.isEmpty()) {
-        qWarning() << "UploadManager: requestUnload has empty ideaId (should never happen), using DEFAULT_IDEA_ID";
+        qWarning() << "UploadManager: requestUnload has empty canvasSessionId (should never happen), using DEFAULT_IDEA_ID";
         m_activeIdeaId = DEFAULT_IDEA_ID;
     }
     
@@ -139,9 +139,9 @@ void UploadManager::requestCancel() {
     if (!m_ws || !m_ws->isConnected() || clientId.isEmpty()) return;
     if (!m_uploadInProgress) return;
     if (m_cancelRequested) return;
-    // Phase 3: ideaId is MANDATORY - always set to DEFAULT_IDEA_ID at minimum
+    // Phase 3: canvasSessionId is MANDATORY - always set to DEFAULT_IDEA_ID at minimum
     if (m_activeIdeaId.isEmpty()) {
-        qWarning() << "UploadManager: requestCancel has empty ideaId (should never happen), using DEFAULT_IDEA_ID";
+        qWarning() << "UploadManager: requestCancel has empty canvasSessionId (should never happen), using DEFAULT_IDEA_ID";
         m_activeIdeaId = DEFAULT_IDEA_ID;
     }
     
@@ -176,9 +176,9 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
         qWarning() << "UploadManager: Upload already in progress, ignoring new start request";
         return;
     }
-    // Phase 3: ideaId is MANDATORY - always set to DEFAULT_IDEA_ID at minimum
+    // Phase 3: canvasSessionId is MANDATORY - always set to DEFAULT_IDEA_ID at minimum
     if (m_activeIdeaId.isEmpty()) {
-        qWarning() << "UploadManager: startUpload has empty ideaId (should never happen), using DEFAULT_IDEA_ID";
+        qWarning() << "UploadManager: startUpload has empty canvasSessionId (should never happen), using DEFAULT_IDEA_ID";
         m_activeIdeaId = DEFAULT_IDEA_ID;
     }
     
@@ -447,7 +447,7 @@ void UploadManager::cleanupIncomingSession(bool deleteDiskContents,
     QString senderId = senderOverride;
     QString cacheDirPath = cacheDirOverride;
     QString uploadId = uploadIdOverride;
-    QString ideaId = ideaOverride;
+    QString canvasSessionId = ideaOverride;
     QStringList fileIds;
     bool matchesActiveSession = false;
 
@@ -461,9 +461,9 @@ void UploadManager::cleanupIncomingSession(bool deleteDiskContents,
     if (matchesActiveSession) {
         if (uploadId.isEmpty()) uploadId = m_incoming.uploadId;
         if (cacheDirPath.isEmpty()) cacheDirPath = m_incoming.cacheDirPath;
-        // Phase 3: ideaId is MANDATORY - fallback to incoming ideaId or DEFAULT_IDEA_ID
-        if (ideaId.isEmpty()) {
-            ideaId = m_incoming.ideaId.isEmpty() ? DEFAULT_IDEA_ID : m_incoming.ideaId;
+        // Phase 3: canvasSessionId is MANDATORY - fallback to incoming canvasSessionId or DEFAULT_IDEA_ID
+        if (canvasSessionId.isEmpty()) {
+            canvasSessionId = m_incoming.canvasSessionId.isEmpty() ? DEFAULT_IDEA_ID : m_incoming.canvasSessionId;
         }
 
         for (auto it = m_incoming.openFiles.begin(); it != m_incoming.openFiles.end(); ++it) {
@@ -492,8 +492,8 @@ void UploadManager::cleanupIncomingSession(bool deleteDiskContents,
         dropChunkTracking(uploadIdOverride);
     }
 
-    // Phase 3: ideaId is MANDATORY - check if it's a specific idea or default
-    const bool ideaScoped = (ideaId != DEFAULT_IDEA_ID);
+    // Phase 3: canvasSessionId is MANDATORY - check if it's a specific idea or default
+    const bool ideaScoped = (canvasSessionId != DEFAULT_IDEA_ID);
     QSet<QString> removalIds;
     for (const QString& fid : fileIds) {
         if (!fid.isEmpty()) {
@@ -501,7 +501,7 @@ void UploadManager::cleanupIncomingSession(bool deleteDiskContents,
         }
     }
     if (ideaScoped) {
-        const QSet<QString> ideaFiles = m_fileManager->getFileIdsForIdea(ideaId);
+        const QSet<QString> ideaFiles = m_fileManager->getFileIdsForIdea(canvasSessionId);
         removalIds.unite(ideaFiles);
     }
 
@@ -528,7 +528,7 @@ void UploadManager::cleanupIncomingSession(bool deleteDiskContents,
         for (const QString& fid : removalIds) {
             if (fid.isEmpty()) continue;
 
-            m_fileManager->dissociateFileFromIdea(fid, ideaId);
+            m_fileManager->dissociateFileFromIdea(fid, canvasSessionId);
             const QSet<QString> remainingIdeas = m_fileManager->getIdeaIdsForFile(fid);
             if (!remainingIdeas.isEmpty()) {
                 continue; // keep file for other ideas still referencing it
@@ -540,9 +540,9 @@ void UploadManager::cleanupIncomingSession(bool deleteDiskContents,
                 if (info.exists()) {
                     QFile file(path);
                     if (!file.remove()) {
-                        qWarning() << "UploadManager: Failed to remove cached file" << path << "for idea" << ideaId;
+                        qWarning() << "UploadManager: Failed to remove cached file" << path << "for idea" << canvasSessionId;
                     } else {
-                        qDebug() << "UploadManager: Removed cached file" << path << "for idea" << ideaId;
+                        qDebug() << "UploadManager: Removed cached file" << path << "for idea" << canvasSessionId;
                     }
                 }
             }
@@ -717,7 +717,7 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         m_expectedChunkIndex.clear();
         m_incoming.senderId = message.value("senderClientId").toString();
         m_incoming.uploadId = message.value("uploadId").toString();
-    m_incoming.ideaId = message.value("ideaId").toString();
+    m_incoming.canvasSessionId = message.value("canvasSessionId").toString();
         m_canceledIncoming.remove(m_incoming.uploadId);
         QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
         if (base.isEmpty()) base = QDir::homePath() + "/.cache";
@@ -768,9 +768,9 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             m_incoming.receivedByFile.insert(fileId, 0);
             // Register mapping so remote scene resolution can find this fileId immediately (even before complete)
             m_fileManager->registerReceivedFilePath(fileId, fullPath);
-            // Phase 3: ideaId is MANDATORY - associate with idea (even if DEFAULT_IDEA_ID)
-            if (m_incoming.ideaId != DEFAULT_IDEA_ID) {
-                m_fileManager->associateFileWithIdea(fileId, m_incoming.ideaId);
+            // Phase 3: canvasSessionId is MANDATORY - associate with idea (even if DEFAULT_IDEA_ID)
+            if (m_incoming.canvasSessionId != DEFAULT_IDEA_ID) {
+                m_fileManager->associateFileWithIdea(fileId, m_incoming.canvasSessionId);
             }
             // Initialize expected chunk index for this file to 0
             m_expectedChunkIndex.insert(m_incoming.uploadId + ":" + fileId, 0);
@@ -780,10 +780,10 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         }
     } else if (type == "upload_chunk") {
         if (message.value("uploadId").toString() != m_incoming.uploadId) return;
-        const QString ideaId = message.value("ideaId").toString();
-        // Phase 3: ideaId matching - compare against incoming ideaId (both should be set)
-        if (!ideaId.isEmpty() && m_incoming.ideaId != DEFAULT_IDEA_ID && ideaId != m_incoming.ideaId) {
-            qWarning() << "UploadManager: Ignoring chunk for mismatched idea" << ideaId << "expected" << m_incoming.ideaId;
+        const QString canvasSessionId = message.value("canvasSessionId").toString();
+        // Phase 3: canvasSessionId matching - compare against incoming canvasSessionId (both should be set)
+        if (!canvasSessionId.isEmpty() && m_incoming.canvasSessionId != DEFAULT_IDEA_ID && canvasSessionId != m_incoming.canvasSessionId) {
+            qWarning() << "UploadManager: Ignoring chunk for mismatched idea" << canvasSessionId << "expected" << m_incoming.canvasSessionId;
             return;
         }
         if (m_canceledIncoming.contains(m_incoming.uploadId)) return;
@@ -844,10 +844,10 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         }
     } else if (type == "upload_complete") {
         if (message.value("uploadId").toString() != m_incoming.uploadId) return;
-        const QString ideaId = message.value("ideaId").toString();
-        // Phase 3: ideaId matching - compare against incoming ideaId (both should be set)
-        if (!ideaId.isEmpty() && m_incoming.ideaId != DEFAULT_IDEA_ID && ideaId != m_incoming.ideaId) {
-            qWarning() << "UploadManager: Ignoring upload_complete for mismatched idea" << ideaId << "expected" << m_incoming.ideaId;
+        const QString canvasSessionId = message.value("canvasSessionId").toString();
+        // Phase 3: canvasSessionId matching - compare against incoming canvasSessionId (both should be set)
+        if (!canvasSessionId.isEmpty() && m_incoming.canvasSessionId != DEFAULT_IDEA_ID && canvasSessionId != m_incoming.canvasSessionId) {
+            qWarning() << "UploadManager: Ignoring upload_complete for mismatched idea" << canvasSessionId << "expected" << m_incoming.canvasSessionId;
             return;
         }
         
@@ -888,7 +888,7 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
     } else if (type == "upload_abort") {
         const QString abortedId = message.value("uploadId").toString();
         const QString senderClientId = message.value("senderClientId").toString();
-        const QString ideaId = message.value("ideaId").toString();
+        const QString canvasSessionId = message.value("canvasSessionId").toString();
         if (!abortedId.isEmpty()) {
             m_canceledIncoming.insert(abortedId);
         }
@@ -905,10 +905,10 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             cacheOverride = base + "/Mouffette/Uploads/" + ackTarget;
         }
 
-        cleanupIncomingSession(true, false, ackTarget, cacheOverride, abortedId, ideaId);
+        cleanupIncomingSession(true, false, ackTarget, cacheOverride, abortedId, canvasSessionId);
     } else if (type == "remove_all_files") {
         const QString senderClientId = message.value("senderClientId").toString();
-        const QString ideaId = message.value("ideaId").toString();
+        const QString canvasSessionId = message.value("canvasSessionId").toString();
         QString ackTarget = !senderClientId.isEmpty() ? senderClientId : m_incoming.senderId;
         if (m_ws && !ackTarget.isEmpty()) {
             m_ws->notifyAllFilesRemovedToSender(ackTarget);
@@ -921,7 +921,7 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             cacheOverride = base + "/Mouffette/Uploads/" + ackTarget;
         }
 
-        cleanupIncomingSession(true, false, ackTarget, cacheOverride, QString(), ideaId);
+        cleanupIncomingSession(true, false, ackTarget, cacheOverride, QString(), canvasSessionId);
         // Clear all expected indices; treat as a hard reset
         m_expectedChunkIndex.clear();
     } else if (type == "connection_lost_cleanup") {
@@ -939,13 +939,13 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
     } else if (type == "remove_file") {
         const QString senderClientId = message.value("senderClientId").toString();
         const QString fileId = message.value("fileId").toString();
-        const QString ideaId = message.value("ideaId").toString();
+        const QString canvasSessionId = message.value("canvasSessionId").toString();
 
         if (!senderClientId.isEmpty() && !fileId.isEmpty()) {
             bool shouldRemoveFromDisk = true;
-            // Phase 3: ideaId is MANDATORY - check if it's a specific idea (not DEFAULT_IDEA_ID)
-            if (ideaId != DEFAULT_IDEA_ID) {
-                m_fileManager->dissociateFileFromIdea(fileId, ideaId);
+            // Phase 3: canvasSessionId is MANDATORY - check if it's a specific idea (not DEFAULT_IDEA_ID)
+            if (canvasSessionId != DEFAULT_IDEA_ID) {
+                m_fileManager->dissociateFileFromIdea(fileId, canvasSessionId);
                 const QSet<QString> remainingIdeas = m_fileManager->getIdeaIdsForFile(fileId);
                 shouldRemoveFromDisk = remainingIdeas.isEmpty();
             }

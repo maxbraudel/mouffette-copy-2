@@ -56,65 +56,65 @@ void RemoteFileTracker::unmarkAllFilesForClient(const QString& clientId) {
     qDebug() << "RemoteFileTracker: Unmarked all files for client" << clientId;
 }
 
-void RemoteFileTracker::associateFileWithIdea(const QString& fileId, const QString& ideaId) {
-    // Phase 3: ideaId is MANDATORY - should never be empty (defensive check)
-    if (fileId.isEmpty() || ideaId.isEmpty()) {
-        qWarning() << "RemoteFileTracker: associateFileWithIdea called with empty parameter - fileId:" << fileId << "ideaId:" << ideaId;
+void RemoteFileTracker::associateFileWithIdea(const QString& fileId, const QString& canvasSessionId) {
+    // Phase 3: canvasSessionId is MANDATORY - should never be empty (defensive check)
+    if (fileId.isEmpty() || canvasSessionId.isEmpty()) {
+        qWarning() << "RemoteFileTracker: associateFileWithIdea called with empty parameter - fileId:" << fileId << "canvasSessionId:" << canvasSessionId;
         return;
     }
     
-    m_fileIdToIdeaIds[fileId].insert(ideaId);
-    m_ideaIdToFileIds[ideaId].insert(fileId);
-    qDebug() << "RemoteFileTracker: File" << fileId << "associated with idea" << ideaId;
+    m_fileIdToIdeaIds[fileId].insert(canvasSessionId);
+    m_canvasSessionIdToFileIds[canvasSessionId].insert(fileId);
+    qDebug() << "RemoteFileTracker: File" << fileId << "associated with idea" << canvasSessionId;
 }
 
-void RemoteFileTracker::dissociateFileFromIdea(const QString& fileId, const QString& ideaId) {
-    // Phase 3: ideaId is MANDATORY - should never be empty (defensive check)
-    if (fileId.isEmpty() || ideaId.isEmpty()) {
-        qWarning() << "RemoteFileTracker: dissociateFileFromIdea called with empty parameter - fileId:" << fileId << "ideaId:" << ideaId;
+void RemoteFileTracker::dissociateFileFromIdea(const QString& fileId, const QString& canvasSessionId) {
+    // Phase 3: canvasSessionId is MANDATORY - should never be empty (defensive check)
+    if (fileId.isEmpty() || canvasSessionId.isEmpty()) {
+        qWarning() << "RemoteFileTracker: dissociateFileFromIdea called with empty parameter - fileId:" << fileId << "canvasSessionId:" << canvasSessionId;
         return;
     }
     
     auto fileIt = m_fileIdToIdeaIds.find(fileId);
     if (fileIt != m_fileIdToIdeaIds.end()) {
-        fileIt.value().remove(ideaId);
+        fileIt.value().remove(canvasSessionId);
         if (fileIt.value().isEmpty()) {
             m_fileIdToIdeaIds.erase(fileIt);
         }
     }
     
-    auto ideaIt = m_ideaIdToFileIds.find(ideaId);
-    if (ideaIt != m_ideaIdToFileIds.end()) {
+    auto ideaIt = m_canvasSessionIdToFileIds.find(canvasSessionId);
+    if (ideaIt != m_canvasSessionIdToFileIds.end()) {
         ideaIt.value().remove(fileId);
         if (ideaIt.value().isEmpty()) {
-            m_ideaIdToFileIds.erase(ideaIt);
+            m_canvasSessionIdToFileIds.erase(ideaIt);
         }
     }
     
-    qDebug() << "RemoteFileTracker: File" << fileId << "dissociated from idea" << ideaId;
+    qDebug() << "RemoteFileTracker: File" << fileId << "dissociated from idea" << canvasSessionId;
 }
 
-QSet<QString> RemoteFileTracker::getFileIdsForIdea(const QString& ideaId) const {
-    return m_ideaIdToFileIds.value(ideaId);
+QSet<QString> RemoteFileTracker::getFileIdsForIdea(const QString& canvasSessionId) const {
+    return m_canvasSessionIdToFileIds.value(canvasSessionId);
 }
 
 QSet<QString> RemoteFileTracker::getIdeaIdsForFile(const QString& fileId) const {
     return m_fileIdToIdeaIds.value(fileId);
 }
 
-void RemoteFileTracker::replaceIdeaFileSet(const QString& ideaId, const QSet<QString>& fileIds) {
-    // Phase 3: ideaId is MANDATORY - should never be empty (defensive check)
-    if (ideaId.isEmpty()) {
-        qWarning() << "RemoteFileTracker: replaceIdeaFileSet called with empty ideaId";
+void RemoteFileTracker::replaceIdeaFileSet(const QString& canvasSessionId, const QSet<QString>& fileIds) {
+    // Phase 3: canvasSessionId is MANDATORY - should never be empty (defensive check)
+    if (canvasSessionId.isEmpty()) {
+        qWarning() << "RemoteFileTracker: replaceIdeaFileSet called with empty canvasSessionId";
         return;
     }
     
     // Remove old associations
-    QSet<QString> oldFiles = m_ideaIdToFileIds.value(ideaId);
+    QSet<QString> oldFiles = m_canvasSessionIdToFileIds.value(canvasSessionId);
     for (const QString& oldFileId : oldFiles) {
         auto it = m_fileIdToIdeaIds.find(oldFileId);
         if (it != m_fileIdToIdeaIds.end()) {
-            it.value().remove(ideaId);
+            it.value().remove(canvasSessionId);
             if (it.value().isEmpty()) {
                 m_fileIdToIdeaIds.erase(it);
             }
@@ -122,30 +122,30 @@ void RemoteFileTracker::replaceIdeaFileSet(const QString& ideaId, const QSet<QSt
     }
     
     // Set new associations
-    m_ideaIdToFileIds[ideaId] = fileIds;
+    m_canvasSessionIdToFileIds[canvasSessionId] = fileIds;
     for (const QString& fileId : fileIds) {
-        m_fileIdToIdeaIds[fileId].insert(ideaId);
+        m_fileIdToIdeaIds[fileId].insert(canvasSessionId);
     }
     
-    qDebug() << "RemoteFileTracker: Replaced file set for idea" << ideaId << "with" << fileIds.size() << "files";
+    qDebug() << "RemoteFileTracker: Replaced file set for idea" << canvasSessionId << "with" << fileIds.size() << "files";
 }
 
-void RemoteFileTracker::removeIdeaAssociations(const QString& ideaId) {
-    // Phase 3: ideaId is MANDATORY - should never be empty (defensive check)
-    if (ideaId.isEmpty()) {
-        qWarning() << "RemoteFileTracker: removeIdeaAssociations called with empty ideaId";
+void RemoteFileTracker::removeIdeaAssociations(const QString& canvasSessionId) {
+    // Phase 3: canvasSessionId is MANDATORY - should never be empty (defensive check)
+    if (canvasSessionId.isEmpty()) {
+        qWarning() << "RemoteFileTracker: removeIdeaAssociations called with empty canvasSessionId";
         return;
     }
     
-    const QSet<QString> files = m_ideaIdToFileIds.take(ideaId);
+    const QSet<QString> files = m_canvasSessionIdToFileIds.take(canvasSessionId);
     for (const QString& fid : files) {
         QSet<QString>& ideas = m_fileIdToIdeaIds[fid];
-        ideas.remove(ideaId);
+        ideas.remove(canvasSessionId);
         if (ideas.isEmpty()) {
             m_fileIdToIdeaIds.remove(fid);
         }
     }
-    qDebug() << "RemoteFileTracker: Removed all associations for idea" << ideaId;
+    qDebug() << "RemoteFileTracker: Removed all associations for idea" << canvasSessionId;
 }
 
 void RemoteFileTracker::removeAllTrackingForFile(const QString& fileId) {
@@ -156,11 +156,11 @@ void RemoteFileTracker::removeAllTrackingForFile(const QString& fileId) {
     
     // Remove from idea tracking
     QSet<QString> ideas = m_fileIdToIdeaIds.take(fileId);
-    for (const QString& ideaId : ideas) {
-        auto& files = m_ideaIdToFileIds[ideaId];
+    for (const QString& canvasSessionId : ideas) {
+        auto& files = m_canvasSessionIdToFileIds[canvasSessionId];
         files.remove(fileId);
         if (files.isEmpty()) {
-            m_ideaIdToFileIds.remove(ideaId);
+            m_canvasSessionIdToFileIds.remove(canvasSessionId);
         }
     }
     
@@ -189,12 +189,12 @@ void RemoteFileTracker::checkAndNotifyIfUnused(const QString& fileId) {
     if (m_fileRemovalNotifier) {
         QList<QString> clientIds = getClientsWithFile(fileId);
         QSet<QString> ideaSet = getIdeaIdsForFile(fileId);
-        QList<QString> ideaIds = ideaSet.values();
+        QList<QString> canvasSessionIds = ideaSet.values();
         
-        if (!clientIds.isEmpty() || !ideaIds.isEmpty()) {
+        if (!clientIds.isEmpty() || !canvasSessionIds.isEmpty()) {
             qDebug() << "RemoteFileTracker: Notifying removal for file" << fileId 
-                     << "clients:" << clientIds << "ideas:" << ideaIds;
-            m_fileRemovalNotifier(fileId, clientIds, ideaIds);
+                     << "clients:" << clientIds << "ideas:" << canvasSessionIds;
+            m_fileRemovalNotifier(fileId, clientIds, canvasSessionIds);
         }
     }
     
@@ -206,5 +206,5 @@ void RemoteFileTracker::clear() {
     qDebug() << "RemoteFileTracker: Clearing all tracking data";
     m_fileIdToClients.clear();
     m_fileIdToIdeaIds.clear();
-    m_ideaIdToFileIds.clear();
+    m_canvasSessionIdToFileIds.clear();
 }

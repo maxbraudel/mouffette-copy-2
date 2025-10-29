@@ -345,9 +345,9 @@ ScreenCanvas::~ScreenCanvas() {
 
 QJsonObject ScreenCanvas::serializeSceneState() const {
     QJsonObject root;
-    // Phase 3: ideaId is MANDATORY - only include in manifest if it's not the default
+    // Phase 3: canvasSessionId is MANDATORY - only include in manifest if it's not the default
     if (m_activeIdeaId != DEFAULT_IDEA_ID) {
-        root["ideaId"] = m_activeIdeaId;
+        root["canvasSessionId"] = m_activeIdeaId;
     }
     // Screens
     QJsonArray screensArr;
@@ -474,11 +474,11 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
     return root;
 }
 
-void ScreenCanvas::setActiveIdeaId(const QString& ideaId) {
-    if (m_activeIdeaId == ideaId) {
+void ScreenCanvas::setActiveIdeaId(const QString& canvasSessionId) {
+    if (m_activeIdeaId == canvasSessionId) {
         return;
     }
-    m_activeIdeaId = ideaId;
+    m_activeIdeaId = canvasSessionId;
 }
 
 void ScreenCanvas::maybeRefreshInfoOverlayOnSceneChanged() {

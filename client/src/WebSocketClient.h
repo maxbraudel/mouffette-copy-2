@@ -40,16 +40,16 @@ public:
         void sendCursorUpdate(int globalX, int globalY);
 
     // Upload/unload protocol (JSON relayed by server)
-    void sendUploadStart(const QString& targetClientId, const QJsonArray& filesManifest, const QString& uploadId, const QString& ideaId);
-    void sendUploadChunk(const QString& targetClientId, const QString& uploadId, const QString& fileId, int chunkIndex, const QByteArray& dataBase64, const QString& ideaId);
-    void sendUploadComplete(const QString& targetClientId, const QString& uploadId, const QString& ideaId);
-    void sendUploadAbort(const QString& targetClientId, const QString& uploadId, const QString& reason, const QString& ideaId);
-    void sendRemoveAllFiles(const QString& targetClientId, const QString& ideaId);
-    void sendRemoveFile(const QString& targetClientId, const QString& ideaId, const QString& fileId);
+    void sendUploadStart(const QString& targetClientId, const QJsonArray& filesManifest, const QString& uploadId, const QString& canvasSessionId);
+    void sendUploadChunk(const QString& targetClientId, const QString& uploadId, const QString& fileId, int chunkIndex, const QByteArray& dataBase64, const QString& canvasSessionId);
+    void sendUploadComplete(const QString& targetClientId, const QString& uploadId, const QString& canvasSessionId);
+    void sendUploadAbort(const QString& targetClientId, const QString& uploadId, const QString& reason, const QString& canvasSessionId);
+    void sendRemoveAllFiles(const QString& targetClientId, const QString& canvasSessionId);
+    void sendRemoveFile(const QString& targetClientId, const QString& canvasSessionId, const QString& fileId);
     
-    // PHASE 2: Canvas lifecycle notifications (CRITICAL for ideaId validation)
-    void sendCanvasCreated(const QString& persistentClientId, const QString& ideaId);
-    void sendCanvasDeleted(const QString& persistentClientId, const QString& ideaId);
+    // PHASE 2: Canvas lifecycle notifications (CRITICAL for canvasSessionId validation)
+    void sendCanvasCreated(const QString& persistentClientId, const QString& canvasSessionId);
+    void sendCanvasDeleted(const QString& persistentClientId, const QString& canvasSessionId);
     
     // Target -> Sender notifications
     void notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent, int filesCompleted, int totalFiles, const QStringList& completedFileIds = QStringList(), const QJsonArray& perFileProgress = QJsonArray());

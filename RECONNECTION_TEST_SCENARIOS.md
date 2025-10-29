@@ -15,7 +15,7 @@
 7. **Vérifier** : Les fichiers uploadés apparaissent toujours sur la scène
 
 **Résultat attendu** :
-- ✅ Client A reçoit `state_sync` avec ideaId + fileIds
+- ✅ Client A reçoit `state_sync` avec canvasSessionId + fileIds
 - ✅ Canvas affiche les médias restaurés
 - ✅ Upload button montre "Unload from Client" (état actif)
 
@@ -77,11 +77,11 @@
 
 ---
 
-### Scénario 5 : Validation ideaId Obligatoire
-**Objectif** : Vérifier que serveur rejette messages sans ideaId
+### Scénario 5 : Validation canvasSessionId Obligatoire
+**Objectif** : Vérifier que serveur rejette messages sans canvasSessionId
 
 **Étapes** :
-1. Modifier temporairement client pour envoyer `upload_start` sans ideaId
+1. Modifier temporairement client pour envoyer `upload_start` sans canvasSessionId
 2. **Vérifier logs serveur** : 
    - `⚠️ upload_start missing required fields`
    - Message d'erreur retourné au client

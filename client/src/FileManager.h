@@ -20,7 +20,7 @@ class FileMemoryCache;
  * 
  * Phase 4.2 Refactor: Delegates to 3 specialized services:
  * - LocalFileRepository: fileId ↔ filePath mapping
- * - RemoteFileTracker: remote client & ideaId tracking
+ * - RemoteFileTracker: remote client & canvasSessionId tracking
  * - FileMemoryCache: memory caching for performance
  * 
  * Phase 4.3: Converted to dependency injection (no longer singleton)
@@ -83,12 +83,12 @@ public:
 
 
     // Associate/de-associate files with logical idea IDs (scenes/projects)
-    void associateFileWithIdea(const QString& fileId, const QString& ideaId);
-    void dissociateFileFromIdea(const QString& fileId, const QString& ideaId);
+    void associateFileWithIdea(const QString& fileId, const QString& canvasSessionId);
+    void dissociateFileFromIdea(const QString& fileId, const QString& canvasSessionId);
     QSet<QString> getIdeaIdsForFile(const QString& fileId) const;
-    QSet<QString> getFileIdsForIdea(const QString& ideaId) const;
-    void replaceIdeaFileSet(const QString& ideaId, const QSet<QString>& fileIds);
-    void removeIdeaAssociations(const QString& ideaId);
+    QSet<QString> getFileIdsForIdea(const QString& canvasSessionId) const;
+    void replaceIdeaFileSet(const QString& canvasSessionId, const QSet<QString>& fileIds);
+    void removeIdeaAssociations(const QString& canvasSessionId);
 
     // Clear all uploaded markers for a given client across all files
     void unmarkAllFilesForClient(const QString& clientId);
@@ -98,7 +98,7 @@ public:
     void removeReceivedFileMappingsUnderPathPrefix(const QString& pathPrefix);
     
     // Set callback for when file should be deleted from remote clients
-    static void setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds)> cb);
+    static void setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& canvasSessionIds)> cb);
 
 private:
     // Phase 4.2: Service references (initialized in constructor)
@@ -110,7 +110,7 @@ private:
     QHash<QString, QList<QString>> m_fileIdToMediaIds; // fileId -> [mediaId1, mediaId2, ...]
     QHash<QString, QString> m_mediaIdToFileId;     // mediaId -> fileId
     
-    static std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds)> s_fileRemovalNotifier;
+    static std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& canvasSessionIds)> s_fileRemovalNotifier;
 };
 
 #endif // FILEMANAGER_H

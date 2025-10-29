@@ -11,12 +11,12 @@ class MouffetteServer {
         this.watchingByWatcher = new Map();
         
         // PHASE 2: Server-side state tracking
-        this.uploads = new Map();        // uploadId -> { sender, target, ideaId, startTime, files: [fileIds] }
-        this.clientFiles = new Map();    // persistentClientId -> Map(ideaId -> Set(fileId))
+        this.uploads = new Map();        // uploadId -> { sender, target, canvasSessionId, startTime, files: [fileIds] }
+        this.clientFiles = new Map();    // persistentClientId -> Map(canvasSessionId -> Set(fileId))
         this.sessionsByPersistent = new Map(); // persistentClientId -> Set(sessionId)
         
-        // PHASE 2: Active canvas tracking (CRITICAL for ideaId validation)
-        this.activeCanvases = new Map(); // persistentClientId -> Set(ideaId)
+        // PHASE 2: Active canvas tracking (CRITICAL for canvasSessionId validation)
+        this.activeCanvases = new Map(); // persistentClientId -> Set(canvasSessionId)
         
         // PHASE 1: Upload timeout configuration
         this.UPLOAD_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
@@ -249,7 +249,7 @@ class MouffetteServer {
             case 'remove_file':
                 this.handleRemoveFile(clientId, message);
                 break;
-            // PHASE 2: Canvas lifecycle tracking (CRITICAL for ideaId validation)
+            // PHASE 2: Canvas lifecycle tracking (CRITICAL for canvasSessionId validation)
             case 'canvas_created':
                 this.handleCanvasCreated(clientId, message);
                 break;
@@ -552,10 +552,10 @@ class MouffetteServer {
         if (this.clientFiles.has(stateKey)) {
             const clientIdeas = this.clientFiles.get(stateKey);
             const ideas = [];
-            for (const [ideaId, fileIds] of clientIdeas.entries()) {
+            for (const [canvasSessionId, fileIds] of clientIdeas.entries()) {
                 if (fileIds.size > 0) {
                     ideas.push({
-                        ideaId: ideaId,
+                        canvasSessionId: canvasSessionId,
                         fileIds: Array.from(fileIds)
                     });
                 }
@@ -612,21 +612,21 @@ class MouffetteServer {
     handleUploadStart(senderId, message) {
         // PHASE 2: Read targetPersistentClientId (new) with fallback to targetClientId (legacy)
         const targetClientId = message.targetPersistentClientId || message.targetClientId;
-        const { uploadId, ideaId, files } = message;
+        const { uploadId, canvasSessionId, files } = message;
         
         // Validation
-        if (!targetClientId || !uploadId || !ideaId) {
+        if (!targetClientId || !uploadId || !canvasSessionId) {
             console.warn(`⚠️ upload_start missing required fields from ${senderId}`);
-            return this.sendError(senderId, 'Missing targetClientId, uploadId, or ideaId');
+            return this.sendError(senderId, 'Missing targetClientId, uploadId, or canvasSessionId');
         }
         
         const targetPersistentId = this.getPersistentId(targetClientId);
         const senderPersistentId = this.getPersistentId(senderId);
         
-        // PHASE 2: Validate ideaId exists for target client (CRITICAL)
+        // PHASE 2: Validate canvasSessionId exists for target client (CRITICAL)
         const targetCanvases = this.activeCanvases.get(targetPersistentId);
-        if (!targetCanvases || !targetCanvases.has(ideaId)) {
-            console.warn(`⚠️ upload_start rejected: ideaId ${ideaId} not found for target ${targetPersistentId}`);
+        if (!targetCanvases || !targetCanvases.has(canvasSessionId)) {
+            console.warn(`⚠️ upload_start rejected: canvasSessionId ${canvasSessionId} not found for target ${targetPersistentId}`);
             console.warn(`   Active canvases:`, targetCanvases ? Array.from(targetCanvases) : 'none');
             
             // Send error back to sender
@@ -636,7 +636,7 @@ class MouffetteServer {
                     type: 'upload_error',
                     uploadId: uploadId,
                     errorCode: 'INVALID_IDEA_ID',
-                    message: `Canvas with ideaId ${ideaId} does not exist on target client ${targetPersistentId}`
+                    message: `Canvas with canvasSessionId ${canvasSessionId} does not exist on target client ${targetPersistentId}`
                 }));
             }
             return;
@@ -649,12 +649,12 @@ class MouffetteServer {
             senderPersistent: senderPersistentId,
             targetSession: targetClientId,
             targetPersistent: targetPersistentId,
-            ideaId,
+            canvasSessionId,
             startTime: Date.now(),
             files: fileIds
         });
         
-        console.log(`📤 Upload started: ${senderPersistentId}/${senderId} -> ${targetPersistentId}/${targetClientId} [${uploadId}] idea:${ideaId} files:${fileIds.length}`);
+        console.log(`📤 Upload started: ${senderPersistentId}/${senderId} -> ${targetPersistentId}/${targetClientId} [${uploadId}] idea:${canvasSessionId} files:${fileIds.length}`);
         
         // Relay to target
         this.relayToTarget(senderId, targetClientId, message);
@@ -663,7 +663,7 @@ class MouffetteServer {
     handleUploadComplete(senderId, message) {
         // PHASE 2: Read targetPersistentClientId (new) with fallback to targetClientId (legacy)
         const targetClientId = message.targetPersistentClientId || message.targetClientId;
-        const { uploadId, ideaId } = message;
+        const { uploadId, canvasSessionId } = message;
         const upload = this.uploads.get(uploadId);
         
         if (!upload) {
@@ -671,13 +671,13 @@ class MouffetteServer {
             // Still relay (backward compatibility)
             return this.relayToTarget(senderId, targetClientId, message);
         }
-        if (!ideaId) {
-            console.warn(`⚠️ upload_complete missing ideaId for ${uploadId}`);
-            return this.sendError(senderId, 'Missing ideaId in upload_complete');
+        if (!canvasSessionId) {
+            console.warn(`⚠️ upload_complete missing canvasSessionId for ${uploadId}`);
+            return this.sendError(senderId, 'Missing canvasSessionId in upload_complete');
         }
         // Track files received by target
         const effectiveTarget = upload.targetPersistent;
-        const effectiveIdea = upload.ideaId;
+        const effectiveIdea = upload.canvasSessionId;
         
         if (!this.clientFiles.has(effectiveTarget)) {
             this.clientFiles.set(effectiveTarget, new Map());
@@ -749,18 +749,18 @@ class MouffetteServer {
     handleRemoveAllFiles(senderId, message) {
         // PHASE 2: Extract targetClientId with fallback
         const targetClientId = message.targetPersistentClientId || message.targetClientId;
-        const { ideaId } = message;
+        const { canvasSessionId } = message;
         const targetPersistentId = this.getPersistentId(targetClientId);
-        if (!targetClientId || !ideaId) {
+        if (!targetClientId || !canvasSessionId) {
             console.warn(`⚠️ remove_all_files missing required fields from ${senderId}`);
-            return this.sendError(senderId, 'Missing targetClientId or ideaId');
+            return this.sendError(senderId, 'Missing targetClientId or canvasSessionId');
         }
 
         const targetFiles = this.clientFiles.get(targetPersistentId);
-        if (targetFiles && targetFiles.has(ideaId)) {
-            const count = targetFiles.get(ideaId).size;
-            targetFiles.delete(ideaId);
-            console.log(`🗑️  Removed ${count} files from ${targetPersistentId}:${ideaId}`);
+        if (targetFiles && targetFiles.has(canvasSessionId)) {
+            const count = targetFiles.get(canvasSessionId).size;
+            targetFiles.delete(canvasSessionId);
+            console.log(`🗑️  Removed ${count} files from ${targetPersistentId}:${canvasSessionId}`);
         }
         
         this.relayToTarget(senderId, targetClientId, message);
@@ -769,24 +769,24 @@ class MouffetteServer {
     handleRemoveFile(senderId, message) {
         // PHASE 2: Extract targetClientId with fallback
         const targetClientId = message.targetPersistentClientId || message.targetClientId;
-        const { ideaId, fileId } = message;
+        const { canvasSessionId, fileId } = message;
         
-        if (!targetClientId || !fileId || !ideaId) {
+        if (!targetClientId || !fileId || !canvasSessionId) {
             console.warn(`⚠️ remove_file missing required fields from ${senderId}`);
-            return this.sendError(senderId, 'Missing targetClientId, ideaId, or fileId');
+            return this.sendError(senderId, 'Missing targetClientId, canvasSessionId, or fileId');
         }
         
         const targetPersistentId = this.getPersistentId(targetClientId);
         const targetFiles = this.clientFiles.get(targetPersistentId);
         if (targetFiles) {
-            const ideaFiles = targetFiles.get(ideaId);
+            const ideaFiles = targetFiles.get(canvasSessionId);
             if (ideaFiles && ideaFiles.has(fileId)) {
                 ideaFiles.delete(fileId);
-                console.log(`🗑️  Removed file ${fileId} from ${targetPersistentId}:${ideaId}`);
+                console.log(`🗑️  Removed file ${fileId} from ${targetPersistentId}:${canvasSessionId}`);
                 
                 // Cleanup empty idea sets
                 if (ideaFiles.size === 0) {
-                    targetFiles.delete(ideaId);
+                    targetFiles.delete(canvasSessionId);
                 }
             }
         }
@@ -796,36 +796,36 @@ class MouffetteServer {
     
     // PHASE 2: Canvas lifecycle tracking handlers
     handleCanvasCreated(senderId, message) {
-        const { persistentClientId, ideaId } = message;
+        const { persistentClientId, canvasSessionId } = message;
         
-        if (!persistentClientId || !ideaId) {
+        if (!persistentClientId || !canvasSessionId) {
             console.warn(`⚠️ canvas_created missing required fields from ${senderId}`);
-            return this.sendError(senderId, 'Missing persistentClientId or ideaId');
+            return this.sendError(senderId, 'Missing persistentClientId or canvasSessionId');
         }
         
         // Track active canvas
         if (!this.activeCanvases.has(persistentClientId)) {
             this.activeCanvases.set(persistentClientId, new Set());
         }
-        this.activeCanvases.get(persistentClientId).add(ideaId);
+        this.activeCanvases.get(persistentClientId).add(canvasSessionId);
         
-        console.log(`🎨 Canvas created: ${persistentClientId}:${ideaId}`);
+        console.log(`🎨 Canvas created: ${persistentClientId}:${canvasSessionId}`);
         console.log(`   Active canvases for ${persistentClientId}:`, Array.from(this.activeCanvases.get(persistentClientId)));
     }
     
     handleCanvasDeleted(senderId, message) {
-        const { persistentClientId, ideaId } = message;
+        const { persistentClientId, canvasSessionId } = message;
         
-        if (!persistentClientId || !ideaId) {
+        if (!persistentClientId || !canvasSessionId) {
             console.warn(`⚠️ canvas_deleted missing required fields from ${senderId}`);
-            return this.sendError(senderId, 'Missing persistentClientId or ideaId');
+            return this.sendError(senderId, 'Missing persistentClientId or canvasSessionId');
         }
         
         // Remove canvas from tracking
         const canvases = this.activeCanvases.get(persistentClientId);
         if (canvases) {
-            canvases.delete(ideaId);
-            console.log(`🗑️  Canvas deleted: ${persistentClientId}:${ideaId}`);
+            canvases.delete(canvasSessionId);
+            console.log(`🗑️  Canvas deleted: ${persistentClientId}:${canvasSessionId}`);
             
             // Cleanup empty sets
             if (canvases.size === 0) {

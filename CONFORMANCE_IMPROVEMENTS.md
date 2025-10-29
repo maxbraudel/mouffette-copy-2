@@ -8,7 +8,7 @@ Le rapport d'analyse a identifié **4 points majeurs non conformes**. Cependant,
 
 ## ⚠️ RISQUES IDENTIFIÉS
 
-### 1. ideaId Obligatoire (50+ modifications)
+### 1. canvasSessionId Obligatoire (50+ modifications)
 **Risque : ÉLEVÉ** 🔴
 - 50+ vérifications `isEmpty()` à supprimer
 - Impact : WebSocketClient, UploadManager, MainWindow, SessionManager
@@ -50,16 +50,16 @@ Le rapport d'analyse a identifié **4 points majeurs non conformes**. Cependant,
 - [ ] Créer `ARCHITECTURE.md`
 - [ ] Documenter flux upload avec diagrammes
 - [ ] Documenter rôle de chaque service
-- [ ] Documenter pourquoi ideaId/mediaId sont actuellement optionnels
+- [ ] Documenter pourquoi canvasSessionId/mediaId sont actuellement optionnels
 
 **Bénéfice** : Facilite la maintenance future
 
 #### 1.3 Ajouter Validation Defensive (0 risque)
-- [ ] Ajouter Q_ASSERT pour ideaId dans les endroits critiques
-- [ ] Logger warnings quand ideaId manque
+- [ ] Ajouter Q_ASSERT pour canvasSessionId dans les endroits critiques
+- [ ] Logger warnings quand canvasSessionId manque
 - [ ] Monitorer les cas réels en production
 
-**Bénéfice** : Identifie si ideaId est vraiment toujours présent
+**Bénéfice** : Identifie si canvasSessionId est vraiment toujours présent
 
 ---
 
@@ -68,7 +68,7 @@ Le rapport d'analyse a identifié **4 points majeurs non conformes**. Cependant,
 
 #### 2.1 Simplifier SessionManager (Risque faible)
 - [ ] Supprimer checks `isEmpty()` dans SessionManager **SI tests passent**
-- [ ] SessionManager génère toujours ideaId → garantie par construction
+- [ ] SessionManager génère toujours canvasSessionId → garantie par construction
 
 **Prérequis** : Tests SessionManager existants
 
@@ -106,7 +106,7 @@ Le rapport d'analyse a identifié **4 points majeurs non conformes**. Cependant,
 - ✅ SessionManager : 100% conforme  
 - ✅ FileManager split : 100% conforme
 - ✅ Upload persistant fonctionne
-- 🟡 ideaId optionnel : **pas un bug**, juste une défense
+- 🟡 canvasSessionId optionnel : **pas un bug**, juste une défense
 - 🟡 mediaId tracking : **redondant mais fonctionnel**
 - 🟡 Singletons : **pratique standard Qt**, pas un antipattern
 

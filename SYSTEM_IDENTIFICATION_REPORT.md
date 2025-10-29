@@ -320,10 +320,10 @@ if (!filesByIdea) {
     filesByIdea = new Map();
     this.clientFiles.set(persistentId, filesByIdea);
 }
-let fileSet = filesByIdea.get(ideaId);
+let fileSet = filesByIdea.get(canvasSessionId);
 if (!fileSet) {
     fileSet = new Set();
-    filesByIdea.set(ideaId, fileSet);
+    filesByIdea.set(canvasSessionId, fileSet);
 }
 for (const fileId of upload.files) {
     fileSet.add(fileId); // Tracking : ce client a ce fichier pour cette idée
@@ -345,7 +345,7 @@ for (const fileId of upload.files) {
 struct CanvasSession {
     QString persistentClientId;  // Client cible (STABLE)
     QString serverAssignedId;    // Session serveur (ÉPHÉMÈRE)
-    QString ideaId;              // Scène active (voir section 6)
+    QString canvasSessionId;              // Scène active (voir section 6)
     ScreenCanvas* canvas;        // Widget Qt du canvas
     QPushButton* uploadButton;   // Bouton d'upload associé
     ClientInfo lastClientInfo;   // Dernier état connu du client
@@ -367,9 +367,9 @@ CanvasSession& session = m_sessionManager->getOrCreateSession(persistentClientId
 CanvasSession* session = m_sessionManager->findSession(persistentClientId);
 ```
 
-**Lookup par ideaId** :
+**Lookup par canvasSessionId** :
 ```cpp
-CanvasSession* session = m_sessionManager->findSessionByIdeaId(ideaId);
+CanvasSession* session = m_sessionManager->findSessionByIdeaId(canvasSessionId);
 ```
 
 **Lookup par serverSessionId** :
@@ -413,8 +413,8 @@ QString MainWindow::createIdeaId() const {
 
 ```cpp
 void MainWindow::rotateSessionIdea(CanvasSession& session) {
-    const QString oldIdeaId = session.ideaId;
-    session.ideaId = createIdeaId(); // NOUVEAU UUID
+    const QString oldIdeaId = session.canvasSessionId;
+    session.canvasSessionId = createIdeaId(); // NOUVEAU UUID
     session.expectedIdeaFileIds.clear();
     session.knownRemoteFileIds.clear();
     m_fileManager->removeIdeaAssociations(oldIdeaId);
@@ -423,10 +423,10 @@ void MainWindow::rotateSessionIdea(CanvasSession& session) {
 
 #### Caractéristiques
 
-✅ **UN PAR CANVAS** : Chaque canvas a son propre ideaId unique
-✅ **ASSOCIE FICHIERS** : Tous les fichiers sur un canvas partagent le même ideaId
-✅ **OBLIGATOIRE** : Toutes les opérations serveur nécessitent un ideaId (Phase 3)
-✅ **ROTATION** : Nouveau ideaId quand on efface le canvas pour repartir à zéro
+✅ **UN PAR CANVAS** : Chaque canvas a son propre canvasSessionId unique
+✅ **ASSOCIE FICHIERS** : Tous les fichiers sur un canvas partagent le même canvasSessionId
+✅ **OBLIGATOIRE** : Toutes les opérations serveur nécessitent un canvasSessionId (Phase 3)
+✅ **ROTATION** : Nouveau canvasSessionId quand on efface le canvas pour repartir à zéro
 
 #### Usage Serveur
 
@@ -434,7 +434,7 @@ void MainWindow::rotateSessionIdea(CanvasSession& session) {
 ```javascript
 // Structure serveur
 this.clientFiles = new Map(); 
-// persistentClientId → Map(ideaId → Set(fileId))
+// persistentClientId → Map(canvasSessionId → Set(fileId))
 
 // Exemple :
 clientFiles.get("client-abc123") = {
@@ -445,11 +445,11 @@ clientFiles.get("client-abc123") = {
 
 **Protocole** :
 ```javascript
-// Tous ces messages DOIVENT contenir ideaId
-upload_start      → ideaId (obligatoire)
-upload_complete   → ideaId (obligatoire)
-remove_all_files  → ideaId (obligatoire)
-remove_file       → ideaId (obligatoire)
+// Tous ces messages DOIVENT contenir canvasSessionId
+upload_start      → canvasSessionId (obligatoire)
+upload_complete   → canvasSessionId (obligatoire)
+remove_all_files  → canvasSessionId (obligatoire)
+remove_file       → canvasSessionId (obligatoire)
 ```
 
 #### Exemple Concret
@@ -458,13 +458,13 @@ remove_file       → ideaId (obligatoire)
 
 ```
 Client A (persistentId: "aaa111")
-  ├─ Canvas A1 (ideaId: "idea-001")
+  ├─ Canvas A1 (canvasSessionId: "idea-001")
   │    ├─ media1 → fileId "xyz789"
   │    └─ media2 → fileId "abc456"
   └─ (pas d'autre canvas pour ce client)
 
 Client B (persistentId: "bbb222")
-  ├─ Canvas B1 (ideaId: "idea-002")
+  ├─ Canvas B1 (canvasSessionId: "idea-002")
   │    └─ media3 → fileId "def789"
   └─ (pas d'autre canvas pour ce client)
 ```
@@ -854,7 +854,7 @@ clientFiles = {
 │  │                                                │            │
 │  │   "3f8c7d2a-..." → CanvasSession {            │            │
 │  │     persistentClientId: "3f8c7d2a-...",       │            │
-│  │     ideaId: "idea-001",  ← Une idée par canvas│            │
+│  │     canvasSessionId: "idea-001",  ← Une idée par canvas│            │
 │  │     canvas: [ScreenCanvas widget],            │            │
 │  │     expectedIdeaFileIds: Set([...]),          │            │
 │  │     knownRemoteFileIds: Set([...])            │            │
@@ -896,7 +896,7 @@ clientFiles = {
 │  │     "aaa111" → "xyz789"                       │            │
 │  │     "bbb222" → "xyz789"                       │            │
 │  │                                               │            │
-│  │     Map<fileId, Set<ideaIds>>                 │            │
+│  │     Map<fileId, Set<canvasSessionIds>>                 │            │
 │  │     "xyz789" → Set(["idea-001", "idea-002"]) │            │
 │  └──────────────────────────────────────────────┘            │
 │                                                               │
@@ -918,7 +918,7 @@ sessionId: "session-A"
                                                    
 Canvas pour Client B (target):
 persistentId: "bbb222"  ← Target
-ideaId: "idea-001"
+canvasSessionId: "idea-001"
 
 Items sur canvas:
   - media1: mediaId "mmm111" → fileId "fff777" (chat.jpg)
@@ -962,7 +962,7 @@ Client A → Server:
   type: "upload_start",
   targetClientId: "bbb222",  ← persistentId du target
   uploadId: "upload-xyz123",  ← UUID unique de cet upload
-  ideaId: "idea-001",         ← Obligatoire !
+  canvasSessionId: "idea-001",         ← Obligatoire !
   filesManifest: [...]
 }
 
@@ -970,7 +970,7 @@ Server reçoit:
 - Crée tracking: uploads.set("upload-xyz123", {
     sender: "aaa111",
     target: "bbb222",
-    ideaId: "idea-001",
+    canvasSessionId: "idea-001",
     files: ["fff777", "fff888"],
     startTime: Date.now()
   })
@@ -980,7 +980,7 @@ Server → Client B:
   type: "upload_start",
   senderClientId: "aaa111",
   uploadId: "upload-xyz123",
-  ideaId: "idea-001",
+  canvasSessionId: "idea-001",
   filesManifest: [...]
 }
 
@@ -1002,7 +1002,7 @@ Client A → Server:
   fileId: "fff777",      ← Identifie le fichier
   chunkIndex: 0,
   data: "base64...",
-  ideaId: "idea-001"
+  canvasSessionId: "idea-001"
 }
 
 Server → Client B: (relay direct)
@@ -1013,7 +1013,7 @@ Server → Client B: (relay direct)
   fileId: "fff777",
   chunkIndex: 0,
   data: "base64...",
-  ideaId: "idea-001"
+  canvasSessionId: "idea-001"
 }
 
 Client B:
@@ -1055,7 +1055,7 @@ Client A → Server:
   type: "upload_complete",
   targetClientId: "bbb222",
   uploadId: "upload-xyz123",
-  ideaId: "idea-001"
+  canvasSessionId: "idea-001"
 }
 
 Server:
@@ -1075,7 +1075,7 @@ Server → Client B:
   type: "upload_complete",
   senderClientId: "aaa111",
   uploadId: "upload-xyz123",
-  ideaId: "idea-001"
+  canvasSessionId: "idea-001"
 }
 
 Client B:
@@ -1106,8 +1106,8 @@ Client A (sender):
   FileManager associations:
     - fileId "fff777" → clients: ["bbb222"]
     - fileId "fff888" → clients: ["bbb222"]
-    - fileId "fff777" → ideaIds: ["idea-001"]
-    - fileId "fff888" → ideaIds: ["idea-001"]
+    - fileId "fff777" → canvasSessionIds: ["idea-001"]
+    - fileId "fff888" → canvasSessionIds: ["idea-001"]
 
 Server tracking:
   clientFiles.get("bbb222") = {
@@ -1227,19 +1227,19 @@ Server clientFiles:
 
 **Canvas A (vers Client B)** :
 ```
-ideaId: "idea-001"
+canvasSessionId: "idea-001"
 media1: mediaId "mmm111" → fileId "fff777" (chat.jpg)
 ```
 
 **Canvas B (vers Client C)** :
 ```
-ideaId: "idea-002"
+canvasSessionId: "idea-002"
 media2: mediaId "mmm222" → fileId "fff777" (chat.jpg, MÊME fileId !)
 ```
 
 **Upload 1 (vers Client B)** :
 ```
-upload_start → targetClientId: "bbb222", ideaId: "idea-001", fileId: "fff777"
+upload_start → targetClientId: "bbb222", canvasSessionId: "idea-001", fileId: "fff777"
 ...chunks...
 upload_complete
 
@@ -1249,7 +1249,7 @@ Server:
 
 **Upload 2 (vers Client C)** :
 ```
-upload_start → targetClientId: "ccc333", ideaId: "idea-002", fileId: "fff777"
+upload_start → targetClientId: "ccc333", canvasSessionId: "idea-002", fileId: "fff777"
 ...chunks...
 upload_complete
 
@@ -1263,12 +1263,12 @@ RemoteFileTracker:
   fileId "fff777" → clients: Set(["bbb222", "ccc333"])
 
 IdeaAssociations:
-  fileId "fff777" → ideaIds: Set(["idea-001", "idea-002"])
+  fileId "fff777" → canvasSessionIds: Set(["idea-001", "idea-002"])
 ```
 
 **Résultat** :
 - ✅ Même fichier uploadé 2 fois (unavoidable, 2 destinations différentes)
-- ✅ Tracking correct par client ET par ideaId
+- ✅ Tracking correct par client ET par canvasSessionId
 - ✅ Si vous supprimez media1, fichier reste pour media2
 
 ---
@@ -1277,7 +1277,7 @@ IdeaAssociations:
 
 **Setup** :
 ```
-Canvas (ideaId "idea-001"):
+Canvas (canvasSessionId "idea-001"):
   media1: mediaId "mmm111" → fileId "fff777" (chat.jpg, position A)
   media2: mediaId "mmm222" → fileId "fff777" (chat.jpg, position B, doublon)
   media3: mediaId "mmm333" → fileId "fff888" (dog.jpg)

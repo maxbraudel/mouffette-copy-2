@@ -323,7 +323,7 @@ void WebSocketClient::sendCursorUpdate(int globalX, int globalY) {
     sendMessage(msg);
 }
 
-void WebSocketClient::sendUploadStart(const QString& targetClientId, const QJsonArray& filesManifest, const QString& uploadId, const QString& ideaId) {
+void WebSocketClient::sendUploadStart(const QString& targetClientId, const QJsonArray& filesManifest, const QString& uploadId, const QString& canvasSessionId) {
     if (!(isConnected() || isUploadChannelConnected())) return;
     
     QJsonObject msg;
@@ -332,7 +332,7 @@ void WebSocketClient::sendUploadStart(const QString& targetClientId, const QJson
     msg["targetPersistentClientId"] = targetClientId;  // PHASE 2: Explicit field name for clarity
     msg["uploadId"] = uploadId;
     msg["files"] = filesManifest;
-    msg["ideaId"] = ideaId;
+    msg["canvasSessionId"] = canvasSessionId;
     if (!m_clientId.isEmpty()) {
         msg["senderClientId"] = m_clientId;           // Legacy (backward compat)
         msg["senderPersistentClientId"] = m_clientId;  // PHASE 2: Explicit field
@@ -340,7 +340,7 @@ void WebSocketClient::sendUploadStart(const QString& targetClientId, const QJson
     sendMessageUpload(msg);
 }
 
-void WebSocketClient::sendUploadChunk(const QString& targetClientId, const QString& uploadId, const QString& fileId, int chunkIndex, const QByteArray& dataBase64, const QString& ideaId) {
+void WebSocketClient::sendUploadChunk(const QString& targetClientId, const QString& uploadId, const QString& fileId, int chunkIndex, const QByteArray& dataBase64, const QString& canvasSessionId) {
     if (!(isConnected() || isUploadChannelConnected())) return;
     if (m_canceledUploads.contains(uploadId)) return; // drop silently
     
@@ -358,7 +358,7 @@ void WebSocketClient::sendUploadChunk(const QString& targetClientId, const QStri
         payload = payload.toBase64();
     }
     msg["data"] = QString::fromUtf8(payload);
-    msg["ideaId"] = ideaId; // now mandatory
+    msg["canvasSessionId"] = canvasSessionId; // now mandatory
     if (!m_clientId.isEmpty()) {
         msg["senderClientId"] = m_clientId;           // Legacy (backward compat)
         msg["senderPersistentClientId"] = m_clientId;  // PHASE 2: Explicit field
@@ -366,7 +366,7 @@ void WebSocketClient::sendUploadChunk(const QString& targetClientId, const QStri
     sendMessageUpload(msg);
 }
 
-void WebSocketClient::sendUploadComplete(const QString& targetClientId, const QString& uploadId, const QString& ideaId) {
+void WebSocketClient::sendUploadComplete(const QString& targetClientId, const QString& uploadId, const QString& canvasSessionId) {
     if (!(isConnected() || isUploadChannelConnected())) return;
     if (m_canceledUploads.contains(uploadId)) return; // already canceled
     
@@ -375,7 +375,7 @@ void WebSocketClient::sendUploadComplete(const QString& targetClientId, const QS
     msg["targetClientId"] = targetClientId;           // Legacy (backward compat)
     msg["targetPersistentClientId"] = targetClientId;  // PHASE 2: Explicit field
     msg["uploadId"] = uploadId;
-    msg["ideaId"] = ideaId;
+    msg["canvasSessionId"] = canvasSessionId;
     if (!m_clientId.isEmpty()) {
         msg["senderClientId"] = m_clientId;           // Legacy (backward compat)
         msg["senderPersistentClientId"] = m_clientId;  // PHASE 2: Explicit field
@@ -383,7 +383,7 @@ void WebSocketClient::sendUploadComplete(const QString& targetClientId, const QS
     sendMessageUpload(msg);
 }
 
-void WebSocketClient::sendUploadAbort(const QString& targetClientId, const QString& uploadId, const QString& reason, const QString& ideaId) {
+void WebSocketClient::sendUploadAbort(const QString& targetClientId, const QString& uploadId, const QString& reason, const QString& canvasSessionId) {
     if (!(isConnected() || isUploadChannelConnected())) return;
     m_canceledUploads.insert(uploadId);
     
@@ -392,7 +392,7 @@ void WebSocketClient::sendUploadAbort(const QString& targetClientId, const QStri
     msg["targetClientId"] = targetClientId;           // Legacy (backward compat)
     msg["targetPersistentClientId"] = targetClientId;  // PHASE 2: Explicit field
     msg["uploadId"] = uploadId;
-    msg["ideaId"] = ideaId;
+    msg["canvasSessionId"] = canvasSessionId;
     if (!reason.isEmpty()) msg["reason"] = reason;
     if (!m_clientId.isEmpty()) {
         msg["senderClientId"] = m_clientId;           // Legacy (backward compat)
@@ -401,18 +401,18 @@ void WebSocketClient::sendUploadAbort(const QString& targetClientId, const QStri
     sendMessageUpload(msg);
 }
 
-void WebSocketClient::sendRemoveAllFiles(const QString& targetClientId, const QString& ideaId) {
+void WebSocketClient::sendRemoveAllFiles(const QString& targetClientId, const QString& canvasSessionId) {
     if (!isConnected()) return;
     
     QJsonObject msg;
     msg["type"] = "remove_all_files";
     msg["targetClientId"] = targetClientId;           // Legacy (backward compat)
     msg["targetPersistentClientId"] = targetClientId;  // PHASE 2: Explicit field
-    msg["ideaId"] = ideaId;
+    msg["canvasSessionId"] = canvasSessionId;
     sendMessage(msg);
 }
 
-void WebSocketClient::sendRemoveFile(const QString& targetClientId, const QString& ideaId, const QString& fileId) {
+void WebSocketClient::sendRemoveFile(const QString& targetClientId, const QString& canvasSessionId, const QString& fileId) {
     if (!isConnected()) return;
     
     QJsonObject msg;
@@ -420,38 +420,38 @@ void WebSocketClient::sendRemoveFile(const QString& targetClientId, const QStrin
     msg["targetClientId"] = targetClientId;           // Legacy (backward compat)
     msg["targetPersistentClientId"] = targetClientId;  // PHASE 2: Explicit field
     msg["fileId"] = fileId;
-    msg["ideaId"] = ideaId;
+    msg["canvasSessionId"] = canvasSessionId;
     if (!m_clientId.isEmpty()) {
         msg["senderClientId"] = m_clientId;           // Legacy (backward compat)
         msg["senderPersistentClientId"] = m_clientId;  // PHASE 2: Explicit field
     }
-    qDebug() << "Sending remove_file command for fileId:" << fileId << "idea:" << ideaId << "to client:" << targetClientId;
+    qDebug() << "Sending remove_file command for fileId:" << fileId << "idea:" << canvasSessionId << "to client:" << targetClientId;
     sendMessage(msg);
 }
 
-// PHASE 2: Canvas lifecycle notifications (CRITICAL for ideaId validation)
-void WebSocketClient::sendCanvasCreated(const QString& persistentClientId, const QString& ideaId) {
+// PHASE 2: Canvas lifecycle notifications (CRITICAL for canvasSessionId validation)
+void WebSocketClient::sendCanvasCreated(const QString& persistentClientId, const QString& canvasSessionId) {
     if (!isConnected()) return;
     
     QJsonObject msg;
     msg["type"] = "canvas_created";
     msg["persistentClientId"] = persistentClientId;
-    msg["ideaId"] = ideaId;
+    msg["canvasSessionId"] = canvasSessionId;
     
     sendMessage(msg);
-    qDebug() << "Notified server: canvas created for client:" << persistentClientId << "ideaId:" << ideaId;
+    qDebug() << "Notified server: canvas created for client:" << persistentClientId << "canvasSessionId:" << canvasSessionId;
 }
 
-void WebSocketClient::sendCanvasDeleted(const QString& persistentClientId, const QString& ideaId) {
+void WebSocketClient::sendCanvasDeleted(const QString& persistentClientId, const QString& canvasSessionId) {
     if (!isConnected()) return;
     
     QJsonObject msg;
     msg["type"] = "canvas_deleted";
     msg["persistentClientId"] = persistentClientId;
-    msg["ideaId"] = ideaId;
+    msg["canvasSessionId"] = canvasSessionId;
     
     sendMessage(msg);
-    qDebug() << "Notified server: canvas deleted for client:" << persistentClientId << "ideaId:" << ideaId;
+    qDebug() << "Notified server: canvas deleted for client:" << persistentClientId << "canvasSessionId:" << canvasSessionId;
 }
 
 void WebSocketClient::notifyUploadProgressToSender(const QString& senderClientId, const QString& uploadId, int percent, int filesCompleted, int totalFiles, const QStringList& completedFileIds, const QJsonArray& perFileProgress) {

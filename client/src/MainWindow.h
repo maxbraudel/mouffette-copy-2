@@ -173,7 +173,7 @@ private:
     const CanvasSession* findCanvasSession(const QString& persistentClientId) const;
     CanvasSession* findCanvasSessionByServerClientId(const QString& serverClientId);
     const CanvasSession* findCanvasSessionByServerClientId(const QString& serverClientId) const;
-    CanvasSession* findCanvasSessionByIdeaId(const QString& ideaId);
+    CanvasSession* findCanvasSessionByIdeaId(const QString& canvasSessionId);
     void configureCanvasSession(CanvasSession& session);
     void switchToCanvasSession(const QString& persistentClientId);
     void updateUploadButtonForSession(CanvasSession& session);

@@ -13,14 +13,14 @@ class ScreenCanvas;
 class QPushButton;
 class ResizableMediaBase;
 
-// Phase 3: ideaId is MANDATORY - use default value instead of empty string
+// Phase 3: canvasSessionId is MANDATORY - use default value instead of empty string
 inline const QString DEFAULT_IDEA_ID = QStringLiteral("default");
 
 /**
  * Phase 4.1: SessionManager
  * 
  * Manages canvas sessions lifecycle, including:
- * - Session storage and lookup (by persistentClientId, ideaId, serverSessionId)
+ * - Session storage and lookup (by persistentClientId, canvasSessionId, serverSessionId)
  * - Session creation and deletion
  * - Session state tracking (online status, remote content, file tracking)
  * 
@@ -50,7 +50,7 @@ public:
     struct CanvasSession {
         QString persistentClientId; // stable client ID persisted across sessions
         QString serverAssignedId;   // temporary server session ID (for local lookup only, send persistentClientId to server)
-        QString ideaId;
+        QString canvasSessionId;
         ScreenCanvas* canvas = nullptr;
         QPushButton* uploadButton = nullptr;
         bool uploadButtonInOverlay = false;
@@ -80,8 +80,8 @@ public:
     CanvasSession* findSession(const QString& persistentClientId);
     const CanvasSession* findSession(const QString& persistentClientId) const;
     
-    CanvasSession* findSessionByIdeaId(const QString& ideaId);
-    const CanvasSession* findSessionByIdeaId(const QString& ideaId) const;
+    CanvasSession* findSessionByIdeaId(const QString& canvasSessionId);
+    const CanvasSession* findSessionByIdeaId(const QString& canvasSessionId) const;
     
     CanvasSession* findSessionByServerClientId(const QString& serverClientId);
     const CanvasSession* findSessionByServerClientId(const QString& serverClientId) const;
@@ -104,7 +104,7 @@ public:
     void markAllSessionsOffline();
     void clearRemoteContentForOfflineSessions();
     
-    // PHASE 1: Index maintenance (call when updating ideaId or serverAssignedId)
+    // PHASE 1: Index maintenance (call when updating canvasSessionId or serverAssignedId)
     void updateSessionIdeaId(const QString& persistentClientId, const QString& newIdeaId);
     void updateSessionServerId(const QString& persistentClientId, const QString& newServerId);
 
@@ -116,7 +116,7 @@ signals:
 private:
     // PHASE 1 OPTIMIZATION: Secondary indexes for O(1) lookups
     QHash<QString, CanvasSession> m_sessions; // persistentClientId → CanvasSession (primary storage)
-    QHash<QString, QString> m_ideaIdToClientId;       // ideaId → persistentClientId (secondary index)
+    QHash<QString, QString> m_canvasSessionIdToClientId;       // canvasSessionId → persistentClientId (secondary index)
     QHash<QString, QString> m_serverIdToClientId;     // serverSessionId → persistentClientId (secondary index)
     
     // Index maintenance helpers

@@ -35,7 +35,7 @@
   "senderClientId": "uuid-xxx",           // LEGACY
   "senderPersistentClientId": "uuid-xxx",  // PHASE 2: Explicit
   "uploadId": "upload-abc",
-  "ideaId": "idea-123",
+  "canvasSessionId": "idea-123",
   "files": [...]
 }
 ```
@@ -73,7 +73,7 @@
 
 ### 2️⃣ Messages Canvas Lifecycle (canvas_created / canvas_deleted)
 
-**Problème résolu** : Serveur ne trackait pas quels canvas (ideaId) existent, uploads pouvaient pointer vers ideaId inexistants.
+**Problème résolu** : Serveur ne trackait pas quels canvas (canvasSessionId) existent, uploads pouvaient pointer vers canvasSessionId inexistants.
 
 **Solution implémentée** :
 
@@ -84,7 +84,7 @@
 {
   "type": "canvas_created",
   "persistentClientId": "uuid-xxx",
-  "ideaId": "idea-123"
+  "canvasSessionId": "idea-123"
 }
 ```
 
@@ -93,7 +93,7 @@
 {
   "type": "canvas_deleted",
   "persistentClientId": "uuid-xxx",
-  "ideaId": "idea-123"
+  "canvasSessionId": "idea-123"
 }
 ```
 
@@ -101,7 +101,7 @@
 
 ```javascript
 // server.js - Constructor
-this.activeCanvases = new Map(); // persistentClientId → Set(ideaId)
+this.activeCanvases = new Map(); // persistentClientId → Set(canvasSessionId)
 
 // Exemple :
 activeCanvases.get("client-abc") = Set(["idea-001", "idea-002"]);
@@ -112,28 +112,28 @@ activeCanvases.get("client-abc") = Set(["idea-001", "idea-002"]);
 **handleCanvasCreated()** :
 ```javascript
 handleCanvasCreated(senderId, message) {
-    const { persistentClientId, ideaId } = message;
+    const { persistentClientId, canvasSessionId } = message;
     
     // Track active canvas
     if (!this.activeCanvases.has(persistentClientId)) {
         this.activeCanvases.set(persistentClientId, new Set());
     }
-    this.activeCanvases.get(persistentClientId).add(ideaId);
+    this.activeCanvases.get(persistentClientId).add(canvasSessionId);
     
-    console.log(`🎨 Canvas created: ${persistentClientId}:${ideaId}`);
+    console.log(`🎨 Canvas created: ${persistentClientId}:${canvasSessionId}`);
 }
 ```
 
 **handleCanvasDeleted()** :
 ```javascript
 handleCanvasDeleted(senderId, message) {
-    const { persistentClientId, ideaId } = message;
+    const { persistentClientId, canvasSessionId } = message;
     
     // Remove canvas from tracking
     const canvases = this.activeCanvases.get(persistentClientId);
     if (canvases) {
-        canvases.delete(ideaId);
-        console.log(`🗑️  Canvas deleted: ${persistentClientId}:${ideaId}`);
+        canvases.delete(canvasSessionId);
+        console.log(`🗑️  Canvas deleted: ${persistentClientId}:${canvasSessionId}`);
         
         // Cleanup empty sets
         if (canvases.size === 0) {
@@ -148,8 +148,8 @@ handleCanvasDeleted(senderId, message) {
 **WebSocketClient.h/cpp** :
 ```cpp
 // Nouveaux méthodes publiques
-void sendCanvasCreated(const QString& persistentClientId, const QString& ideaId);
-void sendCanvasDeleted(const QString& persistentClientId, const QString& ideaId);
+void sendCanvasCreated(const QString& persistentClientId, const QString& canvasSessionId);
+void sendCanvasDeleted(const QString& persistentClientId, const QString& canvasSessionId);
 ```
 
 **MainWindow.cpp - ensureCanvasSession()** :
@@ -162,26 +162,26 @@ CanvasSession& session = m_sessionManager->getOrCreateSession(persistentId, clie
 
 // PHASE 2: Notify server of canvas creation
 if (isNewSession && m_webSocketClient) {
-    m_webSocketClient->sendCanvasCreated(persistentId, session.ideaId);
+    m_webSocketClient->sendCanvasCreated(persistentId, session.canvasSessionId);
 }
 ```
 
 **MainWindow.cpp - rotateSessionIdea()** :
 ```cpp
 void MainWindow::rotateSessionIdea(CanvasSession& session) {
-    const QString oldIdeaId = session.ideaId;
+    const QString oldIdeaId = session.canvasSessionId;
     
     // Notify server: old canvas deleted
     if (m_webSocketClient && !session.persistentClientId.isEmpty()) {
         m_webSocketClient->sendCanvasDeleted(session.persistentClientId, oldIdeaId);
     }
     
-    // Generate new ideaId
-    session.ideaId = createIdeaId();
+    // Generate new canvasSessionId
+    session.canvasSessionId = createIdeaId();
     
     // Notify server: new canvas created
     if (m_webSocketClient && !session.persistentClientId.isEmpty()) {
-        m_webSocketClient->sendCanvasCreated(session.persistentClientId, session.ideaId);
+        m_webSocketClient->sendCanvasCreated(session.persistentClientId, session.canvasSessionId);
     }
 }
 ```
@@ -193,7 +193,7 @@ connect(m_sessionManager, &SessionManager::sessionDeleted, this,
     [this](const QString& persistentClientId) {
         CanvasSession* session = m_sessionManager->findSession(persistentClientId);
         if (session && m_webSocketClient) {
-            m_webSocketClient->sendCanvasDeleted(persistentClientId, session->ideaId);
+            m_webSocketClient->sendCanvasDeleted(persistentClientId, session->canvasSessionId);
         }
     });
 ```
@@ -201,7 +201,7 @@ connect(m_sessionManager, &SessionManager::sessionDeleted, this,
 #### Bénéfices :
 
 - ✅ **Tracking précis** : Serveur connaît tous les canvas actifs
-- ✅ **Validation possible** : Peut vérifier ideaId avant d'accepter uploads
+- ✅ **Validation possible** : Peut vérifier canvasSessionId avant d'accepter uploads
 - ✅ **Debug amélioré** : Logs montrent état canvas en temps réel
 - ✅ **Base solide** : Permet futurs features (sync canvas state, etc.)
 
@@ -218,19 +218,19 @@ connect(m_sessionManager, &SessionManager::sessionDeleted, this,
 ```javascript
 handleUploadStart(senderId, message) {
     const targetClientId = message.targetPersistentClientId || message.targetClientId;
-    const { uploadId, ideaId, files } = message;
+    const { uploadId, canvasSessionId, files } = message;
     
     // Basic validation
-    if (!targetClientId || !uploadId || !ideaId) {
+    if (!targetClientId || !uploadId || !canvasSessionId) {
         return this.sendError(senderId, 'Missing required fields');
     }
     
     const targetPersistentId = this.getPersistentId(targetClientId);
     
-    // PHASE 2: Validate ideaId exists (CRITICAL)
+    // PHASE 2: Validate canvasSessionId exists (CRITICAL)
     const targetCanvases = this.activeCanvases.get(targetPersistentId);
-    if (!targetCanvases || !targetCanvases.has(ideaId)) {
-        console.warn(`⚠️ upload_start rejected: ideaId ${ideaId} not found`);
+    if (!targetCanvases || !targetCanvases.has(canvasSessionId)) {
+        console.warn(`⚠️ upload_start rejected: canvasSessionId ${canvasSessionId} not found`);
         console.warn(`   Active canvases:`, targetCanvases ? Array.from(targetCanvases) : 'none');
         
         // Send error back to sender
@@ -240,7 +240,7 @@ handleUploadStart(senderId, message) {
                 type: 'upload_error',
                 uploadId: uploadId,
                 errorCode: 'INVALID_IDEA_ID',
-                message: `Canvas with ideaId ${ideaId} does not exist on target`
+                message: `Canvas with canvasSessionId ${canvasSessionId} does not exist on target`
             }));
         }
         return; // REJECT upload
@@ -257,7 +257,7 @@ handleUploadStart(senderId, message) {
   "type": "upload_error",
   "uploadId": "upload-abc",
   "errorCode": "INVALID_IDEA_ID",
-  "message": "Canvas with ideaId idea-123 does not exist on target client xyz"
+  "message": "Canvas with canvasSessionId idea-123 does not exist on target client xyz"
 }
 ```
 
@@ -265,7 +265,7 @@ handleUploadStart(senderId, message) {
 
 **Scénario 1 : Upload vers canvas inexistant**
 ```
-1. Client A essaie d'uploader vers ideaId "idea-999"
+1. Client A essaie d'uploader vers canvasSessionId "idea-999"
 2. Serveur check: activeCanvases.get("client-B").has("idea-999") → false
 3. Serveur rejette l'upload immédiatement
 4. Sender reçoit upload_error avec code INVALID_IDEA_ID
@@ -274,7 +274,7 @@ handleUploadStart(senderId, message) {
 
 **Scénario 2 : Canvas supprimé pendant upload**
 ```
-1. Upload démarre vers ideaId "idea-001" (valide)
+1. Upload démarre vers canvasSessionId "idea-001" (valide)
 2. Pendant upload, target client supprime canvas (rotate)
 3. Serveur reçoit canvas_deleted pour "idea-001"
 4. Prochains chunks continuent (upload déjà démarré)
@@ -284,7 +284,7 @@ Note : Ce cas n'est pas bloqué car upload déjà en cours
 
 **Scénario 3 : Upload après reconnexion**
 ```
-1. Client crée canvas avec ideaId "idea-001"
+1. Client crée canvas avec canvasSessionId "idea-001"
 2. Client envoie canvas_created au serveur
 3. Client déconnecte/reconnecte
 4. Client n'a PAS renvoyé canvas_created (bug potentiel)
@@ -294,7 +294,7 @@ Note : Ce cas n'est pas bloqué car upload déjà en cours
 
 #### Bénéfices :
 
-- ✅ **Prévention bugs silencieux** : Upload rejeté immédiatement si ideaId invalide
+- ✅ **Prévention bugs silencieux** : Upload rejeté immédiatement si canvasSessionId invalide
 - ✅ **Feedback explicite** : Sender sait pourquoi upload échoue
 - ✅ **Détection desync** : Si client oublie d'envoyer canvas_created, détecté tout de suite
 - ✅ **Logs détaillés** : Serveur log canvas actifs lors de rejet
@@ -315,7 +315,7 @@ Note : Ce cas n'est pas bloqué car upload déjà en cours
 
 | Aspect | Avant | Après |
 |--------|-------|-------|
-| **Upload vers ideaId invalide** | ❌ Accepté silencieusement | ✅ Rejeté avec erreur explicite |
+| **Upload vers canvasSessionId invalide** | ❌ Accepté silencieusement | ✅ Rejeté avec erreur explicite |
 | **Canvas tracking** | ❌ Aucun (blind trust) | ✅ Tracking server-side complet |
 | **Desync detection** | ❌ Impossible | ✅ Détecté à chaque upload |
 | **Error feedback** | ❌ Generic errors | ✅ Codes d'erreur spécifiques |
@@ -329,7 +329,7 @@ Note : Ce cas n'est pas bloqué car upload déjà en cours
 | **canvas_created** | ❌ Non envoyé | ⚠️ Serveur accepte sans validation |
 | **canvas_deleted** | ❌ Non envoyé | ⚠️ Pas de cleanup tracking |
 
-**Note** : Validation ideaId nécessite **nouveau client ET nouveau serveur**. Anciens clients peuvent uploader sans validation (legacy behavior).
+**Note** : Validation canvasSessionId nécessite **nouveau client ET nouveau serveur**. Anciens clients peuvent uploader sans validation (legacy behavior).
 
 ---
 
@@ -338,18 +338,18 @@ Note : Ce cas n'est pas bloqué car upload déjà en cours
 ### Test 1 : Validation IdeaId
 ```bash
 # 1. Démarrer serveur et 2 clients (A et B)
-# 2. Client A crée canvas vers Client B (ideaId auto-généré: "idea-001")
+# 2. Client A crée canvas vers Client B (canvasSessionId auto-généré: "idea-001")
 # 3. Serveur log : "🎨 Canvas created: client-B:idea-001"
-# 4. Client A upload vers Client B avec ideaId "idea-999" (invalide)
+# 4. Client A upload vers Client B avec canvasSessionId "idea-999" (invalide)
 # 5. Attendu : 
-#    - Serveur log : "⚠️ upload_start rejected: ideaId idea-999 not found"
+#    - Serveur log : "⚠️ upload_start rejected: canvasSessionId idea-999 not found"
 #    - Serveur log : "   Active canvases: ['idea-001']"
 #    - Client A reçoit : upload_error avec INVALID_IDEA_ID
 ```
 
 ### Test 2 : Canvas Rotation
 ```bash
-# 1. Créer canvas (ideaId "idea-001")
+# 1. Créer canvas (canvasSessionId "idea-001")
 # 2. Uploader fichiers
 # 3. Cliquer "Clear Canvas" (trigger rotateSessionIdea)
 # 4. Attendu :
@@ -370,7 +370,7 @@ Note : Ce cas n'est pas bloqué car upload déjà en cours
 
 ### Test 4 : Reconnexion et Sync
 ```bash
-# 1. Créer canvas (ideaId "idea-001")
+# 1. Créer canvas (canvasSessionId "idea-001")
 # 2. Déconnecter client brutalement (kill process)
 # 3. Redémarrer client
 # 4. Essayer d'uploader vers "idea-001"
@@ -399,10 +399,10 @@ Note : Ce cas n'est pas bloqué car upload déjà en cours
 
 ⚠️ **Canvas lifecycle** :
 - Toujours envoyer `canvas_created` après création de session
-- Toujours envoyer `canvas_deleted` avant suppression d'ideaId
+- Toujours envoyer `canvas_deleted` avant suppression d'canvasSessionId
 - Envoyer `canvas_deleted` PUIS `canvas_created` lors de rotation
 
-⚠️ **Validation ideaId** :
+⚠️ **Validation canvasSessionId** :
 - Validation uniquement dans `handleUploadStart()` (pas dans chunks)
 - Upload en cours continue même si canvas supprimé (par design)
 - Erreur INVALID_IDEA_ID bloque upload avant démarrage
@@ -423,7 +423,7 @@ Note : Ce cas n'est pas bloqué car upload déjà en cours
 
 - [x] Code compilé sans erreurs
 - [x] Backward compatibility vérifiée (anciens/nouveaux clients)
-- [ ] Tests manuels effectués (validation ideaId)
+- [ ] Tests manuels effectués (validation canvasSessionId)
 - [ ] Tests rotation canvas effectués
 - [ ] Tests reconnexion effectués
 - [ ] Documentation protocole mise à jour
@@ -447,13 +447,13 @@ Uploads acceptés aveuglement
 ```
 persistentClientId → Explicite et clair
 activeCanvases tracking server-side
-Validation ideaId → Rejet immédiat si invalide
+Validation canvasSessionId → Rejet immédiat si invalide
 ```
 
 ### Métriques
 
 - **Clarté code** : +80% (noms explicites)
-- **Robustesse** : +70% (validation ideaId)
+- **Robustesse** : +70% (validation canvasSessionId)
 - **Maintenabilité** : +60% (auto-documentation)
 - **Backward compat** : 100% (anciens clients OK)
 

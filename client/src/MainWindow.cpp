@@ -731,28 +731,28 @@ MainWindow::MainWindow(QWidget* parent)
         // Notify server when canvas is deleted
         CanvasSession* session = m_sessionManager->findSession(persistentClientId);
         if (session && m_webSocketClient) {
-            m_webSocketClient->sendCanvasDeleted(persistentClientId, session->ideaId);
+            m_webSocketClient->sendCanvasDeleted(persistentClientId, session->canvasSessionId);
         }
     });
     
     // FileManager: configure callback to send file removal commands to remote clients
-    // Phase 3: ideaId is MANDATORY - always present from SessionManager
-    FileManager::setFileRemovalNotifier([this](const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds) {
+    // Phase 3: canvasSessionId is MANDATORY - always present from SessionManager
+    FileManager::setFileRemovalNotifier([this](const QString& fileId, const QList<QString>& clientIds, const QList<QString>& canvasSessionIds) {
         qDebug() << "MainWindow: FileManager requested removal of file" << fileId
-                 << "from clients:" << clientIds << "ideas:" << ideaIds;
+                 << "from clients:" << clientIds << "ideas:" << canvasSessionIds;
         if (!m_webSocketClient) {
             qWarning() << "MainWindow: No WebSocket client available for file removal";
             return;
         }
         
-        for (const QString& ideaId : ideaIds) {
+        for (const QString& canvasSessionId : canvasSessionIds) {
             for (const QString& clientId : clientIds) {
                 qDebug() << "MainWindow: Sending remove_file command for" << fileId
-                         << "to" << clientId << "ideaId" << ideaId;
-                m_webSocketClient->sendRemoveFile(clientId, ideaId, fileId);
+                         << "to" << clientId << "canvasSessionId" << canvasSessionId;
+                m_webSocketClient->sendRemoveFile(clientId, canvasSessionId, fileId);
             }
             
-            if (CanvasSession* session = findCanvasSessionByIdeaId(ideaId)) {
+            if (CanvasSession* session = findCanvasSessionByIdeaId(canvasSessionId)) {
                 session->knownRemoteFileIds.remove(fileId);
                 session->expectedIdeaFileIds.remove(fileId);
             }
@@ -1526,8 +1526,8 @@ const MainWindow::CanvasSession* MainWindow::findCanvasSessionByServerClientId(c
     return m_sessionManager->findSessionByServerClientId(serverClientId);
 }
 
-MainWindow::CanvasSession* MainWindow::findCanvasSessionByIdeaId(const QString& ideaId) {
-    return m_sessionManager->findSessionByIdeaId(ideaId);
+MainWindow::CanvasSession* MainWindow::findCanvasSessionByIdeaId(const QString& canvasSessionId) {
+    return m_sessionManager->findSessionByIdeaId(canvasSessionId);
 }
 
 MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& client) {
@@ -1540,18 +1540,18 @@ MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& cli
     // Check if session already exists
     bool isNewSession = !m_sessionManager->hasSession(persistentId);
     
-    // Phase 4.1: Use SessionManager (creates ideaId automatically)
+    // Phase 4.1: Use SessionManager (creates canvasSessionId automatically)
     CanvasSession& session = m_sessionManager->getOrCreateSession(persistentId, client);
     
-    // PHASE 2: Notify server of canvas creation (CRITICAL for ideaId validation)
+    // PHASE 2: Notify server of canvas creation (CRITICAL for canvasSessionId validation)
     if (isNewSession && m_webSocketClient) {
-        m_webSocketClient->sendCanvasCreated(persistentId, session.ideaId);
+        m_webSocketClient->sendCanvasCreated(persistentId, session.canvasSessionId);
     }
     
     // Initialize canvas if needed (UI-specific responsibility)
     if (!session.canvas) {
         session.canvas = new ScreenCanvas(m_canvasHostStack);
-        session.canvas->setActiveIdeaId(session.ideaId); // Use ideaId from SessionManager
+        session.canvas->setActiveIdeaId(session.canvasSessionId); // Use canvasSessionId from SessionManager
         session.connectionsInitialized = false;
         configureCanvasSession(session);
         m_canvasHostStack->addWidget(session.canvas);
@@ -1574,7 +1574,7 @@ MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& cli
 void MainWindow::configureCanvasSession(CanvasSession& session) {
     if (!session.canvas) return;
 
-    session.canvas->setActiveIdeaId(session.ideaId);
+    session.canvas->setActiveIdeaId(session.canvasSessionId);
     session.canvas->setWebSocketClient(m_webSocketClient);
     session.canvas->setUploadManager(m_uploadManager);
     session.canvas->setFileManager(m_fileManager);
@@ -1669,7 +1669,7 @@ void MainWindow::switchToCanvasSession(const QString& persistentClientId) {
     // Set upload manager target to restore per-session upload state
     if (m_uploadManager) {
         m_uploadManager->setTargetClientId(session->persistentClientId);
-        m_uploadManager->setActiveIdeaId(session->ideaId);
+        m_uploadManager->setActiveIdeaId(session->canvasSessionId);
     }
     updateUploadButtonForSession(*session);
 
@@ -1697,7 +1697,7 @@ void MainWindow::unloadUploadsForSession(CanvasSession& session, bool attemptRem
     }
 
     m_uploadManager->setTargetClientId(targetId);
-    m_uploadManager->setActiveIdeaId(session.ideaId);
+    m_uploadManager->setActiveIdeaId(session.canvasSessionId);
 
     if (attemptRemote && m_webSocketClient && m_webSocketClient->isConnected()) {
         if (m_uploadManager->isUploading() || m_uploadManager->isFinalizing()) {
@@ -1759,43 +1759,43 @@ QString MainWindow::createIdeaId() const {
 }
 
 void MainWindow::rotateSessionIdea(CanvasSession& session) {
-    const QString oldIdeaId = session.ideaId;
+    const QString oldIdeaId = session.canvasSessionId;
     
     // PHASE 2: Notify server of canvas deletion before rotation (CRITICAL)
     if (m_webSocketClient && !session.persistentClientId.isEmpty()) {
         m_webSocketClient->sendCanvasDeleted(session.persistentClientId, oldIdeaId);
     }
     
-    session.ideaId = createIdeaId();
+    session.canvasSessionId = createIdeaId();
     session.expectedIdeaFileIds.clear();
     session.knownRemoteFileIds.clear();
     if (session.canvas) {
-        session.canvas->setActiveIdeaId(session.ideaId);
+        session.canvas->setActiveIdeaId(session.canvasSessionId);
     }
     m_fileManager->removeIdeaAssociations(oldIdeaId);
 
     if (m_uploadManager) {
         if (m_activeSessionIdentity == session.persistentClientId) {
-            m_uploadManager->setActiveIdeaId(session.ideaId);
+            m_uploadManager->setActiveIdeaId(session.canvasSessionId);
         }
     }
     
     // PHASE 2: Notify server of new canvas creation after rotation (CRITICAL)
     if (m_webSocketClient && !session.persistentClientId.isEmpty()) {
-        m_webSocketClient->sendCanvasCreated(session.persistentClientId, session.ideaId);
+        m_webSocketClient->sendCanvasCreated(session.persistentClientId, session.canvasSessionId);
     }
 }
 
 void MainWindow::reconcileRemoteFilesForSession(CanvasSession& session, const QSet<QString>& currentFileIds) {
     session.expectedIdeaFileIds = currentFileIds;
-    m_fileManager->replaceIdeaFileSet(session.ideaId, currentFileIds);
+    m_fileManager->replaceIdeaFileSet(session.canvasSessionId, currentFileIds);
 
     // Phase 3: Use persistentClientId for server communication
     if (!session.persistentClientId.isEmpty()) {
         if (m_webSocketClient && m_webSocketClient->isConnected()) {
             const QSet<QString> toRemove = session.knownRemoteFileIds - currentFileIds;
             for (const QString& fileId : toRemove) {
-                m_webSocketClient->sendRemoveFile(session.persistentClientId, session.ideaId, fileId);
+                m_webSocketClient->sendRemoveFile(session.persistentClientId, session.canvasSessionId, fileId);
                 session.knownRemoteFileIds.remove(fileId);
             }
         }
@@ -1816,7 +1816,7 @@ void MainWindow::handleStateSyncFromServer(const QJsonObject& message) {
     
     for (const QJsonValue& ideaValue : ideas) {
         const QJsonObject ideaObj = ideaValue.toObject();
-        const QString ideaId = ideaObj.value("ideaId").toString();
+        const QString canvasSessionId = ideaObj.value("canvasSessionId").toString();
         const QJsonArray fileIdsArray = ideaObj.value("fileIds").toArray();
         
         if (fileIdsArray.isEmpty()) continue;
@@ -1829,11 +1829,11 @@ void MainWindow::handleStateSyncFromServer(const QJsonObject& message) {
             }
         }
         
-        qDebug() << "MainWindow: Syncing idea" << ideaId << "with" << fileIds.size() << "file(s)";
+        qDebug() << "MainWindow: Syncing idea" << canvasSessionId << "with" << fileIds.size() << "file(s)";
         
-        // Find session with this ideaId and mark files as uploaded
+        // Find session with this canvasSessionId and mark files as uploaded
         // Phase 3: Use persistentClientId for consistency
-        CanvasSession* session = findCanvasSessionByIdeaId(ideaId);
+        CanvasSession* session = findCanvasSessionByIdeaId(canvasSessionId);
         if (session && !session->persistentClientId.isEmpty()) {
             session->knownRemoteFileIds = fileIds;
             
@@ -1843,14 +1843,14 @@ void MainWindow::handleStateSyncFromServer(const QJsonObject& message) {
             }
             
             qDebug() << "MainWindow: Restored upload state for session" << session->persistentClientId
-                     << "idea" << ideaId;
+                     << "idea" << canvasSessionId;
             
             // Refresh UI if this is the active session
             if (m_activeSessionIdentity == session->persistentClientId && m_uploadManager) {
                 emit m_uploadManager->uiStateChanged();
             }
         } else {
-            qDebug() << "MainWindow: No matching session found for idea" << ideaId;
+            qDebug() << "MainWindow: No matching session found for idea" << canvasSessionId;
         }
     }
 }
@@ -2188,7 +2188,7 @@ void MainWindow::onUploadButtonClicked() {
         return;
     }
     m_uploadManager->setTargetClientId(targetClientId);
-    m_uploadManager->setActiveIdeaId(session->ideaId);
+    m_uploadManager->setActiveIdeaId(session->canvasSessionId);
 
     const QString clientLabel = session->lastClientInfo.getDisplayText().isEmpty()
         ? targetClientId
@@ -2244,7 +2244,7 @@ void MainWindow::onUploadButtonClicked() {
             }
 
             currentFileIds.insert(fileId);
-            m_fileManager->associateFileWithIdea(fileId, session->ideaId);
+            m_fileManager->associateFileWithIdea(fileId, session->canvasSessionId);
 
             const bool alreadyOnTarget = m_fileManager->isFileUploadedToClient(fileId, targetClientId);
             if (!processedFileIds.contains(fileId) && !alreadyOnTarget) {

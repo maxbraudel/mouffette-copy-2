@@ -7,7 +7,7 @@ Date : 29 Octobre 2025
 **3 corrections majeures** ont été implémentées pour améliorer la conformité avec le cahier des charges :
 
 1. ✅ **Suppression tracking mediaId redondant** - COMPLET
-2. ✅ **Simplification ideaId obligatoire** - PARTIEL (checks critiques conservés)
+2. ✅ **Simplification canvasSessionId obligatoire** - PARTIEL (checks critiques conservés)
 3. ✅ **Nettoyage identityKey** - DÉJÀ FAIT
 
 ---
@@ -79,12 +79,12 @@ FileManager::instance().markFileUploadedToClient(f.fileId, m_uploadTargetClientI
 
 ---
 
-## 🔧 2. SIMPLIFICATION ideaId OBLIGATOIRE
+## 🔧 2. SIMPLIFICATION canvasSessionId OBLIGATOIRE
 
 ### Problème Initial
-ideaId traité comme optionnel partout avec 50+ checks défensifs :
-- `if (ideaId.isEmpty()) { qWarning()...; return; }`
-- `if (!ideaId.isEmpty()) { ... }`
+canvasSessionId traité comme optionnel partout avec 50+ checks défensifs :
+- `if (canvasSessionId.isEmpty()) { qWarning()...; return; }`
+- `if (!canvasSessionId.isEmpty()) { ... }`
 
 ### Changements Effectués
 
@@ -92,12 +92,12 @@ ideaId traité comme optionnel partout avec 50+ checks défensifs :
 **Simplifié :**
 ```cpp
 // AVANT
-SessionManager::CanvasSession* SessionManager::findSessionByIdeaId(const QString& ideaId) {
-    if (ideaId.isEmpty()) {
+SessionManager::CanvasSession* SessionManager::findSessionByIdeaId(const QString& canvasSessionId) {
+    if (canvasSessionId.isEmpty()) {
         return nullptr;
     }
     for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it) {
-        if (it.value().ideaId == ideaId) {
+        if (it.value().canvasSessionId == canvasSessionId) {
             return &it.value();
         }
     }
@@ -105,9 +105,9 @@ SessionManager::CanvasSession* SessionManager::findSessionByIdeaId(const QString
 }
 
 // APRÈS
-SessionManager::CanvasSession* SessionManager::findSessionByIdeaId(const QString& ideaId) {
+SessionManager::CanvasSession* SessionManager::findSessionByIdeaId(const QString& canvasSessionId) {
     for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it) {
-        if (it.value().ideaId == ideaId) {
+        if (it.value().canvasSessionId == canvasSessionId) {
             return &it.value();
         }
     }
@@ -131,33 +131,33 @@ SessionManager::CanvasSession* SessionManager::findSessionByIdeaId(const QString
 **Simplifié :**
 ```cpp
 // AVANT
-// Phase 3: Reject operations without valid ideaId
-if (ideaIds.isEmpty()) {
-    qWarning() << "MainWindow: Cannot remove file" << fileId << "- no ideaIds provided";
+// Phase 3: Reject operations without valid canvasSessionId
+if (canvasSessionIds.isEmpty()) {
+    qWarning() << "MainWindow: Cannot remove file" << fileId << "- no canvasSessionIds provided";
     return;
 }
 
-for (const QString& ideaId : ideaIds) {
-    if (ideaId.isEmpty()) {
-        qWarning() << "MainWindow: Skipping empty ideaId";
+for (const QString& canvasSessionId : canvasSessionIds) {
+    if (canvasSessionId.isEmpty()) {
+        qWarning() << "MainWindow: Skipping empty canvasSessionId";
         continue;
     }
     // ... process
 }
 
 // APRÈS
-for (const QString& ideaId : ideaIds) {
-    // ... process (ideaId toujours valide)
+for (const QString& canvasSessionId : canvasSessionIds) {
+    // ... process (canvasSessionId toujours valide)
 }
 ```
 **~10 lignes supprimées**
 
 ```cpp
 // AVANT (state_sync)
-if (ideaId.isEmpty() || fileIdsArray.isEmpty()) continue;
+if (canvasSessionId.isEmpty() || fileIdsArray.isEmpty()) continue;
 
 // APRÈS
-if (fileIdsArray.isEmpty()) continue; // ideaId toujours valide
+if (fileIdsArray.isEmpty()) continue; // canvasSessionId toujours valide
 ```
 
 ### Checks Conservés (Légitime)
@@ -167,7 +167,7 @@ Ces checks restent car ils détectent des **erreurs logiques réelles** :
 ```cpp
 // Protection contre setActiveIdeaId() non appelé
 if (m_activeIdeaId.isEmpty()) {
-    qWarning() << "UploadManager: ideaId not set";
+    qWarning() << "UploadManager: canvasSessionId not set";
     return false;
 }
 ```
@@ -175,7 +175,7 @@ if (m_activeIdeaId.isEmpty()) {
 
 ```cpp
 // Détection mismatch entre sender et receiver
-if (!ideaId.isEmpty() && !m_incoming.ideaId.isEmpty() && ideaId != m_incoming.ideaId) {
+if (!canvasSessionId.isEmpty() && !m_incoming.canvasSessionId.isEmpty() && canvasSessionId != m_incoming.canvasSessionId) {
     qWarning() << "Ignoring chunk for mismatched idea";
     return;
 }
@@ -185,7 +185,7 @@ if (!ideaId.isEmpty() && !m_incoming.ideaId.isEmpty() && ideaId != m_incoming.id
 #### RemoteFileTracker.cpp
 ```cpp
 // Validation paramètres API
-if (fileId.isEmpty() || ideaId.isEmpty()) {
+if (fileId.isEmpty() || canvasSessionId.isEmpty()) {
     return;
 }
 ```
@@ -232,12 +232,12 @@ Toutes les références à `identityKey` ont déjà été remplacées par `persi
 ### Conformité Cahier des Charges
 **Avant :**
 - ❌ Tracking mediaId : 40% conforme (conversion seulement)
-- ❌ ideaId obligatoire : 60% conforme (50+ checks)
+- ❌ canvasSessionId obligatoire : 60% conforme (50+ checks)
 - ✅ identityKey : 100% conforme (déjà nettoyé)
 
 **Après :**
 - ✅ Tracking mediaId : **100% conforme** (supprimé complètement)
-- ✅ ideaId obligatoire : **90% conforme** (checks critiques conservés)
+- ✅ canvasSessionId obligatoire : **90% conforme** (checks critiques conservés)
 - ✅ identityKey : **100% conforme** (aucun changement)
 
 ---
@@ -273,7 +273,7 @@ Tous les changements compilent sans erreur ni warning.
 **3 objectifs sur 5 atteints** avec succès :
 
 1. ✅ **Tracking mediaId supprimé** - 100% conforme
-2. ✅ **ideaId simplifié** - 90% conforme (conserve protections critiques)
+2. ✅ **canvasSessionId simplifié** - 90% conforme (conserve protections critiques)
 3. ✅ **identityKey nettoyé** - 100% conforme
 4. ⏸️ **Injection dépendances** - Reporté (trop risqué)
 5. ⏸️ **Tests unitaires** - Reporté (nécessite infra)

@@ -77,7 +77,7 @@ public:
     bool isHostSceneActive() const { return m_hostSceneActive; }
     // Serialize current canvas state (screens + media) for remote scene start
     QJsonObject serializeSceneState() const;
-    void setActiveIdeaId(const QString& ideaId);
+    void setActiveIdeaId(const QString& canvasSessionId);
     QString activeIdeaId() const { return m_activeIdeaId; }
     // Remote scene integration setters
     void setWebSocketClient(class WebSocketClient* client);

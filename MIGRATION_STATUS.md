@@ -15,8 +15,8 @@
   - Fusion automatique lors reconnexion avec même persistentId
 
 - **Upload Tracking** :
-  - `uploads` Map : uploadId → {sender, target, ideaId, files, startTime}
-  - `clientFiles` Map : persistentClientId → Map(ideaId → Set(fileId))
+  - `uploads` Map : uploadId → {sender, target, canvasSessionId, files, startTime}
+  - `clientFiles` Map : persistentClientId → Map(canvasSessionId → Set(fileId))
   - Nettoyage automatique des uploads complétés/aborted
 
 - **State Sync** :
@@ -27,12 +27,12 @@
 ### Validation Stricte (Phase 3)
 - **Rejets Serveur** :
   - ❌ `register` sans `clientId` persistant
-  - ❌ `upload_start/complete` sans `ideaId`
-  - ❌ `remove_all_files/remove_file` sans `ideaId`
+  - ❌ `upload_start/complete` sans `canvasSessionId`
+  - ❌ `remove_all_files/remove_file` sans `canvasSessionId`
   - ❌ `request_screens` sur cible sans `persistentId`
 
 - **Client Guards** :
-  - UploadManager bloque toute action si `ideaId` vide
+  - UploadManager bloque toute action si `canvasSessionId` vide
   - Logs d'avertissement explicites
 
 - **Protocole** :
@@ -47,7 +47,7 @@
 - [ ] Scénario 2 : Nouveau sessionId après reconnexion
 - [ ] Scénario 3 : Deux instances sur même machine
 - [ ] Scénario 4 : Upload interrompu + reconnexion
-- [ ] Scénario 5 : Validation ideaId obligatoire
+- [ ] Scénario 5 : Validation canvasSessionId obligatoire
 - [ ] Scénario 6 : Client sans persistentId
 
 ### Cleanup Restant

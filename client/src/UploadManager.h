@@ -28,7 +28,7 @@ struct UploadFileInfo {
 struct IncomingUploadSession {
     QString senderId;
     QString uploadId;
-    QString ideaId;
+    QString canvasSessionId;
     QString cacheDirPath;
     QHash<QString, QFile*> openFiles;          // fileId -> QFile*
     QHash<QString, qint64> expectedSizes;      // fileId -> total bytes
@@ -56,7 +56,7 @@ public:
     QString targetClientId() const { return m_targetClientId; }
     QString activeUploadTargetClientId() const { return m_uploadTargetClientId; }
     QString lastRemovalClientId() const { return m_lastRemovalClientId; }
-    void setActiveIdeaId(const QString& ideaId) { m_activeIdeaId = ideaId; }
+    void setActiveIdeaId(const QString& canvasSessionId) { m_activeIdeaId = canvasSessionId; }
     void setActiveSessionIdentity(const QString& identity) { m_activeSessionIdentity = identity; }
     QString activeSessionIdentity() const { return m_activeSessionIdentity; }
     void clearLastRemovalClientId() { m_lastRemovalClientId.clear(); }
