@@ -32,6 +32,7 @@
 #include "handlers/UploadEventHandler.h"
 #include "controllers/CanvasSessionController.h"
 #include "handlers/WindowEventHandler.h"
+#include "controllers/TimerController.h"
 #include <QMenuBar>
 #include <QHostInfo>
 #include "ClientInfo.h"
@@ -346,6 +347,7 @@ MainWindow::MainWindow(QWidget* parent)
       m_clientListEventHandler(new ClientListEventHandler(this, m_webSocketClient, this)), // Phase 7.3
       m_canvasSessionController(new CanvasSessionController(this, this)), // Phase 8
       m_windowEventHandler(new WindowEventHandler(this, this)), // Phase 9
+      m_timerController(new TimerController(this, this)), // Phase 10
       m_statusUpdateTimer(new QTimer(this)),
       m_displaySyncTimer(new QTimer(this)),
       m_reconnectTimer(new QTimer(this)),
@@ -888,17 +890,8 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_uploadManager, &UploadManager::uploadFinished, this, [this, applyUploadButtonStyle](){ applyUploadButtonStyle(); });
     connect(m_uploadManager, &UploadManager::allFilesRemoved, this, [this, applyUploadButtonStyle](){ applyUploadButtonStyle(); });
 
-    // Periodic connection status refresh no longer needed (now event-driven); keep timer disabled
-    m_statusUpdateTimer->stop();
-
-    // Periodic display sync only when watched
-    m_displaySyncTimer->setInterval(3000);
-    connect(m_displaySyncTimer, &QTimer::timeout, this, [this]() { if (m_isWatched && m_webSocketClient->isConnected()) syncRegistration(); });
-    // Don't start automatically - will be started when watched
-
-    // Smart reconnect timer
-    m_reconnectTimer->setSingleShot(true);
-    connect(m_reconnectTimer, &QTimer::timeout, this, &MainWindow::attemptReconnect);
+    // [Phase 10] Setup timers via TimerController
+    m_timerController->setupTimers();
 
     // Initialize toast notification system
     m_toastSystem = new ToastNotificationSystem(this, this);
@@ -2083,36 +2076,22 @@ void MainWindow::showSettingsDialog() {
 // (Removed stray duplicated code block previously injected)
 
 void MainWindow::scheduleReconnect() {
-    if (m_userDisconnected) {
-        return; // Don't reconnect if user disabled the client
+    if (m_timerController) {
+        m_timerController->scheduleReconnect();
     }
-    
-    // Exponential backoff: 2^attempts seconds, capped at maxReconnectDelay
-    int delay = qMin(static_cast<int>(qPow(2, m_reconnectAttempts)) * 1000, m_maxReconnectDelay);
-    
-    // Add some jitter to avoid thundering herd (±25%)
-    int jitter = QRandomGenerator::global()->bounded(-delay/4, delay/4);
-    delay += jitter;
-    
-    qDebug() << "Scheduling reconnect attempt" << (m_reconnectAttempts + 1) << "in" << delay << "ms";
-    
-    m_reconnectTimer->start(delay);
-    m_reconnectAttempts++;
 }
 
 void MainWindow::attemptReconnect() {
-    if (m_userDisconnected) {
-        return; // Don't reconnect if user disabled the client
+    if (m_timerController) {
+        m_timerController->attemptReconnect();
     }
-    
-    qDebug() << "Attempting reconnection...";
-    connectToServer();
 }
 
 // [PHASE 7.1] Helper methods for WebSocketMessageHandler
 void MainWindow::resetReconnectState() {
-    m_reconnectAttempts = 0;
-    m_reconnectTimer->stop();
+    if (m_timerController) {
+        m_timerController->resetReconnectState();
+    }
 }
 
 void MainWindow::resetAllSessionUploadStates() {
@@ -2207,59 +2186,9 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
 }
 
 void MainWindow::onWatchStatusChanged(bool watched) {
-    // Store watched state locally (as this client being watched by someone else)
-    // We don't need a member; we can gate sending by this flag at runtime.
-    // For simplicity, keep a static so our timers can read it.
-    m_isWatched = watched;
-    
-    // Start/stop display sync timer based on watch status to prevent unnecessary canvas reloads
-    if (watched) {
-        // Immediately push a fresh snapshot so watchers don't wait for the first 3s tick
-        if (m_webSocketClient && m_webSocketClient->isConnected()) {
-            syncRegistration();
-        }
-        if (!m_displaySyncTimer->isActive()) m_displaySyncTimer->start();
-    } else {
-        if (m_displaySyncTimer->isActive()) m_displaySyncTimer->stop();
-    }
-    
-    qDebug() << "Watch status changed:" << (watched ? "watched" : "not watched");
-
-    // Begin/stop sending our cursor position to watchers (target side)
-    if (watched) {
-        if (!m_cursorTimer) {
-            m_cursorTimer = new QTimer(this);
-            m_cursorTimer->setInterval(m_cursorUpdateIntervalMs); // configurable
-            connect(m_cursorTimer, &QTimer::timeout, this, [this]() {
-                static int lastX = INT_MIN, lastY = INT_MIN;
-#ifdef Q_OS_WIN
-                POINT pt{0,0};
-                const BOOL ok = GetCursorPos(&pt);
-                const int gx = ok ? static_cast<int>(pt.x) : QCursor::pos().x();
-                const int gy = ok ? static_cast<int>(pt.y) : QCursor::pos().y();
-                if (gx != lastX || gy != lastY) {
-                    lastX = gx; lastY = gy;
-                    if (m_webSocketClient && m_webSocketClient->isConnected() && m_isWatched) {
-                        m_webSocketClient->sendCursorUpdate(gx, gy);
-                    }
-                }
-#else
-                const QPoint p = QCursor::pos();
-                if (p.x() != lastX || p.y() != lastY) {
-                    lastX = p.x();
-                    lastY = p.y();
-                    if (m_webSocketClient && m_webSocketClient->isConnected() && m_isWatched) {
-                        m_webSocketClient->sendCursorUpdate(p.x(), p.y());
-                    }
-                }
-#endif
-            });
-        }
-        // Apply any updated interval before starting
-        m_cursorTimer->setInterval(m_cursorUpdateIntervalMs);
-        if (!m_cursorTimer->isActive()) m_cursorTimer->start();
-    } else {
-        if (m_cursorTimer) m_cursorTimer->stop();
+    // [PHASE 10] Delegate to TimerController
+    if (m_timerController) {
+        m_timerController->setWatchedState(watched);
     }
 }
 

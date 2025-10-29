@@ -64,6 +64,7 @@ set(SOURCES
     src/handlers/UploadEventHandler.cpp
     src/handlers/WindowEventHandler.cpp
     src/controllers/CanvasSessionController.cpp
+    src/controllers/TimerController.cpp
 )
 
 # Platform-specific sources
@@ -121,6 +122,7 @@ set(HEADERS
     src/handlers/UploadEventHandler.h
     src/handlers/WindowEventHandler.h
     src/controllers/CanvasSessionController.h
+    src/controllers/TimerController.h
 )
 
 if(WIN32)

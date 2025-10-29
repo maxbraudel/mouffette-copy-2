@@ -66,6 +66,7 @@ class ClientListEventHandler; // Phase 7.3: manages client list events and conne
 class UploadEventHandler; // Phase 7.4: manages upload events and file transfers
 class CanvasSessionController; // Phase 8: manages canvas session lifecycle
 class WindowEventHandler; // Phase 9: manages window lifecycle events
+class TimerController; // Phase 10: manages timer setup and callbacks
 // using QStackedWidget for canvas container switching
 class QFrame; // forward declare for separators in remote info container
 
@@ -75,6 +76,7 @@ class ScreenCanvas;
 class MainWindow : public QMainWindow {
     Q_OBJECT
     friend class CanvasSessionController;
+    friend class TimerController;
 
 public:
     MainWindow(QWidget *parent = nullptr);
@@ -188,6 +190,20 @@ public:
     ResponsiveLayoutManager* getResponsiveLayoutManager() const { return m_responsiveLayoutManager; }
     bool isApplicationSuspended() const { return m_applicationSuspended; }
     void setApplicationSuspended(bool suspended) { m_applicationSuspended = suspended; }
+    
+    // [Phase 10] Accessor methods for TimerController
+    QTimer* getStatusUpdateTimer() const { return m_statusUpdateTimer; }
+    QTimer* getDisplaySyncTimer() const { return m_displaySyncTimer; }
+    QTimer* getReconnectTimer() const { return m_reconnectTimer; }
+    QTimer* getCursorTimer() const { return m_cursorTimer; }
+    void setCursorTimer(QTimer* timer) { m_cursorTimer = timer; }
+    int getReconnectAttempts() const { return m_reconnectAttempts; }
+    void resetReconnectAttempts() { m_reconnectAttempts = 0; }
+    void incrementReconnectAttempts() { m_reconnectAttempts++; }
+    int getMaxReconnectDelay() const { return m_maxReconnectDelay; }
+    void setIsWatched(bool watched) { m_isWatched = watched; }
+    int getCursorUpdateIntervalMs() const { return m_cursorUpdateIntervalMs; }
+    void setCursorUpdateIntervalMs(int intervalMs) { m_cursorUpdateIntervalMs = intervalMs; }
 
 public slots:
     void handleApplicationStateChanged(Qt::ApplicationState state);
@@ -374,8 +390,11 @@ private:
     // Phase 8: Canvas session controller
     CanvasSessionController* m_canvasSessionController = nullptr;
     
-    // Phase 9: Window event handler
+    // [Phase 9] Window event handler
     WindowEventHandler* m_windowEventHandler = nullptr;
+    
+    // [Phase 10] Timer controller
+    TimerController* m_timerController = nullptr;
     
     int m_lastConnectedClientCount = 0;
     QString m_activeSessionIdentity;
