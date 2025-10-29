@@ -115,10 +115,7 @@ void CanvasSessionController::configureCanvasSession(void* sessionPtr) {
 
     // Connect to MainWindow signal via direct call (onRemoteSceneLaunchStateChanged is private)
     connect(session->canvas, &ScreenCanvas::remoteSceneLaunchStateChanged, m_mainWindow,
-            [this](bool active, const QString& targetClientId, const QString& targetMachineName) {
-                // Forward to MainWindow through a public method if needed
-                // For now, we'll handle this in MainWindow itself
-            },
+            &MainWindow::onRemoteSceneLaunchStateChanged,
             Qt::UniqueConnection);
 
     if (session->canvas->viewport()) {

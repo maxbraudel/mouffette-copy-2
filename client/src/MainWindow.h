@@ -73,6 +73,7 @@ class ScreenCanvas;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
+    friend class CanvasSessionController;
 
 public:
     MainWindow(QWidget *parent = nullptr);
@@ -348,6 +349,9 @@ private:
     
     // Phase 6.2: System tray manager
     SystemTrayManager* m_systemTrayManager = nullptr;
+
+    // Backend - network client must be available before handlers
+    WebSocketClient* m_webSocketClient = nullptr;
     
     // Phase 7.1: WebSocket message handler
     WebSocketMessageHandler* m_webSocketMessageHandler = nullptr;
@@ -364,8 +368,6 @@ private:
     // Phase 8: Canvas session controller
     CanvasSessionController* m_canvasSessionController = nullptr;
     
-    // Backend
-    WebSocketClient* m_webSocketClient = nullptr;
     int m_lastConnectedClientCount = 0;
     QString m_activeSessionIdentity;
     ClientInfo m_thisClient;
