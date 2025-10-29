@@ -46,6 +46,12 @@ set(SOURCES
     src/LocalFileRepository.cpp
     src/RemoteFileTracker.cpp
     src/FileMemoryCache.cpp
+    src/ui/widgets/RoundedContainer.cpp
+    src/ui/widgets/ClippedContainer.cpp
+    src/ui/widgets/ClientListDelegate.cpp
+    src/ui/pages/ClientListPage.cpp
+    src/managers/ThemeManager.cpp
+    src/managers/ConnectionManager.cpp
 )
 
 # Platform-specific sources
@@ -84,6 +90,13 @@ set(HEADERS
     src/LocalFileRepository.h
     src/RemoteFileTracker.h
     src/FileMemoryCache.h
+    src/ui/StyleConfig.h
+    src/ui/widgets/RoundedContainer.h
+    src/ui/widgets/ClippedContainer.h
+    src/ui/widgets/ClientListDelegate.h
+    src/ui/pages/ClientListPage.h
+    src/managers/ThemeManager.h
+    src/managers/ConnectionManager.h
 )
 
 if(WIN32)

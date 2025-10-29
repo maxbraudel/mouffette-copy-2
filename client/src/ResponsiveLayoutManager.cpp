@@ -1,5 +1,6 @@
 #include "ResponsiveLayoutManager.h"
 #include "MainWindow.h"
+#include "ui/pages/ClientListPage.h"
 #include <QLayoutItem>
 
 ResponsiveLayoutManager::ResponsiveLayoutManager(MainWindow* parent)

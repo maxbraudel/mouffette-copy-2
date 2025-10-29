@@ -53,6 +53,7 @@ class ResponsiveLayoutManager; // manages responsive layout behavior
 class FileWatcher; // monitors source files and removes media when files are deleted
 class SessionManager; // Phase 4.1: manages canvas session lifecycle
 class FileManager; // Phase 4.3: forward declaration for dependency injection
+class ClientListPage; // Phase 1.1: extracted client list page
 // using QStackedWidget for canvas container switching
 class QFrame; // forward declare for separators in remote info container
 
@@ -73,7 +74,7 @@ public:
     QVBoxLayout* getMainLayout() const { return m_mainLayout; }
     QStackedWidget* getStackedWidget() const { return m_stackedWidget; }
     QWidget* getScreenViewWidget() const { return m_screenViewWidget; }
-    QWidget* getClientListPage() const { return m_clientListPage; }
+    ClientListPage* getClientListPage() const { return m_clientListPage; }
     QPushButton* getBackButton() const { return m_backButton; }
     QLabel* getConnectionStatusLabel() const { return m_connectionStatusLabel; }
     QPushButton* getConnectToggleButton() const { return m_connectToggleButton; }
@@ -89,8 +90,11 @@ private slots:
     void onConnectionError(const QString& error);
     void onClientListReceived(const QList<ClientInfo>& clients);
     void onRegistrationConfirmed(const ClientInfo& clientInfo);
-    void onClientItemClicked(QListWidgetItem* item);
-    void onOngoingSceneItemClicked(QListWidgetItem* item);
+    
+    // Phase 1.1: ClientListPage signals
+    void onClientSelected(const ClientInfo& clientInfo, int clientIndex);
+    void onOngoingSceneSelected(const QString& persistentClientId);
+    
     void updateConnectionStatus();
     void onEnableDisableClicked();
     void attemptReconnect();
@@ -127,7 +131,6 @@ private:
     void setupTrayIcon();
     void setupConnections();
     void updateStylesheetsForTheme();
-    void createClientListPage();
     void createScreenViewPage();
     void setupMenuBar();
     void setupSystemTray();
@@ -143,7 +146,6 @@ private:
     int getSystemVolumePercent();
     void setupVolumeMonitoring();
     void setupCursorMonitoring();
-    void updateClientList(const QList<ClientInfo>& clients);
     void setUIEnabled(bool enabled);
     // Animation durations are set directly where animations are created
     
@@ -158,8 +160,6 @@ private:
     // Legacy helper removed; ScreenCanvas renders screens directly
     void updateVolumeIndicator();
     void setRemoteConnectionStatus(const QString& status, bool propagateLoss = true);
-    void ensureClientListPlaceholder();
-    void ensureOngoingScenesPlaceholder();
     void refreshOverlayActionsState(bool remoteConnected, bool propagateLoss = true);
     // watch management handled by WatchManager component now
     // Manage presence of the volume indicator in the top bar layout
@@ -201,20 +201,14 @@ private:
     QStackedWidget* m_stackedWidget;
     QWidget* m_connectionBar; // container widget for top connection layout
     
-    // Client list page
-    QWidget* m_clientListPage;
+    // Phase 1.1: Client list page (extracted)
+    ClientListPage* m_clientListPage;
     
     // Connection section
     QHBoxLayout* m_connectionLayout;
     QPushButton* m_settingsButton;
     QPushButton* m_connectToggleButton;
     QLabel* m_connectionStatusLabel;
-    
-    // Client list section
-    QLabel* m_clientListLabel;
-    QListWidget* m_clientListWidget;
-    QLabel* m_ongoingScenesLabel = nullptr;
-    QListWidget* m_ongoingScenesList = nullptr;
     
     // Screen view section
     QWidget* m_screenViewWidget;
@@ -276,7 +270,6 @@ private:
     
     // Backend
     WebSocketClient* m_webSocketClient;
-    QList<ClientInfo> m_availableClients;
     int m_lastConnectedClientCount = 0;
     QString m_activeSessionIdentity;
     ClientInfo m_thisClient;

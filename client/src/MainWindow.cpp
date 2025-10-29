@@ -15,6 +15,11 @@
 #include "FileManager.h"
 #include "RemoteSceneController.h"
 #include "SessionManager.h"
+#include "ui/widgets/RoundedContainer.h"
+#include "ui/widgets/ClippedContainer.h"
+#include "ui/widgets/ClientListDelegate.h"
+#include "ui/pages/ClientListPage.h"
+#include "managers/ThemeManager.h"
 #include <QMenuBar>
 #include <QHostInfo>
 #include "ClientInfo.h"
@@ -137,6 +142,23 @@ static BOOL CALLBACK MouffetteEnumMonProc(HMONITOR hMon, HDC, LPRECT, LPARAM lPa
 static RemoteSceneController* g_remoteSceneController = nullptr; // Remote scene controller global instance
 
 const QString MainWindow::DEFAULT_SERVER_URL = "ws://192.168.0.188:8080";
+
+// Global style configuration variables (accessible to UI widgets)
+// TODO: Move to ThemeManager singleton in future refactoring
+int gWindowContentMarginTop = 20;       // Top margin for all window content
+int gWindowContentMarginRight = 20;     // Right margin for all window content
+int gWindowContentMarginBottom = 20;    // Bottom margin for all window content
+int gWindowContentMarginLeft = 20;      // Left margin for all window content
+int gWindowBorderRadiusPx = 10;         // Rounded corner radius (px)
+int gInnerContentGap = 20;              // Gap between sections inside the window
+int gDynamicBoxMinWidth = 80;           // Minimum width for buttons/status boxes
+int gDynamicBoxHeight = 24;             // Fixed height for all elements
+int gDynamicBoxBorderRadius = 6;        // Border radius for rounded corners
+int gDynamicBoxFontPx = 13;             // Standard font size for buttons/status boxes
+int gRemoteClientContainerPadding = 6;  // Horizontal padding for elements in remote client container
+int gTitleTextFontSize = 16;            // Title font size (px)
+int gTitleTextHeight = 24;              // Title fixed height (px)
+
 // Z-ordering constants used throughout the scene
 namespace {
 constexpr qreal Z_SCREENS = -1000.0;
@@ -144,228 +166,29 @@ constexpr qreal Z_MEDIA_BASE = 1.0;
 constexpr qreal Z_REMOTE_CURSOR = 10000.0;
 constexpr qreal Z_SCENE_OVERLAY = 12000.0; // above all scene content
 
-// Global window content margins (between all content and window borders)
-int gWindowContentMarginTop = 20;       // Top margin for all window content
-int gWindowContentMarginRight = 20;     // Right margin for all window content
-int gWindowContentMarginBottom = 20;    // Bottom margin for all window content
-int gWindowContentMarginLeft = 20;      // Left margin for all window content
-
-// Global window appearance variables (edit to customize)
-int gWindowBorderRadiusPx = 10;                    // Rounded corner radius (px)
-
-// Global inner content gap between sections inside the window (top container <-> hostname, hostname <-> canvas)
-int gInnerContentGap = 20;
-
-// Global dynamicBox configuration for standardized buttons and status indicators
-// Edit these values to change all buttons and status boxes at once
-int gDynamicBoxMinWidth = 80;         // Minimum width for buttons/status boxes
-int gDynamicBoxHeight = 24;           // Fixed height for all elements
-int gDynamicBoxBorderRadius = 6;      // Border radius for rounded corners
-int gDynamicBoxFontPx = 13;           // Standard font size for buttons/status boxes
-
-// Remote client info container configuration
-int gRemoteClientContainerPadding = 6; // Horizontal padding for elements in remote client container
-
-
-// Note: Border and background colors are now managed in AppColors.h/cpp
-// Use AppColors::colorSourceToCss(AppColors::gAppBorderColorSource) and AppColors::colorSourceToCss(AppColors::gInteractionBackgroundColorSource)
-
-// Global title text configuration (for headers like "Connected Clients" and hostname)
-int gTitleTextFontSize = 16;          // Title font size (px)
-int gTitleTextHeight = 24;            // Title fixed height (px)
-
-// Shared button style helpers using dynamicBox configuration
+// Temporary wrapper functions for backward compatibility during migration
+// TODO: Remove these and use ThemeManager::instance() directly everywhere
 inline void applyPillBtn(QPushButton* b) {
-    if (!b) return;
-    // Avoid platform default/autoDefault enlarging the control on macOS
-    b->setAutoDefault(false);
-    b->setDefault(false);
-    b->setFocusPolicy(Qt::NoFocus);
-    b->setMinimumWidth(gDynamicBoxMinWidth);
-    b->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
-    // Enforce exact visual height via stylesheet (min/max-height) and fixed padding
-    b->setStyleSheet(QString(
-        "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %4px; border: 1px solid %1;"
-        " border-radius: %2px; background-color: %5; color: palette(buttonText);"
-        " min-height: %3px; max-height: %3px; text-align: center; }"
-        "QPushButton:hover { background-color: %6; }"
-        "QPushButton:pressed { background-color: %7; }"
-        "QPushButton:disabled { color: palette(mid); border-color: %1; background-color: %8; }"
-    ).arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx)
-     .arg(AppColors::colorToCss(AppColors::gButtonNormalBg)).arg(AppColors::colorToCss(AppColors::gButtonHoverBg)).arg(AppColors::colorToCss(AppColors::gButtonPressedBg)).arg(AppColors::colorToCss(AppColors::gButtonDisabledBg)));
-    // Final enforcement (some styles ignore min/max rules)
-    b->setFixedHeight(gDynamicBoxHeight);
+    ThemeManager::instance()->applyPillButton(b);
 }
 
-// Shared title text helper
+inline void applyPrimaryBtn(QPushButton* b) {
+    ThemeManager::instance()->applyPrimaryButton(b);
+}
+
+inline void applyStatusBox(QLabel* l, const QString& borderColor, const QString& bgColor, const QString& textColor) {
+    ThemeManager::instance()->applyStatusBox(l, borderColor, bgColor, textColor);
+}
+
 inline void applyTitleText(QLabel* l) {
-    if (!l) return;
-    l->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    l->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
-    l->setStyleSheet(QString(
-        "QLabel { font-size: %1px; font-weight: bold; color: palette(text); min-height: %2px; max-height: %2px; }"
-    ).arg(gTitleTextFontSize).arg(gTitleTextHeight));
-    l->setFixedHeight(gTitleTextHeight);
+    ThemeManager::instance()->applyTitleText(l);
 }
 
 inline int uploadButtonMaxWidth() {
-    return (gMediaListOverlayAbsoluteMaxWidthPx > 0) ? gMediaListOverlayAbsoluteMaxWidthPx : INT_MAX;
-}
-inline void applyPrimaryBtn(QPushButton* b) {
-    if (!b) return;
-    // Avoid platform default/autoDefault enlarging the control on macOS
-    b->setAutoDefault(false);
-    b->setDefault(false);
-    b->setFocusPolicy(Qt::NoFocus);
-    b->setMinimumWidth(gDynamicBoxMinWidth);
-    b->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
-    b->setStyleSheet(QString(
-        "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %4px; border: 1px solid %1;"
-        " border-radius: %2px; background-color: %5; color: %9;"
-        " min-height: %3px; max-height: %3px; }"
-        "QPushButton:hover { background-color: %6; }"
-        "QPushButton:pressed { background-color: %7; }"
-        "QPushButton:disabled { color: palette(mid); border-color: %1; background-color: %8; }"
-    ).arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx)
-     .arg(AppColors::colorToCss(AppColors::gButtonPrimaryBg)).arg(AppColors::colorToCss(AppColors::gButtonPrimaryHover)).arg(AppColors::colorToCss(AppColors::gButtonPrimaryPressed)).arg(AppColors::colorToCss(AppColors::gButtonPrimaryDisabled))
-     .arg(AppColors::gBrandBlue.name()));
-    // Final enforcement (some styles ignore min/max rules)
-    b->setFixedHeight(gDynamicBoxHeight);
-}
-inline void applyStatusBox(QLabel* l, const QString& borderColor, const QString& bgColor, const QString& textColor) {
-    if (!l) return;
-    l->setMinimumWidth(gDynamicBoxMinWidth);
-    l->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
-    l->setAlignment(Qt::AlignCenter);
-    l->setStyleSheet(QString(
-        "QLabel { padding: 0px 8px; font-size: %5px; border: 1px solid %1; border-radius: %2px; "
-        "background-color: %3; color: %4; font-weight: bold; min-height: %6px; max-height: %6px; }"
-    ).arg(borderColor)
-     .arg(gDynamicBoxBorderRadius)
-     .arg(bgColor)
-     .arg(textColor)
-     .arg(gDynamicBoxFontPx)
-     .arg(gDynamicBoxHeight));
-    // Final enforcement
-    l->setFixedHeight(gDynamicBoxHeight);
+    return ThemeManager::instance()->getUploadButtonMaxWidth();
 }
 }
 
-
-// A central container that paints a rounded rect with antialiased border
-class RoundedContainer : public QWidget {
-public:
-    RoundedContainer(QWidget* parent = nullptr) : QWidget(parent) {}
-    
-protected:
-    void paintEvent(QPaintEvent* event) override {
-        Q_UNUSED(event);
-        QPainter p(this);
-        p.setRenderHint(QPainter::Antialiasing, true);
-
-        const qreal radius = qMax(0, gWindowBorderRadiusPx);
-        QRectF r = rect();
-        // Align to half-pixels for crisp 1px strokes
-        QRectF borderRect = r.adjusted(0.5, 0.5, -0.5, -0.5);
-        QPainterPath path;
-        path.addRoundedRect(borderRect, radius, radius);
-
-        // Use dynamic palette color that updates automatically with theme changes
-        QColor fill = AppColors::getCurrentColor(AppColors::gWindowBackgroundColorSource);
-        // Avoid halo on rounded edges by drawing fill with Source composition
-        p.setCompositionMode(QPainter::CompositionMode_Source);
-        p.fillPath(path, fill);
-        p.setCompositionMode(QPainter::CompositionMode_SourceOver);
-        // No outer border drawing — only rounded fill is rendered
-    }
-};
-
-// A container that properly clips child widgets to its rounded shape
-class ClippedContainer : public QWidget {
-public:
-    ClippedContainer(QWidget* parent = nullptr) : QWidget(parent) {}
-
-protected:
-    void showEvent(QShowEvent* event) override {
-        QWidget::showEvent(event);
-        updateMaskIfNeeded();
-    }
-
-    void resizeEvent(QResizeEvent* event) override {
-        QWidget::resizeEvent(event);
-        updateMaskIfNeeded();
-    }
-
-private:
-    QSize m_lastMaskSize;  // Cache last size to avoid unnecessary recalculation
-    
-    void updateMaskIfNeeded() {
-        const QSize currentSize = size();
-        // Skip if size hasn't changed (common during theme switches, etc.)
-        if (currentSize == m_lastMaskSize && !mask().isEmpty()) return;
-        
-        // Ensure we have a valid size
-        if (currentSize.width() <= 0 || currentSize.height() <= 0) return;
-        
-        // Cache the size
-        m_lastMaskSize = currentSize;
-        
-        // Use more efficient QRegion constructor for rounded rectangles
-        const int radius = qMax(0, qMin(gDynamicBoxBorderRadius, qMin(currentSize.width(), currentSize.height()) / 2));
-        const QRect r(0, 0, currentSize.width(), currentSize.height());
-        
-        // Create rounded region more efficiently using ellipse corners
-        QRegion region(r);
-        if (radius > 0) {
-            // Subtract corner rectangles and add back rounded corners
-            const int d = radius * 2;
-            region -= QRegion(0, 0, radius, radius);                           // top-left corner
-            region -= QRegion(r.width() - radius, 0, radius, radius);         // top-right corner  
-            region -= QRegion(0, r.height() - radius, radius, radius);        // bottom-left corner
-            region -= QRegion(r.width() - radius, r.height() - radius, radius, radius); // bottom-right corner
-            
-            region += QRegion(0, 0, d, d, QRegion::Ellipse);                           // top-left rounded
-            region += QRegion(r.width() - d, 0, d, d, QRegion::Ellipse);               // top-right rounded
-            region += QRegion(0, r.height() - d, d, d, QRegion::Ellipse);              // bottom-left rounded  
-            region += QRegion(r.width() - d, r.height() - d, d, d, QRegion::Ellipse);  // bottom-right rounded
-        }
-        
-        setMask(region);
-    }
-};
-
-// Lightweight delegate that draws separators only between items (no line above first, none below last)
-class ClientListSeparatorDelegate : public QStyledItemDelegate {
-public:
-    using QStyledItemDelegate::QStyledItemDelegate;
-    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override {
-        QStyleOptionViewItem opt(option);
-        // Supprimer l'effet hover / sélection pour l'item message "no clients" (flags vides)
-        if (index.isValid()) {
-            Qt::ItemFlags f = index.model() ? index.model()->flags(index) : Qt::NoItemFlags;
-            if (f == Qt::NoItemFlags) {
-                opt.state &= ~QStyle::State_MouseOver;
-                opt.state &= ~QStyle::State_Selected;
-                opt.state &= ~QStyle::State_HasFocus;
-            }
-        }
-        QStyledItemDelegate::paint(painter, opt, index);
-        if (!index.isValid()) return;
-        const QAbstractItemModel* model = index.model();
-        if (!model) return;
-        // Draw a 1px separator line at the top of items after the first
-        if (index.row() > 0) {
-            painter->save();
-            painter->setRenderHint(QPainter::Antialiasing, false);
-            QColor c = AppColors::getCurrentColor(AppColors::gAppBorderColorSource);
-            painter->setPen(QPen(c, 1));
-            const QRect r = option.rect;
-            const int y = r.top();
-            painter->drawLine(r.left(), y, r.right(), y);
-            painter->restore();
-        }
-    }
-};
 
 bool MainWindow::event(QEvent* event) {
     if (event->type() == QEvent::PaletteChange) {
@@ -373,96 +196,6 @@ bool MainWindow::event(QEvent* event) {
         updateStylesheetsForTheme();
     }
     return QMainWindow::event(event);
-}
-
-// Ensure placeholder item is visible when there are no clients yet (including connecting state)
-void MainWindow::ensureClientListPlaceholder() {
-    if (!m_clientListWidget) return;
-    if (m_clientListWidget->count() == 0) {
-        QListWidgetItem* item = new QListWidgetItem("No clients connected. Make sure other devices are running Mouffette and connected to the same server.");
-        item->setFlags(Qt::NoItemFlags);
-        item->setTextAlignment(Qt::AlignCenter);
-        QFont font = item->font(); font.setItalic(true); font.setPointSize(16); item->setFont(font);
-        item->setForeground(AppColors::gTextMuted);
-        m_clientListWidget->addItem(item);
-    }
-}
-
-void MainWindow::ensureOngoingScenesPlaceholder() {
-    if (!m_ongoingScenesList) return;
-    if (m_ongoingScenesList->count() == 0) {
-        QListWidgetItem* item = new QListWidgetItem("No current ongoing scenes.");
-        item->setFlags(Qt::NoItemFlags);
-        item->setTextAlignment(Qt::AlignCenter);
-        QFont font = item->font(); font.setItalic(true); font.setPointSize(16); item->setFont(font);
-        item->setForeground(AppColors::gTextMuted);
-        m_ongoingScenesList->addItem(item);
-    }
-}
-
-void MainWindow::applyListWidgetStyle(QListWidget* listWidget) const {
-    if (!listWidget) return;
-    listWidget->setStyleSheet(
-        QString("QListWidget { "
-        "   border: 1px solid %1; "
-        "   border-radius: 5px; "
-        "   padding: 0px; "
-        "   background-color: %2; "
-        "   outline: none; "
-        "}"
-        "QListWidget::item { "
-        "   padding: 10px; "
-        "}"
-        "QListWidget::item:hover { "
-        "   background-color: rgba(74, 144, 226, 28); "
-        "}"
-        "QListWidget::item:selected { "
-        "   background-color: transparent; "
-        "   color: palette(text); "
-        "}"
-        "QListWidget::item:selected:active { "
-        "   background-color: transparent; "
-        "   color: palette(text); "
-        "}"
-        "QListWidget::item:selected:hover { "
-        "   background-color: %3; "
-        "   color: palette(text); "
-        "}")
-            .arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource))
-            .arg(AppColors::colorSourceToCss(AppColors::gInteractionBackgroundColorSource))
-            .arg(AppColors::colorToCss(AppColors::gHoverHighlight))
-    );
-}
-
-void MainWindow::refreshOngoingScenesList() {
-    if (!m_ongoingScenesList) return;
-
-    m_ongoingScenesList->clear();
-
-    for (CanvasSession* session : m_sessionManager->getAllSessions()) {
-        ScreenCanvas* canvas = session->canvas;
-        if (!canvas) continue;
-        if (!canvas->isRemoteSceneLaunched()) continue;
-
-        QString display = session->lastClientInfo.getDisplayText();
-        if (display.trimmed().isEmpty()) {
-            display = session->lastClientInfo.getMachineName();
-        }
-        if (display.trimmed().isEmpty()) {
-            display = QStringLiteral("Unnamed client");
-        }
-
-        QString itemText = QStringLiteral("%1 — Scene live").arg(display.trimmed());
-        QListWidgetItem* item = new QListWidgetItem(itemText);
-        item->setFlags(Qt::ItemIsEnabled);
-        item->setData(Qt::UserRole, session->persistentClientId);
-        item->setData(Qt::UserRole + 1, session->persistentClientId);
-        m_ongoingScenesList->addItem(item);
-    }
-
-    if (m_ongoingScenesList->count() == 0) {
-        ensureOngoingScenesPlaceholder();
-    }
 }
 
 void MainWindow::setRemoteConnectionStatus(const QString& status, bool propagateLoss) {
@@ -510,7 +243,9 @@ void MainWindow::setRemoteConnectionStatus(const QString& status, bool propagate
     );
     // If transitioning into a connecting-like state and list is empty, show placeholder
     if (up == "CONNECTING" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
-        ensureClientListPlaceholder();
+        if (m_clientListPage) {
+            m_clientListPage->ensureClientListPlaceholder();
+        }
     }
 
     refreshOverlayActionsState(up == "CONNECTED", propagateLoss);
@@ -555,7 +290,7 @@ MainWindow::MainWindow(QWidget* parent)
       m_centralWidget(nullptr),
       m_mainLayout(nullptr),
       m_stackedWidget(nullptr),
-      m_clientListPage(nullptr),
+      m_clientListPage(nullptr), // Phase 1.1: ClientListPage
       m_connectionLayout(nullptr),
       m_settingsButton(nullptr),
       m_connectToggleButton(nullptr),
@@ -563,9 +298,6 @@ MainWindow::MainWindow(QWidget* parent)
       m_localClientInfoContainer(nullptr),
       m_localClientTitleLabel(nullptr),
       m_localNetworkStatusLabel(nullptr),
-      m_clientListWidget(nullptr),
-    m_ongoingScenesLabel(nullptr),
-    m_ongoingScenesList(nullptr),
       m_screenViewWidget(nullptr),
       m_screenViewLayout(nullptr),
       m_clientNameLabel(nullptr),
@@ -1567,7 +1299,10 @@ MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& cli
         session.remoteContentClearedOnDisconnect = false;
     }
     
-    refreshOngoingScenesList();
+    // Phase 1.1: Refresh ongoing scenes via ClientListPage
+    if (m_clientListPage) {
+        m_clientListPage->refreshOngoingScenesList();
+    }
     return session;
 }
 
@@ -2504,34 +2239,19 @@ void MainWindow::onUploadButtonClicked() {
 void MainWindow::onBackToClientListClicked() { showClientListView(); }
 
 
-void MainWindow::onClientItemClicked(QListWidgetItem* item) {
-    if (!item) return;
-    int index = m_clientListWidget->row(item);
-    if (index >=0 && index < m_availableClients.size()) {
-        ClientInfo client = m_availableClients[index];
-        CanvasSession& session = ensureCanvasSession(client);
-        switchToCanvasSession(session.persistentClientId);
-        m_selectedClient = session.lastClientInfo;
-        showScreenView(session.lastClientInfo);
-        // ScreenNavigationManager will request screens; no need to duplicate here
-    }
+// Phase 1.1: New slot connected to ClientListPage::clientClicked signal
+void MainWindow::onClientSelected(const ClientInfo& client, int clientIndex) {
+    Q_UNUSED(clientIndex);
+    CanvasSession& session = ensureCanvasSession(client);
+    switchToCanvasSession(session.persistentClientId);
+    m_selectedClient = session.lastClientInfo;
+    showScreenView(session.lastClientInfo);
+    // ScreenNavigationManager will request screens; no need to duplicate here
 }
 
-void MainWindow::onOngoingSceneItemClicked(QListWidgetItem* item) {
-    if (!item) return;
-    if (item->flags() == Qt::NoItemFlags) return;
-
-    QString identity = item->data(Qt::UserRole).toString();
-    QString clientId = item->data(Qt::UserRole + 1).toString();
-
-    CanvasSession* session = nullptr;
-    if (!identity.isEmpty()) {
-        session = findCanvasSession(identity);
-    }
-    if (!session && !clientId.isEmpty()) {
-        session = findCanvasSessionByServerClientId(clientId);
-    }
-
+// Phase 1.1: New slot connected to ClientListPage::ongoingSceneClicked signal
+void MainWindow::onOngoingSceneSelected(const QString& persistentClientId) {
+    CanvasSession* session = findCanvasSession(persistentClientId);
     if (!session) return;
 
     switchToCanvasSession(session->persistentClientId);
@@ -2560,38 +2280,7 @@ void MainWindow::updateStylesheetsForTheme() {
             "QWidget#CentralRoot { background-color: %1; }"
         ).arg(AppColors::colorSourceToCss(AppColors::gWindowBackgroundColorSource)));
     }
-    if (m_clientListWidget) {
-        m_clientListWidget->setStyleSheet(
-            QString("QListWidget { "
-            "   border: 1px solid %1; "
-            "   border-radius: 5px; "
-            "   padding: 0px; "
-            "   background-color: %2; "
-            "   outline: none; "
-            "}"
-            "QListWidget::item { "
-            "   padding: 10px; "
-            // No per-item borders; separators are painted via a custom delegate
-            "}"
-            // Hover: very light blue tint
-            "QListWidget::item:hover { "
-            "   background-color: rgba(74, 144, 226, 28); "
-            "}"
-            // Suppress active/selected highlight colors
-            "QListWidget::item:selected { "
-            "   background-color: transparent; "
-            "   color: palette(text); "
-            "}"
-            "QListWidget::item:selected:active { "
-            "   background-color: transparent; "
-            "   color: palette(text); "
-            "}"
-            "QListWidget::item:selected:hover { "
-            "   background-color: " + AppColors::colorToCss(AppColors::gHoverHighlight) + "; "
-            "   color: palette(text); "
-            "}").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)).arg(AppColors::colorSourceToCss(AppColors::gInteractionBackgroundColorSource))
-        );
-    }
+    // Note: Client list styling now handled by ClientListPage
     
     // Ensure the client list page title uses the same text color as other texts
     if (m_pageTitleLabel) {
@@ -2684,9 +2373,7 @@ void MainWindow::updateStylesheetsForTheme() {
             }
         }
     }
-
-    applyListWidgetStyle(m_clientListWidget);
-    applyListWidgetStyle(m_ongoingScenesList);
+    // Note: Client list style updates now handled by ClientListPage
 }
 
 void MainWindow::setupUI() {
@@ -2818,11 +2505,15 @@ void MainWindow::setupUI() {
     bottomLayout->addWidget(m_stackedWidget);
     m_mainLayout->addWidget(bottomSection);
     
-    // Create client list page
-    createClientListPage();
+    // Phase 1.1: Create ClientListPage
+    m_clientListPage = new ClientListPage(m_sessionManager, this);
+    connect(m_clientListPage, &ClientListPage::clientClicked, this, &MainWindow::onClientSelected);
+    connect(m_clientListPage, &ClientListPage::ongoingSceneClicked, this, &MainWindow::onOngoingSceneSelected);
+    m_stackedWidget->addWidget(m_clientListPage);
+    
     // Show placeholder immediately (before any connection) so page isn't empty during CONNECTING state
-    ensureClientListPlaceholder();
-    ensureOngoingScenesPlaceholder();
+    m_clientListPage->ensureClientListPlaceholder();
+    m_clientListPage->ensureOngoingScenesPlaceholder();
     
     // Create screen view page  
     createScreenViewPage();
@@ -2895,49 +2586,6 @@ void MainWindow::setupUI() {
         MacWindowManager::setWindowAlwaysOnTop(this);
     });
 #endif
-}
-
-void MainWindow::createClientListPage() {
-    m_clientListPage = new QWidget();
-    QVBoxLayout* layout = new QVBoxLayout(m_clientListPage);
-    layout->setSpacing(gInnerContentGap);
-    layout->setContentsMargins(0, 0, 0, 0);
-
-    // Client list widget - simple and flexible
-    m_clientListWidget = new QListWidget();
-    applyListWidgetStyle(m_clientListWidget);
-    
-    connect(m_clientListWidget, &QListWidget::itemClicked, this, &MainWindow::onClientItemClicked);
-    m_clientListWidget->setFocusPolicy(Qt::NoFocus);
-    m_clientListWidget->installEventFilter(this);
-    m_clientListWidget->setMouseTracking(true);
-    m_clientListWidget->setItemDelegate(new ClientListSeparatorDelegate(m_clientListWidget));
-    
-    // Simple size policy: expand in both directions, let Qt handle sizing naturally
-    m_clientListWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    m_clientListWidget->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    m_clientListWidget->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    
-    layout->addWidget(m_clientListWidget);
-
-    // Ongoing scenes section mirrors client list styling
-    m_ongoingScenesLabel = new QLabel("Ongoing Scenes");
-    applyTitleText(m_ongoingScenesLabel);
-    layout->addWidget(m_ongoingScenesLabel);
-
-    m_ongoingScenesList = new QListWidget();
-    applyListWidgetStyle(m_ongoingScenesList);
-    m_ongoingScenesList->setFocusPolicy(Qt::NoFocus);
-    m_ongoingScenesList->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_ongoingScenesList->setMouseTracking(true);
-    m_ongoingScenesList->setItemDelegate(new ClientListSeparatorDelegate(m_ongoingScenesList));
-    m_ongoingScenesList->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    m_ongoingScenesList->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    m_ongoingScenesList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    connect(m_ongoingScenesList, &QListWidget::itemClicked, this, &MainWindow::onOngoingSceneItemClicked);
-    layout->addWidget(m_ongoingScenesList);
-    
-    m_stackedWidget->addWidget(m_clientListPage);
 }
 
 void MainWindow::createScreenViewPage() {
@@ -3446,9 +3094,10 @@ void MainWindow::onDisconnected() {
     // Stop watching if any
     if (m_watchManager) m_watchManager->unwatchIfAny();
     
-    // Clear client list
-    m_availableClients.clear();
-    updateClientList(m_availableClients);
+    // Phase 1.1: Clear client list via ClientListPage
+    if (m_clientListPage) {
+        m_clientListPage->updateClientList(QList<ClientInfo>());
+    }
     
     
     // Show tray notification
@@ -3474,12 +3123,13 @@ void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
     
     QList<ClientInfo> displayList = buildDisplayClientList(clients);
 
-    int previousDisplayCount = m_availableClients.size();
     int previousConnectedCount = m_lastConnectedClientCount;
     m_lastConnectedClientCount = clients.size();
 
-    m_availableClients = displayList;
-    updateClientList(m_availableClients);
+    // Phase 1.1: Update ClientListPage
+    if (m_clientListPage) {
+        m_clientListPage->updateClientList(displayList);
+    }
 
     if (!m_activeSessionIdentity.isEmpty()) {
         if (CanvasSession* activeSession = findCanvasSession(m_activeSessionIdentity)) {
@@ -3924,7 +3574,10 @@ void MainWindow::onRemoteSceneLaunchStateChanged(bool active, const QString& tar
     Q_UNUSED(active);
     Q_UNUSED(targetClientId);
     Q_UNUSED(targetMachineName);
-    refreshOngoingScenesList();
+    // Phase 1.1: Refresh ongoing scenes via ClientListPage
+    if (m_clientListPage) {
+        m_clientListPage->refreshOngoingScenesList();
+    }
 }
 
 QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
@@ -4080,34 +3733,11 @@ void MainWindow::setupVolumeMonitoring() {
 #endif
 }
 
-void MainWindow::updateClientList(const QList<ClientInfo>& clients) {
-    m_clientListWidget->clear();
-    
-    if (clients.isEmpty()) {
-        // Simple "no clients" message
-        QListWidgetItem* item = new QListWidgetItem("No clients connected. Make sure other devices are running Mouffette and connected to the same server.");
-        item->setFlags(Qt::NoItemFlags);
-        item->setTextAlignment(Qt::AlignCenter);
-        QFont font = item->font();
-        font.setItalic(true);
-        font.setPointSize(16);
-        item->setFont(font);
-        item->setForeground(AppColors::gTextMuted);
-        m_clientListWidget->addItem(item);
-    } else {
-        // Add client items
-        for (const ClientInfo& client : clients) {
-            QListWidgetItem* item = new QListWidgetItem(client.getDisplayText());
-            m_clientListWidget->addItem(item);
-        }
-    }
-
-    refreshOngoingScenesList();
-}
-
 void MainWindow::setUIEnabled(bool enabled) {
-    // Client list depends on connection
-    m_clientListWidget->setEnabled(enabled);
+    // Phase 1.1: Client list enabled state managed by ClientListPage
+    if (m_clientListPage) {
+        m_clientListPage->setEnabled(enabled);
+    }
 }
 
 void MainWindow::updateConnectionStatus() {
