@@ -1929,8 +1929,8 @@ MainWindow::CanvasSession* MainWindow::sessionForUploadId(const QString& uploadI
 }
 
 void MainWindow::clearUploadTracking(CanvasSession& session) {
-    session.upload.mediaIdsBeingUploaded.clear();
-    session.upload.mediaIdByFileId.clear();
+    // Removed mediaIdsBeingUploaded.clear() - no longer exists
+    // Removed mediaIdByFileId.clear() - no longer exists
     session.upload.itemsByFileId.clear();
     session.upload.currentUploadFileOrder.clear();
     session.upload.serverCompletedFileIds.clear();
@@ -2182,9 +2182,9 @@ void MainWindow::onUploadButtonClicked() {
     qDebug() << "hasRemoteFiles:" << hasRemoteFiles;
 
     upload.itemsByFileId.clear();
-    upload.mediaIdByFileId.clear();
+    // Removed mediaIdByFileId.clear() - no longer exists
     upload.currentUploadFileOrder.clear();
-    upload.mediaIdsBeingUploaded.clear();
+    // Removed mediaIdsBeingUploaded.clear() - no longer exists
     upload.serverCompletedFileIds.clear();
     upload.perFileProgress.clear();
     upload.receivingFilesToastShown = false;
@@ -2299,11 +2299,10 @@ void MainWindow::onUploadButtonClicked() {
         return;
     }
 
+    // Track which fileIds are being uploaded to update UI state
+    QSet<QString> fileIdsBeingUploaded;
     for (const auto& f : files) {
-        const QList<QString> allMediaIds = m_fileManager->getMediaIdsForFile(f.fileId);
-        for (const QString& mediaId : allMediaIds) {
-            upload.mediaIdsBeingUploaded.insert(mediaId);
-        }
+        fileIdsBeingUploaded.insert(f.fileId);
     }
 
     m_uploadManager->clearLastRemovalClientId();
@@ -2312,7 +2311,9 @@ void MainWindow::onUploadButtonClicked() {
         const QList<QGraphicsItem*> allItems = canvas->scene()->items();
         for (QGraphicsItem* it : allItems) {
             if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-                if (upload.mediaIdsBeingUploaded.contains(media->mediaId())) {
+                // Check if this media's file is being uploaded
+                const QString fileId = m_fileManager->getFileIdForMedia(media->mediaId());
+                if (!fileId.isEmpty() && fileIdsBeingUploaded.contains(fileId)) {
                     media->setUploadUploading(0);
                 }
             }
@@ -2436,10 +2437,8 @@ void MainWindow::onUploadButtonClicked() {
                     const QList<QGraphicsItem*> allItems = session->canvas->scene()->items();
                     for (QGraphicsItem* it : allItems) {
                         if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-                            if (session->upload.mediaIdsBeingUploaded.isEmpty() ||
-                                session->upload.mediaIdsBeingUploaded.contains(media->mediaId())) {
-                                media->setUploadNotUploaded();
-                            }
+                            // Reset upload state for all items (no longer tracking specific mediaIds)
+                            media->setUploadNotUploaded();
                         }
                     }
                 }

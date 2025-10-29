@@ -61,8 +61,8 @@ public:
         QSet<QString> expectedIdeaFileIds; // latest scene files present on canvas
         QSet<QString> knownRemoteFileIds;   // files we believe reside on the remote for current idea
         struct UploadTracking {
-            QSet<QString> mediaIdsBeingUploaded;
-            QHash<QString, QString> mediaIdByFileId;
+            // Removed mediaIdsBeingUploaded - redundant with fileIds tracking
+            // Removed mediaIdByFileId - can be derived from FileManager
             QHash<QString, QList<ResizableMediaBase*>> itemsByFileId;
             QStringList currentUploadFileOrder;
             QSet<QString> serverCompletedFileIds;
