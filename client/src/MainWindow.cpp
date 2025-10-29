@@ -34,6 +34,7 @@
 #include "handlers/WindowEventHandler.h"
 #include "controllers/TimerController.h"
 #include "managers/UploadButtonStyleManager.h"
+#include "managers/SettingsManager.h"
 #include <QMenuBar>
 #include <QHostInfo>
 #include "ClientInfo.h"
@@ -317,6 +318,7 @@ MainWindow::MainWindow(QWidget* parent)
       m_menuBarManager(new MenuBarManager(this, this)), // Phase 6.3
       m_systemTrayManager(new SystemTrayManager(this)), // Phase 6.2
       m_webSocketClient(new WebSocketClient(this)),
+      m_settingsManager(new SettingsManager(this, m_webSocketClient, this)), // Phase 12
       m_webSocketMessageHandler(new WebSocketMessageHandler(this, this)), // Phase 7.1
       m_screenEventHandler(new ScreenEventHandler(this, this)), // Phase 7.2
       m_uploadEventHandler(new UploadEventHandler(this, this)), // Phase 7.4
@@ -339,67 +341,9 @@ MainWindow::MainWindow(QWidget* parent)
 #if defined(Q_OS_WIN)
     setWindowIcon(QIcon(":/icons/appicon.ico"));
 #endif
-    // Load persisted settings (server URL, auto-upload, persistent client ID)
-    {
-        QSettings settings("Mouffette", "Client");
-        m_serverUrlConfig = settings.value("serverUrl", DEFAULT_SERVER_URL).toString();
-        m_autoUploadImportedMedia = settings.value("autoUploadImportedMedia", false).toBool();
-        
-        // NEW: Generate or load persistent client ID
-        QString machineId = QSysInfo::machineUniqueId();
-        if (machineId.isEmpty()) {
-            machineId = QHostInfo::localHostName();
-        }
-        if (machineId.isEmpty()) {
-            machineId = QStringLiteral("unknown-machine");
-        }
-        QString sanitizedMachineId = machineId;
-        sanitizedMachineId.replace(QRegularExpression("[^A-Za-z0-9_]"), "_");
-
-        QString instanceSuffix = qEnvironmentVariable("MOUFFETTE_INSTANCE_SUFFIX");
-        if (instanceSuffix.isEmpty()) {
-            const QStringList args = QCoreApplication::arguments();
-            for (int i = 1; i < args.size(); ++i) {
-                const QString& arg = args.at(i);
-                if (arg.startsWith("--instance-suffix=")) {
-                    instanceSuffix = arg.section('=', 1);
-                    break;
-                }
-                if (arg == "--instance-suffix" && (i + 1) < args.size()) {
-                    instanceSuffix = args.at(i + 1);
-                    break;
-                }
-            }
-        }
-        QString sanitizedInstanceSuffix = instanceSuffix;
-        sanitizedInstanceSuffix.replace(QRegularExpression("[^A-Za-z0-9_]"), "_");
-
-        const QByteArray installHashBytes = QCryptographicHash::hash(QCoreApplication::applicationDirPath().toUtf8(), QCryptographicHash::Sha1);
-        QString installFingerprint = QString::fromUtf8(installHashBytes.toHex());
-        if (installFingerprint.isEmpty()) {
-            installFingerprint = QStringLiteral("unknowninstall");
-        }
-        installFingerprint = installFingerprint.left(16); // keep key compact
-
-        QString settingsKey = QStringLiteral("persistentClientId_%1_%2").arg(sanitizedMachineId, installFingerprint);
-        if (!sanitizedInstanceSuffix.isEmpty()) {
-            settingsKey += QStringLiteral("_%1").arg(sanitizedInstanceSuffix);
-        }
-
-        QString persistentClientId = settings.value(settingsKey).toString();
-        if (persistentClientId.isEmpty()) {
-            persistentClientId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-            settings.setValue(settingsKey, persistentClientId);
-            qDebug() << "MainWindow: Generated new persistent client ID:" << persistentClientId
-                     << "using key" << settingsKey << "machineId:" << machineId
-                     << "instanceSuffix:" << sanitizedInstanceSuffix;
-        } else {
-            qDebug() << "MainWindow: Loaded persistent client ID:" << persistentClientId
-                     << "using key" << settingsKey << "machineId:" << machineId
-                     << "instanceSuffix:" << sanitizedInstanceSuffix;
-        }
-        m_webSocketClient->setPersistentClientId(persistentClientId);
-    }
+    // [Phase 12] Load persisted settings (server URL, auto-upload, persistent client ID)
+    m_settingsManager->loadSettings();
+    
     // Use standard OS window frame and title bar (no custom frameless window)
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
     // Optional: keep a clean look (no menu bar) while using native title bar
@@ -855,6 +799,11 @@ void MainWindow::unloadUploadsForSession(CanvasSession& session, bool attemptRem
     if (m_canvasSessionController) {
         m_canvasSessionController->unloadUploadsForSession(&session, attemptRemote);
     }
+}
+
+// [Phase 12] Delegate to SettingsManager
+bool MainWindow::getAutoUploadImportedMedia() const {
+    return m_settingsManager ? m_settingsManager->getAutoUploadImportedMedia() : false;
 }
 
 QString MainWindow::createIdeaId() const {
@@ -1336,10 +1285,10 @@ MainWindow::~MainWindow() {
     if (m_webSocketClient->isConnected()) {
         m_webSocketClient->disconnect();
     }
-    // Persist current settings on shutdown (safety in case dialog not used)
-    QSettings settings("Mouffette", "Client");
-    settings.setValue("serverUrl", m_serverUrlConfig.isEmpty() ? DEFAULT_SERVER_URL : m_serverUrlConfig);
-    settings.setValue("autoUploadImportedMedia", m_autoUploadImportedMedia);
+    // [Phase 12] Persist current settings on shutdown (safety in case dialog not used)
+    if (m_settingsManager) {
+        m_settingsManager->saveSettings();
+    }
 }
 
 void MainWindow::updateStylesheetsForTheme() {
@@ -1750,60 +1699,10 @@ void MainWindow::onEnableDisableClicked() {
 
 // Settings dialog: server URL with Save/Cancel
 void MainWindow::showSettingsDialog() {
-    QDialog dialog(this);
-    dialog.setWindowTitle("Settings");
-    QVBoxLayout* v = new QVBoxLayout(&dialog);
-    QLabel* urlLabel = new QLabel("Server URL");
-    QLineEdit* urlEdit = new QLineEdit(&dialog);
-    if (m_serverUrlConfig.isEmpty()) m_serverUrlConfig = DEFAULT_SERVER_URL;
-    urlEdit->setText(m_serverUrlConfig);
-    v->addWidget(urlLabel);
-    v->addWidget(urlEdit);
-
-    // New: Auto-upload imported media checkbox
-    QCheckBox* autoUploadChk = new QCheckBox("Upload imported media automatically", &dialog);
-    autoUploadChk->setChecked(m_autoUploadImportedMedia);
-    v->addSpacing(8);
-    v->addWidget(autoUploadChk);
-
-    QHBoxLayout* btnRow = new QHBoxLayout();
-    btnRow->addStretch();
-    QPushButton* cancelBtn = new QPushButton("Cancel");
-    QPushButton* saveBtn = new QPushButton("Save");
-    applyPillBtn(cancelBtn);
-    applyPrimaryBtn(saveBtn);
-    btnRow->addWidget(cancelBtn);
-    btnRow->addWidget(saveBtn);
-    v->addLayout(btnRow);
-
-    connect(cancelBtn, &QPushButton::clicked, &dialog, &QDialog::reject);
-    connect(saveBtn, &QPushButton::clicked, this, [this, urlEdit, autoUploadChk, &dialog]() {
-        const QString newUrl = urlEdit->text().trimmed();
-        if (!newUrl.isEmpty()) {
-            bool changed = (newUrl != (m_serverUrlConfig.isEmpty() ? DEFAULT_SERVER_URL : m_serverUrlConfig));
-            m_serverUrlConfig = newUrl;
-            if (changed) {
-                // Restart connection to apply new server URL
-                if (m_webSocketClient->isConnected()) {
-                    m_userDisconnected = false; // this is not a manual disconnect, we want reconnect
-                    m_webSocketClient->disconnect();
-                }
-                connectToServer();
-            }
-        }
-        m_autoUploadImportedMedia = autoUploadChk->isChecked();
-
-        // Persist immediately
-        {
-            QSettings settings("Mouffette", "Client");
-            settings.setValue("serverUrl", m_serverUrlConfig.isEmpty() ? DEFAULT_SERVER_URL : m_serverUrlConfig);
-            settings.setValue("autoUploadImportedMedia", m_autoUploadImportedMedia);
-            settings.sync();
-        }
-        dialog.accept();
-    });
-
-    dialog.exec();
+    // [Phase 12] Delegate to SettingsManager
+    if (m_settingsManager) {
+        m_settingsManager->showSettingsDialog();
+    }
 }
 
 // (Removed stray duplicated code block previously injected)
@@ -1950,7 +1849,8 @@ QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
 
 void MainWindow::connectToServer() {
     if (!m_webSocketClient) return;
-    const QString url = m_serverUrlConfig.isEmpty() ? DEFAULT_SERVER_URL : m_serverUrlConfig;
+    // [Phase 12] Get server URL from SettingsManager
+    const QString url = m_settingsManager ? m_settingsManager->getServerUrl() : DEFAULT_SERVER_URL;
     qDebug() << "Connecting to server:" << url;
     m_webSocketClient->connectToServer(url);
 }

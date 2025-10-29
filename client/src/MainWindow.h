@@ -68,6 +68,7 @@ class CanvasSessionController; // Phase 8: manages canvas session lifecycle
 class WindowEventHandler; // Phase 9: manages window lifecycle events
 class TimerController; // Phase 10: manages timer setup and callbacks
 class UploadButtonStyleManager; // Phase 11: manages upload button styling
+class SettingsManager; // Phase 12: manages application settings and persistence
 // using QStackedWidget for canvas container switching
 class QFrame; // forward declare for separators in remote info container
 
@@ -120,6 +121,7 @@ public:
     void addRemoteStatusToLayout();
     void setRemoteConnectionStatus(const QString& status, bool propagateLoss = true);
     void scheduleReconnect();
+    void connectToServer(); // [Phase 12] Made public for SettingsManager
     
     // [Phase 7.2] Accessor methods for ScreenEventHandler
     FileManager* getFileManager() const { return m_fileManager; }
@@ -158,6 +160,8 @@ public:
     void setActiveRemoteClientId(const QString& id) { m_activeRemoteClientId = id; }
     bool isRemoteClientConnected() const { return m_remoteClientConnected; }
     void setRemoteClientConnected(bool connected) { m_remoteClientConnected = connected; }
+    // [Phase 12] Accessor for SettingsManager
+    void setUserDisconnected(bool disconnected) { m_userDisconnected = disconnected; }
     bool isInlineSpinnerSpinning() const;
     void showInlineSpinner();
     void startInlineSpinner();
@@ -183,7 +187,8 @@ public:
     void setUploadButtonInOverlay(bool inOverlay) { m_uploadButtonInOverlay = inOverlay; }
     QFont getUploadButtonDefaultFont() const { return m_uploadButtonDefaultFont; }
     void setUploadButtonDefaultFont(const QFont& font) { m_uploadButtonDefaultFont = font; }
-    bool getAutoUploadImportedMedia() const { return m_autoUploadImportedMedia; }
+    // [Phase 12] Delegate to SettingsManager
+    bool getAutoUploadImportedMedia() const; // Implementation in .cpp to avoid incomplete type
     QString createIdeaId() const;
     
     // [Phase 11] Accessor methods for UploadButtonStyleManager
@@ -267,7 +272,7 @@ private:
     void createScreenViewPage();
     void setupMenuBar();
     void setupSystemTray();
-    void connectToServer();
+    // connectToServer() moved to public (Phase 12)
     // [Phase 7.1] scheduleReconnect, syncRegistration, setUIEnabled, setLocalNetworkStatus moved to public
     // [Phase 7.2] getLocalScreenInfo, getMachineName, getPlatformName, getSystemVolumePercent moved to public
     void setupVolumeMonitoring();
@@ -404,6 +409,9 @@ private:
     // [Phase 11] Upload button style manager
     UploadButtonStyleManager* m_uploadButtonStyleManager = nullptr;
     
+    // [Phase 12] Settings manager
+    SettingsManager* m_settingsManager = nullptr;
+    
     int m_lastConnectedClientCount = 0;
     QString m_activeSessionIdentity;
     ClientInfo m_thisClient;
@@ -416,8 +424,8 @@ private:
     int m_maxReconnectDelay;
     bool m_isWatched = false; // true when at least one remote client is watching us
     bool m_userDisconnected = false; // suppress auto-reconnect UI flows when true
-    QString m_serverUrlConfig; // configurable server URL
-    bool m_autoUploadImportedMedia = false; // new setting: auto-upload on drop
+    // m_serverUrlConfig moved to SettingsManager (Phase 12)
+    // m_autoUploadImportedMedia moved to SettingsManager (Phase 12)
     
     // Navigation state
     bool m_ignoreSelectionChange;
