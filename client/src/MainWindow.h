@@ -64,7 +64,8 @@ class WebSocketMessageHandler; // Phase 7.1: manages WebSocket message routing
 class ScreenEventHandler; // Phase 7.2: manages screen events and registration
 class ClientListEventHandler; // Phase 7.3: manages client list events and connection state
 class UploadEventHandler; // Phase 7.4: manages upload events and file transfers
-class CanvasSessionController; // Phase 8: manages canvas sessions lifecycle
+class CanvasSessionController; // Phase 8: manages canvas session lifecycle
+class WindowEventHandler; // Phase 9: manages window lifecycle events
 // using QStackedWidget for canvas container switching
 class QFrame; // forward declare for separators in remote info container
 
@@ -182,6 +183,11 @@ public:
     bool getAutoUploadImportedMedia() const { return m_autoUploadImportedMedia; }
     QString createIdeaId() const;
     void refreshOverlayActionsState(bool remoteConnected, bool propagateLoss = true);
+    
+    // [Phase 9] Accessor methods for WindowEventHandler
+    ResponsiveLayoutManager* getResponsiveLayoutManager() const { return m_responsiveLayoutManager; }
+    bool isApplicationSuspended() const { return m_applicationSuspended; }
+    void setApplicationSuspended(bool suspended) { m_applicationSuspended = suspended; }
 
 public slots:
     void handleApplicationStateChanged(Qt::ApplicationState state);
@@ -367,6 +373,9 @@ private:
     
     // Phase 8: Canvas session controller
     CanvasSessionController* m_canvasSessionController = nullptr;
+    
+    // Phase 9: Window event handler
+    WindowEventHandler* m_windowEventHandler = nullptr;
     
     int m_lastConnectedClientCount = 0;
     QString m_activeSessionIdentity;

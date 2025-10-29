@@ -31,6 +31,7 @@
 #include "handlers/ClientListEventHandler.h"
 #include "handlers/UploadEventHandler.h"
 #include "controllers/CanvasSessionController.h"
+#include "handlers/WindowEventHandler.h"
 #include <QMenuBar>
 #include <QHostInfo>
 #include "ClientInfo.h"
@@ -344,6 +345,7 @@ MainWindow::MainWindow(QWidget* parent)
       m_uploadEventHandler(new UploadEventHandler(this, this)), // Phase 7.4
       m_clientListEventHandler(new ClientListEventHandler(this, m_webSocketClient, this)), // Phase 7.3
       m_canvasSessionController(new CanvasSessionController(this, this)), // Phase 8
+      m_windowEventHandler(new WindowEventHandler(this, this)), // Phase 9
       m_statusUpdateTimer(new QTimer(this)),
       m_displaySyncTimer(new QTimer(this)),
       m_reconnectTimer(new QTimer(this)),
@@ -1399,25 +1401,23 @@ void MainWindow::clearUploadTracking(CanvasSession& session) {
 
 
 void MainWindow::updateApplicationSuspendedState(bool suspended) {
-    if (m_applicationSuspended == suspended) {
-        return;
+    if (m_windowEventHandler) {
+        m_windowEventHandler->updateApplicationSuspendedState(suspended);
     }
-    m_applicationSuspended = suspended;
-    ScreenCanvas::setAllCanvasesSuspended(suspended);
 }
 
 
 void MainWindow::changeEvent(QEvent* event) {
     QMainWindow::changeEvent(event);
-    if (event->type() == QEvent::WindowStateChange) {
-        const bool minimized = (windowState() & Qt::WindowMinimized);
-        updateApplicationSuspendedState(minimized || isHidden());
+    if (m_windowEventHandler) {
+        m_windowEventHandler->handleChangeEvent(event);
     }
 }
 
 void MainWindow::handleApplicationStateChanged(Qt::ApplicationState state) {
-    const bool suspended = (state == Qt::ApplicationHidden || state == Qt::ApplicationSuspended);
-    updateApplicationSuspendedState(suspended);
+    if (m_windowEventHandler) {
+        m_windowEventHandler->handleApplicationStateChanged(state);
+    }
 }
 
 void MainWindow::showScreenView(const ClientInfo& client) {
@@ -1968,77 +1968,37 @@ void MainWindow::setupSystemTray() {
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
-    // Interpret window close as: stop watching (to stop remote stream) but keep app running in background.
-    if (m_watchManager) m_watchManager->unwatchIfAny();
-    hide();
-    event->ignore(); // do not quit app
+    if (m_windowEventHandler) {
+        m_windowEventHandler->handleCloseEvent(event);
+    } else {
+        QMainWindow::closeEvent(event);
+    }
 }
 
 void MainWindow::showEvent(QShowEvent* event) {
     QMainWindow::showEvent(event);
-    // If user reopens the window and we are on the canvas view with a selected client but not watching anymore, restart watch.
-    if (m_navigationManager && m_navigationManager->isOnScreenView() && m_watchManager) {
-        const QString selId = m_selectedClient.getId();
-        if (!selId.isEmpty() && !m_watchManager->isWatching() && m_webSocketClient && m_webSocketClient->isConnected()) {
-            qDebug() << "Reopening window: auto-resuming watch on" << selId;
-            m_watchManager->toggleWatch(selId); // since not watching, this starts watch
-            // Also request screens to ensure fresh snapshot if server paused sending after unwatch
-            m_webSocketClient->requestScreens(selId);
-        }
+    if (m_windowEventHandler) {
+        m_windowEventHandler->handleShowEvent(event);
     }
-    updateApplicationSuspendedState(windowState() & Qt::WindowMinimized);
 }
 
 void MainWindow::hideEvent(QHideEvent* event) {
     QMainWindow::hideEvent(event);
-    updateApplicationSuspendedState(true);
+    if (m_windowEventHandler) {
+        m_windowEventHandler->handleHideEvent(event);
+    }
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
     QMainWindow::resizeEvent(event);
-    
-    // Update responsive layout based on window width
-    if (m_responsiveLayoutManager) {
-        m_responsiveLayoutManager->updateResponsiveLayout();
-    }
-    
-    // If we're currently showing the screen view and have a canvas with content,
-    // recenter the view to maintain good visibility only before first reveal or when no screens are present
-    if (m_stackedWidget && m_stackedWidget->currentWidget() == m_canvasViewPage &&  // Phase 1.2
-        m_screenCanvas) {
-        const bool hasScreens = !m_selectedClient.getScreens().isEmpty();
-        if (!m_canvasRevealedForCurrentClient && hasScreens) {
-            m_screenCanvas->recenterWithMargin(53);
-        }
+    if (m_windowEventHandler) {
+        m_windowEventHandler->handleResizeEvent(event);
     }
 }
 
 void MainWindow::onTrayIconActivated(QSystemTrayIcon::ActivationReason reason) {
-    // Show/hide window on any click (left, right, or double-click)
-    switch (reason) {
-    case QSystemTrayIcon::Trigger:        // Single left-click
-    case QSystemTrayIcon::DoubleClick:    // Double left-click  
-    case QSystemTrayIcon::Context:        // Right-click
-        {
-            const bool minimized = (windowState() & Qt::WindowMinimized);
-            const bool hidden = isHidden() || !isVisible();
-            if (minimized || hidden) {
-                // Reveal and focus the window if minimized or hidden
-                if (minimized) {
-                    setWindowState(windowState() & ~Qt::WindowMinimized);
-                    showNormal();
-                }
-                show();
-                raise();
-                activateWindow();
-            } else {
-                // Fully visible: toggle to hide to tray
-                hide();
-            }
-        }
-        break;
-    default:
-        break;
+    if (m_windowEventHandler) {
+        m_windowEventHandler->onTrayIconActivated(reason);
     }
 }
 

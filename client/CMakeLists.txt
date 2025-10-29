@@ -62,6 +62,7 @@ set(SOURCES
     src/handlers/ScreenEventHandler.cpp
     src/handlers/ClientListEventHandler.cpp
     src/handlers/UploadEventHandler.cpp
+    src/handlers/WindowEventHandler.cpp
     src/controllers/CanvasSessionController.cpp
 )
 
@@ -118,6 +119,7 @@ set(HEADERS
     src/handlers/ScreenEventHandler.h
     src/handlers/ClientListEventHandler.h
     src/handlers/UploadEventHandler.h
+    src/handlers/WindowEventHandler.h
     src/controllers/CanvasSessionController.h
 )
 
