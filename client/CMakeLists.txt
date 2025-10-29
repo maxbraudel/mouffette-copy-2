@@ -60,6 +60,7 @@ set(SOURCES
     src/managers/MenuBarManager.cpp
     src/handlers/WebSocketMessageHandler.cpp
     src/handlers/ScreenEventHandler.cpp
+    src/handlers/ClientListEventHandler.cpp
 )
 
 # Platform-specific sources
@@ -113,6 +114,7 @@ set(HEADERS
     src/managers/MenuBarManager.h
     src/handlers/WebSocketMessageHandler.h
     src/handlers/ScreenEventHandler.h
+    src/handlers/ClientListEventHandler.h
 )
 
 if(WIN32)

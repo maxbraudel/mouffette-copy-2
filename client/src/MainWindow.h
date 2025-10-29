@@ -62,6 +62,7 @@ class SystemTrayManager; // Phase 6.2: manages system tray icon
 class MenuBarManager; // Phase 6.3: manages menu bar (File, Help menus)
 class WebSocketMessageHandler; // Phase 7.1: manages WebSocket message routing
 class ScreenEventHandler; // Phase 7.2: manages screen events and registration
+class ClientListEventHandler; // Phase 7.3: manages client list events and connection state
 // using QStackedWidget for canvas container switching
 class QFrame; // forward declare for separators in remote info container
 
@@ -140,6 +141,20 @@ public:
     CanvasSession* findCanvasSession(const QString& persistentClientId);
     CanvasSession* findCanvasSessionByServerClientId(const QString& serverClientId);
     void configureCanvasSession(CanvasSession& session);
+    
+    // [Phase 7.3] Accessor methods for ClientListEventHandler
+    ScreenCanvas* getScreenCanvas() const { return m_screenCanvas; }
+    QList<ClientInfo> buildDisplayClientList(const QList<ClientInfo>& connectedClients);
+    int getLastConnectedClientCount() const { return m_lastConnectedClientCount; }
+    void setLastConnectedClientCount(int count) { m_lastConnectedClientCount = count; }
+    QString getActiveRemoteClientId() const { return m_activeRemoteClientId; }
+    void setActiveRemoteClientId(const QString& id) { m_activeRemoteClientId = id; }
+    bool isRemoteClientConnected() const { return m_remoteClientConnected; }
+    void setRemoteClientConnected(bool connected) { m_remoteClientConnected = connected; }
+    bool isInlineSpinnerSpinning() const;
+    void showInlineSpinner();
+    void startInlineSpinner();
+    void unloadUploadsForSession(CanvasSession& session, bool clearFlag);
 
 public slots:
     void handleApplicationStateChanged(Qt::ApplicationState state);
@@ -229,11 +244,9 @@ private:
     // PHASE 2: State synchronization after reconnection
     void handleStateSyncFromServer(const QJsonObject& message);
 
-    void unloadUploadsForSession(CanvasSession& session, bool attemptRemote);
     QString createIdeaId() const;
     void rotateSessionIdea(CanvasSession& session);
     void reconcileRemoteFilesForSession(CanvasSession& session, const QSet<QString>& currentFileIds);
-    QList<ClientInfo> buildDisplayClientList(const QList<ClientInfo>& connectedClients);
     void markAllSessionsOffline();
     ScreenCanvas* canvasForClientId(const QString& clientId) const;
     CanvasSession* sessionForActiveUpload();
@@ -317,6 +330,9 @@ private:
     
     // Phase 7.2: Screen event handler
     ScreenEventHandler* m_screenEventHandler = nullptr;
+    
+    // Phase 7.3: Client list event handler
+    ClientListEventHandler* m_clientListEventHandler = nullptr;
     
     // Backend
     WebSocketClient* m_webSocketClient;

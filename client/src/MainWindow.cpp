@@ -28,6 +28,7 @@
 #include "managers/MenuBarManager.h"
 #include "handlers/WebSocketMessageHandler.h"
 #include "handlers/ScreenEventHandler.h"
+#include "handlers/ClientListEventHandler.h"
 #include <QMenuBar>
 #include <QHostInfo>
 #include "ClientInfo.h"
@@ -299,9 +300,10 @@ MainWindow::MainWindow(QWidget* parent)
       m_cursorTimer(nullptr),
       m_menuBarManager(new MenuBarManager(this, this)), // Phase 6.3
       m_systemTrayManager(new SystemTrayManager(this)), // Phase 6.2
+      m_webSocketClient(new WebSocketClient(this)),
       m_webSocketMessageHandler(new WebSocketMessageHandler(this, this)), // Phase 7.1
       m_screenEventHandler(new ScreenEventHandler(this, this)), // Phase 7.2
-      m_webSocketClient(new WebSocketClient(this)),
+      m_clientListEventHandler(new ClientListEventHandler(this, m_webSocketClient, this)), // Phase 7.3
       m_statusUpdateTimer(new QTimer(this)),
       m_displaySyncTimer(new QTimer(this)),
       m_reconnectTimer(new QTimer(this)),
@@ -437,9 +439,13 @@ MainWindow::MainWindow(QWidget* parent)
         m_screenEventHandler->setupConnections(m_webSocketClient);
     }
     
+    // [PHASE 7.3] Setup client list event handler connections
+    if (m_clientListEventHandler) {
+        m_clientListEventHandler->setupConnections(m_webSocketClient);
+    }
+    
     // Connect remaining WebSocketClient signals (non-lifecycle)
     connect(m_webSocketClient, &WebSocketClient::connectionError, this, &MainWindow::onConnectionError);
-    connect(m_webSocketClient, &WebSocketClient::clientListReceived, this, &MainWindow::onClientListReceived);
     // Immediate status reflection without polling
     connect(m_webSocketClient, &WebSocketClient::connectionStatusChanged, this, [this](const QString& s){ setLocalNetworkStatus(s); });
     connect(m_webSocketClient, &WebSocketClient::registrationConfirmed, this, &MainWindow::onRegistrationConfirmed);
@@ -913,6 +919,23 @@ void MainWindow::stopInlineSpinner() {
     if (m_inlineSpinner && m_inlineSpinner->isSpinning()) {
         m_inlineSpinner->stop();
         m_inlineSpinner->hide();
+    }
+}
+
+// [PHASE 7.3] Accessors for ClientListEventHandler
+bool MainWindow::isInlineSpinnerSpinning() const {
+    return m_inlineSpinner && m_inlineSpinner->isSpinning();
+}
+
+void MainWindow::showInlineSpinner() {
+    if (m_inlineSpinner) {
+        m_inlineSpinner->show();
+    }
+}
+
+void MainWindow::startInlineSpinner() {
+    if (m_inlineSpinner) {
+        m_inlineSpinner->start();
     }
 }
 
@@ -2593,176 +2616,9 @@ void MainWindow::onConnectionError(const QString& error) {
 }
 
 void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
-    qDebug() << "Received client list with" << clients.size() << "clients";
-    
-    // Update remote scene target ID if the target machine reconnected with a new ID
-    if (m_screenCanvas) {
-        m_screenCanvas->updateRemoteSceneTargetFromClientList(clients);
-    }
-    
-    QList<ClientInfo> displayList = buildDisplayClientList(clients);
-
-    int previousConnectedCount = m_lastConnectedClientCount;
-    m_lastConnectedClientCount = clients.size();
-
-    // Phase 1.1: Update ClientListPage
-    if (m_clientListPage) {
-        m_clientListPage->updateClientList(displayList);
-    }
-
-    if (!m_activeSessionIdentity.isEmpty()) {
-        if (CanvasSession* activeSession = findCanvasSession(m_activeSessionIdentity)) {
-            m_selectedClient = activeSession->lastClientInfo;
-            if (activeSession->canvas && !activeSession->serverAssignedId.isEmpty()) {
-                activeSession->canvas->setRemoteSceneTarget(activeSession->serverAssignedId, activeSession->lastClientInfo.getMachineName());
-            }
-        }
-    }
-
-    // Show notification if new connected clients appeared
-    if (clients.size() > previousConnectedCount && previousConnectedCount >= 0) {
-        int newClients = clients.size() - previousConnectedCount;
-        if (newClients > 0) {
-            QString message = QString("%1 new client%2 available for sharing")
-                .arg(newClients)
-                .arg(newClients == 1 ? "" : "s");
-            qDebug() << "New clients available:" << message;
-        }
-    }
-
-    // Update remote status and canvas behavior if we're on screen view:
-    // Handle remote reconnect where the server assigns a NEW clientId.
-    // Strategy:
-    // 1) If selected client's id is present -> mark CONNECTED. If we're on loader, request screens + watch.
-    // 2) Else, try to match by machineName (and platform). If found -> treat as same device, switch selection to new id,
-    //    reset reveal flag, show screen view for it, request screens + watch.
-    // 3) Else -> mark DISCONNECTED and keep loader.
-    if (m_navigationManager && m_navigationManager->isOnScreenView() && !m_activeSessionIdentity.isEmpty()) {
-        CanvasSession* activeSession = findCanvasSession(m_activeSessionIdentity);
-        if (activeSession) {
-            const QString selId = activeSession->serverAssignedId;
-            const QString selName = activeSession->lastClientInfo.getMachineName();
-            const QString selPlatform = activeSession->lastClientInfo.getPlatform();
-
-            const auto findById = [&clients](const QString& id) -> std::optional<ClientInfo> {
-                for (const auto& c : clients) { if (c.getId() == id) return c; }
-                return std::nullopt;
-            };
-            const auto findByNamePlatform = [&clients](const QString& name, const QString& platform) -> std::optional<ClientInfo> {
-                for (const auto& c : clients) {
-                    if (c.getMachineName().compare(name, Qt::CaseInsensitive) == 0 && c.getPlatform() == platform) return c;
-                }
-                return std::nullopt;
-            };
-
-            std::optional<ClientInfo> byId;
-            if (!selId.isEmpty()) {
-                byId = findById(selId);
-            }
-
-            if (byId.has_value()) {
-                activeSession->serverAssignedId = byId->getId();
-                activeSession->lastClientInfo = byId.value();
-                activeSession->lastClientInfo.setClientId(m_activeSessionIdentity);
-                activeSession->remoteContentClearedOnDisconnect = false;
-                m_selectedClient = activeSession->lastClientInfo;
-                if (activeSession->canvas && !activeSession->serverAssignedId.isEmpty()) {
-                    activeSession->canvas->setRemoteSceneTarget(activeSession->serverAssignedId, selName);
-                }
-                if (m_uploadManager) m_uploadManager->setTargetClientId(activeSession->serverAssignedId);
-                const bool isActiveSelection = (activeSession->persistentClientId == m_activeSessionIdentity);
-                if (isActiveSelection) {
-                    if (m_activeRemoteClientId != activeSession->serverAssignedId) {
-                        m_activeRemoteClientId = activeSession->serverAssignedId;
-                        m_remoteClientConnected = false;
-                    }
-                    if (!m_remoteClientConnected) {
-                        addRemoteStatusToLayout();
-                        setRemoteConnectionStatus("CONNECTING...", /*propagateLoss*/ false);
-                        if (m_inlineSpinner && !m_inlineSpinner->isSpinning()) {
-                            m_inlineSpinner->show();
-                            m_inlineSpinner->start();
-                        }
-                        if (m_webSocketClient && m_webSocketClient->isConnected()) {
-                            m_canvasRevealedForCurrentClient = false;
-                            m_webSocketClient->requestScreens(activeSession->serverAssignedId);
-                            if (m_watchManager) {
-                                if (m_watchManager->watchedClientId() != activeSession->serverAssignedId) {
-                                    m_watchManager->unwatchIfAny();
-                                    m_watchManager->toggleWatch(activeSession->serverAssignedId);
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                auto byName = findByNamePlatform(selName, selPlatform);
-                if (byName.has_value()) {
-                    activeSession->serverAssignedId = byName->getId();
-                    activeSession->lastClientInfo = byName.value();
-                    activeSession->lastClientInfo.setClientId(m_activeSessionIdentity);
-                    activeSession->remoteContentClearedOnDisconnect = false;
-                    m_selectedClient = activeSession->lastClientInfo;
-                    if (activeSession->canvas && !activeSession->serverAssignedId.isEmpty()) {
-                        activeSession->canvas->setRemoteSceneTarget(activeSession->serverAssignedId, selName);
-                    }
-                    if (m_uploadManager) m_uploadManager->setTargetClientId(activeSession->serverAssignedId);
-                    if (m_navigationManager) {
-                        m_navigationManager->refreshActiveClientPreservingCanvas(activeSession->lastClientInfo);
-                    }
-                    updateClientNameDisplay(activeSession->lastClientInfo);
-                    const bool isActiveSelection = (activeSession->persistentClientId == m_activeSessionIdentity);
-                    if (isActiveSelection) {
-                        if (m_activeRemoteClientId != activeSession->serverAssignedId) {
-                            m_activeRemoteClientId = activeSession->serverAssignedId;
-                            m_remoteClientConnected = false;
-                        }
-                        if (!m_remoteClientConnected) {
-                            setRemoteConnectionStatus("CONNECTING...");
-                            addRemoteStatusToLayout();
-                            if (m_inlineSpinner && !m_inlineSpinner->isSpinning()) {
-                                m_inlineSpinner->show();
-                                m_inlineSpinner->start();
-                            }
-                            if (m_webSocketClient && m_webSocketClient->isConnected()) {
-                                m_canvasRevealedForCurrentClient = false;
-                                m_webSocketClient->requestScreens(activeSession->serverAssignedId);
-                                if (m_watchManager) {
-                                    if (m_watchManager->watchedClientId() != activeSession->serverAssignedId) {
-                                        m_watchManager->unwatchIfAny();
-                                        m_watchManager->toggleWatch(activeSession->serverAssignedId);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    if (!activeSession->remoteContentClearedOnDisconnect) {
-                        unloadUploadsForSession(*activeSession, true);
-                    }
-                    addRemoteStatusToLayout();
-                    setRemoteConnectionStatus("DISCONNECTED");
-                    m_preserveViewportOnReconnect = true;
-                    if (m_inlineSpinner) {
-                        m_inlineSpinner->show();
-                        m_inlineSpinner->start();
-                    }
-                    if (m_uploadManager) {
-                        m_uploadManager->setTargetClientId(QString());
-                    }
-                    if (m_watchManager) {
-                        m_watchManager->unwatchIfAny();
-                    }
-                    if (activeSession->lastClientInfo.getVolumePercent() >= 0) {
-                        m_selectedClient = activeSession->lastClientInfo;
-                        addVolumeIndicatorToLayout();
-                        updateVolumeIndicator();
-                    } else {
-                        removeVolumeIndicatorFromLayout();
-                    }
-                }
-            }
-        }
+    // [PHASE 7.3] Delegate to ClientListEventHandler
+    if (m_clientListEventHandler) {
+        m_clientListEventHandler->onClientListReceived(clients);
     }
 }
 
