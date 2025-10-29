@@ -19,8 +19,10 @@
 #include "ui/widgets/ClippedContainer.h"
 #include "ui/widgets/ClientListDelegate.h"
 #include "ui/pages/ClientListPage.h"
-#include "ui/pages/CanvasViewPage.h"
+    #include "ui/pages/CanvasViewPage.h"
 #include "managers/ThemeManager.h"
+#include "managers/RemoteClientInfoManager.h"
+#include "managers/SystemMonitor.h"
 #include <QMenuBar>
 #include <QHostInfo>
 #include "ClientInfo.h"
@@ -283,13 +285,9 @@ MainWindow::MainWindow(QWidget* parent)
       m_localClientTitleLabel(nullptr),
       m_localNetworkStatusLabel(nullptr),
       m_backButton(nullptr),
-      m_remoteClientInfoContainer(nullptr),
+      m_remoteClientInfoManager(new RemoteClientInfoManager(this)), // Phase 5
+      m_systemMonitor(new SystemMonitor(this)), // Phase 3
       m_remoteClientInfoWrapper(nullptr),
-      m_clientNameLabel(nullptr),
-      m_remoteConnectionStatusLabel(nullptr),
-      m_volumeIndicator(nullptr),
-      m_remoteInfoSep1(nullptr),
-      m_remoteInfoSep2(nullptr),
       m_screenCanvas(nullptr),
       m_uploadButton(nullptr),
       m_uploadButtonInOverlay(false),
@@ -405,7 +403,17 @@ MainWindow::MainWindow(QWidget* parent)
     setupMenuBar();
 #endif
     setupSystemTray();
-    setupVolumeMonitoring();
+    
+    // [PHASE 3] Start system monitoring
+    if (m_systemMonitor) {
+        m_systemMonitor->startVolumeMonitoring();
+        // Connect volume changes to sync with server when watched
+        connect(m_systemMonitor, &SystemMonitor::volumeChanged, this, [this](int) {
+            if (m_webSocketClient && m_webSocketClient->isConnected() && m_isWatched) {
+                syncRegistration();
+            }
+        });
+    }
 
     // Connect WebSocketClient signals
     connect(m_webSocketClient, &WebSocketClient::connected, this, &MainWindow::onConnected);
@@ -852,239 +860,40 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
     return QMainWindow::eventFilter(obj, event);
 }
 
+// [PHASE 5] Delegate to RemoteClientInfoManager
 void MainWindow::createRemoteClientInfoContainer() {
-    if (m_remoteClientInfoContainer) {
-        return; // Already created
+    if (m_remoteClientInfoManager) {
+        m_remoteClientInfoManager->createContainer();
     }
-    
-    // Create labels if they don't exist (needed for remote client info)
-    if (!m_clientNameLabel) {
-        m_clientNameLabel = new QLabel();
-        applyTitleText(m_clientNameLabel);
-        m_clientNameLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    }
-    
-    if (!m_remoteConnectionStatusLabel) {
-        m_remoteConnectionStatusLabel = new QLabel("DISCONNECTED");
-        m_remoteConnectionStatusLabel->setStyleSheet(
-            QString("QLabel { "
-            "    color: #E53935; "
-            "    background-color: rgba(244,67,54,0.15); "
-            "    border: none; "
-            "    border-radius: 0px; "
-            "    padding: 0px %2px; "
-            "    font-size: %1px; "
-            "    font-weight: bold; "
-            "}").arg(gDynamicBoxFontPx).arg(gRemoteClientContainerPadding)
-        );
-        m_remoteConnectionStatusLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-        m_remoteConnectionStatusLabel->setFixedWidth(120);
-        m_remoteConnectionStatusLabel->setAlignment(Qt::AlignCenter);
-    }
-    
-    if (!m_volumeIndicator) {
-        m_volumeIndicator = new QLabel("🔈 --");
-        m_volumeIndicator->setStyleSheet("QLabel { font-size: 16px; color: palette(text); font-weight: bold; }");
-        m_volumeIndicator->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        m_volumeIndicator->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    }
-    
-    // Create container widget with dynamic box styling and proper clipping
-    m_remoteClientInfoContainer = new ClippedContainer();
-    
-    // Apply dynamic box styling with transparent background and clipping
-    const QString containerStyle = QString(
-        "QWidget { "
-        "    background-color: transparent; "
-        "    color: palette(button-text); "
-        "    border: 1px solid %3; "
-        "    border-radius: %1px; "
-        "    min-height: %2px; "
-        "    max-height: %2px; "
-        "}"
-    ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource));
-    
-    m_remoteClientInfoContainer->setStyleSheet(containerStyle);
-    m_remoteClientInfoContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    m_remoteClientInfoContainer->setMinimumWidth(120); // Reduced minimum to allow proper hostname shrinking
-    
-    // Create horizontal layout for the container
-    QHBoxLayout* containerLayout = new QHBoxLayout(m_remoteClientInfoContainer);
-    containerLayout->setContentsMargins(0, 0, 0, 0); // No padding at all
-    containerLayout->setSpacing(0); // We'll add separators manually
-    
-    // Add hostname (keep title styling but transparent background)
-    m_clientNameLabel->setStyleSheet(
-        QString("QLabel { "
-        "    background: transparent; "
-        "    border: none; "
-        "    padding: 0px %1px; "
-        "    font-size: 16px; "
-        "    font-weight: bold; "
-        "    color: palette(text); "
-        "}").arg(gRemoteClientContainerPadding)
-    );
-    // Allow client name some flexibility but with conservative minimum
-    m_clientNameLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    m_clientNameLabel->setMinimumWidth(20); // Adjust this value to change hostname minimum width
-    containerLayout->addWidget(m_clientNameLabel);
-    
-    // Add vertical separator
-    m_remoteInfoSep1 = new QFrame();
-    m_remoteInfoSep1->setFrameShape(QFrame::VLine);
-    m_remoteInfoSep1->setFrameShadow(QFrame::Sunken);
-    m_remoteInfoSep1->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
-    m_remoteInfoSep1->setFixedWidth(1);
-    containerLayout->addWidget(m_remoteInfoSep1);
-    
-    // Add status (minimal styling - just inherit from container)
-    // Note: Color and font styling will be applied by setRemoteConnectionStatus()
-    containerLayout->addWidget(m_remoteConnectionStatusLabel);
-    
-    // Add vertical separator
-    m_remoteInfoSep2 = new QFrame();
-    m_remoteInfoSep2->setFrameShape(QFrame::VLine);
-    m_remoteInfoSep2->setFrameShadow(QFrame::Sunken);
-    m_remoteInfoSep2->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
-    m_remoteInfoSep2->setFixedWidth(1);
-    containerLayout->addWidget(m_remoteInfoSep2);
-    
-    // Add volume indicator (ensure no individual styling)
-    m_volumeIndicator->setStyleSheet(
-        QString("QLabel { "
-        "    background: transparent; "
-        "    border: none; "
-        "    padding: 0px %1px; "
-        "    font-size: 16px; "
-        "    font-weight: bold; "
-        "}").arg(gRemoteClientContainerPadding)
-    );
-    containerLayout->addWidget(m_volumeIndicator);
 }
-// Remove remote status (and its leading separator) from layout entirely
+
+// [PHASE 5] Delegate to RemoteClientInfoManager
 void MainWindow::removeRemoteStatusFromLayout() {
-    if (!m_remoteClientInfoContainer || !m_remoteConnectionStatusLabel) return;
-    if (auto* layout = qobject_cast<QHBoxLayout*>(m_remoteClientInfoContainer->layout())) {
-        int idx = layout->indexOf(m_remoteConnectionStatusLabel);
-        if (idx != -1) {
-            layout->removeWidget(m_remoteConnectionStatusLabel);
-            m_remoteConnectionStatusLabel->setParent(nullptr);
-            m_remoteConnectionStatusLabel->hide();
-        }
-        if (m_remoteInfoSep1 && m_remoteInfoSep1->parent() == m_remoteClientInfoContainer) {
-            int sidx = layout->indexOf(m_remoteInfoSep1);
-            if (sidx != -1) {
-                layout->removeWidget(m_remoteInfoSep1);
-                m_remoteInfoSep1->setParent(nullptr);
-                m_remoteInfoSep1->hide();
-            }
-        }
-
-            updateApplicationSuspendedState(false);
+    if (m_remoteClientInfoManager) {
+        m_remoteClientInfoManager->removeRemoteStatusFromLayout();
     }
+    updateApplicationSuspendedState(false);
 }
 
-// Add remote status (and its leading separator) into layout if missing
+// [PHASE 5] Delegate to RemoteClientInfoManager
 void MainWindow::addRemoteStatusToLayout() {
-    if (!m_remoteClientInfoContainer || !m_remoteConnectionStatusLabel) return;
-    auto* layout = qobject_cast<QHBoxLayout*>(m_remoteClientInfoContainer->layout());
-    if (!layout) return;
-    if (!m_remoteInfoSep1) {
-        m_remoteInfoSep1 = new QFrame();
-        m_remoteInfoSep1->setFrameShape(QFrame::VLine);
-        m_remoteInfoSep1->setFrameShadow(QFrame::Sunken);
-        m_remoteInfoSep1->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
-        m_remoteInfoSep1->setFixedWidth(1);
+    if (m_remoteClientInfoManager) {
+        m_remoteClientInfoManager->addRemoteStatusToLayout();
     }
-    // Remove from current position (if any) to re-insert at a fixed index
-    int sepIdx = layout->indexOf(m_remoteInfoSep1);
-    if (sepIdx != -1) {
-        layout->removeWidget(m_remoteInfoSep1);
-    }
-    int statusIdx = layout->indexOf(m_remoteConnectionStatusLabel);
-    if (statusIdx != -1) {
-        layout->removeWidget(m_remoteConnectionStatusLabel);
-    }
-
-    // Insert after hostname label (m_clientNameLabel) to guarantee order: hostname → sep1 → status
-    int baseIdx = 0;
-    if (m_clientNameLabel && m_clientNameLabel->parent() == m_remoteClientInfoContainer) {
-        int nameIdx = layout->indexOf(m_clientNameLabel);
-        if (nameIdx != -1) baseIdx = nameIdx + 1;
-    }
-    layout->insertWidget(baseIdx, m_remoteInfoSep1);
-    m_remoteInfoSep1->setParent(m_remoteClientInfoContainer);
-    m_remoteInfoSep1->show();
-
-    layout->insertWidget(baseIdx + 1, m_remoteConnectionStatusLabel);
-    m_remoteConnectionStatusLabel->setParent(m_remoteClientInfoContainer);
-    m_remoteConnectionStatusLabel->show();
 }
-// Remove the volume indicator (and its preceding separator) from the layout entirely
+
+// [PHASE 5] Delegate to RemoteClientInfoManager
 void MainWindow::removeVolumeIndicatorFromLayout() {
-    if (!m_remoteClientInfoContainer || !m_volumeIndicator) return;
-    if (QHBoxLayout* layout = qobject_cast<QHBoxLayout*>(m_remoteClientInfoContainer->layout())) {
-        // Remove volume label
-        int idx = layout->indexOf(m_volumeIndicator);
-        if (idx != -1) {
-            layout->removeWidget(m_volumeIndicator);
-            m_volumeIndicator->setParent(nullptr);
-            m_volumeIndicator->hide();
-        }
-        // Remove the trailing separator if present and parented here
-        if (m_remoteInfoSep2 && m_remoteInfoSep2->parent() == m_remoteClientInfoContainer) {
-            int sidx = layout->indexOf(m_remoteInfoSep2);
-            if (sidx != -1) {
-                layout->removeWidget(m_remoteInfoSep2);
-                m_remoteInfoSep2->setParent(nullptr);
-                m_remoteInfoSep2->hide();
-            }
-        }
+    if (m_remoteClientInfoManager) {
+        m_remoteClientInfoManager->removeVolumeIndicatorFromLayout();
     }
 }
 
-// Add the volume indicator (and its separator) back into the layout if missing
+// [PHASE 5] Delegate to RemoteClientInfoManager
 void MainWindow::addVolumeIndicatorToLayout() {
-    if (!m_remoteClientInfoContainer || !m_volumeIndicator) return;
-    QHBoxLayout* layout = qobject_cast<QHBoxLayout*>(m_remoteClientInfoContainer->layout());
-    if (!layout) return;
-    // Determine positions: after status label; we added sep2 just after status in createRemoteClientInfoContainer
-    // Ensure separator exists
-    if (!m_remoteInfoSep2) {
-        m_remoteInfoSep2 = new QFrame();
-        m_remoteInfoSep2->setFrameShape(QFrame::VLine);
-        m_remoteInfoSep2->setFrameShadow(QFrame::Sunken);
-        m_remoteInfoSep2->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
-        m_remoteInfoSep2->setFixedWidth(1);
+    if (m_remoteClientInfoManager) {
+        m_remoteClientInfoManager->addVolumeIndicatorToLayout();
     }
-    // Remove current instances (if any) so we can reinsert at a fixed index
-    int sepIdx = layout->indexOf(m_remoteInfoSep2);
-    if (sepIdx != -1) {
-        layout->removeWidget(m_remoteInfoSep2);
-    }
-    int volIdx = layout->indexOf(m_volumeIndicator);
-    if (volIdx != -1) {
-        layout->removeWidget(m_volumeIndicator);
-    }
-
-    // Insert after status if present; otherwise after hostname
-    int baseIdx = -1;
-    if (m_remoteConnectionStatusLabel && m_remoteConnectionStatusLabel->parent() == m_remoteClientInfoContainer) {
-        baseIdx = layout->indexOf(m_remoteConnectionStatusLabel);
-    }
-    if (baseIdx == -1 && m_clientNameLabel && m_clientNameLabel->parent() == m_remoteClientInfoContainer) {
-        baseIdx = layout->indexOf(m_clientNameLabel);
-    }
-    if (baseIdx == -1) baseIdx = layout->count() - 1; // Fallback to end if neither found
-
-    // Guarantee order: ... status → sep2 → volume (or hostname → sep2 → volume when status absent)
-    layout->insertWidget(baseIdx + 1, m_remoteInfoSep2);
-    m_remoteInfoSep2->setParent(m_remoteClientInfoContainer);
-    m_remoteInfoSep2->show();
-
-    layout->insertWidget(baseIdx + 2, m_volumeIndicator);
-    m_volumeIndicator->setParent(m_remoteClientInfoContainer);
-    m_volumeIndicator->show();
 }
 
 void MainWindow::createLocalClientInfoContainer() {
@@ -1184,10 +993,15 @@ void MainWindow::setLocalNetworkStatus(const QString& status) {
     );
 }
 
+// [PHASE 5] Updated to use RemoteClientInfoManager
 void MainWindow::initializeRemoteClientInfoInTopBar() {
+    // Get the container from the manager
+    QWidget* container = m_remoteClientInfoManager ? m_remoteClientInfoManager->getContainer() : nullptr;
+    
     // Create the container if it doesn't exist
-    if (!m_remoteClientInfoContainer) {
+    if (!container) {
         createRemoteClientInfoContainer();
+        container = m_remoteClientInfoManager ? m_remoteClientInfoManager->getContainer() : nullptr;
     }
     
     // Create wrapper widget to hold container + inline spinner side by side (once)
@@ -1196,7 +1010,9 @@ void MainWindow::initializeRemoteClientInfoInTopBar() {
         auto* wrapperLayout = new QHBoxLayout(m_remoteClientInfoWrapper);
         wrapperLayout->setContentsMargins(0, 0, 0, 0);
         wrapperLayout->setSpacing(8); // 8px gap between container and spinner
-        wrapperLayout->addWidget(m_remoteClientInfoContainer);
+        if (container) {
+            wrapperLayout->addWidget(container);
+        }
 
         if (!m_inlineSpinner) {
             m_inlineSpinner = new SpinnerWidget(m_remoteClientInfoWrapper);
@@ -1217,12 +1033,12 @@ void MainWindow::initializeRemoteClientInfoInTopBar() {
         }
     } else {
         // Ensure container and spinner belong to the wrapper layout
-        if (m_remoteClientInfoContainer->parent() != m_remoteClientInfoWrapper) {
-            m_remoteClientInfoContainer->setParent(m_remoteClientInfoWrapper);
+        if (container && container->parent() != m_remoteClientInfoWrapper) {
+            container->setParent(m_remoteClientInfoWrapper);
         }
         auto* wrapperLayout = qobject_cast<QHBoxLayout*>(m_remoteClientInfoWrapper->layout());
-        if (wrapperLayout && wrapperLayout->indexOf(m_remoteClientInfoContainer) == -1) {
-            wrapperLayout->insertWidget(0, m_remoteClientInfoContainer);
+        if (container && wrapperLayout && wrapperLayout->indexOf(container) == -1) {
+            wrapperLayout->insertWidget(0, container);
         }
         if (m_inlineSpinner) {
             if (m_inlineSpinner->parent() != m_remoteClientInfoWrapper) {
@@ -1803,8 +1619,10 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     if (m_remoteClientInfoWrapper) {
         m_remoteClientInfoWrapper->setVisible(true);
     }
-    if (m_remoteClientInfoContainer) {
-        m_remoteClientInfoContainer->setVisible(true);
+    // [PHASE 5] Use manager accessor
+    QWidget* container = m_remoteClientInfoManager ? m_remoteClientInfoManager->getContainer() : nullptr;
+    if (container) {
+        container->setVisible(true);
     }
     if (m_inlineSpinner) {
         m_inlineSpinner->hide();
@@ -1844,25 +1662,10 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     }
 }
 
+// [PHASE 5] Delegate to RemoteClientInfoManager
 void MainWindow::updateClientNameDisplay(const ClientInfo& client) {
-    if (!m_clientNameLabel) return;
-
-    QString name = client.getMachineName().trimmed();
-    QString platform = client.getPlatform().trimmed();
-
-    if (name.isEmpty()) {
-        name = tr("Unknown Machine");
-    }
-
-    QString text = name;
-    if (!platform.isEmpty()) {
-        text = QStringLiteral("%1 (%2)").arg(name, platform);
-    }
-
-    m_clientNameLabel->setText(text);
-
-    if (m_remoteClientInfoContainer) {
-        m_remoteClientInfoContainer->setToolTip(text);
+    if (m_remoteClientInfoManager) {
+        m_remoteClientInfoManager->updateClientNameDisplay(client);
     }
 }
 
@@ -1882,8 +1685,10 @@ void MainWindow::showClientListView() {
     if (m_remoteClientInfoWrapper) {
         m_remoteClientInfoWrapper->setVisible(false);
     }
-    if (m_remoteClientInfoContainer) {
-        m_remoteClientInfoContainer->setVisible(false);
+    // [PHASE 5] Use manager accessor
+    QWidget* container = m_remoteClientInfoManager ? m_remoteClientInfoManager->getContainer() : nullptr;
+    if (container) {
+        container->setVisible(false);
     }
     if (m_inlineSpinner) {
         m_inlineSpinner->stop();
@@ -1904,6 +1709,7 @@ void MainWindow::showClientListView() {
 // Removed legacy createScreenWidget(): ScreenCanvas draws screens directly now
 
 // [PHASE 1.2] Delegate to CanvasViewPage
+// [PHASE 5] Delegate to both CanvasViewPage and RemoteClientInfoManager
 void MainWindow::updateVolumeIndicator() {
     int vol = -1;
     if (!m_selectedClient.getId().isEmpty()) {
@@ -1911,6 +1717,9 @@ void MainWindow::updateVolumeIndicator() {
     }
     if (m_canvasViewPage) {
         m_canvasViewPage->updateVolumeIndicator(vol);
+    }
+    if (m_remoteClientInfoManager) {
+        m_remoteClientInfoManager->updateVolumeIndicator(vol);
     }
 }
 
@@ -2325,8 +2134,9 @@ void MainWindow::updateStylesheetsForTheme() {
         }
     }
     
-    // Update remote client info container border
-    if (m_remoteClientInfoContainer) {
+    // [PHASE 5] Update remote client info container border and separators via manager
+    QWidget* remoteContainer = m_remoteClientInfoManager ? m_remoteClientInfoManager->getContainer() : nullptr;
+    if (remoteContainer) {
         const QString containerStyle = QString(
             "QWidget { "
             "    background-color: transparent; "
@@ -2337,7 +2147,15 @@ void MainWindow::updateStylesheetsForTheme() {
             "    max-height: %2px; "
             "}"
         ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource));
-        m_remoteClientInfoContainer->setStyleSheet(containerStyle);
+        remoteContainer->setStyleSheet(containerStyle);
+        
+        // Update separators in remote client info
+        QList<QFrame*> separators = remoteContainer->findChildren<QFrame*>();
+        for (QFrame* separator : separators) {
+            if (separator && separator->frameShape() == QFrame::VLine) {
+                separator->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
+            }
+        }
     }
     
     // Update local client info container border
@@ -2352,22 +2170,6 @@ void MainWindow::updateStylesheetsForTheme() {
             "}"
         ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource));
         m_localClientInfoContainer->setStyleSheet(containerStyle);
-    }
-    
-    // Update separators in remote client info
-    QList<QFrame*> separators = m_remoteClientInfoContainer ? m_remoteClientInfoContainer->findChildren<QFrame*>() : QList<QFrame*>();
-    for (QFrame* separator : separators) {
-        if (separator && separator->frameShape() == QFrame::VLine) {
-            separator->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
-        }
-    }
-    // Also update the cached trailing separator if it's currently detached
-    if (m_remoteInfoSep2 && (!m_remoteClientInfoContainer || m_remoteInfoSep2->parent() != m_remoteClientInfoContainer)) {
-        m_remoteInfoSep2->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
-    }
-    // And the leading separator if detached
-    if (m_remoteInfoSep1 && (!m_remoteClientInfoContainer || m_remoteInfoSep1->parent() != m_remoteClientInfoContainer)) {
-        m_remoteInfoSep1->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
     }
     
     // Update separators in local client info
@@ -3294,7 +3096,8 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
             m_inlineSpinner->hide();
         }
 
-        if (hasScreens && m_volumeIndicator) {
+        // [PHASE 5] Use manager accessor for volume indicator
+        if (hasScreens && m_remoteClientInfoManager && m_remoteClientInfoManager->getVolumeIndicator()) {
             addVolumeIndicatorToLayout();
             updateVolumeIndicator();
         }
@@ -3428,41 +3231,9 @@ void MainWindow::onRemoteSceneLaunchStateChanged(bool active, const QString& tar
     }
 }
 
+// [PHASE 3] Delegate to SystemMonitor
 QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
-    QList<ScreenInfo> screens;
-    
-
-#ifdef Q_OS_WIN
-    // Use WinAPI to enumerate monitors in PHYSICAL pixels with correct origins (no logical gaps)
-    std::vector<WinMonRect> mons; mons.reserve(8);
-    EnumDisplayMonitors(nullptr, nullptr, MouffetteEnumMonProc, reinterpret_cast<LPARAM>(&mons));
-    if (mons.empty()) {
-        QList<QScreen*> screenList = QGuiApplication::screens();
-        for (int i = 0; i < screenList.size(); ++i) {
-            QScreen* s = screenList[i];
-            const QRect g = s->geometry();
-            screens.append(ScreenInfo(i, g.width(), g.height(), g.x(), g.y(), s == QGuiApplication::primaryScreen()));
-        }
-    } else {
-        for (size_t i = 0; i < mons.size(); ++i) {
-            const auto& m = mons[i];
-            const int px = m.rc.left; const int py = m.rc.top;
-            const int pw = m.rc.right - m.rc.left; const int ph = m.rc.bottom - m.rc.top;
-            // For ScreenInfo we keep absolute coordinates so that cursor mapping (also physical) matches exactly.
-            screens.append(ScreenInfo(static_cast<int>(i), pw, ph, px, py, m.primary));
-        }
-    }
-#else
-    QList<QScreen*> screenList = QGuiApplication::screens();
-    for (int i = 0; i < screenList.size(); ++i) {
-        QScreen* screen = screenList[i];
-        QRect geometry = screen->geometry();
-        bool isPrimary = (screen == QGuiApplication::primaryScreen());
-        screens.append(ScreenInfo(i, geometry.width(), geometry.height(), geometry.x(), geometry.y(), isPrimary));
-    }
-#endif
-
-    return screens;
+    return m_systemMonitor ? m_systemMonitor->getLocalScreenInfo() : QList<ScreenInfo>();
 }
 
 
@@ -3473,112 +3244,28 @@ void MainWindow::connectToServer() {
     m_webSocketClient->connectToServer(url);
 }
 
+// [PHASE 3] Delegate to SystemMonitor
 QString MainWindow::getMachineName() {
-    QString hostName = QHostInfo::localHostName();
-    if (hostName.isEmpty()) {
-        hostName = "Unknown Machine";
-    }
-    return hostName;
+    return m_systemMonitor ? m_systemMonitor->getMachineName() : "Unknown Machine";
 }
 
+// [PHASE 3] Delegate to SystemMonitor
 QString MainWindow::getPlatformName() {
-#ifdef Q_OS_MACOS
-    return "macOS";
-#elif defined(Q_OS_WIN)
-    return "Windows";
-#elif defined(Q_OS_LINUX)
-    return "Linux";
-#else
-    return "Unknown";
-#endif
+    return m_systemMonitor ? m_systemMonitor->getPlatformName() : "Unknown";
 }
 
+// [PHASE 3] Delegate to SystemMonitor
+// [PHASE 3] Delegate to SystemMonitor
 int MainWindow::getSystemVolumePercent() {
-#ifdef Q_OS_MACOS
-    // Return cached value; updated asynchronously in setupVolumeMonitoring()
-    return m_cachedSystemVolume;
-#elif defined(Q_OS_WIN)
-    // Use Windows Core Audio APIs (MMDevice + IAudioEndpointVolume)
-    // Headers are included only on Windows builds.
-    HRESULT hr;
-    IMMDeviceEnumerator* pEnum = nullptr;
-    IMMDevice* pDevice = nullptr;
-    IAudioEndpointVolume* pEndpointVol = nullptr;
-    bool coInit = SUCCEEDED(CoInitialize(nullptr));
-    int result = -1;
-    do {
-        hr = CoCreateInstance(CLSID_MMDeviceEnumerator, nullptr, CLSCTX_ALL, IID_IMMDeviceEnumerator, (void**)&pEnum);
-        if (FAILED(hr) || !pEnum) break;
-        hr = pEnum->GetDefaultAudioEndpoint(eRender, eMultimedia, &pDevice);
-        if (FAILED(hr) || !pDevice) break;
-        hr = pDevice->Activate(IID_IAudioEndpointVolume, CLSCTX_ALL, nullptr, (void**)&pEndpointVol);
-        if (FAILED(hr) || !pEndpointVol) break;
-        float volScalar = 0.0f;
-        hr = pEndpointVol->GetMasterVolumeLevelScalar(&volScalar);
-        if (FAILED(hr)) break;
-        int vol = static_cast<int>(std::round(volScalar * 100.0f));
-        vol = std::clamp(vol, 0, 100);
-        result = vol;
-    } while (false);
-    if (pEndpointVol) pEndpointVol->Release();
-    if (pDevice) pDevice->Release();
-    if (pEnum) pEnum->Release();
-    if (coInit) CoUninitialize();
-    return result;
-#elif defined(Q_OS_LINUX)
-    return -1; // TODO: Implement via PulseAudio/PipeWire if needed
-#else
-    return -1;
-#endif
+    return m_systemMonitor ? m_systemMonitor->getSystemVolumePercent() : -1;
 }
 
+// [PHASE 3] Delegate to SystemMonitor
+// [PHASE 3] Delegate to SystemMonitor - now handled in constructor
 void MainWindow::setupVolumeMonitoring() {
-#ifdef Q_OS_MACOS
-    // Asynchronous polling to avoid blocking the UI thread.
-    if (!m_volProc) {
-        m_volProc = new QProcess(this);
-        // No visible window; ensure fast exit
-        connect(m_volProc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-                [this](int, QProcess::ExitStatus) {
-            const QByteArray out = m_volProc->readAllStandardOutput().trimmed();
-            bool ok = false;
-            int vol = QString::fromUtf8(out).toInt(&ok);
-            if (ok) {
-                vol = std::clamp(vol, 0, 100);
-                if (vol != m_cachedSystemVolume) {
-                    m_cachedSystemVolume = vol;
-                    if (m_webSocketClient->isConnected() && m_isWatched) {
-                        syncRegistration();
-                    }
-                }
-            }
-        });
+    if (m_systemMonitor) {
+        m_systemMonitor->startVolumeMonitoring();
     }
-    if (!m_volTimer) {
-        m_volTimer = new QTimer(this);
-        m_volTimer->setInterval(1200); // ~1.2s cadence
-        connect(m_volTimer, &QTimer::timeout, this, [this]() {
-            if (m_volProc->state() == QProcess::NotRunning) {
-                m_volProc->start("/usr/bin/osascript", {"-e", "output volume of (get volume settings)"});
-            }
-        });
-        m_volTimer->start();
-    }
-#else
-    // Non-macOS: simple polling; Windows call is fast.
-    QTimer* volTimer = new QTimer(this);
-    volTimer->setInterval(1200);
-    connect(volTimer, &QTimer::timeout, this, [this]() {
-        int v = getSystemVolumePercent();
-        if (v != m_cachedSystemVolume) {
-            m_cachedSystemVolume = v;
-            if (m_webSocketClient->isConnected() && m_isWatched) {
-                syncRegistration();
-            }
-        }
-    });
-    volTimer->start();
-#endif
 }
 
 void MainWindow::setUIEnabled(bool enabled) {
@@ -3625,8 +3312,9 @@ int MainWindow::getInnerContentGap() const
     return gInnerContentGap;
 }
 
+// Phase 5: Delegate to RemoteClientInfoManager
 QWidget* MainWindow::getRemoteClientInfoContainer() const {
-    return m_canvasViewPage ? m_canvasViewPage->getRemoteClientInfoContainer() : nullptr;
+    return m_remoteClientInfoManager ? m_remoteClientInfoManager->getContainer() : nullptr;
 }
 
 QPushButton* MainWindow::getBackButton() const {

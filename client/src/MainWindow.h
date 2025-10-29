@@ -55,6 +55,8 @@ class SessionManager; // Phase 4.1: manages canvas session lifecycle
 class FileManager; // Phase 4.3: forward declaration for dependency injection
 class ClientListPage; // Phase 1.1: extracted client list page
 class CanvasViewPage; // Phase 1.2: extracted canvas view page
+class RemoteClientInfoManager; // Phase 5: manages remote client info container
+class SystemMonitor; // Phase 3: system monitoring (volume, screens, platform)
 // using QStackedWidget for canvas container switching
 class QFrame; // forward declare for separators in remote info container
 
@@ -221,14 +223,14 @@ private:
     QLabel* m_localNetworkStatusLabel = nullptr; // Network status in local client container
     QPushButton* m_backButton = nullptr;
     
-    // Remote client info container (managed dynamically)
-    QWidget* m_remoteClientInfoContainer = nullptr;
+    // Phase 5: Remote client info manager (extracted)
+    RemoteClientInfoManager* m_remoteClientInfoManager = nullptr;
+    
+    // Phase 3: System monitor (volume, screens, platform info)
+    SystemMonitor* m_systemMonitor = nullptr;
+    
+    // Remote client info container wrapper (managed dynamically)
     QWidget* m_remoteClientInfoWrapper = nullptr;
-    QLabel* m_clientNameLabel = nullptr;
-    QLabel* m_remoteConnectionStatusLabel = nullptr;
-    QLabel* m_volumeIndicator = nullptr;
-    QFrame* m_remoteInfoSep1 = nullptr;
-    QFrame* m_remoteInfoSep2 = nullptr;
     
     // Responsive layout manager
     ResponsiveLayoutManager* m_responsiveLayoutManager = nullptr;
@@ -292,13 +294,8 @@ private:
     // Constants
     static const QString DEFAULT_SERVER_URL;
     
-    // Volume monitoring (to avoid 1s spikes)
-    int m_cachedSystemVolume = -1;        // last known value (0-100), -1 unknown
-#ifdef Q_OS_MACOS
-    QProcess* m_volProc = nullptr;       // reused for async osascript calls
-    QTimer* m_volTimer = nullptr;        // polls in background
-#endif
-
+    // [PHASE 3] Volume monitoring moved to SystemMonitor
+    
     // Upload feature state
     UploadManager* m_uploadManager;
     bool m_uploadSignalsConnected = false;

@@ -53,6 +53,8 @@ set(SOURCES
     src/ui/pages/CanvasViewPage.cpp
     src/managers/ThemeManager.cpp
     src/managers/ConnectionManager.cpp
+    src/managers/RemoteClientInfoManager.cpp
+    src/managers/SystemMonitor.cpp
 )
 
 # Platform-specific sources
@@ -99,6 +101,8 @@ set(HEADERS
     src/ui/pages/CanvasViewPage.h
     src/managers/ThemeManager.h
     src/managers/ConnectionManager.h
+    src/managers/RemoteClientInfoManager.h
+    src/managers/SystemMonitor.h
 )
 
 if(WIN32)
