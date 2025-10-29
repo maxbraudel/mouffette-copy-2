@@ -50,6 +50,7 @@ set(SOURCES
     src/ui/widgets/ClippedContainer.cpp
     src/ui/widgets/ClientListDelegate.cpp
     src/ui/pages/ClientListPage.cpp
+    src/ui/pages/CanvasViewPage.cpp
     src/managers/ThemeManager.cpp
     src/managers/ConnectionManager.cpp
 )
@@ -95,6 +96,7 @@ set(HEADERS
     src/ui/widgets/ClippedContainer.h
     src/ui/widgets/ClientListDelegate.h
     src/ui/pages/ClientListPage.h
+    src/ui/pages/CanvasViewPage.h
     src/managers/ThemeManager.h
     src/managers/ConnectionManager.h
 )

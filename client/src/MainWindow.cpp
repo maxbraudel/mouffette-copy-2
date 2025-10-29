@@ -19,6 +19,7 @@
 #include "ui/widgets/ClippedContainer.h"
 #include "ui/widgets/ClientListDelegate.h"
 #include "ui/pages/ClientListPage.h"
+#include "ui/pages/CanvasViewPage.h"
 #include "managers/ThemeManager.h"
 #include <QMenuBar>
 #include <QHostInfo>
@@ -198,50 +199,32 @@ bool MainWindow::event(QEvent* event) {
     return QMainWindow::event(event);
 }
 
+// [PHASE 1.2] Delegate to CanvasViewPage + handle MainWindow-specific logic
 void MainWindow::setRemoteConnectionStatus(const QString& status, bool propagateLoss) {
-    if (!m_remoteConnectionStatusLabel) return;
-    const QString up = status.toUpper();
-    m_remoteConnectionStatusLabel->setText(up);
+    // Delegate UI updates to CanvasViewPage
+    if (m_canvasViewPage) {
+        m_canvasViewPage->setRemoteConnectionStatus(status, propagateLoss);
+    }
     
+    // Update MainWindow state
+    const QString up = status.toUpper();
     if (up == "CONNECTED") {
         m_remoteClientConnected = true;
-    } else if (up == "DISCONNECTED") {
-        m_remoteClientConnected = false;
-    } else if (up.startsWith("CONNECTING") || up == "ERROR") {
+    } else if (up == "DISCONNECTED" || up.startsWith("CONNECTING") || up == "ERROR") {
         m_remoteClientConnected = false;
     }
-
-    // Apply same styling as main connection status with colored background
-    QString textColor, bgColor;
+    
+    // Stop inline spinner if connected
     if (up == "CONNECTED") {
-        textColor = AppColors::colorToCss(AppColors::gStatusConnectedText);
-        bgColor = AppColors::colorToCss(AppColors::gStatusConnectedBg);
         if (m_inlineSpinner && m_inlineSpinner->isSpinning()) {
             m_inlineSpinner->stop();
             m_inlineSpinner->hide();
         } else if (m_inlineSpinner) {
             m_inlineSpinner->hide();
         }
-    } else if (up == "ERROR" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
-        textColor = AppColors::colorToCss(AppColors::gStatusWarningText);
-        bgColor = AppColors::colorToCss(AppColors::gStatusWarningBg);
-    } else {
-        textColor = AppColors::colorToCss(AppColors::gStatusErrorText);
-        bgColor = AppColors::colorToCss(AppColors::gStatusErrorBg);
     }
     
-    m_remoteConnectionStatusLabel->setStyleSheet(
-        QString("QLabel { "
-        "    color: %1; "
-        "    background-color: %2; "
-        "    border: none; "
-        "    border-radius: 0px; "
-        "    padding: 0px %4px; "
-        "    font-size: %3px; "
-        "    font-weight: bold; "
-        "}").arg(textColor).arg(bgColor).arg(gDynamicBoxFontPx).arg(gRemoteClientContainerPadding)
-    );
-    // If transitioning into a connecting-like state and list is empty, show placeholder
+    // Show client list placeholder when connecting
     if (up == "CONNECTING" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
         if (m_clientListPage) {
             m_clientListPage->ensureClientListPlaceholder();
@@ -291,6 +274,7 @@ MainWindow::MainWindow(QWidget* parent)
       m_mainLayout(nullptr),
       m_stackedWidget(nullptr),
       m_clientListPage(nullptr), // Phase 1.1: ClientListPage
+      m_canvasViewPage(nullptr), // Phase 1.2: CanvasViewPage
       m_connectionLayout(nullptr),
       m_settingsButton(nullptr),
       m_connectToggleButton(nullptr),
@@ -298,22 +282,19 @@ MainWindow::MainWindow(QWidget* parent)
       m_localClientInfoContainer(nullptr),
       m_localClientTitleLabel(nullptr),
       m_localNetworkStatusLabel(nullptr),
-      m_screenViewWidget(nullptr),
-      m_screenViewLayout(nullptr),
-      m_clientNameLabel(nullptr),
-      m_canvasContainer(nullptr),
-      m_canvasStack(nullptr),
-      m_screenCanvas(nullptr),
-      m_volumeIndicator(nullptr),
-      m_loadingSpinner(nullptr),
-      m_uploadButton(nullptr),
       m_backButton(nullptr),
-      m_spinnerOpacity(nullptr),
-      m_spinnerFade(nullptr),
-      m_canvasOpacity(nullptr),
-      m_canvasFade(nullptr),
-      m_volumeOpacity(nullptr),
-      m_volumeFade(nullptr),
+      m_remoteClientInfoContainer(nullptr),
+      m_remoteClientInfoWrapper(nullptr),
+      m_clientNameLabel(nullptr),
+      m_remoteConnectionStatusLabel(nullptr),
+      m_volumeIndicator(nullptr),
+      m_remoteInfoSep1(nullptr),
+      m_remoteInfoSep2(nullptr),
+      m_screenCanvas(nullptr),
+      m_uploadButton(nullptr),
+      m_uploadButtonInOverlay(false),
+      m_remoteOverlayActionsEnabled(false),
+      m_responsiveLayoutManager(new ResponsiveLayoutManager(this)),
       m_cursorTimer(nullptr),
       m_fileMenu(nullptr),
       m_helpMenu(nullptr),
@@ -329,8 +310,7 @@ MainWindow::MainWindow(QWidget* parent)
       m_uploadManager(new UploadManager(m_fileManager, this)),
       m_watchManager(new WatchManager(this)),
       m_fileWatcher(new FileWatcher(this)),
-      m_navigationManager(nullptr),
-      m_responsiveLayoutManager(new ResponsiveLayoutManager(this))
+      m_navigationManager(nullptr)
 {
     setWindowTitle("Mouffette");
 #if defined(Q_OS_WIN)
@@ -861,7 +841,10 @@ MainWindow::MainWindow(QWidget* parent)
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
     // Block space bar from triggering button presses when focus is on stack/canvas container
-    if ((obj == m_stackedWidget || obj == m_canvasStack || obj == m_screenViewWidget) && event->type() == QEvent::KeyPress) {
+    QStackedWidget* canvasStack = m_canvasViewPage ? m_canvasViewPage->getCanvasStack() : nullptr;
+    QWidget* screenViewWidget = m_canvasViewPage;
+    
+    if ((obj == m_stackedWidget || obj == canvasStack || obj == screenViewWidget) && event->type() == QEvent::KeyPress) {
         QKeyEvent* ke = static_cast<QKeyEvent*>(event);
         if (ke->key() == Qt::Key_Space) { event->accept(); return true; }
     }
@@ -872,6 +855,38 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
 void MainWindow::createRemoteClientInfoContainer() {
     if (m_remoteClientInfoContainer) {
         return; // Already created
+    }
+    
+    // Create labels if they don't exist (needed for remote client info)
+    if (!m_clientNameLabel) {
+        m_clientNameLabel = new QLabel();
+        applyTitleText(m_clientNameLabel);
+        m_clientNameLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    }
+    
+    if (!m_remoteConnectionStatusLabel) {
+        m_remoteConnectionStatusLabel = new QLabel("DISCONNECTED");
+        m_remoteConnectionStatusLabel->setStyleSheet(
+            QString("QLabel { "
+            "    color: #E53935; "
+            "    background-color: rgba(244,67,54,0.15); "
+            "    border: none; "
+            "    border-radius: 0px; "
+            "    padding: 0px %2px; "
+            "    font-size: %1px; "
+            "    font-weight: bold; "
+            "}").arg(gDynamicBoxFontPx).arg(gRemoteClientContainerPadding)
+        );
+        m_remoteConnectionStatusLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        m_remoteConnectionStatusLabel->setFixedWidth(120);
+        m_remoteConnectionStatusLabel->setAlignment(Qt::AlignCenter);
+    }
+    
+    if (!m_volumeIndicator) {
+        m_volumeIndicator = new QLabel("🔈 --");
+        m_volumeIndicator->setStyleSheet("QLabel { font-size: 16px; color: palette(text); font-weight: bold; }");
+        m_volumeIndicator->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        m_volumeIndicator->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     }
     
     // Create container widget with dynamic box styling and proper clipping
@@ -1282,11 +1297,16 @@ MainWindow::CanvasSession& MainWindow::ensureCanvasSession(const ClientInfo& cli
     
     // Initialize canvas if needed (UI-specific responsibility)
     if (!session.canvas) {
-        session.canvas = new ScreenCanvas(m_canvasHostStack);
+        QStackedWidget* canvasHostStack = m_canvasViewPage ? m_canvasViewPage->getCanvasHostStack() : nullptr;
+        if (!canvasHostStack) {
+            qWarning() << "Cannot create canvas: CanvasViewPage not initialized";
+            return session;
+        }
+        session.canvas = new ScreenCanvas(canvasHostStack);
         session.canvas->setActiveIdeaId(session.canvasSessionId); // Use canvasSessionId from SessionManager
         session.connectionsInitialized = false;
         configureCanvasSession(session);
-        m_canvasHostStack->addWidget(session.canvas);
+        canvasHostStack->addWidget(session.canvas);
     }
     
     // Update remote target
@@ -1388,11 +1408,12 @@ void MainWindow::switchToCanvasSession(const QString& persistentClientId) {
         m_navigationManager->setActiveCanvas(m_screenCanvas);
     }
 
-    if (m_canvasHostStack) {
-        if (m_canvasHostStack->indexOf(session->canvas) == -1) {
-            m_canvasHostStack->addWidget(session->canvas);
+    QStackedWidget* canvasHostStack = m_canvasViewPage ? m_canvasViewPage->getCanvasHostStack() : nullptr;
+    if (canvasHostStack) {
+        if (canvasHostStack->indexOf(session->canvas) == -1) {
+            canvasHostStack->addWidget(session->canvas);
         }
-        m_canvasHostStack->setCurrentWidget(session->canvas);
+        canvasHostStack->setCurrentWidget(session->canvas);
     }
 
     session->canvas->setFocus(Qt::OtherFocusReason);
@@ -1882,19 +1903,14 @@ void MainWindow::showClientListView() {
 
 // Removed legacy createScreenWidget(): ScreenCanvas draws screens directly now
 
+// [PHASE 1.2] Delegate to CanvasViewPage
 void MainWindow::updateVolumeIndicator() {
-    if (!m_volumeIndicator) return;
     int vol = -1;
     if (!m_selectedClient.getId().isEmpty()) {
         vol = m_selectedClient.getVolumePercent();
     }
-    if (vol < 0) { m_volumeIndicator->setText("🔈 --"); return; }
-    QString icon;
-    if (vol == 0) icon = "🔇"; else if (vol < 34) icon = "🔈"; else if (vol < 67) icon = "🔉"; else icon = "🔊";
-    m_volumeIndicator->setText(QString("%1 %2%" ).arg(icon).arg(vol));
-    // Don't force-show here; presence in layout is managed elsewhere
-    if (m_volumeOpacity) {
-        if (m_volumeOpacity->opacity() < 1.0) m_volumeOpacity->setOpacity(1.0);
+    if (m_canvasViewPage) {
+        m_canvasViewPage->updateVolumeIndicator(vol);
     }
 }
 
@@ -2295,14 +2311,18 @@ void MainWindow::updateStylesheetsForTheme() {
         );
     }
 
-    if (m_canvasContainer) {
-        m_canvasContainer->setStyleSheet(
-            QString("QWidget#CanvasContainer { "
-            "   background-color: %2; "
-            "   border: 1px solid %1; "
-            "   border-radius: 5px; "
-            "}").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)).arg(AppColors::colorSourceToCss(AppColors::gInteractionBackgroundColorSource))
-        );
+    // Phase 1.2: Update canvas container via CanvasViewPage
+    if (m_canvasViewPage) {
+        QWidget* canvasContainer = m_canvasViewPage->getCanvasContainer();
+        if (canvasContainer) {
+            canvasContainer->setStyleSheet(
+                QString("QWidget#CanvasContainer { "
+                "   background-color: %2; "
+                "   border: 1px solid %1; "
+                "   border-radius: 5px; "
+                "}").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)).arg(AppColors::colorSourceToCss(AppColors::gInteractionBackgroundColorSource))
+            );
+        }
     }
     
     // Update remote client info container border
@@ -2515,8 +2535,9 @@ void MainWindow::setupUI() {
     m_clientListPage->ensureClientListPlaceholder();
     m_clientListPage->ensureOngoingScenesPlaceholder();
     
-    // Create screen view page  
-    createScreenViewPage();
+    // Phase 1.2: Create CanvasViewPage
+    m_canvasViewPage = new CanvasViewPage(this);
+    m_stackedWidget->addWidget(m_canvasViewPage);
     
     // Start with client list page
     m_stackedWidget->setCurrentWidget(m_clientListPage);
@@ -2532,19 +2553,19 @@ void MainWindow::setupUI() {
         ScreenNavigationManager::Widgets w;
         w.stack = m_stackedWidget;
         w.clientListPage = m_clientListPage;
-        w.screenViewPage = m_screenViewWidget;
-        w.backButton = m_backButton;
-        w.canvasStack = m_canvasStack;
-        w.loadingSpinner = m_loadingSpinner;
-        w.spinnerOpacity = m_spinnerOpacity;
-        w.spinnerFade = m_spinnerFade;
-        w.canvasOpacity = m_canvasOpacity;
-        w.canvasFade = m_canvasFade;
+        w.screenViewPage = m_canvasViewPage;  // Phase 1.2: Use CanvasViewPage
+        w.backButton = m_canvasViewPage ? m_canvasViewPage->getBackButton() : nullptr;
+        w.canvasStack = m_canvasViewPage ? m_canvasViewPage->getCanvasStack() : nullptr;
+        w.loadingSpinner = m_canvasViewPage ? m_canvasViewPage->getLoadingSpinner() : nullptr;
+        w.spinnerOpacity = m_canvasViewPage ? m_canvasViewPage->getSpinnerOpacity() : nullptr;
+        w.spinnerFade = m_canvasViewPage ? m_canvasViewPage->getSpinnerFade() : nullptr;
+        w.canvasOpacity = m_canvasViewPage ? m_canvasViewPage->getCanvasOpacity() : nullptr;
+        w.canvasFade = m_canvasViewPage ? m_canvasViewPage->getCanvasFade() : nullptr;
         w.inlineSpinner = m_inlineSpinner;
         w.canvasContentEverLoaded = &m_canvasContentEverLoaded;
-        w.volumeOpacity = m_volumeOpacity;
-        w.volumeFade = m_volumeFade;
-    w.screenCanvas = nullptr;
+        w.volumeOpacity = m_canvasViewPage ? m_canvasViewPage->getVolumeOpacity() : nullptr;
+        w.volumeFade = m_canvasViewPage ? m_canvasViewPage->getVolumeFade() : nullptr;
+        w.screenCanvas = nullptr;
         m_navigationManager->setWidgets(w);
         m_navigationManager->setDurations(m_loaderDelayMs, m_loaderFadeDurationMs, m_fadeDurationMs);
         connect(m_navigationManager, &ScreenNavigationManager::requestScreens, this, [this](const QString& id){
@@ -2565,7 +2586,7 @@ void MainWindow::setupUI() {
     connect(m_webSocketClient, &WebSocketClient::cursorPositionReceived, this,
             [this](const QString& targetId, int x, int y) {
                 if (!m_screenCanvas) return;
-                if (m_stackedWidget->currentWidget() != m_screenViewWidget) return;
+                if (m_stackedWidget->currentWidget() != m_canvasViewPage) return;  // Phase 1.2
                 bool matchWatch = (m_watchManager && targetId == m_watchManager->watchedClientId());
                 bool matchSelected = (!m_selectedClient.getId().isEmpty() && targetId == m_selectedClient.getId());
                 if (matchWatch || matchSelected) {
@@ -2588,188 +2609,7 @@ void MainWindow::setupUI() {
 #endif
 }
 
-void MainWindow::createScreenViewPage() {
-    // Screen view page
-    m_screenViewWidget = new QWidget();
-    m_screenViewLayout = new QVBoxLayout(m_screenViewWidget);
-    // Gap between canvas sections
-    m_screenViewLayout->setSpacing(gInnerContentGap);
-    m_screenViewLayout->setContentsMargins(0, 0, 0, 0);
-    
-    // Create labels for remote client info (will be used in top bar container)
-    m_clientNameLabel = new QLabel();
-    applyTitleText(m_clientNameLabel);
-    m_clientNameLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-
-    // Remote connection status (to the right of hostname)
-    m_remoteConnectionStatusLabel = new QLabel("DISCONNECTED");
-    // Initial styling - will be updated by setRemoteConnectionStatus()
-    m_remoteConnectionStatusLabel->setStyleSheet(
-        QString("QLabel { "
-        "    color: #E53935; "
-        "    background-color: rgba(244,67,54,0.15); "
-        "    border: none; "
-        "    border-radius: 0px; "
-        "    padding: 0px %2px; "
-        "    font-size: %1px; "
-        "    font-weight: bold; "
-        "}").arg(gDynamicBoxFontPx).arg(gRemoteClientContainerPadding)
-    );
-    m_remoteConnectionStatusLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    m_remoteConnectionStatusLabel->setFixedWidth(120); // Fixed width for consistency
-    m_remoteConnectionStatusLabel->setAlignment(Qt::AlignCenter); // Center the text
-
-    m_volumeIndicator = new QLabel("🔈 --");
-    m_volumeIndicator->setStyleSheet("QLabel { font-size: 16px; color: palette(text); font-weight: bold; }");
-    m_volumeIndicator->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    m_volumeIndicator->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-
-    // Initialize remote client info container in top bar permanently
-    initializeRemoteClientInfoInTopBar();
-    
-    // Canvas container holds spinner and canvas with a stacked layout
-    m_canvasContainer = new QWidget();
-    m_canvasContainer->setObjectName("CanvasContainer");
-    // Remove minimum height to allow flexible window resizing
-    // Ensure stylesheet background/border is actually painted
-    m_canvasContainer->setAttribute(Qt::WA_StyledBackground, true);
-    // Match the dark background used by the client list container via palette(base)
-    // Canvas container previously had a bordered panel look; remove to emulate design-tool feel
-    m_canvasContainer->setStyleSheet(
-        QString("QWidget#CanvasContainer { "
-        "   background-color: %2; "
-        "   border: 1px solid %1; "
-        "   border-radius: 5px; "
-        "}").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)).arg(AppColors::colorSourceToCss(AppColors::gInteractionBackgroundColorSource))
-    );
-    QVBoxLayout* containerLayout = new QVBoxLayout(m_canvasContainer);
-    // Remove inner padding so content goes right to the border edge
-    containerLayout->setContentsMargins(0,0,0,0);
-    containerLayout->setSpacing(0);
-    m_canvasStack = new QStackedWidget();
-    // Match client list container: base background, no border on inner stack
-    m_canvasStack->setStyleSheet(
-        "QStackedWidget { "
-        "   background-color: transparent; "
-        "   border: none; "
-        "}"
-    );
-    containerLayout->addWidget(m_canvasStack);
-    // Spinner page
-    m_loadingSpinner = new SpinnerWidget();
-    // Initial appearance (easy to tweak):
-    m_loadingSpinner->setRadius(22);        // circle radius in px
-    m_loadingSpinner->setLineWidth(6);      // line width in px
-    m_loadingSpinner->setColor(AppColors::gBrandBlue); // brand blue
-    m_loadingSpinner->setMinimumSize(QSize(48, 48));
-    // Spinner page widget wraps the spinner centered
-    QWidget* spinnerPage = new QWidget();
-    QVBoxLayout* spinnerLayout = new QVBoxLayout(spinnerPage);
-    spinnerLayout->setContentsMargins(0,0,0,0);
-    spinnerLayout->setSpacing(0);
-    spinnerLayout->addStretch();
-    spinnerLayout->addWidget(m_loadingSpinner, 0, Qt::AlignCenter);
-    spinnerLayout->addStretch();
-    // Spinner page opacity effect & animation (fade entire loader area)
-    m_spinnerOpacity = new QGraphicsOpacityEffect(spinnerPage);
-    spinnerPage->setGraphicsEffect(m_spinnerOpacity);
-    m_spinnerOpacity->setOpacity(0.0);
-    m_spinnerFade = new QPropertyAnimation(m_spinnerOpacity, "opacity", this);
-    m_spinnerFade->setDuration(m_loaderFadeDurationMs);
-    m_spinnerFade->setStartValue(0.0);
-    m_spinnerFade->setEndValue(1.0);
-    // spinnerPage already created above
-
-    // Canvas page
-    QWidget* canvasPage = new QWidget();
-    QVBoxLayout* canvasLayout = new QVBoxLayout(canvasPage);
-    canvasLayout->setContentsMargins(0,0,0,0);
-    canvasLayout->setSpacing(0);
-
-    m_canvasHostStack = new QStackedWidget();
-    m_canvasHostStack->setObjectName("CanvasHostStack");
-    m_canvasHostStack->setStyleSheet(
-        "QStackedWidget { "
-        "   background-color: transparent; "
-        "   border: none; "
-        "}"
-    );
-    canvasLayout->addWidget(m_canvasHostStack);
-
-    QWidget* emptyCanvasPlaceholder = new QWidget();
-    m_canvasHostStack->addWidget(emptyCanvasPlaceholder);
-    m_canvasHostStack->setCurrentWidget(emptyCanvasPlaceholder);
-    // Canvas/content opacity effect & animation (apply to the page, not the QGraphicsView viewport to avoid heavy repaints)
-    m_canvasOpacity = new QGraphicsOpacityEffect(canvasPage);
-    canvasPage->setGraphicsEffect(m_canvasOpacity);
-    m_canvasOpacity->setOpacity(0.0);
-    m_canvasFade = new QPropertyAnimation(m_canvasOpacity, "opacity", this);
-    m_canvasFade->setDuration(m_fadeDurationMs);
-    m_canvasFade->setStartValue(0.0);
-    m_canvasFade->setEndValue(1.0);
-
-    // Add pages and container to main layout
-    m_canvasStack->addWidget(spinnerPage); // index 0: spinner
-    m_canvasStack->addWidget(canvasPage);  // index 1: canvas
-    m_canvasStack->setCurrentIndex(1);     // default to canvas page hidden (opacity 0) until data
-    m_screenViewLayout->addWidget(m_canvasContainer, 1);
-    // Clip container and viewport to rounded corners
-    m_canvasContainer->installEventFilter(this);
-
-    // Ensure focus routing is configured even before a canvas is attached
-    m_screenViewWidget->installEventFilter(this);
-    
-    // Connect upload button in media list overlay to upload functionality
-
-    if (m_screenCanvas) {
-        if (QPushButton* overlayUploadBtn = m_screenCanvas->getUploadButton()) {
-            m_uploadButton = overlayUploadBtn; // Use the overlay button as our upload button
-            m_uploadButtonInOverlay = true; // Flag that this button uses overlay styling
-            m_uploadButtonDefaultFont = m_uploadButton->font();
-            connect(m_uploadButton, &QPushButton::clicked, this, &MainWindow::onUploadButtonClicked);
-            // Apply initial style state machine
-            QTimer::singleShot(0, [this]() {
-                emit m_uploadManager->uiStateChanged();
-            });
-        }
-    }
-
-    // When a new media item is added to the canvas, re-evaluate the upload button state immediately
-    if (m_screenCanvas) {
-        connect(m_screenCanvas, &ScreenCanvas::mediaItemAdded, this, [this](ResizableMediaBase*){
-            if (!m_uploadButton) return;
-            // Post to the event loop so the scene and overlay have finished updating before we re-evaluate
-            QTimer::singleShot(0, [this]() {
-                if (m_uploadManager) emit m_uploadManager->uiStateChanged();
-            });
-        });
-    }
-    
-    // Upload button moved to media list overlay - no action bar needed
-    // Ensure canvas container expands to fill available space
-    m_screenViewLayout->setStretch(0, 1); // container expands
-
-    // Volume label opacity effect & animation
-    m_volumeFade = new QPropertyAnimation(m_volumeOpacity, "opacity", this);
-    m_volumeFade->setDuration(m_fadeDurationMs);
-    m_volumeFade->setStartValue(0.0);
-    m_volumeFade->setEndValue(1.0);
-
-    // Loader delay timer removed (handled inside ScreenNavigationManager)
-    
-    // Add to stacked widget
-    m_stackedWidget->addWidget(m_screenViewWidget);
-
-    // Ensure watch session stops if application quits via menu/shortcut
-    connect(qApp, &QCoreApplication::aboutToQuit, this, [this]() {
-        if (!m_activeSessionIdentity.isEmpty()) {
-            if (CanvasSession* activeSession = findCanvasSession(m_activeSessionIdentity)) {
-                unloadUploadsForSession(*activeSession, true);
-            }
-        }
-        if (m_watchManager) m_watchManager->unwatchIfAny();
-    });
-}
+// [PHASE 1.2] Canvas view page creation moved to CanvasViewPage class (~183 lines removed)
 
 void MainWindow::setupMenuBar() {
     // File menu
@@ -2856,7 +2696,7 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
     
     // If we're currently showing the screen view and have a canvas with content,
     // recenter the view to maintain good visibility only before first reveal or when no screens are present
-    if (m_stackedWidget && m_stackedWidget->currentWidget() == m_screenViewWidget && 
+    if (m_stackedWidget && m_stackedWidget->currentWidget() == m_canvasViewPage &&  // Phase 1.2
         m_screenCanvas) {
         const bool hasScreens = !m_selectedClient.getScreens().isEmpty();
         if (!m_canvasRevealedForCurrentClient && hasScreens) {
@@ -3393,13 +3233,18 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
     }
 
     if (!session->canvas) {
-        session->canvas = new ScreenCanvas(m_canvasHostStack);
+        QStackedWidget* canvasHostStack = m_canvasViewPage ? m_canvasViewPage->getCanvasHostStack() : nullptr;
+        if (!canvasHostStack) {
+            qWarning() << "Cannot create canvas: CanvasViewPage not initialized";
+            return;
+        }
+        session->canvas = new ScreenCanvas(canvasHostStack);
         session->canvas->setWebSocketClient(m_webSocketClient);
         session->canvas->setUploadManager(m_uploadManager);
         session->canvas->setFileManager(m_fileManager);
         session->connectionsInitialized = false;
-        if (m_canvasHostStack && m_canvasHostStack->indexOf(session->canvas) == -1) {
-            m_canvasHostStack->addWidget(session->canvas);
+        if (canvasHostStack->indexOf(session->canvas) == -1) {
+            canvasHostStack->addWidget(session->canvas);
         }
         configureCanvasSession(*session);
     }
@@ -3426,8 +3271,11 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
         if (!m_canvasRevealedForCurrentClient && hasScreens) {
             if (m_navigationManager) {
                 m_navigationManager->revealCanvas();
-            } else if (m_canvasStack) {
-                m_canvasStack->setCurrentIndex(1);
+            } else if (m_canvasViewPage) {  // Phase 1.2
+                QStackedWidget* canvasStack = m_canvasViewPage->getCanvasStack();
+                if (canvasStack) {
+                    canvasStack->setCurrentIndex(1);
+                }
             }
 
             session->canvas->requestDeferredInitialRecenter(53);
@@ -3775,6 +3623,14 @@ void MainWindow::updateIndividualProgressFromServer(int globalPercent, int files
 int MainWindow::getInnerContentGap() const
 {
     return gInnerContentGap;
+}
+
+QWidget* MainWindow::getRemoteClientInfoContainer() const {
+    return m_canvasViewPage ? m_canvasViewPage->getRemoteClientInfoContainer() : nullptr;
+}
+
+QPushButton* MainWindow::getBackButton() const {
+    return m_canvasViewPage ? m_canvasViewPage->getBackButton() : nullptr;
 }
 
 bool MainWindow::hasUnuploadedFilesForTarget(const QString& targetClientId) const {

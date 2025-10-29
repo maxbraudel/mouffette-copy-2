@@ -54,6 +54,7 @@ class FileWatcher; // monitors source files and removes media when files are del
 class SessionManager; // Phase 4.1: manages canvas session lifecycle
 class FileManager; // Phase 4.3: forward declaration for dependency injection
 class ClientListPage; // Phase 1.1: extracted client list page
+class CanvasViewPage; // Phase 1.2: extracted canvas view page
 // using QStackedWidget for canvas container switching
 class QFrame; // forward declare for separators in remote info container
 
@@ -68,14 +69,14 @@ public:
     ~MainWindow();
     
     // Accessor methods for ResponsiveLayoutManager
-    QWidget* getRemoteClientInfoContainer() const { return m_remoteClientInfoContainer; }
+    QWidget* getRemoteClientInfoContainer() const;
     QWidget* getLocalClientInfoContainer() const { return m_localClientInfoContainer; }
     QHBoxLayout* getConnectionLayout() const { return m_connectionLayout; }
     QVBoxLayout* getMainLayout() const { return m_mainLayout; }
     QStackedWidget* getStackedWidget() const { return m_stackedWidget; }
-    QWidget* getScreenViewWidget() const { return m_screenViewWidget; }
+    CanvasViewPage* getCanvasViewPage() const { return m_canvasViewPage; }
     ClientListPage* getClientListPage() const { return m_clientListPage; }
-    QPushButton* getBackButton() const { return m_backButton; }
+    QPushButton* getBackButton() const;
     QLabel* getConnectionStatusLabel() const { return m_connectionStatusLabel; }
     QPushButton* getConnectToggleButton() const { return m_connectToggleButton; }
     QPushButton* getSettingsButton() const { return m_settingsButton; }
@@ -204,60 +205,59 @@ private:
     // Phase 1.1: Client list page (extracted)
     ClientListPage* m_clientListPage;
     
+    // Phase 1.2: Canvas view page (extracted)
+    CanvasViewPage* m_canvasViewPage;
+    
     // Connection section
     QHBoxLayout* m_connectionLayout;
     QPushButton* m_settingsButton;
     QPushButton* m_connectToggleButton;
     QLabel* m_connectionStatusLabel;
     
-    // Screen view section
-    QWidget* m_screenViewWidget;
-    QVBoxLayout* m_screenViewLayout;
-    QLabel* m_clientNameLabel;
-    QLabel* m_remoteConnectionStatusLabel;
-    // Top bar contextual title (e.g., "Connected Clients" on client list page)
+    // Top bar components (managed by ResponsiveLayoutManager)
     QLabel* m_pageTitleLabel = nullptr;
-    QWidget* m_remoteClientInfoContainer = nullptr; // Container for hostname, status, volume
-    QWidget* m_remoteClientInfoWrapper = nullptr;   // Wrapper holding container and inline spinner
-    QFrame* m_remoteInfoSep2 = nullptr; // Trailing separator before volume indicator
-    QFrame* m_remoteInfoSep1 = nullptr; // Leading separator before remote status
     QWidget* m_localClientInfoContainer = nullptr; // Container for "You" and network status
     QLabel* m_localClientTitleLabel = nullptr; // "You" label in local client container
     QLabel* m_localNetworkStatusLabel = nullptr; // Network status in local client container
-    // Canvas container keeps border visible; inside we switch between spinner and canvas
-    QWidget* m_canvasContainer;
-    QStackedWidget* m_canvasStack;
-    QStackedWidget* m_canvasHostStack = nullptr;
-    ScreenCanvas* m_screenCanvas;
-    QLabel* m_volumeIndicator;
-    SpinnerWidget* m_loadingSpinner;
-    QPushButton* m_uploadButton;
-    bool m_uploadButtonInOverlay = false; // Track if upload button is in overlay (uses custom styling)
-    QPushButton* m_backButton;
-    QFont m_uploadButtonDefaultFont;
-    bool m_remoteOverlayActionsEnabled = false;
-    // Loader/content animations
-    int m_loaderDelayMs = 1000;       // show spinner after this delay
-    int m_loaderFadeDurationMs = 500; // fade-in duration for spinner (loader)
-    int m_fadeDurationMs = 50;        // fade-in duration for canvas and indicators
-    QGraphicsOpacityEffect* m_spinnerOpacity = nullptr;
-    QPropertyAnimation* m_spinnerFade = nullptr;
-    QGraphicsOpacityEffect* m_canvasOpacity = nullptr;
-    QPropertyAnimation* m_canvasFade = nullptr;
-    QGraphicsOpacityEffect* m_volumeOpacity = nullptr;
-    QPropertyAnimation* m_volumeFade = nullptr;
-    // Cursor monitoring (only when this client is watched by someone else)
-    QTimer* m_cursorTimer = nullptr;
-    int m_cursorUpdateIntervalMs = 33; // ~30 Hz by default
+    QPushButton* m_backButton = nullptr;
+    
+    // Remote client info container (managed dynamically)
+    QWidget* m_remoteClientInfoContainer = nullptr;
+    QWidget* m_remoteClientInfoWrapper = nullptr;
+    QLabel* m_clientNameLabel = nullptr;
+    QLabel* m_remoteConnectionStatusLabel = nullptr;
+    QLabel* m_volumeIndicator = nullptr;
+    QFrame* m_remoteInfoSep1 = nullptr;
+    QFrame* m_remoteInfoSep2 = nullptr;
     
     // Responsive layout manager
     ResponsiveLayoutManager* m_responsiveLayoutManager = nullptr;
+    
+    // Cursor monitoring (only when this client is watched by someone else)
+    QTimer* m_cursorTimer = nullptr;
+    int m_cursorUpdateIntervalMs = 33; // ~30 Hz by default
     
     // Phase 4.3: FileManager injected (not singleton)
     FileManager* m_fileManager = nullptr;
     
     // Phase 4.1: Session manager (COMPLETED - replaced m_canvasSessions)
     SessionManager* m_sessionManager = nullptr;
+    
+    // Active canvas pointer (dynamically points to current session's canvas)
+    ScreenCanvas* m_screenCanvas = nullptr;
+    
+    // Upload button state (dynamically points to current session's upload button)
+    QPushButton* m_uploadButton = nullptr;
+    bool m_uploadButtonInOverlay = false;
+    QFont m_uploadButtonDefaultFont;
+    
+    // Remote overlay actions state
+    bool m_remoteOverlayActionsEnabled = false;
+    
+    // Animation durations (used by ScreenNavigationManager)
+    int m_loaderDelayMs = 500;
+    int m_loaderFadeDurationMs = 150;
+    int m_fadeDurationMs = 200;
 
     // Menu and actions
     QMenu* m_fileMenu;

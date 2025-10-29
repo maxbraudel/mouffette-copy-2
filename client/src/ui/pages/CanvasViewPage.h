@@ -121,6 +121,11 @@ public:
     QPropertyAnimation* getCanvasFade() const { return m_canvasFade; }
 
     /**
+     * @brief Get the volume opacity effect
+     */
+    QGraphicsOpacityEffect* getVolumeOpacity() const { return m_volumeOpacity; }
+
+    /**
      * @brief Get the volume fade animation
      */
     QPropertyAnimation* getVolumeFade() const { return m_volumeFade; }

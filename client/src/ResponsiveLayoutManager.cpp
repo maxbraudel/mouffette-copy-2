@@ -1,6 +1,7 @@
 #include "ResponsiveLayoutManager.h"
 #include "MainWindow.h"
 #include "ui/pages/ClientListPage.h"
+#include "ui/pages/CanvasViewPage.h"  // Phase 1.2: Need complete type for conversion
 #include <QLayoutItem>
 
 ResponsiveLayoutManager::ResponsiveLayoutManager(MainWindow* parent)
@@ -200,7 +201,8 @@ QStackedWidget* ResponsiveLayoutManager::getStackedWidget() const
 
 QWidget* ResponsiveLayoutManager::getScreenViewWidget() const
 {
-    return m_mainWindow ? m_mainWindow->getScreenViewWidget() : nullptr;
+    // Phase 1.2: getScreenViewWidget() now returns CanvasViewPage
+    return m_mainWindow ? m_mainWindow->getCanvasViewPage() : nullptr;
 }
 
 QWidget* ResponsiveLayoutManager::getClientListPage() const
