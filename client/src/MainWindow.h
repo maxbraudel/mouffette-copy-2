@@ -67,6 +67,7 @@ class UploadEventHandler; // Phase 7.4: manages upload events and file transfers
 class CanvasSessionController; // Phase 8: manages canvas session lifecycle
 class WindowEventHandler; // Phase 9: manages window lifecycle events
 class TimerController; // Phase 10: manages timer setup and callbacks
+class UploadButtonStyleManager; // Phase 11: manages upload button styling
 // using QStackedWidget for canvas container switching
 class QFrame; // forward declare for separators in remote info container
 
@@ -184,6 +185,13 @@ public:
     void setUploadButtonDefaultFont(const QFont& font) { m_uploadButtonDefaultFont = font; }
     bool getAutoUploadImportedMedia() const { return m_autoUploadImportedMedia; }
     QString createIdeaId() const;
+    
+    // [Phase 11] Accessor methods for UploadButtonStyleManager
+    bool isRemoteOverlayActionsEnabled() const { return m_remoteOverlayActionsEnabled; }
+    void setRemoteOverlayActionsEnabled(bool enabled) { m_remoteOverlayActionsEnabled = enabled; }
+    bool hasUnuploadedFilesForTarget(const QString& targetClientId) const;
+    
+    // Deprecated - now handled by UploadButtonStyleManager
     void refreshOverlayActionsState(bool remoteConnected, bool propagateLoss = true);
     
     // [Phase 9] Accessor methods for WindowEventHandler
@@ -239,9 +247,6 @@ private slots:
     void onMenuAboutRequested();
     
     void showSettingsDialog();
-    
-    // Helper methods
-    bool hasUnuploadedFilesForTarget(const QString& targetClientId) const;
 
 protected:
     bool event(QEvent* event) override;
@@ -395,6 +400,9 @@ private:
     
     // [Phase 10] Timer controller
     TimerController* m_timerController = nullptr;
+    
+    // [Phase 11] Upload button style manager
+    UploadButtonStyleManager* m_uploadButtonStyleManager = nullptr;
     
     int m_lastConnectedClientCount = 0;
     QString m_activeSessionIdentity;

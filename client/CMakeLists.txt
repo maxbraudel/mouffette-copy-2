@@ -58,6 +58,7 @@ set(SOURCES
     src/managers/TopBarManager.cpp
     src/managers/SystemTrayManager.cpp
     src/managers/MenuBarManager.cpp
+    src/managers/UploadButtonStyleManager.cpp
     src/handlers/WebSocketMessageHandler.cpp
     src/handlers/ScreenEventHandler.cpp
     src/handlers/ClientListEventHandler.cpp
@@ -116,6 +117,7 @@ set(HEADERS
     src/managers/TopBarManager.h
     src/managers/SystemTrayManager.h
     src/managers/MenuBarManager.h
+    src/managers/UploadButtonStyleManager.h
     src/handlers/WebSocketMessageHandler.h
     src/handlers/ScreenEventHandler.h
     src/handlers/ClientListEventHandler.h

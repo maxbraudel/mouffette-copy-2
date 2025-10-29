@@ -33,6 +33,7 @@
 #include "controllers/CanvasSessionController.h"
 #include "handlers/WindowEventHandler.h"
 #include "controllers/TimerController.h"
+#include "managers/UploadButtonStyleManager.h"
 #include <QMenuBar>
 #include <QHostInfo>
 #include "ClientInfo.h"
@@ -283,34 +284,9 @@ void MainWindow::setRemoteConnectionStatus(const QString& status, bool propagate
 }
 
 void MainWindow::refreshOverlayActionsState(bool remoteConnected, bool propagateLoss) {
-    m_remoteOverlayActionsEnabled = remoteConnected;
-
-    if (m_screenCanvas) {
-        if (!remoteConnected && propagateLoss) {
-            m_screenCanvas->handleRemoteConnectionLost();
-        }
-        m_screenCanvas->setOverlayActionsEnabled(remoteConnected);
-    }
-
-    if (!m_uploadButton) return;
-
-    if (m_uploadButtonInOverlay) {
-        if (!remoteConnected) {
-            m_uploadButton->setEnabled(false);
-            m_uploadButton->setCheckable(false);
-            m_uploadButton->setChecked(false);
-            m_uploadButton->setStyleSheet(ScreenCanvas::overlayDisabledButtonStyle());
-            AppColors::applyCanvasButtonFont(m_uploadButtonDefaultFont);
-            m_uploadButton->setFont(m_uploadButtonDefaultFont);
-            m_uploadButton->setFixedHeight(40);
-            m_uploadButton->setMaximumWidth(uploadButtonMaxWidth());
-        } else if (m_uploadManager) {
-            QTimer::singleShot(0, this, [this]() {
-                if (m_uploadManager) emit m_uploadManager->uiStateChanged();
-            });
-        }
-    } else {
-        m_uploadButton->setEnabled(remoteConnected);
+    // [PHASE 11] Delegate to UploadButtonStyleManager
+    if (m_uploadButtonStyleManager) {
+        m_uploadButtonStyleManager->refreshOverlayActionsState(remoteConnected, propagateLoss);
     }
 }
 
@@ -348,6 +324,7 @@ MainWindow::MainWindow(QWidget* parent)
       m_canvasSessionController(new CanvasSessionController(this, this)), // Phase 8
       m_windowEventHandler(new WindowEventHandler(this, this)), // Phase 9
       m_timerController(new TimerController(this, this)), // Phase 10
+      m_uploadButtonStyleManager(new UploadButtonStyleManager(this, this)), // Phase 11
       m_statusUpdateTimer(new QTimer(this)),
       m_displaySyncTimer(new QTimer(this)),
       m_reconnectTimer(new QTimer(this)),
@@ -620,275 +597,31 @@ MainWindow::MainWindow(QWidget* parent)
         });
     });
 
-    // UI refresh when upload state changes
-    auto applyUploadButtonStyle = [this]() {
+    // [PHASE 11] UI refresh when upload state changes - delegate to UploadButtonStyleManager
+    connect(m_uploadManager, &UploadManager::uiStateChanged, this, [this]() {
+        if (m_uploadButtonStyleManager && m_uploadButton) {
+            m_uploadButtonStyleManager->applyUploadButtonStyle(m_uploadButton);
+        }
+    });
+    connect(m_uploadManager, &UploadManager::uploadProgress, this, [this](int percent, int filesCompleted, int totalFiles){
         if (!m_uploadButton) return;
-        
-        // Recalculate stored default font so runtime changes to typography propagate.
-        AppColors::applyCanvasButtonFont(m_uploadButtonDefaultFont);
-        const QString canvasFontCss = AppColors::canvasButtonFontCss();
-        
-    // If button is in overlay, use custom overlay styling
-        if (m_uploadButtonInOverlay) {
-            if (!m_remoteOverlayActionsEnabled) {
-                m_uploadButton->setEnabled(false);
-                m_uploadButton->setCheckable(false);
-                m_uploadButton->setChecked(false);
-                m_uploadButton->setStyleSheet(ScreenCanvas::overlayDisabledButtonStyle());
-                m_uploadButton->setFont(m_uploadButtonDefaultFont);
-                m_uploadButton->setFixedHeight(40);
-                m_uploadButton->setMaximumWidth(uploadButtonMaxWidth());
-                return;
-            }
-            const QString overlayIdleStyle = QString(
-                "QPushButton { "
-                "    padding: 0px 20px; "
-                "    %1 "
-                "    color: %2; "
-                "    background: transparent; "
-                "    border: none; "
-                "    border-radius: 0px; "
-                "    text-align: center; "
-                "} "
-                "QPushButton:hover { "
-                "    color: white; "
-                "    background: rgba(255,255,255,0.05); "
-                "} "
-                "QPushButton:pressed { "
-                "    color: white; "
-                "    background: rgba(255,255,255,0.1); "
-                "}"
-            ).arg(canvasFontCss, AppColors::colorToCss(AppColors::gOverlayTextColor));
-            const QString overlayUploadingStyle = QString(
-                "QPushButton { "
-                "    padding: 0px 20px; "
-                "    %1 "
-                "    color: %2; "
-                "    background: %3; "
-                "    border: none; "
-                "    border-radius: 0px; "
-                "    text-align: center; "
-                "} "
-                "QPushButton:hover { "
-                "    color: %2; "
-                "    background: %4; "
-                "} "
-                "QPushButton:pressed { "
-                "    color: %2; "
-                "    background: %5; "
-                "}"
-            ).arg(canvasFontCss,
-                  AppColors::gBrandBlue.name(),
-                  AppColors::colorToCss(AppColors::gButtonPrimaryBg),
-                  AppColors::colorToCss(AppColors::gButtonPrimaryHover),
-                  AppColors::colorToCss(AppColors::gButtonPrimaryPressed));
-            const QString overlayUnloadStyle = QString(
-                "QPushButton { "
-                "    padding: 0px 20px; "
-                "    %1 "
-                "    color: %2; "
-                "    background: %3; "
-                "    border: none; "
-                "    border-radius: 0px; "
-                "    text-align: center; "
-                "} "
-                "QPushButton:hover { "
-                "    color: %2; "
-                "    background: rgba(76, 175, 80, 56); "
-                "} "
-                "QPushButton:pressed { "
-                "    color: %2; "
-                "    background: rgba(76, 175, 80, 77); "
-                "}"
-            ).arg(canvasFontCss,
-                  AppColors::colorToCss(AppColors::gMediaUploadedColor),
-                  AppColors::colorToCss(AppColors::gStatusConnectedBg));
-            
-            const QString target = m_uploadManager->targetClientId();
-            const CanvasSession* targetSession = findCanvasSessionByServerClientId(target);
-            const bool sessionHasRemote = targetSession && targetSession->upload.remoteFilesPresent;
-            const bool managerHasActiveForTarget = m_uploadManager->hasActiveUpload() &&
-                                                   m_uploadManager->activeUploadTargetClientId() == target;
-            const bool remoteActive = sessionHasRemote || managerHasActiveForTarget;
-            
-            // Check if remote scene is launched on the canvas that owns this upload button
-            bool remoteSceneLaunched = false;
-            for (CanvasSession* session : m_sessionManager->getAllSessions()) {
-                if (session->uploadButton == m_uploadButton && session->canvas) {
-                    remoteSceneLaunched = session->canvas->isRemoteSceneLaunched();
-                    break;
-                }
-            }
-
-            if (m_uploadManager->isUploading()) {
-                if (m_uploadManager->isCancelling()) {
-                    m_uploadButton->setText("Cancelling…");
-                    m_uploadButton->setEnabled(false);
-                    m_uploadButton->setFont(m_uploadButtonDefaultFont);
-                } else {
-                    if (m_uploadButton->text() == "Upload") {
-                        m_uploadButton->setText("Preparing");
-                    }
-                    m_uploadButton->setEnabled(true);
-                    // Switch to monospace font for stable width while showing progress
-#ifdef Q_OS_MACOS
-                    QFont mono("Menlo");
-#else
-                    QFont mono("Courier New");
-#endif
-                    AppColors::applyCanvasButtonFont(mono);
-                    m_uploadButton->setFont(mono);
-                }
-                m_uploadButton->setStyleSheet(overlayUploadingStyle);
-            } else if (m_uploadManager->isFinalizing()) {
-                m_uploadButton->setText("Finalizing…");
-                m_uploadButton->setEnabled(false);
-                m_uploadButton->setStyleSheet(overlayUploadingStyle);
-                m_uploadButton->setFont(m_uploadButtonDefaultFont);
-            } else if (remoteActive) {
-                // If there are newly added items not yet uploaded to the target, switch back to Upload
-                const bool hasUnuploaded = hasUnuploadedFilesForTarget(target);
-                // If target is unknown for any reason, default to offering Upload rather than Unload
-                if (target.isEmpty() || hasUnuploaded) {
-                    m_uploadButton->setText("Upload");
-                    m_uploadButton->setEnabled(!remoteSceneLaunched); // Disable if remote scene is active
-                    m_uploadButton->setStyleSheet(remoteSceneLaunched ? ScreenCanvas::overlayDisabledButtonStyle() : overlayIdleStyle);
-                    m_uploadButton->setFont(m_uploadButtonDefaultFont);
-                } else {
-                    m_uploadButton->setText("Unload");
-                    m_uploadButton->setEnabled(!remoteSceneLaunched); // Disable if remote scene is active
-                    m_uploadButton->setStyleSheet(remoteSceneLaunched ? ScreenCanvas::overlayDisabledButtonStyle() : overlayUnloadStyle);
-                    m_uploadButton->setFont(m_uploadButtonDefaultFont);
-                }
-            } else {
-                m_uploadButton->setText("Upload");
-                m_uploadButton->setEnabled(!remoteSceneLaunched); // Disable if remote scene is active
-                m_uploadButton->setStyleSheet(remoteSceneLaunched ? ScreenCanvas::overlayDisabledButtonStyle() : overlayIdleStyle);
-                m_uploadButton->setFont(m_uploadButtonDefaultFont);
-            }
-            m_uploadButton->setFixedHeight(40);
-            m_uploadButton->setMaximumWidth(uploadButtonMaxWidth());
-            return;
+        if (m_uploadButtonStyleManager) {
+            m_uploadButtonStyleManager->updateUploadButtonProgress(m_uploadButton, percent, filesCompleted, totalFiles);
         }
-        
-        if (!m_remoteOverlayActionsEnabled) {
-            m_uploadButton->setEnabled(false);
-            m_uploadButton->setCheckable(false);
-            m_uploadButton->setChecked(false);
-            return;
-        }
-
-        // Base style strings using gDynamicBox configuration for regular buttons
-        const QString greyStyle = QString(
-            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; background-color: %4; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
-            "QPushButton:checked { background-color: %5; }"
-        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx).arg(AppColors::colorToCss(AppColors::gButtonGreyBg)).arg(AppColors::colorToCss(AppColors::gButtonGreyPressed));
-        const QString blueStyle = QString(
-            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; background-color: %4; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
-            "QPushButton:checked { background-color: %5; }"
-        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx).arg(AppColors::colorToCss(AppColors::gButtonBlueBg)).arg(AppColors::colorToCss(AppColors::gButtonBluePressed));
-        const QString greenStyle = QString(
-            "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; background-color: %4; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
-            "QPushButton:checked { background-color: %5; }"
-        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx).arg(AppColors::colorToCss(AppColors::gButtonGreenBg)).arg(AppColors::colorToCss(AppColors::gButtonGreenPressed));
-
-    const QString target = m_uploadManager->targetClientId();
-    const CanvasSession* targetSession = findCanvasSessionByServerClientId(target);
-    const bool sessionHasRemote = targetSession && targetSession->upload.remoteFilesPresent;
-    const bool managerHasActiveForTarget = m_uploadManager->hasActiveUpload() &&
-                           m_uploadManager->activeUploadTargetClientId() == target;
-    const bool remoteActive = sessionHasRemote || managerHasActiveForTarget;
-
-        if (m_uploadManager->isUploading()) {
-            // Upload in progress (preparing or actively streaming): show preparing or cancelling state handled elsewhere
-            if (m_uploadManager->isCancelling()) {
-                m_uploadButton->setText("Cancelling…");
-                m_uploadButton->setEnabled(false);
-            } else {
-                // Initial immediate state after click before first progress message
-                if (m_uploadButton->text() == "Upload to Client") {
-                    m_uploadButton->setText("Preparing download");
-                }
-                m_uploadButton->setEnabled(true);
-            }
-            m_uploadButton->setCheckable(true);
-            m_uploadButton->setChecked(true);
-            m_uploadButton->setStyleSheet(blueStyle);
-            m_uploadButton->setFixedHeight(gDynamicBoxHeight);
-            m_uploadButton->setMaximumWidth(uploadButtonMaxWidth());
-            // Monospace font for stability
-#ifdef Q_OS_MACOS
-            QFont mono("Menlo");
-#else
-            QFont mono("Courier New");
-#endif
-            AppColors::applyCanvasButtonFont(mono);
-            m_uploadButton->setFont(mono);
-        } else if (m_uploadManager->isFinalizing()) {
-            // Waiting for server to ack upload_finished
-            m_uploadButton->setCheckable(true);
-            m_uploadButton->setChecked(true);
-            m_uploadButton->setEnabled(false);
-            m_uploadButton->setText("Finalizing…");
-            m_uploadButton->setStyleSheet(blueStyle);
-            m_uploadButton->setFixedHeight(gDynamicBoxHeight);
-            m_uploadButton->setMaximumWidth(uploadButtonMaxWidth());
-            m_uploadButton->setFont(m_uploadButtonDefaultFont);
-        } else if (remoteActive) {
-            // If there are new unuploaded files, return to Upload state; otherwise offer unload
-            // If target is unknown for any reason, default to offering Upload rather than Unload
-            if (target.isEmpty() || hasUnuploadedFilesForTarget(target)) {
-                m_uploadButton->setCheckable(false);
-                m_uploadButton->setChecked(false);
-                m_uploadButton->setEnabled(true);
-                m_uploadButton->setText("Upload to Client");
-                m_uploadButton->setStyleSheet(greyStyle);
-                m_uploadButton->setFixedHeight(gDynamicBoxHeight);
-                m_uploadButton->setMaximumWidth(uploadButtonMaxWidth());
-                m_uploadButton->setFont(m_uploadButtonDefaultFont);
-            } else {
-                // Uploaded & resident on target: allow unload
-                m_uploadButton->setCheckable(true);
-                m_uploadButton->setChecked(true);
-                m_uploadButton->setEnabled(true);
-                m_uploadButton->setText("Remove all files");
-                m_uploadButton->setStyleSheet(greenStyle);
-                m_uploadButton->setFixedHeight(gDynamicBoxHeight);
-                m_uploadButton->setMaximumWidth(uploadButtonMaxWidth());
-                m_uploadButton->setFont(m_uploadButtonDefaultFont);
-            }
-        } else {
-            // Idle state
-            m_uploadButton->setCheckable(false);
-            m_uploadButton->setChecked(false);
-            m_uploadButton->setEnabled(true);
-            m_uploadButton->setText("Upload to Client");
-            m_uploadButton->setStyleSheet(greyStyle);
-            m_uploadButton->setFixedHeight(gDynamicBoxHeight);
-            m_uploadButton->setMaximumWidth(uploadButtonMaxWidth());
-            m_uploadButton->setFont(m_uploadButtonDefaultFont);
-        }
-    };
-    connect(m_uploadManager, &UploadManager::uiStateChanged, this, applyUploadButtonStyle);
-    connect(m_uploadManager, &UploadManager::uploadProgress, this, [this, applyUploadButtonStyle](int percent, int filesCompleted, int totalFiles){
-        if (!m_uploadButton) return;
-        if ((m_uploadManager->isUploading() || m_uploadManager->isFinalizing()) && !m_uploadManager->isCancelling()) {
-            if (m_uploadManager->isFinalizing()) {
-                m_uploadButton->setText("Finalizing…");
-            } else {
-            m_uploadButton->setText(QString("Uploading (%1/%2) %3%")
-                                    .arg(filesCompleted)
-                                    .arg(totalFiles)
-                                    .arg(percent));
-            }
-        }
-        applyUploadButtonStyle();
         
         // Update individual media progress based on server-acknowledged data
         updateIndividualProgressFromServer(percent, filesCompleted, totalFiles);
     });
-    connect(m_uploadManager, &UploadManager::uploadFinished, this, [this, applyUploadButtonStyle](){ applyUploadButtonStyle(); });
-    connect(m_uploadManager, &UploadManager::allFilesRemoved, this, [this, applyUploadButtonStyle](){ applyUploadButtonStyle(); });
+    connect(m_uploadManager, &UploadManager::uploadFinished, this, [this]() {
+        if (m_uploadButtonStyleManager && m_uploadButton) {
+            m_uploadButtonStyleManager->applyUploadButtonStyle(m_uploadButton);
+        }
+    });
+    connect(m_uploadManager, &UploadManager::allFilesRemoved, this, [this]() {
+        if (m_uploadButtonStyleManager && m_uploadButton) {
+            m_uploadButtonStyleManager->applyUploadButtonStyle(m_uploadButton);
+        }
+    });
 
     // [Phase 10] Setup timers via TimerController
     m_timerController->setupTimers();
