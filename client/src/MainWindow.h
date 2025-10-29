@@ -60,6 +60,8 @@ class SystemMonitor; // Phase 3: system monitoring (volume, screens, platform)
 class TopBarManager; // Phase 6.1: manages top bar UI (local client info)
 class SystemTrayManager; // Phase 6.2: manages system tray icon
 class MenuBarManager; // Phase 6.3: manages menu bar (File, Help menus)
+class WebSocketMessageHandler; // Phase 7.1: manages WebSocket message routing
+class ScreenEventHandler; // Phase 7.2: manages screen events and registration
 // using QStackedWidget for canvas container switching
 class QFrame; // forward declare for separators in remote info container
 
@@ -86,6 +88,58 @@ public:
     QPushButton* getConnectToggleButton() const { return m_connectToggleButton; }
     QPushButton* getSettingsButton() const { return m_settingsButton; }
     int getInnerContentGap() const;
+    
+    // [Phase 7.1] Accessor methods for WebSocketMessageHandler
+    ScreenNavigationManager* getNavigationManager() const { return m_navigationManager; }
+    WebSocketClient* getWebSocketClient() const { return m_webSocketClient; }
+    WatchManager* getWatchManager() const { return m_watchManager; }
+    UploadManager* getUploadManager() const { return m_uploadManager; }
+    const ClientInfo& getSelectedClient() const { return m_selectedClient; }
+    bool isUserDisconnected() const { return m_userDisconnected; }
+    
+    // [Phase 7.1] State management for WebSocketMessageHandler
+    void resetReconnectState();
+    void setCanvasRevealedForCurrentClient(bool revealed) { m_canvasRevealedForCurrentClient = revealed; }
+    void setPreserveViewportOnReconnect(bool preserve) { m_preserveViewportOnReconnect = preserve; }
+    void resetAllSessionUploadStates();
+    void syncCanvasSessionFromServer(const QString& canvasSessionId, const QSet<QString>& fileIds);
+    
+    // [Phase 7.1] UI methods for WebSocketMessageHandler (made public)
+    void setUIEnabled(bool enabled);
+    void setLocalNetworkStatus(const QString& status);
+    void syncRegistration();
+    void removeVolumeIndicatorFromLayout();
+    void addRemoteStatusToLayout();
+    void setRemoteConnectionStatus(const QString& status, bool propagateLoss = true);
+    void scheduleReconnect();
+    
+    // [Phase 7.2] Accessor methods for ScreenEventHandler
+    FileManager* getFileManager() const { return m_fileManager; }
+    RemoteClientInfoManager* getRemoteClientInfoManager() const { return m_remoteClientInfoManager; }
+    QString getActiveSessionIdentity() const { return m_activeSessionIdentity; }
+    bool isWatched() const { return m_isWatched; }
+    bool isCanvasRevealedForCurrentClient() const { return m_canvasRevealedForCurrentClient; }
+    bool shouldPreserveViewportOnReconnect() const { return m_preserveViewportOnReconnect; }
+    QList<ScreenInfo> getLocalScreenInfo();
+    int getSystemVolumePercent();
+    QString getMachineName();
+    QString getPlatformName();
+    
+    // [Phase 7.2] State management for ScreenEventHandler
+    void setActiveCanvas(ScreenCanvas* canvas) { m_screenCanvas = canvas; }
+    void setSelectedClient(const ClientInfo& client) { m_selectedClient = client; }
+    void setCanvasContentEverLoaded(bool loaded) { m_canvasContentEverLoaded = loaded; }
+    void stopInlineSpinner();
+    void addVolumeIndicatorToLayout();
+    void updateVolumeIndicator();
+    void updateClientNameDisplay(const ClientInfo& clientInfo);
+    
+    // [Phase 7.2] Session management for ScreenEventHandler
+    using CanvasSession = SessionManager::CanvasSession;
+    CanvasSession& ensureCanvasSession(const ClientInfo& client);
+    CanvasSession* findCanvasSession(const QString& persistentClientId);
+    CanvasSession* findCanvasSessionByServerClientId(const QString& serverClientId);
+    void configureCanvasSession(CanvasSession& session);
 
 public slots:
     void handleApplicationStateChanged(Qt::ApplicationState state);
@@ -135,8 +189,7 @@ protected:
     void hideEvent(QHideEvent* event) override;
 
 private:
-    // Phase 4.1: Use SessionManager's CanvasSession structure
-    using CanvasSession = SessionManager::CanvasSession;
+    // [Phase 7.2] CanvasSession moved to public for ScreenEventHandler
 
     void setupUI();
     void setupTrayIcon();
@@ -146,18 +199,10 @@ private:
     void setupMenuBar();
     void setupSystemTray();
     void connectToServer();
-    void scheduleReconnect();
-    // Sync local display/machine info with the server (used on connect and on display changes)
-    void syncRegistration();
-    QList<ScreenInfo> getLocalScreenInfo();
-    QString getMachineName();
-    QString getPlatformName();
-    // Returns last known system volume without blocking the UI thread.
-    // On macOS, updated asynchronously; on Windows, queried on demand.
-    int getSystemVolumePercent();
+    // [Phase 7.1] scheduleReconnect, syncRegistration, setUIEnabled, setLocalNetworkStatus moved to public
+    // [Phase 7.2] getLocalScreenInfo, getMachineName, getPlatformName, getSystemVolumePercent moved to public
     void setupVolumeMonitoring();
     void setupCursorMonitoring();
-    void setUIEnabled(bool enabled);
     // Animation durations are set directly where animations are created
     
     // Screen view methods
@@ -166,26 +211,18 @@ private:
     void createRemoteClientInfoContainer(); // Create grouped container for remote client info
     void initializeRemoteClientInfoInTopBar(); // Initialize remote client info in top bar
     void createLocalClientInfoContainer(); // Create grouped container for local client info (You + network status)
-    void setLocalNetworkStatus(const QString& status); // Update local network status
-    void updateClientNameDisplay(const ClientInfo& client);
+    // [Phase 7.1] setLocalNetworkStatus moved to public
+    // [Phase 7.2] updateClientNameDisplay, updateVolumeIndicator, addVolumeIndicatorToLayout moved to public
     // Legacy helper removed; ScreenCanvas renders screens directly
-    void updateVolumeIndicator();
-    void setRemoteConnectionStatus(const QString& status, bool propagateLoss = true);
+    // [Phase 7.1] setRemoteConnectionStatus, removeVolumeIndicatorFromLayout, addRemoteStatusToLayout moved to public
     void refreshOverlayActionsState(bool remoteConnected, bool propagateLoss = true);
     // watch management handled by WatchManager component now
-    // Manage presence of the volume indicator in the top bar layout
-    void removeVolumeIndicatorFromLayout();
-    void addVolumeIndicatorToLayout();
     // Manage presence of the remote status (and its leading separator) in the top bar layout
     void removeRemoteStatusFromLayout();
-    void addRemoteStatusToLayout();
-    CanvasSession& ensureCanvasSession(const ClientInfo& client);
-    CanvasSession* findCanvasSession(const QString& persistentClientId);
+    // [Phase 7.2] Session management methods moved to public for ScreenEventHandler
     const CanvasSession* findCanvasSession(const QString& persistentClientId) const;
-    CanvasSession* findCanvasSessionByServerClientId(const QString& serverClientId);
     const CanvasSession* findCanvasSessionByServerClientId(const QString& serverClientId) const;
     CanvasSession* findCanvasSessionByIdeaId(const QString& canvasSessionId);
-    void configureCanvasSession(CanvasSession& session);
     void switchToCanvasSession(const QString& persistentClientId);
     void updateUploadButtonForSession(CanvasSession& session);
     
@@ -274,6 +311,12 @@ private:
     
     // Phase 6.2: System tray manager
     SystemTrayManager* m_systemTrayManager = nullptr;
+    
+    // Phase 7.1: WebSocket message handler
+    WebSocketMessageHandler* m_webSocketMessageHandler = nullptr;
+    
+    // Phase 7.2: Screen event handler
+    ScreenEventHandler* m_screenEventHandler = nullptr;
     
     // Backend
     WebSocketClient* m_webSocketClient;

@@ -58,6 +58,8 @@ set(SOURCES
     src/managers/TopBarManager.cpp
     src/managers/SystemTrayManager.cpp
     src/managers/MenuBarManager.cpp
+    src/handlers/WebSocketMessageHandler.cpp
+    src/handlers/ScreenEventHandler.cpp
 )
 
 # Platform-specific sources
@@ -109,6 +111,8 @@ set(HEADERS
     src/managers/TopBarManager.h
     src/managers/SystemTrayManager.h
     src/managers/MenuBarManager.h
+    src/handlers/WebSocketMessageHandler.h
+    src/handlers/ScreenEventHandler.h
 )
 
 if(WIN32)

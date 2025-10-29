@@ -26,6 +26,8 @@
 #include "managers/TopBarManager.h"
 #include "managers/SystemTrayManager.h"
 #include "managers/MenuBarManager.h"
+#include "handlers/WebSocketMessageHandler.h"
+#include "handlers/ScreenEventHandler.h"
 #include <QMenuBar>
 #include <QHostInfo>
 #include "ClientInfo.h"
@@ -297,6 +299,8 @@ MainWindow::MainWindow(QWidget* parent)
       m_cursorTimer(nullptr),
       m_menuBarManager(new MenuBarManager(this, this)), // Phase 6.3
       m_systemTrayManager(new SystemTrayManager(this)), // Phase 6.2
+      m_webSocketMessageHandler(new WebSocketMessageHandler(this, this)), // Phase 7.1
+      m_screenEventHandler(new ScreenEventHandler(this, this)), // Phase 7.2
       m_webSocketClient(new WebSocketClient(this)),
       m_statusUpdateTimer(new QTimer(this)),
       m_displaySyncTimer(new QTimer(this)),
@@ -423,26 +427,26 @@ MainWindow::MainWindow(QWidget* parent)
         });
     }
 
-    // Connect WebSocketClient signals
-    connect(m_webSocketClient, &WebSocketClient::connected, this, &MainWindow::onConnected);
-    connect(m_webSocketClient, &WebSocketClient::disconnected, this, &MainWindow::onDisconnected);
+    // [PHASE 7.1] Setup WebSocket message handler connections
+    if (m_webSocketMessageHandler) {
+        m_webSocketMessageHandler->setupConnections(m_webSocketClient);
+    }
+    
+    // [PHASE 7.2] Setup screen event handler connections
+    if (m_screenEventHandler) {
+        m_screenEventHandler->setupConnections(m_webSocketClient);
+    }
+    
+    // Connect remaining WebSocketClient signals (non-lifecycle)
     connect(m_webSocketClient, &WebSocketClient::connectionError, this, &MainWindow::onConnectionError);
     connect(m_webSocketClient, &WebSocketClient::clientListReceived, this, &MainWindow::onClientListReceived);
     // Immediate status reflection without polling
     connect(m_webSocketClient, &WebSocketClient::connectionStatusChanged, this, [this](const QString& s){ setLocalNetworkStatus(s); });
     connect(m_webSocketClient, &WebSocketClient::registrationConfirmed, this, &MainWindow::onRegistrationConfirmed);
-    connect(m_webSocketClient, &WebSocketClient::screensInfoReceived, this, &MainWindow::onScreensInfoReceived);
     connect(m_webSocketClient, &WebSocketClient::watchStatusChanged, this, &MainWindow::onWatchStatusChanged);
-    connect(m_webSocketClient, &WebSocketClient::dataRequestReceived, this, &MainWindow::onDataRequestReceived);
     // Unused generic message hook removed; specific handlers are wired explicitly
     // Forward all generic messages to UploadManager so it can handle incoming upload_* and remove_all_files when we are the target
     connect(m_webSocketClient, &WebSocketClient::messageReceived, m_uploadManager, &UploadManager::handleIncomingMessage);
-    // PHASE 2: Handle state_sync messages from server
-    connect(m_webSocketClient, &WebSocketClient::messageReceived, this, [this](const QJsonObject& message) {
-        if (message.value("type").toString() == "state_sync") {
-            handleStateSyncFromServer(message);
-        }
-    });
     // Upload progress forwards
     connect(m_webSocketClient, &WebSocketClient::uploadProgressReceived, m_uploadManager, &UploadManager::onUploadProgress);
     connect(m_webSocketClient, &WebSocketClient::uploadFinishedReceived, m_uploadManager, &UploadManager::onUploadFinished);
@@ -904,6 +908,14 @@ void MainWindow::addVolumeIndicatorToLayout() {
     }
 }
 
+// [PHASE 7.2] Accessor for ScreenEventHandler
+void MainWindow::stopInlineSpinner() {
+    if (m_inlineSpinner && m_inlineSpinner->isSpinning()) {
+        m_inlineSpinner->stop();
+        m_inlineSpinner->hide();
+    }
+}
+
 // [PHASE 6.1] Delegate to TopBarManager
 void MainWindow::createLocalClientInfoContainer() {
     if (m_topBarManager) {
@@ -1301,55 +1313,10 @@ void MainWindow::reconcileRemoteFilesForSession(CanvasSession& session, const QS
     }
 }
 
+// [PHASE 7.1] Simplified - delegates to WebSocketMessageHandler
 void MainWindow::handleStateSyncFromServer(const QJsonObject& message) {
-    // PHASE 2: Process state_sync message from server after reconnection
-    const QJsonArray ideas = message.value("ideas").toArray();
-    
-    if (ideas.isEmpty()) {
-        qDebug() << "MainWindow: Received empty state_sync";
-        return;
-    }
-    
-    qDebug() << "MainWindow: Processing state_sync with" << ideas.size() << "idea(s)";
-    
-    for (const QJsonValue& ideaValue : ideas) {
-        const QJsonObject ideaObj = ideaValue.toObject();
-        const QString canvasSessionId = ideaObj.value("canvasSessionId").toString();
-        const QJsonArray fileIdsArray = ideaObj.value("fileIds").toArray();
-        
-        if (fileIdsArray.isEmpty()) continue;
-        
-        QSet<QString> fileIds;
-        for (const QJsonValue& fidValue : fileIdsArray) {
-            const QString fid = fidValue.toString();
-            if (!fid.isEmpty()) {
-                fileIds.insert(fid);
-            }
-        }
-        
-        qDebug() << "MainWindow: Syncing idea" << canvasSessionId << "with" << fileIds.size() << "file(s)";
-        
-        // Find session with this canvasSessionId and mark files as uploaded
-        // Phase 3: Use persistentClientId for consistency
-        CanvasSession* session = findCanvasSessionByIdeaId(canvasSessionId);
-        if (session && !session->persistentClientId.isEmpty()) {
-            session->knownRemoteFileIds = fileIds;
-            
-            // Mark files as uploaded in FileManager
-            for (const QString& fileId : fileIds) {
-                m_fileManager->markFileUploadedToClient(fileId, session->persistentClientId);
-            }
-            
-            qDebug() << "MainWindow: Restored upload state for session" << session->persistentClientId
-                     << "idea" << canvasSessionId;
-            
-            // Refresh UI if this is the active session
-            if (m_activeSessionIdentity == session->persistentClientId && m_uploadManager) {
-                emit m_uploadManager->uiStateChanged();
-            }
-        } else {
-            qDebug() << "MainWindow: No matching session found for idea" << canvasSessionId;
-        }
+    if (m_webSocketMessageHandler) {
+        m_webSocketMessageHandler->handleStateSyncMessage(message);
     }
 }
 
@@ -2554,79 +2521,13 @@ void MainWindow::attemptReconnect() {
     connectToServer();
 }
 
-void MainWindow::onConnected() {
-    setUIEnabled(true);
-    setLocalNetworkStatus("Connected"); // immediate visual update
-    // Reset reconnection state on successful connection
+// [PHASE 7.1] Helper methods for WebSocketMessageHandler
+void MainWindow::resetReconnectState() {
     m_reconnectAttempts = 0;
     m_reconnectTimer->stop();
-    
-    // Sync this client's info with the server
-    syncRegistration();
-    
-    // If we were on a client's canvas page when the connection dropped,
-    // re-request that client's screens and re-establish watch so content returns
-    // when data is received.
-    if (m_navigationManager && m_navigationManager->isOnScreenView()) {
-        // Ensure the canvas will reveal again on fresh screens
-        m_canvasRevealedForCurrentClient = false;
-        // Remove volume indicator until remote is ready again
-        removeVolumeIndicatorFromLayout();
-        const QString selId = m_selectedClient.getId();
-        if (!selId.isEmpty() && m_webSocketClient && m_webSocketClient->isConnected()) {
-            // Indicate we're attempting to reach the remote again
-            setRemoteConnectionStatus("CONNECTING...");
-            addRemoteStatusToLayout();
-            m_webSocketClient->requestScreens(selId);
-            if (m_watchManager) {
-                // Ensure a clean state after reconnect, then start watching the selected client again
-                m_watchManager->unwatchIfAny();
-                m_watchManager->toggleWatch(selId);
-            }
-        }
-    }
-
-    
-    // Show tray notification
-    TOAST_SUCCESS("Connected to server", 2000);
 }
 
-void MainWindow::onDisconnected() {
-    setUIEnabled(false);
-    setLocalNetworkStatus("Disconnected");
-    // If user is currently on a client's canvas page, immediately switch the canvas
-    // area to a loading state and clear any displayed content/overlays.
-    if (m_navigationManager && m_navigationManager->isOnScreenView()) {
-    // Enter loading state but preserve the current canvas content/viewport; the navigation
-    // manager now hides content instead of clearing it. Mark that we should not recenter on reconnect.
-    m_preserveViewportOnReconnect = true;
-        // Remove volume indicator FIRST (before showing spinner) to avoid layout shift
-        removeVolumeIndicatorFromLayout();
-        // Our local network just dropped; show error state explicitly
-        addRemoteStatusToLayout();
-        setRemoteConnectionStatus("ERROR");
-        // Now show the inline spinner after volume is removed
-    m_navigationManager->enterLoadingStateImmediate();
-    }
-    
-    // Inform upload manager of connection loss to cancel any ongoing upload/finalizing state
-    bool hadUploadInProgress = false;
-    if (m_uploadManager) {
-        hadUploadInProgress = m_uploadManager->isUploading() || m_uploadManager->isFinalizing();
-        m_uploadManager->onConnectionLost();
-    }
-    
-    if (hadUploadInProgress) {
-        TOAST_ERROR("Upload interrupted - connection lost", 3000);
-    } else {
-        TOAST_ERROR("Disconnected from server", 3000);
-    }
-
-    // Start smart reconnection if client is enabled and not manually disconnected
-    if (!m_userDisconnected) {
-        scheduleReconnect();
-    }
-    
+void MainWindow::resetAllSessionUploadStates() {
     for (CanvasSession* session : m_sessionManager->getAllSessions()) {
         if (session->canvas && session->canvas->scene()) {
             const QList<QGraphicsItem*> allItems = session->canvas->scene()->items();
@@ -2643,21 +2544,46 @@ void MainWindow::onDisconnected() {
     }
     m_uploadSessionByUploadId.clear();
     m_activeUploadSessionIdentity.clear();
-
-    // Stop watching if any
-    if (m_watchManager) m_watchManager->unwatchIfAny();
-    
-    // Phase 1.1: Clear client list via ClientListPage
-    if (m_clientListPage) {
-        m_clientListPage->updateClientList(QList<ClientInfo>());
-    }
-    
-    
-    // Show tray notification
-    // Notification supprimée (mode silencieux)
 }
 
-// startWatchingSelectedClient/stopWatchingCurrentClient removed (handled by WatchManager)
+void MainWindow::syncCanvasSessionFromServer(const QString& canvasSessionId, const QSet<QString>& fileIds) {
+    // Find session with this canvasSessionId and mark files as uploaded
+    CanvasSession* session = findCanvasSessionByIdeaId(canvasSessionId);
+    if (session && !session->persistentClientId.isEmpty()) {
+        session->knownRemoteFileIds = fileIds;
+        
+        // Mark files as uploaded in FileManager
+        for (const QString& fileId : fileIds) {
+            m_fileManager->markFileUploadedToClient(fileId, session->persistentClientId);
+        }
+        
+        qDebug() << "MainWindow: Restored upload state for session" << session->persistentClientId
+                 << "idea" << canvasSessionId;
+        
+        // Refresh UI if this is the active session
+        if (m_activeSessionIdentity == session->persistentClientId && m_uploadManager) {
+            emit m_uploadManager->uiStateChanged();
+        }
+    } else {
+        qDebug() << "MainWindow: No matching session found for idea" << canvasSessionId;
+    }
+}
+
+// [PHASE 7.1] Simplified - delegates to WebSocketMessageHandler
+void MainWindow::onConnected() {
+    if (m_webSocketMessageHandler) {
+        m_webSocketMessageHandler->onConnected();
+    }
+}
+
+// [PHASE 7.1] Simplified - delegates to WebSocketMessageHandler  
+void MainWindow::onDisconnected() {
+    if (m_webSocketMessageHandler) {
+        m_webSocketMessageHandler->onDisconnected();
+    }
+}
+
+// start Watching/stopWatchingCurrentClient removed (handled by WatchManager)
 
 void MainWindow::onConnectionError(const QString& error) {
     qWarning() << "Failed to connect to server:" << error << "(silent mode, aucune popup)";
@@ -2846,177 +2772,16 @@ void MainWindow::onRegistrationConfirmed(const ClientInfo& clientInfo) {
 }
 
 void MainWindow::syncRegistration() {
-    QString machineName = getMachineName();
-    QString platform = getPlatformName();
-    QList<ScreenInfo> screens;
-    int volumePercent = -1;
-    // Only include screens/volume when actively watched; otherwise identity-only
-    if (m_isWatched) {
-        screens = getLocalScreenInfo();
-        volumePercent = getSystemVolumePercent();
+    // [PHASE 7.2] Delegate to ScreenEventHandler
+    if (m_screenEventHandler) {
+        m_screenEventHandler->syncRegistration();
     }
-    // Build per-screen uiZones (taskbar/menu/dock)
-    if (!screens.isEmpty()) {
-#if defined(Q_OS_WIN)
-        // Build a list of physical monitors (rcMonitor/rcWork) to align with ScreenInfo (physical px)
-        std::vector<WinMonRect> mons; mons.reserve(8);
-        EnumDisplayMonitors(nullptr, nullptr, MouffetteEnumMonProc, reinterpret_cast<LPARAM>(&mons));
-        auto findMatchingMon = [&](const ScreenInfo& s) -> const WinMonRect* {
-            for (const auto &m : mons) {
-                const int mw = m.rc.right - m.rc.left;
-                const int mh = m.rc.bottom - m.rc.top;
-                if (m.rc.left == s.x && m.rc.top == s.y && mw == s.width && mh == s.height) return &m;
-            }
-            return nullptr;
-        };
-        for (auto &screen : screens) {
-            const WinMonRect* mp = findMatchingMon(screen);
-            if (!mp) continue;
-            const auto &m = *mp;
-            const int screenW = m.rc.right - m.rc.left;
-            const int screenH = m.rc.bottom - m.rc.top;
-            const int workW = m.rcWork.right - m.rcWork.left;
-            const int workH = m.rcWork.bottom - m.rcWork.top;
-            // Compute taskbar thickness and side by comparing rcMonitor and rcWork
-            if (workH < screenH) {
-                const int h = screenH - workH; if (h > 0) {
-                    if (m.rcWork.top > m.rc.top) screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("taskbar"), 0, 0, screenW, h});
-                    else screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("taskbar"), 0, screenH - h, screenW, h});
-                }
-            } else if (workW < screenW) {
-                const int w = screenW - workW; if (w > 0) {
-                    if (m.rcWork.left > m.rc.left) screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("taskbar"), 0, 0, w, screenH});
-                    else screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("taskbar"), screenW - w, 0, w, screenH});
-                }
-            }
-        }
-#elif defined(Q_OS_MACOS)
-        QList<QScreen*> qScreens = QGuiApplication::screens();
-        for (auto &screen : screens) {
-            if (screen.id < 0 || screen.id >= qScreens.size()) continue;
-            QScreen* qs = qScreens[screen.id]; if (!qs) continue;
-            QRect geom = qs->geometry();
-            QRect avail = qs->availableGeometry();
-            // Menu bar
-            if (avail.y() > geom.y()) {
-                int h = avail.y() - geom.y(); if (h>0)
-                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("menu_bar"), 0, 0, geom.width(), h});
-            }
-            // Dock: one differing edge
-            if (avail.bottom() < geom.bottom()) { // bottom dock
-                int h = geom.bottom() - avail.bottom(); if (h>0)
-                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("dock"), 0, geom.height()-h, geom.width(), h});
-            } else if (avail.x() > geom.x()) { // left dock
-                int w = avail.x() - geom.x(); if (w>0)
-                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("dock"), 0, 0, w, geom.height()});
-            } else if (avail.right() < geom.right()) { // right dock
-                int w = geom.right() - avail.right(); if (w>0)
-                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("dock"), geom.width()-w, 0, w, geom.height()});
-            }
-        }
-#endif
-        // uiZones prepared during syncRegistration
-    }
-    
-    qDebug() << "Sync registration:" << machineName << "on" << platform << "with" << screens.size() << "screens";
-    
-    m_webSocketClient->registerClient(machineName, platform, screens, volumePercent);
 }
 
 void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
-    QString persistentId = clientInfo.clientId();
-    if (persistentId.isEmpty()) {
-        qWarning() << "MainWindow::onScreensInfoReceived: client has no persistentClientId";
-        return;
-    }
-
-    CanvasSession* session = findCanvasSession(persistentId);
-    if (!session && !clientInfo.getId().isEmpty()) {
-        session = findCanvasSessionByServerClientId(clientInfo.getId());
-    }
-
-    if (!session) {
-        session = &ensureCanvasSession(clientInfo);
-    } else {
-        session->serverAssignedId = clientInfo.getId();
-        session->lastClientInfo = clientInfo;
-        session->lastClientInfo.setClientId(persistentId);
-        session->lastClientInfo.setFromMemory(true);
-        session->lastClientInfo.setOnline(true);
-    }
-
-    if (!session->canvas) {
-        QStackedWidget* canvasHostStack = m_canvasViewPage ? m_canvasViewPage->getCanvasHostStack() : nullptr;
-        if (!canvasHostStack) {
-            qWarning() << "Cannot create canvas: CanvasViewPage not initialized";
-            return;
-        }
-        session->canvas = new ScreenCanvas(canvasHostStack);
-        session->canvas->setWebSocketClient(m_webSocketClient);
-        session->canvas->setUploadManager(m_uploadManager);
-        session->canvas->setFileManager(m_fileManager);
-        session->connectionsInitialized = false;
-        if (canvasHostStack->indexOf(session->canvas) == -1) {
-            canvasHostStack->addWidget(session->canvas);
-        }
-        configureCanvasSession(*session);
-    }
-
-    const QList<ScreenInfo> screens = clientInfo.getScreens();
-    const bool hasScreens = !screens.isEmpty();
-
-    if (session->canvas) {
-        if (!session->serverAssignedId.isEmpty()) {
-            session->canvas->setRemoteSceneTarget(session->serverAssignedId, session->lastClientInfo.getMachineName());
-        }
-        session->canvas->setScreens(screens);
-    }
-
-    const bool isActiveSession = (session->persistentClientId == m_activeSessionIdentity);
-    if (isActiveSession) {
-        m_screenCanvas = session->canvas;
-        m_selectedClient = session->lastClientInfo;
-    }
-
-    session->lastClientInfo.setScreens(screens);
-
-    if (isActiveSession && session->canvas) {
-        if (!m_canvasRevealedForCurrentClient && hasScreens) {
-            if (m_navigationManager) {
-                m_navigationManager->revealCanvas();
-            } else if (m_canvasViewPage) {  // Phase 1.2
-                QStackedWidget* canvasStack = m_canvasViewPage->getCanvasStack();
-                if (canvasStack) {
-                    canvasStack->setCurrentIndex(1);
-                }
-            }
-
-            session->canvas->requestDeferredInitialRecenter(53);
-            if (!m_preserveViewportOnReconnect) {
-                session->canvas->recenterWithMargin(53);
-            }
-            session->canvas->setFocus(Qt::OtherFocusReason);
-
-            m_preserveViewportOnReconnect = false;
-            m_canvasRevealedForCurrentClient = true;
-            m_canvasContentEverLoaded = true;
-        }
-
-        if (m_inlineSpinner && m_inlineSpinner->isSpinning()) {
-            m_inlineSpinner->stop();
-            m_inlineSpinner->hide();
-        }
-
-        // [PHASE 5] Use manager accessor for volume indicator
-        if (hasScreens && m_remoteClientInfoManager && m_remoteClientInfoManager->getVolumeIndicator()) {
-            addVolumeIndicatorToLayout();
-            updateVolumeIndicator();
-        }
-
-        addRemoteStatusToLayout();
-        setRemoteConnectionStatus(session->lastClientInfo.isOnline() ? "CONNECTED" : "DISCONNECTED");
-
-        updateClientNameDisplay(session->lastClientInfo);
+    // [PHASE 7.2] Delegate to ScreenEventHandler
+    if (m_screenEventHandler) {
+        m_screenEventHandler->onScreensInfoReceived(clientInfo);
     }
 }
 
@@ -3078,58 +2843,10 @@ void MainWindow::onWatchStatusChanged(bool watched) {
 }
 
 void MainWindow::onDataRequestReceived() {
-    // Target-side: server asked us to send fresh state now (screens + volume)
-    if (!m_webSocketClient || !m_webSocketClient->isConnected()) return;
-    QList<ScreenInfo> screens = getLocalScreenInfo();
-    int volumePercent = getSystemVolumePercent();
-    // Build uiZones immediately for snapshot
-#if defined(Q_OS_WIN)
-    {
-        std::vector<WinMonRect> mons; mons.reserve(8);
-        EnumDisplayMonitors(nullptr, nullptr, MouffetteEnumMonProc, reinterpret_cast<LPARAM>(&mons));
-        auto findMatchingMon = [&](const ScreenInfo& s) -> const WinMonRect* {
-            for (const auto &m : mons) {
-                const int mw = m.rc.right - m.rc.left;
-                const int mh = m.rc.bottom - m.rc.top;
-                if (m.rc.left == s.x && m.rc.top == s.y && mw == s.width && mh == s.height) return &m;
-            }
-            return nullptr;
-        };
-        for (auto &screen : screens) {
-            const WinMonRect* mp = findMatchingMon(screen);
-            if (!mp) continue;
-            const auto &m = *mp;
-            const int screenW = m.rc.right - m.rc.left;
-            const int screenH = m.rc.bottom - m.rc.top;
-            const int workW = m.rcWork.right - m.rcWork.left;
-            const int workH = m.rcWork.bottom - m.rcWork.top;
-            if (workH < screenH) {
-                const int h = screenH - workH; if (h > 0) {
-                    if (m.rcWork.top > m.rc.top) screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, 0, screenW, h});
-                    else screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, screenH - h, screenW, h});
-                }
-            } else if (workW < screenW) {
-                const int w = screenW - workW; if (w > 0) {
-                    if (m.rcWork.left > m.rc.left) screen.uiZones.append(ScreenInfo::UIZone{"taskbar", 0, 0, w, screenH});
-                    else screen.uiZones.append(ScreenInfo::UIZone{"taskbar", screenW - w, 0, w, screenH});
-                }
-            }
-        }
+    // [PHASE 7.2] Delegate to ScreenEventHandler
+    if (m_screenEventHandler) {
+        m_screenEventHandler->onDataRequestReceived();
     }
-#elif defined(Q_OS_MACOS)
-    {
-        QList<QScreen*> qScreens = QGuiApplication::screens();
-        for (auto &screen : screens) {
-            if (screen.id < 0 || screen.id >= qScreens.size()) continue; QScreen* qs = qScreens[screen.id]; if (!qs) continue;
-            QRect geom = qs->geometry(); QRect avail = qs->availableGeometry();
-            if (avail.y() > geom.y()) { int h = avail.y()-geom.y(); if (h>0) screen.uiZones.append(ScreenInfo::UIZone{"menu_bar", 0, 0, geom.width(), h}); }
-            if (avail.bottom() < geom.bottom()) { int h = geom.bottom()-avail.bottom(); if (h>0) screen.uiZones.append(ScreenInfo::UIZone{"dock", 0, geom.height()-h, geom.width(), h}); }
-            else if (avail.x() > geom.x()) { int w = avail.x()-geom.x(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"dock", 0, 0, w, geom.height()}); }
-            else if (avail.right() < geom.right()) { int w = geom.right()-avail.right(); if (w>0) screen.uiZones.append(ScreenInfo::UIZone{"dock", geom.width()-w, 0, w, geom.height()}); }
-        }
-    }
-#endif
-    m_webSocketClient->sendStateSnapshot(screens, volumePercent);
 }
 
 void MainWindow::onRemoteSceneLaunchStateChanged(bool active, const QString& targetClientId, const QString& targetMachineName) {
