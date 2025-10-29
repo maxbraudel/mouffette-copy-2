@@ -324,18 +324,12 @@ void WebSocketClient::sendCursorUpdate(int globalX, int globalY) {
 void WebSocketClient::sendUploadStart(const QString& targetClientId, const QJsonArray& filesManifest, const QString& uploadId, const QString& ideaId) {
     if (!(isConnected() || isUploadChannelConnected())) return;
     
-    // Phase 3: ideaId is MANDATORY
-    if (ideaId.isEmpty()) {
-        qWarning() << "WebSocketClient::sendUploadStart - ideaId is required (Phase 3), rejecting upload" << uploadId;
-        return;
-    }
-    
     QJsonObject msg;
     msg["type"] = "upload_start";
     msg["targetClientId"] = targetClientId;
     msg["uploadId"] = uploadId;
     msg["files"] = filesManifest;
-    msg["ideaId"] = ideaId; // now mandatory
+    msg["ideaId"] = ideaId;
     if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
     sendMessageUpload(msg);
 }
@@ -343,12 +337,6 @@ void WebSocketClient::sendUploadStart(const QString& targetClientId, const QJson
 void WebSocketClient::sendUploadChunk(const QString& targetClientId, const QString& uploadId, const QString& fileId, int chunkIndex, const QByteArray& dataBase64, const QString& ideaId) {
     if (!(isConnected() || isUploadChannelConnected())) return;
     if (m_canceledUploads.contains(uploadId)) return; // drop silently
-    
-    // Phase 3: ideaId is MANDATORY
-    if (ideaId.isEmpty()) {
-        qWarning() << "WebSocketClient::sendUploadChunk - ideaId is required (Phase 3), dropping chunk" << uploadId << fileId << chunkIndex;
-        return;
-    }
     
     QJsonObject msg;
     msg["type"] = "upload_chunk";
@@ -372,17 +360,11 @@ void WebSocketClient::sendUploadComplete(const QString& targetClientId, const QS
     if (!(isConnected() || isUploadChannelConnected())) return;
     if (m_canceledUploads.contains(uploadId)) return; // already canceled
     
-    // Phase 3: ideaId is MANDATORY
-    if (ideaId.isEmpty()) {
-        qWarning() << "WebSocketClient::sendUploadComplete - ideaId is required (Phase 3), rejecting" << uploadId;
-        return;
-    }
-    
     QJsonObject msg;
     msg["type"] = "upload_complete";
     msg["targetClientId"] = targetClientId;
     msg["uploadId"] = uploadId;
-    msg["ideaId"] = ideaId; // now mandatory
+    msg["ideaId"] = ideaId;
     if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
     sendMessageUpload(msg);
 }
@@ -391,17 +373,11 @@ void WebSocketClient::sendUploadAbort(const QString& targetClientId, const QStri
     if (!(isConnected() || isUploadChannelConnected())) return;
     m_canceledUploads.insert(uploadId);
     
-    // Phase 3: ideaId is MANDATORY
-    if (ideaId.isEmpty()) {
-        qWarning() << "WebSocketClient::sendUploadAbort - ideaId is required (Phase 3), rejecting" << uploadId;
-        return;
-    }
-    
     QJsonObject msg;
     msg["type"] = "upload_abort";
     msg["targetClientId"] = targetClientId;
     msg["uploadId"] = uploadId;
-    msg["ideaId"] = ideaId; // now mandatory
+    msg["ideaId"] = ideaId;
     if (!reason.isEmpty()) msg["reason"] = reason;
     if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
     sendMessageUpload(msg);
@@ -410,33 +386,21 @@ void WebSocketClient::sendUploadAbort(const QString& targetClientId, const QStri
 void WebSocketClient::sendRemoveAllFiles(const QString& targetClientId, const QString& ideaId) {
     if (!isConnected()) return;
     
-    // Phase 3: ideaId is MANDATORY
-    if (ideaId.isEmpty()) {
-        qWarning() << "WebSocketClient::sendRemoveAllFiles - ideaId is required (Phase 3), rejecting";
-        return;
-    }
-    
     QJsonObject msg;
     msg["type"] = "remove_all_files";
     msg["targetClientId"] = targetClientId;
-    msg["ideaId"] = ideaId; // now mandatory
+    msg["ideaId"] = ideaId;
     sendMessage(msg);
 }
 
 void WebSocketClient::sendRemoveFile(const QString& targetClientId, const QString& ideaId, const QString& fileId) {
     if (!isConnected()) return;
     
-    // Phase 3: ideaId is MANDATORY
-    if (ideaId.isEmpty()) {
-        qWarning() << "WebSocketClient::sendRemoveFile - ideaId is required (Phase 3), rejecting fileId:" << fileId;
-        return;
-    }
-    
     QJsonObject msg;
     msg["type"] = "remove_file";
     msg["targetClientId"] = targetClientId;
     msg["fileId"] = fileId;
-    msg["ideaId"] = ideaId; // now mandatory
+    msg["ideaId"] = ideaId;
     if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
     qDebug() << "Sending remove_file command for fileId:" << fileId << "idea:" << ideaId << "to client:" << targetClientId;
     sendMessage(msg);

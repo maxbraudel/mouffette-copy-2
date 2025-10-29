@@ -10,25 +10,35 @@
 // - FileMemoryCache for memory caching
 
 // Static member definition
-std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds)> FileManager::s_fileRemovalNotifier;
+#include "FileManager.h"
+#include "LocalFileRepository.h"
+#include "RemoteFileTracker.h"
+#include "FileMemoryCache.h"
+#include <QFile>
+#include <QDebug>
+#include <QDir>
 
+std::function<void(const QString&, const QList<QString>&, const QList<QString>&)> FileManager::s_fileRemovalNotifier;
+
+// Phase 4.3: Constructor with dependency injection
 FileManager::FileManager()
-    : m_repository(&LocalFileRepository::instance())
-    , m_tracker(&RemoteFileTracker::instance())
-    , m_cache(&FileMemoryCache::instance())
 {
-    // Initialize removal callback for tracker
-    m_tracker->setFileRemovalNotifier([this](const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds) {
-        if (s_fileRemovalNotifier) {
-            s_fileRemovalNotifier(fileId, clientIds, ideaIds);
-        }
-    });
+    // Phase 4.2: Initialize service references
+    m_repository = &LocalFileRepository::instance();
+    m_tracker = &RemoteFileTracker::instance();
+    m_cache = &FileMemoryCache::instance();
 }
 
+FileManager::~FileManager()
+{
+    // Services are singletons, no need to delete
+}
+
+// Legacy singleton instance (deprecated)
 FileManager& FileManager::instance()
 {
-    static FileManager instance;
-    return instance;
+    static FileManager s_instance;
+    return s_instance;
 }
 
 QString FileManager::getOrCreateFileId(const QString& filePath)
@@ -185,32 +195,6 @@ void FileManager::unmarkFileUploadedToClient(const QString& fileId, const QStrin
     m_tracker->unmarkFileUploadedToClient(fileId, clientId);
 }
 
-void FileManager::markMediaUploadedToClient(const QString& mediaId, const QString& clientId)
-{
-    // Use fileId tracking instead of mediaId tracking
-    QString fileId = m_mediaIdToFileId.value(mediaId);
-    if (!fileId.isEmpty()) {
-        markFileUploadedToClient(fileId, clientId);
-    }
-}
-
-bool FileManager::isMediaUploadedToClient(const QString& mediaId, const QString& clientId) const
-{
-    // Use fileId tracking instead of mediaId tracking
-    QString fileId = m_mediaIdToFileId.value(mediaId);
-    if (fileId.isEmpty()) return false;
-    return isFileUploadedToClient(fileId, clientId);
-}
-
-void FileManager::unmarkMediaUploadedToClient(const QString& mediaId, const QString& clientId)
-{
-    // Use fileId tracking instead of mediaId tracking
-    QString fileId = m_mediaIdToFileId.value(mediaId);
-    if (!fileId.isEmpty()) {
-        unmarkFileUploadedToClient(fileId, clientId);
-    }
-}
-
 void FileManager::setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds)> cb)
 {
     s_fileRemovalNotifier = std::move(cb);
@@ -220,12 +204,6 @@ void FileManager::unmarkAllFilesForClient(const QString& clientId)
 {
     // Delegate to RemoteFileTracker
     m_tracker->unmarkAllFilesForClient(clientId);
-}
-
-void FileManager::unmarkAllMediaForClient(const QString& clientId)
-{
-    // Redirect to file-based unmark (media tracking is file-based)
-    unmarkAllFilesForClient(clientId);
 }
 
 void FileManager::unmarkAllForClient(const QString& clientId)

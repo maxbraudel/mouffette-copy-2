@@ -550,6 +550,8 @@ void MainWindow::refreshOverlayActionsState(bool remoteConnected, bool propagate
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent),
+      m_fileManager(new FileManager()),  // Phase 4.3: Inject FileManager
+      m_sessionManager(new SessionManager(this)),  // Phase 4.1
       m_centralWidget(nullptr),
       m_mainLayout(nullptr),
       m_stackedWidget(nullptr),
@@ -592,12 +594,11 @@ MainWindow::MainWindow(QWidget* parent)
       m_reconnectTimer(new QTimer(this)),
       m_reconnectAttempts(0),
       m_maxReconnectDelay(15000),
-      m_uploadManager(new UploadManager(this)),
+      m_uploadManager(new UploadManager(m_fileManager, this)),
       m_watchManager(new WatchManager(this)),
       m_fileWatcher(new FileWatcher(this)),
       m_navigationManager(nullptr),
-      m_responsiveLayoutManager(new ResponsiveLayoutManager(this)),
-      m_sessionManager(new SessionManager(this))
+      m_responsiveLayoutManager(new ResponsiveLayoutManager(this))
 {
     setWindowTitle("Mouffette");
 #if defined(Q_OS_WIN)
@@ -680,7 +681,7 @@ MainWindow::MainWindow(QWidget* parent)
     setupUI();
     // Initialize remote scene controller once
     if (!g_remoteSceneController) {
-        g_remoteSceneController = new RemoteSceneController(m_webSocketClient, this);
+        g_remoteSceneController = new RemoteSceneController(m_fileManager, m_webSocketClient, this);
     }
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN) || defined(Q_OS_LINUX)
     // Ensure no status bar is shown at the bottom
@@ -726,7 +727,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_watchManager->setWebSocketClient(m_webSocketClient);
     
     // FileManager: configure callback to send file removal commands to remote clients
-    // Phase 3: ideaId is now MANDATORY - only send removal if we have valid ideaIds
+    // Phase 3: ideaId is MANDATORY - always present from SessionManager
     FileManager::setFileRemovalNotifier([this](const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds) {
         qDebug() << "MainWindow: FileManager requested removal of file" << fileId
                  << "from clients:" << clientIds << "ideas:" << ideaIds;
@@ -735,18 +736,7 @@ MainWindow::MainWindow(QWidget* parent)
             return;
         }
         
-        // Phase 3: Reject operations without valid ideaId
-        if (ideaIds.isEmpty()) {
-            qWarning() << "MainWindow: Cannot remove file" << fileId << "- no ideaIds provided (Phase 3 requires ideaId)";
-            return;
-        }
-        
         for (const QString& ideaId : ideaIds) {
-            if (ideaId.isEmpty()) {
-                qWarning() << "MainWindow: Skipping empty ideaId for file removal" << fileId;
-                continue;
-            }
-            
             for (const QString& clientId : clientIds) {
                 qDebug() << "MainWindow: Sending remove_file command for" << fileId
                          << "to" << clientId << "ideaId" << ideaId;
@@ -803,6 +793,9 @@ MainWindow::MainWindow(QWidget* parent)
             });
         }
     });
+    
+    // Phase 4.3: Inject FileManager into media items (static setter)
+    ResizableMediaBase::setFileManager(m_fileManager);
     
     // File error callback: remove media items when playback detects missing/corrupted files
     ResizableMediaBase::setFileErrorNotifier([this](ResizableMediaBase* mediaItem) {
@@ -1567,6 +1560,7 @@ void MainWindow::configureCanvasSession(CanvasSession& session) {
     session.canvas->setActiveIdeaId(session.ideaId);
     session.canvas->setWebSocketClient(m_webSocketClient);
     session.canvas->setUploadManager(m_uploadManager);
+    session.canvas->setFileManager(m_fileManager);
     session.canvas->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     session.canvas->setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
     session.canvas->setFocusPolicy(Qt::StrongFocus);
@@ -1701,7 +1695,7 @@ void MainWindow::unloadUploadsForSession(CanvasSession& session, bool attemptRem
         m_webSocketClient->sendRemoteSceneStop(targetId);
     }
 
-    FileManager::instance().unmarkAllForClient(targetId);
+    m_fileManager->unmarkAllForClient(targetId);
 
     if (session.canvas && session.canvas->scene()) {
         const QList<QGraphicsItem*> items = session.canvas->scene()->items();
@@ -1755,7 +1749,7 @@ void MainWindow::rotateSessionIdea(CanvasSession& session) {
     if (session.canvas) {
         session.canvas->setActiveIdeaId(session.ideaId);
     }
-    FileManager::instance().removeIdeaAssociations(oldIdeaId);
+    m_fileManager->removeIdeaAssociations(oldIdeaId);
 
     if (m_uploadManager) {
         if (m_activeSessionIdentity == session.persistentClientId) {
@@ -1766,7 +1760,7 @@ void MainWindow::rotateSessionIdea(CanvasSession& session) {
 
 void MainWindow::reconcileRemoteFilesForSession(CanvasSession& session, const QSet<QString>& currentFileIds) {
     session.expectedIdeaFileIds = currentFileIds;
-    FileManager::instance().replaceIdeaFileSet(session.ideaId, currentFileIds);
+    m_fileManager->replaceIdeaFileSet(session.ideaId, currentFileIds);
 
     // Phase 3: Use persistentClientId for server communication
     if (!session.persistentClientId.isEmpty()) {
@@ -1797,7 +1791,7 @@ void MainWindow::handleStateSyncFromServer(const QJsonObject& message) {
         const QString ideaId = ideaObj.value("ideaId").toString();
         const QJsonArray fileIdsArray = ideaObj.value("fileIds").toArray();
         
-        if (ideaId.isEmpty() || fileIdsArray.isEmpty()) continue;
+        if (fileIdsArray.isEmpty()) continue;
         
         QSet<QString> fileIds;
         for (const QJsonValue& fidValue : fileIdsArray) {
@@ -1817,7 +1811,7 @@ void MainWindow::handleStateSyncFromServer(const QJsonObject& message) {
             
             // Mark files as uploaded in FileManager
             for (const QString& fileId : fileIds) {
-                FileManager::instance().markFileUploadedToClient(fileId, session->persistentClientId);
+                m_fileManager->markFileUploadedToClient(fileId, session->persistentClientId);
             }
             
             qDebug() << "MainWindow: Restored upload state for session" << session->persistentClientId
@@ -2222,9 +2216,9 @@ void MainWindow::onUploadButtonClicked() {
             }
 
             currentFileIds.insert(fileId);
-            FileManager::instance().associateFileWithIdea(fileId, session->ideaId);
+            m_fileManager->associateFileWithIdea(fileId, session->ideaId);
 
-            const bool alreadyOnTarget = FileManager::instance().isFileUploadedToClient(fileId, targetClientId);
+            const bool alreadyOnTarget = m_fileManager->isFileUploadedToClient(fileId, targetClientId);
             if (!processedFileIds.contains(fileId) && !alreadyOnTarget) {
                 UploadFileInfo info;
                 info.fileId = fileId;
@@ -2269,10 +2263,10 @@ void MainWindow::onUploadButtonClicked() {
                 const QList<QGraphicsItem*> allItems = canvas->scene()->items();
                 for (QGraphicsItem* it : allItems) {
                     if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-                        const QString mediaId = media->mediaId();
-                        if (mediaId.isEmpty()) continue;
-                        if (!FileManager::instance().isMediaUploadedToClient(mediaId, targetClientId)) {
-                            FileManager::instance().markMediaUploadedToClient(mediaId, targetClientId);
+                        const QString fileId = media->fileId();
+                        if (fileId.isEmpty()) continue;
+                        if (!m_fileManager->isFileUploadedToClient(fileId, targetClientId)) {
+                            m_fileManager->markFileUploadedToClient(fileId, targetClientId);
                             media->setUploadUploaded();
                             promotedAny = true;
                         }
@@ -2306,7 +2300,7 @@ void MainWindow::onUploadButtonClicked() {
     }
 
     for (const auto& f : files) {
-        const QList<QString> allMediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
+        const QList<QString> allMediaIds = m_fileManager->getMediaIdsForFile(f.fileId);
         for (const QString& mediaId : allMediaIds) {
             upload.mediaIdsBeingUploaded.insert(mediaId);
         }
@@ -3725,6 +3719,7 @@ void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
         session->canvas = new ScreenCanvas(m_canvasHostStack);
         session->canvas->setWebSocketClient(m_webSocketClient);
         session->canvas->setUploadManager(m_uploadManager);
+        session->canvas->setFileManager(m_fileManager);
         session->connectionsInitialized = false;
         if (m_canvasHostStack && m_canvasHostStack->indexOf(session->canvas) == -1) {
             m_canvasHostStack->addWidget(session->canvas);
@@ -4131,9 +4126,9 @@ bool MainWindow::hasUnuploadedFilesForTarget(const QString& targetClientId) cons
     const QList<QGraphicsItem*> allItems = canvas->scene()->items();
     for (QGraphicsItem* it : allItems) {
         if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-            const QString mediaId = media->mediaId();
-            if (mediaId.isEmpty()) continue;
-            if (!FileManager::instance().isMediaUploadedToClient(mediaId, targetClientId)) return true;
+            const QString fileId = media->fileId();
+            if (fileId.isEmpty()) continue;
+            if (!m_fileManager->isFileUploadedToClient(fileId, targetClientId)) return true;
         }
     }
     return false;

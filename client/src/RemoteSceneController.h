@@ -15,6 +15,7 @@
 #include <memory>
 
 class WebSocketClient;
+class FileManager;
 class QWidget;
 class QMediaPlayer;
 class QVideoSink;
@@ -28,7 +29,7 @@ class QVariantAnimation;
 class RemoteSceneController : public QObject {
 	Q_OBJECT
 public:
-	explicit RemoteSceneController(WebSocketClient* ws, QObject* parent = nullptr);
+	explicit RemoteSceneController(FileManager* fileManager, WebSocketClient* ws, QObject* parent = nullptr);
 	~RemoteSceneController() override;
 	void setEnabled(bool en) { m_enabled = en; if (!en) clearScene(); }
 	bool isEnabled() const { return m_enabled; }
@@ -151,6 +152,9 @@ private:
 	void restoreVideoOutput(const std::shared_ptr<RemoteMediaItem>& item);
 	void applyPixmapToSpans(const std::shared_ptr<RemoteMediaItem>& item, const QPixmap& pixmap) const;
 
+	// Phase 4.3: FileManager injected (not singleton)
+	FileManager* m_fileManager = nullptr;
+	
 	WebSocketClient* m_ws = nullptr; // not owned
 	bool m_enabled = true;
 	QMap<int, ScreenWindow> m_screenWindows;

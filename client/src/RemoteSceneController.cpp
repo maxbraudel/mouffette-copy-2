@@ -108,8 +108,9 @@ QImage convertFrameToImage(const QVideoFrame& frame) {
 }
 } // namespace
 
-RemoteSceneController::RemoteSceneController(WebSocketClient* ws, QObject* parent)
+RemoteSceneController::RemoteSceneController(FileManager* fileManager, WebSocketClient* ws, QObject* parent)
     : QObject(parent)
+    , m_fileManager(fileManager)
     , m_ws(ws) {
     if (m_ws) {
         connect(m_ws, &WebSocketClient::remoteSceneStartReceived, this, &RemoteSceneController::onRemoteSceneStart);
@@ -167,7 +168,7 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
             qWarning() << "RemoteSceneController: media item has no fileId";
             continue;
         }
-        const QString path = FileManager::instance().getFilePathForId(fileId);
+        const QString path = m_fileManager->getFilePathForId(fileId);
         if (path.isEmpty() || !QFile::exists(path)) {
             QString fileName = mediaObj.value("fileName").toString();
             if (fileName.isEmpty()) {
@@ -1083,7 +1084,7 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
                     item->hasDisplayTimestamp = true;
                 }
             }
-            FileManager::instance().preloadFileIntoMemory(item->fileId);
+            m_fileManager->preloadFileIntoMemory(item->fileId);
         }
         m_mediaItems.append(item);
         scheduleMedia(item);
@@ -1161,7 +1162,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             auto item = weakItem.lock();
             if (!item) return false;
             if (epoch != m_sceneEpoch) return false;
-            QString path = FileManager::instance().getFilePathForId(item->fileId);
+            QString path = m_fileManager->getFilePathForId(item->fileId);
             if (!path.isEmpty() && QFileInfo::exists(path)) {
                 QPixmap pm; 
                 if (pm.load(path)) {
@@ -1282,10 +1283,10 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             auto item = weakItem.lock();
             if (!item) return false;
             if (epoch != m_sceneEpoch) return false;
-            QString path = FileManager::instance().getFilePathForId(item->fileId);
+            QString path = m_fileManager->getFilePathForId(item->fileId);
             if (!path.isEmpty() && QFileInfo::exists(path)) {
                 item->pausedAtEnd = false;
-                auto bytes = FileManager::instance().getFileBytes(item->fileId);
+                auto bytes = m_fileManager->getFileBytes(item->fileId);
                 if (!bytes.isNull() && !bytes->isEmpty()) {
                     item->memoryBytes = bytes;
                     if (item->memoryBuffer) {

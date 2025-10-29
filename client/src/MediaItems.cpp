@@ -41,6 +41,7 @@ std::function<QPointF(const QPointF&, const QRectF&, bool, ResizableMediaBase*)>
 std::function<ResizableMediaBase::ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool, ResizableMediaBase*)> ResizableMediaBase::s_resizeSnapCallback;
 std::function<void()> ResizableMediaBase::s_uploadChangedNotifier = nullptr;
 std::function<void(ResizableMediaBase*)> ResizableMediaBase::s_fileErrorNotifier = nullptr;
+FileManager* ResizableMediaBase::s_fileManager = nullptr; // Phase 4.3: injected (not singleton)
 
 QString ResizableMediaBase::displayName() const {
     if (!m_filename.isEmpty()) return m_filename;
@@ -77,9 +78,9 @@ ResizableMediaBase::~ResizableMediaBase() {
         m_lifetimeToken.reset();
     }
     // Clean up FileManager associations
-    if (!m_mediaId.isEmpty()) {
+    if (!m_mediaId.isEmpty() && s_fileManager) {
         qDebug() << "MediaItems: Destructing media" << m_mediaId << "with fileId" << m_fileId;
-        FileManager::instance().removeMediaAssociation(m_mediaId);
+        s_fileManager->removeMediaAssociation(m_mediaId);
     }
 }
 
@@ -332,9 +333,9 @@ void ResizableMediaBase::setSourcePath(const QString& p) {
     m_sourcePath = p;
     
     // If we have a valid file path, register it with FileManager
-    if (!p.isEmpty()) {
-        m_fileId = FileManager::instance().getOrCreateFileId(p);
-        FileManager::instance().associateMediaWithFile(m_mediaId, m_fileId);
+    if (!p.isEmpty() && s_fileManager) {
+        m_fileId = s_fileManager->getOrCreateFileId(p);
+        s_fileManager->associateMediaWithFile(m_mediaId, m_fileId);
     }
 }
 

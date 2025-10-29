@@ -94,6 +94,9 @@ public:
     void setUploadUploaded() { m_uploadState = UploadState::Uploaded; m_uploadProgress = 100; notifyUploadChanged(); }
     static void setUploadChangedNotifier(std::function<void()> cb) { s_uploadChangedNotifier = std::move(cb); }
     
+    // Phase 4.3: FileManager injected (not singleton) - static setter for all media items
+    static void setFileManager(FileManager* manager) { s_fileManager = manager; }
+    
     // File error callback: called when a media item detects its source file is missing/corrupted
     static void setFileErrorNotifier(std::function<void(ResizableMediaBase*)> cb) { s_fileErrorNotifier = std::move(cb); }
     void notifyFileError() { if (s_fileErrorNotifier) s_fileErrorNotifier(this); }
@@ -220,6 +223,9 @@ protected:
     OverlayStyle m_overlayStyle;
     static int heightOfMediaOverlays;
     static int cornerRadiusOfMediaOverlays;
+    
+    // Phase 4.3: FileManager injected (not singleton) - shared by all media items
+    static FileManager* s_fileManager;
 
     // Core paint helpers
     void paintSelectionAndLabel(QPainter* painter);

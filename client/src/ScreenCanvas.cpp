@@ -363,8 +363,8 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
             m["mediaId"] = media->mediaId();
             m["fileId"] = media->fileId();
             // Include original filename (no path) to help remote resolve or display placeholder
-            if (!media->fileId().isEmpty()) {
-                QString p = FileManager::instance().getFilePathForId(media->fileId());
+            if (!media->fileId().isEmpty() && m_fileManager) {
+                QString p = m_fileManager->getFilePathForId(media->fileId());
                 if (!p.isEmpty()) {
                     QFileInfo fi(p); m["fileName"] = fi.fileName();
                 }

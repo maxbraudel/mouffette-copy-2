@@ -31,7 +31,8 @@ bool isVideoExtension(const QString& extension) {
 
 // Removed dependency on ResizableMediaBase / scene scanning.
 
-UploadManager::UploadManager(QObject* parent) : QObject(parent) {
+UploadManager::UploadManager(FileManager* fileManager, QObject* parent)
+    : QObject(parent), m_fileManager(fileManager) {
     m_lastActionTime.start();
     
     // Setup debounce timer for action throttling
@@ -209,7 +210,7 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
         obj["sizeBytes"] = static_cast<double>(f.size);
         
         // Include all mediaIds that use this fileId
-        QList<QString> mediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
+        QList<QString> mediaIds = m_fileManager->getMediaIdsForFile(f.fileId);
         QJsonArray mediaIdArray;
         for (const QString& mediaId : mediaIds) {
             mediaIdArray.append(mediaId);
@@ -325,7 +326,7 @@ void UploadManager::finalizeLocalCancelState() {
     resetToInitial();
     m_lastRemovalClientId = targetId;
     if (!targetId.isEmpty()) {
-        FileManager::instance().unmarkAllForClient(targetId);
+        m_fileManager->unmarkAllForClient(targetId);
     }
     emit allFilesRemoved();
     emit uiStateChanged();
@@ -491,16 +492,16 @@ void UploadManager::cleanupIncomingSession(bool deleteDiskContents,
         }
     }
     if (ideaScoped) {
-        const QSet<QString> ideaFiles = FileManager::instance().getFileIdsForIdea(ideaId);
+        const QSet<QString> ideaFiles = m_fileManager->getFileIdsForIdea(ideaId);
         removalIds.unite(ideaFiles);
     }
 
     if (!ideaScoped) {
         if (!cacheDirPath.isEmpty()) {
-            FileManager::instance().removeReceivedFileMappingsUnderPathPrefix(cacheDirPath + "/");
+            m_fileManager->removeReceivedFileMappingsUnderPathPrefix(cacheDirPath + "/");
         } else if (!removalIds.isEmpty()) {
             for (const QString& fid : removalIds) {
-                FileManager::instance().removeReceivedFileMapping(fid);
+                m_fileManager->removeReceivedFileMapping(fid);
             }
         }
 
@@ -518,13 +519,13 @@ void UploadManager::cleanupIncomingSession(bool deleteDiskContents,
         for (const QString& fid : removalIds) {
             if (fid.isEmpty()) continue;
 
-            FileManager::instance().dissociateFileFromIdea(fid, ideaId);
-            const QSet<QString> remainingIdeas = FileManager::instance().getIdeaIdsForFile(fid);
+            m_fileManager->dissociateFileFromIdea(fid, ideaId);
+            const QSet<QString> remainingIdeas = m_fileManager->getIdeaIdsForFile(fid);
             if (!remainingIdeas.isEmpty()) {
                 continue; // keep file for other ideas still referencing it
             }
 
-            const QString path = FileManager::instance().getFilePathForId(fid);
+            const QString path = m_fileManager->getFilePathForId(fid);
             if (deleteDiskContents && !path.isEmpty()) {
                 QFileInfo info(path);
                 if (info.exists()) {
@@ -536,7 +537,7 @@ void UploadManager::cleanupIncomingSession(bool deleteDiskContents,
                     }
                 }
             }
-            FileManager::instance().removeReceivedFileMapping(fid);
+            m_fileManager->removeReceivedFileMapping(fid);
         }
 
         if (deleteDiskContents && !cacheDirPath.isEmpty()) {
@@ -592,12 +593,9 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
     
     // Mark all uploaded files and media as available on the target client
     for (const auto& f : m_outgoingFiles) {
-        FileManager::instance().markFileUploadedToClient(f.fileId, m_uploadTargetClientId);
-        // mark all media associated to this file id
-        const QList<QString> mediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
-        for (const QString& mediaId : mediaIds) {
-            FileManager::instance().markMediaUploadedToClient(mediaId, m_uploadTargetClientId);
-        }
+        m_fileManager->markFileUploadedToClient(f.fileId, m_uploadTargetClientId);
+        // File-based tracking covers all media instances
+        const QList<QString> mediaIds = m_fileManager->getMediaIdsForFile(f.fileId);
     }
     
     m_uploadActive = true; // switch to active state
@@ -621,7 +619,7 @@ void UploadManager::onAllFilesRemovedRemote() {
                                         ? m_lastRemovalClientId
                                         : (!m_uploadTargetClientId.isEmpty() ? m_uploadTargetClientId : m_targetClientId);
     if (!removedClientId.isEmpty()) {
-        FileManager::instance().unmarkAllForClient(removedClientId);
+        m_fileManager->unmarkAllForClient(removedClientId);
     }
 
     // Now reset state
@@ -648,11 +646,8 @@ void UploadManager::onConnectionLost() {
         // Unmark any files that were part of the outgoing batch but not yet confirmed by onUploadFinished
         if (!m_uploadTargetClientId.isEmpty()) {
             for (const auto& f : m_outgoingFiles) {
-                FileManager::instance().unmarkFileUploadedToClient(f.fileId, m_uploadTargetClientId);
-                const QList<QString> mediaIds = FileManager::instance().getMediaIdsForFile(f.fileId);
-                for (const QString& mediaId : mediaIds) {
-                    FileManager::instance().unmarkMediaUploadedToClient(mediaId, m_uploadTargetClientId);
-                }
+                m_fileManager->unmarkFileUploadedToClient(f.fileId, m_uploadTargetClientId);
+                // File-based unmark covers all media instances
             }
         }
 
@@ -701,7 +696,7 @@ void UploadManager::cleanupIncomingCacheForConnectionLoss() {
         qDebug() << "UploadManager: Cleared uploads cache folder after connection loss:" << uploadsRoot;
     }
 
-    FileManager::instance().removeReceivedFileMappingsUnderPathPrefix(uploadsRoot + "/");
+    m_fileManager->removeReceivedFileMappingsUnderPathPrefix(uploadsRoot + "/");
 }
 
 // Incoming side (target) - replicate subset of MainWindow logic for assembling files
@@ -763,9 +758,9 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             m_incoming.expectedSizes.insert(fileId, qMax<qint64>(0, size));
             m_incoming.receivedByFile.insert(fileId, 0);
             // Register mapping so remote scene resolution can find this fileId immediately (even before complete)
-            FileManager::instance().registerReceivedFilePath(fileId, fullPath);
+            m_fileManager->registerReceivedFilePath(fileId, fullPath);
             if (!m_incoming.ideaId.isEmpty()) {
-                FileManager::instance().associateFileWithIdea(fileId, m_incoming.ideaId);
+                m_fileManager->associateFileWithIdea(fileId, m_incoming.ideaId);
             }
             // Initialize expected chunk index for this file to 0
             m_expectedChunkIndex.insert(m_incoming.uploadId + ":" + fileId, 0);
@@ -861,7 +856,7 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             const QString& fileId = it.key();
             const QString& ext = it.value();
             if (isVideoExtension(ext)) {
-                FileManager::instance().preloadFileIntoMemory(fileId);
+                m_fileManager->preloadFileIntoMemory(fileId);
             }
         }
         m_incoming.fileIdToExtension.clear();
@@ -937,8 +932,8 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         if (!senderClientId.isEmpty() && !fileId.isEmpty()) {
             bool shouldRemoveFromDisk = true;
             if (!ideaId.isEmpty()) {
-                FileManager::instance().dissociateFileFromIdea(fileId, ideaId);
-                const QSet<QString> remainingIdeas = FileManager::instance().getIdeaIdsForFile(fileId);
+                m_fileManager->dissociateFileFromIdea(fileId, ideaId);
+                const QSet<QString> remainingIdeas = m_fileManager->getIdeaIdsForFile(fileId);
                 shouldRemoveFromDisk = remainingIdeas.isEmpty();
             }
 
@@ -952,7 +947,7 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             QString dirPath = base + "/Mouffette/Uploads/" + senderClientId;
 
             bool removedAny = false;
-            const QString mappedPath = FileManager::instance().getFilePathForId(fileId);
+            const QString mappedPath = m_fileManager->getFilePathForId(fileId);
             if (!mappedPath.isEmpty()) {
                 QFileInfo mappedInfo(mappedPath);
                 if (mappedInfo.exists()) {
@@ -996,7 +991,7 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
                 }
             }
 
-            FileManager::instance().removeReceivedFileMapping(fileId);
+            m_fileManager->removeReceivedFileMapping(fileId);
         }
     }
 }

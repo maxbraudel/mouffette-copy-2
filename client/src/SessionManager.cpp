@@ -32,9 +32,6 @@ const SessionManager::CanvasSession* SessionManager::findSession(const QString& 
 
 // Session lookup by ideaId
 SessionManager::CanvasSession* SessionManager::findSessionByIdeaId(const QString& ideaId) {
-    if (ideaId.isEmpty()) {
-        return nullptr;
-    }
     for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it) {
         if (it.value().ideaId == ideaId) {
             return &it.value();
@@ -44,9 +41,6 @@ SessionManager::CanvasSession* SessionManager::findSessionByIdeaId(const QString
 }
 
 const SessionManager::CanvasSession* SessionManager::findSessionByIdeaId(const QString& ideaId) const {
-    if (ideaId.isEmpty()) {
-        return nullptr;
-    }
     for (auto it = m_sessions.constBegin(); it != m_sessions.constEnd(); ++it) {
         if (it.value().ideaId == ideaId) {
             return &it.value();

@@ -52,6 +52,7 @@ class ScreenNavigationManager; // manages page switching & loader UX
 class ResponsiveLayoutManager; // manages responsive layout behavior
 class FileWatcher; // monitors source files and removes media when files are deleted
 class SessionManager; // Phase 4.1: manages canvas session lifecycle
+class FileManager; // Phase 4.3: forward declaration for dependency injection
 // using QStackedWidget for canvas container switching
 class QFrame; // forward declare for separators in remote info container
 
@@ -257,6 +258,9 @@ private:
     
     // Responsive layout manager
     ResponsiveLayoutManager* m_responsiveLayoutManager = nullptr;
+    
+    // Phase 4.3: FileManager injected (not singleton)
+    FileManager* m_fileManager = nullptr;
     
     // Phase 4.1: Session manager (COMPLETED - replaced m_canvasSessions)
     SessionManager* m_sessionManager = nullptr;

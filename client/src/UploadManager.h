@@ -13,6 +13,7 @@
 #include <functional>
 
 class WebSocketClient;
+class FileManager;
 // (graphics scene/item no longer needed here)
 
 struct UploadFileInfo {
@@ -49,7 +50,7 @@ struct IncomingUploadSession {
 class UploadManager : public QObject {
     Q_OBJECT
 public:
-    explicit UploadManager(QObject* parent = nullptr);
+    explicit UploadManager(FileManager* fileManager, QObject* parent = nullptr);
     void setWebSocketClient(WebSocketClient* client);
     void setTargetClientId(const QString& id);
     QString targetClientId() const { return m_targetClientId; }
@@ -159,6 +160,9 @@ private:
     QHash<QString, int> m_effectiveFilePercents;
 
     QString m_lastRemovalClientId;
+
+    // Phase 4.3: FileManager injected (not singleton)
+    FileManager* m_fileManager = nullptr;
 
     // Incoming session (target side)
     IncomingUploadSession m_incoming;

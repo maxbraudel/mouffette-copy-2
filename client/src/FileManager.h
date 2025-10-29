@@ -23,11 +23,15 @@ class FileMemoryCache;
  * - RemoteFileTracker: remote client & ideaId tracking
  * - FileMemoryCache: memory caching for performance
  * 
- * Maintains backward-compatible API while internally using services.
+ * Phase 4.3: Converted to dependency injection (no longer singleton)
  */
 class FileManager
 {
 public:
+    explicit FileManager();
+    ~FileManager();
+    
+    // Legacy singleton access (deprecated - use dependency injection)
     static FileManager& instance();
     
     // Get or create file ID for a given file path
@@ -77,10 +81,7 @@ public:
     // Remove the association indicating a file is uploaded to a client
     void unmarkFileUploadedToClient(const QString& fileId, const QString& clientId);
 
-    // Track which clients have received which media instances (per-item, independent of file dedupe)
-    void markMediaUploadedToClient(const QString& mediaId, const QString& clientId);
-    bool isMediaUploadedToClient(const QString& mediaId, const QString& clientId) const;
-    void unmarkMediaUploadedToClient(const QString& mediaId, const QString& clientId);
+
     // Associate/de-associate files with logical idea IDs (scenes/projects)
     void associateFileWithIdea(const QString& fileId, const QString& ideaId);
     void dissociateFileFromIdea(const QString& fileId, const QString& ideaId);
@@ -89,9 +90,8 @@ public:
     void replaceIdeaFileSet(const QString& ideaId, const QSet<QString>& fileIds);
     void removeIdeaAssociations(const QString& ideaId);
 
-    // Clear all uploaded markers for a given client across all files and media
+    // Clear all uploaded markers for a given client across all files
     void unmarkAllFilesForClient(const QString& clientId);
-    void unmarkAllMediaForClient(const QString& clientId);
     void unmarkAllForClient(const QString& clientId);
 
     // Remove any received-file bookkeeping for paths under the given prefix (used when cleaning cache folders)
@@ -101,8 +101,6 @@ public:
     static void setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& ideaIds)> cb);
 
 private:
-    FileManager();
-    
     // Phase 4.2: Service references (initialized in constructor)
     LocalFileRepository* m_repository;
     RemoteFileTracker* m_tracker;
