@@ -30,6 +30,16 @@ public slots:
      * and coordinates with UploadManager for file transfer
      */
     void onUploadButtonClicked();
+    
+    /**
+     * @brief Update individual file progress from server reports
+     * @param globalPercent Overall upload progress percentage
+     * @param filesCompleted Number of files completed
+     * @param totalFiles Total number of files being uploaded
+     * 
+     * Marks media items as uploaded based on server progress reports
+     */
+    void updateIndividualProgressFromServer(int globalPercent, int filesCompleted, int totalFiles);
 
 private:
     MainWindow* m_mainWindow;

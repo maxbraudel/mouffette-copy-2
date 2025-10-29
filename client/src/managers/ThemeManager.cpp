@@ -1,8 +1,16 @@
 #include "ThemeManager.h"
+#include "../MainWindow.h"
 #include "AppColors.h"
 #include "OverlayPanels.h"
 #include "ScreenCanvas.h"
+#include "RemoteClientInfoManager.h"
+#include "TopBarManager.h"
+#include "../ui/pages/ClientListPage.h"
+#include "../ui/pages/CanvasViewPage.h"
 #include <climits>
+#include <QLabel>
+#include <QFrame>
+#include <QPushButton>
 
 ThemeManager* ThemeManager::s_instance = nullptr;
 
@@ -167,3 +175,121 @@ int ThemeManager::getUploadButtonMaxWidth() const
 {
     return (gMediaListOverlayAbsoluteMaxWidthPx > 0) ? gMediaListOverlayAbsoluteMaxWidthPx : INT_MAX;
 }
+
+void ThemeManager::updateAllWidgetStyles(MainWindow* mainWindow)
+{
+    if (!mainWindow) return;
+    
+    // Re-apply stylesheets that use ColorSource to pick up theme changes
+    QWidget* centralWidget = mainWindow->centralWidget();
+    if (centralWidget) {
+        centralWidget->setStyleSheet(QString(
+            "QWidget#CentralRoot { background-color: %1; }"
+        ).arg(AppColors::colorSourceToCss(AppColors::gWindowBackgroundColorSource)));
+    }
+    
+    // Note: Client list styling now handled by ClientListPage
+    
+    // Ensure the client list page title uses the same text color as other texts
+    QLabel* pageTitleLabel = mainWindow->findChild<QLabel*>("PageTitleLabel");
+    if (pageTitleLabel) {
+        pageTitleLabel->setStyleSheet(QString(
+            "QLabel { "
+            "    background: transparent; "
+            "    border: none; "
+            "    font-size: %1px; "
+            "    font-weight: bold; "
+            "    color: palette(text); "
+            "}").arg(m_config.titleTextFontSize)
+        );
+    }
+    
+    // Update canvas container via CanvasViewPage
+    CanvasViewPage* canvasViewPage = mainWindow->findChild<CanvasViewPage*>();
+    if (canvasViewPage) {
+        QWidget* canvasContainer = canvasViewPage->getCanvasContainer();
+        if (canvasContainer) {
+            canvasContainer->setStyleSheet(
+                QString("QWidget#CanvasContainer { "
+                "   background-color: %2; "
+                "   border: 1px solid %1; "
+                "   border-radius: 5px; "
+                "}").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource))
+                    .arg(AppColors::colorSourceToCss(AppColors::gInteractionBackgroundColorSource))
+            );
+        }
+    }
+    
+    // Update remote client info container border and separators via manager
+    RemoteClientInfoManager* remoteManager = mainWindow->findChild<RemoteClientInfoManager*>();
+    QWidget* remoteContainer = remoteManager ? remoteManager->getContainer() : nullptr;
+    if (remoteContainer) {
+        const QString containerStyle = QString(
+            "QWidget { "
+            "    background-color: transparent; "
+            "    color: palette(button-text); "
+            "    border: 1px solid %3; "
+            "    border-radius: %1px; "
+            "    min-height: %2px; "
+            "    max-height: %2px; "
+            "}"
+        ).arg(m_config.dynamicBoxBorderRadius)
+         .arg(m_config.dynamicBoxHeight)
+         .arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource));
+        remoteContainer->setStyleSheet(containerStyle);
+        
+        // Update separators in remote client info
+        QList<QFrame*> separators = remoteContainer->findChildren<QFrame*>();
+        for (QFrame* separator : separators) {
+            if (separator && separator->frameShape() == QFrame::VLine) {
+                separator->setStyleSheet(QString("QFrame { color: %1; }")
+                    .arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
+            }
+        }
+    }
+    
+    // Update local client info container border via TopBarManager
+    TopBarManager* topBarManager = mainWindow->findChild<TopBarManager*>();
+    QWidget* localContainer = topBarManager ? topBarManager->getLocalClientInfoContainer() : nullptr;
+    if (localContainer) {
+        const QString containerStyle = QString(
+            "QWidget { "
+            "    background-color: transparent; "
+            "    color: palette(button-text); "
+            "    border: 1px solid %3; "
+            "    border-radius: %1px; "
+            "    min-height: %2px; "
+            "}"
+        ).arg(m_config.dynamicBoxBorderRadius)
+         .arg(m_config.dynamicBoxHeight)
+         .arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource));
+        localContainer->setStyleSheet(containerStyle);
+        
+        // Update separators in local client info
+        QList<QFrame*> localSeparators = localContainer->findChildren<QFrame*>();
+        for (QFrame* separator : localSeparators) {
+            if (separator && separator->frameShape() == QFrame::VLine) {
+                separator->setStyleSheet(QString("QFrame { color: %1; }")
+                    .arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
+            }
+        }
+    }
+    
+    // Update all buttons that use gAppBorderColorSource
+    QList<QPushButton*> buttons = mainWindow->findChildren<QPushButton*>();
+    for (QPushButton* button : buttons) {
+        if (button && button->styleSheet().contains("border:") && 
+            !button->styleSheet().contains("border: none") &&
+            !button->styleSheet().contains("background: transparent")) {
+            // Re-apply button styles - check if it's a primary or normal button
+            QString currentStyle = button->styleSheet();
+            if (currentStyle.contains(AppColors::gBrandBlue.name())) {
+                applyPrimaryButton(button);
+            } else if (currentStyle.contains("QPushButton")) {
+                applyPillButton(button);
+            }
+        }
+    }
+    // Note: Client list style updates now handled by ClientListPage
+}
+

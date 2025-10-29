@@ -228,3 +228,30 @@ void UploadEventHandler::onUploadButtonClicked()
         uploadManager->setActiveSessionIdentity(QString());
     }
 }
+
+void UploadEventHandler::updateIndividualProgressFromServer(int globalPercent, int filesCompleted, int totalFiles) {
+    Q_UNUSED(globalPercent);
+    Q_UNUSED(totalFiles);
+    if (totalFiles == 0) return;
+
+    auto* session = m_mainWindow->sessionForActiveUpload();
+    if (!session || !session->canvas || !session->canvas->scene()) return;
+
+    const int desired = qMax(0, filesCompleted);
+    if (desired <= 0) return;
+
+    int have = session->upload.serverCompletedFileIds.size();
+    if (have >= desired) return;
+
+    for (const QString& fileId : session->upload.currentUploadFileOrder) {
+        if (session->upload.serverCompletedFileIds.contains(fileId)) continue;
+        const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
+        for (ResizableMediaBase* item : items) {
+            if (item) item->setUploadUploaded();
+        }
+        session->upload.serverCompletedFileIds.insert(fileId);
+        have++;
+        if (have >= desired) break;
+    }
+}
+

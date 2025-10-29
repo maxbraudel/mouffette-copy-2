@@ -1292,104 +1292,10 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::updateStylesheetsForTheme() {
-    // Re-apply stylesheets that use ColorSource to pick up theme changes
-    if (m_centralWidget) {
-        m_centralWidget->setStyleSheet(QString(
-            "QWidget#CentralRoot { background-color: %1; }"
-        ).arg(AppColors::colorSourceToCss(AppColors::gWindowBackgroundColorSource)));
+    // [Phase 14.2] Delegate to ThemeManager
+    if (ThemeManager::instance()) {
+        ThemeManager::instance()->updateAllWidgetStyles(this);
     }
-    // Note: Client list styling now handled by ClientListPage
-    
-    // Ensure the client list page title uses the same text color as other texts
-    if (m_pageTitleLabel) {
-        m_pageTitleLabel->setStyleSheet(QString(
-            "QLabel { "
-            "    background: transparent; "
-            "    border: none; "
-            "    font-size: %1px; "
-            "    font-weight: bold; "
-            "    color: palette(text); "
-            "}").arg(gTitleTextFontSize)
-        );
-    }
-
-    // Phase 1.2: Update canvas container via CanvasViewPage
-    if (m_canvasViewPage) {
-        QWidget* canvasContainer = m_canvasViewPage->getCanvasContainer();
-        if (canvasContainer) {
-            canvasContainer->setStyleSheet(
-                QString("QWidget#CanvasContainer { "
-                "   background-color: %2; "
-                "   border: 1px solid %1; "
-                "   border-radius: 5px; "
-                "}").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)).arg(AppColors::colorSourceToCss(AppColors::gInteractionBackgroundColorSource))
-            );
-        }
-    }
-    
-    // [PHASE 5] Update remote client info container border and separators via manager
-    QWidget* remoteContainer = m_remoteClientInfoManager ? m_remoteClientInfoManager->getContainer() : nullptr;
-    if (remoteContainer) {
-        const QString containerStyle = QString(
-            "QWidget { "
-            "    background-color: transparent; "
-            "    color: palette(button-text); "
-            "    border: 1px solid %3; "
-            "    border-radius: %1px; "
-            "    min-height: %2px; "
-            "    max-height: %2px; "
-            "}"
-        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource));
-        remoteContainer->setStyleSheet(containerStyle);
-        
-        // Update separators in remote client info
-        QList<QFrame*> separators = remoteContainer->findChildren<QFrame*>();
-        for (QFrame* separator : separators) {
-            if (separator && separator->frameShape() == QFrame::VLine) {
-                separator->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
-            }
-        }
-    }
-    
-    // [PHASE 6.1] Update local client info container border via TopBarManager
-    QWidget* localContainer = m_topBarManager ? m_topBarManager->getLocalClientInfoContainer() : nullptr;
-    if (localContainer) {
-        const QString containerStyle = QString(
-            "QWidget { "
-            "    background-color: transparent; "
-            "    color: palette(button-text); "
-            "    border: 1px solid %3; "
-            "    border-radius: %1px; "
-            "    min-height: %2px; "
-            "}"
-        ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource));
-        localContainer->setStyleSheet(containerStyle);
-    }
-    
-    // Update separators in local client info
-    QList<QFrame*> localSeparators = localContainer ? localContainer->findChildren<QFrame*>() : QList<QFrame*>();
-    for (QFrame* separator : localSeparators) {
-        if (separator && separator->frameShape() == QFrame::VLine) {
-            separator->setStyleSheet(QString("QFrame { color: %1; }").arg(AppColors::colorSourceToCss(AppColors::gAppBorderColorSource)));
-        }
-    }
-    
-    // Update all buttons that use gAppBorderColorSource
-    QList<QPushButton*> buttons = findChildren<QPushButton*>();
-    for (QPushButton* button : buttons) {
-        if (button && button->styleSheet().contains("border:") && 
-            !button->styleSheet().contains("border: none") &&
-            !button->styleSheet().contains("background: transparent")) {
-            // Re-apply button styles - check if it's a primary or normal button
-            QString currentStyle = button->styleSheet();
-            if (currentStyle.contains(AppColors::gBrandBlue.name())) {
-                applyPrimaryBtn(button);
-            } else if (currentStyle.contains("QPushButton")) {
-                applyPillBtn(button);
-            }
-        }
-    }
-    // Note: Client list style updates now handled by ClientListPage
 }
 
 void MainWindow::setupUI() {
@@ -1893,28 +1799,9 @@ void MainWindow::updateConnectionStatus() {
 }
 
 void MainWindow::updateIndividualProgressFromServer(int globalPercent, int filesCompleted, int totalFiles) {
-    Q_UNUSED(globalPercent);
-    Q_UNUSED(totalFiles);
-    if (totalFiles == 0) return;
-
-    CanvasSession* session = sessionForActiveUpload();
-    if (!session || !session->canvas || !session->canvas->scene()) return;
-
-    const int desired = qMax(0, filesCompleted);
-    if (desired <= 0) return;
-
-    int have = session->upload.serverCompletedFileIds.size();
-    if (have >= desired) return;
-
-    for (const QString& fileId : session->upload.currentUploadFileOrder) {
-        if (session->upload.serverCompletedFileIds.contains(fileId)) continue;
-        const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
-        for (ResizableMediaBase* item : items) {
-            if (item) item->setUploadUploaded();
-        }
-        session->upload.serverCompletedFileIds.insert(fileId);
-        have++;
-        if (have >= desired) break;
+    // [Phase 14.3] Delegate to UploadEventHandler
+    if (m_uploadEventHandler) {
+        m_uploadEventHandler->updateIndividualProgressFromServer(globalPercent, filesCompleted, totalFiles);
     }
 }
 

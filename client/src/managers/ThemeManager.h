@@ -114,6 +114,15 @@ public:
      * @return Maximum width in pixels, or INT_MAX if unlimited
      */
     int getUploadButtonMaxWidth() const;
+    
+    /**
+     * @brief Update all widget stylesheets to reflect current theme
+     * @param mainWindow Pointer to main window for accessing widgets
+     * 
+     * This method updates all dynamic stylesheets throughout the application
+     * when the theme changes (e.g., light/dark mode switch).
+     */
+    void updateAllWidgetStyles(class MainWindow* mainWindow);
 
 signals:
     /**

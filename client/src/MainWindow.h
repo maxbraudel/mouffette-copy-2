@@ -191,6 +191,10 @@ public:
     bool getAutoUploadImportedMedia() const; // Implementation in .cpp to avoid incomplete type
     QString createIdeaId() const;
     
+    // [Phase 14.3] Session management accessors
+    CanvasSession* sessionForActiveUpload();
+    CanvasSession* sessionForUploadId(const QString& uploadId);
+    
     // [Phase 11] Accessor methods for UploadButtonStyleManager
     bool isRemoteOverlayActionsEnabled() const { return m_remoteOverlayActionsEnabled; }
     void setRemoteOverlayActionsEnabled(bool enabled) { m_remoteOverlayActionsEnabled = enabled; }
@@ -306,8 +310,8 @@ private:
     void rotateSessionIdea(CanvasSession& session);
     void markAllSessionsOffline();
     ScreenCanvas* canvasForClientId(const QString& clientId) const;
-    CanvasSession* sessionForActiveUpload();
-    CanvasSession* sessionForUploadId(const QString& uploadId);
+    // sessionForActiveUpload() moved to public (Phase 14.3)
+    // sessionForUploadId() moved to public (Phase 14.3)
     void clearUploadTracking(CanvasSession& session);
     void refreshOngoingScenesList();
     void applyListWidgetStyle(QListWidget* listWidget) const;
