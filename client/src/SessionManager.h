@@ -13,6 +13,9 @@ class ScreenCanvas;
 class QPushButton;
 class ResizableMediaBase;
 
+// Phase 3: ideaId is MANDATORY - use default value instead of empty string
+inline const QString DEFAULT_IDEA_ID = QStringLiteral("default");
+
 /**
  * Phase 4.1: SessionManager
  * 

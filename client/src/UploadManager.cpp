@@ -1,6 +1,7 @@
 #include "UploadManager.h"
 #include "WebSocketClient.h"
 #include "FileManager.h"
+#include "SessionManager.h"  // Phase 3: For DEFAULT_IDEA_ID constant
 #include <QGraphicsScene>
 #include <QGraphicsItem>
 #include <QFileInfo>
@@ -105,9 +106,10 @@ void UploadManager::toggleUpload(const QVector<UploadFileInfo>& files) {
 
 void UploadManager::requestRemoval(const QString& clientId) {
     if (!m_ws || !m_ws->isConnected() || clientId.isEmpty()) return;
+    // Phase 3: ideaId is MANDATORY - always set to DEFAULT_IDEA_ID at minimum
     if (m_activeIdeaId.isEmpty()) {
-        qWarning() << "UploadManager: requestRemoval aborted, ideaId not set";
-        return;
+        qWarning() << "UploadManager: requestRemoval has empty ideaId (should never happen), using DEFAULT_IDEA_ID";
+        m_activeIdeaId = DEFAULT_IDEA_ID;
     }
     // Ensure subsequent all_files_removed callbacks attribute to the correct target
     m_uploadTargetClientId = clientId;
@@ -118,9 +120,10 @@ void UploadManager::requestRemoval(const QString& clientId) {
 void UploadManager::requestUnload() {
     const QString clientId = m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId;
     if (!m_uploadActive || clientId.isEmpty()) return;
+    // Phase 3: ideaId is MANDATORY - always set to DEFAULT_IDEA_ID at minimum
     if (m_activeIdeaId.isEmpty()) {
-        qWarning() << "UploadManager: requestUnload aborted, ideaId not set";
-        return;
+        qWarning() << "UploadManager: requestUnload has empty ideaId (should never happen), using DEFAULT_IDEA_ID";
+        m_activeIdeaId = DEFAULT_IDEA_ID;
     }
     
     // Mark action in progress to prevent spam
@@ -136,9 +139,10 @@ void UploadManager::requestCancel() {
     if (!m_ws || !m_ws->isConnected() || clientId.isEmpty()) return;
     if (!m_uploadInProgress) return;
     if (m_cancelRequested) return;
+    // Phase 3: ideaId is MANDATORY - always set to DEFAULT_IDEA_ID at minimum
     if (m_activeIdeaId.isEmpty()) {
-        qWarning() << "UploadManager: requestCancel aborted, ideaId not set";
-        return;
+        qWarning() << "UploadManager: requestCancel has empty ideaId (should never happen), using DEFAULT_IDEA_ID";
+        m_activeIdeaId = DEFAULT_IDEA_ID;
     }
     
     // Mark action in progress to prevent spam
@@ -172,9 +176,10 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
         qWarning() << "UploadManager: Upload already in progress, ignoring new start request";
         return;
     }
+    // Phase 3: ideaId is MANDATORY - always set to DEFAULT_IDEA_ID at minimum
     if (m_activeIdeaId.isEmpty()) {
-        qWarning() << "UploadManager: startUpload aborted, ideaId not set";
-        return;
+        qWarning() << "UploadManager: startUpload has empty ideaId (should never happen), using DEFAULT_IDEA_ID";
+        m_activeIdeaId = DEFAULT_IDEA_ID;
     }
     
     // Mark action in progress to prevent spam
@@ -456,7 +461,10 @@ void UploadManager::cleanupIncomingSession(bool deleteDiskContents,
     if (matchesActiveSession) {
         if (uploadId.isEmpty()) uploadId = m_incoming.uploadId;
         if (cacheDirPath.isEmpty()) cacheDirPath = m_incoming.cacheDirPath;
-        if (ideaId.isEmpty()) ideaId = m_incoming.ideaId;
+        // Phase 3: ideaId is MANDATORY - fallback to incoming ideaId or DEFAULT_IDEA_ID
+        if (ideaId.isEmpty()) {
+            ideaId = m_incoming.ideaId.isEmpty() ? DEFAULT_IDEA_ID : m_incoming.ideaId;
+        }
 
         for (auto it = m_incoming.openFiles.begin(); it != m_incoming.openFiles.end(); ++it) {
             if (it.value()) {
@@ -484,7 +492,8 @@ void UploadManager::cleanupIncomingSession(bool deleteDiskContents,
         dropChunkTracking(uploadIdOverride);
     }
 
-    const bool ideaScoped = !ideaId.isEmpty();
+    // Phase 3: ideaId is MANDATORY - check if it's a specific idea or default
+    const bool ideaScoped = (ideaId != DEFAULT_IDEA_ID);
     QSet<QString> removalIds;
     for (const QString& fid : fileIds) {
         if (!fid.isEmpty()) {
@@ -759,7 +768,8 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             m_incoming.receivedByFile.insert(fileId, 0);
             // Register mapping so remote scene resolution can find this fileId immediately (even before complete)
             m_fileManager->registerReceivedFilePath(fileId, fullPath);
-            if (!m_incoming.ideaId.isEmpty()) {
+            // Phase 3: ideaId is MANDATORY - associate with idea (even if DEFAULT_IDEA_ID)
+            if (m_incoming.ideaId != DEFAULT_IDEA_ID) {
                 m_fileManager->associateFileWithIdea(fileId, m_incoming.ideaId);
             }
             // Initialize expected chunk index for this file to 0
@@ -771,7 +781,8 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
     } else if (type == "upload_chunk") {
         if (message.value("uploadId").toString() != m_incoming.uploadId) return;
         const QString ideaId = message.value("ideaId").toString();
-        if (!ideaId.isEmpty() && !m_incoming.ideaId.isEmpty() && ideaId != m_incoming.ideaId) {
+        // Phase 3: ideaId matching - compare against incoming ideaId (both should be set)
+        if (!ideaId.isEmpty() && m_incoming.ideaId != DEFAULT_IDEA_ID && ideaId != m_incoming.ideaId) {
             qWarning() << "UploadManager: Ignoring chunk for mismatched idea" << ideaId << "expected" << m_incoming.ideaId;
             return;
         }
@@ -834,7 +845,8 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
     } else if (type == "upload_complete") {
         if (message.value("uploadId").toString() != m_incoming.uploadId) return;
         const QString ideaId = message.value("ideaId").toString();
-        if (!ideaId.isEmpty() && !m_incoming.ideaId.isEmpty() && ideaId != m_incoming.ideaId) {
+        // Phase 3: ideaId matching - compare against incoming ideaId (both should be set)
+        if (!ideaId.isEmpty() && m_incoming.ideaId != DEFAULT_IDEA_ID && ideaId != m_incoming.ideaId) {
             qWarning() << "UploadManager: Ignoring upload_complete for mismatched idea" << ideaId << "expected" << m_incoming.ideaId;
             return;
         }
@@ -931,7 +943,8 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
 
         if (!senderClientId.isEmpty() && !fileId.isEmpty()) {
             bool shouldRemoveFromDisk = true;
-            if (!ideaId.isEmpty()) {
+            // Phase 3: ideaId is MANDATORY - check if it's a specific idea (not DEFAULT_IDEA_ID)
+            if (ideaId != DEFAULT_IDEA_ID) {
                 m_fileManager->dissociateFileFromIdea(fileId, ideaId);
                 const QSet<QString> remainingIdeas = m_fileManager->getIdeaIdsForFile(fileId);
                 shouldRemoveFromDisk = remainingIdeas.isEmpty();

@@ -2,6 +2,7 @@
 #include "ScreenCanvas.h"
 #include "WebSocketClient.h" // for remote scene start/stop messaging
 #include "UploadManager.h" // for upload state checking
+#include "SessionManager.h" // Phase 3: For DEFAULT_IDEA_ID constant
 #include <QTimer>
 #include "AppColors.h"
 #include "Theme.h"
@@ -344,7 +345,8 @@ ScreenCanvas::~ScreenCanvas() {
 
 QJsonObject ScreenCanvas::serializeSceneState() const {
     QJsonObject root;
-    if (!m_activeIdeaId.isEmpty()) {
+    // Phase 3: ideaId is MANDATORY - only include in manifest if it's not the default
+    if (m_activeIdeaId != DEFAULT_IDEA_ID) {
         root["ideaId"] = m_activeIdeaId;
     }
     // Screens

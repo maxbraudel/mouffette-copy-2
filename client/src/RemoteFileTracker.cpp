@@ -57,7 +57,9 @@ void RemoteFileTracker::unmarkAllFilesForClient(const QString& clientId) {
 }
 
 void RemoteFileTracker::associateFileWithIdea(const QString& fileId, const QString& ideaId) {
+    // Phase 3: ideaId is MANDATORY - should never be empty (defensive check)
     if (fileId.isEmpty() || ideaId.isEmpty()) {
+        qWarning() << "RemoteFileTracker: associateFileWithIdea called with empty parameter - fileId:" << fileId << "ideaId:" << ideaId;
         return;
     }
     
@@ -67,7 +69,9 @@ void RemoteFileTracker::associateFileWithIdea(const QString& fileId, const QStri
 }
 
 void RemoteFileTracker::dissociateFileFromIdea(const QString& fileId, const QString& ideaId) {
+    // Phase 3: ideaId is MANDATORY - should never be empty (defensive check)
     if (fileId.isEmpty() || ideaId.isEmpty()) {
+        qWarning() << "RemoteFileTracker: dissociateFileFromIdea called with empty parameter - fileId:" << fileId << "ideaId:" << ideaId;
         return;
     }
     
@@ -99,7 +103,9 @@ QSet<QString> RemoteFileTracker::getIdeaIdsForFile(const QString& fileId) const 
 }
 
 void RemoteFileTracker::replaceIdeaFileSet(const QString& ideaId, const QSet<QString>& fileIds) {
+    // Phase 3: ideaId is MANDATORY - should never be empty (defensive check)
     if (ideaId.isEmpty()) {
+        qWarning() << "RemoteFileTracker: replaceIdeaFileSet called with empty ideaId";
         return;
     }
     
@@ -125,7 +131,11 @@ void RemoteFileTracker::replaceIdeaFileSet(const QString& ideaId, const QSet<QSt
 }
 
 void RemoteFileTracker::removeIdeaAssociations(const QString& ideaId) {
-    if (ideaId.isEmpty()) return;
+    // Phase 3: ideaId is MANDATORY - should never be empty (defensive check)
+    if (ideaId.isEmpty()) {
+        qWarning() << "RemoteFileTracker: removeIdeaAssociations called with empty ideaId";
+        return;
+    }
     
     const QSet<QString> files = m_ideaIdToFileIds.take(ideaId);
     for (const QString& fid : files) {
