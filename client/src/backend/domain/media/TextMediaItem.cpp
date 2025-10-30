@@ -5,6 +5,7 @@
 #include <QGraphicsSceneMouseEvent>
 #include <QtGlobal>
 #include <algorithm>
+#include <cmath>
 #include <QGraphicsTextItem>
 #include <QFocusEvent>
 #include <QKeyEvent>
@@ -99,7 +100,6 @@ TextMediaItem::TextMediaItem(
     : ResizableMediaBase(initialSize, visualSizePx, selectionSizePx, QStringLiteral("Text"))
     , m_text(initialText)
     , m_textColor(Qt::white) // Default white text
-    , m_initialContentSize(initialSize)
 {
     // Set up default font
     m_font = QFont(QStringLiteral("Arial"), 24);
@@ -117,6 +117,7 @@ void TextMediaItem::setText(const QString& text) {
         if (m_inlineEditor && !m_isEditing) {
             m_inlineEditor->setPlainText(m_text);
         }
+        updateInlineEditorGeometry();
         update(); // Trigger repaint
         updateOverlayLayout();
     }
@@ -224,79 +225,88 @@ void TextMediaItem::updateInlineEditorGeometry() {
     }
     QScopedValueRollback<bool> guard(m_isUpdatingInlineGeometry, true);
 
-    if (QTextDocument* doc = m_inlineEditor->document()) {
-    QTextOption opt = doc->defaultTextOption();
-    opt.setWrapMode(QTextOption::WordWrap);
+    const qreal margin = 10.0;
+
+    QTextDocument* doc = m_inlineEditor->document();
+    if (doc) {
+        QTextOption opt = doc->defaultTextOption();
+        opt.setWrapMode(QTextOption::WordWrap);
         opt.setAlignment(Qt::AlignHCenter);
-    doc->setDefaultTextOption(opt);
+        doc->setDefaultTextOption(opt);
         doc->setDocumentMargin(0.0);
     }
 
+    const qreal currentContentWidth = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - (margin * 2.0));
+    m_inlineEditor->setTextWidth(currentContentWidth);
+
+    qreal docIdealWidth = 0.0;
+    qreal docHeight = 0.0;
+    if (doc) {
+        docIdealWidth = doc->idealWidth();
+        if (auto* layout = doc->documentLayout()) {
+            QSizeF size = layout->documentSize();
+            docHeight = std::max<qreal>(1.0, size.height());
+        }
+    }
+
+    QSize newBaseSize = m_baseSize;
+    if (doc && m_isEditing) {
+        const qreal requiredWidth = docIdealWidth + margin * 2.0;
+        if (requiredWidth > newBaseSize.width()) {
+            newBaseSize.setWidth(static_cast<int>(std::ceil(requiredWidth)));
+        }
+
+        if (docHeight > 0.0) {
+            const qreal requiredHeight = docHeight + margin * 2.0;
+            if (requiredHeight > newBaseSize.height()) {
+                newBaseSize.setHeight(static_cast<int>(std::ceil(requiredHeight)));
+            }
+        }
+    }
+
+    const bool geometryChanged = (newBaseSize != m_baseSize);
+    if (geometryChanged) {
+        prepareGeometryChange();
+        m_baseSize = newBaseSize;
+    }
+
     const QRectF bounds = boundingRect();
-    const qreal margin = 10.0;
-    const qreal effectiveOpacity = m_contentOpacity * m_contentDisplayOpacity;
+    QRectF contentRect = bounds.adjusted(margin, margin, -margin, -margin);
+    if (contentRect.width() < 1.0) {
+        contentRect.setWidth(1.0);
+    }
+    if (contentRect.height() < 1.0) {
+        contentRect.setHeight(1.0);
+    }
+
     m_inlineEditor->setDefaultTextColor(m_textColor);
-    m_inlineEditor->setOpacity(effectiveOpacity);
+    m_inlineEditor->setOpacity(m_contentOpacity * m_contentDisplayOpacity);
 
-    if (m_fillContentWithoutAspect &&
-        m_initialContentSize.width() > 0 &&
-        m_initialContentSize.height() > 0) {
-        const qreal widthRatio = bounds.width() / static_cast<qreal>(m_initialContentSize.width());
-        const qreal heightRatio = bounds.height() / static_cast<qreal>(m_initialContentSize.height());
-        const qreal baseMarginX = (widthRatio != 0.0) ? margin / widthRatio : margin;
-        const qreal baseMarginY = (heightRatio != 0.0) ? margin / heightRatio : margin;
-        const qreal editableWidthBase = std::max<qreal>(1.0, static_cast<qreal>(m_initialContentSize.width()) - (baseMarginX * 2.0));
-        const qreal editableHeightBase = std::max<qreal>(1.0, static_cast<qreal>(m_initialContentSize.height()) - (baseMarginY * 2.0));
+    QFont editorFont = m_font;
+    m_inlineEditor->setFont(editorFont);
+    m_inlineEditor->setTransform(QTransform());
 
-        QFont editorFont = m_font;
-        editorFont.setPointSize(fontSizeForHeight(m_initialContentSize.height()));
-        m_inlineEditor->setFont(editorFont);
+    const qreal finalTextWidth = std::max<qreal>(1.0, contentRect.width());
+    m_inlineEditor->setTextWidth(finalTextWidth);
 
-        m_inlineEditor->setTransform(QTransform());
-        m_inlineEditor->setTextWidth(editableWidthBase);
-        
-        qreal docHeightBase = editableHeightBase;
-        if (auto* layout = m_inlineEditor->document() ? m_inlineEditor->document()->documentLayout() : nullptr) {
-            docHeightBase = std::max<qreal>(1.0, layout->documentSize().height());
+    qreal finalDocWidth = finalTextWidth;
+    qreal finalDocHeight = contentRect.height();
+    if (doc) {
+        if (auto* layout = doc->documentLayout()) {
+            QSizeF size = layout->documentSize();
+            finalDocWidth = std::max<qreal>(1.0, size.width());
+            finalDocHeight = std::max<qreal>(1.0, size.height());
         }
-        
-        qreal offsetBaseY = std::max<qreal>(0.0, (editableHeightBase - docHeightBase) / 2.0);
+    }
 
-        QTransform transform;
-        transform.scale(widthRatio, heightRatio);
-        m_inlineEditor->setTransform(transform, false);
+    const qreal offsetX = std::max<qreal>(0.0, (contentRect.width() - finalDocWidth) / 2.0);
+    const qreal offsetY = std::max<qreal>(0.0, (contentRect.height() - finalDocHeight) / 2.0);
 
-        QPointF basePos(baseMarginX, baseMarginY + offsetBaseY);
-        QPointF finalPos(basePos.x() * widthRatio, basePos.y() * heightRatio);
-        m_inlineEditor->setPos(finalPos);
-    } else {
-        QRectF contentRect = bounds.adjusted(margin, margin, -margin, -margin);
-        if (contentRect.width() < 1.0) {
-            contentRect.setWidth(1.0);
-        }
-        if (contentRect.height() < 1.0) {
-            contentRect.setHeight(1.0);
-        }
+    m_inlineEditor->setPos(contentRect.topLeft() + QPointF(offsetX, offsetY));
 
-        QFont editorFont = m_font;
-        editorFont.setPointSize(calculateFontSize());
-        m_inlineEditor->setFont(editorFont);
-
-        m_inlineEditor->setTransform(QTransform());
-        m_inlineEditor->setTextWidth(std::max<qreal>(1.0, contentRect.width()));
-        
-        qreal docWidth = contentRect.width();
-        qreal docHeight = contentRect.height();
-        if (auto* layout = m_inlineEditor->document() ? m_inlineEditor->document()->documentLayout() : nullptr) {
-            QSizeF docSize = layout->documentSize();
-            docWidth = std::max<qreal>(1.0, docSize.width());
-            docHeight = std::max<qreal>(1.0, docSize.height());
-        }
-        
-        qreal offsetX = std::max<qreal>(0.0, (contentRect.width() - docWidth) / 2.0);
-        qreal offsetY = std::max<qreal>(0.0, (contentRect.height() - docHeight) / 2.0);
-
-        m_inlineEditor->setPos(contentRect.topLeft() + QPointF(offsetX, offsetY));
+    if (geometryChanged) {
+        updateOverlayLayout();
+        update();
     }
 
     applyCenterAlignment(m_inlineEditor);
@@ -324,18 +334,6 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
 
     updateInlineEditorGeometry();
     update();
-}
-
-int TextMediaItem::fontSizeForHeight(int pixelHeight) const {
-    if (pixelHeight <= 0) {
-        return 12;
-    }
-    return std::clamp(static_cast<int>(pixelHeight * 0.4), 12, 200);
-}
-
-int TextMediaItem::calculateFontSize() const {
-    QRectF bounds = boundingRect();
-    return fontSizeForHeight(static_cast<int>(bounds.height()));
 }
 
 void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) {
@@ -372,41 +370,9 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
     painter->setOpacity(effectiveOpacity);
     
     painter->setPen(m_textColor);
-
-    const bool allowNonUniformStretch = m_fillContentWithoutAspect &&
-        m_initialContentSize.width() > 0 && m_initialContentSize.height() > 0;
-
-    bool drewWithStretch = false;
-    if (allowNonUniformStretch) {
-        const qreal widthRatio = bounds.width() / static_cast<qreal>(m_initialContentSize.width());
-        const qreal heightRatio = bounds.height() / static_cast<qreal>(m_initialContentSize.height());
-        if (!qFuzzyIsNull(widthRatio) && !qFuzzyIsNull(heightRatio)) {
-            QFont stretchedFont = m_font;
-            stretchedFont.setPointSize(fontSizeForHeight(m_initialContentSize.height()));
-            painter->save();
-            painter->scale(widthRatio, heightRatio);
-            painter->setFont(stretchedFont);
-
-            const qreal horizontalMargin = (widthRatio != 0.0) ? 10.0 / widthRatio : 10.0;
-            const qreal verticalMargin = (heightRatio != 0.0) ? 10.0 / heightRatio : 10.0;
-            QRectF referenceRect(0.0, 0.0,
-                                 static_cast<qreal>(m_initialContentSize.width()),
-                                 static_cast<qreal>(m_initialContentSize.height()));
-            QRectF textRect = referenceRect.adjusted(horizontalMargin, verticalMargin,
-                                                     -horizontalMargin, -verticalMargin);
-            painter->drawText(textRect, Qt::AlignCenter | Qt::TextWordWrap, m_text);
-            painter->restore();
-            drewWithStretch = true;
-        }
-    }
-
-    if (!drewWithStretch) {
-        QFont renderFont = m_font;
-        renderFont.setPointSize(calculateFontSize());
-        painter->setFont(renderFont);
-        QRectF textRect = bounds.adjusted(10, 10, -10, -10);
-        painter->drawText(textRect, Qt::AlignCenter | Qt::TextWordWrap, m_text);
-    }
+    painter->setFont(m_font);
+    QRectF textRect = bounds.adjusted(10.0, 10.0, -10.0, -10.0);
+    painter->drawText(textRect, Qt::AlignCenter | Qt::TextWordWrap, m_text);
     
     painter->restore();
     

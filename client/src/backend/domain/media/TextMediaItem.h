@@ -51,14 +51,10 @@ private:
     QString m_text;
     QFont m_font;
     QColor m_textColor;
-    QSize m_initialContentSize;
     QGraphicsTextItem* m_inlineEditor = nullptr;
     bool m_isEditing = false;
     bool m_isUpdatingInlineGeometry = false;
     
-    // Helper to calculate appropriate font size based on item size
-    int calculateFontSize() const;
-    int fontSizeForHeight(int pixelHeight) const;
     void ensureInlineEditor();
     void updateInlineEditorGeometry();
     void finishInlineEditing(bool commitChanges);
