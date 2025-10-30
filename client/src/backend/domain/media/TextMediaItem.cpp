@@ -532,8 +532,15 @@ void TextMediaItem::updateInlineEditorGeometry() {
     }
 
     if (geometryChanged) {
-        updateOverlayLayout();
-        update();
+        // Defer overlay and repaint updates to avoid cascading repaints during active painting
+        if (m_inlineEditor) {
+            QTimer::singleShot(0, m_inlineEditor, [this]() {
+                if (!m_beingDeleted) {
+                    updateOverlayLayout();
+                    update();
+                }
+            });
+        }
     }
 
     const bool hasPendingResize = m_pendingAutoSize;
