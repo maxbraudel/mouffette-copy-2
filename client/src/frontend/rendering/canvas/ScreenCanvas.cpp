@@ -4952,7 +4952,6 @@ void ScreenCanvas::ensureToolSelector() {
     m_selectionToolButton->setAutoRaise(false);
     m_selectionToolButton->setFocusPolicy(Qt::NoFocus);
     m_selectionToolButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    m_selectionToolButton->setCursor(Qt::PointingHandCursor);
     
     // Text Tool button (right segment)
     m_textToolButton = new QToolButton(m_toolSelectorContainer);
@@ -4965,7 +4964,6 @@ void ScreenCanvas::ensureToolSelector() {
     m_textToolButton->setAutoRaise(false);
     m_textToolButton->setFocusPolicy(Qt::NoFocus);
     m_textToolButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    m_textToolButton->setCursor(Qt::PointingHandCursor);
     
     // Visual divider between segments
     QFrame* divider = new QFrame(m_toolSelectorContainer);
@@ -5008,6 +5006,7 @@ void ScreenCanvas::ensureToolSelector() {
         " border-bottom-left-radius: 0px;"
         " border-top-right-radius: %3;"
         " border-bottom-right-radius: %3;"
+        " border-left: none;"
         " padding: 0;"
         " margin: 0;"
         "}"
@@ -5117,12 +5116,8 @@ void ScreenCanvas::setCurrentTool(CanvasTool tool) {
         m_textToolButton->setChecked(tool == CanvasTool::Text);
     }
     
-    // Update cursor (optional visual feedback)
-    if (tool == CanvasTool::Text) {
-        viewport()->setCursor(Qt::CrossCursor);
-    } else {
-        viewport()->setCursor(Qt::ArrowCursor);
-    }
+    // Keep default arrow cursor for all tools
+    viewport()->setCursor(Qt::ArrowCursor);
 }
 
 void ScreenCanvas::createTextMediaAtPosition(const QPointF& scenePos) {

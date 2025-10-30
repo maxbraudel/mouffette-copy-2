@@ -104,7 +104,7 @@ QColor gLaunchTestScenePressed = QColor(255, 0, 255, 77); // Magenta pressed (0.
 QColor gOverlayBackgroundColor = QColor(50, 50, 50, 240);        // Semi-transparent dark
 QColor gOverlayActiveBackgroundColor = QColor(52, 87, 128, 240); // Active overlay
 QColor gOverlayTextColor = QColor(255, 255, 255, 230);      // White text (0.9 * 255 ≈ 230)
-QColor gOverlayBorderColor = QColor(255, 255, 255, 50); // White border (0.2 * 255 ≈ 51)
+QColor gOverlayBorderColor = QColor(100, 100, 100, 255); // White border (0.2 * 255 ≈ 51)
 
 // ============================================================================
 // MEDIA COLORS
