@@ -341,14 +341,6 @@ void TextMediaItem::updateInlineEditorGeometry() {
     const qreal margin = kContentPadding;
 
     QTextDocument* doc = m_inlineEditor->document();
-    if (doc) {
-        QScopedValueRollback<bool> ignoreGuard(m_ignoreDocumentChange, true);
-        QTextOption opt = doc->defaultTextOption();
-        opt.setWrapMode(QTextOption::WordWrap);
-        opt.setAlignment(Qt::AlignHCenter);
-        doc->setDefaultTextOption(opt);
-        doc->setDocumentMargin(0.0);
-    }
 
     const qreal currentContentWidth = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - (margin * 2.0));
     const qreal currentContentHeight = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.height()) - (margin * 2.0));
@@ -423,11 +415,6 @@ void TextMediaItem::updateInlineEditorGeometry() {
         update();
     }
 
-    {
-        QScopedValueRollback<bool> ignoreGuard(m_ignoreDocumentChange, true);
-        applyCenterAlignment(m_inlineEditor);
-    }
-
     const bool hasPendingResize = m_pendingAutoSize;
     if (hasPendingResize && m_inlineEditor) {
         QTimer::singleShot(0, m_inlineEditor, [this]() {
@@ -495,7 +482,10 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
     
     if (!painter) return;
     
-    updateInlineEditorGeometry();
+    // Only update geometry when not editing to avoid triggering expensive layout operations during panning
+    if (!m_isEditing) {
+        updateInlineEditorGeometry();
+    }
 
     if (m_isEditing) {
         if (m_inlineEditor) {
