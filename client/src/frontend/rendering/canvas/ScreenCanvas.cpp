@@ -4923,7 +4923,9 @@ void ScreenCanvas::ensureToolSelector() {
     // Create container for segmented control
     m_toolSelectorContainer = new QWidget(viewport());
     m_toolSelectorContainer->setAttribute(Qt::WA_NoMousePropagation, true);
+    m_toolSelectorContainer->setAttribute(Qt::WA_TranslucentBackground, true);
     m_toolSelectorContainer->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    m_toolSelectorContainer->setStyleSheet("background: transparent;");
     
     QHBoxLayout* layout = new QHBoxLayout(m_toolSelectorContainer);
     layout->setContentsMargins(0, 0, 0, 0);
