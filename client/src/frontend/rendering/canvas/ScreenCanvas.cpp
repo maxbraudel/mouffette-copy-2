@@ -2781,11 +2781,11 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
                     existingText->setSelected(true);
                 }
             }
-            existingText->promptTextEdit(viewport());
+            existingText->beginInlineEditing();
         } else {
             QPointF scenePos = mapToScene(event->pos());
             if (TextMediaItem* newText = createTextMediaAtPosition(scenePos)) {
-                newText->promptTextEdit(viewport());
+                newText->beginInlineEditing();
             }
         }
 

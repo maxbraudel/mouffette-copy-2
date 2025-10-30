@@ -6,7 +6,7 @@
 #include <QFont>
 #include <QColor>
 
-class QWidget;
+class QGraphicsTextItem;
 
 class QGraphicsSceneMouseEvent;
 
@@ -33,12 +33,16 @@ public:
     QColor textColor() const { return m_textColor; }
     void setTextColor(const QColor& color);
 
-    // Launches the text editing dialog. Returns true if the text was updated.
-    bool promptTextEdit(QWidget* parentWidget = nullptr);
+    // Inline editing lifecycle
+    bool beginInlineEditing();
+    void commitInlineEditing();
+    void cancelInlineEditing();
+    bool isEditing() const { return m_isEditing; }
     
     // QGraphicsItem override
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override;
     void mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event) override;
+    QVariant itemChange(GraphicsItemChange change, const QVariant& value) override;
     
     // Override to indicate this is text media
     bool isTextMedia() const override { return true; }
@@ -48,8 +52,13 @@ private:
     QFont m_font;
     QColor m_textColor;
     QSize m_initialContentSize;
+    QGraphicsTextItem* m_inlineEditor = nullptr;
+    bool m_isEditing = false;
     
     // Helper to calculate appropriate font size based on item size
     int calculateFontSize() const;
     int fontSizeForHeight(int pixelHeight) const;
+    void ensureInlineEditor();
+    void updateInlineEditorGeometry();
+    void finishInlineEditing(bool commitChanges);
 };
