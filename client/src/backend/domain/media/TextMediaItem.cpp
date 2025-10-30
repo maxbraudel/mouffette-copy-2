@@ -3,6 +3,10 @@
 #include <QPainter>
 #include <QStyleOptionGraphicsItem>
 #include <QFontMetrics>
+#include <QGraphicsSceneMouseEvent>
+#include <QInputDialog>
+#include <QObject>
+#include <QWidget>
 #include <QtGlobal>
 #include <algorithm>
 
@@ -42,6 +46,30 @@ void TextMediaItem::setFont(const QFont& font) {
 void TextMediaItem::setTextColor(const QColor& color) {
     m_textColor = color;
     update();
+}
+
+bool TextMediaItem::promptTextEdit(QWidget* parentWidget) {
+    QWidget* effectiveParent = parentWidget;
+    if (!effectiveParent && scene() && !scene()->views().isEmpty()) {
+        effectiveParent = scene()->views().first();
+    }
+
+    bool accepted = false;
+    const QString updatedText = QInputDialog::getMultiLineText(
+        effectiveParent,
+        QObject::tr("Edit Text"),
+        QObject::tr("Text content:"),
+        m_text,
+        &accepted
+    );
+
+    if (accepted && updatedText != m_text) {
+        setText(updatedText);
+        updateOverlayLayout();
+        return true;
+    }
+
+    return false;
 }
 
 int TextMediaItem::fontSizeForHeight(int pixelHeight) const {
@@ -120,4 +148,19 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
     
     // Paint selection chrome and overlays (handles, buttons, etc.)
     paintSelectionAndLabel(painter);
+}
+
+void TextMediaItem::mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event) {
+    if (event->button() == Qt::LeftButton) {
+        if (!isSelected()) {
+            setSelected(true);
+        }
+
+        promptTextEdit();
+
+        event->accept();
+        return;
+    }
+
+    ResizableMediaBase::mouseDoubleClickEvent(event);
 }

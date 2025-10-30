@@ -35,6 +35,7 @@ class QPushButton;
 class QToolButton;
 class QScrollArea;
 class QScrollBar;
+class TextMediaItem;
 
 extern int gMediaListOverlayAbsoluteMaxWidthPx; // Absolute width cap (px) for media list overlay; 0 disables cap
 
@@ -226,7 +227,7 @@ private:
     void updateToolSelectorGeometry(); // Position tool selector next to settings button
     
     // Text media creation
-    void createTextMediaAtPosition(const QPointF& scenePos);
+    TextMediaItem* createTextMediaAtPosition(const QPointF& scenePos);
     
     void OnSceneChanged();
     // Snap-to-screen helpers

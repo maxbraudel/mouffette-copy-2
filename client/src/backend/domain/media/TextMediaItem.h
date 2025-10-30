@@ -6,6 +6,10 @@
 #include <QFont>
 #include <QColor>
 
+class QWidget;
+
+class QGraphicsSceneMouseEvent;
+
 // Text media item - displays editable text with same interaction as image/video media
 class TextMediaItem : public ResizableMediaBase {
 public:
@@ -28,9 +32,13 @@ public:
     
     QColor textColor() const { return m_textColor; }
     void setTextColor(const QColor& color);
+
+    // Launches the text editing dialog. Returns true if the text was updated.
+    bool promptTextEdit(QWidget* parentWidget = nullptr);
     
     // QGraphicsItem override
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override;
+    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event) override;
     
     // Override to indicate this is text media
     bool isTextMedia() const override { return true; }

@@ -2760,10 +2760,35 @@ void ScreenCanvas::keyReleaseEvent(QKeyEvent* event) {
 }
 
 void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
-    // Handle Text tool: create text media on left click
+    // Handle Text tool interactions
     if (m_currentTool == CanvasTool::Text && event->button() == Qt::LeftButton) {
-        QPointF scenePos = mapToScene(event->pos());
-        createTextMediaAtPosition(scenePos);
+        TextMediaItem* existingText = nullptr;
+        const QList<QGraphicsItem*> hitItems = items(event->pos());
+        for (QGraphicsItem* gi : hitItems) {
+            if (auto* media = toMedia(gi)) {
+                existingText = dynamic_cast<TextMediaItem*>(media);
+                if (existingText) {
+                    break;
+                }
+            }
+        }
+
+        if (existingText) {
+            if (m_scene) {
+                const bool alreadySingleSelection = existingText->isSelected() && m_scene->selectedItems().size() == 1;
+                if (!alreadySingleSelection) {
+                    m_scene->clearSelection();
+                    existingText->setSelected(true);
+                }
+            }
+            existingText->promptTextEdit(viewport());
+        } else {
+            QPointF scenePos = mapToScene(event->pos());
+            if (TextMediaItem* newText = createTextMediaAtPosition(scenePos)) {
+                newText->promptTextEdit(viewport());
+            }
+        }
+
         event->accept();
         return;
     }
@@ -5125,8 +5150,8 @@ void ScreenCanvas::setCurrentTool(CanvasTool tool) {
     viewport()->setCursor(Qt::ArrowCursor);
 }
 
-void ScreenCanvas::createTextMediaAtPosition(const QPointF& scenePos) {
-    if (!m_scene) return;
+TextMediaItem* ScreenCanvas::createTextMediaAtPosition(const QPointF& scenePos) {
+    if (!m_scene) return nullptr;
     
     // Default size for new text media (300x150 pixels)
     QSize defaultSize(300, 150);
@@ -5146,6 +5171,7 @@ void ScreenCanvas::createTextMediaAtPosition(const QPointF& scenePos) {
     
     // Add to scene
     m_scene->addItem(textItem);
+    emit mediaItemAdded(textItem);
     
     // Select the newly created text item
     m_scene->clearSelection();
@@ -5156,6 +5182,8 @@ void ScreenCanvas::createTextMediaAtPosition(const QPointF& scenePos) {
     
     // Refresh overlay to show new media
     scheduleInfoOverlayRefresh();
+
+    return textItem;
 }
 
 void ScreenCanvas::updateGlobalSettingsPanelVisibility() {
