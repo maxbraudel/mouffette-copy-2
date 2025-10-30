@@ -13,5 +13,7 @@
     <file>icons/delete.svg</file>
     <file>icons/visibility-on.svg</file>
     <file>icons/visibility-off.svg</file>
+    <file>icons/tools/selection-tool.svg</file>
+    <file>icons/tools/text-tool.svg</file>
     </qresource>
 </RCC>

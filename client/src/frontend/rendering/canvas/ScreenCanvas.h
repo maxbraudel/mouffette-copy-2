@@ -213,6 +213,8 @@ private:
     void updateGlobalSettingsPanelVisibility(); // Update global settings panel based on toggle + selection
     void ensureSettingsToggleButton();
     void updateSettingsToggleButtonGeometry();
+    void ensureToolSelector(); // Create tool selector (segmented control)
+    void updateToolSelectorGeometry(); // Position tool selector next to settings button
     
     void OnSceneChanged();
     // Snap-to-screen helpers
@@ -331,6 +333,11 @@ private:
     QToolButton* m_settingsToggleButton = nullptr; // toggle to show/hide media settings panel
     bool m_settingsPanelPreferredVisible = false;
     class MediaSettingsPanel* m_globalSettingsPanel = nullptr; // global settings panel driven by toolbar toggle
+    
+    // Tool selector (segmented control) - positioned to right of settings button
+    QWidget* m_toolSelectorContainer = nullptr;
+    QToolButton* m_selectionToolButton = nullptr;
+    QToolButton* m_textToolButton = nullptr;
     QPushButton* m_launchSceneButton = nullptr; // new Launch Remote Scene toggle button
     QPushButton* m_launchTestSceneButton = nullptr; // new Launch Test Scene toggle button
     QPushButton* m_uploadButton = nullptr; // upload button in media list overlay

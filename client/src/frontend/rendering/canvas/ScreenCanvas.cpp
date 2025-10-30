@@ -892,6 +892,7 @@ void ScreenCanvas::initInfoOverlay() {
         m_globalSettingsPanel->updatePosition();
     }
     updateSettingsToggleButtonGeometry();
+    updateToolSelectorGeometry();
     
     // Initial content and layout
     refreshInfoOverlay();
@@ -1806,7 +1807,10 @@ void ScreenCanvas::showEvent(QShowEvent* event) {
         m_infoBorderRect->setBrush(QBrush(AppColors::gOverlayBackgroundColor));
         QTimer::singleShot(0, [this]() { layoutInfoOverlay(); });
     }
-    QTimer::singleShot(0, this, [this]() { updateSettingsToggleButtonGeometry(); });
+    QTimer::singleShot(0, this, [this]() { 
+        updateSettingsToggleButtonGeometry(); 
+        updateToolSelectorGeometry();
+    });
 }
 
 void ScreenCanvas::setScreens(const QList<ScreenInfo>& screens) {
@@ -3258,6 +3262,7 @@ void ScreenCanvas::resizeEvent(QResizeEvent* event) {
     // Fast-path update: adjust overlay height cap in real-time on viewport size changes
     updateInfoOverlayGeometryForViewport();
     updateSettingsToggleButtonGeometry();
+    updateToolSelectorGeometry();
 }
 
 void ScreenCanvas::dragEnterEvent(QDragEnterEvent* event) {
@@ -4912,6 +4917,118 @@ void ScreenCanvas::ensureSettingsToggleButton() {
     m_settingsToggleButton->show();
 }
 
+void ScreenCanvas::ensureToolSelector() {
+    if (m_toolSelectorContainer || !viewport()) return;
+
+    // Create container for segmented control
+    m_toolSelectorContainer = new QWidget(viewport());
+    m_toolSelectorContainer->setAttribute(Qt::WA_NoMousePropagation, true);
+    m_toolSelectorContainer->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    
+    QHBoxLayout* layout = new QHBoxLayout(m_toolSelectorContainer);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0); // Fused segments, no spacing
+    layout->setSizeConstraint(QLayout::SetFixedSize);
+    
+    // Selection Tool button (left segment)
+    m_selectionToolButton = new QToolButton(m_toolSelectorContainer);
+    m_selectionToolButton->setIcon(QIcon(QStringLiteral(":/icons/icons/tools/selection-tool.svg")));
+    m_selectionToolButton->setObjectName("SelectionToolButton");
+    m_selectionToolButton->setCheckable(true);
+    m_selectionToolButton->setChecked(true); // Default active tool
+    m_selectionToolButton->setToolTip(tr("Selection Tool"));
+    m_selectionToolButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    m_selectionToolButton->setAutoRaise(false);
+    m_selectionToolButton->setFocusPolicy(Qt::NoFocus);
+    m_selectionToolButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    m_selectionToolButton->setCursor(Qt::PointingHandCursor);
+    
+    // Text Tool button (right segment)
+    m_textToolButton = new QToolButton(m_toolSelectorContainer);
+    m_textToolButton->setIcon(QIcon(QStringLiteral(":/icons/icons/tools/text-tool.svg")));
+    m_textToolButton->setObjectName("TextToolButton");
+    m_textToolButton->setCheckable(true);
+    m_textToolButton->setChecked(false);
+    m_textToolButton->setToolTip(tr("Text Tool"));
+    m_textToolButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    m_textToolButton->setAutoRaise(false);
+    m_textToolButton->setFocusPolicy(Qt::NoFocus);
+    m_textToolButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    m_textToolButton->setCursor(Qt::PointingHandCursor);
+    
+    // Visual divider between segments
+    QFrame* divider = new QFrame(m_toolSelectorContainer);
+    divider->setFrameShape(QFrame::VLine);
+    divider->setFixedWidth(1);
+    divider->setStyleSheet(QStringLiteral("background-color: %1;")
+        .arg(AppColors::colorToCss(AppColors::gOverlayBorderColor)));
+    
+    // Apply segmented control styling
+    const QString baseBg = AppColors::colorToCss(AppColors::gOverlayBackgroundColor);
+    const QString activeBg = AppColors::colorToCss(AppColors::gOverlayActiveBackgroundColor);
+    const QString borderColor = AppColors::colorToCss(AppColors::gOverlayBorderColor);
+    const QString cornerRadiusPx = QString::number(gOverlayCornerRadiusPx) + QStringLiteral("px");
+    
+    // Left segment style (rounded left corners only)
+    const QString leftStyle = QStringLiteral(
+        "QToolButton#SelectionToolButton {"
+        " background-color: %1;"
+        " border: 1px solid %2;"
+        " border-top-left-radius: %3;"
+        " border-bottom-left-radius: %3;"
+        " border-top-right-radius: 0px;"
+        " border-bottom-right-radius: 0px;"
+        " border-right: none;"
+        " padding: 0;"
+        " margin: 0;"
+        "}"
+        "QToolButton#SelectionToolButton:hover:!disabled:!checked { background-color: %1; }"
+        "QToolButton#SelectionToolButton:pressed { background-color: %4; }"
+        "QToolButton#SelectionToolButton:checked { background-color: %4; }"
+        "QToolButton#SelectionToolButton:checked:hover { background-color: %4; }"
+    ).arg(baseBg, borderColor, cornerRadiusPx, activeBg);
+    
+    // Right segment style (rounded right corners only)
+    const QString rightStyle = QStringLiteral(
+        "QToolButton#TextToolButton {"
+        " background-color: %1;"
+        " border: 1px solid %2;"
+        " border-top-left-radius: 0px;"
+        " border-bottom-left-radius: 0px;"
+        " border-top-right-radius: %3;"
+        " border-bottom-right-radius: %3;"
+        " padding: 0;"
+        " margin: 0;"
+        "}"
+        "QToolButton#TextToolButton:hover:!disabled:!checked { background-color: %1; }"
+        "QToolButton#TextToolButton:pressed { background-color: %4; }"
+        "QToolButton#TextToolButton:checked { background-color: %4; }"
+        "QToolButton#TextToolButton:checked:hover { background-color: %4; }"
+    ).arg(baseBg, borderColor, cornerRadiusPx, activeBg);
+    
+    m_selectionToolButton->setStyleSheet(leftStyle);
+    m_textToolButton->setStyleSheet(rightStyle);
+    
+    // Add widgets to layout
+    layout->addWidget(m_selectionToolButton);
+    layout->addWidget(divider);
+    layout->addWidget(m_textToolButton);
+    
+    // Mutual exclusivity: only one tool can be active
+    connect(m_selectionToolButton, &QToolButton::clicked, this, [this]() {
+        m_selectionToolButton->setChecked(true);
+        m_textToolButton->setChecked(false);
+        // TODO: Trigger selection tool activation
+    });
+    connect(m_textToolButton, &QToolButton::clicked, this, [this]() {
+        m_textToolButton->setChecked(true);
+        m_selectionToolButton->setChecked(false);
+        // TODO: Trigger text tool activation
+    });
+
+    m_toolSelectorContainer->show();
+}
+
 void ScreenCanvas::updateSettingsToggleButtonGeometry() {
     if (!viewport()) return;
     ensureSettingsToggleButton();
@@ -4944,12 +5061,49 @@ void ScreenCanvas::updateSettingsToggleButtonGeometry() {
             m_globalSettingsPanel->updatePosition();
         }
     }
+
+    updateToolSelectorGeometry();
+}
+
+void ScreenCanvas::updateToolSelectorGeometry() {
+    if (!viewport()) return;
+    ensureToolSelector();
+    if (!m_toolSelectorContainer || !m_settingsToggleButton) return;
+
+    const int margin = 16;
+    const int spacing = 10;
+    int buttonSize = ResizableMediaBase::getHeightOfMediaOverlaysPx();
+    if (buttonSize <= 0) buttonSize = 36;
+    buttonSize = std::max(buttonSize, 24);
+    // Match settings button compensation
+    buttonSize += 2;
+
+    int iconSize = static_cast<int>(std::round(buttonSize * 0.6));
+    const int maxIcon = std::max(16, buttonSize - 4);
+    iconSize = std::clamp(iconSize, 16, maxIcon);
+
+    // Size each button in the segmented control
+    m_selectionToolButton->setFixedSize(buttonSize, buttonSize);
+    m_selectionToolButton->setIconSize(QSize(iconSize, iconSize));
+    m_textToolButton->setFixedSize(buttonSize, buttonSize);
+    m_textToolButton->setIconSize(QSize(iconSize, iconSize));
+
+    const int dividerWidth = 1; // matches divider->setFixedWidth
+    const int totalWidth = (buttonSize * 2) + dividerWidth;
+    m_toolSelectorContainer->setFixedSize(totalWidth, buttonSize);
+    
+    // Position container to the right of settings button with spacing
+    int settingsButtonRight = m_settingsToggleButton->x() + m_settingsToggleButton->width();
+    m_toolSelectorContainer->move(settingsButtonRight + spacing, margin);
+    m_toolSelectorContainer->raise();
+    m_toolSelectorContainer->show();
 }
 
 void ScreenCanvas::updateGlobalSettingsPanelVisibility() {
     if (!m_globalSettingsPanel) return;
     ensureSettingsToggleButton();
     updateSettingsToggleButtonGeometry();
+    updateToolSelectorGeometry();
     
     // Find currently selected media item
     ResizableMediaBase* selectedMedia = nullptr;
