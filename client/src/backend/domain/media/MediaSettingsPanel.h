@@ -96,7 +96,7 @@ private:
     enum class ActiveTab { Scene, Element };
     ActiveTab m_activeTab = ActiveTab::Scene;
 
-    // Section headers and spacers (for dynamic visibility)
+    // Section headers and their preceding spacers (for dynamic visibility)
     QLabel* m_sceneImageHeader = nullptr;
     QLabel* m_sceneAudioHeader = nullptr;
     QLabel* m_sceneVideoHeader = nullptr;

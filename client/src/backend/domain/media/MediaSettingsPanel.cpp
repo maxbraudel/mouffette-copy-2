@@ -24,6 +24,10 @@
 
 namespace {
 
+constexpr int kOptionVerticalSpacing = 10; // Global vertical spacing between settings rows
+constexpr int kHeaderVerticalSpacing = 35; // Space between headers and the next option row
+constexpr int kHeaderFirstRowTopMargin = kHeaderVerticalSpacing - kOptionVerticalSpacing; // Extra offset applied to the first option after a header
+
 QString tabButtonStyle(bool active, const QString& overlayTextCss) {
     const QString fontCss = AppColors::canvasButtonFontCss();
     if (active) {
@@ -203,19 +207,21 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     // Content layout
     m_contentLayout = new QVBoxLayout(m_innerContent);
     m_contentLayout->setContentsMargins(15, 10, 15, 10);
+    m_contentLayout->setSpacing(kOptionVerticalSpacing);
     m_contentLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
     m_contentLayout->setAlignment(Qt::AlignTop);
 
     auto configureRow = [](QWidget* row) {
         if (!row) return;
         row->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        row->setVisible(true);
     };
     
     // Create Scene Options container grouped by category
     m_sceneOptionsContainer = new QWidget(m_innerContent);
     m_sceneOptionsLayout = new QVBoxLayout(m_sceneOptionsContainer);
     m_sceneOptionsLayout->setContentsMargins(0, 0, 0, 0);
-    m_sceneOptionsLayout->setSpacing(6);
+    m_sceneOptionsLayout->setSpacing(kOptionVerticalSpacing);
     m_sceneOptionsLayout->setAlignment(Qt::AlignTop);
     m_contentLayout->addWidget(m_sceneOptionsContainer);
 
@@ -223,15 +229,18 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     auto addSceneSectionHeader = [&](const QString& text) -> std::pair<QSpacerItem*, QLabel*> {
         QSpacerItem* spacer = nullptr;
         if (!sceneFirstSection) {
-            spacer = new QSpacerItem(0, 8, QSizePolicy::Minimum, QSizePolicy::Fixed);
+            spacer = new QSpacerItem(0, kHeaderFirstRowTopMargin, QSizePolicy::Minimum, QSizePolicy::Fixed);
             m_sceneOptionsLayout->addItem(spacer);
         }
         sceneFirstSection = false;
+
         auto* header = new QLabel(text, m_sceneOptionsContainer);
         QFont font = header->font();
         AppColors::applyCanvasMediaSettingsSectionHeadersFont(font);
         header->setFont(font);
         header->setStyleSheet(QString("%1 %2").arg(overlayTextStyle, AppColors::canvasMediaSettingsSectionHeadersFontCss()));
+        header->setContentsMargins(0, 0, 0, 0);
+
         m_sceneOptionsLayout->addWidget(header);
         return {spacer, header};
     };
@@ -251,16 +260,16 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
 
     {
         auto [spacer, header] = addSceneSectionHeader("Image");
-        m_sceneImageHeader = header;
         Q_UNUSED(spacer);
+        m_sceneImageHeader = header;
     }
 
     // Display automatically + Display delay controls
     {
         auto* autoRow = new QWidget(m_sceneOptionsContainer);
         configureRow(autoRow);
-        auto* autoLayout = new QHBoxLayout(autoRow);
-        autoLayout->setContentsMargins(0, 0, 0, 0);
+    auto* autoLayout = new QHBoxLayout(autoRow);
+    autoLayout->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);  // Maintain 35px gap to the header
         autoLayout->setSpacing(0);
         m_displayAfterCheck = new QCheckBox("Display automatically", autoRow);
         m_displayAfterCheck->setStyleSheet(overlayTextStyle);
@@ -335,8 +344,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     {
         m_unmuteRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_unmuteRow);
-        auto* h = new QHBoxLayout(m_unmuteRow);
-        h->setContentsMargins(0, 0, 0, 0);
+    auto* h = new QHBoxLayout(m_unmuteRow);
+    h->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);  // Maintain 35px gap to the header
         h->setSpacing(0);
         m_unmuteCheck = new QCheckBox("Unmute automatically", m_unmuteRow);
         m_unmuteCheck->setStyleSheet(overlayTextStyle);
@@ -414,8 +423,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     {
         m_autoPlayRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_autoPlayRow);
-        auto* autoLayout = new QHBoxLayout(m_autoPlayRow);
-        autoLayout->setContentsMargins(0, 0, 0, 0);
+    auto* autoLayout = new QHBoxLayout(m_autoPlayRow);
+    autoLayout->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);  // Maintain 35px gap to the header
         autoLayout->setSpacing(0);
         m_autoPlayCheck = new QCheckBox("Play automatically", m_autoPlayRow);
         m_autoPlayCheck->setStyleSheet(overlayTextStyle);
@@ -492,7 +501,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     m_elementPropertiesContainer = new QWidget(m_innerContent);
     m_elementPropertiesLayout = new QVBoxLayout(m_elementPropertiesContainer);
     m_elementPropertiesLayout->setContentsMargins(0, 0, 0, 0);
-    m_elementPropertiesLayout->setSpacing(6);
+    m_elementPropertiesLayout->setSpacing(kOptionVerticalSpacing);
     m_elementPropertiesLayout->setAlignment(Qt::AlignTop);
     m_contentLayout->addWidget(m_elementPropertiesContainer);
     m_elementPropertiesContainer->setVisible(false);
@@ -501,23 +510,26 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     auto addElementSectionHeader = [&](const QString& text) -> std::pair<QSpacerItem*, QLabel*> {
         QSpacerItem* spacer = nullptr;
         if (!elementFirstSection) {
-            spacer = new QSpacerItem(0, 8, QSizePolicy::Minimum, QSizePolicy::Fixed);
+            spacer = new QSpacerItem(0, kHeaderFirstRowTopMargin, QSizePolicy::Minimum, QSizePolicy::Fixed);
             m_elementPropertiesLayout->addItem(spacer);
         }
         elementFirstSection = false;
+
         auto* header = new QLabel(text, m_elementPropertiesContainer);
         QFont font = header->font();
         AppColors::applyCanvasMediaSettingsSectionHeadersFont(font);
         header->setFont(font);
         header->setStyleSheet(QString("%1 %2").arg(overlayTextStyle, AppColors::canvasMediaSettingsSectionHeadersFontCss()));
+        header->setContentsMargins(0, 0, 0, 0);
+
         m_elementPropertiesLayout->addWidget(header);
         return {spacer, header};
     };
 
     {
         auto [spacer, header] = addElementSectionHeader("Image");
-        m_elementImageHeader = header;
         Q_UNUSED(spacer);
+        m_elementImageHeader = header;
     }
 
     // Image fade in with checkbox format
@@ -525,7 +537,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         auto* row = new QWidget(m_elementPropertiesContainer);
         configureRow(row);
         auto* h = new QHBoxLayout(row);
-        h->setContentsMargins(0,0,0,0);
+        h->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);  // Maintain 35px gap to the header
         h->setSpacing(0);
         m_fadeInCheck = new QCheckBox("Image fade in: ", row);
         m_fadeInCheck->setStyleSheet(overlayTextStyle);
@@ -593,8 +605,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     {
         m_volumeRow = new QWidget(m_elementPropertiesContainer);
         configureRow(m_volumeRow);
-        auto* h = new QHBoxLayout(m_volumeRow);
-        h->setContentsMargins(0,0,0,0);
+    auto* h = new QHBoxLayout(m_volumeRow);
+    h->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);  // Maintain 35px gap to the header
         h->setSpacing(0);
         m_volumeCheck = new QCheckBox("Volume: ", m_volumeRow);
         m_volumeCheck->setStyleSheet(overlayTextStyle);
@@ -827,14 +839,14 @@ void MediaSettingsPanel::updateSectionHeaderVisibility() {
         if (!header) return;
         bool anyVisible = false;
         for (QWidget* row : rows) {
-            if (row && row->isVisible()) {
+            if (row && !row->isHidden()) {
                 anyVisible = true;
                 break;
             }
         }
         header->setVisible(anyVisible);
         if (spacer) {
-            spacer->changeSize(0, anyVisible ? 8 : 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
+            spacer->changeSize(0, anyVisible ? kHeaderFirstRowTopMargin : 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
         }
     };
 
@@ -848,7 +860,6 @@ void MediaSettingsPanel::updateSectionHeaderVisibility() {
     if (m_elementImageHeader) {
         m_elementImageHeader->setVisible(true);
     }
-
 }
 
 void MediaSettingsPanel::setMediaType(bool isVideo) {
