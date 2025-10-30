@@ -345,6 +345,8 @@ private:
     QToolButton* m_settingsToggleButton = nullptr; // toggle to show/hide media settings panel
     bool m_settingsPanelPreferredVisible = false;
     class MediaSettingsPanel* m_globalSettingsPanel = nullptr; // global settings panel driven by toolbar toggle
+    QTimer* m_settingsPanelHideTimer = nullptr; // defers hide to avoid flicker during selection transitions
+    ResizableMediaBase* m_settingsPanelLastMedia = nullptr; // track last media applied to settings panel
     
     // Tool selector (segmented control) - positioned to right of settings button
     QWidget* m_toolSelectorContainer = nullptr;

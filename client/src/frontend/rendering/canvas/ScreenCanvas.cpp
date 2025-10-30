@@ -5158,16 +5158,41 @@ void ScreenCanvas::updateGlobalSettingsPanelVisibility() {
     ensureSettingsToggleButton();
     updateSettingsToggleButtonGeometry();
     updateToolSelectorGeometry();
-    
-    // Find currently selected media item
+
+    if (!m_settingsPanelHideTimer) {
+        m_settingsPanelHideTimer = new QTimer(this);
+        m_settingsPanelHideTimer->setSingleShot(true);
+        connect(m_settingsPanelHideTimer, &QTimer::timeout, this, [this]() {
+            if (!m_globalSettingsPanel) {
+                return;
+            }
+            ResizableMediaBase* stillSelected = nullptr;
+            if (m_scene) {
+                const QList<QGraphicsItem*> items = m_scene->selectedItems();
+                for (QGraphicsItem* gi : items) {
+                    if (auto* media = dynamic_cast<ResizableMediaBase*>(gi)) {
+                        stillSelected = media;
+                        break;
+                    }
+                }
+            }
+            if (stillSelected) {
+                return; // selection restored before timer fired
+            }
+            m_settingsPanelLastMedia = nullptr;
+            m_globalSettingsPanel->setMediaItem(nullptr);
+            m_globalSettingsPanel->setVisible(false);
+        });
+    }
+
+    // Find currently selected media item (if any)
     ResizableMediaBase* selectedMedia = nullptr;
     if (m_scene) {
-        for (QGraphicsItem* gi : m_scene->items()) {
+        const QList<QGraphicsItem*> selectedItems = m_scene->selectedItems();
+        for (QGraphicsItem* gi : selectedItems) {
             if (auto* media = dynamic_cast<ResizableMediaBase*>(gi)) {
-                if (media->isSelected()) {
-                    selectedMedia = media;
-                    break;
-                }
+                selectedMedia = media;
+                break;
             }
         }
     }
@@ -5181,11 +5206,18 @@ void ScreenCanvas::updateGlobalSettingsPanelVisibility() {
     }
 
     if (!selectedMedia) {
-        // No media selected - hide panel but keep button state
-        m_globalSettingsPanel->setMediaItem(nullptr);
-        m_globalSettingsPanel->setVisible(false);
+        if (m_globalSettingsPanel->isVisible()) {
+            m_settingsPanelHideTimer->start(0); // defer hide to avoid flicker during selection transitions
+        } else {
+            m_settingsPanelHideTimer->stop();
+            m_settingsPanelLastMedia = nullptr;
+            m_globalSettingsPanel->setMediaItem(nullptr);
+        }
         return;
     }
+
+    m_settingsPanelHideTimer->stop();
+    m_settingsPanelLastMedia = selectedMedia;
 
     // Media selected - show panel if button is checked
     m_globalSettingsPanel->setMediaType(selectedMedia->isVideoMedia());

@@ -847,8 +847,14 @@ bool MediaSettingsPanel::isVisible() const {
 }
 
 void MediaSettingsPanel::updateSectionHeaderVisibility() {
-    auto updateSection = [&](QLabel* header, QSpacerItem* spacer, std::initializer_list<QWidget*> rows) {
-        if (!header) return;
+    auto updateSection = [&](QLabel* header,
+                             QSpacerItem* leadingSpacer,
+                             QSpacerItem* headerGap,
+                             std::initializer_list<QWidget*> rows) {
+        if (!header) {
+            return;
+        }
+
         bool anyVisible = false;
         for (QWidget* row : rows) {
             if (row && !row->isHidden()) {
@@ -856,21 +862,43 @@ void MediaSettingsPanel::updateSectionHeaderVisibility() {
                 break;
             }
         }
+
         header->setVisible(anyVisible);
-        if (spacer) {
-            spacer->changeSize(0, anyVisible ? kHeaderFirstRowTopMargin : 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
+
+        const int gapHeight = anyVisible ? kHeaderFirstRowTopMargin : 0;
+        if (leadingSpacer) {
+            leadingSpacer->changeSize(0, gapHeight, QSizePolicy::Minimum, QSizePolicy::Fixed);
+        }
+        if (headerGap) {
+            headerGap->changeSize(0, gapHeight, QSizePolicy::Minimum, QSizePolicy::Fixed);
         }
     };
 
-    updateSection(m_sceneAudioHeader, m_sceneAudioSpacer, {m_unmuteRow, m_unmuteDelayRow, m_muteDelayRow, m_muteWhenEndsRow});
-    updateSection(m_sceneVideoHeader, m_sceneVideoSpacer, {m_autoPlayRow, m_playDelayRow, m_pauseDelayRow, m_repeatRow});
-    updateSection(m_elementAudioHeader, m_elementAudioSpacer, {m_volumeRow, m_audioFadeInRow, m_audioFadeOutRow});
+    updateSection(m_sceneAudioHeader, m_sceneAudioSpacer, m_sceneAudioHeaderGap,
+                  {m_unmuteRow, m_unmuteDelayRow, m_muteDelayRow, m_muteWhenEndsRow});
+    updateSection(m_sceneVideoHeader, m_sceneVideoSpacer, m_sceneVideoHeaderGap,
+                  {m_autoPlayRow, m_playDelayRow, m_pauseDelayRow, m_repeatRow});
+    updateSection(m_elementAudioHeader, m_elementAudioSpacer, m_elementAudioHeaderGap,
+                  {m_volumeRow, m_audioFadeInRow, m_audioFadeOutRow});
 
     if (m_sceneImageHeader) {
         m_sceneImageHeader->setVisible(true);
+        if (m_sceneImageHeaderGap) {
+            m_sceneImageHeaderGap->changeSize(0, kHeaderFirstRowTopMargin, QSizePolicy::Minimum, QSizePolicy::Fixed);
+        }
     }
     if (m_elementImageHeader) {
         m_elementImageHeader->setVisible(true);
+        if (m_elementImageHeaderGap) {
+            m_elementImageHeaderGap->changeSize(0, kHeaderFirstRowTopMargin, QSizePolicy::Minimum, QSizePolicy::Fixed);
+        }
+    }
+
+    if (m_sceneOptionsLayout) {
+        m_sceneOptionsLayout->invalidate();
+    }
+    if (m_elementPropertiesLayout) {
+        m_elementPropertiesLayout->invalidate();
     }
 }
 
