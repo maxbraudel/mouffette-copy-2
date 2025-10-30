@@ -191,6 +191,15 @@ TextMediaItem::TextMediaItem(
 
     m_wasMovableBeforeEditing = flags().testFlag(QGraphicsItem::ItemIsMovable);
 
+    m_cachedTextColor = m_textColor;
+    m_cachedDocumentSize = QSizeF(1.0, 1.0);
+    m_cachedIdealWidth = -1.0;
+    m_cachedTextWidth = -1.0;
+    m_cachedEditorOpacity = -1.0;
+    m_cachedEditorPosValid = false;
+    m_cachedEditorPos = QPointF();
+    m_documentMetricsDirty = true;
+
     m_lastKnownScale = scale();
 }
 
@@ -198,9 +207,13 @@ void TextMediaItem::setText(const QString& text) {
     if (m_text != text) {
         m_text = text;
         m_pendingAutoSize = true;
+        m_documentMetricsDirty = true;
+        m_cachedEditorPosValid = false;
         if (m_inlineEditor && !m_isEditing) {
             QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
             m_inlineEditor->setPlainText(m_text);
+            m_documentMetricsDirty = true;
+            m_cachedEditorPosValid = false;
         }
         updateInlineEditorGeometry();
         update(); // Trigger repaint
@@ -209,13 +222,24 @@ void TextMediaItem::setText(const QString& text) {
 }
 
 void TextMediaItem::setFont(const QFont& font) {
+    if (m_font == font) {
+        return;
+    }
+
     m_font = font;
+    m_documentMetricsDirty = true;
+    m_cachedEditorPosValid = false;
     update();
     updateInlineEditorGeometry();
 }
 
 void TextMediaItem::setTextColor(const QColor& color) {
+    if (m_textColor == color) {
+        return;
+    }
+
     m_textColor = color;
+    m_cachedTextColor = color;
     update();
     if (m_inlineEditor) {
         m_inlineEditor->setDefaultTextColor(m_textColor);
@@ -227,6 +251,8 @@ void TextMediaItem::normalizeEditorFormatting() {
         return;
     }
     normalizeTextFormatting(m_inlineEditor, m_font, m_textColor);
+    m_documentMetricsDirty = true;
+    m_cachedEditorPosValid = false;
 }
 
 bool TextMediaItem::beginInlineEditing() {
@@ -254,6 +280,8 @@ bool TextMediaItem::beginInlineEditing() {
         QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
         m_inlineEditor->setPlainText(m_text);
     }
+    m_documentMetricsDirty = true;
+    m_cachedEditorPosValid = false;
     m_inlineEditor->setDefaultTextColor(m_textColor);
     m_inlineEditor->setEnabled(true);
     m_inlineEditor->setVisible(true);
@@ -313,6 +341,8 @@ void TextMediaItem::ensureInlineEditor() {
             if (m_ignoreDocumentChange) {
                 return;
             }
+            m_documentMetricsDirty = true;
+            m_cachedEditorPosValid = false;
             m_pendingAutoSize = true;
             if (m_isUpdatingInlineGeometry) {
                 return;
@@ -339,37 +369,98 @@ void TextMediaItem::updateInlineEditorGeometry() {
     }
     QScopedValueRollback<bool> guard(m_isUpdatingInlineGeometry, true);
 
+    auto floatsDiffer = [](qreal a, qreal b, qreal epsilon = 0.1) {
+        return std::abs(a - b) > epsilon;
+    };
+
     const bool allowAutoSize = m_pendingAutoSize;
     if (allowAutoSize) {
         m_pendingAutoSize = false;
     }
     const qreal margin = kContentPadding;
 
+    if (!m_inlineEditor->transform().isIdentity()) {
+        m_inlineEditor->setTransform(QTransform());
+    }
+
+    if (m_inlineEditor->font() != m_font) {
+        m_inlineEditor->setFont(m_font);
+        m_documentMetricsDirty = true;
+    }
+
+    if (m_cachedTextColor != m_textColor) {
+        m_inlineEditor->setDefaultTextColor(m_textColor);
+        m_cachedTextColor = m_textColor;
+    }
+
+    const qreal targetOpacity = m_contentOpacity * m_contentDisplayOpacity;
+    if (m_cachedEditorOpacity < 0.0 || floatsDiffer(targetOpacity, m_cachedEditorOpacity, 1e-4)) {
+        m_inlineEditor->setOpacity(targetOpacity);
+        m_cachedEditorOpacity = targetOpacity;
+    }
+
+    QRectF bounds = boundingRect();
+    QRectF contentRect = bounds.adjusted(margin, margin, -margin, -margin);
+    if (contentRect.width() < 1.0) {
+        contentRect.setWidth(1.0);
+    }
+    if (contentRect.height() < 1.0) {
+        contentRect.setHeight(1.0);
+    }
+
+    const qreal contentWidth = std::max<qreal>(1.0, contentRect.width());
+    bool widthChanged = false;
+    if (m_cachedTextWidth < 0.0 || floatsDiffer(contentWidth, m_cachedTextWidth)) {
+        m_inlineEditor->setTextWidth(contentWidth);
+        m_cachedTextWidth = contentWidth;
+        widthChanged = true;
+        m_documentMetricsDirty = true;
+    }
+
     QTextDocument* doc = m_inlineEditor->document();
+    qreal docIdealWidth = m_cachedIdealWidth;
+    qreal docHeight = std::max<qreal>(1.0, m_cachedDocumentSize.height());
 
-    const qreal currentContentWidth = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - (margin * 2.0));
-    const qreal currentContentHeight = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.height()) - (margin * 2.0));
-    m_inlineEditor->setTextWidth(currentContentWidth);
-
-    qreal docIdealWidth = 0.0;
-    qreal docHeight = 0.0;
-    if (doc) {
-        docIdealWidth = doc->idealWidth();
-        if (auto* layout = doc->documentLayout()) {
+    const bool needMetrics = doc && (allowAutoSize || widthChanged || m_documentMetricsDirty || m_cachedIdealWidth < 0.0);
+    if (needMetrics) {
+        docIdealWidth = doc ? doc->idealWidth() : contentWidth;
+        QAbstractTextDocumentLayout* layout = doc ? doc->documentLayout() : nullptr;
+        if (doc && layout) {
             QSizeF size = layout->documentSize();
+            if (size.width() <= 0.0) {
+                size.setWidth(contentWidth);
+            }
+            if (size.height() <= 0.0) {
+                size.setHeight(contentRect.height());
+            }
+            m_cachedDocumentSize = size;
             docHeight = std::max<qreal>(1.0, size.height());
+        } else {
+            m_cachedDocumentSize = QSizeF(contentWidth, docHeight);
+            docHeight = std::max<qreal>(1.0, docHeight);
         }
+        m_cachedIdealWidth = docIdealWidth;
+        m_documentMetricsDirty = false;
+    } else {
+        if (m_cachedIdealWidth < 0.0) {
+            docIdealWidth = contentWidth;
+        }
+        docHeight = std::max<qreal>(1.0, m_cachedDocumentSize.height());
+    }
+
+    if (docIdealWidth <= 0.0) {
+        docIdealWidth = contentWidth;
     }
 
     QSize newBaseSize = m_baseSize;
     if (doc && allowAutoSize) {
-        const qreal requiredContentWidth = docIdealWidth;
-        if (requiredContentWidth > currentContentWidth + 0.5) {
+        const qreal requiredContentWidth = std::max(docIdealWidth, contentWidth);
+        if (requiredContentWidth > contentWidth + 0.5) {
             const qreal requiredWidth = requiredContentWidth + margin * 2.0;
             newBaseSize.setWidth(static_cast<int>(std::ceil(requiredWidth)));
         }
 
-        if (docHeight > currentContentHeight + 0.5) {
+        if (docHeight > contentRect.height() + 0.5) {
             const qreal requiredHeight = docHeight + margin * 2.0;
             newBaseSize.setHeight(static_cast<int>(std::ceil(requiredHeight)));
         }
@@ -379,41 +470,66 @@ void TextMediaItem::updateInlineEditorGeometry() {
     if (geometryChanged) {
         prepareGeometryChange();
         m_baseSize = newBaseSize;
+        bounds = boundingRect();
+        contentRect = bounds.adjusted(margin, margin, -margin, -margin);
+        if (contentRect.width() < 1.0) {
+            contentRect.setWidth(1.0);
+        }
+        if (contentRect.height() < 1.0) {
+            contentRect.setHeight(1.0);
+        }
     }
-
-    const QRectF bounds = boundingRect();
-    QRectF contentRect = bounds.adjusted(margin, margin, -margin, -margin);
-    if (contentRect.width() < 1.0) {
-        contentRect.setWidth(1.0);
-    }
-    if (contentRect.height() < 1.0) {
-        contentRect.setHeight(1.0);
-    }
-
-    m_inlineEditor->setDefaultTextColor(m_textColor);
-    m_inlineEditor->setOpacity(m_contentOpacity * m_contentDisplayOpacity);
-
-    QFont editorFont = m_font;
-    m_inlineEditor->setFont(editorFont);
-    m_inlineEditor->setTransform(QTransform());
 
     const qreal finalTextWidth = std::max<qreal>(1.0, contentRect.width());
-    m_inlineEditor->setTextWidth(finalTextWidth);
+    bool finalWidthChanged = false;
+    if (floatsDiffer(finalTextWidth, m_cachedTextWidth)) {
+        m_inlineEditor->setTextWidth(finalTextWidth);
+        m_cachedTextWidth = finalTextWidth;
+        finalWidthChanged = true;
+        m_documentMetricsDirty = true;
+    }
 
-    qreal finalDocWidth = finalTextWidth;
-    qreal finalDocHeight = contentRect.height();
-    if (doc) {
-        if (auto* layout = doc->documentLayout()) {
+    qreal finalDocWidth = m_cachedDocumentSize.width();
+    qreal finalDocHeight = std::max<qreal>(1.0, m_cachedDocumentSize.height());
+
+    if (doc && (finalWidthChanged || m_documentMetricsDirty)) {
+        QAbstractTextDocumentLayout* layout = doc ? doc->documentLayout() : nullptr;
+        if (layout) {
             QSizeF size = layout->documentSize();
-            finalDocWidth = std::max<qreal>(1.0, size.width());
+            if (size.width() <= 0.0) {
+                size.setWidth(finalTextWidth);
+            }
+            if (size.height() <= 0.0) {
+                size.setHeight(contentRect.height());
+            }
+            m_cachedDocumentSize = size;
+            finalDocWidth = size.width();
             finalDocHeight = std::max<qreal>(1.0, size.height());
+        } else {
+            m_cachedDocumentSize = QSizeF(finalTextWidth, finalDocHeight);
+            finalDocWidth = finalTextWidth;
+        }
+        if (doc) {
+            m_cachedIdealWidth = doc->idealWidth();
+        }
+        m_documentMetricsDirty = false;
+    } else {
+        if (finalDocWidth <= 0.0) {
+            finalDocWidth = finalTextWidth;
+        }
+        if (finalDocHeight <= 0.0) {
+            finalDocHeight = contentRect.height();
         }
     }
 
     const qreal offsetX = std::max<qreal>(0.0, (contentRect.width() - finalDocWidth) / 2.0);
     const qreal offsetY = std::max<qreal>(0.0, (contentRect.height() - finalDocHeight) / 2.0);
-
-    m_inlineEditor->setPos(contentRect.topLeft() + QPointF(offsetX, offsetY));
+    const QPointF newEditorPos = contentRect.topLeft() + QPointF(offsetX, offsetY);
+    if (!m_cachedEditorPosValid || floatsDiffer(newEditorPos.x(), m_cachedEditorPos.x(), 0.1) || floatsDiffer(newEditorPos.y(), m_cachedEditorPos.y(), 0.1)) {
+        m_inlineEditor->setPos(newEditorPos);
+        m_cachedEditorPos = newEditorPos;
+        m_cachedEditorPosValid = true;
+    }
 
     if (geometryChanged) {
         updateOverlayLayout();
@@ -444,6 +560,8 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
         QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
         m_inlineEditor->setPlainText(m_text);
     }
+    m_documentMetricsDirty = true;
+    m_cachedEditorPosValid = false;
 
     m_isEditing = false;
     setFlag(QGraphicsItem::ItemIsMovable, m_wasMovableBeforeEditing);
@@ -472,6 +590,8 @@ void TextMediaItem::applyFontScale(qreal factor) {
 
     updatedFont.setPointSizeF(pointSize * factor);
     m_font = updatedFont;
+    m_documentMetricsDirty = true;
+    m_cachedEditorPosValid = false;
 
     if (m_inlineEditor) {
         m_inlineEditor->setFont(m_font);

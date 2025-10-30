@@ -5,6 +5,8 @@
 #include <QString>
 #include <QFont>
 #include <QColor>
+#include <QSizeF>
+#include <QPointF>
 
 class QGraphicsTextItem;
 
@@ -59,6 +61,14 @@ private:
     bool m_ignoreDocumentChange = false;
     bool m_pendingAutoSize = false;
     bool m_wasMovableBeforeEditing = false;
+    bool m_documentMetricsDirty = true;
+    qreal m_cachedTextWidth = -1.0;
+    QSizeF m_cachedDocumentSize;
+    qreal m_cachedIdealWidth = -1.0;
+    QColor m_cachedTextColor;
+    qreal m_cachedEditorOpacity = -1.0;
+    QPointF m_cachedEditorPos;
+    bool m_cachedEditorPosValid = false;
     
     void ensureInlineEditor();
     void updateInlineEditorGeometry();
