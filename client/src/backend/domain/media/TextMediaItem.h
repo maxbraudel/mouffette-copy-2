@@ -38,6 +38,7 @@ public:
     void commitInlineEditing();
     void cancelInlineEditing();
     bool isEditing() const { return m_isEditing; }
+    void normalizeEditorFormatting();
     
     // QGraphicsItem override
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override;

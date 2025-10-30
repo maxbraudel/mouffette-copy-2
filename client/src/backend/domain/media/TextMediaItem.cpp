@@ -14,9 +14,22 @@
 #include <QAbstractTextDocumentLayout>
 #include <QTextCursor>
 #include <QTextBlockFormat>
+#include <QTextCharFormat>
+#include <QBrush>
+#include <QClipboard>
+#include <QApplication>
 #include <QObject>
 #include <QScopedValueRollback>
 #include <QTimer>
+
+// Global text styling configuration - tweak these to change all text media appearance
+namespace TextMediaDefaults {
+    static const QString FONT_FAMILY = QStringLiteral("Arial");
+    static const int FONT_SIZE = 24;
+    static const QFont::Weight FONT_WEIGHT = QFont::Bold;
+    static const bool FONT_ITALIC = false;
+    static const QColor TEXT_COLOR = Qt::white;
+}
 
 namespace {
 
@@ -58,7 +71,29 @@ protected:
             return;
         }
 
+        // Intercept paste to strip formatting
+        if (event->matches(QKeySequence::Paste)) {
+            QClipboard* clipboard = QApplication::clipboard();
+            if (clipboard) {
+                QString plainText = clipboard->text();
+                if (!plainText.isEmpty()) {
+                    textCursor().insertText(plainText);
+                    event->accept();
+                    return;
+                }
+            }
+        }
+
         QGraphicsTextItem::keyPressEvent(event);
+        
+        // After any text insertion, normalize formatting
+        if (m_owner) {
+            QTimer::singleShot(0, this, [this]() {
+                if (m_owner) {
+                    m_owner->normalizeEditorFormatting();
+                }
+            });
+        }
     }
 
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override {
@@ -70,6 +105,31 @@ protected:
 private:
     TextMediaItem* m_owner = nullptr;
 };
+
+static void normalizeTextFormatting(QGraphicsTextItem* editor, const QFont& currentFont, const QColor& currentColor) {
+    if (!editor || !editor->document()) {
+        return;
+    }
+
+    QTextDocument* doc = editor->document();
+    QTextCursor cursor(doc);
+    
+    // Select all text
+    cursor.select(QTextCursor::Document);
+    
+    // Create standard character format using the current font size (which may have been scaled)
+    QTextCharFormat standardFormat;
+    standardFormat.setFont(currentFont);
+    standardFormat.setForeground(QBrush(currentColor));
+    
+    // Apply to all text
+    cursor.mergeCharFormat(standardFormat);
+    
+    // Reset cursor to end
+    cursor.clearSelection();
+    cursor.movePosition(QTextCursor::End);
+    editor->setTextCursor(cursor);
+}
 
 static void applyCenterAlignment(QGraphicsTextItem* editor) {
     if (!editor) {
@@ -98,11 +158,12 @@ TextMediaItem::TextMediaItem(
 )
     : ResizableMediaBase(initialSize, visualSizePx, selectionSizePx, QStringLiteral("Text"))
     , m_text(initialText)
-    , m_textColor(Qt::white) // Default white text
+    , m_textColor(TextMediaDefaults::TEXT_COLOR)
 {
-    // Set up default font
-    m_font = QFont(QStringLiteral("Arial"), 24);
-    m_font.setBold(true);
+    // Set up default font from global configuration
+    m_font = QFont(TextMediaDefaults::FONT_FAMILY, TextMediaDefaults::FONT_SIZE);
+    m_font.setWeight(TextMediaDefaults::FONT_WEIGHT);
+    m_font.setItalic(TextMediaDefaults::FONT_ITALIC);
     
     // Text media should be selectable and movable
     setFlag(QGraphicsItem::ItemIsSelectable, true);
@@ -138,6 +199,13 @@ void TextMediaItem::setTextColor(const QColor& color) {
     if (m_inlineEditor) {
         m_inlineEditor->setDefaultTextColor(m_textColor);
     }
+}
+
+void TextMediaItem::normalizeEditorFormatting() {
+    if (!m_inlineEditor || !m_isEditing) {
+        return;
+    }
+    normalizeTextFormatting(m_inlineEditor, m_font, m_textColor);
 }
 
 bool TextMediaItem::beginInlineEditing() {
