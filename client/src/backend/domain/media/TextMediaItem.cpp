@@ -75,12 +75,14 @@ static void applyCenterAlignment(QGraphicsTextItem* editor) {
     }
 
     if (QTextDocument* doc = editor->document()) {
+        QTextCursor activeCursor = editor->textCursor();
         QTextCursor cursor(doc);
         cursor.select(QTextCursor::Document);
         QTextBlockFormat blockFormat = cursor.blockFormat();
-        blockFormat.setAlignment(Qt::AlignCenter);
+        blockFormat.setAlignment(Qt::AlignHCenter);
         cursor.mergeBlockFormat(blockFormat);
         cursor.clearSelection();
+        editor->setTextCursor(activeCursor);
     }
 }
 
@@ -195,10 +197,10 @@ void TextMediaItem::ensureInlineEditor() {
 
     if (QTextDocument* doc = editor->document()) {
         doc->setDocumentMargin(0.0);
-        QTextOption opt = doc->defaultTextOption();
-        opt.setWrapMode(QTextOption::WordWrap);
-        opt.setAlignment(Qt::AlignCenter);
-        doc->setDefaultTextOption(opt);
+    QTextOption opt = doc->defaultTextOption();
+    opt.setWrapMode(QTextOption::WordWrap);
+    opt.setAlignment(Qt::AlignHCenter);
+    doc->setDefaultTextOption(opt);
     }
 
     applyCenterAlignment(editor);
@@ -212,10 +214,10 @@ void TextMediaItem::updateInlineEditorGeometry() {
     }
 
     if (QTextDocument* doc = m_inlineEditor->document()) {
-        QTextOption opt = doc->defaultTextOption();
-        opt.setWrapMode(QTextOption::WordWrap);
-        opt.setAlignment(Qt::AlignCenter);
-        doc->setDefaultTextOption(opt);
+    QTextOption opt = doc->defaultTextOption();
+    opt.setWrapMode(QTextOption::WordWrap);
+        opt.setAlignment(Qt::AlignHCenter);
+    doc->setDefaultTextOption(opt);
         doc->setDocumentMargin(0.0);
     }
 
@@ -235,15 +237,21 @@ void TextMediaItem::updateInlineEditorGeometry() {
         const qreal editableWidthBase = std::max<qreal>(1.0, static_cast<qreal>(m_initialContentSize.width()) - (baseMarginX * 2.0));
         const qreal editableHeightBase = std::max<qreal>(1.0, static_cast<qreal>(m_initialContentSize.height()) - (baseMarginY * 2.0));
 
+        QFont editorFont = m_font;
+        editorFont.setPointSize(fontSizeForHeight(m_initialContentSize.height()));
+        m_inlineEditor->setFont(editorFont);
+
         m_inlineEditor->setTransform(QTransform());
         m_inlineEditor->setTextWidth(editableWidthBase);
         if (QTextDocument* doc = m_inlineEditor->document()) {
             doc->adjustSize();
         }
+        
         qreal docHeightBase = editableHeightBase;
         if (auto* layout = m_inlineEditor->document() ? m_inlineEditor->document()->documentLayout() : nullptr) {
             docHeightBase = std::max<qreal>(1.0, layout->documentSize().height());
         }
+        
         qreal offsetBaseY = std::max<qreal>(0.0, (editableHeightBase - docHeightBase) / 2.0);
 
         QTransform transform;
@@ -253,10 +261,6 @@ void TextMediaItem::updateInlineEditorGeometry() {
         QPointF basePos(baseMarginX, baseMarginY + offsetBaseY);
         QPointF finalPos(basePos.x() * widthRatio, basePos.y() * heightRatio);
         m_inlineEditor->setPos(finalPos);
-
-        QFont editorFont = m_font;
-        editorFont.setPointSize(fontSizeForHeight(m_initialContentSize.height()));
-        m_inlineEditor->setFont(editorFont);
     } else {
         QRectF contentRect = bounds.adjusted(margin, margin, -margin, -margin);
         if (contentRect.width() < 1.0) {
@@ -266,22 +270,28 @@ void TextMediaItem::updateInlineEditorGeometry() {
             contentRect.setHeight(1.0);
         }
 
+        QFont editorFont = m_font;
+        editorFont.setPointSize(calculateFontSize());
+        m_inlineEditor->setFont(editorFont);
+
         m_inlineEditor->setTransform(QTransform());
         m_inlineEditor->setTextWidth(std::max<qreal>(1.0, contentRect.width()));
         if (QTextDocument* doc = m_inlineEditor->document()) {
             doc->adjustSize();
         }
+        
+        qreal docWidth = contentRect.width();
         qreal docHeight = contentRect.height();
         if (auto* layout = m_inlineEditor->document() ? m_inlineEditor->document()->documentLayout() : nullptr) {
-            docHeight = std::max<qreal>(1.0, layout->documentSize().height());
+            QSizeF docSize = layout->documentSize();
+            docWidth = std::max<qreal>(1.0, docSize.width());
+            docHeight = std::max<qreal>(1.0, docSize.height());
         }
+        
+        qreal offsetX = std::max<qreal>(0.0, (contentRect.width() - docWidth) / 2.0);
         qreal offsetY = std::max<qreal>(0.0, (contentRect.height() - docHeight) / 2.0);
 
-        m_inlineEditor->setPos(contentRect.topLeft() + QPointF(0.0, offsetY));
-
-        QFont editorFont = m_font;
-        editorFont.setPointSize(calculateFontSize());
-        m_inlineEditor->setFont(editorFont);
+        m_inlineEditor->setPos(contentRect.topLeft() + QPointF(offsetX, offsetY));
     }
 
     applyCenterAlignment(m_inlineEditor);
