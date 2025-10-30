@@ -1,15 +1,12 @@
 #include "TopBarManager.h"
 #include "ui/widgets/ClippedContainer.h"
+#include "ui/StyleConfig.h"
 #include "AppColors.h"
 #include <QLabel>
 #include <QHBoxLayout>
 #include <QFrame>
 
-// External constants from MainWindow.cpp
-extern const int gRemoteClientContainerPadding;
-extern const int gDynamicBoxBorderRadius;
-extern const int gDynamicBoxHeight;
-extern const int gDynamicBoxFontPx;
+// [Phase 17] Style configuration now accessed via macros from StyleConfig.h
 
 TopBarManager::TopBarManager(QObject* parent)
     : QObject(parent)

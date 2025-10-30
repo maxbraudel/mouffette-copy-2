@@ -69,6 +69,8 @@ class WindowEventHandler; // Phase 9: manages window lifecycle events
 class TimerController; // Phase 10: manages timer setup and callbacks
 class UploadButtonStyleManager; // Phase 11: manages upload button styling
 class SettingsManager; // Phase 12: manages application settings and persistence
+class UploadSignalConnector; // Phase 15: manages upload signal connections
+class ClientListBuilder; // Phase 16: builds display client list from connected + offline clients
 // using QStackedWidget for canvas container switching
 class QFrame; // forward declare for separators in remote info container
 
@@ -154,6 +156,7 @@ public:
     // [Phase 7.3] Accessor methods for ClientListEventHandler
     ScreenCanvas* getScreenCanvas() const { return m_screenCanvas; }
     QList<ClientInfo> buildDisplayClientList(const QList<ClientInfo>& connectedClients);
+    void markAllSessionsOffline(); // [Phase 16] Made public for ClientListBuilder
     int getLastConnectedClientCount() const { return m_lastConnectedClientCount; }
     void setLastConnectedClientCount(int count) { m_lastConnectedClientCount = count; }
     QString getActiveRemoteClientId() const { return m_activeRemoteClientId; }
@@ -194,6 +197,9 @@ public:
     // [Phase 14.3] Session management accessors
     CanvasSession* sessionForActiveUpload();
     CanvasSession* sessionForUploadId(const QString& uploadId);
+    
+    // [Phase 15] Upload tracking management (made public for UploadSignalConnector)
+    void clearUploadTracking(CanvasSession& session);
     
     // [Phase 11] Accessor methods for UploadButtonStyleManager
     bool isRemoteOverlayActionsEnabled() const { return m_remoteOverlayActionsEnabled; }
@@ -308,11 +314,11 @@ private:
     void handleStateSyncFromServer(const QJsonObject& message);
 
     void rotateSessionIdea(CanvasSession& session);
-    void markAllSessionsOffline();
+    // markAllSessionsOffline() moved to public (Phase 16)
     ScreenCanvas* canvasForClientId(const QString& clientId) const;
     // sessionForActiveUpload() moved to public (Phase 14.3)
     // sessionForUploadId() moved to public (Phase 14.3)
-    void clearUploadTracking(CanvasSession& session);
+    // clearUploadTracking() moved to public (Phase 15)
     void refreshOngoingScenesList();
     void applyListWidgetStyle(QListWidget* listWidget) const;
     void updateApplicationSuspendedState(bool suspended);
@@ -415,6 +421,9 @@ private:
     
     // [Phase 12] Settings manager
     SettingsManager* m_settingsManager = nullptr;
+    
+    // [Phase 15] Upload signal connector
+    UploadSignalConnector* m_uploadSignalConnector = nullptr;
     
     int m_lastConnectedClientCount = 0;
     QString m_activeSessionIdentity;

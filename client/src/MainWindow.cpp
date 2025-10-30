@@ -35,6 +35,8 @@
 #include "controllers/TimerController.h"
 #include "managers/UploadButtonStyleManager.h"
 #include "managers/SettingsManager.h"
+#include "managers/ClientListBuilder.h"
+#include "handlers/UploadSignalConnector.h"
 #include <QMenuBar>
 #include <QHostInfo>
 #include "ClientInfo.h"
@@ -158,21 +160,21 @@ static RemoteSceneController* g_remoteSceneController = nullptr; // Remote scene
 
 const QString MainWindow::DEFAULT_SERVER_URL = "ws://192.168.0.188:8080";
 
-// Global style configuration variables (accessible to UI widgets)
-// TODO: Move to ThemeManager singleton in future refactoring
-int gWindowContentMarginTop = 20;       // Top margin for all window content
-int gWindowContentMarginRight = 20;     // Right margin for all window content
-int gWindowContentMarginBottom = 20;    // Bottom margin for all window content
-int gWindowContentMarginLeft = 20;      // Left margin for all window content
-int gWindowBorderRadiusPx = 10;         // Rounded corner radius (px)
-int gInnerContentGap = 20;              // Gap between sections inside the window
-int gDynamicBoxMinWidth = 80;           // Minimum width for buttons/status boxes
-int gDynamicBoxHeight = 24;             // Fixed height for all elements
-int gDynamicBoxBorderRadius = 6;        // Border radius for rounded corners
-int gDynamicBoxFontPx = 13;             // Standard font size for buttons/status boxes
-int gRemoteClientContainerPadding = 6;  // Horizontal padding for elements in remote client container
-int gTitleTextFontSize = 16;            // Title font size (px)
-int gTitleTextHeight = 24;              // Title fixed height (px)
+// [Phase 17] Global style configuration - migrated to ThemeManager
+// These macros provide backward compatibility while using ThemeManager
+#define gWindowContentMarginTop (ThemeManager::instance()->getWindowContentMarginTop())
+#define gWindowContentMarginRight (ThemeManager::instance()->getWindowContentMarginRight())
+#define gWindowContentMarginBottom (ThemeManager::instance()->getWindowContentMarginBottom())
+#define gWindowContentMarginLeft (ThemeManager::instance()->getWindowContentMarginLeft())
+#define gWindowBorderRadiusPx (ThemeManager::instance()->getWindowBorderRadiusPx())
+#define gInnerContentGap (ThemeManager::instance()->getInnerContentGap())
+#define gDynamicBoxMinWidth (ThemeManager::instance()->getDynamicBoxMinWidth())
+#define gDynamicBoxHeight (ThemeManager::instance()->getDynamicBoxHeight())
+#define gDynamicBoxBorderRadius (ThemeManager::instance()->getDynamicBoxBorderRadius())
+#define gDynamicBoxFontPx (ThemeManager::instance()->getDynamicBoxFontPx())
+#define gRemoteClientContainerPadding (ThemeManager::instance()->getRemoteClientContainerPadding())
+#define gTitleTextFontSize (ThemeManager::instance()->getTitleTextFontSize())
+#define gTitleTextHeight (ThemeManager::instance()->getTitleTextHeight())
 
 // Z-ordering constants used throughout the scene
 namespace {
@@ -327,6 +329,7 @@ MainWindow::MainWindow(QWidget* parent)
       m_windowEventHandler(new WindowEventHandler(this, this)), // Phase 9
       m_timerController(new TimerController(this, this)), // Phase 10
       m_uploadButtonStyleManager(new UploadButtonStyleManager(this, this)), // Phase 11
+      m_uploadSignalConnector(new UploadSignalConnector(this)), // Phase 15
       m_statusUpdateTimer(new QTimer(this)),
       m_displaySyncTimer(new QTimer(this)),
       m_reconnectTimer(new QTimer(this)),
@@ -834,144 +837,11 @@ void MainWindow::reconcileRemoteFilesForSession(CanvasSession& session, const QS
     }
 }
 
-// [PHASE 7.4] Upload signal connections
+// [Phase 15] Delegate upload signal connections to UploadSignalConnector
 void MainWindow::connectUploadSignals() {
-    if (m_uploadSignalsConnected || !m_uploadManager) return;
-    
-    connect(m_uploadManager, &UploadManager::fileUploadStarted, this, [this](const QString& fileId) {
-        if (CanvasSession* session = sessionForActiveUpload()) {
-            if (!session->canvas || !session->canvas->scene()) return;
-            session->upload.perFileProgress[fileId] = 0;
-            const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
-            for (ResizableMediaBase* item : items) {
-                if (item && item->uploadState() != ResizableMediaBase::UploadState::Uploaded) {
-                    item->setUploadUploading(0);
-                }
-            }
-        }
-    });
-    
-    connect(m_uploadManager, &UploadManager::fileUploadProgress, this, [this](const QString& fileId, int percent) {
-        if (CanvasSession* session = sessionForActiveUpload()) {
-            if (!session->canvas || !session->canvas->scene()) return;
-            if (percent >= 100) {
-                session->upload.perFileProgress[fileId] = 100;
-                const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
-                for (ResizableMediaBase* item : items) {
-                    if (item) item->setUploadUploaded();
-                }
-                session->upload.serverCompletedFileIds.insert(fileId);
-                return;
-            }
-            int clamped = std::clamp(percent, 0, 99);
-            int previous = session->upload.perFileProgress.value(fileId, -1);
-            if (previous >= 100 || clamped <= previous) return;
-            session->upload.perFileProgress[fileId] = clamped;
-            const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
-            for (ResizableMediaBase* item : items) {
-                if (item && item->uploadState() != ResizableMediaBase::UploadState::Uploaded) {
-                    item->setUploadUploading(clamped);
-                }
-            }
-        }
-    });
-    
-    connect(m_webSocketClient, &WebSocketClient::uploadPerFileProgressReceived, this,
-            [this](const QString& uploadId, const QHash<QString, int>& filePercents) {
-        CanvasSession* session = sessionForUploadId(uploadId);
-        if (!session || !session->canvas || !session->canvas->scene()) return;
-
-        if (!session->upload.receivingFilesToastShown && !filePercents.isEmpty()) {
-            const QString label = session->lastClientInfo.getDisplayText().isEmpty()
-                ? session->serverAssignedId
-                : session->lastClientInfo.getDisplayText();
-            TOAST_INFO(QString("Remote client %1 is receiving files...").arg(label));
-            session->upload.receivingFilesToastShown = true;
-        }
-
-        for (auto it = filePercents.constBegin(); it != filePercents.constEnd(); ++it) {
-            const QString& fid = it.key();
-            const int p = std::clamp(it.value(), 0, 100);
-            int previous = session->upload.perFileProgress.value(fid, -1);
-            if (p <= previous && p < 100) continue;
-            session->upload.perFileProgress[fid] = std::max(previous, p);
-            const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fid);
-            for (ResizableMediaBase* item : items) {
-                if (!item) continue;
-                if (p >= 100) item->setUploadUploaded();
-                else item->setUploadUploading(p);
-            }
-            if (p >= 100) session->upload.serverCompletedFileIds.insert(fid);
-        }
-    });
-    
-    connect(m_uploadManager, &UploadManager::uploadFinished, this, [this]() {
-        if (CanvasSession* session = sessionForActiveUpload()) {
-            const QString label = session->lastClientInfo.getDisplayText().isEmpty()
-                ? session->serverAssignedId
-                : session->lastClientInfo.getDisplayText();
-            TOAST_SUCCESS(QString("Upload completed successfully to %1").arg(label));
-            session->upload.remoteFilesPresent = true;
-            session->knownRemoteFileIds.unite(session->expectedIdeaFileIds);
-            clearUploadTracking(*session);
-        } else {
-            TOAST_SUCCESS("Upload completed successfully");
-        }
-    });
-    
-    connect(m_uploadManager, &UploadManager::uploadCompletedFileIds, this, [this](const QStringList& fileIds) {
-        if (CanvasSession* session = sessionForActiveUpload()) {
-            if (!session->canvas || !session->canvas->scene()) return;
-            for (const QString& fileId : fileIds) {
-                if (session->upload.serverCompletedFileIds.contains(fileId)) continue;
-                const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
-                for (ResizableMediaBase* item : items) {
-                    if (item) item->setUploadUploaded();
-                }
-                session->upload.serverCompletedFileIds.insert(fileId);
-            }
-        }
-    });
-    
-    connect(m_uploadManager, &UploadManager::allFilesRemoved, this, [this]() {
-        CanvasSession* session = sessionForActiveUpload();
-        if (!session) {
-            const QString activeIdentity = m_uploadManager->activeSessionIdentity();
-            if (!activeIdentity.isEmpty()) {
-                session = findCanvasSession(activeIdentity);
-            }
-        }
-        if (!session) {
-            const QString lastClientId = m_uploadManager->lastRemovalClientId();
-            if (!lastClientId.isEmpty()) {
-                session = findCanvasSessionByServerClientId(lastClientId);
-            }
-        }
-
-        if (session) {
-            const QString label = session->lastClientInfo.getDisplayText().isEmpty()
-                ? session->serverAssignedId
-                : session->lastClientInfo.getDisplayText();
-            TOAST_INFO(QString("All files removed from %1").arg(label));
-
-            session->upload.remoteFilesPresent = false;
-            if (session->canvas && session->canvas->scene()) {
-                const QList<QGraphicsItem*> allItems = session->canvas->scene()->items();
-                for (QGraphicsItem* it : allItems) {
-                    if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-                        media->setUploadNotUploaded();
-                    }
-                }
-            }
-            clearUploadTracking(*session);
-            m_uploadManager->clearLastRemovalClientId();
-        } else {
-            TOAST_INFO("All files removed from remote client");
-            m_uploadManager->clearLastRemovalClientId();
-        }
-    });
-    
-    m_uploadSignalsConnected = true;
+    if (m_uploadSignalConnector) {
+        m_uploadSignalConnector->connectAllSignals(this, m_uploadManager, m_webSocketClient, m_uploadSignalsConnected);
+    }
 }
 
 void MainWindow::setUploadSessionByUploadId(const QString& uploadId, const QString& sessionIdentity) {
@@ -993,54 +863,9 @@ void MainWindow::markAllSessionsOffline() {
     }
 }
 
+// [Phase 16] Delegate to ClientListBuilder
 QList<ClientInfo> MainWindow::buildDisplayClientList(const QList<ClientInfo>& connectedClients) {
-    QList<ClientInfo> result;
-    markAllSessionsOffline();
-    QSet<QString> identitiesSeen;
-
-    for (ClientInfo client : connectedClients) {
-        QString persistentId = client.clientId();
-        if (persistentId.isEmpty()) {
-            qWarning() << "MainWindow::buildDisplayClientList: client has no persistentClientId";
-            continue;
-        }
-        client.setClientId(persistentId);
-        client.setOnline(true);
-
-        if (CanvasSession* session = findCanvasSession(persistentId)) {
-            session->serverAssignedId = client.getId(); // Keep for local lookup
-            session->lastClientInfo = client;
-            session->lastClientInfo.setClientId(persistentId);
-            session->lastClientInfo.setFromMemory(true);
-            session->lastClientInfo.setOnline(true);
-            session->remoteContentClearedOnDisconnect = false;
-            // Phase 3: Use persistentClientId for server communication
-            if (session->canvas && !session->persistentClientId.isEmpty()) {
-                session->canvas->setRemoteSceneTarget(session->persistentClientId, session->lastClientInfo.getMachineName());
-            }
-            client.setFromMemory(true);
-            client.setId(session->serverAssignedId);
-        } else {
-            client.setFromMemory(false);
-        }
-
-        identitiesSeen.insert(persistentId);
-        result.append(client);
-    }
-
-    for (CanvasSession* session : m_sessionManager->getAllSessions()) {
-        if (identitiesSeen.contains(session->persistentClientId)) continue;
-        ClientInfo info = session->lastClientInfo;
-        info.setClientId(session->persistentClientId);
-        if (!session->serverAssignedId.isEmpty()) {
-            info.setId(session->serverAssignedId);
-        }
-        info.setOnline(false);
-        info.setFromMemory(true);
-        result.append(info);
-    }
-
-    return result;
+    return ClientListBuilder::buildDisplayClientList(this, connectedClients);
 }
 
 ScreenCanvas* MainWindow::canvasForClientId(const QString& clientId) const {

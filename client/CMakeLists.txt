@@ -60,11 +60,13 @@ set(SOURCES
     src/managers/MenuBarManager.cpp
     src/managers/UploadButtonStyleManager.cpp
     src/managers/SettingsManager.cpp
+    src/managers/ClientListBuilder.cpp
     src/handlers/WebSocketMessageHandler.cpp
     src/handlers/ScreenEventHandler.cpp
     src/handlers/ClientListEventHandler.cpp
     src/handlers/UploadEventHandler.cpp
     src/handlers/WindowEventHandler.cpp
+    src/handlers/UploadSignalConnector.cpp
     src/controllers/CanvasSessionController.cpp
     src/controllers/TimerController.cpp
 )
@@ -120,11 +122,13 @@ set(HEADERS
     src/managers/MenuBarManager.h
     src/managers/UploadButtonStyleManager.h
     src/managers/SettingsManager.h
+    src/managers/ClientListBuilder.h
     src/handlers/WebSocketMessageHandler.h
     src/handlers/ScreenEventHandler.h
     src/handlers/ClientListEventHandler.h
     src/handlers/UploadEventHandler.h
     src/handlers/WindowEventHandler.h
+    src/handlers/UploadSignalConnector.h
     src/controllers/CanvasSessionController.h
     src/controllers/TimerController.h
 )

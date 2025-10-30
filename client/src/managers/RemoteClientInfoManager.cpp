@@ -1,15 +1,11 @@
 #include "RemoteClientInfoManager.h"
 #include "AppColors.h"
+#include "ui/StyleConfig.h"
 #include "ui/widgets/ClippedContainer.h"
 #include <QHBoxLayout>
 #include <QFrame>
 
-// Import global style configuration
-extern int gDynamicBoxBorderRadius;
-extern int gDynamicBoxHeight;
-extern int gDynamicBoxFontPx;
-extern int gRemoteClientContainerPadding;
-extern int gTitleTextFontSize;
+// [Phase 17] Style configuration now accessed via macros from StyleConfig.h
 
 RemoteClientInfoManager::RemoteClientInfoManager(QObject* parent)
     : QObject(parent)

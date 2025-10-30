@@ -115,6 +115,21 @@ public:
      */
     int getUploadButtonMaxWidth() const;
     
+    // [Phase 17] Style configuration accessors
+    int getWindowContentMarginTop() const { return m_config.windowContentMarginTop; }
+    int getWindowContentMarginRight() const { return m_config.windowContentMarginRight; }
+    int getWindowContentMarginBottom() const { return m_config.windowContentMarginBottom; }
+    int getWindowContentMarginLeft() const { return m_config.windowContentMarginLeft; }
+    int getWindowBorderRadiusPx() const { return m_config.windowBorderRadiusPx; }
+    int getInnerContentGap() const { return m_config.innerContentGap; }
+    int getDynamicBoxMinWidth() const { return m_config.dynamicBoxMinWidth; }
+    int getDynamicBoxHeight() const { return m_config.dynamicBoxHeight; }
+    int getDynamicBoxBorderRadius() const { return m_config.dynamicBoxBorderRadius; }
+    int getDynamicBoxFontPx() const { return m_config.dynamicBoxFontPx; }
+    int getRemoteClientContainerPadding() const { return m_config.remoteClientContainerPadding; }
+    int getTitleTextFontSize() const { return m_config.titleTextFontSize; }
+    int getTitleTextHeight() const { return m_config.titleTextHeight; }
+    
     /**
      * @brief Update all widget stylesheets to reflect current theme
      * @param mainWindow Pointer to main window for accessing widgets
