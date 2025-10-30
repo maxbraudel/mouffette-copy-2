@@ -259,8 +259,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     };
 
     {
-        auto [spacer, header] = addSceneSectionHeader("Image");
-        Q_UNUSED(spacer);
+        auto [_, header] = addSceneSectionHeader("Image");
         m_sceneImageHeader = header;
     }
 
@@ -527,8 +526,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     };
 
     {
-        auto [spacer, header] = addElementSectionHeader("Image");
-        Q_UNUSED(spacer);
+        auto [_, header] = addElementSectionHeader("Image");
         m_elementImageHeader = header;
     }
 
