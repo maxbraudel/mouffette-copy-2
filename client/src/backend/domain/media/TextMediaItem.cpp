@@ -49,9 +49,25 @@ public:
 protected:
     void focusOutEvent(QFocusEvent* event) override {
         QGraphicsTextItem::focusOutEvent(event);
-        if (m_owner) {
-            m_owner->commitInlineEditing();
+        if (!m_owner) {
+            return;
         }
+
+        const Qt::FocusReason reason = event ? event->reason() : Qt::OtherFocusReason;
+        if (reason == Qt::MouseFocusReason && QApplication::mouseButtons() != Qt::NoButton) {
+            m_owner->commitInlineEditing();
+            return;
+        }
+
+        if (!m_owner->isEditing()) {
+            return;
+        }
+
+        QTimer::singleShot(0, this, [this]() {
+            if (m_owner && m_owner->isEditing()) {
+                this->setFocus(Qt::OtherFocusReason);
+            }
+        });
     }
 
     void keyPressEvent(QKeyEvent* event) override {
