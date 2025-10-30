@@ -3,7 +3,6 @@
 #include <QPainter>
 #include <QStyleOptionGraphicsItem>
 #include <QGraphicsSceneMouseEvent>
-#include <QtGlobal>
 #include <algorithm>
 #include <cmath>
 #include <QGraphicsTextItem>
@@ -15,7 +14,6 @@
 #include <QAbstractTextDocumentLayout>
 #include <QTextCursor>
 #include <QTextBlockFormat>
-#include <QTextCursor>
 #include <QObject>
 #include <QScopedValueRollback>
 
@@ -109,6 +107,8 @@ TextMediaItem::TextMediaItem(
     setFlag(QGraphicsItem::ItemIsSelectable, true);
     setFlag(QGraphicsItem::ItemIsMovable, true);
     setAcceptHoverEvents(true);
+
+    m_lastKnownScale = scale();
 }
 
 void TextMediaItem::setText(const QString& text) {
@@ -336,6 +336,31 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
     update();
 }
 
+void TextMediaItem::applyFontScale(qreal factor) {
+    if (factor <= 0.0 || std::abs(factor - 1.0) < 1e-4) {
+        return;
+    }
+
+    QFont updatedFont = m_font;
+    qreal pointSize = updatedFont.pointSizeF();
+    if (pointSize <= 0.0) {
+        pointSize = static_cast<qreal>(updatedFont.pointSize());
+    }
+    if (pointSize <= 0.0) {
+        return;
+    }
+
+    updatedFont.setPointSizeF(pointSize * factor);
+    m_font = updatedFont;
+
+    if (m_inlineEditor) {
+        m_inlineEditor->setFont(m_font);
+    }
+
+    updateInlineEditorGeometry();
+    update();
+}
+
 void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) {
     Q_UNUSED(option);
     Q_UNUSED(widget);
@@ -396,6 +421,19 @@ void TextMediaItem::mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event) {
 }
 
 QVariant TextMediaItem::itemChange(GraphicsItemChange change, const QVariant& value) {
+    if (change == ItemScaleChange && value.canConvert<double>()) {
+        const qreal newScale = value.toDouble();
+        const qreal previousScale = m_lastKnownScale;
+        const qreal scaleDiff = std::abs(newScale - previousScale);
+        const qreal prevDiffFromOne = std::abs(previousScale - 1.0);
+        const qreal newDiffFromOne = std::abs(newScale - 1.0);
+        const qreal epsilon = 1e-4;
+        if (scaleDiff > epsilon && newDiffFromOne < epsilon && prevDiffFromOne > epsilon && newScale > 0.0) {
+            const qreal factor = previousScale / newScale;
+            applyFontScale(factor);
+        }
+    }
+
     if (change == ItemSelectedHasChanged && value.canConvert<bool>()) {
         const bool selectedNow = value.toBool();
         if (!selectedNow && m_isEditing) {
@@ -404,6 +442,12 @@ QVariant TextMediaItem::itemChange(GraphicsItemChange change, const QVariant& va
     }
 
     QVariant result = ResizableMediaBase::itemChange(change, value);
+
+    if (change == ItemScaleHasChanged && value.canConvert<double>()) {
+        m_lastKnownScale = value.toDouble();
+    } else if (change == ItemScaleHasChanged) {
+        m_lastKnownScale = scale();
+    }
 
     if (change == ItemTransformHasChanged ||
         change == ItemPositionHasChanged ||

@@ -54,8 +54,10 @@ private:
     QGraphicsTextItem* m_inlineEditor = nullptr;
     bool m_isEditing = false;
     bool m_isUpdatingInlineGeometry = false;
+    qreal m_lastKnownScale = 1.0;
     
     void ensureInlineEditor();
     void updateInlineEditorGeometry();
     void finishInlineEditing(bool commitChanges);
+    void applyFontScale(qreal factor);
 };
