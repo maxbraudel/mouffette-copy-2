@@ -268,8 +268,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     {
         auto* autoRow = new QWidget(m_sceneOptionsContainer);
         configureRow(autoRow);
-    auto* autoLayout = new QHBoxLayout(autoRow);
-    autoLayout->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);  // Maintain 35px gap to the header
+        auto* autoLayout = new QHBoxLayout(autoRow);
+        autoLayout->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);
         autoLayout->setSpacing(0);
         m_displayAfterCheck = new QCheckBox("Display automatically", autoRow);
         m_displayAfterCheck->setStyleSheet(overlayTextStyle);
@@ -297,7 +297,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_sceneOptionsLayout->addWidget(delayRow);
     }
 
-    // Hide delay controls for the image section
+    // Hide delay
     {
         m_hideDelayRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_hideDelayRow);
@@ -344,8 +344,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     {
         m_unmuteRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_unmuteRow);
-    auto* h = new QHBoxLayout(m_unmuteRow);
-    h->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);  // Maintain 35px gap to the header
+        auto* h = new QHBoxLayout(m_unmuteRow);
+        h->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);
         h->setSpacing(0);
         m_unmuteCheck = new QCheckBox("Unmute automatically", m_unmuteRow);
         m_unmuteCheck->setStyleSheet(overlayTextStyle);
@@ -419,12 +419,12 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_sceneVideoHeader = header;
     }
 
-    // 1) Play automatically as separate widget (video only) - matching display layout
+    // Play automatically (video only)
     {
         m_autoPlayRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_autoPlayRow);
-    auto* autoLayout = new QHBoxLayout(m_autoPlayRow);
-    autoLayout->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);  // Maintain 35px gap to the header
+        auto* autoLayout = new QHBoxLayout(m_autoPlayRow);
+        autoLayout->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);
         autoLayout->setSpacing(0);
         m_autoPlayCheck = new QCheckBox("Play automatically", m_autoPlayRow);
         m_autoPlayCheck->setStyleSheet(overlayTextStyle);
@@ -434,7 +434,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_sceneOptionsLayout->addWidget(m_autoPlayRow);
     }
     
-    // Play delay as a separate widget (video only) - matching display delay layout
+    // Play delay (video only)
     {
         m_playDelayRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_playDelayRow);
@@ -476,7 +476,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_sceneOptionsLayout->addWidget(m_pauseDelayRow);
     }
 
-    // 2) Repeat (video only) - keeping original single checkbox format
+    // Repeat (video only)
     {
         m_repeatRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_repeatRow);
@@ -532,12 +532,12 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_elementImageHeader = header;
     }
 
-    // Image fade in with checkbox format
+    // Image fade in
     {
         auto* row = new QWidget(m_elementPropertiesContainer);
         configureRow(row);
         auto* h = new QHBoxLayout(row);
-        h->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);  // Maintain 35px gap to the header
+        h->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);
         h->setSpacing(0);
         m_fadeInCheck = new QCheckBox("Image fade in: ", row);
         m_fadeInCheck->setStyleSheet(overlayTextStyle);
@@ -553,7 +553,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_elementPropertiesLayout->addWidget(row);
     }
 
-    // Image fade out with checkbox format
+    // Image fade out
     {
         auto* row = new QWidget(m_elementPropertiesContainer);
         configureRow(row);
@@ -574,7 +574,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_elementPropertiesLayout->addWidget(row);
     }
 
-    // Opacity with checkbox format
+    // Opacity
     {
         auto* row = new QWidget(m_elementPropertiesContainer);
         configureRow(row);
@@ -601,12 +601,12 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_elementAudioHeader = header;
     }
 
-    // Volume with checkbox format (video only)
+    // Volume (video only)
     {
         m_volumeRow = new QWidget(m_elementPropertiesContainer);
         configureRow(m_volumeRow);
-    auto* h = new QHBoxLayout(m_volumeRow);
-    h->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);  // Maintain 35px gap to the header
+        auto* h = new QHBoxLayout(m_volumeRow);
+        h->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);
         h->setSpacing(0);
         m_volumeCheck = new QCheckBox("Volume: ", m_volumeRow);
         m_volumeCheck->setStyleSheet(overlayTextStyle);

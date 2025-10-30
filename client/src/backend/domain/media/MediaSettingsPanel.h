@@ -107,12 +107,9 @@ private:
     QSpacerItem* m_elementAudioSpacer = nullptr;
 
     QCheckBox* m_autoPlayCheck = nullptr;
-    QCheckBox* m_playDelayCheck = nullptr; // New: separate play delay checkbox
-    QCheckBox* m_pauseDelayCheck = nullptr; // New: pause delay checkbox
-
+    QCheckBox* m_playDelayCheck = nullptr;
+    QCheckBox* m_pauseDelayCheck = nullptr;
     QCheckBox* m_repeatCheck = nullptr;
-    
-    // Display delay checkbox (separate from display automatically)
     QCheckBox* m_displayDelayCheck = nullptr;
     QCheckBox* m_unmuteDelayCheck = nullptr;
 
@@ -129,11 +126,10 @@ private:
 
     // Value box widgets for click handling
     QLabel* m_autoPlayBox = nullptr;
-    QLabel* m_autoPlaySecondsLabel = nullptr; // "seconds" text after the play delay input box
-    // New: display automatically after [x] seconds
+    QLabel* m_autoPlaySecondsLabel = nullptr;
     QCheckBox* m_displayAfterCheck = nullptr;
     QLabel* m_displayAfterBox = nullptr;
-    QLabel* m_displayAfterSecondsLabel = nullptr; // "seconds" text after the input box
+    QLabel* m_displayAfterSecondsLabel = nullptr;
     QLabel* m_repeatBox = nullptr;
     QLabel* m_fadeInBox = nullptr;
     QLabel* m_fadeOutBox = nullptr;
@@ -141,7 +137,6 @@ private:
     QLabel* m_audioFadeOutBox = nullptr;
     QLabel* m_hideDelayBox = nullptr;
     QLabel* m_muteDelayBox = nullptr;
-    // New: set opacity to [x]%
     QCheckBox* m_opacityCheck = nullptr;
     QLabel* m_opacityBox = nullptr;
     QCheckBox* m_volumeCheck = nullptr;
