@@ -114,6 +114,15 @@ public:
     void setCornerSnapDistancePx(int px) { m_cornerSnapDistancePx = qMax(1, px); }
     int cornerSnapDistancePx() const { return m_cornerSnapDistancePx; }
     
+    // Canvas tool management
+    enum class CanvasTool {
+        Selection,  // Default tool - select and manipulate media
+        Text        // Text tool - click to create text media
+    };
+    
+    CanvasTool currentTool() const { return m_currentTool; }
+    void setCurrentTool(CanvasTool tool);
+    
     // Z-order management for media items (public interface)
     void moveMediaUp(QGraphicsItem* item);
     void moveMediaDown(QGraphicsItem* item);
@@ -215,6 +224,9 @@ private:
     void updateSettingsToggleButtonGeometry();
     void ensureToolSelector(); // Create tool selector (segmented control)
     void updateToolSelectorGeometry(); // Position tool selector next to settings button
+    
+    // Text media creation
+    void createTextMediaAtPosition(const QPointF& scenePos);
     
     void OnSceneChanged();
     // Snap-to-screen helpers
@@ -338,6 +350,8 @@ private:
     QWidget* m_toolSelectorContainer = nullptr;
     QToolButton* m_selectionToolButton = nullptr;
     QToolButton* m_textToolButton = nullptr;
+    CanvasTool m_currentTool = CanvasTool::Selection; // Current active tool
+    
     QPushButton* m_launchSceneButton = nullptr; // new Launch Remote Scene toggle button
     QPushButton* m_launchTestSceneButton = nullptr; // new Launch Test Scene toggle button
     QPushButton* m_uploadButton = nullptr; // upload button in media list overlay

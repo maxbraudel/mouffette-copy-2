@@ -8,6 +8,7 @@
 #include "backend/files/Theme.h"
 #include "backend/domain/media/MediaItems.h"
 #include "backend/domain/media/MediaSettingsPanel.h" // for settingsPanel() accessor usage
+#include "backend/domain/media/TextMediaItem.h" // for text media creation
 #include "frontend/ui/notifications/ToastNotificationSystem.h" // for toast notifications
 #include <QGraphicsScene>
 #include <QGraphicsSceneMouseEvent>
@@ -2754,6 +2755,14 @@ void ScreenCanvas::keyReleaseEvent(QKeyEvent* event) {
 }
 
 void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
+    // Handle Text tool: create text media on left click
+    if (m_currentTool == CanvasTool::Text && event->button() == Qt::LeftButton) {
+        QPointF scenePos = mapToScene(event->pos());
+        createTextMediaAtPosition(scenePos);
+        event->accept();
+        return;
+    }
+    
     if (m_hostSceneActive) {
         // Block selection interactions during host scene state
         event->ignore();
@@ -5018,14 +5027,10 @@ void ScreenCanvas::ensureToolSelector() {
     
     // Mutual exclusivity: only one tool can be active
     connect(m_selectionToolButton, &QToolButton::clicked, this, [this]() {
-        m_selectionToolButton->setChecked(true);
-        m_textToolButton->setChecked(false);
-        // TODO: Trigger selection tool activation
+        setCurrentTool(CanvasTool::Selection);
     });
     connect(m_textToolButton, &QToolButton::clicked, this, [this]() {
-        m_textToolButton->setChecked(true);
-        m_selectionToolButton->setChecked(false);
-        // TODO: Trigger text tool activation
+        setCurrentTool(CanvasTool::Text);
     });
 
     m_toolSelectorContainer->show();
@@ -5099,6 +5104,58 @@ void ScreenCanvas::updateToolSelectorGeometry() {
     m_toolSelectorContainer->move(settingsButtonRight + spacing, margin);
     m_toolSelectorContainer->raise();
     m_toolSelectorContainer->show();
+}
+
+void ScreenCanvas::setCurrentTool(CanvasTool tool) {
+    if (m_currentTool == tool) return;
+    
+    m_currentTool = tool;
+    
+    // Update button states
+    if (m_selectionToolButton && m_textToolButton) {
+        m_selectionToolButton->setChecked(tool == CanvasTool::Selection);
+        m_textToolButton->setChecked(tool == CanvasTool::Text);
+    }
+    
+    // Update cursor (optional visual feedback)
+    if (tool == CanvasTool::Text) {
+        viewport()->setCursor(Qt::CrossCursor);
+    } else {
+        viewport()->setCursor(Qt::ArrowCursor);
+    }
+}
+
+void ScreenCanvas::createTextMediaAtPosition(const QPointF& scenePos) {
+    if (!m_scene) return;
+    
+    // Default size for new text media (300x150 pixels)
+    QSize defaultSize(300, 150);
+    
+    // Create new text media item with default handle sizes (visual 12, selection 30)
+    TextMediaItem* textItem = new TextMediaItem(
+        defaultSize,
+        m_mediaHandleVisualSizePx,
+        m_mediaHandleSelectionSizePx,
+        QStringLiteral("No Text")
+    );
+    
+    // Set position (center the item on the click position)
+    qreal halfWidth = defaultSize.width() / 2.0;
+    qreal halfHeight = defaultSize.height() / 2.0;
+    textItem->setPos(scenePos.x() - halfWidth, scenePos.y() - halfHeight);
+    
+    // Add to scene
+    m_scene->addItem(textItem);
+    
+    // Select the newly created text item
+    m_scene->clearSelection();
+    textItem->setSelected(true);
+    
+    // Automatically switch back to Selection tool after creating text
+    setCurrentTool(CanvasTool::Selection);
+    
+    // Refresh overlay to show new media
+    scheduleInfoOverlayRefresh();
 }
 
 void ScreenCanvas::updateGlobalSettingsPanelVisibility() {

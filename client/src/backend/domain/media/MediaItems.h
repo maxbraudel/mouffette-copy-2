@@ -194,6 +194,7 @@ public:
     
     // Override in derived classes to indicate media type for settings panel
     virtual bool isVideoMedia() const { return false; }
+    virtual bool isTextMedia() const { return false; }
 
 protected:
     QSize m_baseSize;

@@ -87,6 +87,7 @@ set(SOURCES
     src/backend/domain/media/MediaItems.cpp
     src/backend/domain/media/MediaSettingsPanel.cpp
     src/backend/domain/media/SelectionIndicators.cpp
+    src/backend/domain/media/TextMediaItem.cpp
     
     # Network
     src/backend/network/WebSocketClient.cpp
@@ -205,6 +206,7 @@ set(HEADERS
     src/backend/domain/media/ResizableMediaItems.h
     src/backend/domain/media/MediaSettingsPanel.h
     src/backend/domain/media/SelectionIndicators.h
+    src/backend/domain/media/TextMediaItem.h
     
     # Network
     src/backend/network/WebSocketClient.h
