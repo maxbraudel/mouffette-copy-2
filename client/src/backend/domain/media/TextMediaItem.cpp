@@ -16,6 +16,7 @@
 #include <QTextBlockFormat>
 #include <QObject>
 #include <QScopedValueRollback>
+#include <QTimer>
 
 namespace {
 
@@ -114,7 +115,9 @@ TextMediaItem::TextMediaItem(
 void TextMediaItem::setText(const QString& text) {
     if (m_text != text) {
         m_text = text;
+        m_pendingAutoSize = true;
         if (m_inlineEditor && !m_isEditing) {
+            QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
             m_inlineEditor->setPlainText(m_text);
         }
         updateInlineEditorGeometry();
@@ -155,12 +158,18 @@ bool TextMediaItem::beginInlineEditing() {
 
     m_isEditing = true;
 
-    m_inlineEditor->setPlainText(m_text);
+    {
+        QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
+        m_inlineEditor->setPlainText(m_text);
+    }
     m_inlineEditor->setDefaultTextColor(m_textColor);
     m_inlineEditor->setEnabled(true);
     m_inlineEditor->setVisible(true);
     m_inlineEditor->setTextInteractionFlags(Qt::TextEditorInteraction);
-    applyCenterAlignment(m_inlineEditor);
+    {
+        QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
+        applyCenterAlignment(m_inlineEditor);
+    }
 
     updateInlineEditorGeometry();
 
@@ -199,18 +208,31 @@ void TextMediaItem::ensureInlineEditor() {
     editor->setVisible(false);
 
     if (QTextDocument* doc = editor->document()) {
-        doc->setDocumentMargin(0.0);
-        QTextOption opt = doc->defaultTextOption();
-        opt.setWrapMode(QTextOption::WordWrap);
-        opt.setAlignment(Qt::AlignHCenter);
-        doc->setDefaultTextOption(opt);
+        {
+            QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
+            doc->setDocumentMargin(0.0);
+            QTextOption opt = doc->defaultTextOption();
+            opt.setWrapMode(QTextOption::WordWrap);
+            opt.setAlignment(Qt::AlignHCenter);
+            doc->setDefaultTextOption(opt);
+        }
 
         QObject::connect(doc, &QTextDocument::contentsChanged, editor, [this]() {
+            if (m_ignoreDocumentChange) {
+                return;
+            }
+            m_pendingAutoSize = true;
+            if (m_isUpdatingInlineGeometry) {
+                return;
+            }
             updateInlineEditorGeometry();
         });
     }
 
-    applyCenterAlignment(editor);
+    {
+        QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
+        applyCenterAlignment(editor);
+    }
 
     m_inlineEditor = editor;
 }
@@ -225,10 +247,15 @@ void TextMediaItem::updateInlineEditorGeometry() {
     }
     QScopedValueRollback<bool> guard(m_isUpdatingInlineGeometry, true);
 
+    const bool allowAutoSize = m_pendingAutoSize;
+    if (allowAutoSize) {
+        m_pendingAutoSize = false;
+    }
     const qreal margin = 10.0;
 
     QTextDocument* doc = m_inlineEditor->document();
     if (doc) {
+        QScopedValueRollback<bool> ignoreGuard(m_ignoreDocumentChange, true);
         QTextOption opt = doc->defaultTextOption();
         opt.setWrapMode(QTextOption::WordWrap);
         opt.setAlignment(Qt::AlignHCenter);
@@ -237,6 +264,7 @@ void TextMediaItem::updateInlineEditorGeometry() {
     }
 
     const qreal currentContentWidth = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - (margin * 2.0));
+    const qreal currentContentHeight = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.height()) - (margin * 2.0));
     m_inlineEditor->setTextWidth(currentContentWidth);
 
     qreal docIdealWidth = 0.0;
@@ -250,17 +278,16 @@ void TextMediaItem::updateInlineEditorGeometry() {
     }
 
     QSize newBaseSize = m_baseSize;
-    if (doc && m_isEditing) {
-        const qreal requiredWidth = docIdealWidth + margin * 2.0;
-        if (requiredWidth > newBaseSize.width()) {
+    if (doc && allowAutoSize) {
+        const qreal requiredContentWidth = docIdealWidth;
+        if (requiredContentWidth > currentContentWidth + 0.5) {
+            const qreal requiredWidth = requiredContentWidth + margin * 2.0;
             newBaseSize.setWidth(static_cast<int>(std::ceil(requiredWidth)));
         }
 
-        if (docHeight > 0.0) {
+        if (docHeight > currentContentHeight + 0.5) {
             const qreal requiredHeight = docHeight + margin * 2.0;
-            if (requiredHeight > newBaseSize.height()) {
-                newBaseSize.setHeight(static_cast<int>(std::ceil(requiredHeight)));
-            }
+            newBaseSize.setHeight(static_cast<int>(std::ceil(requiredHeight)));
         }
     }
 
@@ -309,7 +336,17 @@ void TextMediaItem::updateInlineEditorGeometry() {
         update();
     }
 
-    applyCenterAlignment(m_inlineEditor);
+    {
+        QScopedValueRollback<bool> ignoreGuard(m_ignoreDocumentChange, true);
+        applyCenterAlignment(m_inlineEditor);
+    }
+
+    const bool hasPendingResize = m_pendingAutoSize;
+    if (hasPendingResize && m_inlineEditor) {
+        QTimer::singleShot(0, m_inlineEditor, [this]() {
+            updateInlineEditorGeometry();
+        });
+    }
 }
 
 void TextMediaItem::finishInlineEditing(bool commitChanges) {
@@ -324,7 +361,10 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
     m_inlineEditor->clearFocus();
     m_inlineEditor->setEnabled(false);
     m_inlineEditor->setVisible(false);
-    m_inlineEditor->setPlainText(m_text);
+    {
+        QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
+        m_inlineEditor->setPlainText(m_text);
+    }
 
     m_isEditing = false;
 
@@ -357,6 +397,7 @@ void TextMediaItem::applyFontScale(qreal factor) {
         m_inlineEditor->setFont(m_font);
     }
 
+    m_pendingAutoSize = true;
     updateInlineEditorGeometry();
     update();
 }
