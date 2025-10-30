@@ -25,7 +25,8 @@ namespace AppColors {
 struct ColorSource {
     enum Type {
         Static,     // Fixed color value
-        Palette     // Dynamic color from system palette
+        Palette,    // Dynamic color from system palette
+        Blend       // Blend between two palette colors
     };
     
     Type type;
@@ -34,12 +35,24 @@ struct ColorSource {
     QPalette::ColorGroup group;   // Used when type == Palette (default: Active)
     int alpha;                    // Alpha override (0-255, -1 = use original)
     
+    // Blend-specific fields
+    QPalette::ColorRole blendRole1;      // First color for blend
+    QPalette::ColorRole blendRole2;      // Second color for blend
+    float blendRatio;                    // Ratio of first color (0.0-1.0), e.g., 0.2 = 20% first, 80% second
+    
     // Constructors
     ColorSource(const QColor& color) 
-        : type(Static), staticColor(color), role(QPalette::Base), group(QPalette::Active), alpha(-1) {}
+        : type(Static), staticColor(color), role(QPalette::Base), group(QPalette::Active), alpha(-1), 
+          blendRole1(QPalette::Base), blendRole2(QPalette::Base), blendRatio(0.5f) {}
     
     ColorSource(QPalette::ColorRole paletteRole, int alphaOverride = -1, QPalette::ColorGroup grp = QPalette::Active)
-        : type(Palette), role(paletteRole), group(grp), alpha(alphaOverride) {}
+        : type(Palette), role(paletteRole), group(grp), alpha(alphaOverride),
+          blendRole1(QPalette::Base), blendRole2(QPalette::Base), blendRatio(0.5f) {}
+    
+    // Blend constructor: blends ratio of role1 with (1-ratio) of role2
+    ColorSource(QPalette::ColorRole role1, QPalette::ColorRole role2, float ratio, QPalette::ColorGroup grp = QPalette::Active)
+        : type(Blend), role(QPalette::Base), group(grp), alpha(-1),
+          blendRole1(role1), blendRole2(role2), blendRatio(ratio) {}
 };
 
 // ============================================================================

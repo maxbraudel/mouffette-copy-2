@@ -35,7 +35,7 @@ namespace AppColors {
 // ============================================================================
 
 // Configuration: Change these to customize color behavior
-ColorSource gAppBorderColorSource = ColorSource(QPalette::Text, 50);        // Dynamic: Mid palette - more visible borders
+ColorSource gAppBorderColorSource = ColorSource(QPalette::Text, QPalette::Base, 0.2f);  // Blend: 20% Text + 80% Base
 ColorSource gInteractionBackgroundColorSource = ColorSource(QPalette::Text, 8); // Dynamic: Text palette
 ColorSource gWindowBackgroundColorSource = ColorSource(QPalette::Base); // Dynamic: Base palette
 
@@ -168,8 +168,20 @@ QColor getCurrentColor(const ColorSource& source) {
     QColor color;
     if (source.type == ColorSource::Static) {
         color = source.staticColor;
-    } else {
+    } else if (source.type == ColorSource::Palette) {
         color = qApp->palette().color(source.group, source.role);
+    } else if (source.type == ColorSource::Blend) {
+        // Blend two palette colors
+        QColor color1 = qApp->palette().color(source.group, source.blendRole1);
+        QColor color2 = qApp->palette().color(source.group, source.blendRole2);
+        
+        float ratio = qBound(0.0f, source.blendRatio, 1.0f);
+        float inverseRatio = 1.0f - ratio;
+        
+        color.setRed(static_cast<int>(color1.red() * ratio + color2.red() * inverseRatio));
+        color.setGreen(static_cast<int>(color1.green() * ratio + color2.green() * inverseRatio));
+        color.setBlue(static_cast<int>(color1.blue() * ratio + color2.blue() * inverseRatio));
+        color.setAlpha(static_cast<int>(color1.alpha() * ratio + color2.alpha() * inverseRatio));
     }
     
     // Apply alpha override if specified
