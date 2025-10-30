@@ -2762,31 +2762,9 @@ void ScreenCanvas::keyReleaseEvent(QKeyEvent* event) {
 void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
     // Handle Text tool interactions
     if (m_currentTool == CanvasTool::Text && event->button() == Qt::LeftButton) {
-        TextMediaItem* existingText = nullptr;
-        const QList<QGraphicsItem*> hitItems = items(event->pos());
-        for (QGraphicsItem* gi : hitItems) {
-            if (auto* media = toMedia(gi)) {
-                existingText = dynamic_cast<TextMediaItem*>(media);
-                if (existingText) {
-                    break;
-                }
-            }
-        }
-
-        if (existingText) {
-            if (m_scene) {
-                const bool alreadySingleSelection = existingText->isSelected() && m_scene->selectedItems().size() == 1;
-                if (!alreadySingleSelection) {
-                    m_scene->clearSelection();
-                    existingText->setSelected(true);
-                }
-            }
-            existingText->beginInlineEditing();
-        } else {
-            QPointF scenePos = mapToScene(event->pos());
-            if (TextMediaItem* newText = createTextMediaAtPosition(scenePos)) {
-                newText->beginInlineEditing();
-            }
+        QPointF scenePos = mapToScene(event->pos());
+        if (TextMediaItem* newText = createTextMediaAtPosition(scenePos)) {
+            newText->beginInlineEditing();
         }
 
         event->accept();
@@ -2965,7 +2943,8 @@ void ScreenCanvas::mouseDoubleClickEvent(QMouseEvent* event) {
             // Prefer the already-selected item under the cursor, even if occluded
             for (QGraphicsItem* it : sel) {
                 if (auto* m = dynamic_cast<ResizableMediaBase*>(it)) {
-                    if (m->contains(m->mapFromScene(scenePosSel))) {
+                    const bool isTextItem = dynamic_cast<TextMediaItem*>(m) != nullptr;
+                    if (!isTextItem && m->contains(m->mapFromScene(scenePosSel))) {
                         // Consume the double-click so selection is not transferred to a top item
                         event->accept();
                         return;
