@@ -15,8 +15,11 @@
 #include <QTimer>
 #include <QSizePolicy>
 #include <QSignalBlocker>
+#include <QSpacerItem>
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
+#include <utility>
 #include "backend/domain/media/MediaItems.h" // for ResizableMediaBase
 
 namespace {
@@ -217,9 +220,11 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     m_contentLayout->addWidget(m_sceneOptionsContainer);
 
     bool sceneFirstSection = true;
-    auto addSceneSectionHeader = [&](const QString& text) {
+    auto addSceneSectionHeader = [&](const QString& text) -> std::pair<QSpacerItem*, QLabel*> {
+        QSpacerItem* spacer = nullptr;
         if (!sceneFirstSection) {
-            m_sceneOptionsLayout->addSpacing(8);
+            spacer = new QSpacerItem(0, 8, QSizePolicy::Minimum, QSizePolicy::Fixed);
+            m_sceneOptionsLayout->addItem(spacer);
         }
         sceneFirstSection = false;
         auto* header = new QLabel(text, m_sceneOptionsContainer);
@@ -228,6 +233,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         header->setFont(font);
         header->setStyleSheet(QString("%1 %2").arg(overlayTextStyle, AppColors::canvasMediaSettingsSectionHeadersFontCss()));
         m_sceneOptionsLayout->addWidget(header);
+        return {spacer, header};
     };
 
     // Helper to create a small value box label like [1]
@@ -243,7 +249,11 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         return box;
     };
 
-    addSceneSectionHeader("Image");
+    {
+        auto [spacer, header] = addSceneSectionHeader("Image");
+        m_sceneImageHeader = header;
+        Q_UNUSED(spacer);
+    }
 
     // Display automatically + Display delay controls
     {
@@ -315,7 +325,11 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_sceneOptionsLayout->addWidget(m_hideWhenEndsRow);
     }
 
-    addSceneSectionHeader("Audio");
+    {
+        auto [spacer, header] = addSceneSectionHeader("Audio");
+        m_sceneAudioSpacer = spacer;
+        m_sceneAudioHeader = header;
+    }
 
     // Unmute automatically (video only)
     {
@@ -390,7 +404,11 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_sceneOptionsLayout->addWidget(m_muteWhenEndsRow);
     }
 
-    addSceneSectionHeader("Video");
+    {
+        auto [spacer, header] = addSceneSectionHeader("Video");
+        m_sceneVideoSpacer = spacer;
+        m_sceneVideoHeader = header;
+    }
 
     // 1) Play automatically as separate widget (video only) - matching display layout
     {
@@ -480,9 +498,11 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     m_elementPropertiesContainer->setVisible(false);
 
     bool elementFirstSection = true;
-    auto addElementSectionHeader = [&](const QString& text) {
+    auto addElementSectionHeader = [&](const QString& text) -> std::pair<QSpacerItem*, QLabel*> {
+        QSpacerItem* spacer = nullptr;
         if (!elementFirstSection) {
-            m_elementPropertiesLayout->addSpacing(8);
+            spacer = new QSpacerItem(0, 8, QSizePolicy::Minimum, QSizePolicy::Fixed);
+            m_elementPropertiesLayout->addItem(spacer);
         }
         elementFirstSection = false;
         auto* header = new QLabel(text, m_elementPropertiesContainer);
@@ -491,9 +511,14 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         header->setFont(font);
         header->setStyleSheet(QString("%1 %2").arg(overlayTextStyle, AppColors::canvasMediaSettingsSectionHeadersFontCss()));
         m_elementPropertiesLayout->addWidget(header);
+        return {spacer, header};
     };
 
-    addElementSectionHeader("Image");
+    {
+        auto [spacer, header] = addElementSectionHeader("Image");
+        m_elementImageHeader = header;
+        Q_UNUSED(spacer);
+    }
 
     // Image fade in with checkbox format
     {
@@ -558,7 +583,11 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_elementPropertiesLayout->addWidget(row);
     }
 
-    addElementSectionHeader("Audio");
+    {
+        auto [spacer, header] = addElementSectionHeader("Audio");
+        m_elementAudioSpacer = spacer;
+        m_elementAudioHeader = header;
+    }
 
     // Volume with checkbox format (video only)
     {
@@ -722,6 +751,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     if (m_muteWhenEndsRow) {
         m_muteWhenEndsRow->setVisible(false);
     }
+    updateSectionHeaderVisibility();
     updateActiveTabUi();
     updatePosition();
 }
@@ -790,6 +820,35 @@ void MediaSettingsPanel::setVisible(bool visible) {
 
 bool MediaSettingsPanel::isVisible() const {
     return m_widget && m_widget->isVisible();
+}
+
+void MediaSettingsPanel::updateSectionHeaderVisibility() {
+    auto updateSection = [&](QLabel* header, QSpacerItem* spacer, std::initializer_list<QWidget*> rows) {
+        if (!header) return;
+        bool anyVisible = false;
+        for (QWidget* row : rows) {
+            if (row && row->isVisible()) {
+                anyVisible = true;
+                break;
+            }
+        }
+        header->setVisible(anyVisible);
+        if (spacer) {
+            spacer->changeSize(0, anyVisible ? 8 : 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
+        }
+    };
+
+    updateSection(m_sceneAudioHeader, m_sceneAudioSpacer, {m_unmuteRow, m_unmuteDelayRow, m_muteDelayRow, m_muteWhenEndsRow});
+    updateSection(m_sceneVideoHeader, m_sceneVideoSpacer, {m_autoPlayRow, m_playDelayRow, m_pauseDelayRow, m_repeatRow});
+    updateSection(m_elementAudioHeader, m_elementAudioSpacer, {m_volumeRow, m_audioFadeInRow, m_audioFadeOutRow});
+
+    if (m_sceneImageHeader) {
+        m_sceneImageHeader->setVisible(true);
+    }
+    if (m_elementImageHeader) {
+        m_elementImageHeader->setVisible(true);
+    }
+
 }
 
 void MediaSettingsPanel::setMediaType(bool isVideo) {
@@ -880,6 +939,8 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
     }
     
     // Force layout recalculation after visibility changes
+    updateSectionHeaderVisibility();
+
     if (m_contentLayout) {
         m_contentLayout->invalidate();
         m_contentLayout->activate();

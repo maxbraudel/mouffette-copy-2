@@ -9,6 +9,7 @@ class QScrollArea;
 class QScrollBar;
 class QTimer;
 class QPushButton;
+class QSpacerItem;
 
 // Floating settings panel shown when a media's settings toggle is enabled.
 // Implemented as a QWidget parented to the viewport (like info overlay).
@@ -68,6 +69,7 @@ private:
     void pullSettingsFromMedia();
     void pushSettingsToMedia();
     void updateActiveTabUi();
+    void updateSectionHeaderVisibility();
 
 private:
     QWidget* m_widget = nullptr; // parented to viewport
@@ -93,6 +95,16 @@ private:
     QWidget* m_tabSwitcherSeparator = nullptr;
     enum class ActiveTab { Scene, Element };
     ActiveTab m_activeTab = ActiveTab::Scene;
+
+    // Section headers and spacers (for dynamic visibility)
+    QLabel* m_sceneImageHeader = nullptr;
+    QLabel* m_sceneAudioHeader = nullptr;
+    QLabel* m_sceneVideoHeader = nullptr;
+    QSpacerItem* m_sceneAudioSpacer = nullptr;
+    QSpacerItem* m_sceneVideoSpacer = nullptr;
+    QLabel* m_elementImageHeader = nullptr;
+    QLabel* m_elementAudioHeader = nullptr;
+    QSpacerItem* m_elementAudioSpacer = nullptr;
 
     QCheckBox* m_autoPlayCheck = nullptr;
     QCheckBox* m_playDelayCheck = nullptr; // New: separate play delay checkbox
