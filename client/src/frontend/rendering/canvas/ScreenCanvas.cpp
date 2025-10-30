@@ -2573,6 +2573,22 @@ bool ScreenCanvas::gestureEvent(QGestureEvent* event) {
 }
 
 void ScreenCanvas::keyPressEvent(QKeyEvent* event) {
+    bool editingText = false;
+    if (m_scene) {
+        if (QGraphicsItem* focus = m_scene->focusItem()) {
+            if (auto* textItem = dynamic_cast<QGraphicsTextItem*>(focus)) {
+                if (auto* textMedia = dynamic_cast<TextMediaItem*>(textItem->parentItem())) {
+                    editingText = textMedia->isEditing();
+                }
+            }
+        }
+    }
+
+    if (editingText) {
+        QGraphicsView::keyPressEvent(event);
+        return;
+    }
+
     // Any key press is considered fresh input; cancel momentum blocking
     if (m_ignorePanMomentum) { m_ignorePanMomentum = false; m_momentumPrimed = false; }
     if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
