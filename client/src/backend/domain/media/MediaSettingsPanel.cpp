@@ -24,10 +24,11 @@
 
 namespace {
 
-constexpr int kOptionVerticalSpacing = 10; // Global vertical spacing between settings rows
-constexpr int kHeaderVerticalSpacing = 35; // Space between headers and the next option row
+constexpr int kOptionVerticalSpacing = 5; // Global vertical spacing between settings rows
+constexpr int kHeaderVerticalSpacing = 15; // Space between headers and the next option row
 constexpr int kHeaderFirstRowTopMargin = kHeaderVerticalSpacing - kOptionVerticalSpacing; // Supplemental space we insert after each header
-constexpr int kOptionRowHeight = 20; // Baseline height for every option row (user-tunable)
+constexpr int kOptionRowHeight = 25; // Baseline height for every option row (user-tunable)
+constexpr int kOptionValueBoxHeight = 16; // Fixed height for value boxes regardless of row height
 
 QString tabButtonStyle(bool active, const QString& overlayTextCss) {
     const QString fontCss = AppColors::canvasButtonFontCss();
@@ -215,8 +216,13 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     auto configureRow = [](QWidget* row) {
         if (!row) return;
         row->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-        row->setMinimumHeight(kOptionRowHeight);
-        row->setMaximumHeight(kOptionRowHeight);
+        if (kOptionRowHeight > 0) {
+            row->setMinimumHeight(kOptionRowHeight);
+            row->setMaximumHeight(kOptionRowHeight);
+        } else {
+            row->setMinimumHeight(0);
+            row->setMaximumHeight(QWIDGETSIZE_MAX);
+        }
         row->setVisible(true);
     };
 
@@ -265,8 +271,10 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         box->setAttribute(Qt::WA_Hover, true);
         box->setFocusPolicy(Qt::ClickFocus); // allow focus for key events
         box->installEventFilter(this);
-        setBoxActive(box, false); // set initial inactive style
+        setBoxActive(box, false); // set initial inactive style (includes height constraints)
         box->setMinimumWidth(28);
+        // Use Preferred vertical policy so the box can be centered by parent layout
+        box->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
         return box;
     };
 
@@ -1079,7 +1087,9 @@ void MediaSettingsPanel::setBoxActive(QLabel* box, bool active) {
             "  margin-left: 4px;"
             "  margin-right: 0px;"
             "  color: white;"
-            "}").arg(AppColors::gMediaPanelActiveBg.name())
+            "  min-height: %2px;"
+            "  max-height: %2px;"
+            "}").arg(AppColors::gMediaPanelActiveBg.name()).arg(kOptionValueBoxHeight)
         );
     } else {
         box->setStyleSheet(
@@ -1091,7 +1101,9 @@ void MediaSettingsPanel::setBoxActive(QLabel* box, bool active) {
             "  margin-left: 4px;"
             "  margin-right: 0px;"
             "  color: white;"
-            "}").arg(AppColors::gMediaPanelInactiveBg.name()).arg(AppColors::gMediaPanelInactiveBorder.name())
+            "  min-height: %3px;"
+            "  max-height: %3px;"
+            "}").arg(AppColors::gMediaPanelInactiveBg.name()).arg(AppColors::gMediaPanelInactiveBorder.name()).arg(kOptionValueBoxHeight)
         );
     }
 }
@@ -1546,7 +1558,7 @@ void MediaSettingsPanel::onDisplayAutomaticallyToggled(bool checked) {
         } else {
             // Apply disabled styling
             m_displayAfterBox->setStyleSheet(
-                "QLabel {"
+                QString("QLabel {"
                 "  background-color: #404040;"
                 "  border: 1px solid #606060;"
                 "  border-radius: 6px;"
@@ -1554,7 +1566,9 @@ void MediaSettingsPanel::onDisplayAutomaticallyToggled(bool checked) {
                 "  margin-left: 4px;"
                 "  margin-right: 0px;"
                 "  color: #808080;"
-                "}"
+                "  min-height: %1px;"
+                "  max-height: %1px;"
+                "}").arg(kOptionValueBoxHeight)
             );
             
             // Clear active state if this box was active
