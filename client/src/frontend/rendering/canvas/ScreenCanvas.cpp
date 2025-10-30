@@ -2421,6 +2421,11 @@ bool ScreenCanvas::eventFilter(QObject* watched, QEvent* event) {
                 }
                 if (ResizableMediaBase* media = it.value()) {
                     if (m_scene) {
+                        const QList<QGraphicsItem*> selectedItems = m_scene->selectedItems();
+                        const bool alreadySoleSelection = (selectedItems.size() == 1 && selectedItems.first() == media);
+                        if (alreadySoleSelection) {
+                            return true; // ignore redundant selection; keep current state intact
+                        }
                         // Clear existing selection unless multi-select with modifier could be added later
                         m_scene->clearSelection();
                         media->setSelected(true);
