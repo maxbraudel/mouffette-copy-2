@@ -100,10 +100,15 @@ private:
     QLabel* m_sceneImageHeader = nullptr;
     QLabel* m_sceneAudioHeader = nullptr;
     QLabel* m_sceneVideoHeader = nullptr;
+    QSpacerItem* m_sceneImageHeaderGap = nullptr;
+    QSpacerItem* m_sceneAudioHeaderGap = nullptr;
+    QSpacerItem* m_sceneVideoHeaderGap = nullptr;
     QSpacerItem* m_sceneAudioSpacer = nullptr;
     QSpacerItem* m_sceneVideoSpacer = nullptr;
     QLabel* m_elementImageHeader = nullptr;
     QLabel* m_elementAudioHeader = nullptr;
+    QSpacerItem* m_elementImageHeaderGap = nullptr;
+    QSpacerItem* m_elementAudioHeaderGap = nullptr;
     QSpacerItem* m_elementAudioSpacer = nullptr;
 
     QCheckBox* m_autoPlayCheck = nullptr;

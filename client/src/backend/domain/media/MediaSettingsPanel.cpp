@@ -26,7 +26,8 @@ namespace {
 
 constexpr int kOptionVerticalSpacing = 10; // Global vertical spacing between settings rows
 constexpr int kHeaderVerticalSpacing = 35; // Space between headers and the next option row
-constexpr int kHeaderFirstRowTopMargin = kHeaderVerticalSpacing - kOptionVerticalSpacing; // Extra offset applied to the first option after a header
+constexpr int kHeaderFirstRowTopMargin = kHeaderVerticalSpacing - kOptionVerticalSpacing; // Supplemental space we insert after each header
+constexpr int kOptionRowHeight = 20; // Baseline height for every option row (user-tunable)
 
 QString tabButtonStyle(bool active, const QString& overlayTextCss) {
     const QString fontCss = AppColors::canvasButtonFontCss();
@@ -214,7 +215,16 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     auto configureRow = [](QWidget* row) {
         if (!row) return;
         row->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        row->setMinimumHeight(kOptionRowHeight);
+        row->setMaximumHeight(kOptionRowHeight);
         row->setVisible(true);
+    };
+
+    auto configureRowLayout = [](QHBoxLayout* layout) {
+        if (!layout) return;
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(0);
+        layout->setAlignment(Qt::AlignVCenter);
     };
     
     // Create Scene Options container grouped by category
@@ -226,7 +236,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     m_contentLayout->addWidget(m_sceneOptionsContainer);
 
     bool sceneFirstSection = true;
-    auto addSceneSectionHeader = [&](const QString& text) -> std::pair<QSpacerItem*, QLabel*> {
+    auto addSceneSectionHeader = [&](const QString& text, QSpacerItem*& headerGap) -> std::pair<QSpacerItem*, QLabel*> {
         QSpacerItem* spacer = nullptr;
         if (!sceneFirstSection) {
             spacer = new QSpacerItem(0, kHeaderFirstRowTopMargin, QSizePolicy::Minimum, QSizePolicy::Fixed);
@@ -242,6 +252,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         header->setContentsMargins(0, 0, 0, 0);
 
         m_sceneOptionsLayout->addWidget(header);
+        headerGap = new QSpacerItem(0, kHeaderFirstRowTopMargin, QSizePolicy::Minimum, QSizePolicy::Fixed);
+        m_sceneOptionsLayout->addItem(headerGap);
         return {spacer, header};
     };
 
@@ -259,17 +271,18 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     };
 
     {
-        auto [_, header] = addSceneSectionHeader("Image");
-        m_sceneImageHeader = header;
+        QSpacerItem* gap = nullptr;
+        auto headerInfo = addSceneSectionHeader("Image", gap);
+        m_sceneImageHeader = headerInfo.second;
+        m_sceneImageHeaderGap = gap;
     }
 
     // Display automatically + Display delay controls
     {
         auto* autoRow = new QWidget(m_sceneOptionsContainer);
         configureRow(autoRow);
-        auto* autoLayout = new QHBoxLayout(autoRow);
-        autoLayout->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);
-        autoLayout->setSpacing(0);
+    auto* autoLayout = new QHBoxLayout(autoRow);
+    configureRowLayout(autoLayout);
         m_displayAfterCheck = new QCheckBox("Display automatically", autoRow);
         m_displayAfterCheck->setStyleSheet(overlayTextStyle);
         m_displayAfterCheck->installEventFilter(this);
@@ -279,9 +292,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
 
         auto* delayRow = new QWidget(m_sceneOptionsContainer);
         configureRow(delayRow);
-        auto* h = new QHBoxLayout(delayRow);
-        h->setContentsMargins(0, 0, 0, 0);
-        h->setSpacing(0);
+    auto* h = new QHBoxLayout(delayRow);
+    configureRowLayout(h);
         m_displayDelayCheck = new QCheckBox("Display delay: ", delayRow);
         m_displayDelayCheck->setStyleSheet(overlayTextStyle);
         m_displayDelayCheck->installEventFilter(this);
@@ -300,9 +312,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     {
         m_hideDelayRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_hideDelayRow);
-        auto* h = new QHBoxLayout(m_hideDelayRow);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
+    auto* h = new QHBoxLayout(m_hideDelayRow);
+    configureRowLayout(h);
         m_hideDelayCheck = new QCheckBox("Hide delay: ", m_hideDelayRow);
         m_hideDelayCheck->setStyleSheet(overlayTextStyle);
         m_hideDelayCheck->installEventFilter(this);
@@ -321,9 +332,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     {
         m_hideWhenEndsRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_hideWhenEndsRow);
-        auto* h = new QHBoxLayout(m_hideWhenEndsRow);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
+    auto* h = new QHBoxLayout(m_hideWhenEndsRow);
+    configureRowLayout(h);
         m_hideWhenVideoEndsCheck = new QCheckBox("Hide when video ends", m_hideWhenEndsRow);
         m_hideWhenVideoEndsCheck->setStyleSheet(overlayTextStyle);
         m_hideWhenVideoEndsCheck->installEventFilter(this);
@@ -334,18 +344,19 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     }
 
     {
-        auto [spacer, header] = addSceneSectionHeader("Audio");
+        QSpacerItem* gap = nullptr;
+        auto [spacer, header] = addSceneSectionHeader("Audio", gap);
         m_sceneAudioSpacer = spacer;
         m_sceneAudioHeader = header;
+        m_sceneAudioHeaderGap = gap;
     }
 
     // Unmute automatically (video only)
     {
         m_unmuteRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_unmuteRow);
-        auto* h = new QHBoxLayout(m_unmuteRow);
-        h->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);
-        h->setSpacing(0);
+    auto* h = new QHBoxLayout(m_unmuteRow);
+    configureRowLayout(h);
         m_unmuteCheck = new QCheckBox("Unmute automatically", m_unmuteRow);
         m_unmuteCheck->setStyleSheet(overlayTextStyle);
         m_unmuteCheck->installEventFilter(this);
@@ -358,9 +369,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     {
         m_unmuteDelayRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_unmuteDelayRow);
-        auto* h = new QHBoxLayout(m_unmuteDelayRow);
-        h->setContentsMargins(0, 0, 0, 0);
-        h->setSpacing(0);
+    auto* h = new QHBoxLayout(m_unmuteDelayRow);
+    configureRowLayout(h);
         m_unmuteDelayCheck = new QCheckBox("Unmute delay: ", m_unmuteDelayRow);
         m_unmuteDelayCheck->setStyleSheet(overlayTextStyle);
         m_unmuteDelayCheck->installEventFilter(this);
@@ -379,9 +389,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     {
         m_muteDelayRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_muteDelayRow);
-        auto* h = new QHBoxLayout(m_muteDelayRow);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
+    auto* h = new QHBoxLayout(m_muteDelayRow);
+    configureRowLayout(h);
         m_muteDelayCheck = new QCheckBox("Mute delay: ", m_muteDelayRow);
         m_muteDelayCheck->setStyleSheet(overlayTextStyle);
         m_muteDelayCheck->installEventFilter(this);
@@ -400,9 +409,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     {
         m_muteWhenEndsRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_muteWhenEndsRow);
-        auto* h = new QHBoxLayout(m_muteWhenEndsRow);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
+    auto* h = new QHBoxLayout(m_muteWhenEndsRow);
+    configureRowLayout(h);
         m_muteWhenVideoEndsCheck = new QCheckBox("Mute when video ends", m_muteWhenEndsRow);
         m_muteWhenVideoEndsCheck->setStyleSheet(overlayTextStyle);
         m_muteWhenVideoEndsCheck->installEventFilter(this);
@@ -413,18 +421,19 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     }
 
     {
-        auto [spacer, header] = addSceneSectionHeader("Video");
+        QSpacerItem* gap = nullptr;
+        auto [spacer, header] = addSceneSectionHeader("Video", gap);
         m_sceneVideoSpacer = spacer;
         m_sceneVideoHeader = header;
+        m_sceneVideoHeaderGap = gap;
     }
 
     // Play automatically (video only)
     {
         m_autoPlayRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_autoPlayRow);
-        auto* autoLayout = new QHBoxLayout(m_autoPlayRow);
-        autoLayout->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);
-        autoLayout->setSpacing(0);
+    auto* autoLayout = new QHBoxLayout(m_autoPlayRow);
+    configureRowLayout(autoLayout);
         m_autoPlayCheck = new QCheckBox("Play automatically", m_autoPlayRow);
         m_autoPlayCheck->setStyleSheet(overlayTextStyle);
         m_autoPlayCheck->installEventFilter(this);
@@ -437,9 +446,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     {
         m_playDelayRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_playDelayRow);
-        auto* h = new QHBoxLayout(m_playDelayRow);
-        h->setContentsMargins(0, 0, 0, 0);
-        h->setSpacing(0);
+    auto* h = new QHBoxLayout(m_playDelayRow);
+    configureRowLayout(h);
         m_playDelayCheck = new QCheckBox("Play delay: ", m_playDelayRow);
         m_playDelayCheck->setStyleSheet(overlayTextStyle);
         m_playDelayCheck->installEventFilter(this);
@@ -458,9 +466,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     {
         m_pauseDelayRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_pauseDelayRow);
-        auto* h = new QHBoxLayout(m_pauseDelayRow);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
+    auto* h = new QHBoxLayout(m_pauseDelayRow);
+    configureRowLayout(h);
         m_pauseDelayCheck = new QCheckBox("Pause delay: ", m_pauseDelayRow);
         m_pauseDelayCheck->setStyleSheet(overlayTextStyle);
         m_pauseDelayCheck->installEventFilter(this);
@@ -479,9 +486,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     {
         m_repeatRow = new QWidget(m_sceneOptionsContainer);
         configureRow(m_repeatRow);
-        auto* h = new QHBoxLayout(m_repeatRow);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
+    auto* h = new QHBoxLayout(m_repeatRow);
+    configureRowLayout(h);
         m_repeatCheck = new QCheckBox("Repeat ", m_repeatRow);
         m_repeatCheck->setStyleSheet(overlayTextStyle);
         m_repeatCheck->installEventFilter(this);
@@ -506,7 +512,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     m_elementPropertiesContainer->setVisible(false);
 
     bool elementFirstSection = true;
-    auto addElementSectionHeader = [&](const QString& text) -> std::pair<QSpacerItem*, QLabel*> {
+    auto addElementSectionHeader = [&](const QString& text, QSpacerItem*& headerGap) -> std::pair<QSpacerItem*, QLabel*> {
         QSpacerItem* spacer = nullptr;
         if (!elementFirstSection) {
             spacer = new QSpacerItem(0, kHeaderFirstRowTopMargin, QSizePolicy::Minimum, QSizePolicy::Fixed);
@@ -522,21 +528,24 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         header->setContentsMargins(0, 0, 0, 0);
 
         m_elementPropertiesLayout->addWidget(header);
+        headerGap = new QSpacerItem(0, kHeaderFirstRowTopMargin, QSizePolicy::Minimum, QSizePolicy::Fixed);
+        m_elementPropertiesLayout->addItem(headerGap);
         return {spacer, header};
     };
 
     {
-        auto [_, header] = addElementSectionHeader("Image");
-        m_elementImageHeader = header;
+        QSpacerItem* gap = nullptr;
+        auto headerInfo = addElementSectionHeader("Image", gap);
+        m_elementImageHeader = headerInfo.second;
+        m_elementImageHeaderGap = gap;
     }
 
     // Image fade in
     {
         auto* row = new QWidget(m_elementPropertiesContainer);
         configureRow(row);
-        auto* h = new QHBoxLayout(row);
-        h->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);
-        h->setSpacing(0);
+    auto* h = new QHBoxLayout(row);
+    configureRowLayout(h);
         m_fadeInCheck = new QCheckBox("Image fade in: ", row);
         m_fadeInCheck->setStyleSheet(overlayTextStyle);
         m_fadeInCheck->installEventFilter(this);
@@ -555,9 +564,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     {
         auto* row = new QWidget(m_elementPropertiesContainer);
         configureRow(row);
-        auto* h = new QHBoxLayout(row);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
+    auto* h = new QHBoxLayout(row);
+    configureRowLayout(h);
         m_fadeOutCheck = new QCheckBox("Image fade out: ", row);
         m_fadeOutCheck->setStyleSheet(overlayTextStyle);
         m_fadeOutCheck->installEventFilter(this);
@@ -576,9 +584,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     {
         auto* row = new QWidget(m_elementPropertiesContainer);
         configureRow(row);
-        auto* h = new QHBoxLayout(row);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
+    auto* h = new QHBoxLayout(row);
+    configureRowLayout(h);
         m_opacityCheck = new QCheckBox("Opacity: ", row);
         m_opacityCheck->setStyleSheet(overlayTextStyle);
         m_opacityCheck->installEventFilter(this);
@@ -594,18 +601,19 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     }
 
     {
-        auto [spacer, header] = addElementSectionHeader("Audio");
+        QSpacerItem* gap = nullptr;
+        auto [spacer, header] = addElementSectionHeader("Audio", gap);
         m_elementAudioSpacer = spacer;
         m_elementAudioHeader = header;
+        m_elementAudioHeaderGap = gap;
     }
 
     // Volume (video only)
     {
         m_volumeRow = new QWidget(m_elementPropertiesContainer);
         configureRow(m_volumeRow);
-        auto* h = new QHBoxLayout(m_volumeRow);
-        h->setContentsMargins(0, kHeaderFirstRowTopMargin, 0, 0);
-        h->setSpacing(0);
+    auto* h = new QHBoxLayout(m_volumeRow);
+    configureRowLayout(h);
         m_volumeCheck = new QCheckBox("Volume: ", m_volumeRow);
         m_volumeCheck->setStyleSheet(overlayTextStyle);
         m_volumeCheck->installEventFilter(this);
@@ -624,9 +632,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     {
         m_audioFadeInRow = new QWidget(m_elementPropertiesContainer);
         configureRow(m_audioFadeInRow);
-        auto* h = new QHBoxLayout(m_audioFadeInRow);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
+    auto* h = new QHBoxLayout(m_audioFadeInRow);
+    configureRowLayout(h);
         m_audioFadeInCheck = new QCheckBox("Audio fade in: ", m_audioFadeInRow);
         m_audioFadeInCheck->setStyleSheet(overlayTextStyle);
         m_audioFadeInCheck->installEventFilter(this);
@@ -645,9 +652,8 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     {
         m_audioFadeOutRow = new QWidget(m_elementPropertiesContainer);
         configureRow(m_audioFadeOutRow);
-        auto* h = new QHBoxLayout(m_audioFadeOutRow);
-        h->setContentsMargins(0,0,0,0);
-        h->setSpacing(0);
+    auto* h = new QHBoxLayout(m_audioFadeOutRow);
+    configureRowLayout(h);
         m_audioFadeOutCheck = new QCheckBox("Audio fade out: ", m_audioFadeOutRow);
         m_audioFadeOutCheck->setStyleSheet(overlayTextStyle);
         m_audioFadeOutCheck->installEventFilter(this);
