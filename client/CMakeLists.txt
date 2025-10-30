@@ -20,215 +20,239 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-# Source files - Reorganized by layer
+# Source files - Frontend/Backend Architecture
 set(SOURCES
-    # Core
+    # ═══════════════════════════════════════════════════════
+    # CORE
+    # ═══════════════════════════════════════════════════════
     src/main.cpp
     src/MainWindow.cpp
-    src/core/AppColors.cpp
     
-    # Domain - Models
-    src/domain/models/ClientInfo.cpp
-    
-    # Domain - Session
-    src/domain/session/SessionManager.cpp
-    
-    # Domain - Media
-    src/domain/media/MediaItems.cpp
-    src/domain/media/MediaSettingsPanel.cpp
-    src/domain/media/SelectionIndicators.cpp
-    
-    # Network
-    src/network/WebSocketClient.cpp
-    src/network/UploadManager.cpp
-    src/network/WatchManager.cpp
-    src/network/RemoteFileTracker.cpp
-    
-    # Files
-    src/files/FileManager.cpp
-    src/files/LocalFileRepository.cpp
-    src/files/FileMemoryCache.cpp
-    src/files/FileWatcher.cpp
-    src/files/Theme.cpp
-    
-    # Rendering - Canvas
-    src/rendering/canvas/ScreenCanvas.cpp
-    src/rendering/canvas/OverlayPanels.cpp
-    src/rendering/canvas/RoundedRectItem.cpp
-    
-    # Rendering - Remote
-    src/rendering/remote/RemoteSceneController.cpp
-    
-    # Rendering - Navigation
-    src/rendering/navigation/ScreenNavigationManager.cpp
+    # ═══════════════════════════════════════════════════════
+    # FRONTEND - User Interface & Rendering
+    # ═══════════════════════════════════════════════════════
     
     # UI - Pages
-    src/ui/pages/ClientListPage.cpp
-    src/ui/pages/CanvasViewPage.cpp
+    src/frontend/ui/pages/ClientListPage.cpp
+    src/frontend/ui/pages/CanvasViewPage.cpp
     
     # UI - Widgets
-    src/ui/widgets/RoundedContainer.cpp
-    src/ui/widgets/ClippedContainer.cpp
-    src/ui/widgets/ClientListDelegate.cpp
-    src/ui/widgets/SpinnerWidget.cpp
-    src/ui/widgets/QtWaitingSpinner.cpp
+    src/frontend/ui/widgets/RoundedContainer.cpp
+    src/frontend/ui/widgets/ClippedContainer.cpp
+    src/frontend/ui/widgets/ClientListDelegate.cpp
+    src/frontend/ui/widgets/SpinnerWidget.cpp
+    src/frontend/ui/widgets/QtWaitingSpinner.cpp
     
     # UI - Layout
-    src/ui/layout/ResponsiveLayoutManager.cpp
+    src/frontend/ui/layout/ResponsiveLayoutManager.cpp
     
     # UI - Notifications
-    src/ui/notifications/ToastNotificationSystem.cpp
+    src/frontend/ui/notifications/ToastNotificationSystem.cpp
     
     # UI - Theme
-    src/ui/theme/ThemeManager.cpp
+    src/frontend/ui/theme/ThemeManager.cpp
+    src/frontend/ui/theme/AppColors.cpp
     
-    # Handlers
-    src/handlers/WebSocketMessageHandler.cpp
-    src/handlers/ScreenEventHandler.cpp
-    src/handlers/ClientListEventHandler.cpp
-    src/handlers/UploadEventHandler.cpp
-    src/handlers/WindowEventHandler.cpp
-    src/handlers/UploadSignalConnector.cpp
+    # Rendering - Canvas
+    src/frontend/rendering/canvas/ScreenCanvas.cpp
+    src/frontend/rendering/canvas/OverlayPanels.cpp
+    src/frontend/rendering/canvas/RoundedRectItem.cpp
     
-    # Managers - App
-    src/managers/app/SettingsManager.cpp
-    src/managers/app/SystemTrayManager.cpp
-    src/managers/app/MenuBarManager.cpp
+    # Rendering - Remote
+    src/frontend/rendering/remote/RemoteSceneController.cpp
     
-    # Managers - UI
-    src/managers/ui/TopBarManager.cpp
-    src/managers/ui/RemoteClientInfoManager.cpp
-    src/managers/ui/UploadButtonStyleManager.cpp
+    # Rendering - Navigation
+    src/frontend/rendering/navigation/ScreenNavigationManager.cpp
     
-    # Managers - Network
-    src/managers/network/ConnectionManager.cpp
-    src/managers/network/ClientListBuilder.cpp
+    # Frontend Handlers
+    src/frontend/handlers/WindowEventHandler.cpp
+    src/frontend/handlers/UploadSignalConnector.cpp
     
-    # Managers - System
-    src/managers/system/SystemMonitor.cpp
+    # Frontend Managers
+    src/frontend/managers/ui/TopBarManager.cpp
+    src/frontend/managers/ui/RemoteClientInfoManager.cpp
+    src/frontend/managers/ui/UploadButtonStyleManager.cpp
+    
+    # ═══════════════════════════════════════════════════════
+    # BACKEND - Business Logic & Data
+    # ═══════════════════════════════════════════════════════
+    
+    # Domain - Models
+    src/backend/domain/models/ClientInfo.cpp
+    
+    # Domain - Session
+    src/backend/domain/session/SessionManager.cpp
+    
+    # Domain - Media
+    src/backend/domain/media/MediaItems.cpp
+    src/backend/domain/media/MediaSettingsPanel.cpp
+    src/backend/domain/media/SelectionIndicators.cpp
+    
+    # Network
+    src/backend/network/WebSocketClient.cpp
+    src/backend/network/UploadManager.cpp
+    src/backend/network/WatchManager.cpp
+    src/backend/network/RemoteFileTracker.cpp
+    
+    # Files
+    src/backend/files/FileManager.cpp
+    src/backend/files/LocalFileRepository.cpp
+    src/backend/files/FileMemoryCache.cpp
+    src/backend/files/FileWatcher.cpp
+    src/backend/files/Theme.cpp
+    
+    # Backend Handlers
+    src/backend/handlers/WebSocketMessageHandler.cpp
+    src/backend/handlers/ScreenEventHandler.cpp
+    src/backend/handlers/ClientListEventHandler.cpp
+    src/backend/handlers/UploadEventHandler.cpp
+    
+    # Backend Managers - App
+    src/backend/managers/app/SettingsManager.cpp
+    src/backend/managers/app/SystemTrayManager.cpp
+    src/backend/managers/app/MenuBarManager.cpp
+    
+    # Backend Managers - Network
+    src/backend/managers/network/ConnectionManager.cpp
+    src/backend/managers/network/ClientListBuilder.cpp
+    
+    # Backend Managers - System
+    src/backend/managers/system/SystemMonitor.cpp
     
     # Controllers
-    src/controllers/CanvasSessionController.cpp
-    src/controllers/TimerController.cpp
+    src/backend/controllers/CanvasSessionController.cpp
+    src/backend/controllers/TimerController.cpp
 )
 
 # Platform-specific sources
 if(APPLE)
     list(APPEND SOURCES 
-        src/platform/macos/MacVideoThumbnailer.mm 
-        src/platform/macos/MacWindowManager.mm
-        src/platform/macos/NativeMenu.mm
+        src/backend/platform/macos/MacVideoThumbnailer.mm 
+        src/backend/platform/macos/MacWindowManager.mm
+        src/backend/platform/macos/NativeMenu.mm
     )
 endif()
 
 if(WIN32)
-    list(APPEND SOURCES src/platform/windows/WindowsVideoThumbnailer.cpp)
+    list(APPEND SOURCES src/backend/platform/windows/WindowsVideoThumbnailer.cpp)
 endif()
 
-# Header files - Reorganized by layer
+# Header files - Frontend/Backend Architecture
 set(HEADERS
-    # Core
+    # ═══════════════════════════════════════════════════════
+    # CORE
+    # ═══════════════════════════════════════════════════════
     src/MainWindow.h
-    src/core/AppColors.h
     
-    # Domain - Models
-    src/domain/models/ClientInfo.h
-    
-    # Domain - Session
-    src/domain/session/SessionManager.h
-    
-    # Domain - Media
-    src/domain/media/MediaItems.h
-    src/domain/media/ResizableMediaItems.h
-    src/domain/media/MediaSettingsPanel.h
-    src/domain/media/SelectionIndicators.h
-    
-    # Network
-    src/network/WebSocketClient.h
-    src/network/UploadManager.h
-    src/network/WatchManager.h
-    src/network/RemoteFileTracker.h
-    
-    # Files
-    src/files/FileManager.h
-    src/files/LocalFileRepository.h
-    src/files/FileMemoryCache.h
-    src/files/FileWatcher.h
-    src/files/Theme.h
-    
-    # Rendering - Canvas
-    src/rendering/canvas/ScreenCanvas.h
-    src/rendering/canvas/OverlayPanels.h
-    src/rendering/canvas/RoundedRectItem.h
-    
-    # Rendering - Remote
-    src/rendering/remote/RemoteSceneController.h
-    
-    # Rendering - Navigation
-    src/rendering/navigation/ScreenNavigationManager.h
+    # ═══════════════════════════════════════════════════════
+    # FRONTEND - User Interface & Rendering
+    # ═══════════════════════════════════════════════════════
     
     # UI - Pages
-    src/ui/pages/ClientListPage.h
-    src/ui/pages/CanvasViewPage.h
+    src/frontend/ui/pages/ClientListPage.h
+    src/frontend/ui/pages/CanvasViewPage.h
     
     # UI - Widgets
-    src/ui/widgets/RoundedContainer.h
-    src/ui/widgets/ClippedContainer.h
-    src/ui/widgets/ClientListDelegate.h
-    src/ui/widgets/SpinnerWidget.h
-    src/ui/widgets/QtWaitingSpinner.h
+    src/frontend/ui/widgets/RoundedContainer.h
+    src/frontend/ui/widgets/ClippedContainer.h
+    src/frontend/ui/widgets/ClientListDelegate.h
+    src/frontend/ui/widgets/SpinnerWidget.h
+    src/frontend/ui/widgets/QtWaitingSpinner.h
     
     # UI - Layout
-    src/ui/layout/ResponsiveLayoutManager.h
+    src/frontend/ui/layout/ResponsiveLayoutManager.h
     
     # UI - Notifications
-    src/ui/notifications/ToastNotificationSystem.h
+    src/frontend/ui/notifications/ToastNotificationSystem.h
     
     # UI - Theme
-    src/ui/theme/StyleConfig.h
-    src/ui/theme/ThemeManager.h
+    src/frontend/ui/theme/StyleConfig.h
+    src/frontend/ui/theme/ThemeManager.h
+    src/frontend/ui/theme/AppColors.h
     
-    # Handlers
-    src/handlers/WebSocketMessageHandler.h
-    src/handlers/ScreenEventHandler.h
-    src/handlers/ClientListEventHandler.h
-    src/handlers/UploadEventHandler.h
-    src/handlers/WindowEventHandler.h
-    src/handlers/UploadSignalConnector.h
+    # Rendering - Canvas
+    src/frontend/rendering/canvas/ScreenCanvas.h
+    src/frontend/rendering/canvas/OverlayPanels.h
+    src/frontend/rendering/canvas/RoundedRectItem.h
     
-    # Managers - App
-    src/managers/app/SettingsManager.h
-    src/managers/app/SystemTrayManager.h
-    src/managers/app/MenuBarManager.h
+    # Rendering - Remote
+    src/frontend/rendering/remote/RemoteSceneController.h
     
-    # Managers - UI
-    src/managers/ui/TopBarManager.h
-    src/managers/ui/RemoteClientInfoManager.h
-    src/managers/ui/UploadButtonStyleManager.h
+    # Rendering - Navigation
+    src/frontend/rendering/navigation/ScreenNavigationManager.h
     
-    # Managers - Network
-    src/managers/network/ConnectionManager.h
-    src/managers/network/ClientListBuilder.h
+    # Frontend Handlers
+    src/frontend/handlers/WindowEventHandler.h
+    src/frontend/handlers/UploadSignalConnector.h
     
-    # Managers - System
-    src/managers/system/SystemMonitor.h
+    # Frontend Managers
+    src/frontend/managers/ui/TopBarManager.h
+    src/frontend/managers/ui/RemoteClientInfoManager.h
+    src/frontend/managers/ui/UploadButtonStyleManager.h
+    
+    # ═══════════════════════════════════════════════════════
+    # BACKEND - Business Logic & Data
+    # ═══════════════════════════════════════════════════════
+    
+    # Domain - Models
+    src/backend/domain/models/ClientInfo.h
+    
+    # Domain - Session
+    src/backend/domain/session/SessionManager.h
+    
+    # Domain - Media
+    src/backend/domain/media/MediaItems.h
+    src/backend/domain/media/ResizableMediaItems.h
+    src/backend/domain/media/MediaSettingsPanel.h
+    src/backend/domain/media/SelectionIndicators.h
+    
+    # Network
+    src/backend/network/WebSocketClient.h
+    src/backend/network/UploadManager.h
+    src/backend/network/WatchManager.h
+    src/backend/network/RemoteFileTracker.h
+    
+    # Files
+    src/backend/files/FileManager.h
+    src/backend/files/LocalFileRepository.h
+    src/backend/files/FileMemoryCache.h
+    src/backend/files/FileWatcher.h
+    src/backend/files/Theme.h
+    
+    # Backend Handlers
+    src/backend/handlers/WebSocketMessageHandler.h
+    src/backend/handlers/ScreenEventHandler.h
+    src/backend/handlers/ClientListEventHandler.h
+    src/backend/handlers/UploadEventHandler.h
+    
+    # Backend Managers - App
+    src/backend/managers/app/SettingsManager.h
+    src/backend/managers/app/SystemTrayManager.h
+    src/backend/managers/app/MenuBarManager.h
+    
+    # Backend Managers - Network
+    src/backend/managers/network/ConnectionManager.h
+    src/backend/managers/network/ClientListBuilder.h
+    
+    # Backend Managers - System
+    src/backend/managers/system/SystemMonitor.h
     
     # Controllers
-    src/controllers/CanvasSessionController.h
-    src/controllers/TimerController.h
+    src/backend/controllers/CanvasSessionController.h
+    src/backend/controllers/TimerController.h
 )
 
 # Platform-specific headers
 if(APPLE)
     list(APPEND HEADERS
-        src/platform/macos/MacVideoThumbnailer.h
-        src/platform/macos/MacWindowManager.h
-        src/platform/macos/NativeMenu.h
+        src/backend/platform/macos/MacVideoThumbnailer.h
+        src/backend/platform/macos/MacWindowManager.h
+        src/backend/platform/macos/NativeMenu.h
     )
 endif()
 
 if(WIN32)
-    list(APPEND HEADERS src/platform/windows/WindowsVideoThumbnailer.h)
+    list(APPEND HEADERS src/backend/platform/windows/WindowsVideoThumbnailer.h)
 endif()
 
 # UI files
@@ -287,8 +311,8 @@ if(APPLE)
     # Link with macOS frameworks used by native integrations
     target_link_libraries(MouffetteClient "-framework AppKit" "-framework AVFoundation" "-framework CoreMedia" "-framework CoreGraphics" "-framework QuickLookThumbnailing")
     
-    # Set Objective-C++ properties for .mm files (updated paths)
-    set_source_files_properties(src/platform/macos/MacVideoThumbnailer.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
-    set_source_files_properties(src/platform/macos/MacWindowManager.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
-    set_source_files_properties(src/platform/macos/NativeMenu.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
+    # Set Objective-C++ properties for .mm files (updated paths for backend/platform)
+    set_source_files_properties(src/backend/platform/macos/MacVideoThumbnailer.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
+    set_source_files_properties(src/backend/platform/macos/MacWindowManager.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
+    set_source_files_properties(src/backend/platform/macos/NativeMenu.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
 endif()

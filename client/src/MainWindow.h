@@ -27,10 +27,10 @@
 #include <QHash>
 #include <QSet>
 #include <QFont>
-#include "network/WebSocketClient.h"
-#include "domain/models/ClientInfo.h"
-#include "ui/notifications/ToastNotificationSystem.h"
-#include "domain/session/SessionManager.h"
+#include "backend/network/WebSocketClient.h"
+#include "backend/domain/models/ClientInfo.h"
+#include "frontend/ui/notifications/ToastNotificationSystem.h"
+#include "backend/domain/session/SessionManager.h"
 
 QT_BEGIN_NAMESPACE
 class QAction;
