@@ -3,6 +3,7 @@
 #include <QPainter>
 #include <QStyleOptionGraphicsItem>
 #include <QFontMetrics>
+#include <QtGlobal>
 #include <algorithm>
 
 TextMediaItem::TextMediaItem(
@@ -14,6 +15,7 @@ TextMediaItem::TextMediaItem(
     : ResizableMediaBase(initialSize, visualSizePx, selectionSizePx, QStringLiteral("Text"))
     , m_text(initialText)
     , m_textColor(Qt::white) // Default white text
+    , m_initialContentSize(initialSize)
 {
     // Set up default font
     m_font = QFont(QStringLiteral("Arial"), 24);
@@ -42,15 +44,16 @@ void TextMediaItem::setTextColor(const QColor& color) {
     update();
 }
 
+int TextMediaItem::fontSizeForHeight(int pixelHeight) const {
+    if (pixelHeight <= 0) {
+        return 12;
+    }
+    return std::clamp(static_cast<int>(pixelHeight * 0.4), 12, 200);
+}
+
 int TextMediaItem::calculateFontSize() const {
-    // Calculate font size based on item height
-    // Use approximately 60% of the item height for the font
     QRectF bounds = boundingRect();
-    int height = static_cast<int>(bounds.height());
-    
-    // Minimum 12pt, maximum 200pt
-    int fontSize = std::clamp(static_cast<int>(height * 0.4), 12, 200);
-    return fontSize;
+    return fontSizeForHeight(static_cast<int>(bounds.height()));
 }
 
 void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) {
@@ -76,17 +79,42 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
     qreal effectiveOpacity = m_contentOpacity * m_contentDisplayOpacity;
     painter->setOpacity(effectiveOpacity);
     
-    // Set up font with dynamic size
-    QFont renderFont = m_font;
-    renderFont.setPointSize(calculateFontSize());
-    painter->setFont(renderFont);
-    
-    // Set text color
     painter->setPen(m_textColor);
-    
-    // Draw text centered in the bounds
-    QRectF textRect = bounds.adjusted(10, 10, -10, -10); // Add some padding
-    painter->drawText(textRect, Qt::AlignCenter | Qt::TextWordWrap, m_text);
+
+    const bool allowNonUniformStretch = m_fillContentWithoutAspect &&
+        m_initialContentSize.width() > 0 && m_initialContentSize.height() > 0;
+
+    bool drewWithStretch = false;
+    if (allowNonUniformStretch) {
+        const qreal widthRatio = bounds.width() / static_cast<qreal>(m_initialContentSize.width());
+        const qreal heightRatio = bounds.height() / static_cast<qreal>(m_initialContentSize.height());
+        if (!qFuzzyIsNull(widthRatio) && !qFuzzyIsNull(heightRatio)) {
+            QFont stretchedFont = m_font;
+            stretchedFont.setPointSize(fontSizeForHeight(m_initialContentSize.height()));
+            painter->save();
+            painter->scale(widthRatio, heightRatio);
+            painter->setFont(stretchedFont);
+
+            const qreal horizontalMargin = (widthRatio != 0.0) ? 10.0 / widthRatio : 10.0;
+            const qreal verticalMargin = (heightRatio != 0.0) ? 10.0 / heightRatio : 10.0;
+            QRectF referenceRect(0.0, 0.0,
+                                 static_cast<qreal>(m_initialContentSize.width()),
+                                 static_cast<qreal>(m_initialContentSize.height()));
+            QRectF textRect = referenceRect.adjusted(horizontalMargin, verticalMargin,
+                                                     -horizontalMargin, -verticalMargin);
+            painter->drawText(textRect, Qt::AlignCenter | Qt::TextWordWrap, m_text);
+            painter->restore();
+            drewWithStretch = true;
+        }
+    }
+
+    if (!drewWithStretch) {
+        QFont renderFont = m_font;
+        renderFont.setPointSize(calculateFontSize());
+        painter->setFont(renderFont);
+        QRectF textRect = bounds.adjusted(10, 10, -10, -10);
+        painter->drawText(textRect, Qt::AlignCenter | Qt::TextWordWrap, m_text);
+    }
     
     painter->restore();
     

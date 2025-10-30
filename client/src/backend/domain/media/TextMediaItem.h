@@ -39,7 +39,9 @@ private:
     QString m_text;
     QFont m_font;
     QColor m_textColor;
+    QSize m_initialContentSize;
     
     // Helper to calculate appropriate font size based on item size
     int calculateFontSize() const;
+    int fontSizeForHeight(int pixelHeight) const;
 };
