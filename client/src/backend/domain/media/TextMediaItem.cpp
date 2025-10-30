@@ -33,6 +33,8 @@ namespace TextMediaDefaults {
 
 namespace {
 
+constexpr qreal kContentPadding = 0.0;
+
 class InlineTextEditor : public QGraphicsTextItem {
 public:
     explicit InlineTextEditor(TextMediaItem* owner)
@@ -112,23 +114,24 @@ static void normalizeTextFormatting(QGraphicsTextItem* editor, const QFont& curr
     }
 
     QTextDocument* doc = editor->document();
+
+    // Preserve the user's selection/cursor before normalizing
+    QTextCursor restoreCursor = editor->textCursor();
+
     QTextCursor cursor(doc);
-    
-    // Select all text
+    cursor.beginEditBlock();
     cursor.select(QTextCursor::Document);
-    
+
     // Create standard character format using the current font size (which may have been scaled)
     QTextCharFormat standardFormat;
     standardFormat.setFont(currentFont);
     standardFormat.setForeground(QBrush(currentColor));
-    
+
     // Apply to all text
     cursor.mergeCharFormat(standardFormat);
-    
-    // Reset cursor to end
-    cursor.clearSelection();
-    cursor.movePosition(QTextCursor::End);
-    editor->setTextCursor(cursor);
+    cursor.endEditBlock();
+
+    editor->setTextCursor(restoreCursor);
 }
 
 static void applyCenterAlignment(QGraphicsTextItem* editor) {
@@ -319,7 +322,7 @@ void TextMediaItem::updateInlineEditorGeometry() {
     if (allowAutoSize) {
         m_pendingAutoSize = false;
     }
-    const qreal margin = 10.0;
+    const qreal margin = kContentPadding;
 
     QTextDocument* doc = m_inlineEditor->document();
     if (doc) {
@@ -505,7 +508,7 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
     
     painter->setPen(m_textColor);
     painter->setFont(m_font);
-    QRectF textRect = bounds.adjusted(10.0, 10.0, -10.0, -10.0);
+    QRectF textRect = bounds.adjusted(kContentPadding, kContentPadding, -kContentPadding, -kContentPadding);
     painter->drawText(textRect, Qt::AlignCenter | Qt::TextWordWrap, m_text);
     
     painter->restore();
