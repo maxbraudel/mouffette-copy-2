@@ -15,6 +15,8 @@
 #include <QTextCursor>
 #include <QTextBlockFormat>
 #include <QTextCursor>
+#include <QObject>
+#include <QScopedValueRollback>
 
 namespace {
 
@@ -197,10 +199,14 @@ void TextMediaItem::ensureInlineEditor() {
 
     if (QTextDocument* doc = editor->document()) {
         doc->setDocumentMargin(0.0);
-    QTextOption opt = doc->defaultTextOption();
-    opt.setWrapMode(QTextOption::WordWrap);
-    opt.setAlignment(Qt::AlignHCenter);
-    doc->setDefaultTextOption(opt);
+        QTextOption opt = doc->defaultTextOption();
+        opt.setWrapMode(QTextOption::WordWrap);
+        opt.setAlignment(Qt::AlignHCenter);
+        doc->setDefaultTextOption(opt);
+
+        QObject::connect(doc, &QTextDocument::contentsChanged, editor, [this]() {
+            updateInlineEditorGeometry();
+        });
     }
 
     applyCenterAlignment(editor);
@@ -212,6 +218,11 @@ void TextMediaItem::updateInlineEditorGeometry() {
     if (!m_inlineEditor) {
         return;
     }
+
+    if (m_isUpdatingInlineGeometry) {
+        return;
+    }
+    QScopedValueRollback<bool> guard(m_isUpdatingInlineGeometry, true);
 
     if (QTextDocument* doc = m_inlineEditor->document()) {
     QTextOption opt = doc->defaultTextOption();
@@ -243,9 +254,6 @@ void TextMediaItem::updateInlineEditorGeometry() {
 
         m_inlineEditor->setTransform(QTransform());
         m_inlineEditor->setTextWidth(editableWidthBase);
-        if (QTextDocument* doc = m_inlineEditor->document()) {
-            doc->adjustSize();
-        }
         
         qreal docHeightBase = editableHeightBase;
         if (auto* layout = m_inlineEditor->document() ? m_inlineEditor->document()->documentLayout() : nullptr) {
@@ -276,9 +284,6 @@ void TextMediaItem::updateInlineEditorGeometry() {
 
         m_inlineEditor->setTransform(QTransform());
         m_inlineEditor->setTextWidth(std::max<qreal>(1.0, contentRect.width()));
-        if (QTextDocument* doc = m_inlineEditor->document()) {
-            doc->adjustSize();
-        }
         
         qreal docWidth = contentRect.width();
         qreal docHeight = contentRect.height();

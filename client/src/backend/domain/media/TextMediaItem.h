@@ -54,6 +54,7 @@ private:
     QSize m_initialContentSize;
     QGraphicsTextItem* m_inlineEditor = nullptr;
     bool m_isEditing = false;
+    bool m_isUpdatingInlineGeometry = false;
     
     // Helper to calculate appropriate font size based on item size
     int calculateFontSize() const;
