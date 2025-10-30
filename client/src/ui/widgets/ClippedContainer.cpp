@@ -1,5 +1,5 @@
-#include "ClippedContainer.h"
-#include "ui/StyleConfig.h"
+#include "ui/widgets/ClippedContainer.h"
+#include "ui/theme/StyleConfig.h"
 #include <QShowEvent>
 #include <QResizeEvent>
 #include <QRegion>

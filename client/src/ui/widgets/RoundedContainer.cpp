@@ -1,6 +1,6 @@
-#include "RoundedContainer.h"
-#include "AppColors.h"
-#include "ui/StyleConfig.h"
+#include "ui/widgets/RoundedContainer.h"
+#include "core/AppColors.h"
+#include "ui/theme/StyleConfig.h"
 #include <QPainter>
 #include <QPainterPath>
 #include <QPaintEvent>

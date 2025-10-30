@@ -1,11 +1,11 @@
 #include "WebSocketMessageHandler.h"
 #include "MainWindow.h"
-#include "WebSocketClient.h"
-#include "WatchManager.h"
-#include "UploadManager.h"
-#include "ScreenNavigationManager.h"
+#include "network/WebSocketClient.h"
+#include "network/WatchManager.h"
+#include "network/UploadManager.h"
+#include "rendering/navigation/ScreenNavigationManager.h"
 #include "ui/pages/ClientListPage.h"
-#include "ToastNotificationSystem.h"
+#include "ui/notifications/ToastNotificationSystem.h"
 #include <QDebug>
 
 WebSocketMessageHandler::WebSocketMessageHandler(MainWindow* mainWindow, QObject* parent)

@@ -1,11 +1,11 @@
 #include "WindowEventHandler.h"
 #include "MainWindow.h"
-#include "WatchManager.h"
-#include "WebSocketClient.h"
-#include "ScreenNavigationManager.h"
-#include "ResponsiveLayoutManager.h"
-#include "ClientInfo.h"
-#include "ScreenCanvas.h"
+#include "network/WatchManager.h"
+#include "network/WebSocketClient.h"
+#include "rendering/navigation/ScreenNavigationManager.h"
+#include "ui/layout/ResponsiveLayoutManager.h"
+#include "domain/models/ClientInfo.h"
+#include "rendering/canvas/ScreenCanvas.h"
 #include "ui/pages/CanvasViewPage.h"
 #include <QDebug>
 

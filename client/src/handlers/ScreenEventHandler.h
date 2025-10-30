@@ -2,7 +2,7 @@
 #define SCREENEVENTHANDLER_H
 
 #include <QObject>
-#include "ClientInfo.h"
+#include "domain/models/ClientInfo.h"
 
 class MainWindow;
 class WebSocketClient;

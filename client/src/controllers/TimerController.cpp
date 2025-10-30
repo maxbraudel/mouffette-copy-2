@@ -1,6 +1,6 @@
-#include "TimerController.h"
-#include "../MainWindow.h"
-#include "../WebSocketClient.h"
+#include "controllers/TimerController.h"
+#include "MainWindow.h"
+#include "network/WebSocketClient.h"
 #include <QRandomGenerator>
 #include <QtMath>
 #include <QCursor>

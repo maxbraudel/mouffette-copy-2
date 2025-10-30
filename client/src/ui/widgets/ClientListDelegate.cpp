@@ -1,5 +1,5 @@
 #include "ClientListDelegate.h"
-#include "AppColors.h"
+#include "core/AppColors.h"
 #include <QPainter>
 #include <QStyleOptionViewItem>
 #include <QModelIndex>

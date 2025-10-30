@@ -1,10 +1,10 @@
 #include "UploadSignalConnector.h"
 #include "MainWindow.h"
-#include "UploadManager.h"
-#include "WebSocketClient.h"
-#include "ResizableMediaItems.h"
-#include "ScreenCanvas.h"
-#include "ToastNotificationSystem.h"
+#include "network/UploadManager.h"
+#include "network/WebSocketClient.h"
+#include "domain/media/ResizableMediaItems.h"
+#include "rendering/canvas/ScreenCanvas.h"
+#include "ui/notifications/ToastNotificationSystem.h"
 #include <QHash>
 #include <QString>
 #include <QStringList>

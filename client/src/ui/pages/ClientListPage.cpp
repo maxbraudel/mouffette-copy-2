@@ -5,12 +5,12 @@
 
 #include "ui/pages/ClientListPage.h"
 #include "ui/widgets/ClientListDelegate.h"
-#include "managers/ThemeManager.h"
-#include "AppColors.h"
-#include "ui/StyleConfig.h"
-#include "ScreenCanvas.h"
-#include "SessionManager.h"
-#include "ClientInfo.h"
+#include "ui/theme/ThemeManager.h"
+#include "core/AppColors.h"
+#include "ui/theme/StyleConfig.h"
+#include "rendering/canvas/ScreenCanvas.h"
+#include "domain/session/SessionManager.h"
+#include "domain/models/ClientInfo.h"
 #include <QListWidgetItem>
 
 ClientListPage::ClientListPage(SessionManager* sessionManager, QWidget* parent)

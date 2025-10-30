@@ -4,12 +4,12 @@
  */
 
 #include "ui/pages/CanvasViewPage.h"
-#include "managers/ThemeManager.h"
-#include "AppColors.h"
-#include "ui/StyleConfig.h"
-#include "ScreenCanvas.h"
-#include "SpinnerWidget.h"
-#include "ClientInfo.h"
+#include "ui/theme/ThemeManager.h"
+#include "core/AppColors.h"
+#include "ui/theme/StyleConfig.h"
+#include "rendering/canvas/ScreenCanvas.h"
+#include "ui/widgets/SpinnerWidget.h"
+#include "domain/models/ClientInfo.h"
 #include <QTimer>
 
 CanvasViewPage::CanvasViewPage(QWidget* parent)
