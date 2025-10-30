@@ -4,6 +4,11 @@
 #include <QResizeEvent>
 #include <QRegion>
 #include <QRect>
+#include <QPainterPath>
+#include <QPainter>
+#include <QBitmap>
+#include <QImage>
+#include <QtGlobal>
 #include <algorithm>
 
 ClippedContainer::ClippedContainer(QWidget* parent)
@@ -46,27 +51,36 @@ void ClippedContainer::updateMaskIfNeeded()
     // Use more efficient QRegion constructor for rounded rectangles
     const int radius = qMax(0, qMin(gDynamicBoxBorderRadius, 
                                      qMin(currentSize.width(), currentSize.height()) / 2));
-    const QRect r(0, 0, currentSize.width(), currentSize.height());
-    
-    // Create rounded region more efficiently using ellipse corners
-    QRegion region(r);
-    
-    if (radius > 0) {
-        // Subtract corner rectangles and add back rounded corners
-        const int d = radius * 2;
-        
-        // Subtract corner rectangles
-        region -= QRegion(0, 0, radius, radius);                                           // top-left corner
-        region -= QRegion(r.width() - radius, 0, radius, radius);                         // top-right corner  
-        region -= QRegion(0, r.height() - radius, radius, radius);                        // bottom-left corner
-        region -= QRegion(r.width() - radius, r.height() - radius, radius, radius);       // bottom-right corner
-        
-        // Add rounded corners
-        region += QRegion(0, 0, d, d, QRegion::Ellipse);                                  // top-left rounded
-        region += QRegion(r.width() - d, 0, d, d, QRegion::Ellipse);                      // top-right rounded
-        region += QRegion(0, r.height() - d, d, d, QRegion::Ellipse);                     // bottom-left rounded  
-        region += QRegion(r.width() - d, r.height() - d, d, d, QRegion::Ellipse);         // bottom-right rounded
+    const QRectF rect(0.0, 0.0, currentSize.width(), currentSize.height());
+
+    if (radius <= 0) {
+        setMask(QRegion(rect.toRect()));
+        return;
     }
-    
-    setMask(region);
+
+    const qreal inset = 0.5; // keep border pixels inside mask for crisper corners
+    const qreal adjustedRadius = std::max<qreal>(0.0, radius - inset);
+    QPainterPath path;
+    path.addRoundedRect(rect.adjusted(inset, inset, -inset, -inset), adjustedRadius, adjustedRadius);
+
+    const qreal dpr = devicePixelRatioF();
+    const QSize scaledSize(
+        qMax(1, qRound(currentSize.width() * dpr)),
+        qMax(1, qRound(currentSize.height() * dpr))
+    );
+
+    QImage maskImage(scaledSize, QImage::Format_ARGB32_Premultiplied);
+    maskImage.fill(Qt::black);
+    maskImage.setDevicePixelRatio(dpr);
+
+    {
+        QPainter painter(&maskImage);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.scale(dpr, dpr);
+        painter.fillPath(path, Qt::white);
+    }
+
+    QBitmap mask = QBitmap::fromImage(maskImage.createMaskFromColor(Qt::black, Qt::MaskInColor));
+    mask.setDevicePixelRatio(dpr);
+    setMask(mask);
 }
