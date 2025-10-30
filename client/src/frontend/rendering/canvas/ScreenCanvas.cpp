@@ -2876,6 +2876,12 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
         }
         ResizableMediaBase* mediaHit = nullptr; for (QGraphicsItem* it : hitItems) { if ((mediaHit = toMedia(it))) break; }
         if (selectedUnderCursor) {
+            if (auto* textMedia = dynamic_cast<TextMediaItem*>(selectedUnderCursor)) {
+                if (textMedia->isEditing()) {
+                    QGraphicsView::mousePressEvent(event);
+                    return;
+                }
+            }
             // Begin manual drag of the already-selected item; do not change selection
             m_draggingSelected = selectedUnderCursor;
             m_dragStartScene = mapToScene(event->pos());

@@ -58,6 +58,7 @@ private:
     qreal m_lastKnownScale = 1.0;
     bool m_ignoreDocumentChange = false;
     bool m_pendingAutoSize = false;
+    bool m_wasMovableBeforeEditing = false;
     
     void ensureInlineEditor();
     void updateInlineEditorGeometry();

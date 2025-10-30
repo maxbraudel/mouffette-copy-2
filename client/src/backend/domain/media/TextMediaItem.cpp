@@ -189,6 +189,8 @@ TextMediaItem::TextMediaItem(
     setFlag(QGraphicsItem::ItemIsMovable, true);
     setAcceptHoverEvents(true);
 
+    m_wasMovableBeforeEditing = flags().testFlag(QGraphicsItem::ItemIsMovable);
+
     m_lastKnownScale = scale();
 }
 
@@ -242,6 +244,9 @@ bool TextMediaItem::beginInlineEditing() {
     if (!m_inlineEditor) {
         return false;
     }
+
+    m_wasMovableBeforeEditing = flags().testFlag(QGraphicsItem::ItemIsMovable);
+    setFlag(QGraphicsItem::ItemIsMovable, false);
 
     m_isEditing = true;
 
@@ -441,6 +446,7 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
     }
 
     m_isEditing = false;
+    setFlag(QGraphicsItem::ItemIsMovable, m_wasMovableBeforeEditing);
 
     if (commitChanges && editedText != m_text) {
         setText(editedText);
