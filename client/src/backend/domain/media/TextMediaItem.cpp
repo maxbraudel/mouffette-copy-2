@@ -637,6 +637,8 @@ bool TextMediaItem::beginInlineEditing() {
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
     m_inlineEditor->setDefaultTextColor(m_textColor);
+    // Sync font size (important after uniform resize changed m_font via applyFontScale)
+    m_inlineEditor->setFont(m_font);
     m_inlineEditor->setEnabled(true);
     m_inlineEditor->setVisible(true);
     m_inlineEditor->setTextInteractionFlags(Qt::TextEditorInteraction);
@@ -651,6 +653,9 @@ bool TextMediaItem::beginInlineEditing() {
     }
 
     updateInlineEditorGeometry();
+
+    // Normalize all text formatting to use current font (includes updated size from resize)
+    normalizeEditorFormatting();
 
     m_inlineEditor->setFocus(Qt::OtherFocusReason);
     QTextCursor cursor = m_inlineEditor->textCursor();
@@ -950,6 +955,8 @@ void TextMediaItem::onInteractiveGeometryChanged() {
 
     if (m_isEditing) {
         m_pendingUniformScaleBake = false;
+        // Update editor geometry to follow Alt-resize base size changes
+        updateInlineEditorGeometry();
         return;
     }
 
