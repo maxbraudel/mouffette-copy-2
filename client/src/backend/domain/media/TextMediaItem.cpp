@@ -207,6 +207,18 @@ protected:
             if (!cursor.hasSelection()) {
                 const QRectF caretRect = cursorRectForPosition(cursor).translated(bounds.topLeft());
                 if (!caretRect.isEmpty()) {
+                    const qreal desiredSceneWidth = 3.0; // constant thickness in canvas pixels
+                    const QTransform world = painter->worldTransform();
+                    qreal scaleX = std::hypot(world.m11(), world.m21());
+                    if (scaleX <= 1e-6) {
+                        scaleX = 1.0;
+                    }
+                    const qreal caretHalfWidth = (desiredSceneWidth / scaleX) * 0.5;
+                    QRectF adjustedCaretRect = caretRect;
+                    const qreal caretCenterX = adjustedCaretRect.center().x();
+                    adjustedCaretRect.setLeft(caretCenterX - caretHalfWidth);
+                    adjustedCaretRect.setRight(caretCenterX + caretHalfWidth);
+
                     painter->save();
                     painter->setRenderHint(QPainter::Antialiasing, false);
                     painter->setRenderHint(QPainter::TextAntialiasing, false);
@@ -219,9 +231,10 @@ protected:
                     const int luminance = qGray(caretColor.rgb());
                     QColor outlineColor = luminance > 128 ? QColor(0, 0, 0, 160) : QColor(255, 255, 255, 160);
 
-                    QRectF outlineRect = caretRect.adjusted(-1.0, 0.0, 1.0, 0.0);
+                    const qreal outlineInset = 1.0 / scaleX;
+                    QRectF outlineRect = adjustedCaretRect.adjusted(-outlineInset, 0.0, outlineInset, 0.0);
                     painter->fillRect(outlineRect, outlineColor);
-                    painter->fillRect(caretRect, caretColor);
+                    painter->fillRect(adjustedCaretRect, caretColor);
 
                     painter->restore();
                 }
@@ -321,7 +334,7 @@ private:
             return QRectF();
         }
 
-        const qreal caretWidth = 2.0;
+        const qreal caretWidth = 1.0;
         const qreal x = line.cursorToX(posInBlock);
         const qreal y = line.y();
         const qreal height = line.height();
