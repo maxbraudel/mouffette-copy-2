@@ -948,19 +948,24 @@ void TextMediaItem::updateInlineEditorGeometry() {
         }
     }
 
-    // Account for uniform scale transform when centering
-    const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
+    // Center the editor like in renderTextToImage, allowing negative offsets for overflow
+    // The editor document size needs to account for the uniform scale transform
     const qreal transformedDocWidth = finalDocWidth * uniformScale;
     const qreal transformedDocHeight = finalDocHeight * uniformScale;
     
-    const qreal offsetX = std::max<qreal>(0.0, (contentRect.width() - transformedDocWidth) / 2.0);
-    const qreal offsetY = std::max<qreal>(0.0, (contentRect.height() - transformedDocHeight) / 2.0);
+    // Calculate centering offset (can be negative when content overflows)
+    const qreal offsetX = margin + (contentRect.width() - 2.0 * margin - transformedDocWidth) / 2.0;
+    const qreal offsetY = margin + (contentRect.height() - 2.0 * margin - transformedDocHeight) / 2.0;
     const QPointF newEditorPos = contentRect.topLeft() + QPointF(offsetX, offsetY);
+    
     if (!m_cachedEditorPosValid || floatsDiffer(newEditorPos.x(), m_cachedEditorPos.x(), 0.1) || floatsDiffer(newEditorPos.y(), m_cachedEditorPos.y(), 0.1)) {
         m_inlineEditor->setPos(newEditorPos);
         m_cachedEditorPos = newEditorPos;
         m_cachedEditorPosValid = true;
     }
+    
+    // Enable clipping on the editor to handle overflow (centered like rendered text)
+    m_inlineEditor->setFlag(QGraphicsItem::ItemClipsToShape, true);
 
     if (geometryChanged) {
         // Defer overlay and repaint updates to avoid cascading repaints during active painting
