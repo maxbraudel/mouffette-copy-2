@@ -54,7 +54,6 @@ protected:
     void onInteractiveGeometryChanged() override;
 
 private:
-    void bakeUniformScaleIntoBaseSize();
     QString m_text;
     QFont m_font;
     QColor m_textColor;
@@ -80,7 +79,6 @@ private:
     QImage m_rasterizedText;
     bool m_needsRasterization = true;
     QSize m_lastRasterizedSize;
-    bool m_pendingUniformScaleBake = false;
     QImage m_scaledRasterizedText;
     qreal m_lastRasterizedScale = 1.0;
     bool m_scaledRasterDirty = true;
@@ -88,9 +86,9 @@ private:
     void ensureInlineEditor();
     void updateInlineEditorGeometry();
     void finishInlineEditing(bool commitChanges);
-    void applyFontScale(qreal factor);
     void rasterizeText();
     void ensureScaledRaster(qreal scaleFactor);
     void handleInlineEditorTextChanged(const QString& newText);
     const QString& textForRendering() const;
+    void renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor);
 };
