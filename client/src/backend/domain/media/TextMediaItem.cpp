@@ -64,24 +64,15 @@ public:
 
     void invalidateCache(bool resetCaret = false) {
         m_cacheDirty = true;
-        if (resetCaret && m_owner && m_owner->isEditing()) {
+        if (resetCaret) {
             startCaretBlink(true);
         }
         update();
     }
 
-    void stopCaretBlink(bool resetVisible = true) {
-        if (m_caretBlinkTimer.isActive()) {
-            m_caretBlinkTimer.stop();
-        }
-
-        if (resetVisible) {
-            m_caretVisible = true;
-        }
-
-        update();
+    void disableCaretBlink() {
+        stopCaretBlink(true);
     }
-
 
 protected:
     void focusInEvent(QFocusEvent* event) override {
@@ -268,14 +259,34 @@ protected:
 private:
     void startCaretBlink(bool resetVisible) {
         const int interval = caretBlinkInterval();
-        if (resetVisible) {
+        if (resetVisible || !m_caretBlinkTimer.isActive()) {
             m_caretVisible = true;
         }
 
         if (interval > 0) {
-            m_caretBlinkTimer.start(interval);
+            if (m_caretBlinkTimer.interval() != interval) {
+                m_caretBlinkTimer.setInterval(interval);
+            }
+
+            if (!m_caretBlinkTimer.isActive()) {
+                m_caretBlinkTimer.start();
+            } else if (resetVisible) {
+                m_caretBlinkTimer.start();
+            }
         } else {
             m_caretBlinkTimer.stop();
+        }
+
+        update();
+    }
+
+    void stopCaretBlink(bool resetVisible) {
+        if (m_caretBlinkTimer.isActive()) {
+            m_caretBlinkTimer.stop();
+        }
+
+        if (resetVisible) {
+            m_caretVisible = true;
         }
 
         update();
@@ -324,8 +335,11 @@ private:
             return;
         }
 
-        const bool editing = (m_owner && m_owner->isEditing());
-        if (!(textInteractionFlags() & Qt::TextEditable) || !editing) {
+        if (!(textInteractionFlags() & Qt::TextEditable)) {
+            return;
+        }
+
+        if (!m_owner || !m_owner->isEditing()) {
             return;
         }
 
@@ -541,7 +555,6 @@ void TextMediaItem::setFont(const QFont& font) {
     m_font = font;
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
-    m_needsRasterization = true;
     update();
     updateInlineEditorGeometry();
 }
@@ -553,7 +566,6 @@ void TextMediaItem::setTextColor(const QColor& color) {
 
     m_textColor = color;
     m_cachedTextColor = color;
-    m_needsRasterization = true;
     update();
     if (m_inlineEditor) {
         m_inlineEditor->setDefaultTextColor(m_textColor);
@@ -592,7 +604,6 @@ bool TextMediaItem::beginInlineEditing() {
     setFlag(QGraphicsItem::ItemIsMovable, false);
 
     m_isEditing = true;
-    m_pendingResizeBake = false;
 
     {
         QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
@@ -887,6 +898,69 @@ void TextMediaItem::updateInlineEditorGeometry() {
     }
 }
 
+void TextMediaItem::onInteractiveGeometryChanged() {
+    ResizableMediaBase::onInteractiveGeometryChanged();
+
+    if (m_isEditing) {
+        m_pendingUniformScaleBake = false;
+        return;
+    }
+
+    const qreal currentScale = scale();
+    const qreal epsilon = 1e-4;
+    const bool resizing = (m_activeHandle != None);
+
+    if (resizing) {
+        if (!m_lastAxisAltStretch) {
+            m_pendingUniformScaleBake = true;
+        }
+        if (std::abs(currentScale - m_lastKnownScale) > epsilon) {
+            m_needsRasterization = true;
+            m_lastRasterizedSize = QSize();
+        }
+        return;
+    }
+
+    if (m_pendingUniformScaleBake || std::abs(currentScale - 1.0) > epsilon) {
+        bakeUniformScaleIntoBaseSize();
+        m_pendingUniformScaleBake = false;
+    }
+}
+
+void TextMediaItem::bakeUniformScaleIntoBaseSize() {
+    const qreal currentScale = scale();
+    const qreal epsilon = 1e-4;
+    if (std::abs(currentScale - 1.0) < epsilon) {
+        m_lastKnownScale = currentScale;
+        return;
+    }
+
+    const int newWidth = std::max(1, static_cast<int>(std::round(static_cast<qreal>(m_baseSize.width()) * currentScale)));
+    const int newHeight = std::max(1, static_cast<int>(std::round(static_cast<qreal>(m_baseSize.height()) * currentScale)));
+    const QSize newBaseSize(newWidth, newHeight);
+
+    if (newBaseSize != m_baseSize) {
+        prepareGeometryChange();
+        m_baseSize = newBaseSize;
+    }
+
+    setScale(1.0);
+    m_lastKnownScale = 1.0;
+
+    m_needsRasterization = true;
+    m_lastRasterizedSize = QSize();
+    m_documentMetricsDirty = true;
+    m_cachedTextWidth = -1.0;
+    m_cachedIdealWidth = -1.0;
+    m_cachedDocumentSize = QSizeF(1.0, 1.0);
+    m_cachedEditorPosValid = false;
+    m_pendingAutoSize = true;
+
+    updateInlineEditorGeometry();
+    updateOverlayLayout();
+    update();
+}
+
 void TextMediaItem::finishInlineEditing(bool commitChanges) {
     if (!m_inlineEditor) {
         m_isEditing = false;
@@ -894,7 +968,7 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
     }
 
     if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
-        inlineEditor->stopCaretBlink();
+        inlineEditor->disableCaretBlink();
     }
 
     const QString editedText = m_inlineEditor->toPlainText();
@@ -911,7 +985,6 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
     m_cachedEditorPosValid = false;
 
     m_isEditing = false;
-    m_pendingResizeBake = false;
     setFlag(QGraphicsItem::ItemIsMovable, m_wasMovableBeforeEditing);
 
     if (commitChanges && editedText != m_text) {
@@ -957,104 +1030,16 @@ void TextMediaItem::applyFontScale(qreal factor) {
     update();
 }
 
-void TextMediaItem::onInteractiveGeometryChanged() {
-    if (m_isEditing) {
+void TextMediaItem::rasterizeText() {
+    if (!m_needsRasterization && m_lastRasterizedSize == m_baseSize) {
         return;
     }
 
-    // Mark that we need to re-rasterize at new size
-    m_needsRasterization = true;
-    update();
-
-    // During active resize, just mark pending; wait for release
-    if (isActivelyResizing()) {
-        m_pendingResizeBake = true;
-        return;
-    }
-
-    // After resize completes (mouseRelease), bake if pending
-    if (m_pendingResizeBake) {
-        m_pendingResizeBake = false;
-        bakeCurrentScaleIntoBaseSize();
-    }
-}
-
-void TextMediaItem::bakeCurrentScaleIntoBaseSize() {
-    constexpr qreal kScaleEpsilon = 1e-4;
-
-    const qreal currentScale = scale();
-    if (!std::isfinite(currentScale)) {
-        return;
-    }
-
-    const qreal distanceFromIdentity = std::abs(currentScale - 1.0);
-    if (distanceFromIdentity <= kScaleEpsilon) {
-        if (distanceFromIdentity > 0.0) {
-            setScale(1.0);
-        }
-        m_lastKnownScale = scale();
-        return;
-    }
-
-    const int baseWidth = std::max(1, m_baseSize.width());
-    const int baseHeight = std::max(1, m_baseSize.height());
-
-    const int newWidth = std::max(1, static_cast<int>(std::round(static_cast<qreal>(baseWidth) * currentScale)));
-    const int newHeight = std::max(1, static_cast<int>(std::round(static_cast<qreal>(baseHeight) * currentScale)));
-
-    if (newWidth == baseWidth && newHeight == baseHeight) {
-        setScale(1.0);
-        m_lastKnownScale = scale();
-        return;
-    }
-
-    const QPointF previousPos = pos();
-
-    prepareGeometryChange();
-    m_baseSize.setWidth(newWidth);
-    m_baseSize.setHeight(newHeight);
-    m_cachedEditorPosValid = false;
-    m_cachedTextWidth = -1.0;
-    m_cachedIdealWidth = -1.0;
-    m_documentMetricsDirty = true;
-    m_cachedDocumentSize = QSizeF();
-    m_pendingAutoSize = true;
-
-    m_needsRasterization = true;
-    m_lastRasterizedSize = QSize();
-    m_lastRasterizedScale = 1.0;
-
-    setScale(1.0);
-    setPos(previousPos);
-    m_lastKnownScale = scale();
-
-    if (m_inlineEditor) {
-        m_inlineEditor->setFont(m_font);
-        if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
-            inlineEditor->invalidateCache();
-        }
-    }
-
-    updateInlineEditorGeometry();
-    updateOverlayLayout();
-    update();
-}
-
-void TextMediaItem::rasterizeText(qreal renderScale) {
-    constexpr qreal kScaleEpsilon = 1e-4;
-    renderScale = std::max(renderScale, kScaleEpsilon);
-
-    const bool scaleChanged = std::abs(renderScale - m_lastRasterizedScale) > kScaleEpsilon;
-
-    const int targetWidth = std::max(1, static_cast<int>(std::round(static_cast<qreal>(m_baseSize.width()) * renderScale)));
-    const int targetHeight = std::max(1, static_cast<int>(std::round(static_cast<qreal>(m_baseSize.height()) * renderScale)));
-    const QSize targetSize(targetWidth, targetHeight);
-
-    if (!m_needsRasterization && !scaleChanged && m_lastRasterizedSize == targetSize) {
-        return;
-    }
-
-    m_rasterizedText = QImage(targetWidth, targetHeight, QImage::Format_ARGB32_Premultiplied);
+    // Create image at exact pixel size of the text media bounds
+    const int w = std::max(1, m_baseSize.width());
+    const int h = std::max(1, m_baseSize.height());
+    
+    m_rasterizedText = QImage(w, h, QImage::Format_ARGB32_Premultiplied);
     m_rasterizedText.fill(Qt::transparent);
 
     QPainter imagePainter(&m_rasterizedText);
@@ -1062,17 +1047,14 @@ void TextMediaItem::rasterizeText(qreal renderScale) {
     imagePainter.setRenderHint(QPainter::TextAntialiasing, true);
     imagePainter.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
-    // Scale painter so the document renders at the higher resolution
-    imagePainter.scale(renderScale, renderScale);
+    // Draw text centered in the image
     imagePainter.setPen(m_textColor);
     imagePainter.setFont(m_font);
-    QRectF textRect(kContentPadding, kContentPadding, m_baseSize.width() - 2.0 * kContentPadding, m_baseSize.height() - 2.0 * kContentPadding);
+    QRectF textRect(kContentPadding, kContentPadding, w - 2.0 * kContentPadding, h - 2.0 * kContentPadding);
     imagePainter.drawText(textRect, Qt::AlignCenter | Qt::TextWordWrap, m_text);
-
     imagePainter.end();
 
-    m_lastRasterizedSize = targetSize;
-    m_lastRasterizedScale = renderScale;
+    m_lastRasterizedSize = m_baseSize;
     m_needsRasterization = false;
 }
 
@@ -1111,27 +1093,13 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
     // Calculate effective opacity
     qreal effectiveOpacity = m_contentOpacity * m_contentDisplayOpacity;
     painter->setOpacity(effectiveOpacity);
-
-    const qreal currentScale = scale();
-    const qreal absScale = std::abs(currentScale);
-    const qreal renderScale = (!m_isEditing && std::abs(absScale - 1.0) > 1e-4) ? absScale : 1.0;
-
-    // Rasterize text using the current render scale
-    rasterizeText(renderScale);
-
-    // Draw the cached bitmap at native resolution, neutralizing the item scale when needed
+    
+    // Rasterize text if needed (once after editing/resizing)
+    rasterizeText();
+    
+    // Draw the cached bitmap instead of re-rendering vector text
     if (!m_rasterizedText.isNull()) {
-        if (renderScale != 1.0 && std::abs(currentScale) > 1e-6) {
-            painter->save();
-            const qreal inverseScale = 1.0 / currentScale;
-            painter->scale(inverseScale, inverseScale);
-            QRectF targetRect(QPointF(0.0, 0.0), QSizeF(m_rasterizedText.width(), m_rasterizedText.height()));
-            painter->drawImage(targetRect, m_rasterizedText);
-            painter->restore();
-        } else {
-            QRectF targetRect(bounds.topLeft(), QSizeF(m_rasterizedText.width(), m_rasterizedText.height()));
-            painter->drawImage(targetRect, m_rasterizedText);
-        }
+        painter->drawImage(bounds, m_rasterizedText);
     }
     
     painter->restore();
@@ -1180,24 +1148,8 @@ QVariant TextMediaItem::itemChange(GraphicsItemChange change, const QVariant& va
 
     if (change == ItemScaleHasChanged && value.canConvert<double>()) {
         m_lastKnownScale = value.toDouble();
-        
-        // When scale changes significantly during uniform resize, mark for rasterization
-        if (!m_isEditing && !isActivelyResizing()) {
-            const qreal currentScale = value.toDouble();
-            if (std::abs(currentScale - 1.0) > 1e-4) {
-                m_pendingResizeBake = true;
-            }
-        }
     } else if (change == ItemScaleHasChanged) {
         m_lastKnownScale = scale();
-        
-        // When scale changes significantly during uniform resize, mark for rasterization
-        if (!m_isEditing && !isActivelyResizing()) {
-            const qreal currentScale = scale();
-            if (std::abs(currentScale - 1.0) > 1e-4) {
-                m_pendingResizeBake = true;
-            }
-        }
     }
 
     if (change == ItemTransformHasChanged ||

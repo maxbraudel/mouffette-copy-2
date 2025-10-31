@@ -46,12 +46,15 @@ public:
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override;
     void mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event) override;
     QVariant itemChange(GraphicsItemChange change, const QVariant& value) override;
-    void onInteractiveGeometryChanged() override;
     
     // Override to indicate this is text media
     bool isTextMedia() const override { return true; }
 
+protected:
+    void onInteractiveGeometryChanged() override;
+
 private:
+    void bakeUniformScaleIntoBaseSize();
     QString m_text;
     QFont m_font;
     QColor m_textColor;
@@ -75,13 +78,11 @@ private:
     QImage m_rasterizedText;
     bool m_needsRasterization = true;
     QSize m_lastRasterizedSize;
-    bool m_pendingResizeBake = false;
-    qreal m_lastRasterizedScale = 1.0;
+    bool m_pendingUniformScaleBake = false;
     
     void ensureInlineEditor();
     void updateInlineEditorGeometry();
     void finishInlineEditing(bool commitChanges);
     void applyFontScale(qreal factor);
-    void rasterizeText(qreal renderScale);
-    void bakeCurrentScaleIntoBaseSize();
+    void rasterizeText();
 };
