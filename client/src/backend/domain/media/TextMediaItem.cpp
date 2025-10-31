@@ -902,10 +902,8 @@ void TextMediaItem::updateInlineEditorGeometry() {
         }
     }
 
-    // Text width at base size (transform will scale it visually)
-    const qreal finalTextWidth = m_isEditing ?
-        std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - 2.0 * margin) :
-        std::max<qreal>(1.0, contentRect.width());
+    // Text width from contentRect - the uniform scale transform will compensate for base size changes
+    const qreal finalTextWidth = std::max<qreal>(1.0, contentRect.width());
     
     bool finalWidthChanged = false;
     if (floatsDiffer(finalTextWidth, m_cachedTextWidth)) {
@@ -949,13 +947,15 @@ void TextMediaItem::updateInlineEditorGeometry() {
     }
 
     // Center the editor like in renderTextToImage, allowing negative offsets for overflow
-    // The editor document size needs to account for the uniform scale transform
+    // Account for the uniform scale transform applied to the editor
     const qreal transformedDocWidth = finalDocWidth * uniformScale;
     const qreal transformedDocHeight = finalDocHeight * uniformScale;
     
     // Calculate centering offset (can be negative when content overflows)
-    const qreal offsetX = margin + (contentRect.width() - 2.0 * margin - transformedDocWidth) / 2.0;
-    const qreal offsetY = margin + (contentRect.height() - 2.0 * margin - transformedDocHeight) / 2.0;
+    const qreal availableWidth = contentRect.width() - 2.0 * margin;
+    const qreal availableHeight = contentRect.height() - 2.0 * margin;
+    const qreal offsetX = margin + (availableWidth - transformedDocWidth) / 2.0;
+    const qreal offsetY = margin + (availableHeight - transformedDocHeight) / 2.0;
     const QPointF newEditorPos = contentRect.topLeft() + QPointF(offsetX, offsetY);
     
     if (!m_cachedEditorPosValid || floatsDiffer(newEditorPos.x(), m_cachedEditorPos.x(), 0.1) || floatsDiffer(newEditorPos.y(), m_cachedEditorPos.y(), 0.1)) {
@@ -1235,12 +1235,30 @@ QVariant TextMediaItem::itemChange(GraphicsItemChange change, const QVariant& va
         const bool scaleBeingBaked = (std::abs(newScale - 1.0) < epsilon) && (std::abs(oldScale - 1.0) > epsilon);
         
         if (scaleBeingBaked) {
-            // Preserve the text scale by accumulating it into our uniform scale factor
-            if (std::abs(oldScale) > epsilon) {
-                m_uniformScaleFactor *= std::abs(oldScale);
-            }
-            if (std::abs(m_uniformScaleFactor) < epsilon) {
-                m_uniformScaleFactor = 1.0;
+            // If this is an Alt-resize bake (scale being baked into m_baseSize dimensions),
+            // we need to compensate for the base size increase to maintain consistent editor text width.
+            // The base size was multiplied by oldScale, so we divide uniformScale by oldScale to compensate.
+            // Otherwise (normal uniform resize), preserve the scale by accumulating.
+            if (m_lastAxisAltStretch) {
+                // Alt-resize: scale was baked into m_baseSize, so we need inverse compensation
+                // baseSize got multiplied by oldScale, so we divide uniformScale by oldScale
+                if (std::abs(oldScale) > epsilon) {
+                    m_uniformScaleFactor /= std::abs(oldScale);
+                }
+                if (std::abs(m_uniformScaleFactor) < epsilon) {
+                    m_uniformScaleFactor = 1.0;
+                }
+                // Force editor geometry update to sync with new base size
+                m_cachedEditorPosValid = false;
+                m_documentMetricsDirty = true;
+            } else {
+                // Normal bake: accumulate scale to preserve it
+                if (std::abs(oldScale) > epsilon) {
+                    m_uniformScaleFactor *= std::abs(oldScale);
+                }
+                if (std::abs(m_uniformScaleFactor) < epsilon) {
+                    m_uniformScaleFactor = 1.0;
+                }
             }
             m_scaledRasterDirty = true;
         }
