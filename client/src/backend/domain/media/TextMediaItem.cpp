@@ -15,6 +15,8 @@
 #include <QTextCursor>
 #include <QTextBlockFormat>
 #include <QTextCharFormat>
+#include <QColor>
+#include <QtGlobal>
 #include <QTextBlock>
 #include <QTextLayout>
 #include <QBrush>
@@ -47,15 +49,36 @@ public:
         setFlag(QGraphicsItem::ItemIsSelectable, false);
         setFlag(QGraphicsItem::ItemIsFocusable, true);
         setTextInteractionFlags(Qt::NoTextInteraction);
+
+        m_caretBlinkTimer.setSingleShot(false);
+        m_caretBlinkTimer.setTimerType(Qt::CoarseTimer);
+        const int interval = caretBlinkInterval();
+        if (interval > 0) {
+            m_caretBlinkTimer.setInterval(interval);
+        }
+        QObject::connect(&m_caretBlinkTimer, &QTimer::timeout, this, [this]() {
+            m_caretVisible = !m_caretVisible;
+            update();
+        });
     }
 
     void invalidateCache() {
         m_cacheDirty = true;
+        m_caretVisible = true;
+        if (m_caretBlinkTimer.isActive()) {
+            m_caretBlinkTimer.start();
+        }
         update();
     }
 
 protected:
+    void focusInEvent(QFocusEvent* event) override {
+        QGraphicsTextItem::focusInEvent(event);
+        startCaretBlink();
+    }
+
     void focusOutEvent(QFocusEvent* event) override {
+        stopCaretBlink();
         QGraphicsTextItem::focusOutEvent(event);
         if (!m_owner) {
             return;
@@ -131,8 +154,8 @@ protected:
             return;
         }
 
-    QStyleOptionGraphicsItem opt(*option);
-    opt.state &= ~QStyle::State_HasFocus;
+        QStyleOptionGraphicsItem opt(*option);
+        opt.state &= ~QStyle::State_HasFocus;
 
         const QRectF bounds = boundingRect();
         const int width = std::max(1, static_cast<int>(std::ceil(bounds.width())));
@@ -146,13 +169,58 @@ protected:
             bufferPainter.setRenderHint(QPainter::Antialiasing, true);
             bufferPainter.setRenderHint(QPainter::TextAntialiasing, true);
             bufferPainter.translate(-bounds.topLeft());
-            QGraphicsTextItem::paint(&bufferPainter, &opt, widget);
+            // Render text content without the caret so the cursor can stay sharp
+            if (QTextDocument* doc = document()) {
+                QAbstractTextDocumentLayout::PaintContext ctx;
+                ctx.cursorPosition = -1; // hide caret in cached image
+
+                // Preserve selection highlight inside the bitmap
+                QTextCursor cursor = textCursor();
+                if (cursor.hasSelection()) {
+                    QAbstractTextDocumentLayout::Selection selection;
+                    selection.cursor = cursor;
+                    selection.format.setBackground(QColor(100, 149, 237, 128));
+                    ctx.selections.append(selection);
+                }
+
+                ctx.palette.setColor(QPalette::Text, defaultTextColor());
+                doc->documentLayout()->draw(&bufferPainter, ctx);
+            } else {
+                QGraphicsTextItem::paint(&bufferPainter, &opt, widget);
+            }
             bufferPainter.end();
 
             m_cacheDirty = false;
         }
 
         painter->drawImage(bounds.topLeft(), m_cachedImage);
+
+        // Draw the caret on top using a high-contrast vector rectangle so it stays sharp
+        if (hasFocus() && (textInteractionFlags() & Qt::TextEditable) && m_caretVisible) {
+            QTextCursor cursor = textCursor();
+            if (!cursor.hasSelection()) {
+                const QRectF caretRect = cursorRectForPosition(cursor).translated(bounds.topLeft());
+                if (!caretRect.isEmpty()) {
+                    painter->save();
+                    painter->setRenderHint(QPainter::Antialiasing, false);
+                    painter->setRenderHint(QPainter::TextAntialiasing, false);
+                    painter->setPen(Qt::NoPen);
+
+                    QColor caretColor = defaultTextColor();
+                    caretColor.setAlpha(255);
+
+                    // Add a subtle outline that contrasts with the text color for better visibility
+                    const int luminance = qGray(caretColor.rgb());
+                    QColor outlineColor = luminance > 128 ? QColor(0, 0, 0, 160) : QColor(255, 255, 255, 160);
+
+                    QRectF outlineRect = caretRect.adjusted(-1.0, 0.0, 1.0, 0.0);
+                    painter->fillRect(outlineRect, outlineColor);
+                    painter->fillRect(caretRect, caretColor);
+
+                    painter->restore();
+                }
+            }
+        }
     }
 
     void mousePressEvent(QGraphicsSceneMouseEvent* event) override {
@@ -182,9 +250,71 @@ protected:
     }
 
 private:
+    void startCaretBlink() {
+        const int interval = caretBlinkInterval();
+        m_caretVisible = true;
+        if (interval > 0) {
+            if (m_caretBlinkTimer.interval() != interval) {
+                m_caretBlinkTimer.setInterval(interval);
+            }
+            m_caretBlinkTimer.start();
+        } else {
+            m_caretBlinkTimer.stop();
+        }
+        update();
+    }
+
+    void stopCaretBlink() {
+        if (m_caretBlinkTimer.isActive()) {
+            m_caretBlinkTimer.stop();
+        }
+        m_caretVisible = true;
+        update();
+    }
+
+    int caretBlinkInterval() const {
+        const int flashTime = QApplication::cursorFlashTime();
+        if (flashTime <= 0) {
+            return 0;
+        }
+        return std::max(100, flashTime / 2);
+    }
+
+    QRectF cursorRectForPosition(const QTextCursor& cursor) const {
+        QTextDocument* doc = document();
+        if (!doc) {
+            return QRectF();
+        }
+
+        QTextBlock block = cursor.block();
+        QTextLayout* layout = block.layout();
+        if (!layout) {
+            return QRectF();
+        }
+
+        const int posInBlock = cursor.position() - block.position();
+        QTextLine line = layout->lineForTextPosition(posInBlock);
+        if (!line.isValid()) {
+            return QRectF();
+        }
+
+        const qreal caretWidth = 2.0;
+        const qreal x = line.cursorToX(posInBlock);
+        const qreal y = line.y();
+        const qreal height = line.height();
+
+        const QPointF blockOrigin = doc->documentLayout()->blockBoundingRect(block).topLeft();
+        const qreal left = blockOrigin.x() + x - (caretWidth * 0.5);
+        const qreal alignedLeft = std::round(left);
+
+        return QRectF(alignedLeft, blockOrigin.y() + y, caretWidth, height);
+    }
+
     TextMediaItem* m_owner = nullptr;
     mutable QImage m_cachedImage;
     mutable bool m_cacheDirty = true;
+    QTimer m_caretBlinkTimer;
+    bool m_caretVisible = true;
 };
 
 static InlineTextEditor* toInlineEditor(QGraphicsTextItem* item) {
