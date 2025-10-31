@@ -18,6 +18,7 @@
 #include <QBrush>
 #include <QClipboard>
 #include <QApplication>
+#include <QImage>
 #include <QObject>
 #include <QScopedValueRollback>
 #include <QTimer>
@@ -44,6 +45,11 @@ public:
         setFlag(QGraphicsItem::ItemIsSelectable, false);
         setFlag(QGraphicsItem::ItemIsFocusable, true);
         setTextInteractionFlags(Qt::NoTextInteraction);
+    }
+
+    void invalidateCache() {
+        m_cacheDirty = true;
+        update();
     }
 
 protected:
@@ -73,6 +79,7 @@ protected:
     void keyPressEvent(QKeyEvent* event) override {
         if (!m_owner) {
             QGraphicsTextItem::keyPressEvent(event);
+            invalidateCache();
             return;
         }
 
@@ -86,6 +93,7 @@ protected:
             (event->modifiers() & Qt::ControlModifier)) {
             m_owner->commitInlineEditing();
             event->accept();
+            invalidateCache();
             return;
         }
 
@@ -96,6 +104,7 @@ protected:
                 QString plainText = clipboard->text();
                 if (!plainText.isEmpty()) {
                     textCursor().insertText(plainText);
+                    invalidateCache();
                     event->accept();
                     return;
                 }
@@ -103,6 +112,7 @@ protected:
         }
 
         QGraphicsTextItem::keyPressEvent(event);
+        invalidateCache();
         
         // After any text insertion, normalize formatting
         if (m_owner) {
@@ -115,14 +125,43 @@ protected:
     }
 
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override {
+        if (!painter) {
+            return;
+        }
+
         QStyleOptionGraphicsItem opt(*option);
         opt.state &= ~QStyle::State_HasFocus;
-        QGraphicsTextItem::paint(painter, &opt, widget);
+
+        const QRectF bounds = boundingRect();
+        const int width = std::max(1, static_cast<int>(std::ceil(bounds.width())));
+        const int height = std::max(1, static_cast<int>(std::ceil(bounds.height())));
+
+        if (m_cacheDirty || m_cachedImage.size() != QSize(width, height)) {
+            m_cachedImage = QImage(width, height, QImage::Format_ARGB32_Premultiplied);
+            m_cachedImage.fill(Qt::transparent);
+
+            QPainter bufferPainter(&m_cachedImage);
+            bufferPainter.setRenderHint(QPainter::Antialiasing, true);
+            bufferPainter.setRenderHint(QPainter::TextAntialiasing, true);
+            bufferPainter.translate(-bounds.topLeft());
+            QGraphicsTextItem::paint(&bufferPainter, &opt, widget);
+            bufferPainter.end();
+
+            m_cacheDirty = false;
+        }
+
+        painter->drawImage(bounds.topLeft(), m_cachedImage);
     }
 
 private:
     TextMediaItem* m_owner = nullptr;
+    mutable QImage m_cachedImage;
+    mutable bool m_cacheDirty = true;
 };
+
+static InlineTextEditor* toInlineEditor(QGraphicsTextItem* item) {
+    return static_cast<InlineTextEditor*>(item);
+}
 
 static void normalizeTextFormatting(QGraphicsTextItem* editor, const QFont& currentFont, const QColor& currentColor) {
     if (!editor || !editor->document()) {
@@ -199,6 +238,10 @@ TextMediaItem::TextMediaItem(
     m_cachedEditorPosValid = false;
     m_cachedEditorPos = QPointF();
     m_documentMetricsDirty = true;
+    
+    // Initialize rasterization state
+    m_needsRasterization = true;
+    m_lastRasterizedSize = QSize(0, 0);
 
     m_lastKnownScale = scale();
 }
@@ -209,11 +252,15 @@ void TextMediaItem::setText(const QString& text) {
         m_pendingAutoSize = true;
         m_documentMetricsDirty = true;
         m_cachedEditorPosValid = false;
+        m_needsRasterization = true;
         if (m_inlineEditor && !m_isEditing) {
             QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
             m_inlineEditor->setPlainText(m_text);
             m_documentMetricsDirty = true;
             m_cachedEditorPosValid = false;
+            if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
+                inlineEditor->invalidateCache();
+            }
         }
         updateInlineEditorGeometry();
         update(); // Trigger repaint
@@ -243,6 +290,9 @@ void TextMediaItem::setTextColor(const QColor& color) {
     update();
     if (m_inlineEditor) {
         m_inlineEditor->setDefaultTextColor(m_textColor);
+        if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
+            inlineEditor->invalidateCache();
+        }
     }
 }
 
@@ -286,8 +336,13 @@ bool TextMediaItem::beginInlineEditing() {
     m_inlineEditor->setEnabled(true);
     m_inlineEditor->setVisible(true);
     m_inlineEditor->setTextInteractionFlags(Qt::TextEditorInteraction);
-    {
+    
+    // Force editor to work at the exact pixel resolution of the bitmap
+    // This prevents vector re-rendering during editing
+    if (QTextDocument* doc = m_inlineEditor->document()) {
         QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
+        // Set document to use bitmap pixel dimensions
+        doc->setTextWidth(m_baseSize.width() - 2.0 * kContentPadding);
         applyCenterAlignment(m_inlineEditor);
     }
 
@@ -297,6 +352,9 @@ bool TextMediaItem::beginInlineEditing() {
     QTextCursor cursor = m_inlineEditor->textCursor();
     cursor.select(QTextCursor::Document);
     m_inlineEditor->setTextCursor(cursor);
+    if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
+        inlineEditor->invalidateCache();
+    }
 
     update();
     return true;
@@ -326,6 +384,7 @@ void TextMediaItem::ensureInlineEditor() {
     editor->setFont(m_font);
     editor->setEnabled(false);
     editor->setVisible(false);
+    editor->setCacheMode(QGraphicsItem::ItemCoordinateCache);
 
     if (QTextDocument* doc = editor->document()) {
         {
@@ -335,12 +394,15 @@ void TextMediaItem::ensureInlineEditor() {
             opt.setWrapMode(QTextOption::WordWrap);
             opt.setAlignment(Qt::AlignHCenter);
             doc->setDefaultTextOption(opt);
+            // Lock document width to bitmap pixel dimensions
+            doc->setTextWidth(m_baseSize.width() - 2.0 * kContentPadding);
         }
 
-        QObject::connect(doc, &QTextDocument::contentsChanged, editor, [this]() {
+        QObject::connect(doc, &QTextDocument::contentsChanged, editor, [this, editor]() {
             if (m_ignoreDocumentChange) {
                 return;
             }
+            editor->invalidateCache();
             m_documentMetricsDirty = true;
             m_cachedEditorPosValid = false;
             m_pendingAutoSize = true;
@@ -357,6 +419,7 @@ void TextMediaItem::ensureInlineEditor() {
     }
 
     m_inlineEditor = editor;
+    editor->invalidateCache();
 }
 
 void TextMediaItem::updateInlineEditorGeometry() {
@@ -408,7 +471,11 @@ void TextMediaItem::updateInlineEditorGeometry() {
         contentRect.setHeight(1.0);
     }
 
-    const qreal contentWidth = std::max<qreal>(1.0, contentRect.width());
+    // During editing, use fixed bitmap dimensions; otherwise allow dynamic sizing
+    const qreal contentWidth = m_isEditing ? 
+        std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - 2.0 * margin) : 
+        std::max<qreal>(1.0, contentRect.width());
+    
     bool widthChanged = false;
     if (m_cachedTextWidth < 0.0 || floatsDiffer(contentWidth, m_cachedTextWidth)) {
         m_inlineEditor->setTextWidth(contentWidth);
@@ -453,7 +520,8 @@ void TextMediaItem::updateInlineEditorGeometry() {
     }
 
     QSize newBaseSize = m_baseSize;
-    if (doc && allowAutoSize) {
+    // Disable auto-resize during editing to keep bitmap resolution stable
+    if (doc && allowAutoSize && !m_isEditing) {
         const qreal requiredContentWidth = std::max(docIdealWidth, contentWidth);
         if (requiredContentWidth > contentWidth + 0.5) {
             const qreal requiredWidth = requiredContentWidth + margin * 2.0;
@@ -470,6 +538,7 @@ void TextMediaItem::updateInlineEditorGeometry() {
     if (geometryChanged) {
         prepareGeometryChange();
         m_baseSize = newBaseSize;
+        m_needsRasterization = true; // Size changed, need to re-rasterize
         bounds = boundingRect();
         contentRect = bounds.adjusted(margin, margin, -margin, -margin);
         if (contentRect.width() < 1.0) {
@@ -577,6 +646,9 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
         setText(editedText);
     }
 
+    // Rasterize text after editing completes
+    m_needsRasterization = true;
+
     updateInlineEditorGeometry();
     update();
 }
@@ -599,14 +671,46 @@ void TextMediaItem::applyFontScale(qreal factor) {
     m_font = updatedFont;
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
+    m_needsRasterization = true;
 
     if (m_inlineEditor) {
         m_inlineEditor->setFont(m_font);
+        if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
+            inlineEditor->invalidateCache();
+        }
     }
 
     m_pendingAutoSize = true;
     updateInlineEditorGeometry();
     update();
+}
+
+void TextMediaItem::rasterizeText() {
+    if (!m_needsRasterization && m_lastRasterizedSize == m_baseSize) {
+        return;
+    }
+
+    // Create image at exact pixel size of the text media bounds
+    const int w = std::max(1, m_baseSize.width());
+    const int h = std::max(1, m_baseSize.height());
+    
+    m_rasterizedText = QImage(w, h, QImage::Format_ARGB32_Premultiplied);
+    m_rasterizedText.fill(Qt::transparent);
+
+    QPainter imagePainter(&m_rasterizedText);
+    imagePainter.setRenderHint(QPainter::Antialiasing, true);
+    imagePainter.setRenderHint(QPainter::TextAntialiasing, true);
+    imagePainter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+
+    // Draw text centered in the image
+    imagePainter.setPen(m_textColor);
+    imagePainter.setFont(m_font);
+    QRectF textRect(kContentPadding, kContentPadding, w - 2.0 * kContentPadding, h - 2.0 * kContentPadding);
+    imagePainter.drawText(textRect, Qt::AlignCenter | Qt::TextWordWrap, m_text);
+    imagePainter.end();
+
+    m_lastRasterizedSize = m_baseSize;
+    m_needsRasterization = false;
 }
 
 void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) {
@@ -645,10 +749,13 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
     qreal effectiveOpacity = m_contentOpacity * m_contentDisplayOpacity;
     painter->setOpacity(effectiveOpacity);
     
-    painter->setPen(m_textColor);
-    painter->setFont(m_font);
-    QRectF textRect = bounds.adjusted(kContentPadding, kContentPadding, -kContentPadding, -kContentPadding);
-    painter->drawText(textRect, Qt::AlignCenter | Qt::TextWordWrap, m_text);
+    // Rasterize text if needed (once after editing/resizing)
+    rasterizeText();
+    
+    // Draw the cached bitmap instead of re-rendering vector text
+    if (!m_rasterizedText.isNull()) {
+        painter->drawImage(bounds, m_rasterizedText);
+    }
     
     painter->restore();
     

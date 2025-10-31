@@ -70,8 +70,14 @@ private:
     QPointF m_cachedEditorPos;
     bool m_cachedEditorPosValid = false;
     
+    // Rasterization cache for performance
+    QImage m_rasterizedText;
+    bool m_needsRasterization = true;
+    QSize m_lastRasterizedSize;
+    
     void ensureInlineEditor();
     void updateInlineEditorGeometry();
     void finishInlineEditing(bool commitChanges);
     void applyFontScale(qreal factor);
+    void rasterizeText();
 };
