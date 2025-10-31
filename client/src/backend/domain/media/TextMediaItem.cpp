@@ -504,6 +504,28 @@ static void applyCenterAlignment(QGraphicsTextItem* editor) {
 
 } // anonymous namespace
 
+QFont TextMediaItem::getEffectiveScaledFont() const {
+    QFont scaledFont = m_font;
+    // Inline editor only needs m_uniformScaleFactor because it inherits the item's scale() transform
+    const qreal effectiveScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
+    if (std::abs(effectiveScale - 1.0) > 1e-4) {
+        qreal basePointSize = scaledFont.pointSizeF();
+        if (basePointSize <= 0.0) {
+            basePointSize = static_cast<qreal>(scaledFont.pointSize());
+        }
+        if (basePointSize > 0.0) {
+            scaledFont.setPointSizeF(basePointSize * effectiveScale);
+        } else {
+            const int basePixelSize = scaledFont.pixelSize();
+            if (basePixelSize > 0) {
+                const int scaledPixelSize = std::max(1, static_cast<int>(std::round(static_cast<qreal>(basePixelSize) * effectiveScale)));
+                scaledFont.setPixelSize(scaledPixelSize);
+            }
+        }
+    }
+    return scaledFont;
+}
+
 TextMediaItem::TextMediaItem(
     const QSize& initialSize,
     int visualSizePx,
@@ -540,6 +562,7 @@ TextMediaItem::TextMediaItem(
     m_lastRasterizedSize = QSize(0, 0);
 
     m_editorRenderingText = m_text;
+    m_lastObservedScale = scale();
 }
 
 void TextMediaItem::setText(const QString& text) {
@@ -602,7 +625,7 @@ void TextMediaItem::normalizeEditorFormatting() {
     if (!m_inlineEditor || !m_isEditing) {
         return;
     }
-    normalizeTextFormatting(m_inlineEditor, m_font, m_textColor);
+    normalizeTextFormatting(m_inlineEditor, getEffectiveScaledFont(), m_textColor);
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
 }
@@ -637,8 +660,8 @@ bool TextMediaItem::beginInlineEditing() {
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
     m_inlineEditor->setDefaultTextColor(m_textColor);
-    // Sync editor font with current text appearance
-    m_inlineEditor->setFont(m_font);
+    // Sync editor font with current text appearance (including accumulated scale)
+    m_inlineEditor->setFont(getEffectiveScaledFont());
     m_inlineEditor->setEnabled(true);
     m_inlineEditor->setVisible(true);
     m_inlineEditor->setTextInteractionFlags(Qt::TextEditorInteraction);
@@ -788,8 +811,11 @@ void TextMediaItem::updateInlineEditorGeometry() {
         m_inlineEditor->setTransform(QTransform());
     }
 
-    if (m_inlineEditor->font() != m_font) {
-        m_inlineEditor->setFont(m_font);
+    // Calculate scaled font that matches visual appearance
+    QFont scaledFont = getEffectiveScaledFont();
+
+    if (m_inlineEditor->font() != scaledFont) {
+        m_inlineEditor->setFont(scaledFont);
         m_documentMetricsDirty = true;
     }
 
@@ -1087,13 +1113,14 @@ void TextMediaItem::rasterizeText() {
     m_scaledRasterDirty = true;
 }
 
-void TextMediaItem::ensureScaledRaster(qreal scaleFactor) {
+void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale) {
     const qreal epsilon = 1e-4;
-    const qreal effectiveScale = std::max(std::abs(scaleFactor), epsilon);
+    const qreal effectiveScale = std::max(std::abs(visualScaleFactor), epsilon);
+    const qreal boundedGeometryScale = std::max(std::abs(geometryScale), epsilon);
 
-    const int scaledWidth = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.width()) * effectiveScale)));
-    const int scaledHeight = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.height()) * effectiveScale)));
-    const QSize targetSize(scaledWidth, scaledHeight);
+    const int targetWidth = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.width()) * boundedGeometryScale)));
+    const int targetHeight = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.height()) * boundedGeometryScale)));
+    const QSize targetSize(targetWidth, targetHeight);
 
     const bool scaleChanged = std::abs(effectiveScale - m_lastRasterizedScale) > epsilon;
     if (!m_scaledRasterDirty && !scaleChanged && m_scaledRasterizedText.size() == targetSize) {
@@ -1139,12 +1166,15 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
     painter->setOpacity(effectiveOpacity);
 
     const qreal currentScale = scale();
+    const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
+    const qreal effectiveScale = std::max(std::abs(currentScale) * uniformScale, 1e-4);
     const bool resizingUniformly = (m_activeHandle != None && !m_lastAxisAltStretch);
-    const bool needsScaledRaster = std::abs(currentScale - 1.0) > 1e-4 || resizingUniformly;
+    const bool needsScaledRaster = std::abs(currentScale - 1.0) > 1e-4 ||
+        std::abs(m_uniformScaleFactor - 1.0) > 1e-4 ||
+        resizingUniformly;
 
     if (needsScaledRaster) {
-        const qreal effectiveScale = std::max(std::abs(currentScale), 1e-4);
-        ensureScaledRaster(effectiveScale);
+        ensureScaledRaster(effectiveScale, currentScale);
 
         painter->save();
         if (std::abs(currentScale) > 1e-4) {
@@ -1195,6 +1225,30 @@ QVariant TextMediaItem::itemChange(GraphicsItemChange change, const QVariant& va
         if (!selectedNow && m_isEditing) {
             commitInlineEditing();
         }
+    }
+
+    // Detect scale bake BEFORE calling parent (which will change the scale)
+    if (change == ItemScaleHasChanged && value.canConvert<double>()) {
+        const qreal epsilon = 1e-4;
+        qreal newScale = value.toDouble();
+        qreal oldScale = m_lastObservedScale;
+        
+        // Detect when scale is being reset to 1.0 after a uniform resize (scale bake into base size)
+        // This happens when user starts Alt-resize after doing uniform resize
+        const bool scaleBeingBaked = (std::abs(newScale - 1.0) < epsilon) && (std::abs(oldScale - 1.0) > epsilon);
+        
+        if (scaleBeingBaked) {
+            // Preserve the text scale by accumulating it into our uniform scale factor
+            if (std::abs(oldScale) > epsilon) {
+                m_uniformScaleFactor *= std::abs(oldScale);
+            }
+            if (std::abs(m_uniformScaleFactor) < epsilon) {
+                m_uniformScaleFactor = 1.0;
+            }
+            m_scaledRasterDirty = true;
+        }
+        
+        m_lastObservedScale = newScale;
     }
 
     QVariant result = ResizableMediaBase::itemChange(change, value);

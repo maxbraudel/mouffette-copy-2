@@ -81,13 +81,16 @@ private:
     QImage m_scaledRasterizedText;
     qreal m_lastRasterizedScale = 1.0;
     bool m_scaledRasterDirty = true;
+    qreal m_uniformScaleFactor = 1.0;
+    qreal m_lastObservedScale = 1.0;
     
     void ensureInlineEditor();
     void updateInlineEditorGeometry();
     void finishInlineEditing(bool commitChanges);
     void rasterizeText();
-    void ensureScaledRaster(qreal scaleFactor);
+    void ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale);
     void handleInlineEditorTextChanged(const QString& newText);
     const QString& textForRendering() const;
     void renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor);
+    QFont getEffectiveScaledFont() const;
 };
