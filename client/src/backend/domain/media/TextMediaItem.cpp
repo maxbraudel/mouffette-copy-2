@@ -19,6 +19,7 @@
 #include <QtGlobal>
 #include <QTextBlock>
 #include <QTextLayout>
+#include <QVector>
 #include <QBrush>
 #include <QClipboard>
 #include <QApplication>
@@ -169,20 +170,10 @@ protected:
             bufferPainter.setRenderHint(QPainter::Antialiasing, true);
             bufferPainter.setRenderHint(QPainter::TextAntialiasing, true);
             bufferPainter.translate(-bounds.topLeft());
-            // Render text content without the caret so the cursor can stay sharp
+            // Render only the base text content; caret and selection are drawn as overlays
             if (QTextDocument* doc = document()) {
                 QAbstractTextDocumentLayout::PaintContext ctx;
                 ctx.cursorPosition = -1; // hide caret in cached image
-
-                // Preserve selection highlight inside the bitmap
-                QTextCursor cursor = textCursor();
-                if (cursor.hasSelection()) {
-                    QAbstractTextDocumentLayout::Selection selection;
-                    selection.cursor = cursor;
-                    selection.format.setBackground(QColor(100, 149, 237, 128));
-                    ctx.selections.append(selection);
-                }
-
                 ctx.palette.setColor(QPalette::Text, defaultTextColor());
                 doc->documentLayout()->draw(&bufferPainter, ctx);
             } else {
@@ -194,6 +185,9 @@ protected:
         }
 
         painter->drawImage(bounds.topLeft(), m_cachedImage);
+
+        // Draw active selection highlight as an overlay so it stays responsive to cursor movement
+        drawSelectionOverlay(painter, bounds);
 
         // Draw the caret on top using a high-contrast vector rectangle so it stays sharp
         if (hasFocus() && (textInteractionFlags() & Qt::TextEditable) && m_caretVisible) {
@@ -308,6 +302,73 @@ private:
         const qreal alignedLeft = std::round(left);
 
         return QRectF(alignedLeft, blockOrigin.y() + y, caretWidth, height);
+    }
+
+    void drawSelectionOverlay(QPainter* painter, const QRectF& bounds) {
+        if (!painter) {
+            return;
+        }
+
+        QTextCursor cursor = textCursor();
+        if (!cursor.hasSelection()) {
+            return;
+        }
+
+        QTextDocument* doc = document();
+        if (!doc) {
+            return;
+        }
+
+        const int selectionStart = cursor.selectionStart();
+        const int selectionEnd = cursor.selectionEnd();
+        if (selectionStart == selectionEnd) {
+            return;
+        }
+
+        painter->save();
+        painter->setPen(Qt::NoPen);
+        painter->setRenderHint(QPainter::Antialiasing, false);
+        painter->setRenderHint(QPainter::TextAntialiasing, false);
+
+        const QColor highlightColor(100, 149, 237, 128);
+        const QPointF offset = bounds.topLeft();
+
+        QTextBlock block = doc->findBlock(selectionStart);
+        while (block.isValid() && block.position() <= selectionEnd) {
+            QTextLayout* layout = block.layout();
+            if (!layout) {
+                block = block.next();
+                continue;
+            }
+
+            const int blockStart = block.position();
+            const int blockEnd = blockStart + block.length();
+            const int rangeStart = std::max(selectionStart, blockStart);
+            const int rangeEnd = std::min(selectionEnd, blockEnd);
+            if (rangeStart >= rangeEnd) {
+                block = block.next();
+                continue;
+            }
+
+            QTextLayout::FormatRange formatRange;
+            formatRange.start = rangeStart - blockStart;
+            formatRange.length = rangeEnd - rangeStart;
+            formatRange.format.setBackground(highlightColor);
+            formatRange.format.setForeground(Qt::transparent);
+
+            QVector<QTextLayout::FormatRange> ranges;
+            ranges.append(formatRange);
+
+            const QPointF blockPos = doc->documentLayout()->blockBoundingRect(block).topLeft();
+            layout->draw(painter, offset + blockPos, ranges);
+
+            if (blockEnd >= selectionEnd) {
+                break;
+            }
+            block = block.next();
+        }
+
+        painter->restore();
     }
 
     TextMediaItem* m_owner = nullptr;
