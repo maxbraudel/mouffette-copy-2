@@ -15,6 +15,8 @@
 #include <QTextCursor>
 #include <QTextBlockFormat>
 #include <QTextCharFormat>
+#include <QTextBlock>
+#include <QTextLayout>
 #include <QBrush>
 #include <QClipboard>
 #include <QApplication>
@@ -136,6 +138,7 @@ protected:
         const int width = std::max(1, static_cast<int>(std::ceil(bounds.width())));
         const int height = std::max(1, static_cast<int>(std::ceil(bounds.height())));
 
+        // Render text to cache (without cursor)
         if (m_cacheDirty || m_cachedImage.size() != QSize(width, height)) {
             m_cachedImage = QImage(width, height, QImage::Format_ARGB32_Premultiplied);
             m_cachedImage.fill(Qt::transparent);
@@ -144,13 +147,61 @@ protected:
             bufferPainter.setRenderHint(QPainter::Antialiasing, true);
             bufferPainter.setRenderHint(QPainter::TextAntialiasing, true);
             bufferPainter.translate(-bounds.topLeft());
-            QGraphicsTextItem::paint(&bufferPainter, &opt, widget);
+            
+            // Render text without cursor by using paint context
+            QAbstractTextDocumentLayout::PaintContext ctx;
+            ctx.cursorPosition = -1;  // Hide cursor in cache
+            document()->documentLayout()->draw(&bufferPainter, ctx);
+            
             bufferPainter.end();
 
             m_cacheDirty = false;
         }
 
+        // Draw cached text bitmap
         painter->drawImage(bounds.topLeft(), m_cachedImage);
+
+        // Draw cursor and selection vectorially on top
+        if (hasFocus() && (textInteractionFlags() & Qt::TextEditable)) {
+            painter->save();
+            painter->setRenderHint(QPainter::Antialiasing, true);
+            
+            QAbstractTextDocumentLayout::PaintContext ctx;
+            QTextCursor cursor = textCursor();
+            
+            if (cursor.hasSelection()) {
+                // Draw selection highlight
+                QAbstractTextDocumentLayout::Selection selection;
+                selection.cursor = cursor;
+                selection.format.setBackground(QColor(100, 149, 237, 128));
+                selection.format.setForeground(defaultTextColor());
+                ctx.selections.append(selection);
+            }
+            
+            // Set cursor position for drawing
+            ctx.cursorPosition = cursor.position();
+            ctx.palette.setColor(QPalette::Text, defaultTextColor());
+            
+            // Draw only cursor and selection
+            document()->documentLayout()->draw(painter, ctx);
+            
+            painter->restore();
+        }
+    }
+
+    void mousePressEvent(QGraphicsSceneMouseEvent* event) override {
+        QGraphicsTextItem::mousePressEvent(event);
+        invalidateCache();
+    }
+
+    void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override {
+        QGraphicsTextItem::mouseMoveEvent(event);
+        invalidateCache();
+    }
+
+    void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override {
+        QGraphicsTextItem::mouseReleaseEvent(event);
+        invalidateCache();
     }
 
 private:
