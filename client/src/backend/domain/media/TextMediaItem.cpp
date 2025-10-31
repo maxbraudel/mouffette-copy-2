@@ -902,8 +902,12 @@ void TextMediaItem::updateInlineEditorGeometry() {
         }
     }
 
-    // Text width from contentRect - the uniform scale transform will compensate for base size changes
-    const qreal finalTextWidth = std::max<qreal>(1.0, contentRect.width());
+    // Text width should match the visual width seen in the rendered text
+    // For the editor, we need to account for the uniform scale transform that will be applied
+    // The rendered text uses: logicalWidth = (baseSize * geometryScale) / effectiveScale
+    // We want the editor to match this, so we divide contentRect by uniformScale
+    const qreal visualWidth = contentRect.width() / std::max(uniformScale, 1e-4);
+    const qreal finalTextWidth = std::max<qreal>(1.0, visualWidth);
     
     bool finalWidthChanged = false;
     if (floatsDiffer(finalTextWidth, m_cachedTextWidth)) {
