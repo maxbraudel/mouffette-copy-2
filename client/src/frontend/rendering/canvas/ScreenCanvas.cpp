@@ -10,6 +10,7 @@
 #include "backend/domain/media/MediaSettingsPanel.h" // for settingsPanel() accessor usage
 #include "backend/domain/media/TextMediaItem.h" // for text media creation
 #include "frontend/ui/notifications/ToastNotificationSystem.h" // for toast notifications
+#include "frontend/ui/widgets/ClippedContainer.h" // for ClippedContainer widget
 #include <QGraphicsScene>
 #include <QGraphicsSceneMouseEvent>
 #include <QGraphicsSceneHoverEvent>
@@ -70,17 +71,8 @@
 
 // (Trimmed includes to essentials; further pruning can be done if desired.)
 
-// Forward declare SnapGuideItem (full definition just below) and provide a lightweight local ClippedContainer
+// Forward declare SnapGuideItem (full definition just below)
 class SnapGuideItem;
-class ClippedContainer : public QWidget {
-public:
-    using QWidget::QWidget;
-protected:
-    void resizeEvent(QResizeEvent* e) override {
-        QWidget::resizeEvent(e);
-        setMask(QRegion(rect()));
-    }
-};
 
 QSet<ScreenCanvas*> ScreenCanvas::s_activeCanvases;
 bool ScreenCanvas::s_applicationSuspended = false;
