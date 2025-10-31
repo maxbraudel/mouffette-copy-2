@@ -5183,16 +5183,19 @@ void ScreenCanvas::setCurrentTool(CanvasTool tool) {
 TextMediaItem* ScreenCanvas::createTextMediaAtPosition(const QPointF& scenePos) {
     if (!m_scene) return nullptr;
     
-    // Default size for new text media (300x150 pixels)
-    QSize defaultSize(300, 150);
+    // Use global configuration for default size
+    QSize defaultSize(TextMediaDefaults::DEFAULT_WIDTH, TextMediaDefaults::DEFAULT_HEIGHT);
     
-    // Create new text media item with default handle sizes (visual 12, selection 30)
+    // Create new text media item with default handle sizes and text from global configuration
     TextMediaItem* textItem = new TextMediaItem(
         defaultSize,
         m_mediaHandleVisualSizePx,
         m_mediaHandleSelectionSizePx,
-        QStringLiteral("No Text")
+        TextMediaDefaults::DEFAULT_TEXT
     );
+    
+    // Apply default scale from global configuration
+    textItem->setScale(TextMediaDefaults::DEFAULT_SCALE);
     
     // Set position (center the item on the click position)
     qreal halfWidth = defaultSize.width() / 2.0;

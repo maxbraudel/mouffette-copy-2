@@ -30,11 +30,21 @@
 
 // Global text styling configuration - tweak these to change all text media appearance
 namespace TextMediaDefaults {
-    static const QString FONT_FAMILY = QStringLiteral("Arial");
-    static const int FONT_SIZE = 24;
-    static const QFont::Weight FONT_WEIGHT = QFont::Bold;
-    static const bool FONT_ITALIC = false;
-    static const QColor TEXT_COLOR = Qt::white;
+    const QString FONT_FAMILY = QStringLiteral("Arial");
+    const int FONT_SIZE = 24;
+    const QFont::Weight FONT_WEIGHT = QFont::Bold;
+    const bool FONT_ITALIC = false;
+    const QColor TEXT_COLOR = Qt::white;
+    
+    // Default text content when creating new text media
+    const QString DEFAULT_TEXT = QStringLiteral("No Text");
+    
+    // Default size when creating new text media (width x height in pixels)
+    const int DEFAULT_WIDTH = 150;
+    const int DEFAULT_HEIGHT = 75;
+    
+    // Default text scale
+    const qreal DEFAULT_SCALE = 2.0;
 }
 
 namespace {

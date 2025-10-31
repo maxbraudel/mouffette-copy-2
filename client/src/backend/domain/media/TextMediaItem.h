@@ -12,6 +12,25 @@ class QGraphicsTextItem;
 
 class QGraphicsSceneMouseEvent;
 
+// Global configuration namespace for text media defaults
+namespace TextMediaDefaults {
+    extern const QString FONT_FAMILY;
+    extern const int FONT_SIZE;
+    extern const QFont::Weight FONT_WEIGHT;
+    extern const bool FONT_ITALIC;
+    extern const QColor TEXT_COLOR;
+    
+    // Default text content when creating new text media
+    extern const QString DEFAULT_TEXT;
+    
+    // Default size when creating new text media (width x height in pixels)
+    extern const int DEFAULT_WIDTH;
+    extern const int DEFAULT_HEIGHT;
+    
+    // Default text scale
+    extern const qreal DEFAULT_SCALE;
+}
+
 // Text media item - displays editable text with same interaction as image/video media
 class TextMediaItem : public ResizableMediaBase {
 public:
