@@ -710,15 +710,29 @@ void TextMediaItem::ensureInlineEditor() {
             if (m_ignoreDocumentChange) {
                 return;
             }
+            
+            // Check if content actually changed (not just cursor movement)
+            const QString newText = editor->toPlainText();
+            const bool contentChanged = (m_editorRenderingText != newText);
+            
             editor->invalidateCache();
             m_documentMetricsDirty = true;
             m_cachedEditorPosValid = false;
-            m_pendingAutoSize = true;
-            handleInlineEditorTextChanged(editor->toPlainText());
+            
+            // Only trigger auto-resize if content actually changed
+            if (contentChanged) {
+                m_pendingAutoSize = true;
+                handleInlineEditorTextChanged(newText);
+            }
+            
             if (m_isUpdatingInlineGeometry) {
                 return;
             }
-            updateInlineEditorGeometry();
+            
+            // Only update geometry if content changed (not just cursor movement)
+            if (contentChanged) {
+                updateInlineEditorGeometry();
+            }
         });
     }
 
