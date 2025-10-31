@@ -79,10 +79,14 @@ private:
     bool m_needsRasterization = true;
     QSize m_lastRasterizedSize;
     bool m_pendingUniformScaleBake = false;
+    QImage m_scaledRasterizedText;
+    qreal m_lastRasterizedScale = 1.0;
+    bool m_scaledRasterDirty = true;
     
     void ensureInlineEditor();
     void updateInlineEditorGeometry();
     void finishInlineEditing(bool commitChanges);
     void applyFontScale(qreal factor);
     void rasterizeText();
+    void ensureScaledRaster(qreal scaleFactor);
 };

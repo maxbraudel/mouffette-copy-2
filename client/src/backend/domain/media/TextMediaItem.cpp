@@ -532,6 +532,7 @@ void TextMediaItem::setText(const QString& text) {
         m_documentMetricsDirty = true;
         m_cachedEditorPosValid = false;
         m_needsRasterization = true;
+        m_scaledRasterDirty = true;
         if (m_inlineEditor && !m_isEditing) {
             QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
             m_inlineEditor->setPlainText(m_text);
@@ -555,6 +556,8 @@ void TextMediaItem::setFont(const QFont& font) {
     m_font = font;
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
+    m_needsRasterization = true;
+    m_scaledRasterDirty = true;
     update();
     updateInlineEditorGeometry();
 }
@@ -573,6 +576,8 @@ void TextMediaItem::setTextColor(const QColor& color) {
             inlineEditor->invalidateCache();
         }
     }
+    m_needsRasterization = true;
+    m_scaledRasterDirty = true;
 }
 
 void TextMediaItem::normalizeEditorFormatting() {
@@ -817,6 +822,8 @@ void TextMediaItem::updateInlineEditorGeometry() {
         prepareGeometryChange();
         m_baseSize = newBaseSize;
         m_needsRasterization = true; // Size changed, need to re-rasterize
+        m_scaledRasterDirty = true;
+        m_lastRasterizedScale = 1.0;
         bounds = boundingRect();
         contentRect = bounds.adjusted(margin, margin, -margin, -margin);
         if (contentRect.width() < 1.0) {
@@ -917,6 +924,7 @@ void TextMediaItem::onInteractiveGeometryChanged() {
         if (std::abs(currentScale - m_lastKnownScale) > epsilon) {
             m_needsRasterization = true;
             m_lastRasterizedSize = QSize();
+            m_scaledRasterDirty = true;
         }
         return;
     }
@@ -949,6 +957,8 @@ void TextMediaItem::bakeUniformScaleIntoBaseSize() {
 
     m_needsRasterization = true;
     m_lastRasterizedSize = QSize();
+    m_scaledRasterDirty = true;
+    m_lastRasterizedScale = 1.0;
     m_documentMetricsDirty = true;
     m_cachedTextWidth = -1.0;
     m_cachedIdealWidth = -1.0;
@@ -993,6 +1003,7 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
 
     // Rasterize text after editing completes
     m_needsRasterization = true;
+    m_scaledRasterDirty = true;
 
     updateInlineEditorGeometry();
     update();
@@ -1017,6 +1028,7 @@ void TextMediaItem::applyFontScale(qreal factor) {
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
     m_needsRasterization = true;
+    m_scaledRasterDirty = true;
 
     if (m_inlineEditor) {
         m_inlineEditor->setFont(m_font);
@@ -1056,6 +1068,45 @@ void TextMediaItem::rasterizeText() {
 
     m_lastRasterizedSize = m_baseSize;
     m_needsRasterization = false;
+    m_scaledRasterDirty = true;
+}
+
+void TextMediaItem::ensureScaledRaster(qreal scaleFactor) {
+    const qreal epsilon = 1e-4;
+    const qreal effectiveScale = std::max(std::abs(scaleFactor), epsilon);
+
+    const int scaledWidth = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.width()) * effectiveScale)));
+    const int scaledHeight = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.height()) * effectiveScale)));
+    const QSize targetSize(scaledWidth, scaledHeight);
+
+    const bool scaleChanged = std::abs(effectiveScale - m_lastRasterizedScale) > epsilon;
+    if (!m_scaledRasterDirty && !scaleChanged && m_scaledRasterizedText.size() == targetSize) {
+        return;
+    }
+
+    m_scaledRasterizedText = QImage(targetSize, QImage::Format_ARGB32_Premultiplied);
+    m_scaledRasterizedText.fill(Qt::transparent);
+
+    QPainter imagePainter(&m_scaledRasterizedText);
+    imagePainter.setRenderHint(QPainter::Antialiasing, true);
+    imagePainter.setRenderHint(QPainter::TextAntialiasing, true);
+    imagePainter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    imagePainter.scale(effectiveScale, effectiveScale);
+    imagePainter.setPen(m_textColor);
+    imagePainter.setFont(m_font);
+
+    QRectF textRect(
+        kContentPadding,
+        kContentPadding,
+        static_cast<qreal>(m_baseSize.width()) - 2.0 * kContentPadding,
+        static_cast<qreal>(m_baseSize.height()) - 2.0 * kContentPadding
+    );
+
+    imagePainter.drawText(textRect, Qt::AlignCenter | Qt::TextWordWrap, m_text);
+    imagePainter.end();
+
+    m_lastRasterizedScale = effectiveScale;
+    m_scaledRasterDirty = false;
 }
 
 void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) {
@@ -1078,10 +1129,10 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
     }
 
     painter->save();
-    
+
     // Get the item bounds
     QRectF bounds = boundingRect();
-    
+
     // Apply content visibility and opacity
     if (!m_contentVisible || m_contentOpacity <= 0.0 || m_contentDisplayOpacity <= 0.0) {
         painter->restore();
@@ -1093,15 +1144,37 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
     // Calculate effective opacity
     qreal effectiveOpacity = m_contentOpacity * m_contentDisplayOpacity;
     painter->setOpacity(effectiveOpacity);
-    
-    // Rasterize text if needed (once after editing/resizing)
-    rasterizeText();
-    
-    // Draw the cached bitmap instead of re-rendering vector text
-    if (!m_rasterizedText.isNull()) {
-        painter->drawImage(bounds, m_rasterizedText);
+
+    const qreal currentScale = scale();
+    const bool resizingUniformly = (m_activeHandle != None && !m_lastAxisAltStretch);
+    const bool needsScaledRaster = std::abs(currentScale - 1.0) > 1e-4 || resizingUniformly || m_pendingUniformScaleBake;
+
+    if (needsScaledRaster) {
+        const qreal effectiveScale = std::max(std::abs(currentScale), 1e-4);
+        ensureScaledRaster(effectiveScale);
+
+        painter->save();
+        if (std::abs(currentScale) > 1e-4) {
+            painter->scale(1.0 / currentScale, 1.0 / currentScale);
+        }
+        const QTransform scaleTransform = (std::abs(currentScale) > 1e-4)
+            ? QTransform::fromScale(currentScale, currentScale)
+            : QTransform::fromScale(1.0, 1.0);
+        QRectF scaledBounds = scaleTransform.mapRect(bounds);
+        if (!m_scaledRasterizedText.isNull()) {
+            painter->drawImage(scaledBounds, m_scaledRasterizedText);
+        }
+        painter->restore();
+    } else {
+        // Rasterize text if needed (once after editing/resizing)
+        rasterizeText();
+
+        // Draw the cached bitmap instead of re-rendering vector text
+        if (!m_rasterizedText.isNull()) {
+            painter->drawImage(bounds, m_rasterizedText);
+        }
     }
-    
+
     painter->restore();
     
     // Paint selection chrome and overlays (handles, buttons, etc.)
