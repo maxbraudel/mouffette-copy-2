@@ -169,29 +169,32 @@ protected:
         const int width = std::max(1, static_cast<int>(std::ceil(bounds.width())));
         const int height = std::max(1, static_cast<int>(std::ceil(bounds.height())));
 
-        if (m_cacheDirty || m_cachedImage.size() != QSize(width, height)) {
-            m_cachedImage = QImage(width, height, QImage::Format_ARGB32_Premultiplied);
-            m_cachedImage.fill(Qt::transparent);
+        const bool skipDocRendering = (m_owner && m_owner->isEditing());
+        if (!skipDocRendering) {
+            if (m_cacheDirty || m_cachedImage.size() != QSize(width, height)) {
+                m_cachedImage = QImage(width, height, QImage::Format_ARGB32_Premultiplied);
+                m_cachedImage.fill(Qt::transparent);
 
-            QPainter bufferPainter(&m_cachedImage);
-            bufferPainter.setRenderHint(QPainter::Antialiasing, true);
-            bufferPainter.setRenderHint(QPainter::TextAntialiasing, true);
-            bufferPainter.translate(-bounds.topLeft());
-            // Render only the base text content; caret and selection are drawn as overlays
-            if (QTextDocument* doc = document()) {
-                QAbstractTextDocumentLayout::PaintContext ctx;
-                ctx.cursorPosition = -1; // hide caret in cached image
-                ctx.palette.setColor(QPalette::Text, defaultTextColor());
-                doc->documentLayout()->draw(&bufferPainter, ctx);
-            } else {
-                QGraphicsTextItem::paint(&bufferPainter, &opt, widget);
+                QPainter bufferPainter(&m_cachedImage);
+                bufferPainter.setRenderHint(QPainter::Antialiasing, true);
+                bufferPainter.setRenderHint(QPainter::TextAntialiasing, true);
+                bufferPainter.translate(-bounds.topLeft());
+                // Render only the base text content; caret and selection are drawn as overlays
+                if (QTextDocument* doc = document()) {
+                    QAbstractTextDocumentLayout::PaintContext ctx;
+                    ctx.cursorPosition = -1; // hide caret in cached image
+                    ctx.palette.setColor(QPalette::Text, defaultTextColor());
+                    doc->documentLayout()->draw(&bufferPainter, ctx);
+                } else {
+                    QGraphicsTextItem::paint(&bufferPainter, &opt, widget);
+                }
+                bufferPainter.end();
+
+                m_cacheDirty = false;
             }
-            bufferPainter.end();
 
-            m_cacheDirty = false;
+            painter->drawImage(bounds.topLeft(), m_cachedImage);
         }
-
-        painter->drawImage(bounds.topLeft(), m_cachedImage);
 
         // Draw active selection highlight as an overlay so it stays responsive to cursor movement
         drawSelectionOverlay(painter, bounds);
@@ -523,11 +526,13 @@ TextMediaItem::TextMediaItem(
     m_lastRasterizedSize = QSize(0, 0);
 
     m_lastKnownScale = scale();
+    m_editorRenderingText = m_text;
 }
 
 void TextMediaItem::setText(const QString& text) {
     if (m_text != text) {
         m_text = text;
+        m_editorRenderingText = text;
         m_pendingAutoSize = true;
         m_documentMetricsDirty = true;
         m_cachedEditorPosValid = false;
@@ -609,6 +614,8 @@ bool TextMediaItem::beginInlineEditing() {
     setFlag(QGraphicsItem::ItemIsMovable, false);
 
     m_isEditing = true;
+    m_textBeforeEditing = m_text;
+    m_editorRenderingText = m_text;
 
     {
         QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
@@ -689,6 +696,7 @@ void TextMediaItem::ensureInlineEditor() {
             m_documentMetricsDirty = true;
             m_cachedEditorPosValid = false;
             m_pendingAutoSize = true;
+            handleInlineEditorTextChanged(editor->toPlainText());
             if (m_isUpdatingInlineGeometry) {
                 return;
             }
@@ -703,6 +711,25 @@ void TextMediaItem::ensureInlineEditor() {
 
     m_inlineEditor = editor;
     editor->invalidateCache();
+}
+
+void TextMediaItem::handleInlineEditorTextChanged(const QString& newText) {
+    if (!m_isEditing) {
+        return;
+    }
+
+    if (m_editorRenderingText == newText) {
+        return;
+    }
+
+    m_editorRenderingText = newText;
+    m_needsRasterization = true;
+    m_scaledRasterDirty = true;
+    update();
+}
+
+const QString& TextMediaItem::textForRendering() const {
+    return m_editorRenderingText;
 }
 
 void TextMediaItem::updateInlineEditorGeometry() {
@@ -997,9 +1024,23 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
     m_isEditing = false;
     setFlag(QGraphicsItem::ItemIsMovable, m_wasMovableBeforeEditing);
 
-    if (commitChanges && editedText != m_text) {
-        setText(editedText);
+    if (commitChanges) {
+        if (editedText != m_text) {
+            setText(editedText);
+        } else {
+            m_editorRenderingText = m_text;
+        }
+    } else {
+        if (editedText != m_textBeforeEditing) {
+            m_editorRenderingText = m_textBeforeEditing;
+            m_needsRasterization = true;
+            m_scaledRasterDirty = true;
+            m_pendingAutoSize = true;
+        } else {
+            m_editorRenderingText = m_text;
+        }
     }
+    m_textBeforeEditing.clear();
 
     // Rasterize text after editing completes
     m_needsRasterization = true;
@@ -1063,7 +1104,7 @@ void TextMediaItem::rasterizeText() {
     imagePainter.setPen(m_textColor);
     imagePainter.setFont(m_font);
     QRectF textRect(kContentPadding, kContentPadding, w - 2.0 * kContentPadding, h - 2.0 * kContentPadding);
-    imagePainter.drawText(textRect, Qt::AlignCenter | Qt::TextWordWrap, m_text);
+    imagePainter.drawText(textRect, Qt::AlignCenter | Qt::TextWordWrap, textForRendering());
     imagePainter.end();
 
     m_lastRasterizedSize = m_baseSize;
@@ -1102,7 +1143,7 @@ void TextMediaItem::ensureScaledRaster(qreal scaleFactor) {
         static_cast<qreal>(m_baseSize.height()) - 2.0 * kContentPadding
     );
 
-    imagePainter.drawText(textRect, Qt::AlignCenter | Qt::TextWordWrap, m_text);
+    imagePainter.drawText(textRect, Qt::AlignCenter | Qt::TextWordWrap, textForRendering());
     imagePainter.end();
 
     m_lastRasterizedScale = effectiveScale;
@@ -1120,12 +1161,8 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
         updateInlineEditorGeometry();
     }
 
-    if (m_isEditing) {
-        if (m_inlineEditor) {
-            m_inlineEditor->setOpacity(m_contentOpacity * m_contentDisplayOpacity);
-        }
-        paintSelectionAndLabel(painter);
-        return;
+    if (m_isEditing && m_inlineEditor) {
+        m_inlineEditor->setOpacity(m_contentOpacity * m_contentDisplayOpacity);
     }
 
     painter->save();

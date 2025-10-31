@@ -60,6 +60,8 @@ private:
     QColor m_textColor;
     QGraphicsTextItem* m_inlineEditor = nullptr;
     bool m_isEditing = false;
+    QString m_textBeforeEditing;
+    QString m_editorRenderingText;
     bool m_isUpdatingInlineGeometry = false;
     qreal m_lastKnownScale = 1.0;
     bool m_ignoreDocumentChange = false;
@@ -89,4 +91,6 @@ private:
     void applyFontScale(qreal factor);
     void rasterizeText();
     void ensureScaledRaster(qreal scaleFactor);
+    void handleInlineEditorTextChanged(const QString& newText);
+    const QString& textForRendering() const;
 };
