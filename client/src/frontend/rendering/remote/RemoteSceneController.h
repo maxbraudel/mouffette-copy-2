@@ -47,6 +47,7 @@ private:
 		QGraphicsView* graphicsView = nullptr;
 		QGraphicsScene* scene = nullptr;
 		int x=0,y=0,w=0,h=0;
+		quint64 sceneEpoch = 0;
 	};
 	struct RemoteMediaItem {
 		QString mediaId;
@@ -131,6 +132,7 @@ private:
 	};
 
 	QWidget* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);
+	void resetWindowForNewScene(ScreenWindow& sw, int screenId, int x, int y, int w, int h, bool primary);
 	void buildWindows(const QJsonArray& screensArray);
 	void buildMedia(const QJsonArray& mediaArray);
 	void scheduleMedia(const std::shared_ptr<RemoteMediaItem>& item);
@@ -178,5 +180,6 @@ private:
 	bool m_sceneActivated = false;
 	quint64 m_pendingActivationEpoch = 0;
 	QTimer* m_sceneReadyTimeout = nullptr;
+	QTimer* m_windowShowTimer = nullptr; // Timer for deferred window showing
 };
 

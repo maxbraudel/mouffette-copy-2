@@ -28,6 +28,7 @@
 #include <QTextOption>
 #include <QTextDocument>
 #include <QAbstractTextDocumentLayout>
+#include <QPointer>
 #include <QVariant>
 #include <QCoreApplication>
 #include <QEvent>
@@ -207,10 +208,12 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
 
     ++m_sceneEpoch;
     clearScene();
-    // Flush deferred deletions so any widgets scheduled by clearScene() are destroyed
-    // before we create replacement windows. This prevents Qt accessibility from holding
-    // stale pointers that can crash when new overlays are shown.
-    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    // Flush deferred deletions multiple times to ensure ALL nested widget deletions complete
+    // This is critical because QGraphicsView/Scene deletions can queue additional events
+    for (int i = 0; i < 5; ++i) {
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    }
 
     m_pendingSenderClientId = senderClientId;
     m_totalMediaToPrime = media.size();
@@ -228,15 +231,66 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
     buildWindows(screens);
     buildMedia(media);
 
-    // Defer window shows until the event loop flushes deferred deletes to avoid crashing
-    // macOS accessibility on stale QWidget instances when scenes rapidly restart.
-    QTimer::singleShot(0, this, [this]() {
-        for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
-            QWidget* window = it.value().window;
+    // Cancel any pending window show timer from previous scene
+    if (m_windowShowTimer) {
+        m_windowShowTimer->stop();
+        m_windowShowTimer->deleteLater();
+        m_windowShowTimer = nullptr;
+    }
+
+    // Capture current epoch to prevent stale deferred callbacks from operating on wrong scene
+    const quint64 epoch = m_sceneEpoch;
+    
+    // Capture screen IDs (not pointers!) to look up windows at execution time
+    // This avoids dangling pointer issues when widgets are deleted and memory reused
+    QList<int> screenIds;
+    for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
+        screenIds.append(it.key());
+    }
+    
+    // Create a tracked timer (not singleShot) so we can cancel it in clearScene
+    m_windowShowTimer = new QTimer(this);
+    m_windowShowTimer->setSingleShot(true);
+    m_windowShowTimer->setInterval(10);
+    
+    // Use a slightly longer delay (10ms) to ensure all deferred widget deletions have completed
+    // before showing new windows. This prevents crashes in macOS accessibility code when
+    // windows are rapidly created/destroyed. The delay is imperceptible to users but critical
+    // for avoiding race conditions in Qt's widget deletion machinery.
+    connect(m_windowShowTimer, &QTimer::timeout, this, [this, epoch, screenIds]() {
+        // Abort if scene changed (stop/start happened during deferral)
+        if (epoch != m_sceneEpoch) return;
+        
+        // Process any remaining deferred deletions before showing windows
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        
+        // Look up windows by screen ID at execution time to ensure they're still valid
+        for (int screenId : screenIds) {
+            if (epoch != m_sceneEpoch) return;
+
+            auto it = m_screenWindows.find(screenId);
+            if (it == m_screenWindows.end()) continue;
+
+            ScreenWindow& sw = it.value();
+            if (sw.sceneEpoch != epoch) continue;
+
+            QWidget* window = sw.window;
             if (!window) continue;
+
             window->show();
 #ifdef Q_OS_MAC
-            QTimer::singleShot(0, window, [w = window]() {
+            QTimer::singleShot(0, this, [this, epoch, screenId]() {
+                if (epoch != m_sceneEpoch) return;
+
+                auto macIt = m_screenWindows.find(screenId);
+                if (macIt == m_screenWindows.end()) return;
+
+                ScreenWindow& macWindow = macIt.value();
+                if (macWindow.sceneEpoch != epoch) return;
+
+                QWidget* w = macWindow.window;
+                if (!w) return;
+
                 MacWindowManager::setWindowAsGlobalOverlay(w, /*clickThrough*/ true);
             });
 #endif
@@ -244,6 +298,8 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
 
         startSceneActivationIfReady();
     });
+    
+    m_windowShowTimer->start();
 }
 
 void RemoteSceneController::onRemoteSceneStop(const QString& senderClientId) {
@@ -280,6 +336,13 @@ void RemoteSceneController::clearScene() {
         return;
     }
 
+    // CRITICAL: Cancel pending window show timer to prevent showing windows after scene cleared
+    if (m_windowShowTimer) {
+        m_windowShowTimer->stop();
+        m_windowShowTimer->deleteLater();
+        m_windowShowTimer = nullptr;
+    }
+
     resetSceneSynchronization();
     
     // CRITICAL: Stop all fade animations first to prevent accessing deleted graphics items
@@ -299,34 +362,28 @@ void RemoteSceneController::clearScene() {
     }
     m_mediaItems.clear();
     
-    // Close and schedule deletion of screen windows
-    // We MUST use deleteLater for all QObjects to avoid Qt event system crashes
+    // Reset persistent screen windows instead of deleting them so accessibility
+    // never observes stale QWidget pointers during rapid start/stop cycles.
     for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
-        QWidget* window = it.value().window;
-        if (!window) continue;
-        
-        // Disconnect all signals to avoid callbacks during destruction
-        QObject::disconnect(window, nullptr, nullptr, nullptr);
-        
-        // Hide window first to prevent visual artifacts
-        window->hide();
-        
-        // Clear scene items and disconnect before deletion
-        if (it.value().scene) {
-            QObject::disconnect(it.value().scene, nullptr, nullptr, nullptr);
-            it.value().scene->clear();
-            it.value().scene->deleteLater();
+        ScreenWindow& sw = it.value();
+        if (!sw.window) continue;
+
+        QObject::disconnect(sw.window, nullptr, nullptr, nullptr);
+        sw.window->hide();
+        sw.sceneEpoch = 0;
+
+        if (sw.graphicsView) {
+            QObject::disconnect(sw.graphicsView, nullptr, nullptr, nullptr);
+            sw.graphicsView->setScene(nullptr);
         }
-        if (it.value().graphicsView) {
-            QObject::disconnect(it.value().graphicsView, nullptr, nullptr, nullptr);
-            it.value().graphicsView->setScene(nullptr);
-            it.value().graphicsView->deleteLater();
+
+        if (sw.scene) {
+            QObject::disconnect(sw.scene, nullptr, nullptr, nullptr);
+            sw.scene->clear();
+            sw.scene->deleteLater();
+            sw.scene = nullptr;
         }
-        
-        // Schedule window deletion (must use deleteLater for QObjects)
-        window->deleteLater();
     }
-    m_screenWindows.clear();
 }
 
 void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaItem>& item) {
@@ -960,59 +1017,77 @@ void RemoteSceneController::seekToConfiguredStart(const std::shared_ptr<RemoteMe
     }
 }
 
-QWidget* RemoteSceneController::ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary) {
-    if (m_screenWindows.contains(screenId)) return m_screenWindows[screenId].window;
-    QWidget* win = new QWidget();
-    win->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    win->setWindowFlag(Qt::FramelessWindowHint, true);
-    win->setWindowFlag(Qt::WindowStaysOnTopHint, true);
-    // On Windows, prevent appearing in taskbar and avoid focus/activation
-#ifdef Q_OS_WIN
-    win->setWindowFlag(Qt::Tool, true);
-    win->setWindowFlag(Qt::WindowDoesNotAcceptFocus, true);
-    win->setAttribute(Qt::WA_ShowWithoutActivating, true);
-#endif
-    win->setAttribute(Qt::WA_TranslucentBackground, true);
-    win->setAttribute(Qt::WA_NoSystemBackground, true);
-    win->setAttribute(Qt::WA_OpaquePaintEvent, false);
-    win->setObjectName(QString("RemoteScreenWindow_%1").arg(screenId));
-    win->setGeometry(x, y, w, h);
-    win->setWindowTitle(primary ? "Remote Scene (Primary)" : "Remote Scene");
-    
-    // Create a QGraphicsView to host overlay scenes across the remote screens
-    QGraphicsView* view = new QGraphicsView(win);
-    QGraphicsScene* scene = new QGraphicsScene(view);
-    scene->setSceneRect(0, 0, w, h);
-    view->setScene(scene);
-    view->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    view->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    view->setFrameStyle(QFrame::NoFrame);
-    view->setAttribute(Qt::WA_TranslucentBackground, true);
-    view->setStyleSheet("background: transparent;");
-    view->setRenderHint(QPainter::Antialiasing, true);
-    view->setRenderHint(QPainter::SmoothPixmapTransform, true);
-    if (view->viewport()) {
-        view->viewport()->setAutoFillBackground(false);
-        view->viewport()->setAttribute(Qt::WA_TranslucentBackground, true);
-    }
-    
-    auto* layout = new QHBoxLayout(win);
-    layout->setContentsMargins(0,0,0,0);
-    layout->setSpacing(0);
-    layout->addWidget(view);
-    
-    ScreenWindow sw; 
-    sw.window = win; 
-    sw.graphicsView = view;
-    sw.scene = scene;
-    sw.x=x; sw.y=y; sw.w=w; sw.h=h; 
-    m_screenWindows.insert(screenId, sw);
+void RemoteSceneController::resetWindowForNewScene(ScreenWindow& sw, int screenId, int x, int y, int w, int h, bool primary) {
+    if (!sw.window || !sw.graphicsView) return;
 
-    // On macOS, elevate this window to a global overlay that spans Spaces and is hidden from Mission Control
+    sw.x = x;
+    sw.y = y;
+    sw.w = w;
+    sw.h = h;
+    sw.sceneEpoch = m_sceneEpoch;
+
+    sw.window->hide();
+    sw.window->setGeometry(x, y, w, h);
+    sw.window->setWindowTitle(primary ? "Remote Scene (Primary)" : "Remote Scene");
+
+    // Replace graphics scene to ensure a clean slate for the new remote scene
+    QGraphicsScene* oldScene = sw.scene;
+    if (sw.graphicsView->scene()) {
+        sw.graphicsView->setScene(nullptr);
+    }
+    sw.scene = new QGraphicsScene(sw.graphicsView);
+    sw.scene->setSceneRect(0, 0, w, h);
+    sw.graphicsView->setScene(sw.scene);
+
+    if (oldScene) {
+        oldScene->clear();
+        oldScene->deleteLater();
+    }
+
 #ifdef Q_OS_MAC
-    MacWindowManager::setWindowAsGlobalOverlay(win, /*clickThrough*/ true);
+    MacWindowManager::setWindowAsGlobalOverlay(sw.window, /*clickThrough*/ true);
 #endif
-    return win;
+}
+
+QWidget* RemoteSceneController::ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary) {
+    ScreenWindow& sw = m_screenWindows[screenId];
+
+    if (!sw.window) {
+        sw.window = new QWidget();
+        sw.window->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        sw.window->setWindowFlag(Qt::FramelessWindowHint, true);
+        sw.window->setWindowFlag(Qt::WindowStaysOnTopHint, true);
+#ifdef Q_OS_WIN
+        sw.window->setWindowFlag(Qt::Tool, true);
+        sw.window->setWindowFlag(Qt::WindowDoesNotAcceptFocus, true);
+        sw.window->setAttribute(Qt::WA_ShowWithoutActivating, true);
+#endif
+        sw.window->setAttribute(Qt::WA_TranslucentBackground, true);
+        sw.window->setAttribute(Qt::WA_NoSystemBackground, true);
+        sw.window->setAttribute(Qt::WA_OpaquePaintEvent, false);
+        sw.window->setObjectName(QString("RemoteScreenWindow_%1").arg(screenId));
+
+        sw.graphicsView = new QGraphicsView(sw.window);
+        sw.graphicsView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        sw.graphicsView->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        sw.graphicsView->setFrameStyle(QFrame::NoFrame);
+        sw.graphicsView->setAttribute(Qt::WA_TranslucentBackground, true);
+        sw.graphicsView->setStyleSheet("background: transparent;");
+        sw.graphicsView->setRenderHint(QPainter::Antialiasing, true);
+        sw.graphicsView->setRenderHint(QPainter::SmoothPixmapTransform, true);
+        if (sw.graphicsView->viewport()) {
+            sw.graphicsView->viewport()->setAutoFillBackground(false);
+            sw.graphicsView->viewport()->setAttribute(Qt::WA_TranslucentBackground, true);
+        }
+
+        auto* layout = new QHBoxLayout(sw.window);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(0);
+        layout->addWidget(sw.graphicsView);
+    }
+
+    resetWindowForNewScene(sw, screenId, x, y, w, h, primary);
+    return sw.window;
 }
 
 void RemoteSceneController::buildWindows(const QJsonArray& screensArray) {
