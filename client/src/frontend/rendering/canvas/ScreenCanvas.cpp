@@ -962,10 +962,15 @@ void ScreenCanvas::refreshInfoOverlay() {
         QSize sz = m->baseSizePx();
         QString dim = QString::number(sz.width()) + " x " + QString::number(sz.height()) + " px";
         QString sizeStr = QStringLiteral("n/a");
-        QString src = m->sourcePath();
-        if (!src.isEmpty()) {
-            QFileInfo fi(src);
-            if (fi.exists() && fi.isFile()) sizeStr = humanSize(fi.size());
+        
+        // Text media items don't have file size since they're not file-based
+        bool isTextMedia = m->isTextMedia();
+        if (!isTextMedia) {
+            QString src = m->sourcePath();
+            if (!src.isEmpty()) {
+                QFileInfo fi(src);
+                if (fi.exists() && fi.isFile()) sizeStr = humanSize(fi.size());
+            }
         }
         
         // Create a container widget for this media item with content margins
@@ -1002,44 +1007,49 @@ void ScreenCanvas::refreshInfoOverlay() {
         nameLbl->setProperty("originalText", name); // Store original text for ellipsis
         mediaLayout->addWidget(nameLbl);
         
-        // Row: upload status or progress - fixed height container to prevent flickering
-        auto* statusContainer = new QWidget(mediaContainer);
-        statusContainer->setStyleSheet("background: transparent;");
-        statusContainer->setAutoFillBackground(false);
-        statusContainer->setAttribute(Qt::WA_TranslucentBackground, true);
-        statusContainer->setFixedHeight(20); // Fixed height to prevent flickering
-        auto* statusLayout = new QVBoxLayout(statusContainer);
-        statusLayout->setContentsMargins(0, 0, 0, 0);
-        statusLayout->setSpacing(0);
-        statusLayout->setAlignment(Qt::AlignVCenter);
-        
-        if (m->uploadState() == ResizableMediaBase::UploadState::Uploading) {
-            auto* bar = new QProgressBar(statusContainer);
-            bar->setRange(0, 100);
-            bar->setValue(m->uploadProgress());
-            bar->setTextVisible(false);
-            bar->setFixedHeight(10);
-            bar->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed); // Preferred width
-            // Blue progress bar styling consistent with theme - no border radius
-            bar->setStyleSheet("QProgressBar{background: " + AppColors::colorToCss(AppColors::gMediaProgressBg) + ";} QProgressBar::chunk{background: " + AppColors::colorToCss(AppColors::gMediaProgressFill) + ";}");
-            statusLayout->addWidget(bar, 0, Qt::AlignVCenter); // Only center vertically, full width horizontally
-        } else {
-            auto* status = new QLabel(m->uploadState() == ResizableMediaBase::UploadState::Uploaded ? QStringLiteral("Uploaded") : QStringLiteral("Not uploaded"), statusContainer);
-            const QString color = (m->uploadState() == ResizableMediaBase::UploadState::Uploaded) ? AppColors::colorToCss(AppColors::gMediaUploadedColor) : AppColors::colorToCss(AppColors::gMediaNotUploadedColor);
-            status->setStyleSheet(QString("color: %1; font-size: 14px; background: transparent;").arg(color));
-            status->setAutoFillBackground(false);
-            status->setAttribute(Qt::WA_TranslucentBackground, true);
-            status->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-            status->setWordWrap(true);
-            status->setTextInteractionFlags(Qt::NoTextInteraction);
-            status->setFixedHeight(16); // Fixed height to prevent stretching
-            statusLayout->addWidget(status, 0, Qt::AlignLeft | Qt::AlignVCenter); // Left-aligned, vertically centered
+        // Row: upload status or progress - only for non-text media items (text has no files to upload)
+        if (!isTextMedia) {
+            auto* statusContainer = new QWidget(mediaContainer);
+            statusContainer->setStyleSheet("background: transparent;");
+            statusContainer->setAutoFillBackground(false);
+            statusContainer->setAttribute(Qt::WA_TranslucentBackground, true);
+            statusContainer->setFixedHeight(20); // Fixed height to prevent flickering
+            auto* statusLayout = new QVBoxLayout(statusContainer);
+            statusLayout->setContentsMargins(0, 0, 0, 0);
+            statusLayout->setSpacing(0);
+            statusLayout->setAlignment(Qt::AlignVCenter);
+            
+            if (m->uploadState() == ResizableMediaBase::UploadState::Uploading) {
+                auto* bar = new QProgressBar(statusContainer);
+                bar->setRange(0, 100);
+                bar->setValue(m->uploadProgress());
+                bar->setTextVisible(false);
+                bar->setFixedHeight(10);
+                bar->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed); // Preferred width
+                // Blue progress bar styling consistent with theme - no border radius
+                bar->setStyleSheet("QProgressBar{background: " + AppColors::colorToCss(AppColors::gMediaProgressBg) + ";} QProgressBar::chunk{background: " + AppColors::colorToCss(AppColors::gMediaProgressFill) + ";}");
+                statusLayout->addWidget(bar, 0, Qt::AlignVCenter); // Only center vertically, full width horizontally
+            } else {
+                auto* status = new QLabel(m->uploadState() == ResizableMediaBase::UploadState::Uploaded ? QStringLiteral("Uploaded") : QStringLiteral("Not uploaded"), statusContainer);
+                const QString color = (m->uploadState() == ResizableMediaBase::UploadState::Uploaded) ? AppColors::colorToCss(AppColors::gMediaUploadedColor) : AppColors::colorToCss(AppColors::gMediaNotUploadedColor);
+                status->setStyleSheet(QString("color: %1; font-size: 14px; background: transparent;").arg(color));
+                status->setAutoFillBackground(false);
+                status->setAttribute(Qt::WA_TranslucentBackground, true);
+                status->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+                status->setWordWrap(true);
+                status->setTextInteractionFlags(Qt::NoTextInteraction);
+                status->setFixedHeight(16); // Fixed height to prevent stretching
+                statusLayout->addWidget(status, 0, Qt::AlignLeft | Qt::AlignVCenter); // Left-aligned, vertically centered
+            }
+            
+            mediaLayout->addWidget(statusContainer);
         }
         
-    mediaLayout->addWidget(statusContainer);
-        
         // Row: details smaller under status
-        auto* details = new QLabel(dim + QStringLiteral("  ·  ") + sizeStr, mediaContainer);
+        // For text media: show only dimensions (no file size)
+        // For file-based media: show dimensions and file size
+        QString detailsText = isTextMedia ? dim : (dim + QStringLiteral("  ·  ") + sizeStr);
+        auto* details = new QLabel(detailsText, mediaContainer);
         details->setStyleSheet("color: " + AppColors::colorToCss(AppColors::gTextSecondary) + "; font-size: 14px; background: transparent;");
         details->setAutoFillBackground(false);
         details->setAttribute(Qt::WA_TranslucentBackground, true);
@@ -1047,7 +1057,7 @@ void ScreenCanvas::refreshInfoOverlay() {
         details->setWordWrap(false); // Keep dimensions and size on single line
         details->setTextInteractionFlags(Qt::NoTextInteraction);
         details->setFixedHeight(18); // Fixed height to prevent stretching
-        details->setProperty("originalText", dim + QStringLiteral("  ·  ") + sizeStr); // Store original text for ellipsis
+        details->setProperty("originalText", detailsText); // Store original text for ellipsis
     mediaLayout->addWidget(details);
 
     // Add inner content to outer layout

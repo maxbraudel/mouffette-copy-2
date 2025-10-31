@@ -84,6 +84,9 @@ void UploadEventHandler::onUploadButtonClicked()
         for (QGraphicsItem* it : allItems) {
             auto* media = dynamic_cast<ResizableMediaBase*>(it);
             if (!media) continue;
+            
+            // Skip text media items - they don't have associated files
+            if (media->isTextMedia()) continue;
 
             const QString path = media->sourcePath();
             if (path.isEmpty()) continue;
