@@ -124,7 +124,15 @@ RemoteSceneController::RemoteSceneController(FileManager* fileManager, WebSocket
 }
 
 RemoteSceneController::~RemoteSceneController() {
-	clearScene();
+    clearScene();
+    for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
+        ScreenWindow& sw = it.value();
+        if (sw.window) {
+            sw.window->deleteLater();
+            sw.window = nullptr;
+        }
+    }
+    m_screenWindows.clear();
 }
 
 void RemoteSceneController::resetSceneSynchronization() {
