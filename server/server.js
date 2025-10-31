@@ -1,10 +1,42 @@
 const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
 
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 🔐 MOUFFETTE SERVER - IDENTIFICATION SYSTEM & TERMINOLOGY FIX
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+// This server implements the fix for the "clientId" terminology confusion.
+//
+// TERMINOLOGY (Explicit Field Names):
+//
+//   Field Name              | Source        | Meaning                    | Lifetime
+//   ----------------------- | ------------- | -------------------------- | -------------------
+//   persistentClientId      | Client        | Stable device identity     | Permanent (persisted)
+//   sessionId               | Client        | Connection identifier      | Temporary (per launch)
+//   socketId (internal)     | Server        | Raw WebSocket ID           | Per connection
+//   canvasSessionId         | Client        | Logical scene/project      | Until canvas deleted
+//
+// SERVER INTERNAL NAMING:
+//   - client.persistentId: Maps to "persistentClientId" from protocol
+//   - client.sessionId: Maps to "sessionId" from protocol
+//   - client.id: Internal session identifier (used as Map key)
+//
+// BACKWARD COMPATIBILITY:
+//   - Reads "persistentClientId" first (new explicit field)
+//   - Falls back to "clientId" (legacy field) if not present
+//   - Old clients continue to work during transition
+//
+// MIGRATION STATUS:
+//   Phase 1: ✅ Accept both "clientId" and "persistentClientId" (COMPLETE)
+//   Phase 2: ✅ Send explicit field names in responses (COMPLETE)
+//   Phase 3: 🔄 Canvas lifecycle validation (IN PROGRESS)
+//   Phase 4: ⏳ Deprecate "clientId" field (future)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 class MouffetteServer {
     constructor(port = 8080) {
         this.port = port;
-        this.clients = new Map(); // sessionId -> client info
+        this.clients = new Map(); // sessionId -> client info (see terminology above)
         this.wss = null;
         // Watching relations: targetId -> Set of watcherIds, and watcherId -> targetId
         this.watchersByTarget = new Map();
@@ -99,10 +131,11 @@ class MouffetteServer {
             this.clients.set(clientId, clientInfo);
             console.log(`📱 New client connected: ${clientId}`);
             
-            // Send welcome message with client ID
+            // Send welcome message with socket ID (note: this is NOT persistentClientId)
             ws.send(JSON.stringify({
                 type: 'welcome',
-                clientId: clientId,
+                socketId: clientId,        // ✅ NEW: Explicit name for raw socket ID
+                clientId: clientId,        // ⚠️ LEGACY: For backward compatibility
                 message: 'Connected to Mouffette Server'
             }));
             
@@ -447,7 +480,9 @@ class MouffetteServer {
         const client = this.clients.get(clientId);
         if (!client) return;
     
-    // PHASE 2: Read persistentClientId (new explicit field) with fallback to clientId (legacy)
+    // ✅ ID TERMINOLOGY FIX: Read explicit field names with backward compatibility
+    // - "persistentClientId": NEW explicit field (recommended)
+    // - "clientId": LEGACY field (for old client versions)
     const requestedPersistentId = (typeof message.persistentClientId === 'string') 
         ? message.persistentClientId.trim() 
         : (typeof message.clientId === 'string') 
@@ -457,12 +492,14 @@ class MouffetteServer {
     const requestedSessionId = (typeof message.sessionId === 'string') ? message.sessionId.trim() : '';
     const previousPersistentId = client.persistentId;
     const persistentId = requestedPersistentId || previousPersistentId;
+    
+    // Validation: persistentClientId is mandatory for registration
     if (!persistentId) {
-        console.warn(`⚠️ register missing persistentClientId/clientId for socket ${clientId} - machine: ${message.machineName || 'unknown'}`);
+        console.warn(`⚠️ Registration rejected: missing persistentClientId for socket ${clientId} - machine: ${message.machineName || 'unknown'}`);
         if (client.ws && client.ws.readyState === WebSocket.OPEN) {
             client.ws.send(JSON.stringify({
                 type: 'error',
-                message: 'persistentClientId is required for register'
+                message: 'persistentClientId is required for registration'
             }));
         }
         return;

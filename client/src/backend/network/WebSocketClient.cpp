@@ -7,6 +7,43 @@
 #include <QThread>
 #include <QUuid>
 
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 🔐 MOUFFETTE IDENTIFICATION SYSTEM - TERMINOLOGY FIX
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+// This file implements the fix for the critical "clientId" terminology confusion.
+//
+// PROBLEM:
+// The term "clientId" was ambiguously used to mean 3 different things:
+//   1. In protocol messages: persistentClientId (stable device ID)
+//   2. In server code: temporary socket ID (sessionId)
+//   3. Mixed usage caused bugs and maintenance issues
+//
+// SOLUTION (Implemented):
+// Use EXPLICIT field names in all protocol messages:
+//
+//   Field Name              | Meaning                    | Lifetime
+//   ----------------------- | -------------------------- | -------------------
+//   persistentClientId      | Stable device identity     | Permanent (persisted)
+//   sessionId               | Connection identifier      | Temporary (per launch)
+//   socketId                | Raw WebSocket ID           | Per connection
+//   canvasSessionId         | Logical scene/project      | Until canvas deleted
+//   fileId                  | File deduplication key     | While file referenced
+//   mediaId                 | Canvas item instance       | While item exists
+//
+// BACKWARD COMPATIBILITY:
+// - Client sends BOTH "clientId" (legacy) and "persistentClientId" (new)
+// - Server reads "persistentClientId" first, falls back to "clientId"
+// - Old clients continue to work during transition
+//
+// MIGRATION STATUS:
+// Phase 1: ✅ Client sends both fields (COMPLETE)
+// Phase 2: ✅ Server reads both fields (COMPLETE)
+// Phase 3: 🔄 Update all message handlers (IN PROGRESS)
+// Phase 4: ⏳ Deprecate "clientId" field (future)
+// Phase 5: ⏳ Remove legacy support (future v2.0)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 WebSocketClient::WebSocketClient(QObject *parent)
     : QObject(parent)
     , m_webSocket(nullptr)
@@ -247,11 +284,13 @@ void WebSocketClient::registerClient(const QString& machineName, const QString& 
     if (volumePercent >= 0) message["volumePercent"] = volumePercent;
     message["sessionId"] = m_sessionId;
     
-    // PHASE 2: Send persistent client ID with explicit field name for clarity
-    // Keep "clientId" for backward compatibility
+    // ✅ ID TERMINOLOGY FIX: Send both fields for server compatibility
+    // - "persistentClientId": NEW explicit field name (recommended)
+    // - "clientId": LEGACY field (backward compatibility, will be deprecated)
+    // The ambiguous "clientId" terminology is being phased out in favor of explicit naming.
     if (!m_persistentClientId.isEmpty()) {
-        message["clientId"] = m_persistentClientId;           // Legacy field (backward compat)
-        message["persistentClientId"] = m_persistentClientId;  // New explicit field (PHASE 2)
+        message["clientId"] = m_persistentClientId;           // ⚠️ LEGACY: For old server versions
+        message["persistentClientId"] = m_persistentClientId;  // ✅ NEW: Explicit and unambiguous
     }
     
     if (!screens.isEmpty()) {
@@ -661,7 +700,10 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
     }
     
     if (type == "welcome") {
-        m_socketClientId = message["clientId"].toString();
+        // ✅ ID TERMINOLOGY FIX: Read explicit "socketId" field (new) with fallback to "clientId" (legacy)
+        m_socketClientId = message.contains("socketId") 
+            ? message["socketId"].toString() 
+            : message["clientId"].toString();
         qDebug() << "Received welcome with socket ID:" << m_socketClientId;
     }
     else if (type == "error") {
