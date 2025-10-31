@@ -19,7 +19,6 @@
 #include <QtGlobal>
 #include <QTextBlock>
 #include <QTextLayout>
-#include <QVector>
 #include <QBrush>
 #include <QClipboard>
 #include <QApplication>
@@ -63,38 +62,46 @@ public:
         });
     }
 
-    void invalidateCache() {
+    void invalidateCache(bool resetCaret = false) {
         m_cacheDirty = true;
-        m_caretVisible = true;
-        if (m_caretBlinkTimer.isActive()) {
-            m_caretBlinkTimer.start();
+        if (resetCaret) {
+            startCaretBlink(true);
         }
         update();
+    }
+
+    void disableCaretBlink() {
+        stopCaretBlink(true);
     }
 
 protected:
     void focusInEvent(QFocusEvent* event) override {
         QGraphicsTextItem::focusInEvent(event);
-        startCaretBlink();
+        startCaretBlink(false);
     }
 
     void focusOutEvent(QFocusEvent* event) override {
-        stopCaretBlink();
         QGraphicsTextItem::focusOutEvent(event);
+
         if (!m_owner) {
+            stopCaretBlink(true);
             return;
         }
 
         const Qt::FocusReason reason = event ? event->reason() : Qt::OtherFocusReason;
+
+        if (!m_owner->isEditing()) {
+            stopCaretBlink(true);
+            return;
+        }
+
         if (reason == Qt::MouseFocusReason && QApplication::mouseButtons() != Qt::NoButton) {
+            stopCaretBlink(true);
             m_owner->commitInlineEditing();
             return;
         }
 
-        if (!m_owner->isEditing()) {
-            return;
-        }
-
+        // Keep caret blinking while we regain focus asynchronously
         QTimer::singleShot(0, this, [this]() {
             if (m_owner && m_owner->isEditing()) {
                 this->setFocus(Qt::OtherFocusReason);
@@ -130,7 +137,7 @@ protected:
                 QString plainText = clipboard->text();
                 if (!plainText.isEmpty()) {
                     textCursor().insertText(plainText);
-                    invalidateCache();
+                    invalidateCache(true);
                     event->accept();
                     return;
                 }
@@ -138,7 +145,7 @@ protected:
         }
 
         QGraphicsTextItem::keyPressEvent(event);
-        invalidateCache();
+        invalidateCache(true);
         
         // After any text insertion, normalize formatting
         if (m_owner) {
@@ -189,8 +196,10 @@ protected:
         // Draw active selection highlight as an overlay so it stays responsive to cursor movement
         drawSelectionOverlay(painter, bounds);
 
+        const bool editing = (m_owner && m_owner->isEditing());
+
         // Draw the caret on top using a high-contrast vector rectangle so it stays sharp
-        if (hasFocus() && (textInteractionFlags() & Qt::TextEditable) && m_caretVisible) {
+        if (editing && (textInteractionFlags() & Qt::TextEditable) && m_caretVisible) {
             QTextCursor cursor = textCursor();
             if (!cursor.hasSelection()) {
                 const QRectF caretRect = cursorRectForPosition(cursor).translated(bounds.topLeft());
@@ -219,10 +228,14 @@ protected:
 
     void mousePressEvent(QGraphicsSceneMouseEvent* event) override {
         QGraphicsTextItem::mousePressEvent(event);
-        invalidateCache();
+        invalidateCache(true);
     }
 
     void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override {
+        if (event->buttons() == Qt::NoButton) {
+            event->ignore();
+            return;
+        }
         // Store cursor position before event
         int oldPosition = textCursor().position();
         bool hadSelection = textCursor().hasSelection();
@@ -234,35 +247,48 @@ protected:
         bool hasSelection = textCursor().hasSelection();
         
         if (oldPosition != newPosition || hadSelection != hasSelection) {
-            invalidateCache();
+            invalidateCache(false);
         }
     }
 
     void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override {
         QGraphicsTextItem::mouseReleaseEvent(event);
-        invalidateCache();
+        invalidateCache(false);
     }
 
 private:
-    void startCaretBlink() {
+    void startCaretBlink(bool resetVisible) {
         const int interval = caretBlinkInterval();
-        m_caretVisible = true;
+        if (resetVisible || !m_caretBlinkTimer.isActive()) {
+            m_caretVisible = true;
+        }
+
         if (interval > 0) {
             if (m_caretBlinkTimer.interval() != interval) {
                 m_caretBlinkTimer.setInterval(interval);
             }
-            m_caretBlinkTimer.start();
+
+            if (!m_caretBlinkTimer.isActive()) {
+                m_caretBlinkTimer.start();
+            } else if (resetVisible) {
+                m_caretBlinkTimer.start();
+            }
         } else {
             m_caretBlinkTimer.stop();
         }
+
         update();
     }
 
-    void stopCaretBlink() {
+    void stopCaretBlink(bool resetVisible) {
         if (m_caretBlinkTimer.isActive()) {
             m_caretBlinkTimer.stop();
         }
-        m_caretVisible = true;
+
+        if (resetVisible) {
+            m_caretVisible = true;
+        }
+
         update();
     }
 
@@ -309,6 +335,14 @@ private:
             return;
         }
 
+        if (!(textInteractionFlags() & Qt::TextEditable)) {
+            return;
+        }
+
+        if (!m_owner || !m_owner->isEditing()) {
+            return;
+        }
+
         QTextCursor cursor = textCursor();
         if (!cursor.hasSelection()) {
             return;
@@ -334,7 +368,7 @@ private:
         const QPointF offset = bounds.topLeft();
 
         QTextBlock block = doc->findBlock(selectionStart);
-        while (block.isValid() && block.position() <= selectionEnd) {
+        while (block.isValid() && block.position() < selectionEnd) {
             QTextLayout* layout = block.layout();
             if (!layout) {
                 block = block.next();
@@ -350,17 +384,43 @@ private:
                 continue;
             }
 
-            QTextLayout::FormatRange formatRange;
-            formatRange.start = rangeStart - blockStart;
-            formatRange.length = rangeEnd - rangeStart;
-            formatRange.format.setBackground(highlightColor);
-            formatRange.format.setForeground(Qt::transparent);
-
-            QVector<QTextLayout::FormatRange> ranges;
-            ranges.append(formatRange);
-
             const QPointF blockPos = doc->documentLayout()->blockBoundingRect(block).topLeft();
-            layout->draw(painter, offset + blockPos, ranges);
+
+            for (int i = 0; i < layout->lineCount(); ++i) {
+                QTextLine line = layout->lineAt(i);
+                if (!line.isValid()) {
+                    continue;
+                }
+
+                const int lineStart = blockStart + line.textStart();
+                const int lineEnd = lineStart + line.textLength();
+                if (lineEnd <= rangeStart) {
+                    continue;
+                }
+                if (lineStart >= rangeEnd) {
+                    break;
+                }
+
+                const int selStart = std::max(rangeStart, lineStart);
+                int selEnd = std::min(rangeEnd, lineEnd);
+
+                // Include visible newline selection by extending to line width
+                if (selStart == selEnd && lineEnd < rangeEnd) {
+                    selEnd = rangeEnd;
+                }
+
+                const qreal x1 = line.cursorToX(selStart - blockStart);
+                qreal x2 = line.cursorToX(selEnd - blockStart);
+                if (std::abs(x2 - x1) < 0.5) {
+                    // Fallback to cover at least a thin caret width
+                    x2 = x1 + 2.0;
+                }
+
+                const QPointF topLeft = offset + blockPos + QPointF(std::min(x1, x2), line.y());
+                const qreal width = std::max(std::abs(x2 - x1), 1.0);
+                const QRectF highlightRect(topLeft, QSizeF(width, line.height()));
+                painter->fillRect(highlightRect, highlightColor);
+            }
 
             if (blockEnd >= selectionEnd) {
                 break;
@@ -603,7 +663,6 @@ void TextMediaItem::ensureInlineEditor() {
     editor->setFont(m_font);
     editor->setEnabled(false);
     editor->setVisible(false);
-    editor->setCacheMode(QGraphicsItem::ItemCoordinateCache);
 
     if (QTextDocument* doc = editor->document()) {
         {
@@ -843,6 +902,10 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
     if (!m_inlineEditor) {
         m_isEditing = false;
         return;
+    }
+
+    if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
+        inlineEditor->disableCaretBlink();
     }
 
     const QString editedText = m_inlineEditor->toPlainText();
