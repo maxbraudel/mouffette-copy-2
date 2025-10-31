@@ -62,7 +62,6 @@ private:
     QString m_textBeforeEditing;
     QString m_editorRenderingText;
     bool m_isUpdatingInlineGeometry = false;
-    qreal m_lastKnownScale = 1.0;
     bool m_ignoreDocumentChange = false;
     bool m_pendingAutoSize = false;
     bool m_wasMovableBeforeEditing = false;

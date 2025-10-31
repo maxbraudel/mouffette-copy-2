@@ -473,7 +473,7 @@ static void normalizeTextFormatting(QGraphicsTextItem* editor, const QFont& curr
     cursor.beginEditBlock();
     cursor.select(QTextCursor::Document);
 
-    // Create standard character format using the current font size (which may have been scaled)
+    // Create standard character format using the current font settings
     QTextCharFormat standardFormat;
     standardFormat.setFont(currentFont);
     standardFormat.setForeground(QBrush(currentColor));
@@ -539,7 +539,6 @@ TextMediaItem::TextMediaItem(
     m_needsRasterization = true;
     m_lastRasterizedSize = QSize(0, 0);
 
-    m_lastKnownScale = scale();
     m_editorRenderingText = m_text;
 }
 
@@ -638,7 +637,7 @@ bool TextMediaItem::beginInlineEditing() {
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
     m_inlineEditor->setDefaultTextColor(m_textColor);
-    // Sync editor font with current text appearance (respects current item scale)
+    // Sync editor font with current text appearance
     m_inlineEditor->setFont(m_font);
     m_inlineEditor->setEnabled(true);
     m_inlineEditor->setVisible(true);
@@ -971,33 +970,10 @@ void TextMediaItem::onInteractiveGeometryChanged() {
     if (m_isEditing) {
         // Update editor geometry to follow Alt-resize base size changes
         updateInlineEditorGeometry();
-        return;
     }
-
-    const qreal currentScale = scale();
-    const qreal epsilon = 1e-4;
-    const bool resizing = (m_activeHandle != None);
-
-    if (!m_lastAxisAltStretch) {
-        if (resizing) {
-            if (std::abs(currentScale - m_lastKnownScale) > epsilon) {
-                m_needsRasterization = true;
-                m_lastRasterizedSize = QSize();
-                m_scaledRasterDirty = true;
-                update();
-            }
-            m_lastKnownScale = currentScale;
-            return;
-        }
-
-        if (std::abs(currentScale - m_lastKnownScale) > epsilon) {
-            m_needsRasterization = true;
-            m_scaledRasterDirty = true;
-            update();
-        }
-    }
-
-    m_lastKnownScale = currentScale;
+    
+    m_scaledRasterDirty = true;
+    update();
 }
 
 void TextMediaItem::finishInlineEditing(bool commitChanges) {
@@ -1223,10 +1199,9 @@ QVariant TextMediaItem::itemChange(GraphicsItemChange change, const QVariant& va
 
     QVariant result = ResizableMediaBase::itemChange(change, value);
 
-    if (change == ItemScaleHasChanged && value.canConvert<double>()) {
-        m_lastKnownScale = value.toDouble();
-    } else if (change == ItemScaleHasChanged) {
-        m_lastKnownScale = scale();
+    if (change == ItemScaleHasChanged) {
+        m_scaledRasterDirty = true;
+        update();
     }
 
     if (change == ItemTransformHasChanged ||
