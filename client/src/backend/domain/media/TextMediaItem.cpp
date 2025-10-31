@@ -64,15 +64,13 @@ public:
 
     void invalidateCache(bool resetCaret = false) {
         m_cacheDirty = true;
-        if (resetCaret) {
+        if (resetCaret && m_owner && m_owner->isEditing()) {
             startCaretBlink(true);
         }
         update();
     }
 
-    void disableCaretBlink() {
-        stopCaretBlink(true);
-    }
+    void stopCaretBlink(bool resetVisible = true);
 
 protected:
     void focusInEvent(QFocusEvent* event) override {
@@ -256,30 +254,6 @@ protected:
         invalidateCache(false);
     }
 
-private:
-    void startCaretBlink(bool resetVisible) {
-        const int interval = caretBlinkInterval();
-        if (resetVisible || !m_caretBlinkTimer.isActive()) {
-            m_caretVisible = true;
-        }
-
-        if (interval > 0) {
-            if (m_caretBlinkTimer.interval() != interval) {
-                m_caretBlinkTimer.setInterval(interval);
-            }
-
-            if (!m_caretBlinkTimer.isActive()) {
-                m_caretBlinkTimer.start();
-            } else if (resetVisible) {
-                m_caretBlinkTimer.start();
-            }
-        } else {
-            m_caretBlinkTimer.stop();
-        }
-
-        update();
-    }
-
     void stopCaretBlink(bool resetVisible) {
         if (m_caretBlinkTimer.isActive()) {
             m_caretBlinkTimer.stop();
@@ -287,6 +261,22 @@ private:
 
         if (resetVisible) {
             m_caretVisible = true;
+        }
+
+        update();
+    }
+
+private:
+    void startCaretBlink(bool resetVisible) {
+        const int interval = caretBlinkInterval();
+        if (resetVisible) {
+            m_caretVisible = true;
+        }
+
+        if (interval > 0) {
+            m_caretBlinkTimer.start(interval);
+        } else {
+            m_caretBlinkTimer.stop();
         }
 
         update();
@@ -335,11 +325,8 @@ private:
             return;
         }
 
-        if (!(textInteractionFlags() & Qt::TextEditable)) {
-            return;
-        }
-
-        if (!m_owner || !m_owner->isEditing()) {
+        const bool editing = (m_owner && m_owner->isEditing());
+        if (!(textInteractionFlags() & Qt::TextEditable) || !editing) {
             return;
         }
 
@@ -905,7 +892,7 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
     }
 
     if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
-        inlineEditor->disableCaretBlink();
+        inlineEditor->stopCaretBlink();
     }
 
     const QString editedText = m_inlineEditor->toPlainText();
