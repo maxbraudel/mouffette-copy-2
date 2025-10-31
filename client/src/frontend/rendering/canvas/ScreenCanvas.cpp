@@ -5199,6 +5199,9 @@ TextMediaItem* ScreenCanvas::createTextMediaAtPosition(const QPointF& scenePos) 
     qreal halfHeight = defaultSize.height() / 2.0;
     textItem->setPos(scenePos.x() - halfWidth, scenePos.y() - halfHeight);
     
+    // Assign Z value to participate in Z-ordering
+    assignNextZValue(textItem);
+    
     // Add to scene
     m_scene->addItem(textItem);
     emit mediaItemAdded(textItem);
