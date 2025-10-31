@@ -24,6 +24,7 @@ class QBuffer;
 class QGraphicsView;
 class QGraphicsScene;
 class QGraphicsPixmapItem;
+class QGraphicsTextItem;
 class QVariantAnimation;
 
 class RemoteSceneController : public QObject {
@@ -51,13 +52,23 @@ private:
 		QString mediaId;
 		QString fileId;
 		QString fileName;
-		QString type; // image | video
+		QString type; // image | video | text
+		// Text-specific properties
+		QString text;
+		QString fontFamily;
+		int fontSize = 12;
+		bool fontBold = false;
+		bool fontItalic = false;
+		QString textColor;
+		int baseWidth = 0;
+		int baseHeight = 0;
 		// Multi-screen spans support: each span maps to a screen with its own normalized geom
 		struct Span {
 			int screenId = -1;
 			double nx = 0, ny = 0, nw = 0, nh = 0;
 			QWidget* widget = nullptr;
 			QGraphicsPixmapItem* imageItem = nullptr;
+			QGraphicsTextItem* textItem = nullptr;
 		};
 		QList<Span> spans;
 		bool autoDisplay=false; int autoDisplayDelayMs=0;

@@ -23,7 +23,11 @@
 #include <QIODevice>
 #include <QGraphicsView>
 #include <QGraphicsPixmapItem>
+#include <QGraphicsTextItem>
 #include <QGraphicsScene>
+#include <QTextOption>
+#include <QTextDocument>
+#include <QAbstractTextDocumentLayout>
 #include <QVariant>
 #include <QCoreApplication>
 #include <QEvent>
@@ -163,6 +167,13 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
     QStringList missingFileNames;
     for (const QJsonValue& val : media) {
         const QJsonObject mediaObj = val.toObject();
+        const QString type = mediaObj.value("type").toString();
+        
+        // Text items don't have files, skip validation for them
+        if (type == "text") {
+            continue;
+        }
+        
         const QString fileId = mediaObj.value("fileId").toString();
         if (fileId.isEmpty()) {
             qWarning() << "RemoteSceneController: media item has no fileId";
@@ -381,6 +392,13 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     item->muted = true;
 
     for (auto& span : item->spans) {
+        if (span.textItem) {
+            if (span.textItem->scene()) {
+                span.textItem->scene()->removeItem(span.textItem);
+            }
+            delete span.textItem;
+            span.textItem = nullptr;
+        }
         if (span.imageItem) {
             if (span.imageItem->scene()) {
                 span.imageItem->scene()->removeItem(span.imageItem);
@@ -1028,6 +1046,20 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
     item->type = m.value("type").toString();
     item->fileName = m.value("fileName").toString();
     item->sceneEpoch = m_sceneEpoch;
+    
+    // Parse base dimensions for all media types (needed for scaling)
+    item->baseWidth = m.value("baseWidth").toInt(0);
+    item->baseHeight = m.value("baseHeight").toInt(0);
+    
+    // Parse text-specific properties if this is a text item
+    if (item->type == "text") {
+        item->text = m.value("text").toString();
+        item->fontFamily = m.value("fontFamily").toString("Arial");
+        item->fontSize = m.value("fontSize").toInt(12);
+        item->fontBold = m.value("fontBold").toBool(false);
+        item->fontItalic = m.value("fontItalic").toBool(false);
+        item->textColor = m.value("textColor").toString("#FFFFFF");
+    }
         // Parse spans if present
         if (m.contains("spans") && m.value("spans").isArray()) {
             const QJsonArray spans = m.value("spans").toArray();
@@ -1133,7 +1165,66 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
         QGraphicsScene* scene = winIt.value().scene;
         if (!scene) continue;
         
-        if (item->type == "image") {
+        if (item->type == "text") {
+            // Create a text item for text media
+            QGraphicsTextItem* textItem = new QGraphicsTextItem();
+            textItem->setPos(px, py);
+            textItem->setOpacity(0.0);
+            
+            // Set up font
+            QFont font(item->fontFamily, item->fontSize);
+            font.setBold(item->fontBold);
+            font.setItalic(item->fontItalic);
+            textItem->setFont(font);
+            
+            // Set text color
+            QColor color(item->textColor);
+            if (!color.isValid()) {
+                color = QColor(Qt::white);
+            }
+            textItem->setDefaultTextColor(color);
+            
+            // Set text content
+            textItem->setPlainText(item->text);
+            
+            // Center alignment
+            QTextOption textOption = textItem->document()->defaultTextOption();
+            textOption.setAlignment(Qt::AlignCenter);
+            textOption.setWrapMode(QTextOption::WordWrap);
+            textItem->document()->setDefaultTextOption(textOption);
+            
+            // Calculate scale to match target dimensions
+            // The text needs to be scaled from its natural size to fit pw x ph
+            // Use baseWidth from host to determine the original text width, then scale accordingly
+            const int baseWidth = item->baseWidth > 0 ? item->baseWidth : 200;
+            const int baseHeight = item->baseHeight > 0 ? item->baseHeight : 100;
+            
+            // Set text width based on base width (not target width)
+            textItem->setTextWidth(baseWidth);
+            
+            // Get the natural document size after setting text width
+            const QSizeF docSize = textItem->document()->documentLayout()->documentSize();
+            
+            // Calculate scale factors to match target size
+            const qreal scaleX = static_cast<qreal>(pw) / baseWidth;
+            const qreal scaleY = static_cast<qreal>(ph) / baseHeight;
+            
+            // Apply uniform scale (use scaleX to maintain text aspect ratio)
+            const qreal scale = scaleX;
+            textItem->setScale(scale);
+            
+            // Center the text vertically within the target height
+            // This matches the offsetY calculation in renderTextToImage: (availableHeight - docSize.height()) / 2.0
+            // After scaling, the document height will be docSize.height() * scale
+            const qreal scaledDocHeight = docSize.height() * scale;
+            const qreal verticalOffset = (ph - scaledDocHeight) / 2.0;
+            
+            // Adjust the Y position to center the text vertically
+            textItem->setPos(px, py + verticalOffset);
+            
+            scene->addItem(textItem);
+            s.textItem = textItem;
+        } else if (item->type == "image") {
             // Create a pixmap item for host-provided still images
             QGraphicsPixmapItem* pixmapItem = new QGraphicsPixmapItem();
             pixmapItem->setPos(px, py);
@@ -1157,7 +1248,11 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
     // Content loading
     std::weak_ptr<RemoteMediaItem> weakItem = item;
 
-    if (item->type == "image") {
+    if (item->type == "text") {
+        // Text items are immediately ready (no file to load)
+        item->loaded = true;
+        evaluateItemReadiness(item);
+    } else if (item->type == "image") {
         auto attemptLoad = [this, epoch, weakItem]() {
             auto item = weakItem.lock();
             if (!item) return false;
@@ -1600,7 +1695,10 @@ void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item)
     }
     if (durMs <= 10) {
         for (auto& s : item->spans) {
-            if (s.imageItem) {
+            if (s.textItem) {
+                s.textItem->setOpacity(item->contentOpacity);
+                s.textItem->setVisible(true);
+            } else if (s.imageItem) {
                 s.imageItem->setOpacity(item->contentOpacity);
                 s.imageItem->setVisible(true);
             }
@@ -1609,7 +1707,12 @@ void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item)
         return;
     }
     for (auto& s : item->spans) {
-        QGraphicsItem* graphicsItem = s.imageItem ? static_cast<QGraphicsItem*>(s.imageItem) : nullptr;
+        QGraphicsItem* graphicsItem = nullptr;
+        if (s.textItem) {
+            graphicsItem = static_cast<QGraphicsItem*>(s.textItem);
+        } else if (s.imageItem) {
+            graphicsItem = static_cast<QGraphicsItem*>(s.imageItem);
+        }
         if (!graphicsItem) continue;
         graphicsItem->setVisible(true);
         auto* anim = new QVariantAnimation(this);
@@ -1789,6 +1892,7 @@ void RemoteSceneController::fadeOutAndHide(const std::shared_ptr<RemoteMediaItem
         item->hiding = false;
         for (auto& span : item->spans) {
             if (span.widget) span.widget->hide();
+            if (span.textItem) span.textItem->setOpacity(0.0);
             if (span.imageItem) span.imageItem->setOpacity(0.0);
         }
     };
@@ -1804,7 +1908,12 @@ void RemoteSceneController::fadeOutAndHide(const std::shared_ptr<RemoteMediaItem
     }
     auto remaining = std::make_shared<int>(0);
     for (auto& span : item->spans) {
-        QGraphicsItem* graphicsItem = span.imageItem ? static_cast<QGraphicsItem*>(span.imageItem) : nullptr;
+        QGraphicsItem* graphicsItem = nullptr;
+        if (span.textItem) {
+            graphicsItem = static_cast<QGraphicsItem*>(span.textItem);
+        } else if (span.imageItem) {
+            graphicsItem = static_cast<QGraphicsItem*>(span.imageItem);
+        }
         if (!graphicsItem) continue;
         ++(*remaining);
         auto* anim = new QVariantAnimation(this);

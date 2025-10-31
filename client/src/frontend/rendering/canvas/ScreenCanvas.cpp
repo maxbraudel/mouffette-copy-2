@@ -372,7 +372,26 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                     QFileInfo fi(p); m["fileName"] = fi.fileName();
                 }
             }
-            m["type"] = media->isVideoMedia() ? "video" : "image";
+            // Determine media type
+            if (media->isTextMedia()) {
+                m["type"] = "text";
+                // Include text-specific properties
+                if (auto* textMedia = dynamic_cast<TextMediaItem*>(media)) {
+                    m["text"] = textMedia->text();
+                    m["fontFamily"] = textMedia->font().family();
+                    m["fontSize"] = textMedia->font().pointSize();
+                    m["fontBold"] = textMedia->font().bold();
+                    m["fontItalic"] = textMedia->font().italic();
+                    QColor textColor = textMedia->textColor();
+                    m["textColor"] = QString("#%1%2%3")
+                        .arg(textColor.red(), 2, 16, QChar('0'))
+                        .arg(textColor.green(), 2, 16, QChar('0'))
+                        .arg(textColor.blue(), 2, 16, QChar('0'));
+                }
+            } else {
+                m["type"] = media->isVideoMedia() ? "video" : "image";
+            }
+            
             QRectF br;
             const QSize baseSize = media->baseSizePx();
             if (baseSize.width() > 0 && baseSize.height() > 0) {
