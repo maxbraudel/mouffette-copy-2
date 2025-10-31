@@ -550,6 +550,7 @@ TextMediaItem::TextMediaItem(
     m_lastRasterizedSize = QSize(0, 0);
 
     m_editorRenderingText = m_text;
+    m_uniformScaleFactor = scale();
     m_lastObservedScale = scale();
 }
 
@@ -792,10 +793,10 @@ void TextMediaItem::updateInlineEditorGeometry() {
     if (allowAutoSize) {
         m_pendingAutoSize = false;
     }
-    const qreal margin = kContentPadding;
 
-    // Apply uniform scale transform to editor to match rendered text appearance
+    const qreal margin = kContentPadding;
     const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
+
     QTransform editorTransform;
     if (std::abs(uniformScale - 1.0) > 1e-4) {
         editorTransform.scale(uniformScale, uniformScale);
@@ -804,9 +805,7 @@ void TextMediaItem::updateInlineEditorGeometry() {
         m_inlineEditor->setTransform(editorTransform);
     }
 
-    // Use base font (without scaling) since transform handles the scale
     QFont editorFont = m_font;
-
     if (m_inlineEditor->font() != editorFont) {
         m_inlineEditor->setFont(editorFont);
         m_documentMetricsDirty = true;
@@ -832,66 +831,60 @@ void TextMediaItem::updateInlineEditorGeometry() {
         contentRect.setHeight(1.0);
     }
 
-    // Text width at base size (transform will scale it visually)
-    const qreal contentWidth = m_isEditing ? 
-        std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - 2.0 * margin) : 
-        std::max<qreal>(1.0, contentRect.width());
-    
+    const qreal visualContentWidth = contentRect.width();
+    const qreal visualContentHeight = contentRect.height();
+    const qreal logicalContentWidth = std::max<qreal>(1.0, visualContentWidth / uniformScale);
+    const qreal logicalContentHeight = std::max<qreal>(1.0, visualContentHeight / uniformScale);
+
     bool widthChanged = false;
-    if (m_cachedTextWidth < 0.0 || floatsDiffer(contentWidth, m_cachedTextWidth)) {
-        m_inlineEditor->setTextWidth(contentWidth);
-        m_cachedTextWidth = contentWidth;
+    if (m_cachedTextWidth < 0.0 || floatsDiffer(logicalContentWidth, m_cachedTextWidth, 1e-3)) {
+        m_inlineEditor->setTextWidth(logicalContentWidth);
+        m_cachedTextWidth = logicalContentWidth;
         widthChanged = true;
         m_documentMetricsDirty = true;
     }
 
     QTextDocument* doc = m_inlineEditor->document();
     qreal docIdealWidth = m_cachedIdealWidth;
-    qreal docHeight = std::max<qreal>(1.0, m_cachedDocumentSize.height());
+    qreal logicalDocHeight = std::max<qreal>(1.0, m_cachedDocumentSize.height());
 
     const bool needMetrics = doc && (allowAutoSize || widthChanged || m_documentMetricsDirty || m_cachedIdealWidth < 0.0);
     if (needMetrics) {
-        docIdealWidth = doc ? doc->idealWidth() : contentWidth;
+        docIdealWidth = doc ? doc->idealWidth() : logicalContentWidth;
         QAbstractTextDocumentLayout* layout = doc ? doc->documentLayout() : nullptr;
         if (doc && layout) {
             QSizeF size = layout->documentSize();
             if (size.width() <= 0.0) {
-                size.setWidth(contentWidth);
+                size.setWidth(logicalContentWidth);
             }
             if (size.height() <= 0.0) {
-                size.setHeight(contentRect.height());
+                size.setHeight(logicalContentHeight);
             }
             m_cachedDocumentSize = size;
-            docHeight = std::max<qreal>(1.0, size.height());
+            logicalDocHeight = std::max<qreal>(1.0, size.height());
         } else {
-            m_cachedDocumentSize = QSizeF(contentWidth, docHeight);
-            docHeight = std::max<qreal>(1.0, docHeight);
+            m_cachedDocumentSize = QSizeF(logicalContentWidth, logicalContentHeight);
+            logicalDocHeight = std::max<qreal>(1.0, logicalContentHeight);
         }
         m_cachedIdealWidth = docIdealWidth;
         m_documentMetricsDirty = false;
     } else {
         if (m_cachedIdealWidth < 0.0) {
-            docIdealWidth = contentWidth;
+            docIdealWidth = logicalContentWidth;
         }
-        docHeight = std::max<qreal>(1.0, m_cachedDocumentSize.height());
-    }
-
-    if (docIdealWidth <= 0.0) {
-        docIdealWidth = contentWidth;
+        logicalDocHeight = std::max<qreal>(1.0, m_cachedDocumentSize.height());
     }
 
     QSize newBaseSize = m_baseSize;
-    // Allow automatic growth when content exceeds current bounds
     if (doc && allowAutoSize) {
-        const qreal requiredContentWidth = std::max(docIdealWidth, contentWidth);
-        if (requiredContentWidth > contentWidth + 0.5) {
-            const qreal requiredWidth = requiredContentWidth + margin * 2.0;
-            newBaseSize.setWidth(static_cast<int>(std::ceil(requiredWidth)));
+        const qreal requiredVisualWidth = docIdealWidth * uniformScale + margin * 2.0;
+        if (requiredVisualWidth > static_cast<qreal>(newBaseSize.width()) + 0.5) {
+            newBaseSize.setWidth(static_cast<int>(std::ceil(requiredVisualWidth)));
         }
 
-        if (docHeight > contentRect.height() + 0.5) {
-            const qreal requiredHeight = docHeight + margin * 2.0;
-            newBaseSize.setHeight(static_cast<int>(std::ceil(requiredHeight)));
+        const qreal requiredVisualHeight = logicalDocHeight * uniformScale + margin * 2.0;
+        if (requiredVisualHeight > static_cast<qreal>(newBaseSize.height()) + 0.5) {
+            newBaseSize.setHeight(static_cast<int>(std::ceil(requiredVisualHeight)));
         }
     }
 
@@ -899,7 +892,7 @@ void TextMediaItem::updateInlineEditorGeometry() {
     if (geometryChanged) {
         prepareGeometryChange();
         m_baseSize = newBaseSize;
-        m_needsRasterization = true; // Size changed, need to re-rasterize
+        m_needsRasterization = true;
         m_scaledRasterDirty = true;
         m_lastRasterizedScale = 1.0;
         bounds = boundingRect();
@@ -912,73 +905,24 @@ void TextMediaItem::updateInlineEditorGeometry() {
         }
     }
 
-    // Text width from contentRect - the uniform scale transform will compensate for base size changes
-    const qreal finalTextWidth = std::max<qreal>(1.0, contentRect.width());
-    
-    bool finalWidthChanged = false;
-    if (floatsDiffer(finalTextWidth, m_cachedTextWidth)) {
-        m_inlineEditor->setTextWidth(finalTextWidth);
-        m_cachedTextWidth = finalTextWidth;
-        finalWidthChanged = true;
-        m_documentMetricsDirty = true;
-    }
+    const qreal visualDocWidth = std::max<qreal>(1.0, m_cachedDocumentSize.width() * uniformScale);
+    const qreal visualDocHeight = std::max<qreal>(1.0, logicalDocHeight * uniformScale);
 
-    qreal finalDocWidth = m_cachedDocumentSize.width();
-    qreal finalDocHeight = std::max<qreal>(1.0, m_cachedDocumentSize.height());
-
-    if (doc && (finalWidthChanged || m_documentMetricsDirty)) {
-        QAbstractTextDocumentLayout* layout = doc ? doc->documentLayout() : nullptr;
-        if (layout) {
-            QSizeF size = layout->documentSize();
-            if (size.width() <= 0.0) {
-                size.setWidth(finalTextWidth);
-            }
-            if (size.height() <= 0.0) {
-                size.setHeight(contentRect.height());
-            }
-            m_cachedDocumentSize = size;
-            finalDocWidth = size.width();
-            finalDocHeight = std::max<qreal>(1.0, size.height());
-        } else {
-            m_cachedDocumentSize = QSizeF(finalTextWidth, finalDocHeight);
-            finalDocWidth = finalTextWidth;
-        }
-        if (doc) {
-            m_cachedIdealWidth = doc->idealWidth();
-        }
-        m_documentMetricsDirty = false;
-    } else {
-        if (finalDocWidth <= 0.0) {
-            finalDocWidth = finalTextWidth;
-        }
-        if (finalDocHeight <= 0.0) {
-            finalDocHeight = contentRect.height();
-        }
-    }
-
-    // Center the editor like in renderTextToImage, allowing negative offsets for overflow
-    // Account for the uniform scale transform applied to the editor
-    const qreal transformedDocWidth = finalDocWidth * uniformScale;
-    const qreal transformedDocHeight = finalDocHeight * uniformScale;
-    
-    // Calculate centering offset (can be negative when content overflows)
-    const qreal availableWidth = contentRect.width() - 2.0 * margin;
-    const qreal availableHeight = contentRect.height() - 2.0 * margin;
-    const qreal offsetX = margin + (availableWidth - transformedDocWidth) / 2.0;
-    const qreal offsetY = margin + (availableHeight - transformedDocHeight) / 2.0;
+    const qreal availableWidth = std::max<qreal>(1.0, contentRect.width());
+    const qreal availableHeight = std::max<qreal>(1.0, contentRect.height());
+    const qreal offsetX = (availableWidth - visualDocWidth) * 0.5;
+    const qreal offsetY = (availableHeight - visualDocHeight) * 0.5;
     const QPointF newEditorPos = contentRect.topLeft() + QPointF(offsetX, offsetY);
-    
+
     if (!m_cachedEditorPosValid || floatsDiffer(newEditorPos.x(), m_cachedEditorPos.x(), 0.1) || floatsDiffer(newEditorPos.y(), m_cachedEditorPos.y(), 0.1)) {
         m_inlineEditor->setPos(newEditorPos);
         m_cachedEditorPos = newEditorPos;
         m_cachedEditorPosValid = true;
     }
-    
-    // Enable clipping on the editor to handle overflow (centered like rendered text)
+
     m_inlineEditor->setFlag(QGraphicsItem::ItemClipsToShape, true);
 
     if (geometryChanged) {
-        // Defer overlay and repaint updates to avoid cascading repaints during active painting
         if (m_inlineEditor) {
             QTimer::singleShot(0, m_inlineEditor, [this]() {
                 if (!m_beingDeleted) {
@@ -1245,15 +1189,12 @@ QVariant TextMediaItem::itemChange(GraphicsItemChange change, const QVariant& va
         const bool scaleBeingBaked = (std::abs(newScale - 1.0) < epsilon) && (std::abs(oldScale - 1.0) > epsilon);
         
         if (scaleBeingBaked) {
-            // If this is an Alt-resize bake (scale being baked into m_baseSize dimensions),
-            // we need to compensate for the base size increase to maintain consistent editor text width.
-            // The base size was multiplied by oldScale, so we divide uniformScale by oldScale to compensate.
-            // Otherwise (normal uniform resize), preserve the scale by accumulating.
+            // When scale is baked back to 1.0 we need to carry the previous uniform zoom into
+            // m_uniformScaleFactor so text rendering and inline editing keep their size.
+            // Alt-resize mutates the base size, so accumulate the baked scale here as well.
             if (m_lastAxisAltStretch) {
-                // Alt-resize: scale was baked into m_baseSize, so we need inverse compensation
-                // baseSize got multiplied by oldScale, so we divide uniformScale by oldScale
                 if (std::abs(oldScale) > epsilon) {
-                    m_uniformScaleFactor /= std::abs(oldScale);
+                    m_uniformScaleFactor *= std::abs(oldScale);
                 }
                 if (std::abs(m_uniformScaleFactor) < epsilon) {
                     m_uniformScaleFactor = 1.0;
