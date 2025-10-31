@@ -92,5 +92,4 @@ private:
     void handleInlineEditorTextChanged(const QString& newText);
     const QString& textForRendering() const;
     void renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor);
-    QFont getEffectiveScaledFont() const;
 };

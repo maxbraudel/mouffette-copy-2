@@ -504,28 +504,6 @@ static void applyCenterAlignment(QGraphicsTextItem* editor) {
 
 } // anonymous namespace
 
-QFont TextMediaItem::getEffectiveScaledFont() const {
-    QFont scaledFont = m_font;
-    // Inline editor only needs m_uniformScaleFactor because it inherits the item's scale() transform
-    const qreal effectiveScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
-    if (std::abs(effectiveScale - 1.0) > 1e-4) {
-        qreal basePointSize = scaledFont.pointSizeF();
-        if (basePointSize <= 0.0) {
-            basePointSize = static_cast<qreal>(scaledFont.pointSize());
-        }
-        if (basePointSize > 0.0) {
-            scaledFont.setPointSizeF(basePointSize * effectiveScale);
-        } else {
-            const int basePixelSize = scaledFont.pixelSize();
-            if (basePixelSize > 0) {
-                const int scaledPixelSize = std::max(1, static_cast<int>(std::round(static_cast<qreal>(basePixelSize) * effectiveScale)));
-                scaledFont.setPixelSize(scaledPixelSize);
-            }
-        }
-    }
-    return scaledFont;
-}
-
 TextMediaItem::TextMediaItem(
     const QSize& initialSize,
     int visualSizePx,
@@ -625,7 +603,8 @@ void TextMediaItem::normalizeEditorFormatting() {
     if (!m_inlineEditor || !m_isEditing) {
         return;
     }
-    normalizeTextFormatting(m_inlineEditor, getEffectiveScaledFont(), m_textColor);
+    // Use base font (transform will scale it)
+    normalizeTextFormatting(m_inlineEditor, m_font, m_textColor);
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
 }
@@ -660,17 +639,15 @@ bool TextMediaItem::beginInlineEditing() {
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
     m_inlineEditor->setDefaultTextColor(m_textColor);
-    // Sync editor font with current text appearance (including accumulated scale)
-    m_inlineEditor->setFont(getEffectiveScaledFont());
+    // Use base font (transform will scale it)
+    m_inlineEditor->setFont(m_font);
     m_inlineEditor->setEnabled(true);
     m_inlineEditor->setVisible(true);
     m_inlineEditor->setTextInteractionFlags(Qt::TextEditorInteraction);
     
-    // Force editor to work at the exact pixel resolution of the bitmap
-    // This prevents vector re-rendering during editing
+    // Set editor document width at base size (transform will scale it visually)
     if (QTextDocument* doc = m_inlineEditor->document()) {
         QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
-        // Set document to use bitmap pixel dimensions
         doc->setTextWidth(m_baseSize.width() - 2.0 * kContentPadding);
         applyCenterAlignment(m_inlineEditor);
     }
@@ -725,7 +702,7 @@ void TextMediaItem::ensureInlineEditor() {
             opt.setWrapMode(QTextOption::WordWrap);
             opt.setAlignment(Qt::AlignHCenter);
             doc->setDefaultTextOption(opt);
-            // Lock document width to bitmap pixel dimensions
+            // Set width at base size (transform will scale it visually)
             doc->setTextWidth(m_baseSize.width() - 2.0 * kContentPadding);
         }
 
@@ -807,15 +784,21 @@ void TextMediaItem::updateInlineEditorGeometry() {
     }
     const qreal margin = kContentPadding;
 
-    if (!m_inlineEditor->transform().isIdentity()) {
-        m_inlineEditor->setTransform(QTransform());
+    // Apply uniform scale transform to editor to match rendered text appearance
+    const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
+    QTransform editorTransform;
+    if (std::abs(uniformScale - 1.0) > 1e-4) {
+        editorTransform.scale(uniformScale, uniformScale);
+    }
+    if (m_inlineEditor->transform() != editorTransform) {
+        m_inlineEditor->setTransform(editorTransform);
     }
 
-    // Calculate scaled font that matches visual appearance
-    QFont scaledFont = getEffectiveScaledFont();
+    // Use base font (without scaling) since transform handles the scale
+    QFont editorFont = m_font;
 
-    if (m_inlineEditor->font() != scaledFont) {
-        m_inlineEditor->setFont(scaledFont);
+    if (m_inlineEditor->font() != editorFont) {
+        m_inlineEditor->setFont(editorFont);
         m_documentMetricsDirty = true;
     }
 
@@ -839,7 +822,7 @@ void TextMediaItem::updateInlineEditorGeometry() {
         contentRect.setHeight(1.0);
     }
 
-    // During editing, use fixed bitmap dimensions; otherwise allow dynamic sizing
+    // Text width at base size (transform will scale it visually)
     const qreal contentWidth = m_isEditing ? 
         std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - 2.0 * margin) : 
         std::max<qreal>(1.0, contentRect.width());
@@ -919,7 +902,11 @@ void TextMediaItem::updateInlineEditorGeometry() {
         }
     }
 
-    const qreal finalTextWidth = std::max<qreal>(1.0, contentRect.width());
+    // Text width at base size (transform will scale it visually)
+    const qreal finalTextWidth = m_isEditing ?
+        std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - 2.0 * margin) :
+        std::max<qreal>(1.0, contentRect.width());
+    
     bool finalWidthChanged = false;
     if (floatsDiffer(finalTextWidth, m_cachedTextWidth)) {
         m_inlineEditor->setTextWidth(finalTextWidth);
@@ -961,8 +948,13 @@ void TextMediaItem::updateInlineEditorGeometry() {
         }
     }
 
-    const qreal offsetX = std::max<qreal>(0.0, (contentRect.width() - finalDocWidth) / 2.0);
-    const qreal offsetY = std::max<qreal>(0.0, (contentRect.height() - finalDocHeight) / 2.0);
+    // Account for uniform scale transform when centering
+    const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
+    const qreal transformedDocWidth = finalDocWidth * uniformScale;
+    const qreal transformedDocHeight = finalDocHeight * uniformScale;
+    
+    const qreal offsetX = std::max<qreal>(0.0, (contentRect.width() - transformedDocWidth) / 2.0);
+    const qreal offsetY = std::max<qreal>(0.0, (contentRect.height() - transformedDocHeight) / 2.0);
     const QPointF newEditorPos = contentRect.topLeft() + QPointF(offsetX, offsetY);
     if (!m_cachedEditorPosValid || floatsDiffer(newEditorPos.x(), m_cachedEditorPos.x(), 0.1) || floatsDiffer(newEditorPos.y(), m_cachedEditorPos.y(), 0.1)) {
         m_inlineEditor->setPos(newEditorPos);
