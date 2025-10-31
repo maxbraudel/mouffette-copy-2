@@ -548,8 +548,8 @@ void TextMediaItem::updateInlineEditorGeometry() {
     }
 
     QSize newBaseSize = m_baseSize;
-    // Disable auto-resize during editing to keep bitmap resolution stable
-    if (doc && allowAutoSize && !m_isEditing) {
+    // Allow automatic growth when content exceeds current bounds
+    if (doc && allowAutoSize) {
         const qreal requiredContentWidth = std::max(docIdealWidth, contentWidth);
         if (requiredContentWidth > contentWidth + 0.5) {
             const qreal requiredWidth = requiredContentWidth + margin * 2.0;
