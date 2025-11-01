@@ -1394,7 +1394,7 @@ void TextMediaItem::updateAlignmentControlsLayout() {
     buttonSize = std::max(buttonSize, 24);
     
     const int gapPx = 8; // Gap between text item and controls
-    const int buttonGap = 2; // Gap between button groups
+    const int buttonGap = 10; // Gap between button groups (matches top overlay spacing)
     
     // Icon size (60% of button size)
     int iconSize = static_cast<int>(std::round(buttonSize * 0.6));
