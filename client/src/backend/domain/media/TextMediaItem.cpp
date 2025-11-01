@@ -1024,8 +1024,15 @@ void TextMediaItem::onInteractiveGeometryChanged() {
         updateInlineEditorGeometry();
     }
     
+    // Update alignment controls position (similar to video controls)
+    updateAlignmentControlsLayout();
+    
     m_scaledRasterDirty = true;
     update();
+}
+
+void TextMediaItem::refreshAlignmentControlsLayout() {
+    updateAlignmentControlsLayout();
 }
 
 void TextMediaItem::finishInlineEditing(bool commitChanges) {
