@@ -709,7 +709,18 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
     else if (type == "error") {
         const QString err = message.value("message").toString();
         qWarning() << "❌ Server error:" << err;
-        // Emit signal so UI can show the error to user
+        
+        // CRITICAL FIX: Distinguish between connection errors and business logic errors
+        // "Target client not found" is expected when a remote client disconnects
+        // It should NOT trigger a reconnection or show "Disconnected" status
+        if (err.contains("Target client not found", Qt::CaseInsensitive)) {
+            // Business logic error - remote client is offline, this is normal
+            qDebug() << "Remote client is offline, ignoring error (not a connection issue)";
+            // Don't emit connectionError - this would trigger reconnection
+            return;
+        }
+        
+        // For other errors, emit signal so UI can show the error to user
         emit connectionError(err);
     }
     else if (type == "registration_confirmed") {
