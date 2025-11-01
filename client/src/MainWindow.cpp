@@ -265,13 +265,21 @@ void MainWindow::setRemoteConnectionStatus(const QString& status, bool propagate
         m_remoteClientConnected = false;
     }
     
-    // Stop inline spinner if connected
-    if (up == "CONNECTED") {
+    // Manage inline spinner based on connection state
+    // Spinner should only be visible during CONNECTING/RECONNECTING states
+    if (up == "CONNECTED" || up == "DISCONNECTED" || up == "ERROR") {
+        // Stop and hide spinner for stable states
         if (m_inlineSpinner && m_inlineSpinner->isSpinning()) {
             m_inlineSpinner->stop();
             m_inlineSpinner->hide();
         } else if (m_inlineSpinner) {
             m_inlineSpinner->hide();
+        }
+    } else if (up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
+        // Show and start spinner for connecting states
+        if (m_inlineSpinner && !m_inlineSpinner->isSpinning()) {
+            m_inlineSpinner->show();
+            m_inlineSpinner->start();
         }
     }
     

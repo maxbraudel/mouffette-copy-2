@@ -120,10 +120,6 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                     if (!m_mainWindow->isRemoteClientConnected()) {
                         m_mainWindow->addRemoteStatusToLayout();
                         m_mainWindow->setRemoteConnectionStatus("CONNECTING...", /*propagateLoss*/ false);
-                        if (!m_mainWindow->isInlineSpinnerSpinning()) {
-                            m_mainWindow->showInlineSpinner();
-                            m_mainWindow->startInlineSpinner();
-                        }
                         if (m_webSocketClient && m_webSocketClient->isConnected()) {
                             m_mainWindow->setCanvasRevealedForCurrentClient(false);
                             m_webSocketClient->requestScreens(activeSession->serverAssignedId);
@@ -165,10 +161,6 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                         if (!m_mainWindow->isRemoteClientConnected()) {
                             m_mainWindow->setRemoteConnectionStatus("CONNECTING...");
                             m_mainWindow->addRemoteStatusToLayout();
-                            if (!m_mainWindow->isInlineSpinnerSpinning()) {
-                                m_mainWindow->showInlineSpinner();
-                                m_mainWindow->startInlineSpinner();
-                            }
                             if (m_webSocketClient && m_webSocketClient->isConnected()) {
                                 m_mainWindow->setCanvasRevealedForCurrentClient(false);
                                 m_webSocketClient->requestScreens(activeSession->serverAssignedId);
@@ -189,10 +181,6 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                     m_mainWindow->addRemoteStatusToLayout();
                     m_mainWindow->setRemoteConnectionStatus("DISCONNECTED");
                     m_mainWindow->setPreserveViewportOnReconnect(true);
-                    if (!m_mainWindow->isInlineSpinnerSpinning()) {
-                        m_mainWindow->showInlineSpinner();
-                        m_mainWindow->startInlineSpinner();
-                    }
                     UploadManager* uploadManager = m_mainWindow->getUploadManager();
                     if (uploadManager) {
                         uploadManager->setTargetClientId(QString());
