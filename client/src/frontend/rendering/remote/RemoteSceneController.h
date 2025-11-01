@@ -132,6 +132,12 @@ private:
 		QPixmap lastFramePixmap;
 	};
 
+	struct PendingSceneRequest {
+		QString senderId;
+		QJsonObject scene;
+		bool valid = false;
+	};
+
 	QWidget* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);
 	void resetWindowForNewScene(ScreenWindow& sw, int screenId, int x, int y, int w, int h, bool primary);
 	void buildWindows(const QJsonArray& screensArray);
@@ -145,6 +151,9 @@ private:
 	void cancelAudioFade(const std::shared_ptr<RemoteMediaItem>& item, bool applyFinalState);
 	void applyAudioMuteState(const std::shared_ptr<RemoteMediaItem>& item, bool muted, bool skipFade = false);
 	void clearScene();
+	void dispatchDeferredSceneStart();
+	void scheduleSceneRestartCooldown();
+	void drainDeferredDeletes(int passes = 1, bool processEvents = false);
     void teardownMediaItem(const std::shared_ptr<RemoteMediaItem>& item);
     void markItemReady(const std::shared_ptr<RemoteMediaItem>& item);
     void evaluateItemReadiness(const std::shared_ptr<RemoteMediaItem>& item);
@@ -182,5 +191,10 @@ private:
 	quint64 m_pendingActivationEpoch = 0;
 	QTimer* m_sceneReadyTimeout = nullptr;
 	QTimer* m_windowShowTimer = nullptr; // Timer for deferred window showing
+	bool m_teardownInProgress = false;
+	bool m_sceneStartInProgress = false;
+	QTimer* m_sceneRestartDelayTimer = nullptr;
+	bool m_restartCooldownActive = false;
+	PendingSceneRequest m_deferredSceneStart;
 };
 

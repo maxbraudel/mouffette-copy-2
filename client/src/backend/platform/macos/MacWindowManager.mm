@@ -62,6 +62,18 @@ void MacWindowManager::setWindowAsGlobalOverlay(QWidget* widget, bool clickThrou
     }
 }
 
+void MacWindowManager::orderOutWindow(QWidget* widget) {
+    if (!widget || !widget->windowHandle()) {
+        return;
+    }
+
+    NSView* view = (__bridge NSView*)reinterpret_cast<void*>(widget->windowHandle()->winId());
+    NSWindow* window = [view window];
+    if (!window) return;
+
+    [window orderOut:nil];
+}
+
 #else
 
 void MacWindowManager::setWindowAlwaysOnTop(QWidget* widget) {

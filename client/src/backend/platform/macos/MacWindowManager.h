@@ -13,6 +13,8 @@ public:
     // - Transparent, no shadow, at status window level
     // - Optionally click-through (ignores mouse)
     static void setWindowAsGlobalOverlay(QWidget* widget, bool clickThrough = true);
+    // Order out (hide) a window from the screen and window server
+    static void orderOutWindow(QWidget* widget);
 };
 
 #endif // MACWINDOWMANAGER_H

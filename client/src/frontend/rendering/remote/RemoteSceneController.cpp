@@ -32,6 +32,8 @@
 #include <QVariant>
 #include <QCoreApplication>
 #include <QEvent>
+#include <QEventLoop>
+#include <QAccessible>
 #include <cmath>
 #include "backend/files/FileManager.h"
 #include "backend/platform/macos/MacWindowManager.h"
@@ -153,6 +155,20 @@ void RemoteSceneController::resetSceneSynchronization() {
 void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, const QJsonObject& scene) {
     if (!m_enabled) return;
 
+    if (m_sceneStartInProgress || m_teardownInProgress) {
+        qDebug() << "RemoteSceneController: deferring remote scene start while teardown is pending";
+        m_deferredSceneStart.senderId = senderClientId;
+        m_deferredSceneStart.scene = scene;
+        m_deferredSceneStart.valid = true;
+        return;
+    }
+
+    m_sceneStartInProgress = true;
+    auto cleanup = std::shared_ptr<void>(nullptr, [this](void*) {
+        m_sceneStartInProgress = false;
+        dispatchDeferredSceneStart();
+    });
+
     const QJsonArray screens = scene.value("screens").toArray();
     const QJsonArray media = scene.value("media").toArray();
 
@@ -217,11 +233,7 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
     ++m_sceneEpoch;
     clearScene();
     // Flush deferred deletions multiple times to ensure ALL nested widget deletions complete
-    // This is critical because QGraphicsView/Scene deletions can queue additional events
-    for (int i = 0; i < 5; ++i) {
-        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
-        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
-    }
+    drainDeferredDeletes(5, true);
 
     m_pendingSenderClientId = senderClientId;
     m_totalMediaToPrime = media.size();
@@ -344,6 +356,8 @@ void RemoteSceneController::clearScene() {
         return;
     }
 
+    m_teardownInProgress = true;
+
     // CRITICAL: Cancel pending window show timer to prevent showing windows after scene cleared
     if (m_windowShowTimer) {
         m_windowShowTimer->stop();
@@ -370,28 +384,158 @@ void RemoteSceneController::clearScene() {
     }
     m_mediaItems.clear();
     
-    // Reset persistent screen windows instead of deleting them so accessibility
-    // never observes stale QWidget pointers during rapid start/stop cycles.
+    // Close remote screen windows so overlays disappear immediately after stop.
+    // This releases their native cocoa windows while coordinating with Qt's
+    // accessibility bridge to avoid macOS crashes when rapidly restarting scenes.
     for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
         ScreenWindow& sw = it.value();
-        if (!sw.window) continue;
+        if (!sw.window) {
+            continue;
+        }
 
-        QObject::disconnect(sw.window, nullptr, nullptr, nullptr);
-        sw.window->hide();
+        QWidget* window = sw.window;
         sw.sceneEpoch = 0;
 
+        QObject::disconnect(window, nullptr, nullptr, nullptr);
+        window->hide();
+
+        // Notify accessibility clients that the overlay is no longer visible.
+        QAccessibleEvent hideEvent(window, QAccessible::ObjectHide);
+        QAccessible::updateAccessibility(&hideEvent);
+
+#ifdef Q_OS_MAC
+        MacWindowManager::orderOutWindow(window);
+#endif
+
+        // Manually purge Qt's accessibility cache for this widget (fix for QTBUG-95134)
+        QAccessibleInterface* iface = QAccessible::queryAccessibleInterface(window);
+        if (iface) {
+            QAccessible::Id id = QAccessible::uniqueId(iface);
+            QAccessible::deleteAccessibleInterface(id);
+        }
+
+        // Detach and destroy the graphics scene so it will be rebuilt cleanly.
         if (sw.graphicsView) {
             QObject::disconnect(sw.graphicsView, nullptr, nullptr, nullptr);
             sw.graphicsView->setScene(nullptr);
+            sw.graphicsView->deleteLater();
+            sw.graphicsView = nullptr;
         }
-
         if (sw.scene) {
             QObject::disconnect(sw.scene, nullptr, nullptr, nullptr);
             sw.scene->clear();
             sw.scene->deleteLater();
             sw.scene = nullptr;
         }
+
+        window->close();
+        window->lower();
+
+        QAccessibleEvent destroyEvent(window, QAccessible::ObjectDestroyed);
+        QAccessible::updateAccessibility(&destroyEvent);
+
+        window->setParent(nullptr);
+        window->deleteLater();
+
+        sw.window = nullptr;
     }
+
+    m_screenWindows.clear();
+
+    // Make sure deferred deletions run to completion before allowing another scene start
+    // On macOS, process more cycles to ensure accessibility cleanup (QTBUG-95134)
+#ifdef Q_OS_MAC
+    drainDeferredDeletes(6, true);
+#else
+    drainDeferredDeletes(4, true);
+#endif
+
+    m_teardownInProgress = false;
+
+    // Cancel any pending restart cooldown timer and restart if we still have a deferred request
+    if (m_sceneRestartDelayTimer) {
+        m_sceneRestartDelayTimer->stop();
+        m_sceneRestartDelayTimer->deleteLater();
+        m_sceneRestartDelayTimer = nullptr;
+    }
+
+    if (!m_sceneStartInProgress) {
+        if (m_deferredSceneStart.valid) {
+            m_restartCooldownActive = true;
+            scheduleSceneRestartCooldown();
+        } else {
+            dispatchDeferredSceneStart();
+        }
+    }
+}
+
+void RemoteSceneController::dispatchDeferredSceneStart() {
+    if (!m_deferredSceneStart.valid) {
+        return;
+    }
+
+    if (m_restartCooldownActive) {
+        return;
+    }
+
+    if (!m_enabled) {
+        m_deferredSceneStart.valid = false;
+        return;
+    }
+
+    if (m_sceneStartInProgress || m_teardownInProgress) {
+        return;
+    }
+
+    PendingSceneRequest request = m_deferredSceneStart;
+    m_deferredSceneStart.valid = false;
+
+    QMetaObject::invokeMethod(this, [this, request]() {
+        if (!m_enabled) {
+            return;
+        }
+        onRemoteSceneStart(request.senderId, request.scene);
+    }, Qt::QueuedConnection);
+}
+
+void RemoteSceneController::drainDeferredDeletes(int passes, bool allowEventProcessing) {
+    if (passes <= 0) {
+        return;
+    }
+
+    for (int i = 0; i < passes; ++i) {
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        if (allowEventProcessing) {
+            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        }
+    }
+}
+
+void RemoteSceneController::scheduleSceneRestartCooldown() {
+    // Increase cooldown on macOS to give accessibility bridge more time to clear (QTBUG-95134)
+#ifdef Q_OS_MAC
+    constexpr int kRestartCooldownMs = 150;
+#else
+    constexpr int kRestartCooldownMs = 60;
+#endif
+
+    if (!m_sceneRestartDelayTimer) {
+        m_sceneRestartDelayTimer = new QTimer(this);
+        m_sceneRestartDelayTimer->setSingleShot(true);
+        connect(m_sceneRestartDelayTimer, &QTimer::timeout, this, [this]() {
+            m_restartCooldownActive = false;
+            if (m_sceneRestartDelayTimer) {
+                m_sceneRestartDelayTimer->deleteLater();
+                m_sceneRestartDelayTimer = nullptr;
+            }
+            dispatchDeferredSceneStart();
+        });
+    }
+
+    if (m_sceneRestartDelayTimer->isActive()) {
+        m_sceneRestartDelayTimer->stop();
+    }
+    m_sceneRestartDelayTimer->start(kRestartCooldownMs);
 }
 
 void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaItem>& item) {
@@ -1062,6 +1206,9 @@ QWidget* RemoteSceneController::ensureScreenWindow(int screenId, int x, int y, i
 
     if (!sw.window) {
         sw.window = new QWidget();
+        
+        // Force native window on macOS to avoid accessibility crashes (QTBUG-95134)
+        
         sw.window->setAttribute(Qt::WA_TransparentForMouseEvents, true);
         sw.window->setWindowFlag(Qt::FramelessWindowHint, true);
         sw.window->setWindowFlag(Qt::WindowStaysOnTopHint, true);
