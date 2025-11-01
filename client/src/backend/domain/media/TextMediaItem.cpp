@@ -55,6 +55,7 @@ namespace TextMediaDefaults {
 namespace {
 
 constexpr qreal kContentPadding = 0.0;
+constexpr qreal kFitToTextMinWidth = 20.0; // Minimum width in fit-to-text mode
 
 class InlineTextEditor : public QGraphicsTextItem {
 public:
@@ -1871,8 +1872,12 @@ void TextMediaItem::applyFitToTextNow() {
     const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
     const qreal margin = kContentPadding;
 
+    // Calculate dimensions with minimum width constraint in fit-to-text mode
+    const int calculatedWidth = static_cast<int>(std::ceil(logicalContentWidth * uniformScale + margin * 2.0));
+    const int minWidth = static_cast<int>(std::ceil(kFitToTextMinWidth * uniformScale + margin * 2.0));
+    
     QSize newBase(
-        std::max(1, static_cast<int>(std::ceil(logicalContentWidth * uniformScale + margin * 2.0))),
+        std::max(minWidth, std::max(1, calculatedWidth)),
         std::max(1, static_cast<int>(std::ceil(logicalContentHeight * uniformScale + margin * 2.0))));
 
     const QSize oldBase = m_baseSize;
