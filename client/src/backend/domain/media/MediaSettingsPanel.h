@@ -25,6 +25,7 @@ public:
     
     // Configure which options are available based on media type
     void setMediaType(bool isVideo);
+    void updateTextSectionVisibility(bool isTextMedia);
     void setMediaItem(class ResizableMediaBase* item);
     void applyOpacityFromUi(); // make publicly callable
     void applyVolumeFromUi();
@@ -56,6 +57,8 @@ private slots:
     void onMuteDelayToggled(bool checked);
     void onPauseDelayToggled(bool checked);
     void onVolumeToggled(bool checked);
+    void onTextColorToggled(bool checked);
+    void onTextColorBoxClicked();
     void onSceneTabClicked();
     void onElementTabClicked();
 
@@ -70,6 +73,7 @@ private:
     void pushSettingsToMedia();
     void updateActiveTabUi();
     void updateSectionHeaderVisibility();
+    void refreshTextColorBoxStyle(bool activeHighlight = false);
 
 private:
     QWidget* m_widget = nullptr; // parented to viewport
@@ -178,5 +182,14 @@ private:
     QLabel* m_pauseDelaySecondsLabel = nullptr;
     QLabel* m_audioFadeInSecondsLabel = nullptr;
     QLabel* m_audioFadeOutSecondsLabel = nullptr;
+    
+    // Text-only options (for TextMediaItem)
+    QLabel* m_elementTextHeader = nullptr;
+    QSpacerItem* m_elementTextHeaderGap = nullptr;
+    QSpacerItem* m_elementTextSpacer = nullptr;
+    QCheckBox* m_textColorCheck = nullptr;
+    QLabel* m_textColorBox = nullptr;
+    QWidget* m_textColorRow = nullptr;
+    
     class ResizableMediaBase* m_mediaItem = nullptr; // not owning
 };

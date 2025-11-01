@@ -16,11 +16,13 @@
 #include <QSizePolicy>
 #include <QSignalBlocker>
 #include <QSpacerItem>
+#include <QColorDialog>
 #include <algorithm>
 #include <cmath>
 #include <initializer_list>
 #include <utility>
 #include "backend/domain/media/MediaItems.h" // for ResizableMediaBase
+#include "backend/domain/media/TextMediaItem.h"
 
 namespace {
 
@@ -675,6 +677,40 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         h->addStretch();
         m_elementPropertiesLayout->addWidget(m_audioFadeOutRow);
     }
+
+    // Text section (text media only)
+    {
+        QSpacerItem* gap = nullptr;
+        auto [spacer, header] = addElementSectionHeader("Text", gap);
+        m_elementTextSpacer = spacer;
+        m_elementTextHeader = header;
+        m_elementTextHeaderGap = gap;
+    }
+
+    // Text color (text only)
+    {
+        m_textColorRow = new QWidget(m_elementPropertiesContainer);
+        configureRow(m_textColorRow);
+    auto* h = new QHBoxLayout(m_textColorRow);
+    configureRowLayout(h);
+        m_textColorCheck = new QCheckBox("Text color: ", m_textColorRow);
+        m_textColorCheck->setStyleSheet(overlayTextStyle);
+        m_textColorCheck->installEventFilter(this);
+    m_textColorBox = makeValueBox(QStringLiteral("#FFFFFFFF"));
+        // Make the color box clickable
+        m_textColorBox->installEventFilter(this);
+        m_textColorBox->setMinimumWidth(40);
+        m_textColorBox->setMaximumWidth(40);
+    const QString defaultTextColor = TextMediaDefaults::TEXT_COLOR.name(QColor::HexArgb).toUpper();
+    m_textColorBox->setText(defaultTextColor);
+    m_textColorBox->setEnabled(false);
+    refreshTextColorBoxStyle(false);
+        h->addWidget(m_textColorCheck);
+        h->addWidget(m_textColorBox);
+        h->addStretch();
+        QObject::connect(m_textColorCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onTextColorToggled);
+        m_elementPropertiesLayout->addWidget(m_textColorRow);
+    }
     
     // Configure widget dimensions and event handling
     m_widget->setMouseTracking(true);
@@ -880,6 +916,8 @@ void MediaSettingsPanel::updateSectionHeaderVisibility() {
                   {m_autoPlayRow, m_playDelayRow, m_pauseDelayRow, m_repeatRow});
     updateSection(m_elementAudioHeader, m_elementAudioSpacer, m_elementAudioHeaderGap,
                   {m_volumeRow, m_audioFadeInRow, m_audioFadeOutRow});
+    updateSection(m_elementTextHeader, m_elementTextSpacer, m_elementTextHeaderGap,
+                  {m_textColorRow});
 
     if (m_sceneImageHeader) {
         m_sceneImageHeader->setVisible(true);
@@ -1014,6 +1052,50 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
     }
 }
 
+void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
+    // Show/hide text-only section
+    if (m_textColorRow) {
+        m_textColorRow->setVisible(isTextMedia);
+    }
+    
+    // Reset text color checkbox when switching away from text
+    if (!isTextMedia && m_textColorCheck) {
+        const bool prev = m_textColorCheck->blockSignals(true);
+        m_textColorCheck->setChecked(false);
+        m_textColorCheck->blockSignals(prev);
+    }
+
+    if (m_textColorBox) {
+        if (isTextMedia && m_textColorCheck) {
+            m_textColorBox->setEnabled(m_textColorCheck->isChecked());
+        } else {
+            m_textColorBox->setEnabled(false);
+            m_textColorBox->setText(TextMediaDefaults::TEXT_COLOR.name(QColor::HexArgb));
+        }
+        refreshTextColorBoxStyle(m_activeBox == m_textColorBox);
+    }
+    
+    // Clear active box if it belongs to text section
+    if (!isTextMedia && m_activeBox == m_textColorBox) {
+        clearActiveBox();
+    }
+    
+    // Force layout recalculation
+    updateSectionHeaderVisibility();
+    
+    if (m_elementPropertiesLayout) {
+        m_elementPropertiesLayout->invalidate();
+        m_elementPropertiesLayout->activate();
+    }
+    
+    if (m_innerContent) {
+        m_innerContent->ensurePolished();
+    }
+    if (m_widget) {
+        m_widget->ensurePolished();
+    }
+}
+
 void MediaSettingsPanel::updatePosition() {
     if (!m_widget) return;
     
@@ -1105,35 +1187,104 @@ void MediaSettingsPanel::setAnchorMargins(int left, int top, int bottom) {
 void MediaSettingsPanel::setBoxActive(QLabel* box, bool active) {
     if (!box) return;
 
+    if (box == m_textColorBox) {
+        refreshTextColorBoxStyle(active);
+        return;
+    }
+
     if (active) {
         box->setStyleSheet(
             QString("QLabel {"
-            "  background-color: %1;"
-            "  border: 1px solid %1;"
-            "  border-radius: 6px;"
-            "  padding: 2px 10px;"
-            "  margin-left: 4px;"
-            "  margin-right: 0px;"
-            "  color: white;"
-            "  min-height: %2px;"
-            "  max-height: %2px;"
-            "}").arg(AppColors::gMediaPanelActiveBg.name()).arg(kOptionValueBoxHeight)
+                    "  background-color: %1;"
+                    "  border: 1px solid %1;"
+                    "  border-radius: 6px;"
+                    "  padding: 2px 10px;"
+                    "  margin-left: 4px;"
+                    "  margin-right: 0px;"
+                    "  color: white;"
+                    "  min-height: %2px;"
+                    "  max-height: %2px;"
+                    "}").arg(AppColors::gMediaPanelActiveBg.name()).arg(kOptionValueBoxHeight)
         );
     } else {
         box->setStyleSheet(
             QString("QLabel {"
-            "  background-color: %1;"
-            "  border: 1px solid %2;"
-            "  border-radius: 6px;"
-            "  padding: 2px 10px;"
-            "  margin-left: 4px;"
-            "  margin-right: 0px;"
-            "  color: white;"
-            "  min-height: %3px;"
-            "  max-height: %3px;"
-            "}").arg(AppColors::gMediaPanelInactiveBg.name()).arg(AppColors::gMediaPanelInactiveBorder.name()).arg(kOptionValueBoxHeight)
+                    "  background-color: %1;"
+                    "  border: 1px solid %2;"
+                    "  border-radius: 6px;"
+                    "  padding: 2px 10px;"
+                    "  margin-left: 4px;"
+                    "  margin-right: 0px;"
+                    "  color: white;"
+                    "  min-height: %3px;"
+                    "  max-height: %3px;"
+                    "}").arg(AppColors::gMediaPanelInactiveBg.name()).arg(AppColors::gMediaPanelInactiveBorder.name()).arg(kOptionValueBoxHeight)
         );
     }
+}
+
+void MediaSettingsPanel::refreshTextColorBoxStyle(bool activeHighlight) {
+    if (!m_textColorBox) {
+        return;
+    }
+
+    QString rawValue = m_textColorBox->text().trimmed();
+    if (rawValue.isEmpty()) {
+        rawValue = TextMediaDefaults::TEXT_COLOR.name(QColor::HexArgb);
+    }
+
+    QColor color(rawValue);
+    if (!color.isValid()) {
+        color = TextMediaDefaults::TEXT_COLOR;
+    }
+
+    const QString canonicalValue = color.name(QColor::HexArgb).toUpper();
+    if (canonicalValue != m_textColorBox->text()) {
+        m_textColorBox->setText(canonicalValue);
+    }
+    m_textColorBox->setToolTip(canonicalValue);
+
+    auto blendColors = [](const QColor& fg, const QColor& bg, qreal ratio) {
+        ratio = std::clamp(ratio, 0.0, 1.0);
+        const qreal inv = 1.0 - ratio;
+        QColor result;
+        result.setRgbF(
+            fg.redF() * ratio + bg.redF() * inv,
+            fg.greenF() * ratio + bg.greenF() * inv,
+            fg.blueF() * ratio + bg.blueF() * inv,
+            fg.alphaF() * ratio + bg.alphaF() * inv
+        );
+        return result;
+    };
+
+    const QColor borderColor = activeHighlight ? AppColors::gMediaPanelActiveBg : AppColors::gMediaPanelInactiveBorder;
+
+    const QString style = QString(
+        "QLabel {"
+        "  background-color: %1;"
+        "  border: 1px solid %2;"
+        "  border-radius: 6px;"
+        "  padding: 2px 10px;"
+        "  margin-left: 4px;"
+        "  margin-right: 0px;"
+        "  color: transparent;"
+        "  font-size: 0px;"
+        "  min-height: %3px;"
+        "  max-height: %3px;"
+        "}"
+        "QLabel:disabled {"
+        "  background-color: %1;"
+        "  border: 1px solid %2;"
+        "  color: transparent;"
+        "  font-size: 0px;"
+        "}"
+    ).arg(
+        canonicalValue,
+        borderColor.name(),
+        QString::number(kOptionValueBoxHeight)
+    );
+
+    m_textColorBox->setStyleSheet(style);
 }
 
 void MediaSettingsPanel::clearActiveBox() {
@@ -1170,6 +1321,16 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
     // Handle clicks on value boxes FIRST (before general mouse blocking)
     if (event->type() == QEvent::MouseButtonPress) {
         QLabel* box = qobject_cast<QLabel*>(obj);
+    
+        // Special handling for text color box - opens color picker instead of editing
+        if (box == m_textColorBox) {
+            if (!box->isEnabled()) {
+                return true; // consume the event without opening the picker
+            }
+            onTextColorBoxClicked();
+            return true; // consume the event
+        }
+    
     if (box && (box == m_displayAfterBox || box == m_unmuteDelayBox || box == m_autoPlayBox || box == m_pauseDelayBox || box == m_repeatBox || 
         box == m_fadeInBox || box == m_fadeOutBox || box == m_audioFadeInBox || box == m_audioFadeOutBox || box == m_hideDelayBox || box == m_muteDelayBox || box == m_opacityBox || box == m_volumeBox)) {
             // Don't allow interaction with disabled boxes
@@ -1456,6 +1617,48 @@ void MediaSettingsPanel::applyVolumeFromUi() {
 
     if (!m_volumeCheck || !m_volumeBox) return;
     pushSettingsToMedia();
+}
+
+void MediaSettingsPanel::onTextColorToggled(bool checked) {
+    if (m_textColorBox) {
+        m_textColorBox->setEnabled(checked);
+        refreshTextColorBoxStyle(m_activeBox == m_textColorBox);
+    }
+    if (!m_updatingFromMedia) {
+        pushSettingsToMedia();
+    }
+}
+
+void MediaSettingsPanel::onTextColorBoxClicked() {
+    if (!m_textColorBox || !m_mediaItem) return;
+    
+    // Get current color from the text box
+    QString currentColorStr = m_textColorBox->text().trimmed();
+    QColor currentColor(currentColorStr.isEmpty() ? "#FFFFFF" : currentColorStr);
+    if (!currentColor.isValid()) {
+        currentColor = QColor(Qt::white);
+    }
+    
+    // Open native OS color picker dialog
+    QColor newColor = QColorDialog::getColor(
+        currentColor,
+        m_widget,
+        tr("Select Text Color"),
+        QColorDialog::ShowAlphaChannel
+    );
+    
+    // If user didn't cancel and chose a valid color
+    if (newColor.isValid()) {
+        // Update the text box with the new color (hex format with alpha)
+        QString colorStr = newColor.name(QColor::HexArgb);
+        m_textColorBox->setText(colorStr);
+        refreshTextColorBoxStyle(m_activeBox == m_textColorBox);
+        
+        // Apply to media item
+        if (!m_updatingFromMedia) {
+            pushSettingsToMedia();
+        }
+    }
 }
 
 double MediaSettingsPanel::fadeInSeconds() const {
@@ -1823,6 +2026,15 @@ void MediaSettingsPanel::setMediaItem(ResizableMediaBase* item) {
         return;
     }
     m_mediaItem = item;
+    
+    // Detect media type and update section visibility
+    if (m_mediaItem) {
+        bool isVideo = dynamic_cast<ResizableVideoItem*>(m_mediaItem) != nullptr;
+        bool isText = dynamic_cast<TextMediaItem*>(m_mediaItem) != nullptr;
+        setMediaType(isVideo);
+        updateTextSectionVisibility(isText);
+    }
+    
     pullSettingsFromMedia();
 }
 
@@ -1913,6 +2125,28 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     applyBoxText(m_opacityBox, state.opacityText, QStringLiteral("100"));
     applyBoxText(m_volumeBox, state.volumeText, QStringLiteral("100"));
     applyBoxText(m_unmuteDelayBox, state.unmuteDelayText, QStringLiteral("1"), true);
+    
+    // Apply text color for TextMediaItem
+    auto* textItem = dynamic_cast<TextMediaItem*>(m_mediaItem);
+    if (textItem && m_textColorCheck && m_textColorBox) {
+        const QColor currentColor = textItem->textColor();
+        const QString colorStr = currentColor.name(QColor::HexArgb);
+        applyBoxText(m_textColorBox, colorStr, QStringLiteral("#FFFFFFFF"));
+
+        const bool colorOverridden = (currentColor != TextMediaDefaults::TEXT_COLOR);
+        applyCheckState(m_textColorCheck, colorOverridden);
+        m_textColorBox->setEnabled(colorOverridden);
+        refreshTextColorBoxStyle(m_activeBox == m_textColorBox);
+    } else if (m_textColorBox) {
+        if (m_textColorCheck) {
+            const bool prev = m_textColorCheck->blockSignals(true);
+            m_textColorCheck->setChecked(false);
+            m_textColorCheck->blockSignals(prev);
+        }
+        m_textColorBox->setEnabled(false);
+        m_textColorBox->setText(TextMediaDefaults::TEXT_COLOR.name(QColor::HexArgb));
+        refreshTextColorBoxStyle(false);
+    }
 
     // Re-run UI interlock logic without persisting back to the media item
     onDisplayAutomaticallyToggled(m_displayAfterCheck ? m_displayAfterCheck->isChecked() : false);
@@ -1923,6 +2157,7 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     onHideDelayToggled(m_hideDelayCheck ? m_hideDelayCheck->isChecked() : false);
     onMuteDelayToggled(m_muteDelayCheck ? m_muteDelayCheck->isChecked() : false);
     onPauseDelayToggled(m_pauseDelayCheck ? m_pauseDelayCheck->isChecked() : false);
+    onTextColorToggled(m_textColorCheck ? m_textColorCheck->isChecked() : false);
 
     m_updatingFromMedia = false;
 
@@ -2064,6 +2299,21 @@ void MediaSettingsPanel::pushSettingsToMedia() {
     state.muteWhenVideoEnds = m_muteWhenVideoEndsCheck && m_muteWhenVideoEndsCheck->isChecked();
 
     m_mediaItem->setMediaSettingsState(state);
+    
+    // Apply text color if this is a text media item and color override is enabled
+    auto* textItem = dynamic_cast<TextMediaItem*>(m_mediaItem);
+    if (textItem && m_textColorCheck && m_textColorBox) {
+        if (m_textColorCheck->isChecked()) {
+            QString colorStr = m_textColorBox->text().trimmed();
+            QColor color(colorStr);
+            if (color.isValid()) {
+                textItem->setTextColor(color);
+            }
+        } else {
+            // Reset to default color when disabled
+            textItem->setTextColor(TextMediaDefaults::TEXT_COLOR);
+        }
+    }
 }
 
 void MediaSettingsPanel::updateActiveTabUi() {
