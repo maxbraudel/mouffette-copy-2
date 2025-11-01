@@ -15,5 +15,11 @@
     <file>icons/visibility-off.svg</file>
     <file>icons/tools/selection-tool.svg</file>
     <file>icons/tools/text-tool.svg</file>
+    <file>icons/text/horizontal-align-left.svg</file>
+    <file>icons/text/horizontal-align-center.svg</file>
+    <file>icons/text/horizontal-align-right.svg</file>
+    <file>icons/text/vertical-align-top.svg</file>
+    <file>icons/text/vertical-align-center.svg</file>
+    <file>icons/text/vertical-align-bottom.svg</file>
     </qresource>
 </RCC>

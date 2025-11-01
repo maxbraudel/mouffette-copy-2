@@ -9,8 +9,10 @@
 #include <QPointF>
 
 class QGraphicsTextItem;
-
+class QGraphicsRectItem;
+class QGraphicsSvgItem;
 class QGraphicsSceneMouseEvent;
+class RoundedRectItem;
 
 // Global configuration namespace for text media defaults
 namespace TextMediaDefaults {
@@ -70,6 +72,9 @@ public:
     
     // Override to indicate this is text media
     bool isTextMedia() const override { return true; }
+    
+    // Alignment controls interaction (called by canvas, similar to video controls)
+    bool handleAlignmentControlsPressAtItemPos(const QPointF& itemPos);
 
 protected:
     void onInteractiveGeometryChanged() override;
@@ -105,6 +110,33 @@ private:
     qreal m_uniformScaleFactor = 1.0;
     qreal m_lastObservedScale = 1.0;
     
+    // Alignment controls (scene items, similar to video controls)
+    QGraphicsRectItem* m_alignmentControlsBg = nullptr;
+    class SegmentedButtonItem* m_alignLeftBtn = nullptr;
+    class SegmentedButtonItem* m_alignCenterHBtn = nullptr;
+    class SegmentedButtonItem* m_alignRightBtn = nullptr;
+    class SegmentedButtonItem* m_alignTopBtn = nullptr;
+    class SegmentedButtonItem* m_alignCenterVBtn = nullptr;
+    class SegmentedButtonItem* m_alignBottomBtn = nullptr;
+    QGraphicsRectItem* m_hDivider1 = nullptr;  // Divider between left and center-h
+    QGraphicsRectItem* m_hDivider2 = nullptr;  // Divider between center-h and right
+    QGraphicsRectItem* m_vDivider1 = nullptr;  // Divider between top and center-v
+    QGraphicsRectItem* m_vDivider2 = nullptr;  // Divider between center-v and bottom
+    QGraphicsSvgItem* m_alignLeftIcon = nullptr;
+    QGraphicsSvgItem* m_alignCenterHIcon = nullptr;
+    QGraphicsSvgItem* m_alignRightIcon = nullptr;
+    QGraphicsSvgItem* m_alignTopIcon = nullptr;
+    QGraphicsSvgItem* m_alignCenterVIcon = nullptr;
+    QGraphicsSvgItem* m_alignBottomIcon = nullptr;
+    
+    // Button hit test rectangles in item coordinates (similar to video controls)
+    QRectF m_alignLeftBtnRect;
+    QRectF m_alignCenterHBtnRect;
+    QRectF m_alignRightBtnRect;
+    QRectF m_alignTopBtnRect;
+    QRectF m_alignCenterVBtnRect;
+    QRectF m_alignBottomBtnRect;
+    
     void ensureInlineEditor();
     void updateInlineEditorGeometry();
     void finishInlineEditing(bool commitChanges);
@@ -113,4 +145,6 @@ private:
     void handleInlineEditorTextChanged(const QString& newText);
     const QString& textForRendering() const;
     void renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor);
+    void ensureAlignmentControls();
+    void updateAlignmentControlsLayout();
 };

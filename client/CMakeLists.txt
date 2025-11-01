@@ -175,6 +175,7 @@ set(HEADERS
     src/frontend/rendering/canvas/ScreenCanvas.h
     src/frontend/rendering/canvas/OverlayPanels.h
     src/frontend/rendering/canvas/RoundedRectItem.h
+    src/frontend/rendering/canvas/SegmentedButtonItem.h
     
     # Rendering - Remote
     src/frontend/rendering/remote/RemoteSceneController.h

@@ -23,6 +23,11 @@
 #include <QClipboard>
 #include <QApplication>
 #include <QImage>
+#include <QGraphicsRectItem>
+#include <QGraphicsSvgItem>
+#include "frontend/rendering/canvas/OverlayPanels.h"
+#include "frontend/rendering/canvas/SegmentedButtonItem.h"
+#include "frontend/ui/theme/AppColors.h"
 #include <QObject>
 #include <QScopedValueRollback>
 #include <QTimer>
@@ -552,6 +557,9 @@ TextMediaItem::TextMediaItem(
     m_editorRenderingText = m_text;
     m_uniformScaleFactor = scale();
     m_lastObservedScale = scale();
+    
+    // Create alignment controls (will be shown when selected)
+    ensureAlignmentControls();
 }
 
 void TextMediaItem::setText(const QString& text) {
@@ -1229,7 +1237,380 @@ QVariant TextMediaItem::itemChange(GraphicsItemChange change, const QVariant& va
         change == ItemSelectedChange ||
         change == ItemSelectedHasChanged) {
         updateInlineEditorGeometry();
+        updateAlignmentControlsLayout();
     }
 
     return result;
+}
+
+void TextMediaItem::ensureAlignmentControls() {
+    if (m_alignmentControlsBg) return;
+    
+    // Create background container for all alignment controls
+    m_alignmentControlsBg = new QGraphicsRectItem();
+    m_alignmentControlsBg->setPen(Qt::NoPen);
+    m_alignmentControlsBg->setBrush(Qt::NoBrush);
+    m_alignmentControlsBg->setZValue(12000.0); // Same z-value as video controls
+    m_alignmentControlsBg->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    m_alignmentControlsBg->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
+    m_alignmentControlsBg->setAcceptedMouseButtons(Qt::NoButton);
+    m_alignmentControlsBg->setOpacity(1.0);
+    m_alignmentControlsBg->setData(0, "overlay"); // Mark as overlay so canvas doesn't deselect on click
+    if (scene()) scene()->addItem(m_alignmentControlsBg);
+    
+    // Helper lambda to apply segmented border styling
+    auto applySegmentBorder = [](SegmentedButtonItem* item) {
+        if (item) {
+            QPen borderPen(AppColors::gOverlayBorderColor, 1);
+            // Left segment has border on all sides except right
+            // Middle segment has border on top and bottom only
+            // Right segment has border on all sides except left
+            if (item->segment() == SegmentedButtonItem::Segment::Left) {
+                borderPen.setStyle(Qt::SolidLine);
+            } else if (item->segment() == SegmentedButtonItem::Segment::Middle) {
+                borderPen.setStyle(Qt::SolidLine);
+            } else { // Right
+                borderPen.setStyle(Qt::SolidLine);
+            }
+            item->setPen(borderPen);
+        }
+    };
+    
+    // Helper lambda to create divider
+    auto makeDivider = [this](QGraphicsItem* parent) {
+        auto* divider = new QGraphicsRectItem(parent);
+        divider->setPen(Qt::NoPen);
+        divider->setBrush(AppColors::gOverlayBorderColor);
+        divider->setZValue(12001.5); // Between buttons and icons
+        divider->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+        divider->setAcceptedMouseButtons(Qt::NoButton);
+        return divider;
+    };
+    
+    // Helper lambda to create SVG icon
+    auto makeSvg = [](const char* path, QGraphicsItem* parent) {
+        auto* svg = new QGraphicsSvgItem(path, parent);
+        svg->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
+        svg->setZValue(12002.0);
+        svg->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+        svg->setAcceptedMouseButtons(Qt::NoButton);
+        return svg;
+    };
+    
+    // Create horizontal alignment buttons (fused group: left | center | right)
+    m_alignLeftBtn = new SegmentedButtonItem(SegmentedButtonItem::Segment::Left, m_alignmentControlsBg);
+    m_alignLeftBtn->setBrush(AppColors::gOverlayActiveBackgroundColor); // Default active
+    m_alignLeftBtn->setZValue(12001.0);
+    m_alignLeftBtn->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    m_alignLeftBtn->setAcceptedMouseButtons(Qt::NoButton);
+    m_alignLeftBtn->setData(0, "overlay"); // Mark as overlay
+    applySegmentBorder(m_alignLeftBtn);
+    m_alignLeftIcon = makeSvg(":/icons/icons/text/horizontal-align-left.svg", m_alignLeftBtn);
+    
+    m_hDivider1 = makeDivider(m_alignmentControlsBg);
+    
+    m_alignCenterHBtn = new SegmentedButtonItem(SegmentedButtonItem::Segment::Middle, m_alignmentControlsBg);
+    m_alignCenterHBtn->setBrush(AppColors::gOverlayBackgroundColor);
+    m_alignCenterHBtn->setZValue(12001.0);
+    m_alignCenterHBtn->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    m_alignCenterHBtn->setAcceptedMouseButtons(Qt::NoButton);
+    m_alignCenterHBtn->setData(0, "overlay"); // Mark as overlay
+    applySegmentBorder(m_alignCenterHBtn);
+    m_alignCenterHIcon = makeSvg(":/icons/icons/text/horizontal-align-center.svg", m_alignCenterHBtn);
+    
+    m_hDivider2 = makeDivider(m_alignmentControlsBg);
+    
+    m_alignRightBtn = new SegmentedButtonItem(SegmentedButtonItem::Segment::Right, m_alignmentControlsBg);
+    m_alignRightBtn->setBrush(AppColors::gOverlayBackgroundColor);
+    m_alignRightBtn->setZValue(12001.0);
+    m_alignRightBtn->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    m_alignRightBtn->setAcceptedMouseButtons(Qt::NoButton);
+    m_alignRightBtn->setData(0, "overlay"); // Mark as overlay
+    applySegmentBorder(m_alignRightBtn);
+    m_alignRightIcon = makeSvg(":/icons/icons/text/horizontal-align-right.svg", m_alignRightBtn);
+    
+    // Create vertical alignment buttons (fused group: top | center | bottom)
+    m_alignTopBtn = new SegmentedButtonItem(SegmentedButtonItem::Segment::Left, m_alignmentControlsBg);
+    m_alignTopBtn->setBrush(AppColors::gOverlayActiveBackgroundColor); // Default active
+    m_alignTopBtn->setZValue(12001.0);
+    m_alignTopBtn->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    m_alignTopBtn->setAcceptedMouseButtons(Qt::NoButton);
+    m_alignTopBtn->setData(0, "overlay"); // Mark as overlay
+    applySegmentBorder(m_alignTopBtn);
+    m_alignTopIcon = makeSvg(":/icons/icons/text/vertical-align-top.svg", m_alignTopBtn);
+    
+    m_vDivider1 = makeDivider(m_alignmentControlsBg);
+    
+    m_alignCenterVBtn = new SegmentedButtonItem(SegmentedButtonItem::Segment::Middle, m_alignmentControlsBg);
+    m_alignCenterVBtn->setBrush(AppColors::gOverlayBackgroundColor);
+    m_alignCenterVBtn->setZValue(12001.0);
+    m_alignCenterVBtn->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    m_alignCenterVBtn->setAcceptedMouseButtons(Qt::NoButton);
+    m_alignCenterVBtn->setData(0, "overlay"); // Mark as overlay
+    applySegmentBorder(m_alignCenterVBtn);
+    m_alignCenterVIcon = makeSvg(":/icons/icons/text/vertical-align-center.svg", m_alignCenterVBtn);
+    
+    m_vDivider2 = makeDivider(m_alignmentControlsBg);
+    
+    m_alignBottomBtn = new SegmentedButtonItem(SegmentedButtonItem::Segment::Right, m_alignmentControlsBg);
+    m_alignBottomBtn->setBrush(AppColors::gOverlayBackgroundColor);
+    m_alignBottomBtn->setZValue(12001.0);
+    m_alignBottomBtn->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    m_alignBottomBtn->setAcceptedMouseButtons(Qt::NoButton);
+    m_alignBottomBtn->setData(0, "overlay"); // Mark as overlay
+    applySegmentBorder(m_alignBottomBtn);
+    m_alignBottomIcon = makeSvg(":/icons/icons/text/vertical-align-bottom.svg", m_alignBottomBtn);
+    
+    // Initially hide controls (they'll show when item is selected)
+    m_alignmentControlsBg->setVisible(false);
+}
+
+void TextMediaItem::updateAlignmentControlsLayout() {
+    ensureAlignmentControls();
+    if (!m_alignmentControlsBg || !scene()) return;
+    
+    // Ensure controls are added to the scene if they haven't been yet
+    if (m_alignmentControlsBg->scene() != scene()) {
+        scene()->addItem(m_alignmentControlsBg);
+    }
+    
+    // Only show controls when this text item is selected
+    const bool shouldShow = isSelected();
+    m_alignmentControlsBg->setVisible(shouldShow);
+    
+    if (!shouldShow) return;
+    
+    // Get current view to access viewport transform
+    QGraphicsView* view = nullptr;
+    if (scene() && !scene()->views().isEmpty()) {
+        view = scene()->views().first();
+    }
+    if (!view) return;
+    
+    // Button sizing (same as video controls)
+    const int cornerRadiusPx = ResizableMediaBase::getCornerRadiusOfMediaOverlaysPx();
+    int buttonSize = ResizableMediaBase::getHeightOfMediaOverlaysPx();
+    if (buttonSize <= 0) buttonSize = 36;
+    buttonSize = std::max(buttonSize, 24);
+    
+    const int gapPx = 8; // Gap between text item and controls
+    const int buttonGap = 2; // Gap between button groups
+    
+    // Icon size (60% of button size)
+    int iconSize = static_cast<int>(std::round(buttonSize * 0.6));
+    const int maxIcon = std::max(16, buttonSize - 4);
+    iconSize = std::clamp(iconSize, 16, maxIcon);
+    
+    // Calculate total width: 3 buttons + gap + 3 buttons
+    const int totalWidth = (buttonSize * 3) + buttonGap + (buttonSize * 3);
+    const int totalHeight = buttonSize;
+    
+    // Get bottom center of text item in item coordinates
+    const QSize textSize = baseSizePx();
+    const qreal textWidth = static_cast<qreal>(textSize.width());
+    const qreal textHeight = static_cast<qreal>(textSize.height());
+    QPointF bottomCenterItem(textWidth / 2.0, textHeight);
+    
+    // Convert to scene coordinates
+    QPointF bottomCenterScene = mapToScene(bottomCenterItem);
+    
+    // Convert to viewport coordinates
+    QPointF bottomCenterView = view->viewportTransform().map(bottomCenterScene);
+    
+    // Position controls centered horizontally, with gap below the text item
+    QPointF controlsTopLeftView = bottomCenterView + QPointF(-totalWidth / 2.0, gapPx);
+    
+    // Convert back to scene coordinates
+    QPointF controlsTopLeftScene = view->viewportTransform().inverted().map(controlsTopLeftView);
+    
+    // Set background rect
+    m_alignmentControlsBg->setRect(0, 0, totalWidth, totalHeight);
+    m_alignmentControlsBg->setPos(controlsTopLeftScene);
+    
+    // Position horizontal alignment buttons (left group)
+    int xOffset = 0;
+    
+    m_alignLeftBtn->setRect(0, 0, buttonSize, buttonSize);
+    m_alignLeftBtn->setPos(xOffset, 0);
+    m_alignLeftBtn->setRadius(cornerRadiusPx);
+    qreal iconOffsetX = (buttonSize - iconSize) / 2.0;
+    qreal iconOffsetY = (buttonSize - iconSize) / 2.0;
+    m_alignLeftIcon->setPos(iconOffsetX, iconOffsetY);
+    QRectF iconBounds = m_alignLeftIcon->boundingRect();
+    if (iconBounds.width() > 0 && iconBounds.height() > 0) {
+        qreal scaleX = iconSize / iconBounds.width();
+        qreal scaleY = iconSize / iconBounds.height();
+        qreal iconScale = std::min(scaleX, scaleY);
+        m_alignLeftIcon->setScale(iconScale);
+    }
+    xOffset += buttonSize;
+    
+    m_alignCenterHBtn->setRect(0, 0, buttonSize, buttonSize);
+    m_alignCenterHBtn->setPos(xOffset, 0);
+    m_alignCenterHBtn->setRadius(cornerRadiusPx);
+    m_alignCenterHIcon->setPos(iconOffsetX, iconOffsetY);
+    iconBounds = m_alignCenterHIcon->boundingRect();
+    if (iconBounds.width() > 0 && iconBounds.height() > 0) {
+        qreal scaleX = iconSize / iconBounds.width();
+        qreal scaleY = iconSize / iconBounds.height();
+        qreal iconScale = std::min(scaleX, scaleY);
+        m_alignCenterHIcon->setScale(iconScale);
+    }
+    xOffset += buttonSize;
+    
+    m_alignRightBtn->setRect(0, 0, buttonSize, buttonSize);
+    m_alignRightBtn->setPos(xOffset, 0);
+    m_alignRightBtn->setRadius(cornerRadiusPx);
+    m_alignRightIcon->setPos(iconOffsetX, iconOffsetY);
+    iconBounds = m_alignRightIcon->boundingRect();
+    if (iconBounds.width() > 0 && iconBounds.height() > 0) {
+        qreal scaleX = iconSize / iconBounds.width();
+        qreal scaleY = iconSize / iconBounds.height();
+        qreal iconScale = std::min(scaleX, scaleY);
+        m_alignRightIcon->setScale(iconScale);
+    }
+    xOffset += buttonSize + buttonGap;
+    
+    // Position vertical alignment buttons (right group)
+    m_alignTopBtn->setRect(0, 0, buttonSize, buttonSize);
+    m_alignTopBtn->setPos(xOffset, 0);
+    m_alignTopBtn->setRadius(cornerRadiusPx);
+    m_alignTopIcon->setPos(iconOffsetX, iconOffsetY);
+    iconBounds = m_alignTopIcon->boundingRect();
+    if (iconBounds.width() > 0 && iconBounds.height() > 0) {
+        qreal scaleX = iconSize / iconBounds.width();
+        qreal scaleY = iconSize / iconBounds.height();
+        qreal iconScale = std::min(scaleX, scaleY);
+        m_alignTopIcon->setScale(iconScale);
+    }
+    xOffset += buttonSize;
+    
+    m_alignCenterVBtn->setRect(0, 0, buttonSize, buttonSize);
+    m_alignCenterVBtn->setPos(xOffset, 0);
+    m_alignCenterVBtn->setRadius(cornerRadiusPx);
+    m_alignCenterVIcon->setPos(iconOffsetX, iconOffsetY);
+    iconBounds = m_alignCenterVIcon->boundingRect();
+    if (iconBounds.width() > 0 && iconBounds.height() > 0) {
+        qreal scaleX = iconSize / iconBounds.width();
+        qreal scaleY = iconSize / iconBounds.height();
+        qreal iconScale = std::min(scaleX, scaleY);
+        m_alignCenterVIcon->setScale(iconScale);
+    }
+    xOffset += buttonSize;
+    
+    m_alignBottomBtn->setRect(0, 0, buttonSize, buttonSize);
+    m_alignBottomBtn->setPos(xOffset, 0);
+    m_alignBottomBtn->setRadius(cornerRadiusPx);
+    m_alignBottomIcon->setPos(iconOffsetX, iconOffsetY);
+    iconBounds = m_alignBottomIcon->boundingRect();
+    if (iconBounds.width() > 0 && iconBounds.height() > 0) {
+        qreal scaleX = iconSize / iconBounds.width();
+        qreal scaleY = iconSize / iconBounds.height();
+        qreal iconScale = std::min(scaleX, scaleY);
+        m_alignBottomIcon->setScale(iconScale);
+    }
+    
+    // Calculate button hit test rectangles in item coordinates
+    // The controls background is positioned in scene coordinates, and buttons are relative to it
+    // We need to map from the controls background to this item's coordinate system
+    QPointF bgPosInScene = m_alignmentControlsBg->pos();
+    QPointF bgPosInItem = mapFromScene(bgPosInScene);
+    
+    // Calculate each button's rectangle in item coordinates
+    QPointF leftBtnPosInBg = m_alignLeftBtn->pos();
+    m_alignLeftBtnRect = QRectF(bgPosInItem + leftBtnPosInBg, QSizeF(buttonSize, buttonSize));
+    
+    QPointF centerHBtnPosInBg = m_alignCenterHBtn->pos();
+    m_alignCenterHBtnRect = QRectF(bgPosInItem + centerHBtnPosInBg, QSizeF(buttonSize, buttonSize));
+    
+    QPointF rightBtnPosInBg = m_alignRightBtn->pos();
+    m_alignRightBtnRect = QRectF(bgPosInItem + rightBtnPosInBg, QSizeF(buttonSize, buttonSize));
+    
+    QPointF topBtnPosInBg = m_alignTopBtn->pos();
+    m_alignTopBtnRect = QRectF(bgPosInItem + topBtnPosInBg, QSizeF(buttonSize, buttonSize));
+    
+    QPointF centerVBtnPosInBg = m_alignCenterVBtn->pos();
+    m_alignCenterVBtnRect = QRectF(bgPosInItem + centerVBtnPosInBg, QSizeF(buttonSize, buttonSize));
+    
+    QPointF bottomBtnPosInBg = m_alignBottomBtn->pos();
+    m_alignBottomBtnRect = QRectF(bgPosInItem + bottomBtnPosInBg, QSizeF(buttonSize, buttonSize));
+    
+    // Now calculate rectangles properly using the same approach as video controls
+    // Convert controlsTopLeftScene to item coordinates
+    QPointF ctrlTopLeftItem = mapFromScene(controlsTopLeftScene);
+    
+    // Convert pixel button positions to item lengths
+    const qreal buttonSizeItem = toItemLengthFromPixels(buttonSize);
+    const qreal x0Item = toItemLengthFromPixels(0); // Left button
+    const qreal x1Item = toItemLengthFromPixels(buttonSize); // Center H button
+    const qreal x2Item = toItemLengthFromPixels(buttonSize * 2); // Right button
+    const qreal x3Item = toItemLengthFromPixels((buttonSize * 3) + buttonGap); // Top button
+    const qreal x4Item = toItemLengthFromPixels((buttonSize * 4) + buttonGap); // Center V button
+    const qreal x5Item = toItemLengthFromPixels((buttonSize * 5) + buttonGap); // Bottom button
+    
+    // Calculate button rectangles in item coordinates
+    m_alignLeftBtnRect = QRectF(ctrlTopLeftItem.x() + x0Item, ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
+    m_alignCenterHBtnRect = QRectF(ctrlTopLeftItem.x() + x1Item, ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
+    m_alignRightBtnRect = QRectF(ctrlTopLeftItem.x() + x2Item, ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
+    m_alignTopBtnRect = QRectF(ctrlTopLeftItem.x() + x3Item, ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
+    m_alignCenterVBtnRect = QRectF(ctrlTopLeftItem.x() + x4Item, ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
+    m_alignBottomBtnRect = QRectF(ctrlTopLeftItem.x() + x5Item, ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
+}
+
+bool TextMediaItem::handleAlignmentControlsPressAtItemPos(const QPointF& itemPos) {
+    if (!m_alignmentControlsBg || !m_alignmentControlsBg->isVisible()) return false;
+    
+    // Check horizontal alignment buttons
+    if (m_alignLeftBtnRect.contains(itemPos)) {
+        // Set left button active, others inactive
+        m_alignLeftBtn->setBrush(AppColors::gOverlayActiveBackgroundColor);
+        m_alignCenterHBtn->setBrush(AppColors::gOverlayBackgroundColor);
+        m_alignRightBtn->setBrush(AppColors::gOverlayBackgroundColor);
+        // TODO: Apply left alignment to text rendering
+        return true;
+    }
+    if (m_alignCenterHBtnRect.contains(itemPos)) {
+        // Set center button active, others inactive
+        m_alignLeftBtn->setBrush(AppColors::gOverlayBackgroundColor);
+        m_alignCenterHBtn->setBrush(AppColors::gOverlayActiveBackgroundColor);
+        m_alignRightBtn->setBrush(AppColors::gOverlayBackgroundColor);
+        // TODO: Apply center alignment to text rendering
+        return true;
+    }
+    if (m_alignRightBtnRect.contains(itemPos)) {
+        // Set right button active, others inactive
+        m_alignLeftBtn->setBrush(AppColors::gOverlayBackgroundColor);
+        m_alignCenterHBtn->setBrush(AppColors::gOverlayBackgroundColor);
+        m_alignRightBtn->setBrush(AppColors::gOverlayActiveBackgroundColor);
+        // TODO: Apply right alignment to text rendering
+        return true;
+    }
+    
+    // Check vertical alignment buttons
+    if (m_alignTopBtnRect.contains(itemPos)) {
+        // Set top button active, others inactive
+        m_alignTopBtn->setBrush(AppColors::gOverlayActiveBackgroundColor);
+        m_alignCenterVBtn->setBrush(AppColors::gOverlayBackgroundColor);
+        m_alignBottomBtn->setBrush(AppColors::gOverlayBackgroundColor);
+        // TODO: Apply top alignment to text rendering
+        return true;
+    }
+    if (m_alignCenterVBtnRect.contains(itemPos)) {
+        // Set center V button active, others inactive
+        m_alignTopBtn->setBrush(AppColors::gOverlayBackgroundColor);
+        m_alignCenterVBtn->setBrush(AppColors::gOverlayActiveBackgroundColor);
+        m_alignBottomBtn->setBrush(AppColors::gOverlayBackgroundColor);
+        // TODO: Apply center vertical alignment to text rendering
+        return true;
+    }
+    if (m_alignBottomBtnRect.contains(itemPos)) {
+        // Set bottom button active, others inactive
+        m_alignTopBtn->setBrush(AppColors::gOverlayBackgroundColor);
+        m_alignCenterVBtn->setBrush(AppColors::gOverlayBackgroundColor);
+        m_alignBottomBtn->setBrush(AppColors::gOverlayActiveBackgroundColor);
+        // TODO: Apply bottom alignment to text rendering
+        return true;
+    }
+    
+    return false;
 }

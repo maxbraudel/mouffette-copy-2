@@ -2874,7 +2874,6 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
             const QPointF scenePosEarly = mapToScene(event->pos());
             const QList<QGraphicsItem*> selEarly = m_scene->selectedItems();
             for (QGraphicsItem* it : selEarly) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) { if (v->handleControlsPressAtItemPos(v->mapFromScene(scenePosEarly))) { m_overlayMouseDown = true; event->accept(); return; } }
-            for (QGraphicsItem* it : selEarly) if (auto* t = dynamic_cast<TextMediaItem*>(it)) { if (t->handleAlignmentControlsPressAtItemPos(t->mapFromScene(scenePosEarly))) { m_overlayMouseDown = true; event->accept(); return; } }
         }
         // Space+drag always pans
         if (spaceHeld) { m_panning = true; m_lastPanPoint = event->pos(); event->accept(); return; }
@@ -5218,6 +5217,305 @@ TextMediaItem* ScreenCanvas::createTextMediaAtPosition(const QPointF& scenePos) 
     scheduleInfoOverlayRefresh();
 
     return textItem;
+}
+
+    
+    // Horizontal alignment group
+    m_horizontalAlignmentContainer = new QWidget(m_textAlignmentContainer);
+    m_horizontalAlignmentContainer->setAttribute(Qt::WA_TranslucentBackground, true);
+    m_horizontalAlignmentContainer->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    m_horizontalAlignmentContainer->setStyleSheet("background: transparent;");
+    
+    QHBoxLayout* hLayout = new QHBoxLayout(m_horizontalAlignmentContainer);
+    hLayout->setContentsMargins(0, 0, 0, 0);
+    hLayout->setSpacing(0); // Fused segments
+    hLayout->setSizeConstraint(QLayout::SetFixedSize);
+    
+    // Create horizontal alignment buttons
+    m_alignLeftButton = new QToolButton(m_horizontalAlignmentContainer);
+    m_alignLeftButton->setIcon(QIcon(QStringLiteral(":/icons/icons/text/horizontal-align-left.svg")));
+    m_alignLeftButton->setObjectName("AlignLeftButton");
+    m_alignLeftButton->setCheckable(true);
+    m_alignLeftButton->setChecked(true); // Default
+    m_alignLeftButton->setToolTip(tr("Align Left"));
+    m_alignLeftButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    m_alignLeftButton->setAutoRaise(false);
+    m_alignLeftButton->setFocusPolicy(Qt::NoFocus);
+    m_alignLeftButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    
+    m_alignCenterHButton = new QToolButton(m_horizontalAlignmentContainer);
+    m_alignCenterHButton->setIcon(QIcon(QStringLiteral(":/icons/icons/text/horizontal-align-center.svg")));
+    m_alignCenterHButton->setObjectName("AlignCenterHButton");
+    m_alignCenterHButton->setCheckable(true);
+    m_alignCenterHButton->setChecked(false);
+    m_alignCenterHButton->setToolTip(tr("Align Center"));
+    m_alignCenterHButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    m_alignCenterHButton->setAutoRaise(false);
+    m_alignCenterHButton->setFocusPolicy(Qt::NoFocus);
+    m_alignCenterHButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    
+    m_alignRightButton = new QToolButton(m_horizontalAlignmentContainer);
+    m_alignRightButton->setIcon(QIcon(QStringLiteral(":/icons/icons/text/horizontal-align-right.svg")));
+    m_alignRightButton->setObjectName("AlignRightButton");
+    m_alignRightButton->setCheckable(true);
+    m_alignRightButton->setChecked(false);
+    m_alignRightButton->setToolTip(tr("Align Right"));
+    m_alignRightButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    m_alignRightButton->setAutoRaise(false);
+    m_alignRightButton->setFocusPolicy(Qt::NoFocus);
+    m_alignRightButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    
+    // Apply styles
+    m_alignLeftButton->setStyleSheet(createButtonStyle("AlignLeftButton", true, false));
+    m_alignCenterHButton->setStyleSheet(createButtonStyle("AlignCenterHButton", false, false));
+    m_alignRightButton->setStyleSheet(createButtonStyle("AlignRightButton", false, true));
+    
+    // Dividers for horizontal alignment
+    QFrame* hDivider1 = new QFrame(m_horizontalAlignmentContainer);
+    hDivider1->setFrameShape(QFrame::VLine);
+    hDivider1->setFixedWidth(1);
+    hDivider1->setStyleSheet(QStringLiteral("background-color: %1;").arg(borderColor));
+    
+    QFrame* hDivider2 = new QFrame(m_horizontalAlignmentContainer);
+    hDivider2->setFrameShape(QFrame::VLine);
+    hDivider2->setFixedWidth(1);
+    hDivider2->setStyleSheet(QStringLiteral("background-color: %1;").arg(borderColor));
+    
+    // Add to horizontal layout
+    hLayout->addWidget(m_alignLeftButton);
+    hLayout->addWidget(hDivider1);
+    hLayout->addWidget(m_alignCenterHButton);
+    hLayout->addWidget(hDivider2);
+    hLayout->addWidget(m_alignRightButton);
+    
+    // Vertical alignment group
+    m_verticalAlignmentContainer = new QWidget(m_textAlignmentContainer);
+    m_verticalAlignmentContainer->setAttribute(Qt::WA_TranslucentBackground, true);
+    m_verticalAlignmentContainer->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    m_verticalAlignmentContainer->setStyleSheet("background: transparent;");
+    
+    QHBoxLayout* vLayout = new QHBoxLayout(m_verticalAlignmentContainer);
+    vLayout->setContentsMargins(0, 0, 0, 0);
+    vLayout->setSpacing(0); // Fused segments
+    vLayout->setSizeConstraint(QLayout::SetFixedSize);
+    
+    // Create vertical alignment buttons
+    m_alignTopButton = new QToolButton(m_verticalAlignmentContainer);
+    m_alignTopButton->setIcon(QIcon(QStringLiteral(":/icons/icons/text/vertical-align-top.svg")));
+    m_alignTopButton->setObjectName("AlignTopButton");
+    m_alignTopButton->setCheckable(true);
+    m_alignTopButton->setChecked(true); // Default
+    m_alignTopButton->setToolTip(tr("Align Top"));
+    m_alignTopButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    m_alignTopButton->setAutoRaise(false);
+    m_alignTopButton->setFocusPolicy(Qt::NoFocus);
+    m_alignTopButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    
+    m_alignCenterVButton = new QToolButton(m_verticalAlignmentContainer);
+    m_alignCenterVButton->setIcon(QIcon(QStringLiteral(":/icons/icons/text/vertical-align-center.svg")));
+    m_alignCenterVButton->setObjectName("AlignCenterVButton");
+    m_alignCenterVButton->setCheckable(true);
+    m_alignCenterVButton->setChecked(false);
+    m_alignCenterVButton->setToolTip(tr("Align Middle"));
+    m_alignCenterVButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    m_alignCenterVButton->setAutoRaise(false);
+    m_alignCenterVButton->setFocusPolicy(Qt::NoFocus);
+    m_alignCenterVButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    
+    m_alignBottomButton = new QToolButton(m_verticalAlignmentContainer);
+    m_alignBottomButton->setIcon(QIcon(QStringLiteral(":/icons/icons/text/vertical-align-bottom.svg")));
+    m_alignBottomButton->setObjectName("AlignBottomButton");
+    m_alignBottomButton->setCheckable(true);
+    m_alignBottomButton->setChecked(false);
+    m_alignBottomButton->setToolTip(tr("Align Bottom"));
+    m_alignBottomButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    m_alignBottomButton->setAutoRaise(false);
+    m_alignBottomButton->setFocusPolicy(Qt::NoFocus);
+    m_alignBottomButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    
+    // Apply styles
+    m_alignTopButton->setStyleSheet(createButtonStyle("AlignTopButton", true, false));
+    m_alignCenterVButton->setStyleSheet(createButtonStyle("AlignCenterVButton", false, false));
+    m_alignBottomButton->setStyleSheet(createButtonStyle("AlignBottomButton", false, true));
+    
+    // Dividers for vertical alignment
+    QFrame* vDivider1 = new QFrame(m_verticalAlignmentContainer);
+    vDivider1->setFrameShape(QFrame::VLine);
+    vDivider1->setFixedWidth(1);
+    vDivider1->setStyleSheet(QStringLiteral("background-color: %1;").arg(borderColor));
+    
+    QFrame* vDivider2 = new QFrame(m_verticalAlignmentContainer);
+    vDivider2->setFrameShape(QFrame::VLine);
+    vDivider2->setFixedWidth(1);
+    vDivider2->setStyleSheet(QStringLiteral("background-color: %1;").arg(borderColor));
+    
+    // Add to vertical layout
+    vLayout->addWidget(m_alignTopButton);
+    vLayout->addWidget(vDivider1);
+    vLayout->addWidget(m_alignCenterVButton);
+    vLayout->addWidget(vDivider2);
+    vLayout->addWidget(m_alignBottomButton);
+    
+    // Add both groups to main layout
+    mainLayout->addWidget(m_horizontalAlignmentContainer);
+    mainLayout->addWidget(m_verticalAlignmentContainer);
+    
+    // Connect buttons for mutual exclusivity and functionality
+    // Horizontal alignment buttons
+    connect(m_alignLeftButton, &QToolButton::clicked, this, [this]() {
+        m_alignLeftButton->setChecked(true);
+        m_alignCenterHButton->setChecked(false);
+        m_alignRightButton->setChecked(false);
+        // TODO: Apply alignment to selected text item (backend implementation)
+    });
+    connect(m_alignCenterHButton, &QToolButton::clicked, this, [this]() {
+        m_alignLeftButton->setChecked(false);
+        m_alignCenterHButton->setChecked(true);
+        m_alignRightButton->setChecked(false);
+        // TODO: Apply alignment to selected text item (backend implementation)
+    });
+    connect(m_alignRightButton, &QToolButton::clicked, this, [this]() {
+        m_alignLeftButton->setChecked(false);
+        m_alignCenterHButton->setChecked(false);
+        m_alignRightButton->setChecked(true);
+        // TODO: Apply alignment to selected text item (backend implementation)
+    });
+    
+    // Vertical alignment buttons
+    connect(m_alignTopButton, &QToolButton::clicked, this, [this]() {
+        m_alignTopButton->setChecked(true);
+        m_alignCenterVButton->setChecked(false);
+        m_alignBottomButton->setChecked(false);
+        // TODO: Apply alignment to selected text item (backend implementation)
+    });
+    connect(m_alignCenterVButton, &QToolButton::clicked, this, [this]() {
+        m_alignTopButton->setChecked(false);
+        m_alignCenterVButton->setChecked(true);
+        m_alignBottomButton->setChecked(false);
+        // TODO: Apply alignment to selected text item (backend implementation)
+    });
+    connect(m_alignBottomButton, &QToolButton::clicked, this, [this]() {
+        m_alignTopButton->setChecked(false);
+        m_alignCenterVButton->setChecked(false);
+        m_alignBottomButton->setChecked(true);
+        // TODO: Apply alignment to selected text item (backend implementation)
+    });
+    
+    m_textAlignmentContainer->hide(); // Hidden by default
+}
+
+void ScreenCanvas::updateTextAlignmentControlsVisibility() {
+    if (!m_scene) return;
+    
+    ensureTextAlignmentControls();
+    if (!m_textAlignmentContainer) return;
+    
+    // Check if a text media item is selected
+    TextMediaItem* selectedTextItem = nullptr;
+    const QList<QGraphicsItem*> selectedItems = m_scene->selectedItems();
+    for (QGraphicsItem* item : selectedItems) {
+        if (auto* textItem = dynamic_cast<TextMediaItem*>(item)) {
+            selectedTextItem = textItem;
+            break;
+        }
+    }
+    
+    // Show controls only if a text item is selected
+    if (selectedTextItem) {
+        updateTextAlignmentControlsGeometry();
+        m_textAlignmentContainer->show();
+        m_textAlignmentContainer->raise();
+    } else {
+        m_textAlignmentContainer->hide();
+    }
+}
+
+void ScreenCanvas::updateTextAlignmentControlsGeometry() {
+    if (!viewport() || !m_textAlignmentContainer || !m_scene) return;
+    
+    ensureTextAlignmentControls();
+    if (!m_horizontalAlignmentContainer || !m_verticalAlignmentContainer) return;
+    
+    // Find selected text item
+    TextMediaItem* selectedTextItem = nullptr;
+    const QList<QGraphicsItem*> selectedItems = m_scene->selectedItems();
+    for (QGraphicsItem* item : selectedItems) {
+        if (auto* textItem = dynamic_cast<TextMediaItem*>(item)) {
+            selectedTextItem = textItem;
+            break;
+        }
+    }
+    
+    if (!selectedTextItem) return; // No text item selected, don't position
+    
+    const int gapPx = 8; // Gap below text item (matching video controls)
+    int buttonSize = ResizableMediaBase::getHeightOfMediaOverlaysPx();
+    if (buttonSize <= 0) buttonSize = 36;
+    buttonSize = std::max(buttonSize, 24);
+    buttonSize += 2; // Match settings button compensation
+    
+    int iconSize = static_cast<int>(std::round(buttonSize * 0.6));
+    const int maxIcon = std::max(16, buttonSize - 4);
+    iconSize = std::clamp(iconSize, 16, maxIcon);
+    
+    // Size all buttons
+    m_alignLeftButton->setFixedSize(buttonSize, buttonSize);
+    m_alignLeftButton->setIconSize(QSize(iconSize, iconSize));
+    m_alignCenterHButton->setFixedSize(buttonSize, buttonSize);
+    m_alignCenterHButton->setIconSize(QSize(iconSize, iconSize));
+    m_alignRightButton->setFixedSize(buttonSize, buttonSize);
+    m_alignRightButton->setIconSize(QSize(iconSize, iconSize));
+    
+    m_alignTopButton->setFixedSize(buttonSize, buttonSize);
+    m_alignTopButton->setIconSize(QSize(iconSize, iconSize));
+    m_alignCenterVButton->setFixedSize(buttonSize, buttonSize);
+    m_alignCenterVButton->setIconSize(QSize(iconSize, iconSize));
+    m_alignBottomButton->setFixedSize(buttonSize, buttonSize);
+    m_alignBottomButton->setIconSize(QSize(iconSize, iconSize));
+    
+    // Calculate container sizes
+    const int dividerWidth = 1;
+    const int hGroupWidth = (buttonSize * 3) + (dividerWidth * 2);
+    const int vGroupWidth = (buttonSize * 3) + (dividerWidth * 2);
+    m_horizontalAlignmentContainer->setFixedSize(hGroupWidth, buttonSize);
+    m_verticalAlignmentContainer->setFixedSize(vGroupWidth, buttonSize);
+    
+    // Total width includes both groups plus spacing
+    const int groupSpacing = 10;
+    const int totalWidth = hGroupWidth + groupSpacing + vGroupWidth;
+    m_textAlignmentContainer->setFixedSize(totalWidth, buttonSize);
+    
+    // Position below selected text item (similar to video controls positioning)
+    // Get bottom center of text item in item coordinates
+    const QSize textSize = selectedTextItem->baseSizePx();
+    const qreal textWidth = static_cast<qreal>(textSize.width());
+    const qreal textHeight = static_cast<qreal>(textSize.height());
+    QPointF bottomCenterItem(textWidth / 2.0, textHeight);
+    
+    // Convert to scene coordinates
+    QPointF bottomCenterScene = selectedTextItem->mapToScene(bottomCenterItem);
+    
+    // Convert to viewport coordinates
+    QPointF bottomCenterView = viewportTransform().map(bottomCenterScene);
+    
+    // Position controls centered horizontally, with gap below the text item
+    QPointF controlsTopLeftView = bottomCenterView + QPointF(-totalWidth / 2.0, gapPx);
+    
+    // Clamp to viewport bounds
+    const int margin = 8; // Minimum margin from viewport edges
+    const int viewportWidth = viewport()->width();
+    const int viewportHeight = viewport()->height();
+    
+    int xPos = static_cast<int>(std::round(controlsTopLeftView.x()));
+    int yPos = static_cast<int>(std::round(controlsTopLeftView.y()));
+    
+    // Clamp horizontal position
+    xPos = std::clamp(xPos, margin, std::max(margin, viewportWidth - totalWidth - margin));
+    
+    // Clamp vertical position
+    yPos = std::clamp(yPos, margin, std::max(margin, viewportHeight - buttonSize - margin));
+    
+    m_textAlignmentContainer->move(xPos, yPos);
 }
 
 void ScreenCanvas::updateGlobalSettingsPanelVisibility() {
