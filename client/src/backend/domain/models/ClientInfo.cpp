@@ -100,11 +100,11 @@ ClientInfo ClientInfo::fromJson(const QJsonObject& json) {
 QString ClientInfo::getDisplayText() const {
     QString platformIcon;
     if (m_platform == "macOS") {
-        platformIcon = "🍎";
+        platformIcon = "(apple)";
     } else if (m_platform == "Windows") {
-        platformIcon = "🪟";
+        platformIcon = "(windows)";
     } else if (m_platform == "Linux") {
-        platformIcon = "🐧";
+        platformIcon = "(linux)";
     } else {
         platformIcon = "💻";
     }
