@@ -57,6 +57,16 @@ public:
     void setTextColor(const QColor& color);
 
     qreal uniformScaleFactor() const { return m_uniformScaleFactor; }
+    
+    // Text alignment
+    enum class HorizontalAlignment { Left, Center, Right };
+    enum class VerticalAlignment { Top, Center, Bottom };
+    
+    HorizontalAlignment horizontalAlignment() const { return m_horizontalAlignment; }
+    void setHorizontalAlignment(HorizontalAlignment align);
+    
+    VerticalAlignment verticalAlignment() const { return m_verticalAlignment; }
+    void setVerticalAlignment(VerticalAlignment align);
 
     // Inline editing lifecycle
     bool beginInlineEditing();
@@ -110,6 +120,10 @@ private:
     qreal m_uniformScaleFactor = 1.0;
     qreal m_lastObservedScale = 1.0;
     
+    // Text alignment settings
+    HorizontalAlignment m_horizontalAlignment = HorizontalAlignment::Center;
+    VerticalAlignment m_verticalAlignment = VerticalAlignment::Center;
+    
     // Alignment controls (scene items, similar to video controls)
     QGraphicsRectItem* m_alignmentControlsBg = nullptr;
     class SegmentedButtonItem* m_alignLeftBtn = nullptr;
@@ -147,4 +161,6 @@ private:
     void renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor);
     void ensureAlignmentControls();
     void updateAlignmentControlsLayout();
+    void updateAlignmentButtonStates();
+    void applyAlignmentToEditor();
 };

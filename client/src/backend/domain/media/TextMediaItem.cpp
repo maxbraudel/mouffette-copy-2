@@ -500,7 +500,7 @@ static void normalizeTextFormatting(QGraphicsTextItem* editor, const QFont& curr
     editor->setTextCursor(restoreCursor);
 }
 
-static void applyCenterAlignment(QGraphicsTextItem* editor) {
+static void applyTextAlignment(QGraphicsTextItem* editor, Qt::Alignment alignment) {
     if (!editor) {
         return;
     }
@@ -510,11 +510,15 @@ static void applyCenterAlignment(QGraphicsTextItem* editor) {
         QTextCursor cursor(doc);
         cursor.select(QTextCursor::Document);
         QTextBlockFormat blockFormat = cursor.blockFormat();
-        blockFormat.setAlignment(Qt::AlignHCenter);
+        blockFormat.setAlignment(alignment);
         cursor.mergeBlockFormat(blockFormat);
         cursor.clearSelection();
         editor->setTextCursor(activeCursor);
     }
+}
+
+static void applyCenterAlignment(QGraphicsTextItem* editor) {
+    applyTextAlignment(editor, Qt::AlignHCenter);
 }
 
 } // anonymous namespace
@@ -618,6 +622,29 @@ void TextMediaItem::setTextColor(const QColor& color) {
     m_scaledRasterDirty = true;
 }
 
+void TextMediaItem::setHorizontalAlignment(HorizontalAlignment align) {
+    if (m_horizontalAlignment == align) return;
+    m_horizontalAlignment = align;
+    m_needsRasterization = true;
+    m_scaledRasterDirty = true;
+    applyAlignmentToEditor(); // Update inline editor alignment
+    update();
+    updateAlignmentButtonStates();
+}
+
+void TextMediaItem::setVerticalAlignment(VerticalAlignment align) {
+    if (m_verticalAlignment == align) return;
+    m_verticalAlignment = align;
+    m_needsRasterization = true;
+    m_scaledRasterDirty = true;
+    m_cachedEditorPosValid = false; // Force recalculation of editor position
+    if (m_inlineEditor) {
+        updateInlineEditorGeometry(); // Update editor position immediately
+    }
+    update();
+    updateAlignmentButtonStates();
+}
+
 void TextMediaItem::normalizeEditorFormatting() {
     if (!m_inlineEditor || !m_isEditing) {
         return;
@@ -668,7 +695,7 @@ bool TextMediaItem::beginInlineEditing() {
     if (QTextDocument* doc = m_inlineEditor->document()) {
         QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
         doc->setTextWidth(m_baseSize.width() - 2.0 * kContentPadding);
-        applyCenterAlignment(m_inlineEditor);
+        applyAlignmentToEditor(); // Apply current alignment
     }
 
     updateInlineEditorGeometry();
@@ -719,7 +746,20 @@ void TextMediaItem::ensureInlineEditor() {
             doc->setDocumentMargin(0.0);
             QTextOption opt = doc->defaultTextOption();
             opt.setWrapMode(QTextOption::WordWrap);
-            opt.setAlignment(Qt::AlignHCenter);
+            // Apply current horizontal alignment
+            Qt::Alignment qtAlign = Qt::AlignHCenter;
+            switch (m_horizontalAlignment) {
+                case HorizontalAlignment::Left:
+                    qtAlign = Qt::AlignLeft;
+                    break;
+                case HorizontalAlignment::Center:
+                    qtAlign = Qt::AlignHCenter;
+                    break;
+                case HorizontalAlignment::Right:
+                    qtAlign = Qt::AlignRight;
+                    break;
+            }
+            opt.setAlignment(qtAlign);
             doc->setDefaultTextOption(opt);
             // Set width at base size (transform will scale it visually)
             doc->setTextWidth(m_baseSize.width() - 2.0 * kContentPadding);
@@ -757,7 +797,20 @@ void TextMediaItem::ensureInlineEditor() {
 
     {
         QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
-        applyCenterAlignment(editor);
+        // Apply current alignment (not hardcoded center)
+        Qt::Alignment qtAlign = Qt::AlignHCenter;
+        switch (m_horizontalAlignment) {
+            case HorizontalAlignment::Left:
+                qtAlign = Qt::AlignLeft;
+                break;
+            case HorizontalAlignment::Center:
+                qtAlign = Qt::AlignHCenter;
+                break;
+            case HorizontalAlignment::Right:
+                qtAlign = Qt::AlignRight;
+                break;
+        }
+        applyTextAlignment(editor, qtAlign);
     }
 
     m_inlineEditor = editor;
@@ -919,7 +972,21 @@ void TextMediaItem::updateInlineEditorGeometry() {
     const qreal availableWidth = std::max<qreal>(1.0, contentRect.width());
     const qreal availableHeight = std::max<qreal>(1.0, contentRect.height());
     const qreal offsetX = (availableWidth - visualDocWidth) * 0.5;
-    const qreal offsetY = (availableHeight - visualDocHeight) * 0.5;
+    
+    // Apply vertical alignment
+    qreal offsetY = 0.0;
+    switch (m_verticalAlignment) {
+        case VerticalAlignment::Top:
+            offsetY = 0.0;
+            break;
+        case VerticalAlignment::Center:
+            offsetY = (availableHeight - visualDocHeight) * 0.5;
+            break;
+        case VerticalAlignment::Bottom:
+            offsetY = availableHeight - visualDocHeight;
+            break;
+    }
+    
     const QPointF newEditorPos = contentRect.topLeft() + QPointF(offsetX, offsetY);
 
     if (!m_cachedEditorPosValid || floatsDiffer(newEditorPos.x(), m_cachedEditorPos.x(), 0.1) || floatsDiffer(newEditorPos.y(), m_cachedEditorPos.y(), 0.1)) {
@@ -1030,9 +1097,23 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
 
     const QString& text = textForRendering();
 
+    // Apply horizontal alignment
+    Qt::Alignment qtHAlign = Qt::AlignCenter;
+    switch (m_horizontalAlignment) {
+        case HorizontalAlignment::Left:
+            qtHAlign = Qt::AlignLeft;
+            break;
+        case HorizontalAlignment::Center:
+            qtHAlign = Qt::AlignHCenter;
+            break;
+        case HorizontalAlignment::Right:
+            qtHAlign = Qt::AlignRight;
+            break;
+    }
+    
     QTextOption option;
     option.setWrapMode(QTextOption::WordWrap);
-    option.setAlignment(Qt::AlignCenter);
+    option.setAlignment(qtHAlign);
 
     QTextDocument doc;
     doc.setDocumentMargin(0.0);
@@ -1047,8 +1128,34 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
 
     const QSizeF docSize = doc.documentLayout()->documentSize();
     const qreal availableHeight = logicalHeight - 2.0 * kContentPadding;
-    const qreal offsetX = kContentPadding + (availableWidth - docSize.width()) / 2.0;
-    const qreal offsetY = kContentPadding + (availableHeight - docSize.height()) / 2.0;
+    
+    // Apply horizontal alignment offset
+    qreal offsetX = kContentPadding;
+    switch (m_horizontalAlignment) {
+        case HorizontalAlignment::Left:
+            offsetX = kContentPadding;
+            break;
+        case HorizontalAlignment::Center:
+            offsetX = kContentPadding + (availableWidth - docSize.width()) / 2.0;
+            break;
+        case HorizontalAlignment::Right:
+            offsetX = kContentPadding + (availableWidth - docSize.width());
+            break;
+    }
+    
+    // Apply vertical alignment offset
+    qreal offsetY = kContentPadding;
+    switch (m_verticalAlignment) {
+        case VerticalAlignment::Top:
+            offsetY = kContentPadding;
+            break;
+        case VerticalAlignment::Center:
+            offsetY = kContentPadding + (availableHeight - docSize.height()) / 2.0;
+            break;
+        case VerticalAlignment::Bottom:
+            offsetY = kContentPadding + (availableHeight - docSize.height());
+            break;
+    }
 
     QAbstractTextDocumentLayout::PaintContext ctx;
     ctx.palette.setColor(QPalette::Text, m_textColor);
@@ -1299,7 +1406,6 @@ void TextMediaItem::ensureAlignmentControls() {
     
     // Create horizontal alignment buttons (fused group: left | center | right)
     m_alignLeftBtn = new SegmentedButtonItem(SegmentedButtonItem::Segment::Left, m_alignmentControlsBg);
-    m_alignLeftBtn->setBrush(AppColors::gOverlayActiveBackgroundColor); // Default active
     m_alignLeftBtn->setZValue(12001.0);
     m_alignLeftBtn->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     m_alignLeftBtn->setAcceptedMouseButtons(Qt::NoButton);
@@ -1363,6 +1469,9 @@ void TextMediaItem::ensureAlignmentControls() {
     
     // Initially hide controls (they'll show when item is selected)
     m_alignmentControlsBg->setVisible(false);
+    
+    // Set initial button states based on current alignment
+    updateAlignmentButtonStates();
 }
 
 void TextMediaItem::updateAlignmentControlsLayout() {
@@ -1535,55 +1644,87 @@ bool TextMediaItem::handleAlignmentControlsPressAtItemPos(const QPointF& itemPos
     
     // Check horizontal alignment buttons
     if (m_alignLeftBtnRect.contains(itemPos)) {
-        // Set left button active, others inactive
-        m_alignLeftBtn->setBrush(AppColors::gOverlayActiveBackgroundColor);
-        m_alignCenterHBtn->setBrush(AppColors::gOverlayBackgroundColor);
-        m_alignRightBtn->setBrush(AppColors::gOverlayBackgroundColor);
-        // TODO: Apply left alignment to text rendering
+        setHorizontalAlignment(HorizontalAlignment::Left);
         return true;
     }
     if (m_alignCenterHBtnRect.contains(itemPos)) {
-        // Set center button active, others inactive
-        m_alignLeftBtn->setBrush(AppColors::gOverlayBackgroundColor);
-        m_alignCenterHBtn->setBrush(AppColors::gOverlayActiveBackgroundColor);
-        m_alignRightBtn->setBrush(AppColors::gOverlayBackgroundColor);
-        // TODO: Apply center alignment to text rendering
+        setHorizontalAlignment(HorizontalAlignment::Center);
         return true;
     }
     if (m_alignRightBtnRect.contains(itemPos)) {
-        // Set right button active, others inactive
-        m_alignLeftBtn->setBrush(AppColors::gOverlayBackgroundColor);
-        m_alignCenterHBtn->setBrush(AppColors::gOverlayBackgroundColor);
-        m_alignRightBtn->setBrush(AppColors::gOverlayActiveBackgroundColor);
-        // TODO: Apply right alignment to text rendering
+        setHorizontalAlignment(HorizontalAlignment::Right);
         return true;
     }
     
     // Check vertical alignment buttons
     if (m_alignTopBtnRect.contains(itemPos)) {
-        // Set top button active, others inactive
-        m_alignTopBtn->setBrush(AppColors::gOverlayActiveBackgroundColor);
-        m_alignCenterVBtn->setBrush(AppColors::gOverlayBackgroundColor);
-        m_alignBottomBtn->setBrush(AppColors::gOverlayBackgroundColor);
-        // TODO: Apply top alignment to text rendering
+        setVerticalAlignment(VerticalAlignment::Top);
         return true;
     }
     if (m_alignCenterVBtnRect.contains(itemPos)) {
-        // Set center V button active, others inactive
-        m_alignTopBtn->setBrush(AppColors::gOverlayBackgroundColor);
-        m_alignCenterVBtn->setBrush(AppColors::gOverlayActiveBackgroundColor);
-        m_alignBottomBtn->setBrush(AppColors::gOverlayBackgroundColor);
-        // TODO: Apply center vertical alignment to text rendering
+        setVerticalAlignment(VerticalAlignment::Center);
         return true;
     }
     if (m_alignBottomBtnRect.contains(itemPos)) {
-        // Set bottom button active, others inactive
-        m_alignTopBtn->setBrush(AppColors::gOverlayBackgroundColor);
-        m_alignCenterVBtn->setBrush(AppColors::gOverlayBackgroundColor);
-        m_alignBottomBtn->setBrush(AppColors::gOverlayActiveBackgroundColor);
-        // TODO: Apply bottom alignment to text rendering
+        setVerticalAlignment(VerticalAlignment::Bottom);
         return true;
     }
     
     return false;
+}
+
+void TextMediaItem::updateAlignmentButtonStates() {
+    if (!m_alignLeftBtn || !m_alignCenterHBtn || !m_alignRightBtn ||
+        !m_alignTopBtn || !m_alignCenterVBtn || !m_alignBottomBtn) {
+        return;
+    }
+    
+    // Update horizontal alignment button states
+    m_alignLeftBtn->setBrush(m_horizontalAlignment == HorizontalAlignment::Left ? 
+        AppColors::gOverlayActiveBackgroundColor : AppColors::gOverlayBackgroundColor);
+    m_alignCenterHBtn->setBrush(m_horizontalAlignment == HorizontalAlignment::Center ? 
+        AppColors::gOverlayActiveBackgroundColor : AppColors::gOverlayBackgroundColor);
+    m_alignRightBtn->setBrush(m_horizontalAlignment == HorizontalAlignment::Right ? 
+        AppColors::gOverlayActiveBackgroundColor : AppColors::gOverlayBackgroundColor);
+    
+    // Update vertical alignment button states
+    m_alignTopBtn->setBrush(m_verticalAlignment == VerticalAlignment::Top ? 
+        AppColors::gOverlayActiveBackgroundColor : AppColors::gOverlayBackgroundColor);
+    m_alignCenterVBtn->setBrush(m_verticalAlignment == VerticalAlignment::Center ? 
+        AppColors::gOverlayActiveBackgroundColor : AppColors::gOverlayBackgroundColor);
+    m_alignBottomBtn->setBrush(m_verticalAlignment == VerticalAlignment::Bottom ? 
+        AppColors::gOverlayActiveBackgroundColor : AppColors::gOverlayBackgroundColor);
+}
+
+void TextMediaItem::applyAlignmentToEditor() {
+    if (!m_inlineEditor) {
+        return;
+    }
+    
+    // Convert horizontal alignment to Qt alignment
+    Qt::Alignment qtAlign = Qt::AlignVCenter; // We only control horizontal in editor
+    switch (m_horizontalAlignment) {
+        case HorizontalAlignment::Left:
+            qtAlign = Qt::AlignLeft;
+            break;
+        case HorizontalAlignment::Center:
+            qtAlign = Qt::AlignHCenter;
+            break;
+        case HorizontalAlignment::Right:
+            qtAlign = Qt::AlignRight;
+            break;
+    }
+    
+    // Apply to document default
+    if (QTextDocument* doc = m_inlineEditor->document()) {
+        QTextOption opt = doc->defaultTextOption();
+        opt.setAlignment(qtAlign);
+        doc->setDefaultTextOption(opt);
+    }
+    
+    // Apply to all existing text blocks
+    applyTextAlignment(m_inlineEditor, qtAlign);
+    
+    m_documentMetricsDirty = true;
+    m_cachedEditorPosValid = false;
 }
