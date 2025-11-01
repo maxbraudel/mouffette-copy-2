@@ -1,5 +1,6 @@
 #include "WebSocketMessageHandler.h"
 #include "MainWindow.h"
+#include "frontend/managers/ui/RemoteClientState.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/WatchManager.h"
 #include "backend/network/UploadManager.h"
@@ -107,14 +108,9 @@ void WebSocketMessageHandler::onDisconnected()
         // Preserve viewport but show loading state
         m_mainWindow->setPreserveViewportOnReconnect(true);
         
-        // Atomically update remote client info to ERROR state (no flicker)
-        m_mainWindow->updateRemoteClientInfoAtomically(
-            nullptr,     // clientInfo (keep current)
-            "ERROR",     // networkStatus
-            false,       // showVolume (hide)
-            -1,          // volumePercent (N/A)
-            true         // showStatus
-        );
+        // Apply ERROR state (atomic, no flicker)
+        RemoteClientState state = RemoteClientState::error();
+        m_mainWindow->setRemoteClientState(state);
     }
     
     // Inform upload manager of connection loss

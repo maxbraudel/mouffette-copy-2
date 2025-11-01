@@ -101,24 +101,14 @@ public:
     void removeVolumeIndicatorFromLayout();
 
     /**
-     * @brief Atomically update the entire remote client info container
+     * @brief Apply a complete remote client state to the UI
      * 
-     * This method performs a batch update of all container elements without flickering.
-     * All UI updates are deferred until the method completes.
+     * This is the ONE method to update the entire remote client info.
+     * It applies the state atomically without flickering.
      * 
-     * @param clientInfo Client information to display (name, platform)
-     * @param networkStatus Network connection status (CONNECTED, DISCONNECTED, ERROR, CONNECTING...)
-     * @param showVolume Whether to show the volume indicator
-     * @param volumePercent Volume percentage (-1 for unknown/no volume)
-     * @param showStatus Whether to show the network status
+     * @param state The complete state to apply
      */
-    void updateContainerAtomically(
-        const ClientInfo* clientInfo,
-        const QString& networkStatus,
-        bool showVolume,
-        int volumePercent,
-        bool showStatus
-    );
+    void applyState(const struct RemoteClientState& state);
 
 private:
     /**

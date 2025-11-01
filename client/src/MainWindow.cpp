@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "frontend/managers/ui/RemoteClientState.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/domain/models/ClientInfo.h"
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
@@ -1078,63 +1079,44 @@ void MainWindow::updateVolumeIndicator() {
     }
 }
 
-void MainWindow::updateRemoteClientInfoAtomically(
-    const ClientInfo* clientInfo,
-    const QString& networkStatus,
-    bool showVolume,
-    int volumePercent,
-    bool showStatus,
-    bool propagateLoss
-) {
-    // Update internal state first
-    const QString up = networkStatus.toUpper();
-    if (up == "CONNECTED") {
-        m_remoteClientConnected = true;
-    } else if (up == "DISCONNECTED" || up.startsWith("CONNECTING") || up == "ERROR") {
-        m_remoteClientConnected = false;
-    }
+void MainWindow::setRemoteClientState(const RemoteClientState& state, bool propagateLoss) {
+    // Update internal connection state
+    m_remoteClientConnected = (state.connectionStatus == RemoteClientState::Connected);
     
-    // Manage inline spinner based on connection state
-    if (up == "CONNECTED" || up == "DISCONNECTED" || up == "ERROR") {
-        // Stop and hide spinner for stable states
+    // Manage spinner based on state
+    if (state.spinnerActive) {
+        if (m_inlineSpinner && !m_inlineSpinner->isSpinning()) {
+            m_inlineSpinner->show();
+            m_inlineSpinner->start();
+        }
+    } else {
         if (m_inlineSpinner && m_inlineSpinner->isSpinning()) {
             m_inlineSpinner->stop();
             m_inlineSpinner->hide();
         } else if (m_inlineSpinner) {
             m_inlineSpinner->hide();
         }
-    } else if (up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
-        // Show and start spinner for connecting states
-        if (m_inlineSpinner && !m_inlineSpinner->isSpinning()) {
-            m_inlineSpinner->show();
-            m_inlineSpinner->start();
-        }
     }
     
     // Delegate to CanvasViewPage
     if (m_canvasViewPage) {
-        m_canvasViewPage->setRemoteConnectionStatus(networkStatus, propagateLoss);
+        m_canvasViewPage->setRemoteConnectionStatus(state.statusText(), propagateLoss);
     }
     
-    // Update RemoteClientInfoManager atomically (no flicker)
+    // Apply state to RemoteClientInfoManager (atomically, no flicker)
     if (m_remoteClientInfoManager) {
-        m_remoteClientInfoManager->updateContainerAtomically(
-            clientInfo,
-            networkStatus,
-            showVolume,
-            volumePercent,
-            showStatus
-        );
+        m_remoteClientInfoManager->applyState(state);
     }
     
     // Show client list placeholder when connecting
-    if (up == "CONNECTING" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
+    if (state.connectionStatus == RemoteClientState::Connecting || 
+        state.connectionStatus == RemoteClientState::Reconnecting) {
         if (m_clientListPage) {
             m_clientListPage->ensureClientListPlaceholder();
         }
     }
 
-    refreshOverlayActionsState(up == "CONNECTED", propagateLoss);
+    refreshOverlayActionsState(m_remoteClientConnected, propagateLoss);
 }
 
 void MainWindow::onUploadButtonClicked() {

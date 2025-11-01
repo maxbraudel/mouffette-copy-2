@@ -1,9 +1,11 @@
 #include "frontend/managers/ui/RemoteClientInfoManager.h"
+#include "frontend/managers/ui/RemoteClientState.h"
 #include "frontend/ui/theme/AppColors.h"
 #include "frontend/ui/theme/StyleConfig.h"
 #include "frontend/ui/widgets/ClippedContainer.h"
 #include <QHBoxLayout>
 #include <QFrame>
+#include <QApplication>
 
 // [Phase 17] Style configuration now accessed via macros from StyleConfig.h
 
@@ -236,23 +238,22 @@ void RemoteClientInfoManager::removeVolumeIndicatorFromLayout() {
     auto* layout = qobject_cast<QHBoxLayout*>(m_remoteClientInfoContainer->layout());
     if (!layout) return;
 
-    // Remove volume label
-    int idx = layout->indexOf(m_volumeIndicator);
-    if (idx != -1) {
-        layout->removeWidget(m_volumeIndicator);
-        m_volumeIndicator->setParent(nullptr);
-        m_volumeIndicator->hide();
+    // Keep widgets in layout to avoid deferred layout requests, simply collapse them
+    if (m_remoteInfoSep2) {
+        if (layout->indexOf(m_remoteInfoSep2) == -1) {
+            layout->addWidget(m_remoteInfoSep2);
+        }
+        m_remoteInfoSep2->setVisible(false);
+        m_remoteInfoSep2->setFixedWidth(0);
     }
 
-    // Remove separator
-    if (m_remoteInfoSep2 && m_remoteInfoSep2->parent() == m_remoteClientInfoContainer) {
-        int sidx = layout->indexOf(m_remoteInfoSep2);
-        if (sidx != -1) {
-            layout->removeWidget(m_remoteInfoSep2);
-            m_remoteInfoSep2->setParent(nullptr);
-            m_remoteInfoSep2->hide();
-        }
-    }
+    m_volumeIndicator->setVisible(false);
+    m_volumeIndicator->setMinimumWidth(0);
+    m_volumeIndicator->setMaximumWidth(0);
+    m_volumeIndicator->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+
+    layout->invalidate();
+    layout->activate();
 }
 
 void RemoteClientInfoManager::addVolumeIndicatorToLayout() {
@@ -270,73 +271,82 @@ void RemoteClientInfoManager::addVolumeIndicatorToLayout() {
         m_remoteInfoSep2->setFixedWidth(1);
     }
 
-    // Remove current instances (if any) to reinsert at fixed index
-    int sepIdx = layout->indexOf(m_remoteInfoSep2);
-    if (sepIdx != -1) {
-        layout->removeWidget(m_remoteInfoSep2);
-    }
-    int volIdx = layout->indexOf(m_volumeIndicator);
-    if (volIdx != -1) {
-        layout->removeWidget(m_volumeIndicator);
+    // Ensure separator is present immediately after status label
+    int statusIdx = -1;
+    if (m_remoteConnectionStatusLabel) {
+        statusIdx = layout->indexOf(m_remoteConnectionStatusLabel);
     }
 
-    // Insert after status if present; otherwise after hostname
-    int baseIdx = -1;
-    if (m_remoteConnectionStatusLabel && m_remoteConnectionStatusLabel->parent() == m_remoteClientInfoContainer) {
-        baseIdx = layout->indexOf(m_remoteConnectionStatusLabel);
+    if (statusIdx == -1 && m_clientNameLabel) {
+        statusIdx = layout->indexOf(m_clientNameLabel);
     }
-    if (baseIdx == -1 && m_clientNameLabel && m_clientNameLabel->parent() == m_remoteClientInfoContainer) {
-        baseIdx = layout->indexOf(m_clientNameLabel);
+
+    if (statusIdx == -1) {
+        statusIdx = layout->count() - 1;
     }
-    if (baseIdx == -1) baseIdx = layout->count() - 1;
 
-    // Guarantee order: ... status → sep2 → volume
-    layout->insertWidget(baseIdx + 1, m_remoteInfoSep2);
-    m_remoteInfoSep2->setParent(m_remoteClientInfoContainer);
-    m_remoteInfoSep2->show();
+    if (layout->indexOf(m_remoteInfoSep2) == -1) {
+        layout->insertWidget(statusIdx + 1, m_remoteInfoSep2);
+    }
+    if (layout->indexOf(m_volumeIndicator) == -1) {
+        layout->insertWidget(statusIdx + 2, m_volumeIndicator);
+    }
 
-    layout->insertWidget(baseIdx + 2, m_volumeIndicator);
-    m_volumeIndicator->setParent(m_remoteClientInfoContainer);
-    m_volumeIndicator->show();
+    // Restore visual footprint
+    m_remoteInfoSep2->setFixedWidth(1);
+    m_remoteInfoSep2->setVisible(true);
+
+    m_volumeIndicator->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    m_volumeIndicator->setMinimumWidth(0);
+    m_volumeIndicator->setMaximumWidth(QWIDGETSIZE_MAX);
+    m_volumeIndicator->setVisible(true);
+
+    layout->invalidate();
+    layout->activate();
 }
 
-void RemoteClientInfoManager::updateContainerAtomically(
-    const ClientInfo* clientInfo,
-    const QString& networkStatus,
-    bool showVolume,
-    int volumePercent,
-    bool showStatus
-) {
+void RemoteClientInfoManager::applyState(const RemoteClientState& state) {
     if (!m_remoteClientInfoContainer) {
         return;
     }
 
-    // Disable updates during batch modification to prevent flicker
+    // 🔒 Disable updates during batch modification to prevent flicker
     m_remoteClientInfoContainer->setUpdatesEnabled(false);
 
-    // Update client name if provided
-    if (clientInfo) {
-        updateClientNameDisplay(*clientInfo);
+    // 1. Update client name
+    if (!state.clientInfo.getId().isEmpty()) {
+        updateClientNameDisplay(state.clientInfo);
     }
 
-    // Update network status visibility and value
-    if (showStatus) {
+    // 2. Update network status
+    if (state.statusVisible) {
         addRemoteStatusToLayout();
         if (m_remoteConnectionStatusLabel) {
-            const QString upStatus = networkStatus.toUpper();
-            m_remoteConnectionStatusLabel->setText(upStatus);
+            const QString statusText = state.statusText();
+            m_remoteConnectionStatusLabel->setText(statusText);
 
+            // Apply colors based on connection state
             QString textColor;
             QString bgColor;
-            if (upStatus == "CONNECTED") {
-                textColor = AppColors::colorToCss(AppColors::gStatusConnectedText);
-                bgColor = AppColors::colorToCss(AppColors::gStatusConnectedBg);
-            } else if (upStatus == "ERROR" || upStatus.startsWith("CONNECTING") || upStatus.startsWith("RECONNECTING")) {
-                textColor = AppColors::colorToCss(AppColors::gStatusWarningText);
-                bgColor = AppColors::colorToCss(AppColors::gStatusWarningBg);
-            } else {
-                textColor = AppColors::colorToCss(AppColors::gStatusErrorText);
-                bgColor = AppColors::colorToCss(AppColors::gStatusErrorBg);
+            
+            switch (state.connectionStatus) {
+                case RemoteClientState::Connected:
+                    textColor = AppColors::colorToCss(AppColors::gStatusConnectedText);
+                    bgColor = AppColors::colorToCss(AppColors::gStatusConnectedBg);
+                    break;
+                    
+                case RemoteClientState::Connecting:
+                case RemoteClientState::Reconnecting:
+                case RemoteClientState::Error:
+                    textColor = AppColors::colorToCss(AppColors::gStatusWarningText);
+                    bgColor = AppColors::colorToCss(AppColors::gStatusWarningBg);
+                    break;
+                    
+                case RemoteClientState::Disconnected:
+                default:
+                    textColor = AppColors::colorToCss(AppColors::gStatusErrorText);
+                    bgColor = AppColors::colorToCss(AppColors::gStatusErrorBg);
+                    break;
             }
 
             m_remoteConnectionStatusLabel->setStyleSheet(
@@ -358,15 +368,34 @@ void RemoteClientInfoManager::updateContainerAtomically(
         removeRemoteStatusFromLayout();
     }
 
-    // Update volume visibility and value
-    if (showVolume) {
+    // 3. Update volume indicator
+    if (state.shouldShowVolume()) {
         addVolumeIndicatorToLayout();
-        updateVolumeIndicator(volumePercent);
+        updateVolumeIndicator(state.volumePercent);
     } else {
         removeVolumeIndicatorFromLayout();
     }
 
-    // Re-enable updates and trigger a single repaint
+    // Force the layout to recompute geometry immediately so width adjusts without lag
+    if (auto* layout = m_remoteClientInfoContainer->layout()) {
+        layout->invalidate();
+        layout->activate();
+    }
+    m_remoteClientInfoContainer->setMinimumWidth(120);
+    m_remoteClientInfoContainer->setMaximumWidth(QWIDGETSIZE_MAX);
+    m_remoteClientInfoContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    m_remoteClientInfoContainer->updateGeometry();
+    QApplication::sendPostedEvents(m_remoteClientInfoContainer, QEvent::LayoutRequest);
+    if (auto* parentWidget = m_remoteClientInfoContainer->parentWidget()) {
+        if (auto* parentLayout = parentWidget->layout()) {
+            parentLayout->invalidate();
+            parentLayout->activate();
+        }
+        parentWidget->updateGeometry();
+        QApplication::sendPostedEvents(parentWidget, QEvent::LayoutRequest);
+    }
+
+    // ✅ Re-enable updates and trigger a single repaint
     m_remoteClientInfoContainer->setUpdatesEnabled(true);
     m_remoteClientInfoContainer->update();
 }

@@ -1,5 +1,6 @@
 #include "ClientListEventHandler.h"
 #include "MainWindow.h"
+#include "frontend/managers/ui/RemoteClientState.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/domain/models/ClientInfo.h"
 #include "frontend/rendering/canvas/ScreenCanvas.h"
@@ -189,21 +190,17 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                         watchManager->unwatchIfAny();
                     }
                     
-                    // Atomically update remote client info to DISCONNECTED state
-                    const bool showVolume = (activeSession->lastClientInfo.getVolumePercent() >= 0);
-                    const int volumePercent = showVolume ? activeSession->lastClientInfo.getVolumePercent() : -1;
-                    
-                    if (showVolume) {
+                    // Apply DISCONNECTED state
+                    RemoteClientState state = RemoteClientState::disconnected();
+                    const int volumePercent = activeSession->lastClientInfo.getVolumePercent();
+                    if (volumePercent >= 0) {
                         m_mainWindow->setSelectedClient(activeSession->lastClientInfo);
+                        state.clientInfo = activeSession->lastClientInfo;
+                        state.volumeVisible = true;
+                        state.volumePercent = volumePercent;
                     }
                     
-                    m_mainWindow->updateRemoteClientInfoAtomically(
-                        nullptr,          // clientInfo (keep current)
-                        "DISCONNECTED",   // networkStatus
-                        showVolume,       // showVolume
-                        volumePercent,    // volumePercent
-                        true              // showStatus
-                    );
+                    m_mainWindow->setRemoteClientState(state);
                 }
             }
         }

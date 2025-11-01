@@ -1,5 +1,6 @@
 #include "backend/handlers/ScreenEventHandler.h"
 #include "MainWindow.h"
+#include "frontend/managers/ui/RemoteClientState.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/managers/system/SystemMonitor.h"
 #include "frontend/rendering/canvas/ScreenCanvas.h"
@@ -285,18 +286,15 @@ void ScreenEventHandler::onScreensInfoReceived(const ClientInfo& clientInfo)
 
         m_mainWindow->stopInlineSpinner();
 
-        // Atomically update remote client info container (no flicker)
-        const bool isOnline = session->lastClientInfo.isOnline();
-        const QString status = isOnline ? "CONNECTED" : "DISCONNECTED";
-        const int volumePercent = session->lastClientInfo.getVolumePercent();
-        
-        m_mainWindow->updateRemoteClientInfoAtomically(
-            &session->lastClientInfo,  // clientInfo
-            status,                     // networkStatus
-            hasScreens,                 // showVolume
-            volumePercent,              // volumePercent
-            true                        // showStatus
+        // Apply complete remote client state (atomic, no flicker)
+        RemoteClientState state = RemoteClientState::connected(
+            session->lastClientInfo,
+            session->lastClientInfo.getVolumePercent()
         );
+        // Only show volume if we have screens
+        state.volumeVisible = hasScreens && (state.volumePercent >= 0);
+        
+        m_mainWindow->setRemoteClientState(state);
     }
 }
 
