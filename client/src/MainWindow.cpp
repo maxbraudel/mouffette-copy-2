@@ -1078,6 +1078,65 @@ void MainWindow::updateVolumeIndicator() {
     }
 }
 
+void MainWindow::updateRemoteClientInfoAtomically(
+    const ClientInfo* clientInfo,
+    const QString& networkStatus,
+    bool showVolume,
+    int volumePercent,
+    bool showStatus,
+    bool propagateLoss
+) {
+    // Update internal state first
+    const QString up = networkStatus.toUpper();
+    if (up == "CONNECTED") {
+        m_remoteClientConnected = true;
+    } else if (up == "DISCONNECTED" || up.startsWith("CONNECTING") || up == "ERROR") {
+        m_remoteClientConnected = false;
+    }
+    
+    // Manage inline spinner based on connection state
+    if (up == "CONNECTED" || up == "DISCONNECTED" || up == "ERROR") {
+        // Stop and hide spinner for stable states
+        if (m_inlineSpinner && m_inlineSpinner->isSpinning()) {
+            m_inlineSpinner->stop();
+            m_inlineSpinner->hide();
+        } else if (m_inlineSpinner) {
+            m_inlineSpinner->hide();
+        }
+    } else if (up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
+        // Show and start spinner for connecting states
+        if (m_inlineSpinner && !m_inlineSpinner->isSpinning()) {
+            m_inlineSpinner->show();
+            m_inlineSpinner->start();
+        }
+    }
+    
+    // Delegate to CanvasViewPage
+    if (m_canvasViewPage) {
+        m_canvasViewPage->setRemoteConnectionStatus(networkStatus, propagateLoss);
+    }
+    
+    // Update RemoteClientInfoManager atomically (no flicker)
+    if (m_remoteClientInfoManager) {
+        m_remoteClientInfoManager->updateContainerAtomically(
+            clientInfo,
+            networkStatus,
+            showVolume,
+            volumePercent,
+            showStatus
+        );
+    }
+    
+    // Show client list placeholder when connecting
+    if (up == "CONNECTING" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
+        if (m_clientListPage) {
+            m_clientListPage->ensureClientListPlaceholder();
+        }
+    }
+
+    refreshOverlayActionsState(up == "CONNECTED", propagateLoss);
+}
+
 void MainWindow::onUploadButtonClicked() {
     // [PHASE 7.4] Delegate to UploadEventHandler
     if (m_uploadEventHandler) {

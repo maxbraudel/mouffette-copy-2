@@ -178,8 +178,7 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                     if (!activeSession->remoteContentClearedOnDisconnect) {
                         m_mainWindow->unloadUploadsForSession(*activeSession, true);
                     }
-                    m_mainWindow->addRemoteStatusToLayout();
-                    m_mainWindow->setRemoteConnectionStatus("DISCONNECTED");
+                    
                     m_mainWindow->setPreserveViewportOnReconnect(true);
                     UploadManager* uploadManager = m_mainWindow->getUploadManager();
                     if (uploadManager) {
@@ -189,13 +188,22 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                     if (watchManager) {
                         watchManager->unwatchIfAny();
                     }
-                    if (activeSession->lastClientInfo.getVolumePercent() >= 0) {
+                    
+                    // Atomically update remote client info to DISCONNECTED state
+                    const bool showVolume = (activeSession->lastClientInfo.getVolumePercent() >= 0);
+                    const int volumePercent = showVolume ? activeSession->lastClientInfo.getVolumePercent() : -1;
+                    
+                    if (showVolume) {
                         m_mainWindow->setSelectedClient(activeSession->lastClientInfo);
-                        m_mainWindow->addVolumeIndicatorToLayout();
-                        m_mainWindow->updateVolumeIndicator();
-                    } else {
-                        m_mainWindow->removeVolumeIndicatorFromLayout();
                     }
+                    
+                    m_mainWindow->updateRemoteClientInfoAtomically(
+                        nullptr,          // clientInfo (keep current)
+                        "DISCONNECTED",   // networkStatus
+                        showVolume,       // showVolume
+                        volumePercent,    // volumePercent
+                        true              // showStatus
+                    );
                 }
             }
         }

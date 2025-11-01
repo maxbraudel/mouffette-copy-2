@@ -299,3 +299,74 @@ void RemoteClientInfoManager::addVolumeIndicatorToLayout() {
     m_volumeIndicator->setParent(m_remoteClientInfoContainer);
     m_volumeIndicator->show();
 }
+
+void RemoteClientInfoManager::updateContainerAtomically(
+    const ClientInfo* clientInfo,
+    const QString& networkStatus,
+    bool showVolume,
+    int volumePercent,
+    bool showStatus
+) {
+    if (!m_remoteClientInfoContainer) {
+        return;
+    }
+
+    // Disable updates during batch modification to prevent flicker
+    m_remoteClientInfoContainer->setUpdatesEnabled(false);
+
+    // Update client name if provided
+    if (clientInfo) {
+        updateClientNameDisplay(*clientInfo);
+    }
+
+    // Update network status visibility and value
+    if (showStatus) {
+        addRemoteStatusToLayout();
+        if (m_remoteConnectionStatusLabel) {
+            const QString upStatus = networkStatus.toUpper();
+            m_remoteConnectionStatusLabel->setText(upStatus);
+
+            QString textColor;
+            QString bgColor;
+            if (upStatus == "CONNECTED") {
+                textColor = AppColors::colorToCss(AppColors::gStatusConnectedText);
+                bgColor = AppColors::colorToCss(AppColors::gStatusConnectedBg);
+            } else if (upStatus == "ERROR" || upStatus.startsWith("CONNECTING") || upStatus.startsWith("RECONNECTING")) {
+                textColor = AppColors::colorToCss(AppColors::gStatusWarningText);
+                bgColor = AppColors::colorToCss(AppColors::gStatusWarningBg);
+            } else {
+                textColor = AppColors::colorToCss(AppColors::gStatusErrorText);
+                bgColor = AppColors::colorToCss(AppColors::gStatusErrorBg);
+            }
+
+            m_remoteConnectionStatusLabel->setStyleSheet(
+                QString("QLabel { "
+                        "    color: %1; "
+                        "    background-color: %2; "
+                        "    border: none; "
+                        "    border-radius: 0px; "
+                        "    padding: 0px %4px; "
+                        "    font-size: %3px; "
+                        "    font-weight: bold; "
+                        "}")
+                    .arg(textColor)
+                    .arg(bgColor)
+                    .arg(gDynamicBoxFontPx)
+                    .arg(gRemoteClientContainerPadding));
+        }
+    } else {
+        removeRemoteStatusFromLayout();
+    }
+
+    // Update volume visibility and value
+    if (showVolume) {
+        addVolumeIndicatorToLayout();
+        updateVolumeIndicator(volumePercent);
+    } else {
+        removeVolumeIndicatorFromLayout();
+    }
+
+    // Re-enable updates and trigger a single repaint
+    m_remoteClientInfoContainer->setUpdatesEnabled(true);
+    m_remoteClientInfoContainer->update();
+}

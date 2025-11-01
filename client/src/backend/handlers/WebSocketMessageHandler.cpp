@@ -107,12 +107,14 @@ void WebSocketMessageHandler::onDisconnected()
         // Preserve viewport but show loading state
         m_mainWindow->setPreserveViewportOnReconnect(true);
         
-        // Remove volume indicator FIRST to avoid layout shift
-        m_mainWindow->removeVolumeIndicatorFromLayout();
-        
-        // Show error state explicitly (spinner is automatically managed by setRemoteConnectionStatus)
-        m_mainWindow->addRemoteStatusToLayout();
-        m_mainWindow->setRemoteConnectionStatus("ERROR");
+        // Atomically update remote client info to ERROR state (no flicker)
+        m_mainWindow->updateRemoteClientInfoAtomically(
+            nullptr,     // clientInfo (keep current)
+            "ERROR",     // networkStatus
+            false,       // showVolume (hide)
+            -1,          // volumePercent (N/A)
+            true         // showStatus
+        );
     }
     
     // Inform upload manager of connection loss

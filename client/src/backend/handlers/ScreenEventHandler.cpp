@@ -285,16 +285,18 @@ void ScreenEventHandler::onScreensInfoReceived(const ClientInfo& clientInfo)
 
         m_mainWindow->stopInlineSpinner();
 
-        // Add volume indicator if we have screens
-        if (hasScreens && m_mainWindow->getRemoteClientInfoManager() && 
-            m_mainWindow->getRemoteClientInfoManager()->getVolumeIndicator()) {
-            m_mainWindow->addVolumeIndicatorToLayout();
-            m_mainWindow->updateVolumeIndicator();
-        }
-
-        m_mainWindow->addRemoteStatusToLayout();
-        m_mainWindow->setRemoteConnectionStatus(session->lastClientInfo.isOnline() ? "CONNECTED" : "DISCONNECTED");
-        m_mainWindow->updateClientNameDisplay(session->lastClientInfo);
+        // Atomically update remote client info container (no flicker)
+        const bool isOnline = session->lastClientInfo.isOnline();
+        const QString status = isOnline ? "CONNECTED" : "DISCONNECTED";
+        const int volumePercent = session->lastClientInfo.getVolumePercent();
+        
+        m_mainWindow->updateRemoteClientInfoAtomically(
+            &session->lastClientInfo,  // clientInfo
+            status,                     // networkStatus
+            hasScreens,                 // showVolume
+            volumePercent,              // volumePercent
+            true                        // showStatus
+        );
     }
 }
 

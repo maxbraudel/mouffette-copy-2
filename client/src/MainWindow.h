@@ -146,6 +146,28 @@ public:
     void updateVolumeIndicator();
     void updateClientNameDisplay(const ClientInfo& clientInfo);
     
+    /**
+     * @brief Atomically update the remote client info container (no flicker)
+     * 
+     * Updates all container elements in one batch operation to prevent visual flickering.
+     * Use this instead of calling individual update methods sequentially.
+     * 
+     * @param clientInfo Client info to display (nullptr to keep current)
+     * @param networkStatus Network status text (CONNECTED, DISCONNECTED, etc.)
+     * @param showVolume Whether to show volume indicator
+     * @param volumePercent Volume percentage (-1 for unknown)
+     * @param showStatus Whether to show network status
+     * @param propagateLoss Whether to propagate connection loss (default: true)
+     */
+    void updateRemoteClientInfoAtomically(
+        const ClientInfo* clientInfo,
+        const QString& networkStatus,
+        bool showVolume,
+        int volumePercent,
+        bool showStatus,
+        bool propagateLoss = true
+    );
+    
     // [Phase 7.2] Session management for ScreenEventHandler
     using CanvasSession = SessionManager::CanvasSession;
     CanvasSession& ensureCanvasSession(const ClientInfo& client);
