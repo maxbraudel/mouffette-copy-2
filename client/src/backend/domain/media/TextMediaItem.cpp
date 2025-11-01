@@ -564,6 +564,8 @@ TextMediaItem::TextMediaItem(
     
     // Create alignment controls (will be shown when selected)
     ensureAlignmentControls();
+
+    setFitToTextEnabled(true);
 }
 
 void TextMediaItem::setText(const QString& text) {
