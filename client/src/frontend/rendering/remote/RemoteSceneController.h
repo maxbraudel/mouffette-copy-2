@@ -64,6 +64,10 @@ private:
 		int baseWidth = 0;
 		int baseHeight = 0;
 		double uniformScale = 1.0;
+		enum class HorizontalAlignment { Left, Center, Right };
+		enum class VerticalAlignment { Top, Center, Bottom };
+		HorizontalAlignment horizontalAlignment = HorizontalAlignment::Center;
+		VerticalAlignment verticalAlignment = VerticalAlignment::Center;
 		// Multi-screen spans support: each span maps to a screen with its own normalized geom
 		struct Span {
 			int screenId = -1;

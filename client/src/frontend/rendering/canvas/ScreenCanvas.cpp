@@ -387,6 +387,34 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                         uniformScale = 1.0;
                     }
                     m["uniformScale"] = uniformScale;
+
+                    QString horizontalAlignment = QStringLiteral("center");
+                    switch (textMedia->horizontalAlignment()) {
+                        case TextMediaItem::HorizontalAlignment::Left:
+                            horizontalAlignment = QStringLiteral("left");
+                            break;
+                        case TextMediaItem::HorizontalAlignment::Center:
+                            horizontalAlignment = QStringLiteral("center");
+                            break;
+                        case TextMediaItem::HorizontalAlignment::Right:
+                            horizontalAlignment = QStringLiteral("right");
+                            break;
+                    }
+                    m["horizontalAlignment"] = horizontalAlignment;
+
+                    QString verticalAlignment = QStringLiteral("center");
+                    switch (textMedia->verticalAlignment()) {
+                        case TextMediaItem::VerticalAlignment::Top:
+                            verticalAlignment = QStringLiteral("top");
+                            break;
+                        case TextMediaItem::VerticalAlignment::Center:
+                            verticalAlignment = QStringLiteral("center");
+                            break;
+                        case TextMediaItem::VerticalAlignment::Bottom:
+                            verticalAlignment = QStringLiteral("bottom");
+                            break;
+                    }
+                    m["verticalAlignment"] = verticalAlignment;
                 }
             } else {
                 m["type"] = media->isVideoMedia() ? "video" : "image";

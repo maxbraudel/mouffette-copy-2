@@ -1294,6 +1294,24 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
             uniformScale = 1.0;
         }
         item->uniformScale = uniformScale;
+
+        const QString hAlign = m.value("horizontalAlignment").toString("center").toLower();
+        if (hAlign == QLatin1String("left")) {
+            item->horizontalAlignment = RemoteMediaItem::HorizontalAlignment::Left;
+        } else if (hAlign == QLatin1String("right")) {
+            item->horizontalAlignment = RemoteMediaItem::HorizontalAlignment::Right;
+        } else {
+            item->horizontalAlignment = RemoteMediaItem::HorizontalAlignment::Center;
+        }
+
+        const QString vAlign = m.value("verticalAlignment").toString("center").toLower();
+        if (vAlign == QLatin1String("top")) {
+            item->verticalAlignment = RemoteMediaItem::VerticalAlignment::Top;
+        } else if (vAlign == QLatin1String("bottom")) {
+            item->verticalAlignment = RemoteMediaItem::VerticalAlignment::Bottom;
+        } else {
+            item->verticalAlignment = RemoteMediaItem::VerticalAlignment::Center;
+        }
     }
         // Parse spans if present
         if (m.contains("spans") && m.value("spans").isArray()) {
@@ -1405,6 +1423,9 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             QGraphicsTextItem* textItem = new QGraphicsTextItem();
             textItem->setPos(px, py);
             textItem->setOpacity(0.0);
+            if (QTextDocument* doc = textItem->document()) {
+                doc->setDocumentMargin(0.0);
+            }
             
             // Set up font
             QFont font(item->fontFamily, item->fontSize);
@@ -1423,10 +1444,25 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             textItem->setPlainText(item->text);
             
             // Center alignment
-            QTextOption textOption = textItem->document()->defaultTextOption();
-            textOption.setAlignment(Qt::AlignCenter);
+            QTextDocument* doc = textItem->document();
+            QTextOption textOption = doc ? doc->defaultTextOption() : QTextOption();
             textOption.setWrapMode(QTextOption::WordWrap);
-            textItem->document()->setDefaultTextOption(textOption);
+            Qt::Alignment hAlign = Qt::AlignHCenter;
+            switch (item->horizontalAlignment) {
+                case RemoteMediaItem::HorizontalAlignment::Left:
+                    hAlign = Qt::AlignLeft;
+                    break;
+                case RemoteMediaItem::HorizontalAlignment::Center:
+                    hAlign = Qt::AlignHCenter;
+                    break;
+                case RemoteMediaItem::HorizontalAlignment::Right:
+                    hAlign = Qt::AlignRight;
+                    break;
+            }
+            textOption.setAlignment(hAlign);
+            if (doc) {
+                doc->setDefaultTextOption(textOption);
+            }
             
             // Reconstruct host layout: host renders text into a logical width that is
             // reduced by the uniform scale factor, then applies that factor visually.
@@ -1438,7 +1474,6 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             const qreal logicalWidth = std::max<qreal>(1.0, baseWidth / uniformScale);
             textItem->setTextWidth(logicalWidth);
 
-            QTextDocument* doc = textItem->document();
             QSizeF docSize;
             if (doc && doc->documentLayout()) {
                 docSize = doc->documentLayout()->documentSize();
@@ -1455,9 +1490,20 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             // This matches the offsetY calculation in renderTextToImage: (availableHeight - docSize.height()) / 2.0
             // After scaling, the document height will be docSize.height() * scale
             const qreal scaledDocHeight = docSize.height() * appliedScale;
-            const qreal verticalOffset = (ph - scaledDocHeight) / 2.0;
+            qreal verticalOffset = 0.0;
+            switch (item->verticalAlignment) {
+                case RemoteMediaItem::VerticalAlignment::Top:
+                    verticalOffset = 0.0;
+                    break;
+                case RemoteMediaItem::VerticalAlignment::Center:
+                    verticalOffset = (ph - scaledDocHeight) * 0.5;
+                    break;
+                case RemoteMediaItem::VerticalAlignment::Bottom:
+                    verticalOffset = ph - scaledDocHeight;
+                    break;
+            }
             
-            // Adjust the Y position to center the text vertically
+            // Position the text vertically according to alignment
             textItem->setPos(px, py + verticalOffset);
             
             scene->addItem(textItem);
