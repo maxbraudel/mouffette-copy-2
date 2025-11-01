@@ -1946,6 +1946,7 @@ void TextMediaItem::applyFitToTextNow() {
 
     syncInlineEditorToBaseSize();
     updateInlineEditorGeometry();
+    updateAlignmentControlsLayout();
     updateOverlayLayout();
     update();
 }
