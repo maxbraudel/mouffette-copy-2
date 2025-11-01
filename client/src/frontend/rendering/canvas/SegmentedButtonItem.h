@@ -16,7 +16,8 @@ public:
     enum class Segment {
         Left,    // Rounded left corners, no right border
         Middle,  // No rounded corners, no right border
-        Right    // Rounded right corners, has left border
+        Right,   // Rounded right corners, has left border
+        Single   // Standalone button with all corners rounded
     };
     
     explicit SegmentedButtonItem(Segment segment, QGraphicsItem* parent = nullptr)
@@ -59,7 +60,9 @@ private:
         // Clamp radius so it never exceeds half of width/height
         const qreal r = std::min({ m_radius, m_rect.width() * 0.5, m_rect.height() * 0.5 });
         
-        if (r > 0.0 && (m_segment == Segment::Left || m_segment == Segment::Right)) {
+        if (m_segment == Segment::Single) {
+            p.addRoundedRect(m_rect, r, r);
+        } else if (r > 0.0 && (m_segment == Segment::Left || m_segment == Segment::Right)) {
             // Create path with selective corner rounding
             const qreal x = m_rect.x();
             const qreal y = m_rect.y();

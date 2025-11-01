@@ -100,6 +100,10 @@ ResizableMediaBase::ResizableMediaBase(const QSize& baseSizePx, int visualSizePx
     initializeOverlays();
 }
 
+bool ResizableMediaBase::allowAltResize() const {
+    return true;
+}
+
 std::weak_ptr<bool> ResizableMediaBase::lifetimeGuard() const {
     return m_lifetimeToken;
 }
@@ -485,7 +489,10 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
     QPointF desiredMovingCornerScene; // carry outside to translation phase
     bool cornerSnapped = false;
     if (!axisLocked) {
-            const bool altPressed = QGuiApplication::keyboardModifiers().testFlag(Qt::AltModifier);
+            bool altPressed = QGuiApplication::keyboardModifiers().testFlag(Qt::AltModifier);
+            if (!allowAltResize()) {
+                altPressed = false;
+            }
             if (!altPressed) {
                 // Corner style uniform scaling (original logic simplified)
                 const qreal currDist = std::hypot(sceneDelta.x(), sceneDelta.y());
@@ -514,6 +521,7 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                 // Alt + corner: non-uniform two-axis stretch by directly changing base size (independent width/height)
                 // Bake current uniform scale into base size on first Alt use for this interaction
                 if (!m_cornerStretchOrigCaptured) {
+                    onAltResizeModeEngaged();
                     qreal s = scale();
                     if (std::abs(s - 1.0) > 1e-9) {
                         prepareGeometryChange();
@@ -597,7 +605,10 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
             //  1) Default (no Alt): uniform scaling along both axes derived from movement on one axis.
             //  2) Alt/Option held: non-uniform stretch along ONLY the active axis (width OR height).
             const bool horizontalHandle = (m_activeHandle == LeftMid || m_activeHandle == RightMid);
-            const bool altPressed = QGuiApplication::keyboardModifiers().testFlag(Qt::AltModifier);
+            bool altPressed = QGuiApplication::keyboardModifiers().testFlag(Qt::AltModifier);
+            if (!allowAltResize()) {
+                altPressed = false;
+            }
             qreal baseLenAxis = horizontalHandle ? m_baseSize.width() : m_baseSize.height();
             qreal deltaScene = horizontalHandle ? (event->scenePos().x() - m_fixedScenePoint.x())
                                                 : (event->scenePos().y() - m_fixedScenePoint.y());
@@ -628,6 +639,7 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                 m_lastAxisAltStretch = true;
                 m_fillContentWithoutAspect = true; // persist fill behavior after non-uniform axis stretch
                 if (!m_axisStretchOrigCaptured) {
+                    onAltResizeModeEngaged();
                     // First Alt movement in this interaction: bake current uniform scale into base size
                     qreal s = scale();
                     if (std::abs(s - 1.0) > 1e-9) {

@@ -197,6 +197,8 @@ public:
     virtual bool isTextMedia() const { return false; }
 
 protected:
+    virtual bool allowAltResize() const;
+    virtual void onAltResizeModeEngaged() {}
     QSize m_baseSize;
     Handle m_activeHandle = None;
     // Tracks if the current (or last) midpoint axis resize used Alt (option) for axis-only stretch

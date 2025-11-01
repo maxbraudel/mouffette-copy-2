@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" width="24px" height="24px" fill="#e8eaed">
+  <!-- Fit to screen frame (without screen rectangle) -->
+  <path d="M800-600v-120H680v-80h120q33 0 56.5 23.5T880-720v120h-80Zm-720 0v-120q0-33 23.5-56.5T160-800h120v80H160v120H80Zm600 440v-80h120v-120h80v120q0 33-23.5 56.5T800-160H680Zm-520 0q-33 0-56.5-23.5T80-240v-120h80v120h120v80H160Z"/>
+  
+  <!-- Geometrically centered big T -->
+  <path d="M420-280v-280H260v-80h440v80H540v280H420Z"/>
+</svg>

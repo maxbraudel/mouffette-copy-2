@@ -68,6 +68,9 @@ public:
     VerticalAlignment verticalAlignment() const { return m_verticalAlignment; }
     void setVerticalAlignment(VerticalAlignment align);
 
+    bool fitToTextEnabled() const { return m_fitToTextEnabled; }
+    void setFitToTextEnabled(bool enabled);
+
     // Inline editing lifecycle
     bool beginInlineEditing();
     void commitInlineEditing();
@@ -89,9 +92,12 @@ public:
         void syncInlineEditorToBaseSize();
 
 protected:
+    void onAltResizeModeEngaged() override;
     void onInteractiveGeometryChanged() override;
 
 private:
+    void scheduleFitToTextUpdate();
+    void applyFitToTextNow();
     QString m_text;
     QFont m_font;
     QColor m_textColor;
@@ -101,7 +107,6 @@ private:
     QString m_editorRenderingText;
     bool m_isUpdatingInlineGeometry = false;
     bool m_ignoreDocumentChange = false;
-    bool m_pendingAutoSize = false;
     bool m_wasMovableBeforeEditing = false;
     bool m_documentMetricsDirty = true;
     qreal m_cachedTextWidth = -1.0;
@@ -125,8 +130,13 @@ private:
     // Text alignment settings
     HorizontalAlignment m_horizontalAlignment = HorizontalAlignment::Center;
     VerticalAlignment m_verticalAlignment = VerticalAlignment::Center;
+    bool m_fitToTextEnabled = false;
+    bool m_fitToTextUpdatePending = false;
+    bool m_applyingFitToText = false;
     
     // Alignment controls (scene items, similar to video controls)
+    class SegmentedButtonItem* m_fitToTextBtn = nullptr;
+    class QGraphicsSvgItem* m_fitToTextIcon = nullptr;
     QGraphicsRectItem* m_alignmentControlsBg = nullptr;
     class SegmentedButtonItem* m_alignLeftBtn = nullptr;
     class SegmentedButtonItem* m_alignCenterHBtn = nullptr;
@@ -152,6 +162,7 @@ private:
     QRectF m_alignTopBtnRect;
     QRectF m_alignCenterVBtnRect;
     QRectF m_alignBottomBtnRect;
+    QRectF m_fitToTextBtnRect;
     
     void ensureInlineEditor();
     void updateInlineEditorGeometry();
@@ -165,4 +176,5 @@ private:
     void updateAlignmentControlsLayout();
     void updateAlignmentButtonStates();
     void applyAlignmentToEditor();
+    void applyFitModeConstraintsToEditor();
 };

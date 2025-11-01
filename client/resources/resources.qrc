@@ -21,5 +21,6 @@
     <file>icons/text/vertical-align-top.svg</file>
     <file>icons/text/vertical-align-center.svg</file>
     <file>icons/text/vertical-align-bottom.svg</file>
+    <file>icons/text/fit-to-text.svg</file>
     </qresource>
 </RCC>

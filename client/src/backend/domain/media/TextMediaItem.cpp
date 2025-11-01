@@ -570,7 +570,6 @@ void TextMediaItem::setText(const QString& text) {
     if (m_text != text) {
         m_text = text;
         m_editorRenderingText = text;
-        m_pendingAutoSize = true;
         m_documentMetricsDirty = true;
         m_cachedEditorPosValid = false;
         m_needsRasterization = true;
@@ -587,6 +586,9 @@ void TextMediaItem::setText(const QString& text) {
         updateInlineEditorGeometry();
         update(); // Trigger repaint
         updateOverlayLayout();
+        if (m_fitToTextEnabled) {
+            scheduleFitToTextUpdate();
+        }
     }
 }
 
@@ -602,6 +604,9 @@ void TextMediaItem::setFont(const QFont& font) {
     m_scaledRasterDirty = true;
     update();
     updateInlineEditorGeometry();
+    if (m_fitToTextEnabled) {
+        scheduleFitToTextUpdate();
+    }
 }
 
 void TextMediaItem::setTextColor(const QColor& color) {
@@ -630,6 +635,9 @@ void TextMediaItem::setHorizontalAlignment(HorizontalAlignment align) {
     applyAlignmentToEditor(); // Update inline editor alignment
     update();
     updateAlignmentButtonStates();
+    if (m_fitToTextEnabled) {
+        scheduleFitToTextUpdate();
+    }
 }
 
 void TextMediaItem::setVerticalAlignment(VerticalAlignment align) {
@@ -774,9 +782,7 @@ void TextMediaItem::ensureInlineEditor() {
             m_documentMetricsDirty = true;
             m_cachedEditorPosValid = false;
             
-            // Only trigger auto-resize if content actually changed
             if (contentChanged) {
-                m_pendingAutoSize = true;
                 handleInlineEditorTextChanged(newText);
             }
             
@@ -787,6 +793,10 @@ void TextMediaItem::ensureInlineEditor() {
             // Only update geometry if content changed (not just cursor movement)
             if (contentChanged) {
                 updateInlineEditorGeometry();
+            }
+
+            if (contentChanged && m_fitToTextEnabled) {
+                scheduleFitToTextUpdate();
             }
         });
     }
@@ -811,6 +821,8 @@ void TextMediaItem::ensureInlineEditor() {
 
     m_inlineEditor = editor;
     editor->invalidateCache();
+
+    applyFitModeConstraintsToEditor();
 }
 
 void TextMediaItem::handleInlineEditorTextChanged(const QString& newText) {
@@ -845,11 +857,6 @@ void TextMediaItem::updateInlineEditorGeometry() {
     auto floatsDiffer = [](qreal a, qreal b, qreal epsilon = 0.1) {
         return std::abs(a - b) > epsilon;
     };
-
-    const bool allowAutoSize = m_pendingAutoSize;
-    if (allowAutoSize) {
-        m_pendingAutoSize = false;
-    }
 
     const qreal margin = kContentPadding;
     const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
@@ -894,10 +901,16 @@ void TextMediaItem::updateInlineEditorGeometry() {
     const qreal logicalContentHeight = std::max<qreal>(1.0, visualContentHeight / uniformScale);
 
     bool widthChanged = false;
-    if (m_cachedTextWidth < 0.0 || floatsDiffer(logicalContentWidth, m_cachedTextWidth, 1e-3)) {
-        m_inlineEditor->setTextWidth(logicalContentWidth);
-        m_cachedTextWidth = logicalContentWidth;
+    if (!m_fitToTextEnabled) {
+        if (m_cachedTextWidth < 0.0 || floatsDiffer(logicalContentWidth, m_cachedTextWidth, 1e-3)) {
+            m_inlineEditor->setTextWidth(logicalContentWidth);
+            m_cachedTextWidth = logicalContentWidth;
+            widthChanged = true;
+            m_documentMetricsDirty = true;
+        }
+    } else {
         widthChanged = true;
+        m_cachedTextWidth = -1.0;
         m_documentMetricsDirty = true;
     }
 
@@ -905,7 +918,7 @@ void TextMediaItem::updateInlineEditorGeometry() {
     qreal docIdealWidth = m_cachedIdealWidth;
     qreal logicalDocHeight = std::max<qreal>(1.0, m_cachedDocumentSize.height());
 
-    const bool needMetrics = doc && (allowAutoSize || widthChanged || m_documentMetricsDirty || m_cachedIdealWidth < 0.0);
+    const bool needMetrics = doc && (widthChanged || m_documentMetricsDirty || m_cachedIdealWidth < 0.0);
     if (needMetrics) {
         docIdealWidth = doc ? doc->idealWidth() : logicalContentWidth;
         QAbstractTextDocumentLayout* layout = doc ? doc->documentLayout() : nullptr;
@@ -930,36 +943,6 @@ void TextMediaItem::updateInlineEditorGeometry() {
             docIdealWidth = logicalContentWidth;
         }
         logicalDocHeight = std::max<qreal>(1.0, m_cachedDocumentSize.height());
-    }
-
-    QSize newBaseSize = m_baseSize;
-    if (doc && allowAutoSize) {
-        const qreal requiredVisualWidth = docIdealWidth * uniformScale + margin * 2.0;
-        if (requiredVisualWidth > static_cast<qreal>(newBaseSize.width()) + 0.5) {
-            newBaseSize.setWidth(static_cast<int>(std::ceil(requiredVisualWidth)));
-        }
-
-        const qreal requiredVisualHeight = logicalDocHeight * uniformScale + margin * 2.0;
-        if (requiredVisualHeight > static_cast<qreal>(newBaseSize.height()) + 0.5) {
-            newBaseSize.setHeight(static_cast<int>(std::ceil(requiredVisualHeight)));
-        }
-    }
-
-    const bool geometryChanged = (newBaseSize != m_baseSize);
-    if (geometryChanged) {
-        prepareGeometryChange();
-        m_baseSize = newBaseSize;
-        m_needsRasterization = true;
-        m_scaledRasterDirty = true;
-        m_lastRasterizedScale = 1.0;
-        bounds = boundingRect();
-        contentRect = bounds.adjusted(margin, margin, -margin, -margin);
-        if (contentRect.width() < 1.0) {
-            contentRect.setWidth(1.0);
-        }
-        if (contentRect.height() < 1.0) {
-            contentRect.setHeight(1.0);
-        }
     }
 
     const qreal visualDocWidth = std::max<qreal>(1.0, m_cachedDocumentSize.width() * uniformScale);
@@ -992,24 +975,6 @@ void TextMediaItem::updateInlineEditorGeometry() {
     }
 
     m_inlineEditor->setFlag(QGraphicsItem::ItemClipsToShape, true);
-
-    if (geometryChanged) {
-        if (m_inlineEditor) {
-            QTimer::singleShot(0, m_inlineEditor, [this]() {
-                if (!m_beingDeleted) {
-                    updateOverlayLayout();
-                    update();
-                }
-            });
-        }
-    }
-
-    const bool hasPendingResize = m_pendingAutoSize;
-    if (hasPendingResize && m_inlineEditor) {
-        QTimer::singleShot(0, m_inlineEditor, [this]() {
-            updateInlineEditorGeometry();
-        });
-    }
 }
 
 void TextMediaItem::onInteractiveGeometryChanged() {
@@ -1040,14 +1005,7 @@ void TextMediaItem::syncInlineEditorToBaseSize() {
         return;
     }
 
-    QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
-    if (QTextDocument* doc = m_inlineEditor->document()) {
-        const qreal width = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - 2.0 * kContentPadding);
-        doc->setTextWidth(width);
-    }
-    m_cachedTextWidth = -1.0; // force recompute on next geometry pass
-    m_documentMetricsDirty = true;
-    m_cachedIdealWidth = -1.0;
+    applyFitModeConstraintsToEditor();
     m_cachedEditorPosValid = false;
 }
 
@@ -1088,7 +1046,6 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
             m_editorRenderingText = m_textBeforeEditing;
             m_needsRasterization = true;
             m_scaledRasterDirty = true;
-            m_pendingAutoSize = true;
         } else {
             m_editorRenderingText = m_text;
         }
@@ -1100,6 +1057,9 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
     m_scaledRasterDirty = true;
 
     updateInlineEditorGeometry();
+    if (m_fitToTextEnabled) {
+        scheduleFitToTextUpdate();
+    }
     update();
 }
 
@@ -1135,7 +1095,7 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
     }
     
     QTextOption option;
-    option.setWrapMode(QTextOption::WordWrap);
+    option.setWrapMode(m_fitToTextEnabled ? QTextOption::NoWrap : QTextOption::WordWrap);
     option.setAlignment(qtHAlign);
 
     QTextDocument doc;
@@ -1147,23 +1107,32 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
     const qreal logicalWidth = static_cast<qreal>(targetWidth) / effectiveScale;
     const qreal logicalHeight = static_cast<qreal>(targetHeight) / effectiveScale;
     const qreal availableWidth = std::max<qreal>(1.0, logicalWidth - 2.0 * kContentPadding);
-    doc.setTextWidth(availableWidth);
+    if (m_fitToTextEnabled) {
+        doc.setTextWidth(-1.0);
+    } else {
+        doc.setTextWidth(availableWidth);
+    }
 
     const QSizeF docSize = doc.documentLayout()->documentSize();
     const qreal availableHeight = logicalHeight - 2.0 * kContentPadding;
     
-    // Apply horizontal alignment offset
+    // When fit-to-text is enabled, the document handles horizontal alignment internally
+    // via QTextOption (each line is aligned independently). We only apply padding.
+    // When fit-to-text is disabled, we manually offset the entire block.
     qreal offsetX = kContentPadding;
-    switch (m_horizontalAlignment) {
-        case HorizontalAlignment::Left:
-            offsetX = kContentPadding;
-            break;
-        case HorizontalAlignment::Center:
-            offsetX = kContentPadding + (availableWidth - docSize.width()) / 2.0;
-            break;
-        case HorizontalAlignment::Right:
-            offsetX = kContentPadding + (availableWidth - docSize.width());
-            break;
+    if (!m_fitToTextEnabled) {
+        const qreal horizontalSpace = std::max<qreal>(0.0, availableWidth - docSize.width());
+        switch (m_horizontalAlignment) {
+            case HorizontalAlignment::Left:
+                offsetX = kContentPadding;
+                break;
+            case HorizontalAlignment::Center:
+                offsetX = kContentPadding + horizontalSpace * 0.5;
+                break;
+            case HorizontalAlignment::Right:
+                offsetX = kContentPadding + horizontalSpace;
+                break;
+        }
     }
     
     // Apply vertical alignment offset
@@ -1180,12 +1149,69 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
             break;
     }
 
-    QAbstractTextDocumentLayout::PaintContext ctx;
-    ctx.palette.setColor(QPalette::Text, m_textColor);
+    QAbstractTextDocumentLayout* layout = doc.documentLayout();
+    if (!layout) {
+        imagePainter.end();
+        return;
+    }
 
     imagePainter.scale(effectiveScale, effectiveScale);
-    imagePainter.translate(offsetX, offsetY);
-    doc.documentLayout()->draw(&imagePainter, ctx);
+
+    if (!m_fitToTextEnabled) {
+        QAbstractTextDocumentLayout::PaintContext ctx;
+        ctx.palette.setColor(QPalette::Text, m_textColor);
+        imagePainter.translate(offsetX, offsetY);
+        layout->draw(&imagePainter, ctx);
+        imagePainter.end();
+        return;
+    }
+
+    // Fit-to-text: render each line manually so alignment is preserved without forcing word wrap.
+    {
+        QTextCursor docCursor(&doc);
+        docCursor.select(QTextCursor::Document);
+        QTextCharFormat colorFormat;
+        colorFormat.setForeground(m_textColor);
+        docCursor.mergeCharFormat(colorFormat);
+    }
+
+    imagePainter.translate(kContentPadding, offsetY);
+
+    const qreal contentWidth = availableWidth;
+
+    for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+        QTextLayout* textLayout = block.layout();
+        if (!textLayout) {
+            continue;
+        }
+
+        const QRectF blockRect = layout->blockBoundingRect(block);
+        const int lineCount = textLayout->lineCount();
+        for (int lineIndex = 0; lineIndex < lineCount; ++lineIndex) {
+            QTextLine line = textLayout->lineAt(lineIndex);
+            if (!line.isValid()) {
+                continue;
+            }
+
+            qreal lineOffsetX = 0.0;
+            const qreal lineWidth = line.naturalTextWidth();
+            switch (m_horizontalAlignment) {
+                case HorizontalAlignment::Left:
+                    lineOffsetX = 0.0;
+                    break;
+                case HorizontalAlignment::Center:
+                    lineOffsetX = std::max<qreal>(0.0, (contentWidth - lineWidth) * 0.5);
+                    break;
+                case HorizontalAlignment::Right:
+                    lineOffsetX = std::max<qreal>(0.0, contentWidth - lineWidth);
+                    break;
+            }
+
+            const QPointF linePos(lineOffsetX, blockRect.top() + line.y());
+            line.draw(&imagePainter, linePos);
+        }
+    }
+
     imagePainter.end();
 }
 
@@ -1427,6 +1453,16 @@ void TextMediaItem::ensureAlignmentControls() {
         return svg;
     };
     
+    // Create fit-to-text toggle button (standalone)
+    m_fitToTextBtn = new SegmentedButtonItem(SegmentedButtonItem::Segment::Single, m_alignmentControlsBg);
+    m_fitToTextBtn->setBrush(m_fitToTextEnabled ? AppColors::gOverlayActiveBackgroundColor : AppColors::gOverlayBackgroundColor);
+    m_fitToTextBtn->setZValue(12001.0);
+    m_fitToTextBtn->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    m_fitToTextBtn->setAcceptedMouseButtons(Qt::NoButton);
+    m_fitToTextBtn->setData(0, "overlay");
+    applySegmentBorder(m_fitToTextBtn);
+    m_fitToTextIcon = makeSvg(":/icons/icons/text/fit-to-text.svg", m_fitToTextBtn);
+
     // Create horizontal alignment buttons (fused group: left | center | right)
     m_alignLeftBtn = new SegmentedButtonItem(SegmentedButtonItem::Segment::Left, m_alignmentControlsBg);
     m_alignLeftBtn->setZValue(12001.0);
@@ -1533,8 +1569,8 @@ void TextMediaItem::updateAlignmentControlsLayout() {
     const int maxIcon = std::max(16, buttonSize - 4);
     iconSize = std::clamp(iconSize, 16, maxIcon);
     
-    // Calculate total width: 3 buttons + gap + 3 buttons
-    const int totalWidth = (buttonSize * 3) + buttonGap + (buttonSize * 3);
+    // Calculate total width: fit button + gap + 3 buttons + gap + 3 buttons
+    const int totalWidth = buttonSize + buttonGap + (buttonSize * 3) + buttonGap + (buttonSize * 3);
     const int totalHeight = buttonSize;
     
     // Get bottom center of text item in item coordinates
@@ -1559,48 +1595,55 @@ void TextMediaItem::updateAlignmentControlsLayout() {
     m_alignmentControlsBg->setRect(0, 0, totalWidth, totalHeight);
     m_alignmentControlsBg->setPos(controlsTopLeftScene);
     
-    // Position horizontal alignment buttons (left group)
-    int xOffset = 0;
-    
-    m_alignLeftBtn->setRect(0, 0, buttonSize, buttonSize);
-    m_alignLeftBtn->setPos(xOffset, 0);
-    m_alignLeftBtn->setRadius(cornerRadiusPx);
-    qreal iconOffsetX = (buttonSize - iconSize) / 2.0;
-    qreal iconOffsetY = (buttonSize - iconSize) / 2.0;
-    m_alignLeftIcon->setPos(iconOffsetX, iconOffsetY);
-    QRectF iconBounds = m_alignLeftIcon->boundingRect();
-    if (iconBounds.width() > 0 && iconBounds.height() > 0) {
+    auto scaleIconToSize = [&](QGraphicsSvgItem* icon) {
+        if (!icon) {
+            return;
+        }
+        QRectF iconBounds = icon->boundingRect();
+        if (iconBounds.width() <= 0.0 || iconBounds.height() <= 0.0) {
+            return;
+        }
         qreal scaleX = iconSize / iconBounds.width();
         qreal scaleY = iconSize / iconBounds.height();
         qreal iconScale = std::min(scaleX, scaleY);
-        m_alignLeftIcon->setScale(iconScale);
+        icon->setScale(iconScale);
+    };
+
+    // Position fit-to-text button
+    int xOffset = 0;
+    qreal iconOffsetX = (buttonSize - iconSize) / 2.0;
+    qreal iconOffsetY = (buttonSize - iconSize) / 2.0;
+    if (m_fitToTextBtn) {
+        m_fitToTextBtn->setRect(0, 0, buttonSize, buttonSize);
+        m_fitToTextBtn->setPos(xOffset, 0);
+        m_fitToTextBtn->setRadius(cornerRadiusPx);
     }
+    if (m_fitToTextIcon) {
+        m_fitToTextIcon->setPos(iconOffsetX, iconOffsetY);
+        scaleIconToSize(m_fitToTextIcon);
+    }
+    xOffset += buttonSize + buttonGap;
+
+    // Position horizontal alignment buttons (left group)
+    m_alignLeftBtn->setRect(0, 0, buttonSize, buttonSize);
+    m_alignLeftBtn->setPos(xOffset, 0);
+    m_alignLeftBtn->setRadius(cornerRadiusPx);
+    m_alignLeftIcon->setPos(iconOffsetX, iconOffsetY);
+    scaleIconToSize(m_alignLeftIcon);
     xOffset += buttonSize;
     
     m_alignCenterHBtn->setRect(0, 0, buttonSize, buttonSize);
     m_alignCenterHBtn->setPos(xOffset, 0);
     m_alignCenterHBtn->setRadius(cornerRadiusPx);
     m_alignCenterHIcon->setPos(iconOffsetX, iconOffsetY);
-    iconBounds = m_alignCenterHIcon->boundingRect();
-    if (iconBounds.width() > 0 && iconBounds.height() > 0) {
-        qreal scaleX = iconSize / iconBounds.width();
-        qreal scaleY = iconSize / iconBounds.height();
-        qreal iconScale = std::min(scaleX, scaleY);
-        m_alignCenterHIcon->setScale(iconScale);
-    }
+    scaleIconToSize(m_alignCenterHIcon);
     xOffset += buttonSize;
     
     m_alignRightBtn->setRect(0, 0, buttonSize, buttonSize);
     m_alignRightBtn->setPos(xOffset, 0);
     m_alignRightBtn->setRadius(cornerRadiusPx);
     m_alignRightIcon->setPos(iconOffsetX, iconOffsetY);
-    iconBounds = m_alignRightIcon->boundingRect();
-    if (iconBounds.width() > 0 && iconBounds.height() > 0) {
-        qreal scaleX = iconSize / iconBounds.width();
-        qreal scaleY = iconSize / iconBounds.height();
-        qreal iconScale = std::min(scaleX, scaleY);
-        m_alignRightIcon->setScale(iconScale);
-    }
+    scaleIconToSize(m_alignRightIcon);
     xOffset += buttonSize + buttonGap;
     
     // Position vertical alignment buttons (right group)
@@ -1608,63 +1651,52 @@ void TextMediaItem::updateAlignmentControlsLayout() {
     m_alignTopBtn->setPos(xOffset, 0);
     m_alignTopBtn->setRadius(cornerRadiusPx);
     m_alignTopIcon->setPos(iconOffsetX, iconOffsetY);
-    iconBounds = m_alignTopIcon->boundingRect();
-    if (iconBounds.width() > 0 && iconBounds.height() > 0) {
-        qreal scaleX = iconSize / iconBounds.width();
-        qreal scaleY = iconSize / iconBounds.height();
-        qreal iconScale = std::min(scaleX, scaleY);
-        m_alignTopIcon->setScale(iconScale);
-    }
+    scaleIconToSize(m_alignTopIcon);
     xOffset += buttonSize;
     
     m_alignCenterVBtn->setRect(0, 0, buttonSize, buttonSize);
     m_alignCenterVBtn->setPos(xOffset, 0);
     m_alignCenterVBtn->setRadius(cornerRadiusPx);
     m_alignCenterVIcon->setPos(iconOffsetX, iconOffsetY);
-    iconBounds = m_alignCenterVIcon->boundingRect();
-    if (iconBounds.width() > 0 && iconBounds.height() > 0) {
-        qreal scaleX = iconSize / iconBounds.width();
-        qreal scaleY = iconSize / iconBounds.height();
-        qreal iconScale = std::min(scaleX, scaleY);
-        m_alignCenterVIcon->setScale(iconScale);
-    }
+    scaleIconToSize(m_alignCenterVIcon);
     xOffset += buttonSize;
     
     m_alignBottomBtn->setRect(0, 0, buttonSize, buttonSize);
     m_alignBottomBtn->setPos(xOffset, 0);
     m_alignBottomBtn->setRadius(cornerRadiusPx);
     m_alignBottomIcon->setPos(iconOffsetX, iconOffsetY);
-    iconBounds = m_alignBottomIcon->boundingRect();
-    if (iconBounds.width() > 0 && iconBounds.height() > 0) {
-        qreal scaleX = iconSize / iconBounds.width();
-        qreal scaleY = iconSize / iconBounds.height();
-        qreal iconScale = std::min(scaleX, scaleY);
-        m_alignBottomIcon->setScale(iconScale);
-    }
+    scaleIconToSize(m_alignBottomIcon);
     
     // Calculate button rectangles in item coordinates using viewport transform approach
     // (same as video controls - convert pixel positions to item coordinates)
     QPointF ctrlTopLeftItem = mapFromScene(controlsTopLeftScene);
     
     const qreal buttonSizeItem = toItemLengthFromPixels(buttonSize);
-    const qreal x0Item = toItemLengthFromPixels(0); // Left button
-    const qreal x1Item = toItemLengthFromPixels(buttonSize); // Center H button
-    const qreal x2Item = toItemLengthFromPixels(buttonSize * 2); // Right button
-    const qreal x3Item = toItemLengthFromPixels((buttonSize * 3) + buttonGap); // Top button
-    const qreal x4Item = toItemLengthFromPixels((buttonSize * 4) + buttonGap); // Center V button
-    const qreal x5Item = toItemLengthFromPixels((buttonSize * 5) + buttonGap); // Bottom button
-    
-    m_alignLeftBtnRect = QRectF(ctrlTopLeftItem.x() + x0Item, ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
-    m_alignCenterHBtnRect = QRectF(ctrlTopLeftItem.x() + x1Item, ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
-    m_alignRightBtnRect = QRectF(ctrlTopLeftItem.x() + x2Item, ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
-    m_alignTopBtnRect = QRectF(ctrlTopLeftItem.x() + x3Item, ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
-    m_alignCenterVBtnRect = QRectF(ctrlTopLeftItem.x() + x4Item, ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
-    m_alignBottomBtnRect = QRectF(ctrlTopLeftItem.x() + x5Item, ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
+    const int fitPx = 0;
+    const int leftPx = buttonSize + buttonGap;
+    const int centerHPx = leftPx + buttonSize;
+    const int rightPx = centerHPx + buttonSize;
+    const int topPx = rightPx + buttonSize + buttonGap;
+    const int centerVPx = topPx + buttonSize;
+    const int bottomPx = centerVPx + buttonSize;
+
+    m_fitToTextBtnRect = QRectF(ctrlTopLeftItem.x() + toItemLengthFromPixels(fitPx), ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
+    m_alignLeftBtnRect = QRectF(ctrlTopLeftItem.x() + toItemLengthFromPixels(leftPx), ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
+    m_alignCenterHBtnRect = QRectF(ctrlTopLeftItem.x() + toItemLengthFromPixels(centerHPx), ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
+    m_alignRightBtnRect = QRectF(ctrlTopLeftItem.x() + toItemLengthFromPixels(rightPx), ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
+    m_alignTopBtnRect = QRectF(ctrlTopLeftItem.x() + toItemLengthFromPixels(topPx), ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
+    m_alignCenterVBtnRect = QRectF(ctrlTopLeftItem.x() + toItemLengthFromPixels(centerVPx), ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
+    m_alignBottomBtnRect = QRectF(ctrlTopLeftItem.x() + toItemLengthFromPixels(bottomPx), ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
 }
 
 bool TextMediaItem::handleAlignmentControlsPressAtItemPos(const QPointF& itemPos) {
     if (!m_alignmentControlsBg || !m_alignmentControlsBg->isVisible()) return false;
     
+    if (m_fitToTextBtnRect.contains(itemPos)) {
+        setFitToTextEnabled(!m_fitToTextEnabled);
+        return true;
+    }
+
     // Check horizontal alignment buttons
     if (m_alignLeftBtnRect.contains(itemPos)) {
         setHorizontalAlignment(HorizontalAlignment::Left);
@@ -1702,6 +1734,11 @@ void TextMediaItem::updateAlignmentButtonStates() {
         return;
     }
     
+    if (m_fitToTextBtn) {
+        m_fitToTextBtn->setBrush(m_fitToTextEnabled ?
+            AppColors::gOverlayActiveBackgroundColor : AppColors::gOverlayBackgroundColor);
+    }
+
     // Update horizontal alignment button states
     m_alignLeftBtn->setBrush(m_horizontalAlignment == HorizontalAlignment::Left ? 
         AppColors::gOverlayActiveBackgroundColor : AppColors::gOverlayBackgroundColor);
@@ -1717,6 +1754,208 @@ void TextMediaItem::updateAlignmentButtonStates() {
         AppColors::gOverlayActiveBackgroundColor : AppColors::gOverlayBackgroundColor);
     m_alignBottomBtn->setBrush(m_verticalAlignment == VerticalAlignment::Bottom ? 
         AppColors::gOverlayActiveBackgroundColor : AppColors::gOverlayBackgroundColor);
+}
+
+void TextMediaItem::setFitToTextEnabled(bool enabled) {
+    if (m_fitToTextEnabled == enabled) {
+        return;
+    }
+
+    m_fitToTextEnabled = enabled;
+    if (!m_fitToTextEnabled) {
+        m_fitToTextUpdatePending = false;
+    }
+    applyFitModeConstraintsToEditor();
+    updateInlineEditorGeometry();
+    updateAlignmentButtonStates();
+    updateAlignmentControlsLayout();
+
+    if (m_fitToTextEnabled) {
+        scheduleFitToTextUpdate();
+    }
+}
+
+void TextMediaItem::scheduleFitToTextUpdate() {
+    if (!m_fitToTextEnabled) {
+        return;
+    }
+    if (m_fitToTextUpdatePending) {
+        return;
+    }
+    m_fitToTextUpdatePending = true;
+    applyFitToTextNow();
+}
+
+void TextMediaItem::applyFitToTextNow() {
+    m_fitToTextUpdatePending = false;
+    if (!m_fitToTextEnabled || m_applyingFitToText) {
+        return;
+    }
+
+    ensureInlineEditor();
+    if (!m_inlineEditor) {
+        return;
+    }
+
+    QScopedValueRollback<bool> guard(m_applyingFitToText, true);
+
+    if (!m_isEditing && m_inlineEditor->toPlainText() != m_text) {
+        QScopedValueRollback<bool> docGuard(m_ignoreDocumentChange, true);
+        m_inlineEditor->setPlainText(m_text);
+    }
+
+    QTextDocument* doc = m_inlineEditor->document();
+    if (!doc) {
+        return;
+    }
+
+    doc->adjustSize();
+
+    const auto measureLogicalWidth = [doc]() -> qreal {
+        qreal minLeft = 0.0;
+        qreal maxRight = 0.0;
+        bool haveLine = false;
+
+        for (QTextBlock block = doc->begin(); block != doc->end(); block = block.next()) {
+            QTextLayout* layout = block.layout();
+            if (!layout) {
+                continue;
+            }
+
+            const int lineCount = layout->lineCount();
+            for (int lineIndex = 0; lineIndex < lineCount; ++lineIndex) {
+                QTextLine line = layout->lineAt(lineIndex);
+                if (!line.isValid()) {
+                    continue;
+                }
+
+                const qreal left = line.x();
+                const qreal right = line.x() + line.naturalTextWidth();
+                if (!haveLine) {
+                    minLeft = left;
+                    maxRight = right;
+                    haveLine = true;
+                } else {
+                    if (left < minLeft) {
+                        minLeft = left;
+                    }
+                    if (right > maxRight) {
+                        maxRight = right;
+                    }
+                }
+            }
+        }
+
+        if (!haveLine) {
+            const qreal width = doc->idealWidth();
+            return std::max<qreal>(1.0, width);
+        }
+
+        const qreal logicalWidth = std::max<qreal>(1.0, maxRight - minLeft);
+        return logicalWidth;
+    };
+
+    const qreal logicalContentWidth = measureLogicalWidth();
+
+    QAbstractTextDocumentLayout* layout = doc->documentLayout();
+    qreal logicalContentHeight = 0.0;
+    if (layout) {
+        const QSizeF size = layout->documentSize();
+        logicalContentHeight = std::max<qreal>(1.0, size.height());
+    } else {
+        logicalContentHeight = std::max<qreal>(1.0, doc->size().height());
+    }
+
+    const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
+    const qreal margin = kContentPadding;
+
+    QSize newBase(
+        std::max(1, static_cast<int>(std::ceil(logicalContentWidth * uniformScale + margin * 2.0))),
+        std::max(1, static_cast<int>(std::ceil(logicalContentHeight * uniformScale + margin * 2.0))));
+
+    const QSize oldBase = m_baseSize;
+
+    if (newBase != oldBase) {
+        auto anchorPointForSize = [this](const QSize& size) {
+            qreal x = 0.0;
+            switch (m_horizontalAlignment) {
+                case HorizontalAlignment::Left:
+                    x = 0.0;
+                    break;
+                case HorizontalAlignment::Center:
+                    x = static_cast<qreal>(size.width()) * 0.5;
+                    break;
+                case HorizontalAlignment::Right:
+                    x = static_cast<qreal>(size.width());
+                    break;
+            }
+
+            qreal y = 0.0;
+            switch (m_verticalAlignment) {
+                case VerticalAlignment::Top:
+                    y = 0.0;
+                    break;
+                case VerticalAlignment::Center:
+                    y = static_cast<qreal>(size.height()) * 0.5;
+                    break;
+                case VerticalAlignment::Bottom:
+                    y = static_cast<qreal>(size.height());
+                    break;
+            }
+
+            return QPointF(x, y);
+        };
+
+        const QPointF oldAnchorLocal = anchorPointForSize(oldBase);
+        QPointF anchorBefore;
+        if (parentItem()) {
+            anchorBefore = mapToParent(oldAnchorLocal);
+        } else if (scene()) {
+            anchorBefore = mapToScene(oldAnchorLocal);
+        } else {
+            anchorBefore = oldAnchorLocal + pos();
+        }
+
+        prepareGeometryChange();
+        m_baseSize = newBase;
+        m_needsRasterization = true;
+        m_scaledRasterDirty = true;
+        m_lastRasterizedScale = 1.0;
+        m_cachedEditorPosValid = false;
+
+        const QPointF newAnchorLocal = anchorPointForSize(newBase);
+        QPointF anchorAfter;
+        if (parentItem()) {
+            anchorAfter = mapToParent(newAnchorLocal);
+        } else if (scene()) {
+            anchorAfter = mapToScene(newAnchorLocal);
+        } else {
+            anchorAfter = newAnchorLocal + pos();
+        }
+
+        const QPointF delta = anchorBefore - anchorAfter;
+        if (!delta.isNull()) {
+            setPos(pos() + delta);
+        }
+    }
+
+    m_cachedDocumentSize = QSizeF(logicalContentWidth, logicalContentHeight);
+    m_cachedIdealWidth = logicalContentWidth;
+    m_documentMetricsDirty = true;
+    m_cachedEditorPosValid = false;
+
+    syncInlineEditorToBaseSize();
+    updateInlineEditorGeometry();
+    updateOverlayLayout();
+    update();
+}
+
+void TextMediaItem::onAltResizeModeEngaged() {
+    if (!m_fitToTextEnabled) {
+        return;
+    }
+
+    setFitToTextEnabled(false);
 }
 
 void TextMediaItem::applyAlignmentToEditor() {
@@ -1750,4 +1989,51 @@ void TextMediaItem::applyAlignmentToEditor() {
     
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
+}
+
+void TextMediaItem::applyFitModeConstraintsToEditor() {
+    if (!m_inlineEditor) {
+        return;
+    }
+
+    const qreal desiredTextWidth = m_fitToTextEnabled
+        ? -1.0
+        : std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - 2.0 * kContentPadding);
+
+    bool widthModified = false;
+
+    {
+        QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
+
+        if (QTextDocument* doc = m_inlineEditor->document()) {
+            QTextOption opt = doc->defaultTextOption();
+            const QTextOption::WrapMode desiredWrap = m_fitToTextEnabled ? QTextOption::NoWrap : QTextOption::WordWrap;
+            if (opt.wrapMode() != desiredWrap) {
+                opt.setWrapMode(desiredWrap);
+                doc->setDefaultTextOption(opt);
+                widthModified = true;
+            }
+        }
+
+        const qreal currentWidth = m_inlineEditor->textWidth();
+        const bool widthSignDiffers = (currentWidth < 0.0) != (desiredTextWidth < 0.0);
+        const bool widthValueDiffers = (currentWidth >= 0.0 && desiredTextWidth >= 0.0 && std::abs(currentWidth - desiredTextWidth) > 1e-3);
+        if (widthSignDiffers || widthValueDiffers) {
+            m_inlineEditor->setTextWidth(desiredTextWidth);
+            widthModified = true;
+        }
+    }
+
+    if (widthModified) {
+        if (QTextDocument* doc = m_inlineEditor->document()) {
+            doc->adjustSize();
+        }
+        m_cachedEditorPosValid = false;
+    }
+
+    m_cachedTextWidth = -1.0;
+    m_cachedIdealWidth = -1.0;
+    m_documentMetricsDirty = true;
+
+    applyAlignmentToEditor();
 }
