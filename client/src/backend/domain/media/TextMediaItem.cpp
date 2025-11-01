@@ -691,12 +691,8 @@ bool TextMediaItem::beginInlineEditing() {
     m_inlineEditor->setVisible(true);
     m_inlineEditor->setTextInteractionFlags(Qt::TextEditorInteraction);
     
-    // Set editor document width at base size (transform will scale it visually)
-    if (QTextDocument* doc = m_inlineEditor->document()) {
-        QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
-        doc->setTextWidth(m_baseSize.width() - 2.0 * kContentPadding);
-        applyAlignmentToEditor(); // Apply current alignment
-    }
+    syncInlineEditorToBaseSize();
+    applyAlignmentToEditor(); // Apply current alignment
 
     updateInlineEditorGeometry();
 
@@ -1023,6 +1019,10 @@ void TextMediaItem::onInteractiveGeometryChanged() {
         // Update editor geometry to follow Alt-resize base size changes
         updateInlineEditorGeometry();
     }
+    else {
+        // Keep hidden editor in sync with base size so entering edit mode wraps correctly
+        syncInlineEditorToBaseSize();
+    }
     
     // Update alignment controls position (similar to video controls)
     updateAlignmentControlsLayout();
@@ -1033,6 +1033,22 @@ void TextMediaItem::onInteractiveGeometryChanged() {
 
 void TextMediaItem::refreshAlignmentControlsLayout() {
     updateAlignmentControlsLayout();
+}
+
+void TextMediaItem::syncInlineEditorToBaseSize() {
+    if (!m_inlineEditor) {
+        return;
+    }
+
+    QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
+    if (QTextDocument* doc = m_inlineEditor->document()) {
+        const qreal width = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - 2.0 * kContentPadding);
+        doc->setTextWidth(width);
+    }
+    m_cachedTextWidth = -1.0; // force recompute on next geometry pass
+    m_documentMetricsDirty = true;
+    m_cachedIdealWidth = -1.0;
+    m_cachedEditorPosValid = false;
 }
 
 void TextMediaItem::finishInlineEditing(bool commitChanges) {

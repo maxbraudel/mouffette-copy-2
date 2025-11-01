@@ -86,6 +86,7 @@ public:
     // Alignment controls interaction (called by canvas, similar to video controls)
     bool handleAlignmentControlsPressAtItemPos(const QPointF& itemPos);
     void refreshAlignmentControlsLayout();
+        void syncInlineEditorToBaseSize();
 
 protected:
     void onInteractiveGeometryChanged() override;
