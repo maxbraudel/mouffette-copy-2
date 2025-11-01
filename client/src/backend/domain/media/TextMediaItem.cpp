@@ -1510,36 +1510,10 @@ void TextMediaItem::updateAlignmentControlsLayout() {
         m_alignBottomIcon->setScale(iconScale);
     }
     
-    // Calculate button hit test rectangles in item coordinates
-    // The controls background is positioned in scene coordinates, and buttons are relative to it
-    // We need to map from the controls background to this item's coordinate system
-    QPointF bgPosInScene = m_alignmentControlsBg->pos();
-    QPointF bgPosInItem = mapFromScene(bgPosInScene);
-    
-    // Calculate each button's rectangle in item coordinates
-    QPointF leftBtnPosInBg = m_alignLeftBtn->pos();
-    m_alignLeftBtnRect = QRectF(bgPosInItem + leftBtnPosInBg, QSizeF(buttonSize, buttonSize));
-    
-    QPointF centerHBtnPosInBg = m_alignCenterHBtn->pos();
-    m_alignCenterHBtnRect = QRectF(bgPosInItem + centerHBtnPosInBg, QSizeF(buttonSize, buttonSize));
-    
-    QPointF rightBtnPosInBg = m_alignRightBtn->pos();
-    m_alignRightBtnRect = QRectF(bgPosInItem + rightBtnPosInBg, QSizeF(buttonSize, buttonSize));
-    
-    QPointF topBtnPosInBg = m_alignTopBtn->pos();
-    m_alignTopBtnRect = QRectF(bgPosInItem + topBtnPosInBg, QSizeF(buttonSize, buttonSize));
-    
-    QPointF centerVBtnPosInBg = m_alignCenterVBtn->pos();
-    m_alignCenterVBtnRect = QRectF(bgPosInItem + centerVBtnPosInBg, QSizeF(buttonSize, buttonSize));
-    
-    QPointF bottomBtnPosInBg = m_alignBottomBtn->pos();
-    m_alignBottomBtnRect = QRectF(bgPosInItem + bottomBtnPosInBg, QSizeF(buttonSize, buttonSize));
-    
-    // Now calculate rectangles properly using the same approach as video controls
-    // Convert controlsTopLeftScene to item coordinates
+    // Calculate button rectangles in item coordinates using viewport transform approach
+    // (same as video controls - convert pixel positions to item coordinates)
     QPointF ctrlTopLeftItem = mapFromScene(controlsTopLeftScene);
     
-    // Convert pixel button positions to item lengths
     const qreal buttonSizeItem = toItemLengthFromPixels(buttonSize);
     const qreal x0Item = toItemLengthFromPixels(0); // Left button
     const qreal x1Item = toItemLengthFromPixels(buttonSize); // Center H button
@@ -1548,7 +1522,6 @@ void TextMediaItem::updateAlignmentControlsLayout() {
     const qreal x4Item = toItemLengthFromPixels((buttonSize * 4) + buttonGap); // Center V button
     const qreal x5Item = toItemLengthFromPixels((buttonSize * 5) + buttonGap); // Bottom button
     
-    // Calculate button rectangles in item coordinates
     m_alignLeftBtnRect = QRectF(ctrlTopLeftItem.x() + x0Item, ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
     m_alignCenterHBtnRect = QRectF(ctrlTopLeftItem.x() + x1Item, ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
     m_alignRightBtnRect = QRectF(ctrlTopLeftItem.x() + x2Item, ctrlTopLeftItem.y(), buttonSizeItem, buttonSizeItem);
