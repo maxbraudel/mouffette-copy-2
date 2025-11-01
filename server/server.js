@@ -660,36 +660,29 @@ class MouffetteServer {
         const targetPersistentId = this.getPersistentId(targetClientId);
         const senderPersistentId = this.getPersistentId(senderId);
         
-        // DIRECTIONAL SESSION FIX: Generate directional canvasSessionId on server side
-        // Format: "senderClient_TO_targetClient_canvas_uploadId"
+        // DIRECTIONAL SESSION FIX: Client already sends directional canvasSessionId
+        // Format: "senderClient_TO_targetClient_canvas_uuid"
+        // Server just passes it through without modification
         // This ensures A→B and B→A have completely different session IDs
-        const directionalSessionId = `${senderPersistentId}_TO_${targetPersistentId}_canvas_${uploadId}`;
         
-        console.log(`🔄 Converted canvasSessionId: ${canvasSessionId} → ${directionalSessionId}`);
+        console.log(`📤 Upload started: ${senderPersistentId}/${senderId} -> ${targetPersistentId}/${targetClientId} [${uploadId}] directional-idea:${canvasSessionId}`);
         
-        // PHASE 2: Validate canvasSessionId exists for target client (SKIP for directional)
-        // NOTE: With directional IDs, we skip validation since the ID is generated fresh
-        // The target will create the session on first receipt
-        
-        // Track upload state with DIRECTIONAL session ID
+        // Track upload state with directional session ID from client
         const fileIds = Array.isArray(files) ? files.map(f => f.fileId).filter(Boolean) : [];
         this.uploads.set(uploadId, {
             senderSession: senderId,
             senderPersistent: senderPersistentId,
             targetSession: targetClientId,
             targetPersistent: targetPersistentId,
-            canvasSessionId: directionalSessionId, // ← Use directional ID
+            canvasSessionId: canvasSessionId, // ← Use client's directional ID
             startTime: Date.now(),
-            files: fileIds
+            files: fileIds.length > 0 ? fileIds : []
         });
         
-        console.log(`📤 Upload started: ${senderPersistentId}/${senderId} -> ${targetPersistentId}/${targetClientId} [${uploadId}] directional-idea:${directionalSessionId} files:${fileIds.length}`);
+        console.log(`   Files: ${fileIds.length > 0 ? fileIds.length + ' file(s)' : 'none'}`);
         
-        // Override message's canvasSessionId with directional one before relaying
-        const modifiedMessage = { ...message, canvasSessionId: directionalSessionId };
-        
-        // Relay to target with modified session ID
-        this.relayToTarget(senderId, targetClientId, modifiedMessage);
+        // Relay to target WITHOUT modifying canvasSessionId
+        this.relayToTarget(senderId, targetClientId, message);
     }
     
     handleUploadComplete(senderId, message) {

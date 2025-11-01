@@ -718,14 +718,12 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         m_incoming.senderId = message.value("senderClientId").toString();
         m_incoming.uploadId = message.value("uploadId").toString();
         
-        // CRITICAL FIX: Generate DIRECTIONAL canvasSessionId
-        // Format: "senderClient_TO_myClient_canvas_uploadId"
-        // This ensures sender→me and me→sender have DIFFERENT session IDs
-        QString directionalSessionId = QString("%1_TO_%2_canvas_%3")
-            .arg(m_incoming.senderId, m_myClientId, m_incoming.uploadId);
-        m_incoming.canvasSessionId = directionalSessionId;
+        // CRITICAL FIX: Use the directional canvasSessionId sent by the sender
+        // The sender already generated: "senderClient_TO_targetClient_canvas_uuid"
+        // We must use the SAME ID to maintain session consistency
+        m_incoming.canvasSessionId = message.value("canvasSessionId").toString();
         
-        qDebug() << "UploadManager: Generated directional canvasSessionId:" << directionalSessionId;
+        qDebug() << "UploadManager: Received directional canvasSessionId:" << m_incoming.canvasSessionId;
         
         m_canceledIncoming.remove(m_incoming.uploadId);
         QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
