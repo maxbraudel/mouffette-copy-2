@@ -63,6 +63,7 @@ private:
 		QString textColor;
 		int baseWidth = 0;
 		int baseHeight = 0;
+		double uniformScale = 1.0;
 		// Multi-screen spans support: each span maps to a screen with its own normalized geom
 		struct Span {
 			int screenId = -1;

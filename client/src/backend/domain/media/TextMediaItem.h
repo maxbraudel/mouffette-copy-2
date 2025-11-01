@@ -54,6 +54,8 @@ public:
     QColor textColor() const { return m_textColor; }
     void setTextColor(const QColor& color);
 
+    qreal uniformScaleFactor() const { return m_uniformScaleFactor; }
+
     // Inline editing lifecycle
     bool beginInlineEditing();
     void commitInlineEditing();

@@ -379,6 +379,11 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                         .arg(textColor.red(), 2, 16, QChar('0'))
                         .arg(textColor.green(), 2, 16, QChar('0'))
                         .arg(textColor.blue(), 2, 16, QChar('0'));
+                    qreal uniformScale = textMedia->uniformScaleFactor();
+                    if (!std::isfinite(uniformScale) || std::abs(uniformScale) < 1e-6) {
+                        uniformScale = 1.0;
+                    }
+                    m["uniformScale"] = uniformScale;
                 }
             } else {
                 m["type"] = media->isVideoMedia() ? "video" : "image";

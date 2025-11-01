@@ -1142,6 +1142,11 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
         item->fontBold = m.value("fontBold").toBool(false);
         item->fontItalic = m.value("fontItalic").toBool(false);
         item->textColor = m.value("textColor").toString("#FFFFFF");
+        double uniformScale = m.value("uniformScale").toDouble(1.0);
+        if (!std::isfinite(uniformScale) || std::abs(uniformScale) < 1e-6) {
+            uniformScale = 1.0;
+        }
+        item->uniformScale = uniformScale;
     }
         // Parse spans if present
         if (m.contains("spans") && m.value("spans").isArray()) {
@@ -1276,30 +1281,33 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             textOption.setWrapMode(QTextOption::WordWrap);
             textItem->document()->setDefaultTextOption(textOption);
             
-            // Calculate scale to match target dimensions
-            // The text needs to be scaled from its natural size to fit pw x ph
-            // Use baseWidth from host to determine the original text width, then scale accordingly
-            const int baseWidth = item->baseWidth > 0 ? item->baseWidth : 200;
-            const int baseHeight = item->baseHeight > 0 ? item->baseHeight : 100;
-            
-            // Set text width based on base width (not target width)
-            textItem->setTextWidth(baseWidth);
-            
-            // Get the natural document size after setting text width
-            const QSizeF docSize = textItem->document()->documentLayout()->documentSize();
-            
-            // Calculate scale factors to match target size
-            const qreal scaleX = static_cast<qreal>(pw) / baseWidth;
-            const qreal scaleY = static_cast<qreal>(ph) / baseHeight;
-            
-            // Apply uniform scale (use scaleX to maintain text aspect ratio)
-            const qreal scale = scaleX;
-            textItem->setScale(scale);
+            // Reconstruct host layout: host renders text into a logical width that is
+            // reduced by the uniform scale factor, then applies that factor visually.
+            const qreal baseWidth = static_cast<qreal>(item->baseWidth > 0 ? item->baseWidth : 200);
+            const qreal baseHeight = static_cast<qreal>(item->baseHeight > 0 ? item->baseHeight : 100);
+            const qreal uniformScale = std::max<qreal>(static_cast<qreal>(std::abs(item->uniformScale)), 1e-4);
+
+            // Mirror host logical width so wrapping matches the baked glyph layout.
+            const qreal logicalWidth = std::max<qreal>(1.0, baseWidth / uniformScale);
+            textItem->setTextWidth(logicalWidth);
+
+            QTextDocument* doc = textItem->document();
+            QSizeF docSize;
+            if (doc && doc->documentLayout()) {
+                docSize = doc->documentLayout()->documentSize();
+            } else {
+                docSize = QSizeF(logicalWidth, baseHeight / uniformScale);
+            }
+
+            const qreal safeBaseWidth = std::max<qreal>(baseWidth, 1.0);
+            const qreal scaleX = static_cast<qreal>(pw) / safeBaseWidth;
+            const qreal appliedScale = scaleX * uniformScale;
+            textItem->setScale(appliedScale);
             
             // Center the text vertically within the target height
             // This matches the offsetY calculation in renderTextToImage: (availableHeight - docSize.height()) / 2.0
             // After scaling, the document height will be docSize.height() * scale
-            const qreal scaledDocHeight = docSize.height() * scale;
+            const qreal scaledDocHeight = docSize.height() * appliedScale;
             const qreal verticalOffset = (ph - scaledDocHeight) / 2.0;
             
             // Adjust the Y position to center the text vertically
