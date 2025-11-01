@@ -294,6 +294,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     auto* autoLayout = new QHBoxLayout(autoRow);
     configureRowLayout(autoLayout);
         m_displayAfterCheck = new QCheckBox("Display automatically", autoRow);
+        m_displayAfterCheck->setChecked(true); // Default to checked (matches MediaSettingsState default)
         m_displayAfterCheck->setStyleSheet(overlayTextStyle);
         m_displayAfterCheck->installEventFilter(this);
         autoLayout->addWidget(m_displayAfterCheck);
