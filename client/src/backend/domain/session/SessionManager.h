@@ -76,6 +76,13 @@ public:
     explicit SessionManager(QObject *parent = nullptr);
     ~SessionManager();
 
+    // Set my client ID (the local client preparing scenes)
+    void setMyClientId(const QString& myClientId) { m_myClientId = myClientId; }
+    QString getMyClientId() const { return m_myClientId; }
+
+    // Generate directional session ID: "sourceClient_TO_targetClient_canvas_uuid"
+    QString generateDirectionalSessionId(const QString& sourceClientId, const QString& targetClientId) const;
+
     // Session lookup
     CanvasSession* findSession(const QString& persistentClientId);
     const CanvasSession* findSession(const QString& persistentClientId) const;
@@ -118,6 +125,8 @@ private:
     QHash<QString, CanvasSession> m_sessions; // persistentClientId → CanvasSession (primary storage)
     QHash<QString, QString> m_canvasSessionIdToClientId;       // canvasSessionId → persistentClientId (secondary index)
     QHash<QString, QString> m_serverIdToClientId;     // serverSessionId → persistentClientId (secondary index)
+    
+    QString m_myClientId; // Local client ID (who prepares the scenes)
     
     // Index maintenance helpers
     void updateIdeaIdIndex(const QString& persistentClientId, const QString& oldIdeaId, const QString& newIdeaId);

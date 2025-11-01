@@ -1,4 +1,5 @@
 #include "backend/domain/session/SessionManager.h"
+#include <QUuid>
 #include "frontend/rendering/canvas/ScreenCanvas.h"
 #include <QPushButton>
 #include <QDebug>
@@ -76,6 +77,14 @@ const SessionManager::CanvasSession* SessionManager::findSessionByServerClientId
     return findSession(persistentClientId);
 }
 
+// Generate directional session ID
+QString SessionManager::generateDirectionalSessionId(const QString& sourceClientId, const QString& targetClientId) const {
+    // Format: "sourceClient_TO_targetClient_canvas_uuid"
+    // This ensures A→B and B→A have completely different session IDs
+    QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    return QString("%1_TO_%2_canvas_%3").arg(sourceClientId, targetClientId, uuid);
+}
+
 // Get or create session
 SessionManager::CanvasSession& SessionManager::getOrCreateSession(const QString& persistentClientId, const ClientInfo& clientInfo) {
     if (persistentClientId.isEmpty()) {
@@ -92,15 +101,22 @@ SessionManager::CanvasSession& SessionManager::getOrCreateSession(const QString&
         return it.value();
     }
 
-    // Create new session
+    // Create new session with DIRECTIONAL session ID
     CanvasSession newSession;
     newSession.persistentClientId = persistentClientId;
     newSession.lastClientInfo = clientInfo;
     newSession.serverAssignedId = clientInfo.getId();
     newSession.remoteContentClearedOnDisconnect = false;
     newSession.connectionsInitialized = false;
-    // Phase 3: canvasSessionId is MANDATORY - use default value for sessions without explicit idea
-    newSession.canvasSessionId = DEFAULT_IDEA_ID;
+    
+    // CRITICAL FIX: Use directional session ID
+    // This creates separate sessions for A→B and B→A
+    if (m_myClientId.isEmpty()) {
+        qWarning() << "SessionManager: myClientId not set! Using default session ID";
+        newSession.canvasSessionId = DEFAULT_IDEA_ID;
+    } else {
+        newSession.canvasSessionId = generateDirectionalSessionId(m_myClientId, persistentClientId);
+    }
 
     m_sessions.insert(persistentClientId, newSession);
     
@@ -108,7 +124,8 @@ SessionManager::CanvasSession& SessionManager::getOrCreateSession(const QString&
     m_canvasSessionIdToClientId[newSession.canvasSessionId] = persistentClientId;
     m_serverIdToClientId[newSession.serverAssignedId] = persistentClientId;
     
-    qDebug() << "SessionManager: Created new session for client" << persistentClientId << "with canvasSessionId" << newSession.canvasSessionId;
+    qDebug() << "SessionManager: Created new session for client" << persistentClientId 
+             << "with directional canvasSessionId" << newSession.canvasSessionId;
     
     emit sessionCreated(persistentClientId);
     return m_sessions[persistentClientId];

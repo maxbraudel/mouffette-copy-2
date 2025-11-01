@@ -45,6 +45,20 @@ void WebSocketMessageHandler::onConnected()
     // Reset reconnection state on successful connection
     m_mainWindow->resetReconnectState();
     
+    // CRITICAL FIX: Set SessionManager's local client ID for directional sessions
+    if (m_mainWindow->getSessionManager() && m_mainWindow->getWebSocketClient()) {
+        QString myClientId = m_mainWindow->getWebSocketClient()->getPersistentClientId();
+        m_mainWindow->getSessionManager()->setMyClientId(myClientId);
+        qDebug() << "SessionManager: Set local client ID to" << myClientId;
+    }
+    
+    // CRITICAL FIX: Set UploadManager's local client ID for directional incoming sessions
+    if (m_mainWindow->getUploadManager() && m_mainWindow->getWebSocketClient()) {
+        QString myClientId = m_mainWindow->getWebSocketClient()->getPersistentClientId();
+        m_mainWindow->getUploadManager()->setMyClientId(myClientId);
+        qDebug() << "UploadManager: Set local client ID to" << myClientId;
+    }
+    
     // Sync this client's info with the server
     m_mainWindow->syncRegistration();
     

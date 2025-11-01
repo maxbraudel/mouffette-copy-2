@@ -61,6 +61,9 @@ public:
     QString activeSessionIdentity() const { return m_activeSessionIdentity; }
     void clearLastRemovalClientId() { m_lastRemovalClientId.clear(); }
     void forceResetForClient(const QString& clientId = QString());
+    
+    // Set local client ID for generating directional session IDs
+    void setMyClientId(const QString& myClientId) { m_myClientId = myClientId; }
 
     // Outbound (sender side)
     bool hasActiveUpload() const { return m_uploadActive; }
@@ -168,7 +171,10 @@ private:
     IncomingUploadSession m_incoming;
     QSet<QString> m_canceledIncoming; // uploadIds canceled by sender
     // Track next expected chunk index per (uploadId:fileId) on the target side
-    QHash<QString, int> m_expectedChunkIndex; 
+    QHash<QString, int> m_expectedChunkIndex;
+    
+    // Local client ID for directional session generation
+    QString m_myClientId; 
 
     // Anti-spam protection
     QTimer* m_actionDebounceTimer = nullptr;
