@@ -12,27 +12,50 @@
 #include <mmdeviceapi.h>
 #include <endpointvolume.h>
 #include <functiondiscoverykeys_devpkey.h>
+#include <array>
 
-// Windows monitor enumeration structure
+namespace {
+
+constexpr size_t kMaxEnumeratedMonitors = 16; // Defensive upper bound
+
 struct WinMonRect {
     RECT rc;
     RECT rcWork;
     bool primary;
 };
 
+struct MonitorEnumContext {
+    std::array<WinMonRect, kMaxEnumeratedMonitors> monitors{};
+    size_t count = 0;
+    bool overflow = false;
+};
+
 static BOOL CALLBACK MouffetteEnumMonProc(HMONITOR hMon, HDC, LPRECT, LPARAM lParam) {
-    auto* mons = reinterpret_cast<std::vector<WinMonRect>*>(lParam);
-    MONITORINFOEX mi;
-    mi.cbSize = sizeof(mi);
-    if (GetMonitorInfo(hMon, &mi)) {
-        WinMonRect r;
-        r.rc = mi.rcMonitor;
-        r.rcWork = mi.rcWork;
-        r.primary = (mi.dwFlags & MONITORINFOF_PRIMARY);
-        mons->push_back(r);
+    auto* ctx = reinterpret_cast<MonitorEnumContext*>(lParam);
+    if (!ctx) {
+        return FALSE;
     }
+
+    MONITORINFOEXW mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(hMon, &mi)) {
+        return TRUE; // Skip but continue enumeration
+    }
+
+    if (ctx->count >= ctx->monitors.size()) {
+        ctx->overflow = true;
+        return TRUE; // Continue but do not write past the buffer
+    }
+
+    WinMonRect entry{};
+    entry.rc = mi.rcMonitor;
+    entry.rcWork = mi.rcWork;
+    entry.primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
+    ctx->monitors[ctx->count++] = entry;
     return TRUE;
 }
+
+} // namespace
 #endif
 
 SystemMonitor::SystemMonitor(QObject* parent)
@@ -161,11 +184,10 @@ QList<ScreenInfo> SystemMonitor::getLocalScreenInfo() const {
     
 #ifdef Q_OS_WIN
     // Use WinAPI to enumerate monitors in PHYSICAL pixels with correct origins (no logical gaps)
-    std::vector<WinMonRect> mons; 
-    mons.reserve(8);
-    EnumDisplayMonitors(nullptr, nullptr, MouffetteEnumMonProc, reinterpret_cast<LPARAM>(&mons));
+    MonitorEnumContext ctx;
+    EnumDisplayMonitors(nullptr, nullptr, MouffetteEnumMonProc, reinterpret_cast<LPARAM>(&ctx));
     
-    if (mons.empty()) {
+    if (ctx.count == 0) {
         // Fallback to Qt API
         QList<QScreen*> screenList = QGuiApplication::screens();
         for (int i = 0; i < screenList.size(); ++i) {
@@ -175,8 +197,8 @@ QList<ScreenInfo> SystemMonitor::getLocalScreenInfo() const {
                                     s == QGuiApplication::primaryScreen()));
         }
     } else {
-        for (size_t i = 0; i < mons.size(); ++i) {
-            const auto& m = mons[i];
+        for (size_t i = 0; i < ctx.count; ++i) {
+            const auto& m = ctx.monitors[i];
             const int px = m.rc.left;
             const int py = m.rc.top;
             const int pw = m.rc.right - m.rc.left;

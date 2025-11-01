@@ -19,17 +19,50 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-struct WinMonRect { std::wstring name; RECT rc; RECT rcWork; bool primary; };
+#include <array>
+
+namespace {
+
+constexpr size_t kMaxEnumeratedMonitors = 16;
+
+struct WinMonRect {
+    RECT rc;
+    RECT rcWork;
+    bool primary;
+};
+
+struct MonitorEnumContext {
+    std::array<WinMonRect, kMaxEnumeratedMonitors> monitors{};
+    size_t count = 0;
+    bool overflow = false;
+};
+
 static BOOL CALLBACK ScreenEventEnumMonProc(HMONITOR hMon, HDC, LPRECT, LPARAM lParam) {
-    auto* out = reinterpret_cast<std::vector<WinMonRect>*>(lParam);
-    MONITORINFOEXW mi{}; mi.cbSize = sizeof(mi);
-    if (GetMonitorInfoW(hMon, &mi)) {
-        WinMonRect r; r.name = mi.szDevice; r.rc = mi.rcMonitor; r.rcWork = mi.rcWork;
-        r.primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
-        out->push_back(r);
+    auto* ctx = reinterpret_cast<MonitorEnumContext*>(lParam);
+    if (!ctx) {
+        return FALSE;
     }
+
+    MONITORINFOEXW mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(hMon, &mi)) {
+        return TRUE;
+    }
+
+    if (ctx->count >= ctx->monitors.size()) {
+        ctx->overflow = true;
+        return TRUE;
+    }
+
+    WinMonRect entry{};
+    entry.rc = mi.rcMonitor;
+    entry.rcWork = mi.rcWork;
+    entry.primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
+    ctx->monitors[ctx->count++] = entry;
     return TRUE;
 }
+
+} // namespace
 #endif
 
 ScreenEventHandler::ScreenEventHandler(MainWindow* mainWindow, QObject* parent)
@@ -74,12 +107,12 @@ void ScreenEventHandler::syncRegistration()
     if (!screens.isEmpty()) {
 #if defined(Q_OS_WIN)
         // Build a list of physical monitors (rcMonitor/rcWork) to align with ScreenInfo (physical px)
-        std::vector<WinMonRect> mons; 
-        mons.reserve(8);
-        EnumDisplayMonitors(nullptr, nullptr, ScreenEventEnumMonProc, reinterpret_cast<LPARAM>(&mons));
+        MonitorEnumContext ctx;
+        EnumDisplayMonitors(nullptr, nullptr, ScreenEventEnumMonProc, reinterpret_cast<LPARAM>(&ctx));
         
         auto findMatchingMon = [&](const ScreenInfo& s) -> const WinMonRect* {
-            for (const auto &m : mons) {
+            for (size_t idx = 0; idx < ctx.count; ++idx) {
+                const auto &m = ctx.monitors[idx];
                 const int mw = m.rc.right - m.rc.left;
                 const int mh = m.rc.bottom - m.rc.top;
                 if (m.rc.left == s.x && m.rc.top == s.y && mw == s.width && mh == s.height) {
@@ -278,12 +311,12 @@ void ScreenEventHandler::onDataRequestReceived()
     // Build uiZones immediately for snapshot
 #if defined(Q_OS_WIN)
     {
-        std::vector<WinMonRect> mons; 
-        mons.reserve(8);
-        EnumDisplayMonitors(nullptr, nullptr, ScreenEventEnumMonProc, reinterpret_cast<LPARAM>(&mons));
+        MonitorEnumContext ctx;
+        EnumDisplayMonitors(nullptr, nullptr, ScreenEventEnumMonProc, reinterpret_cast<LPARAM>(&ctx));
         
         auto findMatchingMon = [&](const ScreenInfo& s) -> const WinMonRect* {
-            for (const auto &m : mons) {
+            for (size_t idx = 0; idx < ctx.count; ++idx) {
+                const auto &m = ctx.monitors[idx];
                 const int mw = m.rc.right - m.rc.left;
                 const int mh = m.rc.bottom - m.rc.top;
                 if (m.rc.left == s.x && m.rc.top == s.y && mw == s.width && mh == s.height) {
