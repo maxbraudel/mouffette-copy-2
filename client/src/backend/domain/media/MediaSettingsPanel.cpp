@@ -1167,10 +1167,7 @@ void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
     }
 
     if (m_textColorBox) {
-        if (isTextMedia) {
-            m_textColorBox->setEnabled(true);
-        } else {
-            m_textColorBox->setEnabled(false);
+        if (!isTextMedia) {
             m_textColorBox->setText(TextMediaDefaults::TEXT_COLOR.name(QColor::HexArgb).toUpper());
         }
         refreshTextColorBoxStyle(m_activeBox == m_textColorBox);
@@ -1185,16 +1182,12 @@ void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
             } else {
                 defaultBorderWidthStr = QString::number(defaultBorderWidth, 'f', 2);
             }
-            m_textBorderWidthBox->setEnabled(false);
             m_textBorderWidthBox->setText(defaultBorderWidthStr);
         }
     }
 
     if (m_textBorderColorBox) {
-        if (isTextMedia) {
-            m_textBorderColorBox->setEnabled(true);
-        } else {
-            m_textBorderColorBox->setEnabled(false);
+        if (!isTextMedia) {
             m_textBorderColorBox->setText(TextMediaDefaults::TEXT_BORDER_COLOR.name(QColor::HexArgb).toUpper());
         }
         refreshTextBorderColorBoxStyle(m_activeBox == m_textBorderColorBox);
@@ -1203,7 +1196,6 @@ void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
     if (m_textFontWeightBox) {
         if (!isTextMedia) {
             const int defaultWeight = TextMediaDefaults::FONT_WEIGHT_VALUE;
-            m_textFontWeightBox->setEnabled(false);
             m_textFontWeightBox->setText(QString::number(defaultWeight));
         }
     }
@@ -2420,13 +2412,11 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
                 m_textColorCheck->setChecked(false);
                 m_textColorCheck->blockSignals(prev);
             }
-            m_textColorBox->setEnabled(false);
             m_textColorBox->setText(TextMediaDefaults::TEXT_COLOR.name(QColor::HexArgb));
             refreshTextColorBoxStyle(false);
         }
 
         if (m_textBorderWidthBox) {
-            m_textBorderWidthBox->setEnabled(false);
             m_textBorderWidthBox->setText(formatBorderPercent(TextMediaDefaults::TEXT_BORDER_WIDTH_PERCENT));
         }
         if (m_textBorderWidthCheck) {
@@ -2435,7 +2425,6 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
         onTextBorderWidthToggled(false);
 
         if (m_textBorderColorBox) {
-            m_textBorderColorBox->setEnabled(false);
             m_textBorderColorBox->setText(TextMediaDefaults::TEXT_BORDER_COLOR.name(QColor::HexArgb).toUpper());
             refreshTextBorderColorBoxStyle(false);
         }
@@ -2446,7 +2435,6 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
 
         if (m_textFontWeightBox) {
             const int defaultWeight = TextMediaDefaults::FONT_WEIGHT_VALUE;
-            m_textFontWeightBox->setEnabled(false);
             m_textFontWeightBox->setText(QString::number(defaultWeight));
         }
         if (m_textFontWeightCheck) {
