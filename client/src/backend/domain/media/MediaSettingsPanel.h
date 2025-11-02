@@ -59,6 +59,9 @@ private slots:
     void onVolumeToggled(bool checked);
     void onTextColorToggled(bool checked);
     void onTextColorBoxClicked();
+    void onTextBorderWidthToggled(bool checked);
+    void onTextBorderColorToggled(bool checked);
+    void onTextBorderColorBoxClicked();
     void onSceneTabClicked();
     void onElementTabClicked();
 
@@ -74,6 +77,7 @@ private:
     void updateActiveTabUi();
     void updateSectionHeaderVisibility();
     void refreshTextColorBoxStyle(bool activeHighlight = false);
+    void refreshTextBorderColorBoxStyle(bool activeHighlight = false);
 
 private:
     QWidget* m_widget = nullptr; // parented to viewport
@@ -190,6 +194,13 @@ private:
     QCheckBox* m_textColorCheck = nullptr;
     QLabel* m_textColorBox = nullptr;
     QWidget* m_textColorRow = nullptr;
+    QCheckBox* m_textBorderWidthCheck = nullptr;
+    QLabel* m_textBorderWidthBox = nullptr;
+    QLabel* m_textBorderWidthUnitsLabel = nullptr;
+    QWidget* m_textBorderWidthRow = nullptr;
+    QCheckBox* m_textBorderColorCheck = nullptr;
+    QLabel* m_textBorderColorBox = nullptr;
+    QWidget* m_textBorderColorRow = nullptr;
     
     class ResizableMediaBase* m_mediaItem = nullptr; // not owning
 };

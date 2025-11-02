@@ -25,6 +25,7 @@
 #include <QImage>
 #include <QGraphicsRectItem>
 #include <QGraphicsSvgItem>
+#include <QPen>
 #include "frontend/rendering/canvas/OverlayPanels.h"
 #include "frontend/rendering/canvas/SegmentedButtonItem.h"
 #include "frontend/ui/theme/AppColors.h"
@@ -40,6 +41,8 @@ namespace TextMediaDefaults {
     const QFont::Weight FONT_WEIGHT = QFont::Bold;
     const bool FONT_ITALIC = false;
     const QColor TEXT_COLOR = Qt::white;
+    const qreal TEXT_BORDER_WIDTH = 0.0;
+    const QColor TEXT_BORDER_COLOR = Qt::black;
     
     // Default text content when creating new text media
     const QString DEFAULT_TEXT = QStringLiteral("No Text");
@@ -475,7 +478,13 @@ static InlineTextEditor* toInlineEditor(QGraphicsTextItem* item) {
     return static_cast<InlineTextEditor*>(item);
 }
 
-static void normalizeTextFormatting(QGraphicsTextItem* editor, const QFont& currentFont, const QColor& currentColor) {
+static void normalizeTextFormatting(
+    QGraphicsTextItem* editor,
+    const QFont& currentFont,
+    const QColor& currentColor,
+    const QColor& currentOutlineColor,
+    qreal currentOutlineWidth
+) {
     if (!editor || !editor->document()) {
         return;
     }
@@ -493,6 +502,12 @@ static void normalizeTextFormatting(QGraphicsTextItem* editor, const QFont& curr
     QTextCharFormat standardFormat;
     standardFormat.setFont(currentFont);
     standardFormat.setForeground(QBrush(currentColor));
+    if (currentOutlineWidth > 0.0) {
+        QPen outlinePen(currentOutlineColor, currentOutlineWidth, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        standardFormat.setTextOutline(outlinePen);
+    } else {
+        standardFormat.clearProperty(QTextFormat::TextOutline);
+    }
 
     // Apply to all text
     cursor.mergeCharFormat(standardFormat);
@@ -533,6 +548,8 @@ TextMediaItem::TextMediaItem(
     : ResizableMediaBase(initialSize, visualSizePx, selectionSizePx, QStringLiteral("Text"))
     , m_text(initialText)
     , m_textColor(TextMediaDefaults::TEXT_COLOR)
+    , m_textBorderWidth(TextMediaDefaults::TEXT_BORDER_WIDTH)
+    , m_textBorderColor(TextMediaDefaults::TEXT_BORDER_COLOR)
 {
     // Set up default font from global configuration
     m_font = QFont(TextMediaDefaults::FONT_FAMILY, TextMediaDefaults::FONT_SIZE);
@@ -622,12 +639,53 @@ void TextMediaItem::setTextColor(const QColor& color) {
     update();
     if (m_inlineEditor) {
         m_inlineEditor->setDefaultTextColor(m_textColor);
+        normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, m_textBorderWidth);
         if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
             inlineEditor->invalidateCache();
         }
     }
     m_needsRasterization = true;
     m_scaledRasterDirty = true;
+}
+
+void TextMediaItem::setTextBorderWidth(qreal width) {
+    const qreal clamped = std::max<qreal>(0.0, width);
+    if (std::abs(m_textBorderWidth - clamped) < 1e-4) {
+        return;
+    }
+
+    m_textBorderWidth = clamped;
+    m_needsRasterization = true;
+    m_scaledRasterDirty = true;
+    update();
+
+    if (m_inlineEditor) {
+        normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, m_textBorderWidth);
+        if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
+            inlineEditor->invalidateCache();
+        }
+    }
+}
+
+void TextMediaItem::setTextBorderColor(const QColor& color) {
+    if (!color.isValid()) {
+        return;
+    }
+    if (m_textBorderColor == color) {
+        return;
+    }
+
+    m_textBorderColor = color;
+    m_needsRasterization = true;
+    m_scaledRasterDirty = true;
+    update();
+
+    if (m_inlineEditor) {
+        normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, m_textBorderWidth);
+        if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
+            inlineEditor->invalidateCache();
+        }
+    }
 }
 
 void TextMediaItem::setHorizontalAlignment(HorizontalAlignment align) {
@@ -661,7 +719,7 @@ void TextMediaItem::normalizeEditorFormatting() {
         return;
     }
     // Use base font (transform will scale it)
-    normalizeTextFormatting(m_inlineEditor, m_font, m_textColor);
+    normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, m_textBorderWidth);
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
 }
@@ -1160,6 +1218,20 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
 
     imagePainter.scale(effectiveScale, effectiveScale);
 
+    {
+        QTextCursor docCursor(&doc);
+        docCursor.select(QTextCursor::Document);
+        QTextCharFormat format;
+        format.setForeground(m_textColor);
+        if (m_textBorderWidth > 0.0) {
+            QPen outlinePen(m_textBorderColor, m_textBorderWidth, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+            format.setTextOutline(outlinePen);
+        } else {
+            format.clearProperty(QTextFormat::TextOutline);
+        }
+        docCursor.mergeCharFormat(format);
+    }
+
     if (!m_fitToTextEnabled) {
         QAbstractTextDocumentLayout::PaintContext ctx;
         ctx.palette.setColor(QPalette::Text, m_textColor);
@@ -1170,13 +1242,6 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
     }
 
     // Fit-to-text: render each line manually so alignment is preserved without forcing word wrap.
-    {
-        QTextCursor docCursor(&doc);
-        docCursor.select(QTextCursor::Document);
-        QTextCharFormat colorFormat;
-        colorFormat.setForeground(m_textColor);
-        docCursor.mergeCharFormat(colorFormat);
-    }
 
     imagePainter.translate(kContentPadding, offsetY);
 

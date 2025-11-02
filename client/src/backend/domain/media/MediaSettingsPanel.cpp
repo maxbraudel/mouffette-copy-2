@@ -711,6 +711,53 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         QObject::connect(m_textColorCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onTextColorToggled);
         m_elementPropertiesLayout->addWidget(m_textColorRow);
     }
+
+    {
+        m_textBorderWidthRow = new QWidget(m_elementPropertiesContainer);
+        configureRow(m_textBorderWidthRow);
+    auto* h = new QHBoxLayout(m_textBorderWidthRow);
+    configureRowLayout(h);
+        m_textBorderWidthCheck = new QCheckBox("Border width: ", m_textBorderWidthRow);
+        m_textBorderWidthCheck->setStyleSheet(overlayTextStyle);
+        m_textBorderWidthCheck->installEventFilter(this);
+        const qreal defaultBorderWidth = TextMediaDefaults::TEXT_BORDER_WIDTH;
+        QString defaultBorderWidthStr;
+        if (std::abs(defaultBorderWidth - std::round(defaultBorderWidth)) < 1e-4) {
+            defaultBorderWidthStr = QString::number(static_cast<int>(std::lround(defaultBorderWidth)));
+        } else {
+            defaultBorderWidthStr = QString::number(defaultBorderWidth, 'f', 2);
+        }
+        m_textBorderWidthBox = makeValueBox(defaultBorderWidthStr);
+        m_textBorderWidthBox->installEventFilter(this);
+        m_textBorderWidthUnitsLabel = new QLabel("px", m_textBorderWidthRow);
+        m_textBorderWidthUnitsLabel->setStyleSheet(overlayTextStyle);
+        h->addWidget(m_textBorderWidthCheck);
+        h->addWidget(m_textBorderWidthBox);
+        h->addWidget(m_textBorderWidthUnitsLabel);
+        h->addStretch();
+        QObject::connect(m_textBorderWidthCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onTextBorderWidthToggled);
+        m_elementPropertiesLayout->addWidget(m_textBorderWidthRow);
+    }
+
+    {
+        m_textBorderColorRow = new QWidget(m_elementPropertiesContainer);
+        configureRow(m_textBorderColorRow);
+    auto* h = new QHBoxLayout(m_textBorderColorRow);
+    configureRowLayout(h);
+        m_textBorderColorCheck = new QCheckBox("Border color: ", m_textBorderColorRow);
+        m_textBorderColorCheck->setStyleSheet(overlayTextStyle);
+        m_textBorderColorCheck->installEventFilter(this);
+        m_textBorderColorBox = makeValueBox(TextMediaDefaults::TEXT_BORDER_COLOR.name(QColor::HexArgb).toUpper());
+        m_textBorderColorBox->installEventFilter(this);
+        m_textBorderColorBox->setMinimumWidth(40);
+        m_textBorderColorBox->setMaximumWidth(40);
+        refreshTextBorderColorBoxStyle(false);
+        h->addWidget(m_textBorderColorCheck);
+        h->addWidget(m_textBorderColorBox);
+        h->addStretch();
+        QObject::connect(m_textBorderColorCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onTextBorderColorToggled);
+        m_elementPropertiesLayout->addWidget(m_textBorderColorRow);
+    }
     
     // Configure widget dimensions and event handling
     m_widget->setMouseTracking(true);
@@ -1056,6 +1103,12 @@ void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
     if (m_textColorRow) {
         m_textColorRow->setVisible(isTextMedia);
     }
+    if (m_textBorderWidthRow) {
+        m_textBorderWidthRow->setVisible(isTextMedia);
+    }
+    if (m_textBorderColorRow) {
+        m_textBorderColorRow->setVisible(isTextMedia);
+    }
 
     if (m_textColorCheck) {
         m_textColorCheck->setEnabled(isTextMedia);
@@ -1063,6 +1116,22 @@ void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
             const bool prev = m_textColorCheck->blockSignals(true);
             m_textColorCheck->setChecked(false);
             m_textColorCheck->blockSignals(prev);
+        }
+    }
+    if (m_textBorderWidthCheck) {
+        m_textBorderWidthCheck->setEnabled(isTextMedia);
+        if (!isTextMedia && m_textBorderWidthCheck->isChecked()) {
+            const bool prev = m_textBorderWidthCheck->blockSignals(true);
+            m_textBorderWidthCheck->setChecked(false);
+            m_textBorderWidthCheck->blockSignals(prev);
+        }
+    }
+    if (m_textBorderColorCheck) {
+        m_textBorderColorCheck->setEnabled(isTextMedia);
+        if (!isTextMedia && m_textBorderColorCheck->isChecked()) {
+            const bool prev = m_textBorderColorCheck->blockSignals(true);
+            m_textBorderColorCheck->setChecked(false);
+            m_textBorderColorCheck->blockSignals(prev);
         }
     }
 
@@ -1076,9 +1145,42 @@ void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
         refreshTextColorBoxStyle(m_activeBox == m_textColorBox);
     }
 
+    if (m_textBorderWidthBox) {
+        if (!isTextMedia) {
+            const qreal defaultBorderWidth = TextMediaDefaults::TEXT_BORDER_WIDTH;
+            QString defaultBorderWidthStr;
+            if (std::abs(defaultBorderWidth - std::round(defaultBorderWidth)) < 1e-4) {
+                defaultBorderWidthStr = QString::number(static_cast<int>(std::lround(defaultBorderWidth)));
+            } else {
+                defaultBorderWidthStr = QString::number(defaultBorderWidth, 'f', 2);
+            }
+            m_textBorderWidthBox->setEnabled(false);
+            m_textBorderWidthBox->setText(defaultBorderWidthStr);
+        }
+    }
+
+    if (m_textBorderColorBox) {
+        if (isTextMedia) {
+            m_textBorderColorBox->setEnabled(true);
+        } else {
+            m_textBorderColorBox->setEnabled(false);
+            m_textBorderColorBox->setText(TextMediaDefaults::TEXT_BORDER_COLOR.name(QColor::HexArgb).toUpper());
+        }
+        refreshTextBorderColorBoxStyle(m_activeBox == m_textBorderColorBox);
+    }
+
     if (!isTextMedia && m_activeBox == m_textColorBox) {
         clearActiveBox();
     }
+    if (!isTextMedia && m_activeBox == m_textBorderWidthBox) {
+        clearActiveBox();
+    }
+
+    const bool previousGuard = m_updatingFromMedia;
+    m_updatingFromMedia = true;
+    onTextBorderWidthToggled(isTextMedia && m_textBorderWidthCheck && m_textBorderWidthCheck->isChecked());
+    onTextBorderColorToggled(m_textBorderColorCheck && m_textBorderColorCheck->isChecked());
+    m_updatingFromMedia = previousGuard;
 
     updateSectionHeaderVisibility();
 
@@ -1190,6 +1292,10 @@ void MediaSettingsPanel::setBoxActive(QLabel* box, bool active) {
         refreshTextColorBoxStyle(active);
         return;
     }
+    if (box == m_textBorderColorBox) {
+        refreshTextBorderColorBoxStyle(active);
+        return;
+    }
 
     if (active) {
         box->setStyleSheet(
@@ -1288,6 +1394,57 @@ void MediaSettingsPanel::refreshTextColorBoxStyle(bool activeHighlight) {
     m_textColorBox->setStyleSheet(style);
 }
 
+void MediaSettingsPanel::refreshTextBorderColorBoxStyle(bool activeHighlight) {
+    if (!m_textBorderColorBox) {
+        return;
+    }
+
+    QString rawValue = m_textBorderColorBox->text().trimmed();
+    if (rawValue.isEmpty()) {
+        rawValue = TextMediaDefaults::TEXT_BORDER_COLOR.name(QColor::HexArgb);
+    }
+
+    QColor color(rawValue);
+    if (!color.isValid()) {
+        color = TextMediaDefaults::TEXT_BORDER_COLOR;
+    }
+
+    const QString canonicalValue = color.name(QColor::HexArgb).toUpper();
+    if (canonicalValue != m_textBorderColorBox->text()) {
+        m_textBorderColorBox->setText(canonicalValue);
+    }
+    m_textBorderColorBox->setToolTip(canonicalValue);
+
+    const QColor borderColor = activeHighlight ? AppColors::gMediaPanelActiveBg : AppColors::gMediaPanelInactiveBorder;
+
+    const QString style = QString(
+        "QLabel {"
+        "  background-color: %1;"
+        "  border: 1px solid %2;"
+        "  border-radius: 6px;"
+        "  padding: 2px 10px;"
+        "  margin-left: 4px;"
+        "  margin-right: 0px;"
+        "  color: transparent;"
+        "  font-size: 0px;"
+        "  min-height: %3px;"
+        "  max-height: %3px;"
+        "}"
+        "QLabel:disabled {"
+        "  background-color: %1;"
+        "  border: 1px solid %2;"
+        "  color: transparent;"
+        "  font-size: 0px;"
+        "}"
+    ).arg(
+        canonicalValue,
+        borderColor.name(),
+        QString::number(kOptionValueBoxHeight)
+    );
+
+    m_textBorderColorBox->setStyleSheet(style);
+}
+
 void MediaSettingsPanel::clearActiveBox() {
     if (!m_activeBox) return;
 
@@ -1324,16 +1481,20 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
         QLabel* box = qobject_cast<QLabel*>(obj);
     
         // Special handling for text color box - opens color picker instead of editing
-        if (box == m_textColorBox) {
+        if (box == m_textColorBox || box == m_textBorderColorBox) {
             if (!box->isEnabled()) {
                 return true; // consume the event without opening the picker
             }
-            onTextColorBoxClicked();
+            if (box == m_textColorBox) {
+                onTextColorBoxClicked();
+            } else {
+                onTextBorderColorBoxClicked();
+            }
             return true; // consume the event
         }
     
     if (box && (box == m_displayAfterBox || box == m_unmuteDelayBox || box == m_autoPlayBox || box == m_pauseDelayBox || box == m_repeatBox || 
-        box == m_fadeInBox || box == m_fadeOutBox || box == m_audioFadeInBox || box == m_audioFadeOutBox || box == m_hideDelayBox || box == m_muteDelayBox || box == m_opacityBox || box == m_volumeBox)) {
+        box == m_fadeInBox || box == m_fadeOutBox || box == m_audioFadeInBox || box == m_audioFadeOutBox || box == m_hideDelayBox || box == m_muteDelayBox || box == m_opacityBox || box == m_volumeBox || box == m_textBorderWidthBox)) {
             // Don't allow interaction with disabled boxes
             if (!box->isEnabled()) {
                 return true; // consume the event but don't activate
@@ -1540,7 +1701,7 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
 bool MediaSettingsPanel::boxSupportsDecimal(QLabel* box) const {
     return box == m_displayAfterBox || box == m_unmuteDelayBox || box == m_autoPlayBox || box == m_fadeInBox ||
            box == m_fadeOutBox || box == m_audioFadeInBox || box == m_audioFadeOutBox || box == m_hideDelayBox || box == m_pauseDelayBox ||
-           box == m_muteDelayBox;
+           box == m_muteDelayBox || box == m_textBorderWidthBox;
 }
 
 bool MediaSettingsPanel::isValidInputForBox(QLabel* box, QChar character) {
@@ -1656,6 +1817,92 @@ void MediaSettingsPanel::onTextColorBoxClicked() {
         refreshTextColorBoxStyle(m_activeBox == m_textColorBox);
         
         // Apply to media item
+        if (!m_updatingFromMedia) {
+            pushSettingsToMedia();
+        }
+    }
+}
+
+void MediaSettingsPanel::onTextBorderWidthToggled(bool checked) {
+    const QString activeTextStyle = QStringLiteral("color: %1;")
+        .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
+    const QString disabledTextStyle = QStringLiteral("color: #808080;");
+
+    if (m_textBorderWidthCheck) {
+        m_textBorderWidthCheck->setStyleSheet(checked ? activeTextStyle : disabledTextStyle);
+    }
+    if (m_textBorderWidthUnitsLabel) {
+        m_textBorderWidthUnitsLabel->setStyleSheet(checked ? activeTextStyle : disabledTextStyle);
+    }
+
+    if (m_textBorderWidthBox) {
+        m_textBorderWidthBox->setEnabled(checked);
+        if (checked) {
+            setBoxActive(m_textBorderWidthBox, m_activeBox == m_textBorderWidthBox);
+        } else {
+            m_textBorderWidthBox->setStyleSheet(
+                QString("QLabel {"
+                        "  background-color: #404040;"
+                        "  border: 1px solid #606060;"
+                        "  border-radius: 6px;"
+                        "  padding: 2px 10px;"
+                        "  margin-left: 4px;"
+                        "  margin-right: 0px;"
+                        "  color: #808080;"
+                        "  min-height: %1px;"
+                        "  max-height: %1px;"
+                        "}")
+                    .arg(kOptionValueBoxHeight)
+            );
+            if (m_activeBox == m_textBorderWidthBox) {
+                clearActiveBox();
+            }
+        }
+    }
+
+    if (!m_updatingFromMedia) {
+        pushSettingsToMedia();
+    }
+}
+
+void MediaSettingsPanel::onTextBorderColorToggled(bool checked) {
+    const QString activeTextStyle = QStringLiteral("color: %1;")
+        .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
+    const QString disabledTextStyle = QStringLiteral("color: #808080;");
+
+    if (m_textBorderColorCheck) {
+        m_textBorderColorCheck->setStyleSheet(checked ? activeTextStyle : disabledTextStyle);
+    }
+
+    if (m_textBorderColorBox) {
+        refreshTextBorderColorBoxStyle(m_activeBox == m_textBorderColorBox);
+    }
+    if (!m_updatingFromMedia) {
+        pushSettingsToMedia();
+    }
+}
+
+void MediaSettingsPanel::onTextBorderColorBoxClicked() {
+    if (!m_textBorderColorBox || !m_mediaItem) return;
+
+    QString currentColorStr = m_textBorderColorBox->text().trimmed();
+    QColor currentColor(currentColorStr.isEmpty() ? TextMediaDefaults::TEXT_BORDER_COLOR : QColor(currentColorStr));
+    if (!currentColor.isValid()) {
+        currentColor = TextMediaDefaults::TEXT_BORDER_COLOR;
+    }
+
+    QColor newColor = QColorDialog::getColor(
+        currentColor,
+        m_widget,
+        tr("Select Border Color"),
+        QColorDialog::ShowAlphaChannel
+    );
+
+    if (newColor.isValid()) {
+        QString colorStr = newColor.name(QColor::HexArgb);
+        m_textBorderColorBox->setText(colorStr);
+        refreshTextBorderColorBoxStyle(m_activeBox == m_textBorderColorBox);
+
         if (!m_updatingFromMedia) {
             pushSettingsToMedia();
         }
@@ -2126,27 +2373,79 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     applyBoxText(m_opacityBox, state.opacityText, QStringLiteral("100"));
     applyBoxText(m_volumeBox, state.volumeText, QStringLiteral("100"));
     applyBoxText(m_unmuteDelayBox, state.unmuteDelayText, QStringLiteral("1"), true);
-    
-    // Apply text color for TextMediaItem
-    auto* textItem = dynamic_cast<TextMediaItem*>(m_mediaItem);
-    if (textItem && m_textColorCheck && m_textColorBox) {
-        const QColor currentColor = textItem->textColor();
-        const QString colorStr = currentColor.name(QColor::HexArgb);
-        applyBoxText(m_textColorBox, colorStr, QStringLiteral("#FFFFFFFF"));
 
-        const bool colorOverridden = (currentColor != TextMediaDefaults::TEXT_COLOR);
-        applyCheckState(m_textColorCheck, colorOverridden);
-        m_textColorBox->setEnabled(true);
-        refreshTextColorBoxStyle(m_activeBox == m_textColorBox);
-    } else if (m_textColorBox) {
-        if (m_textColorCheck) {
-            const bool prev = m_textColorCheck->blockSignals(true);
-            m_textColorCheck->setChecked(false);
-            m_textColorCheck->blockSignals(prev);
+    auto formatBorderWidth = [](qreal width) {
+        if (std::abs(width - std::round(width)) < 1e-4) {
+            return QString::number(static_cast<int>(std::lround(width)));
         }
-        m_textColorBox->setEnabled(false);
-        m_textColorBox->setText(TextMediaDefaults::TEXT_COLOR.name(QColor::HexArgb));
-        refreshTextColorBoxStyle(false);
+        return QString::number(width, 'f', 2);
+    };
+
+    // Apply text styling for TextMediaItem
+    auto* textItem = dynamic_cast<TextMediaItem*>(m_mediaItem);
+    if (textItem) {
+        if (m_textColorBox) {
+            const QColor currentColor = textItem->textColor();
+            const QString colorStr = currentColor.name(QColor::HexArgb);
+            applyBoxText(m_textColorBox, colorStr, QStringLiteral("#FFFFFFFF"));
+
+            const bool colorOverridden = (currentColor != TextMediaDefaults::TEXT_COLOR);
+            applyCheckState(m_textColorCheck, colorOverridden);
+            m_textColorBox->setEnabled(true);
+            refreshTextColorBoxStyle(m_activeBox == m_textColorBox);
+        }
+
+        if (m_textBorderWidthBox) {
+            const qreal currentWidth = textItem->textBorderWidth();
+            m_textBorderWidthBox->setText(formatBorderWidth(currentWidth));
+        }
+        if (m_textBorderWidthCheck) {
+            const bool widthOverridden = std::abs(textItem->textBorderWidth() - TextMediaDefaults::TEXT_BORDER_WIDTH) > 1e-4;
+            applyCheckState(m_textBorderWidthCheck, widthOverridden);
+        }
+        onTextBorderWidthToggled(m_textBorderWidthCheck && m_textBorderWidthCheck->isChecked());
+
+        if (m_textBorderColorBox) {
+            const QColor currentBorderColor = textItem->textBorderColor();
+            const QString borderColorStr = currentBorderColor.name(QColor::HexArgb);
+            applyBoxText(m_textBorderColorBox, borderColorStr, TextMediaDefaults::TEXT_BORDER_COLOR.name(QColor::HexArgb));
+            refreshTextBorderColorBoxStyle(m_activeBox == m_textBorderColorBox);
+        }
+        if (m_textBorderColorCheck) {
+            const bool colorOverridden = (textItem->textBorderColor() != TextMediaDefaults::TEXT_BORDER_COLOR);
+            applyCheckState(m_textBorderColorCheck, colorOverridden);
+        }
+        onTextBorderColorToggled(m_textBorderColorCheck && m_textBorderColorCheck->isChecked());
+    } else {
+        if (m_textColorBox) {
+            if (m_textColorCheck) {
+                const bool prev = m_textColorCheck->blockSignals(true);
+                m_textColorCheck->setChecked(false);
+                m_textColorCheck->blockSignals(prev);
+            }
+            m_textColorBox->setEnabled(false);
+            m_textColorBox->setText(TextMediaDefaults::TEXT_COLOR.name(QColor::HexArgb));
+            refreshTextColorBoxStyle(false);
+        }
+
+        if (m_textBorderWidthBox) {
+            m_textBorderWidthBox->setEnabled(false);
+            m_textBorderWidthBox->setText(formatBorderWidth(TextMediaDefaults::TEXT_BORDER_WIDTH));
+        }
+        if (m_textBorderWidthCheck) {
+            applyCheckState(m_textBorderWidthCheck, false);
+        }
+        onTextBorderWidthToggled(false);
+
+        if (m_textBorderColorBox) {
+            m_textBorderColorBox->setEnabled(false);
+            m_textBorderColorBox->setText(TextMediaDefaults::TEXT_BORDER_COLOR.name(QColor::HexArgb).toUpper());
+            refreshTextBorderColorBoxStyle(false);
+        }
+        if (m_textBorderColorCheck) {
+            applyCheckState(m_textBorderColorCheck, false);
+        }
+        onTextBorderColorToggled(false);
     }
 
     // Re-run UI interlock logic without persisting back to the media item
@@ -2303,16 +2602,48 @@ void MediaSettingsPanel::pushSettingsToMedia() {
     
     // Apply text color if this is a text media item and color override is enabled
     auto* textItem = dynamic_cast<TextMediaItem*>(m_mediaItem);
-    if (textItem && m_textColorCheck && m_textColorBox) {
-        if (m_textColorCheck->isChecked()) {
-            QString colorStr = m_textColorBox->text().trimmed();
-            QColor color(colorStr);
-            if (color.isValid()) {
-                textItem->setTextColor(color);
+    if (textItem) {
+        if (m_textColorCheck && m_textColorBox) {
+            if (m_textColorCheck->isChecked()) {
+                QString colorStr = m_textColorBox->text().trimmed();
+                QColor color(colorStr);
+                if (color.isValid()) {
+                    textItem->setTextColor(color);
+                }
+            } else {
+                // Reset to default color when disabled
+                textItem->setTextColor(TextMediaDefaults::TEXT_COLOR);
             }
-        } else {
-            // Reset to default color when disabled
-            textItem->setTextColor(TextMediaDefaults::TEXT_COLOR);
+        }
+
+        if (m_textBorderWidthCheck && m_textBorderWidthBox) {
+            qreal parsedWidth = TextMediaDefaults::TEXT_BORDER_WIDTH;
+            if (m_textBorderWidthCheck->isChecked()) {
+                QString widthStr = m_textBorderWidthBox->text().trimmed();
+                if (!widthStr.isEmpty() && widthStr != QStringLiteral("...")) {
+                    widthStr.replace(',', '.');
+                    bool ok = false;
+                    const double candidate = widthStr.toDouble(&ok);
+                    if (ok) {
+                        parsedWidth = std::clamp<qreal>(static_cast<qreal>(candidate), 0.0, 1000.0);
+                    }
+                }
+            }
+            textItem->setTextBorderWidth(parsedWidth);
+        } else if (m_textBorderWidthCheck && !m_textBorderWidthCheck->isChecked()) {
+            textItem->setTextBorderWidth(TextMediaDefaults::TEXT_BORDER_WIDTH);
+        }
+
+        if (m_textBorderColorCheck && m_textBorderColorBox) {
+            if (m_textBorderColorCheck->isChecked()) {
+                QString colorStr = m_textBorderColorBox->text().trimmed();
+                QColor color(colorStr);
+                if (color.isValid()) {
+                    textItem->setTextBorderColor(color);
+                }
+            } else {
+                textItem->setTextBorderColor(TextMediaDefaults::TEXT_BORDER_COLOR);
+            }
         }
     }
 }
