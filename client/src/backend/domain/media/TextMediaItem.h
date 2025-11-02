@@ -82,6 +82,7 @@ public:
 
     bool fitToTextEnabled() const { return m_fitToTextEnabled; }
     void setFitToTextEnabled(bool enabled);
+    void requestFitToTextRefresh();
 
     // Inline editing lifecycle
     bool beginInlineEditing();

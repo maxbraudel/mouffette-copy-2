@@ -840,7 +840,9 @@ void TextMediaItem::setTextFontWeightValue(int weight) {
 }
 
 void TextMediaItem::applyFontChange(const QFont& font) {
-    if (m_font == font) {
+    // Don't skip update for fit-to-text mode since weight changes might not be detected by QFont equality
+    const bool fontChanged = (m_font != font);
+    if (!fontChanged && !m_fitToTextEnabled) {
         return;
     }
 
@@ -856,9 +858,9 @@ void TextMediaItem::applyFontChange(const QFont& font) {
 
     if (m_inlineEditor) {
         m_inlineEditor->setFont(m_font);
-        if (m_isEditing) {
-            normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, m_textBorderWidth);
-        }
+        // Always normalize text formatting when font changes, not just when editing
+        // This ensures the document's character formats match the new font for fit-to-text measurements
+        normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, m_textBorderWidth);
         if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
             inlineEditor->invalidateCache();
         }
@@ -2024,6 +2026,13 @@ void TextMediaItem::setFitToTextEnabled(bool enabled) {
     }
 }
 
+void TextMediaItem::requestFitToTextRefresh() {
+    if (!m_fitToTextEnabled) {
+        return;
+    }
+    scheduleFitToTextUpdate();
+}
+
 void TextMediaItem::scheduleFitToTextUpdate() {
     if (!m_fitToTextEnabled) {
         return;
@@ -2032,7 +2041,13 @@ void TextMediaItem::scheduleFitToTextUpdate() {
         return;
     }
     m_fitToTextUpdatePending = true;
-    applyFitToTextNow();
+    std::weak_ptr<bool> guard = lifetimeGuard();
+    QTimer::singleShot(0, [this, guard]() {
+        if (guard.expired()) {
+            return;
+        }
+        applyFitToTextNow();
+    });
 }
 
 void TextMediaItem::applyFitToTextNow() {
