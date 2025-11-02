@@ -2026,13 +2026,6 @@ void TextMediaItem::setFitToTextEnabled(bool enabled) {
     }
 }
 
-void TextMediaItem::requestFitToTextRefresh() {
-    if (!m_fitToTextEnabled) {
-        return;
-    }
-    scheduleFitToTextUpdate();
-}
-
 void TextMediaItem::scheduleFitToTextUpdate() {
     if (!m_fitToTextEnabled) {
         return;
