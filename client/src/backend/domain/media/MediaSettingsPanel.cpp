@@ -758,6 +758,26 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         QObject::connect(m_textBorderColorCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onTextBorderColorToggled);
         m_elementPropertiesLayout->addWidget(m_textBorderColorRow);
     }
+
+    {
+        m_textFontWeightRow = new QWidget(m_elementPropertiesContainer);
+        configureRow(m_textFontWeightRow);
+        auto* h = new QHBoxLayout(m_textFontWeightRow);
+        configureRowLayout(h);
+        m_textFontWeightCheck = new QCheckBox("Font weight: ", m_textFontWeightRow);
+        m_textFontWeightCheck->setStyleSheet(overlayTextStyle);
+        m_textFontWeightCheck->installEventFilter(this);
+        
+        int defaultWeight = TextMediaDefaults::FONT_WEIGHT_VALUE;
+        m_textFontWeightBox = makeValueBox(QString::number(defaultWeight));
+        m_textFontWeightBox->installEventFilter(this);
+        
+        h->addWidget(m_textFontWeightCheck);
+        h->addWidget(m_textFontWeightBox);
+        h->addStretch();
+        QObject::connect(m_textFontWeightCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onTextFontWeightToggled);
+        m_elementPropertiesLayout->addWidget(m_textFontWeightRow);
+    }
     
     // Configure widget dimensions and event handling
     m_widget->setMouseTracking(true);
@@ -1109,6 +1129,9 @@ void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
     if (m_textBorderColorRow) {
         m_textBorderColorRow->setVisible(isTextMedia);
     }
+    if (m_textFontWeightRow) {
+        m_textFontWeightRow->setVisible(isTextMedia);
+    }
 
     if (m_textColorCheck) {
         m_textColorCheck->setEnabled(isTextMedia);
@@ -1132,6 +1155,14 @@ void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
             const bool prev = m_textBorderColorCheck->blockSignals(true);
             m_textBorderColorCheck->setChecked(false);
             m_textBorderColorCheck->blockSignals(prev);
+        }
+    }
+    if (m_textFontWeightCheck) {
+        m_textFontWeightCheck->setEnabled(isTextMedia);
+        if (!isTextMedia && m_textFontWeightCheck->isChecked()) {
+            const bool prev = m_textFontWeightCheck->blockSignals(true);
+            m_textFontWeightCheck->setChecked(false);
+            m_textFontWeightCheck->blockSignals(prev);
         }
     }
 
@@ -1169,10 +1200,21 @@ void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
         refreshTextBorderColorBoxStyle(m_activeBox == m_textBorderColorBox);
     }
 
+    if (m_textFontWeightBox) {
+        if (!isTextMedia) {
+            const int defaultWeight = TextMediaDefaults::FONT_WEIGHT_VALUE;
+            m_textFontWeightBox->setEnabled(false);
+            m_textFontWeightBox->setText(QString::number(defaultWeight));
+        }
+    }
+
     if (!isTextMedia && m_activeBox == m_textColorBox) {
         clearActiveBox();
     }
     if (!isTextMedia && m_activeBox == m_textBorderWidthBox) {
+        clearActiveBox();
+    }
+    if (!isTextMedia && m_activeBox == m_textFontWeightBox) {
         clearActiveBox();
     }
 
@@ -1180,6 +1222,7 @@ void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
     m_updatingFromMedia = true;
     onTextBorderWidthToggled(isTextMedia && m_textBorderWidthCheck && m_textBorderWidthCheck->isChecked());
     onTextBorderColorToggled(m_textBorderColorCheck && m_textBorderColorCheck->isChecked());
+    onTextFontWeightToggled(isTextMedia && m_textFontWeightCheck && m_textFontWeightCheck->isChecked());
     m_updatingFromMedia = previousGuard;
 
     updateSectionHeaderVisibility();
@@ -1494,7 +1537,7 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
         }
     
     if (box && (box == m_displayAfterBox || box == m_unmuteDelayBox || box == m_autoPlayBox || box == m_pauseDelayBox || box == m_repeatBox || 
-        box == m_fadeInBox || box == m_fadeOutBox || box == m_audioFadeInBox || box == m_audioFadeOutBox || box == m_hideDelayBox || box == m_muteDelayBox || box == m_opacityBox || box == m_volumeBox || box == m_textBorderWidthBox)) {
+        box == m_fadeInBox || box == m_fadeOutBox || box == m_audioFadeInBox || box == m_audioFadeOutBox || box == m_hideDelayBox || box == m_muteDelayBox || box == m_opacityBox || box == m_volumeBox || box == m_textBorderWidthBox || box == m_textFontWeightBox)) {
             // Don't allow interaction with disabled boxes
             if (!box->isEnabled()) {
                 return true; // consume the event but don't activate
@@ -1906,6 +1949,46 @@ void MediaSettingsPanel::onTextBorderColorBoxClicked() {
         if (!m_updatingFromMedia) {
             pushSettingsToMedia();
         }
+    }
+}
+
+void MediaSettingsPanel::onTextFontWeightToggled(bool checked) {
+    const QString activeTextStyle = QStringLiteral("color: %1;")
+        .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
+    const QString disabledTextStyle = QStringLiteral("color: #808080;");
+
+    if (m_textFontWeightCheck) {
+        m_textFontWeightCheck->setStyleSheet(checked ? activeTextStyle : disabledTextStyle);
+    }
+
+    if (m_textFontWeightBox) {
+        m_textFontWeightBox->setEnabled(checked);
+        if (checked) {
+            setBoxActive(m_textFontWeightBox, m_activeBox == m_textFontWeightBox);
+        } else {
+            m_textFontWeightBox->setStyleSheet(
+                QString("QLabel {"
+                        "  background-color: #404040;"
+                        "  border: 1px solid #606060;"
+                        "  border-radius: 6px;"
+                        "  padding: 2px 10px;"
+                        "  margin-left: 4px;"
+                        "  margin-right: 0px;"
+                        "  color: #808080;"
+                        "  min-height: %1px;"
+                        "  max-height: %1px;"
+                        "}")
+                    .arg(kOptionValueBoxHeight)
+            );
+            m_textFontWeightBox->setText(QString::number(TextMediaDefaults::FONT_WEIGHT_VALUE));
+            if (m_activeBox == m_textFontWeightBox) {
+                clearActiveBox();
+            }
+        }
+    }
+
+    if (!m_updatingFromMedia) {
+        pushSettingsToMedia();
     }
 }
 
@@ -2416,6 +2499,16 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
             applyCheckState(m_textBorderColorCheck, colorOverridden);
         }
         onTextBorderColorToggled(m_textBorderColorCheck && m_textBorderColorCheck->isChecked());
+
+        if (m_textFontWeightBox) {
+            const int currentWeightValue = textItem->textFontWeightValue();
+            m_textFontWeightBox->setText(QString::number(currentWeightValue));
+        }
+        if (m_textFontWeightCheck) {
+            const bool weightOverridden = (textItem->textFontWeightValue() != TextMediaDefaults::FONT_WEIGHT_VALUE);
+            applyCheckState(m_textFontWeightCheck, weightOverridden);
+        }
+        onTextFontWeightToggled(m_textFontWeightCheck && m_textFontWeightCheck->isChecked());
     } else {
         if (m_textColorBox) {
             if (m_textColorCheck) {
@@ -2446,6 +2539,16 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
             applyCheckState(m_textBorderColorCheck, false);
         }
         onTextBorderColorToggled(false);
+
+        if (m_textFontWeightBox) {
+            const int defaultWeight = TextMediaDefaults::FONT_WEIGHT_VALUE;
+            m_textFontWeightBox->setEnabled(false);
+            m_textFontWeightBox->setText(QString::number(defaultWeight));
+        }
+        if (m_textFontWeightCheck) {
+            applyCheckState(m_textFontWeightCheck, false);
+        }
+        onTextFontWeightToggled(false);
     }
 
     // Re-run UI interlock logic without persisting back to the media item
@@ -2644,6 +2747,23 @@ void MediaSettingsPanel::pushSettingsToMedia() {
             } else {
                 textItem->setTextBorderColor(TextMediaDefaults::TEXT_BORDER_COLOR);
             }
+        }
+
+        if (m_textFontWeightCheck) {
+            int targetWeight = TextMediaDefaults::FONT_WEIGHT_VALUE;
+            if (m_textFontWeightCheck->isChecked() && m_textFontWeightBox) {
+                QString weightStr = m_textFontWeightBox->text().trimmed();
+                if (!weightStr.isEmpty() && weightStr != QStringLiteral("...")) {
+                    bool ok = false;
+                    const int candidate = weightStr.toInt(&ok);
+                    if (ok) {
+                        targetWeight = std::clamp(candidate, 100, 900);
+                        targetWeight = ((targetWeight + 50) / 100) * 100;
+                        targetWeight = std::clamp(targetWeight, 100, 900);
+                    }
+                }
+            }
+            textItem->setTextFontWeightValue(targetWeight);
         }
     }
 }

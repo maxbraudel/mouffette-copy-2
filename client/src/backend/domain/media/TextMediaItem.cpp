@@ -26,6 +26,9 @@
 #include <QGraphicsRectItem>
 #include <QGraphicsSvgItem>
 #include <QPen>
+#include <QFontDatabase>
+#include <array>
+#include <limits>
 #include "frontend/rendering/canvas/OverlayPanels.h"
 #include "frontend/rendering/canvas/SegmentedButtonItem.h"
 #include "frontend/ui/theme/AppColors.h"
@@ -36,9 +39,12 @@
 
 // Global text styling configuration - tweak these to change all text media appearance
 namespace TextMediaDefaults {
-    const QString FONT_FAMILY = QStringLiteral("Arial");
+    // Use system font or a font known to have multiple weights on macOS
+    // SF Pro Display has full weight range support, fallback to Helvetica Neue which also has good weight support
+    const QString FONT_FAMILY = QStringLiteral(".SF NS Display"); // macOS system font with full weight support
     const int FONT_SIZE = 24;
     const QFont::Weight FONT_WEIGHT = QFont::Bold;
+    const int FONT_WEIGHT_VALUE = 700; // Numeric weight (100-900 range)
     const bool FONT_ITALIC = false;
     const QColor TEXT_COLOR = Qt::white;
     const qreal TEXT_BORDER_WIDTH = 0.0;
@@ -59,6 +65,129 @@ namespace {
 
 constexpr qreal kContentPadding = 0.0;
 constexpr qreal kFitToTextMinWidth = 20.0; // Minimum width in fit-to-text mode
+
+struct WeightMapping {
+    int css; // CSS-like weight (100-900)
+    int qt;  // Qt weight (0-99 scale)
+};
+
+constexpr std::array<WeightMapping, 9> kWeightMappings = {{
+    {100, static_cast<int>(QFont::Thin)},
+    {200, static_cast<int>(QFont::ExtraLight)},
+    {300, static_cast<int>(QFont::Light)},
+    {400, static_cast<int>(QFont::Normal)},
+    {500, static_cast<int>(QFont::Medium)},
+    {600, static_cast<int>(QFont::DemiBold)},
+    {700, static_cast<int>(QFont::Bold)},
+    {800, static_cast<int>(QFont::ExtraBold)},
+    {900, static_cast<int>(QFont::Black)}
+}};
+
+int clampCssWeight(int weight) {
+    int clamped = std::clamp(weight, 1, 1000);
+    clamped = ((clamped + 50) / 100) * 100; // Snap to nearest hundred like CSS font-weight
+    return std::clamp(clamped, 100, 900);
+}
+
+int cssToQtWeight(int cssWeight) {
+    const int clamped = clampCssWeight(cssWeight);
+    const WeightMapping* best = &kWeightMappings.front();
+    int bestDiff = std::numeric_limits<int>::max();
+
+    for (const auto& mapping : kWeightMappings) {
+        const int diff = std::abs(clamped - mapping.css);
+        if (diff < bestDiff) {
+            best = &mapping;
+            bestDiff = diff;
+        }
+    }
+
+    return best->qt;
+}
+
+int qtToCssWeight(int qtWeight) {
+    const WeightMapping* best = &kWeightMappings.front();
+    int bestDiff = std::numeric_limits<int>::max();
+
+    for (const auto& mapping : kWeightMappings) {
+        const int diff = std::abs(qtWeight - mapping.qt);
+        if (diff < bestDiff) {
+            best = &mapping;
+            bestDiff = diff;
+        }
+    }
+
+    return best->css;
+}
+
+QFont fontAdjustedForWeight(const QFont& base, int cssWeight) {
+    QFont result(base);
+    const int clampedCss = clampCssWeight(cssWeight);
+    const int targetQtWeight = cssToQtWeight(clampedCss);
+    const bool wantItalic = result.italic();
+
+    const QString family = result.family();
+    const QStringList styles = QFontDatabase::styles(family);
+
+    auto styleIsCondensed = [](const QString& style) {
+        const QString lower = style.toLower();
+        return lower.contains(QStringLiteral("condensed")) ||
+               lower.contains(QStringLiteral("compressed")) ||
+               lower.contains(QStringLiteral("narrow")) ||
+               lower.contains(QStringLiteral("compact"));
+    };
+
+    auto findBestStyle = [&](bool requireMatchingItalic, bool avoidCondensed) -> QString {
+        QString chosenStyle;
+        int bestDiff = std::numeric_limits<int>::max();
+        for (const QString& style : styles) {
+            const bool styleIsItalic = style.contains(QStringLiteral("italic"), Qt::CaseInsensitive);
+            if (requireMatchingItalic && styleIsItalic != wantItalic) {
+                continue;
+            }
+            if (avoidCondensed && styleIsCondensed(style)) {
+                continue;
+            }
+            const int styleWeight = QFontDatabase::weight(family, style);
+            const int diff = std::abs(styleWeight - targetQtWeight);
+            if (diff < bestDiff) {
+                bestDiff = diff;
+                chosenStyle = style;
+            }
+        }
+        return chosenStyle;
+    };
+
+    QString bestStyle;
+    if (!styles.isEmpty()) {
+        bestStyle = findBestStyle(true, true);
+        if (bestStyle.isEmpty()) {
+            bestStyle = findBestStyle(true, false);
+        }
+        if (bestStyle.isEmpty()) {
+            bestStyle = findBestStyle(false, true);
+        }
+        if (bestStyle.isEmpty()) {
+            bestStyle = findBestStyle(false, false);
+        }
+    }
+
+    if (!bestStyle.isEmpty()) {
+        result.setStyleName(bestStyle);
+        const int matchedQtWeight = QFontDatabase::weight(family, bestStyle);
+        result.setWeight(static_cast<QFont::Weight>(matchedQtWeight));
+    } else {
+        result.setStyleName(QString());
+        result.setWeight(static_cast<QFont::Weight>(targetQtWeight));
+    }
+
+    result.setItalic(wantItalic);
+    return result;
+}
+
+int canonicalCssWeight(const QFont& font) {
+    return qtToCssWeight(font.weight());
+}
 
 class InlineTextEditor : public QGraphicsTextItem {
 public:
@@ -552,9 +681,30 @@ TextMediaItem::TextMediaItem(
     , m_textBorderColor(TextMediaDefaults::TEXT_BORDER_COLOR)
 {
     // Set up default font from global configuration
-    m_font = QFont(TextMediaDefaults::FONT_FAMILY, TextMediaDefaults::FONT_SIZE);
-    m_font.setWeight(TextMediaDefaults::FONT_WEIGHT);
+    // Try system font first, with fallbacks to fonts known to have good weight support
+    QStringList fontCandidates = {
+        TextMediaDefaults::FONT_FAMILY,
+        QStringLiteral(".SF NS Text"),          // macOS system font (alternate name)
+        QStringLiteral("Helvetica Neue"),       // Good weight support on macOS
+        QStringLiteral("Segoe UI"),             // Good weight support on Windows
+        QStringLiteral("Roboto"),               // Good weight support cross-platform
+        QStringLiteral("Arial")                 // Final fallback
+    };
+    
+    QFontDatabase fontDb;
+    QString selectedFamily = fontCandidates.last(); // Default to Arial
+    for (const QString& candidate : fontCandidates) {
+        if (QFontDatabase::hasFamily(candidate)) {
+            selectedFamily = candidate;
+            break;
+        }
+    }
+    
+    m_font = QFont(selectedFamily, TextMediaDefaults::FONT_SIZE);
     m_font.setItalic(TextMediaDefaults::FONT_ITALIC);
+    m_fontWeightValue = clampCssWeight(TextMediaDefaults::FONT_WEIGHT_VALUE);
+    m_font = fontAdjustedForWeight(m_font, m_fontWeightValue);
+    m_fontWeightValue = canonicalCssWeight(m_font);
     
     // Text media should be selectable and movable
     setFlag(QGraphicsItem::ItemIsSelectable, true);
@@ -613,20 +763,10 @@ void TextMediaItem::setText(const QString& text) {
 }
 
 void TextMediaItem::setFont(const QFont& font) {
-    if (m_font == font) {
-        return;
-    }
-
-    m_font = font;
-    m_documentMetricsDirty = true;
-    m_cachedEditorPosValid = false;
-    m_needsRasterization = true;
-    m_scaledRasterDirty = true;
-    update();
-    updateInlineEditorGeometry();
-    if (m_fitToTextEnabled) {
-        scheduleFitToTextUpdate();
-    }
+    QFont adjustedFont = font;
+    m_fontWeightValue = canonicalCssWeight(adjustedFont);
+    adjustedFont = fontAdjustedForWeight(adjustedFont, m_fontWeightValue);
+    applyFontChange(adjustedFont);
 }
 
 void TextMediaItem::setTextColor(const QColor& color) {
@@ -685,6 +825,47 @@ void TextMediaItem::setTextBorderColor(const QColor& color) {
         if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
             inlineEditor->invalidateCache();
         }
+    }
+}
+
+void TextMediaItem::setTextFontWeightValue(int weight) {
+    const int clamped = clampCssWeight(weight);
+    if (m_fontWeightValue == clamped) {
+        return;
+    }
+
+    m_fontWeightValue = clamped;
+    QFont updatedFont = fontAdjustedForWeight(m_font, m_fontWeightValue);
+    applyFontChange(updatedFont);
+}
+
+void TextMediaItem::applyFontChange(const QFont& font) {
+    if (m_font == font) {
+        return;
+    }
+
+    m_font = font;
+    m_fontWeightValue = canonicalCssWeight(m_font);
+
+    m_documentMetricsDirty = true;
+    m_cachedEditorPosValid = false;
+    m_needsRasterization = true;
+    m_scaledRasterDirty = true;
+    update();
+    updateInlineEditorGeometry();
+
+    if (m_inlineEditor) {
+        m_inlineEditor->setFont(m_font);
+        if (m_isEditing) {
+            normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, m_textBorderWidth);
+        }
+        if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
+            inlineEditor->invalidateCache();
+        }
+    }
+
+    if (m_fitToTextEnabled) {
+        scheduleFitToTextUpdate();
     }
 }
 

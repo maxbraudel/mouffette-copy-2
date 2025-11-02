@@ -62,6 +62,7 @@ private slots:
     void onTextBorderWidthToggled(bool checked);
     void onTextBorderColorToggled(bool checked);
     void onTextBorderColorBoxClicked();
+    void onTextFontWeightToggled(bool checked);
     void onSceneTabClicked();
     void onElementTabClicked();
 
@@ -201,6 +202,9 @@ private:
     QCheckBox* m_textBorderColorCheck = nullptr;
     QLabel* m_textBorderColorBox = nullptr;
     QWidget* m_textBorderColorRow = nullptr;
+    QCheckBox* m_textFontWeightCheck = nullptr;
+    QLabel* m_textFontWeightBox = nullptr;
+    QWidget* m_textFontWeightRow = nullptr;
     
     class ResizableMediaBase* m_mediaItem = nullptr; // not owning
 };

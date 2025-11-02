@@ -19,6 +19,7 @@ namespace TextMediaDefaults {
     extern const QString FONT_FAMILY;
     extern const int FONT_SIZE;
     extern const QFont::Weight FONT_WEIGHT;
+    extern const int FONT_WEIGHT_VALUE;
     extern const bool FONT_ITALIC;
     extern const QColor TEXT_COLOR;
     extern const qreal TEXT_BORDER_WIDTH;
@@ -64,6 +65,9 @@ public:
     QColor textBorderColor() const { return m_textBorderColor; }
     void setTextBorderColor(const QColor& color);
 
+    int textFontWeightValue() const { return m_fontWeightValue; }
+    void setTextFontWeightValue(int weight);
+
     qreal uniformScaleFactor() const { return m_uniformScaleFactor; }
     
     // Text alignment
@@ -97,7 +101,7 @@ public:
     // Alignment controls interaction (called by canvas, similar to video controls)
     bool handleAlignmentControlsPressAtItemPos(const QPointF& itemPos);
     void refreshAlignmentControlsLayout();
-        void syncInlineEditorToBaseSize();
+    void syncInlineEditorToBaseSize();
 
 protected:
     void onAltResizeModeEngaged() override;
@@ -106,11 +110,13 @@ protected:
 private:
     void scheduleFitToTextUpdate();
     void applyFitToTextNow();
+    void applyFontChange(const QFont& font);
     QString m_text;
     QFont m_font;
     QColor m_textColor;
     qreal m_textBorderWidth = 0.0;
     QColor m_textBorderColor;
+    int m_fontWeightValue = TextMediaDefaults::FONT_WEIGHT_VALUE;
     QGraphicsTextItem* m_inlineEditor = nullptr;
     bool m_isEditing = false;
     QString m_textBeforeEditing;
