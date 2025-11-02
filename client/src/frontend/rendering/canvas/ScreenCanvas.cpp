@@ -5318,7 +5318,6 @@ void ScreenCanvas::updateGlobalSettingsPanelVisibility() {
     m_settingsPanelLastMedia = selectedMedia;
 
     // Media selected - show panel if button is checked
-    m_globalSettingsPanel->setMediaType(selectedMedia->isVideoMedia());
     m_globalSettingsPanel->setMediaItem(selectedMedia);
 
     const bool shouldShowPanel = !m_settingsToggleButton || m_settingsToggleButton->isChecked();

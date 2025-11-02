@@ -2079,33 +2079,7 @@ void MediaSettingsPanel::onDisplayAutomaticallyToggled(bool checked) {
     }
     
     if (m_displayAfterBox) {
-        m_displayAfterBox->setEnabled(checked);
-        
-        // Update visual styling for the input box
-        if (checked) {
-            // Reset to normal styling when enabled
-            setBoxActive(m_displayAfterBox, m_activeBox == m_displayAfterBox);
-        } else {
-            // Apply disabled styling
-            m_displayAfterBox->setStyleSheet(
-                QString("QLabel {"
-                "  background-color: #404040;"
-                "  border: 1px solid #606060;"
-                "  border-radius: 6px;"
-                "  padding: 2px 10px;"
-                "  margin-left: 4px;"
-                "  margin-right: 0px;"
-                "  color: #808080;"
-                "  min-height: %1px;"
-                "  max-height: %1px;"
-                "}").arg(kOptionValueBoxHeight)
-            );
-            
-            // Clear active state if this box was active
-            if (m_activeBox == m_displayAfterBox) {
-                clearActiveBox();
-            }
-        }
+        setBoxActive(m_displayAfterBox, m_activeBox == m_displayAfterBox);
     }
     
     // Also update the "seconds" label styling
@@ -2142,31 +2116,7 @@ void MediaSettingsPanel::onUnmuteAutomaticallyToggled(bool checked) {
     }
     
     if (m_unmuteDelayBox) {
-        m_unmuteDelayBox->setEnabled(checked);
-        
-        // Update visual styling for the input box
-        if (checked) {
-            // Reset to normal styling when enabled
-            setBoxActive(m_unmuteDelayBox, m_activeBox == m_unmuteDelayBox);
-        } else {
-            // Apply disabled styling
-            m_unmuteDelayBox->setStyleSheet(
-                "QLabel {"
-                "  background-color: #404040;"
-                "  border: 1px solid #606060;"
-                "  border-radius: 6px;"
-                "  padding: 2px 10px;"
-                "  margin-left: 4px;"
-                "  margin-right: 0px;"
-                "  color: #808080;"
-                "}"
-            );
-            
-            // Clear active state if this box was active
-            if (m_activeBox == m_unmuteDelayBox) {
-                clearActiveBox();
-            }
-        }
+        setBoxActive(m_unmuteDelayBox, m_activeBox == m_unmuteDelayBox);
     }
     
     // Also update the "seconds" label styling
@@ -2203,31 +2153,7 @@ void MediaSettingsPanel::onPlayAutomaticallyToggled(bool checked) {
     }
     
     if (m_autoPlayBox) {
-        m_autoPlayBox->setEnabled(checked);
-        
-        // Update visual styling for the input box
-        if (checked) {
-            // Reset to normal styling when enabled
-            setBoxActive(m_autoPlayBox, m_activeBox == m_autoPlayBox);
-        } else {
-            // Apply disabled styling
-            m_autoPlayBox->setStyleSheet(
-                "QLabel {"
-                "  background-color: #404040;"
-                "  border: 1px solid #606060;"
-                "  border-radius: 6px;"
-                "  padding: 2px 10px;"
-                "  margin-left: 4px;"
-                "  margin-right: 0px;"
-                "  color: #808080;"
-                "}"
-            );
-            
-            // Clear active state if this box was active
-            if (m_activeBox == m_autoPlayBox) {
-                clearActiveBox();
-            }
-        }
+        setBoxActive(m_autoPlayBox, m_activeBox == m_autoPlayBox);
     }
     
     // Also update the "seconds" label styling
@@ -2325,15 +2251,24 @@ void MediaSettingsPanel::setMediaItem(ResizableMediaBase* item) {
         return;
     }
     m_mediaItem = item;
-    
+
+    // Temporarily suppress pushes while we realign the UI for the new target item.
+    const bool previousGuard = m_updatingFromMedia;
+    m_updatingFromMedia = true;
+
     // Detect media type and update section visibility
     if (m_mediaItem) {
-        bool isVideo = dynamic_cast<ResizableVideoItem*>(m_mediaItem) != nullptr;
-        bool isText = dynamic_cast<TextMediaItem*>(m_mediaItem) != nullptr;
+        const bool isVideo = dynamic_cast<ResizableVideoItem*>(m_mediaItem) != nullptr;
+        const bool isText = dynamic_cast<TextMediaItem*>(m_mediaItem) != nullptr;
         setMediaType(isVideo);
         updateTextSectionVisibility(isText);
+    } else {
+        setMediaType(false);
+        updateTextSectionVisibility(false);
     }
-    
+
+    m_updatingFromMedia = previousGuard;
+
     pullSettingsFromMedia();
 }
 
