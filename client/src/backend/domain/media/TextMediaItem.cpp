@@ -20,6 +20,7 @@
 #include <QTextBlock>
 #include <QTextLayout>
 #include <QBrush>
+#include <QFontMetricsF>
 #include <QClipboard>
 #include <QApplication>
 #include <QImage>
@@ -47,7 +48,7 @@ namespace TextMediaDefaults {
     const int FONT_WEIGHT_VALUE = 700; // Numeric weight (100-900 range)
     const bool FONT_ITALIC = false;
     const QColor TEXT_COLOR = Qt::white;
-    const qreal TEXT_BORDER_WIDTH = 0.0;
+    const qreal TEXT_BORDER_WIDTH_PERCENT = 0.0;
     const QColor TEXT_BORDER_COLOR = Qt::black;
     
     // Default text content when creating new text media
@@ -677,7 +678,7 @@ TextMediaItem::TextMediaItem(
     : ResizableMediaBase(initialSize, visualSizePx, selectionSizePx, QStringLiteral("Text"))
     , m_text(initialText)
     , m_textColor(TextMediaDefaults::TEXT_COLOR)
-    , m_textBorderWidth(TextMediaDefaults::TEXT_BORDER_WIDTH)
+    , m_textBorderWidthPercent(TextMediaDefaults::TEXT_BORDER_WIDTH_PERCENT)
     , m_textBorderColor(TextMediaDefaults::TEXT_BORDER_COLOR)
 {
     // Set up default font from global configuration
@@ -779,7 +780,8 @@ void TextMediaItem::setTextColor(const QColor& color) {
     update();
     if (m_inlineEditor) {
         m_inlineEditor->setDefaultTextColor(m_textColor);
-        normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, m_textBorderWidth);
+        const qreal strokeWidth = borderStrokeWidthPx();
+        normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, strokeWidth);
         if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
             inlineEditor->invalidateCache();
         }
@@ -788,19 +790,19 @@ void TextMediaItem::setTextColor(const QColor& color) {
     m_scaledRasterDirty = true;
 }
 
-void TextMediaItem::setTextBorderWidth(qreal width) {
-    const qreal clamped = std::max<qreal>(0.0, width);
-    if (std::abs(m_textBorderWidth - clamped) < 1e-4) {
+void TextMediaItem::setTextBorderWidth(qreal percent) {
+    const qreal clamped = std::clamp(percent, 0.0, 100.0);
+    if (std::abs(m_textBorderWidthPercent - clamped) < 1e-4) {
         return;
     }
 
-    m_textBorderWidth = clamped;
+    m_textBorderWidthPercent = clamped;
     m_needsRasterization = true;
     m_scaledRasterDirty = true;
     update();
 
     if (m_inlineEditor) {
-        normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, m_textBorderWidth);
+        normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, borderStrokeWidthPx());
         if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
             inlineEditor->invalidateCache();
         }
@@ -821,11 +823,36 @@ void TextMediaItem::setTextBorderColor(const QColor& color) {
     update();
 
     if (m_inlineEditor) {
-        normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, m_textBorderWidth);
+        const qreal strokeWidth = borderStrokeWidthPx();
+        normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, strokeWidth);
         if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
             inlineEditor->invalidateCache();
         }
     }
+}
+
+qreal TextMediaItem::borderStrokeWidthPx() const {
+    if (m_textBorderWidthPercent <= 0.0) {
+        return 0.0;
+    }
+
+    QFontMetricsF metrics(m_font);
+    qreal reference = metrics.height();
+    if (reference <= 0.0) {
+        if (m_font.pixelSize() > 0) {
+            reference = static_cast<qreal>(m_font.pixelSize());
+        } else {
+            reference = m_font.pointSizeF();
+        }
+    }
+    if (reference <= 0.0) {
+        reference = 16.0; // fallback so outline remains visible even if metrics unavailable
+    }
+
+    constexpr qreal kMaxOutlineThicknessFactor = 0.35; // keep heavy borders legible
+    const qreal normalized = std::clamp(m_textBorderWidthPercent / 100.0, 0.0, 1.0);
+    const qreal eased = std::pow(normalized, 1.1); // soften growth near 100%
+    return eased * kMaxOutlineThicknessFactor * reference;
 }
 
 void TextMediaItem::setTextFontWeightValue(int weight) {
@@ -860,7 +887,8 @@ void TextMediaItem::applyFontChange(const QFont& font) {
         m_inlineEditor->setFont(m_font);
         // Always normalize text formatting when font changes, not just when editing
         // This ensures the document's character formats match the new font for fit-to-text measurements
-        normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, m_textBorderWidth);
+        const qreal strokeWidth = borderStrokeWidthPx();
+        normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, strokeWidth);
         if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
             inlineEditor->invalidateCache();
         }
@@ -902,7 +930,7 @@ void TextMediaItem::normalizeEditorFormatting() {
         return;
     }
     // Use base font (transform will scale it)
-    normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, m_textBorderWidth);
+    normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, borderStrokeWidthPx());
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
 }
@@ -1406,8 +1434,9 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
         docCursor.select(QTextCursor::Document);
         QTextCharFormat format;
         format.setForeground(m_textColor);
-        if (m_textBorderWidth > 0.0) {
-            QPen outlinePen(m_textBorderColor, m_textBorderWidth, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        const qreal strokeWidth = borderStrokeWidthPx();
+        if (strokeWidth > 0.0) {
+            QPen outlinePen(m_textBorderColor, strokeWidth, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
             format.setTextOutline(outlinePen);
         } else {
             format.clearProperty(QTextFormat::TextOutline);

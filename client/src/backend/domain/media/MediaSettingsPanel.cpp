@@ -720,7 +720,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_textBorderWidthCheck = new QCheckBox("Border width: ", m_textBorderWidthRow);
         m_textBorderWidthCheck->setStyleSheet(overlayTextStyle);
         m_textBorderWidthCheck->installEventFilter(this);
-        const qreal defaultBorderWidth = TextMediaDefaults::TEXT_BORDER_WIDTH;
+        const qreal defaultBorderWidth = TextMediaDefaults::TEXT_BORDER_WIDTH_PERCENT;
         QString defaultBorderWidthStr;
         if (std::abs(defaultBorderWidth - std::round(defaultBorderWidth)) < 1e-4) {
             defaultBorderWidthStr = QString::number(static_cast<int>(std::lround(defaultBorderWidth)));
@@ -729,7 +729,7 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         }
         m_textBorderWidthBox = makeValueBox(defaultBorderWidthStr);
         m_textBorderWidthBox->installEventFilter(this);
-        m_textBorderWidthUnitsLabel = new QLabel("px", m_textBorderWidthRow);
+        m_textBorderWidthUnitsLabel = new QLabel("%", m_textBorderWidthRow);
         m_textBorderWidthUnitsLabel->setStyleSheet(overlayTextStyle);
         h->addWidget(m_textBorderWidthCheck);
         h->addWidget(m_textBorderWidthBox);
@@ -1178,7 +1178,7 @@ void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
 
     if (m_textBorderWidthBox) {
         if (!isTextMedia) {
-            const qreal defaultBorderWidth = TextMediaDefaults::TEXT_BORDER_WIDTH;
+            const qreal defaultBorderWidth = TextMediaDefaults::TEXT_BORDER_WIDTH_PERCENT;
             QString defaultBorderWidthStr;
             if (std::abs(defaultBorderWidth - std::round(defaultBorderWidth)) < 1e-4) {
                 defaultBorderWidthStr = QString::number(static_cast<int>(std::lround(defaultBorderWidth)));
@@ -2457,11 +2457,12 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     applyBoxText(m_volumeBox, state.volumeText, QStringLiteral("100"));
     applyBoxText(m_unmuteDelayBox, state.unmuteDelayText, QStringLiteral("1"), true);
 
-    auto formatBorderWidth = [](qreal width) {
-        if (std::abs(width - std::round(width)) < 1e-4) {
-            return QString::number(static_cast<int>(std::lround(width)));
+    auto formatBorderPercent = [](qreal percent) {
+        const qreal clamped = std::clamp(percent, 0.0, 100.0);
+        if (std::abs(clamped - std::round(clamped)) < 1e-4) {
+            return QString::number(static_cast<int>(std::lround(clamped)));
         }
-        return QString::number(width, 'f', 2);
+        return QString::number(clamped, 'f', 1);
     };
 
     // Apply text styling for TextMediaItem
@@ -2480,10 +2481,10 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
 
         if (m_textBorderWidthBox) {
             const qreal currentWidth = textItem->textBorderWidth();
-            m_textBorderWidthBox->setText(formatBorderWidth(currentWidth));
+            m_textBorderWidthBox->setText(formatBorderPercent(currentWidth));
         }
         if (m_textBorderWidthCheck) {
-            const bool widthOverridden = std::abs(textItem->textBorderWidth() - TextMediaDefaults::TEXT_BORDER_WIDTH) > 1e-4;
+            const bool widthOverridden = std::abs(textItem->textBorderWidth() - TextMediaDefaults::TEXT_BORDER_WIDTH_PERCENT) > 1e-4;
             applyCheckState(m_textBorderWidthCheck, widthOverridden);
         }
         onTextBorderWidthToggled(m_textBorderWidthCheck && m_textBorderWidthCheck->isChecked());
@@ -2523,7 +2524,7 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
 
         if (m_textBorderWidthBox) {
             m_textBorderWidthBox->setEnabled(false);
-            m_textBorderWidthBox->setText(formatBorderWidth(TextMediaDefaults::TEXT_BORDER_WIDTH));
+            m_textBorderWidthBox->setText(formatBorderPercent(TextMediaDefaults::TEXT_BORDER_WIDTH_PERCENT));
         }
         if (m_textBorderWidthCheck) {
             applyCheckState(m_textBorderWidthCheck, false);
@@ -2720,7 +2721,7 @@ void MediaSettingsPanel::pushSettingsToMedia() {
         }
 
         if (m_textBorderWidthCheck && m_textBorderWidthBox) {
-            qreal parsedWidth = TextMediaDefaults::TEXT_BORDER_WIDTH;
+            qreal parsedWidth = TextMediaDefaults::TEXT_BORDER_WIDTH_PERCENT;
             if (m_textBorderWidthCheck->isChecked()) {
                 QString widthStr = m_textBorderWidthBox->text().trimmed();
                 if (!widthStr.isEmpty() && widthStr != QStringLiteral("...")) {
@@ -2728,13 +2729,13 @@ void MediaSettingsPanel::pushSettingsToMedia() {
                     bool ok = false;
                     const double candidate = widthStr.toDouble(&ok);
                     if (ok) {
-                        parsedWidth = std::clamp<qreal>(static_cast<qreal>(candidate), 0.0, 1000.0);
+                        parsedWidth = std::clamp<qreal>(static_cast<qreal>(candidate), 0.0, 100.0);
                     }
                 }
             }
             textItem->setTextBorderWidth(parsedWidth);
         } else if (m_textBorderWidthCheck && !m_textBorderWidthCheck->isChecked()) {
-            textItem->setTextBorderWidth(TextMediaDefaults::TEXT_BORDER_WIDTH);
+            textItem->setTextBorderWidth(TextMediaDefaults::TEXT_BORDER_WIDTH_PERCENT);
         }
 
         if (m_textBorderColorCheck && m_textBorderColorBox) {

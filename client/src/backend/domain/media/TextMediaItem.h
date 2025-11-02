@@ -22,7 +22,7 @@ namespace TextMediaDefaults {
     extern const int FONT_WEIGHT_VALUE;
     extern const bool FONT_ITALIC;
     extern const QColor TEXT_COLOR;
-    extern const qreal TEXT_BORDER_WIDTH;
+    extern const qreal TEXT_BORDER_WIDTH_PERCENT;
     extern const QColor TEXT_BORDER_COLOR;
     
     // Default text content when creating new text media
@@ -59,8 +59,8 @@ public:
     QColor textColor() const { return m_textColor; }
     void setTextColor(const QColor& color);
 
-    qreal textBorderWidth() const { return m_textBorderWidth; }
-    void setTextBorderWidth(qreal width);
+    qreal textBorderWidth() const { return m_textBorderWidthPercent; }
+    void setTextBorderWidth(qreal percent);
 
     QColor textBorderColor() const { return m_textBorderColor; }
     void setTextBorderColor(const QColor& color);
@@ -114,7 +114,9 @@ private:
     QString m_text;
     QFont m_font;
     QColor m_textColor;
-    qreal m_textBorderWidth = 0.0;
+    qreal borderStrokeWidthPx() const;
+
+    qreal m_textBorderWidthPercent = 0.0;
     QColor m_textBorderColor;
     int m_fontWeightValue = TextMediaDefaults::FONT_WEIGHT_VALUE;
     QGraphicsTextItem* m_inlineEditor = nullptr;
