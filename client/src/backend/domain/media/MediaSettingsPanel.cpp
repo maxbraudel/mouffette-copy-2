@@ -1703,6 +1703,20 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
                             newText = QStringLiteral("100");
                         }
                         m_activeBox->setText(newText);
+                    } else if (m_activeBox == m_textFontWeightBox) {
+                        bool ok = false;
+                        int weightVal = newText.toInt(&ok);
+                        if (ok && weightVal > 900) {
+                            newText = QStringLiteral("900");
+                        }
+                        m_activeBox->setText(newText);
+                    } else if (m_activeBox == m_textBorderWidthBox) {
+                        bool ok = false;
+                        double percentVal = newText.toDouble(&ok);
+                        if (ok && percentVal > 100.0) {
+                            newText = QStringLiteral("100");
+                        }
+                        m_activeBox->setText(newText);
                     } else if (m_activeBox == m_repeatBox) {
                         if (digitCount > 5) {
                             m_activeBox->setText(QStringLiteral("∞"));
