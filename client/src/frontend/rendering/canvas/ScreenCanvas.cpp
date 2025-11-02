@@ -5223,12 +5223,20 @@ TextMediaItem* ScreenCanvas::createTextMediaAtPosition(const QPointF& scenePos) 
         TextMediaDefaults::DEFAULT_TEXT
     );
     
-    // Apply default scale from global configuration
-    textItem->setScale(TextMediaDefaults::DEFAULT_SCALE);
+    // Apply scale adjusted for current canvas zoom to maintain constant visual size
+    // Get current canvas zoom level from view transform
+    const QTransform t = transform();
+    const qreal canvasZoom = t.m11() > 1e-6 ? t.m11() : 1.0;
+    
+    // Scale inversely to canvas zoom: when zoomed out (canvasZoom < 1), text scale increases
+    // to maintain the same visual size in viewport pixels
+    const qreal adjustedScale = TextMediaDefaults::DEFAULT_VIEWPORT_SCALE / canvasZoom;
+    textItem->setScale(adjustedScale);
     
     // Set position (center the item on the click position)
-    qreal halfWidth = defaultSize.width() / 2.0;
-    qreal halfHeight = defaultSize.height() / 2.0;
+    // Use adjusted scale for positioning calculations
+    qreal halfWidth = (defaultSize.width() * adjustedScale) / 2.0;
+    qreal halfHeight = (defaultSize.height() * adjustedScale) / 2.0;
     textItem->setPos(scenePos.x() - halfWidth, scenePos.y() - halfHeight);
     
     // Assign Z value to participate in Z-ordering

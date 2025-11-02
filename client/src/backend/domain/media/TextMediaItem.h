@@ -32,8 +32,10 @@ namespace TextMediaDefaults {
     extern const int DEFAULT_WIDTH;
     extern const int DEFAULT_HEIGHT;
     
-    // Default text scale
-    extern const qreal DEFAULT_SCALE;
+    // Default text scale (base scale in viewport pixels, independent of canvas zoom)
+    // This represents the desired text size in screen pixels, which will be adjusted
+    // inversely proportional to canvas zoom to maintain constant visual size
+    extern const qreal DEFAULT_VIEWPORT_SCALE;
 }
 
 // Text media item - displays editable text with same interaction as image/video media
