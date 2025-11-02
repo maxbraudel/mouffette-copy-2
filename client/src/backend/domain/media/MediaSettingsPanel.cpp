@@ -700,11 +700,10 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     m_textColorBox = makeValueBox(QStringLiteral("#FFFFFFFF"));
         // Make the color box clickable
         m_textColorBox->installEventFilter(this);
-        m_textColorBox->setMinimumWidth(40);
-        m_textColorBox->setMaximumWidth(40);
+    m_textColorBox->setMinimumWidth(40);
+    m_textColorBox->setMaximumWidth(40);
     const QString defaultTextColor = TextMediaDefaults::TEXT_COLOR.name(QColor::HexArgb).toUpper();
     m_textColorBox->setText(defaultTextColor);
-    m_textColorBox->setEnabled(false);
     refreshTextColorBoxStyle(false);
         h->addWidget(m_textColorCheck);
         h->addWidget(m_textColorBox);
@@ -1054,41 +1053,40 @@ void MediaSettingsPanel::setMediaType(bool isVideo) {
 }
 
 void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
-    // Show/hide text-only section
     if (m_textColorRow) {
         m_textColorRow->setVisible(isTextMedia);
     }
-    
-    // Reset text color checkbox when switching away from text
-    if (!isTextMedia && m_textColorCheck) {
-        const bool prev = m_textColorCheck->blockSignals(true);
-        m_textColorCheck->setChecked(false);
-        m_textColorCheck->blockSignals(prev);
+
+    if (m_textColorCheck) {
+        m_textColorCheck->setEnabled(isTextMedia);
+        if (!isTextMedia && m_textColorCheck->isChecked()) {
+            const bool prev = m_textColorCheck->blockSignals(true);
+            m_textColorCheck->setChecked(false);
+            m_textColorCheck->blockSignals(prev);
+        }
     }
 
     if (m_textColorBox) {
-        if (isTextMedia && m_textColorCheck) {
-            m_textColorBox->setEnabled(m_textColorCheck->isChecked());
+        if (isTextMedia) {
+            m_textColorBox->setEnabled(true);
         } else {
             m_textColorBox->setEnabled(false);
-            m_textColorBox->setText(TextMediaDefaults::TEXT_COLOR.name(QColor::HexArgb));
+            m_textColorBox->setText(TextMediaDefaults::TEXT_COLOR.name(QColor::HexArgb).toUpper());
         }
         refreshTextColorBoxStyle(m_activeBox == m_textColorBox);
     }
-    
-    // Clear active box if it belongs to text section
+
     if (!isTextMedia && m_activeBox == m_textColorBox) {
         clearActiveBox();
     }
-    
-    // Force layout recalculation
+
     updateSectionHeaderVisibility();
-    
+
     if (m_elementPropertiesLayout) {
         m_elementPropertiesLayout->invalidate();
         m_elementPropertiesLayout->activate();
     }
-    
+
     if (m_innerContent) {
         m_innerContent->ensurePolished();
     }
@@ -1258,6 +1256,8 @@ void MediaSettingsPanel::refreshTextColorBoxStyle(bool activeHighlight) {
         return result;
     };
 
+    const QColor displayColor = color;
+
     const QColor borderColor = activeHighlight ? AppColors::gMediaPanelActiveBg : AppColors::gMediaPanelInactiveBorder;
 
     const QString style = QString(
@@ -1280,7 +1280,7 @@ void MediaSettingsPanel::refreshTextColorBoxStyle(bool activeHighlight) {
         "  font-size: 0px;"
         "}"
     ).arg(
-        canonicalValue,
+    displayColor.name(QColor::HexArgb).toUpper(),
         borderColor.name(),
         QString::number(kOptionValueBoxHeight)
     );
@@ -1621,8 +1621,8 @@ void MediaSettingsPanel::applyVolumeFromUi() {
 }
 
 void MediaSettingsPanel::onTextColorToggled(bool checked) {
+    Q_UNUSED(checked);
     if (m_textColorBox) {
-        m_textColorBox->setEnabled(checked);
         refreshTextColorBoxStyle(m_activeBox == m_textColorBox);
     }
     if (!m_updatingFromMedia) {
@@ -2136,7 +2136,7 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
 
         const bool colorOverridden = (currentColor != TextMediaDefaults::TEXT_COLOR);
         applyCheckState(m_textColorCheck, colorOverridden);
-        m_textColorBox->setEnabled(colorOverridden);
+        m_textColorBox->setEnabled(true);
         refreshTextColorBoxStyle(m_activeBox == m_textColorBox);
     } else if (m_textColorBox) {
         if (m_textColorCheck) {
