@@ -1881,40 +1881,18 @@ void MediaSettingsPanel::onTextColorBoxClicked() {
 }
 
 void MediaSettingsPanel::onTextBorderWidthToggled(bool checked) {
-    const QString activeTextStyle = QStringLiteral("color: %1;")
+    const QString labelStyle = QStringLiteral("color: %1;")
         .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
-    const QString disabledTextStyle = QStringLiteral("color: #808080;");
 
     if (m_textBorderWidthCheck) {
-        m_textBorderWidthCheck->setStyleSheet(checked ? activeTextStyle : disabledTextStyle);
+        m_textBorderWidthCheck->setStyleSheet(labelStyle);
     }
     if (m_textBorderWidthUnitsLabel) {
-        m_textBorderWidthUnitsLabel->setStyleSheet(checked ? activeTextStyle : disabledTextStyle);
+        m_textBorderWidthUnitsLabel->setStyleSheet(labelStyle);
     }
 
     if (m_textBorderWidthBox) {
-        m_textBorderWidthBox->setEnabled(checked);
-        if (checked) {
-            setBoxActive(m_textBorderWidthBox, m_activeBox == m_textBorderWidthBox);
-        } else {
-            m_textBorderWidthBox->setStyleSheet(
-                QString("QLabel {"
-                        "  background-color: #404040;"
-                        "  border: 1px solid #606060;"
-                        "  border-radius: 6px;"
-                        "  padding: 2px 10px;"
-                        "  margin-left: 4px;"
-                        "  margin-right: 0px;"
-                        "  color: #808080;"
-                        "  min-height: %1px;"
-                        "  max-height: %1px;"
-                        "}")
-                    .arg(kOptionValueBoxHeight)
-            );
-            if (m_activeBox == m_textBorderWidthBox) {
-                clearActiveBox();
-            }
-        }
+        setBoxActive(m_textBorderWidthBox, m_activeBox == m_textBorderWidthBox);
     }
 
     if (!m_updatingFromMedia) {
@@ -1923,12 +1901,11 @@ void MediaSettingsPanel::onTextBorderWidthToggled(bool checked) {
 }
 
 void MediaSettingsPanel::onTextBorderColorToggled(bool checked) {
-    const QString activeTextStyle = QStringLiteral("color: %1;")
+    const QString labelStyle = QStringLiteral("color: %1;")
         .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
-    const QString disabledTextStyle = QStringLiteral("color: #808080;");
 
     if (m_textBorderColorCheck) {
-        m_textBorderColorCheck->setStyleSheet(checked ? activeTextStyle : disabledTextStyle);
+        m_textBorderColorCheck->setStyleSheet(labelStyle);
     }
 
     if (m_textBorderColorBox) {
@@ -1967,38 +1944,15 @@ void MediaSettingsPanel::onTextBorderColorBoxClicked() {
 }
 
 void MediaSettingsPanel::onTextFontWeightToggled(bool checked) {
-    const QString activeTextStyle = QStringLiteral("color: %1;")
+    const QString labelStyle = QStringLiteral("color: %1;")
         .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
-    const QString disabledTextStyle = QStringLiteral("color: #808080;");
 
     if (m_textFontWeightCheck) {
-        m_textFontWeightCheck->setStyleSheet(checked ? activeTextStyle : disabledTextStyle);
+        m_textFontWeightCheck->setStyleSheet(labelStyle);
     }
 
     if (m_textFontWeightBox) {
-        m_textFontWeightBox->setEnabled(checked);
-        if (checked) {
-            setBoxActive(m_textFontWeightBox, m_activeBox == m_textFontWeightBox);
-        } else {
-            m_textFontWeightBox->setStyleSheet(
-                QString("QLabel {"
-                        "  background-color: #404040;"
-                        "  border: 1px solid #606060;"
-                        "  border-radius: 6px;"
-                        "  padding: 2px 10px;"
-                        "  margin-left: 4px;"
-                        "  margin-right: 0px;"
-                        "  color: #808080;"
-                        "  min-height: %1px;"
-                        "  max-height: %1px;"
-                        "}")
-                    .arg(kOptionValueBoxHeight)
-            );
-            m_textFontWeightBox->setText(QString::number(TextMediaDefaults::FONT_WEIGHT_VALUE));
-            if (m_activeBox == m_textFontWeightBox) {
-                clearActiveBox();
-            }
-        }
+        setBoxActive(m_textFontWeightBox, m_activeBox == m_textFontWeightBox);
     }
 
     if (!m_updatingFromMedia) {
