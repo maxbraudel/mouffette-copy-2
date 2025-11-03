@@ -51,7 +51,7 @@ public:
     ~TextMediaItem() override = default;
 
     // Text content accessors
-    QString text() const { return m_text; }
+    QString text() const { return m_isEditing ? m_editorRenderingText : m_text; }
     void setText(const QString& text);
     
     // Font/styling accessors (for future editing features)
