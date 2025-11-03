@@ -19,6 +19,9 @@
 #include <QtGlobal>
 #include <QTextBlock>
 #include <QTextLayout>
+#include <QGlyphRun>
+#include <QRawFont>
+#include <QPainterPath>
 #include <QBrush>
 #include <QFontMetricsF>
 #include <QClipboard>
@@ -370,7 +373,6 @@ protected:
                     };
 
                     const qreal strokeWidth = computeStrokeWidthPx();
-                    const qreal outlinePenWidth = strokeWidth * 2.0;
 
                     // Clear outline formatting
                     {

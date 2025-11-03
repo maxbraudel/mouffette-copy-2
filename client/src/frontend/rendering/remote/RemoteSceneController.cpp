@@ -187,38 +187,7 @@ protected:
         painter->save();
 
         const qreal strokeWidth = m_strokeWidth;
-        const qreal outlinePenWidth = strokeWidth * 2.0;
         QColor outlineColor = m_outlineColor.isValid() ? m_outlineColor : m_fillColor;
-        QColor maskColor = m_fillColor;
-        maskColor.setAlpha(255);
-
-        auto applyFormat = [&](bool withOutline, const QColor& foreground) {
-            QTextCursor cursor(doc);
-            cursor.select(QTextCursor::Document);
-            QTextCharFormat format;
-            format.setForeground(foreground);
-            if (withOutline && strokeWidth > 0.0) {
-                QPen outlinePen(outlineColor, outlinePenWidth, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
-                format.setTextOutline(outlinePen);
-            } else {
-                format.clearProperty(QTextFormat::TextOutline);
-            }
-            cursor.mergeCharFormat(format);
-        };
-
-        auto drawDocument = [&](QPainter::CompositionMode mode, const QColor& foreground) {
-            painter->save();
-            if (mode != QPainter::CompositionMode_SourceOver) {
-                painter->setCompositionMode(mode);
-            }
-            QAbstractTextDocumentLayout::PaintContext ctx;
-            ctx.palette.setColor(QPalette::Text, foreground);
-            doc->documentLayout()->draw(painter, ctx);
-            painter->restore();
-            if (mode != QPainter::CompositionMode_SourceOver) {
-                painter->setCompositionMode(QPainter::CompositionMode_SourceOver);
-            }
-        };
 
         // Clear outline formatting
         {
