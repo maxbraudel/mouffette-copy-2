@@ -53,6 +53,8 @@ namespace TextMediaDefaults {
     const QColor TEXT_COLOR = Qt::white;
     const qreal TEXT_BORDER_WIDTH_PERCENT = 0.0;
     const QColor TEXT_BORDER_COLOR = Qt::black;
+    const bool TEXT_HIGHLIGHT_ENABLED = false;
+    const QColor TEXT_HIGHLIGHT_COLOR = QColor(255, 255, 0, 160);
     
     // Default text content when creating new text media
     const QString DEFAULT_TEXT = QStringLiteral("No Text");
@@ -71,6 +73,8 @@ namespace {
 
 constexpr qreal kContentPadding = 0.0;
 constexpr qreal kFitToTextMinWidth = 20.0; // Minimum width in fit-to-text mode
+constexpr qreal kStrokeOverflowScale = 0.45; // extra padding multiplier to account for outline bleed
+constexpr qreal kStrokeOverflowMinPx = 2.0;  // minimum extra padding in pixels
 
 struct WeightMapping {
     int css; // CSS-like weight (100-900)
@@ -337,6 +341,52 @@ protected:
                 // Render only the base text content; caret and selection are drawn as overlays
                 if (QTextDocument* doc = document()) {
                     const QColor fillColor = m_owner ? m_owner->textColor() : defaultTextColor();
+                    if (m_owner && m_owner->highlightEnabled()) {
+                        QColor highlight = m_owner->highlightColor();
+                        if (!highlight.isValid()) {
+                            highlight = TextMediaDefaults::TEXT_HIGHLIGHT_COLOR;
+                        }
+                        if (highlight.alpha() > 0) {
+                            bufferPainter.save();
+                            bufferPainter.setPen(Qt::NoPen);
+                            bufferPainter.setBrush(highlight);
+                            
+                            QAbstractTextDocumentLayout* docLayout = doc->documentLayout();
+                            if (docLayout) {
+                                // Draw highlight per-line, respecting document alignment
+                                const qreal docWidth = std::max<qreal>(docLayout->documentSize().width(), 1.0);
+                                const Qt::Alignment align = doc->defaultTextOption().alignment();
+                                for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
+                                    QTextLayout* textLayout = block.layout();
+                                    if (!textLayout) continue;
+                                    
+                                    const QRectF blockRect = docLayout->blockBoundingRect(block);
+                                    for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                                        QTextLine line = textLayout->lineAt(lineIndex);
+                                        if (!line.isValid()) continue;
+                                        
+                                        const qreal lineWidth = line.naturalTextWidth();
+                                        const qreal width = std::max<qreal>(lineWidth, 1.0);
+                                        qreal alignedX = line.x();
+                                        if (std::abs(alignedX) < 1e-4 && width < docWidth - 1e-4) {
+                                            const qreal horizontalSpace = std::max<qreal>(0.0, docWidth - width);
+                                            if (align.testFlag(Qt::AlignRight)) {
+                                                alignedX += horizontalSpace;
+                                            } else if (align.testFlag(Qt::AlignHCenter)) {
+                                                alignedX += horizontalSpace * 0.5;
+                                            }
+                                        }
+                                        const qreal height = std::max<qreal>(line.height(), 1.0);
+                                        // line.x() already contains the alignment offset within the document
+                                        const QPointF topLeft = blockRect.topLeft() + QPointF(alignedX, line.y());
+                                        bufferPainter.drawRect(QRectF(topLeft, QSizeF(width, height)));
+                                    }
+                                }
+                            }
+                            
+                            bufferPainter.restore();
+                        }
+                    }
                     QColor outlineColor = fillColor;
                     if (m_owner) {
                         const QColor ownerOutline = m_owner->textBorderColor();
@@ -771,6 +821,8 @@ TextMediaItem::TextMediaItem(
     , m_textColor(TextMediaDefaults::TEXT_COLOR)
     , m_textBorderWidthPercent(TextMediaDefaults::TEXT_BORDER_WIDTH_PERCENT)
     , m_textBorderColor(TextMediaDefaults::TEXT_BORDER_COLOR)
+    , m_highlightEnabled(TextMediaDefaults::TEXT_HIGHLIGHT_ENABLED)
+    , m_highlightColor(TextMediaDefaults::TEXT_HIGHLIGHT_COLOR)
 {
     // Set up default font from global configuration
     // Try system font first, with fallbacks to fonts known to have good weight support
@@ -821,6 +873,7 @@ TextMediaItem::TextMediaItem(
     m_editorRenderingText = m_text;
     m_uniformScaleFactor = scale();
     m_lastObservedScale = scale();
+    m_appliedContentPaddingPx = contentPaddingPx();
     
     // Create alignment controls (will be shown when selected)
     ensureAlignmentControls();
@@ -897,7 +950,7 @@ void TextMediaItem::setTextBorderWidth(qreal percent) {
         return;
     }
 
-    const qreal oldPadding = contentPaddingPx();
+    const qreal oldPadding = m_appliedContentPaddingPx;
     m_textBorderWidthPercent = clamped;
     const qreal newPadding = contentPaddingPx();
 
@@ -906,6 +959,7 @@ void TextMediaItem::setTextBorderWidth(qreal percent) {
     update();
 
     handleContentPaddingChanged(oldPadding, newPadding);
+    m_appliedContentPaddingPx = newPadding;
 
     if (m_inlineEditor) {
         normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, borderStrokeWidthPx());
@@ -958,6 +1012,45 @@ void TextMediaItem::setTextBorderColorOverrideEnabled(bool enabled) {
     }
 }
 
+void TextMediaItem::setHighlightEnabled(bool enabled) {
+    if (m_highlightEnabled == enabled) {
+        return;
+    }
+
+    m_highlightEnabled = enabled;
+    m_needsRasterization = true;
+    m_scaledRasterDirty = true;
+    update();
+
+    if (m_inlineEditor) {
+        if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
+            inlineEditor->invalidateCache();
+        }
+    }
+}
+
+void TextMediaItem::setHighlightColor(const QColor& color) {
+    QColor normalized = color;
+    if (!normalized.isValid()) {
+        normalized = TextMediaDefaults::TEXT_HIGHLIGHT_COLOR;
+    }
+
+    if (m_highlightColor == normalized) {
+        return;
+    }
+
+    m_highlightColor = normalized;
+    m_needsRasterization = true;
+    m_scaledRasterDirty = true;
+    update();
+
+    if (m_inlineEditor) {
+        if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
+            inlineEditor->invalidateCache();
+        }
+    }
+}
+
 qreal TextMediaItem::borderStrokeWidthPx() const {
     if (m_textBorderWidthPercent <= 0.0) {
         return 0.0;
@@ -987,11 +1080,13 @@ qreal TextMediaItem::contentPaddingPx() const {
     if (strokeWidth <= 0.0) {
         return kContentPadding;
     }
-    return kContentPadding + strokeWidth;
+    const qreal overflowAllowance = std::ceil(std::max<qreal>(strokeWidth * kStrokeOverflowScale, kStrokeOverflowMinPx));
+    return kContentPadding + strokeWidth + overflowAllowance;
 }
 
 void TextMediaItem::handleContentPaddingChanged(qreal oldPadding, qreal newPadding) {
     if (std::abs(newPadding - oldPadding) < 1e-3) {
+        m_appliedContentPaddingPx = newPadding;
         return;
     }
 
@@ -1010,6 +1105,7 @@ void TextMediaItem::handleContentPaddingChanged(qreal oldPadding, qreal newPaddi
         updateAlignmentControlsLayout();
         updateOverlayLayout();
         update();
+        m_appliedContentPaddingPx = newPadding;
         return;
     }
 
@@ -1121,7 +1217,7 @@ void TextMediaItem::applyFontChange(const QFont& font) {
         return;
     }
 
-    const qreal oldPadding = contentPaddingPx();
+    const qreal oldPadding = m_appliedContentPaddingPx;
     m_font = font;
     m_fontWeightValue = canonicalCssWeight(m_font);
     const qreal newPadding = contentPaddingPx();
@@ -1677,6 +1773,12 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
         return;
     }
 
+    const bool highlightEnabled = m_highlightEnabled && m_highlightColor.isValid() && m_highlightColor.alpha() > 0;
+    QColor highlightColor = highlightEnabled ? m_highlightColor : QColor();
+    if (highlightEnabled && !highlightColor.isValid()) {
+        highlightColor = TextMediaDefaults::TEXT_HIGHLIGHT_COLOR;
+    }
+
     imagePainter.scale(effectiveScale, effectiveScale);
 
     const qreal strokeWidth = borderStrokeWidthPx();
@@ -1698,7 +1800,47 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
 
     if (!m_fitToTextEnabled) {
         imagePainter.translate(offsetX, offsetY);
-        
+        if (highlightEnabled && highlightColor.alpha() > 0) {
+            imagePainter.save();
+            imagePainter.setPen(Qt::NoPen);
+            imagePainter.setBrush(highlightColor);
+            // Draw highlight per-line, respecting document alignment
+            const qreal docWidth = std::max<qreal>(docSize.width(), 1.0);
+            for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+                QTextLayout* textLayout = block.layout();
+                if (!textLayout) continue;
+                
+                const QRectF blockRect = layout->blockBoundingRect(block);
+                for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                    QTextLine line = textLayout->lineAt(lineIndex);
+                    if (!line.isValid()) continue;
+                    
+                    const qreal lineWidth = line.naturalTextWidth();
+                    const qreal width = std::max<qreal>(lineWidth, 1.0);
+                    qreal alignedX = line.x();
+                    if (std::abs(alignedX) < 1e-4 && width < docWidth - 1e-4) {
+                        const qreal horizontalSpace = std::max<qreal>(0.0, docWidth - width);
+                        switch (m_horizontalAlignment) {
+                            case HorizontalAlignment::Right:
+                                alignedX += horizontalSpace;
+                                break;
+                            case HorizontalAlignment::Center:
+                                alignedX += horizontalSpace * 0.5;
+                                break;
+                            case HorizontalAlignment::Left:
+                            default:
+                                break;
+                        }
+                    }
+                    const qreal height = std::max<qreal>(line.height(), 1.0);
+                    // line.x() already contains the alignment offset within the document
+                    const QPointF topLeft = blockRect.topLeft() + QPointF(alignedX, line.y());
+                    imagePainter.drawRect(QRectF(topLeft, QSizeF(width, height)));
+                }
+            }
+            imagePainter.restore();
+        }
+
         if (strokeWidth > 0.0) {
             // Build glyph paths from document
             QPainterPath textPath;
@@ -1777,7 +1919,14 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
             }
 
             const QPointF lineBasePos(lineOffsetX, blockRect.top() + line.y());
-            
+
+            if (highlightEnabled && highlightColor.alpha() > 0) {
+                const qreal highlightWidth = std::max<qreal>(lineWidth > 0.0 ? lineWidth : contentWidth, 1.0);
+                const qreal highlightHeight = std::max<qreal>(line.height(), 1.0);
+                const QRectF highlightRect(QPointF(lineOffsetX, blockRect.top() + line.y()), QSizeF(highlightWidth, highlightHeight));
+                imagePainter.fillRect(highlightRect, highlightColor);
+            }
+
             if (strokeWidth > 0.0) {
                 // Build glyph paths for this line
                 QPainterPath linePath;

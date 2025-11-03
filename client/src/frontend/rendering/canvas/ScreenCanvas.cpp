@@ -382,6 +382,9 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                     m["textColor"] = textColor.name(QColor::HexArgb);
                     m["textBorderWidthPercent"] = textMedia->textBorderWidth();
                     m["textBorderColor"] = textMedia->textBorderColor().name(QColor::HexArgb);
+                    m["textHighlightEnabled"] = textMedia->highlightEnabled();
+                    m["textHighlightColor"] = textMedia->highlightColor().name(QColor::HexArgb);
+                    m["textFitToTextEnabled"] = textMedia->fitToTextEnabled();
                     qreal uniformScale = textMedia->uniformScaleFactor();
                     if (!std::isfinite(uniformScale) || std::abs(uniformScale) < 1e-6) {
                         uniformScale = 1.0;

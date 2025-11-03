@@ -24,6 +24,8 @@ namespace TextMediaDefaults {
     extern const QColor TEXT_COLOR;
     extern const qreal TEXT_BORDER_WIDTH_PERCENT;
     extern const QColor TEXT_BORDER_COLOR;
+    extern const bool TEXT_HIGHLIGHT_ENABLED;
+    extern const QColor TEXT_HIGHLIGHT_COLOR;
     
     // Default text content when creating new text media
     extern const QString DEFAULT_TEXT;
@@ -72,6 +74,11 @@ public:
     void setTextBorderColor(const QColor& color);
     bool textBorderColorOverrideEnabled() const { return m_textBorderColorOverrideEnabled; }
     void setTextBorderColorOverrideEnabled(bool enabled);
+
+    bool highlightEnabled() const { return m_highlightEnabled; }
+    void setHighlightEnabled(bool enabled);
+    QColor highlightColor() const { return m_highlightColor; }
+    void setHighlightColor(const QColor& color);
 
     int textFontWeightValue() const { return m_fontWeightValue; }
     void setTextFontWeightValue(int weight, bool markOverride = true);
@@ -131,6 +138,8 @@ private:
     QColor m_textBorderColor;
     bool m_textBorderWidthOverrideEnabled = false;
     bool m_textBorderColorOverrideEnabled = false;
+    bool m_highlightEnabled = false;
+    QColor m_highlightColor;
     int m_fontWeightValue = TextMediaDefaults::FONT_WEIGHT_VALUE;
     bool m_fontWeightOverrideEnabled = false;
     QGraphicsTextItem* m_inlineEditor = nullptr;
@@ -165,6 +174,7 @@ private:
     bool m_fitToTextEnabled = false;
     bool m_fitToTextUpdatePending = false;
     bool m_applyingFitToText = false;
+    qreal m_appliedContentPaddingPx = 0.0;
     
     // Alignment controls (scene items, similar to video controls)
     class SegmentedButtonItem* m_fitToTextBtn = nullptr;

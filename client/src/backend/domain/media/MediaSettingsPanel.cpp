@@ -713,6 +713,27 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
     }
 
     {
+        m_textHighlightRow = new QWidget(m_elementPropertiesContainer);
+        configureRow(m_textHighlightRow);
+    auto* h = new QHBoxLayout(m_textHighlightRow);
+    configureRowLayout(h);
+        m_textHighlightCheck = new QCheckBox("Highlight: ", m_textHighlightRow);
+        m_textHighlightCheck->setStyleSheet(overlayTextStyle);
+        m_textHighlightCheck->installEventFilter(this);
+        QObject::connect(m_textHighlightCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onTextHighlightToggled);
+        const QString defaultHighlightColor = TextMediaDefaults::TEXT_HIGHLIGHT_COLOR.name(QColor::HexArgb).toUpper();
+        m_textHighlightBox = makeValueBox(defaultHighlightColor);
+        m_textHighlightBox->installEventFilter(this);
+        m_textHighlightBox->setMinimumWidth(40);
+        m_textHighlightBox->setMaximumWidth(40);
+        refreshTextHighlightBoxStyle(false);
+        h->addWidget(m_textHighlightCheck);
+        h->addWidget(m_textHighlightBox);
+        h->addStretch();
+        m_elementPropertiesLayout->addWidget(m_textHighlightRow);
+    }
+
+    {
         m_textBorderWidthRow = new QWidget(m_elementPropertiesContainer);
         configureRow(m_textBorderWidthRow);
     auto* h = new QHBoxLayout(m_textBorderWidthRow);
@@ -984,7 +1005,7 @@ void MediaSettingsPanel::updateSectionHeaderVisibility() {
     updateSection(m_elementAudioHeader, m_elementAudioSpacer, m_elementAudioHeaderGap,
                   {m_volumeRow, m_audioFadeInRow, m_audioFadeOutRow});
     updateSection(m_elementTextHeader, m_elementTextSpacer, m_elementTextHeaderGap,
-                  {m_textColorRow});
+                  {m_textColorRow, m_textHighlightRow, m_textBorderWidthRow, m_textBorderColorRow, m_textFontWeightRow});
 
     if (m_sceneImageHeader) {
         m_sceneImageHeader->setVisible(true);
@@ -1123,6 +1144,9 @@ void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
     if (m_textColorRow) {
         m_textColorRow->setVisible(isTextMedia);
     }
+    if (m_textHighlightRow) {
+        m_textHighlightRow->setVisible(isTextMedia);
+    }
     if (m_textBorderWidthRow) {
         m_textBorderWidthRow->setVisible(isTextMedia);
     }
@@ -1139,6 +1163,14 @@ void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
             const bool prev = m_textColorCheck->blockSignals(true);
             m_textColorCheck->setChecked(false);
             m_textColorCheck->blockSignals(prev);
+        }
+    }
+    if (m_textHighlightCheck) {
+        m_textHighlightCheck->setEnabled(isTextMedia);
+        if (!isTextMedia && m_textHighlightCheck->isChecked()) {
+            const bool prev = m_textHighlightCheck->blockSignals(true);
+            m_textHighlightCheck->setChecked(false);
+            m_textHighlightCheck->blockSignals(prev);
         }
     }
     if (m_textBorderWidthCheck) {
@@ -1171,6 +1203,13 @@ void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
             m_textColorBox->setText(TextMediaDefaults::TEXT_COLOR.name(QColor::HexArgb).toUpper());
         }
         refreshTextColorBoxStyle(m_activeBox == m_textColorBox);
+    }
+
+    if (m_textHighlightBox) {
+        if (!isTextMedia) {
+            m_textHighlightBox->setText(TextMediaDefaults::TEXT_HIGHLIGHT_COLOR.name(QColor::HexArgb).toUpper());
+        }
+        refreshTextHighlightBoxStyle(m_activeBox == m_textHighlightBox);
     }
 
     if (m_textBorderWidthBox) {
@@ -1327,6 +1366,10 @@ void MediaSettingsPanel::setBoxActive(QLabel* box, bool active) {
         refreshTextColorBoxStyle(active);
         return;
     }
+    if (box == m_textHighlightBox) {
+        refreshTextHighlightBoxStyle(active);
+        return;
+    }
     if (box == m_textBorderColorBox) {
         refreshTextBorderColorBoxStyle(active);
         return;
@@ -1478,6 +1521,56 @@ void MediaSettingsPanel::refreshTextBorderColorBoxStyle(bool activeHighlight) {
     m_textBorderColorBox->setStyleSheet(style);
 }
 
+void MediaSettingsPanel::refreshTextHighlightBoxStyle(bool activeHighlight) {
+    if (!m_textHighlightBox) {
+        return;
+    }
+
+    QString rawValue = m_textHighlightBox->text().trimmed();
+    if (rawValue.isEmpty()) {
+        rawValue = TextMediaDefaults::TEXT_HIGHLIGHT_COLOR.name(QColor::HexArgb);
+    }
+
+    QColor color(rawValue);
+    if (!color.isValid()) {
+        color = TextMediaDefaults::TEXT_HIGHLIGHT_COLOR;
+    }
+
+    const QString canonicalValue = color.name(QColor::HexArgb).toUpper();
+    if (canonicalValue != m_textHighlightBox->text()) {
+        m_textHighlightBox->setText(canonicalValue);
+    }
+
+    const QColor borderColor = activeHighlight ? AppColors::gMediaPanelActiveBg : AppColors::gMediaPanelInactiveBorder;
+
+    const QString style = QString(
+        "QLabel {"
+        "  background-color: %1;"
+        "  border: 1px solid %2;"
+        "  border-radius: 6px;"
+        "  padding: 2px 10px;"
+        "  margin-left: 4px;"
+        "  margin-right: 0px;"
+        "  color: transparent;"
+        "  font-size: 0px;"
+        "  min-height: %3px;"
+        "  max-height: %3px;"
+        "}"
+        "QLabel:disabled {"
+        "  background-color: %1;"
+        "  border: 1px solid %2;"
+        "  color: transparent;"
+        "  font-size: 0px;"
+        "}"
+    ).arg(
+        canonicalValue,
+        borderColor.name(),
+        QString::number(kOptionValueBoxHeight)
+    );
+
+    m_textHighlightBox->setStyleSheet(style);
+}
+
 void MediaSettingsPanel::clearActiveBox() {
     if (!m_activeBox) return;
 
@@ -1514,12 +1607,14 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
         QLabel* box = qobject_cast<QLabel*>(obj);
     
         // Special handling for text color box - opens color picker instead of editing
-        if (box == m_textColorBox || box == m_textBorderColorBox) {
+        if (box == m_textColorBox || box == m_textBorderColorBox || box == m_textHighlightBox) {
             if (!box->isEnabled()) {
                 return true; // consume the event without opening the picker
             }
             if (box == m_textColorBox) {
                 onTextColorBoxClicked();
+            } else if (box == m_textHighlightBox) {
+                onTextHighlightColorBoxClicked();
             } else {
                 onTextBorderColorBoxClicked();
             }
@@ -1870,6 +1965,50 @@ void MediaSettingsPanel::onTextColorBoxClicked() {
         refreshTextColorBoxStyle(m_activeBox == m_textColorBox);
         
         // Apply to media item
+        if (!m_updatingFromMedia) {
+            pushSettingsToMedia();
+        }
+    }
+}
+
+void MediaSettingsPanel::onTextHighlightToggled(bool checked) {
+    Q_UNUSED(checked);
+    if (m_textHighlightBox) {
+        refreshTextHighlightBoxStyle(m_activeBox == m_textHighlightBox);
+    }
+    if (!m_updatingFromMedia) {
+        pushSettingsToMedia();
+    }
+}
+
+void MediaSettingsPanel::onTextHighlightColorBoxClicked() {
+    if (!m_textHighlightBox || !m_mediaItem) return;
+
+    QString currentColorStr = m_textHighlightBox->text().trimmed();
+    if (currentColorStr.isEmpty()) {
+        currentColorStr = TextMediaDefaults::TEXT_HIGHLIGHT_COLOR.name(QColor::HexArgb);
+    }
+    QColor currentColor(currentColorStr);
+    if (!currentColor.isValid()) {
+        currentColor = TextMediaDefaults::TEXT_HIGHLIGHT_COLOR;
+    }
+
+    QColor newColor = QColorDialog::getColor(
+        currentColor,
+#ifdef Q_OS_WIN
+        nullptr,
+#else
+        m_widget,
+#endif
+        tr("Select Highlight Color"),
+        QColorDialog::ShowAlphaChannel
+    );
+
+    if (newColor.isValid()) {
+        QString colorStr = newColor.name(QColor::HexArgb);
+        m_textHighlightBox->setText(colorStr);
+        refreshTextHighlightBoxStyle(m_activeBox == m_textHighlightBox);
+
         if (!m_updatingFromMedia) {
             pushSettingsToMedia();
         }
@@ -2382,6 +2521,18 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
             }
             m_textColorBox->setEnabled(true);
             refreshTextColorBoxStyle(m_activeBox == m_textColorBox);
+
+            if (m_textHighlightBox) {
+                const QColor highlightColor = textItem->highlightColor();
+                const QString highlightStr = highlightColor.name(QColor::HexArgb);
+                applyBoxText(m_textHighlightBox, highlightStr, TextMediaDefaults::TEXT_HIGHLIGHT_COLOR.name(QColor::HexArgb));
+                refreshTextHighlightBoxStyle(m_activeBox == m_textHighlightBox);
+                m_textHighlightBox->setEnabled(true);
+            }
+            if (m_textHighlightCheck) {
+                applyCheckState(m_textHighlightCheck, textItem->highlightEnabled());
+            }
+            onTextHighlightToggled(m_textHighlightCheck && m_textHighlightCheck->isChecked());
         }
 
         if (m_textBorderWidthBox) {
@@ -2421,6 +2572,16 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
             }
             m_textColorBox->setText(TextMediaDefaults::TEXT_COLOR.name(QColor::HexArgb));
             refreshTextColorBoxStyle(false);
+        }
+
+        if (m_textHighlightBox) {
+            if (m_textHighlightCheck) {
+                const bool prev = m_textHighlightCheck->blockSignals(true);
+                m_textHighlightCheck->setChecked(false);
+                m_textHighlightCheck->blockSignals(prev);
+            }
+            m_textHighlightBox->setText(TextMediaDefaults::TEXT_HIGHLIGHT_COLOR.name(QColor::HexArgb).toUpper());
+            refreshTextHighlightBoxStyle(false);
         }
 
         if (m_textBorderWidthBox) {
@@ -2615,6 +2776,20 @@ void MediaSettingsPanel::pushSettingsToMedia() {
                     textItem->setTextColor(color);
                 }
             }
+        }
+
+        if (m_textHighlightCheck && m_textHighlightBox) {
+            const bool highlightEnabled = m_textHighlightCheck->isChecked();
+            textItem->setHighlightEnabled(highlightEnabled);
+            QString colorStr = m_textHighlightBox->text().trimmed();
+            if (colorStr.isEmpty() || colorStr == QStringLiteral("...")) {
+                colorStr = TextMediaDefaults::TEXT_HIGHLIGHT_COLOR.name(QColor::HexArgb);
+            }
+            QColor highlightColor(colorStr);
+            if (!highlightColor.isValid()) {
+                highlightColor = TextMediaDefaults::TEXT_HIGHLIGHT_COLOR;
+            }
+            textItem->setHighlightColor(highlightColor);
         }
 
         if (m_textBorderWidthCheck && m_textBorderWidthBox) {

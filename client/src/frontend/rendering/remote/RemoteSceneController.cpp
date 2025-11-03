@@ -171,6 +171,16 @@ public:
         setDefaultTextColor(m_fillColor);
     }
 
+    void setHighlightParameters(bool enabled, const QColor& color) {
+        QColor resolved = color;
+        if (!resolved.isValid()) {
+            resolved = QColor(255, 255, 0, 160);
+        }
+        m_highlightEnabled = enabled && resolved.alpha() > 0;
+        m_highlightColor = m_highlightEnabled ? resolved : QColor(Qt::transparent);
+        update();
+    }
+
 protected:
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override {
         if (!painter) {
@@ -188,6 +198,51 @@ protected:
 
         const qreal strokeWidth = m_strokeWidth;
         QColor outlineColor = m_outlineColor.isValid() ? m_outlineColor : m_fillColor;
+        const bool highlightActive = m_highlightEnabled && m_highlightColor.isValid() && m_highlightColor.alpha() > 0;
+
+        if (highlightActive) {
+            if (QAbstractTextDocumentLayout* docLayout = doc->documentLayout()) {
+                const QSizeF docSize = docLayout->documentSize();
+
+                painter->save();
+                painter->setPen(Qt::NoPen);
+                painter->setBrush(m_highlightColor);
+
+                const qreal docWidth = std::max<qreal>(docSize.width(), 1.0);
+                const Qt::Alignment docAlign = doc->defaultTextOption().alignment();
+                for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
+                    QTextLayout* textLayout = block.layout();
+                    if (!textLayout) {
+                        continue;
+                    }
+
+                    const QRectF blockRect = docLayout->blockBoundingRect(block);
+                    for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                        QTextLine line = textLayout->lineAt(lineIndex);
+                        if (!line.isValid()) {
+                            continue;
+                        }
+
+                        const qreal lineWidth = line.naturalTextWidth();
+                        const qreal width = std::max<qreal>(lineWidth, 1.0);
+                        qreal alignedX = line.x();
+                        if (std::abs(alignedX) < 1e-4 && width < docWidth - 1e-4) {
+                            const qreal horizontalSpace = std::max<qreal>(0.0, docWidth - width);
+                            if (docAlign.testFlag(Qt::AlignRight)) {
+                                alignedX += horizontalSpace;
+                            } else if (docAlign.testFlag(Qt::AlignHCenter)) {
+                                alignedX += horizontalSpace * 0.5;
+                            }
+                        }
+                        const qreal height = std::max<qreal>(line.height(), 1.0);
+                        const QPointF topLeft = blockRect.topLeft() + QPointF(alignedX, line.y());
+                        painter->drawRect(QRectF(topLeft, QSizeF(width, height)));
+                    }
+                }
+
+                painter->restore();
+            }
+        }
 
         // Clear outline formatting
         {
@@ -252,6 +307,8 @@ private:
     QColor m_fillColor = Qt::white;
     QColor m_outlineColor = Qt::white;
     qreal m_strokeWidth = 0.0;
+    bool m_highlightEnabled = false;
+    QColor m_highlightColor = Qt::transparent;
 };
 } // namespace
 
@@ -1432,6 +1489,9 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
         item->textColor = m.value("textColor").toString("#FFFFFF");
     item->textBorderWidthPercent = m.value("textBorderWidthPercent").toDouble(0.0);
     item->textBorderColor = m.value("textBorderColor").toString();
+    item->fitToTextEnabled = m.value("textFitToTextEnabled").toBool(false);
+    item->highlightEnabled = m.value("textHighlightEnabled").toBool(false);
+        item->textHighlightColor = m.value("textHighlightColor").toString();
         double uniformScale = m.value("uniformScale").toDouble(1.0);
         if (!std::isfinite(uniformScale) || std::abs(uniformScale) < 1e-6) {
             uniformScale = 1.0;
@@ -1609,7 +1669,16 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             };
 
             const qreal strokeWidth = computeOutlineWidth(item->textBorderWidthPercent, font);
-            const qreal padding = std::max<qreal>(0.0, strokeWidth);
+            auto outlineOverflowAllowance = [](qreal stroke) -> qreal {
+                if (stroke <= 0.0) {
+                    return 0.0;
+                }
+                constexpr qreal kOverflowScale = 0.45;
+                constexpr qreal kOverflowMinPx = 2.0;
+                return std::ceil(std::max<qreal>(stroke * kOverflowScale, kOverflowMinPx));
+            };
+
+            const qreal padding = std::max<qreal>(0.0, strokeWidth + outlineOverflowAllowance(strokeWidth));
             QColor outlineColor(item->textBorderColor);
             if (!outlineColor.isValid()) {
                 outlineColor = color;
@@ -1628,11 +1697,16 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             }
 
             textItem->setOutlineParameters(color, outlineColor, strokeWidth);
+            QColor highlightColor(item->textHighlightColor);
+            if (!highlightColor.isValid()) {
+                highlightColor = QColor(255, 255, 0, 160);
+            }
+            textItem->setHighlightParameters(item->highlightEnabled, highlightColor);
 
             // Center alignment
             QTextDocument* doc = textItem->document();
             QTextOption textOption = doc ? doc->defaultTextOption() : QTextOption();
-            textOption.setWrapMode(QTextOption::WordWrap);
+            textOption.setWrapMode(item->fitToTextEnabled ? QTextOption::NoWrap : QTextOption::WordWrap);
             Qt::Alignment hAlign = Qt::AlignHCenter;
             switch (item->horizontalAlignment) {
                 case RemoteMediaItem::HorizontalAlignment::Left:
@@ -1659,7 +1733,11 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             // Mirror host logical width so wrapping matches the baked glyph layout.
             const qreal availableBaseWidth = std::max<qreal>(1.0, baseWidth - 2.0 * padding);
             const qreal logicalWidth = std::max<qreal>(1.0, availableBaseWidth / uniformScale);
-            textItem->setTextWidth(logicalWidth);
+            if (item->fitToTextEnabled) {
+                textItem->setTextWidth(-1.0);
+            } else {
+                textItem->setTextWidth(logicalWidth);
+            }
 
             QSizeF docSize;
             if (doc && doc->documentLayout()) {

@@ -62,6 +62,8 @@ private slots:
     void onTextBorderWidthToggled(bool checked);
     void onTextBorderColorToggled(bool checked);
     void onTextBorderColorBoxClicked();
+    void onTextHighlightToggled(bool checked);
+    void onTextHighlightColorBoxClicked();
     void onTextFontWeightToggled(bool checked);
     void onSceneTabClicked();
     void onElementTabClicked();
@@ -79,6 +81,7 @@ private:
     void updateSectionHeaderVisibility();
     void refreshTextColorBoxStyle(bool activeHighlight = false);
     void refreshTextBorderColorBoxStyle(bool activeHighlight = false);
+    void refreshTextHighlightBoxStyle(bool activeHighlight = false);
 
 private:
     QWidget* m_widget = nullptr; // parented to viewport
@@ -195,6 +198,9 @@ private:
     QCheckBox* m_textColorCheck = nullptr;
     QLabel* m_textColorBox = nullptr;
     QWidget* m_textColorRow = nullptr;
+    QCheckBox* m_textHighlightCheck = nullptr;
+    QLabel* m_textHighlightBox = nullptr;
+    QWidget* m_textHighlightRow = nullptr;
     QCheckBox* m_textBorderWidthCheck = nullptr;
     QLabel* m_textBorderWidthBox = nullptr;
     QLabel* m_textBorderWidthUnitsLabel = nullptr;

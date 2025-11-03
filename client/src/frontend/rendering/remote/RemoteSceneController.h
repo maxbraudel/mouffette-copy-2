@@ -64,6 +64,9 @@ private:
 		QString textColor;
 		double textBorderWidthPercent = 0.0;
 		QString textBorderColor;
+		bool fitToTextEnabled = false;
+		bool highlightEnabled = false;
+		QString textHighlightColor;
 		int baseWidth = 0;
 		int baseHeight = 0;
 		double uniformScale = 1.0;
