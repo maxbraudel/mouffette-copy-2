@@ -27,7 +27,11 @@
 #include <QGraphicsScene>
 #include <QTextOption>
 #include <QTextDocument>
+#include <QTextCursor>
+#include <QTextCharFormat>
 #include <QAbstractTextDocumentLayout>
+#include <QFontMetricsF>
+#include <QPen>
 #include <QPointer>
 #include <QVariant>
 #include <QCoreApplication>
@@ -40,12 +44,49 @@
 #include <algorithm>
 #include <memory>
 #include <QVideoFrameFormat>
+#include <array>
+#include <limits>
 
 
 namespace {
 constexpr qint64 kStartPositionToleranceMs = 120;
 constexpr qint64 kDecoderSyncToleranceMs = 25;
 constexpr int kLivePlaybackWarmupFrames = 2;
+
+QFont::Weight qFontWeightFromCss(int cssWeight) {
+    struct WeightMapping {
+        int css;
+        QFont::Weight qt;
+    };
+
+    static constexpr std::array<WeightMapping, 9> kMappings = {{
+        {100, QFont::Thin},
+        {200, QFont::ExtraLight},
+        {300, QFont::Light},
+        {400, QFont::Normal},
+        {500, QFont::Medium},
+        {600, QFont::DemiBold},
+        {700, QFont::Bold},
+        {800, QFont::ExtraBold},
+        {900, QFont::Black}
+    }};
+
+    int clamped = std::clamp(cssWeight, 1, 1000);
+    clamped = ((clamped + 50) / 100) * 100;
+    clamped = std::clamp(clamped, 100, 900);
+
+    const WeightMapping* best = &kMappings.front();
+    int bestDiff = std::numeric_limits<int>::max();
+    for (const auto& mapping : kMappings) {
+        const int diff = std::abs(clamped - mapping.css);
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            best = &mapping;
+        }
+    }
+
+    return best->qt;
+}
 
 qint64 frameTimestampMs(const QVideoFrame& frame) {
     if (!frame.isValid()) {
@@ -1288,7 +1329,10 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
         item->fontSize = m.value("fontSize").toInt(12);
         item->fontBold = m.value("fontBold").toBool(false);
         item->fontItalic = m.value("fontItalic").toBool(false);
+    item->fontWeight = m.value("fontWeight").toInt(0);
         item->textColor = m.value("textColor").toString("#FFFFFF");
+    item->textBorderWidthPercent = m.value("textBorderWidthPercent").toDouble(0.0);
+    item->textBorderColor = m.value("textBorderColor").toString();
         double uniformScale = m.value("uniformScale").toDouble(1.0);
         if (!std::isfinite(uniformScale) || std::abs(uniformScale) < 1e-6) {
             uniformScale = 1.0;
@@ -1429,8 +1473,12 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             
             // Set up font
             QFont font(item->fontFamily, item->fontSize);
-            font.setBold(item->fontBold);
             font.setItalic(item->fontItalic);
+            if (item->fontWeight > 0) {
+                font.setWeight(qFontWeightFromCss(item->fontWeight));
+            } else if (item->fontBold) {
+                font.setWeight(QFont::Bold);
+            }
             textItem->setFont(font);
             
             // Set text color
@@ -1438,10 +1486,53 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             if (!color.isValid()) {
                 color = QColor(Qt::white);
             }
-            textItem->setDefaultTextColor(color);
             
             // Set text content
             textItem->setPlainText(item->text);
+
+            if (QTextDocument* doc = textItem->document()) {
+                QTextCursor cursor(doc);
+                cursor.select(QTextCursor::Document);
+                QTextCharFormat format;
+                format.setForeground(color);
+
+                auto computeOutlineWidth = [](double percent, const QFont& baseFont) -> qreal {
+                    if (percent <= 0.0) {
+                        return 0.0;
+                    }
+                    QFontMetricsF metrics(baseFont);
+                    qreal reference = metrics.height();
+                    if (reference <= 0.0) {
+                        if (baseFont.pixelSize() > 0) {
+                            reference = static_cast<qreal>(baseFont.pixelSize());
+                        } else {
+                            reference = baseFont.pointSizeF();
+                        }
+                    }
+                    if (reference <= 0.0) {
+                        reference = 16.0;
+                    }
+                    constexpr qreal kMaxOutlineThicknessFactor = 0.35;
+                    const qreal normalized = std::clamp(percent / 100.0, 0.0, 1.0);
+                    const qreal eased = std::pow(normalized, 1.1);
+                    return eased * kMaxOutlineThicknessFactor * reference;
+                };
+
+                const qreal strokeWidth = computeOutlineWidth(item->textBorderWidthPercent, font);
+                if (strokeWidth > 0.0) {
+                    QColor outlineColor(item->textBorderColor);
+                    if (!outlineColor.isValid()) {
+                        outlineColor = color;
+                    }
+                    QPen outlinePen(outlineColor, strokeWidth, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+                    format.setTextOutline(outlinePen);
+                } else {
+                    format.clearProperty(QTextFormat::TextOutline);
+                }
+                cursor.mergeCharFormat(format);
+            }
+
+            textItem->setDefaultTextColor(color);
             
             // Center alignment
             QTextDocument* doc = textItem->document();

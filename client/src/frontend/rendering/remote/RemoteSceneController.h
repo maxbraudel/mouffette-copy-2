@@ -60,7 +60,10 @@ private:
 		int fontSize = 12;
 		bool fontBold = false;
 		bool fontItalic = false;
+		int fontWeight = 0; // 0 falls back to bold flag
 		QString textColor;
+		double textBorderWidthPercent = 0.0;
+		QString textBorderColor;
 		int baseWidth = 0;
 		int baseHeight = 0;
 		double uniformScale = 1.0;

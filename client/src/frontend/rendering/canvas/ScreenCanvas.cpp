@@ -377,11 +377,11 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                     m["fontSize"] = textMedia->font().pointSize();
                     m["fontBold"] = textMedia->font().bold();
                     m["fontItalic"] = textMedia->font().italic();
+                    m["fontWeight"] = textMedia->textFontWeightValue();
                     QColor textColor = textMedia->textColor();
-                    m["textColor"] = QString("#%1%2%3")
-                        .arg(textColor.red(), 2, 16, QChar('0'))
-                        .arg(textColor.green(), 2, 16, QChar('0'))
-                        .arg(textColor.blue(), 2, 16, QChar('0'));
+                    m["textColor"] = textColor.name(QColor::HexArgb);
+                    m["textBorderWidthPercent"] = textMedia->textBorderWidth();
+                    m["textBorderColor"] = textMedia->textBorderColor().name(QColor::HexArgb);
                     qreal uniformScale = textMedia->uniformScaleFactor();
                     if (!std::isfinite(uniformScale) || std::abs(uniformScale) < 1e-6) {
                         uniformScale = 1.0;
