@@ -1851,9 +1851,15 @@ void MediaSettingsPanel::onTextColorBoxClicked() {
     }
     
     // Open native OS color picker dialog
+    // BUGFIX: Use nullptr as parent on Windows to avoid stylesheet inheritance issues
+    // that cause black/transparent backgrounds in the native color picker
     QColor newColor = QColorDialog::getColor(
         currentColor,
+#ifdef Q_OS_WIN
+        nullptr,  // Don't inherit stylesheet on Windows
+#else
         m_widget,
+#endif
         tr("Select Text Color"),
         QColorDialog::ShowAlphaChannel
     );
@@ -1917,9 +1923,14 @@ void MediaSettingsPanel::onTextBorderColorBoxClicked() {
         currentColor = TextMediaDefaults::TEXT_BORDER_COLOR;
     }
 
+    // BUGFIX: Use nullptr as parent on Windows to avoid stylesheet inheritance issues
     QColor newColor = QColorDialog::getColor(
         currentColor,
+#ifdef Q_OS_WIN
+        nullptr,  // Don't inherit stylesheet on Windows
+#else
         m_widget,
+#endif
         tr("Select Border Color"),
         QColorDialog::ShowAlphaChannel
     );
