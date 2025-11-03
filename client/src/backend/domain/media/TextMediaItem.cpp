@@ -333,10 +333,101 @@ protected:
                 bufferPainter.translate(-bounds.topLeft());
                 // Render only the base text content; caret and selection are drawn as overlays
                 if (QTextDocument* doc = document()) {
-                    QAbstractTextDocumentLayout::PaintContext ctx;
-                    ctx.cursorPosition = -1; // hide caret in cached image
-                    ctx.palette.setColor(QPalette::Text, defaultTextColor());
-                    doc->documentLayout()->draw(&bufferPainter, ctx);
+                    const QColor fillColor = m_owner ? m_owner->textColor() : defaultTextColor();
+                    QColor outlineColor = fillColor;
+                    if (m_owner) {
+                        const QColor ownerOutline = m_owner->textBorderColor();
+                        if (ownerOutline.isValid()) {
+                            outlineColor = ownerOutline;
+                        }
+                    }
+
+                    auto computeStrokeWidthPx = [&]() -> qreal {
+                        if (!m_owner) {
+                            return 0.0;
+                        }
+                        const qreal percent = m_owner->textBorderWidth();
+                        if (percent <= 0.0) {
+                            return 0.0;
+                        }
+                        const QFont ownerFont = m_owner->font();
+                        QFontMetricsF metrics(ownerFont);
+                        qreal reference = metrics.height();
+                        if (reference <= 0.0) {
+                            if (ownerFont.pixelSize() > 0) {
+                                reference = static_cast<qreal>(ownerFont.pixelSize());
+                            } else {
+                                reference = ownerFont.pointSizeF();
+                            }
+                        }
+                        if (reference <= 0.0) {
+                            reference = 16.0;
+                        }
+                        constexpr qreal kMaxOutlineThicknessFactor = 0.35;
+                        const qreal normalized = std::clamp(percent / 100.0, 0.0, 1.0);
+                        const qreal eased = std::pow(normalized, 1.1);
+                        return eased * kMaxOutlineThicknessFactor * reference;
+                    };
+
+                    const qreal strokeWidth = computeStrokeWidthPx();
+                    const qreal outlinePenWidth = strokeWidth * 2.0;
+
+                    // Clear outline formatting
+                    {
+                        QTextCursor cursor(doc);
+                        cursor.select(QTextCursor::Document);
+                        QTextCharFormat format;
+                        format.setForeground(fillColor);
+                        format.clearProperty(QTextFormat::TextOutline);
+                        cursor.mergeCharFormat(format);
+                    }
+
+                    if (strokeWidth > 0.0) {
+                        // Build glyph paths
+                        QPainterPath textPath;
+                        QAbstractTextDocumentLayout* docLayout = doc->documentLayout();
+                        for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
+                            QTextLayout* textLayout = block.layout();
+                            if (!textLayout) continue;
+                            
+                            const QRectF blockRect = docLayout->blockBoundingRect(block);
+                            for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                                QTextLine line = textLayout->lineAt(lineIndex);
+                                if (!line.isValid()) continue;
+                                
+                                QList<QGlyphRun> glyphRuns = line.glyphRuns();
+                                for (const QGlyphRun& run : glyphRuns) {
+                                    const QVector<quint32> indexes = run.glyphIndexes();
+                                    const QVector<QPointF> positions = run.positions();
+                                    // Glyph positions are baseline-relative, don't add ascent
+                                    const QPointF lineBase = blockRect.topLeft() + QPointF(line.x(), line.y());
+                                    for (int gi = 0; gi < indexes.size(); ++gi) {
+                                        QPainterPath glyphPath = run.rawFont().pathForGlyph(indexes[gi]);
+                                        textPath.addPath(glyphPath.translated(lineBase + positions[gi]));
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Draw outside stroke
+                        bufferPainter.save();
+                        bufferPainter.setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                        bufferPainter.setBrush(Qt::NoBrush);
+                        bufferPainter.drawPath(textPath);
+                        bufferPainter.restore();
+                        
+                        // Fill glyphs
+                        bufferPainter.save();
+                        bufferPainter.setPen(Qt::NoPen);
+                        bufferPainter.setBrush(fillColor);
+                        bufferPainter.drawPath(textPath);
+                        bufferPainter.restore();
+                    } else {
+                        QAbstractTextDocumentLayout::PaintContext ctx;
+                        ctx.cursorPosition = -1;
+                        ctx.palette.setColor(QPalette::Text, fillColor);
+                        doc->documentLayout()->draw(&bufferPainter, ctx);
+                    }
                 } else {
                     QGraphicsTextItem::paint(&bufferPainter, &opt, widget);
                 }
@@ -631,15 +722,11 @@ static void normalizeTextFormatting(
     cursor.select(QTextCursor::Document);
 
     // Create standard character format using the current font settings
+    // Note: We clear TextOutline because the inline editor uses glyph paths for outside strokes
     QTextCharFormat standardFormat;
     standardFormat.setFont(currentFont);
     standardFormat.setForeground(QBrush(currentColor));
-    if (currentOutlineWidth > 0.0) {
-        QPen outlinePen(currentOutlineColor, currentOutlineWidth, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
-        standardFormat.setTextOutline(outlinePen);
-    } else {
-        standardFormat.clearProperty(QTextFormat::TextOutline);
-    }
+    standardFormat.clearProperty(QTextFormat::TextOutline);
 
     // Apply to all text
     cursor.mergeCharFormat(standardFormat);
@@ -1475,49 +1562,88 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
 
     imagePainter.scale(effectiveScale, effectiveScale);
 
+    const qreal strokeWidth = borderStrokeWidthPx();
+    const QColor fillColor = m_textColor;
+    QColor outlineColor = m_textBorderColor.isValid() ? m_textBorderColor : fillColor;
+    if (!outlineColor.isValid()) {
+        outlineColor = fillColor;
+    }
+
+    // Clear outline formatting from document
     {
         QTextCursor docCursor(&doc);
         docCursor.select(QTextCursor::Document);
         QTextCharFormat format;
-        format.setForeground(m_textColor);
-        const qreal strokeWidth = borderStrokeWidthPx();
-        if (strokeWidth > 0.0) {
-            QPen outlinePen(m_textBorderColor, strokeWidth, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
-            format.setTextOutline(outlinePen);
-        } else {
-            format.clearProperty(QTextFormat::TextOutline);
-        }
+        format.setForeground(fillColor);
+        format.clearProperty(QTextFormat::TextOutline);
         docCursor.mergeCharFormat(format);
     }
 
     if (!m_fitToTextEnabled) {
-        QAbstractTextDocumentLayout::PaintContext ctx;
-        ctx.palette.setColor(QPalette::Text, m_textColor);
         imagePainter.translate(offsetX, offsetY);
-        layout->draw(&imagePainter, ctx);
+        
+        if (strokeWidth > 0.0) {
+            // Build glyph paths from document
+            QPainterPath textPath;
+            for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+                QTextLayout* textLayout = block.layout();
+                if (!textLayout) continue;
+                
+                const QRectF blockRect = layout->blockBoundingRect(block);
+                for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                    QTextLine line = textLayout->lineAt(lineIndex);
+                    if (!line.isValid()) continue;
+                    
+                    QList<QGlyphRun> glyphRuns = line.glyphRuns();
+                    for (const QGlyphRun& run : glyphRuns) {
+                        const QVector<quint32> indexes = run.glyphIndexes();
+                        const QVector<QPointF> positions = run.positions();
+                        // Use line.y() as the baseline - glyph positions are already baseline-relative
+                        const QPointF lineBase = blockRect.topLeft() + QPointF(line.x(), line.y());
+                        for (int gi = 0; gi < indexes.size(); ++gi) {
+                            QPainterPath glyphPath = run.rawFont().pathForGlyph(indexes[gi]);
+                            textPath.addPath(glyphPath.translated(lineBase + positions[gi]));
+                        }
+                    }
+                }
+            }
+            
+            // Draw outside stroke: full-width stroke + fill on top
+            imagePainter.save();
+            imagePainter.setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            imagePainter.setBrush(Qt::NoBrush);
+            imagePainter.drawPath(textPath);
+            imagePainter.restore();
+            
+            // Fill glyphs
+            imagePainter.save();
+            imagePainter.setPen(Qt::NoPen);
+            imagePainter.setBrush(fillColor);
+            imagePainter.drawPath(textPath);
+            imagePainter.restore();
+        } else {
+            // No outline: standard text draw
+            QAbstractTextDocumentLayout::PaintContext ctx;
+            ctx.palette.setColor(QPalette::Text, fillColor);
+            layout->draw(&imagePainter, ctx);
+        }
+        
         imagePainter.end();
         return;
     }
 
-    // Fit-to-text: render each line manually so alignment is preserved without forcing word wrap.
-
+    // Fit-to-text mode: render aligned lines with outside strokes
     imagePainter.translate(kContentPadding, offsetY);
-
     const qreal contentWidth = availableWidth;
 
     for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
         QTextLayout* textLayout = block.layout();
-        if (!textLayout) {
-            continue;
-        }
+        if (!textLayout) continue;
 
         const QRectF blockRect = layout->blockBoundingRect(block);
-        const int lineCount = textLayout->lineCount();
-        for (int lineIndex = 0; lineIndex < lineCount; ++lineIndex) {
+        for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
             QTextLine line = textLayout->lineAt(lineIndex);
-            if (!line.isValid()) {
-                continue;
-            }
+            if (!line.isValid()) continue;
 
             qreal lineOffsetX = 0.0;
             const qreal lineWidth = line.naturalTextWidth();
@@ -1533,8 +1659,38 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
                     break;
             }
 
-            const QPointF linePos(lineOffsetX, blockRect.top() + line.y());
-            line.draw(&imagePainter, linePos);
+            const QPointF lineBasePos(lineOffsetX, blockRect.top() + line.y());
+            
+            if (strokeWidth > 0.0) {
+                // Build glyph paths for this line
+                QPainterPath linePath;
+                QList<QGlyphRun> glyphRuns = line.glyphRuns();
+                for (const QGlyphRun& run : glyphRuns) {
+                    const QVector<quint32> indexes = run.glyphIndexes();
+                    const QVector<QPointF> positions = run.positions();
+                    // Glyph positions are already baseline-relative, just use lineBasePos
+                    for (int gi = 0; gi < indexes.size(); ++gi) {
+                        QPainterPath glyphPath = run.rawFont().pathForGlyph(indexes[gi]);
+                        linePath.addPath(glyphPath.translated(lineBasePos + positions[gi]));
+                    }
+                }
+                
+                // Draw outside stroke
+                imagePainter.save();
+                imagePainter.setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                imagePainter.setBrush(Qt::NoBrush);
+                imagePainter.drawPath(linePath);
+                imagePainter.restore();
+                
+                // Fill glyphs
+                imagePainter.save();
+                imagePainter.setPen(Qt::NoPen);
+                imagePainter.setBrush(fillColor);
+                imagePainter.drawPath(linePath);
+                imagePainter.restore();
+            } else {
+                line.draw(&imagePainter, lineBasePos);
+            }
         }
     }
 

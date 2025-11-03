@@ -30,6 +30,11 @@
 #include <QTextCursor>
 #include <QTextCharFormat>
 #include <QAbstractTextDocumentLayout>
+#include <QTextBlock>
+#include <QTextLayout>
+#include <QGlyphRun>
+#include <QRawFont>
+#include <QPainterPath>
 #include <QFontMetricsF>
 #include <QPen>
 #include <QPointer>
@@ -154,6 +159,131 @@ QImage convertFrameToImage(const QVideoFrame& frame) {
 
     return mapped;
 }
+
+class RemoteOutlineTextItem : public QGraphicsTextItem {
+public:
+    using QGraphicsTextItem::QGraphicsTextItem;
+
+    void setOutlineParameters(const QColor& fillColor, const QColor& outlineColor, qreal strokeWidthPx) {
+        m_fillColor = fillColor;
+        m_outlineColor = outlineColor.isValid() ? outlineColor : fillColor;
+        m_strokeWidth = std::max<qreal>(0.0, strokeWidthPx);
+        setDefaultTextColor(m_fillColor);
+    }
+
+protected:
+    void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override {
+        if (!painter) {
+            return;
+        }
+        Q_UNUSED(widget);
+
+        QTextDocument* doc = document();
+        if (!doc) {
+            QGraphicsTextItem::paint(painter, option, widget);
+            return;
+        }
+
+        painter->save();
+
+        const qreal strokeWidth = m_strokeWidth;
+        const qreal outlinePenWidth = strokeWidth * 2.0;
+        QColor outlineColor = m_outlineColor.isValid() ? m_outlineColor : m_fillColor;
+        QColor maskColor = m_fillColor;
+        maskColor.setAlpha(255);
+
+        auto applyFormat = [&](bool withOutline, const QColor& foreground) {
+            QTextCursor cursor(doc);
+            cursor.select(QTextCursor::Document);
+            QTextCharFormat format;
+            format.setForeground(foreground);
+            if (withOutline && strokeWidth > 0.0) {
+                QPen outlinePen(outlineColor, outlinePenWidth, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+                format.setTextOutline(outlinePen);
+            } else {
+                format.clearProperty(QTextFormat::TextOutline);
+            }
+            cursor.mergeCharFormat(format);
+        };
+
+        auto drawDocument = [&](QPainter::CompositionMode mode, const QColor& foreground) {
+            painter->save();
+            if (mode != QPainter::CompositionMode_SourceOver) {
+                painter->setCompositionMode(mode);
+            }
+            QAbstractTextDocumentLayout::PaintContext ctx;
+            ctx.palette.setColor(QPalette::Text, foreground);
+            doc->documentLayout()->draw(painter, ctx);
+            painter->restore();
+            if (mode != QPainter::CompositionMode_SourceOver) {
+                painter->setCompositionMode(QPainter::CompositionMode_SourceOver);
+            }
+        };
+
+        // Clear outline formatting
+        {
+            QTextCursor cursor(doc);
+            cursor.select(QTextCursor::Document);
+            QTextCharFormat format;
+            format.setForeground(m_fillColor);
+            format.clearProperty(QTextFormat::TextOutline);
+            cursor.mergeCharFormat(format);
+        }
+
+        if (strokeWidth > 0.0) {
+            // Build glyph paths
+            QPainterPath textPath;
+            QAbstractTextDocumentLayout* docLayout = doc->documentLayout();
+            for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
+                QTextLayout* textLayout = block.layout();
+                if (!textLayout) continue;
+                
+                const QRectF blockRect = docLayout->blockBoundingRect(block);
+                for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                    QTextLine line = textLayout->lineAt(lineIndex);
+                    if (!line.isValid()) continue;
+                    
+                    QList<QGlyphRun> glyphRuns = line.glyphRuns();
+                    for (const QGlyphRun& run : glyphRuns) {
+                        const QVector<quint32> indexes = run.glyphIndexes();
+                        const QVector<QPointF> positions = run.positions();
+                        // Glyph positions are baseline-relative, don't add ascent
+                        const QPointF lineBase = blockRect.topLeft() + QPointF(line.x(), line.y());
+                        for (int gi = 0; gi < indexes.size(); ++gi) {
+                            QPainterPath glyphPath = run.rawFont().pathForGlyph(indexes[gi]);
+                            textPath.addPath(glyphPath.translated(lineBase + positions[gi]));
+                        }
+                    }
+                }
+            }
+            
+            // Draw outside stroke
+            painter->save();
+            painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            painter->setBrush(Qt::NoBrush);
+            painter->drawPath(textPath);
+            painter->restore();
+            
+            // Fill glyphs
+            painter->save();
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(m_fillColor);
+            painter->drawPath(textPath);
+            painter->restore();
+        } else {
+            QAbstractTextDocumentLayout::PaintContext ctx;
+            ctx.palette.setColor(QPalette::Text, m_fillColor);
+            doc->documentLayout()->draw(painter, ctx);
+        }
+
+        painter->restore();
+    }
+
+private:
+    QColor m_fillColor = Qt::white;
+    QColor m_outlineColor = Qt::white;
+    qreal m_strokeWidth = 0.0;
+};
 } // namespace
 
 RemoteSceneController::RemoteSceneController(FileManager* fileManager, WebSocketClient* ws, QObject* parent)
@@ -1464,13 +1594,13 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
         
         if (item->type == "text") {
             // Create a text item for text media
-            QGraphicsTextItem* textItem = new QGraphicsTextItem();
+            RemoteOutlineTextItem* textItem = new RemoteOutlineTextItem();
             textItem->setPos(px, py);
             textItem->setOpacity(0.0);
             if (QTextDocument* doc = textItem->document()) {
                 doc->setDocumentMargin(0.0);
             }
-            
+
             // Set up font
             QFont font(item->fontFamily, item->fontSize);
             font.setItalic(item->fontItalic);
@@ -1480,13 +1610,41 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 font.setWeight(QFont::Bold);
             }
             textItem->setFont(font);
-            
+
             // Set text color
             QColor color(item->textColor);
             if (!color.isValid()) {
                 color = QColor(Qt::white);
             }
-            
+
+            auto computeOutlineWidth = [](double percent, const QFont& baseFont) -> qreal {
+                if (percent <= 0.0) {
+                    return 0.0;
+                }
+                QFontMetricsF metrics(baseFont);
+                qreal reference = metrics.height();
+                if (reference <= 0.0) {
+                    if (baseFont.pixelSize() > 0) {
+                        reference = static_cast<qreal>(baseFont.pixelSize());
+                    } else {
+                        reference = baseFont.pointSizeF();
+                    }
+                }
+                if (reference <= 0.0) {
+                    reference = 16.0;
+                }
+                constexpr qreal kMaxOutlineThicknessFactor = 0.35;
+                const qreal normalized = std::clamp(percent / 100.0, 0.0, 1.0);
+                const qreal eased = std::pow(normalized, 1.1);
+                return eased * kMaxOutlineThicknessFactor * reference;
+            };
+
+            const qreal strokeWidth = computeOutlineWidth(item->textBorderWidthPercent, font);
+            QColor outlineColor(item->textBorderColor);
+            if (!outlineColor.isValid()) {
+                outlineColor = color;
+            }
+
             // Set text content
             textItem->setPlainText(item->text);
 
@@ -1495,45 +1653,12 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 cursor.select(QTextCursor::Document);
                 QTextCharFormat format;
                 format.setForeground(color);
-
-                auto computeOutlineWidth = [](double percent, const QFont& baseFont) -> qreal {
-                    if (percent <= 0.0) {
-                        return 0.0;
-                    }
-                    QFontMetricsF metrics(baseFont);
-                    qreal reference = metrics.height();
-                    if (reference <= 0.0) {
-                        if (baseFont.pixelSize() > 0) {
-                            reference = static_cast<qreal>(baseFont.pixelSize());
-                        } else {
-                            reference = baseFont.pointSizeF();
-                        }
-                    }
-                    if (reference <= 0.0) {
-                        reference = 16.0;
-                    }
-                    constexpr qreal kMaxOutlineThicknessFactor = 0.35;
-                    const qreal normalized = std::clamp(percent / 100.0, 0.0, 1.0);
-                    const qreal eased = std::pow(normalized, 1.1);
-                    return eased * kMaxOutlineThicknessFactor * reference;
-                };
-
-                const qreal strokeWidth = computeOutlineWidth(item->textBorderWidthPercent, font);
-                if (strokeWidth > 0.0) {
-                    QColor outlineColor(item->textBorderColor);
-                    if (!outlineColor.isValid()) {
-                        outlineColor = color;
-                    }
-                    QPen outlinePen(outlineColor, strokeWidth, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
-                    format.setTextOutline(outlinePen);
-                } else {
-                    format.clearProperty(QTextFormat::TextOutline);
-                }
+                format.clearProperty(QTextFormat::TextOutline);
                 cursor.mergeCharFormat(format);
             }
 
-            textItem->setDefaultTextColor(color);
-            
+            textItem->setOutlineParameters(color, outlineColor, strokeWidth);
+
             // Center alignment
             QTextDocument* doc = textItem->document();
             QTextOption textOption = doc ? doc->defaultTextOption() : QTextOption();
