@@ -27,9 +27,6 @@ void SystemTrayManager::setup() {
     }
     m_trayIcon->setIcon(trayIconIcon);
     
-    // Set tooltip
-    m_trayIcon->setToolTip("Mouffette - Media Sharing");
-    
     // Connect tray icon activation to forward the signal
     connect(m_trayIcon, &QSystemTrayIcon::activated, this, &SystemTrayManager::activated);
     
@@ -49,8 +46,9 @@ void SystemTrayManager::hide() {
     }
 }
 
-void SystemTrayManager::setToolTip(const QString& tooltip) {
+void SystemTrayManager::setToolTip(const QString&) {
     if (m_trayIcon) {
-        m_trayIcon->setToolTip(tooltip);
+        // Intentionally keep tray icon tooltip blank across platforms
+        m_trayIcon->setToolTip(QString());
     }
 }

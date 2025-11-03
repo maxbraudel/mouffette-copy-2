@@ -4975,7 +4975,6 @@ void ScreenCanvas::ensureSettingsToggleButton() {
     m_settingsToggleButton->setIcon(QIcon(QStringLiteral(":/icons/icons/settings.svg")));
     m_settingsToggleButton->setObjectName("SettingsToggleButton");
     m_settingsToggleButton->setCheckable(true);
-    m_settingsToggleButton->setToolTip(tr("Settings"));
     m_settingsToggleButton->setAttribute(Qt::WA_NoMousePropagation, true);
     m_settingsToggleButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
     m_settingsToggleButton->setAutoRaise(false);
@@ -5036,7 +5035,6 @@ void ScreenCanvas::ensureToolSelector() {
     m_selectionToolButton->setObjectName("SelectionToolButton");
     m_selectionToolButton->setCheckable(true);
     m_selectionToolButton->setChecked(true); // Default active tool
-    m_selectionToolButton->setToolTip(tr("Selection Tool"));
     m_selectionToolButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
     m_selectionToolButton->setAutoRaise(false);
     m_selectionToolButton->setFocusPolicy(Qt::NoFocus);
@@ -5048,7 +5046,6 @@ void ScreenCanvas::ensureToolSelector() {
     m_textToolButton->setObjectName("TextToolButton");
     m_textToolButton->setCheckable(true);
     m_textToolButton->setChecked(false);
-    m_textToolButton->setToolTip(tr("Text Tool"));
     m_textToolButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
     m_textToolButton->setAutoRaise(false);
     m_textToolButton->setFocusPolicy(Qt::NoFocus);

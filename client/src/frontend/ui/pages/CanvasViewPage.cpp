@@ -296,9 +296,6 @@ void CanvasViewPage::updateClientNameDisplay(const ClientInfo& client) {
 
     m_clientNameLabel->setText(text);
 
-    if (m_remoteClientInfoContainer) {
-        m_remoteClientInfoContainer->setToolTip(text);
-    }
 }
 
 void CanvasViewPage::updateVolumeIndicator(int volumePercent) {

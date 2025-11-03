@@ -1382,7 +1382,6 @@ void MediaSettingsPanel::refreshTextColorBoxStyle(bool activeHighlight) {
     if (canonicalValue != m_textColorBox->text()) {
         m_textColorBox->setText(canonicalValue);
     }
-    m_textColorBox->setToolTip(canonicalValue);
 
     auto blendColors = [](const QColor& fg, const QColor& bg, qreal ratio) {
         ratio = std::clamp(ratio, 0.0, 1.0);
@@ -1448,7 +1447,6 @@ void MediaSettingsPanel::refreshTextBorderColorBoxStyle(bool activeHighlight) {
     if (canonicalValue != m_textBorderColorBox->text()) {
         m_textBorderColorBox->setText(canonicalValue);
     }
-    m_textBorderColorBox->setToolTip(canonicalValue);
 
     const QColor borderColor = activeHighlight ? AppColors::gMediaPanelActiveBg : AppColors::gMediaPanelInactiveBorder;
 
