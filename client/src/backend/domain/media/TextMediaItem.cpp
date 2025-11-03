@@ -1504,6 +1504,15 @@ void TextMediaItem::updateInlineEditorGeometry() {
     }
 
     QRectF bounds = boundingRect();
+    
+    // Match the rendering logic: divide base size by scale first, then subtract padding
+    // This ensures the inline editor wraps at exactly the same width as the visible text
+    const qreal logicalWidth = std::max<qreal>(1.0, bounds.width() / uniformScale);
+    const qreal logicalHeight = std::max<qreal>(1.0, bounds.height() / uniformScale);
+    const qreal logicalContentWidth = std::max<qreal>(1.0, logicalWidth - 2.0 * margin);
+    const qreal logicalContentHeight = std::max<qreal>(1.0, logicalHeight - 2.0 * margin);
+    
+    // Calculate visual dimensions for positioning
     QRectF contentRect = bounds.adjusted(margin, margin, -margin, -margin);
     if (contentRect.width() < 1.0) {
         contentRect.setWidth(1.0);
@@ -1511,11 +1520,8 @@ void TextMediaItem::updateInlineEditorGeometry() {
     if (contentRect.height() < 1.0) {
         contentRect.setHeight(1.0);
     }
-
     const qreal visualContentWidth = contentRect.width();
     const qreal visualContentHeight = contentRect.height();
-    const qreal logicalContentWidth = std::max<qreal>(1.0, visualContentWidth / uniformScale);
-    const qreal logicalContentHeight = std::max<qreal>(1.0, visualContentHeight / uniformScale);
 
     bool widthChanged = false;
     if (!m_fitToTextEnabled) {
