@@ -60,15 +60,23 @@ public:
     
     QColor textColor() const { return m_textColor; }
     void setTextColor(const QColor& color);
+    bool textColorOverrideEnabled() const { return m_textColorOverrideEnabled; }
+    void setTextColorOverrideEnabled(bool enabled);
 
     qreal textBorderWidth() const { return m_textBorderWidthPercent; }
     void setTextBorderWidth(qreal percent);
+    bool textBorderWidthOverrideEnabled() const { return m_textBorderWidthOverrideEnabled; }
+    void setTextBorderWidthOverrideEnabled(bool enabled);
 
     QColor textBorderColor() const { return m_textBorderColor; }
     void setTextBorderColor(const QColor& color);
+    bool textBorderColorOverrideEnabled() const { return m_textBorderColorOverrideEnabled; }
+    void setTextBorderColorOverrideEnabled(bool enabled);
 
     int textFontWeightValue() const { return m_fontWeightValue; }
-    void setTextFontWeightValue(int weight);
+    void setTextFontWeightValue(int weight, bool markOverride = true);
+    bool textFontWeightOverrideEnabled() const { return m_fontWeightOverrideEnabled; }
+    void setTextFontWeightOverrideEnabled(bool enabled);
 
     qreal uniformScaleFactor() const { return m_uniformScaleFactor; }
     
@@ -116,11 +124,15 @@ private:
     QString m_text;
     QFont m_font;
     QColor m_textColor;
+    bool m_textColorOverrideEnabled = false;
     qreal borderStrokeWidthPx() const;
 
     qreal m_textBorderWidthPercent = 0.0;
     QColor m_textBorderColor;
+    bool m_textBorderWidthOverrideEnabled = false;
+    bool m_textBorderColorOverrideEnabled = false;
     int m_fontWeightValue = TextMediaDefaults::FONT_WEIGHT_VALUE;
+    bool m_fontWeightOverrideEnabled = false;
     QGraphicsTextItem* m_inlineEditor = nullptr;
     bool m_isEditing = false;
     QString m_textBeforeEditing;

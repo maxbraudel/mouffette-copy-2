@@ -792,6 +792,16 @@ void TextMediaItem::setTextColor(const QColor& color) {
     m_scaledRasterDirty = true;
 }
 
+void TextMediaItem::setTextColorOverrideEnabled(bool enabled) {
+    if (m_textColorOverrideEnabled == enabled) {
+        return;
+    }
+    m_textColorOverrideEnabled = enabled;
+    if (!enabled) {
+        setTextColor(TextMediaDefaults::TEXT_COLOR);
+    }
+}
+
 void TextMediaItem::setTextBorderWidth(qreal percent) {
     const qreal clamped = std::clamp(percent, 0.0, 100.0);
     if (std::abs(m_textBorderWidthPercent - clamped) < 1e-4) {
@@ -808,6 +818,16 @@ void TextMediaItem::setTextBorderWidth(qreal percent) {
         if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
             inlineEditor->invalidateCache();
         }
+    }
+}
+
+void TextMediaItem::setTextBorderWidthOverrideEnabled(bool enabled) {
+    if (m_textBorderWidthOverrideEnabled == enabled) {
+        return;
+    }
+    m_textBorderWidthOverrideEnabled = enabled;
+    if (!enabled) {
+        setTextBorderWidth(TextMediaDefaults::TEXT_BORDER_WIDTH_PERCENT);
     }
 }
 
@@ -830,6 +850,16 @@ void TextMediaItem::setTextBorderColor(const QColor& color) {
         if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
             inlineEditor->invalidateCache();
         }
+    }
+}
+
+void TextMediaItem::setTextBorderColorOverrideEnabled(bool enabled) {
+    if (m_textBorderColorOverrideEnabled == enabled) {
+        return;
+    }
+    m_textBorderColorOverrideEnabled = enabled;
+    if (!enabled) {
+        setTextBorderColor(TextMediaDefaults::TEXT_BORDER_COLOR);
     }
 }
 
@@ -857,15 +887,29 @@ qreal TextMediaItem::borderStrokeWidthPx() const {
     return eased * kMaxOutlineThicknessFactor * reference;
 }
 
-void TextMediaItem::setTextFontWeightValue(int weight) {
+void TextMediaItem::setTextFontWeightValue(int weight, bool markOverride) {
     const int clamped = clampCssWeight(weight);
-    if (m_fontWeightValue == clamped) {
+    const bool shouldApply = (m_fontWeightValue != clamped) || !markOverride;
+    if (markOverride) {
+        m_fontWeightOverrideEnabled = true;
+    }
+    if (!shouldApply) {
         return;
     }
 
     m_fontWeightValue = clamped;
     QFont updatedFont = fontAdjustedForWeight(m_font, m_fontWeightValue);
     applyFontChange(updatedFont);
+}
+
+void TextMediaItem::setTextFontWeightOverrideEnabled(bool enabled) {
+    if (m_fontWeightOverrideEnabled == enabled) {
+        return;
+    }
+    m_fontWeightOverrideEnabled = enabled;
+    if (!enabled) {
+        setTextFontWeightValue(TextMediaDefaults::FONT_WEIGHT_VALUE, /*markOverride*/false);
+    }
 }
 
 void TextMediaItem::applyFontChange(const QFont& font) {

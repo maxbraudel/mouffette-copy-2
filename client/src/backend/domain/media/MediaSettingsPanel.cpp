@@ -2377,8 +2377,9 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
             const QString colorStr = currentColor.name(QColor::HexArgb);
             applyBoxText(m_textColorBox, colorStr, QStringLiteral("#FFFFFFFF"));
 
-            const bool colorOverridden = (currentColor != TextMediaDefaults::TEXT_COLOR);
-            applyCheckState(m_textColorCheck, colorOverridden);
+            if (m_textColorCheck) {
+                applyCheckState(m_textColorCheck, textItem->textColorOverrideEnabled());
+            }
             m_textColorBox->setEnabled(true);
             refreshTextColorBoxStyle(m_activeBox == m_textColorBox);
         }
@@ -2388,8 +2389,7 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
             m_textBorderWidthBox->setText(formatBorderPercent(currentWidth));
         }
         if (m_textBorderWidthCheck) {
-            const bool widthOverridden = std::abs(textItem->textBorderWidth() - TextMediaDefaults::TEXT_BORDER_WIDTH_PERCENT) > 1e-4;
-            applyCheckState(m_textBorderWidthCheck, widthOverridden);
+            applyCheckState(m_textBorderWidthCheck, textItem->textBorderWidthOverrideEnabled());
         }
         onTextBorderWidthToggled(m_textBorderWidthCheck && m_textBorderWidthCheck->isChecked());
 
@@ -2400,8 +2400,7 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
             refreshTextBorderColorBoxStyle(m_activeBox == m_textBorderColorBox);
         }
         if (m_textBorderColorCheck) {
-            const bool colorOverridden = (textItem->textBorderColor() != TextMediaDefaults::TEXT_BORDER_COLOR);
-            applyCheckState(m_textBorderColorCheck, colorOverridden);
+            applyCheckState(m_textBorderColorCheck, textItem->textBorderColorOverrideEnabled());
         }
         onTextBorderColorToggled(m_textBorderColorCheck && m_textBorderColorCheck->isChecked());
 
@@ -2410,8 +2409,7 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
             m_textFontWeightBox->setText(QString::number(currentWeightValue));
         }
         if (m_textFontWeightCheck) {
-            const bool weightOverridden = (textItem->textFontWeightValue() != TextMediaDefaults::FONT_WEIGHT_VALUE);
-            applyCheckState(m_textFontWeightCheck, weightOverridden);
+            applyCheckState(m_textFontWeightCheck, textItem->textFontWeightOverrideEnabled());
         }
         onTextFontWeightToggled(m_textFontWeightCheck && m_textFontWeightCheck->isChecked());
     } else {
@@ -2608,21 +2606,22 @@ void MediaSettingsPanel::pushSettingsToMedia() {
     auto* textItem = dynamic_cast<TextMediaItem*>(m_mediaItem);
     if (textItem) {
         if (m_textColorCheck && m_textColorBox) {
-            if (m_textColorCheck->isChecked()) {
+            const bool overrideEnabled = m_textColorCheck->isChecked();
+            textItem->setTextColorOverrideEnabled(overrideEnabled);
+            if (overrideEnabled) {
                 QString colorStr = m_textColorBox->text().trimmed();
                 QColor color(colorStr);
                 if (color.isValid()) {
                     textItem->setTextColor(color);
                 }
-            } else {
-                // Reset to default color when disabled
-                textItem->setTextColor(TextMediaDefaults::TEXT_COLOR);
             }
         }
 
         if (m_textBorderWidthCheck && m_textBorderWidthBox) {
-            qreal parsedWidth = TextMediaDefaults::TEXT_BORDER_WIDTH_PERCENT;
-            if (m_textBorderWidthCheck->isChecked()) {
+            const bool overrideEnabled = m_textBorderWidthCheck->isChecked();
+            textItem->setTextBorderWidthOverrideEnabled(overrideEnabled);
+            if (overrideEnabled) {
+                qreal parsedWidth = TextMediaDefaults::TEXT_BORDER_WIDTH_PERCENT;
                 QString widthStr = m_textBorderWidthBox->text().trimmed();
                 if (!widthStr.isEmpty() && widthStr != QStringLiteral("...")) {
                     widthStr.replace(',', '.');
@@ -2632,21 +2631,19 @@ void MediaSettingsPanel::pushSettingsToMedia() {
                         parsedWidth = std::clamp<qreal>(static_cast<qreal>(candidate), 0.0, 100.0);
                     }
                 }
+                textItem->setTextBorderWidth(parsedWidth);
             }
-            textItem->setTextBorderWidth(parsedWidth);
-        } else if (m_textBorderWidthCheck && !m_textBorderWidthCheck->isChecked()) {
-            textItem->setTextBorderWidth(TextMediaDefaults::TEXT_BORDER_WIDTH_PERCENT);
         }
 
         if (m_textBorderColorCheck && m_textBorderColorBox) {
-            if (m_textBorderColorCheck->isChecked()) {
+            const bool overrideEnabled = m_textBorderColorCheck->isChecked();
+            textItem->setTextBorderColorOverrideEnabled(overrideEnabled);
+            if (overrideEnabled) {
                 QString colorStr = m_textBorderColorBox->text().trimmed();
                 QColor color(colorStr);
                 if (color.isValid()) {
                     textItem->setTextBorderColor(color);
                 }
-            } else {
-                textItem->setTextBorderColor(TextMediaDefaults::TEXT_BORDER_COLOR);
             }
         }
 
@@ -2664,7 +2661,11 @@ void MediaSettingsPanel::pushSettingsToMedia() {
                     }
                 }
             }
-            textItem->setTextFontWeightValue(targetWeight);
+            if (m_textFontWeightCheck->isChecked()) {
+                textItem->setTextFontWeightValue(targetWeight);
+            } else {
+                textItem->setTextFontWeightOverrideEnabled(false);
+            }
         }
     }
 }
