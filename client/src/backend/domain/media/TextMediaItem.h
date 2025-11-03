@@ -209,4 +209,6 @@ private:
     void updateAlignmentButtonStates();
     void applyAlignmentToEditor();
     void applyFitModeConstraintsToEditor();
+    qreal contentPaddingPx() const;
+    void handleContentPaddingChanged(qreal oldPadding, qreal newPadding);
 };

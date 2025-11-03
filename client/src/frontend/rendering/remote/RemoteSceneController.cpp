@@ -1609,6 +1609,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             };
 
             const qreal strokeWidth = computeOutlineWidth(item->textBorderWidthPercent, font);
+            const qreal padding = std::max<qreal>(0.0, strokeWidth);
             QColor outlineColor(item->textBorderColor);
             if (!outlineColor.isValid()) {
                 outlineColor = color;
@@ -1656,40 +1657,48 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             const qreal uniformScale = std::max<qreal>(static_cast<qreal>(std::abs(item->uniformScale)), 1e-4);
 
             // Mirror host logical width so wrapping matches the baked glyph layout.
-            const qreal logicalWidth = std::max<qreal>(1.0, baseWidth / uniformScale);
+            const qreal availableBaseWidth = std::max<qreal>(1.0, baseWidth - 2.0 * padding);
+            const qreal logicalWidth = std::max<qreal>(1.0, availableBaseWidth / uniformScale);
             textItem->setTextWidth(logicalWidth);
 
             QSizeF docSize;
             if (doc && doc->documentLayout()) {
                 docSize = doc->documentLayout()->documentSize();
             } else {
-                docSize = QSizeF(logicalWidth, baseHeight / uniformScale);
+                const qreal logicalHeight = std::max<qreal>(1.0, (baseHeight - 2.0 * padding) / uniformScale);
+                docSize = QSizeF(logicalWidth, logicalHeight);
             }
 
             const qreal safeBaseWidth = std::max<qreal>(baseWidth, 1.0);
+            const qreal safeBaseHeight = std::max<qreal>(baseHeight, 1.0);
             const qreal scaleX = static_cast<qreal>(pw) / safeBaseWidth;
+            const qreal scaleY = static_cast<qreal>(ph) / safeBaseHeight;
             const qreal appliedScale = scaleX * uniformScale;
             textItem->setScale(appliedScale);
             
-            // Center the text vertically within the target height
-            // This matches the offsetY calculation in renderTextToImage: (availableHeight - docSize.height()) / 2.0
-            // After scaling, the document height will be docSize.height() * scale
+            // Apply padding offsets to match host-side margin handling
+            const qreal paddingX = padding * scaleX;
+            const qreal paddingY = padding * scaleY;
+
+            // Center the text vertically within the padded height (matches host offset logic)
             const qreal scaledDocHeight = docSize.height() * appliedScale;
-            qreal verticalOffset = 0.0;
+            const qreal availableHeightScene = std::max<qreal>(0.0, static_cast<qreal>(ph) - 2.0 * paddingY);
+            qreal verticalOffset = paddingY;
             switch (item->verticalAlignment) {
                 case RemoteMediaItem::VerticalAlignment::Top:
-                    verticalOffset = 0.0;
+                    verticalOffset = paddingY;
                     break;
                 case RemoteMediaItem::VerticalAlignment::Center:
-                    verticalOffset = (ph - scaledDocHeight) * 0.5;
+                    verticalOffset = paddingY + std::max<qreal>(0.0, (availableHeightScene - scaledDocHeight) * 0.5);
                     break;
                 case RemoteMediaItem::VerticalAlignment::Bottom:
-                    verticalOffset = ph - scaledDocHeight;
+                    verticalOffset = paddingY + std::max<qreal>(0.0, availableHeightScene - scaledDocHeight);
                     break;
             }
             
-            // Position the text vertically according to alignment
-            textItem->setPos(px, py + verticalOffset);
+            // Position the text with horizontal padding as well
+            const qreal horizontalOffset = paddingX;
+            textItem->setPos(px + horizontalOffset, py + verticalOffset);
             
             scene->addItem(textItem);
             s.textItem = textItem;

@@ -897,10 +897,15 @@ void TextMediaItem::setTextBorderWidth(qreal percent) {
         return;
     }
 
+    const qreal oldPadding = contentPaddingPx();
     m_textBorderWidthPercent = clamped;
+    const qreal newPadding = contentPaddingPx();
+
     m_needsRasterization = true;
     m_scaledRasterDirty = true;
     update();
+
+    handleContentPaddingChanged(oldPadding, newPadding);
 
     if (m_inlineEditor) {
         normalizeTextFormatting(m_inlineEditor, m_font, m_textColor, m_textBorderColor, borderStrokeWidthPx());
@@ -908,6 +913,7 @@ void TextMediaItem::setTextBorderWidth(qreal percent) {
             inlineEditor->invalidateCache();
         }
     }
+
 }
 
 void TextMediaItem::setTextBorderWidthOverrideEnabled(bool enabled) {
@@ -976,6 +982,113 @@ qreal TextMediaItem::borderStrokeWidthPx() const {
     return eased * kMaxOutlineThicknessFactor * reference;
 }
 
+qreal TextMediaItem::contentPaddingPx() const {
+    const qreal strokeWidth = borderStrokeWidthPx();
+    if (strokeWidth <= 0.0) {
+        return kContentPadding;
+    }
+    return kContentPadding + strokeWidth;
+}
+
+void TextMediaItem::handleContentPaddingChanged(qreal oldPadding, qreal newPadding) {
+    if (std::abs(newPadding - oldPadding) < 1e-3) {
+        return;
+    }
+
+    const qreal contentWidth = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - oldPadding * 2.0);
+    const qreal contentHeight = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.height()) - oldPadding * 2.0);
+
+    const int newBaseWidth = std::max(1, static_cast<int>(std::ceil(contentWidth + newPadding * 2.0)));
+    const int newBaseHeight = std::max(1, static_cast<int>(std::ceil(contentHeight + newPadding * 2.0)));
+    const QSize newBase(newBaseWidth, newBaseHeight);
+
+    if (newBase == m_baseSize) {
+        m_documentMetricsDirty = true;
+        m_cachedEditorPosValid = false;
+        syncInlineEditorToBaseSize();
+        updateInlineEditorGeometry();
+        updateAlignmentControlsLayout();
+        updateOverlayLayout();
+        update();
+        return;
+    }
+
+    auto anchorPointForSize = [this](const QSize& size) {
+        qreal x = 0.0;
+        switch (m_horizontalAlignment) {
+            case HorizontalAlignment::Left:
+                x = 0.0;
+                break;
+            case HorizontalAlignment::Center:
+                x = static_cast<qreal>(size.width()) * 0.5;
+                break;
+            case HorizontalAlignment::Right:
+                x = static_cast<qreal>(size.width());
+                break;
+        }
+
+        qreal y = 0.0;
+        switch (m_verticalAlignment) {
+            case VerticalAlignment::Top:
+                y = 0.0;
+                break;
+            case VerticalAlignment::Center:
+                y = static_cast<qreal>(size.height()) * 0.5;
+                break;
+            case VerticalAlignment::Bottom:
+                y = static_cast<qreal>(size.height());
+                break;
+        }
+        return QPointF(x, y);
+    };
+
+    const QSize oldBase = m_baseSize;
+    const QPointF oldAnchorLocal = anchorPointForSize(oldBase);
+    QPointF anchorBefore;
+    if (parentItem()) {
+        anchorBefore = mapToParent(oldAnchorLocal);
+    } else if (scene()) {
+        anchorBefore = mapToScene(oldAnchorLocal);
+    } else {
+        anchorBefore = oldAnchorLocal + pos();
+    }
+
+    prepareGeometryChange();
+    m_baseSize = newBase;
+    m_needsRasterization = true;
+    m_scaledRasterDirty = true;
+    m_lastRasterizedScale = 1.0;
+    m_cachedEditorPosValid = false;
+    m_documentMetricsDirty = true;
+    m_cachedIdealWidth = -1.0;
+    m_cachedDocumentSize = QSizeF();
+
+    const QPointF newAnchorLocal = anchorPointForSize(newBase);
+    QPointF anchorAfter;
+    if (parentItem()) {
+        anchorAfter = mapToParent(newAnchorLocal);
+    } else if (scene()) {
+        anchorAfter = mapToScene(newAnchorLocal);
+    } else {
+        anchorAfter = newAnchorLocal + pos();
+    }
+
+    const QPointF delta = anchorBefore - anchorAfter;
+    if (!delta.isNull()) {
+        setPos(pos() + delta);
+    }
+
+    syncInlineEditorToBaseSize();
+    updateInlineEditorGeometry();
+    updateAlignmentControlsLayout();
+    updateOverlayLayout();
+    update();
+
+    if (m_fitToTextEnabled) {
+        scheduleFitToTextUpdate();
+    }
+}
+
 void TextMediaItem::setTextFontWeightValue(int weight, bool markOverride) {
     const int clamped = clampCssWeight(weight);
     const bool shouldApply = (m_fontWeightValue != clamped) || !markOverride;
@@ -1008,15 +1121,18 @@ void TextMediaItem::applyFontChange(const QFont& font) {
         return;
     }
 
+    const qreal oldPadding = contentPaddingPx();
     m_font = font;
     m_fontWeightValue = canonicalCssWeight(m_font);
+    const qreal newPadding = contentPaddingPx();
 
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
     m_needsRasterization = true;
     m_scaledRasterDirty = true;
     update();
-    updateInlineEditorGeometry();
+
+    handleContentPaddingChanged(oldPadding, newPadding);
 
     if (m_inlineEditor) {
         m_inlineEditor->setFont(m_font);
@@ -1027,10 +1143,6 @@ void TextMediaItem::applyFontChange(const QFont& font) {
         if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
             inlineEditor->invalidateCache();
         }
-    }
-
-    if (m_fitToTextEnabled) {
-        scheduleFitToTextUpdate();
     }
 }
 
@@ -1173,7 +1285,9 @@ void TextMediaItem::ensureInlineEditor() {
             opt.setAlignment(qtAlign);
             doc->setDefaultTextOption(opt);
             // Set width at base size (transform will scale it visually)
-            doc->setTextWidth(m_baseSize.width() - 2.0 * kContentPadding);
+            const qreal margin = contentPaddingPx();
+            const qreal logicalWidth = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - 2.0 * margin);
+            doc->setTextWidth(logicalWidth);
         }
 
         QObject::connect(doc, &QTextDocument::contentsChanged, editor, [this, editor]() {
@@ -1265,7 +1379,7 @@ void TextMediaItem::updateInlineEditorGeometry() {
         return std::abs(a - b) > epsilon;
     };
 
-    const qreal margin = kContentPadding;
+    const qreal margin = contentPaddingPx();
     const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
 
     QTransform editorTransform;
@@ -1513,7 +1627,8 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
 
     const qreal logicalWidth = static_cast<qreal>(targetWidth) / effectiveScale;
     const qreal logicalHeight = static_cast<qreal>(targetHeight) / effectiveScale;
-    const qreal availableWidth = std::max<qreal>(1.0, logicalWidth - 2.0 * kContentPadding);
+    const qreal margin = contentPaddingPx();
+    const qreal availableWidth = std::max<qreal>(1.0, logicalWidth - 2.0 * margin);
     if (m_fitToTextEnabled) {
         doc.setTextWidth(-1.0);
     } else {
@@ -1521,38 +1636,38 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
     }
 
     const QSizeF docSize = doc.documentLayout()->documentSize();
-    const qreal availableHeight = logicalHeight - 2.0 * kContentPadding;
+    const qreal availableHeight = std::max<qreal>(1.0, logicalHeight - 2.0 * margin);
     
     // When fit-to-text is enabled, the document handles horizontal alignment internally
     // via QTextOption (each line is aligned independently). We only apply padding.
     // When fit-to-text is disabled, we manually offset the entire block.
-    qreal offsetX = kContentPadding;
+    qreal offsetX = margin;
     if (!m_fitToTextEnabled) {
         const qreal horizontalSpace = std::max<qreal>(0.0, availableWidth - docSize.width());
         switch (m_horizontalAlignment) {
             case HorizontalAlignment::Left:
-                offsetX = kContentPadding;
+                offsetX = margin;
                 break;
             case HorizontalAlignment::Center:
-                offsetX = kContentPadding + horizontalSpace * 0.5;
+                offsetX = margin + horizontalSpace * 0.5;
                 break;
             case HorizontalAlignment::Right:
-                offsetX = kContentPadding + horizontalSpace;
+                offsetX = margin + horizontalSpace;
                 break;
         }
     }
     
     // Apply vertical alignment offset
-    qreal offsetY = kContentPadding;
+    qreal offsetY = margin;
     switch (m_verticalAlignment) {
         case VerticalAlignment::Top:
-            offsetY = kContentPadding;
+            offsetY = margin;
             break;
         case VerticalAlignment::Center:
-            offsetY = kContentPadding + (availableHeight - docSize.height()) / 2.0;
+            offsetY = margin + (availableHeight - docSize.height()) / 2.0;
             break;
         case VerticalAlignment::Bottom:
-            offsetY = kContentPadding + (availableHeight - docSize.height());
+            offsetY = margin + (availableHeight - docSize.height());
             break;
     }
 
@@ -1635,7 +1750,7 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
     }
 
     // Fit-to-text mode: render aligned lines with outside strokes
-    imagePainter.translate(kContentPadding, offsetY);
+    imagePainter.translate(margin, offsetY);
     const qreal contentWidth = availableWidth;
 
     for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
@@ -2357,7 +2472,7 @@ void TextMediaItem::applyFitToTextNow() {
     }
 
     const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
-    const qreal margin = kContentPadding;
+    const qreal margin = contentPaddingPx();
 
     // Calculate dimensions with minimum width constraint in fit-to-text mode
     const int calculatedWidth = static_cast<int>(std::ceil(logicalContentWidth * uniformScale + margin * 2.0));
@@ -2491,9 +2606,10 @@ void TextMediaItem::applyFitModeConstraintsToEditor() {
         return;
     }
 
+    const qreal margin = contentPaddingPx();
     const qreal desiredTextWidth = m_fitToTextEnabled
         ? -1.0
-        : std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - 2.0 * kContentPadding);
+        : std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - 2.0 * margin);
 
     bool widthModified = false;
 
