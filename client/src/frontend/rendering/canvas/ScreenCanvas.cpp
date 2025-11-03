@@ -3355,12 +3355,46 @@ void ScreenCanvas::wheelEvent(QWheelEvent* event) {
 }
 
 void ScreenCanvas::resizeEvent(QResizeEvent* event) {
-    // Qt automatically preserves view center with AnchorViewCenter!
+    // PHASE 1: Calculate adaptive zoom factor (geometric mean scaling)
+    qreal scaleFactor = 1.0;
+    bool shouldAdaptZoom = false;
+    
+    if (event->oldSize().width() > 0 && event->oldSize().height() > 0) {
+        qreal oldW = static_cast<qreal>(event->oldSize().width());
+        qreal oldH = static_cast<qreal>(event->oldSize().height());
+        qreal newW = static_cast<qreal>(event->size().width());
+        qreal newH = static_cast<qreal>(event->size().height());
+        
+        // Geometric mean scaling: √((width_new/width_old) × (height_new/height_old))
+        // This maintains perceived content size when aspect ratio changes
+        qreal widthRatio = newW / oldW;
+        qreal heightRatio = newH / oldH;
+        scaleFactor = std::sqrt(widthRatio * heightRatio);
+        
+        // Only apply if change is meaningful (avoid floating point noise)
+        if (std::abs(scaleFactor - 1.0) > 0.001) {
+            shouldAdaptZoom = true;
+        }
+    }
+    
+    // PHASE 2: Let Qt handle position anchoring (AnchorViewCenter preserves center)
     QGraphicsView::resizeEvent(event);
     
-    // Keep absolute panels pinned during viewport resizes
+    // PHASE 3: Apply adaptive zoom if needed
+    if (shouldAdaptZoom && viewport()) {
+        // Get center in scene coordinates AFTER Qt's position adjustment
+        QPointF center = mapToScene(viewport()->rect().center());
+        
+        // Scale around center point to maintain visual focus
+        QTransform t = transform();
+        t.translate(center.x(), center.y());
+        t.scale(scaleFactor, scaleFactor);
+        t.translate(-center.x(), -center.y());
+        setTransform(t);
+    }
+    
+    // PHASE 4: Update UI overlays to match new viewport
     relayoutAllMediaOverlays(m_scene);
-    // Fast-path update: adjust overlay height cap in real-time on viewport size changes
     updateInfoOverlayGeometryForViewport();
     updateSettingsToggleButtonGeometry();
     updateToolSelectorGeometry();
