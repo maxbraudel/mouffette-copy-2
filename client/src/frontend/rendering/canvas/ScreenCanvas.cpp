@@ -1403,7 +1403,8 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     // Remove frame and make background transparent so only content shows.
     setFrameStyle(QFrame::NoFrame);
     setAttribute(Qt::WA_AcceptTouchEvents, true);
-    setTransformationAnchor(QGraphicsView::NoAnchor); // we'll anchor manually
+    setTransformationAnchor(QGraphicsView::NoAnchor); // we'll anchor manually for zoom/transforms
+    setResizeAnchor(QGraphicsView::AnchorViewCenter); // preserve center during window resize
     if (viewport()) {
         viewport()->setAutoFillBackground(false);
         viewport()->setAttribute(Qt::WA_TranslucentBackground, true);
@@ -3354,7 +3355,9 @@ void ScreenCanvas::wheelEvent(QWheelEvent* event) {
 }
 
 void ScreenCanvas::resizeEvent(QResizeEvent* event) {
+    // Qt automatically preserves view center with AnchorViewCenter!
     QGraphicsView::resizeEvent(event);
+    
     // Keep absolute panels pinned during viewport resizes
     relayoutAllMediaOverlays(m_scene);
     // Fast-path update: adjust overlay height cap in real-time on viewport size changes
