@@ -12,6 +12,7 @@
 #include "backend/domain/session/SessionManager.h"
 #include "backend/domain/models/ClientInfo.h"
 #include <QListWidgetItem>
+#include <algorithm>
 
 ClientListPage::ClientListPage(SessionManager* sessionManager, QWidget* parent)
     : QWidget(parent),
@@ -129,11 +130,31 @@ void ClientListPage::refreshOngoingScenesList() {
 }
 
 void ClientListPage::updateClientList(const QList<ClientInfo>& clients) {
+    if (!m_clientListWidget) {
+        m_availableClients = clients;
+        return;
+    }
+
+    const int previousRow = m_clientListWidget->currentRow();
+    QString previouslySelectedId;
+    if (previousRow >= 0 && previousRow < m_availableClients.size()) {
+        previouslySelectedId = m_availableClients.at(previousRow).getId();
+    }
+
     m_availableClients = clients;
-    m_clientListWidget->clear();
-    
+
+    m_clientListWidget->setUpdatesEnabled(false);
+
+    // Remove any placeholder items before rebuilding list
+    for (int i = m_clientListWidget->count() - 1; i >= 0; --i) {
+        QListWidgetItem* existing = m_clientListWidget->item(i);
+        if (existing && existing->flags() == Qt::NoItemFlags) {
+            delete m_clientListWidget->takeItem(i);
+        }
+    }
+
     if (clients.isEmpty()) {
-        // Simple "no clients" message
+        m_clientListWidget->clear();
         QListWidgetItem* item = new QListWidgetItem("No clients connected. Make sure other devices are running Mouffette and connected to the same server.");
         item->setFlags(Qt::NoItemFlags);
         item->setTextAlignment(Qt::AlignCenter);
@@ -144,12 +165,48 @@ void ClientListPage::updateClientList(const QList<ClientInfo>& clients) {
         item->setForeground(AppColors::gTextMuted);
         m_clientListWidget->addItem(item);
     } else {
-        // Add client items
-        for (const ClientInfo& client : clients) {
+    const int existingCount = m_clientListWidget->count();
+    const int sharedCount = (existingCount < clients.size()) ? existingCount : static_cast<int>(clients.size());
+
+        for (int i = 0; i < sharedCount; ++i) {
+            QListWidgetItem* item = m_clientListWidget->item(i);
+            const ClientInfo& client = clients.at(i);
+            const QString display = client.getDisplayText();
+            if (item->text() != display) {
+                item->setText(display);
+            }
+            item->setData(Qt::UserRole, client.getId());
+        }
+
+        // Remove excess items if the new list is shorter
+        for (int i = existingCount - 1; i >= sharedCount; --i) {
+            delete m_clientListWidget->takeItem(i);
+        }
+
+        // Append new items if needed
+        for (int i = sharedCount; i < clients.size(); ++i) {
+            const ClientInfo& client = clients.at(i);
             QListWidgetItem* item = new QListWidgetItem(client.getDisplayText());
+            item->setData(Qt::UserRole, client.getId());
             m_clientListWidget->addItem(item);
         }
     }
+
+    // Restore selection if the previously selected client still exists
+    if (!clients.isEmpty() && !previouslySelectedId.isEmpty()) {
+        for (int i = 0; i < clients.size(); ++i) {
+            if (clients.at(i).getId() == previouslySelectedId) {
+                m_clientListWidget->setCurrentRow(i);
+                if (QListWidgetItem* restored = m_clientListWidget->item(i)) {
+                    restored->setSelected(true);
+                }
+                break;
+            }
+        }
+    }
+
+    m_clientListWidget->setUpdatesEnabled(true);
+    m_clientListWidget->update();
 
     refreshOngoingScenesList();
 }
