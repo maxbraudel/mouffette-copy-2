@@ -451,11 +451,12 @@ protected:
                                 for (const QGlyphRun& run : glyphRuns) {
                                     const QVector<quint32> indexes = run.glyphIndexes();
                                     const QVector<QPointF> positions = run.positions();
-                                    // Glyph positions are baseline-relative, don't add ascent
-                                    const QPointF lineBase = blockRect.topLeft() + QPointF(line.x(), line.y());
+                                    // Glyph positions from QGlyphRun are already in layout coordinates
+                                    // Only translate by block position to document coordinates
                                     for (int gi = 0; gi < indexes.size(); ++gi) {
                                         QPainterPath glyphPath = run.rawFont().pathForGlyph(indexes[gi]);
-                                        textPath.addPath(glyphPath.translated(lineBase + positions[gi]));
+                                        const QPointF glyphPos = blockRect.topLeft() + positions[gi];
+                                        textPath.addPath(glyphPath.translated(glyphPos));
                                     }
                                 }
                             }
@@ -1863,11 +1864,12 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
                     for (const QGlyphRun& run : glyphRuns) {
                         const QVector<quint32> indexes = run.glyphIndexes();
                         const QVector<QPointF> positions = run.positions();
-                        // Use line.y() as the baseline - glyph positions are already baseline-relative
-                        const QPointF lineBase = blockRect.topLeft() + QPointF(line.x(), line.y());
+                        // Glyph positions from QGlyphRun are already in layout coordinates
+                        // Only translate by block position to document coordinates
                         for (int gi = 0; gi < indexes.size(); ++gi) {
                             QPainterPath glyphPath = run.rawFont().pathForGlyph(indexes[gi]);
-                            textPath.addPath(glyphPath.translated(lineBase + positions[gi]));
+                            const QPointF glyphPos = blockRect.topLeft() + positions[gi];
+                            textPath.addPath(glyphPath.translated(glyphPos));
                         }
                     }
                 }
@@ -1940,10 +1942,12 @@ void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qr
                 for (const QGlyphRun& run : glyphRuns) {
                     const QVector<quint32> indexes = run.glyphIndexes();
                     const QVector<QPointF> positions = run.positions();
-                    // Glyph positions are already baseline-relative, just use lineBasePos
+                    // Glyph positions from QGlyphRun are already in layout coordinates
+                    // Only translate by block position to document coordinates
                     for (int gi = 0; gi < indexes.size(); ++gi) {
                         QPainterPath glyphPath = run.rawFont().pathForGlyph(indexes[gi]);
-                        linePath.addPath(glyphPath.translated(lineBasePos + positions[gi]));
+                        const QPointF glyphPos = blockRect.topLeft() + positions[gi];
+                        linePath.addPath(glyphPath.translated(glyphPos));
                     }
                 }
                 
