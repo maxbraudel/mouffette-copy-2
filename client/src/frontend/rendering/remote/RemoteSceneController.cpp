@@ -1810,9 +1810,9 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             const qreal baseHeight = static_cast<qreal>(item->baseHeight > 0 ? item->baseHeight : 100);
             const qreal uniformScale = std::max<qreal>(static_cast<qreal>(std::abs(item->uniformScale)), 1e-4);
 
-            // Mirror host logical width so wrapping matches the baked glyph layout.
-            const qreal availableBaseWidth = std::max<qreal>(1.0, baseWidth - 2.0 * padding);
-            const qreal logicalWidth = std::max<qreal>(1.0, availableBaseWidth / uniformScale);
+            // Match host calculation: divide base width by scale first, then subtract padding
+            // Host: logicalWidth = (baseWidth / uniformScale) - 2*padding
+            const qreal logicalWidth = std::max<qreal>(1.0, (baseWidth / uniformScale) - 2.0 * padding);
             if (item->fitToTextEnabled) {
                 textItem->setTextWidth(-1.0);
             } else {
