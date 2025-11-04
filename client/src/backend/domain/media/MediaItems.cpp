@@ -127,6 +127,7 @@ void ResizableMediaBase::fadeContentIn(double seconds) {
     m_fadeAnimation->setEndValue(1.0);
     int durationMs = static_cast<int>(seconds * 1000.0);
     m_fadeAnimation->setDuration(std::max(1, durationMs));
+    m_fadeAnimation->setEasingCurve(QEasingCurve::Linear);
     QObject::connect(m_fadeAnimation, &QVariantAnimation::valueChanged, [this](const QVariant& v){
         m_contentDisplayOpacity = v.toDouble();
         update();
@@ -151,6 +152,7 @@ void ResizableMediaBase::fadeContentOut(double seconds) {
     m_fadeAnimation->setEndValue(0.0);
     int durationMs = static_cast<int>(seconds * 1000.0);
     m_fadeAnimation->setDuration(std::max(1, durationMs));
+    m_fadeAnimation->setEasingCurve(QEasingCurve::Linear);
     QObject::connect(m_fadeAnimation, &QVariantAnimation::valueChanged, [this](const QVariant& v){
         m_contentDisplayOpacity = v.toDouble();
         update();

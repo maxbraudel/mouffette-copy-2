@@ -2343,7 +2343,7 @@ void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item)
         anim->setStartValue(0.0);
         anim->setEndValue(item->contentOpacity);
         anim->setDuration(durMs);
-        anim->setEasingCurve(QEasingCurve::OutCubic);
+        anim->setEasingCurve(QEasingCurve::Linear);
         connect(anim, &QVariantAnimation::valueChanged, this, [graphicsItem](const QVariant& v){
             if (graphicsItem) graphicsItem->setOpacity(v.toDouble());
         });
@@ -2544,7 +2544,7 @@ void RemoteSceneController::fadeOutAndHide(const std::shared_ptr<RemoteMediaItem
         anim->setStartValue(graphicsItem->opacity());
         anim->setEndValue(0.0);
         anim->setDuration(durMs);
-        anim->setEasingCurve(QEasingCurve::OutCubic);
+        anim->setEasingCurve(QEasingCurve::Linear);
         connect(anim, &QVariantAnimation::valueChanged, this, [graphicsItem](const QVariant& v) {
             if (graphicsItem) graphicsItem->setOpacity(v.toDouble());
         });
