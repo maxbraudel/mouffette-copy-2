@@ -915,6 +915,7 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     item->primedFirstFrame = false;
     item->primedFrame = QVideoFrame();
     item->primedFrameSticky = false;
+    item->primedFrameDeferred = false;
     item->lastFrameImage = QImage();
     item->lastFramePixmap = QPixmap();
     item->playAuthorized = false;
@@ -1001,7 +1002,7 @@ void RemoteSceneController::startDeferredTimers() {
             item->pendingPlayDelayMs = -1;
         }
         startPendingPauseTimerIfEligible(item);
-        if (item->fadeInPending && item->displayReady && !item->displayStarted) {
+        if (item->fadeInPending && item->displayReady && !item->displayStarted && !autoDisplayDelayActive(item)) {
             fadeIn(item);
         }
     }
@@ -1127,20 +1128,43 @@ void RemoteSceneController::applyPixmapToSpans(const std::shared_ptr<RemoteMedia
     }
 }
 
+bool RemoteSceneController::autoDisplayDelayActive(const std::shared_ptr<RemoteMediaItem>& item) const {
+    if (!item) return false;
+    if (!item->autoDisplay) return false;
+    if (item->displayStarted) return false;
+
+    if (item->pendingDisplayDelayMs > 0) {
+        return true;
+    }
+    if (item->displayTimer && item->displayTimer->isActive() && item->displayTimer->interval() > 0) {
+        return true;
+    }
+    if (!m_sceneActivated && item->autoDisplayDelayMs > 0) {
+        return true;
+    }
+    return false;
+}
+
 void RemoteSceneController::applyPrimedFrameToSinks(const std::shared_ptr<RemoteMediaItem>& item) {
     if (!item) return;
     if (!item->primedFrame.isValid()) return;
     if (!item->primedFrameSticky) return;
-
-    // Only block applying primed frame if awaiting playback AND autoDisplay is false
-    // (autoDisplay videos should show their primed frame immediately)
-    if (item->awaitingLivePlayback && !item->livePlaybackStarted && !item->autoDisplay) return;
 
     QImage image = convertFrameToImage(item->primedFrame);
     if (image.isNull()) return;
 
     item->lastFrameImage = image;
     item->lastFramePixmap = QPixmap::fromImage(image);
+
+    const bool awaitingPlaybackGate = item->awaitingLivePlayback && !item->livePlaybackStarted && !item->autoDisplay;
+    const bool displayDelayActive = autoDisplayDelayActive(item);
+
+    if (awaitingPlaybackGate || displayDelayActive) {
+        item->primedFrameDeferred = true;
+        return;
+    }
+
+    item->primedFrameDeferred = false;
     applyPixmapToSpans(item, item->lastFramePixmap);
 }
 
@@ -1150,6 +1174,7 @@ void RemoteSceneController::clearRenderedFrames(const std::shared_ptr<RemoteMedi
 
     item->lastFrameImage = QImage();
     item->lastFramePixmap = QPixmap();
+    item->primedFrameDeferred = false;
 
     for (auto& span : item->spans) {
         if (span.imageItem) {
@@ -1239,9 +1264,10 @@ void RemoteSceneController::finalizeLivePlaybackStart(const std::shared_ptr<Remo
             item->lastLiveFrameTimestampMs = ts;
         }
     }
-    if (item->fadeInPending && item->displayReady && !item->displayStarted) {
+    const bool displayDelayOutstanding = autoDisplayDelayActive(item);
+    if (item->fadeInPending && item->displayReady && !item->displayStarted && !displayDelayOutstanding) {
         fadeIn(item);
-    } else if (!item->displayStarted && item->displayReady) {
+    } else if (!item->displayStarted && item->displayReady && !displayDelayOutstanding) {
         fadeIn(item);
     }
     startPendingPauseTimerIfEligible(item);
@@ -2145,7 +2171,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                                 applyPrimedFrameToSinks(item);
                                 evaluateItemReadiness(item);
                                 // Allow display even if awaiting live playback, so autoDisplay works immediately
-                                if (item->autoDisplay && item->displayReady && !item->displayStarted) {
+                                if (item->autoDisplay && item->displayReady && !item->displayStarted && !autoDisplayDelayActive(item)) {
                                     fadeIn(item);
                                 }
                                 return;
@@ -2213,7 +2239,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
     // Display/play scheduling
     if (item->autoDisplay) {
         int delay = std::max(0, item->autoDisplayDelayMs);
-        // Mark displayReady immediately so primed frame can be shown
+        // Mark displayReady immediately so fade-in can trigger once delay elapses
         item->displayReady = true;
         item->displayTimer = new QTimer(this); item->displayTimer->setSingleShot(true);
         connect(item->displayTimer, &QTimer::timeout, this, [this,epoch,weakItem]() {
@@ -2294,7 +2320,7 @@ void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item)
         return;
     }
     // Only block fade-in if awaiting live playback AND autoDisplay is false
-    // (autoDisplay=true should show primed frame immediately, even before play starts)
+    // (autoDisplay items wait for their configured display delay instead)
     if (item->awaitingLivePlayback && !item->livePlaybackStarted && !item->autoDisplay) {
         item->fadeInPending = true;
         return;
@@ -2306,6 +2332,9 @@ void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item)
     item->hiding = false;
     if (item->hideTimer) {
         item->hideTimer->stop();
+    }
+    if (item->type == "video" && item->primedFrameSticky) {
+        applyPrimedFrameToSinks(item);
     }
     const int durMs = int(item->fadeInSeconds * 1000.0);
     std::weak_ptr<RemoteMediaItem> weakItem = item;

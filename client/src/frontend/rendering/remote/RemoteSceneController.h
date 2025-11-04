@@ -132,6 +132,7 @@ private:
 		QVideoSink* liveSink = nullptr;
 		bool videoOutputsAttached = false;
 		bool primedFrameSticky = false;
+		bool primedFrameDeferred = false;
 		QTimer* muteTimer = nullptr;
 		QTimer* hideEndDelayTimer = nullptr;
 		QTimer* muteEndDelayTimer = nullptr;
@@ -177,6 +178,7 @@ private:
 	void startPendingPauseTimerIfEligible(const std::shared_ptr<RemoteMediaItem>& item);
 	void triggerAutoPlayNow(const std::shared_ptr<RemoteMediaItem>& item, quint64 epoch);
 	void applyPrimedFrameToSinks(const std::shared_ptr<RemoteMediaItem>& item);
+	bool autoDisplayDelayActive(const std::shared_ptr<RemoteMediaItem>& item) const;
 	void clearRenderedFrames(const std::shared_ptr<RemoteMediaItem>& item);
 	void ensureVideoOutputsAttached(const std::shared_ptr<RemoteMediaItem>& item);
 	void finalizeLivePlaybackStart(const std::shared_ptr<RemoteMediaItem>& item, const QVideoFrame& frame);
