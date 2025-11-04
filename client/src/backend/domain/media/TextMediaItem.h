@@ -7,6 +7,7 @@
 #include <QColor>
 #include <QSizeF>
 #include <QPointF>
+#include <chrono>
 
 class QGraphicsTextItem;
 class QGraphicsRectItem;
@@ -167,6 +168,8 @@ private:
     bool m_scaledRasterDirty = true;
     qreal m_uniformScaleFactor = 1.0;
     qreal m_lastObservedScale = 1.0;
+    std::chrono::steady_clock::time_point m_lastScaledRasterUpdate{};
+    bool m_scaledRasterThrottleActive = false;
     
     // Text alignment settings
     HorizontalAlignment m_horizontalAlignment = HorizontalAlignment::Center;

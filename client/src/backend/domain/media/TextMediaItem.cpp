@@ -41,6 +41,7 @@
 #include <QTimer>
 #include <QPalette>
 #include <QHash>
+#include <chrono>
 
 // Global text styling configuration - tweak these to change all text media appearance
 namespace TextMediaDefaults {
@@ -76,6 +77,7 @@ constexpr qreal kContentPadding = 0.0;
 constexpr qreal kFitToTextMinWidth = 20.0; // Minimum width in fit-to-text mode
 constexpr qreal kStrokeOverflowScale = 0.45; // extra padding multiplier to account for outline bleed
 constexpr qreal kStrokeOverflowMinPx = 2.0;  // minimum extra padding in pixels
+constexpr qint64 kScaledRasterThrottleIntervalMs = 500; // minimum interval between expensive scaled raster updates during uniform resize
 
 struct GlyphPathKey {
     QString family;
@@ -2051,15 +2053,41 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     const int targetHeight = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.height()) * boundedGeometryScale)));
     const QSize targetSize(targetWidth, targetHeight);
 
+    const bool resizingUniformly = (m_activeHandle != None && !m_lastAxisAltStretch);
+    const bool hasScaledRaster = !m_scaledRasterizedText.isNull();
+
     const bool scaleChanged = std::abs(effectiveScale - m_lastRasterizedScale) > epsilon;
     if (!m_scaledRasterDirty && !scaleChanged && m_scaledRasterizedText.size() == targetSize) {
+        if (!resizingUniformly) {
+            m_scaledRasterThrottleActive = false;
+        }
         return;
+    }
+
+    if (!resizingUniformly && m_scaledRasterThrottleActive) {
+        m_scaledRasterThrottleActive = false;
+    }
+
+    if (resizingUniformly && hasScaledRaster && m_scaledRasterThrottleActive) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed = now - m_lastScaledRasterUpdate;
+        if (elapsed < std::chrono::milliseconds(kScaledRasterThrottleIntervalMs)) {
+            m_scaledRasterDirty = true;
+            return;
+        }
     }
 
     renderTextToImage(m_scaledRasterizedText, targetSize, effectiveScale);
 
     m_lastRasterizedScale = effectiveScale;
     m_scaledRasterDirty = false;
+
+    if (resizingUniformly) {
+        m_scaledRasterThrottleActive = true;
+        m_lastScaledRasterUpdate = std::chrono::steady_clock::now();
+    } else {
+        m_scaledRasterThrottleActive = false;
+    }
 }
 
 void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) {
