@@ -1970,6 +1970,13 @@ void TextMediaItem::updateInlineEditorGeometry() {
 void TextMediaItem::onInteractiveGeometryChanged() {
     ResizableMediaBase::onInteractiveGeometryChanged();
 
+    if (m_lastAxisAltStretch) {
+        // Force a fresh base raster when Alt stretch mutates dimensions so preview stays crisp.
+        if (m_lastRasterizedSize != m_baseSize) {
+            m_needsRasterization = true;
+        }
+    }
+
     if (m_isEditing) {
         // Update editor geometry to follow Alt-resize base size changes
         updateInlineEditorGeometry();
@@ -2368,6 +2375,7 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     const QSize targetSize(targetWidth, targetHeight);
 
     const bool resizingUniformly = (m_activeHandle != None && !m_lastAxisAltStretch);
+    const bool altStretching = (m_activeHandle != None && m_lastAxisAltStretch);
     const bool hasScaledRaster = !m_scaledRasterizedText.isNull();
 
     const bool scaleChanged = std::abs(effectiveScale - m_lastRasterizedScale) > epsilon;
@@ -2380,6 +2388,36 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
 
     if (!resizingUniformly && m_scaledRasterThrottleActive) {
         m_scaledRasterThrottleActive = false;
+    }
+
+    if (altStretching) {
+        ++m_rasterRequestId;
+        m_pendingRasterRequestId = m_rasterRequestId;
+        m_asyncRasterInProgress = false;
+
+        TextRasterJob job;
+        job.text = textForRendering();
+        job.font = m_font;
+        job.fillColor = m_textColor;
+        job.outlineColor = m_textBorderColor;
+        job.outlineWidthPercent = m_textBorderWidthPercent;
+        job.highlightEnabled = m_highlightEnabled;
+        job.highlightColor = m_highlightColor;
+        job.targetSize = targetSize;
+        job.scaleFactor = effectiveScale;
+        job.contentPaddingPx = contentPaddingPx();
+        job.fitToTextEnabled = m_fitToTextEnabled;
+        job.horizontalAlignment = m_horizontalAlignment;
+        job.verticalAlignment = m_verticalAlignment;
+        job.requestId = m_rasterRequestId;
+
+        m_scaledRasterizedText = job.execute();
+        m_lastRasterizedScale = effectiveScale;
+        m_scaledRasterDirty = false;
+        m_scaledRasterThrottleActive = false;
+        m_lastScaledRasterUpdate = std::chrono::steady_clock::now();
+        update();
+        return;
     }
 
     // Throttle during active uniform resize
@@ -2399,6 +2437,30 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     if (resizingUniformly) {
         m_scaledRasterThrottleActive = true;
         m_lastScaledRasterUpdate = std::chrono::steady_clock::now();
+
+        // Provide an immediate preview by scaling the latest raster so the text keeps its apparent size
+        const QImage* previewSource = nullptr;
+        if (!m_scaledRasterizedText.isNull()) {
+            previewSource = &m_scaledRasterizedText;
+        } else if (!m_rasterizedText.isNull()) {
+            previewSource = &m_rasterizedText;
+        }
+
+        if (previewSource && previewSource->size() != targetSize) {
+            const QImage* bestSource = previewSource;
+            if (!m_rasterizedText.isNull()) {
+                const bool baseIsLarger = (
+                    m_rasterizedText.width() * m_rasterizedText.height() >= previewSource->width() * previewSource->height()
+                );
+                if (baseIsLarger) {
+                    bestSource = &m_rasterizedText;
+                }
+            }
+
+            m_scaledRasterizedText = bestSource->scaled(targetSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            // Keep dirty flag true so the async job still replaces the preview with a high-fidelity raster
+            update();
+        }
     } else {
         m_scaledRasterThrottleActive = false;
     }
@@ -2433,7 +2495,6 @@ void TextMediaItem::kickAsyncRasterJob(const QSize& targetSize, qreal effectiveS
     // Capture weak guard to prevent dangling this pointer
     std::weak_ptr<bool> guard = lifetimeGuard();
     
-    // Watch for completion and apply result on main thread
     // Note: QFutureWatcher needs QObject parent; we can't pass 'this' since QGraphicsItem isn't QObject
     auto* watcher = new QFutureWatcher<QImage>();
     QObject::connect(watcher, &QFutureWatcher<QImage>::finished, watcher, [this, guard, watcher, targetSize, effectiveScale, requestId]() {
@@ -2504,10 +2565,12 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
     const qreal currentScale = scale();
     const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
     const qreal effectiveScale = std::max(std::abs(currentScale) * uniformScale, 1e-4);
+    const bool altStretchInProgress = (m_activeHandle != None && m_lastAxisAltStretch);
     const bool resizingUniformly = (m_activeHandle != None && !m_lastAxisAltStretch);
     const bool needsScaledRaster = std::abs(currentScale - 1.0) > 1e-4 ||
         std::abs(m_uniformScaleFactor - 1.0) > 1e-4 ||
-        resizingUniformly;
+        resizingUniformly ||
+        altStretchInProgress;
 
     if (needsScaledRaster) {
         ensureScaledRaster(effectiveScale, currentScale);
