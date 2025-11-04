@@ -204,16 +204,24 @@ QImage convertFrameToImage(const QVideoFrame& frame) {
 
 class RemoteOutlineTextItem : public QGraphicsTextItem {
 public:
-    RemoteOutlineTextItem();
-    explicit RemoteOutlineTextItem(QGraphicsItem* parent);
-    RemoteOutlineTextItem(const QString& text, QGraphicsItem* parent);
+    using QGraphicsTextItem::QGraphicsTextItem;
 
     void setOutlineParameters(const QColor& fillColor, const QColor& outlineColor, qreal strokeWidthPx) {
         m_fillColor = fillColor;
         m_outlineColor = outlineColor.isValid() ? outlineColor : fillColor;
         m_strokeWidth = std::max<qreal>(0.0, strokeWidthPx);
+        
+        // Calculate overflow allowance to match host logic
+        qreal overflow = 0.0;
+        if (m_strokeWidth > 0.0) {
+            constexpr qreal kOverflowScale = 0.45;
+            constexpr qreal kOverflowMinPx = 2.0;
+            overflow = std::ceil(std::max<qreal>(m_strokeWidth * kOverflowScale, kOverflowMinPx));
+        }
+        m_totalPadding = m_strokeWidth + overflow;
+        
         setDefaultTextColor(m_fillColor);
-        markCacheDirty();
+        update();
     }
 
     void setHighlightParameters(bool enabled, const QColor& color) {
@@ -225,139 +233,74 @@ public:
         if (m_highlightEnabled != active || m_highlightColor != resolved) {
             m_highlightEnabled = active;
             m_highlightColor = active ? resolved : QColor(Qt::transparent);
-            markCacheDirty();
+            update();
         }
-    }
-
-    void setFont(const QFont& font) {
-        QGraphicsTextItem::setFont(font);
-        markCacheDirty();
-    }
-
-    void setPlainText(const QString& text) {
-        if (text == toPlainText()) {
-            return;
-        }
-        QGraphicsTextItem::setPlainText(text);
-        markCacheDirty();
-    }
-
-    void setTextWidth(qreal width) {
-        if (qFuzzyCompare(width + 1.0, textWidth() + 1.0)) {
-            QGraphicsTextItem::setTextWidth(width);
-            return;
-        }
-        QGraphicsTextItem::setTextWidth(width);
-        markCacheDirty();
     }
 
 protected:
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override {
-        Q_UNUSED(option);
+        if (!painter) {
+            return;
+        }
         Q_UNUSED(widget);
-        if (!painter) {
-            return;
-        }
-
-        ensureCachedImage(painter);
-
-        if (!m_cachedImage.isNull()) {
-            painter->drawImage(QPointF(0.0, 0.0), m_cachedImage);
-        } else {
-            QGraphicsTextItem::paint(painter, option, widget);
-        }
-    }
-
-private:
-    void initializeDocumentWatcher();
-    void markCacheDirty() {
-        m_cacheDirty = true;
-        update();
-    }
-
-    void ensureCachedImage(QPainter* painter) {
-        if (!painter) {
-            return;
-        }
 
         QTextDocument* doc = document();
         if (!doc) {
-            m_cachedImage = QImage();
-            m_cacheDirty = false;
+            QGraphicsTextItem::paint(painter, option, widget);
             return;
         }
 
-        QAbstractTextDocumentLayout* layout = doc->documentLayout();
-        if (!layout) {
-            m_cachedImage = QImage();
-            m_cacheDirty = false;
-            return;
-        }
-
-        const QSizeF docSize = layout->documentSize();
-        const QPaintDevice* paintDevice = painter->device();
-        const qreal targetDeviceScale = std::max<qreal>(1.0, paintDevice ? paintDevice->devicePixelRatioF() : 1.0);
-
-        if (!m_cacheDirty && qFuzzyCompare(targetDeviceScale, m_cachedDeviceScale) && qFuzzyCompare(docSize.width(), m_cachedDocSize.width()) && qFuzzyCompare(docSize.height(), m_cachedDocSize.height())) {
-            return;
-        }
-
-        const int targetWidth = std::max(1, static_cast<int>(std::ceil(docSize.width() * targetDeviceScale)));
-        const int targetHeight = std::max(1, static_cast<int>(std::ceil(docSize.height() * targetDeviceScale)));
-
-        QImage raster(targetWidth, targetHeight, QImage::Format_ARGB32_Premultiplied);
-        raster.setDevicePixelRatio(targetDeviceScale);
-        raster.fill(Qt::transparent);
-
-        QPainter imagePainter(&raster);
-        imagePainter.setRenderHint(QPainter::Antialiasing, true);
-        imagePainter.setRenderHint(QPainter::TextAntialiasing, true);
-        imagePainter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        painter->save();
 
         const qreal strokeWidth = m_strokeWidth;
         QColor outlineColor = m_outlineColor.isValid() ? m_outlineColor : m_fillColor;
         const bool highlightActive = m_highlightEnabled && m_highlightColor.isValid() && m_highlightColor.alpha() > 0;
 
         if (highlightActive) {
-            imagePainter.save();
-            imagePainter.setPen(Qt::NoPen);
-            imagePainter.setBrush(m_highlightColor);
+            if (QAbstractTextDocumentLayout* docLayout = doc->documentLayout()) {
+                const QSizeF docSize = docLayout->documentSize();
 
-            const qreal docWidth = std::max<qreal>(docSize.width(), 1.0);
-            const Qt::Alignment docAlign = doc->defaultTextOption().alignment();
-            for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
-                QTextLayout* textLayout = block.layout();
-                if (!textLayout) {
-                    continue;
-                }
+                painter->save();
+                painter->setPen(Qt::NoPen);
+                painter->setBrush(m_highlightColor);
 
-                const QRectF blockRect = layout->blockBoundingRect(block);
-                for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-                    QTextLine line = textLayout->lineAt(lineIndex);
-                    if (!line.isValid()) {
+                const qreal docWidth = std::max<qreal>(docSize.width(), 1.0);
+                const Qt::Alignment docAlign = doc->defaultTextOption().alignment();
+                for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
+                    QTextLayout* textLayout = block.layout();
+                    if (!textLayout) {
                         continue;
                     }
 
-                    const qreal lineWidth = line.naturalTextWidth();
-                    const qreal width = std::max<qreal>(lineWidth, 1.0);
-                    qreal alignedX = line.x();
-                    if (std::abs(alignedX) < 1e-4 && width < docWidth - 1e-4) {
-                        const qreal horizontalSpace = std::max<qreal>(0.0, docWidth - width);
-                        if (docAlign.testFlag(Qt::AlignRight)) {
-                            alignedX += horizontalSpace;
-                        } else if (docAlign.testFlag(Qt::AlignHCenter)) {
-                            alignedX += horizontalSpace * 0.5;
+                    const QRectF blockRect = docLayout->blockBoundingRect(block);
+                    for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                        QTextLine line = textLayout->lineAt(lineIndex);
+                        if (!line.isValid()) {
+                            continue;
                         }
-                    }
-                    const qreal height = std::max<qreal>(line.height(), 1.0);
-                    const QPointF topLeft = blockRect.topLeft() + QPointF(alignedX, line.y());
-                    imagePainter.drawRect(QRectF(topLeft, QSizeF(width, height)));
-                }
-            }
 
-            imagePainter.restore();
+                        const qreal lineWidth = line.naturalTextWidth();
+                        const qreal width = std::max<qreal>(lineWidth, 1.0);
+                        qreal alignedX = line.x();
+                        if (std::abs(alignedX) < 1e-4 && width < docWidth - 1e-4) {
+                            const qreal horizontalSpace = std::max<qreal>(0.0, docWidth - width);
+                            if (docAlign.testFlag(Qt::AlignRight)) {
+                                alignedX += horizontalSpace;
+                            } else if (docAlign.testFlag(Qt::AlignHCenter)) {
+                                alignedX += horizontalSpace * 0.5;
+                            }
+                        }
+                        const qreal height = std::max<qreal>(line.height(), 1.0);
+                        const QPointF topLeft = blockRect.topLeft() + QPointF(alignedX, line.y());
+                        painter->drawRect(QRectF(topLeft, QSizeF(width, height)));
+                    }
+                }
+
+                painter->restore();
+            }
         }
 
+        // Clear outline formatting
         {
             QTextCursor cursor(doc);
             cursor.select(QTextCursor::Document);
@@ -368,29 +311,24 @@ private:
         }
 
         if (strokeWidth > 0.0) {
+            // Build glyph paths
             QPainterPath textPath;
-            textPath.setFillRule(Qt::WindingFill);
-
+            textPath.setFillRule(Qt::WindingFill); // Preserve glyph counters
+            QAbstractTextDocumentLayout* docLayout = doc->documentLayout();
             for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
                 QTextLayout* textLayout = block.layout();
-                if (!textLayout) {
-                    continue;
-                }
-
-                const QRectF blockRect = layout->blockBoundingRect(block);
+                if (!textLayout) continue;
+                
+                const QRectF blockRect = docLayout->blockBoundingRect(block);
                 for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
                     QTextLine line = textLayout->lineAt(lineIndex);
-                    if (!line.isValid()) {
-                        continue;
-                    }
-
-                    const QList<QGlyphRun> glyphRuns = line.glyphRuns();
+                    if (!line.isValid()) continue;
+                    
+                    QList<QGlyphRun> glyphRuns = line.glyphRuns();
                     for (const QGlyphRun& run : glyphRuns) {
                         const QVector<quint32> indexes = run.glyphIndexes();
                         const QVector<QPointF> positions = run.positions();
-                        if (indexes.size() != positions.size()) {
-                            continue;
-                        }
+                        if (indexes.size() != positions.size()) continue;
                         const QRawFont rawFont = run.rawFont();
                         for (int gi = 0; gi < indexes.size(); ++gi) {
                             const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
@@ -400,76 +338,46 @@ private:
                     }
                 }
             }
-
-            imagePainter.save();
-            imagePainter.setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-            imagePainter.setBrush(Qt::NoBrush);
-            imagePainter.drawPath(textPath);
-            imagePainter.restore();
-
-            imagePainter.save();
-            imagePainter.setPen(Qt::NoPen);
-            imagePainter.setBrush(m_fillColor);
-            imagePainter.drawPath(textPath);
-            imagePainter.restore();
+            
+            // Draw outside stroke
+            painter->save();
+            painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            painter->setBrush(Qt::NoBrush);
+            painter->drawPath(textPath);
+            painter->restore();
+            
+            // Fill glyphs
+            painter->save();
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(m_fillColor);
+            painter->drawPath(textPath);
+            painter->restore();
         } else {
             QAbstractTextDocumentLayout::PaintContext ctx;
             ctx.palette.setColor(QPalette::Text, m_fillColor);
-            layout->draw(&imagePainter, ctx);
+            doc->documentLayout()->draw(painter, ctx);
         }
 
-        imagePainter.end();
-
-        m_cachedDocSize = docSize;
-        m_cachedDeviceScale = targetDeviceScale;
-        m_cachedImage = std::move(raster);
-        m_cacheDirty = false;
+        painter->restore();
     }
 
-    void init() {
-        setCacheMode(QGraphicsItem::DeviceCoordinateCache);
-        initializeDocumentWatcher();
-        markCacheDirty();
+    QRectF boundingRect() const override {
+        QRectF bounds = QGraphicsTextItem::boundingRect();
+        if (m_totalPadding > 0.0) {
+            // Expand bounds to include stroke overflow
+            bounds.adjust(-m_totalPadding, -m_totalPadding, m_totalPadding, m_totalPadding);
+        }
+        return bounds;
     }
 
+private:
     QColor m_fillColor = Qt::white;
     QColor m_outlineColor = Qt::white;
     qreal m_strokeWidth = 0.0;
+    qreal m_totalPadding = 0.0;
     bool m_highlightEnabled = false;
     QColor m_highlightColor = Qt::transparent;
-
-    QMetaObject::Connection m_docConnection;
-    QImage m_cachedImage;
-    QSizeF m_cachedDocSize;
-    qreal m_cachedDeviceScale = 1.0;
-    bool m_cacheDirty = true;
 };
-
-RemoteOutlineTextItem::RemoteOutlineTextItem()
-    : QGraphicsTextItem() {
-    init();
-}
-
-RemoteOutlineTextItem::RemoteOutlineTextItem(QGraphicsItem* parent)
-    : QGraphicsTextItem(parent) {
-    init();
-}
-
-RemoteOutlineTextItem::RemoteOutlineTextItem(const QString& text, QGraphicsItem* parent)
-    : QGraphicsTextItem(text, parent) {
-    init();
-}
-
-void RemoteOutlineTextItem::initializeDocumentWatcher() {
-    if (m_docConnection) {
-        QObject::disconnect(m_docConnection);
-    }
-    if (QTextDocument* doc = document()) {
-        m_docConnection = QObject::connect(doc, &QTextDocument::contentsChanged, this, [this]() {
-            markCacheDirty();
-        });
-    }
-}
 } // namespace
 
 RemoteSceneController::RemoteSceneController(FileManager* fileManager, WebSocketClient* ws, QObject* parent)
