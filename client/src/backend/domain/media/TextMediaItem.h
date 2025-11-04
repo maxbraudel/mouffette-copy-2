@@ -171,6 +171,11 @@ private:
     std::chrono::steady_clock::time_point m_lastScaledRasterUpdate{};
     bool m_scaledRasterThrottleActive = false;
     
+    // Async rasterization
+    quint64 m_rasterRequestId = 0;
+    quint64 m_pendingRasterRequestId = 0;
+    bool m_asyncRasterInProgress = false;
+    
     // Text alignment settings
     HorizontalAlignment m_horizontalAlignment = HorizontalAlignment::Center;
     VerticalAlignment m_verticalAlignment = VerticalAlignment::Center;
@@ -214,6 +219,8 @@ private:
     void finishInlineEditing(bool commitChanges);
     void rasterizeText();
     void ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale);
+    void kickAsyncRasterJob(const QSize& targetSize, qreal effectiveScale, quint64 requestId);
+    void applyAsyncRasterResult(const QImage& raster, qreal scale, const QSize& size, quint64 requestId);
     void handleInlineEditorTextChanged(const QString& newText);
     const QString& textForRendering() const;
     void renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor);

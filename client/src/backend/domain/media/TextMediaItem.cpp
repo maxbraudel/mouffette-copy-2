@@ -42,6 +42,9 @@
 #include <QPalette>
 #include <QHash>
 #include <chrono>
+#include <QtConcurrent>
+#include <QFutureWatcher>
+#include <memory>
 
 // Global text styling configuration - tweak these to change all text media appearance
 namespace TextMediaDefaults {
@@ -118,6 +121,26 @@ QPainterPath cachedGlyphPath(const QRawFont& font, quint32 glyphIndex) {
     s_cache.insert(cacheKey, path);
     return path;
 }
+
+// Snapshot for async text rasterization
+struct TextRasterJob {
+    QString text;
+    QFont font;
+    QColor fillColor;
+    QColor outlineColor;
+    qreal outlineWidthPercent;
+    bool highlightEnabled;
+    QColor highlightColor;
+    QSize targetSize;
+    qreal scaleFactor;
+    qreal contentPaddingPx;
+    bool fitToTextEnabled;
+    TextMediaItem::HorizontalAlignment horizontalAlignment;
+    TextMediaItem::VerticalAlignment verticalAlignment;
+    quint64 requestId;
+    
+    QImage execute() const; // Runs on worker thread
+};
 
 struct WeightMapping {
     int css; // CSS-like weight (100-900)
@@ -240,6 +263,297 @@ QFont fontAdjustedForWeight(const QFont& base, int cssWeight) {
 
 int canonicalCssWeight(const QFont& font) {
     return qtToCssWeight(font.weight());
+}
+
+QImage TextRasterJob::execute() const {
+    // Build QTextDocument on worker thread with snapshot data
+    QTextDocument doc;
+    doc.setDocumentMargin(0.0);
+    doc.setDefaultFont(font);
+    doc.setPlainText(text);
+    
+    const int targetWidth = std::max(1, targetSize.width());
+    const int targetHeight = std::max(1, targetSize.height());
+    const qreal epsilon = 1e-4;
+    const qreal effectiveScale = std::max(std::abs(scaleFactor), epsilon);
+    
+    QImage result(targetWidth, targetHeight, QImage::Format_ARGB32_Premultiplied);
+    result.fill(Qt::transparent);
+    
+    QPainter imagePainter(&result);
+    imagePainter.setRenderHint(QPainter::Antialiasing, true);
+    imagePainter.setRenderHint(QPainter::TextAntialiasing, true);
+    imagePainter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    
+    // Apply horizontal alignment
+    Qt::Alignment qtHAlign = Qt::AlignCenter;
+    switch (horizontalAlignment) {
+        case TextMediaItem::HorizontalAlignment::Left:
+            qtHAlign = Qt::AlignLeft;
+            break;
+        case TextMediaItem::HorizontalAlignment::Center:
+            qtHAlign = Qt::AlignHCenter;
+            break;
+        case TextMediaItem::HorizontalAlignment::Right:
+            qtHAlign = Qt::AlignRight;
+            break;
+    }
+    
+    QTextOption option;
+    option.setWrapMode(fitToTextEnabled ? QTextOption::NoWrap : QTextOption::WordWrap);
+    option.setAlignment(qtHAlign);
+    doc.setDefaultTextOption(option);
+    
+    const qreal logicalWidth = static_cast<qreal>(targetWidth) / effectiveScale;
+    const qreal logicalHeight = static_cast<qreal>(targetHeight) / effectiveScale;
+    const qreal margin = contentPaddingPx;
+    const qreal availableWidth = std::max<qreal>(1.0, logicalWidth - 2.0 * margin);
+    
+    if (fitToTextEnabled) {
+        doc.setTextWidth(-1.0);
+    } else {
+        doc.setTextWidth(availableWidth);
+    }
+    
+    const QSizeF docSize = doc.documentLayout()->documentSize();
+    const qreal availableHeight = std::max<qreal>(1.0, logicalHeight - 2.0 * margin);
+    
+    // Calculate stroke width from percentage
+    qreal strokeWidth = 0.0;
+    if (outlineWidthPercent > 0.0) {
+        QFontMetricsF metrics(font);
+        qreal reference = metrics.height();
+        if (reference <= 0.0) {
+            if (font.pixelSize() > 0) {
+                reference = static_cast<qreal>(font.pixelSize());
+            } else {
+                reference = font.pointSizeF();
+            }
+        }
+        if (reference <= 0.0) {
+            reference = 16.0;
+        }
+        constexpr qreal kMaxOutlineThicknessFactor = 0.35;
+        const qreal normalized = std::clamp(outlineWidthPercent / 100.0, 0.0, 1.0);
+        const qreal eased = std::pow(normalized, 1.1);
+        strokeWidth = eased * kMaxOutlineThicknessFactor * reference;
+    }
+    
+    qreal offsetX = margin;
+    if (!fitToTextEnabled) {
+        const qreal horizontalSpace = std::max<qreal>(0.0, availableWidth - docSize.width());
+        switch (horizontalAlignment) {
+            case TextMediaItem::HorizontalAlignment::Left:
+                offsetX = margin;
+                break;
+            case TextMediaItem::HorizontalAlignment::Center:
+                offsetX = margin + horizontalSpace * 0.5;
+                break;
+            case TextMediaItem::HorizontalAlignment::Right:
+                offsetX = margin + horizontalSpace;
+                break;
+        }
+    }
+    
+    qreal offsetY = margin;
+    switch (verticalAlignment) {
+        case TextMediaItem::VerticalAlignment::Top:
+            offsetY = margin;
+            break;
+        case TextMediaItem::VerticalAlignment::Center:
+            offsetY = margin + (availableHeight - docSize.height()) / 2.0;
+            break;
+        case TextMediaItem::VerticalAlignment::Bottom:
+            offsetY = margin + (availableHeight - docSize.height());
+            break;
+    }
+    
+    QAbstractTextDocumentLayout* layout = doc.documentLayout();
+    if (!layout) {
+        imagePainter.end();
+        return result;
+    }
+    
+    const bool hlEnabled = highlightEnabled && highlightColor.isValid() && highlightColor.alpha() > 0;
+    QColor hlColor = hlEnabled ? highlightColor : QColor();
+    
+    imagePainter.scale(effectiveScale, effectiveScale);
+    
+    QColor outColor = outlineColor.isValid() ? outlineColor : fillColor;
+    if (!outColor.isValid()) {
+        outColor = fillColor;
+    }
+    
+    // Clear outline formatting
+    {
+        QTextCursor docCursor(&doc);
+        docCursor.select(QTextCursor::Document);
+        QTextCharFormat format;
+        format.setForeground(fillColor);
+        format.clearProperty(QTextFormat::TextOutline);
+        docCursor.mergeCharFormat(format);
+    }
+    
+    if (!fitToTextEnabled) {
+        imagePainter.translate(offsetX, offsetY);
+        if (hlEnabled && hlColor.alpha() > 0) {
+            imagePainter.save();
+            imagePainter.setPen(Qt::NoPen);
+            imagePainter.setBrush(hlColor);
+            const qreal docWidth = std::max<qreal>(docSize.width(), 1.0);
+            for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+                QTextLayout* textLayout = block.layout();
+                if (!textLayout) continue;
+                
+                const QRectF blockRect = layout->blockBoundingRect(block);
+                for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                    QTextLine line = textLayout->lineAt(lineIndex);
+                    if (!line.isValid()) continue;
+                    
+                    const qreal lineWidth = line.naturalTextWidth();
+                    const qreal width = std::max<qreal>(lineWidth, 1.0);
+                    qreal alignedX = line.x();
+                    if (std::abs(alignedX) < 1e-4 && width < docWidth - 1e-4) {
+                        const qreal horizontalSpace = std::max<qreal>(0.0, docWidth - width);
+                        switch (horizontalAlignment) {
+                            case TextMediaItem::HorizontalAlignment::Right:
+                                alignedX += horizontalSpace;
+                                break;
+                            case TextMediaItem::HorizontalAlignment::Center:
+                                alignedX += horizontalSpace * 0.5;
+                                break;
+                            case TextMediaItem::HorizontalAlignment::Left:
+                            default:
+                                break;
+                        }
+                    }
+                    const qreal height = std::max<qreal>(line.height(), 1.0);
+                    const QPointF topLeft = blockRect.topLeft() + QPointF(alignedX, line.y());
+                    imagePainter.drawRect(QRectF(topLeft, QSizeF(width, height)));
+                }
+            }
+            imagePainter.restore();
+        }
+        
+        if (strokeWidth > 0.0) {
+            QPainterPath textPath;
+            textPath.setFillRule(Qt::WindingFill);
+            for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+                QTextLayout* textLayout = block.layout();
+                if (!textLayout) continue;
+                
+                const QRectF blockRect = layout->blockBoundingRect(block);
+                for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                    QTextLine line = textLayout->lineAt(lineIndex);
+                    if (!line.isValid()) continue;
+                    
+                    QList<QGlyphRun> glyphRuns = line.glyphRuns();
+                    for (const QGlyphRun& run : glyphRuns) {
+                        const QVector<quint32> indexes = run.glyphIndexes();
+                        const QVector<QPointF> positions = run.positions();
+                        if (indexes.size() != positions.size()) continue;
+                        const QRawFont rawFont = run.rawFont();
+                        for (int gi = 0; gi < indexes.size(); ++gi) {
+                            const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
+                            const QPointF glyphPos = blockRect.topLeft() + positions[gi];
+                            textPath.addPath(glyphPath.translated(glyphPos));
+                        }
+                    }
+                }
+            }
+            
+            imagePainter.save();
+            imagePainter.setPen(QPen(outColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            imagePainter.setBrush(Qt::NoBrush);
+            imagePainter.drawPath(textPath);
+            imagePainter.restore();
+            
+            imagePainter.save();
+            imagePainter.setPen(Qt::NoPen);
+            imagePainter.setBrush(fillColor);
+            imagePainter.drawPath(textPath);
+            imagePainter.restore();
+        } else {
+            QAbstractTextDocumentLayout::PaintContext ctx;
+            ctx.palette.setColor(QPalette::Text, fillColor);
+            layout->draw(&imagePainter, ctx);
+        }
+        
+        imagePainter.end();
+        return result;
+    }
+    
+    // Fit-to-text mode
+    imagePainter.translate(margin, offsetY);
+    const qreal contentWidth = availableWidth;
+    
+    for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+        QTextLayout* textLayout = block.layout();
+        if (!textLayout) continue;
+        
+        const QRectF blockRect = layout->blockBoundingRect(block);
+        for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+            QTextLine line = textLayout->lineAt(lineIndex);
+            if (!line.isValid()) continue;
+            
+            qreal lineOffsetX = 0.0;
+            const qreal lineWidth = line.naturalTextWidth();
+            switch (horizontalAlignment) {
+                case TextMediaItem::HorizontalAlignment::Left:
+                    lineOffsetX = 0.0;
+                    break;
+                case TextMediaItem::HorizontalAlignment::Center:
+                    lineOffsetX = std::max<qreal>(0.0, (contentWidth - lineWidth) * 0.5);
+                    break;
+                case TextMediaItem::HorizontalAlignment::Right:
+                    lineOffsetX = std::max<qreal>(0.0, contentWidth - lineWidth);
+                    break;
+            }
+            
+            const QPointF lineBasePos(lineOffsetX, blockRect.top() + line.y());
+            
+            if (hlEnabled && hlColor.alpha() > 0) {
+                const qreal highlightWidth = std::max<qreal>(lineWidth > 0.0 ? lineWidth : contentWidth, 1.0);
+                const qreal highlightHeight = std::max<qreal>(line.height(), 1.0);
+                const QRectF highlightRect(QPointF(lineOffsetX, blockRect.top() + line.y()), QSizeF(highlightWidth, highlightHeight));
+                imagePainter.fillRect(highlightRect, hlColor);
+            }
+            
+            if (strokeWidth > 0.0) {
+                QPainterPath linePath;
+                linePath.setFillRule(Qt::WindingFill);
+                QList<QGlyphRun> glyphRuns = line.glyphRuns();
+                for (const QGlyphRun& run : glyphRuns) {
+                    const QVector<quint32> indexes = run.glyphIndexes();
+                    const QVector<QPointF> positions = run.positions();
+                    if (indexes.size() != positions.size()) continue;
+                    const QRawFont rawFont = run.rawFont();
+                    for (int gi = 0; gi < indexes.size(); ++gi) {
+                        const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
+                        const QPointF glyphPos = blockRect.topLeft() + positions[gi];
+                        linePath.addPath(glyphPath.translated(glyphPos));
+                    }
+                }
+                
+                imagePainter.save();
+                imagePainter.setPen(QPen(outColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                imagePainter.setBrush(Qt::NoBrush);
+                imagePainter.drawPath(linePath);
+                imagePainter.restore();
+                
+                imagePainter.save();
+                imagePainter.setPen(Qt::NoPen);
+                imagePainter.setBrush(fillColor);
+                imagePainter.drawPath(linePath);
+                imagePainter.restore();
+            } else {
+                line.draw(&imagePainter, lineBasePos);
+            }
+        }
+    }
+    
+    imagePainter.end();
+    return result;
 }
 
 class InlineTextEditor : public QGraphicsTextItem {
@@ -2057,7 +2371,7 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     const bool hasScaledRaster = !m_scaledRasterizedText.isNull();
 
     const bool scaleChanged = std::abs(effectiveScale - m_lastRasterizedScale) > epsilon;
-    if (!m_scaledRasterDirty && !scaleChanged && m_scaledRasterizedText.size() == targetSize) {
+    if (!m_scaledRasterDirty && !scaleChanged && m_scaledRasterizedText.size() == targetSize && !m_asyncRasterInProgress) {
         if (!resizingUniformly) {
             m_scaledRasterThrottleActive = false;
         }
@@ -2068,6 +2382,7 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
         m_scaledRasterThrottleActive = false;
     }
 
+    // Throttle during active uniform resize
     if (resizingUniformly && hasScaledRaster && m_scaledRasterThrottleActive) {
         const auto now = std::chrono::steady_clock::now();
         const auto elapsed = now - m_lastScaledRasterUpdate;
@@ -2077,10 +2392,9 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
         }
     }
 
-    renderTextToImage(m_scaledRasterizedText, targetSize, effectiveScale);
-
-    m_lastRasterizedScale = effectiveScale;
-    m_scaledRasterDirty = false;
+    // Kick async job instead of synchronous render
+    ++m_rasterRequestId;
+    kickAsyncRasterJob(targetSize, effectiveScale, m_rasterRequestId);
 
     if (resizingUniformly) {
         m_scaledRasterThrottleActive = true;
@@ -2088,6 +2402,71 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     } else {
         m_scaledRasterThrottleActive = false;
     }
+}
+
+void TextMediaItem::kickAsyncRasterJob(const QSize& targetSize, qreal effectiveScale, quint64 requestId) {
+    m_asyncRasterInProgress = true;
+    m_pendingRasterRequestId = requestId;
+    
+    // Snapshot all data needed for rendering
+    TextRasterJob job;
+    job.text = textForRendering();
+    job.font = m_font;
+    job.fillColor = m_textColor;
+    job.outlineColor = m_textBorderColor;
+    job.outlineWidthPercent = m_textBorderWidthPercent;
+    job.highlightEnabled = m_highlightEnabled;
+    job.highlightColor = m_highlightColor;
+    job.targetSize = targetSize;
+    job.scaleFactor = effectiveScale;
+    job.contentPaddingPx = contentPaddingPx();
+    job.fitToTextEnabled = m_fitToTextEnabled;
+    job.horizontalAlignment = m_horizontalAlignment;
+    job.verticalAlignment = m_verticalAlignment;
+    job.requestId = requestId;
+    
+    // Use QtConcurrent to execute on worker thread and callback on main thread
+    auto future = QtConcurrent::run([job]() {
+        return job.execute();
+    });
+    
+    // Capture weak guard to prevent dangling this pointer
+    std::weak_ptr<bool> guard = lifetimeGuard();
+    
+    // Watch for completion and apply result on main thread
+    // Note: QFutureWatcher needs QObject parent; we can't pass 'this' since QGraphicsItem isn't QObject
+    auto* watcher = new QFutureWatcher<QImage>();
+    QObject::connect(watcher, &QFutureWatcher<QImage>::finished, watcher, [this, guard, watcher, targetSize, effectiveScale, requestId]() {
+        if (guard.expired()) {
+            watcher->deleteLater();
+            return;
+        }
+        
+        QImage result = watcher->result();
+        watcher->deleteLater();
+        
+        applyAsyncRasterResult(result, effectiveScale, targetSize, requestId);
+    });
+    
+    watcher->setFuture(future);
+}
+
+void TextMediaItem::applyAsyncRasterResult(const QImage& raster, qreal scale, const QSize& size, quint64 requestId) {
+    // Discard stale results
+    if (requestId != m_rasterRequestId) {
+        if (requestId == m_pendingRasterRequestId) {
+            m_asyncRasterInProgress = false;
+        }
+        return;
+    }
+    
+    m_scaledRasterizedText = raster;
+    m_lastRasterizedScale = scale;
+    m_scaledRasterDirty = false;
+    m_asyncRasterInProgress = false;
+    
+    // Trigger repaint to show new raster
+    update();
 }
 
 void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) {
