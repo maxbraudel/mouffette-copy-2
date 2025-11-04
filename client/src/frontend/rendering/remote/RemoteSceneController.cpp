@@ -204,7 +204,19 @@ QImage convertFrameToImage(const QVideoFrame& frame) {
 
 class RemoteOutlineTextItem : public QGraphicsTextItem {
 public:
-    using QGraphicsTextItem::QGraphicsTextItem;
+    RemoteOutlineTextItem() : QGraphicsTextItem() {
+        // Enable device coordinate caching to pre-compose all layers before applying opacity
+        // This prevents highlight/border/text from blending during fade while maintaining sharpness
+        setCacheMode(QGraphicsItem::DeviceCoordinateCache);
+    }
+    
+    explicit RemoteOutlineTextItem(QGraphicsItem* parent) : QGraphicsTextItem(parent) {
+        setCacheMode(QGraphicsItem::DeviceCoordinateCache);
+    }
+    
+    RemoteOutlineTextItem(const QString& text, QGraphicsItem* parent) : QGraphicsTextItem(text, parent) {
+        setCacheMode(QGraphicsItem::DeviceCoordinateCache);
+    }
 
     void setOutlineParameters(const QColor& fillColor, const QColor& outlineColor, qreal strokeWidthPx) {
         m_fillColor = fillColor;
