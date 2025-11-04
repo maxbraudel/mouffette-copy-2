@@ -38,6 +38,7 @@
 #include <QFontMetricsF>
 #include <QPen>
 #include <QPointer>
+#include <QHash>
 #include <QVariant>
 #include <QCoreApplication>
 #include <QEvent>
@@ -57,6 +58,46 @@ namespace {
 constexpr qint64 kStartPositionToleranceMs = 120;
 constexpr qint64 kDecoderSyncToleranceMs = 25;
 constexpr int kLivePlaybackWarmupFrames = 2;
+
+struct GlyphPathKey {
+    QString family;
+    QString style;
+    qint64 pixelSizeScaled = 0;
+    quint32 glyphIndex = 0;
+
+    friend bool operator==(const GlyphPathKey& a, const GlyphPathKey& b) {
+        return a.glyphIndex == b.glyphIndex &&
+               a.pixelSizeScaled == b.pixelSizeScaled &&
+               a.family == b.family &&
+               a.style == b.style;
+    }
+};
+
+uint qHash(const GlyphPathKey& key, uint seed = 0) {
+    seed = ::qHash(key.family, seed);
+    seed = ::qHash(key.style, seed);
+    seed = ::qHash(static_cast<quint64>(key.pixelSizeScaled), seed);
+    return ::qHash(key.glyphIndex, seed);
+}
+
+QPainterPath cachedGlyphPath(const QRawFont& font, quint32 glyphIndex) {
+    static QHash<GlyphPathKey, QPainterPath> s_cache;
+
+    const qreal pixelSize = font.pixelSize();
+    const qint64 pixelSizeScaled = static_cast<qint64>(std::llround(pixelSize * 1024.0));
+    const GlyphPathKey cacheKey{font.familyName(), font.styleName(), pixelSizeScaled, glyphIndex};
+    const auto it = s_cache.constFind(cacheKey);
+    if (it != s_cache.cend()) {
+        return *it;
+    }
+
+    QPainterPath path;
+    if (font.isValid()) {
+        path = font.pathForGlyph(glyphIndex);
+    }
+    s_cache.insert(cacheKey, path);
+    return path;
+}
 
 QFont::Weight qFontWeightFromCss(int cssWeight) {
     struct WeightMapping {
@@ -257,6 +298,7 @@ protected:
         if (strokeWidth > 0.0) {
             // Build glyph paths
             QPainterPath textPath;
+            textPath.setFillRule(Qt::WindingFill); // Preserve glyph counters
             QAbstractTextDocumentLayout* docLayout = doc->documentLayout();
             for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
                 QTextLayout* textLayout = block.layout();
@@ -271,10 +313,12 @@ protected:
                     for (const QGlyphRun& run : glyphRuns) {
                         const QVector<quint32> indexes = run.glyphIndexes();
                         const QVector<QPointF> positions = run.positions();
+                        if (indexes.size() != positions.size()) continue; // Guard against mismatch
+                        const QRawFont rawFont = run.rawFont();
                         // Glyph positions from QGlyphRun are already in layout coordinates
                         // Only translate by block position to document coordinates
                         for (int gi = 0; gi < indexes.size(); ++gi) {
-                            QPainterPath glyphPath = run.rawFont().pathForGlyph(indexes[gi]);
+                            const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
                             const QPointF glyphPos = blockRect.topLeft() + positions[gi];
                             textPath.addPath(glyphPath.translated(glyphPos));
                         }
