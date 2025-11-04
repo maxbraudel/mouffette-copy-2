@@ -10,6 +10,7 @@
 #include <QImage>
 #include <QString>
 #include <QVideoFrame>
+#include <QSizeF>
 #include <QVideoSink>
 #include <QMediaPlayer>
 #include <QAudioOutput>
@@ -356,7 +357,9 @@ protected:
 
 private:
     void maybeAdoptFrameSize(const QVideoFrame& f);
-    void adoptBaseSize(const QSize& sz);
+    QSizeF computeFrameDisplaySize(const QVideoFrame& frame) const;
+    QImage applyViewportCrop(const QImage& image, const QVideoFrame& frame) const;
+    void adoptBaseSize(const QSize& sz, bool force = false);
     void setControlsVisible(bool show);
     void updateControlsLayout();
     bool isVisibleInAnyView() const;
@@ -386,6 +389,7 @@ private:
     QAudioOutput* m_audio = nullptr;
     QVideoSink* m_sink = nullptr;
     QImage m_lastFrameImage;
+    QSizeF m_lastFrameDisplaySize;
     qint64 m_lastFrameTimestampMs = -1;
     qint64 m_durationMs = 0;
     qint64 m_positionMs = 0;

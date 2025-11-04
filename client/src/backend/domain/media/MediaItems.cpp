@@ -1199,6 +1199,7 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
             } else {
                 m_conversionFailures = 0;
                 maybeAdoptFrameSize(f);
+                converted = applyViewportCrop(converted, f);
                 m_lastFrameImage = std::move(converted);
                 const qint64 ts = frameTimestampMs(f);
                 if (ts >= 0) {
@@ -1290,7 +1291,11 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
             if (!m_adoptedSize) {
                 const QMediaMetaData md = m_player->metaData();
                 const QVariant v = md.value(QMediaMetaData::Resolution);
-                const QSize sz = v.toSize(); if (!sz.isEmpty()) adoptBaseSize(sz);
+                const QSize sz = v.toSize();
+                if (!sz.isEmpty()) {
+                    m_lastFrameDisplaySize = QSizeF(sz);
+                    adoptBaseSize(sz);
+                }
                 const QVariant thumbVar = md.value(QMediaMetaData::ThumbnailImage);
                 if (!m_posterImageSet && thumbVar.isValid()) {
                     if (thumbVar.canConvert<QImage>()) { m_posterImage = thumbVar.value<QImage>(); m_posterImageSet = !m_posterImage.isNull(); }
@@ -1614,7 +1619,18 @@ void ResizableVideoItem::pauseAndSetPosition(qint64 posMs) {
     updateControlsLayout(); update();
 }
 
-void ResizableVideoItem::setExternalPosterImage(const QImage& img) { if (!img.isNull()) { m_posterImage = img; m_posterImageSet = true; if (!m_adoptedSize) adoptBaseSize(img.size()); update(); } }
+void ResizableVideoItem::setExternalPosterImage(const QImage& img) {
+    if (img.isNull()) {
+        return;
+    }
+    m_posterImage = img;
+    m_posterImageSet = true;
+    m_lastFrameDisplaySize = QSizeF(img.size());
+    if (!m_adoptedSize) {
+        adoptBaseSize(img.size());
+    }
+    update();
+}
 
 void ResizableVideoItem::updateDragWithScenePos(const QPointF& scenePos) {
     QPointF p = mapFromScene(scenePos);
@@ -1718,9 +1734,32 @@ void ResizableVideoItem::paint(QPainter* painter, const QStyleOptionGraphicsItem
         if (bounds.isEmpty() || imgSz.isEmpty()) return bounds; qreal brW = bounds.width(); qreal brH = bounds.height(); qreal imgW = imgSz.width(); qreal imgH = imgSz.height(); if (imgW <= 0 || imgH <= 0) return bounds; qreal brAR = brW / brH; qreal imgAR = imgW / imgH; if (imgAR > brAR) { qreal h = brW / imgAR; return QRectF(bounds.left(), bounds.top() + (brH - h)/2.0, brW, h);} else { qreal w = brH * imgAR; return QRectF(bounds.left() + (brW - w)/2.0, bounds.top(), w, brH);} };
     if (isContentVisible() || m_contentDisplayOpacity > 0.0) {
         qreal effective = contentOpacity() * m_contentDisplayOpacity;
-        auto drawImg = [&](const QImage& img){ if (img.isNull() || effective <= 0.0) return; QRectF dst = fitRect(br, img.size()); if (effective >= 0.999) { painter->drawImage(dst, img); } else { painter->save(); painter->setOpacity(effective); painter->drawImage(dst, img); painter->restore(); } };
-    if (!m_lastFrameImage.isNull()) { drawImg(m_lastFrameImage); }
-    else if (m_posterImageSet && !m_posterImage.isNull()) { drawImg(m_posterImage); }
+        auto targetDisplaySize = [&](const QImage& img) -> QSize {
+            if (!m_lastFrameDisplaySize.isEmpty()) {
+                return QSize(
+                    std::max(1, static_cast<int>(std::lround(m_lastFrameDisplaySize.width()))),
+                    std::max(1, static_cast<int>(std::lround(m_lastFrameDisplaySize.height()))));
+            }
+            return img.size();
+        };
+        auto drawImg = [&](const QImage& img){
+            if (img.isNull() || effective <= 0.0) return;
+            const QSize displaySize = targetDisplaySize(img);
+            QRectF dst = fitRect(br, displaySize);
+            if (effective >= 0.999) {
+                painter->drawImage(dst, img);
+            } else {
+                painter->save();
+                painter->setOpacity(effective);
+                painter->drawImage(dst, img);
+                painter->restore();
+            }
+        };
+        if (!m_lastFrameImage.isNull()) {
+            drawImg(m_lastFrameImage);
+        } else if (m_posterImageSet && !m_posterImage.isNull()) {
+            drawImg(m_posterImage);
+        }
     }
     paintSelectionAndLabel(painter);
 }
@@ -1819,15 +1858,110 @@ void ResizableVideoItem::prepareForDeletion() {
 }
 
 void ResizableVideoItem::maybeAdoptFrameSize(const QVideoFrame& f) {
-    if (m_adoptedSize) return;
-    if (!f.isValid()) return;
-    const int w = f.width();
-    const int h = f.height();
-    if (w <= 0 || h <= 0) return;
-    adoptBaseSize(QSize(w, h));
+    if (!f.isValid()) {
+        return;
+    }
+
+    const QSizeF displaySizeF = computeFrameDisplaySize(f);
+    if (displaySizeF.isEmpty()) {
+        return;
+    }
+
+    m_lastFrameDisplaySize = displaySizeF;
+
+    const QSize targetSize(
+        std::max(1, static_cast<int>(std::lround(displaySizeF.width()))),
+        std::max(1, static_cast<int>(std::lround(displaySizeF.height()))));
+
+    if (targetSize.isEmpty()) {
+        return;
+    }
+
+    bool forceAdopt = !m_adoptedSize;
+    if (!forceAdopt && !m_fillContentWithoutAspect) {
+        const qreal currentW = baseWidth();
+        const qreal currentH = baseHeight();
+        if (currentW > 0.0 && currentH > 0.0) {
+            const qreal currentAspect = currentW / currentH;
+            const qreal newAspect = displaySizeF.width() / displaySizeF.height();
+            if (std::abs(currentAspect - newAspect) > 0.01) {
+                forceAdopt = true;
+            }
+        }
+    }
+
+    if (forceAdopt) {
+        adoptBaseSize(targetSize, true);
+    }
 }
 
-void ResizableVideoItem::adoptBaseSize(const QSize& sz) { if (m_adoptedSize) return; if (sz.isEmpty()) return; m_adoptedSize = true; const QRectF oldRect(0,0, baseWidth(), baseHeight()); const QPointF oldCenterScene = mapToScene(oldRect.center()); prepareGeometryChange(); m_baseSize = sz; setScale(m_initialScaleFactor); const QPointF newTopLeftScene = oldCenterScene - QPointF(sz.width()*m_initialScaleFactor/2.0, sz.height()*m_initialScaleFactor/2.0); setPos(newTopLeftScene); update(); }
+QSizeF ResizableVideoItem::computeFrameDisplaySize(const QVideoFrame& frame) const {
+    if (!frame.isValid()) {
+        return QSizeF();
+    }
+
+    const QVideoFrameFormat format = frame.surfaceFormat();
+    const int width = format.frameWidth();
+    const int height = format.frameHeight();
+
+    if (width <= 0 || height <= 0) {
+        return QSizeF();
+    }
+
+    // Start with storage dimensions
+    qreal displayWidth = static_cast<qreal>(width);
+    qreal displayHeight = static_cast<qreal>(height);
+
+    // For now, use storage dimensions as display dimensions
+    // (pixel aspect ratio and rotation are not reliably available in Qt 6.x)
+    return QSizeF(displayWidth, displayHeight);
+}
+
+QImage ResizableVideoItem::applyViewportCrop(const QImage& image, const QVideoFrame& frame) const {
+    if (image.isNull()) {
+        return image;
+    }
+
+    const QVideoFrameFormat format = frame.surfaceFormat();
+    const QRectF viewport = format.viewport();
+    if (viewport.isNull()) {
+        return image;
+    }
+
+    QRect cropRect = viewport.toAlignedRect();
+    if (cropRect.isEmpty()) {
+        return image;
+    }
+
+    cropRect = cropRect.intersected(image.rect());
+    if (cropRect.isEmpty() || cropRect == image.rect()) {
+        return image;
+    }
+
+    return image.copy(cropRect);
+}
+
+void ResizableVideoItem::adoptBaseSize(const QSize& sz, bool force) {
+    if (sz.isEmpty()) {
+        return;
+    }
+    if (m_adoptedSize && !force) {
+        return;
+    }
+
+    const QRectF oldRect(0,0, baseWidth(), baseHeight());
+    const QPointF oldCenterScene = mapToScene(oldRect.center());
+
+    prepareGeometryChange();
+    m_baseSize = sz;
+    m_adoptedSize = true;
+    setScale(m_initialScaleFactor);
+
+    const QPointF newTopLeftScene = oldCenterScene - QPointF(sz.width() * m_initialScaleFactor / 2.0,
+                                                             sz.height() * m_initialScaleFactor / 2.0);
+    setPos(newTopLeftScene);
+    update();
+}
 
 void ResizableVideoItem::setControlsVisible(bool show) {
      if (!m_controlsBg) return; bool allow = show && !m_controlsLockedUntilReady;
@@ -2211,6 +2345,7 @@ void ResizableVideoItem::restartPrimingSequence() {
     m_primingFirstFrame = false;
     m_holdLastFrameAtEnd = false;
     m_lastFrameImage = QImage();
+    m_lastFrameDisplaySize = QSizeF();
     m_lastFrameTimestampMs = -1;
     m_smoothProgressRatio = 0.0;
     m_positionMs = 0;
@@ -2261,6 +2396,7 @@ void ResizableVideoItem::teardownPlayback() {
     }
 
     m_lastFrameTimestampMs = -1;
+    m_lastFrameDisplaySize = QSizeF();
 
     if (m_audio) {
         QObject::disconnect(m_audio, nullptr, nullptr, nullptr);
