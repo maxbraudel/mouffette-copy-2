@@ -493,9 +493,15 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
             if (!allowAltResize()) {
                 altPressed = false;
             }
+            const bool wasAltStretching = m_lastAxisAltStretch;
+            const qreal currDist = std::hypot(sceneDelta.x(), sceneDelta.y());
             if (!altPressed) {
                 // Corner style uniform scaling (original logic simplified)
-                const qreal currDist = std::hypot(sceneDelta.x(), sceneDelta.y());
+                if (wasAltStretching) {
+                    m_initialScale = scale();
+                    m_initialGrabDist = (currDist > 1e-6) ? currDist : 1e-6;
+                    m_cornerStretchOrigCaptured = false;
+                }
                 qreal newScale = m_initialScale * (currDist / (m_initialGrabDist > 0 ? m_initialGrabDist : 1e-6));
                 newScale = std::clamp<qreal>(newScale, 0.05, 100.0);
                 qreal finalScale = newScale;
@@ -516,7 +522,7 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                 targetScale = std::clamp<qreal>(targetScale, 0.05, 100.0);
                 m_lastAxisAltStretch = false;
                 // Reset corner stretch state if previously used
-                if (m_cornerStretchOrigCaptured) m_cornerStretchOrigCaptured = false;
+                if (!wasAltStretching && m_cornerStretchOrigCaptured) m_cornerStretchOrigCaptured = false;
             } else {
                 // Alt + corner: non-uniform two-axis stretch by directly changing base size (independent width/height)
                 // Bake current uniform scale into base size on first Alt use for this interaction
@@ -531,6 +537,13 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                         // Re-evaluate fixed corner scene point after transform change
                         m_fixedItemPoint = handlePoint(opposite(m_activeHandle));
                         m_fixedScenePoint = mapToScene(m_fixedItemPoint);
+                    }
+                    // Rebase the interactive scale/grab metrics so switching back to uniform resize
+                    // (when Alt is released) computes sensible deltas relative to the current state.
+                    m_initialScale = scale();
+                    {
+                        const qreal d = std::hypot(event->scenePos().x() - m_fixedScenePoint.x(), event->scenePos().y() - m_fixedScenePoint.y());
+                        m_initialGrabDist = (d > 1e-6) ? d : 1e-6;
                     }
                     // Capture initial cursor offsets along X/Y relative to moving corner edge endpoints.
                     QPointF movingCornerScene = mapToScene(handlePoint(m_activeHandle));
@@ -650,6 +663,12 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                         // Re-evaluate fixed corner scene point after transform change
                         m_fixedItemPoint = handlePoint(opposite(m_activeHandle));
                         m_fixedScenePoint = mapToScene(m_fixedItemPoint);
+                    }
+                    // Update initial scale/grab so exiting Alt (back to uniform) doesn't jump.
+                    m_initialScale = scale();
+                    {
+                        const qreal d = std::hypot(event->scenePos().x() - m_fixedScenePoint.x(), event->scenePos().y() - m_fixedScenePoint.y());
+                        m_initialGrabDist = (d > 1e-6) ? d : 1e-6;
                     }
                     // Capture initial cursor offset to preserve relative positioning
                     QPointF currentMovingEdgeScene = mapToScene(handlePoint(m_activeHandle));
