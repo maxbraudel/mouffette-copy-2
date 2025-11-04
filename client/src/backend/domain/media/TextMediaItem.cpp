@@ -1091,11 +1091,15 @@ void TextMediaItem::handleContentPaddingChanged(qreal oldPadding, qreal newPaddi
         return;
     }
 
-    const qreal contentWidth = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - oldPadding * 2.0);
-    const qreal contentHeight = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.height()) - oldPadding * 2.0);
+    const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
+    const qreal oldPaddingScene = oldPadding * uniformScale;
+    const qreal newPaddingScene = newPadding * uniformScale;
 
-    const int newBaseWidth = std::max(1, static_cast<int>(std::ceil(contentWidth + newPadding * 2.0)));
-    const int newBaseHeight = std::max(1, static_cast<int>(std::ceil(contentHeight + newPadding * 2.0)));
+    const qreal contentWidth = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - oldPaddingScene * 2.0);
+    const qreal contentHeight = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.height()) - oldPaddingScene * 2.0);
+
+    const int newBaseWidth = std::max(1, static_cast<int>(std::ceil(contentWidth + newPaddingScene * 2.0)));
+    const int newBaseHeight = std::max(1, static_cast<int>(std::ceil(contentHeight + newPaddingScene * 2.0)));
     const QSize newBase(newBaseWidth, newBaseHeight);
 
     if (newBase == m_baseSize) {
@@ -1383,7 +1387,8 @@ void TextMediaItem::ensureInlineEditor() {
             doc->setDefaultTextOption(opt);
             // Set width at base size (transform will scale it visually)
             const qreal margin = contentPaddingPx();
-            const qreal logicalWidth = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - 2.0 * margin);
+            const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
+            const qreal logicalWidth = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) / uniformScale - 2.0 * margin);
             doc->setTextWidth(logicalWidth);
         }
 
@@ -1476,8 +1481,9 @@ void TextMediaItem::updateInlineEditorGeometry() {
         return std::abs(a - b) > epsilon;
     };
 
-    const qreal margin = contentPaddingPx();
+    const qreal marginLogical = contentPaddingPx();
     const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
+    const qreal marginScene = marginLogical * uniformScale;
 
     QTransform editorTransform;
     if (std::abs(uniformScale - 1.0) > 1e-4) {
@@ -1510,11 +1516,11 @@ void TextMediaItem::updateInlineEditorGeometry() {
     // This ensures the inline editor wraps at exactly the same width as the visible text
     const qreal logicalWidth = std::max<qreal>(1.0, bounds.width() / uniformScale);
     const qreal logicalHeight = std::max<qreal>(1.0, bounds.height() / uniformScale);
-    const qreal logicalContentWidth = std::max<qreal>(1.0, logicalWidth - 2.0 * margin);
-    const qreal logicalContentHeight = std::max<qreal>(1.0, logicalHeight - 2.0 * margin);
+    const qreal logicalContentWidth = std::max<qreal>(1.0, logicalWidth - 2.0 * marginLogical);
+    const qreal logicalContentHeight = std::max<qreal>(1.0, logicalHeight - 2.0 * marginLogical);
     
     // Calculate visual dimensions for positioning
-    QRectF contentRect = bounds.adjusted(margin, margin, -margin, -margin);
+    QRectF contentRect = bounds.adjusted(marginScene, marginScene, -marginScene, -marginScene);
     if (contentRect.width() < 1.0) {
         contentRect.setWidth(1.0);
     }
@@ -2631,15 +2637,16 @@ void TextMediaItem::applyFitToTextNow() {
     }
 
     const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
-    const qreal margin = contentPaddingPx();
+    const qreal marginLogical = contentPaddingPx();
+    const qreal marginScene = marginLogical * uniformScale;
 
     // Calculate dimensions with minimum width constraint in fit-to-text mode
-    const int calculatedWidth = static_cast<int>(std::ceil(logicalContentWidth * uniformScale + margin * 2.0));
-    const int minWidth = static_cast<int>(std::ceil(kFitToTextMinWidth * uniformScale + margin * 2.0));
+    const int calculatedWidth = static_cast<int>(std::ceil(logicalContentWidth * uniformScale + marginScene * 2.0));
+    const int minWidth = static_cast<int>(std::ceil(kFitToTextMinWidth * uniformScale + marginScene * 2.0));
     
     QSize newBase(
         std::max(minWidth, std::max(1, calculatedWidth)),
-        std::max(1, static_cast<int>(std::ceil(logicalContentHeight * uniformScale + margin * 2.0))));
+        std::max(1, static_cast<int>(std::ceil(logicalContentHeight * uniformScale + marginScene * 2.0))));
 
     const QSize oldBase = m_baseSize;
 
@@ -2766,9 +2773,10 @@ void TextMediaItem::applyFitModeConstraintsToEditor() {
     }
 
     const qreal margin = contentPaddingPx();
+    const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
     const qreal desiredTextWidth = m_fitToTextEnabled
         ? -1.0
-        : std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) - 2.0 * margin);
+        : std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) / uniformScale - 2.0 * margin);
 
     bool widthModified = false;
 
