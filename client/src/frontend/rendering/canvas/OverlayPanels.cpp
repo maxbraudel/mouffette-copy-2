@@ -158,7 +158,16 @@ void OverlayTextElement::setText(const QString& text) {
 OverlayButtonElement::OverlayButtonElement(const QString& label, const QString& id)
     : OverlayElement(Button, id), m_label(label) {}
 
-OverlayButtonElement::~OverlayButtonElement() { delete m_background; }
+OverlayButtonElement::~OverlayButtonElement() {
+    // Remove from scene first to avoid double-delete
+    if (m_background) {
+        if (auto* sc = m_background->scene()) {
+            sc->removeItem(m_background);
+        }
+        delete m_background;
+        m_background = nullptr;
+    }
+}
 
 void OverlayButtonElement::createGraphicsItems() {
     if (m_background) return;
@@ -403,7 +412,16 @@ private:
 OverlaySliderElement::OverlaySliderElement(const QString& id)
     : OverlayElement(Slider, id) {}
 
-OverlaySliderElement::~OverlaySliderElement() { delete m_container; }
+OverlaySliderElement::~OverlaySliderElement() {
+    // Remove from scene first to avoid double-delete
+    if (m_container) {
+        if (auto* sc = m_container->scene()) {
+            sc->removeItem(m_container);
+        }
+        delete m_container;
+        m_container = nullptr;
+    }
+}
 
 void OverlaySliderElement::createGraphicsItems() {
     if (m_container) return;
@@ -553,7 +571,19 @@ qreal OverlaySliderElement::valueFromLocalPos(const QPointF& localPos) const {
 OverlayPanel::OverlayPanel(Position position, Layout layout)
     : m_position(position), m_layout(layout) {}
 
-OverlayPanel::~OverlayPanel() { delete m_background; }
+OverlayPanel::~OverlayPanel() {
+    // Clear elements first to destroy button/slider destructors before background
+    m_elements.clear();
+    
+    // Now safely handle background cleanup
+    if (m_background) {
+        if (auto* sc = m_background->scene()) {
+            sc->removeItem(m_background);
+        }
+        delete m_background;
+        m_background = nullptr;
+    }
+}
 
 void OverlayPanel::setLayout(Layout layout) {
     if (m_layout != layout) {
