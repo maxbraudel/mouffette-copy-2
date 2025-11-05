@@ -2430,6 +2430,36 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
         return;
     }
 
+    if (m_isEditing) {
+        ++m_rasterRequestId;
+        m_pendingRasterRequestId = m_rasterRequestId;
+        m_asyncRasterInProgress = false;
+
+        TextRasterJob job;
+        job.text = textForRendering();
+        job.font = m_font;
+        job.fillColor = m_textColor;
+        job.outlineColor = m_textBorderColor;
+        job.outlineWidthPercent = m_textBorderWidthPercent;
+        job.highlightEnabled = m_highlightEnabled;
+        job.highlightColor = m_highlightColor;
+        job.targetSize = targetSize;
+        job.scaleFactor = effectiveScale;
+        job.contentPaddingPx = contentPaddingPx();
+        job.fitToTextEnabled = m_fitToTextEnabled;
+        job.horizontalAlignment = m_horizontalAlignment;
+        job.verticalAlignment = m_verticalAlignment;
+        job.requestId = m_rasterRequestId;
+
+        m_scaledRasterizedText = job.execute();
+        m_lastRasterizedScale = effectiveScale;
+        m_scaledRasterDirty = false;
+        m_scaledRasterThrottleActive = false;
+        m_lastScaledRasterUpdate = std::chrono::steady_clock::now();
+        update();
+        return;
+    }
+
     if (!resizingUniformly && m_scaledRasterThrottleActive) {
         m_scaledRasterThrottleActive = false;
     }
