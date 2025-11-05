@@ -3465,9 +3465,13 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                     if (m_dragPreviewIsVideo && m_dragPreviewGotFrame && !m_dragPreviewPixmap.isNull()) {
                         QImage poster = m_dragPreviewPixmap.toImage();
                         if (!poster.isNull()) {
+                            qDebug() << "ScreenCanvas: drag preview poster.size=" << poster.size()
+                                     << "m_dragPreviewVideoSize=" << m_dragPreviewVideoSize
+                                     << "for" << localPath;
                             // If we know the actual video size and it differs from the thumbnail, scale the poster
                             if (!m_dragPreviewVideoSize.isEmpty() && poster.size() != m_dragPreviewVideoSize) {
                                 poster = poster.scaled(m_dragPreviewVideoSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                                qDebug() << "ScreenCanvas: scaled poster to" << poster.size();
                             }
                             v->setExternalPosterImage(poster);
                         }
@@ -3676,6 +3680,7 @@ void ScreenCanvas::startFastMacThumbnailProbe(const QString& localFilePath) {
 
     // Get actual video dimensions immediately (very fast, no frame extraction)
     QSize dims = MacVideoThumbnailer::videoDimensions(localFilePath);
+    qDebug() << "ScreenCanvas: MacVideoThumbnailer dimensions =" << dims << "for" << localFilePath;
     if (!dims.isEmpty()) {
         m_dragPreviewVideoSize = dims;
         m_dragPreviewBaseSize = dims;
@@ -3763,6 +3768,8 @@ void ScreenCanvas::onFastVideoThumbnailReady(const QImage& img) {
     QPixmap pm = QPixmap::fromImage(img); 
     if (pm.isNull()) return; 
     m_dragPreviewPixmap = pm; 
+    qDebug() << "ScreenCanvas: onFastVideoThumbnailReady - thumbnail.size=" << pm.size()
+             << "m_dragPreviewVideoSize=" << m_dragPreviewVideoSize;
     // Only use thumbnail size if we don't already have actual video dimensions
     if (m_dragPreviewVideoSize.isEmpty()) {
         m_dragPreviewVideoSize = pm.size();

@@ -1209,6 +1209,11 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
                 }
                 ++m_framesProcessed;
                 if (m_primingFirstFrame && !m_firstFramePrimed) {
+                    qDebug() << "ResizableVideoItem: first frame primed - frame.size=" << f.size()
+                             << "converted.size=" << m_lastFrameImage.size()
+                             << "displaySize=" << m_lastFrameDisplaySize
+                             << "baseSize=" << m_baseSize
+                             << "for" << m_sourcePath;
                     m_firstFramePrimed = true;
                     m_primingFirstFrame = false;
                     if (m_player) {
@@ -1290,22 +1295,40 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
         if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
             if (!m_adoptedSize) {
                 const QMediaMetaData md = m_player->metaData();
-                const QVariant v = md.value(QMediaMetaData::Resolution);
-                const QSize sz = v.toSize();
-                if (!sz.isEmpty()) {
-                    m_lastFrameDisplaySize = QSizeF(sz);
-                    adoptBaseSize(sz);
-                }
+                
+                // First, try to extract cover/thumbnail images which represent correct display dimensions
+                // (especially important for videos with non-square pixels where storage != display dimensions)
+                QImage coverImage;
                 const QVariant thumbVar = md.value(QMediaMetaData::ThumbnailImage);
-                if (!m_posterImageSet && thumbVar.isValid()) {
-                    if (thumbVar.canConvert<QImage>()) { m_posterImage = thumbVar.value<QImage>(); m_posterImageSet = !m_posterImage.isNull(); }
-                    else if (thumbVar.canConvert<QPixmap>()) { m_posterImage = thumbVar.value<QPixmap>().toImage(); m_posterImageSet = !m_posterImage.isNull(); }
-                    if (!m_posterImageSet) {
-                        const QVariant coverVar = md.value(QMediaMetaData::CoverArtImage);
-                        if (coverVar.canConvert<QImage>()) { m_posterImage = coverVar.value<QImage>(); m_posterImageSet = !m_posterImage.isNull(); }
-                        else if (coverVar.canConvert<QPixmap>()) { m_posterImage = coverVar.value<QPixmap>().toImage(); m_posterImageSet = !m_posterImage.isNull(); }
+                if (thumbVar.isValid()) {
+                    if (thumbVar.canConvert<QImage>()) { coverImage = thumbVar.value<QImage>(); }
+                    else if (thumbVar.canConvert<QPixmap>()) { coverImage = thumbVar.value<QPixmap>().toImage(); }
+                }
+                if (coverImage.isNull()) {
+                    const QVariant coverVar = md.value(QMediaMetaData::CoverArtImage);
+                    if (coverVar.canConvert<QImage>()) { coverImage = coverVar.value<QImage>(); }
+                    else if (coverVar.canConvert<QPixmap>()) { coverImage = coverVar.value<QPixmap>().toImage(); }
+                }
+                
+                // If we have a cover image, use its dimensions as the display size (respects PAR/DAR)
+                // and lock the display size to prevent frame storage dimensions from overriding it
+                if (!coverImage.isNull()) {
+                    qDebug() << "ResizableVideoItem: metadata cover image size =" << coverImage.size() << "for" << m_sourcePath;
+                    m_posterImage = coverImage;
+                    m_posterImageSet = true;
+                    m_lastFrameDisplaySize = QSizeF(coverImage.size());
+                    m_displaySizeLocked = true; // Lock to prevent frame dimensions from overriding
+                    adoptBaseSize(coverImage.size());
+                    update();
+                } else {
+                    // Fallback: use metadata resolution (storage dimensions, may not respect DAR)
+                    const QVariant v = md.value(QMediaMetaData::Resolution);
+                    const QSize sz = v.toSize();
+                    if (!sz.isEmpty()) {
+                        qDebug() << "ResizableVideoItem: metadata resolution (storage) =" << sz << "for" << m_sourcePath;
+                        m_lastFrameDisplaySize = QSizeF(sz);
+                        adoptBaseSize(sz);
                     }
-                    if (m_posterImageSet) update();
                 }
             }
             if (!m_firstFramePrimed && !m_primingFirstFrame) {
@@ -1626,6 +1649,7 @@ void ResizableVideoItem::setExternalPosterImage(const QImage& img) {
     m_posterImage = img;
     m_posterImageSet = true;
     m_lastFrameDisplaySize = QSizeF(img.size());
+    m_displaySizeLocked = true; // Lock display size to prevent frame dimensions from overriding
     if (!m_adoptedSize) {
         adoptBaseSize(img.size());
     }
@@ -1859,6 +1883,14 @@ void ResizableVideoItem::prepareForDeletion() {
 
 void ResizableVideoItem::maybeAdoptFrameSize(const QVideoFrame& f) {
     if (!f.isValid()) {
+        return;
+    }
+
+    // If display size is locked (e.g., from external poster with correct aspect ratio),
+    // don't let frame storage dimensions override it
+    if (m_displaySizeLocked) {
+        qDebug() << "ResizableVideoItem: display size locked, ignoring frame storage dimensions" 
+                 << f.size() << "keeping display size" << QSize(baseWidth(), baseHeight());
         return;
     }
 

@@ -432,5 +432,6 @@ private:
     int m_settingsRepeatLoopsRemaining = 0;
     bool m_settingsRepeatSessionActive = false;
     bool m_volumeChangeFromSettings = false;
+    bool m_displaySizeLocked = false; // When true, prevent frame dimensions from overriding display size
 };
 
