@@ -2424,7 +2424,6 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
 
     const bool resizingUniformly = (m_activeHandle != None && !m_lastAxisAltStretch);
     const bool altStretching = (m_activeHandle != None && m_lastAxisAltStretch);
-    const bool hasScaledRaster = !m_scaledRasterizedText.isNull();
 
     const bool scaleChanged = std::abs(effectiveScale - m_lastRasterizedScale) > epsilon;
     if (!m_scaledRasterDirty && !scaleChanged && m_scaledRasterizedText.size() == targetSize && !m_asyncRasterInProgress) {
@@ -2437,7 +2436,9 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     // Force synchronous rendering when editing or when font properties changed
     // to prevent visual glitches from mismatched cached bitmaps
     const bool fontPropertiesChanged = m_needsRasterization;
-    if (m_isEditing || fontPropertiesChanged) {
+    const bool needsSyncRender = m_isEditing || fontPropertiesChanged || altStretching;
+    
+    if (needsSyncRender) {
         ++m_rasterRequestId;
         m_pendingRasterRequestId = m_rasterRequestId;
         m_asyncRasterInProgress = false;
@@ -2471,35 +2472,7 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
         m_scaledRasterThrottleActive = false;
     }
 
-    if (altStretching) {
-        ++m_rasterRequestId;
-        m_pendingRasterRequestId = m_rasterRequestId;
-        m_asyncRasterInProgress = false;
-
-        TextRasterJob job;
-        job.text = textForRendering();
-        job.font = m_font;
-        job.fillColor = m_textColor;
-        job.outlineColor = m_textBorderColor;
-        job.outlineWidthPercent = m_textBorderWidthPercent;
-        job.highlightEnabled = m_highlightEnabled;
-        job.highlightColor = m_highlightColor;
-        job.targetSize = targetSize;
-        job.scaleFactor = effectiveScale;
-        job.contentPaddingPx = contentPaddingPx();
-        job.fitToTextEnabled = m_fitToTextEnabled;
-        job.horizontalAlignment = m_horizontalAlignment;
-        job.verticalAlignment = m_verticalAlignment;
-        job.requestId = m_rasterRequestId;
-
-        m_scaledRasterizedText = job.execute();
-        m_lastRasterizedScale = effectiveScale;
-        m_scaledRasterDirty = false;
-        m_scaledRasterThrottleActive = false;
-        m_lastScaledRasterUpdate = std::chrono::steady_clock::now();
-        update();
-        return;
-    }
+    const bool hasScaledRaster = !m_scaledRasterizedText.isNull() && m_scaledRasterizedText.size() == targetSize;
 
     // Throttle during active uniform resize
     if (resizingUniformly && hasScaledRaster && m_scaledRasterThrottleActive) {
