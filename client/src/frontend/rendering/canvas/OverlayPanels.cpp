@@ -659,6 +659,64 @@ std::shared_ptr<OverlayElement> OverlayPanel::findElement(const QString& id) con
     return (it != m_elements.end()) ? *it : nullptr;
 }
 
+std::shared_ptr<OverlayButtonElement> OverlayPanel::getButton(const QString& id) const {
+    auto element = findElement(id);
+    return std::dynamic_pointer_cast<OverlayButtonElement>(element);
+}
+
+std::shared_ptr<OverlaySliderElement> OverlayPanel::getSlider(const QString& id) const {
+    auto element = findElement(id);
+    return std::dynamic_pointer_cast<OverlaySliderElement>(element);
+}
+
+void OverlayPanel::addStandardVideoControls(const VideoControlCallbacks& callbacks) {
+    // Row 1: Play/Pause, Stop, Repeat buttons, then Mute + Volume slider
+    auto playPause = addButton(QString(), QStringLiteral("play-pause"));
+    if (playPause) {
+        playPause->setSvgIcon(":/icons/icons/play.svg");
+        playPause->setSegmentRole(OverlayButtonElement::SegmentRole::Solo);
+        if (callbacks.onPlayPause) playPause->setOnClicked(callbacks.onPlayPause);
+    }
+
+    auto stop = addButton(QString(), QStringLiteral("stop"));
+    if (stop) {
+        stop->setSvgIcon(":/icons/icons/stop.svg");
+        stop->setSegmentRole(OverlayButtonElement::SegmentRole::Solo);
+        if (callbacks.onStop) stop->setOnClicked(callbacks.onStop);
+    }
+
+    auto repeat = addButton(QString(), QStringLiteral("repeat"));
+    if (repeat) {
+        repeat->setSvgIcon(":/icons/icons/loop.svg");
+        repeat->setSegmentRole(OverlayButtonElement::SegmentRole::Solo);
+        repeat->setToggleOnly(true);
+        repeat->setSpacingAfter(m_style.itemSpacing);
+        if (callbacks.onRepeat) repeat->setOnClicked(callbacks.onRepeat);
+    }
+
+    auto mute = addButton(QString(), QStringLiteral("mute"));
+    if (mute) {
+        mute->setSvgIcon(":/icons/icons/volume-on.svg");
+        mute->setSegmentRole(OverlayButtonElement::SegmentRole::Solo);
+        mute->setToggleOnly(true);
+        mute->setSpacingAfter(m_style.itemSpacing);
+        if (callbacks.onMute) mute->setOnClicked(callbacks.onMute);
+    }
+
+    auto volume = addSlider(QStringLiteral("volume"));
+    if (volume && callbacks.onVolumeBegin && callbacks.onVolumeUpdate && callbacks.onVolumeEnd) {
+        volume->setInteractionCallbacks(callbacks.onVolumeBegin, callbacks.onVolumeUpdate, callbacks.onVolumeEnd);
+    }
+
+    // Row 2: Progress bar slider spanning full width
+    newRow();
+
+    auto progress = addSlider(QStringLiteral("progress"));
+    if (progress && callbacks.onProgressBegin && callbacks.onProgressUpdate && callbacks.onProgressEnd) {
+        progress->setInteractionCallbacks(callbacks.onProgressBegin, callbacks.onProgressUpdate, callbacks.onProgressEnd);
+    }
+}
+
 // (Legacy label management removed)
 
 void OverlayPanel::setVisible(bool visible) {

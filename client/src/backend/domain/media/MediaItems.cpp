@@ -1944,88 +1944,44 @@ void ResizableVideoItem::ensureControlsPanel() {
         controlsStyle.paddingY = std::max(controlsStyle.paddingY, 6);
         controlsStyle.itemSpacing = std::max(controlsStyle.itemSpacing, 8);
         controlsStyle.maxWidth = 360;
-    const int desiredControlHeight = 36;
-    controlsStyle.defaultHeight = std::max(controlsStyle.defaultHeight, desiredControlHeight);
+        const int desiredControlHeight = 36;
+        controlsStyle.defaultHeight = std::max(controlsStyle.defaultHeight, desiredControlHeight);
         m_controlsPanel->setStyle(controlsStyle);
         m_controlsPanel->setBackgroundVisible(true);
 
-        m_playPauseButton = m_controlsPanel->addButton(QString(), QStringLiteral("play_pause"));
-        if (m_playPauseButton) {
-            m_playPauseButton->setSvgIcon(":/icons/icons/play.svg");
-            m_playPauseButton->setSegmentRole(OverlayButtonElement::SegmentRole::Solo);
-            m_playPauseButton->setOnClicked([this]() {
-                m_holdLastFrameAtEnd = false;
-                togglePlayPause();
-            });
-        }
-
-        m_stopButton = m_controlsPanel->addButton(QString(), QStringLiteral("stop"));
-        if (m_stopButton) {
-            m_stopButton->setSvgIcon(":/icons/icons/stop.svg");
-            m_stopButton->setSegmentRole(OverlayButtonElement::SegmentRole::Solo);
-            m_stopButton->setOnClicked([this]() { stopToBeginning(); });
-        }
-
-        m_repeatButton = m_controlsPanel->addButton(QString(), QStringLiteral("repeat"));
-        if (m_repeatButton) {
-            m_repeatButton->setSvgIcon(":/icons/icons/loop.svg");
-            m_repeatButton->setSegmentRole(OverlayButtonElement::SegmentRole::Solo);
-            m_repeatButton->setToggleOnly(true);
-            m_repeatButton->setSpacingAfter(controlsStyle.itemSpacing);
-            m_repeatButton->setOnClicked([this]() { toggleRepeat(); });
-        }
-
-        m_muteButton = m_controlsPanel->addButton(QString(), QStringLiteral("mute"));
-        if (m_muteButton) {
-            m_muteButton->setSvgIcon(":/icons/icons/volume-on.svg");
-            m_muteButton->setSegmentRole(OverlayButtonElement::SegmentRole::Solo);
-            m_muteButton->setToggleOnly(true);
-            m_muteButton->setSpacingAfter(controlsStyle.itemSpacing);
-            m_muteButton->setOnClicked([this]() { toggleMute(); });
-        }
-
-        m_volumeSlider = m_controlsPanel->addSlider(QStringLiteral("volume"));
-        if (m_volumeSlider) {
-            m_volumeSlider->setInteractionCallbacks(
-                [this](qreal ratio) {
-                    m_draggingVolume = true;
-                    setVolumeFromControl(ratio, false);
-                    if (m_volumeSlider) m_volumeSlider->setState(OverlayElement::Active);
-                },
-                [this](qreal ratio) {
-                    setVolumeFromControl(ratio, false);
-                },
-                [this](qreal ratio) {
-                    setVolumeFromControl(ratio, false);
-                    m_draggingVolume = false;
-                    if (m_volumeSlider) {
-                        m_volumeSlider->setState(m_effectiveMuted ? OverlayElement::Disabled : OverlayElement::Normal);
-                    }
-                });
-        }
-
-        m_controlsPanel->newRow();
-
-        m_progressSlider = m_controlsPanel->addSlider(QStringLiteral("progress"));
-        if (m_progressSlider) {
-            m_progressSlider->setInteractionCallbacks(
-                [this](qreal ratio) {
-                    m_draggingProgress = true;
-                    m_holdLastFrameAtEnd = false;
-                    seekToRatio(ratio);
-                    if (m_progressSlider) m_progressSlider->setState(OverlayElement::Active);
-                },
-                [this](qreal ratio) {
-                    m_holdLastFrameAtEnd = false;
-                    seekToRatio(ratio);
-                },
-                [this](qreal ratio) {
-                    seekToRatio(ratio);
-                    m_draggingProgress = false;
-                    if (m_progressSlider) m_progressSlider->setState(OverlayElement::Normal);
-                });
-        }
-
+        // Use factory to create all standard video controls in one call
+        OverlayPanel::VideoControlCallbacks callbacks;
+        callbacks.onPlayPause = [this]() { m_holdLastFrameAtEnd = false; togglePlayPause(); };
+        callbacks.onStop = [this]() { stopToBeginning(); };
+        callbacks.onRepeat = [this]() { toggleRepeat(); };
+        callbacks.onMute = [this]() { toggleMute(); };
+        callbacks.onVolumeBegin = [this](qreal ratio) {
+            m_draggingVolume = true;
+            setVolumeFromControl(ratio, false);
+            if (auto slider = m_controlsPanel->getSlider("volume")) slider->setState(OverlayElement::Active);
+        };
+        callbacks.onVolumeUpdate = [this](qreal ratio) { setVolumeFromControl(ratio, false); };
+        callbacks.onVolumeEnd = [this](qreal ratio) {
+            setVolumeFromControl(ratio, false);
+            m_draggingVolume = false;
+            if (auto slider = m_controlsPanel->getSlider("volume")) {
+                slider->setState(m_effectiveMuted ? OverlayElement::Disabled : OverlayElement::Normal);
+            }
+        };
+        callbacks.onProgressBegin = [this](qreal ratio) {
+            m_draggingProgress = true;
+            m_holdLastFrameAtEnd = false;
+            seekToRatio(ratio);
+            if (auto slider = m_controlsPanel->getSlider("progress")) slider->setState(OverlayElement::Active);
+        };
+        callbacks.onProgressUpdate = [this](qreal ratio) { m_holdLastFrameAtEnd = false; seekToRatio(ratio); };
+        callbacks.onProgressEnd = [this](qreal ratio) {
+            seekToRatio(ratio);
+            m_draggingProgress = false;
+            if (auto slider = m_controlsPanel->getSlider("progress")) slider->setState(OverlayElement::Normal);
+        };
+        
+        m_controlsPanel->addStandardVideoControls(callbacks);
         m_controlsPanel->setVisible(false);
     }
 
@@ -2038,27 +1994,31 @@ void ResizableVideoItem::updateControlsVisualState() {
     if (!m_controlsPanel) return;
 
     const bool playing = isEffectivelyPlayingForControls() || m_expectedPlayingState;
-    if (m_playPauseButton) {
-        m_playPauseButton->setSvgIcon(playing ? ":/icons/icons/pause.svg" : ":/icons/icons/play.svg");
+    if (auto playPause = m_controlsPanel->getButton("play-pause")) {
+        playPause->setSvgIcon(playing ? ":/icons/icons/pause.svg" : ":/icons/icons/play.svg");
     }
 
-    if (m_repeatButton) {
-        m_repeatButton->setState((m_repeatEnabled || m_settingsRepeatEnabled) ? OverlayElement::Toggled : OverlayElement::Normal);
+    if (auto repeat = m_controlsPanel->getButton("repeat")) {
+        repeat->setState((m_repeatEnabled || m_settingsRepeatEnabled) ? OverlayElement::Toggled : OverlayElement::Normal);
     }
 
-    if (m_muteButton) {
-        m_muteButton->setSvgIcon(m_effectiveMuted ? ":/icons/icons/volume-off.svg" : ":/icons/icons/volume-on.svg");
-        m_muteButton->setState(m_effectiveMuted ? OverlayElement::Toggled : OverlayElement::Normal);
+    if (auto mute = m_controlsPanel->getButton("mute")) {
+        mute->setSvgIcon(m_effectiveMuted ? ":/icons/icons/volume-off.svg" : ":/icons/icons/volume-on.svg");
+        mute->setState(m_effectiveMuted ? OverlayElement::Toggled : OverlayElement::Normal);
     }
 
-    if (m_volumeSlider && !m_draggingVolume) {
-        m_volumeSlider->setValue(std::clamp<qreal>(m_effectiveMuted ? 0.0 : m_userVolumeRatio, 0.0, 1.0));
-        m_volumeSlider->setState(m_effectiveMuted ? OverlayElement::Disabled : OverlayElement::Normal);
+    if (auto volumeSlider = m_controlsPanel->getSlider("volume")) {
+        if (!m_draggingVolume) {
+            volumeSlider->setValue(std::clamp<qreal>(m_effectiveMuted ? 0.0 : m_userVolumeRatio, 0.0, 1.0));
+            volumeSlider->setState(m_effectiveMuted ? OverlayElement::Disabled : OverlayElement::Normal);
+        }
     }
 
-    if (m_progressSlider && !m_draggingProgress) {
-        m_progressSlider->setValue(std::clamp<qreal>(m_smoothProgressRatio, 0.0, 1.0));
-        m_progressSlider->setState(OverlayElement::Normal);
+    if (auto progressSlider = m_controlsPanel->getSlider("progress")) {
+        if (!m_draggingProgress) {
+            progressSlider->setValue(std::clamp<qreal>(m_smoothProgressRatio, 0.0, 1.0));
+            progressSlider->setState(OverlayElement::Normal);
+        }
     }
 }
 
@@ -2338,11 +2298,11 @@ void ResizableVideoItem::logFrameStats() const {
 
 void ResizableVideoItem::updatePlayPauseIconState(bool playing) {
     ensureControlsPanel();
-    if (m_playPauseButton) {
+    if (auto playPause = m_controlsPanel->getButton("play-pause")) {
         const QString iconPath = playing ? QStringLiteral(":/icons/icons/pause.svg")
                                          : QStringLiteral(":/icons/icons/play.svg");
-        m_playPauseButton->setSvgIcon(iconPath);
-        m_playPauseButton->setState(playing ? OverlayElement::Active : OverlayElement::Normal);
+        playPause->setSvgIcon(iconPath);
+        playPause->setState(playing ? OverlayElement::Active : OverlayElement::Normal);
     }
     updateControlsVisualState();
 }
@@ -2442,8 +2402,10 @@ bool ResizableVideoItem::isEffectivelyPlayingForControls() const {
 
 void ResizableVideoItem::updateProgressBar() {
     // Progress is now managed by the overlay slider element
-    if (m_progressSlider && !m_draggingProgress) {
-        m_progressSlider->setValue(std::clamp<qreal>(m_smoothProgressRatio, 0.0, 1.0));
+    if (auto progressSlider = m_controlsPanel->getSlider("progress")) {
+        if (!m_draggingProgress) {
+            progressSlider->setValue(std::clamp<qreal>(m_smoothProgressRatio, 0.0, 1.0));
+        }
     }
 }
 

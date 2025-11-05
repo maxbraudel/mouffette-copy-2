@@ -67,6 +67,20 @@ void ThemeManager::applyPillButton(QPushButton* button)
     button->setFixedHeight(m_config.dynamicBoxHeight);
 }
 
+QPushButton* ThemeManager::createPillButton(const QString& text, QWidget* parent)
+{
+    QPushButton* button = new QPushButton(text, parent);
+    instance()->applyPillButton(button);
+    return button;
+}
+
+QPushButton* ThemeManager::createPrimaryButton(const QString& text, QWidget* parent)
+{
+    QPushButton* button = new QPushButton(text, parent);
+    instance()->applyPrimaryButton(button);
+    return button;
+}
+
 void ThemeManager::applyPrimaryButton(QPushButton* button)
 {
     if (!button) return;

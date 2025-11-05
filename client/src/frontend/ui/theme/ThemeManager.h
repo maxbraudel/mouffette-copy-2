@@ -87,6 +87,24 @@ public:
      */
     void applyPrimaryButton(QPushButton* button);
     
+    // Button factory helpers
+    
+    /**
+     * @brief Create a pill button (standard grey button) with text
+     * @param text Button label text
+     * @param parent Parent widget
+     * @return Newly created and styled button
+     */
+    static QPushButton* createPillButton(const QString& text, QWidget* parent = nullptr);
+    
+    /**
+     * @brief Create a primary button (blue brand button) with text
+     * @param text Button label text
+     * @param parent Parent widget
+     * @return Newly created and styled button
+     */
+    static QPushButton* createPrimaryButton(const QString& text, QWidget* parent = nullptr);
+    
     /**
      * @brief Apply status box style with custom colors
      * @param label Label to style as status box

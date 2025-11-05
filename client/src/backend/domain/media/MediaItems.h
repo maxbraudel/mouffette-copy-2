@@ -403,13 +403,7 @@ private:
     qreal m_lastUserVolumeBeforeMute = 1.0;
     qreal m_userVolumeRatio = 1.0;
     QImage m_posterImage; bool m_posterImageSet = false;
-    std::unique_ptr<OverlayPanel> m_controlsPanel;
-    std::shared_ptr<OverlayButtonElement> m_playPauseButton;
-    std::shared_ptr<OverlayButtonElement> m_stopButton;
-    std::shared_ptr<OverlayButtonElement> m_repeatButton;
-    std::shared_ptr<OverlayButtonElement> m_muteButton;
-    std::shared_ptr<OverlaySliderElement> m_volumeSlider;
-    std::shared_ptr<OverlaySliderElement> m_progressSlider;
+    std::unique_ptr<OverlayPanel> m_controlsPanel; // Factory-based: all controls accessed via getButton/getSlider
     bool m_adoptedSize = false; qreal m_initialScaleFactor = 1.0;
     bool m_repeatEnabled = false;
     bool m_draggingProgress = false; bool m_draggingVolume = false; bool m_holdLastFrameAtEnd = false;

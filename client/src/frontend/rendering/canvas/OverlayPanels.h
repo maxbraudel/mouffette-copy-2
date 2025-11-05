@@ -349,6 +349,27 @@ public:
     std::shared_ptr<OverlayButtonElement> addButton(const QString& label = QString(), const QString& id = QString());
     std::shared_ptr<OverlaySliderElement> addSlider(const QString& id = QString());
     void newRow(); // inserts a row break token
+    
+    // Typed element retrieval helpers
+    std::shared_ptr<OverlayButtonElement> getButton(const QString& id) const;
+    std::shared_ptr<OverlaySliderElement> getSlider(const QString& id) const;
+    
+    // Factory: standard video controls (play/pause, stop, repeat, mute, volume slider, progress slider)
+    // Callbacks: onPlayPause, onStop, onRepeat, onMute, onVolumeBegin, onVolumeUpdate, onVolumeEnd, onProgressBegin, onProgressUpdate, onProgressEnd
+    struct VideoControlCallbacks {
+        std::function<void()> onPlayPause;
+        std::function<void()> onStop;
+        std::function<void()> onRepeat;
+        std::function<void()> onMute;
+        std::function<void(qreal)> onVolumeBegin;
+        std::function<void(qreal)> onVolumeUpdate;
+        std::function<void(qreal)> onVolumeEnd;
+        std::function<void(qreal)> onProgressBegin;
+        std::function<void(qreal)> onProgressUpdate;
+        std::function<void(qreal)> onProgressEnd;
+    };
+    void addStandardVideoControls(const VideoControlCallbacks& callbacks);
+    
     const QList<std::shared_ptr<OverlayElement>>& elements() const { return m_elements; }
     // Visibility
     bool isVisible() const { return m_visible; }

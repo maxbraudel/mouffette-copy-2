@@ -2067,6 +2067,43 @@ void ScreenCanvas::setMediaHandleSelectionSizePx(int px) { m_mediaHandleSelectio
 void ScreenCanvas::setMediaHandleVisualSizePx(int px) { m_mediaHandleVisualSizePx = qMax(1, px); }
 void ScreenCanvas::setMediaHandleSizePx(int px) { setMediaHandleSelectionSizePx(px); setMediaHandleVisualSizePx(px); }
 
+// Selection chrome factory helpers
+QGraphicsPathItem* ScreenCanvas::createSelectionBorderPath(const QColor& color, qreal zValue, Qt::PenStyle style, qreal dashOffset) {
+    QGraphicsPathItem* p = new QGraphicsPathItem();
+    m_scene->addItem(p);
+    p->setAcceptedMouseButtons(Qt::NoButton);
+    p->setFlag(QGraphicsItem::ItemIgnoresTransformations, false);
+    QPen pen(color);
+    pen.setCosmetic(true);
+    pen.setWidth(1);
+    pen.setStyle(style);
+    if (style == Qt::DashLine) {
+        pen.setDashPattern({4, 4});
+    }
+    if (dashOffset != 0.0) {
+        pen.setDashOffset(dashOffset);
+    }
+    pen.setCapStyle(Qt::FlatCap);
+    pen.setJoinStyle(Qt::MiterJoin);
+    p->setPen(pen);
+    p->setBrush(Qt::NoBrush);
+    p->setZValue(zValue);
+    p->setData(0, QVariant());
+    return p;
+}
+
+QGraphicsRectItem* ScreenCanvas::createSelectionHandle(qreal zValue) {
+    QGraphicsRectItem* r = new QGraphicsRectItem();
+    m_scene->addItem(r);
+    r->setAcceptedMouseButtons(Qt::NoButton);
+    r->setFlag(QGraphicsItem::ItemIgnoresTransformations, false);
+    r->setBrush(Qt::white);
+    r->setPen(QPen(QColor(74, 144, 226), 0));
+    r->setZValue(zValue);
+    r->setData(0, QVariant());
+    return r;
+}
+
 // Create/update high-z selection chrome so borders/handles are always visible above media
 void ScreenCanvas::updateSelectionChrome() {
     if (!m_scene) return;
@@ -2080,10 +2117,11 @@ void ScreenCanvas::updateSelectionChrome() {
             const qreal zBorderBlue  = 11999.0;
             const qreal zHandle      = 11999.5;
             auto ensurePath = [&](QGraphicsPathItem*& p, const QColor& color, qreal z, Qt::PenStyle style, qreal dashOffset){
-                if (!p) { p = new QGraphicsPathItem(); m_scene->addItem(p); p->setAcceptedMouseButtons(Qt::NoButton); p->setFlag(QGraphicsItem::ItemIgnoresTransformations, false); }
-                QPen pen(color); pen.setCosmetic(true); pen.setWidth(1); pen.setStyle(style); if (style == Qt::DashLine) pen.setDashPattern({4,4}); if (dashOffset != 0.0) pen.setDashOffset(dashOffset); pen.setCapStyle(Qt::FlatCap); pen.setJoinStyle(Qt::MiterJoin); p->setPen(pen); p->setBrush(Qt::NoBrush); p->setZValue(z); p->setData(0, QVariant());
+                if (!p) { p = createSelectionBorderPath(color, z, style, dashOffset); }
             };
-            auto ensureHandle = [&](QGraphicsRectItem*& r){ if (!r) { r = new QGraphicsRectItem(); m_scene->addItem(r); r->setAcceptedMouseButtons(Qt::NoButton); r->setFlag(QGraphicsItem::ItemIgnoresTransformations, false);} r->setBrush(Qt::white); r->setPen(QPen(QColor(74,144,226), 0)); r->setZValue(zHandle); r->setData(0, QVariant()); };
+            auto ensureHandle = [&](QGraphicsRectItem*& r){
+                if (!r) { r = createSelectionHandle(zHandle); }
+            };
             ensurePath(sc.borderWhite, QColor(255,255,255), zBorderWhite, Qt::DashLine, 0.0);
             ensurePath(sc.borderBlue,  QColor(74,144,226), zBorderBlue,  Qt::DashLine, 4.0);
             for (int i=0;i<8;++i) ensureHandle(sc.handles[i]);

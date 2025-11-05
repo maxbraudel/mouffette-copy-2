@@ -103,10 +103,8 @@ void SettingsManager::showSettingsDialog() {
 
     QHBoxLayout* btnRow = new QHBoxLayout();
     btnRow->addStretch();
-    QPushButton* cancelBtn = new QPushButton("Cancel");
-    QPushButton* saveBtn = new QPushButton("Save");
-    applyPillBtn(cancelBtn);
-    applyPrimaryBtn(saveBtn);
+    QPushButton* cancelBtn = ThemeManager::createPillButton("Cancel");
+    QPushButton* saveBtn = ThemeManager::createPrimaryButton("Save");
     btnRow->addWidget(cancelBtn);
     btnRow->addWidget(saveBtn);
     v->addLayout(btnRow);

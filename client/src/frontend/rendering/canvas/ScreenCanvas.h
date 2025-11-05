@@ -226,6 +226,10 @@ private:
     void ensureToolSelector(); // Create tool selector (segmented control)
     void updateToolSelectorGeometry(); // Position tool selector next to settings button
     
+    // Selection chrome factory helpers
+    QGraphicsPathItem* createSelectionBorderPath(const QColor& color, qreal zValue, Qt::PenStyle style, qreal dashOffset);
+    QGraphicsRectItem* createSelectionHandle(qreal zValue);
+    
     // Text media creation
     TextMediaItem* createTextMediaAtPosition(const QPointF& scenePos);
     

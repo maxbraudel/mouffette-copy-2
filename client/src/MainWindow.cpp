@@ -1237,8 +1237,7 @@ void MainWindow::setupUI() {
     // using gDynamicBox configuration for consistent sizing
 
     // Back button (left-aligned, initially hidden)
-    m_backButton = new QPushButton("← Go Back");
-    applyPillBtn(m_backButton);
+    m_backButton = ThemeManager::createPillButton("← Go Back");
     // Ensure button is sized properly for its text content
     m_backButton->adjustSize();
     int textWidth = m_backButton->fontMetrics().horizontalAdvance(m_backButton->text()) + 24; // text + padding
@@ -1255,8 +1254,7 @@ void MainWindow::setupUI() {
     setLocalNetworkStatus("DISCONNECTED");
 
     // Enable/Disable toggle button with fixed width (left of Settings)
-    m_connectToggleButton = new QPushButton("Disable");
-    applyPillBtn(m_connectToggleButton);
+    m_connectToggleButton = ThemeManager::createPillButton("Disable");
     // Ensure button is sized properly for "Disable"/"Enable" text (using longer text)
     int toggleTextWidth = m_connectToggleButton->fontMetrics().horizontalAdvance("Disable") + 24;
     int toggleButtonWidth = qMax(80, toggleTextWidth);
@@ -1264,8 +1262,7 @@ void MainWindow::setupUI() {
     connect(m_connectToggleButton, &QPushButton::clicked, this, &MainWindow::onEnableDisableClicked);
 
     // Settings button
-    m_settingsButton = new QPushButton("Settings");
-    applyPillBtn(m_settingsButton);
+    m_settingsButton = ThemeManager::createPillButton("Settings");
     // Ensure button is sized properly for its text content
     int settingsTextWidth = m_settingsButton->fontMetrics().horizontalAdvance("Settings") + 24;
     int settingsButtonWidth = qMax(80, settingsTextWidth);
