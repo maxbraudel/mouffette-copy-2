@@ -15,6 +15,7 @@
 #include <QString>
 #include <QList>
 #include <memory>
+#include <functional>
 
 // Forward declare SVG item to avoid requiring heavy include in header
 class QGraphicsSvgItem;
@@ -153,10 +154,13 @@ public:
     // State management (default no-op: subclasses override to update appearance)
     virtual void setState(ElementState s) { m_state = s; }
     ElementState state() const { return m_state; }
+    void setSpacingAfter(qreal spacingPx) { m_spacingAfter = spacingPx; }
+    qreal spacingAfter() const { return m_spacingAfter; }
 protected:
     ElementType m_type;
     QString m_id;
     ElementState m_state = Normal;
+    qreal m_spacingAfter = -1.0; // <0 => use panel default spacing
 };
 
 class OverlayTextElement : public OverlayElement {
@@ -189,12 +193,15 @@ private:
 // Basic square button element (stub). Will gain richer state visuals in a later step.
 class OverlayButtonElement : public OverlayElement {
 public:
+    enum class SegmentRole { Solo, Leading, Middle, Trailing };
     // If label empty, button renders blank square (icon-ready placeholder)
     OverlayButtonElement(const QString& label = QString(), const QString& id = QString());
     ~OverlayButtonElement() override;
 
     QString label() const { return m_label; }
     void setLabel(const QString& l);
+    SegmentRole segmentRole() const { return m_segmentRole; }
+    void setSegmentRole(SegmentRole role);
 
     // OverlayElement implementation
     void applyStyle(const OverlayStyle& style) override;
@@ -242,6 +249,7 @@ public:
 private:
     void createGraphicsItems();
     void updateLabelPosition();
+    void applySegmentCorners();
     QString m_label;
     bool m_visible = true;
     MouseBlockingRoundedRectItem* m_background = nullptr;
@@ -250,6 +258,7 @@ private:
     OverlayStyle m_currentStyle;
     std::function<void()> m_onClicked;
     bool m_toggleOnly = false; // disables hover/press transient states if true
+    SegmentRole m_segmentRole = SegmentRole::Solo;
 };
 
 // Linear horizontal slider (track + fill). Value range [0,1].
@@ -333,7 +342,12 @@ public:
     // Layout & positioning
     void updateLayoutWithAnchor(const QPointF& anchorScenePoint, QGraphicsView* view);
     QSizeF calculateSize() const;
-    void setBackgroundVisible(bool visible) { m_backgroundVisible = visible; updateBackground(); }
+    void setBackgroundVisible(bool visible) {
+        m_backgroundVisible = visible;
+        m_backgroundVisibilityOverridden = true;
+        updateBackground();
+    }
+    void clearBackgroundVisibilityOverride();
     bool backgroundVisible() const { return m_backgroundVisible; }
 private:
     void createBackground();
@@ -345,6 +359,7 @@ private:
     OverlayStyle m_style;
     bool m_visible = true;
     bool m_backgroundVisible = true;
+    bool m_backgroundVisibilityOverridden = false;
     QList<std::shared_ptr<OverlayElement>> m_elements;
     MouseBlockingRectItem* m_background = nullptr; // parent & backdrop
     QGraphicsItem* m_parentItem = nullptr;     // external parent if any

@@ -8,10 +8,9 @@
 #include <QSizeF>
 #include <QPointF>
 #include <chrono>
+#include <memory>
 
 class QGraphicsTextItem;
-class QGraphicsRectItem;
-class QGraphicsSvgItem;
 class QGraphicsSceneMouseEvent;
 class RoundedRectItem;
 
@@ -195,26 +194,15 @@ private:
     bool m_applyingFitToText = false;
     qreal m_appliedContentPaddingPx = 0.0;
     
-    // Alignment controls (scene items, similar to video controls)
-    class SegmentedButtonItem* m_fitToTextBtn = nullptr;
-    class QGraphicsSvgItem* m_fitToTextIcon = nullptr;
-    QGraphicsRectItem* m_alignmentControlsBg = nullptr;
-    class SegmentedButtonItem* m_alignLeftBtn = nullptr;
-    class SegmentedButtonItem* m_alignCenterHBtn = nullptr;
-    class SegmentedButtonItem* m_alignRightBtn = nullptr;
-    class SegmentedButtonItem* m_alignTopBtn = nullptr;
-    class SegmentedButtonItem* m_alignCenterVBtn = nullptr;
-    class SegmentedButtonItem* m_alignBottomBtn = nullptr;
-    QGraphicsRectItem* m_hDivider1 = nullptr;  // Divider between left and center-h
-    QGraphicsRectItem* m_hDivider2 = nullptr;  // Divider between center-h and right
-    QGraphicsRectItem* m_vDivider1 = nullptr;  // Divider between top and center-v
-    QGraphicsRectItem* m_vDivider2 = nullptr;  // Divider between center-v and bottom
-    QGraphicsSvgItem* m_alignLeftIcon = nullptr;
-    QGraphicsSvgItem* m_alignCenterHIcon = nullptr;
-    QGraphicsSvgItem* m_alignRightIcon = nullptr;
-    QGraphicsSvgItem* m_alignTopIcon = nullptr;
-    QGraphicsSvgItem* m_alignCenterVIcon = nullptr;
-    QGraphicsSvgItem* m_alignBottomIcon = nullptr;
+    // Alignment controls (overlay panel with unified buttons)
+    std::unique_ptr<OverlayPanel> m_alignmentPanel;
+    std::shared_ptr<OverlayButtonElement> m_fitToTextBtn;
+    std::shared_ptr<OverlayButtonElement> m_alignLeftBtn;
+    std::shared_ptr<OverlayButtonElement> m_alignCenterHBtn;
+    std::shared_ptr<OverlayButtonElement> m_alignRightBtn;
+    std::shared_ptr<OverlayButtonElement> m_alignTopBtn;
+    std::shared_ptr<OverlayButtonElement> m_alignCenterVBtn;
+    std::shared_ptr<OverlayButtonElement> m_alignBottomBtn;
     
     void ensureInlineEditor();
     void updateInlineEditorGeometry();

@@ -204,6 +204,8 @@ void OverlayButtonElement::createGraphicsItems() {
         m_textItem->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
         m_textItem->setData(0, QStringLiteral("overlay"));
     }
+
+    applySegmentCorners();
 }
 
 void OverlayButtonElement::applyStyle(const OverlayStyle& style) {
@@ -212,6 +214,7 @@ void OverlayButtonElement::applyStyle(const OverlayStyle& style) {
     if (m_background) {
         m_background->setBrush(buttonBrushForState(style, state()));
         m_background->setRadius(style.cornerRadius);
+        applySegmentCorners();
     }
     if (m_textItem) {
         QFont f = m_textItem->font();
@@ -239,6 +242,7 @@ QSizeF OverlayButtonElement::preferredSize(const OverlayStyle& style) const {
 void OverlayButtonElement::setSize(const QSizeF& size) {
     createGraphicsItems();
     if (m_background) m_background->setRect(0,0,size.width(), size.height());
+    applySegmentCorners();
     updateLabelPosition();
     if (m_svgIcon) {
         // Scale icon to fit ~60% of button height preserving aspect ratio
@@ -294,6 +298,17 @@ void OverlayButtonElement::setLabel(const QString& l) {
     updateLabelPosition();
 }
 
+void OverlayButtonElement::setSegmentRole(SegmentRole role) {
+    if (m_segmentRole == role) return;
+    m_segmentRole = role;
+    if (role == SegmentRole::Leading || role == SegmentRole::Middle) {
+        OverlayElement::setSpacingAfter(0.0);
+    } else if (spacingAfter() <= 0.0) {
+        OverlayElement::setSpacingAfter(-1.0);
+    }
+    applySegmentCorners();
+}
+
 // Override setState to update brush dynamically
 void OverlayButtonElement::setState(ElementState s) {
     if (state() == s) return;
@@ -326,6 +341,25 @@ void OverlayButtonElement::setSvgIcon(const QString& resourcePath) {
     }
     // Trigger size/layout recompute using current background size
     if (m_background) setSize(m_background->rect().size());
+}
+
+void OverlayButtonElement::applySegmentCorners() {
+    if (!m_background) return;
+    const qreal radius = m_currentStyle.cornerRadius;
+    switch (m_segmentRole) {
+        case SegmentRole::Solo:
+            m_background->setCornerRadii(radius, radius, radius, radius);
+            break;
+        case SegmentRole::Leading:
+            m_background->setCornerRadii(radius, 0.0, 0.0, radius);
+            break;
+        case SegmentRole::Middle:
+            m_background->setCornerRadii(0.0, 0.0, 0.0, 0.0);
+            break;
+        case SegmentRole::Trailing:
+            m_background->setCornerRadii(0.0, radius, radius, 0.0);
+            break;
+    }
 }
 
 // ============================================================================
@@ -586,6 +620,13 @@ void OverlayPanel::setScene(QGraphicsScene* scene) {
     }
 }
 
+void OverlayPanel::clearBackgroundVisibilityOverride() {
+    if (!m_backgroundVisibilityOverridden) return;
+    m_backgroundVisibilityOverridden = false;
+    m_backgroundVisible = (m_position != Top);
+    updateBackground();
+}
+
 void OverlayPanel::updateLayoutWithAnchor(const QPointF& anchorScenePoint, QGraphicsView* view) {
     if (!view || m_elements.isEmpty()) return;
     // Cache parameters for potential deferred relayout when becoming visible
@@ -603,7 +644,9 @@ void OverlayPanel::updateLayoutWithAnchor(const QPointF& anchorScenePoint, QGrap
     }
 
     // For top panels we never render a shared background rect; for others keep it.
-    m_backgroundVisible = (m_position != Top);
+    if (!m_backgroundVisibilityOverridden) {
+        m_backgroundVisible = (m_position != Top);
+    }
     updateBackground();
     updateLabelsLayout();
 }
@@ -629,19 +672,29 @@ QSizeF OverlayPanel::calculateSize() const {
     QList<qreal> rowWidths; rowWidths.append(0.0);
     QList<qreal> rowHeights; rowHeights.append(0.0);
     QList<int> rowCounts; rowCounts.append(0);
+    QList<qreal> rowPendingSpacing; rowPendingSpacing.append(m_style.itemSpacing);
     int r = 0;
     for (const auto &e : m_elements) {
         if (e->type() == OverlayElement::RowBreak) {
             // Only start a new row if current row has elements (avoid empty duplicates)
             if (rowCounts[r] == 0) continue;
-            rowWidths.append(0.0); rowHeights.append(0.0); rowCounts.append(0); ++r; continue;
+            rowWidths.append(0.0);
+            rowHeights.append(0.0);
+            rowCounts.append(0);
+            rowPendingSpacing.append(m_style.itemSpacing);
+            ++r;
+            continue;
         }
         if (!e->isVisible()) continue;
         QSizeF sz = e->preferredSize(m_style);
-        if (rowCounts[r] > 0) rowWidths[r] += m_style.itemSpacing;
+        if (rowCounts[r] > 0) {
+            const qreal spacing = rowPendingSpacing[r] >= 0.0 ? rowPendingSpacing[r] : m_style.itemSpacing;
+            rowWidths[r] += spacing;
+        }
         rowWidths[r] += sz.width();
         rowHeights[r] = std::max(rowHeights[r], sz.height());
         rowCounts[r]++;
+        rowPendingSpacing[r] = (e->spacingAfter() >= 0.0) ? e->spacingAfter() : m_style.itemSpacing;
     }
     // Aggregate size
     qreal panelW = 0, panelH = 0;
@@ -715,14 +768,18 @@ void OverlayPanel::updateLabelsLayout() {
             } else {
                 element->setPosition(m_currentPosition + currentPos);
             }
-            currentPos.setY(currentPos.y() + elementSize.height() + m_style.itemSpacing);
+            const qreal spacing = (element->spacingAfter() >= 0.0) ? element->spacingAfter() : m_style.itemSpacing;
+            currentPos.setY(currentPos.y() + elementSize.height() + spacing);
         }
     } else {
         // Horizontal with potential row breaks
         qreal panelInnerW = m_currentSize.width() - 2*m_style.paddingX;
         QPointF origin(m_style.paddingX, m_style.paddingY);
-        QPointF cursor = origin;
+        qreal cursorX = origin.x();
+        qreal cursorY = origin.y();
         qreal currentRowMaxH = 0;
+        qreal pendingSpacing = 0.0;
+        bool firstInRow = true;
 
         // Detect special two-row top panel pattern: first row = single text element, then row break, then buttons.
         bool specialTwoRowTop = false;
@@ -740,20 +797,25 @@ void OverlayPanel::updateLabelsLayout() {
             }
             if (rowBreakIndex >=0 && firstText && visibleBeforeBreak==1) {
                 // Count buttons after break
-                int buttonsCount = 0;
                 qreal buttonsRowWidth = 0;
                 qreal buttonsRowHeight = 0;
+                qreal buttonsPendingSpacing = 0.0;
+                bool buttonsFirst = true;
                 for (int j=rowBreakIndex+1;j<m_elements.size();++j) {
                     auto &el = m_elements[j];
                     if (!el->isVisible()) continue;
                     if (el->type() == OverlayElement::RowBreak) break; // only first row after break considered
                     QSizeF sz = el->preferredSize(m_style);
-                    if (buttonsCount>0) buttonsRowWidth += m_style.itemSpacing;
+                    if (!buttonsFirst) {
+                        const qreal spacing = buttonsPendingSpacing >= 0.0 ? buttonsPendingSpacing : m_style.itemSpacing;
+                        buttonsRowWidth += spacing;
+                    }
                     buttonsRowWidth += sz.width();
                     buttonsRowHeight = std::max(buttonsRowHeight, sz.height());
-                    ++buttonsCount;
+                    buttonsPendingSpacing = (el->spacingAfter() >= 0.0) ? el->spacingAfter() : m_style.itemSpacing;
+                    buttonsFirst = false;
                 }
-                if (buttonsCount>0) {
+                if (!buttonsFirst) {
                     // Force the filename text element width to match the buttons row width exactly.
                     // If the natural text is wider it will be elided; if narrower it is expanded to align edges.
                     QSizeF textPref = firstText->preferredSize(m_style);
@@ -785,11 +847,18 @@ void OverlayPanel::updateLabelsLayout() {
                     qreal ySecond = m_style.paddingY + firstText->preferredSize(m_style).height() + m_style.itemSpacing;
                     QPointF btnCursor(m_style.paddingX, ySecond);
                     qreal rowMaxH = 0;
+                    qreal spacingBefore = 0.0;
+                    bool firstInSecondRow = true;
                     for (int j=rowBreakIndex+1;j<m_elements.size();++j) {
                         auto &el = m_elements[j];
                         if (!el->isVisible()) continue;
                         if (el->type() == OverlayElement::RowBreak) break;
                         QSizeF sz = el->preferredSize(m_style);
+                        if (firstInSecondRow) {
+                            firstInSecondRow = false;
+                        } else {
+                            btnCursor.setX(btnCursor.x() + spacingBefore);
+                        }
                         el->setSize(sz);
                         if (haveContainer) {
                             if (auto *gi = el->graphicsItem()) {
@@ -799,7 +868,8 @@ void OverlayPanel::updateLabelsLayout() {
                         } else {
                             el->setPosition(m_currentPosition + btnCursor);
                         }
-                        btnCursor.setX(btnCursor.x() + sz.width() + m_style.itemSpacing);
+                        btnCursor.setX(btnCursor.x() + sz.width());
+                        spacingBefore = (el->spacingAfter() >= 0.0) ? el->spacingAfter() : m_style.itemSpacing;
                         rowMaxH = std::max(rowMaxH, sz.height());
                     }
                 }
@@ -810,11 +880,13 @@ void OverlayPanel::updateLabelsLayout() {
             for (auto &element : m_elements) {
                 if (element->type() == OverlayElement::RowBreak) {
                     // New row only if something placed in current row
-                    if (cursor.x() != origin.x()) {
-                        // advance to next row
+                    if (!firstInRow) {
                         origin.setY(origin.y() + currentRowMaxH + m_style.itemSpacing);
-                        cursor = QPointF(m_style.paddingX, origin.y());
+                        cursorX = m_style.paddingX;
+                        cursorY = origin.y();
                         currentRowMaxH = 0;
+                        pendingSpacing = 0.0;
+                        firstInRow = true;
                     }
                     continue;
                 }
@@ -826,16 +898,23 @@ void OverlayPanel::updateLabelsLayout() {
                     if (elementSize.width() > maxInner) elementSize.setWidth(maxInner);
                 }
                 element->setSize(elementSize);
+                if (!firstInRow) {
+                    const qreal spacing = pendingSpacing >= 0.0 ? pendingSpacing : m_style.itemSpacing;
+                    cursorX += spacing;
+                }
+                QPointF elementPos(cursorX, cursorY);
                 if (haveContainer) {
                     if (auto *gi = element->graphicsItem()) {
                         if (gi->parentItem() != m_background) gi->setParentItem(m_background);
                     }
-                    element->setPosition(cursor);
+                    element->setPosition(elementPos);
                 } else {
-                    element->setPosition(m_currentPosition + cursor);
+                    element->setPosition(m_currentPosition + elementPos);
                 }
-                cursor.setX(cursor.x() + elementSize.width() + m_style.itemSpacing);
+                cursorX += elementSize.width();
+                pendingSpacing = (element->spacingAfter() >= 0.0) ? element->spacingAfter() : m_style.itemSpacing;
                 currentRowMaxH = std::max(currentRowMaxH, elementSize.height());
+                firstInRow = false;
             }
         }
         // If we used the special two-row top layout, ensure final background rect and position reflect possibly updated m_currentSize while keeping anchor center.
