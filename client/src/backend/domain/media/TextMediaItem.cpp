@@ -1645,6 +1645,10 @@ void TextMediaItem::applyFontChange(const QFont& font) {
             inlineEditor->invalidateCache();
         }
     }
+
+    if (m_fitToTextEnabled) {
+        scheduleFitToTextUpdate();
+    }
 }
 
 void TextMediaItem::setHorizontalAlignment(HorizontalAlignment align) {
