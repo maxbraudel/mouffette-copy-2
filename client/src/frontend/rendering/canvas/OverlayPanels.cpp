@@ -159,14 +159,13 @@ OverlayButtonElement::OverlayButtonElement(const QString& label, const QString& 
     : OverlayElement(Button, id), m_label(label) {}
 
 OverlayButtonElement::~OverlayButtonElement() {
-    // Remove from scene first to avoid double-delete
-    if (m_background) {
-        if (auto* sc = m_background->scene()) {
-            sc->removeItem(m_background);
-        }
-        delete m_background;
-        m_background = nullptr;
-    }
+    // Graphics items are owned by their parent or scene - don't manually delete
+    // If m_background has a parent (the panel's background), it will be cleaned up automatically
+    // If it's in a scene with no parent, removing from scene is the element's responsibility
+    // but typically these are children of panel background, so no action needed
+    m_background = nullptr; // just null out the pointer
+    m_textItem = nullptr;
+    m_svgIcon = nullptr;
 }
 
 void OverlayButtonElement::createGraphicsItems() {
@@ -413,14 +412,12 @@ OverlaySliderElement::OverlaySliderElement(const QString& id)
     : OverlayElement(Slider, id) {}
 
 OverlaySliderElement::~OverlaySliderElement() {
-    // Remove from scene first to avoid double-delete
-    if (m_container) {
-        if (auto* sc = m_container->scene()) {
-            sc->removeItem(m_container);
-        }
-        delete m_container;
-        m_container = nullptr;
-    }
+    // Graphics items are owned by their parent or scene - don't manually delete
+    // All slider graphics (m_track, m_fill) are children of m_container
+    // m_container is child of panel background, so it will be cleaned up automatically
+    m_container = nullptr; // just null out the pointer
+    m_track = nullptr;
+    m_fill = nullptr;
 }
 
 void OverlaySliderElement::createGraphicsItems() {
@@ -572,10 +569,12 @@ OverlayPanel::OverlayPanel(Position position, Layout layout)
     : m_position(position), m_layout(layout) {}
 
 OverlayPanel::~OverlayPanel() {
-    // Clear elements first to destroy button/slider destructors before background
+    // Clear elements first so button/slider smart pointers release before we delete graphics items
+    // (this nulls out their raw pointers to graphics items before Qt deletes them)
     m_elements.clear();
     
-    // Now safely handle background cleanup
+    // Delete background - this automatically deletes all child graphics items (buttons, sliders, etc.)
+    // via Qt's parent-child ownership
     if (m_background) {
         if (auto* sc = m_background->scene()) {
             sc->removeItem(m_background);
@@ -773,13 +772,10 @@ void OverlayPanel::setScene(QGraphicsScene* scene) {
         scene->addItem(m_background);
     }
     
-    // Add any existing elements to the scene if they have no parent/scene
-    if (scene) {
-        for (auto& element : m_elements) {
-            QGraphicsItem* gi = element->graphicsItem();
-            if (gi && !gi->scene() && !gi->parentItem()) scene->addItem(gi);
-        }
-    }
+    // Element graphics items should be children of panel background, not added directly to scene
+    // They will be automatically added when background is added/parented
+    // No need to manually add them here anymore
+    
     // If scene just set and we have cached anchor+view and visible, relayout now
     if (m_scene && m_visible && m_hasLastAnchor && m_lastView) {
         updateLayoutWithAnchor(m_lastAnchorScenePoint, m_lastView);
