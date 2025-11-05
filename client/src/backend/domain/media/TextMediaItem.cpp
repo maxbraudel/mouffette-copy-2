@@ -1631,6 +1631,10 @@ void TextMediaItem::applyFontChange(const QFont& font) {
     m_cachedEditorPosValid = false;
     m_needsRasterization = true;
     m_scaledRasterDirty = true;
+    
+    // Don't clear the scaled raster immediately - let ensureScaledRaster handle the transition
+    // to avoid showing empty frames during font changes
+    
     update();
 
     handleContentPaddingChanged(oldPadding, newPadding);
@@ -2430,7 +2434,10 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
         return;
     }
 
-    if (m_isEditing) {
+    // Force synchronous rendering when editing or when font properties changed
+    // to prevent visual glitches from mismatched cached bitmaps
+    const bool fontPropertiesChanged = m_needsRasterization;
+    if (m_isEditing || fontPropertiesChanged) {
         ++m_rasterRequestId;
         m_pendingRasterRequestId = m_rasterRequestId;
         m_asyncRasterInProgress = false;
