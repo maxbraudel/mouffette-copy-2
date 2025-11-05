@@ -22,6 +22,8 @@ namespace TextMediaDefaults {
     extern const QFont::Weight FONT_WEIGHT;
     extern const int FONT_WEIGHT_VALUE;
     extern const bool FONT_ITALIC;
+    extern const bool FONT_UNDERLINE;
+    extern const bool FONT_ALL_CAPS;
     extern const QColor TEXT_COLOR;
     extern const qreal TEXT_BORDER_WIDTH_PERCENT;
     extern const QColor TEXT_BORDER_COLOR;
@@ -86,6 +88,13 @@ public:
     bool textFontWeightOverrideEnabled() const { return m_fontWeightOverrideEnabled; }
     void setTextFontWeightOverrideEnabled(bool enabled);
 
+    bool italicEnabled() const { return m_italicEnabled; }
+    void setItalicEnabled(bool enabled);
+    bool underlineEnabled() const { return m_underlineEnabled; }
+    void setUnderlineEnabled(bool enabled);
+    bool uppercaseEnabled() const { return m_uppercaseEnabled; }
+    void setUppercaseEnabled(bool enabled);
+
     qreal uniformScaleFactor() const { return m_uniformScaleFactor; }
     
     // Text alignment
@@ -131,6 +140,9 @@ private:
     void applyFontChange(const QFont& font);
     QString m_text;
     QFont m_font;
+    bool m_italicEnabled = TextMediaDefaults::FONT_ITALIC;
+    bool m_underlineEnabled = TextMediaDefaults::FONT_UNDERLINE;
+    bool m_uppercaseEnabled = TextMediaDefaults::FONT_ALL_CAPS;
     QColor m_textColor;
     bool m_textColorOverrideEnabled = false;
     qreal borderStrokeWidthPx() const;

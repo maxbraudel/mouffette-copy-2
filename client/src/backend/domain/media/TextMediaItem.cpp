@@ -55,6 +55,8 @@ namespace TextMediaDefaults {
     const QFont::Weight FONT_WEIGHT = QFont::Bold;
     const int FONT_WEIGHT_VALUE = 700; // Numeric weight (100-900 range)
     const bool FONT_ITALIC = false;
+    const bool FONT_UNDERLINE = false;
+    const bool FONT_ALL_CAPS = false;
     const QColor TEXT_COLOR = Qt::white;
     const qreal TEXT_BORDER_WIDTH_PERCENT = 0.0;
     const QColor TEXT_BORDER_COLOR = Qt::black;
@@ -1207,6 +1209,11 @@ TextMediaItem::TextMediaItem(
     
     m_font = QFont(selectedFamily, TextMediaDefaults::FONT_SIZE);
     m_font.setItalic(TextMediaDefaults::FONT_ITALIC);
+    m_font.setUnderline(TextMediaDefaults::FONT_UNDERLINE);
+    m_font.setCapitalization(TextMediaDefaults::FONT_ALL_CAPS ? QFont::AllUppercase : QFont::MixedCase);
+    m_italicEnabled = m_font.italic();
+    m_underlineEnabled = m_font.underline();
+    m_uppercaseEnabled = (m_font.capitalization() == QFont::AllUppercase);
     m_fontWeightValue = clampCssWeight(TextMediaDefaults::FONT_WEIGHT_VALUE);
     m_font = fontAdjustedForWeight(m_font, m_fontWeightValue);
     m_fontWeightValue = canonicalCssWeight(m_font);
@@ -1575,6 +1582,36 @@ void TextMediaItem::setTextFontWeightOverrideEnabled(bool enabled) {
     }
 }
 
+void TextMediaItem::setItalicEnabled(bool enabled) {
+    if (m_italicEnabled == enabled) {
+        return;
+    }
+    m_italicEnabled = enabled;
+    QFont updatedFont = m_font;
+    updatedFont.setItalic(enabled);
+    applyFontChange(updatedFont);
+}
+
+void TextMediaItem::setUnderlineEnabled(bool enabled) {
+    if (m_underlineEnabled == enabled) {
+        return;
+    }
+    m_underlineEnabled = enabled;
+    QFont updatedFont = m_font;
+    updatedFont.setUnderline(enabled);
+    applyFontChange(updatedFont);
+}
+
+void TextMediaItem::setUppercaseEnabled(bool enabled) {
+    if (m_uppercaseEnabled == enabled) {
+        return;
+    }
+    m_uppercaseEnabled = enabled;
+    QFont updatedFont = m_font;
+    updatedFont.setCapitalization(enabled ? QFont::AllUppercase : QFont::MixedCase);
+    applyFontChange(updatedFont);
+}
+
 void TextMediaItem::applyFontChange(const QFont& font) {
     // Don't skip update for fit-to-text mode since weight changes might not be detected by QFont equality
     const bool fontChanged = (m_font != font);
@@ -1584,6 +1621,9 @@ void TextMediaItem::applyFontChange(const QFont& font) {
 
     const qreal oldPadding = m_appliedContentPaddingPx;
     m_font = font;
+    m_italicEnabled = m_font.italic();
+    m_underlineEnabled = m_font.underline();
+    m_uppercaseEnabled = (m_font.capitalization() == QFont::AllUppercase);
     m_fontWeightValue = canonicalCssWeight(m_font);
     const qreal newPadding = contentPaddingPx();
 

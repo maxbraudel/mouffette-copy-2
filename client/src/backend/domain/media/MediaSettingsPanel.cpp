@@ -799,6 +799,51 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         QObject::connect(m_textFontWeightCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onTextFontWeightToggled);
         m_elementPropertiesLayout->addWidget(m_textFontWeightRow);
     }
+
+    {
+        m_textUnderlineRow = new QWidget(m_elementPropertiesContainer);
+        configureRow(m_textUnderlineRow);
+        auto* h = new QHBoxLayout(m_textUnderlineRow);
+        configureRowLayout(h);
+        m_textUnderlineCheck = new QCheckBox("Underline", m_textUnderlineRow);
+        m_textUnderlineCheck->setStyleSheet(overlayTextStyle);
+        m_textUnderlineCheck->installEventFilter(this);
+        m_textUnderlineCheck->setChecked(TextMediaDefaults::FONT_UNDERLINE);
+        h->addWidget(m_textUnderlineCheck);
+        h->addStretch();
+        QObject::connect(m_textUnderlineCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onTextUnderlineToggled);
+        m_elementPropertiesLayout->addWidget(m_textUnderlineRow);
+    }
+
+    {
+        m_textItalicRow = new QWidget(m_elementPropertiesContainer);
+        configureRow(m_textItalicRow);
+        auto* h = new QHBoxLayout(m_textItalicRow);
+        configureRowLayout(h);
+        m_textItalicCheck = new QCheckBox("Italic", m_textItalicRow);
+        m_textItalicCheck->setStyleSheet(overlayTextStyle);
+        m_textItalicCheck->installEventFilter(this);
+        m_textItalicCheck->setChecked(TextMediaDefaults::FONT_ITALIC);
+        h->addWidget(m_textItalicCheck);
+        h->addStretch();
+        QObject::connect(m_textItalicCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onTextItalicToggled);
+        m_elementPropertiesLayout->addWidget(m_textItalicRow);
+    }
+
+    {
+        m_textUppercaseRow = new QWidget(m_elementPropertiesContainer);
+        configureRow(m_textUppercaseRow);
+        auto* h = new QHBoxLayout(m_textUppercaseRow);
+        configureRowLayout(h);
+        m_textUppercaseCheck = new QCheckBox("Uppercase", m_textUppercaseRow);
+        m_textUppercaseCheck->setStyleSheet(overlayTextStyle);
+        m_textUppercaseCheck->installEventFilter(this);
+        m_textUppercaseCheck->setChecked(TextMediaDefaults::FONT_ALL_CAPS);
+        h->addWidget(m_textUppercaseCheck);
+        h->addStretch();
+        QObject::connect(m_textUppercaseCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onTextUppercaseToggled);
+        m_elementPropertiesLayout->addWidget(m_textUppercaseRow);
+    }
     
     // Configure widget dimensions and event handling
     m_widget->setMouseTracking(true);
@@ -1005,7 +1050,8 @@ void MediaSettingsPanel::updateSectionHeaderVisibility() {
     updateSection(m_elementAudioHeader, m_elementAudioSpacer, m_elementAudioHeaderGap,
                   {m_volumeRow, m_audioFadeInRow, m_audioFadeOutRow});
     updateSection(m_elementTextHeader, m_elementTextSpacer, m_elementTextHeaderGap,
-                  {m_textColorRow, m_textHighlightRow, m_textBorderWidthRow, m_textBorderColorRow, m_textFontWeightRow});
+                  {m_textColorRow, m_textHighlightRow, m_textBorderWidthRow, m_textBorderColorRow, m_textFontWeightRow,
+                   m_textUnderlineRow, m_textItalicRow, m_textUppercaseRow});
 
     if (m_sceneImageHeader) {
         m_sceneImageHeader->setVisible(true);
@@ -1156,6 +1202,15 @@ void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
     if (m_textFontWeightRow) {
         m_textFontWeightRow->setVisible(isTextMedia);
     }
+    if (m_textUnderlineRow) {
+        m_textUnderlineRow->setVisible(isTextMedia);
+    }
+    if (m_textItalicRow) {
+        m_textItalicRow->setVisible(isTextMedia);
+    }
+    if (m_textUppercaseRow) {
+        m_textUppercaseRow->setVisible(isTextMedia);
+    }
 
     if (m_textColorCheck) {
         m_textColorCheck->setEnabled(isTextMedia);
@@ -1195,6 +1250,30 @@ void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
             const bool prev = m_textFontWeightCheck->blockSignals(true);
             m_textFontWeightCheck->setChecked(false);
             m_textFontWeightCheck->blockSignals(prev);
+        }
+    }
+    if (m_textUnderlineCheck) {
+        m_textUnderlineCheck->setEnabled(isTextMedia);
+        if (!isTextMedia && m_textUnderlineCheck->isChecked() != TextMediaDefaults::FONT_UNDERLINE) {
+            const bool prev = m_textUnderlineCheck->blockSignals(true);
+            m_textUnderlineCheck->setChecked(TextMediaDefaults::FONT_UNDERLINE);
+            m_textUnderlineCheck->blockSignals(prev);
+        }
+    }
+    if (m_textItalicCheck) {
+        m_textItalicCheck->setEnabled(isTextMedia);
+        if (!isTextMedia && m_textItalicCheck->isChecked() != TextMediaDefaults::FONT_ITALIC) {
+            const bool prev = m_textItalicCheck->blockSignals(true);
+            m_textItalicCheck->setChecked(TextMediaDefaults::FONT_ITALIC);
+            m_textItalicCheck->blockSignals(prev);
+        }
+    }
+    if (m_textUppercaseCheck) {
+        m_textUppercaseCheck->setEnabled(isTextMedia);
+        if (!isTextMedia && m_textUppercaseCheck->isChecked() != TextMediaDefaults::FONT_ALL_CAPS) {
+            const bool prev = m_textUppercaseCheck->blockSignals(true);
+            m_textUppercaseCheck->setChecked(TextMediaDefaults::FONT_ALL_CAPS);
+            m_textUppercaseCheck->blockSignals(prev);
         }
     }
 
@@ -1254,6 +1333,9 @@ void MediaSettingsPanel::updateTextSectionVisibility(bool isTextMedia) {
     onTextBorderWidthToggled(isTextMedia && m_textBorderWidthCheck && m_textBorderWidthCheck->isChecked());
     onTextBorderColorToggled(m_textBorderColorCheck && m_textBorderColorCheck->isChecked());
     onTextFontWeightToggled(isTextMedia && m_textFontWeightCheck && m_textFontWeightCheck->isChecked());
+    onTextUnderlineToggled(isTextMedia && m_textUnderlineCheck && m_textUnderlineCheck->isChecked());
+    onTextItalicToggled(isTextMedia && m_textItalicCheck && m_textItalicCheck->isChecked());
+    onTextUppercaseToggled(isTextMedia && m_textUppercaseCheck && m_textUppercaseCheck->isChecked());
     m_updatingFromMedia = previousGuard;
 
     updateSectionHeaderVisibility();
@@ -2100,6 +2182,48 @@ void MediaSettingsPanel::onTextFontWeightToggled(bool checked) {
     }
 }
 
+void MediaSettingsPanel::onTextUnderlineToggled(bool checked) {
+    Q_UNUSED(checked);
+    const QString labelStyle = QStringLiteral("color: %1;")
+        .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
+
+    if (m_textUnderlineCheck) {
+        m_textUnderlineCheck->setStyleSheet(labelStyle);
+    }
+
+    if (!m_updatingFromMedia) {
+        pushSettingsToMedia();
+    }
+}
+
+void MediaSettingsPanel::onTextItalicToggled(bool checked) {
+    Q_UNUSED(checked);
+    const QString labelStyle = QStringLiteral("color: %1;")
+        .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
+
+    if (m_textItalicCheck) {
+        m_textItalicCheck->setStyleSheet(labelStyle);
+    }
+
+    if (!m_updatingFromMedia) {
+        pushSettingsToMedia();
+    }
+}
+
+void MediaSettingsPanel::onTextUppercaseToggled(bool checked) {
+    Q_UNUSED(checked);
+    const QString labelStyle = QStringLiteral("color: %1;")
+        .arg(AppColors::colorToCss(AppColors::gOverlayTextColor));
+
+    if (m_textUppercaseCheck) {
+        m_textUppercaseCheck->setStyleSheet(labelStyle);
+    }
+
+    if (!m_updatingFromMedia) {
+        pushSettingsToMedia();
+    }
+}
+
 double MediaSettingsPanel::fadeInSeconds() const {
     if (!m_fadeInCheck || !m_fadeInBox) return 0.0;
     if (!m_fadeInCheck->isChecked()) return 0.0;
@@ -2563,6 +2687,19 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
             applyCheckState(m_textFontWeightCheck, textItem->textFontWeightOverrideEnabled());
         }
         onTextFontWeightToggled(m_textFontWeightCheck && m_textFontWeightCheck->isChecked());
+
+        if (m_textUnderlineCheck) {
+            applyCheckState(m_textUnderlineCheck, textItem->underlineEnabled());
+        }
+        if (m_textItalicCheck) {
+            applyCheckState(m_textItalicCheck, textItem->italicEnabled());
+        }
+        if (m_textUppercaseCheck) {
+            applyCheckState(m_textUppercaseCheck, textItem->uppercaseEnabled());
+        }
+        onTextUnderlineToggled(m_textUnderlineCheck && m_textUnderlineCheck->isChecked());
+        onTextItalicToggled(m_textItalicCheck && m_textItalicCheck->isChecked());
+        onTextUppercaseToggled(m_textUppercaseCheck && m_textUppercaseCheck->isChecked());
     } else {
         if (m_textColorBox) {
             if (m_textColorCheck) {
@@ -2609,6 +2746,19 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
             applyCheckState(m_textFontWeightCheck, false);
         }
         onTextFontWeightToggled(false);
+
+        if (m_textUnderlineCheck) {
+            applyCheckState(m_textUnderlineCheck, TextMediaDefaults::FONT_UNDERLINE);
+        }
+        if (m_textItalicCheck) {
+            applyCheckState(m_textItalicCheck, TextMediaDefaults::FONT_ITALIC);
+        }
+        if (m_textUppercaseCheck) {
+            applyCheckState(m_textUppercaseCheck, TextMediaDefaults::FONT_ALL_CAPS);
+        }
+        onTextUnderlineToggled(TextMediaDefaults::FONT_UNDERLINE);
+        onTextItalicToggled(TextMediaDefaults::FONT_ITALIC);
+        onTextUppercaseToggled(TextMediaDefaults::FONT_ALL_CAPS);
     }
 
     // Re-run UI interlock logic without persisting back to the media item
@@ -2820,6 +2970,16 @@ void MediaSettingsPanel::pushSettingsToMedia() {
                     textItem->setTextBorderColor(color);
                 }
             }
+        }
+
+        if (m_textUnderlineCheck) {
+            textItem->setUnderlineEnabled(m_textUnderlineCheck->isChecked());
+        }
+        if (m_textItalicCheck) {
+            textItem->setItalicEnabled(m_textItalicCheck->isChecked());
+        }
+        if (m_textUppercaseCheck) {
+            textItem->setUppercaseEnabled(m_textUppercaseCheck->isChecked());
         }
 
         if (m_textFontWeightCheck) {

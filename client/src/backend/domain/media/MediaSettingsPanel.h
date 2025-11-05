@@ -65,6 +65,9 @@ private slots:
     void onTextHighlightToggled(bool checked);
     void onTextHighlightColorBoxClicked();
     void onTextFontWeightToggled(bool checked);
+    void onTextUnderlineToggled(bool checked);
+    void onTextItalicToggled(bool checked);
+    void onTextUppercaseToggled(bool checked);
     void onSceneTabClicked();
     void onElementTabClicked();
 
@@ -211,6 +214,12 @@ private:
     QCheckBox* m_textFontWeightCheck = nullptr;
     QLabel* m_textFontWeightBox = nullptr;
     QWidget* m_textFontWeightRow = nullptr;
+    QCheckBox* m_textUnderlineCheck = nullptr;
+    QWidget* m_textUnderlineRow = nullptr;
+    QCheckBox* m_textItalicCheck = nullptr;
+    QWidget* m_textItalicRow = nullptr;
+    QCheckBox* m_textUppercaseCheck = nullptr;
+    QWidget* m_textUppercaseRow = nullptr;
     
     class ResizableMediaBase* m_mediaItem = nullptr; // not owning
 };
