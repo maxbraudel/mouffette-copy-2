@@ -746,6 +746,50 @@ void OverlayPanel::addStandardVideoControls(const VideoControlCallbacks& callbac
     }
 }
 
+void OverlayPanel::addStandardMediaOverlayButtons(const MediaOverlayCallbacks& callbacks, bool initiallyVisible) {
+    // Visibility toggle button (toggle type)
+    auto visibilityBtn = addButton(QString(), QStringLiteral("visibility_toggle"));
+    if (visibilityBtn) {
+        visibilityBtn->setSvgIcon(initiallyVisible ? ":/icons/icons/visibility-on.svg" : ":/icons/icons/visibility-off.svg");
+        visibilityBtn->setToggleOnly(true);
+        visibilityBtn->setState(initiallyVisible ? OverlayElement::Toggled : OverlayElement::Normal);
+        if (callbacks.onVisibilityToggle) {
+            visibilityBtn->setOnClicked([callbacks, visibilityBtn]() {
+                const bool nowVisible = (visibilityBtn->state() == OverlayElement::Toggled);
+                // Toggle state
+                const bool newVisible = !nowVisible;
+                visibilityBtn->setState(newVisible ? OverlayElement::Toggled : OverlayElement::Normal);
+                visibilityBtn->setSvgIcon(newVisible ? ":/icons/icons/visibility-on.svg" : ":/icons/icons/visibility-off.svg");
+                callbacks.onVisibilityToggle(newVisible);
+            });
+        }
+    }
+
+    // Bring forward button (press type)
+    auto bringForwardBtn = addButton(QString(), QStringLiteral("bring_forward"));
+    if (bringForwardBtn) {
+        bringForwardBtn->setSvgIcon(":/icons/icons/arrow-up.svg");
+        bringForwardBtn->setToggleOnly(false);
+        if (callbacks.onBringForward) bringForwardBtn->setOnClicked(callbacks.onBringForward);
+    }
+
+    // Bring backward button (press type)
+    auto bringBackwardBtn = addButton(QString(), QStringLiteral("bring_backward"));
+    if (bringBackwardBtn) {
+        bringBackwardBtn->setSvgIcon(":/icons/icons/arrow-down.svg");
+        bringBackwardBtn->setToggleOnly(false);
+        if (callbacks.onBringBackward) bringBackwardBtn->setOnClicked(callbacks.onBringBackward);
+    }
+
+    // Delete button (press type)
+    auto deleteBtn = addButton(QString(), QStringLiteral("delete_media"));
+    if (deleteBtn) {
+        deleteBtn->setSvgIcon(":/icons/icons/delete.svg");
+        deleteBtn->setToggleOnly(false);
+        if (callbacks.onDelete) deleteBtn->setOnClicked(callbacks.onDelete);
+    }
+}
+
 // (Legacy label management removed)
 
 void OverlayPanel::setVisible(bool visible) {

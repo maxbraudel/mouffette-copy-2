@@ -370,6 +370,16 @@ public:
     };
     void addStandardVideoControls(const VideoControlCallbacks& callbacks);
     
+    // Factory: standard media overlay buttons (visibility toggle, bring forward/back, delete)
+    // Callbacks: onVisibilityToggle, onBringForward, onBringBackward, onDelete
+    struct MediaOverlayCallbacks {
+        std::function<void(bool visible)> onVisibilityToggle; // receives new visible state
+        std::function<void()> onBringForward;
+        std::function<void()> onBringBackward;
+        std::function<void()> onDelete;
+    };
+    void addStandardMediaOverlayButtons(const MediaOverlayCallbacks& callbacks, bool initiallyVisible = true);
+    
     const QList<std::shared_ptr<OverlayElement>>& elements() const { return m_elements; }
     // Visibility
     bool isVisible() const { return m_visible; }

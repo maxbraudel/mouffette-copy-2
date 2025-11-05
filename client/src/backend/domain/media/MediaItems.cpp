@@ -961,44 +961,32 @@ qreal ResizableMediaBase::toItemLengthFromPixels(int px) const {
 void ResizableMediaBase::initializeOverlays() {
     m_overlayStyle.cornerRadius = getCornerRadiusOfMediaOverlaysPx();
     if (getHeightOfMediaOverlaysPx() > 0) m_overlayStyle.defaultHeight = getHeightOfMediaOverlaysPx();
-    m_topPanel = std::make_unique<OverlayPanel>(OverlayPanel::Top); m_topPanel->setStyle(m_overlayStyle);
+    m_topPanel = std::make_unique<OverlayPanel>(OverlayPanel::Top);
+    m_topPanel->setStyle(m_overlayStyle);
+    
     if (!m_filename.isEmpty()) {
-    auto filenameElement = std::make_shared<OverlayTextElement>(m_filename, "filename");
-    filenameElement->setMaxWidthPx(gOverlayFilenameMaxWidthPx);
+        // Add filename label
+        auto filenameElement = std::make_shared<OverlayTextElement>(m_filename, "filename");
+        filenameElement->setMaxWidthPx(gOverlayFilenameMaxWidthPx);
         m_topPanel->addElement(filenameElement);
-        // Insert an explicit row break so buttons are laid out on a second row below the filename.
-        // Subsequent layout logic in OverlayPanel ensures the first row (filename) is widened
-        // to match the exact width of the buttons row for a clean vertical stack.
+        
+        // Insert row break so buttons appear on second row below filename
         m_topPanel->newRow();
         
-        // Add visibility toggle button (content visibility only)
-        auto visibilityBtn = std::make_shared<OverlayButtonElement>(QString(), "visibility_toggle");
-        visibilityBtn->setSvgIcon(":/icons/icons/visibility-on.svg"); // start visible
-        visibilityBtn->setToggleOnly(true);
-        visibilityBtn->setState(OverlayElement::Toggled); // initial: visible ON
-        visibilityBtn->setOnClicked([this, btnRef=visibilityBtn]() {
-            if (!btnRef) return;
-            const bool currentlyVisible = (btnRef->state() == OverlayElement::Toggled);
+        // Add standard media overlay buttons using factory
+        OverlayPanel::MediaOverlayCallbacks callbacks;
+        
+        callbacks.onVisibilityToggle = [this](bool visible) {
             // Retrieve fade parameters from per-media settings
             const double fadeInSeconds = fadeInDurationSeconds();
             const double fadeOutSeconds = fadeOutDurationSeconds();
-            // Always cancel any in-flight fade before starting a new transition or applying an instant change
+            
+            // Always cancel any in-flight fade before starting a new transition
             cancelFade();
-            if (currentlyVisible) {
-                // Switch to hidden using fade out if configured
-                if (fadeOutSeconds > 0.0) {
-                    fadeContentOut(fadeOutSeconds);
-                } else {
-                    setContentVisible(false);
-                    m_contentDisplayOpacity = 0.0;
-                    update();
-                }
-                btnRef->setState(OverlayElement::Normal);
-                btnRef->setSvgIcon(":/icons/icons/visibility-off.svg");
-            } else {
+            
+            if (visible) {
                 // Switch to visible using fade in if configured
                 if (fadeInSeconds > 0.0) {
-                    // Start from 0 for a consistent fade-in if currently fully hidden
                     if (m_contentDisplayOpacity <= 0.0) m_contentDisplayOpacity = 0.0;
                     setContentVisible(true);
                     fadeContentIn(fadeInSeconds);
@@ -1007,46 +995,35 @@ void ResizableMediaBase::initializeOverlays() {
                     m_contentDisplayOpacity = 1.0;
                     update();
                 }
-                btnRef->setState(OverlayElement::Toggled);
-                btnRef->setSvgIcon(":/icons/icons/visibility-on.svg");
+            } else {
+                // Switch to hidden using fade out if configured
+                if (fadeOutSeconds > 0.0) {
+                    fadeContentOut(fadeOutSeconds);
+                } else {
+                    setContentVisible(false);
+                    m_contentDisplayOpacity = 0.0;
+                    update();
+                }
             }
-        });
-        m_topPanel->addElement(visibilityBtn);
+        };
         
-        // Add bring forward button (Z-order up)
-        auto bringForwardBtn = std::make_shared<OverlayButtonElement>(QString(), "bring_forward");
-        bringForwardBtn->setSvgIcon(":/icons/icons/arrow-up.svg");
-        bringForwardBtn->setToggleOnly(false); // Simple button, not a toggle
-        bringForwardBtn->setState(OverlayElement::Normal);
-        bringForwardBtn->setOnClicked([this]() {
+        callbacks.onBringForward = [this]() {
             if (scene() && !scene()->views().isEmpty()) {
                 if (auto* screenCanvas = qobject_cast<ScreenCanvas*>(scene()->views().first())) {
                     screenCanvas->moveMediaUp(this);
                 }
             }
-        });
-        m_topPanel->addElement(bringForwardBtn);
+        };
         
-        // Add bring backward button (Z-order down)
-        auto bringBackwardBtn = std::make_shared<OverlayButtonElement>(QString(), "bring_backward");
-        bringBackwardBtn->setSvgIcon(":/icons/icons/arrow-down.svg");
-        bringBackwardBtn->setToggleOnly(false); // Simple button, not a toggle
-        bringBackwardBtn->setState(OverlayElement::Normal);
-        bringBackwardBtn->setOnClicked([this]() {
+        callbacks.onBringBackward = [this]() {
             if (scene() && !scene()->views().isEmpty()) {
                 if (auto* screenCanvas = qobject_cast<ScreenCanvas*>(scene()->views().first())) {
                     screenCanvas->moveMediaDown(this);
                 }
             }
-        });
-        m_topPanel->addElement(bringBackwardBtn);
-
-        // Add delete button (remove media)
-        auto deleteBtn = std::make_shared<OverlayButtonElement>(QString(), "delete_media");
-        deleteBtn->setSvgIcon(":/icons/icons/delete.svg");
-        deleteBtn->setToggleOnly(false);
-        deleteBtn->setState(OverlayElement::Normal);
-        deleteBtn->setOnClicked([this]() {
+        };
+        
+        callbacks.onDelete = [this]() {
             if (scene() && !scene()->views().isEmpty()) {
                 if (auto* screenCanvas = qobject_cast<ScreenCanvas*>(scene()->views().first())) {
                     ScreenCanvas::requestMediaDeletion(screenCanvas, this);
@@ -1058,8 +1035,9 @@ void ResizableMediaBase::initializeOverlays() {
             prepareForDeletion();
             if (scene()) scene()->removeItem(this);
             delete this;
-        });
-        m_topPanel->addElement(deleteBtn);
+        };
+        
+        m_topPanel->addStandardMediaOverlayButtons(callbacks, true);
     }
 }
 
