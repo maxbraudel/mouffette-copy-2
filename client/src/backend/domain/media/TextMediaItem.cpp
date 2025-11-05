@@ -536,6 +536,10 @@ QImage TextRasterJob::execute() const {
                         linePath.addPath(glyphPath.translated(glyphPos));
                     }
                 }
+
+                if (!linePath.isEmpty()) {
+                    linePath.translate(lineOffsetX, 0.0);
+                }
                 
                 imagePainter.save();
                 imagePainter.setPen(QPen(outColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
