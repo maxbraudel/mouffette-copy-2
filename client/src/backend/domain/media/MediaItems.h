@@ -379,6 +379,12 @@ private:
     void finalizeAudioFade(bool targetMuted);
     void ensureControlsPanel();
     void updateControlsVisualState();
+    void startWarmup();
+    void finishWarmup(bool forceImmediate);
+    void startWarmupKeepAlive();
+    void stopWarmupKeepAlive();
+    void handleWarmupKeepAlive();
+    void performWarmupPulse();
 
     qreal baseWidth() const { return static_cast<qreal>(m_baseSize.width()); }
     qreal baseHeight() const { return static_cast<qreal>(m_baseSize.height()); }
@@ -391,8 +397,10 @@ private:
     qint64 m_lastFrameTimestampMs = -1;
     qint64 m_durationMs = 0;
     qint64 m_positionMs = 0;
-    bool m_primingFirstFrame = false;
     bool m_firstFramePrimed = false;
+    bool m_warmupActive = false;
+    bool m_warmupFrameCaptured = false;
+    qint64 m_warmupTargetPositionMs = 0;
     bool m_savedMuted = false;
     bool m_effectiveMuted = false;
     bool m_pendingMuteTarget = false;
@@ -424,5 +432,8 @@ private:
     bool m_settingsRepeatSessionActive = false;
     bool m_volumeChangeFromSettings = false;
     bool m_displaySizeLocked = false; // When true, prevent frame dimensions from overriding display size
+    QTimer* m_warmupKeepAliveTimer = nullptr;
+    qint64 m_lastWarmupCompletionMs = 0;
+    bool m_keepAlivePulseActive = false;
 };
 
