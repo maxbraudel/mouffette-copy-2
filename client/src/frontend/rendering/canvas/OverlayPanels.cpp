@@ -380,7 +380,6 @@ public:
         : MouseBlockingRectItem(), m_owner(owner) {
         setAcceptedMouseButtons(Qt::LeftButton);
         setAcceptHoverEvents(true);
-        setCursor(Qt::PointingHandCursor);
     }
 
 protected:
@@ -460,7 +459,7 @@ void OverlaySliderElement::applyStyle(const OverlayStyle& style) {
     }
     if (m_fill) {
         // Use stronger tint depending on state (e.g., Active brighter)
-        QColor fillColor = AppColors::gOverlayActiveBackgroundColor;
+        QColor fillColor = AppColors::gOverlayActiveSliderFillColor;
         if (state() == OverlayElement::Disabled) {
             fillColor = AppColors::gOverlayBackgroundColor;
         }

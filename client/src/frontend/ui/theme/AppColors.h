@@ -130,6 +130,7 @@ extern QColor gLaunchTestScenePressed;
 
 extern QColor gOverlayBackgroundColor;       // Semi-transparent overlay background
 extern QColor gOverlayActiveBackgroundColor; // Active overlay background
+extern QColor gOverlayActiveSliderFillColor; // Brighter fill color for sliders
 extern QColor gOverlayTextColor;             // Overlay text color
 extern QColor gOverlayBorderColor;           // Overlay border color
 
