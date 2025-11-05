@@ -2909,7 +2909,6 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
             const QPointF scenePosEarly = mapToScene(event->pos());
             const QList<QGraphicsItem*> selEarly = m_scene->selectedItems();
             for (QGraphicsItem* it : selEarly) if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) { if (v->handleControlsPressAtItemPos(v->mapFromScene(scenePosEarly))) { m_overlayMouseDown = true; event->accept(); return; } }
-            for (QGraphicsItem* it : selEarly) if (auto* t = dynamic_cast<TextMediaItem*>(it)) { if (t->handleAlignmentControlsPressAtItemPos(t->mapFromScene(scenePosEarly))) { m_overlayMouseDown = true; event->accept(); return; } }
         }
         // Space+drag always pans
         if (spaceHeld) { m_panning = true; m_lastPanPoint = event->pos(); event->accept(); return; }

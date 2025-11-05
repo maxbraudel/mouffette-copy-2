@@ -126,7 +126,6 @@ public:
     bool isTextMedia() const override { return true; }
     
     // Alignment controls interaction (called by canvas, similar to video controls)
-    bool handleAlignmentControlsPressAtItemPos(const QPointF& itemPos);
     void refreshAlignmentControlsLayout();
     void syncInlineEditorToBaseSize();
 
@@ -216,15 +215,6 @@ private:
     QGraphicsSvgItem* m_alignTopIcon = nullptr;
     QGraphicsSvgItem* m_alignCenterVIcon = nullptr;
     QGraphicsSvgItem* m_alignBottomIcon = nullptr;
-    
-    // Button hit test rectangles in item coordinates (similar to video controls)
-    QRectF m_alignLeftBtnRect;
-    QRectF m_alignCenterHBtnRect;
-    QRectF m_alignRightBtnRect;
-    QRectF m_alignTopBtnRect;
-    QRectF m_alignCenterVBtnRect;
-    QRectF m_alignBottomBtnRect;
-    QRectF m_fitToTextBtnRect;
     
     void ensureInlineEditor();
     void updateInlineEditorGeometry();

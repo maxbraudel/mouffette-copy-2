@@ -5,7 +5,10 @@
 #include <QPainterPath>
 #include <QRectF>
 #include <QPainter>
+#include <QGraphicsSceneMouseEvent>
+#include <QGraphicsSceneHoverEvent>
 #include <algorithm>
+#include <functional>
 
 /**
  * A graphics item for creating segmented/fused button groups with individual corner control.
@@ -21,7 +24,10 @@ public:
     };
     
     explicit SegmentedButtonItem(Segment segment, QGraphicsItem* parent = nullptr)
-        : QGraphicsPathItem(parent), m_segment(segment), m_radius(0.0) {}
+        : QGraphicsPathItem(parent), m_segment(segment), m_radius(0.0) {
+        setAcceptedMouseButtons(Qt::LeftButton);
+        setAcceptHoverEvents(true);
+    }
     
     void setRect(const QRectF& r) { 
         m_rect = r; 
@@ -47,6 +53,66 @@ public:
     
     Segment segment() const {
         return m_segment;
+    }
+
+    void setClickCallback(std::function<void()> callback) { m_clickCallback = std::move(callback); }
+    void setPressCallback(std::function<void(bool)> callback) { m_pressCallback = std::move(callback); }
+    void setHoverCallback(std::function<void(bool)> callback) { m_hoverCallback = std::move(callback); }
+
+protected:
+    void mousePressEvent(QGraphicsSceneMouseEvent* event) override {
+        if (event->button() != Qt::LeftButton) {
+            QGraphicsPathItem::mousePressEvent(event);
+            return;
+        }
+        event->accept();
+        m_pressActive = true;
+        if (m_pressCallback) {
+            m_pressCallback(true);
+        }
+    }
+
+    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent* event) override {
+        if (event->button() != Qt::LeftButton) {
+            QGraphicsPathItem::mouseDoubleClickEvent(event);
+            return;
+        }
+        event->accept();
+        m_pressActive = true;
+        if (m_pressCallback) {
+            m_pressCallback(true);
+        }
+    }
+
+    void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override {
+        if (!m_pressActive || event->button() != Qt::LeftButton) {
+            QGraphicsPathItem::mouseReleaseEvent(event);
+            return;
+        }
+
+        const bool inside = shape().contains(event->pos());
+        event->accept();
+        if (m_pressCallback) {
+            m_pressCallback(false);
+        }
+        if (inside && m_clickCallback) {
+            m_clickCallback();
+        }
+        m_pressActive = false;
+    }
+
+    void hoverEnterEvent(QGraphicsSceneHoverEvent* event) override {
+        event->accept();
+        if (m_hoverCallback) {
+            m_hoverCallback(true);
+        }
+    }
+
+    void hoverLeaveEvent(QGraphicsSceneHoverEvent* event) override {
+        event->accept();
+        if (m_hoverCallback) {
+            m_hoverCallback(false);
+        }
     }
 
 private:
@@ -115,6 +181,10 @@ private:
     QRectF m_rect;
     qreal  m_radius;
     Segment m_segment;
+    bool m_pressActive = false;
+    std::function<void()> m_clickCallback;
+    std::function<void(bool)> m_pressCallback;
+    std::function<void(bool)> m_hoverCallback;
 };
 
 #endif // SEGMENTEDBUTTONITEM_H
