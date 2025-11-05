@@ -587,7 +587,7 @@ OverlayPanel::~OverlayPanel() {
 void OverlayPanel::setLayout(Layout layout) {
     if (m_layout != layout) {
         m_layout = layout;
-        updateLabelsLayout();
+        updateElementsLayout();
     }
 }
 
@@ -632,7 +632,7 @@ void OverlayPanel::addElement(std::shared_ptr<OverlayElement> element) {
     }
     
     // Recompute layout (size + child positions) if we already know view anchor later
-    updateLabelsLayout();
+    updateElementsLayout();
 }
 
 // Convenience helpers -------------------------------------------------------
@@ -665,19 +665,19 @@ void OverlayPanel::removeElement(const QString& id) {
                           });
     if (it != m_elements.end()) {
         m_elements.erase(it);
-        updateLabelsLayout();
+        updateElementsLayout();
     }
 }
 
 void OverlayPanel::removeElement(std::shared_ptr<OverlayElement> element) {
     if (m_elements.removeOne(element)) {
-        updateLabelsLayout();
+        updateElementsLayout();
     }
 }
 
 void OverlayPanel::clearElements() {
     m_elements.clear();
-    updateLabelsLayout();
+    updateElementsLayout();
 }
 
 std::shared_ptr<OverlayElement> OverlayPanel::findElement(const QString& id) const {
@@ -790,8 +790,6 @@ void OverlayPanel::addStandardMediaOverlayButtons(const MediaOverlayCallbacks& c
     }
 }
 
-// (Legacy label management removed)
-
 void OverlayPanel::setVisible(bool visible) {
     if (m_visible == visible) return;
     m_visible = visible;
@@ -854,7 +852,7 @@ void OverlayPanel::updateLayoutWithAnchor(const QPointF& anchorScenePoint, QGrap
         m_backgroundVisible = (m_position != Top);
     }
     updateBackground();
-    updateLabelsLayout();
+    updateElementsLayout();
 }
 
 
@@ -945,7 +943,7 @@ void OverlayPanel::updateBackground() {
     m_background->setPos(m_currentPosition);
 }
 
-void OverlayPanel::updateLabelsLayout() {
+void OverlayPanel::updateElementsLayout() {
     if (m_elements.isEmpty()) return;
     const bool haveContainer = (m_background != nullptr);
     if (m_layout == Vertical) {

@@ -402,7 +402,7 @@ public:
 private:
     void createBackground();
     void updateBackground();
-    void updateLabelsLayout(); // positions child elements (name retained for continuity)
+    void updateElementsLayout(); // positions child elements
     QPointF calculatePanelPositionFromAnchor(const QPointF& anchorScenePoint, QGraphicsView* view) const;
     Position m_position;
     Layout m_layout;
