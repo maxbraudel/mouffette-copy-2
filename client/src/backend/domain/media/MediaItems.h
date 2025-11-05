@@ -313,8 +313,6 @@ public:
     void setExternalPosterImage(const QImage& img);
     bool isDraggingProgress() const { return m_draggingProgress; }
     bool isDraggingVolume() const { return m_draggingVolume; }
-    void updateDragWithScenePos(const QPointF& scenePos);
-    void endDrag();
     void requestOverlayRelayout() { updateControlsLayout(); }
     void setApplicationSuspended(bool suspended);
     QMediaPlayer* mediaPlayer() const { return m_player; }
@@ -325,8 +323,6 @@ public:
     void getFrameStats(int& received, int& processed, int& skipped) const;
     void getFrameStatsExtended(int& received, int& processed, int& skipped, int& dropped, int& conversionFailures) const;
     void resetFrameStats();
-    bool handleControlsPressAtItemPos(const QPointF& itemPos); // view-level forwarding
-
     // Audio state accessors for scene serialization
     bool isMuted() const { return m_effectiveMuted; }
     qreal volume() const { return m_userVolumeRatio; }
@@ -381,6 +377,8 @@ private:
     void stopAudioFadeAnimation(bool resetVolumeGuard);
     void startAudioFade(qreal startVolume, qreal endVolume, double durationSeconds, bool targetMuted);
     void finalizeAudioFade(bool targetMuted);
+    void ensureControlsPanel();
+    void updateControlsVisualState();
 
     qreal baseWidth() const { return static_cast<qreal>(m_baseSize.width()); }
     qreal baseHeight() const { return static_cast<qreal>(m_baseSize.height()); }
@@ -405,15 +403,14 @@ private:
     qreal m_lastUserVolumeBeforeMute = 1.0;
     qreal m_userVolumeRatio = 1.0;
     QImage m_posterImage; bool m_posterImageSet = false;
-    QGraphicsRectItem* m_controlsBg = nullptr;
-    RoundedRectItem* m_playBtnRectItem = nullptr; QGraphicsSvgItem* m_playIcon = nullptr; QGraphicsSvgItem* m_pauseIcon = nullptr;
-    RoundedRectItem* m_stopBtnRectItem = nullptr; QGraphicsSvgItem* m_stopIcon = nullptr;
-    RoundedRectItem* m_repeatBtnRectItem = nullptr; QGraphicsSvgItem* m_repeatIcon = nullptr;
-    RoundedRectItem* m_muteBtnRectItem = nullptr; QGraphicsSvgItem* m_muteIcon = nullptr; QGraphicsSvgItem* m_muteSlashIcon = nullptr;
-    QGraphicsRectItem* m_volumeBgRectItem = nullptr; QGraphicsRectItem* m_volumeFillRectItem = nullptr;
-    QGraphicsRectItem* m_progressBgRectItem = nullptr; QGraphicsRectItem* m_progressFillRectItem = nullptr;
+    std::unique_ptr<OverlayPanel> m_controlsPanel;
+    std::shared_ptr<OverlayButtonElement> m_playPauseButton;
+    std::shared_ptr<OverlayButtonElement> m_stopButton;
+    std::shared_ptr<OverlayButtonElement> m_repeatButton;
+    std::shared_ptr<OverlayButtonElement> m_muteButton;
+    std::shared_ptr<OverlaySliderElement> m_volumeSlider;
+    std::shared_ptr<OverlaySliderElement> m_progressSlider;
     bool m_adoptedSize = false; qreal m_initialScaleFactor = 1.0;
-    QRectF m_playBtnRectItemCoords; QRectF m_stopBtnRectItemCoords; QRectF m_repeatBtnRectItemCoords; QRectF m_muteBtnRectItemCoords; QRectF m_volumeRectItemCoords; QRectF m_progRectItemCoords;
     bool m_repeatEnabled = false;
     bool m_draggingProgress = false; bool m_draggingVolume = false; bool m_holdLastFrameAtEnd = false;
     QTimer* m_progressTimer = nullptr; qreal m_smoothProgressRatio = 0.0; bool m_seeking = false;

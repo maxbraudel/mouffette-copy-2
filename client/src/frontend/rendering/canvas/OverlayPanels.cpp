@@ -366,6 +366,40 @@ void OverlayButtonElement::applySegmentCorners() {
 // OverlaySliderElement Implementation (horizontal track/fill)
 // ============================================================================
 
+class OverlaySliderElement::SliderHandleItem : public MouseBlockingRectItem {
+public:
+    explicit SliderHandleItem(OverlaySliderElement* owner)
+        : MouseBlockingRectItem(), m_owner(owner) {
+        setAcceptedMouseButtons(Qt::LeftButton);
+        setAcceptHoverEvents(true);
+        setCursor(Qt::PointingHandCursor);
+    }
+
+protected:
+    void mousePressEvent(QGraphicsSceneMouseEvent* event) override {
+        MouseBlockingRectItem::mousePressEvent(event);
+        if (!m_owner || event->button() != Qt::LeftButton) return;
+        m_owner->beginInteraction(event->pos());
+    }
+
+    void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override {
+        event->accept();
+        if (!m_owner) return;
+        if (event->buttons() & Qt::LeftButton) {
+            m_owner->continueInteraction(event->pos());
+        }
+    }
+
+    void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override {
+        MouseBlockingRectItem::mouseReleaseEvent(event);
+        if (!m_owner || event->button() != Qt::LeftButton) return;
+        m_owner->endInteraction(event->pos());
+    }
+
+private:
+    OverlaySliderElement* m_owner = nullptr;
+};
+
 OverlaySliderElement::OverlaySliderElement(const QString& id)
     : OverlayElement(Slider, id) {}
 
@@ -373,7 +407,7 @@ OverlaySliderElement::~OverlaySliderElement() { delete m_container; }
 
 void OverlaySliderElement::createGraphicsItems() {
     if (m_container) return;
-    m_container = new MouseBlockingRectItem();
+    m_container = new SliderHandleItem(this);
     m_container->setPen(Qt::NoPen);
     m_container->setBrush(Qt::NoBrush); // transparent container
     m_container->setZValue(Z_SCENE_OVERLAY);
@@ -386,32 +420,37 @@ void OverlaySliderElement::createGraphicsItems() {
     m_track->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
     m_track->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     m_track->setData(0, QStringLiteral("overlay"));
+    m_track->setAcceptedMouseButtons(Qt::NoButton);
+    m_track->setAcceptHoverEvents(false);
 
     m_fill = new MouseBlockingRoundedRectItem(m_container);
     m_fill->setPen(Qt::NoPen);
     m_fill->setCacheMode(QGraphicsItem::DeviceCoordinateCache);
     m_fill->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     m_fill->setData(0, QStringLiteral("overlay"));
+    m_fill->setAcceptedMouseButtons(Qt::NoButton);
+    m_fill->setAcceptHoverEvents(false);
+}
+
+QGraphicsItem* OverlaySliderElement::graphicsItem() {
+    return m_container;
 }
 
 void OverlaySliderElement::applyStyle(const OverlayStyle& style) {
     m_currentStyle = style;
     createGraphicsItems();
     if (m_track) {
-        QColor trackColor = AppColors::gOverlayBackgroundColor;
-        trackColor.setAlphaF(std::min(1.0, trackColor.alphaF() * 0.55)); // lighter track
-        m_track->setBrush(trackColor);
-        m_track->setRadius(style.cornerRadius);
+        m_track->setBrush(buttonBrushForState(style, OverlayElement::Normal));
+        m_track->setRadius(0.0); // Rectangular, no border radius
     }
     if (m_fill) {
         // Use stronger tint depending on state (e.g., Active brighter)
-        qreal t = 0.6;
-        if (state() == OverlayElement::Hovered) t = 0.7;
-        else if (state() == OverlayElement::Active) t = 0.85;
-        else if (state() == OverlayElement::Disabled) t = 0.25;
-        else if (state() == OverlayElement::Toggled) t = 0.9;
-        m_fill->setBrush(style.tintedBackgroundBrush(t));
-        m_fill->setRadius(style.cornerRadius);
+        QColor fillColor = AppColors::gOverlayActiveBackgroundColor;
+        if (state() == OverlayElement::Disabled) {
+            fillColor = AppColors::gOverlayBackgroundColor;
+        }
+        m_fill->setBrush(fillColor);
+        m_fill->setRadius(0.0); // Rectangular, no border radius
     }
 }
 
@@ -426,10 +465,8 @@ void OverlaySliderElement::setSize(const QSizeF& size) {
     createGraphicsItems();
     if (!m_container) return;
     m_container->setRect(0,0,size.width(), size.height());
-    // Track occupies full height minus vertical padding fraction (use paddingY to inset slightly)
-    qreal insetY = std::min<qreal>(m_currentStyle.paddingY, size.height()/4.0);
-    qreal trackH = size.height() - 2*insetY;
-    m_trackRect = QRectF(0, insetY, size.width(), trackH);
+    // Use full height to match button height - no vertical inset
+    m_trackRect = QRectF(0, 0, size.width(), size.height());
     if (m_track) m_track->setRect(m_trackRect);
     updateFill();
 }
@@ -458,6 +495,15 @@ void OverlaySliderElement::setValue(qreal v) {
     updateFill();
 }
 
+void OverlaySliderElement::setInteractionCallbacks(std::function<void(qreal)> onBegin,
+                                                   std::function<void(qreal)> onUpdate,
+                                                   std::function<void(qreal)> onEnd) {
+    m_onBegin = std::move(onBegin);
+    m_onUpdate = std::move(onUpdate);
+    m_onEnd = std::move(onEnd);
+    createGraphicsItems();
+}
+
 // Provide state updates for slider (mainly affects fill tint)
 void OverlaySliderElement::setState(ElementState s) {
     if (state() == s) return;
@@ -466,6 +512,38 @@ void OverlaySliderElement::setState(ElementState s) {
     applyStyle(m_currentStyle);
     // Preserve geometry after style reapplication
     updateFill();
+}
+
+void OverlaySliderElement::beginInteraction(const QPointF& localPos) {
+    m_dragging = true;
+    setState(OverlayElement::Active);
+    const qreal newValue = valueFromLocalPos(localPos);
+    setValue(newValue);
+    if (m_onBegin) m_onBegin(m_value);
+    // Note: setValue already triggered m_onUpdate, no need to call it again
+}
+
+void OverlaySliderElement::continueInteraction(const QPointF& localPos) {
+    if (!m_dragging) return;
+    const qreal newValue = valueFromLocalPos(localPos);
+    setValue(newValue);
+    if (m_onUpdate) m_onUpdate(m_value);
+}
+
+void OverlaySliderElement::endInteraction(const QPointF& localPos) {
+    if (!m_dragging) return;
+    const qreal newValue = valueFromLocalPos(localPos);
+    setValue(newValue);
+    if (m_onUpdate) m_onUpdate(m_value);
+    if (m_onEnd) m_onEnd(m_value);
+    m_dragging = false;
+    setState(OverlayElement::Normal);
+}
+
+qreal OverlaySliderElement::valueFromLocalPos(const QPointF& localPos) const {
+    if (m_trackRect.width() <= 0.0) return 0.0;
+    qreal ratio = (localPos.x() - m_trackRect.left()) / m_trackRect.width();
+    return std::clamp<qreal>(ratio, 0.0, 1.0);
 }
 
 // ============================================================================
@@ -728,24 +806,13 @@ void OverlayPanel::createBackground() {
 
 void OverlayPanel::updateBackground() {
     if (!m_background) return;
-    // For the top media overlay (filename + settings) we do NOT want any rectangular background.
-    // Only the individual elements (text/button) should be visible. So force a transparent brush
-    // and do not tag the whole rect as an overlay hit target. Bottom/other panels retain previous logic.
-    if (m_position == Top) {
-        m_background->setBrush(Qt::NoBrush);
-        m_background->setData(0, QVariant());
-        // Let child elements receive clicks (filename text, settings button)
-        m_background->setAcceptedMouseButtons(Qt::NoButton);
-    } else {
-        // Existing behavior for non-top panels (e.g. video controls)
-        if (m_backgroundVisible) {
-            m_background->setBrush(m_style.backgroundBrush());
-            m_background->setData(0, QStringLiteral("overlay"));
-        } else {
-            m_background->setBrush(Qt::NoBrush);
-            m_background->setData(0, QVariant());
-        }
-    }
+    // No rectangular background behind overlay panels—individual elements provide their own styling.
+    // This gives a cleaner look without the "ugly background" rectangle.
+    m_background->setBrush(Qt::NoBrush);
+    m_background->setData(0, QVariant());
+    // Let child elements receive clicks (buttons, sliders)
+    m_background->setAcceptedMouseButtons(Qt::NoButton);
+    
     m_background->setRect(0, 0, m_currentSize.width(), m_currentSize.height());
     m_background->setPos(m_currentPosition);
 }
@@ -897,12 +964,26 @@ void OverlayPanel::updateLabelsLayout() {
                     qreal maxInner = std::min(panelInnerW, static_cast<qreal>(m_style.maxWidth - 2*m_style.paddingX));
                     if (elementSize.width() > maxInner) elementSize.setWidth(maxInner);
                 }
-                element->setSize(elementSize);
+
+                qreal spacingBefore = 0.0;
                 if (!firstInRow) {
-                    const qreal spacing = pendingSpacing >= 0.0 ? pendingSpacing : m_style.itemSpacing;
-                    cursorX += spacing;
+                    spacingBefore = (pendingSpacing >= 0.0) ? pendingSpacing : m_style.itemSpacing;
                 }
-                QPointF elementPos(cursorX, cursorY);
+                const qreal elementX = cursorX + spacingBefore;
+
+                if (element->type() == OverlayElement::Slider) {
+                    const QString elementId = element->id();
+                    const qreal currentOffset = elementX - m_style.paddingX;
+                    const qreal remaining = std::max<qreal>(0.0, panelInnerW - currentOffset);
+                    if (elementId == QLatin1String("progress")) {
+                        elementSize.setWidth(remaining); // remaining == panelInnerW when offset is zero
+                    } else {
+                        elementSize.setWidth(remaining);
+                    }
+                }
+
+                element->setSize(elementSize);
+                QPointF elementPos(elementX, cursorY);
                 if (haveContainer) {
                     if (auto *gi = element->graphicsItem()) {
                         if (gi->parentItem() != m_background) gi->setParentItem(m_background);
@@ -911,7 +992,7 @@ void OverlayPanel::updateLabelsLayout() {
                 } else {
                     element->setPosition(m_currentPosition + elementPos);
                 }
-                cursorX += elementSize.width();
+                cursorX = elementX + elementSize.width();
                 pendingSpacing = (element->spacingAfter() >= 0.0) ? element->spacingAfter() : m_style.itemSpacing;
                 currentRowMaxH = std::max(currentRowMaxH, elementSize.height());
                 firstInRow = false;

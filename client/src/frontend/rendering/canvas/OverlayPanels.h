@@ -102,6 +102,10 @@ protected:
         event->accept();
     }
     
+    void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override {
+        event->accept();
+    }
+
     void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override {
         // Accept the event to prevent it from propagating to items behind
         event->accept();
@@ -270,12 +274,16 @@ public:
     qreal value() const { return m_value; }
     void setValue(qreal v); // clamps and updates fill
 
+    void setInteractionCallbacks(std::function<void(qreal)> onBegin,
+                                  std::function<void(qreal)> onUpdate,
+                                  std::function<void(qreal)> onEnd);
+
     // OverlayElement implementation
     void applyStyle(const OverlayStyle& style) override;
     QSizeF preferredSize(const OverlayStyle& style) const override; // width heuristic, height = max(defaultHeight, track)
     void setSize(const QSizeF& size) override;
     void setPosition(const QPointF& pos) override;
-    QGraphicsItem* graphicsItem() override { return m_container; }
+    QGraphicsItem* graphicsItem() override;
     bool isVisible() const override { return m_visible; }
     void setVisible(bool v) override;
     void setState(ElementState s) override; // updates tint
@@ -284,16 +292,26 @@ public:
     QRectF trackRect() const { return m_trackRect; }
     QRectF fillRect() const { return m_fillRect; }
 private:
+    class SliderHandleItem;
+
     void createGraphicsItems();
     void updateFill();
+    void beginInteraction(const QPointF& localPos);
+    void continueInteraction(const QPointF& localPos);
+    void endInteraction(const QPointF& localPos);
+    qreal valueFromLocalPos(const QPointF& localPos) const;
     qreal m_value = 0.0; // 0..1
     bool m_visible = true;
-    MouseBlockingRectItem* m_container = nullptr; // parent container (transparent, still blocks events)
+    SliderHandleItem* m_container = nullptr; // parent container (transparent, still blocks events)
     MouseBlockingRoundedRectItem* m_track = nullptr; // full track
     MouseBlockingRoundedRectItem* m_fill = nullptr;  // filled portion
     OverlayStyle m_currentStyle;
     QRectF m_trackRect;
     QRectF m_fillRect;
+    bool m_dragging = false;
+    std::function<void(qreal)> m_onBegin;
+    std::function<void(qreal)> m_onUpdate;
+    std::function<void(qreal)> m_onEnd;
 };
 
 // Sentinel element representing a row break (no graphics)
@@ -339,6 +357,7 @@ public:
     void setParentItem(QGraphicsItem* parent);
     void setScene(QGraphicsScene* scene);
     QGraphicsScene* scene() const { return m_scene; }
+    QGraphicsItem* rootItem() const { return m_background; }
     // Layout & positioning
     void updateLayoutWithAnchor(const QPointF& anchorScenePoint, QGraphicsView* view);
     QSizeF calculateSize() const;
