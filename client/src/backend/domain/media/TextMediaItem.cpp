@@ -2230,9 +2230,11 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
         return;
     }
 
-    // Force synchronous rendering when editing or when font properties changed
-    // to prevent visual glitches from mismatched cached bitmaps
-    const bool needsSyncRender = m_isEditing || altStretching;
+    // Force synchronous rendering only when Alt-stretching (font properties changed)
+    // to prevent visual glitches from mismatched cached bitmaps.
+    // Editing mode can use async rendering - the inline editor handles text input,
+    // and the background raster doesn't need perfect sync.
+    const bool needsSyncRender = altStretching;
     
     if (needsSyncRender) {
         ++m_rasterRequestId;
