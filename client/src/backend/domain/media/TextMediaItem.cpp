@@ -28,6 +28,7 @@
 #include <QClipboard>
 #include <QApplication>
 #include <QImage>
+#include <QPixmap>
 #include <QCursor>
 #include <QPen>
 #include <QFontDatabase>
@@ -39,31 +40,18 @@
 #include <QScopedValueRollback>
 #include <QTimer>
 #include <QPalette>
-#include <QHash>
 #include <chrono>
 #include <QtConcurrent>
 #include <QFutureWatcher>
 #include <memory>
+#include <utility>
 
-int TextMediaItem::s_maxRasterDimension = 500;
-
-void TextMediaItem::setMaxRasterDimension(int pixels) {
-    const int clamped = std::clamp(pixels, 256, 1000);
-    s_maxRasterDimension = clamped;
-}
-
-int TextMediaItem::maxRasterDimension() {
-    return s_maxRasterDimension;
-}
-
-// Global text styling configuration - tweak these to change all text media appearance
+// TextMediaDefaults namespace implementation
 namespace TextMediaDefaults {
-    // Use system font or a font known to have multiple weights on macOS
-    // SF Pro Display has full weight range support, fallback to Helvetica Neue which also has good weight support
-    const QString FONT_FAMILY = QStringLiteral(".SF NS Display"); // macOS system font with full weight support
-    const int FONT_SIZE = 24;
-    const QFont::Weight FONT_WEIGHT = QFont::Bold;
-    const int FONT_WEIGHT_VALUE = 700; // Numeric weight (100-900 range)
+    const QString FONT_FAMILY = QStringLiteral("Arial");
+    const int FONT_SIZE = 48;
+    const QFont::Weight FONT_WEIGHT = QFont::Normal;
+    const int FONT_WEIGHT_VALUE = 400;
     const bool FONT_ITALIC = false;
     const bool FONT_UNDERLINE = false;
     const bool FONT_ALL_CAPS = false;
@@ -71,505 +59,92 @@ namespace TextMediaDefaults {
     const qreal TEXT_BORDER_WIDTH_PERCENT = 0.0;
     const QColor TEXT_BORDER_COLOR = Qt::black;
     const bool TEXT_HIGHLIGHT_ENABLED = false;
-    const QColor TEXT_HIGHLIGHT_COLOR = QColor(255, 255, 0, 160);
-    
-    // Default text content when creating new text media
-    const QString DEFAULT_TEXT = QStringLiteral("No Text");
-    
-    // Default size when creating new text media (width x height in pixels)
-    const int DEFAULT_WIDTH = 150;
-    const int DEFAULT_HEIGHT = 75;
-    
-    // Default text scale (base scale in viewport pixels, independent of canvas zoom)
-    // This represents the desired text size in screen pixels, which will be adjusted
-    // inversely proportional to canvas zoom to maintain constant visual size
-    const qreal DEFAULT_VIEWPORT_SCALE = 2.0;
+    const QColor TEXT_HIGHLIGHT_COLOR = QColor(255, 255, 0, 128);
+    const QString DEFAULT_TEXT = QStringLiteral("Text");
+    const int DEFAULT_WIDTH = 400;
+    const int DEFAULT_HEIGHT = 200;
+    const qreal DEFAULT_VIEWPORT_SCALE = 1.0;
+}
+
+// Static member definition
+int TextMediaItem::s_maxRasterDimension = 4096;
+
+void TextMediaItem::setMaxRasterDimension(int pixels) {
+    s_maxRasterDimension = std::max(256, std::min(pixels, 16384));
+}
+
+int TextMediaItem::maxRasterDimension() {
+    return s_maxRasterDimension;
 }
 
 namespace {
 
-constexpr qreal kContentPadding = 0.0;
-constexpr qreal kFitToTextMinWidth = 20.0; // Minimum width in fit-to-text mode
-constexpr qreal kStrokeOverflowScale = 0.45; // extra padding multiplier to account for outline bleed
-constexpr qreal kStrokeOverflowMinPx = 2.0;  // minimum extra padding in pixels
-constexpr qint64 kScaledRasterThrottleIntervalMs = 500; // minimum interval between expensive scaled raster updates during uniform resize
+constexpr qreal kContentPadding = 4.0;
+constexpr qreal kStrokeOverflowScale = 0.75;
+constexpr qreal kStrokeOverflowMinPx = 1.5;
+constexpr int kScaledRasterThrottleIntervalMs = 45;
+constexpr qreal kFitToTextMinWidth = 24.0;
 
-struct GlyphPathKey {
-    QString family;
-    QString style;
-    qint64 pixelSizeScaled = 0;
-    quint32 glyphIndex = 0;
-
-    friend bool operator==(const GlyphPathKey& a, const GlyphPathKey& b) {
-        return a.glyphIndex == b.glyphIndex &&
-               a.pixelSizeScaled == b.pixelSizeScaled &&
-               a.family == b.family &&
-               a.style == b.style;
-    }
+struct CssWeightMapping {
+    int cssWeight;
+    QFont::Weight qtWeight;
 };
 
-uint qHash(const GlyphPathKey& key, uint seed = 0) {
-    seed = ::qHash(key.family, seed);
-    seed = ::qHash(key.style, seed);
-    seed = ::qHash(static_cast<quint64>(key.pixelSizeScaled), seed);
-    return ::qHash(key.glyphIndex, seed);
-}
-
-QPainterPath cachedGlyphPath(const QRawFont& font, quint32 glyphIndex) {
-    static QHash<GlyphPathKey, QPainterPath> s_cache;
-
-    const qreal pixelSize = font.pixelSize();
-    const qint64 pixelSizeScaled = static_cast<qint64>(std::llround(pixelSize * 1024.0));
-    const GlyphPathKey cacheKey{font.familyName(), font.styleName(), pixelSizeScaled, glyphIndex};
-    const auto it = s_cache.constFind(cacheKey);
-    if (it != s_cache.cend()) {
-        return *it;
-    }
-
-    QPainterPath path;
-    if (font.isValid()) {
-        path = font.pathForGlyph(glyphIndex);
-    }
-    s_cache.insert(cacheKey, path);
-    return path;
-}
-
-// Snapshot for async text rasterization
-struct TextRasterJob {
-    QString text;
-    QFont font;
-    QColor fillColor;
-    QColor outlineColor;
-    qreal outlineWidthPercent;
-    bool highlightEnabled;
-    QColor highlightColor;
-    QSize targetSize;
-    qreal scaleFactor;
-    qreal contentPaddingPx;
-    bool fitToTextEnabled;
-    TextMediaItem::HorizontalAlignment horizontalAlignment;
-    TextMediaItem::VerticalAlignment verticalAlignment;
-    quint64 requestId;
-    
-    QImage execute() const; // Runs on worker thread
+constexpr std::array<CssWeightMapping, 9> kWeightMappings = {
+    CssWeightMapping{100, QFont::Thin},
+    CssWeightMapping{200, QFont::ExtraLight},
+    CssWeightMapping{300, QFont::Light},
+    CssWeightMapping{400, QFont::Normal},
+    CssWeightMapping{500, QFont::Medium},
+    CssWeightMapping{600, QFont::DemiBold},
+    CssWeightMapping{700, QFont::Bold},
+    CssWeightMapping{800, QFont::ExtraBold},
+    CssWeightMapping{900, QFont::Black},
 };
-
-struct WeightMapping {
-    int css; // CSS-like weight (100-900)
-    int qt;  // Qt weight (0-99 scale)
-};
-
-constexpr std::array<WeightMapping, 9> kWeightMappings = {{
-    {100, static_cast<int>(QFont::Thin)},
-    {200, static_cast<int>(QFont::ExtraLight)},
-    {300, static_cast<int>(QFont::Light)},
-    {400, static_cast<int>(QFont::Normal)},
-    {500, static_cast<int>(QFont::Medium)},
-    {600, static_cast<int>(QFont::DemiBold)},
-    {700, static_cast<int>(QFont::Bold)},
-    {800, static_cast<int>(QFont::ExtraBold)},
-    {900, static_cast<int>(QFont::Black)}
-}};
 
 int clampCssWeight(int weight) {
-    int clamped = std::clamp(weight, 1, 1000);
-    clamped = ((clamped + 50) / 100) * 100; // Snap to nearest hundred like CSS font-weight
-    return std::clamp(clamped, 100, 900);
+    const int clamped = std::clamp(weight, 100, 900);
+    const int rounded = ((clamped + 50) / 100) * 100;
+    return std::clamp(rounded, 100, 900);
 }
 
-int cssToQtWeight(int cssWeight) {
-    const int clamped = clampCssWeight(cssWeight);
-    const WeightMapping* best = &kWeightMappings.front();
-    int bestDiff = std::numeric_limits<int>::max();
-
+QFont::Weight cssWeightToQtWeight(int cssWeight) {
+    const int normalized = clampCssWeight(cssWeight);
     for (const auto& mapping : kWeightMappings) {
-        const int diff = std::abs(clamped - mapping.css);
-        if (diff < bestDiff) {
-            best = &mapping;
-            bestDiff = diff;
+        if (mapping.cssWeight == normalized) {
+            return mapping.qtWeight;
         }
     }
-
-    return best->qt;
+    return QFont::Normal;
 }
 
-int qtToCssWeight(int qtWeight) {
-    const WeightMapping* best = &kWeightMappings.front();
-    int bestDiff = std::numeric_limits<int>::max();
-
+int qtWeightToCssWeight(QFont::Weight weight) {
+    int bestCss = 400;
+    int bestDelta = std::numeric_limits<int>::max();
     for (const auto& mapping : kWeightMappings) {
-        const int diff = std::abs(qtWeight - mapping.qt);
-        if (diff < bestDiff) {
-            best = &mapping;
-            bestDiff = diff;
+        const int delta = std::abs(static_cast<int>(weight) - static_cast<int>(mapping.qtWeight));
+        if (delta < bestDelta) {
+            bestDelta = delta;
+            bestCss = mapping.cssWeight;
         }
     }
-
-    return best->css;
-}
-
-QFont fontAdjustedForWeight(const QFont& base, int cssWeight) {
-    QFont result(base);
-    const int clampedCss = clampCssWeight(cssWeight);
-    const int targetQtWeight = cssToQtWeight(clampedCss);
-    const bool wantItalic = result.italic();
-
-    const QString family = result.family();
-    const QStringList styles = QFontDatabase::styles(family);
-
-    auto styleIsCondensed = [](const QString& style) {
-        const QString lower = style.toLower();
-        return lower.contains(QStringLiteral("condensed")) ||
-               lower.contains(QStringLiteral("compressed")) ||
-               lower.contains(QStringLiteral("narrow")) ||
-               lower.contains(QStringLiteral("compact"));
-    };
-
-    auto findBestStyle = [&](bool requireMatchingItalic, bool avoidCondensed) -> QString {
-        QString chosenStyle;
-        int bestDiff = std::numeric_limits<int>::max();
-        for (const QString& style : styles) {
-            const bool styleIsItalic = style.contains(QStringLiteral("italic"), Qt::CaseInsensitive);
-            if (requireMatchingItalic && styleIsItalic != wantItalic) {
-                continue;
-            }
-            if (avoidCondensed && styleIsCondensed(style)) {
-                continue;
-            }
-            const int styleWeight = QFontDatabase::weight(family, style);
-            const int diff = std::abs(styleWeight - targetQtWeight);
-            if (diff < bestDiff) {
-                bestDiff = diff;
-                chosenStyle = style;
-            }
-        }
-        return chosenStyle;
-    };
-
-    QString bestStyle;
-    if (!styles.isEmpty()) {
-        bestStyle = findBestStyle(true, true);
-        if (bestStyle.isEmpty()) {
-            bestStyle = findBestStyle(true, false);
-        }
-        if (bestStyle.isEmpty()) {
-            bestStyle = findBestStyle(false, true);
-        }
-        if (bestStyle.isEmpty()) {
-            bestStyle = findBestStyle(false, false);
-        }
-    }
-
-    if (!bestStyle.isEmpty()) {
-        result.setStyleName(bestStyle);
-        const int matchedQtWeight = QFontDatabase::weight(family, bestStyle);
-        result.setWeight(static_cast<QFont::Weight>(matchedQtWeight));
-    } else {
-        result.setStyleName(QString());
-        result.setWeight(static_cast<QFont::Weight>(targetQtWeight));
-    }
-
-    result.setItalic(wantItalic);
-    return result;
+    return bestCss;
 }
 
 int canonicalCssWeight(const QFont& font) {
-    return qtToCssWeight(font.weight());
+    return qtWeightToCssWeight(font.weight());
 }
 
-QImage TextRasterJob::execute() const {
-    // Build QTextDocument on worker thread with snapshot data
-    QTextDocument doc;
-    doc.setDocumentMargin(0.0);
-    doc.setDefaultFont(font);
-    doc.setPlainText(text);
-    
-    const int targetWidth = std::max(1, targetSize.width());
-    const int targetHeight = std::max(1, targetSize.height());
-    const qreal epsilon = 1e-4;
-    const qreal effectiveScale = std::max(std::abs(scaleFactor), epsilon);
-    
-    QImage result(targetWidth, targetHeight, QImage::Format_ARGB32_Premultiplied);
-    result.fill(Qt::transparent);
-    
-    QPainter imagePainter(&result);
-    imagePainter.setRenderHint(QPainter::Antialiasing, true);
-    imagePainter.setRenderHint(QPainter::TextAntialiasing, true);
-    imagePainter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    
-    // Apply horizontal alignment
-    Qt::Alignment qtHAlign = Qt::AlignCenter;
-    switch (horizontalAlignment) {
-        case TextMediaItem::HorizontalAlignment::Left:
-            qtHAlign = Qt::AlignLeft;
-            break;
-        case TextMediaItem::HorizontalAlignment::Center:
-            qtHAlign = Qt::AlignHCenter;
-            break;
-        case TextMediaItem::HorizontalAlignment::Right:
-            qtHAlign = Qt::AlignRight;
-            break;
-    }
-    
-    QTextOption option;
-    option.setWrapMode(fitToTextEnabled ? QTextOption::NoWrap : QTextOption::WordWrap);
-    option.setAlignment(qtHAlign);
-    doc.setDefaultTextOption(option);
-    
-    const qreal logicalWidth = static_cast<qreal>(targetWidth) / effectiveScale;
-    const qreal logicalHeight = static_cast<qreal>(targetHeight) / effectiveScale;
-    const qreal margin = contentPaddingPx;
-    const qreal availableWidth = std::max<qreal>(1.0, logicalWidth - 2.0 * margin);
-    
-    if (fitToTextEnabled) {
-        doc.setTextWidth(-1.0);
-    } else {
-        doc.setTextWidth(availableWidth);
-    }
-    
-    const QSizeF docSize = doc.documentLayout()->documentSize();
-    const qreal availableHeight = std::max<qreal>(1.0, logicalHeight - 2.0 * margin);
-    
-    // Calculate stroke width from percentage
-    qreal strokeWidth = 0.0;
-    if (outlineWidthPercent > 0.0) {
-        QFontMetricsF metrics(font);
-        qreal reference = metrics.height();
-        if (reference <= 0.0) {
-            if (font.pixelSize() > 0) {
-                reference = static_cast<qreal>(font.pixelSize());
-            } else {
-                reference = font.pointSizeF();
-            }
-        }
-        if (reference <= 0.0) {
-            reference = 16.0;
-        }
-        constexpr qreal kMaxOutlineThicknessFactor = 0.35;
-        const qreal normalized = std::clamp(outlineWidthPercent / 100.0, 0.0, 1.0);
-        const qreal eased = std::pow(normalized, 1.1);
-        strokeWidth = eased * kMaxOutlineThicknessFactor * reference;
-    }
-    
-    qreal offsetX = margin;
-    if (!fitToTextEnabled) {
-        const qreal horizontalSpace = std::max<qreal>(0.0, availableWidth - docSize.width());
-        switch (horizontalAlignment) {
-            case TextMediaItem::HorizontalAlignment::Left:
-                offsetX = margin;
-                break;
-            case TextMediaItem::HorizontalAlignment::Center:
-                offsetX = margin + horizontalSpace * 0.5;
-                break;
-            case TextMediaItem::HorizontalAlignment::Right:
-                offsetX = margin + horizontalSpace;
-                break;
-        }
-    }
-    
-    qreal offsetY = margin;
-    switch (verticalAlignment) {
-        case TextMediaItem::VerticalAlignment::Top:
-            offsetY = margin;
-            break;
-        case TextMediaItem::VerticalAlignment::Center:
-            offsetY = margin + (availableHeight - docSize.height()) / 2.0;
-            break;
-        case TextMediaItem::VerticalAlignment::Bottom:
-            offsetY = margin + (availableHeight - docSize.height());
-            break;
-    }
-    
-    QAbstractTextDocumentLayout* layout = doc.documentLayout();
-    if (!layout) {
-        imagePainter.end();
-        return result;
-    }
-    
-    const bool hlEnabled = highlightEnabled && highlightColor.isValid() && highlightColor.alpha() > 0;
-    QColor hlColor = hlEnabled ? highlightColor : QColor();
-    
-    imagePainter.scale(effectiveScale, effectiveScale);
-    
-    QColor outColor = outlineColor.isValid() ? outlineColor : fillColor;
-    if (!outColor.isValid()) {
-        outColor = fillColor;
-    }
-    
-    // Clear outline formatting
-    {
-        QTextCursor docCursor(&doc);
-        docCursor.select(QTextCursor::Document);
-        QTextCharFormat format;
-        format.setForeground(fillColor);
-        format.clearProperty(QTextFormat::TextOutline);
-        docCursor.mergeCharFormat(format);
-    }
-    
-    if (!fitToTextEnabled) {
-        imagePainter.translate(offsetX, offsetY);
-        if (hlEnabled && hlColor.alpha() > 0) {
-            imagePainter.save();
-            imagePainter.setPen(Qt::NoPen);
-            imagePainter.setBrush(hlColor);
-            const qreal docWidth = std::max<qreal>(docSize.width(), 1.0);
-            for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
-                QTextLayout* textLayout = block.layout();
-                if (!textLayout) continue;
-                
-                const QRectF blockRect = layout->blockBoundingRect(block);
-                for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-                    QTextLine line = textLayout->lineAt(lineIndex);
-                    if (!line.isValid()) continue;
-                    
-                    const qreal lineWidth = line.naturalTextWidth();
-                    const qreal width = std::max<qreal>(lineWidth, 1.0);
-                    qreal alignedX = line.x();
-                    if (std::abs(alignedX) < 1e-4 && width < docWidth - 1e-4) {
-                        const qreal horizontalSpace = std::max<qreal>(0.0, docWidth - width);
-                        switch (horizontalAlignment) {
-                            case TextMediaItem::HorizontalAlignment::Right:
-                                alignedX += horizontalSpace;
-                                break;
-                            case TextMediaItem::HorizontalAlignment::Center:
-                                alignedX += horizontalSpace * 0.5;
-                                break;
-                            case TextMediaItem::HorizontalAlignment::Left:
-                            default:
-                                break;
-                        }
-                    }
-                    const qreal height = std::max<qreal>(line.height(), 1.0);
-                    const QPointF topLeft = blockRect.topLeft() + QPointF(alignedX, line.y());
-                    imagePainter.drawRect(QRectF(topLeft, QSizeF(width, height)));
-                }
-            }
-            imagePainter.restore();
-        }
-        
-        if (strokeWidth > 0.0) {
-            QPainterPath textPath;
-            textPath.setFillRule(Qt::WindingFill);
-            for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
-                QTextLayout* textLayout = block.layout();
-                if (!textLayout) continue;
-                
-                const QRectF blockRect = layout->blockBoundingRect(block);
-                for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-                    QTextLine line = textLayout->lineAt(lineIndex);
-                    if (!line.isValid()) continue;
-                    
-                    QList<QGlyphRun> glyphRuns = line.glyphRuns();
-                    for (const QGlyphRun& run : glyphRuns) {
-                        const QVector<quint32> indexes = run.glyphIndexes();
-                        const QVector<QPointF> positions = run.positions();
-                        if (indexes.size() != positions.size()) continue;
-                        const QRawFont rawFont = run.rawFont();
-                        for (int gi = 0; gi < indexes.size(); ++gi) {
-                            const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
-                            const QPointF glyphPos = blockRect.topLeft() + positions[gi];
-                            textPath.addPath(glyphPath.translated(glyphPos));
-                        }
-                    }
-                }
-            }
-            
-            imagePainter.save();
-            imagePainter.setPen(QPen(outColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-            imagePainter.setBrush(Qt::NoBrush);
-            imagePainter.drawPath(textPath);
-            imagePainter.restore();
-            
-            imagePainter.save();
-            imagePainter.setPen(Qt::NoPen);
-            imagePainter.setBrush(fillColor);
-            imagePainter.drawPath(textPath);
-            imagePainter.restore();
-        } else {
-            QAbstractTextDocumentLayout::PaintContext ctx;
-            ctx.palette.setColor(QPalette::Text, fillColor);
-            layout->draw(&imagePainter, ctx);
-        }
-        
-        imagePainter.end();
-        return result;
-    }
-    
-    // Fit-to-text mode
-    imagePainter.translate(margin, offsetY);
-    const qreal contentWidth = availableWidth;
-    
-    for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
-        QTextLayout* textLayout = block.layout();
-        if (!textLayout) continue;
-        
-        const QRectF blockRect = layout->blockBoundingRect(block);
-        for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-            QTextLine line = textLayout->lineAt(lineIndex);
-            if (!line.isValid()) continue;
-            
-            qreal lineOffsetX = 0.0;
-            const qreal lineWidth = line.naturalTextWidth();
-            switch (horizontalAlignment) {
-                case TextMediaItem::HorizontalAlignment::Left:
-                    lineOffsetX = 0.0;
-                    break;
-                case TextMediaItem::HorizontalAlignment::Center:
-                    lineOffsetX = std::max<qreal>(0.0, (contentWidth - lineWidth) * 0.5);
-                    break;
-                case TextMediaItem::HorizontalAlignment::Right:
-                    lineOffsetX = std::max<qreal>(0.0, contentWidth - lineWidth);
-                    break;
-            }
-            
-            const QPointF lineBasePos(lineOffsetX, blockRect.top() + line.y());
-            
-            if (hlEnabled && hlColor.alpha() > 0) {
-                const qreal highlightWidth = std::max<qreal>(lineWidth > 0.0 ? lineWidth : contentWidth, 1.0);
-                const qreal highlightHeight = std::max<qreal>(line.height(), 1.0);
-                const QRectF highlightRect(QPointF(lineOffsetX, blockRect.top() + line.y()), QSizeF(highlightWidth, highlightHeight));
-                imagePainter.fillRect(highlightRect, hlColor);
-            }
-            
-            if (strokeWidth > 0.0) {
-                QPainterPath linePath;
-                linePath.setFillRule(Qt::WindingFill);
-                QList<QGlyphRun> glyphRuns = line.glyphRuns();
-                for (const QGlyphRun& run : glyphRuns) {
-                    const QVector<quint32> indexes = run.glyphIndexes();
-                    const QVector<QPointF> positions = run.positions();
-                    if (indexes.size() != positions.size()) continue;
-                    const QRawFont rawFont = run.rawFont();
-                    for (int gi = 0; gi < indexes.size(); ++gi) {
-                        const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
-                        const QPointF glyphPos = blockRect.topLeft() + positions[gi];
-                        linePath.addPath(glyphPath.translated(glyphPos));
-                    }
-                }
+QFont fontAdjustedForWeight(QFont font, int cssWeight) {
+    font.setWeight(cssWeightToQtWeight(cssWeight));
+    return font;
+}
 
-                if (!linePath.isEmpty()) {
-                    linePath.translate(lineOffsetX, 0.0);
-                }
-                
-                imagePainter.save();
-                imagePainter.setPen(QPen(outColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                imagePainter.setBrush(Qt::NoBrush);
-                imagePainter.drawPath(linePath);
-                imagePainter.restore();
-                
-                imagePainter.save();
-                imagePainter.setPen(Qt::NoPen);
-                imagePainter.setBrush(fillColor);
-                imagePainter.drawPath(linePath);
-                imagePainter.restore();
-            } else {
-                line.draw(&imagePainter, lineBasePos);
-            }
-        }
+QPainterPath cachedGlyphPath(const QRawFont& rawFont, quint32 glyphIndex) {
+    if (!rawFont.isValid()) {
+        return QPainterPath();
     }
-    
-    imagePainter.end();
-    return result;
+    return rawFont.pathForGlyph(glyphIndex);
 }
 
 class InlineTextEditor : public QGraphicsTextItem {
@@ -1185,7 +760,331 @@ static void applyCenterAlignment(QGraphicsTextItem* editor) {
     applyTextAlignment(editor, Qt::AlignHCenter);
 }
 
-} // anonymous namespace
+} // anonymous namespace (InlineTextEditor and helpers)
+
+TextMediaItem::VectorDrawSnapshot TextMediaItem::captureVectorSnapshot() const {
+    VectorDrawSnapshot snapshot;
+    snapshot.text = textForRendering();
+    snapshot.font = m_font;
+    snapshot.fillColor = m_textColor;
+    snapshot.outlineColor = m_textBorderColor;
+    snapshot.outlineWidthPercent = m_textBorderWidthPercent;
+    snapshot.highlightEnabled = m_highlightEnabled;
+    snapshot.highlightColor = m_highlightColor;
+    snapshot.contentPaddingPx = contentPaddingPx();
+    snapshot.fitToTextEnabled = m_fitToTextEnabled;
+    snapshot.horizontalAlignment = m_horizontalAlignment;
+    snapshot.verticalAlignment = m_verticalAlignment;
+    return snapshot;
+}
+
+void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor) {
+    if (!painter) {
+        return;
+    }
+
+    const int targetWidth = std::max(1, targetSize.width());
+    const int targetHeight = std::max(1, targetSize.height());
+
+    const qreal epsilon = 1e-4;
+    const qreal effectiveScale = std::max(std::abs(scaleFactor), epsilon);
+
+    QTextDocument doc;
+    doc.setDocumentMargin(0.0);
+    doc.setDefaultFont(snapshot.font);
+    doc.setPlainText(snapshot.text);
+
+    Qt::Alignment qtHAlign = Qt::AlignCenter;
+    switch (snapshot.horizontalAlignment) {
+        case HorizontalAlignment::Left:
+            qtHAlign = Qt::AlignLeft;
+            break;
+        case HorizontalAlignment::Center:
+            qtHAlign = Qt::AlignHCenter;
+            break;
+        case HorizontalAlignment::Right:
+            qtHAlign = Qt::AlignRight;
+            break;
+    }
+
+    QTextOption option;
+    option.setWrapMode(snapshot.fitToTextEnabled ? QTextOption::NoWrap : QTextOption::WordWrap);
+    option.setAlignment(qtHAlign);
+    doc.setDefaultTextOption(option);
+
+    const qreal logicalWidth = static_cast<qreal>(targetWidth) / effectiveScale;
+    const qreal logicalHeight = static_cast<qreal>(targetHeight) / effectiveScale;
+    const qreal margin = snapshot.contentPaddingPx;
+    const qreal availableWidth = std::max<qreal>(1.0, logicalWidth - 2.0 * margin);
+
+    if (snapshot.fitToTextEnabled) {
+        doc.setTextWidth(-1.0);
+    } else {
+        doc.setTextWidth(availableWidth);
+    }
+
+    const QSizeF docSize = doc.documentLayout()->documentSize();
+    const qreal availableHeight = std::max<qreal>(1.0, logicalHeight - 2.0 * margin);
+
+    qreal offsetX = margin;
+    if (!snapshot.fitToTextEnabled) {
+        const qreal horizontalSpace = std::max<qreal>(0.0, availableWidth - docSize.width());
+        switch (snapshot.horizontalAlignment) {
+            case HorizontalAlignment::Left:
+                offsetX = margin;
+                break;
+            case HorizontalAlignment::Center:
+                offsetX = margin + horizontalSpace * 0.5;
+                break;
+            case HorizontalAlignment::Right:
+                offsetX = margin + horizontalSpace;
+                break;
+        }
+    }
+
+    qreal offsetY = margin;
+    switch (snapshot.verticalAlignment) {
+        case VerticalAlignment::Top:
+            offsetY = margin;
+            break;
+        case VerticalAlignment::Center:
+            offsetY = margin + (availableHeight - docSize.height()) / 2.0;
+            break;
+        case VerticalAlignment::Bottom:
+            offsetY = margin + (availableHeight - docSize.height());
+            break;
+    }
+
+    QAbstractTextDocumentLayout* layout = doc.documentLayout();
+    if (!layout) {
+        return;
+    }
+
+    const QColor fillColor = snapshot.fillColor;
+    QColor outlineColor = snapshot.outlineColor.isValid() ? snapshot.outlineColor : fillColor;
+    if (!outlineColor.isValid()) {
+        outlineColor = fillColor;
+    }
+
+    bool highlightEnabled = snapshot.highlightEnabled && snapshot.highlightColor.alpha() > 0;
+    QColor highlightColor = highlightEnabled ? snapshot.highlightColor : QColor();
+    if (highlightEnabled && !highlightColor.isValid()) {
+        highlightColor = TextMediaDefaults::TEXT_HIGHLIGHT_COLOR;
+    }
+
+    auto computeStrokeWidth = [&snapshot]() -> qreal {
+        if (snapshot.outlineWidthPercent <= 0.0) {
+            return 0.0;
+        }
+
+        QFontMetricsF metrics(snapshot.font);
+        qreal reference = metrics.height();
+        if (reference <= 0.0) {
+            if (snapshot.font.pixelSize() > 0) {
+                reference = static_cast<qreal>(snapshot.font.pixelSize());
+            } else {
+                reference = snapshot.font.pointSizeF();
+            }
+        }
+        if (reference <= 0.0) {
+            reference = 16.0;
+        }
+
+        constexpr qreal kMaxOutlineThicknessFactor = 0.35;
+        const qreal normalized = std::clamp(snapshot.outlineWidthPercent / 100.0, 0.0, 1.0);
+        const qreal eased = std::pow(normalized, 1.1);
+        return eased * kMaxOutlineThicknessFactor * reference;
+    };
+
+    const qreal strokeWidth = computeStrokeWidth();
+
+    {
+        QTextCursor cursor(&doc);
+        cursor.select(QTextCursor::Document);
+        QTextCharFormat format;
+        format.setForeground(fillColor);
+        format.clearProperty(QTextFormat::TextOutline);
+        cursor.mergeCharFormat(format);
+    }
+
+    painter->save();
+    painter->scale(effectiveScale, effectiveScale);
+
+    if (!snapshot.fitToTextEnabled) {
+        painter->translate(offsetX, offsetY);
+
+        if (highlightEnabled && highlightColor.alpha() > 0) {
+            painter->save();
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(highlightColor);
+
+            const qreal docWidth = std::max<qreal>(docSize.width(), 1.0);
+            for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+                QTextLayout* textLayout = block.layout();
+                if (!textLayout) continue;
+
+                const QRectF blockRect = layout->blockBoundingRect(block);
+                for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                    QTextLine line = textLayout->lineAt(lineIndex);
+                    if (!line.isValid()) continue;
+
+                    const qreal lineWidth = line.naturalTextWidth();
+                    const qreal width = std::max<qreal>(lineWidth, 1.0);
+                    qreal alignedX = line.x();
+                    if (std::abs(alignedX) < 1e-4 && width < docWidth - 1e-4) {
+                        const qreal horizontalSpace = std::max<qreal>(0.0, docWidth - width);
+                        if (snapshot.horizontalAlignment == HorizontalAlignment::Right) {
+                            alignedX += horizontalSpace;
+                        } else if (snapshot.horizontalAlignment == HorizontalAlignment::Center) {
+                            alignedX += horizontalSpace * 0.5;
+                        }
+                    }
+                    const qreal height = std::max<qreal>(line.height(), 1.0);
+                    const QPointF topLeft = blockRect.topLeft() + QPointF(alignedX, line.y());
+                    painter->drawRect(QRectF(topLeft, QSizeF(width, height)));
+                }
+            }
+
+            painter->restore();
+        }
+
+        if (strokeWidth > 0.0) {
+            QPainterPath textPath;
+            textPath.setFillRule(Qt::WindingFill);
+            for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+                QTextLayout* textLayout = block.layout();
+                if (!textLayout) continue;
+
+                const QRectF blockRect = layout->blockBoundingRect(block);
+                for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                    QTextLine line = textLayout->lineAt(lineIndex);
+                    if (!line.isValid()) continue;
+
+                    const QList<QGlyphRun> glyphRuns = line.glyphRuns();
+                    for (const QGlyphRun& run : glyphRuns) {
+                        const QVector<quint32> indexes = run.glyphIndexes();
+                        const QVector<QPointF> positions = run.positions();
+                        if (indexes.size() != positions.size()) continue;
+                        const QRawFont rawFont = run.rawFont();
+                        for (int gi = 0; gi < indexes.size(); ++gi) {
+                            const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
+                            const QPointF glyphPos = blockRect.topLeft() + positions[gi];
+                            textPath.addPath(glyphPath.translated(glyphPos));
+                        }
+                    }
+                }
+            }
+
+            painter->save();
+            painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            painter->setBrush(Qt::NoBrush);
+            painter->drawPath(textPath);
+            painter->restore();
+
+            painter->save();
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(fillColor);
+            painter->drawPath(textPath);
+            painter->restore();
+        } else {
+            QAbstractTextDocumentLayout::PaintContext ctx;
+            ctx.cursorPosition = -1;
+            ctx.palette.setColor(QPalette::Text, fillColor);
+            layout->draw(painter, ctx);
+        }
+
+        painter->restore();
+        return;
+    }
+
+    painter->translate(margin, offsetY);
+    const qreal contentWidth = availableWidth;
+
+    for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+        QTextLayout* textLayout = block.layout();
+        if (!textLayout) continue;
+
+        const QRectF blockRect = layout->blockBoundingRect(block);
+        for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+            QTextLine line = textLayout->lineAt(lineIndex);
+            if (!line.isValid()) continue;
+
+            qreal lineOffsetX = 0.0;
+            const qreal lineWidth = line.naturalTextWidth();
+            switch (snapshot.horizontalAlignment) {
+                case HorizontalAlignment::Left:
+                    lineOffsetX = 0.0;
+                    break;
+                case HorizontalAlignment::Center:
+                    lineOffsetX = std::max<qreal>(0.0, (contentWidth - lineWidth) * 0.5);
+                    break;
+                case HorizontalAlignment::Right:
+                    lineOffsetX = std::max<qreal>(0.0, contentWidth - lineWidth);
+                    break;
+            }
+
+            const QPointF lineBasePos(lineOffsetX, blockRect.top() + line.y());
+
+            if (highlightEnabled && highlightColor.alpha() > 0) {
+                const qreal highlightWidth = std::max<qreal>(lineWidth > 0.0 ? lineWidth : contentWidth, 1.0);
+                const qreal highlightHeight = std::max<qreal>(line.height(), 1.0);
+                const QRectF highlightRect(QPointF(lineOffsetX, blockRect.top() + line.y()), QSizeF(highlightWidth, highlightHeight));
+                painter->fillRect(highlightRect, highlightColor);
+            }
+
+            if (strokeWidth > 0.0) {
+                QPainterPath linePath;
+                linePath.setFillRule(Qt::WindingFill);
+                QList<QGlyphRun> glyphRuns = line.glyphRuns();
+                for (const QGlyphRun& run : glyphRuns) {
+                    const QVector<quint32> indexes = run.glyphIndexes();
+                    const QVector<QPointF> positions = run.positions();
+                    if (indexes.size() != positions.size()) continue;
+                    const QRawFont rawFont = run.rawFont();
+                    for (int gi = 0; gi < indexes.size(); ++gi) {
+                        const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
+                        const QPointF glyphPos = blockRect.topLeft() + positions[gi];
+                        linePath.addPath(glyphPath.translated(glyphPos));
+                    }
+                }
+
+                painter->save();
+                painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                painter->setBrush(Qt::NoBrush);
+                painter->drawPath(linePath);
+                painter->restore();
+
+                painter->save();
+                painter->setPen(Qt::NoPen);
+                painter->setBrush(fillColor);
+                painter->drawPath(linePath);
+                painter->restore();
+            } else {
+                line.draw(painter, lineBasePos);
+            }
+        }
+    }
+
+    painter->restore();
+}
+
+QImage TextMediaItem::TextRasterJob::execute() const {
+    const int targetWidth = std::max(1, targetSize.width());
+    const int targetHeight = std::max(1, targetSize.height());
+
+    QImage result(targetWidth, targetHeight, QImage::Format_ARGB32_Premultiplied);
+    result.fill(Qt::transparent);
+
+    QPainter imagePainter(&result);
+    imagePainter.setRenderHint(QPainter::Antialiasing, true);
+    imagePainter.setRenderHint(QPainter::TextAntialiasing, true);
+    imagePainter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+
+    TextMediaItem::paintVectorSnapshot(&imagePainter, snapshot, targetSize, scaleFactor);
+    imagePainter.end();
+
+    return result;
+}
 
 TextMediaItem::TextMediaItem(
     const QSize& initialSize,
@@ -1212,7 +1111,6 @@ TextMediaItem::TextMediaItem(
         QStringLiteral("Arial")                 // Final fallback
     };
     
-    QFontDatabase fontDb;
     QString selectedFamily = fontCandidates.last(); // Default to Arial
     for (const QString& candidate : fontCandidates) {
         if (QFontDatabase::hasFamily(candidate)) {
@@ -2124,295 +2022,12 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
 }
 
 void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor) {
-    const int targetWidth = std::max(1, imageSize.width());
-    const int targetHeight = std::max(1, imageSize.height());
+    TextRasterJob job;
+    job.snapshot = captureVectorSnapshot();
+    job.targetSize = QSize(std::max(1, imageSize.width()), std::max(1, imageSize.height()));
+    job.scaleFactor = scaleFactor;
 
-    const qreal epsilon = 1e-4;
-    const qreal effectiveScale = std::max(std::abs(scaleFactor), epsilon);
-
-    target = QImage(targetWidth, targetHeight, QImage::Format_ARGB32_Premultiplied);
-    target.fill(Qt::transparent);
-
-    QPainter imagePainter(&target);
-    imagePainter.setRenderHint(QPainter::Antialiasing, true);
-    imagePainter.setRenderHint(QPainter::TextAntialiasing, true);
-    imagePainter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-
-    const QString& text = textForRendering();
-
-    // Apply horizontal alignment
-    Qt::Alignment qtHAlign = Qt::AlignCenter;
-    switch (m_horizontalAlignment) {
-        case HorizontalAlignment::Left:
-            qtHAlign = Qt::AlignLeft;
-            break;
-        case HorizontalAlignment::Center:
-            qtHAlign = Qt::AlignHCenter;
-            break;
-        case HorizontalAlignment::Right:
-            qtHAlign = Qt::AlignRight;
-            break;
-    }
-    
-    QTextOption option;
-    option.setWrapMode(m_fitToTextEnabled ? QTextOption::NoWrap : QTextOption::WordWrap);
-    option.setAlignment(qtHAlign);
-
-    QTextDocument doc;
-    doc.setDocumentMargin(0.0);
-    doc.setDefaultFont(m_font);
-    doc.setDefaultTextOption(option);
-    doc.setPlainText(text);
-
-    const qreal logicalWidth = static_cast<qreal>(targetWidth) / effectiveScale;
-    const qreal logicalHeight = static_cast<qreal>(targetHeight) / effectiveScale;
-    const qreal margin = contentPaddingPx();
-    const qreal availableWidth = std::max<qreal>(1.0, logicalWidth - 2.0 * margin);
-    if (m_fitToTextEnabled) {
-        doc.setTextWidth(-1.0);
-    } else {
-        doc.setTextWidth(availableWidth);
-    }
-
-    const QSizeF docSize = doc.documentLayout()->documentSize();
-    const qreal availableHeight = std::max<qreal>(1.0, logicalHeight - 2.0 * margin);
-    
-    // When fit-to-text is enabled, the document handles horizontal alignment internally
-    // via QTextOption (each line is aligned independently). We only apply padding.
-    // When fit-to-text is disabled, we manually offset the entire block.
-    qreal offsetX = margin;
-    if (!m_fitToTextEnabled) {
-        const qreal horizontalSpace = std::max<qreal>(0.0, availableWidth - docSize.width());
-        switch (m_horizontalAlignment) {
-            case HorizontalAlignment::Left:
-                offsetX = margin;
-                break;
-            case HorizontalAlignment::Center:
-                offsetX = margin + horizontalSpace * 0.5;
-                break;
-            case HorizontalAlignment::Right:
-                offsetX = margin + horizontalSpace;
-                break;
-        }
-    }
-    
-    // Apply vertical alignment offset
-    qreal offsetY = margin;
-    switch (m_verticalAlignment) {
-        case VerticalAlignment::Top:
-            offsetY = margin;
-            break;
-        case VerticalAlignment::Center:
-            offsetY = margin + (availableHeight - docSize.height()) / 2.0;
-            break;
-        case VerticalAlignment::Bottom:
-            offsetY = margin + (availableHeight - docSize.height());
-            break;
-    }
-
-    QAbstractTextDocumentLayout* layout = doc.documentLayout();
-    if (!layout) {
-        imagePainter.end();
-        return;
-    }
-
-    const bool highlightEnabled = m_highlightEnabled && m_highlightColor.isValid() && m_highlightColor.alpha() > 0;
-    QColor highlightColor = highlightEnabled ? m_highlightColor : QColor();
-    if (highlightEnabled && !highlightColor.isValid()) {
-        highlightColor = TextMediaDefaults::TEXT_HIGHLIGHT_COLOR;
-    }
-
-    imagePainter.scale(effectiveScale, effectiveScale);
-
-    const qreal strokeWidth = borderStrokeWidthPx();
-    const QColor fillColor = m_textColor;
-    QColor outlineColor = m_textBorderColor.isValid() ? m_textBorderColor : fillColor;
-    if (!outlineColor.isValid()) {
-        outlineColor = fillColor;
-    }
-
-    // Clear outline formatting from document
-    {
-        QTextCursor docCursor(&doc);
-        docCursor.select(QTextCursor::Document);
-        QTextCharFormat format;
-        format.setForeground(fillColor);
-        format.clearProperty(QTextFormat::TextOutline);
-        docCursor.mergeCharFormat(format);
-    }
-
-    if (!m_fitToTextEnabled) {
-        imagePainter.translate(offsetX, offsetY);
-        if (highlightEnabled && highlightColor.alpha() > 0) {
-            imagePainter.save();
-            imagePainter.setPen(Qt::NoPen);
-            imagePainter.setBrush(highlightColor);
-            // Draw highlight per-line, respecting document alignment
-            const qreal docWidth = std::max<qreal>(docSize.width(), 1.0);
-            for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
-                QTextLayout* textLayout = block.layout();
-                if (!textLayout) continue;
-                
-                const QRectF blockRect = layout->blockBoundingRect(block);
-                for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-                    QTextLine line = textLayout->lineAt(lineIndex);
-                    if (!line.isValid()) continue;
-                    
-                    const qreal lineWidth = line.naturalTextWidth();
-                    const qreal width = std::max<qreal>(lineWidth, 1.0);
-                    qreal alignedX = line.x();
-                    if (std::abs(alignedX) < 1e-4 && width < docWidth - 1e-4) {
-                        const qreal horizontalSpace = std::max<qreal>(0.0, docWidth - width);
-                        switch (m_horizontalAlignment) {
-                            case HorizontalAlignment::Right:
-                                alignedX += horizontalSpace;
-                                break;
-                            case HorizontalAlignment::Center:
-                                alignedX += horizontalSpace * 0.5;
-                                break;
-                            case HorizontalAlignment::Left:
-                            default:
-                                break;
-                        }
-                    }
-                    const qreal height = std::max<qreal>(line.height(), 1.0);
-                    // line.x() already contains the alignment offset within the document
-                    const QPointF topLeft = blockRect.topLeft() + QPointF(alignedX, line.y());
-                    imagePainter.drawRect(QRectF(topLeft, QSizeF(width, height)));
-                }
-            }
-            imagePainter.restore();
-        }
-
-        if (strokeWidth > 0.0) {
-            // Build glyph paths from document
-            QPainterPath textPath;
-            textPath.setFillRule(Qt::WindingFill); // Preserve glyph counters
-            for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
-                QTextLayout* textLayout = block.layout();
-                if (!textLayout) continue;
-                
-                const QRectF blockRect = layout->blockBoundingRect(block);
-                for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-                    QTextLine line = textLayout->lineAt(lineIndex);
-                    if (!line.isValid()) continue;
-                    
-                    QList<QGlyphRun> glyphRuns = line.glyphRuns();
-                    for (const QGlyphRun& run : glyphRuns) {
-                        const QVector<quint32> indexes = run.glyphIndexes();
-                        const QVector<QPointF> positions = run.positions();
-                        if (indexes.size() != positions.size()) continue; // Guard against mismatch
-                        const QRawFont rawFont = run.rawFont();
-                        // Glyph positions from QGlyphRun are already in layout coordinates
-                        // Only translate by block position to document coordinates
-                        for (int gi = 0; gi < indexes.size(); ++gi) {
-                            const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
-                            const QPointF glyphPos = blockRect.topLeft() + positions[gi];
-                            textPath.addPath(glyphPath.translated(glyphPos));
-                        }
-                    }
-                }
-            }
-            
-            // Draw outside stroke: full-width stroke + fill on top
-            imagePainter.save();
-            imagePainter.setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-            imagePainter.setBrush(Qt::NoBrush);
-            imagePainter.drawPath(textPath);
-            imagePainter.restore();
-            
-            // Fill glyphs
-            imagePainter.save();
-            imagePainter.setPen(Qt::NoPen);
-            imagePainter.setBrush(fillColor);
-            imagePainter.drawPath(textPath);
-            imagePainter.restore();
-        } else {
-            // No outline: standard text draw
-            QAbstractTextDocumentLayout::PaintContext ctx;
-            ctx.palette.setColor(QPalette::Text, fillColor);
-            layout->draw(&imagePainter, ctx);
-        }
-        
-        imagePainter.end();
-        return;
-    }
-
-    // Fit-to-text mode: render aligned lines with outside strokes
-    imagePainter.translate(margin, offsetY);
-    const qreal contentWidth = availableWidth;
-
-    for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
-        QTextLayout* textLayout = block.layout();
-        if (!textLayout) continue;
-
-        const QRectF blockRect = layout->blockBoundingRect(block);
-        for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-            QTextLine line = textLayout->lineAt(lineIndex);
-            if (!line.isValid()) continue;
-
-            qreal lineOffsetX = 0.0;
-            const qreal lineWidth = line.naturalTextWidth();
-            switch (m_horizontalAlignment) {
-                case HorizontalAlignment::Left:
-                    lineOffsetX = 0.0;
-                    break;
-                case HorizontalAlignment::Center:
-                    lineOffsetX = std::max<qreal>(0.0, (contentWidth - lineWidth) * 0.5);
-                    break;
-                case HorizontalAlignment::Right:
-                    lineOffsetX = std::max<qreal>(0.0, contentWidth - lineWidth);
-                    break;
-            }
-
-            const QPointF lineBasePos(lineOffsetX, blockRect.top() + line.y());
-
-            if (highlightEnabled && highlightColor.alpha() > 0) {
-                const qreal highlightWidth = std::max<qreal>(lineWidth > 0.0 ? lineWidth : contentWidth, 1.0);
-                const qreal highlightHeight = std::max<qreal>(line.height(), 1.0);
-                const QRectF highlightRect(QPointF(lineOffsetX, blockRect.top() + line.y()), QSizeF(highlightWidth, highlightHeight));
-                imagePainter.fillRect(highlightRect, highlightColor);
-            }
-
-            if (strokeWidth > 0.0) {
-                // Build glyph paths for this line
-                QPainterPath linePath;
-                linePath.setFillRule(Qt::WindingFill); // Preserve glyph counters
-                QList<QGlyphRun> glyphRuns = line.glyphRuns();
-                for (const QGlyphRun& run : glyphRuns) {
-                    const QVector<quint32> indexes = run.glyphIndexes();
-                    const QVector<QPointF> positions = run.positions();
-                    if (indexes.size() != positions.size()) continue; // Guard against mismatch
-                    const QRawFont rawFont = run.rawFont();
-                    // Glyph positions from QGlyphRun are already in layout coordinates
-                    // Only translate by block position to document coordinates
-                    for (int gi = 0; gi < indexes.size(); ++gi) {
-                        const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
-                        const QPointF glyphPos = blockRect.topLeft() + positions[gi];
-                        linePath.addPath(glyphPath.translated(glyphPos));
-                    }
-                }
-                
-                // Draw outside stroke
-                imagePainter.save();
-                imagePainter.setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                imagePainter.setBrush(Qt::NoBrush);
-                imagePainter.drawPath(linePath);
-                imagePainter.restore();
-                
-                // Fill glyphs
-                imagePainter.save();
-                imagePainter.setPen(Qt::NoPen);
-                imagePainter.setBrush(fillColor);
-                imagePainter.drawPath(linePath);
-                imagePainter.restore();
-            } else {
-                line.draw(&imagePainter, lineBasePos);
-            }
-        }
-    }
-
-    imagePainter.end();
+    target = job.execute();
 }
 
 void TextMediaItem::rasterizeText() {
@@ -2432,11 +2047,11 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     const qreal epsilon = 1e-4;
     const qreal effectiveScale = std::max(std::abs(visualScaleFactor), epsilon);
     const qreal boundedGeometryScale = std::max(std::abs(geometryScale), epsilon);
-
     const qreal boundedCanvasZoom = std::max(std::abs(canvasZoom), epsilon);
+    const qreal boundedUniformScale = std::max(std::abs(m_uniformScaleFactor), epsilon);
 
-    int targetWidth = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.width()) * boundedGeometryScale * boundedCanvasZoom)));
-    int targetHeight = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.height()) * boundedGeometryScale * boundedCanvasZoom)));
+    int targetWidth = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.width()) * boundedGeometryScale * boundedUniformScale * boundedCanvasZoom)));
+    int targetHeight = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.height()) * boundedGeometryScale * boundedUniformScale * boundedCanvasZoom)));
     qreal rasterScale = effectiveScale;
 
     const int maxDimension = TextMediaItem::maxRasterDimension();
@@ -2472,24 +2087,13 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
         ++m_rasterRequestId;
         m_pendingRasterRequestId = m_rasterRequestId;
         m_asyncRasterInProgress = false;
+        m_activeAsyncRasterRequest.reset();
+        m_pendingAsyncRasterRequest.reset();
 
-        TextRasterJob job;
-        job.text = textForRendering();
-        job.font = m_font;
-        job.fillColor = m_textColor;
-        job.outlineColor = m_textBorderColor;
-        job.outlineWidthPercent = m_textBorderWidthPercent;
-        job.highlightEnabled = m_highlightEnabled;
-        job.highlightColor = m_highlightColor;
-        job.targetSize = targetSize;
-        job.scaleFactor = rasterScale;
-        job.contentPaddingPx = contentPaddingPx();
-        job.fitToTextEnabled = m_fitToTextEnabled;
-        job.horizontalAlignment = m_horizontalAlignment;
-        job.verticalAlignment = m_verticalAlignment;
-        job.requestId = m_rasterRequestId;
-
-        m_scaledRasterizedText = job.execute();
+        renderTextToImage(m_scaledRasterizedText, targetSize, rasterScale);
+        m_scaledRasterPixmap = QPixmap::fromImage(m_scaledRasterizedText);
+        m_scaledRasterPixmap.setDevicePixelRatio(1.0);
+        m_scaledRasterPixmapValid = !m_scaledRasterPixmap.isNull();
         m_lastRasterizedScale = rasterScale;
         m_lastCanvasZoomForRaster = boundedCanvasZoom;
         m_scaledRasterDirty = false;
@@ -2517,7 +2121,7 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
 
     // Kick async job instead of synchronous render
     ++m_rasterRequestId;
-    kickAsyncRasterJob(targetSize, rasterScale, boundedCanvasZoom, m_rasterRequestId);
+    startRasterJob(targetSize, rasterScale, boundedCanvasZoom, m_rasterRequestId);
 
     if (resizingUniformly) {
         m_scaledRasterThrottleActive = true;
@@ -2543,6 +2147,9 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
             }
 
             m_scaledRasterizedText = bestSource->scaled(targetSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            m_scaledRasterPixmap = QPixmap::fromImage(m_scaledRasterizedText);
+            m_scaledRasterPixmap.setDevicePixelRatio(1.0);
+            m_scaledRasterPixmapValid = !m_scaledRasterPixmap.isNull();
             // Keep dirty flag true so the async job still replaces the preview with a high-fidelity raster
             update();
         }
@@ -2551,70 +2158,103 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     }
 }
 
-void TextMediaItem::kickAsyncRasterJob(const QSize& targetSize, qreal effectiveScale, qreal canvasZoom, quint64 requestId) {
+void TextMediaItem::startRasterJob(const QSize& targetSize, qreal effectiveScale, qreal canvasZoom, quint64 requestId) {
+    AsyncRasterRequest request{targetSize, effectiveScale, canvasZoom, requestId};
+
+    if (m_asyncRasterInProgress) {
+        if (m_activeAsyncRasterRequest && m_activeAsyncRasterRequest->isEquivalentTo(targetSize, effectiveScale, canvasZoom)) {
+            m_rasterRequestId = m_activeAsyncRasterRequest->requestId;
+            m_pendingRasterRequestId = m_activeAsyncRasterRequest->requestId;
+            return;
+        }
+        m_pendingAsyncRasterRequest = request;
+        m_pendingRasterRequestId = requestId;
+        return;
+    }
+
+    m_pendingAsyncRasterRequest.reset();
+    startAsyncRasterRequest(targetSize, effectiveScale, canvasZoom, requestId);
+}
+
+void TextMediaItem::startAsyncRasterRequest(const QSize& targetSize, qreal effectiveScale, qreal canvasZoom, quint64 requestId) {
+    const QSize sanitizedSize(std::max(1, targetSize.width()), std::max(1, targetSize.height()));
+    AsyncRasterRequest request{sanitizedSize, effectiveScale, canvasZoom, requestId};
+    request.generation = ++m_rasterJobGeneration;
+
     m_asyncRasterInProgress = true;
     m_pendingRasterRequestId = requestId;
-    
-    // Snapshot all data needed for rendering
+    m_activeAsyncRasterRequest = request;
+
     TextRasterJob job;
-    job.text = textForRendering();
-    job.font = m_font;
-    job.fillColor = m_textColor;
-    job.outlineColor = m_textBorderColor;
-    job.outlineWidthPercent = m_textBorderWidthPercent;
-    job.highlightEnabled = m_highlightEnabled;
-    job.highlightColor = m_highlightColor;
-    job.targetSize = targetSize;
+    job.snapshot = captureVectorSnapshot();
+    job.targetSize = sanitizedSize;
     job.scaleFactor = effectiveScale;
-    job.contentPaddingPx = contentPaddingPx();
-    job.fitToTextEnabled = m_fitToTextEnabled;
-    job.horizontalAlignment = m_horizontalAlignment;
-    job.verticalAlignment = m_verticalAlignment;
-    job.requestId = requestId;
-    
-    // Use QtConcurrent to execute on worker thread and callback on main thread
+
     auto future = QtConcurrent::run([job]() {
         return job.execute();
     });
-    
-    // Capture weak guard to prevent dangling this pointer
+
     std::weak_ptr<bool> guard = lifetimeGuard();
-    
-    // Note: QFutureWatcher needs QObject parent; we can't pass 'this' since QGraphicsItem isn't QObject
     auto* watcher = new QFutureWatcher<QImage>();
-    QObject::connect(watcher, &QFutureWatcher<QImage>::finished, watcher, [this, guard, watcher, targetSize, effectiveScale, canvasZoom, requestId]() {
+    QObject::connect(watcher, &QFutureWatcher<QImage>::finished, watcher, [this, guard, watcher, request]() mutable {
         if (guard.expired()) {
             watcher->deleteLater();
             return;
         }
-        
+
         QImage result = watcher->result();
         watcher->deleteLater();
 
-        applyAsyncRasterResult(result, effectiveScale, canvasZoom, targetSize, requestId);
+        handleRasterJobFinished(request.generation, std::move(result), request.targetSize, request.scale, request.canvasZoom);
     });
-    
+
     watcher->setFuture(future);
 }
 
-void TextMediaItem::applyAsyncRasterResult(const QImage& raster, qreal scale, qreal canvasZoom, const QSize& size, quint64 requestId) {
-    Q_UNUSED(size);
-    // Discard stale results
-    if (requestId != m_rasterRequestId) {
-        if (requestId == m_pendingRasterRequestId) {
-            m_asyncRasterInProgress = false;
-        }
+void TextMediaItem::startNextPendingAsyncRasterRequest() {
+    if (m_asyncRasterInProgress) {
         return;
     }
-    
-    m_scaledRasterizedText = raster;
+    if (!m_pendingAsyncRasterRequest.has_value()) {
+        return;
+    }
+
+    AsyncRasterRequest next = *m_pendingAsyncRasterRequest;
+    m_pendingAsyncRasterRequest.reset();
+
+    if (next.requestId < m_rasterRequestId) {
+        return;
+    }
+
+    startAsyncRasterRequest(next.targetSize, next.scale, next.canvasZoom, next.requestId);
+}
+
+void TextMediaItem::handleRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size, qreal scale, qreal canvasZoom) {
+    Q_UNUSED(size);
+
+    if (m_activeAsyncRasterRequest && m_activeAsyncRasterRequest->generation == generation) {
+        m_asyncRasterInProgress = false;
+        m_activeAsyncRasterRequest.reset();
+    }
+
+    if (generation != m_rasterJobGeneration) {
+        startNextPendingAsyncRasterRequest();
+        return;
+    }
+
+    m_scaledRasterizedText = std::move(raster);
+    m_scaledRasterPixmap = QPixmap::fromImage(m_scaledRasterizedText);
+    m_scaledRasterPixmap.setDevicePixelRatio(1.0);
+    m_scaledRasterPixmapValid = !m_scaledRasterPixmap.isNull();
     m_lastRasterizedScale = scale;
     m_lastCanvasZoomForRaster = canvasZoom;
     m_scaledRasterDirty = false;
     m_asyncRasterInProgress = false;
-    
-    // Trigger repaint to show new raster
+    m_pendingRasterRequestId = 0;
+    m_lastScaledRasterUpdate = std::chrono::steady_clock::now();
+
     update();
+    startNextPendingAsyncRasterRequest();
 }
 
 void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) {
@@ -2685,14 +2325,28 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
         ensureScaledRaster(effectiveScale, currentScale, canvasZoom);
 
         painter->save();
-        if (std::abs(currentScale) > 1e-4) {
-            painter->scale(1.0 / currentScale, 1.0 / currentScale);
-        }
-        const QTransform scaleTransform = (std::abs(currentScale) > 1e-4)
-            ? QTransform::fromScale(currentScale, currentScale)
+        // Neutralize the item's local scale, uniform scale, and canvas/view zoom so the text
+        // keeps the same layout size inside the container while the raster image
+        // provides more pixels when zooming.
+        const qreal epsilon = 1e-4;
+        const qreal totalScale = std::max(std::abs(currentScale * uniformScale * canvasZoom), epsilon);
+        painter->scale(1.0 / totalScale, 1.0 / totalScale);
+
+        const QTransform scaleTransform = (std::abs(totalScale) > epsilon)
+            ? QTransform::fromScale(totalScale, totalScale)
             : QTransform::fromScale(1.0, 1.0);
         QRectF scaledBounds = scaleTransform.mapRect(bounds);
-        if (!m_scaledRasterizedText.isNull()) {
+
+        if (m_scaledRasterPixmapValid && !m_scaledRasterPixmap.isNull()) {
+            // DPR is always 1.0, so source size equals physical pixel dimensions
+            const QSizeF sourceSize(
+                static_cast<qreal>(m_scaledRasterPixmap.width()),
+                static_cast<qreal>(m_scaledRasterPixmap.height())
+            );
+            const QRectF sourceRect(QPointF(0.0, 0.0), sourceSize);
+            painter->drawPixmap(scaledBounds, m_scaledRasterPixmap, sourceRect);
+        } else if (!m_scaledRasterizedText.isNull()) {
+            // drawImage has no sourceRect overload for QImage here; scale via painter
             painter->drawImage(scaledBounds, m_scaledRasterizedText);
         }
         painter->restore();

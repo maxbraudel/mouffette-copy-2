@@ -7,8 +7,13 @@
 #include <QColor>
 #include <QSizeF>
 #include <QPointF>
+#include <QPainter>
+#include <QImage>
+#include <cmath>
 #include <chrono>
 #include <memory>
+#include <optional>
+#include <QPixmap>
 
 class QGraphicsTextItem;
 class QGraphicsSceneMouseEvent;
@@ -187,9 +192,30 @@ private:
     bool m_scaledRasterThrottleActive = false;
     
     // Async rasterization
+    struct AsyncRasterRequest {
+        QSize targetSize;
+        qreal scale = 1.0;
+        qreal canvasZoom = 1.0;
+        quint64 requestId = 0;
+        quint64 generation = 0;
+
+        bool isEquivalentTo(const QSize& size, qreal scaleFactor, qreal zoom) const {
+            constexpr qreal tolerance = 1e-4;
+            return targetSize == size &&
+                   std::abs(scale - scaleFactor) < tolerance &&
+                   std::abs(canvasZoom - zoom) < tolerance;
+        }
+    };
+
     quint64 m_rasterRequestId = 0;
     quint64 m_pendingRasterRequestId = 0;
     bool m_asyncRasterInProgress = false;
+    quint64 m_rasterJobGeneration = 0;
+    std::optional<AsyncRasterRequest> m_activeAsyncRasterRequest;
+    std::optional<AsyncRasterRequest> m_pendingAsyncRasterRequest;
+
+    QPixmap m_scaledRasterPixmap;
+    bool m_scaledRasterPixmapValid = false;
     
     // Text alignment settings
     HorizontalAlignment m_horizontalAlignment = HorizontalAlignment::Center;
@@ -213,9 +239,36 @@ private:
     void updateInlineEditorGeometry();
     void finishInlineEditing(bool commitChanges);
     void rasterizeText();
+    struct VectorDrawSnapshot {
+        QString text;
+        QFont font;
+        QColor fillColor;
+        QColor outlineColor;
+        qreal outlineWidthPercent = 0.0;
+        bool highlightEnabled = false;
+        QColor highlightColor;
+        qreal contentPaddingPx = 0.0;
+        bool fitToTextEnabled = false;
+        HorizontalAlignment horizontalAlignment = HorizontalAlignment::Center;
+        VerticalAlignment verticalAlignment = VerticalAlignment::Center;
+    };
+
+    struct TextRasterJob {
+        VectorDrawSnapshot snapshot;
+        QSize targetSize;
+        qreal scaleFactor = 1.0;
+
+        QImage execute() const;
+    };
+
+    VectorDrawSnapshot captureVectorSnapshot() const;
+    static void paintVectorSnapshot(QPainter* painter, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor);
+
     void ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale, qreal canvasZoom);
-    void kickAsyncRasterJob(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
-    void applyAsyncRasterResult(const QImage& raster, qreal visualScaleFactor, qreal canvasZoom, const QSize& size, quint64 requestId);
+    void startRasterJob(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
+    void handleRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size, qreal scale, qreal canvasZoom);
+    void startAsyncRasterRequest(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
+    void startNextPendingAsyncRasterRequest();
     void handleInlineEditorTextChanged(const QString& newText);
     const QString& textForRendering() const;
     void renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor);
