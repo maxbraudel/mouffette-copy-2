@@ -2179,16 +2179,10 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     int targetHeight = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.height()) * boundedGeometryScale * boundedUniformScale * boundedCanvasZoom)));
     qreal rasterScale = effectiveScale;
 
-    const int maxDimension = TextMediaItem::maxRasterDimension();
-    if (maxDimension > 0) {
-        const int largestSide = std::max(targetWidth, targetHeight);
-        if (largestSide > maxDimension) {
-            const qreal ratio = static_cast<qreal>(maxDimension) / static_cast<qreal>(largestSide);
-            targetWidth = std::max(1, static_cast<int>(std::llround(static_cast<qreal>(targetWidth) * ratio)));
-            targetHeight = std::max(1, static_cast<int>(std::llround(static_cast<qreal>(targetHeight) * ratio)));
-            rasterScale = std::max(epsilon, rasterScale * ratio);
-        }
-    }
+    // Note: No longer applying maxRasterDimension limit here because:
+    // 1. With viewport optimization, we only render visible region (much smaller)
+    // 2. This limit was causing pixelation during zoom by reducing rasterScale
+    // 3. Memory is controlled by viewport size, not full text size
 
     const QSize targetSize(targetWidth, targetHeight);
     
