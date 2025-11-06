@@ -34,10 +34,12 @@ public:
     QString getServerUrl() const { return m_serverUrlConfig; }
     bool getAutoUploadImportedMedia() const { return m_autoUploadImportedMedia; }
     QString getPersistentClientId() const { return m_persistentClientId; }
+    int getTextRasterMaxDimension() const { return m_textRasterMaxDimension; }
     
     // Setters
     void setServerUrl(const QString& url);
     void setAutoUploadImportedMedia(bool enabled);
+    void setTextRasterMaxDimension(int pixels);
 
 signals:
     void settingsChanged();
@@ -51,6 +53,7 @@ private:
     QString m_serverUrlConfig;
     bool m_autoUploadImportedMedia;
     QString m_persistentClientId;
+    int m_textRasterMaxDimension;
     
     // Persistent client ID generation
     QString generateOrLoadPersistentClientId();

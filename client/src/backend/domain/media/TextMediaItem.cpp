@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <QGraphicsTextItem>
+#include <QGraphicsView>
 #include <QFocusEvent>
 #include <QKeyEvent>
 #include <QTransform>
@@ -43,6 +44,17 @@
 #include <QtConcurrent>
 #include <QFutureWatcher>
 #include <memory>
+
+int TextMediaItem::s_maxRasterDimension = 500;
+
+void TextMediaItem::setMaxRasterDimension(int pixels) {
+    const int clamped = std::clamp(pixels, 256, 1000);
+    s_maxRasterDimension = clamped;
+}
+
+int TextMediaItem::maxRasterDimension() {
+    return s_maxRasterDimension;
+}
 
 // Global text styling configuration - tweak these to change all text media appearance
 namespace TextMediaDefaults {
@@ -1243,6 +1255,7 @@ TextMediaItem::TextMediaItem(
     m_editorRenderingText = m_text;
     m_uniformScaleFactor = scale();
     m_lastObservedScale = scale();
+    m_lastVisualScaleFactor = 1.0;
     m_appliedContentPaddingPx = contentPaddingPx();
     
     // Create alignment controls (will be shown when selected)
@@ -2415,19 +2428,34 @@ void TextMediaItem::rasterizeText() {
     m_scaledRasterDirty = true;
 }
 
-void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale) {
+void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale, qreal canvasZoom) {
     const qreal epsilon = 1e-4;
     const qreal effectiveScale = std::max(std::abs(visualScaleFactor), epsilon);
     const qreal boundedGeometryScale = std::max(std::abs(geometryScale), epsilon);
 
-    const int targetWidth = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.width()) * boundedGeometryScale)));
-    const int targetHeight = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.height()) * boundedGeometryScale)));
+    const qreal boundedCanvasZoom = std::max(std::abs(canvasZoom), epsilon);
+
+    int targetWidth = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.width()) * boundedGeometryScale * boundedCanvasZoom)));
+    int targetHeight = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.height()) * boundedGeometryScale * boundedCanvasZoom)));
+    qreal rasterScale = effectiveScale;
+
+    const int maxDimension = TextMediaItem::maxRasterDimension();
+    if (maxDimension > 0) {
+        const int largestSide = std::max(targetWidth, targetHeight);
+        if (largestSide > maxDimension) {
+            const qreal ratio = static_cast<qreal>(maxDimension) / static_cast<qreal>(largestSide);
+            targetWidth = std::max(1, static_cast<int>(std::llround(static_cast<qreal>(targetWidth) * ratio)));
+            targetHeight = std::max(1, static_cast<int>(std::llround(static_cast<qreal>(targetHeight) * ratio)));
+            rasterScale = std::max(epsilon, rasterScale * ratio);
+        }
+    }
+
     const QSize targetSize(targetWidth, targetHeight);
 
     const bool resizingUniformly = (m_activeHandle != None && !m_lastAxisAltStretch);
     const bool altStretching = (m_activeHandle != None && m_lastAxisAltStretch);
 
-    const bool scaleChanged = std::abs(effectiveScale - m_lastRasterizedScale) > epsilon;
+    const bool scaleChanged = std::abs(rasterScale - m_lastRasterizedScale) > epsilon;
     if (!m_scaledRasterDirty && !scaleChanged && m_scaledRasterizedText.size() == targetSize && !m_asyncRasterInProgress) {
         if (!resizingUniformly) {
             m_scaledRasterThrottleActive = false;
@@ -2454,7 +2482,7 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
         job.highlightEnabled = m_highlightEnabled;
         job.highlightColor = m_highlightColor;
         job.targetSize = targetSize;
-        job.scaleFactor = effectiveScale;
+        job.scaleFactor = rasterScale;
         job.contentPaddingPx = contentPaddingPx();
         job.fitToTextEnabled = m_fitToTextEnabled;
         job.horizontalAlignment = m_horizontalAlignment;
@@ -2462,7 +2490,8 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
         job.requestId = m_rasterRequestId;
 
         m_scaledRasterizedText = job.execute();
-        m_lastRasterizedScale = effectiveScale;
+        m_lastRasterizedScale = rasterScale;
+        m_lastCanvasZoomForRaster = boundedCanvasZoom;
         m_scaledRasterDirty = false;
         m_scaledRasterThrottleActive = false;
         m_lastScaledRasterUpdate = std::chrono::steady_clock::now();
@@ -2488,7 +2517,7 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
 
     // Kick async job instead of synchronous render
     ++m_rasterRequestId;
-    kickAsyncRasterJob(targetSize, effectiveScale, m_rasterRequestId);
+    kickAsyncRasterJob(targetSize, rasterScale, boundedCanvasZoom, m_rasterRequestId);
 
     if (resizingUniformly) {
         m_scaledRasterThrottleActive = true;
@@ -2522,7 +2551,7 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     }
 }
 
-void TextMediaItem::kickAsyncRasterJob(const QSize& targetSize, qreal effectiveScale, quint64 requestId) {
+void TextMediaItem::kickAsyncRasterJob(const QSize& targetSize, qreal effectiveScale, qreal canvasZoom, quint64 requestId) {
     m_asyncRasterInProgress = true;
     m_pendingRasterRequestId = requestId;
     
@@ -2553,7 +2582,7 @@ void TextMediaItem::kickAsyncRasterJob(const QSize& targetSize, qreal effectiveS
     
     // Note: QFutureWatcher needs QObject parent; we can't pass 'this' since QGraphicsItem isn't QObject
     auto* watcher = new QFutureWatcher<QImage>();
-    QObject::connect(watcher, &QFutureWatcher<QImage>::finished, watcher, [this, guard, watcher, targetSize, effectiveScale, requestId]() {
+    QObject::connect(watcher, &QFutureWatcher<QImage>::finished, watcher, [this, guard, watcher, targetSize, effectiveScale, canvasZoom, requestId]() {
         if (guard.expired()) {
             watcher->deleteLater();
             return;
@@ -2561,14 +2590,15 @@ void TextMediaItem::kickAsyncRasterJob(const QSize& targetSize, qreal effectiveS
         
         QImage result = watcher->result();
         watcher->deleteLater();
-        
-        applyAsyncRasterResult(result, effectiveScale, targetSize, requestId);
+
+        applyAsyncRasterResult(result, effectiveScale, canvasZoom, targetSize, requestId);
     });
     
     watcher->setFuture(future);
 }
 
-void TextMediaItem::applyAsyncRasterResult(const QImage& raster, qreal scale, const QSize& size, quint64 requestId) {
+void TextMediaItem::applyAsyncRasterResult(const QImage& raster, qreal scale, qreal canvasZoom, const QSize& size, quint64 requestId) {
+    Q_UNUSED(size);
     // Discard stale results
     if (requestId != m_rasterRequestId) {
         if (requestId == m_pendingRasterRequestId) {
@@ -2579,6 +2609,7 @@ void TextMediaItem::applyAsyncRasterResult(const QImage& raster, qreal scale, co
     
     m_scaledRasterizedText = raster;
     m_lastRasterizedScale = scale;
+    m_lastCanvasZoomForRaster = canvasZoom;
     m_scaledRasterDirty = false;
     m_asyncRasterInProgress = false;
     
@@ -2620,16 +2651,38 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
 
     const qreal currentScale = scale();
     const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
-    const qreal effectiveScale = std::max(std::abs(currentScale) * uniformScale, 1e-4);
+
+    qreal canvasZoom = 1.0;
+    if (scene() && !scene()->views().isEmpty()) {
+        if (QGraphicsView* view = scene()->views().first()) {
+            const QTransform viewTransform = view->transform();
+            const qreal scaleX = std::hypot(viewTransform.m11(), viewTransform.m21());
+            const qreal scaleY = std::hypot(viewTransform.m22(), viewTransform.m12());
+            if (scaleX > 1e-6 && scaleY > 1e-6) {
+                canvasZoom = (scaleX + scaleY) * 0.5;
+            } else if (scaleX > 1e-6) {
+                canvasZoom = scaleX;
+            } else if (scaleY > 1e-6) {
+                canvasZoom = scaleY;
+            }
+        }
+    }
+    if (canvasZoom <= 1e-6) {
+        canvasZoom = 1.0;
+    }
+
+    const qreal effectiveScale = std::max(std::abs(currentScale) * uniformScale * canvasZoom, 1e-4);
     const bool altStretchInProgress = (m_activeHandle != None && m_lastAxisAltStretch);
     const bool resizingUniformly = (m_activeHandle != None && !m_lastAxisAltStretch);
-    const bool needsScaledRaster = std::abs(currentScale - 1.0) > 1e-4 ||
+    const bool zoomed = std::abs(canvasZoom - 1.0) > 1e-4;
+    const bool needsScaledRaster = zoomed ||
+        std::abs(currentScale - 1.0) > 1e-4 ||
         std::abs(m_uniformScaleFactor - 1.0) > 1e-4 ||
         resizingUniformly ||
         altStretchInProgress;
 
     if (needsScaledRaster) {
-        ensureScaledRaster(effectiveScale, currentScale);
+        ensureScaledRaster(effectiveScale, currentScale, canvasZoom);
 
         painter->save();
         if (std::abs(currentScale) > 1e-4) {

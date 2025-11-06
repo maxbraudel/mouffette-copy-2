@@ -2,6 +2,7 @@
 #include "MainWindow.h"
 #include "backend/network/WebSocketClient.h"
 #include "frontend/ui/theme/ThemeManager.h"
+#include "backend/domain/media/TextMediaItem.h"
 #include <QDialog>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -17,6 +18,8 @@
 #include <QUuid>
 #include <QRegularExpression>
 #include <QDebug>
+#include <QSpinBox>
+#include <algorithm>
 
 // Import helper functions from MainWindow namespace
 namespace {
@@ -38,6 +41,7 @@ SettingsManager::SettingsManager(MainWindow* mainWindow, WebSocketClient* webSoc
     , m_webSocketClient(webSocketClient)
     , m_serverUrlConfig(DEFAULT_SERVER_URL)
     , m_autoUploadImportedMedia(false)
+    , m_textRasterMaxDimension(4096)
 {
 }
 
@@ -45,6 +49,9 @@ void SettingsManager::loadSettings() {
     QSettings settings("Mouffette", "Client");
     m_serverUrlConfig = settings.value("serverUrl", DEFAULT_SERVER_URL).toString();
     m_autoUploadImportedMedia = settings.value("autoUploadImportedMedia", false).toBool();
+    m_textRasterMaxDimension = settings.value("textRasterMaxDimension", 4096).toInt();
+    m_textRasterMaxDimension = std::clamp(m_textRasterMaxDimension, 256, 16384);
+    TextMediaItem::setMaxRasterDimension(m_textRasterMaxDimension);
     
     // Generate or load persistent client ID
     m_persistentClientId = generateOrLoadPersistentClientId();
@@ -56,13 +63,15 @@ void SettingsManager::loadSettings() {
     
     qDebug() << "SettingsManager: Settings loaded - URL:" << m_serverUrlConfig
              << "Auto-upload:" << m_autoUploadImportedMedia
-             << "Client ID:" << m_persistentClientId;
+             << "Client ID:" << m_persistentClientId
+             << "Text raster max:" << m_textRasterMaxDimension;
 }
 
 void SettingsManager::saveSettings() {
     QSettings settings("Mouffette", "Client");
     settings.setValue("serverUrl", m_serverUrlConfig.isEmpty() ? DEFAULT_SERVER_URL : m_serverUrlConfig);
     settings.setValue("autoUploadImportedMedia", m_autoUploadImportedMedia);
+    settings.setValue("textRasterMaxDimension", m_textRasterMaxDimension);
     settings.sync();
     
     qDebug() << "SettingsManager: Settings saved";
@@ -84,6 +93,15 @@ void SettingsManager::setAutoUploadImportedMedia(bool enabled) {
     }
 }
 
+void SettingsManager::setTextRasterMaxDimension(int pixels) {
+    const int clamped = std::clamp(pixels, 256, 16384);
+    if (m_textRasterMaxDimension != clamped) {
+        m_textRasterMaxDimension = clamped;
+        TextMediaItem::setMaxRasterDimension(m_textRasterMaxDimension);
+        saveSettings();
+    }
+}
+
 void SettingsManager::showSettingsDialog() {
     QDialog dialog(m_mainWindow);
     dialog.setWindowTitle("Settings");
@@ -101,6 +119,15 @@ void SettingsManager::showSettingsDialog() {
     v->addSpacing(8);
     v->addWidget(autoUploadChk);
 
+    QLabel* rasterLabel = new QLabel("Max text raster dimension (px)");
+    QSpinBox* rasterSpin = new QSpinBox(&dialog);
+    rasterSpin->setRange(256, 16384);
+    rasterSpin->setSingleStep(256);
+    rasterSpin->setValue(m_textRasterMaxDimension);
+    v->addSpacing(8);
+    v->addWidget(rasterLabel);
+    v->addWidget(rasterSpin);
+
     QHBoxLayout* btnRow = new QHBoxLayout();
     btnRow->addStretch();
     QPushButton* cancelBtn = ThemeManager::createPillButton("Cancel");
@@ -110,7 +137,7 @@ void SettingsManager::showSettingsDialog() {
     v->addLayout(btnRow);
 
     connect(cancelBtn, &QPushButton::clicked, &dialog, &QDialog::reject);
-    connect(saveBtn, &QPushButton::clicked, this, [this, urlEdit, autoUploadChk, &dialog]() {
+    connect(saveBtn, &QPushButton::clicked, this, [this, urlEdit, autoUploadChk, rasterSpin, &dialog]() {
         const QString newUrl = urlEdit->text().trimmed();
         if (!newUrl.isEmpty()) {
             bool changed = (newUrl != (m_serverUrlConfig.isEmpty() ? DEFAULT_SERVER_URL : m_serverUrlConfig));
@@ -125,6 +152,11 @@ void SettingsManager::showSettingsDialog() {
             }
         }
         m_autoUploadImportedMedia = autoUploadChk->isChecked();
+        const int newRasterDim = std::clamp(rasterSpin->value(), 256, 16384);
+        if (newRasterDim != m_textRasterMaxDimension) {
+            m_textRasterMaxDimension = newRasterDim;
+            TextMediaItem::setMaxRasterDimension(m_textRasterMaxDimension);
+        }
         
         saveSettings();
         dialog.accept();

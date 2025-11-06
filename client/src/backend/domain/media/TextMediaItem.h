@@ -95,6 +95,9 @@ public:
     void setUppercaseEnabled(bool enabled);
 
     qreal uniformScaleFactor() const { return m_uniformScaleFactor; }
+
+    static void setMaxRasterDimension(int pixels);
+    static int maxRasterDimension();
     
     // Text alignment
     enum class HorizontalAlignment { Left, Center, Right };
@@ -178,6 +181,8 @@ private:
     bool m_scaledRasterDirty = true;
     qreal m_uniformScaleFactor = 1.0;
     qreal m_lastObservedScale = 1.0;
+    qreal m_lastVisualScaleFactor = 1.0;
+    qreal m_lastCanvasZoomForRaster = 1.0;
     std::chrono::steady_clock::time_point m_lastScaledRasterUpdate{};
     bool m_scaledRasterThrottleActive = false;
     
@@ -208,9 +213,9 @@ private:
     void updateInlineEditorGeometry();
     void finishInlineEditing(bool commitChanges);
     void rasterizeText();
-    void ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale);
-    void kickAsyncRasterJob(const QSize& targetSize, qreal effectiveScale, quint64 requestId);
-    void applyAsyncRasterResult(const QImage& raster, qreal scale, const QSize& size, quint64 requestId);
+    void ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale, qreal canvasZoom);
+    void kickAsyncRasterJob(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
+    void applyAsyncRasterResult(const QImage& raster, qreal visualScaleFactor, qreal canvasZoom, const QSize& size, quint64 requestId);
     void handleInlineEditorTextChanged(const QString& newText);
     const QString& textForRendering() const;
     void renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor);
@@ -221,4 +226,6 @@ private:
     void applyFitModeConstraintsToEditor();
     qreal contentPaddingPx() const;
     void handleContentPaddingChanged(qreal oldPadding, qreal newPadding);
+
+    static int s_maxRasterDimension;
 };
