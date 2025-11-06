@@ -213,6 +213,7 @@ private:
     quint64 m_rasterJobGeneration = 0;
     std::optional<AsyncRasterRequest> m_activeAsyncRasterRequest;
     std::optional<AsyncRasterRequest> m_pendingAsyncRasterRequest;
+    bool m_rasterDispatchQueued = false;
 
     QPixmap m_scaledRasterPixmap;
     bool m_scaledRasterPixmapValid = false;
@@ -269,6 +270,8 @@ private:
     void handleRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size, qreal scale, qreal canvasZoom);
     void startAsyncRasterRequest(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
     void startNextPendingAsyncRasterRequest();
+    void queueRasterJobDispatch();
+    void dispatchPendingRasterRequest();
     void handleInlineEditorTextChanged(const QString& newText);
     const QString& textForRendering() const;
     void renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor);

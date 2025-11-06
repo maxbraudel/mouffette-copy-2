@@ -2069,10 +2069,11 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
 
     const bool resizingUniformly = (m_activeHandle != None && !m_lastAxisAltStretch);
     const bool altStretching = (m_activeHandle != None && m_lastAxisAltStretch);
+    const bool zoomed = std::abs(boundedCanvasZoom - 1.0) > epsilon;
 
     const bool scaleChanged = std::abs(rasterScale - m_lastRasterizedScale) > epsilon;
     if (!m_scaledRasterDirty && !scaleChanged && m_scaledRasterizedText.size() == targetSize && !m_asyncRasterInProgress) {
-        if (!resizingUniformly) {
+        if (!resizingUniformly && !zoomed) {
             m_scaledRasterThrottleActive = false;
         }
         return;
@@ -2080,8 +2081,7 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
 
     // Force synchronous rendering when editing or when font properties changed
     // to prevent visual glitches from mismatched cached bitmaps
-    const bool fontPropertiesChanged = m_needsRasterization;
-    const bool needsSyncRender = m_isEditing || fontPropertiesChanged || altStretching;
+    const bool needsSyncRender = m_isEditing || altStretching;
     
     if (needsSyncRender) {
         ++m_rasterRequestId;
@@ -2103,14 +2103,11 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
         return;
     }
 
-    if (!resizingUniformly && m_scaledRasterThrottleActive) {
-        m_scaledRasterThrottleActive = false;
-    }
-
     const bool hasScaledRaster = !m_scaledRasterizedText.isNull() && m_scaledRasterizedText.size() == targetSize;
 
-    // Throttle during active uniform resize
-    if (resizingUniformly && hasScaledRaster && m_scaledRasterThrottleActive) {
+    // Throttle during active operations (resize or zoom) to prevent job spam
+    const bool isActiveOperation = resizingUniformly || zoomed;
+    if (isActiveOperation && hasScaledRaster && m_scaledRasterThrottleActive) {
         const auto now = std::chrono::steady_clock::now();
         const auto elapsed = now - m_lastScaledRasterUpdate;
         if (elapsed < std::chrono::milliseconds(kScaledRasterThrottleIntervalMs)) {
@@ -2123,62 +2120,37 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     ++m_rasterRequestId;
     startRasterJob(targetSize, rasterScale, boundedCanvasZoom, m_rasterRequestId);
 
-    if (resizingUniformly) {
+    if (isActiveOperation) {
         m_scaledRasterThrottleActive = true;
         m_lastScaledRasterUpdate = std::chrono::steady_clock::now();
-
-        // Provide an immediate preview by scaling the latest raster so the text keeps its apparent size
-        const QImage* previewSource = nullptr;
-        if (!m_scaledRasterizedText.isNull()) {
-            previewSource = &m_scaledRasterizedText;
-        } else if (!m_rasterizedText.isNull()) {
-            previewSource = &m_rasterizedText;
-        }
-
-        if (previewSource && previewSource->size() != targetSize) {
-            const QImage* bestSource = previewSource;
-            if (!m_rasterizedText.isNull()) {
-                const bool baseIsLarger = (
-                    m_rasterizedText.width() * m_rasterizedText.height() >= previewSource->width() * previewSource->height()
-                );
-                if (baseIsLarger) {
-                    bestSource = &m_rasterizedText;
-                }
-            }
-
-            m_scaledRasterizedText = bestSource->scaled(targetSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-            m_scaledRasterPixmap = QPixmap::fromImage(m_scaledRasterizedText);
-            m_scaledRasterPixmap.setDevicePixelRatio(1.0);
-            m_scaledRasterPixmapValid = !m_scaledRasterPixmap.isNull();
-            // Keep dirty flag true so the async job still replaces the preview with a high-fidelity raster
-            update();
-        }
     } else {
         m_scaledRasterThrottleActive = false;
     }
 }
 
 void TextMediaItem::startRasterJob(const QSize& targetSize, qreal effectiveScale, qreal canvasZoom, quint64 requestId) {
-    AsyncRasterRequest request{targetSize, effectiveScale, canvasZoom, requestId};
+    const QSize sanitizedSize(std::max(1, targetSize.width()), std::max(1, targetSize.height()));
+    AsyncRasterRequest request{sanitizedSize, effectiveScale, canvasZoom, requestId};
 
     if (m_asyncRasterInProgress) {
-        if (m_activeAsyncRasterRequest && m_activeAsyncRasterRequest->isEquivalentTo(targetSize, effectiveScale, canvasZoom)) {
+        if (m_activeAsyncRasterRequest && m_activeAsyncRasterRequest->isEquivalentTo(sanitizedSize, effectiveScale, canvasZoom)) {
             m_rasterRequestId = m_activeAsyncRasterRequest->requestId;
             m_pendingRasterRequestId = m_activeAsyncRasterRequest->requestId;
             return;
         }
         m_pendingAsyncRasterRequest = request;
         m_pendingRasterRequestId = requestId;
+        queueRasterJobDispatch();
         return;
     }
 
-    m_pendingAsyncRasterRequest.reset();
-    startAsyncRasterRequest(targetSize, effectiveScale, canvasZoom, requestId);
+    m_pendingAsyncRasterRequest = request;
+    m_pendingRasterRequestId = requestId;
+    queueRasterJobDispatch();
 }
 
 void TextMediaItem::startAsyncRasterRequest(const QSize& targetSize, qreal effectiveScale, qreal canvasZoom, quint64 requestId) {
-    const QSize sanitizedSize(std::max(1, targetSize.width()), std::max(1, targetSize.height()));
-    AsyncRasterRequest request{sanitizedSize, effectiveScale, canvasZoom, requestId};
+    AsyncRasterRequest request{targetSize, effectiveScale, canvasZoom, requestId};
     request.generation = ++m_rasterJobGeneration;
 
     m_asyncRasterInProgress = true;
@@ -2187,7 +2159,7 @@ void TextMediaItem::startAsyncRasterRequest(const QSize& targetSize, qreal effec
 
     TextRasterJob job;
     job.snapshot = captureVectorSnapshot();
-    job.targetSize = sanitizedSize;
+    job.targetSize = targetSize;
     job.scaleFactor = effectiveScale;
 
     auto future = QtConcurrent::run([job]() {
@@ -2211,22 +2183,52 @@ void TextMediaItem::startAsyncRasterRequest(const QSize& targetSize, qreal effec
     watcher->setFuture(future);
 }
 
-void TextMediaItem::startNextPendingAsyncRasterRequest() {
+void TextMediaItem::queueRasterJobDispatch() {
+    if (m_rasterDispatchQueued) {
+        return;
+    }
+
+    m_rasterDispatchQueued = true;
+    std::weak_ptr<bool> guard = lifetimeGuard();
+    QTimer::singleShot(0, [this, guard]() {
+        if (guard.expired()) {
+            return;
+        }
+
+        m_rasterDispatchQueued = false;
+        dispatchPendingRasterRequest();
+    });
+}
+
+void TextMediaItem::dispatchPendingRasterRequest() {
     if (m_asyncRasterInProgress) {
         return;
     }
+
     if (!m_pendingAsyncRasterRequest.has_value()) {
         return;
     }
 
-    AsyncRasterRequest next = *m_pendingAsyncRasterRequest;
+    AsyncRasterRequest request = *m_pendingAsyncRasterRequest;
     m_pendingAsyncRasterRequest.reset();
 
-    if (next.requestId < m_rasterRequestId) {
+    if (request.requestId < m_rasterRequestId) {
         return;
     }
 
-    startAsyncRasterRequest(next.targetSize, next.scale, next.canvasZoom, next.requestId);
+    startAsyncRasterRequest(request.targetSize, request.scale, request.canvasZoom, request.requestId);
+}
+
+void TextMediaItem::startNextPendingAsyncRasterRequest() {
+    if (!m_pendingAsyncRasterRequest.has_value()) {
+        return;
+    }
+
+    if (m_asyncRasterInProgress) {
+        return;
+    }
+
+    queueRasterJobDispatch();
 }
 
 void TextMediaItem::handleRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size, qreal scale, qreal canvasZoom) {
