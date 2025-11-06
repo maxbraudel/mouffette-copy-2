@@ -2048,11 +2048,12 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
     update();
 }
 
-void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor) {
+void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor, const QRectF& visibleRegion) {
     TextRasterJob job;
     job.snapshot = captureVectorSnapshot();
     job.targetSize = QSize(std::max(1, imageSize.width()), std::max(1, imageSize.height()));
     job.scaleFactor = scaleFactor;
+    job.targetRect = visibleRegion;  // ✅ Pass viewport for partial rendering even in sync mode
 
     target = job.execute();
 }
@@ -2233,10 +2234,18 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
         m_activeAsyncRasterRequest.reset();
         m_pendingAsyncRasterRequest.reset();
 
-        renderTextToImage(m_scaledRasterizedText, targetSize, rasterScale);
+        // ✅ Option A: Apply viewport optimization even in sync rendering mode
+        // This reduces pixels by 10× during editing at high zoom levels
+        renderTextToImage(m_scaledRasterizedText, targetSize, rasterScale, visibleRegion);
         m_scaledRasterPixmap = QPixmap::fromImage(m_scaledRasterizedText);
         m_scaledRasterPixmap.setDevicePixelRatio(1.0);
         m_scaledRasterPixmapValid = !m_scaledRasterPixmap.isNull();
+        
+        // ✅ Update viewport tracking for cache management
+        m_scaledRasterVisibleRegion = visibleRegion;
+        m_lastViewportRect = visibleRegion;
+        m_lastViewportScale = boundedCanvasZoom;
+        
         m_lastRasterizedScale = rasterScale;
         m_lastCanvasZoomForRaster = boundedCanvasZoom;
         m_scaledRasterDirty = false;

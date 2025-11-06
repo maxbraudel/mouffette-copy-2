@@ -291,7 +291,7 @@ private:
     void startNextPendingBaseRasterRequest();
     void handleInlineEditorTextChanged(const QString& newText);
     const QString& textForRendering() const;
-    void renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor);
+    void renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor, const QRectF& visibleRegion = QRectF());
     void ensureAlignmentControls();
     void updateAlignmentControlsLayout();
     void updateAlignmentButtonStates();
