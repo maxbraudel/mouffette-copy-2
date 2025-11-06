@@ -1197,6 +1197,7 @@ void TextMediaItem::setText(const QString& text) {
         m_cachedEditorPosValid = false;
         m_needsRasterization = true;
         m_scaledRasterDirty = true;
+        m_frozenFallbackValid = false;  // Phase 3: Invalidate fallback when text changes
         if (m_inlineEditor && !m_isEditing) {
             QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
             m_inlineEditor->setPlainText(m_text);
@@ -1219,6 +1220,7 @@ void TextMediaItem::setFont(const QFont& font) {
     QFont adjustedFont = font;
     m_fontWeightValue = canonicalCssWeight(adjustedFont);
     adjustedFont = fontAdjustedForWeight(adjustedFont, m_fontWeightValue);
+    m_frozenFallbackValid = false;  // Phase 3: Invalidate fallback when font changes
     applyFontChange(adjustedFont);
 }
 
@@ -1229,6 +1231,7 @@ void TextMediaItem::setTextColor(const QColor& color) {
 
     m_textColor = color;
     m_cachedTextColor = color;
+    m_frozenFallbackValid = false;  // Phase 3: Invalidate fallback when text color changes
     update();
     if (m_inlineEditor) {
         m_inlineEditor->setDefaultTextColor(m_textColor);
@@ -1264,6 +1267,7 @@ void TextMediaItem::setTextBorderWidth(qreal percent) {
 
     m_needsRasterization = true;
     m_scaledRasterDirty = true;
+    m_frozenFallbackValid = false;  // Phase 3: Invalidate fallback when border width changes
     update();
 
     handleContentPaddingChanged(oldPadding, newPadding);
@@ -1299,6 +1303,7 @@ void TextMediaItem::setTextBorderColor(const QColor& color) {
     m_textBorderColor = color;
     m_needsRasterization = true;
     m_scaledRasterDirty = true;
+    m_frozenFallbackValid = false;  // Phase 3: Invalidate fallback when border color changes
     update();
 
     if (m_inlineEditor) {
@@ -1328,6 +1333,7 @@ void TextMediaItem::setHighlightEnabled(bool enabled) {
     m_highlightEnabled = enabled;
     m_needsRasterization = true;
     m_scaledRasterDirty = true;
+    m_frozenFallbackValid = false;  // Phase 3: Invalidate fallback when highlight toggled
     update();
 
     if (m_inlineEditor) {
@@ -1350,6 +1356,7 @@ void TextMediaItem::setHighlightColor(const QColor& color) {
     m_highlightColor = normalized;
     m_needsRasterization = true;
     m_scaledRasterDirty = true;
+    m_frozenFallbackValid = false;  // Phase 3: Invalidate fallback when highlight color changes
     update();
 
     if (m_inlineEditor) {
@@ -2280,6 +2287,54 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     }
 }
 
+void TextMediaItem::ensureFrozenFallbackCache(qreal currentCanvasZoom) {
+    // Phase 1: Create/update low-resolution fallback cache for freeze zones
+    // This provides visible context for text areas outside the viewport
+    
+    const qreal epsilon = 1e-4;
+    const qreal targetFallbackScale = 1.5;    // Fixed low-res scale for fallback
+    
+    // Check if we need to create or update the fallback cache
+    const bool textSizeChanged = (m_baseSize != m_frozenFallbackSize);
+    const bool scaleChanged = std::abs(m_frozenFallbackScale - targetFallbackScale) > epsilon;
+    const bool needsUpdate = !m_frozenFallbackValid || textSizeChanged || scaleChanged;
+    
+    if (!needsUpdate) {
+        // Fallback cache is still valid, nothing to do
+        return;
+    }
+    
+    // Calculate dimensions for fallback (full text at low resolution)
+    const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), epsilon);
+    const int fallbackWidth = std::max(1, static_cast<int>(
+        std::ceil(static_cast<qreal>(m_baseSize.width()) * uniformScale * targetFallbackScale)
+    ));
+    const int fallbackHeight = std::max(1, static_cast<int>(
+        std::ceil(static_cast<qreal>(m_baseSize.height()) * uniformScale * targetFallbackScale)
+    ));
+    const QSize fallbackSize(fallbackWidth, fallbackHeight);
+    
+    // Render FULL text at low resolution (no viewport clipping)
+    // Pass empty QRectF() to renderTextToImage to render entire text
+    QImage fallbackImage;
+    renderTextToImage(fallbackImage, fallbackSize, targetFallbackScale, QRectF());
+    
+    // Store fallback in cache
+    m_frozenFallbackPixmap = QPixmap::fromImage(fallbackImage);
+    m_frozenFallbackPixmap.setDevicePixelRatio(1.0);
+    m_frozenFallbackValid = !m_frozenFallbackPixmap.isNull();
+    m_frozenFallbackScale = targetFallbackScale;
+    m_frozenFallbackSize = m_baseSize;
+    
+    // Log fallback creation for debugging
+    if (m_frozenFallbackValid) {
+        qDebug() << "[Freeze Zones] Fallback cache created:"
+                 << fallbackSize
+                 << "@ scale" << targetFallbackScale
+                 << "for canvas zoom" << QString::number(currentCanvasZoom, 'f', 2) << "x";
+    }
+}
+
 void TextMediaItem::startRasterJob(const QSize& targetSize, qreal effectiveScale, qreal canvasZoom, quint64 requestId) {
     const QSize sanitizedSize(std::max(1, targetSize.width()), std::max(1, targetSize.height()));
     AsyncRasterRequest request{sanitizedSize, effectiveScale, canvasZoom, requestId};
@@ -2595,6 +2650,7 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
 
     if (needsScaledRaster) {
         ensureScaledRaster(effectiveScale, currentScale, canvasZoom);
+        ensureFrozenFallbackCache(canvasZoom);  // Phase 2: Create/update fallback cache
 
         painter->save();
         // Neutralize the item's local scale, uniform scale, and canvas/view zoom so the text
@@ -2609,6 +2665,73 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
             : QTransform::fromScale(1.0, 1.0);
         QRectF scaledBounds = scaleTransform.mapRect(bounds);
 
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // Phase 2: DUAL-CACHE RENDERING - Two-pass system for freeze zones
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        
+        // Calculate viewport region FIRST (needed for both passes)
+        QRectF viewportDestRect;
+        bool hasViewportCache = false;
+        if (m_scaledRasterPixmapValid && !m_scaledRasterPixmap.isNull()) {
+            hasViewportCache = true;
+            viewportDestRect = scaledBounds;
+            if (!m_scaledRasterVisibleRegion.isEmpty() && m_scaledRasterVisibleRegion.isValid()) {
+                const QRectF scaledVisibleRegion = scaleTransform.mapRect(m_scaledRasterVisibleRegion);
+                viewportDestRect = scaledVisibleRegion;
+            }
+        }
+        
+        // ✅ PASS 1: Draw frozen fallback cache (background layer - full text at low res)
+        // This provides visible context for text areas OUTSIDE the viewport ONLY
+        if (m_frozenFallbackValid && !m_frozenFallbackPixmap.isNull()) {
+            // Calculate display scale for fallback
+            // fallbackDisplayScale converts from fallback resolution to current display resolution
+            const qreal fallbackDisplayScale = totalScale / m_frozenFallbackScale;
+            
+            painter->save();
+            painter->scale(fallbackDisplayScale, fallbackDisplayScale);
+            
+            // OPTIMIZATION: Set clipping region to exclude viewport area
+            // This prevents drawing fallback under the high-res viewport cache
+            if (hasViewportCache) {
+                // Create clipping path: full text MINUS viewport region
+                QPainterPath fullTextPath;
+                const QSizeF fallbackSize(
+                    static_cast<qreal>(m_frozenFallbackPixmap.width()),
+                    static_cast<qreal>(m_frozenFallbackPixmap.height())
+                );
+                fullTextPath.addRect(QRectF(QPointF(0.0, 0.0), fallbackSize));
+                
+                // Transform viewport rect to fallback coordinate space
+                const QRectF viewportInFallbackSpace(
+                    viewportDestRect.x() / fallbackDisplayScale,
+                    viewportDestRect.y() / fallbackDisplayScale,
+                    viewportDestRect.width() / fallbackDisplayScale,
+                    viewportDestRect.height() / fallbackDisplayScale
+                );
+                
+                QPainterPath viewportPath;
+                viewportPath.addRect(viewportInFallbackSpace);
+                
+                // Subtract viewport from full text to get "freeze zones only"
+                QPainterPath freezeZonesPath = fullTextPath.subtracted(viewportPath);
+                painter->setClipPath(freezeZonesPath);
+            }
+            
+            const QSizeF fallbackSize(
+                static_cast<qreal>(m_frozenFallbackPixmap.width()),
+                static_cast<qreal>(m_frozenFallbackPixmap.height())
+            );
+            const QRectF fallbackDestRect(QPointF(0.0, 0.0), fallbackSize);
+            const QRectF fallbackSourceRect(QPointF(0.0, 0.0), fallbackSize);
+            
+            // Draw fallback ONLY in non-viewport areas (thanks to clipping)
+            painter->drawPixmap(fallbackDestRect, m_frozenFallbackPixmap, fallbackSourceRect);
+            painter->restore();
+        }
+        
+        // ✅ PASS 2: Draw high-res viewport cache (foreground layer - viewport area only)
+        // This provides sharp rendering for the currently visible portion
         if (m_scaledRasterPixmapValid && !m_scaledRasterPixmap.isNull()) {
             // DPR is always 1.0, so source size equals physical pixel dimensions
             const QSizeF sourceSize(
@@ -2626,6 +2749,7 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
                 destRect = scaledVisibleRegion;
             }
             
+            // Draw viewport at high resolution (8×+) - this overwrites the fallback in the visible area
             painter->drawPixmap(destRect, m_scaledRasterPixmap, sourceRect);
         } else if (!m_scaledRasterizedText.isNull()) {
             // drawImage has no sourceRect overload for QImage here; scale via painter

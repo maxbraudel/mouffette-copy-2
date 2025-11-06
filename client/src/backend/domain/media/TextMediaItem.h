@@ -228,6 +228,12 @@ private:
     QRectF m_lastViewportRect;   // Last viewport rectangle calculated (item coords)
     qreal m_lastViewportScale = 1.0;  // Scale factor of last viewport calculation
     
+    // Freeze zone fallback cache - low-res full text for out-of-viewport regions (Phase 1)
+    QPixmap m_frozenFallbackPixmap;      // Full text at low res (background for non-viewport areas)
+    bool m_frozenFallbackValid = false;  // Is fallback cache valid
+    qreal m_frozenFallbackScale = 1.0;   // Scale at which fallback was created
+    QSize m_frozenFallbackSize;          // Size of text when fallback was created (detect resize)
+    
     // Text alignment settings
     HorizontalAlignment m_horizontalAlignment = HorizontalAlignment::Center;
     VerticalAlignment m_verticalAlignment = VerticalAlignment::Center;
@@ -278,6 +284,7 @@ private:
 
     QRectF computeVisibleRegion() const;
     void ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale, qreal canvasZoom);
+    void ensureFrozenFallbackCache(qreal currentCanvasZoom);  // Phase 1: Create/update low-res fallback cache
     void startRasterJob(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
     void handleRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size, qreal scale, qreal canvasZoom, const QRectF& visibleRegion = QRectF());
     void startAsyncRasterRequest(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
