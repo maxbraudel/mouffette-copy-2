@@ -190,6 +190,11 @@ private:
     qreal m_lastCanvasZoomForRaster = 1.0;
     std::chrono::steady_clock::time_point m_lastScaledRasterUpdate{};
     bool m_scaledRasterThrottleActive = false;
+    bool m_baseRasterInProgress = false;
+    quint64 m_baseRasterGeneration = 0;
+    std::optional<QSize> m_pendingBaseRasterRequest;
+    QSize m_activeBaseRasterSize;
+    bool m_baseRasterDispatchQueued = false;
     
     // Async rasterization
     struct AsyncRasterRequest {
@@ -217,6 +222,11 @@ private:
 
     QPixmap m_scaledRasterPixmap;
     bool m_scaledRasterPixmapValid = false;
+    QRectF m_scaledRasterVisibleRegion;  // Region of item that was rasterized (for viewport optimization)
+    
+    // Viewport tracking for cache management (Étape 3)
+    QRectF m_lastViewportRect;   // Last viewport rectangle calculated (item coords)
+    qreal m_lastViewportScale = 1.0;  // Scale factor of last viewport calculation
     
     // Text alignment settings
     HorizontalAlignment m_horizontalAlignment = HorizontalAlignment::Center;
@@ -258,6 +268,7 @@ private:
         VectorDrawSnapshot snapshot;
         QSize targetSize;
         qreal scaleFactor = 1.0;
+        QRectF targetRect;  // Region to rasterize in item coordinates (empty = full raster)
 
         QImage execute() const;
     };
@@ -265,13 +276,19 @@ private:
     VectorDrawSnapshot captureVectorSnapshot() const;
     static void paintVectorSnapshot(QPainter* painter, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor);
 
+    QRectF computeVisibleRegion() const;
     void ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale, qreal canvasZoom);
     void startRasterJob(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
-    void handleRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size, qreal scale, qreal canvasZoom);
+    void handleRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size, qreal scale, qreal canvasZoom, const QRectF& visibleRegion = QRectF());
     void startAsyncRasterRequest(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
     void startNextPendingAsyncRasterRequest();
     void queueRasterJobDispatch();
     void dispatchPendingRasterRequest();
+    void startBaseRasterRequest(const QSize& targetSize);
+    void handleBaseRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size);
+    void queueBaseRasterDispatch();
+    void dispatchPendingBaseRasterRequest();
+    void startNextPendingBaseRasterRequest();
     void handleInlineEditorTextChanged(const QString& newText);
     const QString& textForRendering() const;
     void renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor);
