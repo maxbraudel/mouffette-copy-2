@@ -28,11 +28,8 @@
 #include <QClipboard>
 #include <QApplication>
 #include <QImage>
-#include <QPixmap>
-#include <QCursor>
 #include <QPen>
 #include <QFontDatabase>
-#include <QDebug>
 #include <array>
 #include <limits>
 #include <functional>
@@ -41,9 +38,6 @@
 #include <QScopedValueRollback>
 #include <QTimer>
 #include <QPalette>
-#include <chrono>
-#include <QtConcurrent>
-#include <QFutureWatcher>
 #include <memory>
 #include <utility>
 
@@ -67,23 +61,11 @@ namespace TextMediaDefaults {
     const qreal DEFAULT_VIEWPORT_SCALE = 1.0;
 }
 
-// Static member definition
-int TextMediaItem::s_maxRasterDimension = 100000;
-
-void TextMediaItem::setMaxRasterDimension(int pixels) {
-    s_maxRasterDimension = std::max(256, std::min(pixels, 100000));
-}
-
-int TextMediaItem::maxRasterDimension() {
-    return s_maxRasterDimension;
-}
-
 namespace {
 
 constexpr qreal kContentPadding = 4.0;
 constexpr qreal kStrokeOverflowScale = 0.75;
 constexpr qreal kStrokeOverflowMinPx = 1.5;
-constexpr int kScaledRasterThrottleIntervalMs = 45;
 constexpr qreal kFitToTextMinWidth = 24.0;
 
 struct CssWeightMapping {
@@ -1069,50 +1051,6 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
     painter->restore();
 }
 
-QImage TextMediaItem::TextRasterJob::execute() const {
-    const int targetWidth = std::max(1, targetSize.width());
-    const int targetHeight = std::max(1, targetSize.height());
-
-    // If targetRect is specified and valid, render only that region
-    if (!targetRect.isEmpty() && targetRect.isValid()) {
-        // Calculate pixel dimensions for the visible region
-        const int regionWidth = std::max(1, static_cast<int>(std::ceil(targetRect.width() * scaleFactor)));
-        const int regionHeight = std::max(1, static_cast<int>(std::ceil(targetRect.height() * scaleFactor)));
-        
-        // Create image for visible region only
-        QImage result(regionWidth, regionHeight, QImage::Format_ARGB32_Premultiplied);
-        result.fill(Qt::transparent);
-
-        QPainter imagePainter(&result);
-        imagePainter.setRenderHint(QPainter::Antialiasing, true);
-        imagePainter.setRenderHint(QPainter::TextAntialiasing, true);
-        imagePainter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-
-        // Translate to render only the visible region
-        // targetRect is in item coordinates, we need to offset by its top-left
-        imagePainter.translate(-targetRect.left() * scaleFactor, -targetRect.top() * scaleFactor);
-
-        TextMediaItem::paintVectorSnapshot(&imagePainter, snapshot, targetSize, scaleFactor);
-        imagePainter.end();
-
-        return result;
-    }
-
-    // Fallback: render full image (original behavior)
-    QImage result(targetWidth, targetHeight, QImage::Format_ARGB32_Premultiplied);
-    result.fill(Qt::transparent);
-
-    QPainter imagePainter(&result);
-    imagePainter.setRenderHint(QPainter::Antialiasing, true);
-    imagePainter.setRenderHint(QPainter::TextAntialiasing, true);
-    imagePainter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-
-    TextMediaItem::paintVectorSnapshot(&imagePainter, snapshot, targetSize, scaleFactor);
-    imagePainter.end();
-
-    return result;
-}
-
 TextMediaItem::TextMediaItem(
     const QSize& initialSize,
     int visualSizePx,
@@ -1173,14 +1111,9 @@ TextMediaItem::TextMediaItem(
     m_cachedEditorPos = QPointF();
     m_documentMetricsDirty = true;
     
-    // Initialize rasterization state
-    m_needsRasterization = true;
-    m_lastRasterizedSize = QSize(0, 0);
-
     m_editorRenderingText = m_text;
     m_uniformScaleFactor = scale();
     m_lastObservedScale = scale();
-    m_lastVisualScaleFactor = 1.0;
     m_appliedContentPaddingPx = contentPaddingPx();
     
     // Create alignment controls (will be shown when selected)
@@ -1195,9 +1128,6 @@ void TextMediaItem::setText(const QString& text) {
         m_editorRenderingText = text;
         m_documentMetricsDirty = true;
         m_cachedEditorPosValid = false;
-        m_needsRasterization = true;
-        m_scaledRasterDirty = true;
-        m_frozenFallbackValid = false;  // Phase 3: Invalidate fallback when text changes
         if (m_inlineEditor && !m_isEditing) {
             QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
             m_inlineEditor->setPlainText(m_text);
@@ -1220,7 +1150,6 @@ void TextMediaItem::setFont(const QFont& font) {
     QFont adjustedFont = font;
     m_fontWeightValue = canonicalCssWeight(adjustedFont);
     adjustedFont = fontAdjustedForWeight(adjustedFont, m_fontWeightValue);
-    m_frozenFallbackValid = false;  // Phase 3: Invalidate fallback when font changes
     applyFontChange(adjustedFont);
 }
 
@@ -1231,7 +1160,6 @@ void TextMediaItem::setTextColor(const QColor& color) {
 
     m_textColor = color;
     m_cachedTextColor = color;
-    m_frozenFallbackValid = false;  // Phase 3: Invalidate fallback when text color changes
     update();
     if (m_inlineEditor) {
         m_inlineEditor->setDefaultTextColor(m_textColor);
@@ -1241,8 +1169,6 @@ void TextMediaItem::setTextColor(const QColor& color) {
             inlineEditor->invalidateCache();
         }
     }
-    m_needsRasterization = true;
-    m_scaledRasterDirty = true;
 }
 
 void TextMediaItem::setTextColorOverrideEnabled(bool enabled) {
@@ -1265,9 +1191,6 @@ void TextMediaItem::setTextBorderWidth(qreal percent) {
     m_textBorderWidthPercent = clamped;
     const qreal newPadding = contentPaddingPx();
 
-    m_needsRasterization = true;
-    m_scaledRasterDirty = true;
-    m_frozenFallbackValid = false;  // Phase 3: Invalidate fallback when border width changes
     update();
 
     handleContentPaddingChanged(oldPadding, newPadding);
@@ -1301,9 +1224,6 @@ void TextMediaItem::setTextBorderColor(const QColor& color) {
     }
 
     m_textBorderColor = color;
-    m_needsRasterization = true;
-    m_scaledRasterDirty = true;
-    m_frozenFallbackValid = false;  // Phase 3: Invalidate fallback when border color changes
     update();
 
     if (m_inlineEditor) {
@@ -1331,9 +1251,6 @@ void TextMediaItem::setHighlightEnabled(bool enabled) {
     }
 
     m_highlightEnabled = enabled;
-    m_needsRasterization = true;
-    m_scaledRasterDirty = true;
-    m_frozenFallbackValid = false;  // Phase 3: Invalidate fallback when highlight toggled
     update();
 
     if (m_inlineEditor) {
@@ -1354,9 +1271,6 @@ void TextMediaItem::setHighlightColor(const QColor& color) {
     }
 
     m_highlightColor = normalized;
-    m_needsRasterization = true;
-    m_scaledRasterDirty = true;
-    m_frozenFallbackValid = false;  // Phase 3: Invalidate fallback when highlight color changes
     update();
 
     if (m_inlineEditor) {
@@ -1470,9 +1384,6 @@ void TextMediaItem::handleContentPaddingChanged(qreal oldPadding, qreal newPaddi
 
     prepareGeometryChange();
     m_baseSize = newBase;
-    m_needsRasterization = true;
-    m_scaledRasterDirty = true;
-    m_lastRasterizedScale = 1.0;
     m_cachedEditorPosValid = false;
     m_documentMetricsDirty = true;
     m_cachedIdealWidth = -1.0;
@@ -1576,12 +1487,6 @@ void TextMediaItem::applyFontChange(const QFont& font) {
 
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
-    m_needsRasterization = true;
-    m_scaledRasterDirty = true;
-    
-    // Don't clear the scaled raster immediately - let ensureScaledRaster handle the transition
-    // to avoid showing empty frames during font changes
-    
     update();
 
     handleContentPaddingChanged(oldPadding, newPadding);
@@ -1605,8 +1510,6 @@ void TextMediaItem::applyFontChange(const QFont& font) {
 void TextMediaItem::setHorizontalAlignment(HorizontalAlignment align) {
     if (m_horizontalAlignment == align) return;
     m_horizontalAlignment = align;
-    m_needsRasterization = true;
-    m_scaledRasterDirty = true;
     applyAlignmentToEditor(); // Update inline editor alignment
     update();
     updateAlignmentButtonStates();
@@ -1618,8 +1521,6 @@ void TextMediaItem::setHorizontalAlignment(HorizontalAlignment align) {
 void TextMediaItem::setVerticalAlignment(VerticalAlignment align) {
     if (m_verticalAlignment == align) return;
     m_verticalAlignment = align;
-    m_needsRasterization = true;
-    m_scaledRasterDirty = true;
     m_cachedEditorPosValid = false; // Force recalculation of editor position
     if (m_inlineEditor) {
         updateInlineEditorGeometry(); // Update editor position immediately
@@ -1813,8 +1714,6 @@ void TextMediaItem::handleInlineEditorTextChanged(const QString& newText) {
     }
 
     m_editorRenderingText = newText;
-    m_needsRasterization = true;
-    m_scaledRasterDirty = true;
     update();
 }
 
@@ -1965,13 +1864,6 @@ void TextMediaItem::updateInlineEditorGeometry() {
 void TextMediaItem::onInteractiveGeometryChanged() {
     ResizableMediaBase::onInteractiveGeometryChanged();
 
-    if (m_lastAxisAltStretch) {
-        // Force a fresh base raster when Alt stretch mutates dimensions so preview stays crisp.
-        if (m_lastRasterizedSize != m_baseSize) {
-            m_needsRasterization = true;
-        }
-    }
-
     if (m_isEditing) {
         // Update editor geometry to follow Alt-resize base size changes
         updateInlineEditorGeometry();
@@ -1983,8 +1875,6 @@ void TextMediaItem::onInteractiveGeometryChanged() {
     
     // Update alignment controls position (similar to video controls)
     updateAlignmentControlsLayout();
-    
-    m_scaledRasterDirty = true;
     update();
 }
 
@@ -2036,17 +1926,11 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
     } else {
         if (editedText != m_textBeforeEditing) {
             m_editorRenderingText = m_textBeforeEditing;
-            m_needsRasterization = true;
-            m_scaledRasterDirty = true;
         } else {
             m_editorRenderingText = m_text;
         }
     }
     m_textBeforeEditing.clear();
-
-    // Rasterize text after editing completes
-    m_needsRasterization = true;
-    m_scaledRasterDirty = true;
 
     updateInlineEditorGeometry();
     if (m_fitToTextEnabled) {
@@ -2055,544 +1939,14 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
     update();
 }
 
-void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor, const QRectF& visibleRegion) {
-    TextRasterJob job;
-    job.snapshot = captureVectorSnapshot();
-    job.targetSize = QSize(std::max(1, imageSize.width()), std::max(1, imageSize.height()));
-    job.scaleFactor = scaleFactor;
-    job.targetRect = visibleRegion;  // ✅ Pass viewport for partial rendering even in sync mode
-
-    target = job.execute();
-}
-
-void TextMediaItem::rasterizeText() {
-    const QSize targetSize(std::max(1, m_baseSize.width()), std::max(1, m_baseSize.height()));
-    const bool altStretching = (m_activeHandle != None && m_lastAxisAltStretch);
-    const bool needsSyncRender = m_isEditing || altStretching;
-    const bool hasExistingRaster = !m_rasterizedText.isNull();
-
-    if (needsSyncRender || !hasExistingRaster) {
-        ++m_baseRasterGeneration;
-        m_baseRasterInProgress = false;
-        m_pendingBaseRasterRequest.reset();
-        m_baseRasterDispatchQueued = false;
-
-        renderTextToImage(m_rasterizedText, targetSize, 1.0);
-
-        m_activeBaseRasterSize = targetSize;
-        m_lastRasterizedSize = m_baseSize;
-        m_needsRasterization = false;
-        m_scaledRasterDirty = true;
-        return;
-    }
-
-    if (!m_needsRasterization && m_lastRasterizedSize == m_baseSize && !m_baseRasterInProgress) {
-        return;
-    }
-
-    if (m_baseRasterInProgress) {
-        if (m_activeBaseRasterSize == targetSize) {
-            return;
-        }
-        m_pendingBaseRasterRequest = targetSize;
-        queueBaseRasterDispatch();
-        return;
-    }
-
-    m_pendingBaseRasterRequest = targetSize;
-    queueBaseRasterDispatch();
-}
-
-QRectF TextMediaItem::computeVisibleRegion() const {
-    // If no scene or view, fallback to entire item bounds
-    if (!scene() || scene()->views().isEmpty()) {
-        return boundingRect();
-    }
-    
-    QGraphicsView* view = scene()->views().first();
-    if (!view) {
-        return boundingRect();
-    }
-    
-    // Get viewport rectangle in scene coordinates
-    const QRect viewportRect = view->viewport()->rect();
-    const QPolygonF viewportScenePolygon = view->mapToScene(viewportRect);
-    const QRectF viewportSceneRect = viewportScenePolygon.boundingRect();
-    
-    // Get our item's bounding rect in scene coordinates
-    const QRectF itemSceneRect = mapRectToScene(boundingRect());
-    
-    // Compute intersection
-    const QRectF visibleSceneRect = viewportSceneRect.intersected(itemSceneRect);
-    
-    if (visibleSceneRect.isEmpty()) {
-        return QRectF(); // Item completely off-screen
-    }
-    
-    // Convert back to item local coordinates
-    return mapRectFromScene(visibleSceneRect);
-}
-
-void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale, qreal canvasZoom) {
-    const qreal epsilon = 1e-4;
-    const qreal effectiveScale = std::max(std::abs(visualScaleFactor), epsilon);
-    const qreal boundedGeometryScale = std::max(std::abs(geometryScale), epsilon);
-    const qreal boundedCanvasZoom = std::max(std::abs(canvasZoom), epsilon);
-    const qreal boundedUniformScale = std::max(std::abs(m_uniformScaleFactor), epsilon);
-
-    // Compute visible region in item coordinates
-    const QRectF visibleRegion = computeVisibleRegion();
-    const bool itemOffScreen = visibleRegion.isEmpty();
-    
-    if (itemOffScreen) {
-        // No need to rasterize if completely off-screen
-        return;
-    }
-
-    // Étape 3: Cache management - check if viewport shift is significant
-    // If we already have a raster and the viewport hasn't changed much, keep the cache
-    bool viewportShiftedSignificantly = true;
-    
-    if (!m_lastViewportRect.isEmpty() && !visibleRegion.isEmpty() && m_scaledRasterPixmapValid) {
-        // Check if scale changed significantly
-        const qreal scaleEpsilon = 0.01; // 1% tolerance
-        const bool scaleUnchanged = std::abs(boundedCanvasZoom - m_lastViewportScale) < scaleEpsilon;
-        
-        if (scaleUnchanged) {
-            // Calculate overlap between old and new viewport
-            const QRectF intersection = m_lastViewportRect.intersected(visibleRegion);
-            const QRectF unionRect = m_lastViewportRect.united(visibleRegion);
-            
-            const qreal intersectionArea = intersection.width() * intersection.height();
-            const qreal unionArea = unionRect.width() * unionRect.height();
-            
-            // If overlap > 70%, consider the viewport unchanged
-            const qreal overlapRatio = (unionArea > 0) ? (intersectionArea / unionArea) : 0.0;
-            
-            if (overlapRatio > 0.7) {
-                viewportShiftedSignificantly = false;
-                
-                // Log cache hit
-                qDebug() << "[TextMedia Cache Hit] Viewport overlap:" << QString::number(overlapRatio * 100.0, 'f', 1) << "% - keeping cache";
-            }
-        }
-    }
-    
-    // If viewport didn't shift significantly, we can skip re-rasterization
-    if (!viewportShiftedSignificantly && !m_scaledRasterDirty && m_scaledRasterPixmapValid) {
-        return;
-    }
-
-    int targetWidth = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.width()) * boundedGeometryScale * boundedUniformScale * boundedCanvasZoom)));
-    int targetHeight = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.height()) * boundedGeometryScale * boundedUniformScale * boundedCanvasZoom)));
-    qreal rasterScale = effectiveScale;
-
-    // Note: No longer applying maxRasterDimension limit here because:
-    // 1. With viewport optimization, we only render visible region (much smaller)
-    // 2. This limit was causing pixelation during zoom by reducing rasterScale
-    // 3. Memory is controlled by viewport size, not full text size
-
-    const QSize targetSize(targetWidth, targetHeight);
-    
-    // Log viewport optimization metrics
-    const QRectF fullBounds = boundingRect();
-    const qreal fullArea = fullBounds.width() * fullBounds.height();
-    const qreal visibleArea = visibleRegion.width() * visibleRegion.height();
-    const qreal visibleRatio = (fullArea > 0) ? (visibleArea / fullArea) : 1.0;
-    
-    // Calculate potential pixel savings
-    const int fullPixels = targetWidth * targetHeight;
-    const int visiblePixels = static_cast<int>(std::ceil(visibleRegion.width() * boundedGeometryScale * boundedUniformScale * boundedCanvasZoom)) *
-                               static_cast<int>(std::ceil(visibleRegion.height() * boundedGeometryScale * boundedUniformScale * boundedCanvasZoom));
-    const qreal pixelReduction = (fullPixels > 0) ? (static_cast<qreal>(visiblePixels) / static_cast<qreal>(fullPixels)) : 1.0;
-    
-    // Log only when there's significant optimization potential (zoom > 200% and visible < 80%)
-    if (boundedCanvasZoom > 2.0 && visibleRatio < 0.8) {
-        qDebug() << "[TextMedia Viewport Optimization]"
-                 << "\n  Full size:" << targetSize
-                 << "\n  Visible region:" << visibleRegion
-                 << "\n  Visible area ratio:" << QString::number(visibleRatio * 100.0, 'f', 1) << "%"
-                 << "\n  Full pixels:" << fullPixels
-                 << "\n  Potential visible pixels:" << visiblePixels
-                 << "\n  Potential reduction:" << QString::number((1.0 - pixelReduction) * 100.0, 'f', 1) << "%"
-                 << "\n  Canvas zoom:" << QString::number(boundedCanvasZoom, 'f', 2) << "x";
-    }
-
-    const bool resizingUniformly = (m_activeHandle != None && !m_lastAxisAltStretch);
-    const bool altStretching = (m_activeHandle != None && m_lastAxisAltStretch);
-    const bool zoomed = std::abs(boundedCanvasZoom - 1.0) > epsilon;
-
-    const bool scaleChanged = std::abs(rasterScale - m_lastRasterizedScale) > epsilon;
-    if (!m_scaledRasterDirty && !scaleChanged && m_scaledRasterizedText.size() == targetSize && !m_asyncRasterInProgress) {
-        if (!resizingUniformly && !zoomed) {
-            m_scaledRasterThrottleActive = false;
-        }
-        return;
-    }
-
-    // Force synchronous rendering only when Alt-stretching (font properties changed)
-    // to prevent visual glitches from mismatched cached bitmaps.
-    // Editing mode can use async rendering - the inline editor handles text input,
-    // and the background raster doesn't need perfect sync.
-    const bool needsSyncRender = altStretching;
-    
-    if (needsSyncRender) {
-        ++m_rasterRequestId;
-        m_pendingRasterRequestId = m_rasterRequestId;
-        m_asyncRasterInProgress = false;
-        m_activeAsyncRasterRequest.reset();
-        m_pendingAsyncRasterRequest.reset();
-
-        // ✅ Option A: Apply viewport optimization even in sync rendering mode
-        // This reduces pixels by 10× during editing at high zoom levels
-        renderTextToImage(m_scaledRasterizedText, targetSize, rasterScale, visibleRegion);
-        m_scaledRasterPixmap = QPixmap::fromImage(m_scaledRasterizedText);
-        m_scaledRasterPixmap.setDevicePixelRatio(1.0);
-        m_scaledRasterPixmapValid = !m_scaledRasterPixmap.isNull();
-        
-        // ✅ Update viewport tracking for cache management
-        m_scaledRasterVisibleRegion = visibleRegion;
-        m_lastViewportRect = visibleRegion;
-        m_lastViewportScale = boundedCanvasZoom;
-        
-        m_lastRasterizedScale = rasterScale;
-        m_lastCanvasZoomForRaster = boundedCanvasZoom;
-        m_scaledRasterDirty = false;
-        m_scaledRasterThrottleActive = false;
-        m_lastScaledRasterUpdate = std::chrono::steady_clock::now();
-        update();
-        return;
-    }
-
-    const bool hasScaledRaster = !m_scaledRasterizedText.isNull() && m_scaledRasterizedText.size() == targetSize;
-
-    // Throttle during active operations (resize or zoom) to prevent job spam
-    const bool isActiveOperation = resizingUniformly || zoomed;
-    if (isActiveOperation && hasScaledRaster && m_scaledRasterThrottleActive) {
-        const auto now = std::chrono::steady_clock::now();
-        const auto elapsed = now - m_lastScaledRasterUpdate;
-        if (elapsed < std::chrono::milliseconds(kScaledRasterThrottleIntervalMs)) {
-            m_scaledRasterDirty = true;
-            return;
-        }
-    }
-
-    // Kick async job instead of synchronous render
-    ++m_rasterRequestId;
-    startRasterJob(targetSize, rasterScale, boundedCanvasZoom, m_rasterRequestId);
-
-    if (isActiveOperation) {
-        m_scaledRasterThrottleActive = true;
-        m_lastScaledRasterUpdate = std::chrono::steady_clock::now();
-    } else {
-        m_scaledRasterThrottleActive = false;
-    }
-}
-
-void TextMediaItem::ensureFrozenFallbackCache(qreal currentCanvasZoom) {
-    // Phase 1: Create/update low-resolution fallback cache for freeze zones
-    // This provides visible context for text areas outside the viewport
-    
-    const qreal epsilon = 1e-4;
-    const qreal targetFallbackScale = 1.5;    // Fixed low-res scale for fallback
-    
-    // Check if we need to create or update the fallback cache
-    const bool textSizeChanged = (m_baseSize != m_frozenFallbackSize);
-    const bool scaleChanged = std::abs(m_frozenFallbackScale - targetFallbackScale) > epsilon;
-    const bool needsUpdate = !m_frozenFallbackValid || textSizeChanged || scaleChanged;
-    
-    if (!needsUpdate) {
-        // Fallback cache is still valid, nothing to do
-        return;
-    }
-    
-    // Calculate dimensions for fallback (full text at low resolution)
-    const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), epsilon);
-    const int fallbackWidth = std::max(1, static_cast<int>(
-        std::ceil(static_cast<qreal>(m_baseSize.width()) * uniformScale * targetFallbackScale)
-    ));
-    const int fallbackHeight = std::max(1, static_cast<int>(
-        std::ceil(static_cast<qreal>(m_baseSize.height()) * uniformScale * targetFallbackScale)
-    ));
-    const QSize fallbackSize(fallbackWidth, fallbackHeight);
-    
-    // Render FULL text at low resolution (no viewport clipping)
-    // Pass empty QRectF() to renderTextToImage to render entire text
-    QImage fallbackImage;
-    renderTextToImage(fallbackImage, fallbackSize, targetFallbackScale, QRectF());
-    
-    // Store fallback in cache
-    m_frozenFallbackPixmap = QPixmap::fromImage(fallbackImage);
-    m_frozenFallbackPixmap.setDevicePixelRatio(1.0);
-    m_frozenFallbackValid = !m_frozenFallbackPixmap.isNull();
-    m_frozenFallbackScale = targetFallbackScale;
-    m_frozenFallbackSize = m_baseSize;
-    
-    // Log fallback creation for debugging
-    if (m_frozenFallbackValid) {
-        qDebug() << "[Freeze Zones] Fallback cache created:"
-                 << fallbackSize
-                 << "@ scale" << targetFallbackScale
-                 << "for canvas zoom" << QString::number(currentCanvasZoom, 'f', 2) << "x";
-    }
-}
-
-void TextMediaItem::startRasterJob(const QSize& targetSize, qreal effectiveScale, qreal canvasZoom, quint64 requestId) {
-    const QSize sanitizedSize(std::max(1, targetSize.width()), std::max(1, targetSize.height()));
-    AsyncRasterRequest request{sanitizedSize, effectiveScale, canvasZoom, requestId};
-
-    if (m_asyncRasterInProgress) {
-        if (m_activeAsyncRasterRequest && m_activeAsyncRasterRequest->isEquivalentTo(sanitizedSize, effectiveScale, canvasZoom)) {
-            m_rasterRequestId = m_activeAsyncRasterRequest->requestId;
-            m_pendingRasterRequestId = m_activeAsyncRasterRequest->requestId;
-            return;
-        }
-        m_pendingAsyncRasterRequest = request;
-        m_pendingRasterRequestId = requestId;
-        queueRasterJobDispatch();
-        return;
-    }
-
-    m_pendingAsyncRasterRequest = request;
-    m_pendingRasterRequestId = requestId;
-    queueRasterJobDispatch();
-}
-
-void TextMediaItem::startAsyncRasterRequest(const QSize& targetSize, qreal effectiveScale, qreal canvasZoom, quint64 requestId) {
-    AsyncRasterRequest request{targetSize, effectiveScale, canvasZoom, requestId};
-    request.generation = ++m_rasterJobGeneration;
-
-    m_asyncRasterInProgress = true;
-    m_pendingRasterRequestId = requestId;
-    m_activeAsyncRasterRequest = request;
-
-    // Calculate visible region for viewport optimization
-    QRectF visibleRegion = computeVisibleRegion();
-    
-    TextRasterJob job;
-    job.snapshot = captureVectorSnapshot();
-    job.targetSize = targetSize;
-    job.scaleFactor = effectiveScale;
-    job.targetRect = visibleRegion;  // Pass visible region for partial rendering
-
-    auto future = QtConcurrent::run([job]() {
-        return job.execute();
-    });
-
-    std::weak_ptr<bool> guard = lifetimeGuard();
-    auto* watcher = new QFutureWatcher<QImage>();
-    QObject::connect(watcher, &QFutureWatcher<QImage>::finished, watcher, [this, guard, watcher, request, visibleRegion]() mutable {
-        if (guard.expired()) {
-            watcher->deleteLater();
-            return;
-        }
-
-        QImage result = watcher->result();
-        watcher->deleteLater();
-
-        handleRasterJobFinished(request.generation, std::move(result), request.targetSize, request.scale, request.canvasZoom, visibleRegion);
-    });
-
-    watcher->setFuture(future);
-}
-
-void TextMediaItem::queueRasterJobDispatch() {
-    if (m_rasterDispatchQueued) {
-        return;
-    }
-
-    m_rasterDispatchQueued = true;
-    std::weak_ptr<bool> guard = lifetimeGuard();
-    QTimer::singleShot(0, [this, guard]() {
-        if (guard.expired()) {
-            return;
-        }
-
-        m_rasterDispatchQueued = false;
-        dispatchPendingRasterRequest();
-    });
-}
-
-void TextMediaItem::dispatchPendingRasterRequest() {
-    if (m_asyncRasterInProgress) {
-        return;
-    }
-
-    if (!m_pendingAsyncRasterRequest.has_value()) {
-        return;
-    }
-
-    AsyncRasterRequest request = *m_pendingAsyncRasterRequest;
-    m_pendingAsyncRasterRequest.reset();
-
-    if (request.requestId < m_rasterRequestId) {
-        return;
-    }
-
-    startAsyncRasterRequest(request.targetSize, request.scale, request.canvasZoom, request.requestId);
-}
-
-void TextMediaItem::startBaseRasterRequest(const QSize& targetSize) {
-    if (m_baseRasterInProgress) {
-        return;
-    }
-
-    const QSize sanitized(std::max(1, targetSize.width()), std::max(1, targetSize.height()));
-    m_baseRasterInProgress = true;
-    m_activeBaseRasterSize = sanitized;
-    const quint64 generation = ++m_baseRasterGeneration;
-
-    TextRasterJob job;
-    job.snapshot = captureVectorSnapshot();
-    job.targetSize = sanitized;
-    job.scaleFactor = 1.0;
-
-    auto future = QtConcurrent::run([job]() {
-        return job.execute();
-    });
-
-    std::weak_ptr<bool> guard = lifetimeGuard();
-    auto* watcher = new QFutureWatcher<QImage>();
-    QObject::connect(watcher, &QFutureWatcher<QImage>::finished, watcher, [this, guard, watcher, generation, sanitized]() mutable {
-        if (guard.expired()) {
-            watcher->deleteLater();
-            return;
-        }
-
-        QImage result = watcher->result();
-        watcher->deleteLater();
-
-        handleBaseRasterJobFinished(generation, std::move(result), sanitized);
-    });
-
-    watcher->setFuture(future);
-}
-
-void TextMediaItem::queueBaseRasterDispatch() {
-    if (m_baseRasterDispatchQueued) {
-        return;
-    }
-
-    m_baseRasterDispatchQueued = true;
-    std::weak_ptr<bool> guard = lifetimeGuard();
-    QTimer::singleShot(0, [this, guard]() {
-        if (guard.expired()) {
-            return;
-        }
-
-        m_baseRasterDispatchQueued = false;
-        dispatchPendingBaseRasterRequest();
-    });
-}
-
-void TextMediaItem::dispatchPendingBaseRasterRequest() {
-    if (m_baseRasterInProgress) {
-        return;
-    }
-
-    if (!m_pendingBaseRasterRequest.has_value()) {
-        return;
-    }
-
-    const QSize target = *m_pendingBaseRasterRequest;
-    m_pendingBaseRasterRequest.reset();
-
-    startBaseRasterRequest(target);
-}
-
-void TextMediaItem::startNextPendingBaseRasterRequest() {
-    if (!m_pendingBaseRasterRequest.has_value()) {
-        return;
-    }
-
-    if (m_baseRasterInProgress) {
-        return;
-    }
-
-    queueBaseRasterDispatch();
-}
-
-void TextMediaItem::handleBaseRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size) {
-    if (generation != m_baseRasterGeneration) {
-        m_baseRasterInProgress = false;
-        startNextPendingBaseRasterRequest();
-        return;
-    }
-
-    m_baseRasterInProgress = false;
-    m_activeBaseRasterSize = QSize();
-
-    const QSize expectedSize(std::max(1, m_baseSize.width()), std::max(1, m_baseSize.height()));
-    if (size != expectedSize) {
-        m_needsRasterization = true;
-        m_pendingBaseRasterRequest = expectedSize;
-        queueBaseRasterDispatch();
-        return;
-    }
-
-    m_rasterizedText = std::move(raster);
-    m_lastRasterizedSize = m_baseSize;
-    m_needsRasterization = false;
-    m_scaledRasterDirty = true;
-    m_lastRasterizedScale = 1.0;
-
-    update();
-    startNextPendingBaseRasterRequest();
-}
-
-void TextMediaItem::startNextPendingAsyncRasterRequest() {
-    if (!m_pendingAsyncRasterRequest.has_value()) {
-        return;
-    }
-
-    if (m_asyncRasterInProgress) {
-        return;
-    }
-
-    queueRasterJobDispatch();
-}
-
-void TextMediaItem::handleRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size, qreal scale, qreal canvasZoom, const QRectF& visibleRegion) {
-    Q_UNUSED(size);
-
-    if (m_activeAsyncRasterRequest && m_activeAsyncRasterRequest->generation == generation) {
-        m_asyncRasterInProgress = false;
-        m_activeAsyncRasterRequest.reset();
-    }
-
-    if (generation != m_rasterJobGeneration) {
-        startNextPendingAsyncRasterRequest();
-        return;
-    }
-
-    m_scaledRasterizedText = std::move(raster);
-    m_scaledRasterPixmap = QPixmap::fromImage(m_scaledRasterizedText);
-    m_scaledRasterPixmap.setDevicePixelRatio(1.0);
-    m_scaledRasterPixmapValid = !m_scaledRasterPixmap.isNull();
-    m_scaledRasterVisibleRegion = visibleRegion;  // Store visible region for correct positioning
-    
-    // Étape 3: Update viewport tracking when new raster completes
-    m_lastViewportRect = visibleRegion;
-    m_lastViewportScale = canvasZoom;
-    
-    m_lastRasterizedScale = scale;
-    m_lastCanvasZoomForRaster = canvasZoom;
-    m_scaledRasterDirty = false;
-    m_asyncRasterInProgress = false;
-    m_pendingRasterRequestId = 0;
-    m_lastScaledRasterUpdate = std::chrono::steady_clock::now();
-
-    update();
-    startNextPendingAsyncRasterRequest();
-}
-
 void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) {
     Q_UNUSED(option);
     Q_UNUSED(widget);
-    
-    if (!painter) return;
-    
-    // Only update geometry when not editing to avoid triggering expensive layout operations during panning
+
+    if (!painter) {
+        return;
+    }
+
     if (!m_isEditing) {
         updateInlineEditorGeometry();
     }
@@ -2603,174 +1957,23 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
 
     painter->save();
 
-    // Get the item bounds
-    QRectF bounds = boundingRect();
-
-    // Apply content visibility and opacity
     if (!m_contentVisible || m_contentOpacity <= 0.0 || m_contentDisplayOpacity <= 0.0) {
         painter->restore();
-        // Still paint selection chrome and overlays
         paintSelectionAndLabel(painter);
         return;
     }
-    
-    // Calculate effective opacity
-    qreal effectiveOpacity = m_contentOpacity * m_contentDisplayOpacity;
-    painter->setOpacity(effectiveOpacity);
 
-    const qreal currentScale = scale();
-    const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
+    painter->setOpacity(m_contentOpacity * m_contentDisplayOpacity);
 
-    qreal canvasZoom = 1.0;
-    if (scene() && !scene()->views().isEmpty()) {
-        if (QGraphicsView* view = scene()->views().first()) {
-            const QTransform viewTransform = view->transform();
-            const qreal scaleX = std::hypot(viewTransform.m11(), viewTransform.m21());
-            const qreal scaleY = std::hypot(viewTransform.m22(), viewTransform.m12());
-            if (scaleX > 1e-6 && scaleY > 1e-6) {
-                canvasZoom = (scaleX + scaleY) * 0.5;
-            } else if (scaleX > 1e-6) {
-                canvasZoom = scaleX;
-            } else if (scaleY > 1e-6) {
-                canvasZoom = scaleY;
-            }
-        }
-    }
-    if (canvasZoom <= 1e-6) {
-        canvasZoom = 1.0;
-    }
+    const QSize targetSize(
+        std::max(1, m_baseSize.width()),
+        std::max(1, m_baseSize.height())
+    );
 
-    const qreal effectiveScale = std::max(std::abs(currentScale) * uniformScale * canvasZoom, 1e-4);
-    const bool altStretchInProgress = (m_activeHandle != None && m_lastAxisAltStretch);
-    const bool resizingUniformly = (m_activeHandle != None && !m_lastAxisAltStretch);
-    const bool zoomed = std::abs(canvasZoom - 1.0) > 1e-4;
-    const bool needsScaledRaster = zoomed ||
-        std::abs(currentScale - 1.0) > 1e-4 ||
-        std::abs(m_uniformScaleFactor - 1.0) > 1e-4 ||
-        resizingUniformly ||
-        altStretchInProgress;
-
-    if (needsScaledRaster) {
-        ensureScaledRaster(effectiveScale, currentScale, canvasZoom);
-        ensureFrozenFallbackCache(canvasZoom);  // Phase 2: Create/update fallback cache
-
-        painter->save();
-        // Neutralize the item's local scale, uniform scale, and canvas/view zoom so the text
-        // keeps the same layout size inside the container while the raster image
-        // provides more pixels when zooming.
-        const qreal epsilon = 1e-4;
-        const qreal totalScale = std::max(std::abs(currentScale * uniformScale * canvasZoom), epsilon);
-        painter->scale(1.0 / totalScale, 1.0 / totalScale);
-
-        const QTransform scaleTransform = (std::abs(totalScale) > epsilon)
-            ? QTransform::fromScale(totalScale, totalScale)
-            : QTransform::fromScale(1.0, 1.0);
-        QRectF scaledBounds = scaleTransform.mapRect(bounds);
-
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Phase 2: DUAL-CACHE RENDERING - Two-pass system for freeze zones
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        
-        // Calculate viewport region FIRST (needed for both passes)
-        QRectF viewportDestRect;
-        bool hasViewportCache = false;
-        if (m_scaledRasterPixmapValid && !m_scaledRasterPixmap.isNull()) {
-            hasViewportCache = true;
-            viewportDestRect = scaledBounds;
-            if (!m_scaledRasterVisibleRegion.isEmpty() && m_scaledRasterVisibleRegion.isValid()) {
-                const QRectF scaledVisibleRegion = scaleTransform.mapRect(m_scaledRasterVisibleRegion);
-                viewportDestRect = scaledVisibleRegion;
-            }
-        }
-        
-        // ✅ PASS 1: Draw frozen fallback cache (background layer - full text at low res)
-        // This provides visible context for text areas OUTSIDE the viewport ONLY
-        if (m_frozenFallbackValid && !m_frozenFallbackPixmap.isNull()) {
-            // Calculate display scale for fallback
-            // fallbackDisplayScale converts from fallback resolution to current display resolution
-            const qreal fallbackDisplayScale = totalScale / m_frozenFallbackScale;
-            
-            painter->save();
-            painter->scale(fallbackDisplayScale, fallbackDisplayScale);
-            
-            // OPTIMIZATION: Set clipping region to exclude viewport area
-            // This prevents drawing fallback under the high-res viewport cache
-            if (hasViewportCache) {
-                // Create clipping path: full text MINUS viewport region
-                QPainterPath fullTextPath;
-                const QSizeF fallbackSize(
-                    static_cast<qreal>(m_frozenFallbackPixmap.width()),
-                    static_cast<qreal>(m_frozenFallbackPixmap.height())
-                );
-                fullTextPath.addRect(QRectF(QPointF(0.0, 0.0), fallbackSize));
-                
-                // Transform viewport rect to fallback coordinate space
-                const QRectF viewportInFallbackSpace(
-                    viewportDestRect.x() / fallbackDisplayScale,
-                    viewportDestRect.y() / fallbackDisplayScale,
-                    viewportDestRect.width() / fallbackDisplayScale,
-                    viewportDestRect.height() / fallbackDisplayScale
-                );
-                
-                QPainterPath viewportPath;
-                viewportPath.addRect(viewportInFallbackSpace);
-                
-                // Subtract viewport from full text to get "freeze zones only"
-                QPainterPath freezeZonesPath = fullTextPath.subtracted(viewportPath);
-                painter->setClipPath(freezeZonesPath);
-            }
-            
-            const QSizeF fallbackSize(
-                static_cast<qreal>(m_frozenFallbackPixmap.width()),
-                static_cast<qreal>(m_frozenFallbackPixmap.height())
-            );
-            const QRectF fallbackDestRect(QPointF(0.0, 0.0), fallbackSize);
-            const QRectF fallbackSourceRect(QPointF(0.0, 0.0), fallbackSize);
-            
-            // Draw fallback ONLY in non-viewport areas (thanks to clipping)
-            painter->drawPixmap(fallbackDestRect, m_frozenFallbackPixmap, fallbackSourceRect);
-            painter->restore();
-        }
-        
-        // ✅ PASS 2: Draw high-res viewport cache (foreground layer - viewport area only)
-        // This provides sharp rendering for the currently visible portion
-        if (m_scaledRasterPixmapValid && !m_scaledRasterPixmap.isNull()) {
-            // DPR is always 1.0, so source size equals physical pixel dimensions
-            const QSizeF sourceSize(
-                static_cast<qreal>(m_scaledRasterPixmap.width()),
-                static_cast<qreal>(m_scaledRasterPixmap.height())
-            );
-            const QRectF sourceRect(QPointF(0.0, 0.0), sourceSize);
-            
-            // If viewport optimization is active, draw at the correct offset
-            QRectF destRect = scaledBounds;
-            if (!m_scaledRasterVisibleRegion.isEmpty() && m_scaledRasterVisibleRegion.isValid()) {
-                // The rasterized image represents only m_scaledRasterVisibleRegion of the item
-                // Position it correctly in item coordinates
-                const QRectF scaledVisibleRegion = scaleTransform.mapRect(m_scaledRasterVisibleRegion);
-                destRect = scaledVisibleRegion;
-            }
-            
-            // Draw viewport at high resolution (8×+) - this overwrites the fallback in the visible area
-            painter->drawPixmap(destRect, m_scaledRasterPixmap, sourceRect);
-        } else if (!m_scaledRasterizedText.isNull()) {
-            // drawImage has no sourceRect overload for QImage here; scale via painter
-            painter->drawImage(scaledBounds, m_scaledRasterizedText);
-        }
-        painter->restore();
-    } else {
-        // Rasterize text if needed (once after editing/resizing)
-        rasterizeText();
-
-        // Draw the cached bitmap instead of re-rendering vector text
-        if (!m_rasterizedText.isNull()) {
-            painter->drawImage(bounds, m_rasterizedText);
-        }
-    }
+    const VectorDrawSnapshot snapshot = captureVectorSnapshot();
+    paintVectorSnapshot(painter, snapshot, targetSize, 1.0);
 
     painter->restore();
-    
-    // Paint selection chrome and overlays (handles, buttons, etc.)
     paintSelectionAndLabel(painter);
 }
 
@@ -2830,7 +2033,6 @@ QVariant TextMediaItem::itemChange(GraphicsItemChange change, const QVariant& va
                     m_uniformScaleFactor = 1.0;
                 }
             }
-            m_scaledRasterDirty = true;
         }
         
         m_lastObservedScale = newScale;
@@ -2839,7 +2041,6 @@ QVariant TextMediaItem::itemChange(GraphicsItemChange change, const QVariant& va
     QVariant result = ResizableMediaBase::itemChange(change, value);
 
     if (change == ItemScaleHasChanged) {
-        m_scaledRasterDirty = true;
         update();
     }
 
@@ -3171,9 +2372,6 @@ void TextMediaItem::applyFitToTextNow() {
 
         prepareGeometryChange();
         m_baseSize = newBase;
-        m_needsRasterization = true;
-        m_scaledRasterDirty = true;
-        m_lastRasterizedScale = 1.0;
         m_cachedEditorPosValid = false;
 
         const QPointF newAnchorLocal = anchorPointForSize(newBase);

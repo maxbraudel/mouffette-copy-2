@@ -8,12 +8,8 @@
 #include <QSizeF>
 #include <QPointF>
 #include <QPainter>
-#include <QImage>
 #include <cmath>
-#include <chrono>
 #include <memory>
-#include <optional>
-#include <QPixmap>
 
 class QGraphicsTextItem;
 class QGraphicsSceneMouseEvent;
@@ -101,9 +97,6 @@ public:
 
     qreal uniformScaleFactor() const { return m_uniformScaleFactor; }
 
-    static void setMaxRasterDimension(int pixels);
-    static int maxRasterDimension();
-    
     // Text alignment
     enum class HorizontalAlignment { Left, Center, Right };
     enum class VerticalAlignment { Top, Center, Bottom };
@@ -177,62 +170,8 @@ private:
     QPointF m_cachedEditorPos;
     bool m_cachedEditorPosValid = false;
     
-    // Rasterization cache for performance
-    QImage m_rasterizedText;
-    bool m_needsRasterization = true;
-    QSize m_lastRasterizedSize;
-    QImage m_scaledRasterizedText;
-    qreal m_lastRasterizedScale = 1.0;
-    bool m_scaledRasterDirty = true;
     qreal m_uniformScaleFactor = 1.0;
     qreal m_lastObservedScale = 1.0;
-    qreal m_lastVisualScaleFactor = 1.0;
-    qreal m_lastCanvasZoomForRaster = 1.0;
-    std::chrono::steady_clock::time_point m_lastScaledRasterUpdate{};
-    bool m_scaledRasterThrottleActive = false;
-    bool m_baseRasterInProgress = false;
-    quint64 m_baseRasterGeneration = 0;
-    std::optional<QSize> m_pendingBaseRasterRequest;
-    QSize m_activeBaseRasterSize;
-    bool m_baseRasterDispatchQueued = false;
-    
-    // Async rasterization
-    struct AsyncRasterRequest {
-        QSize targetSize;
-        qreal scale = 1.0;
-        qreal canvasZoom = 1.0;
-        quint64 requestId = 0;
-        quint64 generation = 0;
-
-        bool isEquivalentTo(const QSize& size, qreal scaleFactor, qreal zoom) const {
-            constexpr qreal tolerance = 1e-4;
-            return targetSize == size &&
-                   std::abs(scale - scaleFactor) < tolerance &&
-                   std::abs(canvasZoom - zoom) < tolerance;
-        }
-    };
-
-    quint64 m_rasterRequestId = 0;
-    quint64 m_pendingRasterRequestId = 0;
-    bool m_asyncRasterInProgress = false;
-    quint64 m_rasterJobGeneration = 0;
-    std::optional<AsyncRasterRequest> m_activeAsyncRasterRequest;
-    std::optional<AsyncRasterRequest> m_pendingAsyncRasterRequest;
-    bool m_rasterDispatchQueued = false;
-
-    QPixmap m_scaledRasterPixmap;
-    bool m_scaledRasterPixmapValid = false;
-    QRectF m_scaledRasterVisibleRegion;  // Region of item that was rasterized (for viewport optimization)
-    
-    // Viewport tracking for cache management (Étape 3)
-    QRectF m_lastViewportRect;   // Last viewport rectangle calculated (item coords)
-    qreal m_lastViewportScale = 1.0;  // Scale factor of last viewport calculation
-    
-    // Freeze zone fallback cache - low-res full text for out-of-viewport regions (Phase 1)
-    QPixmap m_frozenFallbackPixmap;      // Full text at low res (background for non-viewport areas)
-    bool m_frozenFallbackValid = false;  // Is fallback cache valid
-    qreal m_frozenFallbackScale = 1.0;   // Scale at which fallback was created
-    QSize m_frozenFallbackSize;          // Size of text when fallback was created (detect resize)
     
     // Text alignment settings
     HorizontalAlignment m_horizontalAlignment = HorizontalAlignment::Center;
@@ -255,7 +194,6 @@ private:
     void ensureInlineEditor();
     void updateInlineEditorGeometry();
     void finishInlineEditing(bool commitChanges);
-    void rasterizeText();
     struct VectorDrawSnapshot {
         QString text;
         QFont font;
@@ -269,36 +207,10 @@ private:
         HorizontalAlignment horizontalAlignment = HorizontalAlignment::Center;
         VerticalAlignment verticalAlignment = VerticalAlignment::Center;
     };
-
-    struct TextRasterJob {
-        VectorDrawSnapshot snapshot;
-        QSize targetSize;
-        qreal scaleFactor = 1.0;
-        QRectF targetRect;  // Region to rasterize in item coordinates (empty = full raster)
-
-        QImage execute() const;
-    };
-
     VectorDrawSnapshot captureVectorSnapshot() const;
     static void paintVectorSnapshot(QPainter* painter, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor);
-
-    QRectF computeVisibleRegion() const;
-    void ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale, qreal canvasZoom);
-    void ensureFrozenFallbackCache(qreal currentCanvasZoom);  // Phase 1: Create/update low-res fallback cache
-    void startRasterJob(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
-    void handleRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size, qreal scale, qreal canvasZoom, const QRectF& visibleRegion = QRectF());
-    void startAsyncRasterRequest(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
-    void startNextPendingAsyncRasterRequest();
-    void queueRasterJobDispatch();
-    void dispatchPendingRasterRequest();
-    void startBaseRasterRequest(const QSize& targetSize);
-    void handleBaseRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size);
-    void queueBaseRasterDispatch();
-    void dispatchPendingBaseRasterRequest();
-    void startNextPendingBaseRasterRequest();
     void handleInlineEditorTextChanged(const QString& newText);
     const QString& textForRendering() const;
-    void renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor, const QRectF& visibleRegion = QRectF());
     void ensureAlignmentControls();
     void updateAlignmentControlsLayout();
     void updateAlignmentButtonStates();
@@ -307,5 +219,4 @@ private:
     qreal contentPaddingPx() const;
     void handleContentPaddingChanged(qreal oldPadding, qreal newPadding);
 
-    static int s_maxRasterDimension;
 };
