@@ -3391,6 +3391,12 @@ void ScreenCanvas::wheelEvent(QWheelEvent* event) {
         }
         horizontalScrollBar()->setValue(horizontalScrollBar()->value() - delta.x());
         verticalScrollBar()->setValue(verticalScrollBar()->value() - delta.y());
+        
+        // Update text layer viewport after trackpad pan
+        if (m_textLayer && m_globalTextRasterizationEnabled) {
+            m_textLayer->invalidate();
+        }
+        
         relayoutAllMediaOverlays(m_scene);
         layoutInfoOverlay();
         event->accept();
