@@ -14,7 +14,7 @@ TextRasterizationLayer::TextRasterizationLayer(ScreenCanvas* canvas)
     , m_rasterTimer(new QTimer(this))
     , m_currentZoom(1.0)
     , m_lastRasterZoom(1.0)
-    , m_rasterizationFactor(0.5)
+    , m_rasterizationFactor(1)
     , m_layerVisible(true)
     , m_dirty(true)
 {
@@ -92,27 +92,9 @@ bool TextRasterizationLayer::shouldRerasterForZoom(qreal newZoom) const {
 void TextRasterizationLayer::invalidate() {
     m_dirty = true;
     
-    // Immediately remove tiles that are outside text bounds to prevent ghosts
-    const QRectF textBounds = calculateTextBounds();
-    const QRectF visibleRect = getVisibleSceneRect();
-    const QRectF neededBounds = textBounds.united(visibleRect);
-    
-    // Remove tiles outside the current needed area immediately
-    for (int i = m_tiles.size() - 1; i >= 0; --i) {
-        const QRectF tileRect(m_tiles[i].sceneRect);
-        if (!neededBounds.intersects(tileRect)) {
-            if (m_tiles[i].item) {
-                // Hide and delete the tile immediately
-                if (m_tiles[i].item->scene()) {
-                    m_tiles[i].item->scene()->removeItem(m_tiles[i].item);
-                }
-                delete m_tiles[i].item;
-            }
-            m_tiles.removeAt(i);
-        } else {
-            // Mark remaining tiles as dirty
-            m_tiles[i].dirty = true;
-        }
+    // Mark all tiles as dirty
+    for (Tile& tile : m_tiles) {
+        tile.dirty = true;
     }
     
     scheduleRasterization();
@@ -166,62 +148,93 @@ QRectF TextRasterizationLayer::getVisibleSceneRect() const {
 }
 
 void TextRasterizationLayer::updateTileGrid() {
-    const QRectF textBounds = calculateTextBounds();
-    const QRectF visibleRect = getVisibleSceneRect();
-    const QRectF neededBounds = textBounds.united(visibleRect);
-    
-    if (neededBounds.isEmpty()) {
+    if (!m_canvas || !m_canvas->viewport()) {
         return;
     }
     
-    // Calculate tile grid dimensions
-    const int minTileX = static_cast<int>(std::floor(neededBounds.left() / TILE_SIZE));
-    const int maxTileX = static_cast<int>(std::ceil(neededBounds.right() / TILE_SIZE));
-    const int minTileY = static_cast<int>(std::floor(neededBounds.top() / TILE_SIZE));
-    const int maxTileY = static_cast<int>(std::ceil(neededBounds.bottom() / TILE_SIZE));
+    // Get viewport dimensions (in pixels)
+    const QRect viewportRect = m_canvas->viewport()->rect();
+    if (viewportRect.isEmpty()) {
+        return;
+    }
+    
+    // Calculate tile grid dimensions based on viewport size
+    const int tilesX = (viewportRect.width() + TILE_SIZE - 1) / TILE_SIZE;
+    const int tilesY = (viewportRect.height() + TILE_SIZE - 1) / TILE_SIZE;
+    const int neededTiles = tilesX * tilesY;
     
     // Create map of existing tiles for quick lookup
     QMap<QPair<int, int>, Tile*> existingTiles;
     for (Tile& tile : m_tiles) {
-        const int tileX = tile.sceneRect.x() / TILE_SIZE;
-        const int tileY = tile.sceneRect.y() / TILE_SIZE;
+        const int tileX = tile.viewportRect.x() / TILE_SIZE;
+        const int tileY = tile.viewportRect.y() / TILE_SIZE;
         existingTiles[qMakePair(tileX, tileY)] = &tile;
     }
     
-    // Add new tiles as needed
-    for (int tileY = minTileY; tileY < maxTileY; ++tileY) {
-        for (int tileX = minTileX; tileX < maxTileX; ++tileX) {
+    // Create tiles to cover viewport
+    QList<Tile> newTiles;
+    for (int tileY = 0; tileY < tilesY; ++tileY) {
+        for (int tileX = 0; tileX < tilesX; ++tileX) {
             auto key = qMakePair(tileX, tileY);
             
-            if (!existingTiles.contains(key)) {
+            if (existingTiles.contains(key)) {
+                // Keep existing tile
+                newTiles.append(*existingTiles[key]);
+            } else {
+                // Create new tile
                 Tile newTile;
-                newTile.sceneRect = QRect(tileX * TILE_SIZE, tileY * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                newTile.viewportRect = QRect(
+                    tileX * TILE_SIZE,
+                    tileY * TILE_SIZE,
+                    TILE_SIZE,
+                    TILE_SIZE
+                );
                 newTile.dirty = true;
                 newTile.item = nullptr;
-                m_tiles.append(newTile);
+                newTile.lastZoom = 0.0;
+                newTiles.append(newTile);
             }
         }
     }
+    
+    // Delete tiles that are no longer needed
+    for (Tile& oldTile : m_tiles) {
+        const int tileX = oldTile.viewportRect.x() / TILE_SIZE;
+        const int tileY = oldTile.viewportRect.y() / TILE_SIZE;
+        const bool stillNeeded = (tileX < tilesX && tileY < tilesY);
+        
+        if (!stillNeeded && oldTile.item) {
+            delete oldTile.item;
+        }
+    }
+    
+    m_tiles = newTiles;
 }
 
 void TextRasterizationLayer::renderTile(Tile& tile, const QList<TextMediaItem*>& sortedItems, qreal resolution) {
-    const QRectF tileSceneRect(tile.sceneRect);
+    if (!m_canvas) {
+        return;
+    }
+    
+    // Map viewport tile to scene coordinates
+    const QPolygonF scenePolygon = m_canvas->mapToScene(tile.viewportRect);
+    const QRectF tileSceneRect = scenePolygon.boundingRect();
     
     // Clamp resolution to prevent excessive memory usage
     const qreal clampedResolution = std::min(resolution, 10.0);
     
-    // Calculate exact pixmap size for this tile
+    // Calculate pixmap size based on scene rect dimensions and resolution
+    // The pixmap should have enough pixels to render the scene area at the target resolution
     const QSize pixmapSize(
-        static_cast<int>(std::ceil(TILE_SIZE * clampedResolution)),
-        static_cast<int>(std::ceil(TILE_SIZE * clampedResolution))
+        static_cast<int>(std::ceil(tileSceneRect.width() * clampedResolution)),
+        static_cast<int>(std::ceil(tileSceneRect.height() * clampedResolution))
     );
     
     // Safety check - prevent creating huge pixmaps
-    const int maxPixmapDimension = 8192; // 8K max
+    const int maxPixmapDimension = 8192;
     if (pixmapSize.width() <= 0 || pixmapSize.height() <= 0 ||
         pixmapSize.width() > maxPixmapDimension || pixmapSize.height() > maxPixmapDimension) {
-        qWarning() << "TextRasterizationLayer: Skipping tile - pixmap too large:" << pixmapSize 
-                   << "resolution:" << resolution << "clamped:" << clampedResolution;
+        qWarning() << "TextRasterizationLayer: Skipping tile - pixmap size:" << pixmapSize;
         return;
     }
     
@@ -246,10 +259,10 @@ void TextRasterizationLayer::renderTile(Tile& tile, const QList<TextMediaItem*>&
     // Translate to tile's scene position
     painter.translate(-tileSceneRect.topLeft());
     
-    // Expand clip rect slightly to prevent anti-aliasing seams
-    // This renders a bit beyond tile bounds to ensure smooth edges
+    // Expand clip rect to prevent anti-aliasing seams
+    // Use a generous margin (8 scene units) to ensure smooth edges at all zoom levels
     QRectF expandedClip = tileSceneRect;
-    expandedClip.adjust(-1, -1, 1, 1); // 1 pixel overlap for anti-aliasing
+    expandedClip.adjust(-8, -8, 8, 8);
     painter.setClipRect(expandedClip);
     
     // Render text items that intersect this tile
@@ -288,33 +301,23 @@ void TextRasterizationLayer::renderTile(Tile& tile, const QList<TextMediaItem*>&
     // Update tile pixmap item
     tile.item->setPixmap(tilePixmap);
     tile.item->setPos(tileSceneRect.topLeft());
+    
+    // Scale the pixmap DOWN to scene coordinates (inverse of resolution)
+    // The pixmap was rendered at clampedResolution, so scale it back down
     tile.item->setScale(1.0 / clampedResolution);
+    
     tile.item->setVisible(true);
     tile.item->update(); // Force immediate visual update
     
-    // Mark tile as clean and store resolution
+    // Mark tile as clean and store zoom
     tile.dirty = false;
-    tile.lastResolution = clampedResolution;
+    tile.lastZoom = m_currentZoom;
 }
 
 void TextRasterizationLayer::cleanupUnusedTiles(const QRectF& viewportBounds) {
-    // Remove tiles that are far from viewport to save memory
-    // With smaller tiles, keep fewer extra tiles around
-    const qreal cleanupMargin = TILE_SIZE * 2.0; // Keep 2 tiles worth of margin
-    QRectF keepBounds = viewportBounds;
-    keepBounds.adjust(-cleanupMargin, -cleanupMargin, cleanupMargin, cleanupMargin);
-    
-    for (int i = m_tiles.size() - 1; i >= 0; --i) {
-        const QRectF tileRect(m_tiles[i].sceneRect);
-        
-        // Remove tiles far from viewport
-        if (!keepBounds.intersects(tileRect)) {
-            if (m_tiles[i].item) {
-                delete m_tiles[i].item;
-            }
-            m_tiles.removeAt(i);
-        }
-    }
+    // Tiles are now viewport-based, so cleanup is handled by updateTileGrid()
+    // This function is kept for compatibility but does nothing
+    Q_UNUSED(viewportBounds);
 }
 
 void TextRasterizationLayer::performRasterization() {
@@ -330,40 +333,26 @@ void TextRasterizationLayer::performRasterization() {
         return;
     }
     
-    // Get visible viewport area
-    const QRectF visibleRect = getVisibleSceneRect();
+    // Update tile grid based on viewport (creates fixed number of tiles)
+    updateTileGrid();
+    
+    // Calculate resolution for rendering
     const qreal resolution = computeRasterResolution();
     
-    // Calculate bounds of all text items
+    // Calculate bounds of all text items in scene coordinates
     const QRectF textBounds = calculateTextBounds();
     if (textBounds.isEmpty()) {
         // No text items visible - clear all tiles
         for (Tile& tile : m_tiles) {
             if (tile.item) {
-                delete tile.item;
-                tile.item = nullptr;
+                if (tile.item->pixmap().isNull() == false) {
+                    tile.item->setPixmap(QPixmap()); // Clear to transparent
+                    tile.item->setVisible(false);
+                }
             }
         }
-        m_tiles.clear();
         return;
     }
-    
-    // Expand bounds to include viewport with margin
-    QRectF neededBounds = textBounds.united(visibleRect);
-    
-    // Remove tiles outside needed bounds first to clean up ghosts
-    for (int i = m_tiles.size() - 1; i >= 0; --i) {
-        const QRectF tileRect(m_tiles[i].sceneRect);
-        if (!neededBounds.intersects(tileRect)) {
-            if (m_tiles[i].item) {
-                delete m_tiles[i].item;
-            }
-            m_tiles.removeAt(i);
-        }
-    }
-    
-    // Update tile grid to cover needed bounds
-    updateTileGrid();
     
     // Sort text items once by z-order
     QList<TextMediaItem*> sortedItems = m_textItems;
@@ -372,36 +361,29 @@ void TextRasterizationLayer::performRasterization() {
                   return a->zValue() < b->zValue(); 
               });
     
-    // Get tiles that need updating
+    // Render each tile
     for (Tile& tile : m_tiles) {
-        const QRectF tileSceneRect(tile.sceneRect);
+        // Map viewport tile to scene coordinates to check if it intersects text
+        const QPolygonF scenePolygon = m_canvas->mapToScene(tile.viewportRect);
+        const QRectF tileSceneRect = scenePolygon.boundingRect();
         
-        // Only update tiles in viewport OR dirty tiles anywhere
-        const bool inViewport = visibleRect.intersects(tileSceneRect);
         const bool intersectsText = textBounds.intersects(tileSceneRect);
         
-        // If tile doesn't intersect text anymore, clear it immediately
-        if (!intersectsText && tile.item) {
-            tile.item->setPixmap(QPixmap()); // Clear to transparent
-            tile.item->setVisible(false);
+        // If tile doesn't intersect text, clear it
+        if (!intersectsText) {
+            if (tile.item && !tile.item->pixmap().isNull()) {
+                tile.item->setPixmap(QPixmap()); // Clear to transparent
+                tile.item->setVisible(false);
+            }
             continue;
         }
         
-        // CRITICAL: Only update resolution for tiles IN VIEWPORT
-        // Tiles outside viewport keep their last resolution (showing old pixelation)
-        if (inViewport && intersectsText) {
-            // Always render viewport tiles at current resolution
+        // Check if tile needs updating (dirty flag or zoom changed)
+        const bool zoomChanged = !qFuzzyCompare(tile.lastZoom, m_currentZoom);
+        if (tile.dirty || zoomChanged) {
             renderTile(tile, sortedItems, resolution);
-        } else if (tile.dirty && intersectsText) {
-            // Render dirty tiles outside viewport at their last resolution
-            // This handles content changes without updating resolution
-            const qreal tileResolution = tile.lastResolution > 0 ? tile.lastResolution : resolution;
-            renderTile(tile, sortedItems, tileResolution);
         }
     }
-    
-    // Clean up tiles far from viewport to save memory
-    cleanupUnusedTiles(visibleRect);
     
     // Update state
     m_lastRasterZoom = m_currentZoom;

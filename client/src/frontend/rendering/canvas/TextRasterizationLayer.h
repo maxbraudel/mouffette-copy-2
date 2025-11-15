@@ -57,8 +57,8 @@ private slots:
 private:
     struct Tile {
         QGraphicsPixmapItem* item = nullptr;
-        QRect sceneRect;  // Tile bounds in scene coordinates
-        qreal lastResolution = 0.0;
+        QRect viewportRect;  // Tile bounds in viewport coordinates (pixels)
+        qreal lastZoom = 0.0;
         bool dirty = true;
     };
     
