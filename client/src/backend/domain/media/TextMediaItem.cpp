@@ -254,11 +254,14 @@ protected:
             return;
         }
         
-        // Skip rendering if global text layer is active (unless editing)
-        if (m_owner && !m_owner->directPaintingEnabled() && !m_owner->isEditing()) {
-            // Only draw caret and selection during editing
+        // Skip text rendering if global text layer is active - only draw caret/selection
+        if (m_owner && !m_owner->directPaintingEnabled()) {
             const QRectF bounds = boundingRect();
-            drawSelectionOverlay(painter, bounds);
+            
+            // Draw selection overlay if editing
+            if (m_owner->isEditing()) {
+                drawSelectionOverlay(painter, bounds);
+            }
             
             // Draw caret if editing
             if (m_owner->isEditing() && (textInteractionFlags() & Qt::TextEditable) && m_caretVisible) {
@@ -1176,6 +1179,11 @@ TextMediaItem::~TextMediaItem() {
 }
 
 void TextMediaItem::notifyLayerChanged() {
+    // Skip layer notification during editing - the item paints itself directly
+    if (m_isEditing) {
+        return;
+    }
+    
     if (scene()) {
         const QList<QGraphicsView*> views = scene()->views();
         if (!views.isEmpty()) {
@@ -2020,8 +2028,8 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
     }
 
     // Skip rendering if global rasterization layer is active (text will be rendered by the layer)
-    // Always paint when editing to show the inline editor
-    if (!m_directPaintingEnabled && !m_isEditing) {
+    // Even during editing, the rasterized version remains visible
+    if (!m_directPaintingEnabled) {
         // Still paint selection and label chrome
         paintSelectionAndLabel(painter);
         return;
