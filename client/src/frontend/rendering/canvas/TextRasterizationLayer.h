@@ -5,6 +5,13 @@
 #include <QPixmap>
 #include <QList>
 #include <QTimer>
+#include <QFuture>
+#include <QFutureWatcher>
+#include <QMutex>
+#include <QAtomicInt>
+#include <QFont>
+#include <QColor>
+#include <QTransform>
 
 class TextMediaItem;
 class ScreenCanvas;
@@ -57,11 +64,50 @@ private slots:
     void performRasterization();
 
 private:
+    struct TextItemRenderData {
+        QTransform sceneTransform;
+        QRectF sceneBoundingRect;
+        QString text;
+        QFont font;
+        QColor textColor;
+        qreal borderWidthPercent = 0.0;
+        QColor borderColor;
+        bool highlightEnabled = false;
+        QColor highlightColor;
+        bool directPaintingEnabled = false;
+        qreal zValue = 0.0;
+        
+        // Default constructor
+        TextItemRenderData() = default;
+        
+        // Copy constructor
+        TextItemRenderData(const TextItemRenderData&) = default;
+        
+        // Move constructor
+        TextItemRenderData(TextItemRenderData&&) noexcept = default;
+        
+        // Copy assignment
+        TextItemRenderData& operator=(const TextItemRenderData&) = default;
+        
+        // Move assignment
+        TextItemRenderData& operator=(TextItemRenderData&&) noexcept = default;
+    };
+    
+    struct TileRenderData {
+        QRect viewportRect;
+        QRectF sceneRect;
+        QSize pixmapSize;
+        qreal resolution;
+        QList<TextItemRenderData> textItems;
+        int tileIndex;
+    };
+    
     struct Tile {
         QGraphicsPixmapItem* item = nullptr;
         QRect viewportRect;  // Tile bounds in viewport coordinates (pixels)
         qreal lastZoom = 0.0;
         bool dirty = true;
+        QAtomicInt rendering; // 0 = idle, 1 = rendering
     };
     
     void scheduleRasterization();
@@ -73,6 +119,12 @@ private:
     void renderTile(Tile& tile, const QList<TextMediaItem*>& sortedItems, qreal resolution);
     void cleanupUnusedTiles(const QRectF& viewportBounds);
     
+    // Async rendering
+    static QPixmap renderTileAsync(const TileRenderData& data);
+    void startAsyncRasterization();
+    void applyRenderedTile(int tileIndex, const QPixmap& pixmap, const QRectF& sceneRect, qreal resolution);
+    void onAllTilesRendered();
+    
     ScreenCanvas* m_canvas;
     QList<TextMediaItem*> m_textItems;
     QTimer* m_rasterTimer;
@@ -82,6 +134,12 @@ private:
     bool m_layerVisible;
     bool m_dirty;
     QList<Tile> m_tiles;
+    
+    // Async rendering state
+    QList<QFutureWatcher<QPixmap>*> m_activeWatchers;
+    QMutex m_renderMutex;
+    QAtomicInt m_pendingRenders;
+    bool m_asyncRenderInProgress;
 };
 
 #endif // TEXTRASTERIZATIONLAYER_H
