@@ -51,6 +51,7 @@ public:
     static constexpr int RASTER_DELAY_MS = 0;      // No debounce - immediate rasterization
     static constexpr int TILE_SIZE = 256;          // Small tile size for fine-grained updates
     static constexpr int TILE_OVERLAP = 2;         // Pixel overlap between tiles to prevent gaps
+    static constexpr int VIEWPORT_BUFFER_TILES = 1; // Number of tile layers to render outside viewport
 
 private slots:
     void performRasterization();

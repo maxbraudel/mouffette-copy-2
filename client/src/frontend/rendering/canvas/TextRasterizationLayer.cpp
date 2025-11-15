@@ -159,9 +159,16 @@ void TextRasterizationLayer::updateTileGrid() {
     }
     
     // Calculate tile grid dimensions based on viewport size
-    const int tilesX = (viewportRect.width() + TILE_SIZE - 1) / TILE_SIZE;
-    const int tilesY = (viewportRect.height() + TILE_SIZE - 1) / TILE_SIZE;
-    const int neededTiles = tilesX * tilesY;
+    const int viewportTilesX = (viewportRect.width() + TILE_SIZE - 1) / TILE_SIZE;
+    const int viewportTilesY = (viewportRect.height() + TILE_SIZE - 1) / TILE_SIZE;
+    
+    // Add buffer tiles around viewport
+    const int tilesX = viewportTilesX + (VIEWPORT_BUFFER_TILES * 2);
+    const int tilesY = viewportTilesY + (VIEWPORT_BUFFER_TILES * 2);
+    
+    // Calculate starting offset for tiles (negative coordinates for buffer tiles)
+    const int startTileX = -VIEWPORT_BUFFER_TILES;
+    const int startTileY = -VIEWPORT_BUFFER_TILES;
     
     // Create map of existing tiles for quick lookup
     QMap<QPair<int, int>, Tile*> existingTiles;
@@ -171,10 +178,10 @@ void TextRasterizationLayer::updateTileGrid() {
         existingTiles[qMakePair(tileX, tileY)] = &tile;
     }
     
-    // Create tiles to cover viewport
+    // Create tiles to cover viewport + buffer
     QList<Tile> newTiles;
-    for (int tileY = 0; tileY < tilesY; ++tileY) {
-        for (int tileX = 0; tileX < tilesX; ++tileX) {
+    for (int tileY = startTileY; tileY < startTileY + tilesY; ++tileY) {
+        for (int tileX = startTileX; tileX < startTileX + tilesX; ++tileX) {
             auto key = qMakePair(tileX, tileY);
             
             if (existingTiles.contains(key)) {
@@ -185,8 +192,8 @@ void TextRasterizationLayer::updateTileGrid() {
                 // Tiles extend TILE_OVERLAP pixels into adjacent tiles
                 const int x = tileX * TILE_SIZE;
                 const int y = tileY * TILE_SIZE;
-                const int width = TILE_SIZE + (tileX < tilesX - 1 ? TILE_OVERLAP : 0);
-                const int height = TILE_SIZE + (tileY < tilesY - 1 ? TILE_OVERLAP : 0);
+                const int width = TILE_SIZE + TILE_OVERLAP;
+                const int height = TILE_SIZE + TILE_OVERLAP;
                 
                 Tile newTile;
                 newTile.viewportRect = QRect(x, y, width, height);
@@ -202,7 +209,8 @@ void TextRasterizationLayer::updateTileGrid() {
     for (Tile& oldTile : m_tiles) {
         const int tileX = oldTile.viewportRect.x() / TILE_SIZE;
         const int tileY = oldTile.viewportRect.y() / TILE_SIZE;
-        const bool stillNeeded = (tileX < tilesX && tileY < tilesY);
+        const bool stillNeeded = (tileX >= startTileX && tileX < startTileX + tilesX &&
+                                   tileY >= startTileY && tileY < startTileY + tilesY);
         
         if (!stillNeeded && oldTile.item) {
             delete oldTile.item;
