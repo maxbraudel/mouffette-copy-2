@@ -385,6 +385,27 @@ MainWindow::MainWindow(QWidget* parent)
         m_menuBarManager->setup();
         connect(m_menuBarManager, &MenuBarManager::quitRequested, this, &MainWindow::onMenuQuitRequested);
         connect(m_menuBarManager, &MenuBarManager::aboutRequested, this, &MainWindow::onMenuAboutRequested);
+        
+        // Connect text rasterization toggle to canvas
+        if (QAction* textRasterAction = m_menuBarManager->getTextRasterizationAction()) {
+            connect(textRasterAction, &QAction::triggered, this, [this](bool checked) {
+                if (m_canvasViewPage && m_canvasViewPage->getScreenCanvas()) {
+                    m_canvasViewPage->getScreenCanvas()->setGlobalTextRasterizationEnabled(checked);
+                }
+            });
+        }
+        
+        // Connect rasterization factor debug controls to canvas
+        if (QActionGroup* factorGroup = m_menuBarManager->getRasterFactorActionGroup()) {
+            connect(factorGroup, &QActionGroup::triggered, this, [this](QAction* action) {
+                if (m_canvasViewPage && m_canvasViewPage->getScreenCanvas()) {
+                    if (auto* textLayer = m_canvasViewPage->getScreenCanvas()->textLayer()) {
+                        qreal factor = action->data().toReal();
+                        textLayer->setRasterizationFactor(factor);
+                    }
+                }
+            });
+        }
     }
 #endif
     

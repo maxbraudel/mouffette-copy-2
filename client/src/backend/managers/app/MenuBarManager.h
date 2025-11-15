@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QMenu>
 #include <QAction>
+#include <QActionGroup>
 
 class QMenuBar;
 class QMainWindow;
@@ -43,6 +44,12 @@ public:
      * @return Pointer to the Help menu
      */
     QMenu* getHelpMenu() const { return m_helpMenu; }
+    
+    /**
+     * @brief Get the View menu
+     * @return Pointer to the View menu
+     */
+    QMenu* getViewMenu() const { return m_viewMenu; }
 
     /**
      * @brief Get the Exit action
@@ -55,6 +62,18 @@ public:
      * @return Pointer to the About action
      */
     QAction* getAboutAction() const { return m_aboutAction; }
+    
+    /**
+     * @brief Get the Global Text Rasterization toggle action
+     * @return Pointer to the text rasterization action
+     */
+    QAction* getTextRasterizationAction() const { return m_textRasterizationAction; }
+    
+    /**
+     * @brief Get the rasterization factor action group
+     * @return Pointer to the action group containing factor presets
+     */
+    QActionGroup* getRasterFactorActionGroup() const { return m_rasterFactorGroup; }
 
 signals:
     /**
@@ -70,9 +89,13 @@ signals:
 private:
     QMainWindow* m_mainWindow = nullptr;
     QMenu* m_fileMenu = nullptr;
+    QMenu* m_viewMenu = nullptr;
+    QMenu* m_rasterFactorMenu = nullptr;
     QMenu* m_helpMenu = nullptr;
     QAction* m_exitAction = nullptr;
     QAction* m_aboutAction = nullptr;
+    QAction* m_textRasterizationAction = nullptr;
+    QActionGroup* m_rasterFactorGroup = nullptr;
 };
 
 #endif // MENUBARMANAGER_H

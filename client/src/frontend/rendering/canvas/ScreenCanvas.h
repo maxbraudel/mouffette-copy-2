@@ -133,6 +133,12 @@ public:
     // Media list overlay management
     void refreshInfoOverlay();
     void refreshSettingsPanelVolumeDisplay(); // Update volume display in settings panel (for real-time slider sync)
+    
+    // Global text rasterization layer control
+    void setGlobalTextRasterizationEnabled(bool enabled);
+    bool globalTextRasterizationEnabled() const { return m_globalTextRasterizationEnabled; }
+    void refreshTextLayer();
+    class TextRasterizationLayer* textLayer() const { return m_textLayer; }
 
     // Snapping support for side (midpoint) resize handles: clamps scale so the moving edge
     // sticks to nearby screen borders when within snap distance.
@@ -287,6 +293,10 @@ private:
     QString m_activeIdeaId;
     // Global initial media scale: set to 1.0 for 1:1 pixel parity between screens and imported media
     double m_scaleFactor = 1.0;
+    
+    // Global text rasterization layer
+    class TextRasterizationLayer* m_textLayer = nullptr;
+    bool m_globalTextRasterizationEnabled = true;
     int m_mediaHandleSelectionSizePx = 30;
     int m_mediaHandleVisualSizePx = 12;
     int m_screenBorderWidthPx = 1;

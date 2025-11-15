@@ -33,6 +33,41 @@ void MenuBarManager::setup()
     connect(m_exitAction, &QAction::triggered, this, &MenuBarManager::quitRequested);
     m_fileMenu->addAction(m_exitAction);
     
+    // Create View menu
+    m_viewMenu = menuBar->addMenu("View");
+    
+    // Create Global Text Rasterization toggle action
+    m_textRasterizationAction = new QAction("Global Text Rasterization", this);
+    m_textRasterizationAction->setCheckable(true);
+    m_textRasterizationAction->setChecked(true); // Enabled by default
+    m_textRasterizationAction->setToolTip("Render all text elements in a single composited layer for better performance");
+    m_viewMenu->addAction(m_textRasterizationAction);
+    
+    // Create Rasterization Factor submenu for debugging
+    m_rasterFactorMenu = m_viewMenu->addMenu("Rasterization Factor (Debug)");
+    m_rasterFactorGroup = new QActionGroup(this);
+    
+    // Add preset factor values
+    const QList<QPair<QString, qreal>> presets = {
+        {"0.25x (Very Low)", 0.25},
+        {"0.5x (Low)", 0.5},
+        {"1.0x (Normal)", 1.0},
+        {"2.0x (High)", 2.0}
+    };
+    
+    for (const auto& preset : presets) {
+        QAction* action = new QAction(preset.first, this);
+        action->setCheckable(true);
+        action->setData(preset.second);
+        action->setActionGroup(m_rasterFactorGroup);
+        m_rasterFactorMenu->addAction(action);
+        
+        // Set 1.0x as default
+        if (qFuzzyCompare(preset.second, 1.0)) {
+            action->setChecked(true);
+        }
+    }
+    
     // Create Help menu
     m_helpMenu = menuBar->addMenu("Help");
     

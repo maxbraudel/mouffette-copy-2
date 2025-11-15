@@ -57,6 +57,7 @@ set(SOURCES
     src/frontend/rendering/canvas/ScreenCanvas.cpp
     src/frontend/rendering/canvas/OverlayPanels.cpp
     src/frontend/rendering/canvas/RoundedRectItem.cpp
+    src/frontend/rendering/canvas/TextRasterizationLayer.cpp
     
     # Rendering - Remote
     src/frontend/rendering/remote/RemoteSceneController.cpp
@@ -176,6 +177,7 @@ set(HEADERS
     src/frontend/rendering/canvas/OverlayPanels.h
     src/frontend/rendering/canvas/RoundedRectItem.h
     src/frontend/rendering/canvas/SegmentedButtonItem.h
+    src/frontend/rendering/canvas/TextRasterizationLayer.h
     
     # Rendering - Remote
     src/frontend/rendering/remote/RemoteSceneController.h

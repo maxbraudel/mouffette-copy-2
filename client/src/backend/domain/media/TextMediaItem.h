@@ -53,7 +53,7 @@ public:
         const QString& initialText = QStringLiteral("No Text")
     );
     
-    ~TextMediaItem() override = default;
+    ~TextMediaItem() override;
 
     // Text content accessors
     QString text() const { return m_isEditing ? m_editorRenderingText : m_text; }
@@ -128,6 +128,10 @@ public:
     // Alignment controls interaction (called by canvas, similar to video controls)
     void refreshAlignmentControlsLayout();
     void syncInlineEditorToBaseSize();
+    
+    // Global text rasterization layer integration
+    void setDirectPaintingEnabled(bool enabled) { m_directPaintingEnabled = enabled; update(); }
+    bool directPaintingEnabled() const { return m_directPaintingEnabled; }
 
 protected:
     void onAltResizeModeEngaged() override;
@@ -137,6 +141,8 @@ private:
     void scheduleFitToTextUpdate();
     void applyFitToTextNow();
     void applyFontChange(const QFont& font);
+    void notifyLayerChanged();
+    
     QString m_text;
     QFont m_font;
     bool m_italicEnabled = TextMediaDefaults::FONT_ITALIC;
@@ -156,6 +162,7 @@ private:
     bool m_fontWeightOverrideEnabled = false;
     QGraphicsTextItem* m_inlineEditor = nullptr;
     bool m_isEditing = false;
+    bool m_directPaintingEnabled = true; // False when using global rasterization layer
     QString m_textBeforeEditing;
     QString m_editorRenderingText;
     bool m_isUpdatingInlineGeometry = false;

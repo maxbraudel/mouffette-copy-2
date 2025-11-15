@@ -1,5 +1,6 @@
 // ScreenCanvas implementation (snap guides rendered via dedicated SnapGuideItem)
 #include "frontend/rendering/canvas/ScreenCanvas.h"
+#include "frontend/rendering/canvas/TextRasterizationLayer.h"
 #include "backend/network/WebSocketClient.h" // for remote scene start/stop messaging
 #include "backend/network/UploadManager.h" // for upload state checking
 #include "backend/domain/session/SessionManager.h" // Phase 3: For DEFAULT_IDEA_ID constant
@@ -1393,6 +1394,12 @@ std::pair<int, bool> ScreenCanvas::calculateDesiredWidthAndConstraint() {
 }
 
 ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
+    // Check environment variable for text rasterization override
+    bool envOverride = qEnvironmentVariableIsSet("MOUFFETTE_GLOBAL_TEXT_RASTER");
+    if (envOverride) {
+        m_globalTextRasterizationEnabled = qEnvironmentVariableIntValue("MOUFFETTE_GLOBAL_TEXT_RASTER") != 0;
+    }
+    
     setAcceptDrops(true);
     setDragMode(QGraphicsView::NoDrag); // manual panning / selection logic
     m_scene = new QGraphicsScene(this);
@@ -1424,6 +1431,11 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     // Create snap guide item (between media and overlays)
     m_snapGuides = new SnapGuideItem(this);
     m_scene->addItem(m_snapGuides);
+    
+    // Create global text rasterization layer
+    m_textLayer = new TextRasterizationLayer(this);
+    m_scene->addItem(m_textLayer);
+    m_textLayer->setLayerVisible(m_globalTextRasterizationEnabled);
 
     // On scene changes, re-anchor, refresh overlay on media count change, and keep selection chrome in sync
     connect(m_scene, &QGraphicsScene::changed, this, [this](const QList<QRectF>&){ layoutInfoOverlay(); maybeRefreshInfoOverlayOnSceneChanged(); updateSelectionChrome(); });
@@ -4025,6 +4037,13 @@ QPointF ScreenCanvas::mapRemoteCursorToScene(int remoteX, int remoteY) const {
 void ScreenCanvas::zoomAroundViewportPos(const QPointF& vpPosF, qreal factor) {
     QPoint vpPos = vpPosF.toPoint(); if (!viewport()->rect().contains(vpPos)) vpPos = viewport()->rect().center(); const QPointF sceneAnchor = mapToScene(vpPos);
     QTransform t = transform(); t.translate(sceneAnchor.x(), sceneAnchor.y()); t.scale(factor, factor); t.translate(-sceneAnchor.x(), -sceneAnchor.y()); setTransform(t);
+    
+    // Update text layer with new zoom factor
+    if (m_textLayer && m_globalTextRasterizationEnabled) {
+        const qreal newZoom = transform().m11();
+        m_textLayer->setCurrentZoomFactor(newZoom);
+    }
+    
     if (m_scene) { const QList<QGraphicsItem*> sel = m_scene->selectedItems(); for (QGraphicsItem* it : sel) { if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) v->requestOverlayRelayout(); if (auto* b = dynamic_cast<ResizableMediaBase*>(it)) b->requestLabelRelayout(); } }
 }
 
@@ -5594,3 +5613,31 @@ void ScreenCanvas::updateRemoteSceneTargetFromClientList(const QList<ClientInfo>
     // Machine not found in current client list - it's disconnected
     // Keep the stored info in case it reconnects later
 }
+
+void ScreenCanvas::setGlobalTextRasterizationEnabled(bool enabled) {
+    if (m_globalTextRasterizationEnabled == enabled) {
+        return;
+    }
+    
+    m_globalTextRasterizationEnabled = enabled;
+    
+    if (m_textLayer) {
+        m_textLayer->setLayerVisible(enabled);
+    }
+    
+    // Toggle individual text item direct painting mode
+    if (m_scene) {
+        for (QGraphicsItem* item : m_scene->items()) {
+            if (auto* textItem = dynamic_cast<TextMediaItem*>(item)) {
+                textItem->setDirectPaintingEnabled(!enabled);
+            }
+        }
+    }
+}
+
+void ScreenCanvas::refreshTextLayer() {
+    if (m_textLayer && m_globalTextRasterizationEnabled) {
+        m_textLayer->invalidate();
+    }
+}
+

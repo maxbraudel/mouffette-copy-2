@@ -1,5 +1,7 @@
 // TextMediaItem.cpp - Implementation of text media item
 #include "TextMediaItem.h"
+#include "frontend/rendering/canvas/ScreenCanvas.h"
+#include "frontend/rendering/canvas/TextRasterizationLayer.h"
 #include <QPainter>
 #include <QStyleOptionGraphicsItem>
 #include <QGraphicsSceneMouseEvent>
@@ -249,6 +251,40 @@ protected:
 
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override {
         if (!painter) {
+            return;
+        }
+        
+        // Skip rendering if global text layer is active (unless editing)
+        if (m_owner && !m_owner->directPaintingEnabled() && !m_owner->isEditing()) {
+            // Only draw caret and selection during editing
+            const QRectF bounds = boundingRect();
+            drawSelectionOverlay(painter, bounds);
+            
+            // Draw caret if editing
+            if (m_owner->isEditing() && (textInteractionFlags() & Qt::TextEditable) && m_caretVisible) {
+                QTextCursor cursor = textCursor();
+                if (!cursor.hasSelection()) {
+                    const QRectF caretRect = cursorRectForPosition(cursor).translated(bounds.topLeft());
+                    if (!caretRect.isEmpty()) {
+                        const qreal desiredSceneWidth = 3.0;
+                        const QTransform world = painter->worldTransform();
+                        qreal scaleX = std::hypot(world.m11(), world.m21());
+                        if (scaleX <= 1e-6) {
+                            scaleX = 1.0;
+                        }
+                        const qreal caretHalfWidth = (desiredSceneWidth / scaleX) * 0.5;
+                        QRectF adjustedCaretRect = caretRect;
+                        const qreal caretCenterX = adjustedCaretRect.center().x();
+                        adjustedCaretRect.setLeft(caretCenterX - caretHalfWidth);
+                        adjustedCaretRect.setRight(caretCenterX + caretHalfWidth);
+                        
+                        // Use text color for caret
+                        QColor caretColor = defaultTextColor();
+                        caretColor.setAlpha(255);
+                        painter->fillRect(adjustedCaretRect, caretColor);
+                    }
+                }
+            }
             return;
         }
 
@@ -1120,6 +1156,36 @@ TextMediaItem::TextMediaItem(
     ensureAlignmentControls();
 
     setFitToTextEnabled(true);
+    
+    // Note: Registration with text rasterization layer happens in itemChange(ItemSceneHasChanged)
+    // when the item is actually added to the scene
+}
+
+TextMediaItem::~TextMediaItem() {
+    // Unregister from global text rasterization layer
+    if (scene()) {
+        const QList<QGraphicsView*> views = scene()->views();
+        if (!views.isEmpty()) {
+            if (ScreenCanvas* canvas = qobject_cast<ScreenCanvas*>(views.first())) {
+                if (TextRasterizationLayer* layer = canvas->textLayer()) {
+                    layer->unregisterTextItem(this);
+                }
+            }
+        }
+    }
+}
+
+void TextMediaItem::notifyLayerChanged() {
+    if (scene()) {
+        const QList<QGraphicsView*> views = scene()->views();
+        if (!views.isEmpty()) {
+            if (ScreenCanvas* canvas = qobject_cast<ScreenCanvas*>(views.first())) {
+                if (TextRasterizationLayer* layer = canvas->textLayer()) {
+                    layer->onTextItemChanged(this);
+                }
+            }
+        }
+    }
 }
 
 void TextMediaItem::setText(const QString& text) {
@@ -1140,6 +1206,7 @@ void TextMediaItem::setText(const QString& text) {
         updateInlineEditorGeometry();
         update(); // Trigger repaint
         updateOverlayLayout();
+        notifyLayerChanged(); // Notify global text layer
         if (m_fitToTextEnabled) {
             scheduleFitToTextUpdate();
         }
@@ -1505,6 +1572,8 @@ void TextMediaItem::applyFontChange(const QFont& font) {
     if (m_fitToTextEnabled) {
         scheduleFitToTextUpdate();
     }
+    
+    notifyLayerChanged(); // Notify global text layer
 }
 
 void TextMediaItem::setHorizontalAlignment(HorizontalAlignment align) {
@@ -1947,6 +2016,14 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
         return;
     }
 
+    // Skip rendering if global rasterization layer is active (text will be rendered by the layer)
+    // Always paint when editing to show the inline editor
+    if (!m_directPaintingEnabled && !m_isEditing) {
+        // Still paint selection and label chrome
+        paintSelectionAndLabel(painter);
+        return;
+    }
+
     if (!m_isEditing) {
         updateInlineEditorGeometry();
     }
@@ -1997,6 +2074,25 @@ QVariant TextMediaItem::itemChange(GraphicsItemChange change, const QVariant& va
         const bool selectedNow = value.toBool();
         if (!selectedNow && m_isEditing) {
             commitInlineEditing();
+        }
+    }
+    
+    // When item is added to scene, sync with global rasterization layer
+    if (change == ItemSceneHasChanged && value.canConvert<QGraphicsScene*>()) {
+        QGraphicsScene* newScene = qvariant_cast<QGraphicsScene*>(value);
+        if (newScene) {
+            const QList<QGraphicsView*> views = newScene->views();
+            if (!views.isEmpty()) {
+                if (ScreenCanvas* canvas = qobject_cast<ScreenCanvas*>(views.first())) {
+                    // Register with text rasterization layer
+                    if (TextRasterizationLayer* layer = canvas->textLayer()) {
+                        layer->registerTextItem(this);
+                        
+                        // Set initial direct painting state based on canvas setting
+                        m_directPaintingEnabled = !canvas->globalTextRasterizationEnabled();
+                    }
+                }
+            }
         }
     }
 
