@@ -3158,6 +3158,12 @@ void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
                 // current mouse position (keeps the grabbed point perfectly pinned under the cursor)
                 t.translate(deltaView.x() / t.m11(), deltaView.y() / t.m22());
                 setTransform(t);
+                
+                // Update text layer viewport as we pan
+                if (m_textLayer && m_globalTextRasterizationEnabled) {
+                    m_textLayer->invalidate();
+                }
+                
                 // Keep absolute panels pinned during pan
                 relayoutAllMediaOverlays(m_scene);
                 layoutInfoOverlay();

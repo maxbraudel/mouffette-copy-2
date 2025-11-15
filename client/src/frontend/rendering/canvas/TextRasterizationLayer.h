@@ -49,15 +49,27 @@ public:
     // Configuration
     static constexpr qreal ZOOM_THRESHOLD = 0.15;  // Re-raster if zoom changes >15%
     static constexpr int RASTER_DELAY_MS = 0;      // No debounce - immediate rasterization
+    static constexpr int TILE_SIZE = 256;          // Small tile size for fine-grained updates
 
 private slots:
     void performRasterization();
 
 private:
+    struct Tile {
+        QGraphicsPixmapItem* item = nullptr;
+        QRect sceneRect;  // Tile bounds in scene coordinates
+        qreal lastResolution = 0.0;
+        bool dirty = true;
+    };
+    
     void scheduleRasterization();
     QRectF calculateTextBounds() const;
+    QRectF getVisibleSceneRect() const;
     qreal computeRasterResolution() const;
     bool shouldRerasterForZoom(qreal newZoom) const;
+    void updateTileGrid();
+    void renderTile(Tile& tile, const QList<TextMediaItem*>& sortedItems, qreal resolution);
+    void cleanupUnusedTiles(const QRectF& viewportBounds);
     
     ScreenCanvas* m_canvas;
     QList<TextMediaItem*> m_textItems;
@@ -67,6 +79,7 @@ private:
     qreal m_rasterizationFactor;
     bool m_layerVisible;
     bool m_dirty;
+    QList<Tile> m_tiles;
 };
 
 #endif // TEXTRASTERIZATIONLAYER_H
