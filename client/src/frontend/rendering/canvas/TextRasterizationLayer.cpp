@@ -6,8 +6,32 @@
 #include <QDebug>
 #include <QtConcurrent>
 #include <QMutexLocker>
+#include <QTextOption>
+#include <QPainterPath>
+#include <QImage>
+#include <utility>
 #include <cmath>
 #include <algorithm>
+#include <QPointF>
+
+namespace {
+// Aligns a scene-space rectangle so its edges land on exact pixel boundaries
+// once multiplied by the raster resolution. This avoids sub-pixel rounding
+// discrepancies between neighboring tiles that can manifest as seams.
+QRectF alignRectToResolution(const QRectF& rect, qreal resolution) {
+    if (resolution <= 0.0) {
+        return rect;
+    }
+
+    const qreal invResolution = 1.0 / resolution;
+    const qreal left = std::floor(rect.left() * resolution) * invResolution;
+    const qreal top = std::floor(rect.top() * resolution) * invResolution;
+    const qreal right = std::ceil((rect.left() + rect.width()) * resolution) * invResolution;
+    const qreal bottom = std::ceil((rect.top() + rect.height()) * resolution) * invResolution;
+
+    return QRectF(QPointF(left, top), QPointF(right, bottom));
+}
+} // namespace
 
 TextRasterizationLayer::TextRasterizationLayer(ScreenCanvas* canvas)
     : QObject()
@@ -21,6 +45,7 @@ TextRasterizationLayer::TextRasterizationLayer(ScreenCanvas* canvas)
     , m_dirty(true)
     , m_pendingRenders(0)
     , m_asyncRenderInProgress(false)
+    , m_generationCounter(0)
 {
     // Z-order: Below selection chrome (11998), above media items (1-9999)
     setZValue(9998.0);
@@ -36,10 +61,10 @@ TextRasterizationLayer::TextRasterizationLayer(ScreenCanvas* canvas)
 
 TextRasterizationLayer::~TextRasterizationLayer() {
     // Cancel all pending async renders
-    for (QFutureWatcher<QPixmap>* watcher : m_activeWatchers) {
+    for (QFutureWatcher<TileRenderResult>* watcher : m_activeWatchers) {
         watcher->cancel();
         watcher->waitForFinished();
-        delete watcher;
+        watcher->deleteLater();
     }
     m_activeWatchers.clear();
     
@@ -235,9 +260,14 @@ void TextRasterizationLayer::renderTile(Tile& tile, const QList<TextMediaItem*>&
         return;
     }
     
-    // Map viewport tile to scene coordinates
-    const QPolygonF scenePolygon = m_canvas->mapToScene(tile.viewportRect);
-    const QRectF tileSceneRect = scenePolygon.boundingRect();
+    bool invertible = false;
+    const QTransform invTransform = m_canvas->viewportTransform().inverted(&invertible);
+    if (!invertible) {
+        return;
+    }
+
+    QRectF tileSceneRect = invTransform.mapRect(QRectF(tile.viewportRect));
+    tileSceneRect = alignRectToResolution(tileSceneRect, resolution);
     
     // Calculate pixmap size based on scene rect dimensions and resolution
     // The pixmap should have enough pixels to render the scene area at the target resolution
@@ -345,10 +375,8 @@ void TextRasterizationLayer::performRasterization() {
     // Update tile grid based on viewport (creates fixed number of tiles)
     updateTileGrid();
     
-    // Start async rendering if not already in progress
-    if (!m_asyncRenderInProgress) {
-        startAsyncRasterization();
-    }
+    // Always request async rendering (generation tracking prevents stale results)
+    startAsyncRasterization();
 }
 
 void TextRasterizationLayer::rasterizeAllText() {
@@ -368,7 +396,7 @@ void TextRasterizationLayer::setLayerVisible(bool visible) {
         scheduleRasterization();
     } else if (!visible) {
         // Cancel pending async renders
-        for (QFutureWatcher<QPixmap>* watcher : m_activeWatchers) {
+        for (QFutureWatcher<TileRenderResult>* watcher : m_activeWatchers) {
             watcher->cancel();
         }
         
@@ -393,263 +421,303 @@ void TextRasterizationLayer::startAsyncRasterization() {
     if (!m_canvas) {
         return;
     }
-    
-    QMutexLocker locker(&m_renderMutex);
-    
-    // Mark render in progress
-    m_asyncRenderInProgress = true;
-    
-    // Calculate resolution for rendering
+
     const qreal resolution = computeRasterResolution();
-    
-    // Calculate bounds of all text items in scene coordinates
     const QRectF textBounds = calculateTextBounds();
+
     if (textBounds.isEmpty()) {
-        // No text items visible - clear all tiles synchronously (fast)
         for (Tile& tile : m_tiles) {
             if (tile.item && !tile.item->pixmap().isNull()) {
                 tile.item->setPixmap(QPixmap());
                 tile.item->setVisible(false);
             }
+            tile.activeJobs.storeRelaxed(0);
+            tile.pendingGeneration = 0;
         }
+        QMutexLocker locker(&m_renderMutex);
         m_asyncRenderInProgress = false;
+        m_currentGeneration = 0;
         return;
     }
-    
-    // Prepare text data for async rendering (thread-safe copies)
-    // Sort text items first by z-order, then copy their data
+
     QList<TextMediaItem*> sortedItems = m_textItems;
-    std::sort(sortedItems.begin(), sortedItems.end(), 
-              [](TextMediaItem* a, TextMediaItem* b) { 
-                  return a->zValue() < b->zValue(); 
-              });
-    
+    std::sort(sortedItems.begin(), sortedItems.end(), [](TextMediaItem* a, TextMediaItem* b) {
+        return a->zValue() < b->zValue();
+    });
+
     QList<TextItemRenderData> textItemsData;
+    textItemsData.reserve(sortedItems.size());
     for (TextMediaItem* item : sortedItems) {
         if (!item || !item->isVisible()) {
             continue;
         }
-        
-        // Extract thread-safe data from text item
-        TextItemRenderData itemData;
-        itemData.sceneTransform = item->sceneTransform();
-        itemData.sceneBoundingRect = item->sceneBoundingRect();
-        itemData.text = item->text();
-        itemData.font = item->font();
-        itemData.textColor = item->textColor();
-        itemData.borderWidthPercent = item->textBorderWidth();
-        itemData.borderColor = item->textBorderColor();
-        itemData.highlightEnabled = item->highlightEnabled();
-        itemData.highlightColor = item->highlightColor();
-        itemData.directPaintingEnabled = item->directPaintingEnabled();
-        itemData.zValue = item->zValue();
-        
-        textItemsData.append(itemData);
+
+        TextItemRenderData data;
+        data.sceneTransform = item->sceneTransform();
+        data.sceneBoundingRect = item->sceneBoundingRect();
+        data.text = item->text();
+        data.font = item->font();
+        data.textColor = item->textColor();
+        data.borderWidthPercent = item->textBorderWidth();
+        data.borderColor = item->textBorderColor();
+        data.highlightEnabled = item->highlightEnabled();
+        data.highlightColor = item->highlightColor();
+        data.directPaintingEnabled = item->directPaintingEnabled();
+        data.zValue = item->zValue();
+
+        textItemsData.append(std::move(data));
     }
-    
-    // Submit tiles for async rendering
+
+    auto textItemsShared = QSharedPointer<QList<TextItemRenderData>>::create();
+    textItemsShared->swap(textItemsData);
+
+    const quint64 generation = m_generationCounter.fetchAndAddRelaxed(1) + 1;
+    {
+        QMutexLocker locker(&m_renderMutex);
+        m_asyncRenderInProgress = true;
+        m_currentGeneration = generation;
+    }
+
+    GenerationState& generationState = m_generationStates[generation];
+    generationState.pendingTiles = 0;
+    generationState.results.clear();
+
     int tilesSubmitted = 0;
     for (int i = 0; i < m_tiles.size(); ++i) {
         Tile& tile = m_tiles[i];
-        
-        // Skip if already rendering
-        if (tile.rendering.loadAcquire() != 0) {
-            continue;
-        }
-        
-        // Map viewport tile to scene coordinates
+
         const QPolygonF scenePolygon = m_canvas->mapToScene(tile.viewportRect);
         const QRectF tileSceneRect = scenePolygon.boundingRect();
-        
-        const bool intersectsText = textBounds.intersects(tileSceneRect);
-        
-        // If tile doesn't intersect text, clear it synchronously (fast)
-        if (!intersectsText) {
+
+        if (!textBounds.intersects(tileSceneRect)) {
             if (tile.item && !tile.item->pixmap().isNull()) {
                 tile.item->setPixmap(QPixmap());
                 tile.item->setVisible(false);
             }
+            tile.dirty = false;
+            tile.lastZoom = m_currentZoom;
+            tile.pendingGeneration = 0;
             continue;
         }
-        
-        // Check if tile needs updating
+
         const bool zoomChanged = !qFuzzyCompare(tile.lastZoom, m_currentZoom);
         if (!tile.dirty && !zoomChanged) {
             continue;
         }
-        
-        // Calculate pixmap size
+
         const QSize pixmapSize(
             static_cast<int>(std::ceil(tileSceneRect.width() * resolution)),
             static_cast<int>(std::ceil(tileSceneRect.height() * resolution))
         );
-        
+
         if (pixmapSize.width() <= 0 || pixmapSize.height() <= 0) {
             continue;
         }
-        
-        // Filter text items for this tile (only items that intersect)
-        QList<TextItemRenderData> tileTextItems;
-        for (const TextItemRenderData& itemData : textItemsData) {
-            if (tileSceneRect.intersects(itemData.sceneBoundingRect)) {
-                tileTextItems.append(itemData);
-            }
-        }
-        
-        // Prepare render data (thread-safe)
+
         TileRenderData renderData;
         renderData.viewportRect = tile.viewportRect;
         renderData.sceneRect = tileSceneRect;
         renderData.pixmapSize = pixmapSize;
         renderData.resolution = resolution;
-        renderData.textItems = tileTextItems;
+        renderData.textItems = textItemsShared;
         renderData.tileIndex = i;
-        
-        // Mark tile as rendering
-        tile.rendering.storeRelease(1);
-        
-        // Create future watcher
-        auto* watcher = new QFutureWatcher<QPixmap>(this);
+        renderData.generation = generation;
+
+        tile.pendingGeneration = generation;
+        tile.activeJobs.fetchAndAddRelaxed(1);
+
+        ++generationState.pendingTiles;
+
+        auto* watcher = new QFutureWatcher<TileRenderResult>(this);
         m_activeWatchers.append(watcher);
-        
-        // Connect completion signal
-        connect(watcher, &QFutureWatcher<QPixmap>::finished, this, [this, i, tileSceneRect, resolution, watcher]() {
-            if (!watcher->isCanceled()) {
-                const QPixmap result = watcher->result();
-                applyRenderedTile(i, result, tileSceneRect, resolution);
+
+        const int tileIndex = i;
+        const quint64 tileGeneration = generation;
+
+        connect(watcher, &QFutureWatcher<TileRenderResult>::finished, this, [this, watcher, tileIndex, tileGeneration]() {
+            const bool canceled = watcher->isCanceled();
+            TileRenderResult result;
+            if (!canceled) {
+                result = watcher->result();
+            } else {
+                result.tileIndex = tileIndex;
+                result.generation = tileGeneration;
+                result.resolution = 1.0;
+                result.hasContent = false;
             }
-            
-            // Remove from active watchers
+            handleRenderFinished(result, canceled);
+
             m_activeWatchers.removeOne(watcher);
             watcher->deleteLater();
-            
-            // Decrement pending count
+
             m_pendingRenders.fetchAndAddRelaxed(-1);
-            
-            // Check if all tiles are done
             if (m_pendingRenders.loadAcquire() == 0 && m_activeWatchers.isEmpty()) {
                 onAllTilesRendered();
             }
         });
-        
-        // Submit async render
+
         m_pendingRenders.fetchAndAddRelaxed(1);
-        QFuture<QPixmap> future = QtConcurrent::run(renderTileAsync, renderData);
-        watcher->setFuture(future);
-        
-        tilesSubmitted++;
+        watcher->setFuture(QtConcurrent::run(renderTileAsync, renderData));
+        ++tilesSubmitted;
     }
-    
-    // If no tiles were submitted, mark as complete
+
     if (tilesSubmitted == 0) {
+        m_generationStates.remove(generation);
+        QMutexLocker locker(&m_renderMutex);
         m_asyncRenderInProgress = false;
     }
 }
 
-QPixmap TextRasterizationLayer::renderTileAsync(const TileRenderData& data) {
-    // This runs on a background thread - no Qt GUI operations allowed!
-    
-    QPixmap tilePixmap(data.pixmapSize);
-    tilePixmap.fill(Qt::transparent);
-    
-    QPainter painter(&tilePixmap);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setRenderHint(QPainter::TextAntialiasing, true);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    
-    // Scale painter to resolution
-    painter.scale(data.resolution, data.resolution);
-    
-    // Translate to tile's scene position
-    painter.translate(-data.sceneRect.topLeft());
-    
-    // Render text items in z-order
-    for (const TextItemRenderData& item : data.textItems) {
-        if (item.text.isEmpty()) {
-            continue;
+TextRasterizationLayer::TileRenderResult TextRasterizationLayer::renderTileAsync(const TileRenderData& data) {
+    TileRenderResult result;
+    result.tileIndex = data.tileIndex;
+    result.sceneRect = data.sceneRect;
+    result.resolution = data.resolution;
+    result.generation = data.generation;
+
+    QImage image(data.pixmapSize, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+
+    if (data.textItems && !data.textItems->isEmpty()) {
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setRenderHint(QPainter::TextAntialiasing, true);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+
+        painter.scale(data.resolution, data.resolution);
+        painter.translate(-data.sceneRect.topLeft());
+
+        for (const TextItemRenderData& item : std::as_const(*data.textItems)) {
+            if (item.text.isEmpty() || !data.sceneRect.intersects(item.sceneBoundingRect)) {
+                continue;
+            }
+
+            painter.save();
+            painter.setTransform(item.sceneTransform, true);
+
+            const QRectF localRect = item.sceneTransform.inverted().mapRect(item.sceneBoundingRect);
+
+            painter.setFont(item.font);
+
+            if (item.highlightEnabled) {
+                painter.fillRect(localRect, item.highlightColor);
+            }
+
+            QTextOption textOption;
+            textOption.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+            textOption.setAlignment(Qt::AlignLeft | Qt::AlignTop);
+
+            if (item.borderWidthPercent > 0.0) {
+                const qreal borderWidth = item.font.pixelSize() * (item.borderWidthPercent / 100.0);
+
+                QPen borderPen(item.borderColor);
+                borderPen.setWidthF(borderWidth * 2.0);
+                borderPen.setJoinStyle(Qt::RoundJoin);
+
+                QPainterPath path;
+                path.addText(localRect.topLeft(), item.font, item.text);
+
+                painter.strokePath(path, borderPen);
+                painter.fillPath(path, item.textColor);
+            } else {
+                painter.setPen(item.textColor);
+                painter.drawText(localRect, item.text, textOption);
+            }
+
+            painter.restore();
+            result.hasContent = true;
         }
-        
-        painter.save();
-        
-        // Apply the item's scene transformation
-        painter.setTransform(item.sceneTransform, true);
-        
-        // Get item's local bounding rect for rendering
-        const QRectF localRect = item.sceneTransform.inverted().mapRect(item.sceneBoundingRect);
-        
-        // Setup text rendering
-        QFont font = item.font;
-        painter.setFont(font);
-        
-        // Draw highlight background if enabled
-        if (item.highlightEnabled) {
-            painter.fillRect(localRect, item.highlightColor);
-        }
-        
-        // Setup text drawing options
-        QTextOption textOption;
-        textOption.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
-        textOption.setAlignment(Qt::AlignLeft | Qt::AlignTop);
-        
-        // Draw text with border (stroke) if needed
-        if (item.borderWidthPercent > 0.0) {
-            const qreal borderWidth = item.font.pixelSize() * (item.borderWidthPercent / 100.0);
-            
-            // Draw border (stroke)
-            QPen borderPen(item.borderColor);
-            borderPen.setWidthF(borderWidth * 2.0); // Double width for proper outline
-            borderPen.setJoinStyle(Qt::RoundJoin);
-            
-            QPainterPath path;
-            path.addText(localRect.topLeft(), font, item.text);
-            
-            painter.strokePath(path, borderPen);
-            painter.fillPath(path, item.textColor);
-        } else {
-            // Simple text rendering without border
-            painter.setPen(item.textColor);
-            painter.drawText(localRect, item.text, textOption);
-        }
-        
-        painter.restore();
+
+        painter.end();
     }
-    
-    painter.end();
-    
-    return tilePixmap;
+
+    result.image = std::move(image);
+    return result;
 }
 
-void TextRasterizationLayer::applyRenderedTile(int tileIndex, const QPixmap& pixmap, const QRectF& sceneRect, qreal resolution) {
-    // Back on UI thread - safe to update graphics items
-    
-    if (tileIndex < 0 || tileIndex >= m_tiles.size()) {
+void TextRasterizationLayer::handleRenderFinished(const TileRenderResult& result, bool canceled) {
+    if (result.generation == 0) {
         return;
     }
-    
-    Tile& tile = m_tiles[tileIndex];
-    
-    // Create or reuse tile pixmap item
-    if (!tile.item) {
-        tile.item = new QGraphicsPixmapItem(this);
-        tile.item->setZValue(zValue());
+
+    if (result.tileIndex < 0 || result.tileIndex >= m_tiles.size()) {
+        return;
     }
-    
-    // Update tile pixmap
-    tile.item->setPixmap(pixmap);
-    tile.item->setPos(sceneRect.topLeft());
-    tile.item->setScale(1.0 / resolution);
-    tile.item->setVisible(true);
-    tile.item->update();
-    
-    // Mark tile as clean
-    tile.dirty = false;
-    tile.lastZoom = m_currentZoom;
-    tile.rendering.storeRelease(0);
+
+    Tile& tile = m_tiles[result.tileIndex];
+    tile.activeJobs.fetchAndAddRelaxed(-1);
+
+    auto stateIt = m_generationStates.find(result.generation);
+    if (stateIt == m_generationStates.end()) {
+        return;
+    }
+
+    GenerationState& state = stateIt.value();
+
+    if (!canceled) {
+        state.results.insert(result.tileIndex, result);
+    }
+
+    if (--state.pendingTiles <= 0) {
+        const bool isCurrent = (result.generation == m_currentGeneration);
+        QHash<int, TileRenderResult> generationResults = state.results;
+        m_generationStates.erase(stateIt);
+
+        if (isCurrent && !generationResults.isEmpty()) {
+            applyGenerationResults(result.generation, generationResults);
+        }
+    }
+}
+
+void TextRasterizationLayer::applyGenerationResults(quint64 generation, const QHash<int, TileRenderResult>& results) {
+    for (auto it = results.constBegin(); it != results.constEnd(); ++it) {
+        const int tileIndex = it.key();
+        if (tileIndex < 0 || tileIndex >= m_tiles.size()) {
+            continue;
+        }
+
+        const TileRenderResult& result = it.value();
+        Tile& tile = m_tiles[tileIndex];
+
+        if (tile.pendingGeneration > generation) {
+            continue;
+        }
+
+        tile.pendingGeneration = 0;
+
+        if (!tile.item) {
+            tile.item = new QGraphicsPixmapItem(this);
+            tile.item->setZValue(zValue());
+        }
+
+        if (!result.hasContent || result.image.isNull()) {
+            tile.item->setPixmap(QPixmap());
+            tile.item->setVisible(false);
+        } else {
+            QPixmap pixmap = QPixmap::fromImage(result.image);
+            pixmap.setDevicePixelRatio(result.resolution);
+            tile.item->setPixmap(pixmap);
+            tile.item->setPos(result.sceneRect.topLeft());
+            tile.item->setScale(1.0);
+            tile.item->setVisible(true);
+            tile.item->update();
+        }
+
+        tile.dirty = false;
+        tile.lastZoom = m_currentZoom;
+    }
 }
 
 void TextRasterizationLayer::onAllTilesRendered() {
-    // All async rendering complete
     m_asyncRenderInProgress = false;
+
+    for (const Tile& tile : std::as_const(m_tiles)) {
+        if (tile.dirty) {
+            scheduleRasterization();
+            return;
+        }
+    }
+
     m_lastRasterZoom = m_currentZoom;
     m_dirty = false;
 }

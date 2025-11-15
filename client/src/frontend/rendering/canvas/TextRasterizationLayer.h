@@ -3,12 +3,16 @@
 
 #include <QGraphicsPixmapItem>
 #include <QPixmap>
+#include <QImage>
 #include <QList>
 #include <QTimer>
 #include <QFuture>
 #include <QFutureWatcher>
 #include <QMutex>
 #include <QAtomicInt>
+#include <QAtomicInteger>
+#include <QSharedPointer>
+#include <QHash>
 #include <QFont>
 #include <QColor>
 #include <QTransform>
@@ -98,8 +102,18 @@ private:
         QRectF sceneRect;
         QSize pixmapSize;
         qreal resolution;
-        QList<TextItemRenderData> textItems;
+        QSharedPointer<QList<TextItemRenderData>> textItems;
         int tileIndex;
+        quint64 generation = 0;
+    };
+
+    struct TileRenderResult {
+        int tileIndex = -1;
+        QRectF sceneRect;
+        qreal resolution = 1.0;
+        quint64 generation = 0;
+        bool hasContent = false;
+        QImage image;
     };
     
     struct Tile {
@@ -107,7 +121,8 @@ private:
         QRect viewportRect;  // Tile bounds in viewport coordinates (pixels)
         qreal lastZoom = 0.0;
         bool dirty = true;
-        QAtomicInt rendering; // 0 = idle, 1 = rendering
+        QAtomicInt activeJobs;
+        quint64 pendingGeneration = 0;
     };
     
     void scheduleRasterization();
@@ -120,9 +135,10 @@ private:
     void cleanupUnusedTiles(const QRectF& viewportBounds);
     
     // Async rendering
-    static QPixmap renderTileAsync(const TileRenderData& data);
+    static TileRenderResult renderTileAsync(const TileRenderData& data);
     void startAsyncRasterization();
-    void applyRenderedTile(int tileIndex, const QPixmap& pixmap, const QRectF& sceneRect, qreal resolution);
+    void handleRenderFinished(const TileRenderResult& result, bool canceled);
+    void applyGenerationResults(quint64 generation, const QHash<int, TileRenderResult>& results);
     void onAllTilesRendered();
     
     ScreenCanvas* m_canvas;
@@ -136,10 +152,17 @@ private:
     QList<Tile> m_tiles;
     
     // Async rendering state
-    QList<QFutureWatcher<QPixmap>*> m_activeWatchers;
+    QList<QFutureWatcher<TileRenderResult>*> m_activeWatchers;
     QMutex m_renderMutex;
     QAtomicInt m_pendingRenders;
     bool m_asyncRenderInProgress;
+    QAtomicInteger<quint64> m_generationCounter;
+    quint64 m_currentGeneration = 0;
+    struct GenerationState {
+        int pendingTiles = 0;
+        QHash<int, TileRenderResult> results;
+    };
+    QHash<quint64, GenerationState> m_generationStates;
 };
 
 #endif // TEXTRASTERIZATIONLAYER_H
