@@ -1179,11 +1179,6 @@ TextMediaItem::~TextMediaItem() {
 }
 
 void TextMediaItem::notifyLayerChanged() {
-    // Skip layer notification during editing - the item paints itself directly
-    if (m_isEditing) {
-        return;
-    }
-    
     if (scene()) {
         const QList<QGraphicsView*> views = scene()->views();
         if (!views.isEmpty()) {
@@ -1792,6 +1787,9 @@ void TextMediaItem::handleInlineEditorTextChanged(const QString& newText) {
 
     m_editorRenderingText = newText;
     update();
+    
+    // Notify rasterization layer to update with new text content
+    notifyLayerChanged();
 }
 
 const QString& TextMediaItem::textForRendering() const {
