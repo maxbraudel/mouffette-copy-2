@@ -1942,6 +1942,9 @@ void TextMediaItem::onInteractiveGeometryChanged() {
         syncInlineEditorToBaseSize();
     }
     
+    // Notify rasterization layer of geometry change
+    notifyLayerChanged();
+    
     // Update alignment controls position (similar to video controls)
     updateAlignmentControlsLayout();
     update();
@@ -2146,6 +2149,11 @@ QVariant TextMediaItem::itemChange(GraphicsItemChange change, const QVariant& va
         change == ItemSelectedHasChanged) {
         updateInlineEditorGeometry();
         updateAlignmentControlsLayout();
+        
+        // Notify rasterization layer when position/transform changes
+        if (change == ItemTransformHasChanged || change == ItemPositionHasChanged) {
+            notifyLayerChanged();
+        }
     }
 
     return result;

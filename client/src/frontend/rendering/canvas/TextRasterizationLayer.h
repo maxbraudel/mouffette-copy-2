@@ -48,9 +48,7 @@ public:
     
     // Configuration
     static constexpr qreal ZOOM_THRESHOLD = 0.15;  // Re-raster if zoom changes >15%
-    static constexpr int RASTER_DELAY_MS = 50;     // Debounce delay in milliseconds
-    static constexpr qreal MIN_RESOLUTION = 0.5;   // Minimum raster resolution (0.5x)
-    static constexpr qreal MAX_RESOLUTION = 4.0;   // Maximum raster resolution (4.0x)
+    static constexpr int RASTER_DELAY_MS = 0;      // No debounce - immediate rasterization
 
 private slots:
     void performRasterization();

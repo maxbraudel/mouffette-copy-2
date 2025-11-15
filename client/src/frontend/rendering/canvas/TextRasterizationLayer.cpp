@@ -119,10 +119,8 @@ QRectF TextRasterizationLayer::calculateTextBounds() const {
 qreal TextRasterizationLayer::computeRasterResolution() const {
     // Render at zoom-adjusted resolution multiplied by rasterization factor
     // Factor allows debugging (e.g., 0.5 = half resolution for visible pixelation)
-    // Clamp between MIN_RESOLUTION and MAX_RESOLUTION to avoid:
-    // - Excessive memory usage at extreme zoom-in
-    // - Severe quality loss at extreme zoom-out
-    return std::clamp(m_currentZoom * m_rasterizationFactor, MIN_RESOLUTION, MAX_RESOLUTION);
+    // No limits - resolution scales directly with zoom level
+    return m_currentZoom * m_rasterizationFactor;
 }
 
 void TextRasterizationLayer::performRasterization() {
