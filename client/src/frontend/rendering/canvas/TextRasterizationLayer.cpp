@@ -68,10 +68,8 @@ void TextRasterizationLayer::setCurrentZoomFactor(qreal zoom) {
 }
 
 void TextRasterizationLayer::setRasterizationFactor(qreal factor) {
-    const qreal clampedFactor = std::clamp(factor, 0.1, 4.0);
-    
-    if (!qFuzzyCompare(m_rasterizationFactor, clampedFactor)) {
-        m_rasterizationFactor = clampedFactor;
+    if (!qFuzzyCompare(m_rasterizationFactor, factor)) {
+        m_rasterizationFactor = factor;
         invalidate();
     }
 }
@@ -229,21 +227,15 @@ void TextRasterizationLayer::renderTile(Tile& tile, const QList<TextMediaItem*>&
     const QPolygonF scenePolygon = m_canvas->mapToScene(tile.viewportRect);
     const QRectF tileSceneRect = scenePolygon.boundingRect();
     
-    // Clamp resolution to prevent excessive memory usage
-    const qreal clampedResolution = std::min(resolution, 10.0);
-    
     // Calculate pixmap size based on scene rect dimensions and resolution
     // The pixmap should have enough pixels to render the scene area at the target resolution
     const QSize pixmapSize(
-        static_cast<int>(std::ceil(tileSceneRect.width() * clampedResolution)),
-        static_cast<int>(std::ceil(tileSceneRect.height() * clampedResolution))
+        static_cast<int>(std::ceil(tileSceneRect.width() * resolution)),
+        static_cast<int>(std::ceil(tileSceneRect.height() * resolution))
     );
     
-    // Safety check - prevent creating huge pixmaps
-    const int maxPixmapDimension = 8192;
-    if (pixmapSize.width() <= 0 || pixmapSize.height() <= 0 ||
-        pixmapSize.width() > maxPixmapDimension || pixmapSize.height() > maxPixmapDimension) {
-        qWarning() << "TextRasterizationLayer: Skipping tile - pixmap size:" << pixmapSize;
+    // Safety check - ensure valid size
+    if (pixmapSize.width() <= 0 || pixmapSize.height() <= 0) {
         return;
     }
     
@@ -263,7 +255,7 @@ void TextRasterizationLayer::renderTile(Tile& tile, const QList<TextMediaItem*>&
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     
     // Scale painter to resolution
-    painter.scale(clampedResolution, clampedResolution);
+    painter.scale(resolution, resolution);
     
     // Translate to tile's scene position
     painter.translate(-tileSceneRect.topLeft());
@@ -308,8 +300,8 @@ void TextRasterizationLayer::renderTile(Tile& tile, const QList<TextMediaItem*>&
     tile.item->setPos(tileSceneRect.topLeft());
     
     // Scale the pixmap DOWN to scene coordinates (inverse of resolution)
-    // The pixmap was rendered at clampedResolution, so scale it back down
-    tile.item->setScale(1.0 / clampedResolution);
+    // The pixmap was rendered at resolution, so scale it back down
+    tile.item->setScale(1.0 / resolution);
     
     tile.item->setVisible(true);
     tile.item->update(); // Force immediate visual update
