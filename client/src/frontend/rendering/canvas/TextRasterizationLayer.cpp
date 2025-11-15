@@ -181,14 +181,15 @@ void TextRasterizationLayer::updateTileGrid() {
                 // Keep existing tile
                 newTiles.append(*existingTiles[key]);
             } else {
-                // Create new tile
+                // Create new tile with overlap to prevent gaps during zoom
+                // Tiles extend TILE_OVERLAP pixels into adjacent tiles
+                const int x = tileX * TILE_SIZE;
+                const int y = tileY * TILE_SIZE;
+                const int width = TILE_SIZE + (tileX < tilesX - 1 ? TILE_OVERLAP : 0);
+                const int height = TILE_SIZE + (tileY < tilesY - 1 ? TILE_OVERLAP : 0);
+                
                 Tile newTile;
-                newTile.viewportRect = QRect(
-                    tileX * TILE_SIZE,
-                    tileY * TILE_SIZE,
-                    TILE_SIZE,
-                    TILE_SIZE
-                );
+                newTile.viewportRect = QRect(x, y, width, height);
                 newTile.dirty = true;
                 newTile.item = nullptr;
                 newTile.lastZoom = 0.0;
@@ -259,11 +260,7 @@ void TextRasterizationLayer::renderTile(Tile& tile, const QList<TextMediaItem*>&
     // Translate to tile's scene position
     painter.translate(-tileSceneRect.topLeft());
     
-    // Expand clip rect to prevent anti-aliasing seams
-    // Use a generous margin (8 scene units) to ensure smooth edges at all zoom levels
-    QRectF expandedClip = tileSceneRect;
-    expandedClip.adjust(-8, -8, 8, 8);
-    painter.setClipRect(expandedClip);
+    // No clipping needed - tiles have overlap to prevent gaps
     
     // Render text items that intersect this tile
     for (TextMediaItem* item : sortedItems) {

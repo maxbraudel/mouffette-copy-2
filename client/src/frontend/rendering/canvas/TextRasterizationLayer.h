@@ -50,6 +50,7 @@ public:
     static constexpr qreal ZOOM_THRESHOLD = 0.15;  // Re-raster if zoom changes >15%
     static constexpr int RASTER_DELAY_MS = 0;      // No debounce - immediate rasterization
     static constexpr int TILE_SIZE = 256;          // Small tile size for fine-grained updates
+    static constexpr int TILE_OVERLAP = 2;         // Pixel overlap between tiles to prevent gaps
 
 private slots:
     void performRasterization();
