@@ -94,7 +94,7 @@ constexpr qreal kMaxOutlineThicknessFactor = 0.35;
 constexpr int kMaxCachedGlyphPaths = 60000;
 constexpr int kMaxRenderedGlyphPixmaps = 500;  // Phase 2: Rendered glyph cache limit
 constexpr int kFallbackMaxDimensionPx = 2048;
-constexpr qreal kFallbackMinScale = 0.35;
+constexpr qreal kFallbackMinScale = 0.50;      // Increased from 0.35 to 0.50 for better low-zoom preview quality
 constexpr qreal kInitialPreviewScaleMax = 0.45;
 constexpr qreal kPreviewStrokePercentCap = 35.0;
 constexpr qreal kMinPreviewStrokePercent = 8.0;
@@ -3150,9 +3150,16 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     // and the background raster doesn't need perfect sync.
     const bool needsSyncRender = altStretching;
     
-    const bool previewEligible = !needsSyncRender && !m_scaledRasterPixmapValid && !m_asyncRasterInProgress && (rasterScale - kInitialPreviewScaleMax > epsilon);
+    // Enable preview at BOTH high zoom (rasterScale > kInitialPreviewScaleMax) AND low zoom (rasterScale < kFallbackMinScale)
+    // This ensures chunks outside viewport show cached preview at all zoom levels
+    const bool highZoomPreview = (rasterScale - kInitialPreviewScaleMax > epsilon);
+    const bool lowZoomPreview = (rasterScale < kFallbackMinScale);
+    const bool previewEligible = !needsSyncRender && !m_scaledRasterPixmapValid && !m_asyncRasterInProgress && (highZoomPreview || lowZoomPreview);
     if (previewEligible) {
-        const qreal previewScale = std::clamp(kInitialPreviewScaleMax, epsilon, rasterScale);
+        // For low zoom, use kFallbackMinScale as preview quality to maintain visibility
+        // For high zoom, use kInitialPreviewScaleMax for faster initial render
+        const qreal targetPreviewScale = lowZoomPreview ? kFallbackMinScale : kInitialPreviewScaleMax;
+        const qreal previewScale = std::clamp(targetPreviewScale, epsilon, std::max(rasterScale, targetPreviewScale));
         const qreal previewRatio = std::max(previewScale / std::max(rasterScale, epsilon), epsilon);
         const QSize previewSize(
             std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(targetWidth) * previewRatio))),
