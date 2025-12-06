@@ -1203,6 +1203,259 @@ void TextMediaItem::paintSimplifiedStroke(QPainter* painter, const VectorDrawSna
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// TIER 3 OPTIMIZATION IMPLEMENTATIONS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// Phase 3: Texture Atlas Management
+quint64 TextMediaItem::getAtlasKey(const QPixmap& glyph, const QColor& fill, const QColor& stroke, qreal strokeWidth, qreal scale) const {
+    // Generate unique key for atlas lookup - combines glyph visual properties
+    quint64 h = qHash(glyph.cacheKey());
+    h ^= static_cast<quint64>(fill.rgba()) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    h ^= static_cast<quint64>(stroke.rgba()) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    h ^= static_cast<quint64>(strokeWidth * 1000.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    h ^= static_cast<quint64>(scale * 1000.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    return h;
+}
+
+bool TextMediaItem::insertGlyphIntoAtlas(quint64 key, const QPixmap& glyph) {
+    // Already in atlas?
+    if (m_atlasGlyphMap.contains(key)) {
+        return true;
+    }
+    
+    const QImage glyphImg = glyph.toImage();
+    const QSize glyphSize = glyphImg.size();
+    
+    // Try to insert into existing atlases
+    for (int i = 0; i < m_glyphAtlases.size(); ++i) {
+        if (m_glyphAtlases[i].isFull) continue;
+        
+        std::optional<QRect> rect = m_glyphAtlases[i].tryInsert(glyphSize);
+        if (rect.has_value()) {
+            // Blit glyph into atlas
+            QPainter p(&m_glyphAtlases[i].sheet);
+            p.setCompositionMode(QPainter::CompositionMode_Source);
+            p.drawImage(rect->topLeft(), glyphImg);
+            p.end();
+            
+            // Record location
+            AtlasGlyphEntry entry;
+            entry.atlasRect = *rect;
+            entry.atlasSheetIndex = i;
+            entry.offset = QPointF(0, 0); // Offset handled during rendering
+            m_atlasGlyphMap.insert(key, entry);
+            return true;
+        }
+    }
+    
+    // No space - create new atlas
+    if (m_glyphAtlases.size() >= 4) {
+        // Atlas pool full - evict oldest sheet (LRU-like)
+        qDebug() << "TextMediaItem: Atlas pool full, clearing oldest sheet";
+        m_glyphAtlases.removeFirst();
+        
+        // Remove stale map entries pointing to deleted sheet
+        QMutableHashIterator<quint64, AtlasGlyphEntry> it(m_atlasGlyphMap);
+        while (it.hasNext()) {
+            it.next();
+            if (it.value().atlasSheetIndex == 0) {
+                it.remove();
+            } else {
+                // Decrement sheet indices after removal
+                it.value().atlasSheetIndex--;
+            }
+        }
+    }
+    
+    // Add new atlas and retry
+    m_glyphAtlases.append(TextureAtlas());
+    return insertGlyphIntoAtlas(key, glyph); // Recursive retry
+}
+
+std::optional<TextMediaItem::AtlasGlyphEntry> TextMediaItem::getGlyphFromAtlas(quint64 key) const {
+    auto it = m_atlasGlyphMap.constFind(key);
+    if (it != m_atlasGlyphMap.constEnd()) {
+        return it.value();
+    }
+    return std::nullopt;
+}
+
+void TextMediaItem::clearAtlases() {
+    m_glyphAtlases.clear();
+    m_atlasGlyphMap.clear();
+}
+
+// Phase 4: Text Diff Algorithm
+TextMediaItem::TextEditDiff TextMediaItem::computeTextDiff(const QString& newText, const QFont& newFont, int newWidth) const {
+    TextEditDiff diff;
+    
+    // Check if font or layout width changed (geometric change)
+    const bool fontChanged = (newFont != m_previousFont);
+    const bool widthChanged = (newWidth != m_previousTextWidth);
+    diff.geometryChanged = fontChanged || widthChanged;
+    
+    if (diff.geometryChanged) {
+        // Full re-render required - geometry invalidates all caches
+        diff.changeStartIdx = 0;
+        diff.changeEndIdx = newText.length();
+        diff.insertedCount = newText.length();
+        diff.deletedCount = m_previousText.length();
+        return diff;
+    }
+    
+    // Compute text diff using longest common subsequence approach
+    const int oldLen = m_previousText.length();
+    const int newLen = newText.length();
+    
+    if (oldLen == 0) {
+        // First render - all text is new
+        diff.changeStartIdx = 0;
+        diff.changeEndIdx = newLen;
+        diff.insertedCount = newLen;
+        diff.deletedCount = 0;
+        return diff;
+    }
+    
+    // Find common prefix
+    int prefixLen = 0;
+    while (prefixLen < oldLen && prefixLen < newLen && m_previousText[prefixLen] == newText[prefixLen]) {
+        ++prefixLen;
+    }
+    
+    // Find common suffix
+    int suffixLen = 0;
+    while (suffixLen < (oldLen - prefixLen) && suffixLen < (newLen - prefixLen) &&
+           m_previousText[oldLen - 1 - suffixLen] == newText[newLen - 1 - suffixLen]) {
+        ++suffixLen;
+    }
+    
+    // Calculate change region
+    diff.changeStartIdx = prefixLen;
+    diff.changeEndIdx = newLen - suffixLen;
+    diff.deletedCount = (oldLen - prefixLen - suffixLen);
+    diff.insertedCount = (newLen - prefixLen - suffixLen);
+    
+    // If change is too large (>30% of text), treat as geometric change for simplicity
+    const qreal changeRatio = static_cast<qreal>(diff.insertedCount + diff.deletedCount) / std::max(1, oldLen + newLen);
+    if (changeRatio > 0.3) {
+        diff.geometryChanged = true;
+    }
+    
+    return diff;
+}
+
+void TextMediaItem::applyTextDiff(const TextEditDiff& diff) {
+    // Update tracked state
+    m_previousText = textForRendering();
+    m_previousFont = m_font;
+    m_previousTextWidth = static_cast<int>(boundingRect().width());
+    
+    // Invalidate affected caches
+    if (diff.geometryChanged) {
+        // Full invalidation
+        m_glyphLayoutCache.clear();
+        m_blockVisibilityCacheValid = false;
+        m_baseRasterValid = false;
+        m_incrementalRenderValid = false;
+    } else if (diff.hasChanges()) {
+        // Partial invalidation - glyph cache stays valid for unchanged glyphs
+        m_blockVisibilityCacheValid = false;
+        m_incrementalRenderValid = false;
+    }
+}
+
+// Phase 5: Partial Compositing
+void TextMediaItem::initializeBaseRaster(const QSize& size) {
+    if (m_baseRaster.size() != size || m_baseRaster.format() != QImage::Format_ARGB32_Premultiplied) {
+        m_baseRaster = QImage(size, QImage::Format_ARGB32_Premultiplied);
+        m_baseRaster.fill(Qt::transparent);
+        m_baseRasterValid = false;
+    }
+}
+
+void TextMediaItem::renderDirtyRegion(const TextEditDiff& diff, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor) {
+    // Phase 5: Render only the changed region to overlay
+    if (!diff.hasChanges()) {
+        return;
+    }
+    
+    // Initialize overlay if needed
+    if (m_dirtyOverlay.size() != targetSize || m_dirtyOverlay.format() != QImage::Format_ARGB32_Premultiplied) {
+        m_dirtyOverlay = QImage(targetSize, QImage::Format_ARGB32_Premultiplied);
+    }
+    m_dirtyOverlay.fill(Qt::transparent);
+    
+    // TODO: Compute bounding box of changed glyphs
+    // For now, conservatively mark entire image as dirty
+    m_dirtyBounds = QRect(0, 0, targetSize.width(), targetSize.height());
+    
+    // Render changed region to overlay
+    QPainter overlayPainter(&m_dirtyOverlay);
+    overlayPainter.setRenderHint(QPainter::Antialiasing, true);
+    overlayPainter.setRenderHint(QPainter::TextAntialiasing, true);
+    overlayPainter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    
+    // Use existing paintVectorSnapshot for overlay rendering
+    // Note: This is simplified - full implementation would render only diff.changeStartIdx to diff.changeEndIdx
+    paintVectorSnapshot(&overlayPainter, snapshot, targetSize, scaleFactor, 1.0, QRectF());
+    
+    m_incrementalRenderValid = true;
+}
+
+QImage TextMediaItem::compositeRasterLayers() const {
+    if (!m_baseRasterValid || !m_incrementalRenderValid) {
+        // Fallback to base raster only
+        return m_baseRaster.copy();
+    }
+    
+    // Composite base + overlay
+    QImage result = m_baseRaster.copy();
+    QPainter p(&result);
+    p.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    p.drawImage(m_dirtyBounds.topLeft(), m_dirtyOverlay, m_dirtyBounds);
+    p.end();
+    
+    return result;
+}
+
+void TextMediaItem::flattenCompositeToBase() {
+    if (!m_incrementalRenderValid) {
+        return;
+    }
+    
+    // Merge overlay into base raster
+    QPainter p(&m_baseRaster);
+    p.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    p.drawImage(m_dirtyBounds.topLeft(), m_dirtyOverlay, m_dirtyBounds);
+    p.end();
+    
+    // Clear overlay
+    m_dirtyOverlay.fill(Qt::transparent);
+    m_incrementalRenderValid = false;
+    m_baseRasterValid = true;
+}
+
+bool TextMediaItem::shouldUseIncrementalRender(const TextEditDiff& diff) const {
+    // Use incremental rendering for small text edits
+    if (diff.geometryChanged) {
+        return false; // Geometric changes require full re-render
+    }
+    
+    if (!diff.hasChanges()) {
+        return false; // No changes - no need for incremental
+    }
+    
+    // Threshold: use incremental if change affects <20% of text
+    const int totalChars = m_previousText.length();
+    if (totalChars == 0) return false;
+    
+    const int changedChars = diff.insertedCount + diff.deletedCount;
+    const qreal changeRatio = static_cast<qreal>(changedChars) / static_cast<qreal>(totalChars);
+    
+    return changeRatio < 0.2;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 TextMediaItem::VectorDrawSnapshot TextMediaItem::captureVectorSnapshot(StrokeRenderMode mode) const {
     VectorDrawSnapshot snapshot;
@@ -1489,22 +1742,32 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
                             
                             for (int gi = 0; gi < indexes.size(); ++gi) {
                                 const QPointF glyphPos = blockRect.topLeft() + positions[gi];
-                                const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
                                 
-                                // Draw stroke for ALL glyphs (cached or not)
-                                painter->save();
-                                painter->translate(glyphPos);
-                                painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                                painter->setBrush(Qt::NoBrush);
-                                painter->drawPath(glyphPath);
-                                painter->restore();
+                                // TIER 3: Use pre-rendered cached glyph (stroke+fill baked in)
+                                const QPixmap glyphPixmap = cachedRenderedGlyph(rawFont, indexes[gi], 
+                                                                                fillColor, outlineColor, 
+                                                                                strokeWidth, scaleFactor);
+                                
+                                if (!glyphPixmap.isNull()) {
+                                    // Draw pre-rendered glyph (contains stroke + fill)
+                                    painter->drawPixmap(glyphPos, glyphPixmap);
+                                } else {
+                                    // Fallback to path rendering
+                                    const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
+                                    painter->save();
+                                    painter->translate(glyphPos);
+                                    painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                                    painter->setBrush(Qt::NoBrush);
+                                    painter->drawPath(glyphPath);
+                                    painter->restore();
+                                }
                             }
                             glyphCount += indexes.size();
                         }
                     }
                 }
                 
-                // Pass 2: Render all fills on top (foreground layer)
+                // Pass 2: Render all fills on top (foreground layer) - ONLY for fallback glyphs
                 blockIdx = 0;
                 for (QTextBlock block = doc.begin(); block.isValid(); block = block.next(), ++blockIdx) {
                     // Phase 7: Skip blocks outside viewport
@@ -1529,15 +1792,21 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
                             
                             for (int gi = 0; gi < indexes.size(); ++gi) {
                                 const QPointF glyphPos = blockRect.topLeft() + positions[gi];
-                                const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
                                 
-                                // Draw fill for ALL glyphs
-                                painter->save();
-                                painter->translate(glyphPos);
-                                painter->setPen(Qt::NoPen);
-                                painter->setBrush(fillColor);
-                                painter->drawPath(glyphPath);
-                                painter->restore();
+                                // Only draw fill if we don't have cached pixmap
+                                const QPixmap glyphPixmap = cachedRenderedGlyph(rawFont, indexes[gi], 
+                                                                                fillColor, outlineColor, 
+                                                                                strokeWidth, scaleFactor);
+                                
+                                if (glyphPixmap.isNull()) {
+                                    const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
+                                    painter->save();
+                                    painter->translate(glyphPos);
+                                    painter->setPen(Qt::NoPen);
+                                    painter->setBrush(fillColor);
+                                    painter->drawPath(glyphPath);
+                                    painter->restore();
+                                }
                             }
                         }
                     }
@@ -1804,6 +2073,10 @@ TextMediaItem::TextMediaItem(
 
 void TextMediaItem::setText(const QString& text) {
     if (m_text != text) {
+        // Phase 4: Compute text diff before updating
+        const int currentWidth = static_cast<int>(boundingRect().width());
+        TextEditDiff diff = computeTextDiff(text, m_font, currentWidth);
+        
         m_text = text;
         m_editorRenderingText = text;
         m_documentMetricsDirty = true;
@@ -1811,6 +2084,10 @@ void TextMediaItem::setText(const QString& text) {
         m_needsRasterization = true;
         m_scaledRasterDirty = true;
         m_frozenFallbackValid = false;  // Phase 3: Invalidate fallback when text changes
+        
+        // Phase 4: Apply diff-based cache invalidation
+        applyTextDiff(diff);
+        
         if (m_inlineEditor && !m_isEditing) {
             QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
             m_inlineEditor->setPlainText(m_text);
@@ -1837,6 +2114,13 @@ void TextMediaItem::setFont(const QFont& font) {
     m_fontWeightValue = canonicalCssWeight(adjustedFont);
     adjustedFont = fontAdjustedForWeight(adjustedFont, m_fontWeightValue);
     m_frozenFallbackValid = false;  // Phase 3: Invalidate fallback when font changes
+    
+    // Phase 3: Font change invalidates atlas (glyphs need re-render)
+    clearAtlases();
+    // Phase 5: Font change invalidates base raster (geometric change)
+    m_baseRasterValid = false;
+    m_incrementalRenderValid = false;
+    
     applyFontChange(adjustedFont);
 }
 
@@ -1848,6 +2132,12 @@ void TextMediaItem::setTextColor(const QColor& color) {
     m_textColor = color;
     m_cachedTextColor = color;
     m_frozenFallbackValid = false;  // Phase 3: Invalidate fallback when text color changes
+    
+    // Phase 3: Color change invalidates atlas (glyphs use baked-in colors)
+    clearAtlases();
+    // Phase 5: Color-only change can reuse geometry but needs overlay re-render
+    m_incrementalRenderValid = false;
+    
     update();
     if (m_inlineEditor) {
         m_inlineEditor->setDefaultTextColor(m_textColor);
@@ -2653,6 +2943,11 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
     // Rasterize text after editing completes
     m_needsRasterization = true;
     m_scaledRasterDirty = true;
+    
+    // Phase 5: Flatten composite overlay to base on commit
+    if (commitChanges && m_incrementalRenderValid) {
+        flattenCompositeToBase();
+    }
 
     updateInlineEditorGeometry();
     if (m_fitToTextEnabled) {

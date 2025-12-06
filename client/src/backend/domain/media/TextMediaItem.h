@@ -286,6 +286,83 @@ private:
     QSize m_pendingFallbackSize;
     qreal m_pendingFallbackScale = 1.0;
 
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // TIER 3 OPTIMIZATION STRUCTURES
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    // Phase 3: Texture Atlas for Glyph Batching
+    struct AtlasGlyphEntry {
+        QRect atlasRect;        // UV rectangle in atlas texture
+        int atlasSheetIndex;    // Which atlas sheet (0-3)
+        QPointF offset;         // Rendering offset from glyph origin
+    };
+    
+    struct TextureAtlas {
+        QImage sheet;           // 2048x2048 ARGB32 texture
+        int nextX = 0;          // Next shelf position
+        int nextY = 0;          // Current shelf Y position
+        int rowHeight = 0;      // Height of current shelf row
+        bool isFull = false;
+        
+        TextureAtlas() : sheet(2048, 2048, QImage::Format_ARGB32_Premultiplied) {
+            sheet.fill(Qt::transparent);
+        }
+        
+        // Shelf packing: try to insert glyph, return rect or null
+        std::optional<QRect> tryInsert(const QSize& glyphSize) {
+            const int padding = 2; // Prevent texture bleeding
+            const int requiredWidth = glyphSize.width() + padding * 2;
+            const int requiredHeight = glyphSize.height() + padding * 2;
+            
+            // Try current shelf
+            if (nextX + requiredWidth <= 2048 && nextY + requiredHeight <= 2048) {
+                QRect rect(nextX + padding, nextY + padding, glyphSize.width(), glyphSize.height());
+                nextX += requiredWidth;
+                rowHeight = std::max(rowHeight, requiredHeight);
+                return rect;
+            }
+            
+            // Move to next shelf
+            if (nextY + rowHeight + requiredHeight <= 2048) {
+                nextY += rowHeight;
+                nextX = 0;
+                rowHeight = 0;
+                return tryInsert(glyphSize); // Retry on new shelf
+            }
+            
+            // Atlas full
+            isFull = true;
+            return std::nullopt;
+        }
+    };
+    
+    QVector<TextureAtlas> m_glyphAtlases;  // Dynamic pool of atlas sheets
+    QHash<quint64, AtlasGlyphEntry> m_atlasGlyphMap; // renderedGlyphKey -> atlas location
+    
+    // Phase 4: Text Diff for Incremental Updates
+    struct TextEditDiff {
+        int changeStartIdx = -1;
+        int changeEndIdx = -1;
+        int insertedCount = 0;
+        int deletedCount = 0;
+        bool geometryChanged = false;  // Line wrap or alignment affected
+        
+        bool hasChanges() const {
+            return changeStartIdx >= 0 || geometryChanged;
+        }
+    };
+    
+    QString m_previousText;  // For diff computation
+    QFont m_previousFont;
+    int m_previousTextWidth = -1;
+    
+    // Phase 5: Partial Raster Compositing
+    QImage m_baseRaster;           // Full text at last stable state
+    QImage m_dirtyOverlay;         // Only changed glyphs
+    QRect m_dirtyBounds;           // Bounding box of changes in image coords
+    bool m_incrementalRenderValid = false;
+    bool m_baseRasterValid = false;
+
     bool m_previewStrokeActive = false;
     qreal m_previewStrokePercent = 0.0;
     bool m_waitingForHighResRaster = false;
@@ -369,6 +446,7 @@ private:
     bool isStrokeWorkExpensiveCandidate() const;
     void ensureBasePreviewRaster(const QSize& targetSize);
     
+    
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // TIER 2 OPTIMIZATION METHODS
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -386,5 +464,27 @@ private:
     StrokeQuality selectStrokeQuality(qreal canvasZoom) const;
     void paintSimplifiedStroke(QPainter* painter, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor, qreal canvasZoom);
 
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // TIER 3 OPTIMIZATION METHODS
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    // Phase 3: Texture Atlas Management
+    quint64 getAtlasKey(const QPixmap& glyph, const QColor& fill, const QColor& stroke, qreal strokeWidth, qreal scale) const;
+    bool insertGlyphIntoAtlas(quint64 key, const QPixmap& glyph);
+    std::optional<AtlasGlyphEntry> getGlyphFromAtlas(quint64 key) const;
+    void clearAtlases();
+    
+    // Phase 4: Text Diff Algorithm
+    TextEditDiff computeTextDiff(const QString& newText, const QFont& newFont, int newWidth) const;
+    void applyTextDiff(const TextEditDiff& diff);
+    
+    // Phase 5: Partial Compositing
+    void initializeBaseRaster(const QSize& size);
+    void renderDirtyRegion(const TextEditDiff& diff, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor);
+    QImage compositeRasterLayers() const;
+    void flattenCompositeToBase();
+    bool shouldUseIncrementalRender(const TextEditDiff& diff) const;
+
     static int s_maxRasterDimension;
 };
+
