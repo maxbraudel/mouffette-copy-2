@@ -3037,34 +3037,13 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
     
     if (!painter) return;
     
-    // Phase 12: Editor Mode Fast Path - bypass expensive rasterization during typing
-    // The InlineTextEditor already has its own cached rendering, so we skip the main
-    // TextMediaItem raster pipeline entirely while editing for <5ms latency
-    if (m_isEditing && m_inlineEditor) {
-        painter->save();
-        
-        // Apply content visibility and opacity
-        if (!m_contentVisible || m_contentOpacity <= 0.0 || m_contentDisplayOpacity <= 0.0) {
-            painter->restore();
-            paintSelectionAndLabel(painter);
-            return;
-        }
-        
-        // Set editor opacity
-        m_inlineEditor->setOpacity(m_contentOpacity * m_contentDisplayOpacity);
-        
-        // The InlineTextEditor will render itself via its own paint() method
-        // which uses its m_cachedImage buffer - no need to duplicate work here
-        painter->restore();
-        
-        // Paint selection chrome and overlays
-        paintSelectionAndLabel(painter);
-        return;
-    }
-    
     // Only update geometry when not editing to avoid triggering expensive layout operations during panning
     if (!m_isEditing) {
         updateInlineEditorGeometry();
+    }
+
+    if (m_isEditing && m_inlineEditor) {
+        m_inlineEditor->setOpacity(m_contentOpacity * m_contentDisplayOpacity);
     }
 
     painter->save();
