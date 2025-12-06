@@ -1882,7 +1882,8 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
                     const QRawFont rawFont = run.rawFont();
                     
                     for (int gi = 0; gi < indexes.size(); ++gi) {
-                        const QPointF glyphPos = blockRect.topLeft() + positions[gi];
+                        // Apply horizontal alignment offset to glyph position
+                        const QPointF glyphPos = QPointF(lineOffsetX, blockRect.top()) + positions[gi];
                         const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
                         
                         // Draw stroke for ALL glyphs
@@ -1904,7 +1905,8 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
                     const QRawFont rawFont = run.rawFont();
                     
                     for (int gi = 0; gi < indexes.size(); ++gi) {
-                        const QPointF glyphPos = blockRect.topLeft() + positions[gi];
+                        // Apply horizontal alignment offset to glyph position
+                        const QPointF glyphPos = QPointF(lineOffsetX, blockRect.top()) + positions[gi];
                         const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
                         
                         // Draw fill for ALL glyphs
