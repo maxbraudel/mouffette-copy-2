@@ -53,11 +53,6 @@ public:
         Preview
     };
 
-    enum class StatusBadgeState {
-        Hidden,
-        Rendering,
-        Warning
-    };
 
     explicit TextMediaItem(
         const QSize& initialSize,
@@ -249,14 +244,8 @@ private:
 
     bool m_previewStrokeActive = false;
     qreal m_previewStrokePercent = 0.0;
-    StatusBadgeState m_statusBadgeState = StatusBadgeState::Hidden;
-    QString m_statusBadgeText;
     bool m_waitingForHighResRaster = false;
     qreal m_pendingHighResScale = 0.0;
-    bool m_strokeConfirmationActive = false;
-    bool m_allowUnsafeStroke = false;
-    qreal m_pendingUnsafeStrokePercent = 0.0;
-    std::chrono::steady_clock::time_point m_strokeConfirmationTimestamp{};
     
     // Text alignment settings
     HorizontalAlignment m_horizontalAlignment = HorizontalAlignment::Center;
@@ -333,11 +322,6 @@ private:
     void handleContentPaddingChanged(qreal oldPadding, qreal newPadding);
     void updateStrokePreviewState(qreal requestedPercent);
     bool isStrokeWorkExpensiveCandidate() const;
-    void updateStrokeBadgeVisibility();
-    void setStatusBadge(StatusBadgeState state, const QString& text);
-    void clearStatusBadgeIfWarning();
-    qreal applyStrokeSafetyLimits(qreal requestedPercent);
-    void resetStrokeSafetyState();
     void ensureBasePreviewRaster(const QSize& targetSize);
 
     static int s_maxRasterDimension;
