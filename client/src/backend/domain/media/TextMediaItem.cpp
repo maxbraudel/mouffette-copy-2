@@ -97,6 +97,9 @@ constexpr qreal kFallbackMinScale = 0.35;
 constexpr qreal kInitialPreviewScaleMax = 0.45;
 constexpr qreal kPreviewStrokePercentCap = 35.0;
 constexpr qreal kMinPreviewStrokePercent = 8.0;
+constexpr qreal kStrokeAutoLimitPercent = 60.0;
+constexpr qreal kStrokeConfirmTolerancePercent = 0.75;
+constexpr int kStrokeConfirmExpiryMs = 8000;
 constexpr int kStrokeHeavyGlyphThreshold = 1800;
 constexpr qint64 kStrokeHeavyPixelThreshold = 2800000;
 
@@ -1352,6 +1355,7 @@ void TextMediaItem::setText(const QString& text) {
         }
         m_waitingForHighResRaster = false;
         m_pendingHighResScale = 0.0;
+        resetStrokeSafetyState();
         updateStrokePreviewState(m_textBorderWidthPercent);
     }
 }
@@ -1397,18 +1401,20 @@ void TextMediaItem::setTextColorOverrideEnabled(bool enabled) {
 
 void TextMediaItem::setTextBorderWidth(qreal percent) {
     const qreal clamped = std::clamp(percent, 0.0, 100.0);
-    if (std::abs(m_textBorderWidthPercent - clamped) < 1e-4) {
+    const qreal guardedPercent = applyStrokeSafetyLimits(clamped);
+    if (std::abs(m_textBorderWidthPercent - guardedPercent) < 1e-4) {
         return;
     }
 
     const qreal oldPadding = m_appliedContentPaddingPx;
     qDebug() << "[TextMediaItem]" << mediaId() << "setTextBorderWidth%" << clamped
-             << "approxPx" << computeStrokeWidthFromFont(m_font, clamped)
+             << "applied%" << guardedPercent
+             << "approxPx" << computeStrokeWidthFromFont(m_font, guardedPercent)
              << "textLength" << m_text.size();
-    m_textBorderWidthPercent = clamped;
+    m_textBorderWidthPercent = guardedPercent;
     m_waitingForHighResRaster = false;
     m_pendingHighResScale = 0.0;
-    updateStrokePreviewState(clamped);
+    updateStrokePreviewState(guardedPercent);
     const qreal newPadding = contentPaddingPx();
 
     m_needsRasterization = true;
@@ -1699,6 +1705,7 @@ void TextMediaItem::applyFontChange(const QFont& font) {
     m_uppercaseEnabled = (m_font.capitalization() == QFont::AllUppercase);
     m_fontWeightValue = canonicalCssWeight(m_font);
     const qreal newPadding = contentPaddingPx();
+    resetStrokeSafetyState();
 
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
@@ -1943,6 +1950,7 @@ void TextMediaItem::handleInlineEditorTextChanged(const QString& newText) {
     m_scaledRasterDirty = true;
     m_waitingForHighResRaster = false;
     m_pendingHighResScale = 0.0;
+    resetStrokeSafetyState();
     updateStrokePreviewState(m_textBorderWidthPercent);
     update();
 }
@@ -2116,6 +2124,7 @@ void TextMediaItem::onInteractiveGeometryChanged() {
     m_scaledRasterDirty = true;
     update();
 
+    resetStrokeSafetyState();
     updateStrokePreviewState(m_textBorderWidthPercent);
 }
 
@@ -2200,42 +2209,48 @@ void TextMediaItem::renderTextToImage(QImage& target,
     target = job.execute();
 }
 
+void TextMediaItem::ensureBasePreviewRaster(const QSize& targetSize) {
+    if (targetSize.isEmpty()) {
+        return;
+    }
+
+    const qreal previewScale = std::clamp(kInitialPreviewScaleMax, 0.1, 1.0);
+    const qreal scaleRatio = std::max(previewScale, 1e-3);
+    const QSize previewSize(
+        std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(targetSize.width()) * scaleRatio))),
+        std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(targetSize.height()) * scaleRatio))));
+
+    StrokeRenderMode strokeMode = m_previewStrokeActive ? StrokeRenderMode::Preview : StrokeRenderMode::Normal;
+    QImage preview;
+    renderTextToImage(preview, previewSize, previewScale, QRectF(), strokeMode);
+
+    if (preview.size() != targetSize) {
+        preview = preview.scaled(targetSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    }
+
+    m_rasterizedText = preview;
+}
+
 void TextMediaItem::rasterizeText() {
     const QSize targetSize(std::max(1, m_baseSize.width()), std::max(1, m_baseSize.height()));
-    const bool altStretching = (m_activeHandle != None && m_lastAxisAltStretch);
-    const bool needsSyncRender = m_isEditing || altStretching;
-    const bool hasExistingRaster = !m_rasterizedText.isNull();
+    const bool sizeChanged = (m_lastRasterizedSize != m_baseSize);
+    const bool needsNewRaster = m_needsRasterization || sizeChanged;
 
-    if (needsSyncRender || !hasExistingRaster) {
-        ++m_baseRasterGeneration;
-        m_baseRasterInProgress = false;
-        m_pendingBaseRasterRequest.reset();
-        m_baseRasterDispatchQueued = false;
+    if (!needsNewRaster && !m_baseRasterInProgress) {
+        return;
+    }
 
-        renderTextToImage(m_rasterizedText, targetSize, 1.0);
-
-        m_activeBaseRasterSize = targetSize;
+    if (needsNewRaster) {
+        ensureBasePreviewRaster(targetSize);
         m_lastRasterizedSize = m_baseSize;
-        m_needsRasterization = false;
         m_scaledRasterDirty = true;
-        return;
-    }
-
-    if (!m_needsRasterization && m_lastRasterizedSize == m_baseSize && !m_baseRasterInProgress) {
-        return;
-    }
-
-    if (m_baseRasterInProgress) {
-        if (m_activeBaseRasterSize == targetSize) {
-            return;
-        }
         m_pendingBaseRasterRequest = targetSize;
         queueBaseRasterDispatch();
-        return;
+        m_needsRasterization = false;
+    } else if (m_baseRasterInProgress && m_activeBaseRasterSize != targetSize) {
+        m_pendingBaseRasterRequest = targetSize;
+        queueBaseRasterDispatch();
     }
-
-    m_pendingBaseRasterRequest = targetSize;
-    queueBaseRasterDispatch();
 }
 
 QRectF TextMediaItem::computeVisibleRegion() const {
@@ -3021,21 +3036,27 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
         }
     }
 
-    if (m_renderingStrokeBadgeVisible) {
+    if (m_statusBadgeState != StatusBadgeState::Hidden && !m_statusBadgeText.isEmpty()) {
         painter->save();
-        const qreal inset = std::min<qreal>(bounds.width(), bounds.height()) * 0.02;
-        const QPointF badgeTopLeft = bounds.topLeft() + QPointF(std::max<qreal>(inset, 12.0), std::max<qreal>(inset, 12.0));
-        const QSizeF badgeSize(190.0, 32.0);
-        QRectF badgeRect(badgeTopLeft, badgeSize);
-        painter->setPen(Qt::NoPen);
-        painter->setBrush(QColor(0, 0, 0, 180));
-        painter->drawRoundedRect(badgeRect, 6.0, 6.0);
-        painter->setPen(Qt::white);
         QFont badgeFont = painter->font();
         badgeFont.setPointSizeF(std::max<qreal>(badgeFont.pointSizeF(), 11.0));
         badgeFont.setBold(true);
         painter->setFont(badgeFont);
-        painter->drawText(badgeRect.adjusted(10.0, 0.0, -10.0, 0.0), Qt::AlignVCenter | Qt::AlignLeft, QStringLiteral("Rendering outline..."));
+        QFontMetricsF metrics(badgeFont);
+        const qreal textWidth = metrics.horizontalAdvance(m_statusBadgeText);
+        const qreal baseWidth = std::min<qreal>(bounds.width(), std::max<qreal>(190.0, textWidth + 32.0));
+        const qreal badgeHeight = 34.0;
+        const qreal inset = std::min<qreal>(bounds.width(), bounds.height()) * 0.02;
+        const QPointF badgeTopLeft = bounds.topLeft() + QPointF(std::max<qreal>(inset, 12.0), std::max<qreal>(inset, 12.0));
+        QRectF badgeRect(badgeTopLeft, QSizeF(baseWidth, badgeHeight));
+        painter->setPen(Qt::NoPen);
+        const QColor background = (m_statusBadgeState == StatusBadgeState::Warning)
+            ? QColor(168, 37, 37, 210)
+            : QColor(0, 0, 0, 180);
+        painter->setBrush(background);
+        painter->drawRoundedRect(badgeRect, 6.0, 6.0);
+        painter->setPen(Qt::white);
+        painter->drawText(badgeRect.adjusted(10.0, 0.0, -10.0, 0.0), Qt::AlignVCenter | Qt::AlignLeft, m_statusBadgeText);
         painter->restore();
     }
 
@@ -3278,12 +3299,81 @@ void TextMediaItem::updateStrokePreviewState(qreal requestedPercent) {
 }
 
 void TextMediaItem::updateStrokeBadgeVisibility() {
-    const bool showBadge = m_previewStrokeActive || m_waitingForHighResRaster || (m_asyncRasterInProgress && isStrokeWorkExpensiveCandidate());
-    if (showBadge == m_renderingStrokeBadgeVisible) {
+    if (m_statusBadgeState == StatusBadgeState::Warning) {
         return;
     }
-    m_renderingStrokeBadgeVisible = showBadge;
+
+    const bool showRenderingBadge = m_previewStrokeActive || m_waitingForHighResRaster ||
+        (m_asyncRasterInProgress && isStrokeWorkExpensiveCandidate()) ||
+        (m_baseRasterInProgress && isStrokeWorkExpensiveCandidate());
+    if (showRenderingBadge) {
+        setStatusBadge(StatusBadgeState::Rendering, QStringLiteral("Rendering outline..."));
+    } else {
+        setStatusBadge(StatusBadgeState::Hidden, QString());
+    }
+}
+
+void TextMediaItem::setStatusBadge(StatusBadgeState state, const QString& text) {
+    if (m_statusBadgeState == state && m_statusBadgeText == text) {
+        return;
+    }
+    m_statusBadgeState = state;
+    m_statusBadgeText = text;
     update();
+}
+
+void TextMediaItem::clearStatusBadgeIfWarning() {
+    if (m_statusBadgeState == StatusBadgeState::Warning) {
+        setStatusBadge(StatusBadgeState::Hidden, QString());
+    }
+}
+
+void TextMediaItem::resetStrokeSafetyState() {
+    m_strokeConfirmationActive = false;
+    m_allowUnsafeStroke = false;
+    m_pendingUnsafeStrokePercent = 0.0;
+    clearStatusBadgeIfWarning();
+    updateStrokeBadgeVisibility();
+}
+
+qreal TextMediaItem::applyStrokeSafetyLimits(qreal requestedPercent) {
+    const qreal bounded = std::clamp(requestedPercent, 0.0, 100.0);
+    const bool expensiveStroke = isStrokeWorkExpensiveCandidate();
+
+    if (!expensiveStroke || bounded <= kStrokeAutoLimitPercent) {
+        resetStrokeSafetyState();
+        return bounded;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const bool confirmationExpired = (now - m_strokeConfirmationTimestamp) > std::chrono::milliseconds(kStrokeConfirmExpiryMs);
+
+    if (m_allowUnsafeStroke && !confirmationExpired &&
+        std::abs(bounded - m_pendingUnsafeStrokePercent) < kStrokeConfirmTolerancePercent) {
+        m_strokeConfirmationTimestamp = now;
+        return bounded;
+    }
+
+    if (m_strokeConfirmationActive && !confirmationExpired &&
+        std::abs(bounded - m_pendingUnsafeStrokePercent) < kStrokeConfirmTolerancePercent) {
+        m_strokeConfirmationActive = false;
+        m_allowUnsafeStroke = true;
+        m_strokeConfirmationTimestamp = now;
+        clearStatusBadgeIfWarning();
+        updateStrokeBadgeVisibility();
+        return bounded;
+    }
+
+    m_strokeConfirmationActive = true;
+    m_allowUnsafeStroke = false;
+    m_pendingUnsafeStrokePercent = bounded;
+    m_strokeConfirmationTimestamp = now;
+
+    const QString warningText = QStringLiteral("Stroke limited to %1% for stability. Apply again to confirm %2%.")
+        .arg(QString::number(kStrokeAutoLimitPercent, 'f', 0))
+        .arg(QString::number(static_cast<int>(std::round(bounded))));
+    setStatusBadge(StatusBadgeState::Warning, warningText);
+    return kStrokeAutoLimitPercent;
 }
 
 void TextMediaItem::updateAlignmentButtonStates() {
