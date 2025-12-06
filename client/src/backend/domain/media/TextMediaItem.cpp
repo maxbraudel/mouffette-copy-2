@@ -92,6 +92,7 @@ constexpr int kScaledRasterThrottleIntervalMs = 45;
 constexpr qreal kFitToTextMinWidth = 24.0;
 constexpr qreal kMaxOutlineThicknessFactor = 0.35;
 constexpr int kMaxCachedGlyphPaths = 60000;
+constexpr int kMaxRenderedGlyphPixmaps = 500;  // Phase 2: Rendered glyph cache limit
 constexpr int kFallbackMaxDimensionPx = 2048;
 constexpr qreal kFallbackMinScale = 0.35;
 constexpr qreal kInitialPreviewScaleMax = 0.45;
@@ -259,6 +260,121 @@ QPainterPath cachedGlyphPath(const QRawFont& rawFont, quint32 glyphIndex) {
     }
 
     return path;
+}
+
+// Phase 2: Rendered Glyph Cache - caches pre-rendered glyphs with stroke+fill applied
+struct RenderedGlyphKey {
+    quint64 outlinePathKey;      // Reuse outline cache key
+    QRgb fillColor;              // Packed ARGB
+    QRgb strokeColor;            // Packed ARGB
+    qint32 strokeWidthScaled;    // Fixed-point: width * 1024
+    qint32 scaleFactorScaled;    // Fixed-point: scale * 256 (coarser for better cache hits)
+    
+    bool operator==(const RenderedGlyphKey& other) const {
+        return outlinePathKey == other.outlinePathKey &&
+               fillColor == other.fillColor &&
+               strokeColor == other.strokeColor &&
+               strokeWidthScaled == other.strokeWidthScaled &&
+               scaleFactorScaled == other.scaleFactorScaled;
+    }
+};
+
+inline uint qHash(const RenderedGlyphKey& key, uint seed = 0) {
+    seed = ::qHash(key.outlinePathKey, seed);
+    seed = ::qHash(key.fillColor, seed);
+    seed = ::qHash(key.strokeColor, seed);
+    seed = ::qHash(key.strokeWidthScaled, seed);
+    return ::qHash(key.scaleFactorScaled, seed);
+}
+
+RenderedGlyphKey makeRenderedGlyphKey(const QRawFont& rawFont, quint32 glyphIndex,
+                                      const QColor& fillColor, const QColor& strokeColor,
+                                      qreal strokeWidth, qreal scaleFactor) {
+    RenderedGlyphKey key;
+    key.outlinePathKey = makeGlyphCacheKey(rawFont, glyphIndex);
+    key.fillColor = fillColor.rgba();
+    key.strokeColor = strokeColor.rgba();
+    key.strokeWidthScaled = static_cast<qint32>(std::round(strokeWidth * 1024.0));
+    // Quantize scale to 1/256 increments for better cache hits
+    key.scaleFactorScaled = static_cast<qint32>(std::round(scaleFactor * 256.0));
+    return key;
+}
+
+QPixmap renderGlyphToPixmap(const QPainterPath& glyphPath, const QColor& fillColor,
+                             const QColor& strokeColor, qreal strokeWidth) {
+    if (glyphPath.isEmpty()) {
+        return QPixmap();
+    }
+    
+    // Calculate tight bounds with stroke overflow
+    const QRectF pathBounds = glyphPath.boundingRect();
+    const qreal padding = std::ceil(strokeWidth * 2.0) + 2.0;
+    const QRectF renderBounds = pathBounds.adjusted(-padding, -padding, padding, padding);
+    
+    const int width = std::max(1, static_cast<int>(std::ceil(renderBounds.width())));
+    const int height = std::max(1, static_cast<int>(std::ceil(renderBounds.height())));
+    
+    QImage img(width, height, QImage::Format_ARGB32_Premultiplied);
+    img.fill(Qt::transparent);
+    
+    QPainter p(&img);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.translate(-renderBounds.left(), -renderBounds.top());
+    
+    // Draw stroke
+    if (strokeWidth > 0.0) {
+        p.setPen(QPen(strokeColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(glyphPath);
+    }
+    
+    // Draw fill
+    p.setPen(Qt::NoPen);
+    p.setBrush(fillColor);
+    p.drawPath(glyphPath);
+    
+    p.end();
+    
+    return QPixmap::fromImage(img);
+}
+
+QPixmap cachedRenderedGlyph(const QRawFont& rawFont, quint32 glyphIndex,
+                             const QColor& fillColor, const QColor& strokeColor,
+                             qreal strokeWidth, qreal scaleFactor) {
+    if (!rawFont.isValid() || strokeWidth < 0.0) {
+        return QPixmap();
+    }
+    
+    static QCache<RenderedGlyphKey, QPixmap> s_renderedGlyphCache(kMaxRenderedGlyphPixmaps);
+    static QMutex s_renderedCacheMutex;
+    
+    const RenderedGlyphKey cacheKey = makeRenderedGlyphKey(rawFont, glyphIndex, fillColor, strokeColor, strokeWidth, scaleFactor);
+    
+    {
+        QMutexLocker locker(&s_renderedCacheMutex);
+        if (const QPixmap* cached = s_renderedGlyphCache.object(cacheKey)) {
+            return *cached;
+        }
+    }
+    
+    // Cache miss - render the glyph
+    const QPainterPath glyphPath = cachedGlyphPath(rawFont, glyphIndex);
+    if (glyphPath.isEmpty()) {
+        return QPixmap();
+    }
+    
+    QPixmap rendered = renderGlyphToPixmap(glyphPath, fillColor, strokeColor, strokeWidth);
+    
+    {
+        QMutexLocker locker(&s_renderedCacheMutex);
+        if (!s_renderedGlyphCache.object(cacheKey)) {
+            // Cost based on pixmap size in KB
+            const int costKB = (rendered.width() * rendered.height() * 4) / 1024;
+            s_renderedGlyphCache.insert(cacheKey, new QPixmap(rendered), std::max(1, costKB));
+        }
+    }
+    
+    return rendered;
 }
 
 class InlineTextEditor : public QGraphicsTextItem {
@@ -471,13 +587,13 @@ protected:
                     }
 
                     if (strokeWidth > 0.0) {
-                        // Build glyph paths
-                        QPainterPath textPath;
-                        textPath.setFillRule(Qt::WindingFill); // Preserve glyph counters
+                        // Phase 2: Strict two-pass rendering in InlineTextEditor
                         QAbstractTextDocumentLayout* docLayout = doc->documentLayout();
                         QElapsedTimer strokeTimer;
                         strokeTimer.start();
                         int glyphCount = 0;
+                        
+                        // Pass 1: Render all strokes first (background)
                         for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
                             QTextLayout* textLayout = block.layout();
                             if (!textLayout) continue;
@@ -491,19 +607,59 @@ protected:
                                 for (const QGlyphRun& run : glyphRuns) {
                                     const QVector<quint32> indexes = run.glyphIndexes();
                                     const QVector<QPointF> positions = run.positions();
-                                    if (indexes.size() != positions.size()) continue; // Guard against mismatch
+                                    if (indexes.size() != positions.size()) continue;
                                     const QRawFont rawFont = run.rawFont();
-                                    // Glyph positions from QGlyphRun are already in layout coordinates
-                                    // Only translate by block position to document coordinates
+                                    
                                     for (int gi = 0; gi < indexes.size(); ++gi) {
-                                        const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
                                         const QPointF glyphPos = blockRect.topLeft() + positions[gi];
-                                        textPath.addPath(glyphPath.translated(glyphPos));
+                                        const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
+                                        
+                                        // Draw stroke for ALL glyphs
+                                        bufferPainter.save();
+                                        bufferPainter.translate(glyphPos);
+                                        bufferPainter.setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                                        bufferPainter.setBrush(Qt::NoBrush);
+                                        bufferPainter.drawPath(glyphPath);
+                                        bufferPainter.restore();
                                     }
                                     glyphCount += indexes.size();
                                 }
                             }
                         }
+                        
+                        // Pass 2: Render all fills on top (foreground)
+                        for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
+                            QTextLayout* textLayout = block.layout();
+                            if (!textLayout) continue;
+                            
+                            const QRectF blockRect = docLayout->blockBoundingRect(block);
+                            for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                                QTextLine line = textLayout->lineAt(lineIndex);
+                                if (!line.isValid()) continue;
+                                
+                                QList<QGlyphRun> glyphRuns = line.glyphRuns();
+                                for (const QGlyphRun& run : glyphRuns) {
+                                    const QVector<quint32> indexes = run.glyphIndexes();
+                                    const QVector<QPointF> positions = run.positions();
+                                    if (indexes.size() != positions.size()) continue;
+                                    const QRawFont rawFont = run.rawFont();
+                                    
+                                    for (int gi = 0; gi < indexes.size(); ++gi) {
+                                        const QPointF glyphPos = blockRect.topLeft() + positions[gi];
+                                        const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
+                                        
+                                        // Draw fill for ALL glyphs
+                                        bufferPainter.save();
+                                        bufferPainter.translate(glyphPos);
+                                        bufferPainter.setPen(Qt::NoPen);
+                                        bufferPainter.setBrush(fillColor);
+                                        bufferPainter.drawPath(glyphPath);
+                                        bufferPainter.restore();
+                                    }
+                                }
+                            }
+                        }
+                        
                         const qint64 outlineMs = strokeTimer.elapsed();
                         logStrokeDiagnostics("InlineEditorStroke",
                                               m_owner ? m_owner->textBorderWidth() : 0.0,
@@ -515,20 +671,6 @@ protected:
                                               QSize(width, height),
                                               1.0,
                                               previewTextForLog(doc->toPlainText()));
-                        
-                        // Draw outside stroke
-                        bufferPainter.save();
-                        bufferPainter.setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                        bufferPainter.setBrush(Qt::NoBrush);
-                        bufferPainter.drawPath(textPath);
-                        bufferPainter.restore();
-                        
-                        // Fill glyphs
-                        bufferPainter.save();
-                        bufferPainter.setPen(Qt::NoPen);
-                        bufferPainter.setBrush(fillColor);
-                        bufferPainter.drawPath(textPath);
-                        bufferPainter.restore();
                     } else {
                         QAbstractTextDocumentLayout::PaintContext ctx;
                         ctx.cursorPosition = -1;
@@ -1049,10 +1191,11 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         int glyphCount = 0;
         qint64 outlineMs = 0;
         if (strokeWidth > 0.0) {
-            QPainterPath textPath;
-            textPath.setFillRule(Qt::WindingFill);
             QElapsedTimer outlineTimer;
             outlineTimer.start();
+            
+            // Phase 2: Strict two-pass rendering - ALL strokes first, then ALL fills
+            // Pass 1: Render all strokes (background layer)
             for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
                 QTextLayout* textLayout = block.layout();
                 if (!textLayout) continue;
@@ -1068,28 +1211,58 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
                         const QVector<QPointF> positions = run.positions();
                         if (indexes.size() != positions.size()) continue;
                         const QRawFont rawFont = run.rawFont();
+                        
                         for (int gi = 0; gi < indexes.size(); ++gi) {
-                            const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
                             const QPointF glyphPos = blockRect.topLeft() + positions[gi];
-                            textPath.addPath(glyphPath.translated(glyphPos));
+                            const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
+                            
+                            // Draw stroke for ALL glyphs (cached or not)
+                            painter->save();
+                            painter->translate(glyphPos);
+                            painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                            painter->setBrush(Qt::NoBrush);
+                            painter->drawPath(glyphPath);
+                            painter->restore();
                         }
                         glyphCount += indexes.size();
                     }
                 }
             }
+            
+            // Pass 2: Render all fills on top (foreground layer)
+            for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+                QTextLayout* textLayout = block.layout();
+                if (!textLayout) continue;
+
+                const QRectF blockRect = layout->blockBoundingRect(block);
+                for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                    QTextLine line = textLayout->lineAt(lineIndex);
+                    if (!line.isValid()) continue;
+
+                    const QList<QGlyphRun> glyphRuns = line.glyphRuns();
+                    for (const QGlyphRun& run : glyphRuns) {
+                        const QVector<quint32> indexes = run.glyphIndexes();
+                        const QVector<QPointF> positions = run.positions();
+                        if (indexes.size() != positions.size()) continue;
+                        const QRawFont rawFont = run.rawFont();
+                        
+                        for (int gi = 0; gi < indexes.size(); ++gi) {
+                            const QPointF glyphPos = blockRect.topLeft() + positions[gi];
+                            const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
+                            
+                            // Draw fill for ALL glyphs
+                            painter->save();
+                            painter->translate(glyphPos);
+                            painter->setPen(Qt::NoPen);
+                            painter->setBrush(fillColor);
+                            painter->drawPath(glyphPath);
+                            painter->restore();
+                        }
+                    }
+                }
+            }
+            
             outlineMs = outlineTimer.elapsed();
-
-            painter->save();
-            painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-            painter->setBrush(Qt::NoBrush);
-            painter->drawPath(textPath);
-            painter->restore();
-
-            painter->save();
-            painter->setPen(Qt::NoPen);
-            painter->setBrush(fillColor);
-            painter->drawPath(textPath);
-            painter->restore();
         } else {
             QAbstractTextDocumentLayout::PaintContext ctx;
             ctx.cursorPosition = -1;
@@ -1146,33 +1319,52 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
                     outlineTimer.start();
                     outlineTimerRunning = true;
                 }
-                QPainterPath linePath;
-                linePath.setFillRule(Qt::WindingFill);
-                QList<QGlyphRun> glyphRuns = line.glyphRuns();
+                
+                // Phase 2: Strict two-pass rendering for fit-to-text mode
+                const QList<QGlyphRun> glyphRuns = line.glyphRuns();
+                
+                // Pass 1: Render all strokes first (background)
                 for (const QGlyphRun& run : glyphRuns) {
                     const QVector<quint32> indexes = run.glyphIndexes();
                     const QVector<QPointF> positions = run.positions();
                     if (indexes.size() != positions.size()) continue;
                     const QRawFont rawFont = run.rawFont();
+                    
                     for (int gi = 0; gi < indexes.size(); ++gi) {
-                        const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
                         const QPointF glyphPos = blockRect.topLeft() + positions[gi];
-                        linePath.addPath(glyphPath.translated(glyphPos));
+                        const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
+                        
+                        // Draw stroke for ALL glyphs
+                        painter->save();
+                        painter->translate(glyphPos);
+                        painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                        painter->setBrush(Qt::NoBrush);
+                        painter->drawPath(glyphPath);
+                        painter->restore();
                     }
                     glyphCount += indexes.size();
                 }
-
-                painter->save();
-                painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                painter->setBrush(Qt::NoBrush);
-                painter->drawPath(linePath);
-                painter->restore();
-
-                painter->save();
-                painter->setPen(Qt::NoPen);
-                painter->setBrush(fillColor);
-                painter->drawPath(linePath);
-                painter->restore();
+                
+                // Pass 2: Render all fills on top (foreground)
+                for (const QGlyphRun& run : glyphRuns) {
+                    const QVector<quint32> indexes = run.glyphIndexes();
+                    const QVector<QPointF> positions = run.positions();
+                    if (indexes.size() != positions.size()) continue;
+                    const QRawFont rawFont = run.rawFont();
+                    
+                    for (int gi = 0; gi < indexes.size(); ++gi) {
+                        const QPointF glyphPos = blockRect.topLeft() + positions[gi];
+                        const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
+                        
+                        // Draw fill for ALL glyphs
+                        painter->save();
+                        painter->translate(glyphPos);
+                        painter->setPen(Qt::NoPen);
+                        painter->setBrush(fillColor);
+                        painter->drawPath(glyphPath);
+                        painter->restore();
+                    }
+                }
             } else {
                 line.draw(painter, lineBasePos);
             }
@@ -2845,13 +3037,34 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
     
     if (!painter) return;
     
+    // Phase 12: Editor Mode Fast Path - bypass expensive rasterization during typing
+    // The InlineTextEditor already has its own cached rendering, so we skip the main
+    // TextMediaItem raster pipeline entirely while editing for <5ms latency
+    if (m_isEditing && m_inlineEditor) {
+        painter->save();
+        
+        // Apply content visibility and opacity
+        if (!m_contentVisible || m_contentOpacity <= 0.0 || m_contentDisplayOpacity <= 0.0) {
+            painter->restore();
+            paintSelectionAndLabel(painter);
+            return;
+        }
+        
+        // Set editor opacity
+        m_inlineEditor->setOpacity(m_contentOpacity * m_contentDisplayOpacity);
+        
+        // The InlineTextEditor will render itself via its own paint() method
+        // which uses its m_cachedImage buffer - no need to duplicate work here
+        painter->restore();
+        
+        // Paint selection chrome and overlays
+        paintSelectionAndLabel(painter);
+        return;
+    }
+    
     // Only update geometry when not editing to avoid triggering expensive layout operations during panning
     if (!m_isEditing) {
         updateInlineEditorGeometry();
-    }
-
-    if (m_isEditing && m_inlineEditor) {
-        m_inlineEditor->setOpacity(m_contentOpacity * m_contentDisplayOpacity);
     }
 
     painter->save();
