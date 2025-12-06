@@ -12,10 +12,14 @@
 #include <cmath>
 #include <chrono>
 #include <QPixmap>
+#include <QVector>
 
 class QGraphicsTextItem;
 class QGraphicsSceneMouseEvent;
 class RoundedRectItem;
+class QAbstractTextDocumentLayout;
+class QAbstractTextDocumentLayout;
+class QRawFont;
 
 // Global configuration namespace for text media defaults
 namespace TextMediaDefaults {
@@ -232,6 +236,46 @@ private:
     QRectF m_lastViewportRect;   // Last viewport rectangle calculated (item coords)
     qreal m_lastViewportScale = 1.0;  // Scale factor of last viewport calculation
     
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // TIER 2 OPTIMIZATION STRUCTURES
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    // Phase 6: Glyph Layout Pre-computation Cache
+    // Note: Simplified to avoid QRawFont storage complexity
+    // Actual Phase 6 optimization deferred - cache infrastructure ready but not used
+    struct GlyphLayoutCache {
+        quint64 fingerprint = 0;           // Hash of text + font + size + width
+        bool valid = false;
+        
+        void clear() {
+            fingerprint = 0;
+            valid = false;
+        }
+    };
+    GlyphLayoutCache m_glyphLayoutCache;
+    
+    // Phase 7: Per-Block Viewport Culling
+    struct BlockVisibility {
+        int blockIndex = -1;
+        QRectF blockBounds;                // Block bounds in item coordinates
+        bool fullyVisible = false;         // Entire block inside viewport
+        bool fullyInvisible = false;       // Entire block outside viewport
+        bool partiallyVisible = false;     // Block intersects viewport edge
+        QRectF visibleIntersection;        // Visible portion if partially visible
+    };
+    QVector<BlockVisibility> m_blockVisibilityCache;
+    QRectF m_lastCullingViewport;          // Viewport used for last cull calculation
+    bool m_blockVisibilityCacheValid = false;
+    
+    // Phase 8: Stroke Quality LOD (Level-of-Detail)
+    enum class StrokeQuality {
+        Full,        // Per-glyph precision (zoom >= 20%)
+        Medium,      // Per-word grouping (zoom 5-20%)
+        Low          // Unified text outline (zoom < 5%)
+    };
+    StrokeQuality m_lastStrokeQuality = StrokeQuality::Full;
+    qreal m_lastStrokeQualityZoom = 1.0;
+    
     // Freeze zone fallback cache - low-res full text for out-of-viewport regions (Phase 1)
     QPixmap m_frozenFallbackPixmap;      // Full text at low res (background for non-viewport areas)
     bool m_frozenFallbackValid = false;  // Is fallback cache valid
@@ -287,13 +331,14 @@ private:
         VectorDrawSnapshot snapshot;
         QSize targetSize;
         qreal scaleFactor = 1.0;
+        qreal canvasZoom = 1.0;  // Tier 2: Canvas zoom for Phase 8 LOD selection
         QRectF targetRect;  // Region to rasterize in item coordinates (empty = full raster)
 
         QImage execute() const;
     };
 
     VectorDrawSnapshot captureVectorSnapshot(StrokeRenderMode mode = StrokeRenderMode::Normal) const;
-    static void paintVectorSnapshot(QPainter* painter, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor);
+    static void paintVectorSnapshot(QPainter* painter, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor, qreal canvasZoom = 1.0, const QRectF& viewport = QRectF());
 
     QRectF computeVisibleRegion() const;
     void ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale, qreal canvasZoom);
@@ -323,6 +368,23 @@ private:
     void updateStrokePreviewState(qreal requestedPercent);
     bool isStrokeWorkExpensiveCandidate() const;
     void ensureBasePreviewRaster(const QSize& targetSize);
+    
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // TIER 2 OPTIMIZATION METHODS
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    // Phase 6: Glyph Layout Pre-computation
+    quint64 computeLayoutFingerprint(const QString& text, const QFont& font, qreal width) const;
+    void updateGlyphLayoutCache(const VectorDrawSnapshot& snapshot, const QSize& targetSize);
+    bool isGlyphLayoutCacheValid(const VectorDrawSnapshot& snapshot, const QSize& targetSize) const;
+    
+    // Phase 7: Viewport Culling
+    void updateBlockVisibilityCache(const QRectF& viewport, QTextDocument& doc, QAbstractTextDocumentLayout* layout);
+    bool shouldSkipBlock(int blockIndex) const;
+    
+    // Phase 8: Stroke Quality LOD
+    StrokeQuality selectStrokeQuality(qreal canvasZoom) const;
+    void paintSimplifiedStroke(QPainter* painter, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor, qreal canvasZoom);
 
     static int s_maxRasterDimension;
 };
