@@ -30,9 +30,14 @@
 #include <QImage>
 #include <QPixmap>
 #include <QCursor>
+#include <QHashFunctions>
 #include <QPen>
 #include <QFontDatabase>
 #include <QDebug>
+#include <QElapsedTimer>
+#include <QCache>
+#include <QMutex>
+#include <QMutexLocker>
 #include <array>
 #include <limits>
 #include <functional>
@@ -85,6 +90,10 @@ constexpr qreal kStrokeOverflowScale = 0.75;
 constexpr qreal kStrokeOverflowMinPx = 1.5;
 constexpr int kScaledRasterThrottleIntervalMs = 45;
 constexpr qreal kFitToTextMinWidth = 24.0;
+constexpr qreal kMaxOutlineThicknessFactor = 0.35;
+constexpr int kMaxCachedGlyphPaths = 60000;
+constexpr int kFallbackMaxDimensionPx = 2048;
+constexpr qreal kFallbackMinScale = 0.35;
 
 struct CssWeightMapping {
     int cssWeight;
@@ -141,11 +150,110 @@ QFont fontAdjustedForWeight(QFont font, int cssWeight) {
     return font;
 }
 
+QString previewTextForLog(const QString& text, int maxLen = 120) {
+    if (text.isEmpty()) {
+        return QStringLiteral("<empty>");
+    }
+
+    QString sanitized = text;
+    sanitized.replace('\n', QLatin1Char(' '));
+    sanitized.replace('\r', QLatin1Char(' '));
+    sanitized = sanitized.simplified();
+    if (sanitized.size() > maxLen) {
+        return sanitized.left(maxLen) + QStringLiteral("... (%1 chars)").arg(sanitized.size());
+    }
+    return sanitized;
+}
+
+qreal computeStrokeWidthFromFont(const QFont& font, qreal widthPercent) {
+    if (widthPercent <= 0.0) {
+        return 0.0;
+    }
+
+    QFontMetricsF metrics(font);
+    qreal reference = metrics.height();
+    if (reference <= 0.0) {
+        if (font.pixelSize() > 0) {
+            reference = static_cast<qreal>(font.pixelSize());
+        } else {
+            reference = font.pointSizeF();
+        }
+    }
+    if (reference <= 0.0) {
+        reference = 16.0;
+    }
+
+    const qreal normalized = std::clamp(widthPercent / 100.0, 0.0, 1.0);
+    const qreal eased = std::pow(normalized, 1.1);
+    return eased * kMaxOutlineThicknessFactor * reference;
+}
+
+void logStrokeDiagnostics(const char* context,
+                          qreal strokePercent,
+                          qreal strokeWidthPx,
+                          int glyphCount,
+                          qint64 outlineBuildMs,
+                          qint64 totalMs,
+                          const QSizeF& docSize,
+                          const QSize& targetSize,
+                          qreal scaleFactor,
+                          const QString& previewText) {
+    qDebug() << "[TextMediaItem][Stroke]"
+             << context
+             << "percent" << strokePercent
+             << "px" << strokeWidthPx
+             << "glyphs" << glyphCount
+             << "outlineMs" << outlineBuildMs
+             << "totalMs" << totalMs
+             << "docSize" << docSize
+             << "targetPx" << targetSize
+             << "scale" << scaleFactor
+             << "preview" << previewText;
+}
+
+quint64 makeGlyphCacheKey(const QRawFont& rawFont, quint32 glyphIndex) {
+    QString descriptor;
+    descriptor.reserve(80);
+    descriptor.append(rawFont.familyName());
+    descriptor.append(QLatin1Char('|'));
+    descriptor.append(rawFont.styleName());
+    descriptor.append(QLatin1Char('|'));
+    descriptor.append(QString::number(rawFont.pixelSize()));
+    descriptor.append(QLatin1Char(':'));
+    descriptor.append(QString::number(static_cast<quint64>(glyphIndex)));
+    return static_cast<quint64>(qHash(descriptor));
+}
+
 QPainterPath cachedGlyphPath(const QRawFont& rawFont, quint32 glyphIndex) {
     if (!rawFont.isValid()) {
         return QPainterPath();
     }
-    return rawFont.pathForGlyph(glyphIndex);
+
+    static QCache<quint64, QPainterPath> s_glyphCache(kMaxCachedGlyphPaths);
+    static QMutex s_cacheMutex;
+
+    const quint64 combinedKey = makeGlyphCacheKey(rawFont, glyphIndex);
+
+    {
+        QMutexLocker locker(&s_cacheMutex);
+        if (const QPainterPath* cached = s_glyphCache.object(combinedKey)) {
+            return *cached;
+        }
+    }
+
+    QPainterPath path = rawFont.pathForGlyph(glyphIndex);
+    if (path.isEmpty()) {
+        return path;
+    }
+
+    {
+        QMutexLocker locker(&s_cacheMutex);
+        if (!s_glyphCache.object(combinedKey)) {
+            s_glyphCache.insert(combinedKey, new QPainterPath(path), 1);
+        }
+    }
+
+    return path;
 }
 
 class InlineTextEditor : public QGraphicsTextItem {
@@ -344,34 +452,8 @@ protected:
                         }
                     }
 
-                    auto computeStrokeWidthPx = [&]() -> qreal {
-                        if (!m_owner) {
-                            return 0.0;
-                        }
-                        const qreal percent = m_owner->textBorderWidth();
-                        if (percent <= 0.0) {
-                            return 0.0;
-                        }
-                        const QFont ownerFont = m_owner->font();
-                        QFontMetricsF metrics(ownerFont);
-                        qreal reference = metrics.height();
-                        if (reference <= 0.0) {
-                            if (ownerFont.pixelSize() > 0) {
-                                reference = static_cast<qreal>(ownerFont.pixelSize());
-                            } else {
-                                reference = ownerFont.pointSizeF();
-                            }
-                        }
-                        if (reference <= 0.0) {
-                            reference = 16.0;
-                        }
-                        constexpr qreal kMaxOutlineThicknessFactor = 0.35;
-                        const qreal normalized = std::clamp(percent / 100.0, 0.0, 1.0);
-                        const qreal eased = std::pow(normalized, 1.1);
-                        return eased * kMaxOutlineThicknessFactor * reference;
-                    };
-
-                    const qreal strokeWidth = computeStrokeWidthPx();
+                    const QFont ownerFont = m_owner ? m_owner->font() : font();
+                    const qreal strokeWidth = m_owner ? computeStrokeWidthFromFont(ownerFont, m_owner->textBorderWidth()) : 0.0;
 
                     // Clear outline formatting
                     {
@@ -388,6 +470,9 @@ protected:
                         QPainterPath textPath;
                         textPath.setFillRule(Qt::WindingFill); // Preserve glyph counters
                         QAbstractTextDocumentLayout* docLayout = doc->documentLayout();
+                        QElapsedTimer strokeTimer;
+                        strokeTimer.start();
+                        int glyphCount = 0;
                         for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
                             QTextLayout* textLayout = block.layout();
                             if (!textLayout) continue;
@@ -410,9 +495,21 @@ protected:
                                         const QPointF glyphPos = blockRect.topLeft() + positions[gi];
                                         textPath.addPath(glyphPath.translated(glyphPos));
                                     }
+                                    glyphCount += indexes.size();
                                 }
                             }
                         }
+                        const qint64 outlineMs = strokeTimer.elapsed();
+                        logStrokeDiagnostics("InlineEditorStroke",
+                                              m_owner ? m_owner->textBorderWidth() : 0.0,
+                                              strokeWidth,
+                                              glyphCount,
+                                              outlineMs,
+                                              outlineMs,
+                                              docLayout ? docLayout->documentSize() : QSizeF(),
+                                              QSize(width, height),
+                                              1.0,
+                                              previewTextForLog(doc->toPlainText()));
                         
                         // Draw outside stroke
                         bufferPainter.save();
@@ -784,6 +881,9 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         return;
     }
 
+    QElapsedTimer snapshotTimer;
+    snapshotTimer.start();
+
     const int targetWidth = std::max(1, targetSize.width());
     const int targetHeight = std::max(1, targetSize.height());
 
@@ -824,7 +924,11 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         doc.setTextWidth(availableWidth);
     }
 
-    const QSizeF docSize = doc.documentLayout()->documentSize();
+    QAbstractTextDocumentLayout* layout = doc.documentLayout();
+    if (!layout) {
+        return;
+    }
+    const QSizeF docSize = layout->documentSize();
     const qreal availableHeight = std::max<qreal>(1.0, logicalHeight - 2.0 * margin);
 
     qreal offsetX = margin;
@@ -856,11 +960,6 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
             break;
     }
 
-    QAbstractTextDocumentLayout* layout = doc.documentLayout();
-    if (!layout) {
-        return;
-    }
-
     const QColor fillColor = snapshot.fillColor;
     QColor outlineColor = snapshot.outlineColor.isValid() ? snapshot.outlineColor : fillColor;
     if (!outlineColor.isValid()) {
@@ -873,31 +972,23 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         highlightColor = TextMediaDefaults::TEXT_HIGHLIGHT_COLOR;
     }
 
-    auto computeStrokeWidth = [&snapshot]() -> qreal {
-        if (snapshot.outlineWidthPercent <= 0.0) {
-            return 0.0;
+    const qreal strokeWidth = computeStrokeWidthFromFont(snapshot.font, snapshot.outlineWidthPercent);
+    const QString preview = previewTextForLog(snapshot.text);
+    auto logSnapshotPerf = [&](const char* context, qint64 outlineMs, int glyphCount, qint64 totalMs) {
+        if (strokeWidth <= 0.0 && totalMs < 4) {
+            return;
         }
-
-        QFontMetricsF metrics(snapshot.font);
-        qreal reference = metrics.height();
-        if (reference <= 0.0) {
-            if (snapshot.font.pixelSize() > 0) {
-                reference = static_cast<qreal>(snapshot.font.pixelSize());
-            } else {
-                reference = snapshot.font.pointSizeF();
-            }
-        }
-        if (reference <= 0.0) {
-            reference = 16.0;
-        }
-
-        constexpr qreal kMaxOutlineThicknessFactor = 0.35;
-        const qreal normalized = std::clamp(snapshot.outlineWidthPercent / 100.0, 0.0, 1.0);
-        const qreal eased = std::pow(normalized, 1.1);
-        return eased * kMaxOutlineThicknessFactor * reference;
+        logStrokeDiagnostics(context,
+                              snapshot.outlineWidthPercent,
+                              strokeWidth,
+                              glyphCount,
+                              outlineMs,
+                              totalMs,
+                              docSize,
+                              targetSize,
+                              scaleFactor,
+                              preview);
     };
-
-    const qreal strokeWidth = computeStrokeWidth();
 
     {
         QTextCursor cursor(&doc);
@@ -949,9 +1040,13 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
             painter->restore();
         }
 
+        int glyphCount = 0;
+        qint64 outlineMs = 0;
         if (strokeWidth > 0.0) {
             QPainterPath textPath;
             textPath.setFillRule(Qt::WindingFill);
+            QElapsedTimer outlineTimer;
+            outlineTimer.start();
             for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
                 QTextLayout* textLayout = block.layout();
                 if (!textLayout) continue;
@@ -972,9 +1067,11 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
                             const QPointF glyphPos = blockRect.topLeft() + positions[gi];
                             textPath.addPath(glyphPath.translated(glyphPos));
                         }
+                        glyphCount += indexes.size();
                     }
                 }
             }
+            outlineMs = outlineTimer.elapsed();
 
             painter->save();
             painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
@@ -995,11 +1092,16 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         }
 
         painter->restore();
+        logSnapshotPerf("vector-full", outlineMs, glyphCount, snapshotTimer.elapsed());
         return;
     }
 
     painter->translate(margin, offsetY);
     const qreal contentWidth = availableWidth;
+    int glyphCount = 0;
+    qint64 outlineMs = 0;
+    QElapsedTimer outlineTimer;
+    bool outlineTimerRunning = false;
 
     for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
         QTextLayout* textLayout = block.layout();
@@ -1034,6 +1136,10 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
             }
 
             if (strokeWidth > 0.0) {
+                if (!outlineTimerRunning) {
+                    outlineTimer.start();
+                    outlineTimerRunning = true;
+                }
                 QPainterPath linePath;
                 linePath.setFillRule(Qt::WindingFill);
                 QList<QGlyphRun> glyphRuns = line.glyphRuns();
@@ -1047,6 +1153,7 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
                         const QPointF glyphPos = blockRect.topLeft() + positions[gi];
                         linePath.addPath(glyphPath.translated(glyphPos));
                     }
+                    glyphCount += indexes.size();
                 }
 
                 painter->save();
@@ -1067,9 +1174,15 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
     }
 
     painter->restore();
+    if (outlineTimerRunning) {
+        outlineMs = outlineTimer.elapsed();
+    }
+    logSnapshotPerf("vector-fit", outlineMs, glyphCount, snapshotTimer.elapsed());
 }
 
 QImage TextMediaItem::TextRasterJob::execute() const {
+    QElapsedTimer rasterTimer;
+    rasterTimer.start();
     const int targetWidth = std::max(1, targetSize.width());
     const int targetHeight = std::max(1, targetSize.height());
 
@@ -1095,6 +1208,15 @@ QImage TextMediaItem::TextRasterJob::execute() const {
         TextMediaItem::paintVectorSnapshot(&imagePainter, snapshot, targetSize, scaleFactor);
         imagePainter.end();
 
+        const qint64 renderMs = rasterTimer.elapsed();
+        if (snapshot.outlineWidthPercent > 0.0 || renderMs > 8) {
+            qDebug() << "[TextMediaItem][RasterJob]"
+                     << "region" << QSize(regionWidth, regionHeight)
+                     << "scale" << scaleFactor
+                     << "strokePercent" << snapshot.outlineWidthPercent
+                     << "durationMs" << renderMs;
+        }
+
         return result;
     }
 
@@ -1109,6 +1231,15 @@ QImage TextMediaItem::TextRasterJob::execute() const {
 
     TextMediaItem::paintVectorSnapshot(&imagePainter, snapshot, targetSize, scaleFactor);
     imagePainter.end();
+
+    const qint64 renderMs = rasterTimer.elapsed();
+    if (snapshot.outlineWidthPercent > 0.0 || renderMs > 8) {
+        qDebug() << "[TextMediaItem][RasterJob]"
+                 << "region" << QSize(targetWidth, targetHeight)
+                 << "scale" << scaleFactor
+                 << "strokePercent" << snapshot.outlineWidthPercent
+                 << "durationMs" << renderMs;
+    }
 
     return result;
 }
@@ -1262,6 +1393,9 @@ void TextMediaItem::setTextBorderWidth(qreal percent) {
     }
 
     const qreal oldPadding = m_appliedContentPaddingPx;
+    qDebug() << "[TextMediaItem]" << mediaId() << "setTextBorderWidth%" << clamped
+             << "approxPx" << computeStrokeWidthFromFont(m_font, clamped)
+             << "textLength" << m_text.size();
     m_textBorderWidthPercent = clamped;
     const qreal newPadding = contentPaddingPx();
 
@@ -1367,27 +1501,7 @@ void TextMediaItem::setHighlightColor(const QColor& color) {
 }
 
 qreal TextMediaItem::borderStrokeWidthPx() const {
-    if (m_textBorderWidthPercent <= 0.0) {
-        return 0.0;
-    }
-
-    QFontMetricsF metrics(m_font);
-    qreal reference = metrics.height();
-    if (reference <= 0.0) {
-        if (m_font.pixelSize() > 0) {
-            reference = static_cast<qreal>(m_font.pixelSize());
-        } else {
-            reference = m_font.pointSizeF();
-        }
-    }
-    if (reference <= 0.0) {
-        reference = 16.0; // fallback so outline remains visible even if metrics unavailable
-    }
-
-    constexpr qreal kMaxOutlineThicknessFactor = 0.35; // keep heavy borders legible
-    const qreal normalized = std::clamp(m_textBorderWidthPercent / 100.0, 0.0, 1.0);
-    const qreal eased = std::pow(normalized, 1.1); // soften growth near 100%
-    return eased * kMaxOutlineThicknessFactor * reference;
+    return computeStrokeWidthFromFont(m_font, m_textBorderWidthPercent);
 }
 
 qreal TextMediaItem::contentPaddingPx() const {
@@ -2291,50 +2405,115 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
 
 void TextMediaItem::ensureFrozenFallbackCache(qreal currentCanvasZoom) {
     // Phase 1: Create/update low-resolution fallback cache for freeze zones
-    // This provides visible context for text areas outside the viewport
-    
     const qreal epsilon = 1e-4;
-    const qreal targetFallbackScale = 1.5;    // Fixed low-res scale for fallback
-    
-    // Check if we need to create or update the fallback cache
+    const qreal targetFallbackScale = 1.5;
+    const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), epsilon);
+    const qreal logicalWidth = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) * uniformScale);
+    const qreal logicalHeight = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.height()) * uniformScale);
+
+    auto computeClampedScale = [&](qreal desiredScale) {
+        qreal finalScale = desiredScale;
+        const qreal desiredWidth = logicalWidth * finalScale;
+        const qreal desiredHeight = logicalHeight * finalScale;
+        const bool exceedsWidth = desiredWidth > kFallbackMaxDimensionPx;
+        const bool exceedsHeight = desiredHeight > kFallbackMaxDimensionPx;
+        if (exceedsWidth || exceedsHeight) {
+            const qreal widthFactor = exceedsWidth
+                ? (kFallbackMaxDimensionPx / std::max<qreal>(desiredWidth, 1.0))
+                : 1.0;
+            const qreal heightFactor = exceedsHeight
+                ? (kFallbackMaxDimensionPx / std::max<qreal>(desiredHeight, 1.0))
+                : 1.0;
+            finalScale *= std::min(widthFactor, heightFactor);
+        }
+        finalScale = std::clamp(finalScale, kFallbackMinScale, desiredScale);
+        return finalScale;
+    };
+
+    const qreal fallbackScale = computeClampedScale(targetFallbackScale);
+    const QSize fallbackSize(
+        std::max(1, static_cast<int>(std::ceil(logicalWidth * fallbackScale))),
+        std::max(1, static_cast<int>(std::ceil(logicalHeight * fallbackScale)))
+    );
+
     const bool textSizeChanged = (m_baseSize != m_frozenFallbackSize);
-    const bool scaleChanged = std::abs(m_frozenFallbackScale - targetFallbackScale) > epsilon;
+    const bool scaleChanged = std::abs(m_frozenFallbackScale - fallbackScale) > epsilon;
     const bool needsUpdate = !m_frozenFallbackValid || textSizeChanged || scaleChanged;
-    
+
     if (!needsUpdate) {
-        // Fallback cache is still valid, nothing to do
         return;
     }
-    
-    // Calculate dimensions for fallback (full text at low resolution)
-    const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), epsilon);
-    const int fallbackWidth = std::max(1, static_cast<int>(
-        std::ceil(static_cast<qreal>(m_baseSize.width()) * uniformScale * targetFallbackScale)
-    ));
-    const int fallbackHeight = std::max(1, static_cast<int>(
-        std::ceil(static_cast<qreal>(m_baseSize.height()) * uniformScale * targetFallbackScale)
-    ));
-    const QSize fallbackSize(fallbackWidth, fallbackHeight);
-    
-    // Render FULL text at low resolution (no viewport clipping)
-    // Pass empty QRectF() to renderTextToImage to render entire text
-    QImage fallbackImage;
-    renderTextToImage(fallbackImage, fallbackSize, targetFallbackScale, QRectF());
-    
-    // Store fallback in cache
-    m_frozenFallbackPixmap = QPixmap::fromImage(fallbackImage);
+
+    if (m_frozenFallbackJobInFlight) {
+        const bool sameRequest = (m_pendingFallbackSize == fallbackSize) &&
+                                 (std::abs(m_pendingFallbackScale - fallbackScale) < epsilon);
+        if (sameRequest) {
+            return;
+        }
+    }
+
+    const quint64 generation = ++m_frozenFallbackJobGeneration;
+    m_frozenFallbackJobInFlight = true;
+    m_pendingFallbackSize = fallbackSize;
+    m_pendingFallbackScale = fallbackScale;
+
+    TextRasterJob job;
+    job.snapshot = captureVectorSnapshot();
+    job.targetSize = fallbackSize;
+    job.scaleFactor = fallbackScale;
+    job.targetRect = QRectF();
+
+    auto future = QtConcurrent::run([job]() mutable {
+        return job.execute();
+    });
+
+    std::weak_ptr<bool> guard = lifetimeGuard();
+    auto* watcher = new QFutureWatcher<QImage>();
+    QObject::connect(watcher, &QFutureWatcher<QImage>::finished, watcher, [this, guard, watcher, generation, fallbackSize, fallbackScale]() mutable {
+        if (guard.expired()) {
+            watcher->deleteLater();
+            return;
+        }
+
+        QImage result = watcher->result();
+        watcher->deleteLater();
+
+        handleFrozenFallbackJobFinished(generation, std::move(result), fallbackSize, fallbackScale);
+    });
+
+    watcher->setFuture(future);
+}
+
+void TextMediaItem::handleFrozenFallbackJobFinished(quint64 generation, QImage&& raster, const QSize& size, qreal scale) {
+    if (generation != m_frozenFallbackJobGeneration) {
+        return;
+    }
+
+    m_frozenFallbackJobInFlight = false;
+
+    if (raster.isNull()) {
+        m_pendingFallbackSize = QSize();
+        m_pendingFallbackScale = 1.0;
+        return;
+    }
+
+    m_frozenFallbackPixmap = QPixmap::fromImage(raster);
     m_frozenFallbackPixmap.setDevicePixelRatio(1.0);
     m_frozenFallbackValid = !m_frozenFallbackPixmap.isNull();
-    m_frozenFallbackScale = targetFallbackScale;
-    m_frozenFallbackSize = m_baseSize;
-    
-    // Log fallback creation for debugging
-    if (m_frozenFallbackValid) {
-        qDebug() << "[Freeze Zones] Fallback cache created:"
-                 << fallbackSize
-                 << "@ scale" << targetFallbackScale
-                 << "for canvas zoom" << QString::number(currentCanvasZoom, 'f', 2) << "x";
+    if (!m_frozenFallbackValid) {
+        m_pendingFallbackSize = QSize();
+        m_pendingFallbackScale = 1.0;
+        return;
     }
+
+    m_frozenFallbackScale = scale;
+    m_frozenFallbackSize = m_baseSize;
+    m_pendingFallbackSize = QSize();
+    m_pendingFallbackScale = 1.0;
+    qDebug() << "[Freeze Zones] Fallback cache created:"
+             << size
+             << "@ scale" << scale;
+    update();
 }
 
 void TextMediaItem::startRasterJob(const QSize& targetSize, qreal effectiveScale, qreal canvasZoom, quint64 requestId) {

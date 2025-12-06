@@ -233,6 +233,10 @@ private:
     bool m_frozenFallbackValid = false;  // Is fallback cache valid
     qreal m_frozenFallbackScale = 1.0;   // Scale at which fallback was created
     QSize m_frozenFallbackSize;          // Size of text when fallback was created (detect resize)
+    bool m_frozenFallbackJobInFlight = false;
+    quint64 m_frozenFallbackJobGeneration = 0;
+    QSize m_pendingFallbackSize;
+    qreal m_pendingFallbackScale = 1.0;
     
     // Text alignment settings
     HorizontalAlignment m_horizontalAlignment = HorizontalAlignment::Center;
@@ -285,6 +289,7 @@ private:
     QRectF computeVisibleRegion() const;
     void ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale, qreal canvasZoom);
     void ensureFrozenFallbackCache(qreal currentCanvasZoom);  // Phase 1: Create/update low-res fallback cache
+    void handleFrozenFallbackJobFinished(quint64 generation, QImage&& raster, const QSize& size, qreal scale);
     void startRasterJob(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
     void handleRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size, qreal scale, qreal canvasZoom, const QRectF& visibleRegion = QRectF());
     void startAsyncRasterRequest(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
