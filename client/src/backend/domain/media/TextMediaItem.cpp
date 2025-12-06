@@ -94,6 +94,11 @@ constexpr qreal kMaxOutlineThicknessFactor = 0.35;
 constexpr int kMaxCachedGlyphPaths = 60000;
 constexpr int kFallbackMaxDimensionPx = 2048;
 constexpr qreal kFallbackMinScale = 0.35;
+constexpr qreal kInitialPreviewScaleMax = 0.45;
+constexpr qreal kPreviewStrokePercentCap = 35.0;
+constexpr qreal kMinPreviewStrokePercent = 8.0;
+constexpr int kStrokeHeavyGlyphThreshold = 1800;
+constexpr qint64 kStrokeHeavyPixelThreshold = 2800000;
 
 struct CssWeightMapping {
     int cssWeight;
@@ -860,13 +865,14 @@ static void applyCenterAlignment(QGraphicsTextItem* editor) {
 
 } // anonymous namespace (InlineTextEditor and helpers)
 
-TextMediaItem::VectorDrawSnapshot TextMediaItem::captureVectorSnapshot() const {
+TextMediaItem::VectorDrawSnapshot TextMediaItem::captureVectorSnapshot(StrokeRenderMode mode) const {
     VectorDrawSnapshot snapshot;
     snapshot.text = textForRendering();
     snapshot.font = m_font;
     snapshot.fillColor = m_textColor;
     snapshot.outlineColor = m_textBorderColor;
-    snapshot.outlineWidthPercent = m_textBorderWidthPercent;
+    const bool usePreviewStroke = (mode == StrokeRenderMode::Preview) && m_previewStrokeActive;
+    snapshot.outlineWidthPercent = usePreviewStroke ? m_previewStrokePercent : m_textBorderWidthPercent;
     snapshot.highlightEnabled = m_highlightEnabled;
     snapshot.highlightColor = m_highlightColor;
     snapshot.contentPaddingPx = contentPaddingPx();
@@ -1344,6 +1350,9 @@ void TextMediaItem::setText(const QString& text) {
         if (m_fitToTextEnabled) {
             scheduleFitToTextUpdate();
         }
+        m_waitingForHighResRaster = false;
+        m_pendingHighResScale = 0.0;
+        updateStrokePreviewState(m_textBorderWidthPercent);
     }
 }
 
@@ -1397,6 +1406,9 @@ void TextMediaItem::setTextBorderWidth(qreal percent) {
              << "approxPx" << computeStrokeWidthFromFont(m_font, clamped)
              << "textLength" << m_text.size();
     m_textBorderWidthPercent = clamped;
+    m_waitingForHighResRaster = false;
+    m_pendingHighResScale = 0.0;
+    updateStrokePreviewState(clamped);
     const qreal newPadding = contentPaddingPx();
 
     m_needsRasterization = true;
@@ -1413,7 +1425,7 @@ void TextMediaItem::setTextBorderWidth(qreal percent) {
             inlineEditor->invalidateCache();
         }
     }
-
+    updateStrokeBadgeVisibility();
 }
 
 void TextMediaItem::setTextBorderWidthOverrideEnabled(bool enabled) {
@@ -1929,6 +1941,9 @@ void TextMediaItem::handleInlineEditorTextChanged(const QString& newText) {
     m_editorRenderingText = newText;
     m_needsRasterization = true;
     m_scaledRasterDirty = true;
+    m_waitingForHighResRaster = false;
+    m_pendingHighResScale = 0.0;
+    updateStrokePreviewState(m_textBorderWidthPercent);
     update();
 }
 
@@ -2100,6 +2115,8 @@ void TextMediaItem::onInteractiveGeometryChanged() {
     
     m_scaledRasterDirty = true;
     update();
+
+    updateStrokePreviewState(m_textBorderWidthPercent);
 }
 
 void TextMediaItem::refreshAlignmentControlsLayout() {
@@ -2169,9 +2186,13 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
     update();
 }
 
-void TextMediaItem::renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor, const QRectF& visibleRegion) {
+void TextMediaItem::renderTextToImage(QImage& target,
+                                      const QSize& imageSize,
+                                      qreal scaleFactor,
+                                      const QRectF& visibleRegion,
+                                      StrokeRenderMode mode) {
     TextRasterJob job;
-    job.snapshot = captureVectorSnapshot();
+    job.snapshot = captureVectorSnapshot(mode);
     job.targetSize = QSize(std::max(1, imageSize.width()), std::max(1, imageSize.height()));
     job.scaleFactor = scaleFactor;
     job.targetRect = visibleRegion;  // ✅ Pass viewport for partial rendering even in sync mode
@@ -2350,6 +2371,42 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     // and the background raster doesn't need perfect sync.
     const bool needsSyncRender = altStretching;
     
+    const bool previewEligible = !needsSyncRender && !m_scaledRasterPixmapValid && !m_asyncRasterInProgress && (rasterScale - kInitialPreviewScaleMax > epsilon);
+    if (previewEligible) {
+        const qreal previewScale = std::clamp(kInitialPreviewScaleMax, epsilon, rasterScale);
+        const qreal previewRatio = std::max(previewScale / std::max(rasterScale, epsilon), epsilon);
+        const QSize previewSize(
+            std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(targetWidth) * previewRatio))),
+            std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(targetHeight) * previewRatio))));
+
+        const StrokeRenderMode strokeMode = m_previewStrokeActive ? StrokeRenderMode::Preview : StrokeRenderMode::Normal;
+        renderTextToImage(m_scaledRasterizedText, previewSize, previewScale, visibleRegion, strokeMode);
+
+        QImage previewImage = m_scaledRasterizedText;
+        if (previewImage.size() != targetSize) {
+            previewImage = previewImage.scaled(targetSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        }
+
+        m_scaledRasterizedText = previewImage;
+        m_scaledRasterPixmap = QPixmap::fromImage(m_scaledRasterizedText);
+        m_scaledRasterPixmap.setDevicePixelRatio(1.0);
+        m_scaledRasterPixmapValid = !m_scaledRasterPixmap.isNull();
+        m_scaledRasterVisibleRegion = visibleRegion;
+        m_lastViewportRect = visibleRegion;
+        m_lastViewportScale = boundedCanvasZoom;
+        m_lastRasterizedScale = previewScale;
+        m_lastCanvasZoomForRaster = boundedCanvasZoom;
+        m_scaledRasterDirty = true;
+
+        m_waitingForHighResRaster = true;
+        m_pendingHighResScale = rasterScale;
+        updateStrokeBadgeVisibility();
+
+        ++m_rasterRequestId;
+        startAsyncRasterRequest(targetSize, rasterScale, boundedCanvasZoom, m_rasterRequestId);
+        return;
+    }
+
     if (needsSyncRender) {
         ++m_rasterRequestId;
         m_pendingRasterRequestId = m_rasterRequestId;
@@ -2359,7 +2416,8 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
 
         // ✅ Option A: Apply viewport optimization even in sync rendering mode
         // This reduces pixels by 10× during editing at high zoom levels
-        renderTextToImage(m_scaledRasterizedText, targetSize, rasterScale, visibleRegion);
+        const StrokeRenderMode strokeMode = m_previewStrokeActive ? StrokeRenderMode::Preview : StrokeRenderMode::Normal;
+        renderTextToImage(m_scaledRasterizedText, targetSize, rasterScale, visibleRegion, strokeMode);
         m_scaledRasterPixmap = QPixmap::fromImage(m_scaledRasterizedText);
         m_scaledRasterPixmap.setDevicePixelRatio(1.0);
         m_scaledRasterPixmapValid = !m_scaledRasterPixmap.isNull();
@@ -2544,6 +2602,7 @@ void TextMediaItem::startAsyncRasterRequest(const QSize& targetSize, qreal effec
     m_asyncRasterInProgress = true;
     m_pendingRasterRequestId = requestId;
     m_activeAsyncRasterRequest = request;
+    updateStrokeBadgeVisibility();
 
     // Calculate visible region for viewport optimization
     QRectF visibleRegion = computeVisibleRegion();
@@ -2740,6 +2799,11 @@ void TextMediaItem::handleRasterJobFinished(quint64 generation, QImage&& raster,
     }
 
     if (generation != m_rasterJobGeneration) {
+        if (m_waitingForHighResRaster && std::abs(scale - m_pendingHighResScale) < 1e-3) {
+            m_waitingForHighResRaster = false;
+            m_pendingHighResScale = 0.0;
+        }
+        updateStrokeBadgeVisibility();
         startNextPendingAsyncRasterRequest();
         return;
     }
@@ -2760,6 +2824,16 @@ void TextMediaItem::handleRasterJobFinished(quint64 generation, QImage&& raster,
     m_asyncRasterInProgress = false;
     m_pendingRasterRequestId = 0;
     m_lastScaledRasterUpdate = std::chrono::steady_clock::now();
+
+    if (m_waitingForHighResRaster && std::abs(scale - m_pendingHighResScale) < 1e-3) {
+        m_waitingForHighResRaster = false;
+        m_pendingHighResScale = 0.0;
+        if (m_previewStrokeActive) {
+            m_previewStrokeActive = false;
+        }
+    }
+
+    updateStrokeBadgeVisibility();
 
     update();
     startNextPendingAsyncRasterRequest();
@@ -2945,6 +3019,24 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
         if (!m_rasterizedText.isNull()) {
             painter->drawImage(bounds, m_rasterizedText);
         }
+    }
+
+    if (m_renderingStrokeBadgeVisible) {
+        painter->save();
+        const qreal inset = std::min<qreal>(bounds.width(), bounds.height()) * 0.02;
+        const QPointF badgeTopLeft = bounds.topLeft() + QPointF(std::max<qreal>(inset, 12.0), std::max<qreal>(inset, 12.0));
+        const QSizeF badgeSize(190.0, 32.0);
+        QRectF badgeRect(badgeTopLeft, badgeSize);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(QColor(0, 0, 0, 180));
+        painter->drawRoundedRect(badgeRect, 6.0, 6.0);
+        painter->setPen(Qt::white);
+        QFont badgeFont = painter->font();
+        badgeFont.setPointSizeF(std::max<qreal>(badgeFont.pointSizeF(), 11.0));
+        badgeFont.setBold(true);
+        painter->setFont(badgeFont);
+        painter->drawText(badgeRect.adjusted(10.0, 0.0, -10.0, 0.0), Qt::AlignVCenter | Qt::AlignLeft, QStringLiteral("Rendering outline..."));
+        painter->restore();
     }
 
     painter->restore();
@@ -3148,6 +3240,50 @@ void TextMediaItem::updateAlignmentControlsLayout() {
     const QPointF anchorScene = mapToScene(anchorItem);
 
     m_alignmentPanel->updateLayoutWithAnchor(anchorScene, view);
+}
+
+bool TextMediaItem::isStrokeWorkExpensiveCandidate() const {
+    const QString& content = textForRendering();
+    if (content.size() > kStrokeHeavyGlyphThreshold) {
+        return true;
+    }
+
+    const qint64 width = std::max(1, m_baseSize.width());
+    const qint64 height = std::max(1, m_baseSize.height());
+    const qint64 pixelEstimate = width * height;
+    return pixelEstimate > kStrokeHeavyPixelThreshold;
+}
+
+void TextMediaItem::updateStrokePreviewState(qreal requestedPercent) {
+    const bool expensiveStroke = (requestedPercent >= kPreviewStrokePercentCap) && isStrokeWorkExpensiveCandidate();
+    const bool shouldEnablePreview = expensiveStroke && requestedPercent > 0.0;
+
+    if (shouldEnablePreview) {
+        const bool wasActive = m_previewStrokeActive;
+        m_previewStrokeActive = true;
+        const qreal previewPercent = std::min(kPreviewStrokePercentCap, std::max(kMinPreviewStrokePercent, requestedPercent * 0.35));
+        m_previewStrokePercent = previewPercent;
+        if (!wasActive) {
+            qDebug() << "[TextMediaItem][StrokePreview]" << mediaId()
+                     << "requested%" << requestedPercent
+                     << "preview%" << previewPercent
+                     << "glyphEstimate" << textForRendering().size();
+        }
+    } else if (m_previewStrokeActive) {
+        m_previewStrokeActive = false;
+        m_previewStrokePercent = 0.0;
+    }
+
+    updateStrokeBadgeVisibility();
+}
+
+void TextMediaItem::updateStrokeBadgeVisibility() {
+    const bool showBadge = m_previewStrokeActive || m_waitingForHighResRaster || (m_asyncRasterInProgress && isStrokeWorkExpensiveCandidate());
+    if (showBadge == m_renderingStrokeBadgeVisible) {
+        return;
+    }
+    m_renderingStrokeBadgeVisible = showBadge;
+    update();
 }
 
 void TextMediaItem::updateAlignmentButtonStates() {

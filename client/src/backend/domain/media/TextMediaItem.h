@@ -50,6 +50,11 @@ namespace TextMediaDefaults {
 // Text media item - displays editable text with same interaction as image/video media
 class TextMediaItem : public ResizableMediaBase {
 public:
+    enum class StrokeRenderMode {
+        Normal,
+        Preview
+    };
+
     explicit TextMediaItem(
         const QSize& initialSize,
         int visualSizePx,
@@ -237,6 +242,12 @@ private:
     quint64 m_frozenFallbackJobGeneration = 0;
     QSize m_pendingFallbackSize;
     qreal m_pendingFallbackScale = 1.0;
+
+    bool m_previewStrokeActive = false;
+    qreal m_previewStrokePercent = 0.0;
+    bool m_renderingStrokeBadgeVisible = false;
+    bool m_waitingForHighResRaster = false;
+    qreal m_pendingHighResScale = 0.0;
     
     // Text alignment settings
     HorizontalAlignment m_horizontalAlignment = HorizontalAlignment::Center;
@@ -283,7 +294,7 @@ private:
         QImage execute() const;
     };
 
-    VectorDrawSnapshot captureVectorSnapshot() const;
+    VectorDrawSnapshot captureVectorSnapshot(StrokeRenderMode mode = StrokeRenderMode::Normal) const;
     static void paintVectorSnapshot(QPainter* painter, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor);
 
     QRectF computeVisibleRegion() const;
@@ -303,7 +314,7 @@ private:
     void startNextPendingBaseRasterRequest();
     void handleInlineEditorTextChanged(const QString& newText);
     const QString& textForRendering() const;
-    void renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor, const QRectF& visibleRegion = QRectF());
+    void renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor, const QRectF& visibleRegion = QRectF(), StrokeRenderMode mode = StrokeRenderMode::Normal);
     void ensureAlignmentControls();
     void updateAlignmentControlsLayout();
     void updateAlignmentButtonStates();
@@ -311,6 +322,9 @@ private:
     void applyFitModeConstraintsToEditor();
     qreal contentPaddingPx() const;
     void handleContentPaddingChanged(qreal oldPadding, qreal newPadding);
+    void updateStrokePreviewState(qreal requestedPercent);
+    bool isStrokeWorkExpensiveCandidate() const;
+    void updateStrokeBadgeVisibility();
 
     static int s_maxRasterDimension;
 };
