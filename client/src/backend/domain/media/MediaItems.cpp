@@ -529,31 +529,19 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                 // Alt + corner: non-uniform two-axis stretch by directly changing base size (independent width/height)
                 // Bake current uniform scale into base size when Alt mode starts
                 if (!m_cornerStretchOrigCaptured || !wasAltStretching) {
-                    qDebug() << "[ALT_RESIZE_DEBUG] Corner Alt resize CAPTURE (wasAltStretching:" << wasAltStretching << ")";
-                    qDebug() << "  m_baseSize BEFORE:" << m_baseSize;
-                    qDebug() << "  scale() BEFORE:" << scale();
-                    
                     const bool derivedHandlesBaking = onAltResizeModeEngaged();
                     qreal s = scale();
-                    
-                    qDebug() << "  derivedHandlesBaking:" << derivedHandlesBaking;
-                    qDebug() << "  scale() AFTER onAltResizeModeEngaged:" << s;
                     
                     // Capture original size - always use current m_baseSize
                     // For derived classes (TextMedia), they handle scale via m_uniformScaleFactor
                     // so we work with baseSize, and the visual size = baseSize * scale
                     QSize originalSize = m_baseSize;
-                    qDebug() << "  originalSize captured as m_baseSize:" << originalSize;
                     
                     if (!derivedHandlesBaking && std::abs(s - 1.0) > 1e-9) {
-                        qDebug() << "  PARENT BAKING scale into baseSize";
                         prepareGeometryChange();
-                        QSize oldBase = m_baseSize;
                         m_baseSize.setWidth(std::max(1, int(std::round(m_baseSize.width() * s))));
                         m_baseSize.setHeight(std::max(1, int(std::round(m_baseSize.height() * s))));
-                        qDebug() << "  m_baseSize changed:" << oldBase << "->" << m_baseSize;
                         setScale(1.0);
-                        qDebug() << "  scale reset to 1.0";
                         // Re-evaluate fixed corner scene point after transform change
                         m_fixedItemPoint = handlePoint(opposite(m_activeHandle));
                         m_fixedScenePoint = mapToScene(m_fixedItemPoint);
@@ -576,8 +564,6 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                     m_cornerStretchInitialOffsetX = dx;
                     m_cornerStretchInitialOffsetY = dy;
                     m_cornerStretchOriginalBaseSize = originalSize;
-                    qDebug() << "  m_cornerStretchOriginalBaseSize captured as:" << originalSize;
-                    qDebug() << "  m_baseSize after capture:" << m_baseSize;
                     m_cornerStretchOrigCaptured = true;
                 }
                 // Compute current outward deltas
@@ -629,15 +615,8 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                 int newW = std::max(1, static_cast<int>(std::round(desiredW / currentScale)));
                 int newH = std::max(1, static_cast<int>(std::round(desiredH / currentScale)));
                 if (newW != newBase.width() || newH != newBase.height()) {
-                    qDebug() << "[ALT_RESIZE_DEBUG] Applying new dimensions during drag:";
-                    qDebug() << "  desiredW/H (visual):" << desiredW << "/" << desiredH;
-                    qDebug() << "  currentScale:" << currentScale;
-                    qDebug() << "  newW/H (baseSize):" << newW << "/" << newH;
-                    qDebug() << "  m_cornerStretchOriginalBaseSize:" << m_cornerStretchOriginalBaseSize;
-                    qDebug() << "  m_baseSize BEFORE:" << m_baseSize;
                     prepareGeometryChange();
                     newBase.setWidth(newW); newBase.setHeight(newH); m_baseSize = newBase;
-                    qDebug() << "  m_baseSize AFTER:" << m_baseSize;
                     // Update fixed item point (opposite corner) but keep scene anchor stable
                     m_fixedItemPoint = handlePoint(opposite(m_activeHandle));
                 }
