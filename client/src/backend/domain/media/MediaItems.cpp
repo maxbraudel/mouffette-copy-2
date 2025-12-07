@@ -527,15 +527,33 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                 if (!wasAltStretching && m_cornerStretchOrigCaptured) m_cornerStretchOrigCaptured = false;
             } else {
                 // Alt + corner: non-uniform two-axis stretch by directly changing base size (independent width/height)
-                // Bake current uniform scale into base size on first Alt use for this interaction
-                if (!m_cornerStretchOrigCaptured) {
-                    onAltResizeModeEngaged();
+                // Bake current uniform scale into base size when Alt mode starts
+                if (!m_cornerStretchOrigCaptured || !wasAltStretching) {
+                    qDebug() << "[ALT_RESIZE_DEBUG] Corner Alt resize CAPTURE (wasAltStretching:" << wasAltStretching << ")";
+                    qDebug() << "  m_baseSize BEFORE:" << m_baseSize;
+                    qDebug() << "  scale() BEFORE:" << scale();
+                    
+                    const bool derivedHandlesBaking = onAltResizeModeEngaged();
                     qreal s = scale();
-                    if (std::abs(s - 1.0) > 1e-9) {
+                    
+                    qDebug() << "  derivedHandlesBaking:" << derivedHandlesBaking;
+                    qDebug() << "  scale() AFTER onAltResizeModeEngaged:" << s;
+                    
+                    // Capture original size - always use current m_baseSize
+                    // For derived classes (TextMedia), they handle scale via m_uniformScaleFactor
+                    // so we work with baseSize, and the visual size = baseSize * scale
+                    QSize originalSize = m_baseSize;
+                    qDebug() << "  originalSize captured as m_baseSize:" << originalSize;
+                    
+                    if (!derivedHandlesBaking && std::abs(s - 1.0) > 1e-9) {
+                        qDebug() << "  PARENT BAKING scale into baseSize";
                         prepareGeometryChange();
+                        QSize oldBase = m_baseSize;
                         m_baseSize.setWidth(std::max(1, int(std::round(m_baseSize.width() * s))));
                         m_baseSize.setHeight(std::max(1, int(std::round(m_baseSize.height() * s))));
+                        qDebug() << "  m_baseSize changed:" << oldBase << "->" << m_baseSize;
                         setScale(1.0);
+                        qDebug() << "  scale reset to 1.0";
                         // Re-evaluate fixed corner scene point after transform change
                         m_fixedItemPoint = handlePoint(opposite(m_activeHandle));
                         m_fixedScenePoint = mapToScene(m_fixedItemPoint);
@@ -557,7 +575,9 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                     if (m_activeHandle == TopLeft || m_activeHandle == TopRight)  dy = -dy; // outward = up for top corners
                     m_cornerStretchInitialOffsetX = dx;
                     m_cornerStretchInitialOffsetY = dy;
-                    m_cornerStretchOriginalBaseSize = m_baseSize;
+                    m_cornerStretchOriginalBaseSize = originalSize;
+                    qDebug() << "  m_cornerStretchOriginalBaseSize captured as:" << originalSize;
+                    qDebug() << "  m_baseSize after capture:" << m_baseSize;
                     m_cornerStretchOrigCaptured = true;
                 }
                 // Compute current outward deltas
@@ -603,11 +623,21 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                 }
                 // Apply new base size (non-uniform)
                 QSize newBase = m_baseSize;
-                int newW = std::max(1, static_cast<int>(std::round(desiredW)));
-                int newH = std::max(1, static_cast<int>(std::round(desiredH)));
+                // For items with scale != 1 that handle their own baking (TextMedia),
+                // we need to convert visual dimensions back to base dimensions
+                qreal currentScale = scale();
+                int newW = std::max(1, static_cast<int>(std::round(desiredW / currentScale)));
+                int newH = std::max(1, static_cast<int>(std::round(desiredH / currentScale)));
                 if (newW != newBase.width() || newH != newBase.height()) {
+                    qDebug() << "[ALT_RESIZE_DEBUG] Applying new dimensions during drag:";
+                    qDebug() << "  desiredW/H (visual):" << desiredW << "/" << desiredH;
+                    qDebug() << "  currentScale:" << currentScale;
+                    qDebug() << "  newW/H (baseSize):" << newW << "/" << newH;
+                    qDebug() << "  m_cornerStretchOriginalBaseSize:" << m_cornerStretchOriginalBaseSize;
+                    qDebug() << "  m_baseSize BEFORE:" << m_baseSize;
                     prepareGeometryChange();
                     newBase.setWidth(newW); newBase.setHeight(newH); m_baseSize = newBase;
+                    qDebug() << "  m_baseSize AFTER:" << m_baseSize;
                     // Update fixed item point (opposite corner) but keep scene anchor stable
                     m_fixedItemPoint = handlePoint(opposite(m_activeHandle));
                 }
@@ -624,6 +654,7 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
             if (!allowAltResize()) {
                 altPressed = false;
             }
+            const bool wasAltStretching = m_lastAxisAltStretch;
             qreal baseLenAxis = horizontalHandle ? m_baseSize.width() : m_baseSize.height();
             qreal deltaScene = horizontalHandle ? (event->scenePos().x() - m_fixedScenePoint.x())
                                                 : (event->scenePos().y() - m_fixedScenePoint.y());
@@ -653,11 +684,16 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                 // update m_baseSize dimension directly for instantaneous non-uniform scaling.
                 m_lastAxisAltStretch = true;
                 m_fillContentWithoutAspect = true; // persist fill behavior after non-uniform axis stretch
-                if (!m_axisStretchOrigCaptured) {
-                    onAltResizeModeEngaged();
-                    // First Alt movement in this interaction: bake current uniform scale into base size
+                if (!m_axisStretchOrigCaptured || !wasAltStretching) {
+                    const bool derivedHandlesBaking = onAltResizeModeEngaged();
                     qreal s = scale();
-                    if (std::abs(s - 1.0) > 1e-9) {
+                    
+                    // Capture original size - always use current m_baseSize
+                    // For derived classes (TextMedia), they handle scale via m_uniformScaleFactor
+                    // so we work with baseSize, and the visual size = baseSize * scale
+                    QSize originalSize = m_baseSize;
+                    
+                    if (!derivedHandlesBaking && std::abs(s - 1.0) > 1e-9) {
                         prepareGeometryChange();
                         m_baseSize.setWidth(std::max(1, int(std::round(m_baseSize.width() * s))));
                         m_baseSize.setHeight(std::max(1, int(std::round(m_baseSize.height() * s))));
@@ -679,7 +715,7 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                     // Apply the same direction normalization as deltaScene to ensure consistency
                     if (m_activeHandle == LeftMid || m_activeHandle == TopMid) cursorToEdgeDist = -cursorToEdgeDist;
                     m_axisStretchInitialOffset = cursorToEdgeDist;
-                    m_axisStretchOriginalBaseSize = m_baseSize;
+                    m_axisStretchOriginalBaseSize = originalSize;
                     m_axisStretchOrigCaptured = true;
                 }
                 // Check for Shift+Alt snapping before applying size changes
@@ -706,15 +742,18 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                 }
 
                 QSize newBase = m_baseSize;
+                // For items with scale != 1 that handle their own baking (TextMedia),
+                // we need to convert visual dimensions back to base dimensions
+                qreal currentScale = scale();
                 if (horizontalHandle) {
-                    int newW = std::max(1, static_cast<int>(std::round(desiredAxisSize)));
+                    int newW = std::max(1, static_cast<int>(std::round(desiredAxisSize / currentScale)));
                     if (newW != newBase.width()) {
                         prepareGeometryChange();
                         newBase.setWidth(newW);
                         m_baseSize = newBase;
                     }
                 } else {
-                    int newH = std::max(1, static_cast<int>(std::round(desiredAxisSize)));
+                    int newH = std::max(1, static_cast<int>(std::round(desiredAxisSize / currentScale)));
                     if (newH != newBase.height()) {
                         prepareGeometryChange();
                         newBase.setHeight(newH);

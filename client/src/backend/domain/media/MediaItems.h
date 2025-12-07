@@ -199,7 +199,8 @@ public:
 
 protected:
     virtual bool allowAltResize() const;
-    virtual void onAltResizeModeEngaged() {}
+    // Return true if derived class handles scale baking internally (TextMedia), false for default parent baking
+    virtual bool onAltResizeModeEngaged() { return false; }
     QSize m_baseSize;
     Handle m_activeHandle = None;
     // Tracks if the current (or last) midpoint axis resize used Alt (option) for axis-only stretch

@@ -2859,6 +2859,13 @@ void TextMediaItem::updateInlineEditorGeometry() {
 }
 
 void TextMediaItem::onInteractiveGeometryChanged() {
+    qDebug() << "[ALT_RESIZE_DEBUG] onInteractiveGeometryChanged";
+    qDebug() << "  m_baseSize:" << m_baseSize;
+    qDebug() << "  scale():" << scale();
+    qDebug() << "  m_uniformScaleFactor:" << m_uniformScaleFactor;
+    qDebug() << "  m_lastAxisAltStretch:" << m_lastAxisAltStretch;
+    qDebug() << "  visualSize:" << QSizeF(m_baseSize.width() * m_uniformScaleFactor * scale(), m_baseSize.height() * m_uniformScaleFactor * scale());
+    
     ResizableMediaBase::onInteractiveGeometryChanged();
 
     if (m_lastAxisAltStretch) {
@@ -3845,28 +3852,36 @@ QVariant TextMediaItem::itemChange(GraphicsItemChange change, const QVariant& va
         const bool scaleBeingBaked = (std::abs(newScale - 1.0) < epsilon) && (std::abs(oldScale - 1.0) > epsilon);
         
         if (scaleBeingBaked) {
-            // When scale is baked back to 1.0 we need to carry the previous uniform zoom into
-            // m_uniformScaleFactor so text rendering and inline editing keep their size.
-            // Alt-resize mutates the base size, so accumulate the baked scale here as well.
+            qDebug() << "[ALT_RESIZE_DEBUG] itemChange: scale being baked";
+            qDebug() << "  oldScale:" << oldScale << "newScale:" << newScale;
+            qDebug() << "  m_pendingUniformScaleBake:" << m_pendingUniformScaleBake;
+            qDebug() << "  m_pendingUniformScaleAmount:" << m_pendingUniformScaleAmount;
+            qDebug() << "  m_uniformScaleFactor BEFORE:" << m_uniformScaleFactor;
+            qDebug() << "  m_baseSize:" << m_baseSize;
+            
+            qreal bakeScale = m_pendingUniformScaleBake ? m_pendingUniformScaleAmount : std::abs(oldScale);
+            if (std::abs(bakeScale) <= epsilon) {
+                bakeScale = 1.0;
+            }
+            qDebug() << "  bakeScale:" << bakeScale;
+
+            if (std::abs(bakeScale - 1.0) > epsilon) {
+                m_uniformScaleFactor *= bakeScale;
+                qDebug() << "  m_uniformScaleFactor AFTER multiply:" << m_uniformScaleFactor;
+            }
+            if (std::abs(m_uniformScaleFactor) < epsilon) {
+                m_uniformScaleFactor = 1.0;
+            }
+            qDebug() << "  m_uniformScaleFactor FINAL:" << m_uniformScaleFactor;
+
             if (m_lastAxisAltStretch) {
-                if (std::abs(oldScale) > epsilon) {
-                    m_uniformScaleFactor *= std::abs(oldScale);
-                }
-                if (std::abs(m_uniformScaleFactor) < epsilon) {
-                    m_uniformScaleFactor = 1.0;
-                }
                 // Force editor geometry update to sync with new base size
                 m_cachedEditorPosValid = false;
                 m_documentMetricsDirty = true;
-            } else {
-                // Normal bake: accumulate scale to preserve it
-                if (std::abs(oldScale) > epsilon) {
-                    m_uniformScaleFactor *= std::abs(oldScale);
-                }
-                if (std::abs(m_uniformScaleFactor) < epsilon) {
-                    m_uniformScaleFactor = 1.0;
-                }
             }
+
+            m_pendingUniformScaleBake = false;
+            m_pendingUniformScaleAmount = 1.0;
             m_scaledRasterDirty = true;
         }
         
@@ -4276,12 +4291,31 @@ void TextMediaItem::applyFitToTextNow() {
     update();
 }
 
-void TextMediaItem::onAltResizeModeEngaged() {
-    if (!m_fitToTextEnabled) {
-        return;
+bool TextMediaItem::onAltResizeModeEngaged() {
+    const qreal epsilon = 1e-4;
+    const qreal currentScale = scale();
+    
+    qDebug() << "[ALT_RESIZE_DEBUG] onAltResizeModeEngaged() called";
+    qDebug() << "  currentScale:" << currentScale;
+    qDebug() << "  m_baseSize:" << m_baseSize;
+    qDebug() << "  m_uniformScaleFactor:" << m_uniformScaleFactor;
+    qDebug() << "  visualSize (baseSize * uniformScale):" << QSizeF(m_baseSize.width() * m_uniformScaleFactor, m_baseSize.height() * m_uniformScaleFactor);
+    
+    if (std::abs(currentScale - 1.0) > epsilon) {
+        m_pendingUniformScaleBake = true;
+        m_pendingUniformScaleAmount = std::abs(currentScale);
+        m_lastObservedScale = currentScale;
+        qDebug() << "  pendingBake SET: amount =" << m_pendingUniformScaleAmount;
     }
 
-    setFitToTextEnabled(false);
+    if (m_fitToTextEnabled) {
+        qDebug() << "  Disabling fit-to-text mode";
+        setFitToTextEnabled(false);
+    }
+    
+    qDebug() << "  Returning true (TextMedia handles baking)";
+    // Return true to indicate TextMedia handles scale baking internally via m_uniformScaleFactor
+    return true;
 }
 
 void TextMediaItem::applyAlignmentToEditor() {

@@ -145,7 +145,7 @@ public:
     void syncInlineEditorToBaseSize();
 
 protected:
-    void onAltResizeModeEngaged() override;
+    bool onAltResizeModeEngaged() override;
     void onInteractiveGeometryChanged() override;
 
 private:
@@ -194,6 +194,8 @@ private:
     bool m_scaledRasterDirty = true;
     qreal m_uniformScaleFactor = 1.0;
     qreal m_lastObservedScale = 1.0;
+    bool m_pendingUniformScaleBake = false;
+    qreal m_pendingUniformScaleAmount = 1.0;
     qreal m_lastVisualScaleFactor = 1.0;
     qreal m_lastCanvasZoomForRaster = 1.0;
     std::chrono::steady_clock::time_point m_lastScaledRasterUpdate{};
