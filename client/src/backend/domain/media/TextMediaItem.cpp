@@ -1448,6 +1448,22 @@ void TextMediaItem::paintSimplifiedStroke(QPainter* painter, const VectorDrawSna
     
     if (snapshot.fitToTextEnabled) {
         doc.setTextWidth(-1.0);
+        qreal maxLineWidth = 1.0;
+        if (QAbstractTextDocumentLayout* docLayout = doc.documentLayout()) {
+            for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+                if (QTextLayout* textLayout = block.layout()) {
+                    for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                        const QTextLine line = textLayout->lineAt(lineIndex);
+                        if (!line.isValid()) {
+                            continue;
+                        }
+                        maxLineWidth = std::max(maxLineWidth, line.naturalTextWidth());
+                    }
+                }
+            }
+            maxLineWidth = std::max(maxLineWidth, docLayout->documentSize().width());
+        }
+        doc.setTextWidth(std::max<qreal>(1.0, maxLineWidth));
     } else {
         doc.setTextWidth(availableWidth);
     }
@@ -2115,6 +2131,22 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
 
     if (snapshot.fitToTextEnabled) {
         doc.setTextWidth(-1.0);
+        qreal maxLineWidth = 1.0;
+        if (QAbstractTextDocumentLayout* docLayout = doc.documentLayout()) {
+            for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+                if (QTextLayout* textLayout = block.layout()) {
+                    for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                        const QTextLine line = textLayout->lineAt(lineIndex);
+                        if (!line.isValid()) {
+                            continue;
+                        }
+                        maxLineWidth = std::max(maxLineWidth, line.naturalTextWidth());
+                    }
+                }
+            }
+            maxLineWidth = std::max(maxLineWidth, docLayout->documentSize().width());
+        }
+        doc.setTextWidth(std::max<qreal>(1.0, maxLineWidth));
     } else {
         doc.setTextWidth(availableWidth);
     }
@@ -2345,7 +2377,6 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
     }
 
     painter->translate(margin, offsetY);
-    const qreal contentWidth = availableWidth;
     int glyphCount = 0;
     qint64 outlineMs = 0;
 
@@ -2364,22 +2395,11 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
             QTextLine line = textLayout->lineAt(lineIndex);
             if (!line.isValid()) continue;
 
-            qreal lineOffsetX = 0.0;
             const qreal lineWidth = line.naturalTextWidth();
-            switch (snapshot.horizontalAlignment) {
-                case HorizontalAlignment::Left:
-                    lineOffsetX = 0.0;
-                    break;
-                case HorizontalAlignment::Center:
-                    lineOffsetX = std::max<qreal>(0.0, (contentWidth - lineWidth) * 0.5);
-                    break;
-                case HorizontalAlignment::Right:
-                    lineOffsetX = std::max<qreal>(0.0, contentWidth - lineWidth);
-                    break;
-            }
+            const qreal lineOffsetX = line.x();
 
             if (highlightEnabled && highlightColor.alpha() > 0) {
-                const qreal highlightWidth = std::max<qreal>(lineWidth > 0.0 ? lineWidth : contentWidth, 1.0);
+                const qreal highlightWidth = std::max<qreal>(lineWidth > 0.0 ? lineWidth : availableWidth, 1.0);
                 const qreal highlightHeight = std::max<qreal>(line.height(), 1.0);
                 const QRectF highlightRect(QPointF(lineOffsetX, blockRect.top() + line.y()), QSizeF(highlightWidth, highlightHeight));
                 painter->fillRect(highlightRect, highlightColor);
@@ -4953,9 +4973,7 @@ void TextMediaItem::applyFitModeConstraintsToEditor() {
 
     const qreal margin = contentPaddingPx();
     const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
-    const qreal desiredTextWidth = m_fitToTextEnabled
-        ? -1.0
-        : std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) / uniformScale - 2.0 * margin);
+    qreal desiredTextWidth = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) / uniformScale - 2.0 * margin);
 
     bool widthModified = false;
 
@@ -4969,6 +4987,24 @@ void TextMediaItem::applyFitModeConstraintsToEditor() {
                 opt.setWrapMode(desiredWrap);
                 doc->setDefaultTextOption(opt);
                 widthModified = true;
+            }
+
+            if (m_fitToTextEnabled) {
+                doc->adjustSize();
+                qreal maxLineWidth = 1.0;
+                for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
+                    if (QTextLayout* textLayout = block.layout()) {
+                        for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                            const QTextLine line = textLayout->lineAt(lineIndex);
+                            if (!line.isValid()) {
+                                continue;
+                            }
+                            maxLineWidth = std::max(maxLineWidth, line.naturalTextWidth());
+                        }
+                    }
+                }
+                maxLineWidth = std::max(maxLineWidth, doc->idealWidth());
+                desiredTextWidth = std::max<qreal>(1.0, maxLineWidth);
             }
         }
 
