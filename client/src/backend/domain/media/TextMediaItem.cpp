@@ -396,7 +396,7 @@ QRectF computeDocumentTextBounds(const QTextDocument& doc, QAbstractTextDocument
     const auto lineVisualRectInDocument = [](const QRectF& blockRect, const QTextLine& line) {
         const QRectF naturalRect = line.naturalTextRect();
         if (naturalRect.isValid() && naturalRect.width() > 0.0 && naturalRect.height() > 0.0) {
-            return naturalRect.translated(blockRect.topLeft() + QPointF(0.0, line.y()));
+            return naturalRect.translated(blockRect.topLeft());
         }
 
         return QRectF(blockRect.left() + line.x(),
@@ -838,7 +838,7 @@ protected:
 
                                         QRectF lineRect = line.naturalTextRect();
                                         if (lineRect.isValid() && lineRect.width() > 0.0 && lineRect.height() > 0.0) {
-                                            lineRect.translate(blockRect.topLeft() + QPointF(0.0, line.y()));
+                                            lineRect.translate(blockRect.topLeft());
                                         } else {
                                             const qreal lineWidth = line.naturalTextWidth();
                                             const qreal width = std::max<qreal>(lineWidth, 1.0);
@@ -2397,7 +2397,7 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
 
                     QRectF lineRect = line.naturalTextRect();
                     if (lineRect.isValid() && lineRect.width() > 0.0 && lineRect.height() > 0.0) {
-                        lineRect.translate(blockRect.topLeft() + QPointF(0.0, line.y()));
+                        lineRect.translate(blockRect.topLeft());
                     } else {
                         const qreal lineWidth = line.naturalTextWidth();
                         const qreal width = std::max<qreal>(lineWidth, 1.0);
