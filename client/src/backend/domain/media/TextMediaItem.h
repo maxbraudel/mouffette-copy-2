@@ -318,6 +318,8 @@ private:
     // Async rasterization
     struct AsyncRasterRequest {
         QSize targetSize;
+        QSize baseSizeAtRequest;
+        QRectF visibleRegionAtRequest;
         qreal scale = 1.0;
         qreal canvasZoom = 1.0;
         quint64 contentRevision = 0;
