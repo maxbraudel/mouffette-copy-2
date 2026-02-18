@@ -3571,6 +3571,21 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     bool targetSizeChanged = (m_lastScaledTargetSize != targetSize);
     bool baseSizeChanged = (m_lastScaledBaseSize != m_baseSize);
     const bool forceRefresh = m_forceScaledRasterRefresh;
+    bool visibleRegionFullyCovered = true;
+
+    if (!disableViewportOptimization && m_scaledRasterPixmapValid &&
+        m_scaledRasterVisibleRegion.isValid() && !m_scaledRasterVisibleRegion.isEmpty() &&
+        !visibleRegion.isEmpty()) {
+        constexpr qreal kCoverageEpsilon = 0.5;
+        QRectF requiredVisible = visibleRegion.adjusted(kCoverageEpsilon,
+                                                        kCoverageEpsilon,
+                                                        -kCoverageEpsilon,
+                                                        -kCoverageEpsilon);
+        if (requiredVisible.isEmpty()) {
+            requiredVisible = visibleRegion;
+        }
+        visibleRegionFullyCovered = m_scaledRasterVisibleRegion.contains(requiredVisible);
+    }
     
     if (!disableViewportOptimization && !forceRefresh && !m_lastViewportRect.isEmpty() && !visibleRegion.isEmpty() && m_scaledRasterPixmapValid && !targetSizeChanged && !baseSizeChanged) {
         // Check if scale changed significantly
@@ -3593,6 +3608,13 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
                 
             }
         }
+    }
+
+    // Coverage gate: even if overlap heuristic says "stable", we must rerender
+    // when the currently presented partial region does not fully cover the
+    // current camera field. This eliminates persistent missing tiles on pan.
+    if (!visibleRegionFullyCovered) {
+        viewportShiftedSignificantly = true;
     }
     
     // If viewport didn't shift significantly AND target size AND base size unchanged, we can skip re-rasterization
