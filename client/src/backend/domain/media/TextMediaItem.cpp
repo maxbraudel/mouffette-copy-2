@@ -4164,34 +4164,44 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
             m_renderState == RenderState::HighResReady;
         const bool hasPresentedScaledRaster = hasCurrentHighRes && stateAllowsPresent;
         const bool staleScaledGeometry = (m_lastScaledBaseSize != m_baseSize);
+        const bool geometryFreshForPresentation = !staleScaledGeometry;
+        const bool canPresentCurrentHighRes = hasPresentedScaledRaster && geometryFreshForPresentation;
 
         auto drawPixmapWithoutDeformation = [&](const QPixmap& pixmap,
                                                 const QRectF& sourceRect,
                                                 const QRectF& preferredDestRect,
-                                                const QRectF& logicalSourceItemRect) {
+                                                const QRectF& logicalSourceItemRect,
+                                                bool centerInBounds) {
             painter->save();
             painter->setClipRect(scaledBounds);
-            const QRectF destRect = logicalSourceItemRect.isValid() && !logicalSourceItemRect.isEmpty()
+            QRectF destRect = logicalSourceItemRect.isValid() && !logicalSourceItemRect.isEmpty()
                 ? scaleTransform.mapRect(logicalSourceItemRect)
                 : preferredDestRect;
+            if (centerInBounds) {
+                destRect.moveCenter(scaledBounds.center());
+            }
             painter->drawPixmap(destRect, pixmap, sourceRect);
             painter->restore();
         };
 
         auto drawImageWithoutDeformation = [&](const QImage& image,
                                                const QRectF& preferredDestRect,
-                                               const QRectF& logicalSourceItemRect) {
+                                               const QRectF& logicalSourceItemRect,
+                                               bool centerInBounds) {
             painter->save();
             painter->setClipRect(scaledBounds);
-            const QRectF destRect = logicalSourceItemRect.isValid() && !logicalSourceItemRect.isEmpty()
+            QRectF destRect = logicalSourceItemRect.isValid() && !logicalSourceItemRect.isEmpty()
                 ? scaleTransform.mapRect(logicalSourceItemRect)
                 : preferredDestRect;
+            if (centerInBounds) {
+                destRect.moveCenter(scaledBounds.center());
+            }
             const QRectF sourceRect(QPointF(0.0, 0.0), QSizeF(static_cast<qreal>(image.width()), static_cast<qreal>(image.height())));
             painter->drawImage(destRect, image, sourceRect);
             painter->restore();
         };
 
-        if (hasPresentedScaledRaster) {
+        if (canPresentCurrentHighRes) {
             // DPR is always 1.0, so source size equals physical pixel dimensions
             const QSizeF sourceSize(
                 static_cast<qreal>(m_scaledRasterPixmap.width()),
@@ -4214,7 +4224,7 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
                 destRect = scaledBounds;
             }
 
-            const bool shouldAvoidDeformation = interactiveResize && staleScaledGeometry;
+            const bool shouldAvoidDeformation = staleScaledGeometry;
             if (shouldAvoidDeformation) {
                 QRectF logicalSourceItemRect;
                 if (!m_scaledRasterVisibleRegion.isEmpty() && m_scaledRasterVisibleRegion.isValid()) {
@@ -4224,7 +4234,8 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
                                                    static_cast<qreal>(m_lastScaledBaseSize.width()),
                                                    static_cast<qreal>(m_lastScaledBaseSize.height()));
                 }
-                drawPixmapWithoutDeformation(m_scaledRasterPixmap, sourceRect, destRect, logicalSourceItemRect);
+                const bool centerInBounds = m_lastAxisAltStretch;
+                drawPixmapWithoutDeformation(m_scaledRasterPixmap, sourceRect, destRect, logicalSourceItemRect, centerInBounds);
             } else {
                 // Draw viewport at high resolution (8×+) - this overwrites the fallback in the visible area
                 painter->drawPixmap(destRect, m_scaledRasterPixmap, sourceRect);
@@ -4255,7 +4266,8 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
                                                        static_cast<qreal>(m_lastScaledBaseSize.width()),
                                                        static_cast<qreal>(m_lastScaledBaseSize.height()));
                     }
-                    drawPixmapWithoutDeformation(m_scaledRasterPixmap, sourceRect, destRect, logicalSourceItemRect);
+                    const bool centerInBounds = m_lastAxisAltStretch;
+                    drawPixmapWithoutDeformation(m_scaledRasterPixmap, sourceRect, destRect, logicalSourceItemRect, centerInBounds);
                 } else {
                     painter->drawPixmap(destRect, m_scaledRasterPixmap, sourceRect);
                 }
@@ -4268,7 +4280,8 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
                                                        static_cast<qreal>(m_lastRasterizedSize.width()),
                                                        static_cast<qreal>(m_lastRasterizedSize.height()));
                     }
-                    drawImageWithoutDeformation(m_rasterizedText, scaledBounds, logicalSourceItemRect);
+                    const bool centerInBounds = m_lastAxisAltStretch;
+                    drawImageWithoutDeformation(m_rasterizedText, scaledBounds, logicalSourceItemRect, centerInBounds);
                 } else {
                     painter->drawImage(scaledBounds, m_rasterizedText);
                 }
