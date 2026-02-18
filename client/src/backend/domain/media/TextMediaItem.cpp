@@ -2480,6 +2480,9 @@ TextMediaItem::TextMediaItem(
     ensureTextRenderer();
 
     setFitToTextEnabled(true);
+    // Ensure initial geometry is already fit-to-text before first paint.
+    // Without this, the first frame can show default 400x200 then snap.
+    applyFitToTextNow();
 }
 
 void TextMediaItem::setText(const QString& text) {
