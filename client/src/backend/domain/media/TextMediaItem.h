@@ -185,6 +185,109 @@ private:
     qreal m_cachedEditorOpacity = -1.0;
     QPointF m_cachedEditorPos;
     bool m_cachedEditorPosValid = false;
+
+    enum class InvalidationReason {
+        Content,
+        Geometry,
+        VisualStyle,
+        Zoom
+    };
+
+    struct TextRenderTarget {
+        qreal visualScaleFactor = 1.0;
+        qreal geometryScale = 1.0;
+        qreal canvasZoom = 1.0;
+
+        bool isEquivalentTo(const TextRenderTarget& other, qreal tolerance = 1e-4) const {
+            return std::abs(visualScaleFactor - other.visualScaleFactor) < tolerance &&
+                   std::abs(geometryScale - other.geometryScale) < tolerance &&
+                   std::abs(canvasZoom - other.canvasZoom) < tolerance;
+        }
+    };
+
+    struct TextRenderScheduler {
+        bool dirty = true;
+        InvalidationReason reason = InvalidationReason::Content;
+        std::optional<TextRenderTarget> previewTarget;
+        std::optional<TextRenderTarget> highResTarget;
+        std::optional<TextRenderTarget> presentTarget;
+
+        void invalidate(InvalidationReason newReason) {
+            dirty = true;
+            reason = newReason;
+        }
+
+        void requestPreview(const TextRenderTarget& target) {
+            previewTarget = target;
+        }
+
+        void requestHighRes(const TextRenderTarget& target) {
+            highResTarget = target;
+            presentTarget = target;
+        }
+
+        std::optional<TextRenderTarget> takePresentTarget() {
+            if (!presentTarget.has_value()) {
+                return std::nullopt;
+            }
+            TextRenderTarget target = *presentTarget;
+            presentTarget.reset();
+            return target;
+        }
+
+        void markPresented() {
+            dirty = false;
+        }
+    };
+
+    struct TextRenderCacheKey {
+        quint64 textHash = 0;
+        quint64 styleHash = 0;
+        int wrapWidthPx = 0;
+        int targetWidthPx = 0;
+        int targetHeightPx = 0;
+        int scalePermille = 1000;
+        int dprPermille = 1000;
+        bool fitToText = false;
+
+        bool operator==(const TextRenderCacheKey& other) const {
+            return textHash == other.textHash &&
+                   styleHash == other.styleHash &&
+                   wrapWidthPx == other.wrapWidthPx &&
+                   targetWidthPx == other.targetWidthPx &&
+                   targetHeightPx == other.targetHeightPx &&
+                   scalePermille == other.scalePermille &&
+                   dprPermille == other.dprPermille &&
+                   fitToText == other.fitToText;
+        }
+    };
+
+    struct TextLayoutSnapshot {
+        quint64 key = 0;
+        qreal wrapWidth = 0.0;
+        QSizeF docSize;
+        qreal idealWidth = 0.0;
+        int lineCount = 0;
+        bool valid = false;
+    };
+
+    struct TextRasterJob;
+
+    struct ITextRenderer {
+        virtual ~ITextRenderer() = default;
+        virtual QImage render(const TextRasterJob& job) const = 0;
+        virtual const char* backendName() const = 0;
+    };
+
+    TextRenderScheduler m_renderScheduler;
+    TextLayoutSnapshot m_layoutSnapshot;
+    TextRenderCacheKey m_activeHighResCacheKey;
+    TextRenderCacheKey m_previewCacheKey;
+    bool m_activeHighResCacheKeyValid = false;
+    bool m_previewCacheKeyValid = false;
+    static constexpr qint64 kPerItemCacheBudgetBytes = 24LL * 1024LL * 1024LL;
+    std::unique_ptr<ITextRenderer> m_textRenderer;
+    QString m_textRendererBackend;
     
     // Rasterization cache for performance
     QImage m_rasterizedText;
@@ -218,6 +321,7 @@ private:
         qreal canvasZoom = 1.0;
         quint64 requestId = 0;
         quint64 generation = 0;
+        std::chrono::steady_clock::time_point startedAt{};
 
         bool isEquivalentTo(const QSize& size, qreal scaleFactor, qreal zoom) const {
             constexpr qreal tolerance = 1e-4;
@@ -238,6 +342,17 @@ private:
     QPixmap m_scaledRasterPixmap;
     bool m_scaledRasterPixmapValid = false;
     QRectF m_scaledRasterVisibleRegion;  // Region of item that was rasterized (for viewport optimization)
+    enum class RenderState {
+        Idle,
+        PreviewReady,
+        HighResPending,
+        HighResReady
+    };
+    RenderState m_renderState = RenderState::Idle;
+    bool m_scaledRasterUpdateQueued = false;
+    qreal m_queuedVisualScaleFactor = 1.0;
+    qreal m_queuedGeometryScale = 1.0;
+    qreal m_queuedCanvasZoom = 1.0;
     
     // Viewport tracking for cache management (Étape 3)
     QRectF m_lastViewportRect;   // Last viewport rectangle calculated (item coords)
@@ -424,6 +539,15 @@ private:
 
     VectorDrawSnapshot captureVectorSnapshot(StrokeRenderMode mode = StrokeRenderMode::Normal) const;
     static void paintVectorSnapshot(QPainter* painter, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor, qreal canvasZoom = 1.0, const QRectF& viewport = QRectF());
+    void invalidateRenderPipeline(InvalidationReason reason, bool invalidateLayout = false);
+    TextRenderCacheKey makeCacheKey(const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor, qreal dpr) const;
+    bool cacheKeyMatches(const TextRenderCacheKey& lhs, const TextRenderCacheKey& rhs) const;
+    void enforceCacheBudget();
+    quint64 computeLayoutSnapshotKey(const QString& text, const QFont& font, qreal wrapWidth) const;
+    bool canReuseLayoutSnapshot(const QString& text, const QFont& font, qreal wrapWidth) const;
+    void updateLayoutSnapshot(const QString& text, const QFont& font, qreal wrapWidth, const QSizeF& docSize, qreal idealWidth, int lineCount);
+    void ensureTextRenderer();
+    QImage renderRasterJobWithBackend(const TextRasterJob& job) const;
 
     QRectF computeVisibleRegion() const;
     void ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale, qreal canvasZoom);
@@ -443,6 +567,8 @@ private:
     void handleInlineEditorTextChanged(const QString& newText);
     const QString& textForRendering() const;
     void renderTextToImage(QImage& target, const QSize& imageSize, qreal scaleFactor, const QRectF& visibleRegion = QRectF(), StrokeRenderMode mode = StrokeRenderMode::Normal);
+    void queueScaledRasterUpdate(qreal visualScaleFactor, qreal geometryScale, qreal canvasZoom);
+    void dispatchQueuedScaledRasterUpdate();
     void ensureAlignmentControls();
     void updateAlignmentControlsLayout();
     void updateAlignmentButtonStates();

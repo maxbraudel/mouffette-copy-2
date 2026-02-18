@@ -22,7 +22,6 @@ template<typename T> class QFutureWatcher;
 #endif
 class QLabel;
 class QVBoxLayout;
-class MouseBlockingRoundedRectItem;
 class QGraphicsProxyWidget; // kept for other uses, but not used by info overlay anymore
 
 class QMimeData;
@@ -225,6 +224,14 @@ private:
     void updateSettingsToggleButtonGeometry();
     void ensureToolSelector(); // Create tool selector (segmented control)
     void updateToolSelectorGeometry(); // Position tool selector next to settings button
+    void scheduleSceneChangedMaintenance();
+    void processSceneChangedMaintenance();
+    void requestZoomRelayout(bool forceFull = false);
+    void processZoomRelayout();
+    void queueOverlayRelayoutFor(ResizableMediaBase* media);
+    void processPendingOverlayRelayoutSet();
+    void maybeEmitCanvasPerfSnapshot();
+    void recordZoomEvent();
     
     // Selection chrome factory helpers
     QGraphicsPathItem* createSelectionBorderPath(const QColor& color, qreal zValue, Qt::PenStyle style, qreal dashOffset);
@@ -277,6 +284,18 @@ private:
     QPoint m_lastMomentumDelta;
     QElapsedTimer m_momentumTimer;
     QElapsedTimer m_lastOverlayLayoutTimer; // throttle rapid overlay relayouts during pinch/scroll
+    QElapsedTimer m_canvasPerfWindow;
+    QTimer* m_sceneChangedWorkTimer = nullptr;
+    bool m_sceneChangedWorkPending = false;
+    QTimer* m_zoomRelayoutTimer = nullptr;
+    bool m_zoomRelayoutPending = false;
+    bool m_zoomRelayoutForceFull = false;
+    quint64 m_perfZoomEventCount = 0;
+    quint64 m_perfRelayoutCount = 0;
+    quint64 m_perfFullRelayoutCount = 0;
+    quint64 m_perfSelectionChromeCount = 0;
+    quint64 m_perfSceneChangedBatchCount = 0;
+    QSet<ResizableMediaBase*> m_pendingOverlayRelayoutSet;
     QGraphicsEllipseItem* m_remoteCursorDot = nullptr;
     // Remote cursor styling
     int m_remoteCursorDiameterPx = 30;
@@ -361,7 +380,6 @@ private:
     QPushButton* m_launchSceneButton = nullptr; // new Launch Remote Scene toggle button
     QPushButton* m_launchTestSceneButton = nullptr; // new Launch Test Scene toggle button
     QPushButton* m_uploadButton = nullptr; // upload button in media list overlay
-    MouseBlockingRoundedRectItem* m_infoBorderRect = nullptr; // graphics rect for info overlay border
     bool m_infoRefreshQueued = false;
     int m_lastMediaItemCount = -1; // cache to detect add/remove
     // Mapping media item -> container widget in overlay (pour gestion sélection visuelle)

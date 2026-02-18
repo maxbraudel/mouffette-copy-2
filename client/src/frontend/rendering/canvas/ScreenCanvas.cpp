@@ -166,6 +166,55 @@ static const int gScrollbarAutoHideDelayMs = 500; // Time in milliseconds before
 
 // Helper: relayout overlays for all media items so absolute panels (settings) stay pinned
 namespace {
+static bool envFlagEnabled(const char* primary, const char* fallback = nullptr) {
+    const auto parse = [](const QByteArray& raw) {
+        if (raw.isEmpty()) {
+            return false;
+        }
+        const QByteArray lowered = raw.trimmed().toLower();
+        return lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on";
+    };
+
+    if (qEnvironmentVariableIsSet(primary) && parse(qgetenv(primary))) {
+        return true;
+    }
+    if (fallback && qEnvironmentVariableIsSet(fallback) && parse(qgetenv(fallback))) {
+        return true;
+    }
+    return false;
+}
+
+static bool canvasProfilingEnabled() {
+    static const bool enabled = envFlagEnabled("MOUFFETTE_CANVAS_PROFILING");
+    return enabled;
+}
+
+static bool forceFullViewportUpdateEnabled() {
+    static const bool enabled = envFlagEnabled("MOUFFETTE_FORCE_FULL_VIEWPORT_UPDATE");
+    return enabled;
+}
+
+static bool targetedZoomRelayoutEnabled() {
+    static const bool enabled = envFlagEnabled("MOUFFETTE_TARGETED_ZOOM_RELAYOUT", "canvas.zoom.coalescer");
+    return enabled;
+}
+
+static QString mediaListOverlayChromeStyle() {
+    return QStringLiteral(
+        "#MediaListOverlayWidget {"
+        " background-color: %1;"
+        " border: 1px solid %2;"
+        " border-radius: %3px;"
+        " color: %4;"
+        " %5"
+        " }")
+        .arg(AppColors::colorToCss(AppColors::gOverlayBackgroundColor))
+        .arg(AppColors::colorToCss(AppColors::gOverlayBorderColor))
+        .arg(QString::number(gOverlayCornerRadiusPx))
+        .arg(AppColors::colorToCss(AppColors::gOverlayTextColor))
+        .arg(AppColors::canvasMediaSettingsOptionsFontCss());
+}
+
 static void relayoutAllMediaOverlays(QGraphicsScene* scene) {
     if (!scene) return;
     const QList<QGraphicsItem*> items = scene->items();
@@ -175,6 +224,34 @@ static void relayoutAllMediaOverlays(QGraphicsScene* scene) {
             if (auto* textItem = dynamic_cast<TextMediaItem*>(base)) {
                 textItem->refreshAlignmentControlsLayout();
             }
+        }
+    }
+}
+
+static void relayoutSelectedMediaOverlays(QGraphicsScene* scene) {
+    if (!scene) {
+        return;
+    }
+
+    const QList<QGraphicsItem*> selected = scene->selectedItems();
+    for (QGraphicsItem* it : selected) {
+        if (auto* base = dynamic_cast<ResizableMediaBase*>(it)) {
+            base->updateOverlayLayout();
+            if (auto* textItem = dynamic_cast<TextMediaItem*>(base)) {
+                textItem->refreshAlignmentControlsLayout();
+            }
+        }
+    }
+}
+
+static void relayoutMediaOverlays(const QSet<ResizableMediaBase*>& mediaSet) {
+    for (ResizableMediaBase* base : mediaSet) {
+        if (!base) {
+            continue;
+        }
+        base->updateOverlayLayout();
+        if (auto* textItem = dynamic_cast<TextMediaItem*>(base)) {
+            textItem->refreshAlignmentControlsLayout();
         }
     }
 }
@@ -327,11 +404,6 @@ ScreenCanvas::~ScreenCanvas() {
     unregisterCanvas(this);
     if (m_scene) {
         disconnect(m_scene, nullptr, this, nullptr);
-    }
-    if (m_infoBorderRect && scene()) {
-        scene()->removeItem(m_infoBorderRect);
-        delete m_infoBorderRect;
-        m_infoBorderRect = nullptr;
     }
     if (m_infoWidget) {
         m_infoWidget->deleteLater();
@@ -556,14 +628,12 @@ void ScreenCanvas::initInfoOverlay() {
     if (!m_infoWidget) {
         // Create a clipped container to properly handle border-radius clipping
         m_infoWidget = new ClippedContainer(viewport());
+        m_infoWidget->setObjectName("MediaListOverlayWidget");
         m_infoWidget->setAttribute(Qt::WA_StyledBackground, true);
         m_infoWidget->setAutoFillBackground(true);
         // Ensure overlay blocks mouse events to canvas behind it
         m_infoWidget->setAttribute(Qt::WA_NoMousePropagation, true);
-        // Build stylesheet - transparent background like MediaSettingsPanel (background handled by graphics rect)
-        // Remove corner rounding (was using gOverlayCornerRadiusPx) to have sharp edges per latest design
-        const QString bg = QString("background-color: transparent; border-radius: 0px; color: white; font-size: 16px;");
-        m_infoWidget->setStyleSheet(bg);
+        m_infoWidget->setStyleSheet(mediaListOverlayChromeStyle());
         // Baseline minimum width to avoid tiny panel before content exists
         m_infoWidget->setMinimumWidth(200);
         // Vertically, the overlay must never stretch; we'll size it explicitly
@@ -922,19 +992,6 @@ void ScreenCanvas::initInfoOverlay() {
         m_infoWidget->hide(); // hidden until first layout
     }
     
-    // Create background rectangle early to prevent visibility issues during window state changes
-    if (!m_infoBorderRect && scene()) {
-        m_infoBorderRect = new MouseBlockingRoundedRectItem();
-        m_infoBorderRect->setRadius(gOverlayCornerRadiusPx);
-        applyOverlayBorder(m_infoBorderRect);
-        m_infoBorderRect->setBrush(QBrush(AppColors::gOverlayBackgroundColor));
-        m_infoBorderRect->setZValue(12009.5);
-        m_infoBorderRect->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-        m_infoBorderRect->setData(0, QStringLiteral("overlay"));
-        scene()->addItem(m_infoBorderRect);
-        m_infoBorderRect->setVisible(false);
-    }
-    
     // Ensure settings toggle button + detached panel are ready
     ensureSettingsToggleButton();
     if (!m_globalSettingsPanel) {
@@ -1051,9 +1108,10 @@ void ScreenCanvas::refreshInfoOverlay() {
         nameLbl->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Fixed); // Allow expanding to show full text
         nameLbl->setWordWrap(false);
         nameLbl->setTextInteractionFlags(Qt::NoTextInteraction);
-        nameLbl->setFixedHeight(18); // Exact height to prevent any extra spacing
+        const int nameMinHeight = std::max(18, QFontMetrics(nameLbl->font()).height() + 2);
+        nameLbl->setFixedHeight(nameMinHeight);
         nameLbl->setContentsMargins(0, 0, 0, 0); // Force zero margins
-        nameLbl->setAlignment(Qt::AlignLeft | Qt::AlignTop); // Align text to top
+        nameLbl->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         nameLbl->setProperty("originalText", name); // Store original text for ellipsis
         mediaLayout->addWidget(nameLbl);
         
@@ -1106,7 +1164,8 @@ void ScreenCanvas::refreshInfoOverlay() {
         details->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Fixed); // Allow expanding to show full text
         details->setWordWrap(false); // Keep dimensions and size on single line
         details->setTextInteractionFlags(Qt::NoTextInteraction);
-        details->setFixedHeight(18); // Fixed height to prevent stretching
+        const int detailsMinHeight = std::max(18, QFontMetrics(details->font()).height() + 2);
+        details->setFixedHeight(detailsMinHeight);
         details->setProperty("originalText", detailsText); // Store original text for ellipsis
     mediaLayout->addWidget(details);
 
@@ -1208,19 +1267,9 @@ void ScreenCanvas::refreshInfoOverlay() {
     // Only show overlay if there are media items present
     if (!media.isEmpty()) {
         m_infoWidget->show();
-        if (m_infoBorderRect) m_infoBorderRect->setVisible(true);
     } else {
         // Hide overlay when no media is present
         m_infoWidget->hide();
-        if (m_infoBorderRect) {
-            m_infoBorderRect->setVisible(false);
-            // Guard against any deferred layout that might resurrect visibility
-            QTimer::singleShot(0, this, [this]() {
-                if (m_infoBorderRect && (!m_infoWidget || !m_infoWidget->isVisible())) {
-                    m_infoBorderRect->setVisible(false);
-                }
-            });
-        }
     }
     
     // Perform final layout and positioning synchronously to prevent flicker
@@ -1236,22 +1285,7 @@ void ScreenCanvas::layoutInfoOverlay() {
     const int x = viewport()->width() - margin - w;
     const int y = viewport()->height() - margin - m_infoWidget->height();
     m_infoWidget->move(std::max(0, x), std::max(0, y));
-    
-    // Update border rect position and visibility based on widget state
-    if (m_infoWidget->isVisible() && m_infoBorderRect) {
-        // Immediate positioning to avoid jitter caused by queued updates while panning/zooming
-        const int widthNow = w;
-        const int heightNow = m_infoWidget->height();
-        const QPoint vpPosNow(std::max(0, x), std::max(0, y));
-        // map viewport pixel position directly to scene
-        const QPointF widgetTopLeftScene = mapToScene(vpPosNow);
-        m_infoBorderRect->setRect(0, 0, widthNow, heightNow);
-        m_infoBorderRect->setPos(widgetTopLeftScene);
-        m_infoBorderRect->setVisible(true);
-    } else if (m_infoBorderRect) {
-        m_infoBorderRect->setVisible(false);
-    }
-    
+
     updateOverlayVScrollVisibilityAndGeometry();
 }
 
@@ -1412,8 +1446,13 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
         viewport()->setAutoFillBackground(false);
         viewport()->setAttribute(Qt::WA_TranslucentBackground, true);
     }
-    // FullViewportUpdate avoids artifacts when we translate/scale manually.
-    setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
+    // Use a bounded update mode by default to reduce redraw pressure during zoom.
+    // Fallback to full viewport updates can be forced via env for artifact investigation.
+    if (forceFullViewportUpdateEnabled()) {
+        setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
+    } else {
+        setViewportUpdateMode(QGraphicsView::BoundingRectViewportUpdate);
+    }
     viewport()->setMouseTracking(true);
     grabGesture(Qt::PinchGesture); // for non-macOS platforms
     m_nativePinchGuardTimer = new QTimer(this);
@@ -1426,7 +1465,7 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     m_scene->addItem(m_snapGuides);
 
     // On scene changes, re-anchor, refresh overlay on media count change, and keep selection chrome in sync
-    connect(m_scene, &QGraphicsScene::changed, this, [this](const QList<QRectF>&){ layoutInfoOverlay(); maybeRefreshInfoOverlayOnSceneChanged(); updateSelectionChrome(); });
+    connect(m_scene, &QGraphicsScene::changed, this, [this](const QList<QRectF>&){ scheduleSceneChangedMaintenance(); });
     connect(m_scene, &QGraphicsScene::selectionChanged, this, [this](){ 
         updateSelectionChrome(); 
         updateGlobalSettingsPanelVisibility(); // Update settings panel when selection changes
@@ -1454,6 +1493,153 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
 
     // Register for global upload state callbacks
     registerCanvas(this);
+}
+
+void ScreenCanvas::scheduleSceneChangedMaintenance() {
+    m_sceneChangedWorkPending = true;
+    if (!m_sceneChangedWorkTimer) {
+        m_sceneChangedWorkTimer = new QTimer(this);
+        m_sceneChangedWorkTimer->setSingleShot(true);
+        m_sceneChangedWorkTimer->setInterval(16);
+        connect(m_sceneChangedWorkTimer, &QTimer::timeout, this, [this]() {
+            processSceneChangedMaintenance();
+        });
+    }
+
+    if (!m_sceneChangedWorkTimer->isActive()) {
+        m_sceneChangedWorkTimer->start();
+    }
+}
+
+void ScreenCanvas::queueOverlayRelayoutFor(ResizableMediaBase* media) {
+    if (!media) {
+        return;
+    }
+    m_pendingOverlayRelayoutSet.insert(media);
+}
+
+void ScreenCanvas::processPendingOverlayRelayoutSet() {
+    if (m_pendingOverlayRelayoutSet.isEmpty()) {
+        return;
+    }
+
+    QSet<ResizableMediaBase*> valid;
+    valid.reserve(m_pendingOverlayRelayoutSet.size());
+    for (ResizableMediaBase* media : m_pendingOverlayRelayoutSet) {
+        if (!media || media->scene() != m_scene) {
+            continue;
+        }
+        valid.insert(media);
+    }
+    m_pendingOverlayRelayoutSet.clear();
+    if (!valid.isEmpty()) {
+        relayoutMediaOverlays(valid);
+    }
+}
+
+void ScreenCanvas::processSceneChangedMaintenance() {
+    if (!m_sceneChangedWorkPending) {
+        return;
+    }
+
+    m_sceneChangedWorkPending = false;
+    ++m_perfSceneChangedBatchCount;
+
+    maybeRefreshInfoOverlayOnSceneChanged();
+    processPendingOverlayRelayoutSet();
+    if (m_lastOverlayLayoutTimer.elapsed() > 20) {
+        layoutInfoOverlay();
+        m_lastOverlayLayoutTimer.restart();
+    }
+    updateSelectionChrome();
+
+    maybeEmitCanvasPerfSnapshot();
+}
+
+void ScreenCanvas::requestZoomRelayout(bool forceFull) {
+    m_zoomRelayoutPending = true;
+    m_zoomRelayoutForceFull = m_zoomRelayoutForceFull || forceFull;
+
+    if (!m_zoomRelayoutTimer) {
+        m_zoomRelayoutTimer = new QTimer(this);
+        m_zoomRelayoutTimer->setSingleShot(true);
+        m_zoomRelayoutTimer->setInterval(8);
+        connect(m_zoomRelayoutTimer, &QTimer::timeout, this, [this]() {
+            processZoomRelayout();
+        });
+    }
+
+    if (!m_zoomRelayoutTimer->isActive()) {
+        m_zoomRelayoutTimer->start();
+    }
+}
+
+void ScreenCanvas::processZoomRelayout() {
+    if (!m_zoomRelayoutPending || !m_scene) {
+        return;
+    }
+
+    const bool forceFull = m_zoomRelayoutForceFull;
+    m_zoomRelayoutPending = false;
+    m_zoomRelayoutForceFull = false;
+
+    const bool canUseTargeted = targetedZoomRelayoutEnabled() && !forceFull;
+    if (canUseTargeted) {
+        const bool hadExplicitSet = !m_pendingOverlayRelayoutSet.isEmpty();
+        processPendingOverlayRelayoutSet();
+        if (!hadExplicitSet) {
+            relayoutSelectedMediaOverlays(m_scene);
+        }
+    } else {
+        relayoutAllMediaOverlays(m_scene);
+        ++m_perfFullRelayoutCount;
+    }
+
+    ++m_perfRelayoutCount;
+    if (m_lastOverlayLayoutTimer.elapsed() > 24) {
+        layoutInfoOverlay();
+        m_lastOverlayLayoutTimer.restart();
+    }
+    updateSelectionChrome();
+
+    maybeEmitCanvasPerfSnapshot();
+}
+
+void ScreenCanvas::recordZoomEvent() {
+    ++m_perfZoomEventCount;
+    if (!m_canvasPerfWindow.isValid()) {
+        m_canvasPerfWindow.start();
+    }
+}
+
+void ScreenCanvas::maybeEmitCanvasPerfSnapshot() {
+    if (!canvasProfilingEnabled()) {
+        return;
+    }
+
+    if (!m_canvasPerfWindow.isValid()) {
+        m_canvasPerfWindow.start();
+        return;
+    }
+
+    if (m_canvasPerfWindow.elapsed() < 1000) {
+        return;
+    }
+
+    qInfo() << "[CanvasPerf]"
+            << "zoomEvents" << m_perfZoomEventCount
+            << "relayouts" << m_perfRelayoutCount
+            << "fullRelayouts" << m_perfFullRelayoutCount
+            << "selectionChrome" << m_perfSelectionChromeCount
+            << "sceneChangedBatches" << m_perfSceneChangedBatchCount
+            << "viewportMode" << static_cast<int>(viewportUpdateMode());
+
+    m_perfZoomEventCount = 0;
+    m_perfRelayoutCount = 0;
+    m_perfFullRelayoutCount = 0;
+    m_perfSelectionChromeCount = 0;
+    m_perfSceneChangedBatchCount = 0;
+    m_canvasPerfWindow.restart();
 }
 
 QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const QRectF& mediaBounds, bool shiftPressed, ResizableMediaBase* movingItem) const {
@@ -1863,10 +2049,9 @@ QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const
 
 void ScreenCanvas::showEvent(QShowEvent* event) {
     QGraphicsView::showEvent(event);
-    // Restore overlay background when window becomes visible (fixes minimize/restore issue)
-    if (m_infoBorderRect && m_infoWidget && m_infoWidget->isVisible()) {
-        m_infoBorderRect->setVisible(true);
-        m_infoBorderRect->setBrush(QBrush(AppColors::gOverlayBackgroundColor));
+    // Re-apply overlay style and layout when window becomes visible (fixes minimize/restore issue)
+    if (m_infoWidget && m_infoWidget->isVisible()) {
+        m_infoWidget->setStyleSheet(mediaListOverlayChromeStyle());
         QTimer::singleShot(0, [this]() { layoutInfoOverlay(); });
     }
     QTimer::singleShot(0, this, [this]() { 
@@ -2023,9 +2208,7 @@ void ScreenCanvas::recenterWithMargin(int marginPx) {
         fitInView(bounds, Qt::KeepAspectRatio);
         centerOn(bounds.center());
         // Ensure overlays are repositioned immediately in this early-exit path as well
-        relayoutAllMediaOverlays(m_scene);
-        layoutInfoOverlay();
-        updateSelectionChrome();
+        requestZoomRelayout(true);
         return;
     }
     const qreal sx = availW / bounds.width();
@@ -2039,13 +2222,12 @@ void ScreenCanvas::recenterWithMargin(int marginPx) {
             if (auto* b = dynamic_cast<ResizableMediaBase*>(it)) b->requestLabelRelayout();
         }
         // Also relayout all media overlays to keep absolute panels pinned
-        relayoutAllMediaOverlays(m_scene);
+        requestZoomRelayout(true);
     }
-    updateSelectionChrome();
     // Also immediately re-layout the media list overlay to avoid a brief misalignment
     // between the QWidget overlay (in viewport coords) and its scene-backed background rect
     // when the view's transform/center changes.
-    layoutInfoOverlay();
+    requestZoomRelayout(true);
     m_ignorePanMomentum = true; m_momentumPrimed = false; m_lastMomentumMag = 0.0; m_lastMomentumDelta = QPoint(0,0); m_momentumTimer.restart();
 }
 
@@ -2107,6 +2289,7 @@ QGraphicsRectItem* ScreenCanvas::createSelectionHandle(qreal zValue) {
 // Create/update high-z selection chrome so borders/handles are always visible above media
 void ScreenCanvas::updateSelectionChrome() {
     if (!m_scene) return;
+    ++m_perfSelectionChromeCount;
     QSet<ResizableMediaBase*> stillSelected;
     for (QGraphicsItem* it : m_scene->selectedItems()) {
         if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
@@ -2603,10 +2786,8 @@ bool ScreenCanvas::event(QEvent* event) {
             }
             m_lastMousePos = vpPos; // remember anchor
             zoomAroundViewportPos(vpPos, factor);
-            relayoutAllMediaOverlays(m_scene);
-            // Throttle overlay layout during rapid native pinch; rely on updateInfoOverlayGeometryForViewport on resize
-            if (m_lastOverlayLayoutTimer.elapsed() > 16) { layoutInfoOverlay(); m_lastOverlayLayoutTimer.restart(); }
-            updateSelectionChrome();
+            recordZoomEvent();
+            requestZoomRelayout();
             event->accept(); return true;
         }
     }
@@ -2629,9 +2810,8 @@ bool ScreenCanvas::viewportEvent(QEvent* event) {
             if (!viewport()->rect().contains(vpPos)) vpPos = viewport()->rect().center();
             m_lastMousePos = vpPos; // remember anchor
             zoomAroundViewportPos(vpPos, factor);
-            relayoutAllMediaOverlays(m_scene);
-            layoutInfoOverlay();
-            updateSelectionChrome();
+            recordZoomEvent();
+            requestZoomRelayout();
             event->accept();
             return true;
         }
@@ -2662,8 +2842,8 @@ bool ScreenCanvas::gestureEvent(QGestureEvent* event) {
             m_lastMousePos = vpPos; // keep coherent for subsequent wheel/native zooms
             const qreal factor = pinch->scaleFactor();
             zoomAroundViewportPos(vpPos, factor);
-            relayoutAllMediaOverlays(m_scene);
-            layoutInfoOverlay();
+            recordZoomEvent();
+            requestZoomRelayout();
         }
         event->accept();
         return true;
@@ -2767,6 +2947,7 @@ void ScreenCanvas::keyPressEvent(QKeyEvent* event) {
                                 // Relayout overlays/labels for this item after movement
                                 base->requestLabelRelayout();
                                 base->updateOverlayLayout();
+                                queueOverlayRelayoutFor(base);
                                 moved = true;
                             }
                         }
@@ -2803,6 +2984,7 @@ void ScreenCanvas::deleteMediaItem(ResizableMediaBase* item) {
     item->setVisible(false);
     item->setEnabled(false);
     item->prepareForDeletion();
+    m_pendingOverlayRelayoutSet.remove(item);
 
     clearSelectionChromeFor(item);
     if (item->isSelected()) item->setSelected(false);
@@ -3130,6 +3312,7 @@ void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
             const QPointF delta = sceneNow - m_dragStartScene;
             m_draggingSelected->setPos(m_dragItemStartPos + delta);
             m_draggingSelected->updateOverlayLayout();
+            queueOverlayRelayoutFor(m_draggingSelected);
             updateSelectionChromeGeometry(m_draggingSelected);
             event->accept();
             return;
@@ -3147,8 +3330,7 @@ void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
                 t.translate(deltaView.x() / t.m11(), deltaView.y() / t.m22());
                 setTransform(t);
                 // Keep absolute panels pinned during pan
-                relayoutAllMediaOverlays(m_scene);
-                layoutInfoOverlay();
+                requestZoomRelayout();
             }
             m_lastPanPoint = event->pos();
             event->accept();
@@ -3164,6 +3346,7 @@ void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
             m_draggingSelected->setPos(m_dragItemStartPos + delta);
             // Keep overlays and selection chrome in sync while dragging
             m_draggingSelected->updateOverlayLayout();
+            queueOverlayRelayoutFor(m_draggingSelected);
             updateSelectionChromeGeometry(m_draggingSelected);
             event->accept();
             return;
@@ -3334,10 +3517,8 @@ void ScreenCanvas::wheelEvent(QWheelEvent* event) {
             // Convert from view widget coords to viewport coords for correct anchoring
             QPoint vpPos = viewport() ? viewport()->mapFrom(this, event->position().toPoint()) : event->position().toPoint();
             zoomAroundViewportPos(vpPos, factor);
-            // After zooming, re-anchor all absolute overlays and the media info overlay
-            relayoutAllMediaOverlays(m_scene);
-            layoutInfoOverlay();
-            updateSelectionChrome();
+            recordZoomEvent();
+            requestZoomRelayout();
             event->accept();
             return;
         }
@@ -3373,8 +3554,7 @@ void ScreenCanvas::wheelEvent(QWheelEvent* event) {
         }
         horizontalScrollBar()->setValue(horizontalScrollBar()->value() - delta.x());
         verticalScrollBar()->setValue(verticalScrollBar()->value() - delta.y());
-        relayoutAllMediaOverlays(m_scene);
-        layoutInfoOverlay();
+        requestZoomRelayout();
         event->accept();
         return;
     }
@@ -3421,7 +3601,7 @@ void ScreenCanvas::resizeEvent(QResizeEvent* event) {
     }
     
     // PHASE 4: Update UI overlays to match new viewport
-    relayoutAllMediaOverlays(m_scene);
+    requestZoomRelayout(true);
     updateInfoOverlayGeometryForViewport();
     updateSettingsToggleButtonGeometry();
     updateToolSelectorGeometry();
@@ -3561,10 +3741,8 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
         setTransform(originalTransform);
         centerOn(originalCenter);
         if (m_scene) {
-            relayoutAllMediaOverlays(m_scene);
+            requestZoomRelayout(true);
         }
-        layoutInfoOverlay();
-        updateSelectionChrome();
     }
 }
 
