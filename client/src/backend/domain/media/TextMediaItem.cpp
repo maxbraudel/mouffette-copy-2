@@ -117,6 +117,56 @@ constexpr qreal kBorderWidthQuantizationStepPercent = 1.0;
 constexpr int kMaxCachedGlyphPaths = 60000;
 constexpr int kMaxRenderedGlyphPixmaps = 500;  // Phase 2: Rendered glyph cache limit
 constexpr int kFallbackFontPixelSize = 12;
+constexpr int kAbsoluteMaxRasterDimension = 8192;
+
+struct RasterSizingResult {
+    QSize size;
+    qreal scaleMultiplier = 1.0;
+    bool clamped = false;
+};
+
+int configuredRasterDimensionLimit() {
+    const int configured = std::clamp(TextMediaItem::maxRasterDimension(), 256, 16384);
+    return std::min(configured, kAbsoluteMaxRasterDimension);
+}
+
+RasterSizingResult constrainRasterSizing(qreal desiredWidth, qreal desiredHeight) {
+    const int maxDim = configuredRasterDimensionLimit();
+    const qreal safeDesiredWidth = (std::isfinite(desiredWidth) && desiredWidth > 0.0) ? desiredWidth : 1.0;
+    const qreal safeDesiredHeight = (std::isfinite(desiredHeight) && desiredHeight > 0.0) ? desiredHeight : 1.0;
+
+    qreal multiplier = 1.0;
+    const qreal maxDimQ = static_cast<qreal>(maxDim);
+    if (safeDesiredWidth > maxDimQ) {
+        multiplier = std::min(multiplier, maxDimQ / safeDesiredWidth);
+    }
+    if (safeDesiredHeight > maxDimQ) {
+        multiplier = std::min(multiplier, maxDimQ / safeDesiredHeight);
+    }
+
+    const qreal desiredArea = safeDesiredWidth * safeDesiredHeight;
+    const qreal maxArea = static_cast<qreal>(maxDim) * static_cast<qreal>(maxDim);
+    if (std::isfinite(desiredArea) && desiredArea > maxArea && desiredArea > 0.0) {
+        multiplier = std::min(multiplier, std::sqrt(maxArea / desiredArea));
+    }
+
+    if (!std::isfinite(multiplier) || multiplier <= 0.0) {
+        multiplier = 1e-4;
+    }
+
+    const int width = std::clamp(static_cast<int>(std::ceil(safeDesiredWidth * multiplier)), 1, maxDim);
+    const int height = std::clamp(static_cast<int>(std::ceil(safeDesiredHeight * multiplier)), 1, maxDim);
+
+    const bool clamped = (width < static_cast<int>(std::ceil(safeDesiredWidth))) ||
+                         (height < static_cast<int>(std::ceil(safeDesiredHeight))) ||
+                         (multiplier < 0.9999);
+
+    return RasterSizingResult{QSize(width, height), multiplier, clamped};
+}
+
+QSize constrainRasterSizeOnly(qreal desiredWidth, qreal desiredHeight) {
+    return constrainRasterSizing(desiredWidth, desiredHeight).size;
+}
 
 bool textProfilingEnabled() {
     static const bool enabled = envFlagEnabled("MOUFFETTE_TEXT_PROFILING");
@@ -2023,8 +2073,9 @@ void TextMediaItem::ensureTextRenderer() {
 
     struct GpuTextRendererPrototype final : ITextRenderer {
         QImage render(const TextRasterJob& job) const override {
-            const int targetWidth = std::max(1, job.targetSize.width());
-            const int targetHeight = std::max(1, job.targetSize.height());
+            const QSize constrainedTarget = constrainRasterSizeOnly(job.targetSize.width(), job.targetSize.height());
+            const int targetWidth = constrainedTarget.width();
+            const int targetHeight = constrainedTarget.height();
 
             auto renderImage = [&](const QSize& imageSize, const QRectF& clipRect, const QPointF& translation) {
                 QImage result(imageSize, QImage::Format_ARGB32_Premultiplied);
@@ -2056,8 +2107,10 @@ void TextMediaItem::ensureTextRenderer() {
             };
 
             if (!job.targetRect.isEmpty() && job.targetRect.isValid()) {
-                const int regionWidth = std::max(1, static_cast<int>(std::ceil(job.targetRect.width() * job.scaleFactor)));
-                const int regionHeight = std::max(1, static_cast<int>(std::ceil(job.targetRect.height() * job.scaleFactor)));
+                const QSize constrainedRegion = constrainRasterSizeOnly(job.targetRect.width() * job.scaleFactor,
+                                                                        job.targetRect.height() * job.scaleFactor);
+                const int regionWidth = constrainedRegion.width();
+                const int regionHeight = constrainedRegion.height();
                 return renderImage(QSize(regionWidth, regionHeight),
                                    job.targetRect,
                                    QPointF(-job.targetRect.left() * job.scaleFactor,
@@ -2416,14 +2469,17 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
 QImage TextMediaItem::TextRasterJob::execute() const {
     QElapsedTimer rasterTimer;
     rasterTimer.start();
-    const int targetWidth = std::max(1, targetSize.width());
-    const int targetHeight = std::max(1, targetSize.height());
+    const QSize constrainedTarget = constrainRasterSizeOnly(targetSize.width(), targetSize.height());
+    const int targetWidth = constrainedTarget.width();
+    const int targetHeight = constrainedTarget.height();
 
     // If targetRect is specified and valid, render only that region
     if (!targetRect.isEmpty() && targetRect.isValid()) {
         // Calculate pixel dimensions for the visible region
-        const int regionWidth = std::max(1, static_cast<int>(std::ceil(targetRect.width() * scaleFactor)));
-        const int regionHeight = std::max(1, static_cast<int>(std::ceil(targetRect.height() * scaleFactor)));
+        const QSize constrainedRegion = constrainRasterSizeOnly(targetRect.width() * scaleFactor,
+                                                                targetRect.height() * scaleFactor);
+        const int regionWidth = constrainedRegion.width();
+        const int regionHeight = constrainedRegion.height();
         
         // Create image for visible region only
         QImage result(regionWidth, regionHeight, QImage::Format_ARGB32_Premultiplied);
@@ -3636,9 +3692,12 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     }
 
     // Calculate target size first (needed for cache validation)
-    int targetWidth = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.width()) * boundedGeometryScale * boundedUniformScale * boundedCanvasZoom * boundedDpr)));
-    int targetHeight = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(m_baseSize.height()) * boundedGeometryScale * boundedUniformScale * boundedCanvasZoom * boundedDpr)));
-    qreal rasterScale = effectiveScale * boundedDpr;
+    const qreal desiredTargetWidth = static_cast<qreal>(m_baseSize.width()) * boundedGeometryScale * boundedUniformScale * boundedCanvasZoom * boundedDpr;
+    const qreal desiredTargetHeight = static_cast<qreal>(m_baseSize.height()) * boundedGeometryScale * boundedUniformScale * boundedCanvasZoom * boundedDpr;
+    const RasterSizingResult constrainedRaster = constrainRasterSizing(desiredTargetWidth, desiredTargetHeight);
+    int targetWidth = constrainedRaster.size.width();
+    int targetHeight = constrainedRaster.size.height();
+    qreal rasterScale = std::max(effectiveScale * boundedDpr * constrainedRaster.scaleMultiplier, epsilon);
     const QSize targetSize(targetWidth, targetHeight);
     const VectorDrawSnapshot cacheSnapshot = captureVectorSnapshot();
     const TextRenderCacheKey targetCacheKey = makeCacheKey(cacheSnapshot, targetSize, rasterScale, boundedDpr);
