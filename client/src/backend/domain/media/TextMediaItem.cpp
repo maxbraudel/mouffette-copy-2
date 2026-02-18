@@ -2167,6 +2167,72 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         cursor.mergeCharFormat(format);
     }
 
+    auto drawDocumentWithStrokeBehindFill = [&](qint64* outlineMsOut, int* glyphCountOut) {
+        if (outlineMsOut) {
+            *outlineMsOut = 0;
+        }
+        if (glyphCountOut) {
+            *glyphCountOut = 0;
+        }
+
+        if (strokeWidth <= 0.0) {
+            QAbstractTextDocumentLayout::PaintContext ctx;
+            ctx.cursorPosition = -1;
+            ctx.palette.setColor(QPalette::Text, fillColor);
+            layout->draw(painter, ctx);
+            return;
+        }
+
+        QElapsedTimer outlineTimer;
+        outlineTimer.start();
+
+        // Pass 1: fill only
+        {
+            QTextCursor cursor(&doc);
+            cursor.select(QTextCursor::Document);
+            QTextCharFormat fillFormat;
+            fillFormat.setForeground(fillColor);
+            fillFormat.clearProperty(QTextFormat::TextOutline);
+            cursor.mergeCharFormat(fillFormat);
+        }
+
+        {
+            QAbstractTextDocumentLayout::PaintContext ctx;
+            ctx.cursorPosition = -1;
+            ctx.palette.setColor(QPalette::Text, fillColor);
+            layout->draw(painter, ctx);
+        }
+
+        // Pass 2: outline only, drawn behind fill so it appears outside
+        {
+            QTextCursor cursor(&doc);
+            cursor.select(QTextCursor::Document);
+            QTextCharFormat strokeFormat;
+            QColor transparentFill = fillColor;
+            transparentFill.setAlpha(0);
+            strokeFormat.setForeground(transparentFill);
+            strokeFormat.setTextOutline(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            cursor.mergeCharFormat(strokeFormat);
+        }
+
+        {
+            painter->save();
+            painter->setCompositionMode(QPainter::CompositionMode_DestinationOver);
+            QAbstractTextDocumentLayout::PaintContext ctx;
+            ctx.cursorPosition = -1;
+            ctx.palette.setColor(QPalette::Text, Qt::transparent);
+            layout->draw(painter, ctx);
+            painter->restore();
+        }
+
+        if (outlineMsOut) {
+            *outlineMsOut = outlineTimer.elapsed();
+        }
+        if (glyphCountOut) {
+            *glyphCountOut = snapshot.text.size();
+        }
+    };
+
     painter->save();
     painter->scale(effectiveScale, effectiveScale);
 
@@ -2210,195 +2276,7 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
 
         int glyphCount = 0;
         qint64 outlineMs = 0;
-        if (strokeWidth > 0.0) {
-            QElapsedTimer outlineTimer;
-            outlineTimer.start();
-            
-            // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            // TIER 2: Phase 8 - Stroke Quality LOD Selection
-            // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            
-            // Determine stroke quality based on canvas zoom level
-            StrokeQuality quality = StrokeQuality::Full;
-            if (canvasZoom < 0.05) {
-                quality = StrokeQuality::Low;
-            } else if (canvasZoom < 0.20) {
-                quality = StrokeQuality::Medium;
-            }
-            
-            if (quality == StrokeQuality::Low) {
-                // Phase 8: Simplified stroke - draw fills then unified outline
-                painter->save();
-                
-                // Step 1: Draw all fills
-                QAbstractTextDocumentLayout::PaintContext ctx;
-                ctx.cursorPosition = -1;
-                ctx.palette.setColor(QPalette::Text, fillColor);
-                layout->draw(painter, ctx);
-                
-                // Step 2: Create unified outline around all glyphs
-                QPainterPath unifiedOutline;
-                for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
-                    QTextLayout* textLayout = block.layout();
-                    if (!textLayout) continue;
-                    
-                    const QRectF blockRect = layout->blockBoundingRect(block);
-                    for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-                        QTextLine line = textLayout->lineAt(lineIndex);
-                        if (!line.isValid()) continue;
-                        
-                        // Use line.x() from Qt's layout engine which already handles alignment
-                        const qreal lineOffsetX = line.x();
-                        
-                        const QList<QGlyphRun> glyphRuns = line.glyphRuns();
-                        for (const QGlyphRun& run : glyphRuns) {
-                            const QVector<quint32> indexes = run.glyphIndexes();
-                            const QVector<QPointF> positions = run.positions();
-                            if (indexes.size() != positions.size()) continue;
-                            const QRawFont rawFont = run.rawFont();
-                            
-                            for (int gi = 0; gi < indexes.size(); ++gi) {
-                                const QPointF glyphPos = blockRect.topLeft() + QPointF(lineOffsetX, line.y()) + positions[gi];
-                                QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
-                                glyphPath.translate(glyphPos);
-                                unifiedOutline.addPath(glyphPath);
-                            }
-                            glyphCount += indexes.size();
-                        }
-                    }
-                }
-                
-                // Step 3: Single stroke operation on unified outline (80%+ faster)
-                painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                painter->setBrush(Qt::NoBrush);
-                painter->drawPath(unifiedOutline);
-                painter->restore();
-            } else {
-                // Phase 2 + Phase 7: Full quality with viewport culling
-                // Strict two-pass rendering - ALL strokes first, then ALL fills
-                
-                // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                // TIER 2: Phase 7 - Build Block Visibility Cache (if viewport provided)
-                // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                QVector<bool> skipBlock;
-                if (!viewport.isEmpty() && viewport.isValid()) {
-                    int blockIdx = 0;
-                    for (QTextBlock block = doc.begin(); block.isValid(); block = block.next(), ++blockIdx) {
-                        const QRectF blockBounds = layout->blockBoundingRect(block);
-                        const bool isInvisible = !viewport.intersects(blockBounds);
-                        skipBlock.append(isInvisible);
-                    }
-                }
-                
-                // Pass 1: Render all strokes (background layer)
-                int blockIdx = 0;
-                for (QTextBlock block = doc.begin(); block.isValid(); block = block.next(), ++blockIdx) {
-                    // Phase 7: Skip blocks outside viewport
-                    if (blockIdx < skipBlock.size() && skipBlock[blockIdx]) {
-                        continue;
-                    }
-                    
-                    QTextLayout* textLayout = block.layout();
-                    if (!textLayout) continue;
-
-                    const QRectF blockRect = layout->blockBoundingRect(block);
-                    for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-                        QTextLine line = textLayout->lineAt(lineIndex);
-                        if (!line.isValid()) continue;
-
-                        // Use line.x() from Qt's layout engine which already handles alignment
-                        const qreal lineOffsetX = line.x();
-
-                        const QList<QGlyphRun> glyphRuns = line.glyphRuns();
-                        for (const QGlyphRun& run : glyphRuns) {
-                            const QVector<quint32> indexes = run.glyphIndexes();
-                            const QVector<QPointF> positions = run.positions();
-                            if (indexes.size() != positions.size()) continue;
-                            const QRawFont rawFont = run.rawFont();
-                            
-                            for (int gi = 0; gi < indexes.size(); ++gi) {
-                                const QPointF glyphPos = blockRect.topLeft() + QPointF(lineOffsetX, line.y()) + positions[gi];
-                                
-                                // TIER 3: Use pre-rendered cached glyph (stroke+fill baked in)
-                                const RenderedGlyphBitmap glyphBitmap = cachedRenderedGlyph(rawFont, indexes[gi], 
-                                                                                           fillColor, outlineColor, 
-                                                                                           strokeWidth, scaleFactor);
-                                
-                                if (!glyphBitmap.pixmap.isNull()) {
-                                    // Draw pre-rendered glyph (contains stroke + fill) with offset compensation
-                                    painter->drawPixmap(glyphPos + glyphBitmap.originOffset, glyphBitmap.pixmap);
-                                } else {
-                                    // Fallback to path rendering
-                                    const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
-                                    painter->save();
-                                    painter->translate(glyphPos);
-                                    painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                                    painter->setBrush(Qt::NoBrush);
-                                    painter->drawPath(glyphPath);
-                                    painter->restore();
-                                }
-                            }
-                            glyphCount += indexes.size();
-                        }
-                    }
-                }
-                
-                // Pass 2: Render all fills on top (foreground layer) - ONLY for fallback glyphs
-                blockIdx = 0;
-                for (QTextBlock block = doc.begin(); block.isValid(); block = block.next(), ++blockIdx) {
-                    // Phase 7: Skip blocks outside viewport
-                    if (blockIdx < skipBlock.size() && skipBlock[blockIdx]) {
-                        continue;
-                    }
-                    
-                    QTextLayout* textLayout = block.layout();
-                    if (!textLayout) continue;
-
-                    const QRectF blockRect = layout->blockBoundingRect(block);
-                    for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-                        QTextLine line = textLayout->lineAt(lineIndex);
-                        if (!line.isValid()) continue;
-
-                        // Use line.x() from Qt's layout engine which already handles alignment
-                        const qreal lineOffsetX = line.x();
-
-                        const QList<QGlyphRun> glyphRuns = line.glyphRuns();
-                        for (const QGlyphRun& run : glyphRuns) {
-                            const QVector<quint32> indexes = run.glyphIndexes();
-                            const QVector<QPointF> positions = run.positions();
-                            if (indexes.size() != positions.size()) continue;
-                            const QRawFont rawFont = run.rawFont();
-                            
-                            for (int gi = 0; gi < indexes.size(); ++gi) {
-                                const QPointF glyphPos = blockRect.topLeft() + QPointF(lineOffsetX, line.y()) + positions[gi];
-                                
-                                // Only draw fill if we don't have cached pixmap
-                                const RenderedGlyphBitmap glyphBitmap = cachedRenderedGlyph(rawFont, indexes[gi], 
-                                                                                           fillColor, outlineColor, 
-                                                                                           strokeWidth, scaleFactor);
-                                
-                                if (glyphBitmap.pixmap.isNull()) {
-                                    const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
-                                    painter->save();
-                                    painter->translate(glyphPos);
-                                    painter->setPen(Qt::NoPen);
-                                    painter->setBrush(fillColor);
-                                    painter->drawPath(glyphPath);
-                                    painter->restore();
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            
-            outlineMs = outlineTimer.elapsed();
-        } else {
-            QAbstractTextDocumentLayout::PaintContext ctx;
-            ctx.cursorPosition = -1;
-            ctx.palette.setColor(QPalette::Text, fillColor);
-            layout->draw(painter, ctx);
-        }
+        drawDocumentWithStrokeBehindFill(&outlineMs, &glyphCount);
 
         painter->restore();
         logSnapshotPerf("vector-full", outlineMs, glyphCount, snapshotTimer.elapsed());
@@ -2409,8 +2287,6 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
     const qreal contentWidth = availableWidth;
     int glyphCount = 0;
     qint64 outlineMs = 0;
-    QElapsedTimer outlineTimer;
-    bool outlineTimerRunning = false;
 
     for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
         QTextLayout* textLayout = block.layout();
@@ -2435,81 +2311,18 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
                     break;
             }
 
-            const QPointF lineBasePos(lineOffsetX, blockRect.top() + line.y());
-
             if (highlightEnabled && highlightColor.alpha() > 0) {
                 const qreal highlightWidth = std::max<qreal>(lineWidth > 0.0 ? lineWidth : contentWidth, 1.0);
                 const qreal highlightHeight = std::max<qreal>(line.height(), 1.0);
                 const QRectF highlightRect(QPointF(lineOffsetX, blockRect.top() + line.y()), QSizeF(highlightWidth, highlightHeight));
                 painter->fillRect(highlightRect, highlightColor);
             }
-
-            if (strokeWidth > 0.0) {
-                if (!outlineTimerRunning) {
-                    outlineTimer.start();
-                    outlineTimerRunning = true;
-                }
-                
-                // Phase 2: Strict two-pass rendering for fit-to-text mode
-                const QList<QGlyphRun> glyphRuns = line.glyphRuns();
-                
-                // Pass 1: Render all strokes first (background)
-                for (const QGlyphRun& run : glyphRuns) {
-                    const QVector<quint32> indexes = run.glyphIndexes();
-                    const QVector<QPointF> positions = run.positions();
-                    if (indexes.size() != positions.size()) continue;
-                    const QRawFont rawFont = run.rawFont();
-                    
-                    for (int gi = 0; gi < indexes.size(); ++gi) {
-                        // Apply horizontal alignment offset to glyph position
-                        const QPointF glyphPos = QPointF(lineOffsetX, blockRect.top() + line.y()) + positions[gi];
-                        const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
-                        
-                        // Draw stroke for ALL glyphs
-                        painter->save();
-                        painter->translate(glyphPos);
-                        painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                        painter->setBrush(Qt::NoBrush);
-                        painter->drawPath(glyphPath);
-                        painter->restore();
-                    }
-                    glyphCount += indexes.size();
-                }
-                
-                // Pass 2: Render all fills on top (foreground)
-                for (const QGlyphRun& run : glyphRuns) {
-                    const QVector<quint32> indexes = run.glyphIndexes();
-                    const QVector<QPointF> positions = run.positions();
-                    if (indexes.size() != positions.size()) continue;
-                    const QRawFont rawFont = run.rawFont();
-                    
-                    for (int gi = 0; gi < indexes.size(); ++gi) {
-                        // Apply horizontal alignment offset to glyph position
-                        const QPointF glyphPos = QPointF(lineOffsetX, blockRect.top() + line.y()) + positions[gi];
-                        const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
-                        
-                        // Draw fill for ALL glyphs
-                        painter->save();
-                        painter->translate(glyphPos);
-                        painter->setPen(Qt::NoPen);
-                        painter->setBrush(fillColor);
-                        painter->drawPath(glyphPath);
-                        painter->restore();
-                    }
-                }
-            } else {
-                painter->save();
-                painter->setPen(fillColor);
-                line.draw(painter, lineBasePos);
-                painter->restore();
-            }
         }
     }
 
+    drawDocumentWithStrokeBehindFill(&outlineMs, &glyphCount);
+
     painter->restore();
-    if (outlineTimerRunning) {
-        outlineMs = outlineTimer.elapsed();
-    }
     logSnapshotPerf("vector-fit", outlineMs, glyphCount, snapshotTimer.elapsed());
 }
 
