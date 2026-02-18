@@ -340,6 +340,51 @@ qreal computeStrokeWidthFromFont(const QFont& font, qreal widthPercent) {
     return eased * kMaxOutlineThicknessFactor * reference;
 }
 
+QRectF computeDocumentTextBounds(const QTextDocument& doc, QAbstractTextDocumentLayout* layout) {
+    if (!layout) {
+        return QRectF();
+    }
+
+    QRectF bounds;
+    bool hasBounds = false;
+
+    for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+        QTextLayout* textLayout = block.layout();
+        if (!textLayout) {
+            continue;
+        }
+
+        const QRectF blockRect = layout->blockBoundingRect(block);
+        for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+            QTextLine line = textLayout->lineAt(lineIndex);
+            if (!line.isValid()) {
+                continue;
+            }
+
+            QRectF lineRect = line.naturalTextRect();
+            if (lineRect.isEmpty()) {
+                lineRect = QRectF(0.0, 0.0,
+                                  std::max<qreal>(line.naturalTextWidth(), 1.0),
+                                  std::max<qreal>(line.height(), 1.0));
+            }
+
+            const QPointF lineOrigin(blockRect.left() + line.x(), blockRect.top() + line.y());
+            const QRectF translated = lineRect.translated(lineOrigin);
+            bounds = hasBounds ? bounds.united(translated) : translated;
+            hasBounds = true;
+        }
+    }
+
+    if (!hasBounds) {
+        const QSizeF fallbackSize = layout->documentSize();
+        return QRectF(0.0, 0.0,
+                      std::max<qreal>(fallbackSize.width(), 1.0),
+                      std::max<qreal>(fallbackSize.height(), 1.0));
+    }
+
+    return bounds;
+}
+
 QFont ensureRenderableFont(QFont font, const QString& itemId, const char* callerTag) {
     const int pixelSize = font.pixelSize();
     const qreal pointSize = font.pointSizeF();
@@ -1386,8 +1431,11 @@ void TextMediaItem::paintSimplifiedStroke(QPainter* painter, const VectorDrawSna
     if (!layout) return;
     
     const QSizeF docSize = layout->documentSize();
+    const QRectF docBounds = computeDocumentTextBounds(doc, layout);
     const qreal logicalHeight = static_cast<qreal>(targetHeight) / effectiveScale;
     const qreal availableHeight = std::max<qreal>(1.0, logicalHeight - 2.0 * margin);
+    const qreal docVisualTop = docBounds.top();
+    const qreal docVisualHeight = std::max<qreal>(1.0, docBounds.height());
     
     // Calculate offsets to match main rendering
     qreal offsetX = margin;
@@ -1409,13 +1457,13 @@ void TextMediaItem::paintSimplifiedStroke(QPainter* painter, const VectorDrawSna
     qreal offsetY = margin;
     switch (snapshot.verticalAlignment) {
         case VerticalAlignment::Top:
-            offsetY = margin;
+            offsetY = margin - docVisualTop;
             break;
         case VerticalAlignment::Center:
-            offsetY = margin + (availableHeight - docSize.height()) / 2.0;
+            offsetY = margin + (availableHeight - docVisualHeight) / 2.0 - docVisualTop;
             break;
         case VerticalAlignment::Bottom:
-            offsetY = margin + (availableHeight - docSize.height());
+            offsetY = margin + (availableHeight - docVisualHeight) - docVisualTop;
             break;
     }
     
@@ -1963,7 +2011,10 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         return;
     }
     const QSizeF docSize = layout->documentSize();
+    const QRectF docBounds = computeDocumentTextBounds(doc, layout);
     const qreal availableHeight = std::max<qreal>(1.0, logicalHeight - 2.0 * margin);
+    const qreal docVisualTop = docBounds.top();
+    const qreal docVisualHeight = std::max<qreal>(1.0, docBounds.height());
 
     qreal offsetX = margin;
     if (!snapshot.fitToTextEnabled) {
@@ -1984,13 +2035,13 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
     qreal offsetY = margin;
     switch (snapshot.verticalAlignment) {
         case VerticalAlignment::Top:
-            offsetY = margin;
+            offsetY = margin - docVisualTop;
             break;
         case VerticalAlignment::Center:
-            offsetY = margin + (availableHeight - docSize.height()) / 2.0;
+            offsetY = margin + (availableHeight - docVisualHeight) / 2.0 - docVisualTop;
             break;
         case VerticalAlignment::Bottom:
-            offsetY = margin + (availableHeight - docSize.height());
+            offsetY = margin + (availableHeight - docVisualHeight) - docVisualTop;
             break;
     }
 
@@ -2329,7 +2380,7 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
                     
                     for (int gi = 0; gi < indexes.size(); ++gi) {
                         // Apply horizontal alignment offset to glyph position
-                        const QPointF glyphPos = QPointF(lineOffsetX, blockRect.top()) + positions[gi];
+                        const QPointF glyphPos = QPointF(lineOffsetX, blockRect.top() + line.y()) + positions[gi];
                         const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
                         
                         // Draw stroke for ALL glyphs
@@ -2352,7 +2403,7 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
                     
                     for (int gi = 0; gi < indexes.size(); ++gi) {
                         // Apply horizontal alignment offset to glyph position
-                        const QPointF glyphPos = QPointF(lineOffsetX, blockRect.top()) + positions[gi];
+                        const QPointF glyphPos = QPointF(lineOffsetX, blockRect.top() + line.y()) + positions[gi];
                         const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
                         
                         // Draw fill for ALL glyphs
@@ -3242,6 +3293,7 @@ void TextMediaItem::updateInlineEditorGeometry() {
     QTextDocument* doc = m_inlineEditor->document();
     qreal docIdealWidth = m_cachedIdealWidth;
     qreal logicalDocHeight = std::max<qreal>(1.0, m_cachedDocumentSize.height());
+    qreal logicalDocTop = 0.0;
 
     const bool hasReusableLayoutSnapshot = canReuseLayoutSnapshot(textForRendering(), m_font, logicalContentWidth);
     const bool needMetrics = doc && (widthChanged || m_documentMetricsDirty || m_cachedIdealWidth < 0.0 || !hasReusableLayoutSnapshot);
@@ -3257,8 +3309,10 @@ void TextMediaItem::updateInlineEditorGeometry() {
             if (size.height() <= 0.0) {
                 size.setHeight(logicalContentHeight);
             }
+            const QRectF docBounds = computeDocumentTextBounds(*doc, layout);
             m_cachedDocumentSize = size;
-            logicalDocHeight = std::max<qreal>(1.0, size.height());
+            logicalDocHeight = std::max<qreal>(1.0, docBounds.height());
+            logicalDocTop = docBounds.top();
             for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
                 if (QTextLayout* textLayout = block.layout()) {
                     lineCount += textLayout->lineCount();
@@ -3267,6 +3321,7 @@ void TextMediaItem::updateInlineEditorGeometry() {
         } else {
             m_cachedDocumentSize = QSizeF(logicalContentWidth, logicalContentHeight);
             logicalDocHeight = std::max<qreal>(1.0, logicalContentHeight);
+            logicalDocTop = 0.0;
         }
         m_cachedIdealWidth = docIdealWidth;
         updateLayoutSnapshot(textForRendering(), m_font, logicalContentWidth, m_cachedDocumentSize, m_cachedIdealWidth, lineCount);
@@ -3280,10 +3335,18 @@ void TextMediaItem::updateInlineEditorGeometry() {
             docIdealWidth = logicalContentWidth;
         }
         logicalDocHeight = std::max<qreal>(1.0, m_cachedDocumentSize.height());
+        if (doc) {
+            if (QAbstractTextDocumentLayout* layout = doc->documentLayout()) {
+                const QRectF docBounds = computeDocumentTextBounds(*doc, layout);
+                logicalDocHeight = std::max<qreal>(1.0, docBounds.height());
+                logicalDocTop = docBounds.top();
+            }
+        }
     }
 
     const qreal visualDocWidth = std::max<qreal>(1.0, m_cachedDocumentSize.width() * uniformScale);
     const qreal visualDocHeight = std::max<qreal>(1.0, logicalDocHeight * uniformScale);
+    const qreal visualDocTop = logicalDocTop * uniformScale;
 
     const qreal availableWidth = std::max<qreal>(1.0, contentRect.width());
     const qreal availableHeight = std::max<qreal>(1.0, contentRect.height());
@@ -3293,13 +3356,13 @@ void TextMediaItem::updateInlineEditorGeometry() {
     qreal offsetY = 0.0;
     switch (m_verticalAlignment) {
         case VerticalAlignment::Top:
-            offsetY = 0.0;
+            offsetY = -visualDocTop;
             break;
         case VerticalAlignment::Center:
-            offsetY = (availableHeight - visualDocHeight) * 0.5;
+            offsetY = (availableHeight - visualDocHeight) * 0.5 - visualDocTop;
             break;
         case VerticalAlignment::Bottom:
-            offsetY = availableHeight - visualDocHeight;
+            offsetY = availableHeight - visualDocHeight - visualDocTop;
             break;
     }
     
