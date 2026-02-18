@@ -907,6 +907,15 @@ void MediaSettingsPanel::buildUi(QWidget* parentWidget) {
         m_overlayVScroll->setValue(src->value());
     }
 
+    if (!m_textBorderWidthDebounceTimer) {
+        m_textBorderWidthDebounceTimer = new QTimer(this);
+        m_textBorderWidthDebounceTimer->setSingleShot(true);
+        m_textBorderWidthDebounceTimer->setInterval(120);
+        QObject::connect(m_textBorderWidthDebounceTimer, &QTimer::timeout, this, [this]() {
+            flushPendingTextBorderWidthPush();
+        });
+    }
+
     // Connect display automatically checkbox to enable/disable display delay controls
     if (m_displayAfterCheck) {
         QObject::connect(m_displayAfterCheck, &QCheckBox::toggled, this, &MediaSettingsPanel::onDisplayAutomaticallyToggled);
@@ -1661,6 +1670,7 @@ void MediaSettingsPanel::clearActiveBox() {
 
     const bool wasOpacityBox = (previous == m_opacityBox);
     const bool wasVolumeBox = (previous == m_volumeBox);
+    const bool wasBorderWidthBox = (previous == m_textBorderWidthBox);
 
     setBoxActive(previous, false);
     previous->clearFocus();
@@ -1674,6 +1684,39 @@ void MediaSettingsPanel::clearActiveBox() {
     if (wasVolumeBox && m_volumeCheck && m_volumeCheck->isChecked()) {
         applyVolumeFromUi();
     }
+    if (wasBorderWidthBox) {
+        scheduleTextBorderWidthPush(true);
+    }
+}
+
+void MediaSettingsPanel::scheduleTextBorderWidthPush(bool immediate) {
+    if (m_updatingFromMedia) {
+        return;
+    }
+
+    m_textBorderWidthPushPending = true;
+    if (!m_textBorderWidthDebounceTimer) {
+        pushSettingsToMedia();
+        m_textBorderWidthPushPending = false;
+        return;
+    }
+
+    if (immediate) {
+        m_textBorderWidthDebounceTimer->stop();
+        flushPendingTextBorderWidthPush();
+        return;
+    }
+
+    m_textBorderWidthDebounceTimer->start();
+}
+
+void MediaSettingsPanel::flushPendingTextBorderWidthPush() {
+    if (!m_textBorderWidthPushPending || m_updatingFromMedia) {
+        return;
+    }
+
+    m_textBorderWidthPushPending = false;
+    pushSettingsToMedia();
 }
 
 bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
@@ -1742,6 +1785,9 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
         
         // Enter key deactivates
         if (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter) {
+            if (m_activeBox == m_textBorderWidthBox) {
+                scheduleTextBorderWidthPush(true);
+            }
             clearActiveBox();
             return true;
         }
@@ -1750,7 +1796,11 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
             m_activeBox->setText("...");
             m_pendingDecimalInsertion = false;
             if (!m_updatingFromMedia) {
-                pushSettingsToMedia();
+                if (m_activeBox == m_textBorderWidthBox) {
+                    scheduleTextBorderWidthPush(false);
+                } else {
+                    pushSettingsToMedia();
+                }
             }
             return true;
         }
@@ -1761,7 +1811,11 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
                 m_activeBox->setText("∞");
                 m_pendingDecimalInsertion = false;
                 if (!m_updatingFromMedia) {
-                    pushSettingsToMedia();
+                    if (m_activeBox == m_textBorderWidthBox) {
+                        scheduleTextBorderWidthPush(false);
+                    } else {
+                        pushSettingsToMedia();
+                    }
                 }
                 return true;
             } else {
@@ -1834,7 +1888,11 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
 
                     m_activeBox->setText(baseText);
                     if (!m_updatingFromMedia) {
-                        pushSettingsToMedia();
+                        if (m_activeBox == m_textBorderWidthBox) {
+                            scheduleTextBorderWidthPush(false);
+                        } else {
+                            pushSettingsToMedia();
+                        }
                     }
                     return true;
                 }
@@ -1900,7 +1958,11 @@ bool MediaSettingsPanel::eventFilter(QObject* obj, QEvent* event) {
                     }
 
                     if (!m_updatingFromMedia) {
-                        pushSettingsToMedia();
+                        if (m_activeBox == m_textBorderWidthBox) {
+                            scheduleTextBorderWidthPush(false);
+                        } else {
+                            pushSettingsToMedia();
+                        }
                     }
                     return true;
                 }

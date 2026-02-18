@@ -1811,9 +1811,12 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                     reference = 16.0;
                 }
                 constexpr qreal kMaxOutlineThicknessFactor = 0.35;
+                constexpr qreal kOutlineCurveExponent = 1.35;
+                constexpr qreal kMaxOutlineStrokePx = 14.0;
                 const qreal normalized = std::clamp(percent / 100.0, 0.0, 1.0);
-                const qreal eased = std::pow(normalized, 1.1);
-                return eased * kMaxOutlineThicknessFactor * reference;
+                const qreal eased = std::pow(normalized, kOutlineCurveExponent);
+                const qreal scaledStroke = eased * kMaxOutlineThicknessFactor * reference;
+                return std::clamp(scaledStroke, 0.0, kMaxOutlineStrokePx);
             };
 
             const qreal strokeWidth = computeOutlineWidth(item->textBorderWidthPercent, font);

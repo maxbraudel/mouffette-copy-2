@@ -110,6 +110,10 @@ constexpr int kScaledRasterThrottleIntervalMs = 45;
 constexpr qreal kFitToTextMinWidth = 24.0;
 constexpr int kFitToTextSizeStabilizationPx = 1;
 constexpr qreal kMaxOutlineThicknessFactor = 0.35;
+constexpr qreal kOutlineCurveExponent = 1.35;
+constexpr qreal kMaxOutlineStrokePx = 14.0;
+constexpr qreal kMinOutlineStrokePx = 0.25;
+constexpr qreal kBorderWidthQuantizationStepPercent = 1.0;
 constexpr int kMaxCachedGlyphPaths = 60000;
 constexpr int kMaxRenderedGlyphPixmaps = 500;  // Phase 2: Rendered glyph cache limit
 constexpr int kFallbackFontPixelSize = 12;
@@ -329,8 +333,9 @@ qreal computeStrokeWidthFromFont(const QFont& font, qreal widthPercent) {
     }
 
     const qreal normalized = std::clamp(widthPercent / 100.0, 0.0, 1.0);
-    const qreal eased = std::pow(normalized, 1.1);
-    return eased * kMaxOutlineThicknessFactor * reference;
+    const qreal eased = std::pow(normalized, kOutlineCurveExponent);
+    const qreal scaledStroke = eased * kMaxOutlineThicknessFactor * reference;
+    return std::clamp(scaledStroke, 0.0, kMaxOutlineStrokePx);
 }
 
 QRectF computeDocumentTextBounds(const QTextDocument& doc, QAbstractTextDocumentLayout* layout) {
@@ -2141,7 +2146,14 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
 
     const qreal baseStrokeWidth = computeStrokeWidthFromFont(snapshot.font, snapshot.outlineWidthPercent);
     const qreal uniformScale = std::max(std::abs(snapshot.uniformScaleFactor), epsilon);
-    const qreal strokeWidth = baseStrokeWidth * uniformScale;
+    const qreal strokeWidthRaw = baseStrokeWidth * uniformScale;
+    const qreal adaptiveMaxStrokePx = std::clamp(
+        std::min<qreal>(static_cast<qreal>(targetWidth), static_cast<qreal>(targetHeight)) * 0.035,
+        4.0,
+        kMaxOutlineStrokePx);
+    const qreal strokeWidth = (strokeWidthRaw >= kMinOutlineStrokePx)
+        ? std::min(strokeWidthRaw, adaptiveMaxStrokePx)
+        : 0.0;
     const QString preview = previewTextForLog(snapshot.text);
     auto logSnapshotPerf = [&](const char* context, qint64 outlineMs, int glyphCount, qint64 totalMs) {
         if (strokeWidth <= 0.0 && totalMs < 4) {
@@ -2555,17 +2567,21 @@ void TextMediaItem::setTextColorOverrideEnabled(bool enabled) {
 
 void TextMediaItem::setTextBorderWidth(qreal percent) {
     const qreal clamped = std::clamp(percent, 0.0, 100.0);
-    if (std::abs(m_textBorderWidthPercent - clamped) < 1e-4) {
+    const qreal quantized = std::clamp(
+        std::round(clamped / kBorderWidthQuantizationStepPercent) * kBorderWidthQuantizationStepPercent,
+        0.0,
+        100.0);
+    if (std::abs(m_textBorderWidthPercent - quantized) < 1e-4) {
         return;
     }
 
     const qreal oldPadding = m_appliedContentPaddingPx;
     if (textHotLogsEnabled()) {
-        qDebug() << "[TextMediaItem]" << mediaId() << "setTextBorderWidth%" << clamped
-                 << "approxPx" << computeStrokeWidthFromFont(m_font, clamped)
+        qDebug() << "[TextMediaItem]" << mediaId() << "setTextBorderWidth%" << quantized
+                 << "approxPx" << computeStrokeWidthFromFont(m_font, quantized)
                  << "textLength" << m_text.size();
     }
-    m_textBorderWidthPercent = clamped;
+    m_textBorderWidthPercent = quantized;
     const qreal newPadding = contentPaddingPx();
 
     invalidateRenderPipeline(InvalidationReason::VisualStyle, false);

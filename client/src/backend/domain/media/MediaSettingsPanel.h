@@ -80,6 +80,8 @@ private:
     void updateScrollbarGeometry();
     void pullSettingsFromMedia();
     void pushSettingsToMedia();
+    void scheduleTextBorderWidthPush(bool immediate = false);
+    void flushPendingTextBorderWidthPush();
     void updateActiveTabUi();
     void updateSectionHeaderVisibility();
     void refreshTextColorBoxStyle(bool activeHighlight = false);
@@ -170,6 +172,8 @@ private:
     // Overlay scrollbar to mirror media list behavior
     QScrollBar* m_overlayVScroll = nullptr;
     QTimer* m_scrollbarHideTimer = nullptr;
+    QTimer* m_textBorderWidthDebounceTimer = nullptr;
+    bool m_textBorderWidthPushPending = false;
     bool m_updatingFromMedia = false;
     
     // Video-only option widgets (for show/hide based on media type)
