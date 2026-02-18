@@ -1074,6 +1074,7 @@ void ResizableMediaBase::updateOverlayLayout() {
     QRectF itemRect(0,0,m_baseSize.width(), m_baseSize.height());
     QPointF topAnchorScene = mapToScene(QPointF(itemRect.center().x(), itemRect.top()));
     if (m_topPanel) m_topPanel->updateLayoutWithAnchor(topAnchorScene, view);
+    onOverlayLayoutUpdated();
     // Settings panel now managed globally by ScreenCanvas
 }
 

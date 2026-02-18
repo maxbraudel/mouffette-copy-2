@@ -244,6 +244,8 @@ protected:
 
     // Subclass hook for live geometry changes (resize/drag) to keep overlays glued
     virtual void onInteractiveGeometryChanged() {}
+    // Subclass hook invoked after base overlay layout has been updated.
+    virtual void onOverlayLayoutUpdated() {}
     virtual void onMediaSettingsChanged();
 
     // QGraphicsItem overrides

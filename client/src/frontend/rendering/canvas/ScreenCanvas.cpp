@@ -221,9 +221,6 @@ static void relayoutAllMediaOverlays(QGraphicsScene* scene) {
     for (QGraphicsItem* it : items) {
         if (auto* base = dynamic_cast<ResizableMediaBase*>(it)) {
             base->updateOverlayLayout();
-            if (auto* textItem = dynamic_cast<TextMediaItem*>(base)) {
-                textItem->refreshAlignmentControlsLayout();
-            }
         }
     }
 }
@@ -237,9 +234,6 @@ static void relayoutSelectedMediaOverlays(QGraphicsScene* scene) {
     for (QGraphicsItem* it : selected) {
         if (auto* base = dynamic_cast<ResizableMediaBase*>(it)) {
             base->updateOverlayLayout();
-            if (auto* textItem = dynamic_cast<TextMediaItem*>(base)) {
-                textItem->refreshAlignmentControlsLayout();
-            }
         }
     }
 }
@@ -250,9 +244,6 @@ static void relayoutMediaOverlays(const QSet<ResizableMediaBase*>& mediaSet) {
             continue;
         }
         base->updateOverlayLayout();
-        if (auto* textItem = dynamic_cast<TextMediaItem*>(base)) {
-            textItem->refreshAlignmentControlsLayout();
-        }
     }
 }
 

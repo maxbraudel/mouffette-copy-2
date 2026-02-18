@@ -147,6 +147,7 @@ public:
 
 protected:
     void onInteractiveGeometryChanged() override;
+    void onOverlayLayoutUpdated() override;
     bool onAltResizeModeEngaged() override;
 
 private:
@@ -215,6 +216,9 @@ private:
         void invalidate(InvalidationReason newReason) {
             dirty = true;
             reason = newReason;
+            previewTarget.reset();
+            highResTarget.reset();
+            presentTarget.reset();
         }
 
         void requestPreview(const TextRenderTarget& target) {
@@ -310,6 +314,7 @@ private:
     bool m_scaledRasterThrottleActive = false;
     bool m_baseRasterInProgress = false;
     quint64 m_baseRasterGeneration = 0;
+    quint64 m_contentRevision = 1;
     std::optional<QSize> m_pendingBaseRasterRequest;
     QSize m_activeBaseRasterSize;
     bool m_baseRasterDispatchQueued = false;
@@ -319,15 +324,17 @@ private:
         QSize targetSize;
         qreal scale = 1.0;
         qreal canvasZoom = 1.0;
+        quint64 contentRevision = 0;
         quint64 requestId = 0;
         quint64 generation = 0;
         std::chrono::steady_clock::time_point startedAt{};
 
-        bool isEquivalentTo(const QSize& size, qreal scaleFactor, qreal zoom) const {
+        bool isEquivalentTo(const QSize& size, qreal scaleFactor, qreal zoom, quint64 revision) const {
             constexpr qreal tolerance = 1e-4;
             return targetSize == size &&
                    std::abs(scale - scaleFactor) < tolerance &&
-                   std::abs(canvasZoom - zoom) < tolerance;
+                   std::abs(canvasZoom - zoom) < tolerance &&
+                   contentRevision == revision;
         }
     };
 
@@ -341,6 +348,7 @@ private:
 
     QPixmap m_scaledRasterPixmap;
     bool m_scaledRasterPixmapValid = false;
+    quint64 m_scaledRasterContentRevision = 0;
     QRectF m_scaledRasterVisibleRegion;  // Region of item that was rasterized (for viewport optimization)
     enum class RenderState {
         Idle,
@@ -401,12 +409,14 @@ private:
     // Freeze zone fallback cache - low-res full text for out-of-viewport regions (Phase 1)
     QPixmap m_frozenFallbackPixmap;      // Full text at low res (background for non-viewport areas)
     bool m_frozenFallbackValid = false;  // Is fallback cache valid
+    quint64 m_frozenFallbackContentRevision = 0;
     qreal m_frozenFallbackScale = 1.0;   // Scale at which fallback was created
     QSize m_frozenFallbackSize;          // Size of text when fallback was created (detect resize)
     bool m_frozenFallbackJobInFlight = false;
     quint64 m_frozenFallbackJobGeneration = 0;
     QSize m_pendingFallbackSize;
     qreal m_pendingFallbackScale = 1.0;
+    quint64 m_baseRasterContentRevision = 0;
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // TIER 3 OPTIMIZATION STRUCTURES
@@ -507,6 +517,7 @@ private:
     std::shared_ptr<OverlayButtonElement> m_alignTopBtn;
     std::shared_ptr<OverlayButtonElement> m_alignCenterVBtn;
     std::shared_ptr<OverlayButtonElement> m_alignBottomBtn;
+    QString m_alignmentPanelStyleSignature;
     
     void ensureInlineEditor();
     void updateInlineEditorGeometry();
@@ -552,7 +563,7 @@ private:
     QRectF computeVisibleRegion() const;
     void ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale, qreal canvasZoom);
     void ensureFrozenFallbackCache(qreal currentCanvasZoom);  // Phase 1: Create/update low-res fallback cache
-    void handleFrozenFallbackJobFinished(quint64 generation, QImage&& raster, const QSize& size, qreal scale);
+    void handleFrozenFallbackJobFinished(quint64 generation, quint64 contentRevision, QImage&& raster, const QSize& size, qreal scale);
     void startRasterJob(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
     void handleRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size, qreal scale, qreal canvasZoom, const QRectF& visibleRegion = QRectF());
     void startAsyncRasterRequest(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
@@ -560,7 +571,7 @@ private:
     void queueRasterJobDispatch();
     void dispatchPendingRasterRequest();
     void startBaseRasterRequest(const QSize& targetSize);
-    void handleBaseRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size);
+    void handleBaseRasterJobFinished(quint64 generation, quint64 contentRevision, QImage&& raster, const QSize& size);
     void queueBaseRasterDispatch();
     void dispatchPendingBaseRasterRequest();
     void startNextPendingBaseRasterRequest();
