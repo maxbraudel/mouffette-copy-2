@@ -1542,7 +1542,7 @@ void ScreenCanvas::processSceneChangedMaintenance() {
         layoutInfoOverlay();
         m_lastOverlayLayoutTimer.restart();
     }
-    updateSelectionChrome();
+    updateSelectionChromeFast();
 
     maybeEmitCanvasPerfSnapshot();
 }
@@ -1591,7 +1591,7 @@ void ScreenCanvas::processZoomRelayout() {
         layoutInfoOverlay();
         m_lastOverlayLayoutTimer.restart();
     }
-    updateSelectionChrome();
+    updateSelectionChromeFast();
 
     maybeEmitCanvasPerfSnapshot();
 }
@@ -1601,6 +1601,44 @@ void ScreenCanvas::recordZoomEvent() {
     if (!m_canvasPerfWindow.isValid()) {
         m_canvasPerfWindow.start();
     }
+}
+
+void ScreenCanvas::queueZoomInput(const QPointF& vpPos, qreal factor) {
+    if (factor <= 0.0 || !std::isfinite(factor)) {
+        return;
+    }
+
+    m_zoomFrameCoordinator.anchorVpPos = vpPos;
+    m_zoomFrameCoordinator.factor *= factor;
+    m_zoomFrameCoordinator.pending = true;
+
+    if (!m_zoomFrameCoordinator.timer) {
+        m_zoomFrameCoordinator.timer = new QTimer(this);
+        m_zoomFrameCoordinator.timer->setSingleShot(true);
+        m_zoomFrameCoordinator.timer->setInterval(8);
+        connect(m_zoomFrameCoordinator.timer, &QTimer::timeout, this, [this]() {
+            processQueuedZoomInput();
+        });
+    }
+
+    if (!m_zoomFrameCoordinator.timer->isActive()) {
+        m_zoomFrameCoordinator.timer->start();
+    }
+}
+
+void ScreenCanvas::processQueuedZoomInput() {
+    if (!m_zoomFrameCoordinator.pending) {
+        return;
+    }
+
+    const QPointF vpPos = m_zoomFrameCoordinator.anchorVpPos;
+    const qreal factor = m_zoomFrameCoordinator.factor;
+    m_zoomFrameCoordinator.pending = false;
+    m_zoomFrameCoordinator.factor = 1.0;
+
+    zoomAroundViewportPos(vpPos, factor);
+    recordZoomEvent();
+    requestZoomRelayout();
 }
 
 void ScreenCanvas::maybeEmitCanvasPerfSnapshot() {
@@ -2310,31 +2348,69 @@ void ScreenCanvas::updateSelectionChrome() {
     }
     for (ResizableMediaBase* m : toRemove) clearSelectionChromeFor(m);
 
-    // Mettre à jour le style de surbrillance dans l'overlay sans forcer un rebuild complet
+    refreshMediaContainerSelectionStyles(stillSelected);
+}
+
+void ScreenCanvas::updateSelectionChromeFast() {
+    if (!m_scene) {
+        return;
+    }
+
+    ++m_perfSelectionChromeCount;
+
+    QSet<ResizableMediaBase*> stillSelected;
+    for (QGraphicsItem* it : m_scene->selectedItems()) {
+        if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
+            stillSelected.insert(media);
+        }
+    }
+
+    bool membershipChanged = (stillSelected.size() != m_selectionChromeMap.size());
+    if (!membershipChanged) {
+        for (ResizableMediaBase* media : stillSelected) {
+            if (!m_selectionChromeMap.contains(media)) {
+                membershipChanged = true;
+                break;
+            }
+        }
+    }
+
+    if (membershipChanged) {
+        updateSelectionChrome();
+        return;
+    }
+
+    for (ResizableMediaBase* media : stillSelected) {
+        updateSelectionChromeGeometry(media);
+    }
+
+    refreshMediaContainerSelectionStyles(stillSelected);
+}
+
+void ScreenCanvas::refreshMediaContainerSelectionStyles(const QSet<ResizableMediaBase*>& selectedMedia) {
     const QString selectedBg = "rgba(255,255,255,0.10)";
     const QString hoverBg = "rgba(255,255,255,0.05)";
-    const QString disabledBg = "rgba(255,255,255,0.03)"; // Very subtle grey for disabled state
-    
-    bool remoteSceneActive = m_sceneLaunched || m_sceneLaunching || m_sceneStopping;
-    
+    const QString disabledBg = "rgba(255,255,255,0.03)";
+
+    const bool remoteSceneActive = m_sceneLaunched || m_sceneLaunching || m_sceneStopping;
+
     for (auto it = m_mediaContainerByItem.begin(); it != m_mediaContainerByItem.end(); ++it) {
-        ResizableMediaBase* media = it.key(); QWidget* w = it.value(); if (!w) continue;
-        bool sel = stillSelected.contains(media);
-        bool hovered = (m_hoveredMediaItem == media);
+        ResizableMediaBase* media = it.key();
+        QWidget* w = it.value();
+        if (!w) {
+            continue;
+        }
+
+        const bool sel = selectedMedia.contains(media);
+        const bool hovered = (m_hoveredMediaItem == media);
         w->setAutoFillBackground(true);
         w->setAttribute(Qt::WA_TranslucentBackground, false);
-        // Pleine largeur: pas de border-radius pour que le fond touche les séparateurs
-        // Priority: Remote Scene Disabled > Selected > Hovered > Transparent
-        QString bgColor;
-        QString opacity;
+
         if (remoteSceneActive) {
-            // When remote scene is active, apply disabled appearance
-            bgColor = disabledBg;
-            opacity = "0.4"; // Make text/labels less prominent
-            w->setStyleSheet(QString("QWidget { background-color: %1; } QLabel { opacity: %2; }")
-                             .arg(bgColor).arg(opacity));
+            w->setStyleSheet(QString("QWidget { background-color: %1; } QLabel { opacity: 0.4; }")
+                             .arg(disabledBg));
         } else {
-            bgColor = sel ? selectedBg : (hovered ? hoverBg : "transparent");
+            const QString bgColor = sel ? selectedBg : (hovered ? hoverBg : "transparent");
             w->setStyleSheet(QString("QWidget { background-color: %1; }")
                              .arg(bgColor));
         }
@@ -2776,9 +2852,7 @@ bool ScreenCanvas::event(QEvent* event) {
                 if (!viewport()->rect().contains(vpPos)) vpPos = m_lastMousePos.isNull() ? viewport()->rect().center() : m_lastMousePos;
             }
             m_lastMousePos = vpPos; // remember anchor
-            zoomAroundViewportPos(vpPos, factor);
-            recordZoomEvent();
-            requestZoomRelayout();
+            queueZoomInput(vpPos, factor);
             event->accept(); return true;
         }
     }
@@ -2800,9 +2874,7 @@ bool ScreenCanvas::viewportEvent(QEvent* event) {
             QPoint vpPos = viewport()->mapFrom(this, ng->position().toPoint());
             if (!viewport()->rect().contains(vpPos)) vpPos = viewport()->rect().center();
             m_lastMousePos = vpPos; // remember anchor
-            zoomAroundViewportPos(vpPos, factor);
-            recordZoomEvent();
-            requestZoomRelayout();
+            queueZoomInput(vpPos, factor);
             event->accept();
             return true;
         }
@@ -2832,9 +2904,7 @@ bool ScreenCanvas::gestureEvent(QGestureEvent* event) {
             }
             m_lastMousePos = vpPos; // keep coherent for subsequent wheel/native zooms
             const qreal factor = pinch->scaleFactor();
-            zoomAroundViewportPos(vpPos, factor);
-            recordZoomEvent();
-            requestZoomRelayout();
+            queueZoomInput(vpPos, factor);
         }
         event->accept();
         return true;
@@ -3507,9 +3577,7 @@ void ScreenCanvas::wheelEvent(QWheelEvent* event) {
             const qreal factor = std::pow(1.0015, deltaY);
             // Convert from view widget coords to viewport coords for correct anchoring
             QPoint vpPos = viewport() ? viewport()->mapFrom(this, event->position().toPoint()) : event->position().toPoint();
-            zoomAroundViewportPos(vpPos, factor);
-            recordZoomEvent();
-            requestZoomRelayout();
+            queueZoomInput(vpPos, factor);
             event->accept();
             return;
         }

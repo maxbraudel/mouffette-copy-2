@@ -232,6 +232,8 @@ private:
     void processPendingOverlayRelayoutSet();
     void maybeEmitCanvasPerfSnapshot();
     void recordZoomEvent();
+    void queueZoomInput(const QPointF& vpPos, qreal factor);
+    void processQueuedZoomInput();
     
     // Selection chrome factory helpers
     QGraphicsPathItem* createSelectionBorderPath(const QColor& color, qreal zValue, Qt::PenStyle style, qreal dashOffset);
@@ -285,6 +287,13 @@ private:
     QElapsedTimer m_momentumTimer;
     QElapsedTimer m_lastOverlayLayoutTimer; // throttle rapid overlay relayouts during pinch/scroll
     QElapsedTimer m_canvasPerfWindow;
+    struct ZoomFrameCoordinator {
+        QTimer* timer = nullptr;
+        bool pending = false;
+        QPointF anchorVpPos;
+        qreal factor = 1.0;
+    };
+    ZoomFrameCoordinator m_zoomFrameCoordinator;
     QTimer* m_sceneChangedWorkTimer = nullptr;
     bool m_sceneChangedWorkPending = false;
     QTimer* m_zoomRelayoutTimer = nullptr;
@@ -352,9 +361,11 @@ private:
     };
     QMap<ResizableMediaBase*, SelectionChrome> m_selectionChromeMap;
     void updateSelectionChrome();
+    void updateSelectionChromeFast();
     void updateSelectionChromeGeometry(ResizableMediaBase* item);
     void clearSelectionChromeFor(ResizableMediaBase* item);
     void clearAllSelectionChrome();
+    void refreshMediaContainerSelectionStyles(const QSet<ResizableMediaBase*>& selectedMedia);
 
     // Info overlay widgets (viewport child, independent from scene transforms)
     QWidget* m_infoWidget = nullptr;       // panel widget parented to viewport()

@@ -53,8 +53,7 @@ namespace TextMediaDefaults {
 class TextMediaItem : public ResizableMediaBase {
 public:
     enum class StrokeRenderMode {
-        Normal,
-        Preview
+        Normal
     };
 
 
@@ -209,38 +208,36 @@ private:
     struct TextRenderScheduler {
         bool dirty = true;
         InvalidationReason reason = InvalidationReason::Content;
-        std::optional<TextRenderTarget> previewTarget;
         std::optional<TextRenderTarget> highResTarget;
-        std::optional<TextRenderTarget> presentTarget;
+        bool highResPending = false;
 
         void invalidate(InvalidationReason newReason) {
             dirty = true;
             reason = newReason;
-            previewTarget.reset();
             highResTarget.reset();
-            presentTarget.reset();
-        }
-
-        void requestPreview(const TextRenderTarget& target) {
-            previewTarget = target;
+            highResPending = false;
         }
 
         void requestHighRes(const TextRenderTarget& target) {
             highResTarget = target;
-            presentTarget = target;
+            highResPending = true;
         }
 
         std::optional<TextRenderTarget> takePresentTarget() {
-            if (!presentTarget.has_value()) {
-                return std::nullopt;
+            if (highResPending && highResTarget.has_value()) {
+                return *highResTarget;
             }
-            TextRenderTarget target = *presentTarget;
-            presentTarget.reset();
-            return target;
+
+            return std::nullopt;
         }
 
         void markPresented() {
+            highResPending = false;
             dirty = false;
+        }
+
+        bool hasPendingPresentation() const {
+            return highResPending && highResTarget.has_value();
         }
     };
 
@@ -286,9 +283,7 @@ private:
     TextRenderScheduler m_renderScheduler;
     TextLayoutSnapshot m_layoutSnapshot;
     TextRenderCacheKey m_activeHighResCacheKey;
-    TextRenderCacheKey m_previewCacheKey;
     bool m_activeHighResCacheKeyValid = false;
-    bool m_previewCacheKeyValid = false;
     static constexpr qint64 kPerItemCacheBudgetBytes = 24LL * 1024LL * 1024LL;
     std::unique_ptr<ITextRenderer> m_textRenderer;
     QString m_textRendererBackend;
@@ -318,6 +313,7 @@ private:
     std::optional<QSize> m_pendingBaseRasterRequest;
     QSize m_activeBaseRasterSize;
     bool m_baseRasterDispatchQueued = false;
+    quint64 m_rasterSupersessionToken = 1;
     
     // Async rasterization
     struct AsyncRasterRequest {
@@ -327,14 +323,16 @@ private:
         quint64 contentRevision = 0;
         quint64 requestId = 0;
         quint64 generation = 0;
+        quint64 supersessionToken = 0;
         std::chrono::steady_clock::time_point startedAt{};
 
-        bool isEquivalentTo(const QSize& size, qreal scaleFactor, qreal zoom, quint64 revision) const {
+        bool isEquivalentTo(const QSize& size, qreal scaleFactor, qreal zoom, quint64 revision, quint64 token) const {
             constexpr qreal tolerance = 1e-4;
             return targetSize == size &&
                    std::abs(scale - scaleFactor) < tolerance &&
                    std::abs(canvasZoom - zoom) < tolerance &&
-                   contentRevision == revision;
+                   contentRevision == revision &&
+                   supersessionToken == token;
         }
     };
 
@@ -352,7 +350,6 @@ private:
     QRectF m_scaledRasterVisibleRegion;  // Region of item that was rasterized (for viewport optimization)
     enum class RenderState {
         Idle,
-        PreviewReady,
         HighResPending,
         HighResReady
     };
@@ -406,16 +403,6 @@ private:
     StrokeQuality m_lastStrokeQuality = StrokeQuality::Full;
     qreal m_lastStrokeQualityZoom = 1.0;
     
-    // Freeze zone fallback cache - low-res full text for out-of-viewport regions (Phase 1)
-    QPixmap m_frozenFallbackPixmap;      // Full text at low res (background for non-viewport areas)
-    bool m_frozenFallbackValid = false;  // Is fallback cache valid
-    quint64 m_frozenFallbackContentRevision = 0;
-    qreal m_frozenFallbackScale = 1.0;   // Scale at which fallback was created
-    QSize m_frozenFallbackSize;          // Size of text when fallback was created (detect resize)
-    bool m_frozenFallbackJobInFlight = false;
-    quint64 m_frozenFallbackJobGeneration = 0;
-    QSize m_pendingFallbackSize;
-    qreal m_pendingFallbackScale = 1.0;
     quint64 m_baseRasterContentRevision = 0;
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -495,11 +482,6 @@ private:
     bool m_incrementalRenderValid = false;
     bool m_baseRasterValid = false;
 
-    bool m_previewStrokeActive = false;
-    qreal m_previewStrokePercent = 0.0;
-    bool m_waitingForHighResRaster = false;
-    qreal m_pendingHighResScale = 0.0;
-    
     // Text alignment settings
     HorizontalAlignment m_horizontalAlignment = HorizontalAlignment::Center;
     VerticalAlignment m_verticalAlignment = VerticalAlignment::Center;
@@ -562,8 +544,6 @@ private:
 
     QRectF computeVisibleRegion() const;
     void ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale, qreal canvasZoom);
-    void ensureFrozenFallbackCache(qreal currentCanvasZoom);  // Phase 1: Create/update low-res fallback cache
-    void handleFrozenFallbackJobFinished(quint64 generation, quint64 contentRevision, QImage&& raster, const QSize& size, qreal scale);
     void startRasterJob(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
     void handleRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size, qreal scale, qreal canvasZoom, const QRectF& visibleRegion = QRectF());
     void startAsyncRasterRequest(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
@@ -587,9 +567,6 @@ private:
     void applyFitModeConstraintsToEditor();
     qreal contentPaddingPx() const;
     void handleContentPaddingChanged(qreal oldPadding, qreal newPadding);
-    void updateStrokePreviewState(qreal requestedPercent);
-    bool isStrokeWorkExpensiveCandidate() const;
-    void ensureBasePreviewRaster(const QSize& targetSize);
     
     
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
