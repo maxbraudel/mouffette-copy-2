@@ -361,16 +361,11 @@ QRectF computeDocumentTextBounds(const QTextDocument& doc, QAbstractTextDocument
                 continue;
             }
 
-            QRectF lineRect = line.naturalTextRect();
-            if (lineRect.isEmpty()) {
-                lineRect = QRectF(0.0, 0.0,
+            const QRectF lineRect(blockRect.left() + line.x(),
+                                  blockRect.top() + line.y(),
                                   std::max<qreal>(line.naturalTextWidth(), 1.0),
                                   std::max<qreal>(line.height(), 1.0));
-            }
-
-            const QPointF lineOrigin(blockRect.left() + line.x(), blockRect.top() + line.y());
-            const QRectF translated = lineRect.translated(lineOrigin);
-            bounds = hasBounds ? bounds.united(translated) : translated;
+            bounds = hasBounds ? bounds.united(lineRect) : lineRect;
             hasBounds = true;
         }
     }
@@ -846,6 +841,8 @@ protected:
                                 QTextLine line = textLayout->lineAt(lineIndex);
                                 if (!line.isValid()) continue;
 
+                                const qreal lineOffsetX = line.x();
+
                                 QList<QGlyphRun> glyphRuns = line.glyphRuns();
                                 for (const QGlyphRun& run : glyphRuns) {
                                     const QVector<quint32> indexes = run.glyphIndexes();
@@ -854,7 +851,7 @@ protected:
                                     const QRawFont rawFont = run.rawFont();
                                     
                                     for (int gi = 0; gi < indexes.size(); ++gi) {
-                                        const QPointF glyphPos = blockRect.topLeft() + positions[gi];
+                                        const QPointF glyphPos = blockRect.topLeft() + QPointF(lineOffsetX, line.y()) + positions[gi];
                                         const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);                                        // Draw stroke for ALL glyphs
                                         bufferPainter.save();
                                         bufferPainter.translate(glyphPos);
@@ -878,6 +875,8 @@ protected:
                                 QTextLine line = textLayout->lineAt(lineIndex);
                                 if (!line.isValid()) continue;
 
+                                const qreal lineOffsetX = line.x();
+
                                 QList<QGlyphRun> glyphRuns = line.glyphRuns();
                                 for (const QGlyphRun& run : glyphRuns) {
                                     const QVector<quint32> indexes = run.glyphIndexes();
@@ -886,7 +885,7 @@ protected:
                                     const QRawFont rawFont = run.rawFont();
                                     
                                     for (int gi = 0; gi < indexes.size(); ++gi) {
-                                        const QPointF glyphPos = blockRect.topLeft() + positions[gi];
+                                        const QPointF glyphPos = blockRect.topLeft() + QPointF(lineOffsetX, line.y()) + positions[gi];
                                         const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);                                        // Draw fill for ALL glyphs
                                         bufferPainter.save();
                                         bufferPainter.translate(glyphPos);
@@ -4921,8 +4920,8 @@ void TextMediaItem::applyFitToTextNow() {
     QAbstractTextDocumentLayout* layout = doc->documentLayout();
     qreal logicalContentHeight = 0.0;
     if (layout) {
-        const QSizeF size = layout->documentSize();
-        logicalContentHeight = std::max<qreal>(1.0, size.height());
+        const QRectF docBounds = computeDocumentTextBounds(*doc, layout);
+        logicalContentHeight = std::max<qreal>(1.0, docBounds.height());
     } else {
         logicalContentHeight = std::max<qreal>(1.0, doc->size().height());
     }

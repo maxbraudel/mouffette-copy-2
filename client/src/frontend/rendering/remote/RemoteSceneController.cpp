@@ -100,6 +100,46 @@ QPainterPath cachedGlyphPath(const QRawFont& font, quint32 glyphIndex) {
     return path;
 }
 
+QRectF computeDocumentTextBounds(const QTextDocument& doc, QAbstractTextDocumentLayout* layout) {
+    if (!layout) {
+        return QRectF();
+    }
+
+    QRectF bounds;
+    bool hasBounds = false;
+
+    for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+        QTextLayout* textLayout = block.layout();
+        if (!textLayout) {
+            continue;
+        }
+
+        const QRectF blockRect = layout->blockBoundingRect(block);
+        for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+            QTextLine line = textLayout->lineAt(lineIndex);
+            if (!line.isValid()) {
+                continue;
+            }
+
+            const QRectF lineRect(blockRect.left() + line.x(),
+                                  blockRect.top() + line.y(),
+                                  std::max<qreal>(line.naturalTextWidth(), 1.0),
+                                  std::max<qreal>(line.height(), 1.0));
+            bounds = hasBounds ? bounds.united(lineRect) : lineRect;
+            hasBounds = true;
+        }
+    }
+
+    if (!hasBounds) {
+        const QSizeF fallbackSize = layout->documentSize();
+        return QRectF(0.0, 0.0,
+                      std::max<qreal>(fallbackSize.width(), 1.0),
+                      std::max<qreal>(fallbackSize.height(), 1.0));
+    }
+
+    return bounds;
+}
+
 QFont::Weight qFontWeightFromCss(int cssWeight) {
     struct WeightMapping {
         int css;
@@ -335,6 +375,8 @@ protected:
                 for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
                     QTextLine line = textLayout->lineAt(lineIndex);
                     if (!line.isValid()) continue;
+
+                    const qreal lineOffsetX = line.x();
                     
                     QList<QGlyphRun> glyphRuns = line.glyphRuns();
                     for (const QGlyphRun& run : glyphRuns) {
@@ -344,7 +386,7 @@ protected:
                         const QRawFont rawFont = run.rawFont();
                         for (int gi = 0; gi < indexes.size(); ++gi) {
                             const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
-                            const QPointF glyphPos = blockRect.topLeft() + positions[gi];
+                            const QPointF glyphPos = blockRect.topLeft() + QPointF(lineOffsetX, line.y()) + positions[gi];
                             textPath.addPath(glyphPath.translated(glyphPos));
                         }
                     }
@@ -1846,11 +1888,15 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             }
 
             QSizeF docSize;
+            QRectF docBounds;
             if (doc && doc->documentLayout()) {
-                docSize = doc->documentLayout()->documentSize();
+                QAbstractTextDocumentLayout* docLayout = doc->documentLayout();
+                docSize = docLayout->documentSize();
+                docBounds = computeDocumentTextBounds(*doc, docLayout);
             } else {
                 const qreal logicalHeight = std::max<qreal>(1.0, (baseHeight - 2.0 * padding) / uniformScale);
                 docSize = QSizeF(logicalWidth, logicalHeight);
+                docBounds = QRectF(0.0, 0.0, std::max<qreal>(logicalWidth, 1.0), logicalHeight);
             }
 
             const qreal safeBaseWidth = std::max<qreal>(baseWidth, 1.0);
@@ -1865,18 +1911,21 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             const qreal paddingY = padding * scaleY;
 
             // Center the text vertically within the padded height (matches host offset logic)
-            const qreal scaledDocHeight = docSize.height() * appliedScale;
+            const qreal docVisualTop = docBounds.top();
+            const qreal docVisualHeight = std::max<qreal>(1.0, docBounds.height());
+            const qreal scaledDocTop = docVisualTop * appliedScale;
+            const qreal scaledDocHeight = docVisualHeight * appliedScale;
             const qreal availableHeightScene = std::max<qreal>(0.0, static_cast<qreal>(ph) - 2.0 * paddingY);
             qreal verticalOffset = paddingY;
             switch (item->verticalAlignment) {
                 case RemoteMediaItem::VerticalAlignment::Top:
-                    verticalOffset = paddingY;
+                    verticalOffset = paddingY - scaledDocTop;
                     break;
                 case RemoteMediaItem::VerticalAlignment::Center:
-                    verticalOffset = paddingY + std::max<qreal>(0.0, (availableHeightScene - scaledDocHeight) * 0.5);
+                    verticalOffset = paddingY + std::max<qreal>(0.0, (availableHeightScene - scaledDocHeight) * 0.5) - scaledDocTop;
                     break;
                 case RemoteMediaItem::VerticalAlignment::Bottom:
-                    verticalOffset = paddingY + std::max<qreal>(0.0, availableHeightScene - scaledDocHeight);
+                    verticalOffset = paddingY + std::max<qreal>(0.0, availableHeightScene - scaledDocHeight) - scaledDocTop;
                     break;
             }
             
