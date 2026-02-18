@@ -13,6 +13,7 @@
 #include <chrono>
 #include <QPixmap>
 #include <QVector>
+#include <memory>
 
 class QGraphicsTextItem;
 class QGraphicsSceneMouseEvent;
@@ -285,7 +286,7 @@ private:
     TextRenderCacheKey m_activeHighResCacheKey;
     bool m_activeHighResCacheKeyValid = false;
     static constexpr qint64 kPerItemCacheBudgetBytes = 24LL * 1024LL * 1024LL;
-    std::unique_ptr<ITextRenderer> m_textRenderer;
+    std::shared_ptr<ITextRenderer> m_textRenderer;
     QString m_textRendererBackend;
     
     // Rasterization cache for performance

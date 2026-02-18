@@ -343,6 +343,18 @@ QRectF computeDocumentTextBounds(const QTextDocument& doc, QAbstractTextDocument
         return QRectF();
     }
 
+    const auto lineVisualRectInDocument = [](const QRectF& blockRect, const QTextLine& line) {
+        const QRectF naturalRect = line.naturalTextRect();
+        if (naturalRect.isValid() && naturalRect.width() > 0.0 && naturalRect.height() > 0.0) {
+            return naturalRect.translated(blockRect.topLeft() + QPointF(0.0, line.y()));
+        }
+
+        return QRectF(blockRect.left() + line.x(),
+                      blockRect.top() + line.y(),
+                      std::max<qreal>(line.naturalTextWidth(), 1.0),
+                      std::max<qreal>(line.height(), 1.0));
+    };
+
     QRectF bounds;
     bool hasBounds = false;
 
@@ -359,10 +371,7 @@ QRectF computeDocumentTextBounds(const QTextDocument& doc, QAbstractTextDocument
                 continue;
             }
 
-            const QRectF lineRect(blockRect.left() + line.x(),
-                                  blockRect.top() + line.y(),
-                                  std::max<qreal>(line.naturalTextWidth(), 1.0),
-                                  std::max<qreal>(line.height(), 1.0));
+            const QRectF lineRect = lineVisualRectInDocument(blockRect, line);
             bounds = hasBounds ? bounds.united(lineRect) : lineRect;
             hasBounds = true;
         }
@@ -612,6 +621,9 @@ public:
             m_caretBlinkTimer.setInterval(interval);
         }
         QObject::connect(&m_caretBlinkTimer, &QTimer::timeout, this, [this]() {
+            if (textCursor().hasSelection()) {
+                return;
+            }
             m_caretVisible = !m_caretVisible;
             update();
         });
@@ -701,15 +713,10 @@ protected:
 
         QGraphicsTextItem::keyPressEvent(event);
         invalidateCache(true);
-        
-        // After any text insertion, normalize formatting
-        if (m_owner) {
-            QTimer::singleShot(0, this, [this]() {
-                if (m_owner) {
-                    m_owner->normalizeEditorFormatting();
-                }
-            });
-        }
+
+        // Keep blink timer idle while selection is active to avoid unnecessary repaints.
+        // Formatting normalization is handled at edit start and explicit style changes.
+        updateCaretBlinkState();
     }
 
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override {
@@ -778,22 +785,27 @@ protected:
                                     for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
                                         QTextLine line = textLayout->lineAt(lineIndex);
                                         if (!line.isValid()) continue;
-                                        
-                                        const qreal lineWidth = line.naturalTextWidth();
-                                        const qreal width = std::max<qreal>(lineWidth, 1.0);
-                                        qreal alignedX = line.x();
-                                        if (std::abs(alignedX) < 1e-4 && width < docWidth - 1e-4) {
-                                            const qreal horizontalSpace = std::max<qreal>(0.0, docWidth - width);
-                                            if (align.testFlag(Qt::AlignRight)) {
-                                                alignedX += horizontalSpace;
-                                            } else if (align.testFlag(Qt::AlignHCenter)) {
-                                                alignedX += horizontalSpace * 0.5;
+
+                                        QRectF lineRect = line.naturalTextRect();
+                                        if (lineRect.isValid() && lineRect.width() > 0.0 && lineRect.height() > 0.0) {
+                                            lineRect.translate(blockRect.topLeft() + QPointF(0.0, line.y()));
+                                        } else {
+                                            const qreal lineWidth = line.naturalTextWidth();
+                                            const qreal width = std::max<qreal>(lineWidth, 1.0);
+                                            qreal alignedX = line.x();
+                                            if (std::abs(alignedX) < 1e-4 && width < docWidth - 1e-4) {
+                                                const qreal horizontalSpace = std::max<qreal>(0.0, docWidth - width);
+                                                if (align.testFlag(Qt::AlignRight)) {
+                                                    alignedX += horizontalSpace;
+                                                } else if (align.testFlag(Qt::AlignHCenter)) {
+                                                    alignedX += horizontalSpace * 0.5;
+                                                }
                                             }
+                                            const qreal height = std::max<qreal>(line.height(), 1.0);
+                                            lineRect = QRectF(blockRect.topLeft() + QPointF(alignedX, line.y()), QSizeF(width, height));
                                         }
-                                        const qreal height = std::max<qreal>(line.height(), 1.0);
-                                        // line.x() already contains the alignment offset within the document
-                                        const QPointF topLeft = blockRect.topLeft() + QPointF(alignedX, line.y());
-                                        bufferPainter.drawRect(QRectF(topLeft, QSizeF(width, height)));
+
+                                        bufferPainter.drawRect(lineRect);
                                     }
                                 }
                             }
@@ -839,8 +851,6 @@ protected:
                                 QTextLine line = textLayout->lineAt(lineIndex);
                                 if (!line.isValid()) continue;
 
-                                const qreal lineOffsetX = line.x();
-
                                 QList<QGlyphRun> glyphRuns = line.glyphRuns();
                                 for (const QGlyphRun& run : glyphRuns) {
                                     const QVector<quint32> indexes = run.glyphIndexes();
@@ -849,7 +859,7 @@ protected:
                                     const QRawFont rawFont = run.rawFont();
                                     
                                     for (int gi = 0; gi < indexes.size(); ++gi) {
-                                        const QPointF glyphPos = blockRect.topLeft() + QPointF(lineOffsetX, line.y()) + positions[gi];
+                                        const QPointF glyphPos = blockRect.topLeft() + QPointF(0.0, line.y()) + positions[gi];
                                         const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);                                        // Draw stroke for ALL glyphs
                                         bufferPainter.save();
                                         bufferPainter.translate(glyphPos);
@@ -873,8 +883,6 @@ protected:
                                 QTextLine line = textLayout->lineAt(lineIndex);
                                 if (!line.isValid()) continue;
 
-                                const qreal lineOffsetX = line.x();
-
                                 QList<QGlyphRun> glyphRuns = line.glyphRuns();
                                 for (const QGlyphRun& run : glyphRuns) {
                                     const QVector<quint32> indexes = run.glyphIndexes();
@@ -883,7 +891,7 @@ protected:
                                     const QRawFont rawFont = run.rawFont();
                                     
                                     for (int gi = 0; gi < indexes.size(); ++gi) {
-                                        const QPointF glyphPos = blockRect.topLeft() + QPointF(lineOffsetX, line.y()) + positions[gi];
+                                        const QPointF glyphPos = blockRect.topLeft() + QPointF(0.0, line.y()) + positions[gi];
                                         const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);                                        // Draw fill for ALL glyphs
                                         bufferPainter.save();
                                         bufferPainter.translate(glyphPos);
@@ -975,6 +983,7 @@ protected:
     void mousePressEvent(QGraphicsSceneMouseEvent* event) override {
         QGraphicsTextItem::mousePressEvent(event);
         invalidateCache(true);
+        updateCaretBlinkState();
     }
 
     void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override {
@@ -995,16 +1004,25 @@ protected:
         if (oldPosition != newPosition || hadSelection != hasSelection) {
             invalidateCache(false);
         }
+        updateCaretBlinkState();
     }
 
     void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override {
         QGraphicsTextItem::mouseReleaseEvent(event);
         invalidateCache(false);
+        updateCaretBlinkState();
     }
 
 private:
     void startCaretBlink(bool resetVisible) {
         const int interval = caretBlinkInterval();
+        if (textCursor().hasSelection()) {
+            if (m_caretBlinkTimer.isActive()) {
+                m_caretBlinkTimer.stop();
+            }
+            return;
+        }
+
         if (resetVisible || !m_caretBlinkTimer.isActive()) {
             m_caretVisible = true;
         }
@@ -1024,6 +1042,16 @@ private:
         }
 
         update();
+    }
+
+    void updateCaretBlinkState() {
+        if (textCursor().hasSelection()) {
+            if (m_caretBlinkTimer.isActive()) {
+                m_caretBlinkTimer.stop();
+            }
+            return;
+        }
+        startCaretBlink(false);
     }
 
     void stopCaretBlink(bool resetVisible) {
@@ -1488,10 +1516,7 @@ void TextMediaItem::paintSimplifiedStroke(QPainter* painter, const VectorDrawSna
         for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
             QTextLine line = textLayout->lineAt(lineIndex);
             if (!line.isValid()) continue;
-            
-            // Use line.x() from Qt's layout engine which already handles alignment
-            const qreal lineOffsetX = line.x();
-            
+
             const QList<QGlyphRun> glyphRuns = line.glyphRuns();
             for (const QGlyphRun& run : glyphRuns) {
                 const QVector<quint32> indexes = run.glyphIndexes();
@@ -1500,7 +1525,7 @@ void TextMediaItem::paintSimplifiedStroke(QPainter* painter, const VectorDrawSna
                 const QRawFont rawFont = run.rawFont();
                 
                 for (int gi = 0; gi < indexes.size(); ++gi) {
-                    const QPointF glyphPos = blockRect.topLeft() + QPointF(lineOffsetX, line.y()) + positions[gi];
+                    const QPointF glyphPos = blockRect.topLeft() + QPointF(0.0, line.y()) + positions[gi];
                     QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
                     glyphPath.translate(glyphPos);
                     unifiedOutline.addPath(glyphPath);
@@ -2031,9 +2056,9 @@ void TextMediaItem::ensureTextRenderer() {
     };
 
     if (textRendererGpuEnabled()) {
-        m_textRenderer = std::make_unique<GpuTextRendererPrototype>();
+        m_textRenderer = std::make_shared<GpuTextRendererPrototype>();
     } else {
-        m_textRenderer = std::make_unique<CpuTextRenderer>();
+        m_textRenderer = std::make_shared<CpuTextRenderer>();
     }
     m_textRendererBackend = QString::fromLatin1(m_textRenderer->backendName());
 }
@@ -2266,20 +2291,25 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
                     QTextLine line = textLayout->lineAt(lineIndex);
                     if (!line.isValid()) continue;
 
-                    const qreal lineWidth = line.naturalTextWidth();
-                    const qreal width = std::max<qreal>(lineWidth, 1.0);
-                    qreal alignedX = line.x();
-                    if (std::abs(alignedX) < 1e-4 && width < docWidth - 1e-4) {
-                        const qreal horizontalSpace = std::max<qreal>(0.0, docWidth - width);
-                        if (snapshot.horizontalAlignment == HorizontalAlignment::Right) {
-                            alignedX += horizontalSpace;
-                        } else if (snapshot.horizontalAlignment == HorizontalAlignment::Center) {
-                            alignedX += horizontalSpace * 0.5;
+                    QRectF lineRect = line.naturalTextRect();
+                    if (lineRect.isValid() && lineRect.width() > 0.0 && lineRect.height() > 0.0) {
+                        lineRect.translate(blockRect.topLeft() + QPointF(0.0, line.y()));
+                    } else {
+                        const qreal lineWidth = line.naturalTextWidth();
+                        const qreal width = std::max<qreal>(lineWidth, 1.0);
+                        qreal alignedX = line.x();
+                        if (std::abs(alignedX) < 1e-4 && width < docWidth - 1e-4) {
+                            const qreal horizontalSpace = std::max<qreal>(0.0, docWidth - width);
+                            if (snapshot.horizontalAlignment == HorizontalAlignment::Right) {
+                                alignedX += horizontalSpace;
+                            } else if (snapshot.horizontalAlignment == HorizontalAlignment::Center) {
+                                alignedX += horizontalSpace * 0.5;
+                            }
                         }
+                        const qreal height = std::max<qreal>(line.height(), 1.0);
+                        lineRect = QRectF(blockRect.topLeft() + QPointF(alignedX, line.y()), QSizeF(width, height));
                     }
-                    const qreal height = std::max<qreal>(line.height(), 1.0);
-                    const QPointF topLeft = blockRect.topLeft() + QPointF(alignedX, line.y());
-                    painter->drawRect(QRectF(topLeft, QSizeF(width, height)));
+                    painter->drawRect(lineRect);
                 }
             }
 
@@ -3776,8 +3806,12 @@ void TextMediaItem::startAsyncRasterRequest(const QSize& targetSize, qreal effec
     job.targetRect = request.visibleRegionAtRequest;  // Pass visible region for partial rendering
 
     ensureTextRenderer();
-    auto future = QtConcurrent::run([this, job]() {
-        return renderRasterJobWithBackend(job);
+    const std::shared_ptr<ITextRenderer> renderer = m_textRenderer;
+    auto future = QtConcurrent::run([renderer, job]() {
+        if (renderer) {
+            return renderer->render(job);
+        }
+        return job.execute();
     });
 
     std::weak_ptr<bool> guard = lifetimeGuard();
@@ -3853,8 +3887,12 @@ void TextMediaItem::startBaseRasterRequest(const QSize& targetSize) {
     job.canvasZoom = 1.0;  // Tier 2: Base raster always at 1.0 zoom
 
     ensureTextRenderer();
-    auto future = QtConcurrent::run([this, job]() {
-        return renderRasterJobWithBackend(job);
+    const std::shared_ptr<ITextRenderer> renderer = m_textRenderer;
+    auto future = QtConcurrent::run([renderer, job]() {
+        if (renderer) {
+            return renderer->render(job);
+        }
+        return job.execute();
     });
 
     std::weak_ptr<bool> guard = lifetimeGuard();
@@ -4109,16 +4147,6 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
         std::abs(currentScale - 1.0) > 1e-4 ||
         std::abs(m_uniformScaleFactor - 1.0) > 1e-4 ||
         resizingUniformly;
-
-    if (m_isEditing) {
-        const int targetWidth = std::max(1, static_cast<int>(std::ceil(bounds.width())));
-        const int targetHeight = std::max(1, static_cast<int>(std::ceil(bounds.height())));
-        const VectorDrawSnapshot snapshot = captureVectorSnapshot();
-        paintVectorSnapshot(painter, snapshot, QSize(targetWidth, targetHeight), 1.0, canvasZoom);
-        painter->restore();
-        paintSelectionAndLabel(painter);
-        return;
-    }
 
     if (needsScaledRaster) {
         const bool interactiveResize = resizingUniformly;
