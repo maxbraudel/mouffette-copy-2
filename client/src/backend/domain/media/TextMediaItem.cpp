@@ -2077,6 +2077,7 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
 
     QElapsedTimer snapshotTimer;
     snapshotTimer.start();
+    const bool hasViewport = viewport.isValid() && !viewport.isEmpty();
 
     const int targetWidth = std::max(1, targetSize.width());
     const int targetHeight = std::max(1, targetSize.height());
@@ -2204,7 +2205,10 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         cursor.mergeCharFormat(format);
     }
 
-    auto drawDocumentWithStrokeBehindFill = [&](qint64* outlineMsOut, int* glyphCountOut) {
+    auto drawDocumentWithStrokeBehindFill = [&](qint64* outlineMsOut,
+                                                int* glyphCountOut,
+                                                qreal translateX,
+                                                qreal translateY) {
         if (outlineMsOut) {
             *outlineMsOut = 0;
         }
@@ -2216,6 +2220,9 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
             QAbstractTextDocumentLayout::PaintContext ctx;
             ctx.cursorPosition = -1;
             ctx.palette.setColor(QPalette::Text, fillColor);
+            if (hasViewport) {
+                ctx.clip = viewport.translated(-translateX, -translateY);
+            }
             layout->draw(painter, ctx);
             return;
         }
@@ -2237,6 +2244,9 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
             QAbstractTextDocumentLayout::PaintContext ctx;
             ctx.cursorPosition = -1;
             ctx.palette.setColor(QPalette::Text, fillColor);
+            if (hasViewport) {
+                ctx.clip = viewport.translated(-translateX, -translateY);
+            }
             layout->draw(painter, ctx);
         }
 
@@ -2258,6 +2268,9 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
             QAbstractTextDocumentLayout::PaintContext ctx;
             ctx.cursorPosition = -1;
             ctx.palette.setColor(QPalette::Text, Qt::transparent);
+            if (hasViewport) {
+                ctx.clip = viewport.translated(-translateX, -translateY);
+            }
             layout->draw(painter, ctx);
             painter->restore();
         }
@@ -2287,6 +2300,12 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
                 if (!textLayout) continue;
 
                 const QRectF blockRect = layout->blockBoundingRect(block);
+                if (hasViewport) {
+                    const QRectF blockInItemCoords = blockRect.translated(offsetX, offsetY);
+                    if (!viewport.intersects(blockInItemCoords)) {
+                        continue;
+                    }
+                }
                 for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
                     QTextLine line = textLayout->lineAt(lineIndex);
                     if (!line.isValid()) continue;
@@ -2318,7 +2337,7 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
 
         int glyphCount = 0;
         qint64 outlineMs = 0;
-        drawDocumentWithStrokeBehindFill(&outlineMs, &glyphCount);
+        drawDocumentWithStrokeBehindFill(&outlineMs, &glyphCount, offsetX, offsetY);
 
         painter->restore();
         logSnapshotPerf("vector-full", outlineMs, glyphCount, snapshotTimer.elapsed());
@@ -2335,6 +2354,12 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         if (!textLayout) continue;
 
         const QRectF blockRect = layout->blockBoundingRect(block);
+        if (hasViewport) {
+            const QRectF blockInItemCoords = blockRect.translated(margin, offsetY);
+            if (!viewport.intersects(blockInItemCoords)) {
+                continue;
+            }
+        }
         for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
             QTextLine line = textLayout->lineAt(lineIndex);
             if (!line.isValid()) continue;
@@ -2362,7 +2387,7 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         }
     }
 
-    drawDocumentWithStrokeBehindFill(&outlineMs, &glyphCount);
+    drawDocumentWithStrokeBehindFill(&outlineMs, &glyphCount, margin, offsetY);
 
     painter->restore();
     logSnapshotPerf("vector-fit", outlineMs, glyphCount, snapshotTimer.elapsed());
@@ -3573,7 +3598,7 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     const qreal boundedUniformScale = std::max(std::abs(m_uniformScaleFactor), epsilon);
     const bool resizingUniformly = (m_activeHandle != None);
     const bool interactiveAltResize = resizingUniformly && m_lastAxisAltStretch;
-    const bool disableViewportOptimization = resizingUniformly;
+    const bool disableViewportOptimization = resizingUniformly && !interactiveAltResize;
     qreal boundedDpr = 1.0;
     if (scene() && !scene()->views().isEmpty()) {
         if (QGraphicsView* view = scene()->views().first()) {
@@ -3766,7 +3791,12 @@ void TextMediaItem::startRasterJob(const QSize& targetSize, qreal effectiveScale
     AsyncRasterRequest request{sanitizedSize, m_baseSize, visibleRegion, effectiveScale, canvasZoom, m_contentRevision, requestId, 0, m_rasterSupersessionToken};
 
     if (m_asyncRasterInProgress) {
-        if (m_activeAsyncRasterRequest && m_activeAsyncRasterRequest->isEquivalentTo(sanitizedSize, effectiveScale, canvasZoom, m_contentRevision, m_rasterSupersessionToken)) {
+        if (m_activeAsyncRasterRequest && m_activeAsyncRasterRequest->isEquivalentTo(sanitizedSize,
+                                                                                      effectiveScale,
+                                                                                      canvasZoom,
+                                                                                      visibleRegion,
+                                                                                      m_contentRevision,
+                                                                                      m_rasterSupersessionToken)) {
             m_rasterRequestId = m_activeAsyncRasterRequest->requestId;
             m_pendingRasterRequestId = m_activeAsyncRasterRequest->requestId;
             return;
@@ -3782,8 +3812,8 @@ void TextMediaItem::startRasterJob(const QSize& targetSize, qreal effectiveScale
     queueRasterJobDispatch();
 }
 
-void TextMediaItem::startAsyncRasterRequest(const QSize& targetSize, qreal effectiveScale, qreal canvasZoom, quint64 requestId) {
-    AsyncRasterRequest request{targetSize, m_baseSize, QRectF(), effectiveScale, canvasZoom, m_contentRevision, requestId, 0, m_rasterSupersessionToken};
+void TextMediaItem::startAsyncRasterRequest(const QSize& targetSize, qreal effectiveScale, qreal canvasZoom, const QRectF& visibleRegion, quint64 requestId) {
+    AsyncRasterRequest request{targetSize, m_baseSize, visibleRegion, effectiveScale, canvasZoom, m_contentRevision, requestId, 0, m_rasterSupersessionToken};
     request.generation = ++m_rasterJobGeneration;
     request.startedAt = std::chrono::steady_clock::now();
 
@@ -3863,7 +3893,7 @@ void TextMediaItem::dispatchPendingRasterRequest() {
         return;
     }
 
-    startAsyncRasterRequest(request.targetSize, request.scale, request.canvasZoom, request.requestId);
+    startAsyncRasterRequest(request.targetSize, request.scale, request.canvasZoom, request.visibleRegionAtRequest, request.requestId);
 }
 
 void TextMediaItem::startBaseRasterRequest(const QSize& targetSize) {
@@ -4233,13 +4263,24 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
                                                 const QRectF& sourceRect,
                                                 const QRectF& preferredDestRect,
                                                 const QRectF& logicalSourceItemRect,
+                                                const QRectF& fullLogicalBounds,
                                                 bool anchorToAlignment) {
             painter->save();
             painter->setClipRect(scaledBounds);
             QRectF destRect = logicalSourceItemRect.isValid() && !logicalSourceItemRect.isEmpty()
                 ? scaleTransform.mapRect(logicalSourceItemRect)
                 : preferredDestRect;
-            if (anchorToAlignment) {
+            bool sourceIsFullBounds = true;
+            if (logicalSourceItemRect.isValid() && !logicalSourceItemRect.isEmpty() &&
+                fullLogicalBounds.isValid() && !fullLogicalBounds.isEmpty()) {
+                constexpr qreal kBoundsEpsilon = 0.5;
+                sourceIsFullBounds =
+                    std::abs(logicalSourceItemRect.left() - fullLogicalBounds.left()) <= kBoundsEpsilon &&
+                    std::abs(logicalSourceItemRect.top() - fullLogicalBounds.top()) <= kBoundsEpsilon &&
+                    std::abs(logicalSourceItemRect.width() - fullLogicalBounds.width()) <= kBoundsEpsilon &&
+                    std::abs(logicalSourceItemRect.height() - fullLogicalBounds.height()) <= kBoundsEpsilon;
+            }
+            if (anchorToAlignment && sourceIsFullBounds) {
                 destRect = anchorRectToAlignment(destRect, scaledBounds);
             }
             painter->drawPixmap(destRect, pixmap, sourceRect);
@@ -4249,13 +4290,24 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
         auto drawImageWithoutDeformation = [&](const QImage& image,
                                                const QRectF& preferredDestRect,
                                                const QRectF& logicalSourceItemRect,
+                                               const QRectF& fullLogicalBounds,
                                                bool anchorToAlignment) {
             painter->save();
             painter->setClipRect(scaledBounds);
             QRectF destRect = logicalSourceItemRect.isValid() && !logicalSourceItemRect.isEmpty()
                 ? scaleTransform.mapRect(logicalSourceItemRect)
                 : preferredDestRect;
-            if (anchorToAlignment) {
+            bool sourceIsFullBounds = true;
+            if (logicalSourceItemRect.isValid() && !logicalSourceItemRect.isEmpty() &&
+                fullLogicalBounds.isValid() && !fullLogicalBounds.isEmpty()) {
+                constexpr qreal kBoundsEpsilon = 0.5;
+                sourceIsFullBounds =
+                    std::abs(logicalSourceItemRect.left() - fullLogicalBounds.left()) <= kBoundsEpsilon &&
+                    std::abs(logicalSourceItemRect.top() - fullLogicalBounds.top()) <= kBoundsEpsilon &&
+                    std::abs(logicalSourceItemRect.width() - fullLogicalBounds.width()) <= kBoundsEpsilon &&
+                    std::abs(logicalSourceItemRect.height() - fullLogicalBounds.height()) <= kBoundsEpsilon;
+            }
+            if (anchorToAlignment && sourceIsFullBounds) {
                 destRect = anchorRectToAlignment(destRect, scaledBounds);
             }
             const QRectF sourceRect(QPointF(0.0, 0.0), QSizeF(static_cast<qreal>(image.width()), static_cast<qreal>(image.height())));
@@ -4297,7 +4349,13 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
                                                    static_cast<qreal>(m_lastScaledBaseSize.height()));
                 }
                 const bool anchorToAlignment = m_lastAxisAltStretch;
-                drawPixmapWithoutDeformation(m_scaledRasterPixmap, sourceRect, destRect, logicalSourceItemRect, anchorToAlignment);
+                QRectF fullLogicalBounds;
+                if (m_lastScaledBaseSize.width() > 0 && m_lastScaledBaseSize.height() > 0) {
+                    fullLogicalBounds = QRectF(0.0, 0.0,
+                                               static_cast<qreal>(m_lastScaledBaseSize.width()),
+                                               static_cast<qreal>(m_lastScaledBaseSize.height()));
+                }
+                drawPixmapWithoutDeformation(m_scaledRasterPixmap, sourceRect, destRect, logicalSourceItemRect, fullLogicalBounds, anchorToAlignment);
             } else {
                 // Draw viewport at high resolution (8×+) - this overwrites the fallback in the visible area
                 painter->drawPixmap(destRect, m_scaledRasterPixmap, sourceRect);
@@ -4329,7 +4387,13 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
                                                        static_cast<qreal>(m_lastScaledBaseSize.height()));
                     }
                     const bool anchorToAlignment = m_lastAxisAltStretch;
-                    drawPixmapWithoutDeformation(m_scaledRasterPixmap, sourceRect, destRect, logicalSourceItemRect, anchorToAlignment);
+                    QRectF fullLogicalBounds;
+                    if (m_lastScaledBaseSize.width() > 0 && m_lastScaledBaseSize.height() > 0) {
+                        fullLogicalBounds = QRectF(0.0, 0.0,
+                                                   static_cast<qreal>(m_lastScaledBaseSize.width()),
+                                                   static_cast<qreal>(m_lastScaledBaseSize.height()));
+                    }
+                    drawPixmapWithoutDeformation(m_scaledRasterPixmap, sourceRect, destRect, logicalSourceItemRect, fullLogicalBounds, anchorToAlignment);
                 } else {
                     painter->drawPixmap(destRect, m_scaledRasterPixmap, sourceRect);
                 }
@@ -4343,7 +4407,13 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
                                                        static_cast<qreal>(m_lastRasterizedSize.height()));
                     }
                     const bool anchorToAlignment = m_lastAxisAltStretch;
-                    drawImageWithoutDeformation(m_rasterizedText, scaledBounds, logicalSourceItemRect, anchorToAlignment);
+                    QRectF fullLogicalBounds;
+                    if (m_lastRasterizedSize.width() > 0 && m_lastRasterizedSize.height() > 0) {
+                        fullLogicalBounds = QRectF(0.0, 0.0,
+                                                   static_cast<qreal>(m_lastRasterizedSize.width()),
+                                                   static_cast<qreal>(m_lastRasterizedSize.height()));
+                    }
+                    drawImageWithoutDeformation(m_rasterizedText, scaledBounds, logicalSourceItemRect, fullLogicalBounds, anchorToAlignment);
                 } else {
                     painter->drawImage(scaledBounds, m_rasterizedText);
                 }

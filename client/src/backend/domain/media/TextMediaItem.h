@@ -329,11 +329,30 @@ private:
         quint64 supersessionToken = 0;
         std::chrono::steady_clock::time_point startedAt{};
 
-        bool isEquivalentTo(const QSize& size, qreal scaleFactor, qreal zoom, quint64 revision, quint64 token) const {
+        bool isEquivalentTo(const QSize& size,
+                            qreal scaleFactor,
+                            qreal zoom,
+                            const QRectF& visibleRegion,
+                            quint64 revision,
+                            quint64 token) const {
             constexpr qreal tolerance = 1e-4;
+            constexpr qreal rectTolerance = 0.5;
+            const auto rectsCloseEnough = [&](const QRectF& lhs, const QRectF& rhs) {
+                if (lhs.isEmpty() && rhs.isEmpty()) {
+                    return true;
+                }
+                if (lhs.isValid() != rhs.isValid()) {
+                    return false;
+                }
+                return std::abs(lhs.x() - rhs.x()) <= rectTolerance &&
+                       std::abs(lhs.y() - rhs.y()) <= rectTolerance &&
+                       std::abs(lhs.width() - rhs.width()) <= rectTolerance &&
+                       std::abs(lhs.height() - rhs.height()) <= rectTolerance;
+            };
             return targetSize == size &&
                    std::abs(scale - scaleFactor) < tolerance &&
                    std::abs(canvasZoom - zoom) < tolerance &&
+                   rectsCloseEnough(visibleRegionAtRequest, visibleRegion) &&
                    contentRevision == revision &&
                    supersessionToken == token;
         }
@@ -549,7 +568,7 @@ private:
     void ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale, qreal canvasZoom);
     void startRasterJob(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, const QRectF& visibleRegion, quint64 requestId);
     void handleRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size, qreal scale, qreal canvasZoom, const QRectF& visibleRegion = QRectF());
-    void startAsyncRasterRequest(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
+    void startAsyncRasterRequest(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, const QRectF& visibleRegion, quint64 requestId);
     void startNextPendingAsyncRasterRequest();
     void queueRasterJobDispatch();
     void dispatchPendingRasterRequest();
