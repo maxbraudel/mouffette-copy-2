@@ -139,14 +139,15 @@ public:
     
     // Override to indicate this is text media
     bool isTextMedia() const override { return true; }
+    bool allowAltResize() const override { return true; }
     
     // Alignment controls interaction (called by canvas, similar to video controls)
     void refreshAlignmentControlsLayout();
     void syncInlineEditorToBaseSize();
 
 protected:
-    bool onAltResizeModeEngaged() override;
     void onInteractiveGeometryChanged() override;
+    bool onAltResizeModeEngaged() override;
 
 private:
     void scheduleFitToTextUpdate();
@@ -192,10 +193,14 @@ private:
     QImage m_scaledRasterizedText;
     qreal m_lastRasterizedScale = 1.0;
     bool m_scaledRasterDirty = true;
+    QSize m_lastScaledTargetSize;
+    QSize m_lastScaledBaseSize;
+    bool m_forceScaledRasterRefresh = false;
     qreal m_uniformScaleFactor = 1.0;
     qreal m_lastObservedScale = 1.0;
     bool m_pendingUniformScaleBake = false;
     qreal m_pendingUniformScaleAmount = 1.0;
+    bool m_customScaleBaking = false;  // Set during Alt-resize to prevent itemChange interference
     qreal m_lastVisualScaleFactor = 1.0;
     qreal m_lastCanvasZoomForRaster = 1.0;
     std::chrono::steady_clock::time_point m_lastScaledRasterUpdate{};
@@ -404,6 +409,7 @@ private:
         bool fitToTextEnabled = false;
         HorizontalAlignment horizontalAlignment = HorizontalAlignment::Center;
         VerticalAlignment verticalAlignment = VerticalAlignment::Center;
+        qreal uniformScaleFactor = 1.0;
     };
 
     struct TextRasterJob {
