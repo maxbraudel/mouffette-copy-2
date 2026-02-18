@@ -3957,9 +3957,10 @@ void TextMediaItem::handleRasterJobFinished(quint64 generation, QImage&& raster,
         return;
     }
 
-    // Keep interactive resize rendering stable: avoid swapping in async rasters
+    // Keep non-Alt interactive resize rendering stable: avoid swapping in async rasters
     // produced against stale intermediate geometry while handles are moving.
-    if (m_activeHandle != None) {
+    // For Alt-resize we allow live async presentation (geometry gate above still rejects stale size).
+    if (m_activeHandle != None && !m_lastAxisAltStretch) {
         m_scaledRasterDirty = true;
         recordTextRasterResult(durationMs, false, true);
         startNextPendingAsyncRasterRequest();
