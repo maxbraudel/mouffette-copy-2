@@ -3750,7 +3750,7 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
 
     // Kick async job instead of synchronous render
     ++m_rasterRequestId;
-    startRasterJob(targetSize, rasterScale, boundedCanvasZoom, m_rasterRequestId);
+    startRasterJob(targetSize, rasterScale, boundedCanvasZoom, visibleRegion, m_rasterRequestId);
 
     if (isActiveOperation) {
         m_scaledRasterThrottleActive = true;
@@ -3761,9 +3761,9 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
 }
 
 
-void TextMediaItem::startRasterJob(const QSize& targetSize, qreal effectiveScale, qreal canvasZoom, quint64 requestId) {
+void TextMediaItem::startRasterJob(const QSize& targetSize, qreal effectiveScale, qreal canvasZoom, const QRectF& visibleRegion, quint64 requestId) {
     const QSize sanitizedSize(std::max(1, targetSize.width()), std::max(1, targetSize.height()));
-    AsyncRasterRequest request{sanitizedSize, m_baseSize, QRectF(), effectiveScale, canvasZoom, m_contentRevision, requestId, 0, m_rasterSupersessionToken};
+    AsyncRasterRequest request{sanitizedSize, m_baseSize, visibleRegion, effectiveScale, canvasZoom, m_contentRevision, requestId, 0, m_rasterSupersessionToken};
 
     if (m_asyncRasterInProgress) {
         if (m_activeAsyncRasterRequest && m_activeAsyncRasterRequest->isEquivalentTo(sanitizedSize, effectiveScale, canvasZoom, m_contentRevision, m_rasterSupersessionToken)) {
@@ -3795,9 +3795,6 @@ void TextMediaItem::startAsyncRasterRequest(const QSize& targetSize, qreal effec
     const quint64 queueDepth = (m_asyncRasterInProgress ? 1 : 0) + (m_pendingAsyncRasterRequest.has_value() ? 1 : 0);
     recordTextRasterStart(queueDepth);
 
-    // Calculate visible region for viewport optimization
-    request.visibleRegionAtRequest = computeVisibleRegion();
-    
     TextRasterJob job;
     job.snapshot = captureVectorSnapshot();
     job.targetSize = targetSize;
@@ -4197,19 +4194,53 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
         const bool staleScaledGeometry = (m_lastScaledBaseSize != m_baseSize);
         const bool geometryFreshForPresentation = !staleScaledGeometry;
         const bool canPresentCurrentHighRes = hasPresentedScaledRaster && geometryFreshForPresentation;
+        const bool hasVisibleRegionMetadata = m_scaledRasterVisibleRegion.isValid() && !m_scaledRasterVisibleRegion.isEmpty();
+        const bool coversFullItemRegion = !hasVisibleRegionMetadata || m_scaledRasterVisibleRegion.contains(bounds);
+
+        auto anchorRectToAlignment = [&](QRectF rect, const QRectF& boundsRect) {
+            if (!rect.isValid() || rect.isEmpty() || !boundsRect.isValid() || boundsRect.isEmpty()) {
+                return rect;
+            }
+
+            switch (m_horizontalAlignment) {
+                case HorizontalAlignment::Left:
+                    rect.moveLeft(boundsRect.left());
+                    break;
+                case HorizontalAlignment::Center:
+                    rect.moveCenter(QPointF(boundsRect.center().x(), rect.center().y()));
+                    break;
+                case HorizontalAlignment::Right:
+                    rect.moveRight(boundsRect.right());
+                    break;
+            }
+
+            switch (m_verticalAlignment) {
+                case VerticalAlignment::Top:
+                    rect.moveTop(boundsRect.top());
+                    break;
+                case VerticalAlignment::Center:
+                    rect.moveCenter(QPointF(rect.center().x(), boundsRect.center().y()));
+                    break;
+                case VerticalAlignment::Bottom:
+                    rect.moveBottom(boundsRect.bottom());
+                    break;
+            }
+
+            return rect;
+        };
 
         auto drawPixmapWithoutDeformation = [&](const QPixmap& pixmap,
                                                 const QRectF& sourceRect,
                                                 const QRectF& preferredDestRect,
                                                 const QRectF& logicalSourceItemRect,
-                                                bool centerInBounds) {
+                                                bool anchorToAlignment) {
             painter->save();
             painter->setClipRect(scaledBounds);
             QRectF destRect = logicalSourceItemRect.isValid() && !logicalSourceItemRect.isEmpty()
                 ? scaleTransform.mapRect(logicalSourceItemRect)
                 : preferredDestRect;
-            if (centerInBounds) {
-                destRect.moveCenter(scaledBounds.center());
+            if (anchorToAlignment) {
+                destRect = anchorRectToAlignment(destRect, scaledBounds);
             }
             painter->drawPixmap(destRect, pixmap, sourceRect);
             painter->restore();
@@ -4218,14 +4249,14 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
         auto drawImageWithoutDeformation = [&](const QImage& image,
                                                const QRectF& preferredDestRect,
                                                const QRectF& logicalSourceItemRect,
-                                               bool centerInBounds) {
+                                               bool anchorToAlignment) {
             painter->save();
             painter->setClipRect(scaledBounds);
             QRectF destRect = logicalSourceItemRect.isValid() && !logicalSourceItemRect.isEmpty()
                 ? scaleTransform.mapRect(logicalSourceItemRect)
                 : preferredDestRect;
-            if (centerInBounds) {
-                destRect.moveCenter(scaledBounds.center());
+            if (anchorToAlignment) {
+                destRect = anchorRectToAlignment(destRect, scaledBounds);
             }
             const QRectF sourceRect(QPointF(0.0, 0.0), QSizeF(static_cast<qreal>(image.width()), static_cast<qreal>(image.height())));
             painter->drawImage(destRect, image, sourceRect);
@@ -4249,13 +4280,13 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
                 destRect = scaledVisibleRegion;
             }
 
-            if (interactiveResize) {
+            if (interactiveResize && coversFullItemRegion) {
                 // During active handle drag, pin draw target to full bounds to prevent
                 // viewport-region wobble while geometry is changing every frame.
                 destRect = scaledBounds;
             }
 
-            const bool shouldAvoidDeformation = staleScaledGeometry;
+            const bool shouldAvoidDeformation = staleScaledGeometry || (interactiveResize && !coversFullItemRegion);
             if (shouldAvoidDeformation) {
                 QRectF logicalSourceItemRect;
                 if (!m_scaledRasterVisibleRegion.isEmpty() && m_scaledRasterVisibleRegion.isValid()) {
@@ -4265,8 +4296,8 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
                                                    static_cast<qreal>(m_lastScaledBaseSize.width()),
                                                    static_cast<qreal>(m_lastScaledBaseSize.height()));
                 }
-                const bool centerInBounds = m_lastAxisAltStretch;
-                drawPixmapWithoutDeformation(m_scaledRasterPixmap, sourceRect, destRect, logicalSourceItemRect, centerInBounds);
+                const bool anchorToAlignment = m_lastAxisAltStretch;
+                drawPixmapWithoutDeformation(m_scaledRasterPixmap, sourceRect, destRect, logicalSourceItemRect, anchorToAlignment);
             } else {
                 // Draw viewport at high resolution (8×+) - this overwrites the fallback in the visible area
                 painter->drawPixmap(destRect, m_scaledRasterPixmap, sourceRect);
@@ -4297,8 +4328,8 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
                                                        static_cast<qreal>(m_lastScaledBaseSize.width()),
                                                        static_cast<qreal>(m_lastScaledBaseSize.height()));
                     }
-                    const bool centerInBounds = m_lastAxisAltStretch;
-                    drawPixmapWithoutDeformation(m_scaledRasterPixmap, sourceRect, destRect, logicalSourceItemRect, centerInBounds);
+                    const bool anchorToAlignment = m_lastAxisAltStretch;
+                    drawPixmapWithoutDeformation(m_scaledRasterPixmap, sourceRect, destRect, logicalSourceItemRect, anchorToAlignment);
                 } else {
                     painter->drawPixmap(destRect, m_scaledRasterPixmap, sourceRect);
                 }
@@ -4311,8 +4342,8 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
                                                        static_cast<qreal>(m_lastRasterizedSize.width()),
                                                        static_cast<qreal>(m_lastRasterizedSize.height()));
                     }
-                    const bool centerInBounds = m_lastAxisAltStretch;
-                    drawImageWithoutDeformation(m_rasterizedText, scaledBounds, logicalSourceItemRect, centerInBounds);
+                    const bool anchorToAlignment = m_lastAxisAltStretch;
+                    drawImageWithoutDeformation(m_rasterizedText, scaledBounds, logicalSourceItemRect, anchorToAlignment);
                 } else {
                     painter->drawImage(scaledBounds, m_rasterizedText);
                 }

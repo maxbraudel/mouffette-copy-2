@@ -547,7 +547,7 @@ private:
 
     QRectF computeVisibleRegion() const;
     void ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale, qreal canvasZoom);
-    void startRasterJob(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
+    void startRasterJob(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, const QRectF& visibleRegion, quint64 requestId);
     void handleRasterJobFinished(quint64 generation, QImage&& raster, const QSize& size, qreal scale, qreal canvasZoom, const QRectF& visibleRegion = QRectF());
     void startAsyncRasterRequest(const QSize& targetSize, qreal visualScaleFactor, qreal canvasZoom, quint64 requestId);
     void startNextPendingAsyncRasterRequest();
