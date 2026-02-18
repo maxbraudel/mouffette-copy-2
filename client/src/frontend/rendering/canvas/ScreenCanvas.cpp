@@ -3742,10 +3742,9 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                     
                     // Use actual video dimensions from preview if available, otherwise use default placeholder
                     QSize videoSize = m_dragPreviewVideoSize.isEmpty() ? QSize(640, 360) : m_dragPreviewVideoSize;
-                    const qreal phW = videoSize.width() * m_scaleFactor;
-                    const qreal phH = videoSize.height() * m_scaleFactor;
-                    v->setPos(scenePos - QPointF(phW/2.0, phH/2.0));
+                    Q_UNUSED(videoSize);
                     v->setScale(m_scaleFactor); // adoptBaseSize already called by setExternalPosterImage
+                    positionMediaCenteredAtScene(v, scenePos);
                     
                     assignNextZValue(v);
                     m_scene->addItem(v);
@@ -3756,8 +3755,8 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                     if (!pm.isNull()) {
                         auto* p = new ResizablePixmapItem(pm, 12, 30, QFileInfo(localPath).fileName());
                         p->setSourcePath(localPath);
-                        p->setPos(scenePos - QPointF(pm.width()/2.0 * m_scaleFactor, pm.height()/2.0 * m_scaleFactor));
                         p->setScale(m_scaleFactor);
+                        positionMediaCenteredAtScene(p, scenePos);
                         assignNextZValue(p);
                         m_scene->addItem(p);
                         p->setSelected(true);
@@ -3773,8 +3772,8 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
             if (!pm.isNull()) {
                 auto* p = new ResizablePixmapItem(pm, 12, 30, QString());
                 p->setSourcePath(QString()); // Set sourcePath to empty string for images
-                p->setPos(scenePos - QPointF(pm.width()/2.0 * m_scaleFactor, pm.height()/2.0 * m_scaleFactor));
                 p->setScale(m_scaleFactor);
+                positionMediaCenteredAtScene(p, scenePos);
                 assignNextZValue(p);
                 m_scene->addItem(p);
                 p->setSelected(true);
@@ -3803,6 +3802,18 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
             requestZoomRelayout(true);
         }
     }
+}
+
+void ScreenCanvas::positionMediaCenteredAtScene(ResizableMediaBase* media, const QPointF& scenePos) {
+    if (!media) {
+        return;
+    }
+
+    const QSize baseSize = media->baseSizePx();
+    const qreal mediaScale = std::max<qreal>(std::abs(media->scale()), 1e-6);
+    const qreal width = static_cast<qreal>(baseSize.width()) * mediaScale;
+    const qreal height = static_cast<qreal>(baseSize.height()) * mediaScale;
+    media->setPos(scenePos - QPointF(width * 0.5, height * 0.5));
 }
 
 void ScreenCanvas::ensureDragPreview(const QMimeData* mime) {
@@ -5537,12 +5548,10 @@ TextMediaItem* ScreenCanvas::createTextMediaAtPosition(const QPointF& scenePos) 
     // to maintain the same visual size in viewport pixels
     const qreal adjustedScale = TextMediaDefaults::DEFAULT_VIEWPORT_SCALE / canvasZoom;
     textItem->setScale(adjustedScale);
-    
-    // Set position (center the item on the click position)
-    // Use adjusted scale for positioning calculations
-    qreal halfWidth = (defaultSize.width() * adjustedScale) / 2.0;
-    qreal halfHeight = (defaultSize.height() * adjustedScale) / 2.0;
-    textItem->setPos(scenePos.x() - halfWidth, scenePos.y() - halfHeight);
+
+    // Center using the item's actual current geometry (important now that fit-to-text
+    // can adjust base size before first paint).
+    positionMediaCenteredAtScene(textItem, scenePos);
     
     // Assign Z value to participate in Z-ordering
     assignNextZValue(textItem);

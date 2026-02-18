@@ -241,6 +241,7 @@ private:
     
     // Text media creation
     TextMediaItem* createTextMediaAtPosition(const QPointF& scenePos);
+    void positionMediaCenteredAtScene(ResizableMediaBase* media, const QPointF& scenePos);
     
     void OnSceneChanged();
     // Snap-to-screen helpers
