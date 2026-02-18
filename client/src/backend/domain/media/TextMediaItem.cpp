@@ -3512,9 +3512,24 @@ QRectF TextMediaItem::computeVisibleRegion() const {
     if (visibleSceneRect.isEmpty()) {
         return QRectF(); // Item completely off-screen
     }
-    
-    // Convert back to item local coordinates
-    return mapRectFromScene(visibleSceneRect);
+
+    // Convert back to item local coordinates and add an overscan gutter.
+    // This prevents seam artifacts at viewport edges caused by antialiasing
+    // and outline stroke extents when using partial-tile rasterization.
+    QRectF visibleLocal = mapRectFromScene(visibleSceneRect);
+    const qreal strokeOverflow = std::max<qreal>(
+        kStrokeOverflowMinPx,
+        borderStrokeWidthPx() * kStrokeOverflowScale + 1.0);
+    visibleLocal = visibleLocal.adjusted(-strokeOverflow, -strokeOverflow,
+                                         strokeOverflow, strokeOverflow);
+
+    const QRectF bounds = boundingRect();
+    visibleLocal = visibleLocal.intersected(bounds);
+    if (visibleLocal.isEmpty()) {
+        return QRectF();
+    }
+
+    return visibleLocal;
 }
 
 void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometryScale, qreal canvasZoom) {
