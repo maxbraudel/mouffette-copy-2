@@ -3449,12 +3449,7 @@ void TextMediaItem::rasterizeText() {
     }
 
     if (needsNewRaster) {
-        QImage baseRaster;
-        renderTextToImage(baseRaster, targetSize, 1.0, QRectF(), StrokeRenderMode::Normal);
-        m_rasterizedText = std::move(baseRaster);
-        m_baseRasterContentRevision = m_contentRevision;
-        m_lastRasterizedSize = m_baseSize;
-        m_scaledRasterDirty = true;
+        // Async-only pipeline: keep presenting last completed raster while new one is computed.
         m_pendingBaseRasterRequest = targetSize;
         queueBaseRasterDispatch();
         m_needsRasterization = false;
@@ -4078,6 +4073,9 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
             m_scaledRasterPixmapValid &&
             !m_scaledRasterPixmap.isNull() &&
             m_scaledRasterContentRevision == m_contentRevision;
+        const bool hasAnyScaledRaster =
+            m_scaledRasterPixmapValid &&
+            !m_scaledRasterPixmap.isNull();
         const bool stateAllowsPresent =
             m_renderState == RenderState::HighResPending ||
             m_renderState == RenderState::HighResReady;
@@ -4110,10 +4108,21 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
             painter->drawPixmap(destRect, m_scaledRasterPixmap, sourceRect);
             
         } else {
-            if (m_needsRasterization || m_lastRasterizedSize != m_baseSize || m_baseRasterContentRevision != m_contentRevision) {
-                rasterizeText();
-            }
-            if (!m_rasterizedText.isNull() && m_baseRasterContentRevision == m_contentRevision) {
+            // Keep UI thread smooth: present last completed frame while async refresh is in flight.
+            if (hasAnyScaledRaster) {
+                const QSizeF sourceSize(
+                    static_cast<qreal>(m_scaledRasterPixmap.width()),
+                    static_cast<qreal>(m_scaledRasterPixmap.height())
+                );
+                const QRectF sourceRect(QPointF(0.0, 0.0), sourceSize);
+
+                QRectF destRect = scaledBounds;
+                if (!m_scaledRasterVisibleRegion.isEmpty() && m_scaledRasterVisibleRegion.isValid()) {
+                    const QRectF scaledVisibleRegion = scaleTransform.mapRect(m_scaledRasterVisibleRegion);
+                    destRect = scaledVisibleRegion;
+                }
+                painter->drawPixmap(destRect, m_scaledRasterPixmap, sourceRect);
+            } else if (!m_rasterizedText.isNull()) {
                 painter->drawImage(scaledBounds, m_rasterizedText);
             }
         }
