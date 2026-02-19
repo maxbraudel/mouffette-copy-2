@@ -4304,19 +4304,37 @@ void TextMediaItem::startRasterJob(const QSize& targetSize, qreal effectiveScale
         }
 
         bool cameraMotionOnlyUpdate = false;
+        bool shouldCancelForMotionCatchUp = false;
         if (m_activeAsyncRasterRequest.has_value()) {
             const AsyncRasterRequest& active = *m_activeAsyncRasterRequest;
             cameraMotionOnlyUpdate =
                 active.contentRevision == request.contentRevision &&
                 active.supersessionToken == request.supersessionToken &&
                 active.baseSizeAtRequest == request.baseSizeAtRequest;
+
+            if (cameraMotionOnlyUpdate) {
+                const qint64 activePixels =
+                    static_cast<qint64>(std::max(1, active.targetSize.width())) *
+                    static_cast<qint64>(std::max(1, active.targetSize.height()));
+                const qint64 requestedPixels =
+                    static_cast<qint64>(std::max(1, request.targetSize.width())) *
+                    static_cast<qint64>(std::max(1, request.targetSize.height()));
+
+                const bool zoomingOut = request.canvasZoom + 1e-4 < active.canvasZoom;
+                const bool substantiallyCheaperTarget = (requestedPixels * 4) <= (activePixels * 3); // <= 75%
+
+                // Keep no-cancel behavior for pan/zoom-in, but allow catch-up cancellation
+                // when rapid zoom-out requests become much cheaper than the in-flight work.
+                shouldCancelForMotionCatchUp = zoomingOut && substantiallyCheaperTarget;
+            }
         }
 
         // For camera motion updates (zoom/pan only), keep the in-flight job alive so
         // intermediate high-res frames can complete. Cancelling every frame starves
         // completions and leaves the UI stuck showing stale low-res fallback.
-        // Still cancel for real supersession (content/style/geometry token changes).
-        if (!cameraMotionOnlyUpdate && m_rasterCancellationToken) {
+        // Still cancel for real supersession (content/style/geometry token changes),
+        // and for rapid zoom-out catch-up when the pending target is much cheaper.
+        if ((!cameraMotionOnlyUpdate || shouldCancelForMotionCatchUp) && m_rasterCancellationToken) {
             m_rasterCancellationToken->store(true, std::memory_order_relaxed);
         }
 
