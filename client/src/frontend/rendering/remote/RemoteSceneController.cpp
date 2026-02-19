@@ -25,6 +25,8 @@
 #include <QGraphicsPixmapItem>
 #include <QGraphicsTextItem>
 #include <QGraphicsScene>
+#include <QStyleOptionGraphicsItem>
+#include <QStyle>
 #include <QTextOption>
 #include <QTextDocument>
 #include <QTextCursor>
@@ -287,6 +289,15 @@ public:
             m_highlightColor = active ? resolved : QColor(Qt::transparent);
             update();
         }
+    }
+
+    void paintInto(QPainter* painter) {
+        if (!painter) {
+            return;
+        }
+        QStyleOptionGraphicsItem option;
+        option.state = QStyle::State_None;
+        paint(painter, &option, nullptr);
     }
 
 protected:
@@ -580,13 +591,6 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
     // Capture current epoch to prevent stale deferred callbacks from operating on wrong scene
     const quint64 epoch = m_sceneEpoch;
     
-    // Capture screen IDs (not pointers!) to look up windows at execution time
-    // This avoids dangling pointer issues when widgets are deleted and memory reused
-    QList<int> screenIds;
-    for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
-        screenIds.append(it.key());
-    }
-    
     // Create a tracked timer (not singleShot) so we can cancel it in clearScene
     m_windowShowTimer = new QTimer(this);
     m_windowShowTimer->setSingleShot(true);
@@ -596,44 +600,12 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
     // before showing new windows. This prevents crashes in macOS accessibility code when
     // windows are rapidly created/destroyed. The delay is imperceptible to users but critical
     // for avoiding race conditions in Qt's widget deletion machinery.
-    connect(m_windowShowTimer, &QTimer::timeout, this, [this, epoch, screenIds]() {
+    connect(m_windowShowTimer, &QTimer::timeout, this, [this, epoch]() {
         // Abort if scene changed (stop/start happened during deferral)
         if (epoch != m_sceneEpoch) return;
         
         // Process any remaining deferred deletions before showing windows
         QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
-        
-        // Look up windows by screen ID at execution time to ensure they're still valid
-        for (int screenId : screenIds) {
-            if (epoch != m_sceneEpoch) return;
-
-            auto it = m_screenWindows.find(screenId);
-            if (it == m_screenWindows.end()) continue;
-
-            ScreenWindow& sw = it.value();
-            if (sw.sceneEpoch != epoch) continue;
-
-            QWidget* window = sw.window;
-            if (!window) continue;
-
-            window->show();
-#ifdef Q_OS_MAC
-            QTimer::singleShot(0, this, [this, epoch, screenId]() {
-                if (epoch != m_sceneEpoch) return;
-
-                auto macIt = m_screenWindows.find(screenId);
-                if (macIt == m_screenWindows.end()) return;
-
-                ScreenWindow& macWindow = macIt.value();
-                if (macWindow.sceneEpoch != epoch) return;
-
-                QWidget* w = macWindow.window;
-                if (!w) return;
-
-                MacWindowManager::setWindowAsGlobalOverlay(w, /*clickThrough*/ true);
-            });
-#endif
-        }
 
         startSceneActivationIfReady();
     });
@@ -1325,6 +1297,36 @@ void RemoteSceneController::activateScene() {
         m_sceneReadyTimeout->stop();
     }
 
+    const quint64 activationEpoch = m_sceneEpoch;
+    for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
+        ScreenWindow& sw = it.value();
+        if (!sw.window || sw.sceneEpoch != activationEpoch) {
+            continue;
+        }
+
+        sw.window->show();
+#ifdef Q_OS_MAC
+        const int screenId = it.key();
+        QTimer::singleShot(0, this, [this, activationEpoch, screenId]() {
+            if (activationEpoch != m_sceneEpoch) {
+                return;
+            }
+
+            auto macIt = m_screenWindows.find(screenId);
+            if (macIt == m_screenWindows.end()) {
+                return;
+            }
+
+            ScreenWindow& macWindow = macIt.value();
+            if (macWindow.sceneEpoch != activationEpoch || !macWindow.window) {
+                return;
+            }
+
+            MacWindowManager::setWindowAsGlobalOverlay(macWindow.window, /*clickThrough*/ true);
+        });
+#endif
+    }
+
     // Mute all videos at scene start and schedule automatic unmute if enabled
     const quint64 epoch = m_sceneEpoch;
     for (const auto& item : m_mediaItems) {
@@ -1770,11 +1772,9 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
         if (!scene) continue;
         
         if (item->type == "text") {
-            // Create a text item for text media
-            RemoteOutlineTextItem* textItem = new RemoteOutlineTextItem();
-            textItem->setPos(px, py);
-            textItem->setOpacity(0.0);
-            if (QTextDocument* doc = textItem->document()) {
+            RemoteOutlineTextItem preRaster;
+            preRaster.setOpacity(1.0);
+            if (QTextDocument* doc = preRaster.document()) {
                 doc->setDocumentMargin(0.0);
             }
 
@@ -1786,7 +1786,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             } else if (item->fontBold) {
                 font.setWeight(QFont::Bold);
             }
-            textItem->setFont(font);
+            preRaster.setFont(font);
 
             // Set text color
             QColor color(item->textColor);
@@ -1836,9 +1836,9 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             }
 
             // Set text content
-            textItem->setPlainText(item->text);
+            preRaster.setPlainText(item->text);
 
-            if (QTextDocument* doc = textItem->document()) {
+            if (QTextDocument* doc = preRaster.document()) {
                 QTextCursor cursor(doc);
                 cursor.select(QTextCursor::Document);
                 QTextCharFormat format;
@@ -1847,15 +1847,15 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 cursor.mergeCharFormat(format);
             }
 
-            textItem->setOutlineParameters(color, outlineColor, strokeWidth);
+            preRaster.setOutlineParameters(color, outlineColor, strokeWidth);
             QColor highlightColor(item->textHighlightColor);
             if (!highlightColor.isValid()) {
                 highlightColor = QColor(255, 255, 0, 160);
             }
-            textItem->setHighlightParameters(item->highlightEnabled, highlightColor);
+            preRaster.setHighlightParameters(item->highlightEnabled, highlightColor);
 
             // Center alignment
-            QTextDocument* doc = textItem->document();
+            QTextDocument* doc = preRaster.document();
             QTextOption textOption = doc ? doc->defaultTextOption() : QTextOption();
             textOption.setWrapMode(item->fitToTextEnabled ? QTextOption::NoWrap : QTextOption::WordWrap);
             Qt::Alignment hAlign = Qt::AlignHCenter;
@@ -1885,9 +1885,9 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             // Host: logicalWidth = (baseWidth / uniformScale) - 2*padding
             const qreal logicalWidth = std::max<qreal>(1.0, (baseWidth / uniformScale) - 2.0 * padding);
             if (item->fitToTextEnabled) {
-                textItem->setTextWidth(-1.0);
+                preRaster.setTextWidth(-1.0);
             } else {
-                textItem->setTextWidth(logicalWidth);
+                preRaster.setTextWidth(logicalWidth);
             }
 
             QSizeF docSize;
@@ -1907,7 +1907,6 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             const qreal scaleX = static_cast<qreal>(pw) / safeBaseWidth;
             const qreal scaleY = static_cast<qreal>(ph) / safeBaseHeight;
             const qreal appliedScale = scaleX * uniformScale;
-            textItem->setScale(appliedScale);
             
             // Apply padding offsets to match host-side margin handling
             const qreal paddingX = padding * scaleX;
@@ -1934,10 +1933,41 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             
             // Position the text with horizontal padding as well
             const qreal horizontalOffset = paddingX;
-            textItem->setPos(px + horizontalOffset, py + verticalOffset);
-            
-            scene->addItem(textItem);
-            s.textItem = textItem;
+
+            qreal spanDpr = 1.0;
+            if (QWidget* topLevel = container->window()) {
+                if (QScreen* screen = topLevel->screen()) {
+                    spanDpr = std::max<qreal>(1.0, screen->devicePixelRatio());
+                }
+            }
+
+            const int rasterW = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(pw) * spanDpr)));
+            const int rasterH = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(ph) * spanDpr)));
+            QImage raster(rasterW, rasterH, QImage::Format_ARGB32_Premultiplied);
+            raster.fill(Qt::transparent);
+
+            {
+                QPainter p(&raster);
+                p.setRenderHint(QPainter::Antialiasing, true);
+                p.setRenderHint(QPainter::TextAntialiasing, true);
+                p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+                p.scale(spanDpr, spanDpr);
+                p.setClipRect(QRectF(0.0, 0.0, static_cast<qreal>(pw), static_cast<qreal>(ph)));
+                p.translate(horizontalOffset, verticalOffset);
+                p.scale(appliedScale, appliedScale);
+                preRaster.paintInto(&p);
+            }
+
+            QPixmap textPixmap = QPixmap::fromImage(raster);
+            textPixmap.setDevicePixelRatio(spanDpr);
+
+            QGraphicsPixmapItem* textPixmapItem = new QGraphicsPixmapItem();
+            textPixmapItem->setPos(px, py);
+            textPixmapItem->setOpacity(0.0);
+            textPixmapItem->setTransformationMode(Qt::SmoothTransformation);
+            textPixmapItem->setPixmap(textPixmap);
+            scene->addItem(textPixmapItem);
+            s.imageItem = textPixmapItem;
         } else if (item->type == "image") {
             // Create a pixmap item for host-provided still images
             QGraphicsPixmapItem* pixmapItem = new QGraphicsPixmapItem();
@@ -1963,8 +1993,17 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
     std::weak_ptr<RemoteMediaItem> weakItem = item;
 
     if (item->type == "text") {
-        // Text items are immediately ready (no file to load)
-        item->loaded = true;
+        bool renderedAllSpans = !item->spans.isEmpty();
+        for (const auto& span : item->spans) {
+            if (!span.imageItem) {
+                renderedAllSpans = false;
+                break;
+            }
+        }
+        item->loaded = renderedAllSpans;
+        if (!renderedAllSpans) {
+            qWarning() << "RemoteSceneController: text pre-raster incomplete for" << item->mediaId;
+        }
         evaluateItemReadiness(item);
     } else if (item->type == "image") {
         auto attemptLoad = [this, epoch, weakItem]() {
