@@ -2205,12 +2205,8 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
     const qreal baseStrokeWidth = computeStrokeWidthFromFont(snapshot.font, snapshot.outlineWidthPercent);
     const qreal uniformScale = std::max(std::abs(snapshot.uniformScaleFactor), epsilon);
     const qreal strokeWidthRaw = baseStrokeWidth * uniformScale;
-    const qreal adaptiveMaxStrokePx = std::clamp(
-        std::min<qreal>(static_cast<qreal>(targetWidth), static_cast<qreal>(targetHeight)) * 0.035,
-        4.0,
-        kMaxOutlineStrokePx);
     const qreal strokeWidth = (strokeWidthRaw >= kMinOutlineStrokePx)
-        ? std::min(strokeWidthRaw, adaptiveMaxStrokePx)
+        ? std::min(strokeWidthRaw, kMaxOutlineStrokePx)
         : 0.0;
     const QString preview = previewTextForLog(snapshot.text);
     auto logSnapshotPerf = [&](const char* context, qint64 outlineMs, int glyphCount, qint64 totalMs) {
