@@ -510,6 +510,7 @@ private:
     bool m_fitToTextEnabled = false;
     bool m_fitToTextUpdatePending = false;
     bool m_applyingFitToText = false;
+    std::optional<QSize> m_pendingGeometryCommitSize;
     qreal m_appliedContentPaddingPx = 0.0;
     
     // Alignment controls (overlay panel with unified buttons)
@@ -587,6 +588,8 @@ private:
     void updateAlignmentButtonStates();
     void applyAlignmentToEditor();
     void applyFitModeConstraintsToEditor();
+    QPointF anchorPointForAlignment(const QSize& size) const;
+    void commitBaseSizeKeepingAnchor(const QSize& newBase);
     qreal contentPaddingPx() const;
     void handleContentPaddingChanged(qreal oldPadding, qreal newPadding);
     

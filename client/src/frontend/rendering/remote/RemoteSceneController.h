@@ -78,9 +78,13 @@ private:
 		struct Span {
 			int screenId = -1;
 			double nx = 0, ny = 0, nw = 0, nh = 0;
+			double destNx = 0, destNy = 0, destNw = 0, destNh = 0;
+			double srcNx = 0, srcNy = 0, srcNw = 1, srcNh = 1;
 			QWidget* widget = nullptr;
 			QGraphicsPixmapItem* imageItem = nullptr;
 			QGraphicsTextItem* textItem = nullptr;
+			bool requiresRender = false;
+			bool renderReady = false;
 		};
 		QList<Span> spans;
 		bool autoDisplay=false; int autoDisplayDelayMs=0;

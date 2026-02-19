@@ -971,7 +971,7 @@ void RemoteSceneController::evaluateItemReadiness(const std::shared_ptr<RemoteMe
     } else if (item->type == "video") {
         ready = item->loaded && item->primedFirstFrame;
     } else {
-        ready = true;
+        ready = item->loaded;
     }
     if (ready) {
         markItemReady(item);
@@ -1138,7 +1138,18 @@ void RemoteSceneController::applyPixmapToSpans(const std::shared_ptr<RemoteMedia
         if (span.imageItem->scene() == nullptr) continue;
         const int targetW = span.widget ? std::max(1, span.widget->width()) : std::max(1, pixmap.width());
         const int targetH = span.widget ? std::max(1, span.widget->height()) : std::max(1, pixmap.height());
-        span.imageItem->setPixmap(pixmap.scaled(QSize(targetW, targetH), Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+        const int sourceX = std::clamp(static_cast<int>(std::floor(span.srcNx * pixmap.width())), 0, std::max(0, pixmap.width() - 1));
+        const int sourceY = std::clamp(static_cast<int>(std::floor(span.srcNy * pixmap.height())), 0, std::max(0, pixmap.height() - 1));
+        const int sourceW = std::max(1, static_cast<int>(std::ceil(span.srcNw * pixmap.width())));
+        const int sourceH = std::max(1, static_cast<int>(std::ceil(span.srcNh * pixmap.height())));
+        const QRect sourceRect(sourceX, sourceY, sourceW, sourceH);
+        const QRect boundedSource = sourceRect.intersected(QRect(0, 0, pixmap.width(), pixmap.height()));
+        if (!boundedSource.isValid() || boundedSource.isEmpty()) {
+            span.imageItem->setPixmap(QPixmap());
+            continue;
+        }
+        QPixmap clipped = pixmap.copy(boundedSource);
+        span.imageItem->setPixmap(clipped.scaled(QSize(targetW, targetH), Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
     }
 }
 
@@ -1673,6 +1684,14 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
                 const QJsonObject so = sv.toObject();
                 RemoteMediaItem::Span s; s.screenId = so.value("screenId").toInt(-1);
                 s.nx = so.value("normX").toDouble(); s.ny = so.value("normY").toDouble(); s.nw = so.value("normW").toDouble(); s.nh = so.value("normH").toDouble();
+                s.destNx = so.contains("spanDestNormX") ? so.value("spanDestNormX").toDouble() : s.nx;
+                s.destNy = so.contains("spanDestNormY") ? so.value("spanDestNormY").toDouble() : s.ny;
+                s.destNw = so.contains("spanDestNormW") ? so.value("spanDestNormW").toDouble() : s.nw;
+                s.destNh = so.contains("spanDestNormH") ? so.value("spanDestNormH").toDouble() : s.nh;
+                s.srcNx = so.contains("spanSourceNormX") ? so.value("spanSourceNormX").toDouble() : 0.0;
+                s.srcNy = so.contains("spanSourceNormY") ? so.value("spanSourceNormY").toDouble() : 0.0;
+                s.srcNw = so.contains("spanSourceNormW") ? so.value("spanSourceNormW").toDouble() : 1.0;
+                s.srcNh = so.contains("spanSourceNormH") ? so.value("spanSourceNormH").toDouble() : 1.0;
                 item->spans.append(s);
             }
         }
@@ -1759,10 +1778,16 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
         w->setAttribute(Qt::WA_OpaquePaintEvent, false);
         w->hide();
         // Geometry
-        int px = int(s.nx * container->width());
-        int py = int(s.ny * container->height());
-        int pw = int(s.nw * container->width());
-        int ph = int(s.nh * container->height());
+        const qreal containerW = static_cast<qreal>(container->width());
+        const qreal containerH = static_cast<qreal>(container->height());
+        const qreal exactX = s.destNx * containerW;
+        const qreal exactY = s.destNy * containerH;
+        const int px = static_cast<int>(std::floor(exactX));
+        const int py = static_cast<int>(std::floor(exactY));
+        const int right = static_cast<int>(std::ceil((s.destNx + s.destNw) * containerW));
+        const int bottom = static_cast<int>(std::ceil((s.destNy + s.destNh) * containerH));
+        int pw = std::max(0, right - px);
+        int ph = std::max(0, bottom - py);
         if (pw <=0 || ph <=0) { pw = 10; ph = 10; }
         w->setGeometry(px, py, pw, ph);
     s.widget = w;
@@ -1904,20 +1929,24 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
 
             const qreal safeBaseWidth = std::max<qreal>(baseWidth, 1.0);
             const qreal safeBaseHeight = std::max<qreal>(baseHeight, 1.0);
-            const qreal scaleX = static_cast<qreal>(pw) / safeBaseWidth;
-            const qreal scaleY = static_cast<qreal>(ph) / safeBaseHeight;
+            const qreal safeSrcNw = std::max<qreal>(1e-6, s.srcNw);
+            const qreal safeSrcNh = std::max<qreal>(1e-6, s.srcNh);
+            const qreal fullDisplayWidth = (s.destNw * containerW) / safeSrcNw;
+            const qreal fullDisplayHeight = (s.destNh * containerH) / safeSrcNh;
+            const qreal scaleX = fullDisplayWidth / safeBaseWidth;
+            const qreal scaleY = fullDisplayHeight / safeBaseHeight;
             const qreal appliedScale = scaleX * uniformScale;
             
             // Apply padding offsets to match host-side margin handling
-            const qreal paddingX = padding * scaleX;
-            const qreal paddingY = padding * scaleY;
+            const qreal paddingX = padding * appliedScale;
+            const qreal paddingY = padding * appliedScale;
 
             // Center the text vertically within the padded height (matches host offset logic)
             const qreal docVisualTop = docBounds.top();
             const qreal docVisualHeight = std::max<qreal>(1.0, docBounds.height());
             const qreal scaledDocTop = docVisualTop * appliedScale;
             const qreal scaledDocHeight = docVisualHeight * appliedScale;
-            const qreal availableHeightScene = std::max<qreal>(0.0, static_cast<qreal>(ph) - 2.0 * paddingY);
+            const qreal availableHeightScene = std::max<qreal>(0.0, fullDisplayHeight - 2.0 * paddingY);
             qreal verticalOffset = paddingY;
             switch (item->verticalAlignment) {
                 case RemoteMediaItem::VerticalAlignment::Top:
@@ -1933,6 +1962,8 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             
             // Position the text with horizontal padding as well
             const qreal horizontalOffset = paddingX;
+            const qreal sourcePixelOffsetX = s.srcNx * baseWidth * scaleX;
+            const qreal sourcePixelOffsetY = s.srcNy * baseHeight * scaleY;
 
             qreal spanDpr = 1.0;
             if (QWidget* topLevel = container->window()) {
@@ -1952,8 +1983,12 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                 p.setRenderHint(QPainter::TextAntialiasing, true);
                 p.setRenderHint(QPainter::SmoothPixmapTransform, true);
                 p.scale(spanDpr, spanDpr);
-                p.setClipRect(QRectF(0.0, 0.0, static_cast<qreal>(pw), static_cast<qreal>(ph)));
-                p.translate(horizontalOffset, verticalOffset);
+                constexpr qreal kTextClipGuardPx = 0.5;
+                p.setClipRect(QRectF(-kTextClipGuardPx,
+                                     -kTextClipGuardPx,
+                                     static_cast<qreal>(pw) + 2.0 * kTextClipGuardPx,
+                                     static_cast<qreal>(ph) + 2.0 * kTextClipGuardPx));
+                p.translate(horizontalOffset - sourcePixelOffsetX, verticalOffset - sourcePixelOffsetY);
                 p.scale(appliedScale, appliedScale);
                 preRaster.paintInto(&p);
             }
@@ -1962,7 +1997,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             textPixmap.setDevicePixelRatio(spanDpr);
 
             QGraphicsPixmapItem* textPixmapItem = new QGraphicsPixmapItem();
-            textPixmapItem->setPos(px, py);
+            textPixmapItem->setPos(exactX, exactY);
             textPixmapItem->setOpacity(0.0);
             textPixmapItem->setTransformationMode(Qt::SmoothTransformation);
             textPixmapItem->setPixmap(textPixmap);
@@ -1971,7 +2006,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
         } else if (item->type == "image") {
             // Create a pixmap item for host-provided still images
             QGraphicsPixmapItem* pixmapItem = new QGraphicsPixmapItem();
-            pixmapItem->setPos(px, py);
+            pixmapItem->setPos(exactX, exactY);
             pixmapItem->setOpacity(0.0);
             pixmapItem->setTransformationMode(Qt::SmoothTransformation);
             scene->addItem(pixmapItem);
@@ -1979,7 +2014,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
         } else if (item->type == "video") {
             // Create a pixmap item to display CPU-rendered video frames
             QGraphicsPixmapItem* frameItem = new QGraphicsPixmapItem();
-            frameItem->setPos(px, py);
+            frameItem->setPos(exactX, exactY);
             frameItem->setOpacity(0.0);
             frameItem->setTransformationMode(Qt::SmoothTransformation);
             scene->addItem(frameItem);
@@ -2014,17 +2049,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             if (!path.isEmpty() && QFileInfo::exists(path)) {
                 QPixmap pm; 
                 if (pm.load(path)) {
-                    for (auto& s : item->spans) { 
-                        if (s.imageItem) {
-                            const QWidget* parentWidget = s.widget ? s.widget->parentWidget() : nullptr;
-                            const int containerWidth = parentWidget ? parentWidget->width() : 100;
-                            const int containerHeight = parentWidget ? parentWidget->height() : 100;
-                            const int pw = int(s.nw * containerWidth);
-                            const int ph = int(s.nh * containerHeight);
-                            QPixmap scaled = pm.scaled(QSize(std::max(1, pw), std::max(1, ph)), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-                            s.imageItem->setPixmap(scaled);
-                        }
-                    }
+                    applyPixmapToSpans(item, pm);
                     item->loaded = true;
                     evaluateItemReadiness(item);
                     return true;

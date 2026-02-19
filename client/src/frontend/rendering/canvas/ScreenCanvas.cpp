@@ -542,8 +542,10 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
             m["baseWidth"] = media->baseSizePx().width();
             m["baseHeight"] = media->baseSizePx().height();
             m["visible"] = media->isContentVisible();
-            // Compute per-screen spans: for every screen intersecting this media, include a span with normalized geometry
-            // relative to that screen. Do NOT clamp; negatives/overflow allow the remote to position and rely on parent clipping.
+            // Compute per-screen spans: for every screen intersecting this media, include:
+            // - legacy full-bounds normalized geometry (norm*) for backward compatibility
+            // - clipped destination geometry on the target screen (spanDestNorm*)
+            // - clipped source geometry in media-local space (spanSourceNorm*)
             int bestScreenId = -1; QRectF bestScreenRect; qreal bestArea = 0.0;
             QJsonArray spans;
             for (auto it = m_sceneScreenRects.constBegin(); it != m_sceneScreenRects.constEnd(); ++it) {
@@ -555,10 +557,28 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                 // Record as a span
                 QJsonObject span;
                 span["screenId"] = sid;
+                // Legacy fields (full media bounds normalized to screen)
                 span["normX"] = (br.x() - srect.x()) / srect.width();
                 span["normY"] = (br.y() - srect.y()) / srect.height();
                 span["normW"] = br.width() / srect.width();
                 span["normH"] = br.height() / srect.height();
+                // New clipped destination fields (only visible overlap on that screen)
+                span["spanDestNormX"] = (inter.x() - srect.x()) / srect.width();
+                span["spanDestNormY"] = (inter.y() - srect.y()) / srect.height();
+                span["spanDestNormW"] = inter.width() / srect.width();
+                span["spanDestNormH"] = inter.height() / srect.height();
+                // New clipped source fields (where this overlap lies inside media bounds)
+                if (br.width() > 0.0 && br.height() > 0.0) {
+                    span["spanSourceNormX"] = (inter.x() - br.x()) / br.width();
+                    span["spanSourceNormY"] = (inter.y() - br.y()) / br.height();
+                    span["spanSourceNormW"] = inter.width() / br.width();
+                    span["spanSourceNormH"] = inter.height() / br.height();
+                } else {
+                    span["spanSourceNormX"] = 0.0;
+                    span["spanSourceNormY"] = 0.0;
+                    span["spanSourceNormW"] = 1.0;
+                    span["spanSourceNormH"] = 1.0;
+                }
                 spans.append(span);
                 // Track best-overlap screen for potential fallback span creation
                 if (area > bestArea) { bestArea = area; bestScreenId = sid; bestScreenRect = srect; }

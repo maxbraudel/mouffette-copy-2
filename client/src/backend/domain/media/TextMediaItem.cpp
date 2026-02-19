@@ -1480,19 +1480,17 @@ void TextMediaItem::paintSimplifiedStroke(QPainter* painter, const VectorDrawSna
     
     // Calculate offsets to match main rendering
     qreal offsetX = margin;
-    if (!snapshot.fitToTextEnabled) {
-        const qreal horizontalSpace = std::max<qreal>(0.0, availableWidth - docSize.width());
-        switch (snapshot.horizontalAlignment) {
-            case HorizontalAlignment::Left:
-                offsetX = margin;
-                break;
-            case HorizontalAlignment::Center:
-                offsetX = margin + horizontalSpace * 0.5;
-                break;
-            case HorizontalAlignment::Right:
-                offsetX = margin + horizontalSpace;
-                break;
-        }
+    const qreal horizontalSpace = std::max<qreal>(0.0, availableWidth - docSize.width());
+    switch (snapshot.horizontalAlignment) {
+        case HorizontalAlignment::Left:
+            offsetX = margin;
+            break;
+        case HorizontalAlignment::Center:
+            offsetX = margin + horizontalSpace * 0.5;
+            break;
+        case HorizontalAlignment::Right:
+            offsetX = margin + horizontalSpace;
+            break;
     }
     
     qreal offsetY = margin;
@@ -1864,6 +1862,7 @@ TextMediaItem::VectorDrawSnapshot TextMediaItem::captureVectorSnapshot(StrokeRen
 void TextMediaItem::invalidateRenderPipeline(InvalidationReason reason, bool invalidateLayout) {
     ++m_contentRevision;
     ++m_rasterSupersessionToken;
+    m_pendingGeometryCommitSize.reset();
     m_renderScheduler.invalidate(reason);
     m_needsRasterization = true;
     m_scaledRasterDirty = true;
@@ -2162,19 +2161,17 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
     const qreal docVisualHeight = std::max<qreal>(1.0, docBounds.height());
 
     qreal offsetX = margin;
-    if (!snapshot.fitToTextEnabled) {
-        const qreal horizontalSpace = std::max<qreal>(0.0, availableWidth - docSize.width());
-        switch (snapshot.horizontalAlignment) {
-            case HorizontalAlignment::Left:
-                offsetX = margin;
-                break;
-            case HorizontalAlignment::Center:
-                offsetX = margin + horizontalSpace * 0.5;
-                break;
-            case HorizontalAlignment::Right:
-                offsetX = margin + horizontalSpace;
-                break;
-        }
+    const qreal horizontalSpace = std::max<qreal>(0.0, availableWidth - docSize.width());
+    switch (snapshot.horizontalAlignment) {
+        case HorizontalAlignment::Left:
+            offsetX = margin;
+            break;
+        case HorizontalAlignment::Center:
+            offsetX = margin + horizontalSpace * 0.5;
+            break;
+        case HorizontalAlignment::Right:
+            offsetX = margin + horizontalSpace;
+            break;
     }
 
     qreal offsetY = margin;
@@ -2372,7 +2369,7 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         return;
     }
 
-    painter->translate(margin, offsetY);
+    painter->translate(offsetX, offsetY);
     int glyphCount = 0;
     qint64 outlineMs = 0;
 
@@ -2382,7 +2379,7 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
 
         const QRectF blockRect = layout->blockBoundingRect(block);
         if (hasViewport) {
-            const QRectF blockInItemCoords = blockRect.translated(margin, offsetY);
+            const QRectF blockInItemCoords = blockRect.translated(offsetX, offsetY);
             if (!viewport.intersects(blockInItemCoords)) {
                 continue;
             }
@@ -2403,7 +2400,7 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         }
     }
 
-    drawDocumentWithStrokeBehindFill(&outlineMs, &glyphCount, margin, offsetY);
+    drawDocumentWithStrokeBehindFill(&outlineMs, &glyphCount, offsetX, offsetY);
 
     painter->restore();
     logSnapshotPerf("vector-fit", outlineMs, glyphCount, snapshotTimer.elapsed());
@@ -2669,6 +2666,10 @@ void TextMediaItem::setTextBorderWidth(qreal percent) {
         if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
             inlineEditor->invalidateCache();
         }
+    }
+
+    if (m_fitToTextEnabled) {
+        scheduleFitToTextUpdate();
     }
 }
 
@@ -3970,6 +3971,28 @@ void TextMediaItem::handleBaseRasterJobFinished(quint64 generation, quint64 cont
     m_baseRasterInProgress = false;
     m_activeBaseRasterSize = QSize();
 
+    if (m_pendingGeometryCommitSize.has_value()) {
+        const QSize pendingSize = *m_pendingGeometryCommitSize;
+        if (size != pendingSize) {
+            m_needsRasterization = true;
+            m_pendingBaseRasterRequest = pendingSize;
+            queueBaseRasterDispatch();
+            return;
+        }
+
+        commitBaseSizeKeepingAnchor(pendingSize);
+        m_pendingGeometryCommitSize.reset();
+        m_cachedEditorPosValid = false;
+
+        if (m_isEditing) {
+            updateInlineEditorGeometry();
+        } else {
+            syncInlineEditorToBaseSize();
+        }
+        updateAlignmentControlsLayout();
+        updateOverlayLayout();
+    }
+
     const QSize expectedSize(std::max(1, m_baseSize.width()), std::max(1, m_baseSize.height()));
     if (size != expectedSize) {
         m_needsRasterization = true;
@@ -4651,6 +4674,71 @@ void TextMediaItem::updateAlignmentButtonStates() {
     updateVertical(VerticalAlignment::Bottom, m_alignBottomBtn);
 }
 
+QPointF TextMediaItem::anchorPointForAlignment(const QSize& size) const {
+    qreal x = 0.0;
+    switch (m_horizontalAlignment) {
+        case HorizontalAlignment::Left:
+            x = 0.0;
+            break;
+        case HorizontalAlignment::Center:
+            x = static_cast<qreal>(size.width()) * 0.5;
+            break;
+        case HorizontalAlignment::Right:
+            x = static_cast<qreal>(size.width());
+            break;
+    }
+
+    qreal y = 0.0;
+    switch (m_verticalAlignment) {
+        case VerticalAlignment::Top:
+            y = 0.0;
+            break;
+        case VerticalAlignment::Center:
+            y = static_cast<qreal>(size.height()) * 0.5;
+            break;
+        case VerticalAlignment::Bottom:
+            y = static_cast<qreal>(size.height());
+            break;
+    }
+
+    return QPointF(x, y);
+}
+
+void TextMediaItem::commitBaseSizeKeepingAnchor(const QSize& newBase) {
+    const QSize oldBase = m_baseSize;
+    if (newBase == oldBase) {
+        return;
+    }
+
+    const QPointF oldAnchorLocal = anchorPointForAlignment(oldBase);
+    QPointF anchorBefore;
+    if (parentItem()) {
+        anchorBefore = mapToParent(oldAnchorLocal);
+    } else if (scene()) {
+        anchorBefore = mapToScene(oldAnchorLocal);
+    } else {
+        anchorBefore = oldAnchorLocal + pos();
+    }
+
+    prepareGeometryChange();
+    m_baseSize = newBase;
+
+    const QPointF newAnchorLocal = anchorPointForAlignment(newBase);
+    QPointF anchorAfter;
+    if (parentItem()) {
+        anchorAfter = mapToParent(newAnchorLocal);
+    } else if (scene()) {
+        anchorAfter = mapToScene(newAnchorLocal);
+    } else {
+        anchorAfter = newAnchorLocal + pos();
+    }
+
+    const QPointF delta = anchorBefore - anchorAfter;
+    if (!delta.isNull()) {
+        setPos(pos() + delta);
+    }
+}
+
 void TextMediaItem::setFitToTextEnabled(bool enabled) {
     if (m_fitToTextEnabled == enabled) {
         return;
@@ -4670,6 +4758,7 @@ void TextMediaItem::setFitToTextEnabled(bool enabled) {
     
     if (!m_fitToTextEnabled) {
         m_fitToTextUpdatePending = false;
+        m_pendingGeometryCommitSize.reset();
     }
     applyFitModeConstraintsToEditor();
     updateInlineEditorGeometry();
@@ -4782,13 +4871,19 @@ void TextMediaItem::applyFitToTextNow() {
     const qreal marginLogical = contentPaddingPx();
     const qreal marginScene = marginLogical * uniformScale;
 
+    const qreal strokeWidthLogical = borderStrokeWidthPx();
+    const qreal borderPaddingLogical = (strokeWidthLogical > 0.0)
+        ? (strokeWidthLogical + std::max<qreal>(kStrokeOverflowMinPx, strokeWidthLogical * kStrokeOverflowScale + 1.0))
+        : 0.0;
+    const qreal borderPaddingScene = borderPaddingLogical * uniformScale;
+
     // Calculate dimensions with minimum width constraint in fit-to-text mode
-    const int calculatedWidth = static_cast<int>(std::ceil(logicalContentWidth * uniformScale + marginScene * 2.0));
-    const int minWidth = static_cast<int>(std::ceil(kFitToTextMinWidth * uniformScale + marginScene * 2.0));
+    const int calculatedWidth = static_cast<int>(std::ceil(logicalContentWidth * uniformScale + marginScene * 2.0 + borderPaddingScene * 2.0));
+    const int minWidth = static_cast<int>(std::ceil(kFitToTextMinWidth * uniformScale + marginScene * 2.0 + borderPaddingScene * 2.0));
     
     QSize newBase(
         std::max(minWidth, std::max(1, calculatedWidth)),
-        std::max(1, static_cast<int>(std::ceil(logicalContentHeight * uniformScale + marginScene * 2.0))));
+        std::max(1, static_cast<int>(std::ceil(logicalContentHeight * uniformScale + marginScene * 2.0 + borderPaddingScene * 2.0))));
 
     const QSize oldBase = m_baseSize;
 
@@ -4798,66 +4893,13 @@ void TextMediaItem::applyFitToTextNow() {
     }
 
     if (newBase != oldBase) {
-        auto anchorPointForSize = [this](const QSize& size) {
-            qreal x = 0.0;
-            switch (m_horizontalAlignment) {
-                case HorizontalAlignment::Left:
-                    x = 0.0;
-                    break;
-                case HorizontalAlignment::Center:
-                    x = static_cast<qreal>(size.width()) * 0.5;
-                    break;
-                case HorizontalAlignment::Right:
-                    x = static_cast<qreal>(size.width());
-                    break;
-            }
-
-            qreal y = 0.0;
-            switch (m_verticalAlignment) {
-                case VerticalAlignment::Top:
-                    y = 0.0;
-                    break;
-                case VerticalAlignment::Center:
-                    y = static_cast<qreal>(size.height()) * 0.5;
-                    break;
-                case VerticalAlignment::Bottom:
-                    y = static_cast<qreal>(size.height());
-                    break;
-            }
-
-            return QPointF(x, y);
-        };
-
-        const QPointF oldAnchorLocal = anchorPointForSize(oldBase);
-        QPointF anchorBefore;
-        if (parentItem()) {
-            anchorBefore = mapToParent(oldAnchorLocal);
-        } else if (scene()) {
-            anchorBefore = mapToScene(oldAnchorLocal);
-        } else {
-            anchorBefore = oldAnchorLocal + pos();
-        }
-
-        prepareGeometryChange();
-        m_baseSize = newBase;
+        m_pendingGeometryCommitSize = newBase;
         invalidateRenderPipeline(InvalidationReason::Geometry, true);
+        m_pendingGeometryCommitSize = newBase;
         m_lastRasterizedScale = 1.0;
         m_cachedEditorPosValid = false;
-
-        const QPointF newAnchorLocal = anchorPointForSize(newBase);
-        QPointF anchorAfter;
-        if (parentItem()) {
-            anchorAfter = mapToParent(newAnchorLocal);
-        } else if (scene()) {
-            anchorAfter = mapToScene(newAnchorLocal);
-        } else {
-            anchorAfter = newAnchorLocal + pos();
-        }
-
-        const QPointF delta = anchorBefore - anchorAfter;
-        if (!delta.isNull()) {
-            setPos(pos() + delta);
-        }
+        m_pendingBaseRasterRequest = newBase;
+        queueBaseRasterDispatch();
     }
 
     m_cachedDocumentSize = QSizeF(logicalContentWidth, logicalContentHeight);
