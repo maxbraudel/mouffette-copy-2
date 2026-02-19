@@ -30,6 +30,7 @@
 #include <QPushButton>
 #include <QToolButton>
 #include <QFont>
+#include <QFontMetrics>
 #include <QIcon>
 #include <QScrollArea>
 #include <QProgressBar>
@@ -139,10 +140,50 @@ void ScreenCanvas::applyApplicationSuspended(bool suspended) {
 
 void ScreenCanvas::drawBackground(QPainter* painter, const QRectF& rect) {
     QGraphicsView::drawBackground(painter, rect);
+
+    Q_UNUSED(rect);
+    if (!painter || m_screens.isEmpty() || m_sceneScreenRects.isEmpty()) {
+        return;
+    }
+
+    painter->save();
+    painter->resetTransform();
+    painter->setRenderHint(QPainter::TextAntialiasing, true);
+
+    const int labelFontPt = std::clamp(m_screenLabelFontPt, 9, 18);
+    QFont font(QStringLiteral("Arial"), labelFontPt, QFont::Bold);
+    painter->setFont(font);
+    painter->setPen(Qt::white);
+
+    const QFontMetrics fm(font);
+    constexpr int kLabelGapPx = 6;
+
+    for (int i = 0; i < m_screens.size(); ++i) {
+        const ScreenInfo& screen = m_screens[i];
+        const auto sceneRectIt = m_sceneScreenRects.constFind(screen.id);
+        if (sceneRectIt == m_sceneScreenRects.cend()) {
+            continue;
+        }
+
+        const QRectF screenSceneRect = sceneRectIt.value();
+        const QPoint viewTopCenter = mapFromScene(QPointF(screenSceneRect.center().x(), screenSceneRect.top()));
+        const QString labelText = QStringLiteral("Screen %1 (%2x%3)").arg(i + 1).arg(screen.width).arg(screen.height);
+
+        const int textWidth = fm.horizontalAdvance(labelText);
+        const int textHeight = fm.height();
+        const int textX = viewTopCenter.x() - (textWidth / 2);
+        const int textY = viewTopCenter.y() - kLabelGapPx - textHeight;
+
+        painter->drawText(textX, textY + fm.ascent(), labelText);
+    }
+
+    painter->restore();
 }
 
 void ScreenCanvas::drawForeground(QPainter* painter, const QRectF& rect) {
     QGraphicsView::drawForeground(painter, rect);
+    Q_UNUSED(painter);
+    Q_UNUSED(rect);
 }
 
 // Local lightweight ClippedContainer for viewport overlay clipping.
@@ -4090,26 +4131,13 @@ static void updateScreenItemGeometry(QGraphicsRectItem* item,
     pen.setWidth(borderWidthPx);
     item->setPen(pen);
 
-    QGraphicsTextItem* label = nullptr;
+    Q_UNUSED(labelFontPt);
     const QList<QGraphicsItem*> children = item->childItems();
     for (QGraphicsItem* child : children) {
-        if (auto* text = qgraphicsitem_cast<QGraphicsTextItem*>(child)) {
-            label = text;
-            break;
+        if (qgraphicsitem_cast<QGraphicsTextItem*>(child)) {
+            delete child;
         }
     }
-    if (!label) {
-        label = new QGraphicsTextItem(item);
-    }
-    label->setDefaultTextColor(Qt::white);
-    QFont font("Arial", labelFontPt, QFont::Bold);
-    label->setFont(font);
-    label->setPlainText(QStringLiteral("Screen %1\n%2×%3").arg(index + 1).arg(screen.width).arg(screen.height));
-    QRectF labelRect = label->boundingRect();
-    QRectF screenRect = item->rect();
-    const QPointF labelPos(screenRect.center().x() - labelRect.width() / 2.0,
-                           screenRect.center().y() - labelRect.height() / 2.0);
-    label->setPos(labelPos);
 }
 
 void ScreenCanvas::createScreenItems() {
@@ -4217,11 +4245,6 @@ QGraphicsRectItem* ScreenCanvas::createScreenItem(const ScreenInfo& screen, int 
     if (screen.primary) { item->setBrush(QBrush(QColor(74,144,226,180))); item->setPen(QPen(QColor(74,144,226), penWidth)); }
     else { item->setBrush(QBrush(QColor(80,80,80,180))); item->setPen(QPen(QColor(160,160,160), penWidth)); }
     item->setData(0, index);
-    QGraphicsTextItem* label = new QGraphicsTextItem(QString("Screen %1\n%2×%3").arg(index+1).arg(screen.width).arg(screen.height));
-    label->setDefaultTextColor(Qt::white);
-    QFont f("Arial", m_screenLabelFontPt, QFont::Bold);
-    label->setFont(f);
-    QRectF labelRect = label->boundingRect(); QRectF screenRect = item->rect(); label->setPos(screenRect.center() - labelRect.center()); label->setParentItem(item);
     return item;
 }
 
