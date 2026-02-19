@@ -120,7 +120,7 @@ bool envFlagEnabled(const char* primary, const char* fallback = nullptr) {
 constexpr qreal kContentPadding = 4.0;
 constexpr qreal kStrokeOverflowScale = 0.75;
 constexpr qreal kStrokeOverflowMinPx = 1.5;
-constexpr int kScaledRasterThrottleIntervalMs = 45;
+constexpr int kScaledRasterThrottleIntervalMs = 20;
 constexpr qreal kFitToTextMinWidth = 24.0;
 constexpr int kFitToTextSizeStabilizationPx = 1;
 constexpr qreal kMaxOutlineThicknessFactor = 0.35;
@@ -4208,11 +4208,24 @@ void TextMediaItem::startRasterJob(const QSize& targetSize, qreal effectiveScale
             m_pendingRasterRequestId = m_activeAsyncRasterRequest->requestId;
             return;
         }
-        // The in-flight job is now superseded. Signal it to abort cooperatively so
-        // the thread-pool slot is freed as soon as possible for the new request.
-        if (m_rasterCancellationToken) {
+
+        bool cameraMotionOnlyUpdate = false;
+        if (m_activeAsyncRasterRequest.has_value()) {
+            const AsyncRasterRequest& active = *m_activeAsyncRasterRequest;
+            cameraMotionOnlyUpdate =
+                active.contentRevision == request.contentRevision &&
+                active.supersessionToken == request.supersessionToken &&
+                active.baseSizeAtRequest == request.baseSizeAtRequest;
+        }
+
+        // For camera motion updates (zoom/pan only), keep the in-flight job alive so
+        // intermediate high-res frames can complete. Cancelling every frame starves
+        // completions and leaves the UI stuck showing stale low-res fallback.
+        // Still cancel for real supersession (content/style/geometry token changes).
+        if (!cameraMotionOnlyUpdate && m_rasterCancellationToken) {
             m_rasterCancellationToken->store(true, std::memory_order_relaxed);
         }
+
         m_pendingAsyncRasterRequest = request;
         m_pendingRasterRequestId = requestId;
         queueRasterJobDispatch();
@@ -4444,8 +4457,14 @@ void TextMediaItem::handleBaseRasterJobFinished(quint64 generation, quint64 cont
     m_baseRasterContentRevision = contentRevision;
     m_lastRasterizedSize = m_baseSize;
     m_needsRasterization = false;
-    m_scaledRasterDirty = true;
-    m_lastRasterizedScale = 1.0;
+    // Do NOT reset m_lastRasterizedScale or set m_scaledRasterDirty here.
+    // The base raster is a secondary 1× cache; its completion has no bearing on
+    // the validity of the currently-displayed zoom-level scaled raster.
+    // Previously, resetting m_lastRasterizedScale = 1.0 tricked ensureScaledRaster
+    // into treating the valid zoom raster as "scale-changed" and forcing a redundant
+    // re-render cycle. Similarly, setting m_scaledRasterDirty = true caused the same
+    // unnecessary raster job. Removing both eliminates the post-alt-resize
+    // zoom-in/out jitter that the spurious cycle was producing.
 
     update();
     startNextPendingBaseRasterRequest();
@@ -4829,7 +4848,11 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
                     painter->drawPixmap(destRect, m_scaledRasterPixmap, sourceRect);
                 }
             } else if (!m_rasterizedText.isNull()) {
-                const bool shouldAvoidDeformation = interactiveResize;
+                const bool staleBaseGeometry =
+                    m_lastRasterizedSize.width() > 0 &&
+                    m_lastRasterizedSize.height() > 0 &&
+                    m_lastRasterizedSize != m_baseSize;
+                const bool shouldAvoidDeformation = interactiveResize || staleBaseGeometry;
                 if (shouldAvoidDeformation) {
                     QRectF logicalSourceItemRect;
                     if (m_lastRasterizedSize.width() > 0 && m_lastRasterizedSize.height() > 0) {
@@ -4856,19 +4879,65 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
         rasterizeText();
         m_renderState = RenderState::Idle;
 
-        // Draw the cached bitmap instead of re-rendering vector text
-        if (!m_rasterizedText.isNull()) {
+        // Only draw the base raster if it was produced for the CURRENT base size.
+        // After an alt-resize, m_lastRasterizedSize still refers to the pre-resize
+        // dimensions. Drawing the old (differently-sized) image into `bounds` would
+        // stretch or squish the text, producing a text-size flicker on every frame
+        // until the new base-raster job completes. When the sizes differ, fall through
+        // to the scaled-raster fallback instead (correct scale, possibly blurry) or
+        // accept a blank frame rather than show actively misleading wrong-scale text.
+        const bool baseRasterSizeMatch = !m_rasterizedText.isNull() && (m_lastRasterizedSize == m_baseSize);
+        if (baseRasterSizeMatch) {
             painter->drawImage(bounds, m_rasterizedText);
         } else if (m_scaledRasterPixmapValid && !m_scaledRasterPixmap.isNull()) {
-            // Fallback: present the last available scaled raster scaled to fit bounds while
-            // the 1× base raster job is in flight. This eliminates the blank-text flash
-            // that occurs when rapidly zooming back to 1× before m_rasterizedText is ready.
+            // Fallback: present the last available scaled raster scaled to fit bounds
+            // while the base-raster job is in flight, OR while the base raster is stale
+            // (wrong size after alt-resize). Using the scaled raster here shows the text
+            // at approximately the right visual size rather than stretched wrong-size text.
             const QRectF src(QPointF(0.0, 0.0),
                              QSizeF(static_cast<qreal>(m_scaledRasterPixmap.width()),
                                     static_cast<qreal>(m_scaledRasterPixmap.height())));
+            QRectF destRect = bounds;
+            if (m_lastScaledBaseSize.width() > 0 && m_lastScaledBaseSize.height() > 0) {
+                destRect = QRectF(0.0, 0.0,
+                                  static_cast<qreal>(m_lastScaledBaseSize.width()),
+                                  static_cast<qreal>(m_lastScaledBaseSize.height()));
+            } else if (m_lastRasterizedSize.width() > 0 && m_lastRasterizedSize.height() > 0) {
+                destRect = QRectF(0.0, 0.0,
+                                  static_cast<qreal>(m_lastRasterizedSize.width()),
+                                  static_cast<qreal>(m_lastRasterizedSize.height()));
+            }
+
+            if (m_lastAxisAltStretch && destRect.isValid() && !destRect.isEmpty()) {
+                switch (m_horizontalAlignment) {
+                    case HorizontalAlignment::Left:
+                        destRect.moveLeft(bounds.left());
+                        break;
+                    case HorizontalAlignment::Center:
+                        destRect.moveCenter(QPointF(bounds.center().x(), destRect.center().y()));
+                        break;
+                    case HorizontalAlignment::Right:
+                        destRect.moveRight(bounds.right());
+                        break;
+                }
+
+                switch (m_verticalAlignment) {
+                    case VerticalAlignment::Top:
+                        destRect.moveTop(bounds.top());
+                        break;
+                    case VerticalAlignment::Center:
+                        destRect.moveCenter(QPointF(destRect.center().x(), bounds.center().y()));
+                        break;
+                    case VerticalAlignment::Bottom:
+                        destRect.moveBottom(bounds.bottom());
+                        break;
+                }
+            }
+
             painter->save();
             painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
-            painter->drawPixmap(bounds, m_scaledRasterPixmap, src);
+            painter->setClipRect(bounds);
+            painter->drawPixmap(destRect, m_scaledRasterPixmap, src);
             painter->restore();
         }
     }
