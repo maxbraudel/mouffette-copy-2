@@ -11,6 +11,7 @@
 #include <QImage>
 #include <cmath>
 #include <chrono>
+#include <atomic>
 #include <QPixmap>
 #include <QVector>
 #include <memory>
@@ -365,6 +366,9 @@ private:
     std::optional<AsyncRasterRequest> m_activeAsyncRasterRequest;
     std::optional<AsyncRasterRequest> m_pendingAsyncRasterRequest;
     bool m_rasterDispatchQueued = false;
+    // Cooperative cancellation token for the currently in-flight raster job.
+    // Set to true from the main thread to signal early abort; replaced on each new dispatch.
+    std::shared_ptr<std::atomic<bool>> m_rasterCancellationToken;
 
     QPixmap m_scaledRasterPixmap;
     bool m_scaledRasterPixmapValid = false;
@@ -549,12 +553,15 @@ private:
         qreal scaleFactor = 1.0;
         qreal canvasZoom = 1.0;  // Tier 2: Canvas zoom for Phase 8 LOD selection
         QRectF targetRect;  // Region to rasterize in item coordinates (empty = full raster)
+        // Cooperative cancellation: main thread sets this to true to request early abort.
+        // Checked at block boundaries in paintVectorSnapshot and at job entry in execute().
+        std::shared_ptr<std::atomic<bool>> cancellationToken;
 
         QImage execute() const;
     };
 
     VectorDrawSnapshot captureVectorSnapshot(StrokeRenderMode mode = StrokeRenderMode::Normal) const;
-    static void paintVectorSnapshot(QPainter* painter, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor, qreal canvasZoom = 1.0, const QRectF& viewport = QRectF());
+    static void paintVectorSnapshot(QPainter* painter, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor, qreal canvasZoom = 1.0, const QRectF& viewport = QRectF(), const std::atomic<bool>* cancelled = nullptr);
     void invalidateRenderPipeline(InvalidationReason reason, bool invalidateLayout = false);
     TextRenderCacheKey makeCacheKey(const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor, qreal dpr) const;
     bool cacheKeyMatches(const TextRenderCacheKey& lhs, const TextRenderCacheKey& rhs) const;

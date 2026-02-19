@@ -2051,6 +2051,12 @@ TextMediaItem::VectorDrawSnapshot TextMediaItem::captureVectorSnapshot(StrokeRen
 void TextMediaItem::invalidateRenderPipeline(InvalidationReason reason, bool invalidateLayout) {
     ++m_contentRevision;
     ++m_rasterSupersessionToken;
+    // Cancel any in-flight raster job early — its result will be discarded by the
+    // supersession / content-revision guard in handleRasterJobFinished anyway, so
+    // aborting cooperatively frees the thread pool slot sooner.
+    if (m_rasterCancellationToken) {
+        m_rasterCancellationToken->store(true, std::memory_order_relaxed);
+    }
     m_pendingGeometryCommitSize.reset();
     m_renderScheduler.invalidate(reason);
     m_needsRasterization = true;
@@ -2147,10 +2153,15 @@ void TextMediaItem::enforceCacheBudget() {
     }
 
     if (total > (kPerItemCacheBudgetBytes * 2)) {
-        m_rasterizedText = QImage();
-        m_baseRaster = QImage();
-        m_baseRasterValid = false;
-        m_baseRasterContentRevision = 0;
+        // Intentionally preserve m_rasterizedText (the 1:1 base raster, ~320 KB).
+        // Evicting it causes a blank-text flash when returning to 1× zoom because
+        // the non-zoomed paint path has no other fallback until a new base raster
+        // is computed. Only release the (re-computable) incremental compositing base.
+        if (!m_baseRaster.isNull()) {
+            m_baseRaster = QImage();
+            m_baseRasterValid = false;
+            m_baseRasterContentRevision = 0;
+        }
     }
 }
 
@@ -2231,13 +2242,16 @@ void TextMediaItem::ensureTextRenderer() {
                                                       job.targetSize,
                                                       job.scaleFactor,
                                                       job.canvasZoom,
-                                                      clipRect);
+                                                      clipRect,
+                                                      job.cancellationToken ? job.cancellationToken.get() : nullptr);
                 } else {
                     TextMediaItem::paintVectorSnapshot(&imagePainter,
                                                       job.snapshot,
                                                       job.targetSize,
                                                       job.scaleFactor,
-                                                      job.canvasZoom);
+                                                      job.canvasZoom,
+                                                      QRectF(),
+                                                      job.cancellationToken ? job.cancellationToken.get() : nullptr);
                 }
                 imagePainter.end();
                 return result;
@@ -2274,7 +2288,7 @@ QImage TextMediaItem::renderRasterJobWithBackend(const TextRasterJob& job) const
     return job.execute();
 }
 
-void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor, qreal canvasZoom, const QRectF& viewport) {
+void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor, qreal canvasZoom, const QRectF& viewport, const std::atomic<bool>* cancelled) {
     if (!painter) {
         return;
     }
@@ -2512,6 +2526,17 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
             return false;
         }
 
+        // At extreme zoom the per-glyph bitmaps become enormous: a 48px glyph at
+        // scaleFactor=100 would be rendered as a ~3000×4000 px QImage + QPixmap per
+        // character, taking seconds on the thread pool and potentially triggering
+        // undefined-behaviour from QPixmap::fromImage on a non-main thread.
+        // Beyond kMaxGlyphAtlasScale fall back to Qt's layout->draw() path, which is
+        // viewport-clipped and does not pre-allocate oversized per-glyph buffers.
+        constexpr qreal kMaxGlyphAtlasScale = 8.0;
+        if (scaleFactor > kMaxGlyphAtlasScale) {
+            return false;
+        }
+
         QElapsedTimer atlasTimer;
         atlasTimer.start();
 
@@ -2532,6 +2557,11 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         QVector<GlyphDrawCommand> glyphCommands;
 
         for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+            // Cooperatively yield if the job has been superseded by a newer request.
+            if (cancelled && cancelled->load(std::memory_order_relaxed)) {
+                return false;
+            }
+
             QTextLayout* textLayout = block.layout();
             if (!textLayout) {
                 continue;
@@ -2756,6 +2786,12 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
 }
 
 QImage TextMediaItem::TextRasterJob::execute() const {
+    // Check cancellation before beginning — avoids wasted thread-pool work on
+    // requests that have already been superseded by the time execution starts.
+    if (cancellationToken && cancellationToken->load(std::memory_order_relaxed)) {
+        return QImage{};
+    }
+
     QElapsedTimer rasterTimer;
     rasterTimer.start();
     const int targetWidth = std::max(1, targetSize.width());
@@ -2781,8 +2817,14 @@ QImage TextMediaItem::TextRasterJob::execute() const {
         imagePainter.translate(-targetRect.left() * scaleFactor, -targetRect.top() * scaleFactor);
 
         // Tier 2: Pass canvasZoom for Phase 8 LOD, targetRect as viewport for Phase 7 culling
-        TextMediaItem::paintVectorSnapshot(&imagePainter, snapshot, targetSize, scaleFactor, canvasZoom, targetRect);
+        TextMediaItem::paintVectorSnapshot(&imagePainter, snapshot, targetSize, scaleFactor, canvasZoom, targetRect,
+                                           cancellationToken ? cancellationToken.get() : nullptr);
         imagePainter.end();
+
+        // If the job was cancelled mid-render, return an empty image so the result is discarded.
+        if (cancellationToken && cancellationToken->load(std::memory_order_relaxed)) {
+            return QImage{};
+        }
 
         const qint64 renderMs = rasterTimer.elapsed();
         if ((snapshot.outlineWidthPercent > 0.0 || renderMs > 8) && textHotLogsEnabled()) {
@@ -2806,8 +2848,13 @@ QImage TextMediaItem::TextRasterJob::execute() const {
     imagePainter.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
     // Tier 2: Pass canvasZoom for Phase 8 LOD selection
-    TextMediaItem::paintVectorSnapshot(&imagePainter, snapshot, targetSize, scaleFactor, canvasZoom);
+    TextMediaItem::paintVectorSnapshot(&imagePainter, snapshot, targetSize, scaleFactor, canvasZoom,
+                                       QRectF(), cancellationToken ? cancellationToken.get() : nullptr);
     imagePainter.end();
+
+    if (cancellationToken && cancellationToken->load(std::memory_order_relaxed)) {
+        return QImage{};
+    }
 
     const qint64 renderMs = rasterTimer.elapsed();
     if ((snapshot.outlineWidthPercent > 0.0 || renderMs > 8) && textHotLogsEnabled()) {
@@ -4134,6 +4181,11 @@ void TextMediaItem::startRasterJob(const QSize& targetSize, qreal effectiveScale
             m_pendingRasterRequestId = m_activeAsyncRasterRequest->requestId;
             return;
         }
+        // The in-flight job is now superseded. Signal it to abort cooperatively so
+        // the thread-pool slot is freed as soon as possible for the new request.
+        if (m_rasterCancellationToken) {
+            m_rasterCancellationToken->store(true, std::memory_order_relaxed);
+        }
         m_pendingAsyncRasterRequest = request;
         m_pendingRasterRequestId = requestId;
         queueRasterJobDispatch();
@@ -4150,6 +4202,10 @@ void TextMediaItem::startAsyncRasterRequest(const QSize& targetSize, qreal effec
     request.generation = ++m_rasterJobGeneration;
     request.startedAt = std::chrono::steady_clock::now();
 
+    // Issue a fresh cancellation token for this job. The previous token (if any) was
+    // already set to true by startRasterJob when the superseding request was enqueued.
+    m_rasterCancellationToken = std::make_shared<std::atomic<bool>>(false);
+
     m_asyncRasterInProgress = true;
     m_pendingRasterRequestId = requestId;
     m_activeAsyncRasterRequest = request;
@@ -4164,6 +4220,7 @@ void TextMediaItem::startAsyncRasterRequest(const QSize& targetSize, qreal effec
     job.scaleFactor = effectiveScale;
     job.canvasZoom = request.canvasZoom;  // Tier 2: Pass canvas zoom for Phase 8
     job.targetRect = request.visibleRegionAtRequest;  // Pass visible region for partial rendering
+    job.cancellationToken = m_rasterCancellationToken;
 
     ensureTextRenderer();
     const std::shared_ptr<ITextRenderer> renderer = m_textRenderer;
@@ -4451,6 +4508,16 @@ void TextMediaItem::handleRasterJobFinished(quint64 generation, QImage&& raster,
     }
     enforceCacheBudget();
     recordTextRasterResult(durationMs, false, false);
+
+    // Speculatively warm up the base (1×) raster while the system is between zoom
+    // events. This ensures m_rasterizedText is ready when the user zooms back out,
+    // eliminating the blank-frame transition at 1× zoom.
+    if (!m_baseRasterInProgress && m_needsRasterization) {
+        const QSize baseTarget(std::max(1, m_baseSize.width()), std::max(1, m_baseSize.height()));
+        m_pendingBaseRasterRequest = baseTarget;
+        queueBaseRasterDispatch();
+        m_needsRasterization = false;
+    }
 
     update();
     startNextPendingAsyncRasterRequest();
@@ -4765,6 +4832,17 @@ void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* opt
         // Draw the cached bitmap instead of re-rendering vector text
         if (!m_rasterizedText.isNull()) {
             painter->drawImage(bounds, m_rasterizedText);
+        } else if (m_scaledRasterPixmapValid && !m_scaledRasterPixmap.isNull()) {
+            // Fallback: present the last available scaled raster scaled to fit bounds while
+            // the 1× base raster job is in flight. This eliminates the blank-text flash
+            // that occurs when rapidly zooming back to 1× before m_rasterizedText is ready.
+            const QRectF src(QPointF(0.0, 0.0),
+                             QSizeF(static_cast<qreal>(m_scaledRasterPixmap.width()),
+                                    static_cast<qreal>(m_scaledRasterPixmap.height())));
+            painter->save();
+            painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
+            painter->drawPixmap(bounds, m_scaledRasterPixmap, src);
+            painter->restore();
         }
     }
 
