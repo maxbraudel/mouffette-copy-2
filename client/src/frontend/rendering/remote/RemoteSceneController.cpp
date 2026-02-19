@@ -42,6 +42,10 @@
 #include <QPen>
 #include <QPointer>
 #include <QHash>
+#include <QCache>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QElapsedTimer>
 #include <QVariant>
 #include <QCoreApplication>
 #include <QEvent>
@@ -61,6 +65,161 @@ namespace {
 constexpr qint64 kStartPositionToleranceMs = 120;
 constexpr qint64 kDecoderSyncToleranceMs = 25;
 constexpr int kLivePlaybackWarmupFrames = 2;
+constexpr int kDefaultRemoteRenderedGlyphCacheCostKb = 32768;
+
+bool parseEnvBool(const QByteArray& raw, bool* valid = nullptr) {
+    const QByteArray lowered = raw.trimmed().toLower();
+    const bool isTrue = lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on";
+    const bool isFalse = lowered == "0" || lowered == "false" || lowered == "no" || lowered == "off";
+    if (valid) {
+        *valid = isTrue || isFalse;
+    }
+    return isTrue;
+}
+
+bool envFlagValue(const char* primary, const char* fallback, bool defaultValue) {
+    if (qEnvironmentVariableIsSet(primary)) {
+        bool valid = false;
+        const bool value = parseEnvBool(qgetenv(primary), &valid);
+        if (valid) {
+            return value;
+        }
+    }
+    if (fallback && qEnvironmentVariableIsSet(fallback)) {
+        bool valid = false;
+        const bool value = parseEnvBool(qgetenv(fallback), &valid);
+        if (valid) {
+            return value;
+        }
+    }
+    return defaultValue;
+}
+
+bool envFlagEnabled(const char* primary, const char* fallback = nullptr) {
+    return envFlagValue(primary, fallback, false);
+}
+
+bool textProfilingEnabled() {
+    static const bool enabled = envFlagEnabled("MOUFFETTE_TEXT_PROFILING");
+    return enabled;
+}
+
+bool textGlyphAtlasV1Enabled() {
+    static const bool enabled = envFlagValue("MOUFFETTE_TEXT_GLYPH_ATLAS_V1", "text.renderer.glyph_atlas.v1", true);
+    return enabled;
+}
+
+int renderedGlyphCacheMaxCostKb() {
+    static const int maxCostKb = []() {
+        const QByteArray raw = qgetenv("MOUFFETTE_TEXT_GLYPH_CACHE_MAX_COST_KB");
+        if (!raw.isEmpty()) {
+            bool ok = false;
+            const int parsed = raw.trimmed().toInt(&ok);
+            if (ok) {
+                return std::clamp(parsed, 1024, 262144);
+            }
+        }
+        return kDefaultRemoteRenderedGlyphCacheCostKb;
+    }();
+    return maxCostKb;
+}
+
+struct RemoteGlyphCacheStats {
+    quint64 hits = 0;
+    quint64 misses = 0;
+    quint64 glyphsDrawn = 0;
+    qint64 totalDurationMs = 0;
+    quint64 inserts = 0;
+    quint64 evictionHints = 0;
+    int currentCostKb = 0;
+    int maxCostKb = 0;
+    QVector<qint64> recentDurationsMs;
+    QElapsedTimer window;
+};
+
+RemoteGlyphCacheStats& remoteGlyphCacheStats() {
+    static RemoteGlyphCacheStats stats;
+    return stats;
+}
+
+void recordRemoteGlyphCacheInsert(bool evictionHint, int currentCostKb, int maxCostKb) {
+    if (!textProfilingEnabled()) {
+        return;
+    }
+
+    RemoteGlyphCacheStats& stats = remoteGlyphCacheStats();
+    ++stats.inserts;
+    if (evictionHint) {
+        ++stats.evictionHints;
+    }
+    stats.currentCostKb = std::max(0, currentCostKb);
+    stats.maxCostKb = std::max(0, maxCostKb);
+}
+
+void recordRemoteGlyphCacheStats(quint64 hits, quint64 misses, quint64 glyphsDrawn, qint64 durationMs) {
+    if (!textProfilingEnabled()) {
+        return;
+    }
+
+    RemoteGlyphCacheStats& stats = remoteGlyphCacheStats();
+    stats.hits += hits;
+    stats.misses += misses;
+    stats.glyphsDrawn += glyphsDrawn;
+    stats.totalDurationMs += std::max<qint64>(0, durationMs);
+    stats.recentDurationsMs.append(std::max<qint64>(0, durationMs));
+    if (stats.recentDurationsMs.size() > 256) {
+        stats.recentDurationsMs.remove(0, stats.recentDurationsMs.size() - 256);
+    }
+
+    if (!stats.window.isValid()) {
+        stats.window.start();
+        return;
+    }
+
+    if (stats.window.elapsed() < 1000) {
+        return;
+    }
+
+    const quint64 lookups = stats.hits + stats.misses;
+    const double hitRatePct = (lookups > 0)
+        ? (100.0 * static_cast<double>(stats.hits) / static_cast<double>(lookups))
+        : 0.0;
+    const qint64 avgMsPerGlyph = (stats.glyphsDrawn > 0)
+        ? static_cast<qint64>(std::llround(static_cast<double>(stats.totalDurationMs) / static_cast<double>(stats.glyphsDrawn)))
+        : 0;
+    qint64 p95Ms = 0;
+    if (!stats.recentDurationsMs.isEmpty()) {
+        QVector<qint64> sorted = stats.recentDurationsMs;
+        std::sort(sorted.begin(), sorted.end());
+        const int upperBound = static_cast<int>(sorted.size()) - 1;
+        const int candidateIdx = static_cast<int>(std::ceil(static_cast<double>(upperBound) * 0.95));
+        const int idx = std::clamp(candidateIdx, 0, upperBound);
+        p95Ms = sorted.at(idx);
+    }
+    const double occupancyPct = (stats.maxCostKb > 0)
+        ? (100.0 * static_cast<double>(stats.currentCostKb) / static_cast<double>(stats.maxCostKb))
+        : 0.0;
+
+    qInfo() << "[RemoteTextGlyphCache]"
+            << "hits" << stats.hits
+            << "misses" << stats.misses
+            << "hitRatePct" << hitRatePct
+            << "glyphs" << stats.glyphsDrawn
+            << "avgMsPerGlyph" << avgMsPerGlyph
+            << "p95Ms" << p95Ms
+            << "inserts" << stats.inserts
+            << "evictionHints" << stats.evictionHints
+            << "occupancyPct" << occupancyPct;
+
+    stats.hits = 0;
+    stats.misses = 0;
+    stats.glyphsDrawn = 0;
+    stats.totalDurationMs = 0;
+    stats.inserts = 0;
+    stats.evictionHints = 0;
+    stats.recentDurationsMs.clear();
+    stats.window.restart();
+}
 
 struct GlyphPathKey {
     QString family;
@@ -100,6 +259,174 @@ QPainterPath cachedGlyphPath(const QRawFont& font, quint32 glyphIndex) {
     }
     s_cache.insert(cacheKey, path);
     return path;
+}
+
+struct RemoteRenderedGlyphKey {
+    QString family;
+    QString style;
+    qint64 pixelSizeScaled = 0;
+    quint32 glyphIndex = 0;
+    QRgb fillColor = 0;
+    QRgb strokeColor = 0;
+    QRgb highlightColor = 0;
+    quint8 highlightEnabled = 0;
+    qint32 strokeWidthScaled = 0;
+    qint32 scaleBucket = 0;
+
+    friend bool operator==(const RemoteRenderedGlyphKey& a, const RemoteRenderedGlyphKey& b) {
+        return a.family == b.family &&
+               a.style == b.style &&
+               a.pixelSizeScaled == b.pixelSizeScaled &&
+               a.glyphIndex == b.glyphIndex &&
+               a.fillColor == b.fillColor &&
+               a.strokeColor == b.strokeColor &&
+               a.highlightColor == b.highlightColor &&
+               a.highlightEnabled == b.highlightEnabled &&
+               a.strokeWidthScaled == b.strokeWidthScaled &&
+               a.scaleBucket == b.scaleBucket;
+    }
+};
+
+uint qHash(const RemoteRenderedGlyphKey& key, uint seed = 0) {
+    seed = ::qHash(key.family, seed);
+    seed = ::qHash(key.style, seed);
+    seed = ::qHash(static_cast<quint64>(key.pixelSizeScaled), seed);
+    seed = ::qHash(key.glyphIndex, seed);
+    seed = ::qHash(key.fillColor, seed);
+    seed = ::qHash(key.strokeColor, seed);
+    seed = ::qHash(key.highlightColor, seed);
+    seed = ::qHash(key.highlightEnabled, seed);
+    seed = ::qHash(key.strokeWidthScaled, seed);
+    return ::qHash(key.scaleBucket, seed);
+}
+
+struct RemoteRenderedGlyphBitmap {
+    QPixmap strokePixmap;
+    QPixmap fillPixmap;
+    QPointF originOffset;
+};
+
+RemoteRenderedGlyphBitmap cachedRenderedGlyph(const QRawFont& font,
+                                              quint32 glyphIndex,
+                                              const QColor& fillColor,
+                                              const QColor& strokeColor,
+                                              const QColor& highlightColor,
+                                              bool highlightEnabled,
+                                              qreal strokeWidth,
+                                              qreal scaleFactor,
+                                              bool* cacheHit = nullptr) {
+    RemoteRenderedGlyphBitmap result;
+    if (!font.isValid() || strokeWidth < 0.0) {
+        if (cacheHit) {
+            *cacheHit = false;
+        }
+        return result;
+    }
+
+    static QCache<RemoteRenderedGlyphKey, RemoteRenderedGlyphBitmap> s_renderedGlyphCache(renderedGlyphCacheMaxCostKb());
+    static QMutex s_renderedGlyphCacheMutex;
+
+    const qreal pixelSize = font.pixelSize();
+    const qint64 pixelSizeScaled = static_cast<qint64>(std::llround(pixelSize * 1024.0));
+    RemoteRenderedGlyphKey cacheKey;
+    cacheKey.family = font.familyName();
+    cacheKey.style = font.styleName();
+    cacheKey.pixelSizeScaled = pixelSizeScaled;
+    cacheKey.glyphIndex = glyphIndex;
+    cacheKey.fillColor = fillColor.rgba();
+    cacheKey.strokeColor = strokeColor.rgba();
+    cacheKey.highlightColor = highlightColor.rgba();
+    cacheKey.highlightEnabled = highlightEnabled ? 1 : 0;
+    cacheKey.strokeWidthScaled = static_cast<qint32>(std::llround(strokeWidth * 1024.0));
+    cacheKey.scaleBucket = static_cast<qint32>(std::llround(std::max(std::abs(scaleFactor), 1e-4) * 256.0));
+
+    {
+        QMutexLocker locker(&s_renderedGlyphCacheMutex);
+        if (const RemoteRenderedGlyphBitmap* cached = s_renderedGlyphCache.object(cacheKey)) {
+            if (cacheHit) {
+                *cacheHit = true;
+            }
+            return *cached;
+        }
+    }
+
+    const QPainterPath glyphPath = cachedGlyphPath(font, glyphIndex);
+    if (glyphPath.isEmpty()) {
+        if (cacheHit) {
+            *cacheHit = false;
+        }
+        return result;
+    }
+
+    const QRectF pathBounds = glyphPath.boundingRect();
+    const qreal padding = std::ceil(strokeWidth * 2.0) + 2.0;
+    const QRectF renderBounds = pathBounds.adjusted(-padding, -padding, padding, padding);
+    const qreal rasterScale = std::max(std::abs(scaleFactor), 1e-4);
+    const int width = std::max(1, static_cast<int>(std::ceil(renderBounds.width() * rasterScale)));
+    const int height = std::max(1, static_cast<int>(std::ceil(renderBounds.height() * rasterScale)));
+
+    QImage fillImage(width, height, QImage::Format_ARGB32_Premultiplied);
+    fillImage.fill(Qt::transparent);
+
+    if (strokeWidth > 0.0) {
+        QImage strokeImage(width, height, QImage::Format_ARGB32_Premultiplied);
+        strokeImage.fill(Qt::transparent);
+        QPainter strokePainter(&strokeImage);
+        strokePainter.setRenderHint(QPainter::Antialiasing, true);
+        strokePainter.scale(rasterScale, rasterScale);
+        strokePainter.translate(-renderBounds.left(), -renderBounds.top());
+        strokePainter.setPen(QPen(strokeColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        strokePainter.setBrush(Qt::NoBrush);
+        strokePainter.drawPath(glyphPath);
+        strokePainter.end();
+        result.strokePixmap = QPixmap::fromImage(strokeImage);
+        result.strokePixmap.setDevicePixelRatio(rasterScale);
+    }
+
+    QPainter fillPainter(&fillImage);
+    fillPainter.setRenderHint(QPainter::Antialiasing, true);
+    fillPainter.scale(rasterScale, rasterScale);
+    fillPainter.translate(-renderBounds.left(), -renderBounds.top());
+    fillPainter.setPen(Qt::NoPen);
+    fillPainter.setBrush(fillColor);
+    fillPainter.drawPath(glyphPath);
+    fillPainter.end();
+
+    result.fillPixmap = QPixmap::fromImage(fillImage);
+    result.fillPixmap.setDevicePixelRatio(rasterScale);
+    result.originOffset = renderBounds.topLeft();
+    if (result.fillPixmap.isNull() && result.strokePixmap.isNull()) {
+        if (cacheHit) {
+            *cacheHit = false;
+        }
+        return result;
+    }
+
+    {
+        QMutexLocker locker(&s_renderedGlyphCacheMutex);
+        const int countBefore = s_renderedGlyphCache.count();
+        const int totalCostBefore = s_renderedGlyphCache.totalCost();
+        if (!s_renderedGlyphCache.object(cacheKey)) {
+            const int strokeCostKb = result.strokePixmap.isNull()
+                ? 0
+                : (result.strokePixmap.width() * result.strokePixmap.height() * 4) / 1024;
+            const int fillCostKb = result.fillPixmap.isNull()
+                ? 0
+                : (result.fillPixmap.width() * result.fillPixmap.height() * 4) / 1024;
+            const int costKb = std::max(1, strokeCostKb + fillCostKb);
+            s_renderedGlyphCache.insert(cacheKey, new RemoteRenderedGlyphBitmap(result), costKb);
+            const int countAfter = s_renderedGlyphCache.count();
+            const int totalCostAfter = s_renderedGlyphCache.totalCost();
+            const bool evictionHint = (countAfter <= countBefore) ||
+                (totalCostAfter < (totalCostBefore + costKb));
+            recordRemoteGlyphCacheInsert(evictionHint, totalCostAfter, s_renderedGlyphCache.maxCost());
+        }
+    }
+
+    if (cacheHit) {
+        *cacheHit = false;
+    }
+    return result;
 }
 
 QRectF computeDocumentTextBounds(const QTextDocument& doc, QAbstractTextDocumentLayout* layout) {
@@ -373,27 +700,169 @@ protected:
             cursor.mergeCharFormat(format);
         }
 
-        if (strokeWidth > 0.0) {
-            // Build glyph paths
-            QPainterPath textPath;
-            textPath.setFillRule(Qt::WindingFill); // Preserve glyph counters
+        auto drawWithGlyphBitmaps = [&]() -> bool {
+            if (!textGlyphAtlasV1Enabled()) {
+                return false;
+            }
+
             QAbstractTextDocumentLayout* docLayout = doc->documentLayout();
+            if (!docLayout) {
+                return false;
+            }
+
+            const QTransform world = painter->worldTransform();
+            qreal scaleX = std::hypot(world.m11(), world.m21());
+            qreal scaleY = std::hypot(world.m22(), world.m12());
+            if (scaleX <= 1e-6) {
+                scaleX = 1.0;
+            }
+            if (scaleY <= 1e-6) {
+                scaleY = 1.0;
+            }
+
+            qreal dpr = 1.0;
+            if (QPaintDevice* device = painter->device()) {
+                dpr = std::max<qreal>(1.0, device->devicePixelRatioF());
+            }
+
+            const qreal cacheScale = std::max<qreal>(1.0, std::max(scaleX, scaleY) * dpr);
+            quint64 cacheHits = 0;
+            quint64 cacheMisses = 0;
+            quint64 glyphDrawn = 0;
+            struct GlyphDrawCommand {
+                QPointF glyphPos;
+                RemoteRenderedGlyphBitmap rendered;
+                QPainterPath fallbackPath;
+                bool useFallbackPath = false;
+            };
+            QVector<GlyphDrawCommand> glyphCommands;
+            QElapsedTimer timer;
+            timer.start();
+
             for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
                 QTextLayout* textLayout = block.layout();
-                if (!textLayout) continue;
-                
+                if (!textLayout) {
+                    continue;
+                }
+
                 const QRectF blockRect = docLayout->blockBoundingRect(block);
                 for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
                     QTextLine line = textLayout->lineAt(lineIndex);
-                    if (!line.isValid()) continue;
+                    if (!line.isValid()) {
+                        continue;
+                    }
 
                     const qreal lineOffsetX = line.x();
-                    
-                    QList<QGlyphRun> glyphRuns = line.glyphRuns();
+                    const QList<QGlyphRun> glyphRuns = line.glyphRuns();
                     for (const QGlyphRun& run : glyphRuns) {
                         const QVector<quint32> indexes = run.glyphIndexes();
                         const QVector<QPointF> positions = run.positions();
-                        if (indexes.size() != positions.size()) continue;
+                        if (indexes.size() != positions.size()) {
+                            continue;
+                        }
+
+                        const QRawFont rawFont = run.rawFont();
+                        if (!rawFont.isValid()) {
+                            continue;
+                        }
+
+                        for (int gi = 0; gi < indexes.size(); ++gi) {
+                            bool cacheHit = false;
+                            const RemoteRenderedGlyphBitmap rendered = cachedRenderedGlyph(rawFont,
+                                                                                            indexes[gi],
+                                                                                            m_fillColor,
+                                                                                            outlineColor,
+                                                                                            m_highlightColor,
+                                                                                            m_highlightEnabled,
+                                                                                            strokeWidth,
+                                                                                            cacheScale,
+                                                                                            &cacheHit);
+                            if (cacheHit) {
+                                ++cacheHits;
+                            } else {
+                                ++cacheMisses;
+                            }
+
+                            GlyphDrawCommand command;
+                            command.glyphPos = blockRect.topLeft() + QPointF(lineOffsetX, line.y()) + positions[gi];
+                            command.rendered = rendered;
+
+                            if (rendered.fillPixmap.isNull() && rendered.strokePixmap.isNull()) {
+                                const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
+                                if (glyphPath.isEmpty()) {
+                                    continue;
+                                }
+                                command.useFallbackPath = true;
+                                command.fallbackPath = glyphPath.translated(command.glyphPos);
+                            }
+
+                            glyphCommands.append(std::move(command));
+                            ++glyphDrawn;
+                        }
+                    }
+                }
+            }
+
+            if (strokeWidth > 0.0) {
+                for (const GlyphDrawCommand& command : std::as_const(glyphCommands)) {
+                    if (command.useFallbackPath) {
+                        painter->save();
+                        painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                        painter->setBrush(Qt::NoBrush);
+                        painter->drawPath(command.fallbackPath);
+                        painter->restore();
+                        continue;
+                    }
+                    if (!command.rendered.strokePixmap.isNull()) {
+                        painter->drawPixmap(command.glyphPos + command.rendered.originOffset, command.rendered.strokePixmap);
+                    }
+                }
+            }
+
+            for (const GlyphDrawCommand& command : std::as_const(glyphCommands)) {
+                if (command.useFallbackPath) {
+                    painter->save();
+                    painter->setPen(Qt::NoPen);
+                    painter->setBrush(m_fillColor);
+                    painter->drawPath(command.fallbackPath);
+                    painter->restore();
+                    continue;
+                }
+                if (!command.rendered.fillPixmap.isNull()) {
+                    painter->drawPixmap(command.glyphPos + command.rendered.originOffset, command.rendered.fillPixmap);
+                }
+            }
+
+            recordRemoteGlyphCacheStats(cacheHits, cacheMisses, glyphDrawn, timer.elapsed());
+            return true;
+        };
+
+        const bool drewWithGlyphCache = drawWithGlyphBitmaps();
+        if (!drewWithGlyphCache && strokeWidth > 0.0) {
+            QPainterPath textPath;
+            textPath.setFillRule(Qt::WindingFill);
+            QAbstractTextDocumentLayout* docLayout = doc->documentLayout();
+            for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
+                QTextLayout* textLayout = block.layout();
+                if (!textLayout) {
+                    continue;
+                }
+
+                const QRectF blockRect = docLayout->blockBoundingRect(block);
+                for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                    QTextLine line = textLayout->lineAt(lineIndex);
+                    if (!line.isValid()) {
+                        continue;
+                    }
+
+                    const qreal lineOffsetX = line.x();
+                    const QList<QGlyphRun> glyphRuns = line.glyphRuns();
+                    for (const QGlyphRun& run : glyphRuns) {
+                        const QVector<quint32> indexes = run.glyphIndexes();
+                        const QVector<QPointF> positions = run.positions();
+                        if (indexes.size() != positions.size()) {
+                            continue;
+                        }
                         const QRawFont rawFont = run.rawFont();
                         for (int gi = 0; gi < indexes.size(); ++gi) {
                             const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
@@ -403,21 +872,19 @@ protected:
                     }
                 }
             }
-            
-            // Draw outside stroke
+
             painter->save();
             painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
             painter->setBrush(Qt::NoBrush);
             painter->drawPath(textPath);
             painter->restore();
-            
-            // Fill glyphs
+
             painter->save();
             painter->setPen(Qt::NoPen);
             painter->setBrush(m_fillColor);
             painter->drawPath(textPath);
             painter->restore();
-        } else {
+        } else if (!drewWithGlyphCache) {
             QAbstractTextDocumentLayout::PaintContext ctx;
             ctx.palette.setColor(QPalette::Text, m_fillColor);
             doc->documentLayout()->draw(painter, ctx);
