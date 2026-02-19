@@ -293,26 +293,6 @@ static bool screenListsEquivalent(const QList<ScreenInfo>& a, const QList<Screen
     }
     return true;
 }
-
-constexpr qreal kCanvasMinZoomScale = 0.05;
-constexpr qreal kCanvasMaxZoomScale = 100.0;
-constexpr qreal kMinQueuedZoomFactor = 0.05;
-constexpr qreal kMaxQueuedZoomFactor = 20.0;
-
-qreal averageTransformScale(const QTransform& t) {
-    const qreal scaleX = std::hypot(t.m11(), t.m21());
-    const qreal scaleY = std::hypot(t.m22(), t.m12());
-    if (scaleX > 1e-6 && scaleY > 1e-6) {
-        return (scaleX + scaleY) * 0.5;
-    }
-    if (scaleX > 1e-6) {
-        return scaleX;
-    }
-    if (scaleY > 1e-6) {
-        return scaleY;
-    }
-    return 1.0;
-}
 }
 
 // Dedicated item to render snap guides between scene content and overlays.
@@ -1630,10 +1610,6 @@ void ScreenCanvas::queueZoomInput(const QPointF& vpPos, qreal factor) {
 
     m_zoomFrameCoordinator.anchorVpPos = vpPos;
     m_zoomFrameCoordinator.factor *= factor;
-    if (!std::isfinite(m_zoomFrameCoordinator.factor) || m_zoomFrameCoordinator.factor <= 0.0) {
-        m_zoomFrameCoordinator.factor = 1.0;
-    }
-    m_zoomFrameCoordinator.factor = std::clamp(m_zoomFrameCoordinator.factor, kMinQueuedZoomFactor, kMaxQueuedZoomFactor);
     m_zoomFrameCoordinator.pending = true;
 
     if (!m_zoomFrameCoordinator.timer) {
@@ -4295,30 +4271,8 @@ QPointF ScreenCanvas::mapRemoteCursorToScene(int remoteX, int remoteY) const {
 }
 
 void ScreenCanvas::zoomAroundViewportPos(const QPointF& vpPosF, qreal factor) {
-    if (!std::isfinite(factor) || factor <= 0.0) {
-        return;
-    }
-
-    QPoint vpPos = vpPosF.toPoint();
-    if (!viewport()->rect().contains(vpPos)) {
-        vpPos = viewport()->rect().center();
-    }
-
-    const QPointF sceneAnchor = mapToScene(vpPos);
-    const qreal currentScale = std::max<qreal>(averageTransformScale(transform()), 1e-6);
-    const qreal requestedScale = currentScale * factor;
-    const qreal clampedScale = std::clamp(requestedScale, kCanvasMinZoomScale, kCanvasMaxZoomScale);
-    const qreal appliedFactor = clampedScale / currentScale;
-
-    if (!std::isfinite(appliedFactor) || appliedFactor <= 0.0 || std::abs(appliedFactor - 1.0) < 1e-6) {
-        return;
-    }
-
-    QTransform t = transform();
-    t.translate(sceneAnchor.x(), sceneAnchor.y());
-    t.scale(appliedFactor, appliedFactor);
-    t.translate(-sceneAnchor.x(), -sceneAnchor.y());
-    setTransform(t);
+    QPoint vpPos = vpPosF.toPoint(); if (!viewport()->rect().contains(vpPos)) vpPos = viewport()->rect().center(); const QPointF sceneAnchor = mapToScene(vpPos);
+    QTransform t = transform(); t.translate(sceneAnchor.x(), sceneAnchor.y()); t.scale(factor, factor); t.translate(-sceneAnchor.x(), -sceneAnchor.y()); setTransform(t);
     if (m_scene) { const QList<QGraphicsItem*> sel = m_scene->selectedItems(); for (QGraphicsItem* it : sel) { if (auto* v = dynamic_cast<ResizableVideoItem*>(it)) v->requestOverlayRelayout(); if (auto* b = dynamic_cast<ResizableMediaBase*>(it)) b->requestLabelRelayout(); } }
 }
 
