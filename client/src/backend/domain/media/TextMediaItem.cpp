@@ -2389,6 +2389,17 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
             offsetY = margin + (availableHeight - docVisualHeight) - docVisualTop;
             break;
     }
+    // Clamp: never push text above the top margin.
+    // When the box is too short to hold the wrapped text (e.g. during a fast alt-resize
+    // that narrows the width while height is fixed, producing more line-breaks than the
+    // height can accommodate), a Center/Bottom offsetY can go negative, causing the first
+    // lines to be painted above y=0. This makes partially-visible lines from the top
+    // bleed into the next visible line, creating apparent visual overlap. By clamping to
+    // the top-aligned position we fall back to top-clipping which is visually correct.
+    const qreal topAlignedOffsetY = margin - docVisualTop;
+    if (offsetY < topAlignedOffsetY) {
+        offsetY = topAlignedOffsetY;
+    }
 
     const QColor fillColor = snapshot.fillColor;
     QColor outlineColor = snapshot.outlineColor.isValid() ? snapshot.outlineColor : fillColor;
@@ -3507,7 +3518,10 @@ void TextMediaItem::ensureInlineEditor() {
             // Set width at base size (transform will scale it visually)
             const qreal margin = contentPaddingPx();
             const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
-            const qreal logicalWidth = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) / uniformScale - 2.0 * margin);
+            // Match applyFitModeConstraintsToEditor: visual wrap = (baseWidth - 2*margin),
+            // so logical width (before editor's scale(uniformScale) transform) must be
+            // (baseWidth - 2*margin) / uniformScale.
+            const qreal logicalWidth = std::max<qreal>(1.0, (static_cast<qreal>(m_baseSize.width()) - 2.0 * margin) / uniformScale);
             doc->setTextWidth(logicalWidth);
         }
 
@@ -3630,12 +3644,16 @@ void TextMediaItem::updateInlineEditorGeometry() {
 
     QRectF bounds = boundingRect();
     
-    // Match the rendering logic: divide base size by scale first, then subtract padding
-    // This ensures the inline editor wraps at exactly the same width as the visible text
-    const qreal logicalWidth = std::max<qreal>(1.0, bounds.width() / uniformScale);
-    const qreal logicalHeight = std::max<qreal>(1.0, bounds.height() / uniformScale);
-    const qreal logicalContentWidth = std::max<qreal>(1.0, logicalWidth - 2.0 * marginLogical);
-    const qreal logicalContentHeight = std::max<qreal>(1.0, logicalHeight - 2.0 * marginLogical);
+    // Compute logical content dimensions that match paintVectorSnapshot exactly.
+    // paintVectorSnapshot wraps at (m_baseSize.width() - 2*margin) in its own logical
+    // space (scale-independent). The editor renders with transform scale(uniformScale),
+    // so its *logical* text width must be (m_baseSize.width() - 2*margin) / uniformScale
+    // so that the *visual* wrap = logicalContentWidth * uniformScale = m_baseSize.width() - 2*margin.
+    // The previous formula  (bounds.width()/uniformScale - 2*marginLogical) was equivalent to
+    // (m_baseSize.width() - 2*margin*uniformScale) / uniformScale, giving visual wrap
+    // m_baseSize.width() - 2*margin*uniformScale — incorrect when uniformScale != 1.
+    const qreal logicalContentWidth = std::max<qreal>(1.0, (bounds.width() - 2.0 * marginLogical) / uniformScale);
+    const qreal logicalContentHeight = std::max<qreal>(1.0, (bounds.height() - 2.0 * marginLogical) / uniformScale);
     
     // Calculate visual dimensions for positioning
     QRectF contentRect = bounds.adjusted(marginScene, marginScene, -marginScene, -marginScene);
@@ -3737,7 +3755,16 @@ void TextMediaItem::updateInlineEditorGeometry() {
             offsetY = availableHeight - visualDocHeight - visualDocTop;
             break;
     }
-    
+    // Clamp: mirror the same guard as paintVectorSnapshot — never push the editor above
+    // the content area top. When the box is narrowed via alt-resize (height fixed, more
+    // line-breaks needed), Center/Bottom can produce a negative offsetY that shifts the
+    // editor outside the bounding rect. Without ItemClipsChildrenToShape on the parent,
+    // this causes lines to visually overlap or bleed onto adjacent scene items.
+    const qreal topAlignedOffsetY = -visualDocTop;
+    if (offsetY < topAlignedOffsetY) {
+        offsetY = topAlignedOffsetY;
+    }
+
     const QPointF newEditorPos = contentRect.topLeft() + QPointF(offsetX, offsetY);
 
     if (!m_cachedEditorPosValid || floatsDiffer(newEditorPos.x(), m_cachedEditorPos.x(), 0.1) || floatsDiffer(newEditorPos.y(), m_cachedEditorPos.y(), 0.1)) {
@@ -5388,7 +5415,17 @@ void TextMediaItem::applyFitModeConstraintsToEditor() {
 
     const qreal margin = contentPaddingPx();
     const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
-    qreal desiredTextWidth = std::max<qreal>(1.0, static_cast<qreal>(m_baseSize.width()) / uniformScale - 2.0 * margin);
+    // The inline editor is rendered with a transform of scale(uniformScale), so its
+    // document coordinates are in "logical" units. The raster (paintVectorSnapshot) wraps
+    // at `m_baseSize.width() - 2*margin` (logical pixels, scale-independent). To produce
+    // the same visual wrap width in the editor we need:
+    //   desiredTextWidth * uniformScale == m_baseSize.width() - 2*margin
+    //   → desiredTextWidth = (m_baseSize.width() - 2*margin) / uniformScale
+    // The previous formula  (m_baseSize.width() / uniformScale - 2*margin) was wrong:
+    // it gave visual wrap = m_baseSize.width() - 2*margin*uniformScale, which diverges
+    // from the raster when uniformScale != 1 and caused editors for scaled items to
+    // break lines at different points than the displayed raster.
+    qreal desiredTextWidth = std::max<qreal>(1.0, (static_cast<qreal>(m_baseSize.width()) - 2.0 * margin) / uniformScale);
 
     bool widthModified = false;
 
