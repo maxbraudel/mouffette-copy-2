@@ -6,6 +6,7 @@
 #include <QScreen>
 #include <QHostInfo>
 #include <algorithm>
+#include <cmath>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -212,7 +213,14 @@ QList<ScreenInfo> SystemMonitor::getLocalScreenInfo() const {
     QList<QScreen*> screenList = QGuiApplication::screens();
     for (int i = 0; i < screenList.size(); ++i) {
         QScreen* screen = screenList[i];
-        QRect geometry = screen->geometry();
+    QRect geometry = screen->geometry();
+#ifdef Q_OS_MACOS
+    const qreal dpr = std::max<qreal>(1.0, screen->devicePixelRatio());
+    geometry.setX(static_cast<int>(std::lround(static_cast<qreal>(geometry.x()) * dpr)));
+    geometry.setY(static_cast<int>(std::lround(static_cast<qreal>(geometry.y()) * dpr)));
+    geometry.setWidth(static_cast<int>(std::lround(static_cast<qreal>(geometry.width()) * dpr)));
+    geometry.setHeight(static_cast<int>(std::lround(static_cast<qreal>(geometry.height()) * dpr)));
+#endif
         bool isPrimary = (screen == QGuiApplication::primaryScreen());
         screens.append(ScreenInfo(i, geometry.width(), geometry.height(), 
                                 geometry.x(), geometry.y(), isPrimary));

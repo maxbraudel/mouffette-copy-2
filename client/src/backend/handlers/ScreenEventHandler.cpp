@@ -14,6 +14,7 @@
 #include <QStackedWidget>
 #include <QGuiApplication>
 #include <QScreen>
+#include <cmath>
 
 #ifdef Q_OS_WIN
 #ifndef WIN32_LEAN_AND_MEAN
@@ -160,32 +161,36 @@ void ScreenEventHandler::syncRegistration()
             QScreen* qs = qScreens[screen.id]; 
             if (!qs) continue;
             
+            const qreal dpr = std::max<qreal>(1.0, qs->devicePixelRatio());
             QRect geom = qs->geometry();
             QRect avail = qs->availableGeometry();
+
+            const int geomWidthPx = static_cast<int>(std::lround(static_cast<qreal>(geom.width()) * dpr));
+            const int geomHeightPx = static_cast<int>(std::lround(static_cast<qreal>(geom.height()) * dpr));
             
             // Menu bar
             if (avail.y() > geom.y()) {
-                int h = avail.y() - geom.y(); 
+                int h = static_cast<int>(std::lround(static_cast<qreal>(avail.y() - geom.y()) * dpr)); 
                 if (h > 0) {
-                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("menu_bar"), 0, 0, geom.width(), h});
+                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("menu_bar"), 0, 0, geomWidthPx, h});
                 }
             }
             
             // Dock: one differing edge
             if (avail.bottom() < geom.bottom()) { // bottom dock
-                int h = geom.bottom() - avail.bottom(); 
+                int h = static_cast<int>(std::lround(static_cast<qreal>(geom.bottom() - avail.bottom()) * dpr)); 
                 if (h > 0) {
-                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("dock"), 0, geom.height() - h, geom.width(), h});
+                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("dock"), 0, geomHeightPx - h, geomWidthPx, h});
                 }
             } else if (avail.x() > geom.x()) { // left dock
-                int w = avail.x() - geom.x(); 
+                int w = static_cast<int>(std::lround(static_cast<qreal>(avail.x() - geom.x()) * dpr)); 
                 if (w > 0) {
-                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("dock"), 0, 0, w, geom.height()});
+                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("dock"), 0, 0, w, geomHeightPx});
                 }
             } else if (avail.right() < geom.right()) { // right dock
-                int w = geom.right() - avail.right(); 
+                int w = static_cast<int>(std::lround(static_cast<qreal>(geom.right() - avail.right()) * dpr)); 
                 if (w > 0) {
-                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("dock"), geom.width() - w, 0, w, geom.height()});
+                    screen.uiZones.append(ScreenInfo::UIZone{QStringLiteral("dock"), geomWidthPx - w, 0, w, geomHeightPx});
                 }
             }
         }
@@ -364,30 +369,34 @@ void ScreenEventHandler::onDataRequestReceived()
             QScreen* qs = qScreens[screen.id]; 
             if (!qs) continue;
             
+            const qreal dpr = std::max<qreal>(1.0, qs->devicePixelRatio());
             QRect geom = qs->geometry(); 
             QRect avail = qs->availableGeometry();
+
+            const int geomWidthPx = static_cast<int>(std::lround(static_cast<qreal>(geom.width()) * dpr));
+            const int geomHeightPx = static_cast<int>(std::lround(static_cast<qreal>(geom.height()) * dpr));
             
             if (avail.y() > geom.y()) { 
-                int h = avail.y() - geom.y(); 
+                int h = static_cast<int>(std::lround(static_cast<qreal>(avail.y() - geom.y()) * dpr)); 
                 if (h > 0) {
-                    screen.uiZones.append(ScreenInfo::UIZone{"menu_bar", 0, 0, geom.width(), h}); 
+                    screen.uiZones.append(ScreenInfo::UIZone{"menu_bar", 0, 0, geomWidthPx, h}); 
                 }
             }
             
             if (avail.bottom() < geom.bottom()) { 
-                int h = geom.bottom() - avail.bottom(); 
+                int h = static_cast<int>(std::lround(static_cast<qreal>(geom.bottom() - avail.bottom()) * dpr)); 
                 if (h > 0) {
-                    screen.uiZones.append(ScreenInfo::UIZone{"dock", 0, geom.height() - h, geom.width(), h}); 
+                    screen.uiZones.append(ScreenInfo::UIZone{"dock", 0, geomHeightPx - h, geomWidthPx, h}); 
                 }
             } else if (avail.x() > geom.x()) { 
-                int w = avail.x() - geom.x(); 
+                int w = static_cast<int>(std::lround(static_cast<qreal>(avail.x() - geom.x()) * dpr)); 
                 if (w > 0) {
-                    screen.uiZones.append(ScreenInfo::UIZone{"dock", 0, 0, w, geom.height()}); 
+                    screen.uiZones.append(ScreenInfo::UIZone{"dock", 0, 0, w, geomHeightPx}); 
                 }
             } else if (avail.right() < geom.right()) { 
-                int w = geom.right() - avail.right(); 
+                int w = static_cast<int>(std::lround(static_cast<qreal>(geom.right() - avail.right()) * dpr)); 
                 if (w > 0) {
-                    screen.uiZones.append(ScreenInfo::UIZone{"dock", geom.width() - w, 0, w, geom.height()}); 
+                    screen.uiZones.append(ScreenInfo::UIZone{"dock", geomWidthPx - w, 0, w, geomHeightPx}); 
                 }
             }
         }
