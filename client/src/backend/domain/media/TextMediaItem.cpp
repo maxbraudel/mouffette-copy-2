@@ -2541,11 +2541,105 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         // scaleFactor=100 would be rendered as a ~3000×4000 px QImage + QPixmap per
         // character, taking seconds on the thread pool and potentially triggering
         // undefined-behaviour from QPixmap::fromImage on a non-main thread.
-        // Beyond kMaxGlyphAtlasScale fall back to Qt's layout->draw() path, which is
-        // viewport-clipped and does not pre-allocate oversized per-glyph buffers.
+        // Beyond kMaxGlyphAtlasScale, switch to direct vector glyph paths with
+        // explicit block/line culling, so cost scales with visible glyphs only.
         constexpr qreal kMaxGlyphAtlasScale = 8.0;
         if (scaleFactor > kMaxGlyphAtlasScale) {
-            return false;
+            QElapsedTimer vectorPathTimer;
+            vectorPathTimer.start();
+
+            const QRectF visibleDocRect = hasViewport
+                ? viewport.translated(-translateX, -translateY)
+                : QRectF();
+
+            QVector<QPainterPath> visibleGlyphPaths;
+            visibleGlyphPaths.reserve(512);
+
+            int glyphDrawn = 0;
+            for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+                if (cancelled && cancelled->load(std::memory_order_relaxed)) {
+                    return false;
+                }
+
+                QTextLayout* textLayout = block.layout();
+                if (!textLayout) {
+                    continue;
+                }
+
+                const QRectF blockRect = layout->blockBoundingRect(block);
+                if (hasViewport && !visibleDocRect.intersects(blockRect)) {
+                    continue;
+                }
+
+                for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
+                    const QTextLine line = textLayout->lineAt(lineIndex);
+                    if (!line.isValid()) {
+                        continue;
+                    }
+
+                    const QRectF lineRect(blockRect.left() + line.x(),
+                                          blockRect.top() + line.y(),
+                                          std::max<qreal>(line.naturalTextWidth(), 1.0),
+                                          std::max<qreal>(line.height(), 1.0));
+                    if (hasViewport && !visibleDocRect.intersects(lineRect)) {
+                        continue;
+                    }
+
+                    const qreal lineOffsetX = line.x();
+                    const QList<QGlyphRun> glyphRuns = line.glyphRuns();
+                    for (const QGlyphRun& run : glyphRuns) {
+                        const QVector<quint32> indexes = run.glyphIndexes();
+                        const QVector<QPointF> positions = run.positions();
+                        if (indexes.size() != positions.size()) {
+                            continue;
+                        }
+
+                        const QRawFont rawFont = run.rawFont();
+                        if (!rawFont.isValid()) {
+                            continue;
+                        }
+
+                        for (int gi = 0; gi < indexes.size(); ++gi) {
+                            QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
+                            if (glyphPath.isEmpty()) {
+                                continue;
+                            }
+
+                            const QPointF glyphPos = blockRect.topLeft() + QPointF(lineOffsetX, line.y()) + positions[gi];
+                            glyphPath.translate(glyphPos);
+                            visibleGlyphPaths.append(std::move(glyphPath));
+                            ++glyphDrawn;
+                        }
+                    }
+                }
+            }
+
+            if (strokeWidth > 0.0) {
+                painter->save();
+                painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                painter->setBrush(Qt::NoBrush);
+                for (const QPainterPath& path : std::as_const(visibleGlyphPaths)) {
+                    painter->drawPath(path);
+                }
+                painter->restore();
+            }
+
+            painter->save();
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(fillColor);
+            for (const QPainterPath& path : std::as_const(visibleGlyphPaths)) {
+                painter->drawPath(path);
+            }
+            painter->restore();
+
+            const qint64 durationMs = vectorPathTimer.elapsed();
+            if (outlineMsOut) {
+                *outlineMsOut = durationMs;
+            }
+            if (glyphCountOut) {
+                *glyphCountOut = glyphDrawn;
+            }
+            return true;
         }
 
         QElapsedTimer atlasTimer;
