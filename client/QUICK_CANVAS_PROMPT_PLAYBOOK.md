@@ -43,6 +43,39 @@ Exit criteria:
 - Boundaries are explicit and documented.
 - Guardrails are present.
 - No behavior regression.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ## Prompt 2 — Verification of Phase -2
@@ -78,6 +111,72 @@ Output format (strict):
 Rules:
 - Audit only, no implementation.
 - Be strict and conservative.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ## Prompt 3 — Optional Deep Verification for Phase -2 (Architecture Conformance)
@@ -114,9 +213,79 @@ Output:
 - violations,
 - severity,
 - exact fixes required.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ---
+
+### Global Strict Protocol (applies to this prompt)
+
+```text
+Apply these mandatory rules. They are attached to this prompt:
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
+```
 
 ## Prompt 4 — Implementation of Phase -1 (Characterization Baseline)
 
@@ -156,6 +325,39 @@ Execution protocol:
 Exit criteria:
 - Baseline checks reproducible and green on legacy path.
 - Baseline assets available for parity comparison.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ## Prompt 5 — Verification of Phase -1
@@ -188,6 +390,72 @@ Output format (strict):
 Rules:
 - Audit only.
 - No optimistic assumptions.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ## Prompt 6 — Optional Deep Verification for Phase -1 (Baseline Quality)
@@ -220,9 +488,79 @@ Output:
 - quality score,
 - weak points,
 - required improvements.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ---
+
+### Global Strict Protocol (applies to this prompt)
+
+```text
+Apply these mandatory rules. They are attached to this prompt:
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
+```
 
 ## Prompt 7 — Implementation of Phase -0.5 (Operational Safety Controls)
 
@@ -251,6 +589,39 @@ Execution protocol:
 Exit criteria:
 - Controls are documented and operational.
 - Rollback ownership and escalation path are explicit.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ## Prompt 8 — Verification of Phase -0.5
@@ -279,9 +650,79 @@ Output format:
 3) Risk level
 4) Decision ADVANCE / DO NOT ADVANCE
 5) Minimal remediation
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ---
+
+### Global Strict Protocol (applies to this prompt)
+
+```text
+Apply these mandatory rules. They are attached to this prompt:
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
+```
 
 ## Prompt 9 — Implementation of Phase 0 (Freeze + Flag + Telemetry)
 
@@ -310,6 +751,39 @@ Exit criteria:
 - Flag works.
 - Legacy path unchanged.
 - Telemetry available.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ## Prompt 10 — Verification of Phase 0
@@ -339,9 +813,79 @@ Output:
 3) risks
 4) ADVANCE / DO NOT ADVANCE
 5) remediation if needed
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ---
+
+### Global Strict Protocol (applies to this prompt)
+
+```text
+Apply these mandatory rules. They are attached to this prompt:
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
+```
 
 ## Prompt 11 — Implementation of Phase 0.5 (Contract Extraction Critical)
 
@@ -376,6 +920,39 @@ Execution protocol:
 Exit criteria:
 - Contract-based orchestration is active.
 - Legacy runtime behavior remains identical.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ## Prompt 12 — Verification of Phase 0.5
@@ -408,6 +985,72 @@ Output:
 - risks,
 - ADVANCE / DO NOT ADVANCE,
 - exact fix list if needed.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ## Prompt 13 — Optional Deep Verification for Phase 0.5 (Regression Audit)
@@ -442,9 +1085,79 @@ Output:
 - suspected regressions,
 - severity,
 - must-fix list.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ---
+
+### Global Strict Protocol (applies to this prompt)
+
+```text
+Apply these mandatory rules. They are attached to this prompt:
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
+```
 
 ## Prompt 14 — Implementation of Phase 1 (Quick Shell)
 
@@ -474,6 +1187,39 @@ Exit criteria:
 - Both runtime paths operational.
 - Legacy path unchanged.
 - Quick shell visible and stable.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ## Prompt 15 — Verification of Phase 1
@@ -503,9 +1249,79 @@ Output:
 - risks,
 - ADVANCE / DO NOT ADVANCE,
 - minimal remediation.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ---
+
+### Global Strict Protocol (applies to this prompt)
+
+```text
+Apply these mandatory rules. They are attached to this prompt:
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
+```
 
 ## Prompt 16 — Implementation of Phase 2 (Camera/Input Parity)
 
@@ -528,6 +1344,39 @@ Required tasks:
 Exit criteria:
 - interaction parity checks pass,
 - zoom focal drift within defined tolerance.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ## Prompt 17 — Verification of Phase 2
@@ -554,9 +1403,79 @@ Output:
 - measured drift/perf notes,
 - ADVANCE / DO NOT ADVANCE,
 - exact remediation list.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ---
+
+### Global Strict Protocol (applies to this prompt)
+
+```text
+Apply these mandatory rules. They are attached to this prompt:
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
+```
 
 ## Prompt 18 — Implementation of Phase 3 (Static Layers)
 
@@ -579,6 +1498,39 @@ Required tasks:
 
 Exit criteria:
 - static layers match legacy behavior/appearance.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ## Prompt 19 — Verification of Phase 3
@@ -605,6 +1557,39 @@ Output:
 - visual mismatch list,
 - ADVANCE / DO NOT ADVANCE,
 - exact fixes.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ---
@@ -661,6 +1646,39 @@ Output:
 - perf delta summary,
 - ADVANCE / DO NOT ADVANCE,
 - fixes required.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ## Prompt 22 — Optional Deep Verification for Phase 4 (Regression Audit)
@@ -695,6 +1713,39 @@ Output:
 - regressions,
 - severity,
 - must-fix list.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ---
@@ -742,6 +1793,39 @@ Output:
 - interaction parity issues,
 - ADVANCE / DO NOT ADVANCE,
 - remediation steps.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ---
@@ -791,6 +1875,39 @@ Output:
 - overlay alignment/hit-testing issues,
 - ADVANCE / DO NOT ADVANCE,
 - exact fixes.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ## Prompt 27 — Optional Deep Verification for Phase 6 (Regression Audit)
@@ -821,6 +1938,39 @@ Output:
 - regressions,
 - severity,
 - must-fix list.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ---
@@ -870,6 +2020,39 @@ Output:
 - remaining integration risks,
 - ADVANCE / DO NOT ADVANCE,
 - must-fix list.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ---
@@ -918,6 +2101,39 @@ Output:
 2) blocker list
 3) Decision: ADVANCE / DO NOT ADVANCE
 4) exact remediation plan if needed
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ---
@@ -967,6 +2183,39 @@ Output:
 - rollout risk level,
 - ADVANCE / DO NOT ADVANCE,
 - remediation steps.
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ---
@@ -1031,6 +2280,39 @@ Output:
    - MIGRATION_COMPLETE
    - COMPLETE_WITH_KNOWN_RISKS
    - NOT_COMPLETE
+
+Apply these mandatory rules :
+
+1) Anti-scope enforcement (mandatory)
+- If any requested change is outside the current phase scope, refuse it and list it under "Deferred Items".
+- Do not implement deferred items.
+
+2) Evidence-first output (mandatory)
+- Every PASS/FAIL claim must include concrete evidence:
+   - file paths changed or inspected,
+   - command/check run,
+   - observed result.
+- If evidence is missing, mark the item FAIL.
+
+3) Fixed risk rubric (mandatory)
+- Low: no critical or major failures, only cosmetic/document-only gaps.
+- Medium: at least one major gap, no critical safety/parity break.
+- High: any critical regression/safety/parity or rollback failure.
+
+4) Gate decision rule (mandatory)
+- ADVANCE only if all required criteria are PASS and no High-risk item exists.
+- Otherwise DO NOT ADVANCE.
+
+5) Retry and escalation (mandatory)
+- Max 2 remediation loops for the same failed gate.
+- If still failing after 2 loops, output ESCALATE with blocker list, owner suggestion, and rollback recommendation.
+
+6) Output schema (mandatory)
+- Scope check (In-scope / Deferred Items)
+- Criteria matrix (criterion, PASS/FAIL, evidence)
+- Risk level (Low/Medium/High) with rationale
+- Decision (ADVANCE / DO NOT ADVANCE / ESCALATE)
+- Minimal next actions
 ```
 
 ---
