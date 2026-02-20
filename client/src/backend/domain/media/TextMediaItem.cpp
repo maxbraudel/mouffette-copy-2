@@ -258,7 +258,7 @@ QFont ensureRenderableFont(QFont font, const QString& itemId, const char* caller
 void logStrokeDiagnostics(const char* context,
                           qreal strokePercent,
                           qreal strokeWidthPx,
-                          int glyphCount,
+                          int textLength,
                           qint64 outlineBuildMs,
                           qint64 totalMs,
                           const QSizeF& docSize,
@@ -273,7 +273,7 @@ void logStrokeDiagnostics(const char* context,
              << context
              << "percent" << strokePercent
              << "px" << strokeWidthPx
-             << "glyphs" << glyphCount
+             << "textLength" << textLength
              << "outlineMs" << outlineBuildMs
              << "totalMs" << totalMs
              << "docSize" << docSize
@@ -682,7 +682,7 @@ static void normalizeTextFormatting(
     cursor.select(QTextCursor::Document);
 
     // Create standard character format using the current font settings
-    // Note: We clear TextOutline because the inline editor uses glyph paths for outside strokes
+    // Note: We clear TextOutline because the inline editor renders outside strokes directly.
     QTextCharFormat standardFormat;
     standardFormat.setFont(currentFont);
     standardFormat.setForeground(QBrush(currentColor));
@@ -925,14 +925,14 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         ? std::min(strokeWidthRaw, kMaxOutlineStrokePx)
         : 0.0;
     const QString preview = previewTextForLog(snapshot.text);
-    auto logSnapshotPerf = [&](const char* context, qint64 outlineMs, int glyphCount, qint64 totalMs) {
+    auto logSnapshotPerf = [&](const char* context, qint64 outlineMs, int textLength, qint64 totalMs) {
         if (strokeWidth <= 0.0 && totalMs < 4) {
             return;
         }
         logStrokeDiagnostics(context,
                               snapshot.outlineWidthPercent,
                               strokeWidth,
-                              glyphCount,
+                              textLength,
                               outlineMs,
                               totalMs,
                               docSize,
@@ -950,14 +950,14 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
     }
 
     auto drawDocumentWithStrokeBehindFill = [&](qint64* outlineMsOut,
-                                                int* glyphCountOut,
+                                                int* textLengthOut,
                                                 qreal translateX,
                                                 qreal translateY) {
         if (outlineMsOut) {
             *outlineMsOut = 0;
         }
-        if (glyphCountOut) {
-            *glyphCountOut = 0;
+        if (textLengthOut) {
+            *textLengthOut = 0;
         }
 
         if (strokeWidth <= 0.0) {
@@ -1022,8 +1022,8 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         if (outlineMsOut) {
             *outlineMsOut = outlineTimer.elapsed();
         }
-        if (glyphCountOut) {
-            *glyphCountOut = snapshot.text.size();
+        if (textLengthOut) {
+            *textLengthOut = snapshot.text.size();
         }
     };
 
@@ -1079,17 +1079,17 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
             painter->restore();
         }
 
-        int glyphCount = 0;
+        int textLength = 0;
         qint64 outlineMs = 0;
-        drawDocumentWithStrokeBehindFill(&outlineMs, &glyphCount, offsetX, offsetY);
+        drawDocumentWithStrokeBehindFill(&outlineMs, &textLength, offsetX, offsetY);
 
         painter->restore();
-        logSnapshotPerf("vector-full", outlineMs, glyphCount, snapshotTimer.elapsed());
+        logSnapshotPerf("vector-full", outlineMs, textLength, snapshotTimer.elapsed());
         return;
     }
 
     painter->translate(offsetX, offsetY);
-    int glyphCount = 0;
+    int textLength = 0;
     qint64 outlineMs = 0;
 
     for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
@@ -1119,10 +1119,10 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         }
     }
 
-    drawDocumentWithStrokeBehindFill(&outlineMs, &glyphCount, offsetX, offsetY);
+    drawDocumentWithStrokeBehindFill(&outlineMs, &textLength, offsetX, offsetY);
 
     painter->restore();
-    logSnapshotPerf("vector-fit", outlineMs, glyphCount, snapshotTimer.elapsed());
+    logSnapshotPerf("vector-fit", outlineMs, textLength, snapshotTimer.elapsed());
 }
 
 TextMediaItem::TextMediaItem(
