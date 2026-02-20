@@ -577,32 +577,86 @@ QPainterPath cachedGlyphPath(const QRawFont& rawFont, quint32 glyphIndex) {
         return QPainterPath();
     }
 
-    static QCache<quint64, QPainterPath> s_glyphCache(kMaxCachedGlyphPaths);
-    static QMutex s_cacheMutex;
+    static QCache<quint64, QPainterPath> s_glyphPathCache(kMaxCachedGlyphPaths);
+    static QMutex s_glyphPathCacheMutex;
 
-    const quint64 combinedKey = makeGlyphCacheKey(rawFont, glyphIndex);
+    const quint64 cacheKey = makeGlyphCacheKey(rawFont, glyphIndex);
 
     {
-        QMutexLocker locker(&s_cacheMutex);
-        if (const QPainterPath* cached = s_glyphCache.object(combinedKey)) {
+        QMutexLocker locker(&s_glyphPathCacheMutex);
+        if (const QPainterPath* cached = s_glyphPathCache.object(cacheKey)) {
             return *cached;
         }
     }
 
-    QPainterPath path = rawFont.pathForGlyph(glyphIndex);
-    if (path.isEmpty()) {
-        return path;
-    }
+    const QPainterPath glyphPath = rawFont.pathForGlyph(glyphIndex);
 
     {
-        QMutexLocker locker(&s_cacheMutex);
-        if (!s_glyphCache.object(combinedKey)) {
-            s_glyphCache.insert(combinedKey, new QPainterPath(path), 1);
+        QMutexLocker locker(&s_glyphPathCacheMutex);
+        if (!s_glyphPathCache.object(cacheKey)) {
+            s_glyphPathCache.insert(cacheKey, new QPainterPath(glyphPath), 1);
         }
     }
 
-    return path;
+    return glyphPath;
 }
+
+
+// Helper to create a filled path representing the stroke of the original path
+QPainterPath createStrokePath(const QPainterPath& path, qreal width) {
+    QPainterPathStroker stroker;
+    stroker.setWidth(width);
+    stroker.setCapStyle(Qt::RoundCap);
+    stroker.setJoinStyle(Qt::RoundJoin);
+    return stroker.createStroke(path);
+}
+
+// Caches both the fill path and the pre-calculated stroke path (outline)
+struct CachedGlyphGeometry {
+    QPainterPath fillPath;
+    QPainterPath strokePath; // Represents the outline as a filled shape
+};
+
+const CachedGlyphGeometry& cachedGlyphGeometry(const QRawFont& rawFont, quint32 glyphIndex, qreal strokeWidth) {
+    // Composite key: font|glyph|strokeWidth
+    // We quantize stroke width to avoid infinite cache growth (e.g. to nearest 0.5px)
+    const int quantizedWidth = static_cast<int>(std::round(strokeWidth * 10.0));
+    
+    static QCache<quint64, CachedGlyphGeometry> s_geometryCache(kMaxCachedGlyphPaths); // Reuse existing size limit or define new
+    static QMutex s_geomCacheMutex;
+
+    // specialized key generation for geometry
+    const quint64 baseKey = makeGlyphCacheKey(rawFont, glyphIndex);
+    const quint64 combinedKey = baseKey ^ (static_cast<quint64>(quantizedWidth) << 32); 
+
+    {
+        QMutexLocker locker(&s_geomCacheMutex);
+        if (const CachedGlyphGeometry* cached = s_geometryCache.object(combinedKey)) {
+            return *cached;
+        }
+    }
+
+    CachedGlyphGeometry geometry;
+    // Get standard path
+    geometry.fillPath = cachedGlyphPath(rawFont, glyphIndex);
+    
+    // Pre-calculate stroke path if needed
+    if (quantizedWidth > 0 && !geometry.fillPath.isEmpty()) {
+        geometry.strokePath = createStrokePath(geometry.fillPath, static_cast<qreal>(quantizedWidth) / 10.0);
+    }
+
+    {
+        QMutexLocker locker(&s_geomCacheMutex);
+        if (!s_geometryCache.object(combinedKey)) {
+             s_geometryCache.insert(combinedKey, new CachedGlyphGeometry(geometry), 1);
+        }
+        // Return mostly safe reference (cache doesn't delete immediately usually, but copy is safer if size is small)
+        // For performance we return ref but in highly concurrent scenarios copies might be needed. 
+        // Given QCache behavior, we'll return the pointer content.
+        return *s_geometryCache.object(combinedKey);
+    }
+}
+
 
 // Phase 2: Rendered Glyph Cache - caches pre-rendered glyph layers (stroke + fill)
 struct RenderedGlyphKey {
@@ -2552,8 +2606,18 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
                 ? viewport.translated(-translateX, -translateY)
                 : QRectF();
 
-            QVector<QPainterPath> visibleGlyphPaths;
-            visibleGlyphPaths.reserve(512);
+            // Pre-collect paths to avoid locking mutex per glyph in the draw loop
+            struct BufferedGlyph {
+                const QPainterPath* fillPath;
+                const QPainterPath* strokePath;
+                QPointF position;
+            };
+            QVector<BufferedGlyph> visibleGlyphs;
+            visibleGlyphs.reserve(512);
+
+            // Use the pre-calculated stroke width for valid geometry caching
+            // We duplicate the quantizing logic here roughly to match the cache key
+            const qreal renderStrokeWidth = strokeWidth * 2.0; // stroke is drawn centered, so geometry width is 2x
 
             int glyphDrawn = 0;
             for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
@@ -2600,35 +2664,52 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
                         }
 
                         for (int gi = 0; gi < indexes.size(); ++gi) {
-                            QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
-                            if (glyphPath.isEmpty()) {
+                            // Retrieve both fill and pre-stroked geometric paths
+                            const auto& geom = cachedGlyphGeometry(rawFont, indexes[gi], renderStrokeWidth);
+                            
+                            if (geom.fillPath.isEmpty()) {
                                 continue;
                             }
 
                             const QPointF glyphPos = blockRect.topLeft() + QPointF(lineOffsetX, line.y()) + positions[gi];
-                            glyphPath.translate(glyphPos);
-                            visibleGlyphPaths.append(std::move(glyphPath));
+                            BufferedGlyph bg;
+                            bg.fillPath = &geom.fillPath;
+                            bg.strokePath = (strokeWidth > 0.0) ? &geom.strokePath : nullptr;
+                            bg.position = glyphPos;
+                            visibleGlyphs.append(bg);
                             ++glyphDrawn;
                         }
                     }
                 }
             }
 
+            // Draw Outlines (Background) - using pre-calculated FILL paths, not strokes!
+            // This is the key optimization: we "fill" the stroke shape rather than asking QPainter to mathematical stroke the path.
             if (strokeWidth > 0.0) {
                 painter->save();
-                painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                painter->setBrush(Qt::NoBrush);
-                for (const QPainterPath& path : std::as_const(visibleGlyphPaths)) {
-                    painter->drawPath(path);
+                painter->setPen(Qt::NoPen);
+                painter->setBrush(outlineColor);
+                for (const auto& bg : visibleGlyphs) {
+                    if (bg.strokePath && !bg.strokePath->isEmpty()) {
+                         // We must translate the path to position
+                         const QPointF& pos = bg.position;
+                         painter->translate(pos);
+                         painter->drawPath(*bg.strokePath);
+                         painter->translate(-pos);
+                    }
                 }
                 painter->restore();
             }
 
+            // Draw Fills (Foreground)
             painter->save();
             painter->setPen(Qt::NoPen);
             painter->setBrush(fillColor);
-            for (const QPainterPath& path : std::as_const(visibleGlyphPaths)) {
-                painter->drawPath(path);
+            for (const auto& bg : visibleGlyphs) {
+                const QPointF& pos = bg.position;
+                painter->translate(pos);
+                painter->drawPath(*bg.fillPath);
+                painter->translate(-pos);
             }
             painter->restore();
 
