@@ -160,6 +160,93 @@ Post-migration runtime:
 
 ## 8) Phase-by-phase migration (strict-gated)
 
+## Phase -2 — Pre-migration codebase structuring and hygiene (recommended)
+
+### Goals
+- Stabilize architecture boundaries before any renderer work.
+- Reduce hidden coupling and surprise regressions.
+
+### Actions
+1. Define module ownership map (single source of truth):
+  - canvas logic
+  - canvas rendering
+  - overlays
+  - media domain
+  - sessions
+  - upload/files
+2. Enforce include direction rules:
+  - backend must not depend on Quick/QML types
+  - controllers/handlers depend on interfaces, not concrete render classes
+3. Introduce naming and folder conventions for new quickcanvas module.
+4. Add lightweight architecture lint checks:
+  - disallow direct includes of `ScreenCanvas.h` outside legacy wrapper and renderer adapters
+  - disallow QWidget overlay code from directly querying QGraphicsScene
+5. Identify and remove dead/duplicate pathways in current canvas initialization code to minimize branch complexity.
+6. Document migration-safe extension points in this file and link them from onboarding docs.
+
+### Exit gate
+- Module boundary map published and approved.
+- Include-direction checks active in CI (or pre-merge scripts).
+- Known coupling hotspots cataloged with owners.
+
+---
+
+## Phase -1 — Characterization test harness (must be green before refactor)
+
+### Goals
+- Capture current behavior exactly before structural changes.
+- Make regressions immediately visible during migration.
+
+### Actions
+1. Build a deterministic canvas fixture suite:
+  - text-heavy scene
+  - mixed image/video/text scene
+  - selection/snap stress scene
+  - reconnect/upload active scene
+2. Add interaction replay scripts:
+  - zoom/pan path replay
+  - drag/resize path replay
+  - text edit lifecycle replay
+3. Add screenshot-baseline snapshots for key checkpoints:
+  - idle
+  - selected item
+  - resizing
+  - overlays visible
+4. Add protocol/session invariance tests:
+  - no schema change in outbound/inbound messages
+  - same session identity transitions
+5. Add upload invariance tests:
+  - same file IDs/media associations before vs after actions
+  - same cancel/unload semantics
+
+### Exit gate
+- Baseline fixtures and replay scripts are reproducible locally and in CI.
+- Snapshot baseline approved by product/design.
+- Invariance tests pass on legacy path.
+
+---
+
+## Phase -0.5 — Operational safety and delivery controls
+
+### Goals
+- Ensure migration can proceed incrementally without blocking feature delivery.
+
+### Actions
+1. Add PR template section for migration risk assessment.
+2. Require phase label on each PR (`phase--2`, `phase--1`, `phase-0.5`, etc.).
+3. Add mandatory rollback note in each migration PR.
+4. Define release channels:
+  - dev-only
+  - internal dogfood
+  - staged production
+5. Establish incident protocol for renderer regressions (owner, SLA, rollback decision tree).
+
+### Exit gate
+- Delivery process is documented and adopted by the team.
+- Rollback ownership and escalation path are explicit.
+
+---
+
 ## Phase 0 — Freeze + safety net + observability
 
 ### Goals
