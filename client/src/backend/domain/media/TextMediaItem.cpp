@@ -311,290 +311,6 @@ void logStrokeDiagnostics(const char* context,
              << "preview" << previewText;
 }
 
-quint64 makeGlyphCacheKey(const QRawFont& rawFont, quint32 glyphIndex) {
-    QString descriptor;
-    descriptor.reserve(80);
-    descriptor.append(rawFont.familyName());
-    descriptor.append(QLatin1Char('|'));
-    descriptor.append(rawFont.styleName());
-    descriptor.append(QLatin1Char('|'));
-    descriptor.append(QString::number(rawFont.pixelSize()));
-    descriptor.append(QLatin1Char(':'));
-    descriptor.append(QString::number(static_cast<quint64>(glyphIndex)));
-    return static_cast<quint64>(qHash(descriptor));
-}
-
-QPainterPath cachedGlyphPath(const QRawFont& rawFont, quint32 glyphIndex) {
-    if (!rawFont.isValid()) {
-        return QPainterPath();
-    }
-
-    static QCache<quint64, QPainterPath> s_glyphPathCache(kMaxCachedGlyphPaths);
-    static QMutex s_glyphPathCacheMutex;
-
-    const quint64 cacheKey = makeGlyphCacheKey(rawFont, glyphIndex);
-
-    {
-        QMutexLocker locker(&s_glyphPathCacheMutex);
-        if (const QPainterPath* cached = s_glyphPathCache.object(cacheKey)) {
-            return *cached;
-        }
-    }
-
-    const QPainterPath glyphPath = rawFont.pathForGlyph(glyphIndex);
-
-    {
-        QMutexLocker locker(&s_glyphPathCacheMutex);
-        if (!s_glyphPathCache.object(cacheKey)) {
-            s_glyphPathCache.insert(cacheKey, new QPainterPath(glyphPath), 1);
-        }
-    }
-
-    return glyphPath;
-}
-
-
-// Helper to create a filled path representing the stroke of the original path
-QPainterPath createStrokePath(const QPainterPath& path, qreal width) {
-    QPainterPathStroker stroker;
-    stroker.setWidth(width);
-    stroker.setCapStyle(Qt::RoundCap);
-    stroker.setJoinStyle(Qt::RoundJoin);
-    return stroker.createStroke(path);
-}
-
-// Caches both the fill path and the pre-calculated stroke path (outline)
-struct CachedGlyphGeometry {
-    QPainterPath fillPath;
-    QPainterPath strokePath; // Represents the outline as a filled shape
-};
-
-const CachedGlyphGeometry& cachedGlyphGeometry(const QRawFont& rawFont, quint32 glyphIndex, qreal strokeWidth) {
-    // Composite key: font|glyph|strokeWidth
-    // We quantize stroke width to avoid infinite cache growth (e.g. to nearest 0.5px)
-    const int quantizedWidth = static_cast<int>(std::round(strokeWidth * 10.0));
-    
-    static QCache<quint64, CachedGlyphGeometry> s_geometryCache(kMaxCachedGlyphPaths); // Reuse existing size limit or define new
-    static QMutex s_geomCacheMutex;
-
-    // specialized key generation for geometry
-    const quint64 baseKey = makeGlyphCacheKey(rawFont, glyphIndex);
-    const quint64 combinedKey = baseKey ^ (static_cast<quint64>(quantizedWidth) << 32); 
-
-    {
-        QMutexLocker locker(&s_geomCacheMutex);
-        if (const CachedGlyphGeometry* cached = s_geometryCache.object(combinedKey)) {
-            return *cached;
-        }
-    }
-
-    CachedGlyphGeometry geometry;
-    // Get standard path
-    geometry.fillPath = cachedGlyphPath(rawFont, glyphIndex);
-    
-    // Pre-calculate stroke path if needed
-    if (quantizedWidth > 0 && !geometry.fillPath.isEmpty()) {
-        geometry.strokePath = createStrokePath(geometry.fillPath, static_cast<qreal>(quantizedWidth) / 10.0);
-    }
-
-    {
-        QMutexLocker locker(&s_geomCacheMutex);
-        if (!s_geometryCache.object(combinedKey)) {
-             s_geometryCache.insert(combinedKey, new CachedGlyphGeometry(geometry), 1);
-        }
-        // Return mostly safe reference (cache doesn't delete immediately usually, but copy is safer if size is small)
-        // For performance we return ref but in highly concurrent scenarios copies might be needed. 
-        // Given QCache behavior, we'll return the pointer content.
-        return *s_geometryCache.object(combinedKey);
-    }
-}
-
-
-// Phase 2: Rendered Glyph Cache - caches pre-rendered glyph layers (stroke + fill)
-struct RenderedGlyphKey {
-    quint64 outlinePathKey;      // Reuse outline cache key
-    QRgb fillColor;              // Packed ARGB
-    QRgb strokeColor;            // Packed ARGB
-    QRgb highlightColor;         // Highlight signature for strict style key invariants
-    quint8 highlightEnabled;     // 1 if highlight active
-    qint32 strokeWidthScaled;    // Fixed-point: width * 1024
-    qint32 scaleFactorScaled;    // Fixed-point: scale * 256 (coarser for better cache hits)
-    
-    bool operator==(const RenderedGlyphKey& other) const {
-        return outlinePathKey == other.outlinePathKey &&
-               fillColor == other.fillColor &&
-               strokeColor == other.strokeColor &&
-                highlightColor == other.highlightColor &&
-                highlightEnabled == other.highlightEnabled &&
-               strokeWidthScaled == other.strokeWidthScaled &&
-               scaleFactorScaled == other.scaleFactorScaled;
-    }
-};
-
-inline uint qHash(const RenderedGlyphKey& key, uint seed = 0) {
-    seed = ::qHash(key.outlinePathKey, seed);
-    seed = ::qHash(key.fillColor, seed);
-    seed = ::qHash(key.strokeColor, seed);
-    seed = ::qHash(key.highlightColor, seed);
-    seed = ::qHash(key.highlightEnabled, seed);
-    seed = ::qHash(key.strokeWidthScaled, seed);
-    return ::qHash(key.scaleFactorScaled, seed);
-}
-
-struct RenderedGlyphBitmap {
-    QPixmap strokePixmap;
-    QPixmap fillPixmap;
-    QPointF originOffset;
-};
-
-RenderedGlyphKey makeRenderedGlyphKey(const QRawFont& rawFont, quint32 glyphIndex,
-                                      const QColor& fillColor, const QColor& strokeColor,
-                                      const QColor& highlightColor, bool highlightEnabled,
-                                      qreal strokeWidth, qreal scaleFactor) {
-    RenderedGlyphKey key;
-    key.outlinePathKey = makeGlyphCacheKey(rawFont, glyphIndex);
-    key.fillColor = fillColor.rgba();
-    key.strokeColor = strokeColor.rgba();
-    key.highlightColor = highlightColor.rgba();
-    key.highlightEnabled = highlightEnabled ? 1 : 0;
-    key.strokeWidthScaled = static_cast<qint32>(std::round(strokeWidth * 1024.0));
-    // Quantize scale to 1/256 increments for better cache hits
-    key.scaleFactorScaled = static_cast<qint32>(std::round(scaleFactor * 256.0));
-    return key;
-}
-
-RenderedGlyphBitmap renderGlyphToPixmap(const QPainterPath& glyphPath, const QColor& fillColor,
-                                        const QColor& strokeColor, qreal strokeWidth,
-                                        qreal scaleFactor) {
-    RenderedGlyphBitmap result;
-    if (glyphPath.isEmpty()) {
-        return result;
-    }
-    
-    // Calculate tight bounds with stroke overflow
-    const QRectF pathBounds = glyphPath.boundingRect();
-    const qreal padding = std::ceil(strokeWidth * 2.0) + 2.0;
-    const QRectF renderBounds = pathBounds.adjusted(-padding, -padding, padding, padding);
-    
-    const qreal rasterScale = std::max(std::abs(scaleFactor), 1e-4);
-    const int width = std::max(1, static_cast<int>(std::ceil(renderBounds.width() * rasterScale)));
-    const int height = std::max(1, static_cast<int>(std::ceil(renderBounds.height() * rasterScale)));
-    
-    QImage fillImage(width, height, QImage::Format_ARGB32_Premultiplied);
-    fillImage.fill(Qt::transparent);
-
-    if (strokeWidth > 0.0) {
-        QImage strokeImage(width, height, QImage::Format_ARGB32_Premultiplied);
-        strokeImage.fill(Qt::transparent);
-        QPainter strokePainter(&strokeImage);
-        strokePainter.setRenderHint(QPainter::Antialiasing, true);
-        strokePainter.scale(rasterScale, rasterScale);
-        strokePainter.translate(-renderBounds.left(), -renderBounds.top());
-        strokePainter.setPen(QPen(strokeColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-        strokePainter.setBrush(Qt::NoBrush);
-        strokePainter.drawPath(glyphPath);
-        strokePainter.end();
-        result.strokePixmap = QPixmap::fromImage(strokeImage);
-        result.strokePixmap.setDevicePixelRatio(rasterScale);
-    }
-
-    QPainter fillPainter(&fillImage);
-    fillPainter.setRenderHint(QPainter::Antialiasing, true);
-    fillPainter.scale(rasterScale, rasterScale);
-    fillPainter.translate(-renderBounds.left(), -renderBounds.top());
-    fillPainter.setPen(Qt::NoPen);
-    fillPainter.setBrush(fillColor);
-    fillPainter.drawPath(glyphPath);
-    fillPainter.end();
-
-    result.fillPixmap = QPixmap::fromImage(fillImage);
-    result.fillPixmap.setDevicePixelRatio(rasterScale);
-    result.originOffset = renderBounds.topLeft();
-    return result;
-}
-
-    RenderedGlyphBitmap cachedRenderedGlyph(const QRawFont& rawFont, quint32 glyphIndex,
-                                            const QColor& fillColor, const QColor& strokeColor,
-                                            const QColor& highlightColor, bool highlightEnabled,
-                                            qreal strokeWidth, qreal scaleFactor,
-                                            bool* cacheHit = nullptr) {
-        RenderedGlyphBitmap result;
-        if (!rawFont.isValid() || strokeWidth < 0.0) {
-            if (cacheHit) {
-                *cacheHit = false;
-            }
-            return result;
-        }
-    
-        static QCache<RenderedGlyphKey, RenderedGlyphBitmap> s_renderedGlyphCache(renderedGlyphCacheMaxCostKb());
-        static QMutex s_renderedCacheMutex;
-    
-        const RenderedGlyphKey cacheKey = makeRenderedGlyphKey(rawFont,
-                                       glyphIndex,
-                                       fillColor,
-                                       strokeColor,
-                                       highlightColor,
-                                       highlightEnabled,
-                                       strokeWidth,
-                                       scaleFactor);
-    
-        {
-            QMutexLocker locker(&s_renderedCacheMutex);
-            if (const RenderedGlyphBitmap* cached = s_renderedGlyphCache.object(cacheKey)) {
-                if (cacheHit) {
-                    *cacheHit = true;
-                }
-                return *cached;
-            }
-        }
-    
-        // Cache miss - render the glyph
-        const QPainterPath glyphPath = cachedGlyphPath(rawFont, glyphIndex);
-        if (glyphPath.isEmpty()) {
-            return result;
-        }
-    
-        RenderedGlyphBitmap rendered = renderGlyphToPixmap(glyphPath,
-                                   fillColor,
-                                   strokeColor,
-                                   strokeWidth,
-                                   scaleFactor);
-        if (rendered.fillPixmap.isNull() && rendered.strokePixmap.isNull()) {
-            if (cacheHit) {
-                *cacheHit = false;
-            }
-            return rendered;
-        }
-    
-        {
-            QMutexLocker locker(&s_renderedCacheMutex);
-            const int countBefore = s_renderedGlyphCache.count();
-            const int totalCostBefore = s_renderedGlyphCache.totalCost();
-            if (!s_renderedGlyphCache.object(cacheKey)) {
-                const int strokeCostKB = rendered.strokePixmap.isNull()
-                    ? 0
-                    : (rendered.strokePixmap.width() * rendered.strokePixmap.height() * 4) / 1024;
-                const int fillCostKB = rendered.fillPixmap.isNull()
-                    ? 0
-                    : (rendered.fillPixmap.width() * rendered.fillPixmap.height() * 4) / 1024;
-                const int costKB = strokeCostKB + fillCostKB;
-                s_renderedGlyphCache.insert(cacheKey, new RenderedGlyphBitmap(rendered), std::max(1, costKB));
-                const int countAfter = s_renderedGlyphCache.count();
-                const int totalCostAfter = s_renderedGlyphCache.totalCost();
-                const int insertedCost = std::max(1, costKB);
-                const bool evictionHint = (countAfter <= countBefore) ||
-                    (totalCostAfter < (totalCostBefore + insertedCost));
-                Q_UNUSED(evictionHint);
-            }
-        }
-
-        if (cacheHit) {
-            *cacheHit = false;
-        }
-    
-        return rendered;
-    }
-
 } // anonymous namespace
 
 namespace {
@@ -1036,569 +752,6 @@ static InlineTextEditor* toInlineEditor(QGraphicsTextItem* item) {
 } // anonymous namespace (InlineTextEditor and helpers)
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// TIER 2 OPTIMIZATION IMPLEMENTATIONS
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-// Phase 6: Glyph Layout Pre-computation
-quint64 TextMediaItem::computeLayoutFingerprint(const QString& text, const QFont& font, qreal width) const {
-    // Generate stable hash from text content + font properties + layout width
-    quint64 h = qHash(text);
-    h ^= qHash(font.family()) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= static_cast<quint64>(font.pointSizeF() * 1000.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= static_cast<quint64>(font.weight()) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= static_cast<quint64>(font.italic() ? 1 : 0) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= static_cast<quint64>(width * 100.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    return h;
-}
-
-void TextMediaItem::updateGlyphLayoutCache(const VectorDrawSnapshot& snapshot, const QSize& targetSize) {
-    // Phase 6: Simplified - just track fingerprint for future optimization
-    // Full glyph position caching deferred to avoid QRawFont storage complexity
-    if (snapshot.outlineWidthPercent <= 0.0) {
-        m_glyphLayoutCache.valid = false;
-        return;
-    }
-    
-    const quint64 fingerprint = computeLayoutFingerprint(snapshot.text, snapshot.font, static_cast<qreal>(targetSize.width()));
-    if (m_glyphLayoutCache.valid && m_glyphLayoutCache.fingerprint == fingerprint) {
-        return; // Already cached
-    }
-    
-    m_glyphLayoutCache.clear();
-    m_glyphLayoutCache.fingerprint = fingerprint;
-    m_glyphLayoutCache.valid = true;
-}
-
-bool TextMediaItem::isGlyphLayoutCacheValid(const VectorDrawSnapshot& snapshot, const QSize& targetSize) const {
-    if (!m_glyphLayoutCache.valid) return false;
-    const quint64 fingerprint = computeLayoutFingerprint(snapshot.text, snapshot.font, static_cast<qreal>(targetSize.width()));
-    return m_glyphLayoutCache.fingerprint == fingerprint;
-}
-
-// Phase 7: Viewport Culling
-void TextMediaItem::updateBlockVisibilityCache(const QRectF& viewport, QTextDocument& doc, QAbstractTextDocumentLayout* layout) {
-    if (!layout) {
-        m_blockVisibilityCacheValid = false;
-        return;
-    }
-    
-    // Skip update if viewport unchanged
-    if (m_blockVisibilityCacheValid && m_lastCullingViewport == viewport) {
-        return;
-    }
-    
-    m_blockVisibilityCache.clear();
-    m_lastCullingViewport = viewport;
-    
-    int blockIdx = 0;
-    for (QTextBlock block = doc.begin(); block.isValid(); block = block.next(), ++blockIdx) {
-        const QRectF blockBounds = layout->blockBoundingRect(block);
-        
-        BlockVisibility vis;
-        vis.blockIndex = blockIdx;
-        vis.blockBounds = blockBounds;
-        
-        if (viewport.isEmpty() || !viewport.isValid()) {
-            // No viewport culling - all blocks visible
-            vis.fullyVisible = true;
-            vis.fullyInvisible = false;
-            vis.partiallyVisible = false;
-        } else if (viewport.contains(blockBounds)) {
-            // Block completely inside viewport
-            vis.fullyVisible = true;
-            vis.fullyInvisible = false;
-            vis.partiallyVisible = false;
-        } else if (!viewport.intersects(blockBounds)) {
-            // Block completely outside viewport
-            vis.fullyVisible = false;
-            vis.fullyInvisible = true;
-            vis.partiallyVisible = false;
-        } else {
-            // Block partially visible
-            vis.fullyVisible = false;
-            vis.fullyInvisible = false;
-            vis.partiallyVisible = true;
-            vis.visibleIntersection = viewport.intersected(blockBounds);
-        }
-        
-        m_blockVisibilityCache.append(vis);
-    }
-    
-    m_blockVisibilityCacheValid = true;
-}
-
-bool TextMediaItem::shouldSkipBlock(int blockIndex) const {
-    if (!m_blockVisibilityCacheValid || blockIndex < 0 || blockIndex >= m_blockVisibilityCache.size()) {
-        return false; // Conservative: render if cache invalid
-    }
-    return m_blockVisibilityCache[blockIndex].fullyInvisible;
-}
-
-// Phase 8: Stroke Quality LOD
-TextMediaItem::StrokeQuality TextMediaItem::selectStrokeQuality(qreal canvasZoom) const {
-    // Hysteresis to prevent thrashing when zoom hovers near threshold
-    constexpr qreal kFullQualityThreshold = 0.20;    // >= 20% zoom
-    constexpr qreal kMediumQualityThreshold = 0.05;  // 5-20% zoom
-    constexpr qreal kHysteresisMargin = 0.02;        // 2% hysteresis band
-    
-    // If zoom direction changed, apply hysteresis
-    const bool zoomingIn = canvasZoom > m_lastStrokeQualityZoom;
-    const bool zoomingOut = canvasZoom < m_lastStrokeQualityZoom;
-    
-    if (canvasZoom >= kFullQualityThreshold) {
-        return StrokeQuality::Full;
-    } else if (canvasZoom >= kMediumQualityThreshold) {
-        // Apply hysteresis: if transitioning from Full, require zoom to drop below (threshold - margin)
-        if (m_lastStrokeQuality == StrokeQuality::Full && zoomingOut) {
-            if (canvasZoom >= (kFullQualityThreshold - kHysteresisMargin)) {
-                return StrokeQuality::Full; // Stay in Full
-            }
-        }
-        return StrokeQuality::Medium;
-    } else {
-        // Apply hysteresis: if transitioning from Medium, require zoom to drop below (threshold - margin)
-        if (m_lastStrokeQuality == StrokeQuality::Medium && zoomingOut) {
-            if (canvasZoom >= (kMediumQualityThreshold - kHysteresisMargin)) {
-                return StrokeQuality::Medium; // Stay in Medium
-            }
-        }
-        return StrokeQuality::Low;
-    }
-}
-
-void TextMediaItem::paintSimplifiedStroke(QPainter* painter, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor, qreal canvasZoom) {
-    // Phase 8: Low-quality mode - draw fills + unified outline around text bounds
-    // This is 80%+ faster at very small zoom levels where per-glyph detail is imperceptible
-    
-    const int targetWidth = std::max(1, targetSize.width());
-    const int targetHeight = std::max(1, targetSize.height());
-    
-    const qreal epsilon = 1e-4;
-    const qreal effectiveScale = std::max(std::abs(scaleFactor), epsilon);
-    
-    QTextDocument doc;
-    doc.setDocumentMargin(0.0);
-    QFont renderFont = ensureRenderableFont(snapshot.font, mediaId(), "simplifiedStroke");
-    doc.setDefaultFont(renderFont);
-    doc.setPlainText(snapshot.text);
-    
-    // Set alignment option so Qt's layout engine positions lines correctly
-    Qt::Alignment qtHAlign = Qt::AlignCenter;
-    switch (snapshot.horizontalAlignment) {
-        case HorizontalAlignment::Left:
-            qtHAlign = Qt::AlignLeft;
-            break;
-        case HorizontalAlignment::Center:
-            qtHAlign = Qt::AlignHCenter;
-            break;
-        case HorizontalAlignment::Right:
-            qtHAlign = Qt::AlignRight;
-            break;
-    }
-    
-    QTextOption option;
-    option.setWrapMode(snapshot.fitToTextEnabled ? QTextOption::NoWrap : QTextOption::WordWrap);
-    option.setAlignment(qtHAlign);
-    doc.setDefaultTextOption(option);
-    
-    // CRITICAL: Use availableWidth (excluding margins) to match main rendering
-    const qreal logicalWidth = static_cast<qreal>(targetWidth) / effectiveScale;
-    const qreal margin = snapshot.contentPaddingPx;
-    const qreal availableWidth = std::max<qreal>(1.0, logicalWidth - 2.0 * margin);
-    
-    if (snapshot.fitToTextEnabled) {
-        doc.setTextWidth(-1.0);
-        qreal maxLineWidth = 1.0;
-        if (QAbstractTextDocumentLayout* docLayout = doc.documentLayout()) {
-            for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
-                if (QTextLayout* textLayout = block.layout()) {
-                    for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-                        const QTextLine line = textLayout->lineAt(lineIndex);
-                        if (!line.isValid()) {
-                            continue;
-                        }
-                        maxLineWidth = std::max(maxLineWidth, line.naturalTextWidth());
-                    }
-                }
-            }
-            maxLineWidth = std::max(maxLineWidth, docLayout->documentSize().width());
-        }
-        doc.setTextWidth(std::max<qreal>(1.0, maxLineWidth));
-    } else {
-        doc.setTextWidth(availableWidth);
-    }
-    
-    QAbstractTextDocumentLayout* layout = doc.documentLayout();
-    if (!layout) return;
-    
-    const QSizeF docSize = layout->documentSize();
-    const QRectF docBounds = computeDocumentTextBounds(doc, layout);
-    const qreal logicalHeight = static_cast<qreal>(targetHeight) / effectiveScale;
-    const qreal availableHeight = std::max<qreal>(1.0, logicalHeight - 2.0 * margin);
-    const qreal docVisualTop = docBounds.top();
-    const qreal docVisualHeight = std::max<qreal>(1.0, docBounds.height());
-    
-    // Calculate offsets to match main rendering
-    qreal offsetX = margin;
-    const qreal horizontalSpace = std::max<qreal>(0.0, availableWidth - docSize.width());
-    switch (snapshot.horizontalAlignment) {
-        case HorizontalAlignment::Left:
-            offsetX = margin;
-            break;
-        case HorizontalAlignment::Center:
-            offsetX = margin + horizontalSpace * 0.5;
-            break;
-        case HorizontalAlignment::Right:
-            offsetX = margin + horizontalSpace;
-            break;
-    }
-    
-    qreal offsetY = margin;
-    switch (snapshot.verticalAlignment) {
-        case VerticalAlignment::Top:
-            offsetY = margin - docVisualTop;
-            break;
-        case VerticalAlignment::Center:
-            offsetY = margin + (availableHeight - docVisualHeight) / 2.0 - docVisualTop;
-            break;
-        case VerticalAlignment::Bottom:
-            offsetY = margin + (availableHeight - docVisualHeight) - docVisualTop;
-            break;
-    }
-    
-    painter->save();
-    painter->scale(effectiveScale, effectiveScale);
-    painter->translate(offsetX, offsetY);
-    
-    const QColor fillColor = snapshot.fillColor;
-    const QColor outlineColor = snapshot.outlineColor;
-    const qreal strokeWidth = computeStrokeWidthFromFont(snapshot.font, snapshot.outlineWidthPercent);
-    
-    // Step 1: Draw all fills normally (fast path)
-    QAbstractTextDocumentLayout::PaintContext ctx;
-    ctx.cursorPosition = -1;
-    ctx.palette.setColor(QPalette::Text, fillColor);
-    layout->draw(painter, ctx);
-    
-    // Step 2: Create unified outline path around all glyphs
-    QPainterPath unifiedOutline;
-    for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
-        QTextLayout* textLayout = block.layout();
-        if (!textLayout) continue;
-        
-        const QRectF blockRect = layout->blockBoundingRect(block);
-        for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-            QTextLine line = textLayout->lineAt(lineIndex);
-            if (!line.isValid()) continue;
-
-            const QList<QGlyphRun> glyphRuns = line.glyphRuns();
-            for (const QGlyphRun& run : glyphRuns) {
-                const QVector<quint32> indexes = run.glyphIndexes();
-                const QVector<QPointF> positions = run.positions();
-                if (indexes.size() != positions.size()) continue;
-                const QRawFont rawFont = run.rawFont();
-                
-                for (int gi = 0; gi < indexes.size(); ++gi) {
-                    const QPointF glyphPos = blockRect.topLeft() + QPointF(0.0, line.y()) + positions[gi];
-                    QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
-                    glyphPath.translate(glyphPos);
-                    unifiedOutline.addPath(glyphPath);
-                }
-            }
-        }
-    }
-    
-    // Step 3: Stroke the unified outline (single operation instead of per-glyph)
-    painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    painter->setBrush(Qt::NoBrush);
-    painter->drawPath(unifiedOutline);
-    
-    painter->restore();
-}
-
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// TIER 3 OPTIMIZATION IMPLEMENTATIONS
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-// Phase 3: Texture Atlas Management
-quint64 TextMediaItem::getAtlasKey(const QPixmap& glyph, const QColor& fill, const QColor& stroke, qreal strokeWidth, qreal scale) const {
-    // Generate unique key for atlas lookup - combines glyph visual properties
-    quint64 h = qHash(glyph.cacheKey());
-    h ^= static_cast<quint64>(fill.rgba()) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= static_cast<quint64>(stroke.rgba()) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= static_cast<quint64>(strokeWidth * 1000.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= static_cast<quint64>(scale * 1000.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    return h;
-}
-
-bool TextMediaItem::insertGlyphIntoAtlas(quint64 key, const QPixmap& glyph) {
-    // Already in atlas?
-    if (m_atlasGlyphMap.contains(key)) {
-        return true;
-    }
-    
-    const QImage glyphImg = glyph.toImage();
-    const QSize glyphSize = glyphImg.size();
-    
-    // Try to insert into existing atlases
-    for (int i = 0; i < m_glyphAtlases.size(); ++i) {
-        if (m_glyphAtlases[i].isFull) continue;
-        
-        std::optional<QRect> rect = m_glyphAtlases[i].tryInsert(glyphSize);
-        if (rect.has_value()) {
-            // Blit glyph into atlas
-            QPainter p(&m_glyphAtlases[i].sheet);
-            p.setCompositionMode(QPainter::CompositionMode_Source);
-            p.drawImage(rect->topLeft(), glyphImg);
-            p.end();
-            
-            // Record location
-            AtlasGlyphEntry entry;
-            entry.atlasRect = *rect;
-            entry.atlasSheetIndex = i;
-            entry.offset = QPointF(0, 0); // Offset handled during rendering
-            m_atlasGlyphMap.insert(key, entry);
-            return true;
-        }
-    }
-    
-    // No space - create new atlas
-    if (m_glyphAtlases.size() >= 4) {
-        // Atlas pool full - evict oldest sheet (LRU-like)
-        if (textHotLogsEnabled()) {
-            qDebug() << "TextMediaItem: Atlas pool full, clearing oldest sheet";
-        }
-        m_glyphAtlases.removeFirst();
-        
-        // Remove stale map entries pointing to deleted sheet
-        QMutableHashIterator<quint64, AtlasGlyphEntry> it(m_atlasGlyphMap);
-        while (it.hasNext()) {
-            it.next();
-            if (it.value().atlasSheetIndex == 0) {
-                it.remove();
-            } else {
-                // Decrement sheet indices after removal
-                it.value().atlasSheetIndex--;
-            }
-        }
-    }
-    
-    // Add new atlas and retry
-    m_glyphAtlases.append(TextureAtlas());
-    return insertGlyphIntoAtlas(key, glyph); // Recursive retry
-}
-
-std::optional<TextMediaItem::AtlasGlyphEntry> TextMediaItem::getGlyphFromAtlas(quint64 key) const {
-    auto it = m_atlasGlyphMap.constFind(key);
-    if (it != m_atlasGlyphMap.constEnd()) {
-        return it.value();
-    }
-    return std::nullopt;
-}
-
-void TextMediaItem::clearAtlases() {
-    m_glyphAtlases.clear();
-    m_atlasGlyphMap.clear();
-}
-
-// Phase 4: Text Diff Algorithm
-TextMediaItem::TextEditDiff TextMediaItem::computeTextDiff(const QString& newText, const QFont& newFont, int newWidth) const {
-    TextEditDiff diff;
-    
-    // Check if font or layout width changed (geometric change)
-    const bool fontChanged = (newFont != m_previousFont);
-    const bool widthChanged = (newWidth != m_previousTextWidth);
-    diff.geometryChanged = fontChanged || widthChanged;
-    
-    if (diff.geometryChanged) {
-        // Full re-render required - geometry invalidates all caches
-        diff.changeStartIdx = 0;
-        diff.changeEndIdx = newText.length();
-        diff.insertedCount = newText.length();
-        diff.deletedCount = m_previousText.length();
-        return diff;
-    }
-    
-    // Compute text diff using longest common subsequence approach
-    const int oldLen = m_previousText.length();
-    const int newLen = newText.length();
-    
-    if (oldLen == 0) {
-        // First render - all text is new
-        diff.changeStartIdx = 0;
-        diff.changeEndIdx = newLen;
-        diff.insertedCount = newLen;
-        diff.deletedCount = 0;
-        return diff;
-    }
-    
-    // Find common prefix
-    int prefixLen = 0;
-    while (prefixLen < oldLen && prefixLen < newLen && m_previousText[prefixLen] == newText[prefixLen]) {
-        ++prefixLen;
-    }
-    
-    // Find common suffix
-    int suffixLen = 0;
-    while (suffixLen < (oldLen - prefixLen) && suffixLen < (newLen - prefixLen) &&
-           m_previousText[oldLen - 1 - suffixLen] == newText[newLen - 1 - suffixLen]) {
-        ++suffixLen;
-    }
-    
-    // Calculate change region
-    diff.changeStartIdx = prefixLen;
-    diff.changeEndIdx = newLen - suffixLen;
-    diff.deletedCount = (oldLen - prefixLen - suffixLen);
-    diff.insertedCount = (newLen - prefixLen - suffixLen);
-    
-    // If change is too large (>30% of text), treat as geometric change for simplicity
-    const qreal changeRatio = static_cast<qreal>(diff.insertedCount + diff.deletedCount) / std::max(1, oldLen + newLen);
-    if (changeRatio > 0.3) {
-        diff.geometryChanged = true;
-    }
-    
-    return diff;
-}
-
-void TextMediaItem::applyTextDiff(const TextEditDiff& diff) {
-    // Update tracked state
-    m_previousText = textForRendering();
-    m_previousFont = m_font;
-    m_previousTextWidth = static_cast<int>(boundingRect().width());
-    
-    // Invalidate affected caches
-    if (diff.geometryChanged) {
-        // Full invalidation
-        m_glyphLayoutCache.clear();
-        m_blockVisibilityCacheValid = false;
-        m_baseRasterValid = false;
-        m_incrementalRenderValid = false;
-    } else if (diff.hasChanges()) {
-        // Partial invalidation - glyph cache stays valid for unchanged glyphs
-        m_blockVisibilityCacheValid = false;
-        m_incrementalRenderValid = false;
-    }
-}
-
-// Phase 5: Partial Compositing
-void TextMediaItem::initializeBaseRaster(const QSize& size) {
-    if (m_baseRaster.size() != size || m_baseRaster.format() != QImage::Format_ARGB32_Premultiplied) {
-        m_baseRaster = QImage(size, QImage::Format_ARGB32_Premultiplied);
-        m_baseRaster.fill(Qt::transparent);
-        m_baseRasterValid = false;
-    }
-}
-
-void TextMediaItem::renderDirtyRegion(const TextEditDiff& diff, const VectorDrawSnapshot& snapshot, const QSize& targetSize, qreal scaleFactor) {
-    // Phase 5: Render only the changed region to overlay
-    if (!diff.hasChanges()) {
-        return;
-    }
-    
-    // Initialize overlay if needed
-    if (m_dirtyOverlay.size() != targetSize || m_dirtyOverlay.format() != QImage::Format_ARGB32_Premultiplied) {
-        m_dirtyOverlay = QImage(targetSize, QImage::Format_ARGB32_Premultiplied);
-    }
-    m_dirtyOverlay.fill(Qt::transparent);
-
-    const QRect fullBounds(0, 0, targetSize.width(), targetSize.height());
-    if (diff.geometryChanged || snapshot.text.isEmpty()) {
-        m_dirtyBounds = fullBounds;
-    } else {
-        const int totalChars = std::max(1, static_cast<int>(snapshot.text.size()));
-        const int rawStart = std::max(0, diff.changeStartIdx);
-        const int rawEnd = std::max(rawStart + 1, diff.changeEndIdx);
-        const int clampedStart = std::min(rawStart, totalChars - 1);
-        const int clampedEnd = std::min(rawEnd, totalChars);
-
-        const qreal startRatio = static_cast<qreal>(clampedStart) / static_cast<qreal>(totalChars);
-        const qreal endRatio = static_cast<qreal>(clampedEnd) / static_cast<qreal>(totalChars);
-
-        const int padPx = 2;
-        const int topPx = std::max(0, static_cast<int>(std::floor(startRatio * targetSize.height())) - padPx);
-        const int bottomPx = std::min(targetSize.height(), static_cast<int>(std::ceil(endRatio * targetSize.height())) + padPx);
-        const int heightPx = std::max(1, bottomPx - topPx);
-
-        m_dirtyBounds = QRect(0, topPx, targetSize.width(), heightPx).intersected(fullBounds);
-        if (!m_dirtyBounds.isValid() || m_dirtyBounds.isEmpty()) {
-            m_dirtyBounds = fullBounds;
-        }
-    }
-    
-    // Render changed region to overlay
-    QPainter overlayPainter(&m_dirtyOverlay);
-    overlayPainter.setRenderHint(QPainter::Antialiasing, true);
-    overlayPainter.setRenderHint(QPainter::TextAntialiasing, true);
-    overlayPainter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    overlayPainter.setClipRect(m_dirtyBounds);
-    
-    const qreal safeScale = std::max(std::abs(scaleFactor), 1e-4);
-    const QRectF dirtyItemRect(
-        static_cast<qreal>(m_dirtyBounds.x()) / safeScale,
-        static_cast<qreal>(m_dirtyBounds.y()) / safeScale,
-        static_cast<qreal>(m_dirtyBounds.width()) / safeScale,
-        static_cast<qreal>(m_dirtyBounds.height()) / safeScale);
-
-    // Render only the dirty region into overlay (full content draw clipped to dirty rect).
-    paintVectorSnapshot(&overlayPainter, snapshot, targetSize, scaleFactor, 1.0, dirtyItemRect);
-    
-    m_incrementalRenderValid = true;
-}
-
-QImage TextMediaItem::compositeRasterLayers() const {
-    if (!m_baseRasterValid || !m_incrementalRenderValid) {
-        // Fallback to base raster only
-        return m_baseRaster.copy();
-    }
-    
-    // Composite base + overlay
-    QImage result = m_baseRaster.copy();
-    QPainter p(&result);
-    p.setCompositionMode(QPainter::CompositionMode_SourceOver);
-    p.drawImage(m_dirtyBounds.topLeft(), m_dirtyOverlay, m_dirtyBounds);
-    p.end();
-    
-    return result;
-}
-
-void TextMediaItem::flattenCompositeToBase() {
-    if (!m_incrementalRenderValid) {
-        return;
-    }
-    
-    // Merge overlay into base raster
-    QPainter p(&m_baseRaster);
-    p.setCompositionMode(QPainter::CompositionMode_SourceOver);
-    p.drawImage(m_dirtyBounds.topLeft(), m_dirtyOverlay, m_dirtyBounds);
-    p.end();
-    
-    // Clear overlay
-    m_dirtyOverlay.fill(Qt::transparent);
-    m_incrementalRenderValid = false;
-    m_baseRasterValid = true;
-}
-
-bool TextMediaItem::shouldUseIncrementalRender(const TextEditDiff& diff) const {
-    // Use incremental rendering for small text edits
-    if (diff.geometryChanged) {
-        return false; // Geometric changes require full re-render
-    }
-    
-    if (!diff.hasChanges()) {
-        return false; // No changes - no need for incremental
-    }
-    
-    // Threshold: use incremental if change affects <20% of text
-    const int totalChars = m_previousText.length();
-    if (totalChars == 0) return false;
-    
-    const int changedChars = diff.insertedCount + diff.deletedCount;
-    const qreal changeRatio = static_cast<qreal>(changedChars) / static_cast<qreal>(totalChars);
-    
-    return changeRatio < 0.2;
-}
-
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 TextMediaItem::VectorDrawSnapshot TextMediaItem::captureVectorSnapshot(StrokeRenderMode mode) const {
     Q_UNUSED(mode);
@@ -1693,23 +846,12 @@ void TextMediaItem::enforceCacheBudget() {
 
     auto currentTotalBytes = [&]() -> qint64 {
         return imageBytes(m_scaledRasterizedText) +
-               imageBytes(m_rasterizedText) +
-               imageBytes(m_baseRaster) +
-               imageBytes(m_dirtyOverlay);
+               imageBytes(m_rasterizedText);
     };
 
     qint64 total = currentTotalBytes();
     if (total <= kPerItemCacheBudgetBytes) {
         return;
-    }
-
-    // Deterministic eviction order (least critical first):
-    // 1) incremental overlay, 2) scaled raster, 3) base layers.
-    if (!m_dirtyOverlay.isNull()) {
-        m_dirtyOverlay = QImage();
-        m_dirtyBounds = QRect();
-        m_incrementalRenderValid = false;
-        total = currentTotalBytes();
     }
 
     if (total > kPerItemCacheBudgetBytes && m_scaledRasterPixmapValid) {
@@ -1721,18 +863,6 @@ void TextMediaItem::enforceCacheBudget() {
         m_activeHighResCacheKeyValid = false;
         m_renderState = RenderState::Idle;
         total = currentTotalBytes();
-    }
-
-    if (total > (kPerItemCacheBudgetBytes * 2)) {
-        // Intentionally preserve m_rasterizedText (the 1:1 base raster, ~320 KB).
-        // Evicting it causes a blank-text flash when returning to 1× zoom because
-        // the non-zoomed paint path has no other fallback until a new base raster
-        // is computed. Only release the (re-computable) incremental compositing base.
-        if (!m_baseRaster.isNull()) {
-            m_baseRaster = QImage();
-            m_baseRasterValid = false;
-            m_baseRasterContentRevision = 0;
-        }
     }
 }
 
@@ -2093,300 +1223,6 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         }
     };
 
-    auto drawGlyphAtlasWithFallback = [&](qint64* outlineMsOut,
-                                          int* glyphCountOut,
-                                          qreal translateX,
-                                          qreal translateY) -> bool {
-        if (outlineMsOut) {
-            *outlineMsOut = 0;
-        }
-        if (glyphCountOut) {
-            *glyphCountOut = 0;
-        }
-
-        if (!kTextOptimizationGlyphAtlasEnabled) {
-            return false;
-        }
-
-        // At extreme zoom the per-glyph bitmaps become enormous: a 48px glyph at
-        // scaleFactor=100 would be rendered as a ~3000×4000 px QImage + QPixmap per
-        // character, taking seconds on the thread pool and potentially triggering
-        // undefined-behaviour from QPixmap::fromImage on a non-main thread.
-        // Beyond kMaxGlyphAtlasScale, switch to direct vector glyph paths with
-        // explicit block/line culling, so cost scales with visible glyphs only.
-        constexpr qreal kMaxGlyphAtlasScale = 8.0;
-        if (scaleFactor > kMaxGlyphAtlasScale) {
-            QElapsedTimer vectorPathTimer;
-            vectorPathTimer.start();
-
-            const QRectF visibleDocRect = hasViewport
-                ? viewport.translated(-translateX, -translateY)
-                : QRectF();
-
-            // Pre-collect paths to avoid locking mutex per glyph in the draw loop
-            struct BufferedGlyph {
-                const QPainterPath* fillPath;
-                const QPainterPath* strokePath;
-                QPointF position;
-            };
-            QVector<BufferedGlyph> visibleGlyphs;
-            visibleGlyphs.reserve(512);
-
-            // Use the pre-calculated stroke width for valid geometry caching
-            // We duplicate the quantizing logic here roughly to match the cache key
-            const qreal renderStrokeWidth = strokeWidth * 2.0; // stroke is drawn centered, so geometry width is 2x
-
-            int glyphDrawn = 0;
-            for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
-                if (cancelled && cancelled->load(std::memory_order_relaxed)) {
-                    return false;
-                }
-
-                QTextLayout* textLayout = block.layout();
-                if (!textLayout) {
-                    continue;
-                }
-
-                const QRectF blockRect = layout->blockBoundingRect(block);
-                if (hasViewport && !visibleDocRect.intersects(blockRect)) {
-                    continue;
-                }
-
-                for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-                    const QTextLine line = textLayout->lineAt(lineIndex);
-                    if (!line.isValid()) {
-                        continue;
-                    }
-
-                    const QRectF lineRect(blockRect.left() + line.x(),
-                                          blockRect.top() + line.y(),
-                                          std::max<qreal>(line.naturalTextWidth(), 1.0),
-                                          std::max<qreal>(line.height(), 1.0));
-                    if (hasViewport && !visibleDocRect.intersects(lineRect)) {
-                        continue;
-                    }
-
-                    const qreal lineOffsetX = line.x();
-                    const QList<QGlyphRun> glyphRuns = line.glyphRuns();
-                    for (const QGlyphRun& run : glyphRuns) {
-                        const QVector<quint32> indexes = run.glyphIndexes();
-                        const QVector<QPointF> positions = run.positions();
-                        if (indexes.size() != positions.size()) {
-                            continue;
-                        }
-
-                        const QRawFont rawFont = run.rawFont();
-                        if (!rawFont.isValid()) {
-                            continue;
-                        }
-
-                        for (int gi = 0; gi < indexes.size(); ++gi) {
-                            // Retrieve both fill and pre-stroked geometric paths
-                            const auto& geom = cachedGlyphGeometry(rawFont, indexes[gi], renderStrokeWidth);
-                            
-                            if (geom.fillPath.isEmpty()) {
-                                continue;
-                            }
-
-                            const QPointF glyphPos = blockRect.topLeft() + QPointF(lineOffsetX, line.y()) + positions[gi];
-                            BufferedGlyph bg;
-                            bg.fillPath = &geom.fillPath;
-                            bg.strokePath = (strokeWidth > 0.0) ? &geom.strokePath : nullptr;
-                            bg.position = glyphPos;
-                            visibleGlyphs.append(bg);
-                            ++glyphDrawn;
-                        }
-                    }
-                }
-            }
-
-            // Draw Outlines (Background) - using pre-calculated FILL paths, not strokes!
-            // This is the key optimization: we "fill" the stroke shape rather than asking QPainter to mathematical stroke the path.
-            if (strokeWidth > 0.0) {
-                painter->save();
-                painter->setPen(Qt::NoPen);
-                painter->setBrush(outlineColor);
-                for (const auto& bg : visibleGlyphs) {
-                    if (bg.strokePath && !bg.strokePath->isEmpty()) {
-                         // We must translate the path to position
-                         const QPointF& pos = bg.position;
-                         painter->translate(pos);
-                         painter->drawPath(*bg.strokePath);
-                         painter->translate(-pos);
-                    }
-                }
-                painter->restore();
-            }
-
-            // Draw Fills (Foreground)
-            painter->save();
-            painter->setPen(Qt::NoPen);
-            painter->setBrush(fillColor);
-            for (const auto& bg : visibleGlyphs) {
-                const QPointF& pos = bg.position;
-                painter->translate(pos);
-                painter->drawPath(*bg.fillPath);
-                painter->translate(-pos);
-            }
-            painter->restore();
-
-            const qint64 durationMs = vectorPathTimer.elapsed();
-            if (outlineMsOut) {
-                *outlineMsOut = durationMs;
-            }
-            if (glyphCountOut) {
-                *glyphCountOut = glyphDrawn;
-            }
-            return true;
-        }
-
-        QElapsedTimer atlasTimer;
-        atlasTimer.start();
-
-        const qreal cacheScale = std::max(std::abs(scaleFactor), 1e-4);
-        const QRectF visibleDocRect = hasViewport
-            ? viewport.translated(-translateX, -translateY)
-            : QRectF();
-
-        quint64 cacheHits = 0;
-        quint64 cacheMisses = 0;
-        quint64 glyphDrawn = 0;
-        struct GlyphDrawCommand {
-            QPointF glyphPos;
-            RenderedGlyphBitmap rendered;
-            QPainterPath fallbackPath;
-            bool useFallbackPath = false;
-        };
-        QVector<GlyphDrawCommand> glyphCommands;
-
-        for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
-            // Cooperatively yield if the job has been superseded by a newer request.
-            if (cancelled && cancelled->load(std::memory_order_relaxed)) {
-                return false;
-            }
-
-            QTextLayout* textLayout = block.layout();
-            if (!textLayout) {
-                continue;
-            }
-
-            const QRectF blockRect = layout->blockBoundingRect(block);
-            if (hasViewport && !visibleDocRect.intersects(blockRect)) {
-                continue;
-            }
-
-            for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-                QTextLine line = textLayout->lineAt(lineIndex);
-                if (!line.isValid()) {
-                    continue;
-                }
-
-                const QRectF lineRect(blockRect.left() + line.x(),
-                                      blockRect.top() + line.y(),
-                                      std::max<qreal>(line.naturalTextWidth(), 1.0),
-                                      std::max<qreal>(line.height(), 1.0));
-                if (hasViewport && !visibleDocRect.intersects(lineRect)) {
-                    continue;
-                }
-
-                const qreal lineOffsetX = line.x();
-                const QList<QGlyphRun> glyphRuns = line.glyphRuns();
-                for (const QGlyphRun& run : glyphRuns) {
-                    const QVector<quint32> indexes = run.glyphIndexes();
-                    const QVector<QPointF> positions = run.positions();
-                    if (indexes.size() != positions.size()) {
-                        continue;
-                    }
-
-                    const QRawFont rawFont = run.rawFont();
-                    if (!rawFont.isValid()) {
-                        continue;
-                    }
-
-                    for (int gi = 0; gi < indexes.size(); ++gi) {
-                        const QPointF glyphPos = blockRect.topLeft() + QPointF(lineOffsetX, line.y()) + positions[gi];
-                        bool cacheHit = false;
-                        const RenderedGlyphBitmap rendered = cachedRenderedGlyph(rawFont,
-                                                                                 indexes[gi],
-                                                                                 fillColor,
-                                                                                 outlineColor,
-                                                                                  highlightColor,
-                                                                                  highlightEnabled,
-                                                                                 strokeWidth,
-                                                                                 cacheScale,
-                                                                                 &cacheHit);
-                        if (cacheHit) {
-                            ++cacheHits;
-                        } else {
-                            ++cacheMisses;
-                        }
-
-                        GlyphDrawCommand command;
-                        command.glyphPos = glyphPos;
-                        command.rendered = rendered;
-
-                        if (rendered.fillPixmap.isNull() && rendered.strokePixmap.isNull()) {
-                            const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);
-                            if (glyphPath.isEmpty()) {
-                                continue;
-                            }
-                            command.useFallbackPath = true;
-                            command.fallbackPath = glyphPath.translated(glyphPos);
-                        }
-
-                        glyphCommands.append(std::move(command));
-                        ++glyphDrawn;
-                    }
-                }
-            }
-        }
-
-        if (strokeWidth > 0.0) {
-            for (const GlyphDrawCommand& command : std::as_const(glyphCommands)) {
-                if (command.useFallbackPath) {
-                    painter->save();
-                    painter->setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                    painter->setBrush(Qt::NoBrush);
-                    painter->drawPath(command.fallbackPath);
-                    painter->restore();
-                    continue;
-                }
-                if (!command.rendered.strokePixmap.isNull()) {
-                    painter->drawPixmap(command.glyphPos + command.rendered.originOffset, command.rendered.strokePixmap);
-                }
-            }
-        }
-
-        for (const GlyphDrawCommand& command : std::as_const(glyphCommands)) {
-            if (command.useFallbackPath) {
-                painter->save();
-                painter->setPen(Qt::NoPen);
-                painter->setBrush(fillColor);
-                painter->drawPath(command.fallbackPath);
-                painter->restore();
-                continue;
-            }
-            if (!command.rendered.fillPixmap.isNull()) {
-                painter->drawPixmap(command.glyphPos + command.rendered.originOffset, command.rendered.fillPixmap);
-            }
-        }
-
-        const qint64 durationMs = atlasTimer.elapsed();
-        Q_UNUSED(cacheHits);
-        Q_UNUSED(cacheMisses);
-        Q_UNUSED(glyphDrawn);
-        Q_UNUSED(durationMs);
-
-        if (outlineMsOut) {
-            *outlineMsOut = durationMs;
-        }
-        if (glyphCountOut) {
-            *glyphCountOut = static_cast<int>(glyphDrawn);
-        }
-
-        return true;
-    };
-
     painter->save();
     painter->scale(effectiveScale, effectiveScale);
 
@@ -2441,13 +1277,10 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
 
         int glyphCount = 0;
         qint64 outlineMs = 0;
-        const bool drewWithAtlas = drawGlyphAtlasWithFallback(&outlineMs, &glyphCount, offsetX, offsetY);
-        if (!drewWithAtlas) {
-            drawDocumentWithStrokeBehindFill(&outlineMs, &glyphCount, offsetX, offsetY);
-        }
+        drawDocumentWithStrokeBehindFill(&outlineMs, &glyphCount, offsetX, offsetY);
 
         painter->restore();
-        logSnapshotPerf(drewWithAtlas ? "vector-full-atlas" : "vector-full", outlineMs, glyphCount, snapshotTimer.elapsed());
+        logSnapshotPerf("vector-full", outlineMs, glyphCount, snapshotTimer.elapsed());
         return;
     }
 
@@ -2482,13 +1315,10 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         }
     }
 
-    const bool drewWithAtlas = drawGlyphAtlasWithFallback(&outlineMs, &glyphCount, offsetX, offsetY);
-    if (!drewWithAtlas) {
-        drawDocumentWithStrokeBehindFill(&outlineMs, &glyphCount, offsetX, offsetY);
-    }
+    drawDocumentWithStrokeBehindFill(&outlineMs, &glyphCount, offsetX, offsetY);
 
     painter->restore();
-    logSnapshotPerf(drewWithAtlas ? "vector-fit-atlas" : "vector-fit", outlineMs, glyphCount, snapshotTimer.elapsed());
+    logSnapshotPerf("vector-fit", outlineMs, glyphCount, snapshotTimer.elapsed());
 }
 
 QImage TextMediaItem::TextRasterJob::execute() const {
@@ -2658,19 +1488,12 @@ TextMediaItem::TextMediaItem(
 
 void TextMediaItem::setText(const QString& text) {
     if (m_text != text) {
-        // Phase 4: Compute text diff before updating
-        const int currentWidth = static_cast<int>(boundingRect().width());
-        TextEditDiff diff = computeTextDiff(text, m_font, currentWidth);
-        
         m_text = text;
         m_editorRenderingText = text;
         m_documentMetricsDirty = true;
         m_cachedEditorPosValid = false;
         invalidateRenderPipeline(InvalidationReason::Content, true);
-        
-        // Phase 4: Apply diff-based cache invalidation
-        applyTextDiff(diff);
-        
+
         if (m_inlineEditor && !m_isEditing) {
             QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
             m_inlineEditor->setPlainText(m_text);
@@ -2695,12 +1518,6 @@ void TextMediaItem::setFont(const QFont& font) {
     adjustedFont = fontAdjustedForWeight(adjustedFont, m_fontWeightValue);
     adjustedFont = ensureRenderableFont(adjustedFont, mediaId(), "setFont");
     
-    // Phase 3: Font change invalidates atlas (glyphs need re-render)
-    clearAtlases();
-    // Phase 5: Font change invalidates base raster (geometric change)
-    m_baseRasterValid = false;
-    m_incrementalRenderValid = false;
-    
     applyFontChange(adjustedFont);
 }
 
@@ -2711,11 +1528,6 @@ void TextMediaItem::setTextColor(const QColor& color) {
 
     m_textColor = color;
     m_cachedTextColor = color;
-    
-    // Phase 3: Color change invalidates atlas (glyphs use baked-in colors)
-    clearAtlases();
-    // Phase 5: Color-only change can reuse geometry but needs overlay re-render
-    m_incrementalRenderValid = false;
     
     update();
     if (m_inlineEditor) {
@@ -2756,7 +1568,6 @@ void TextMediaItem::setTextBorderWidth(qreal percent) {
                  << "textLength" << m_text.size();
     }
     m_textBorderWidthPercent = quantized;
-    clearAtlases();
     const qreal newPadding = contentPaddingPx();
 
     invalidateRenderPipeline(InvalidationReason::VisualStyle, false);
@@ -2796,7 +1607,6 @@ void TextMediaItem::setTextBorderColor(const QColor& color) {
     }
 
     m_textBorderColor = color;
-    clearAtlases();
     invalidateRenderPipeline(InvalidationReason::VisualStyle, false);
     update();
 
@@ -2825,7 +1635,6 @@ void TextMediaItem::setHighlightEnabled(bool enabled) {
     }
 
     m_highlightEnabled = enabled;
-    clearAtlases();
     invalidateRenderPipeline(InvalidationReason::VisualStyle, false);
     update();
 
@@ -2847,7 +1656,6 @@ void TextMediaItem::setHighlightColor(const QColor& color) {
     }
 
     m_highlightColor = normalized;
-    clearAtlases();
     invalidateRenderPipeline(InvalidationReason::VisualStyle, false);
     update();
 
@@ -3071,7 +1879,6 @@ void TextMediaItem::applyFontChange(const QFont& font) {
 void TextMediaItem::setHorizontalAlignment(HorizontalAlignment align) {
     if (m_horizontalAlignment == align) return;
     m_horizontalAlignment = align;
-    clearAtlases();
     invalidateRenderPipeline(InvalidationReason::Geometry, true);
     applyAlignmentToEditor(); // Update inline editor alignment
     update();
@@ -3084,7 +1891,6 @@ void TextMediaItem::setHorizontalAlignment(HorizontalAlignment align) {
 void TextMediaItem::setVerticalAlignment(VerticalAlignment align) {
     if (m_verticalAlignment == align) return;
     m_verticalAlignment = align;
-    clearAtlases();
     invalidateRenderPipeline(InvalidationReason::Geometry, true);
     m_cachedEditorPosValid = false; // Force recalculation of editor position
     if (m_inlineEditor) {
@@ -4643,8 +3449,6 @@ void TextMediaItem::setFitToTextEnabled(bool enabled) {
     }
 
     m_fitToTextEnabled = enabled;
-    clearAtlases();
-    
     // Invalidate all caches when fit mode changes because text layout is completely different
     invalidateRenderPipeline(InvalidationReason::Geometry, true);
     // Keep the last completed scaled raster alive as visual fallback while the
