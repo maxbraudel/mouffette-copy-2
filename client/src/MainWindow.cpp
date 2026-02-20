@@ -9,7 +9,6 @@
 #include "frontend/ui/widgets/SpinnerWidget.h"
 #include "frontend/rendering/canvas/ScreenCanvas.h"
 #include "backend/domain/media/MediaItems.h"
-#include "frontend/ui/overlays/canvas/CanvasMediaSettingsPanel.h"
 #include "frontend/rendering/canvas/OverlayPanels.h"
 #include "backend/files/Theme.h"
 #include "frontend/ui/theme/AppColors.h"
@@ -56,7 +55,6 @@
 #include <QNativeGestureEvent>
 #include <QCursor>
 #include <QRandomGenerator>
-#include <algorithm>
 #include <QPaintEvent>
 #include <QGraphicsOpacityEffect>
 #include <QPropertyAnimation>
@@ -181,28 +179,6 @@ constexpr qreal Z_SCREENS = -1000.0;
 constexpr qreal Z_MEDIA_BASE = 1.0;
 constexpr qreal Z_REMOTE_CURSOR = 10000.0;
 constexpr qreal Z_SCENE_OVERLAY = 12000.0; // above all scene content
-
-// Temporary wrapper functions for backward compatibility during migration
-// TODO: Remove these and use ThemeManager::instance() directly everywhere
-inline void applyPillBtn(QPushButton* b) {
-    ThemeManager::instance()->applyPillButton(b);
-}
-
-inline void applyPrimaryBtn(QPushButton* b) {
-    ThemeManager::instance()->applyPrimaryButton(b);
-}
-
-inline void applyStatusBox(QLabel* l, const QString& borderColor, const QString& bgColor, const QString& textColor) {
-    ThemeManager::instance()->applyStatusBox(l, borderColor, bgColor, textColor);
-}
-
-inline void applyTitleText(QLabel* l) {
-    ThemeManager::instance()->applyTitleText(l);
-}
-
-inline int uploadButtonMaxWidth() {
-    return ThemeManager::instance()->getUploadButtonMaxWidth();
-}
 }
 
 
@@ -1254,7 +1230,7 @@ void MainWindow::setupUI() {
     
     // Contextual page title
     m_pageTitleLabel = new QLabel("Connected Clients");
-    applyTitleText(m_pageTitleLabel);
+    ThemeManager::instance()->applyTitleText(m_pageTitleLabel);
     // Match hostname styling: same font size, weight, and color
     m_pageTitleLabel->setStyleSheet(QString(
         "QLabel { "

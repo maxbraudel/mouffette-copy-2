@@ -23,16 +23,13 @@ class FileMemoryCache;
  * - RemoteFileTracker: remote client & canvasSessionId tracking
  * - FileMemoryCache: memory caching for performance
  * 
- * Phase 4.3: Converted to dependency injection (no longer singleton)
+ * Phase 4.3: Converted to dependency injection
  */
 class FileManager
 {
 public:
     explicit FileManager();
     ~FileManager();
-    
-    // Legacy singleton access (deprecated - use dependency injection)
-    static FileManager& instance();
     
     // Get or create file ID for a given file path
     QString getOrCreateFileId(const QString& filePath);
@@ -91,7 +88,6 @@ public:
     void removeIdeaAssociations(const QString& canvasSessionId);
 
     // Clear all uploaded markers for a given client across all files
-    void unmarkAllFilesForClient(const QString& clientId);
     void unmarkAllForClient(const QString& clientId);
 
     // Remove any received-file bookkeeping for paths under the given prefix (used when cleaning cache folders)
@@ -110,7 +106,6 @@ private:
     QHash<QString, QList<QString>> m_fileIdToMediaIds; // fileId -> [mediaId1, mediaId2, ...]
     QHash<QString, QString> m_mediaIdToFileId;     // mediaId -> fileId
     
-    static std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& canvasSessionIds)> s_fileRemovalNotifier;
 };
 
 #endif // FILEMANAGER_H

@@ -2,23 +2,9 @@
 #include "backend/files/LocalFileRepository.h"
 #include "backend/network/RemoteFileTracker.h"
 #include "backend/files/FileMemoryCache.h"
-#include <QDebug>
-
-// Phase 4.2: FileManager delegates to specialized services
-// - LocalFileRepository for fileId ↔ filePath
-// - RemoteFileTracker for client & canvasSessionId tracking
-// - FileMemoryCache for memory caching
-
-// Static member definition
-#include "backend/files/FileManager.h"
-#include "backend/files/LocalFileRepository.h"
-#include "backend/network/RemoteFileTracker.h"
-#include "backend/files/FileMemoryCache.h"
 #include <QFile>
 #include <QDebug>
 #include <QDir>
-
-std::function<void(const QString&, const QList<QString>&, const QList<QString>&)> FileManager::s_fileRemovalNotifier;
 
 // Phase 4.3: Constructor with dependency injection
 FileManager::FileManager()
@@ -32,13 +18,6 @@ FileManager::FileManager()
 FileManager::~FileManager()
 {
     // Services are singletons, no need to delete
-}
-
-// Legacy singleton instance (deprecated)
-FileManager& FileManager::instance()
-{
-    static FileManager s_instance;
-    return s_instance;
 }
 
 QString FileManager::getOrCreateFileId(const QString& filePath)
@@ -197,18 +176,12 @@ void FileManager::unmarkFileUploadedToClient(const QString& fileId, const QStrin
 
 void FileManager::setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& canvasSessionIds)> cb)
 {
-    s_fileRemovalNotifier = std::move(cb);
-}
-
-void FileManager::unmarkAllFilesForClient(const QString& clientId)
-{
-    // Delegate to RemoteFileTracker
-    m_tracker->unmarkAllFilesForClient(clientId);
+    RemoteFileTracker::instance().setFileRemovalNotifier(std::move(cb));
 }
 
 void FileManager::unmarkAllForClient(const QString& clientId)
 {
-    unmarkAllFilesForClient(clientId);
+    m_tracker->unmarkAllFilesForClient(clientId);
 }
 
 void FileManager::removeReceivedFileMappingsUnderPathPrefix(const QString& pathPrefix)
