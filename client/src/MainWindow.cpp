@@ -9,7 +9,7 @@
 #include "frontend/ui/widgets/SpinnerWidget.h"
 #include "frontend/rendering/canvas/ScreenCanvas.h"
 #include "backend/domain/media/MediaItems.h"
-#include "backend/domain/media/MediaSettingsPanel.h"
+#include "frontend/ui/overlays/canvas/CanvasMediaSettingsPanel.h"
 #include "frontend/rendering/canvas/OverlayPanels.h"
 #include "backend/files/Theme.h"
 #include "frontend/ui/theme/AppColors.h"
@@ -294,9 +294,44 @@ void MainWindow::setRemoteConnectionStatus(const QString& status, bool propagate
 }
 
 void MainWindow::refreshOverlayActionsState(bool remoteConnected, bool propagateLoss) {
-    // [PHASE 11] Delegate to UploadButtonStyleManager
-    if (m_uploadButtonStyleManager) {
-        m_uploadButtonStyleManager->refreshOverlayActionsState(remoteConnected, propagateLoss);
+    m_remoteOverlayActionsEnabled = remoteConnected;
+
+    ScreenCanvas* screenCanvas = getScreenCanvas();
+    if (screenCanvas) {
+        if (!remoteConnected && propagateLoss) {
+            screenCanvas->handleRemoteConnectionLost();
+        }
+        screenCanvas->setOverlayActionsEnabled(remoteConnected);
+    }
+
+    QPushButton* uploadButton = getUploadButton();
+    if (!uploadButton) {
+        return;
+    }
+
+    if (getUploadButtonInOverlay()) {
+        if (!remoteConnected) {
+            uploadButton->setEnabled(false);
+            uploadButton->setCheckable(false);
+            uploadButton->setChecked(false);
+            uploadButton->setStyleSheet(ScreenCanvas::overlayDisabledButtonStyle());
+            QFont defaultFont = getUploadButtonDefaultFont();
+            AppColors::applyCanvasButtonFont(defaultFont);
+            uploadButton->setFont(defaultFont);
+            uploadButton->setFixedHeight(40);
+            uploadButton->setMaximumWidth(ThemeManager::instance()->getUploadButtonMaxWidth());
+        } else {
+            UploadManager* uploadManager = getUploadManager();
+            if (uploadManager) {
+                QTimer::singleShot(0, this, [uploadManager]() {
+                    if (uploadManager) {
+                        emit uploadManager->uiStateChanged();
+                    }
+                });
+            }
+        }
+    } else {
+        uploadButton->setEnabled(remoteConnected);
     }
 }
 

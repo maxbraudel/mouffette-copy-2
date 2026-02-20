@@ -16,44 +16,6 @@ UploadButtonStyleManager::UploadButtonStyleManager(MainWindow* mainWindow, QObje
 {
 }
 
-void UploadButtonStyleManager::refreshOverlayActionsState(bool remoteConnected, bool propagateLoss) {
-    m_mainWindow->setRemoteOverlayActionsEnabled(remoteConnected);
-
-    ScreenCanvas* screenCanvas = m_mainWindow->getScreenCanvas();
-    if (screenCanvas) {
-        if (!remoteConnected && propagateLoss) {
-            screenCanvas->handleRemoteConnectionLost();
-        }
-        screenCanvas->setOverlayActionsEnabled(remoteConnected);
-    }
-
-    QPushButton* uploadButton = m_mainWindow->getUploadButton();
-    if (!uploadButton) return;
-
-    if (m_mainWindow->getUploadButtonInOverlay()) {
-        if (!remoteConnected) {
-            uploadButton->setEnabled(false);
-            uploadButton->setCheckable(false);
-            uploadButton->setChecked(false);
-            uploadButton->setStyleSheet(ScreenCanvas::overlayDisabledButtonStyle());
-            QFont defaultFont = m_mainWindow->getUploadButtonDefaultFont();
-            AppColors::applyCanvasButtonFont(defaultFont);
-            uploadButton->setFont(defaultFont);
-            uploadButton->setFixedHeight(40);
-            uploadButton->setMaximumWidth(ThemeManager::instance()->getUploadButtonMaxWidth());
-        } else {
-            UploadManager* uploadManager = m_mainWindow->getUploadManager();
-            if (uploadManager) {
-                QTimer::singleShot(0, this, [uploadManager]() {
-                    if (uploadManager) emit uploadManager->uiStateChanged();
-                });
-            }
-        }
-    } else {
-        uploadButton->setEnabled(remoteConnected);
-    }
-}
-
 void UploadButtonStyleManager::applyUploadButtonStyle(QPushButton* uploadButton) {
     if (!uploadButton) return;
     

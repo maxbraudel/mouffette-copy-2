@@ -324,6 +324,7 @@ void CanvasViewPage::updateVolumeIndicator(int volumePercent) {
 
 void CanvasViewPage::setRemoteConnectionStatus(const QString& status, bool propagateLoss) {
     if (!m_remoteConnectionStatusLabel) return;
+    Q_UNUSED(propagateLoss);
     
     const QString up = status.toUpper();
     m_remoteConnectionStatusLabel->setText(up);
@@ -365,35 +366,6 @@ void CanvasViewPage::setRemoteConnectionStatus(const QString& status, bool propa
         "}").arg(textColor).arg(bgColor).arg(gDynamicBoxFontPx).arg(gRemoteClientContainerPadding)
     );
 
-    refreshOverlayActionsState(up == "CONNECTED", propagateLoss);
-}
-
-void CanvasViewPage::refreshOverlayActionsState(bool remoteConnected, bool propagateLoss) {
-    m_remoteOverlayActionsEnabled = remoteConnected;
-
-    if (m_screenCanvas) {
-        if (!remoteConnected && propagateLoss) {
-            m_screenCanvas->handleRemoteConnectionLost();
-        }
-        m_screenCanvas->setOverlayActionsEnabled(remoteConnected);
-    }
-
-    if (!m_uploadButton) return;
-
-    if (m_uploadButtonInOverlay) {
-        if (!remoteConnected) {
-            m_uploadButton->setEnabled(false);
-            m_uploadButton->setCheckable(false);
-            m_uploadButton->setChecked(false);
-            m_uploadButton->setStyleSheet(ScreenCanvas::overlayDisabledButtonStyle());
-            AppColors::applyCanvasButtonFont(m_uploadButtonDefaultFont);
-            m_uploadButton->setFont(m_uploadButtonDefaultFont);
-            m_uploadButton->setFixedHeight(40);
-            m_uploadButton->setMaximumWidth(ThemeManager::instance()->getUploadButtonMaxWidth());
-        }
-    } else {
-        m_uploadButton->setEnabled(remoteConnected);
-    }
 }
 
 void CanvasViewPage::showRemoteClientInfo() {

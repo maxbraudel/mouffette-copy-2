@@ -214,10 +214,9 @@ public:
     
     // [Phase 11] Accessor methods for UploadButtonStyleManager
     bool isRemoteOverlayActionsEnabled() const { return m_remoteOverlayActionsEnabled; }
-    void setRemoteOverlayActionsEnabled(bool enabled) { m_remoteOverlayActionsEnabled = enabled; }
     bool hasUnuploadedFilesForTarget(const QString& targetClientId) const;
-    
-    // Deprecated - now handled by UploadButtonStyleManager
+
+    // Remote-overlay action coordinator
     void refreshOverlayActionsState(bool remoteConnected, bool propagateLoss = true);
     
     // [Phase 9] Accessor methods for WindowEventHandler

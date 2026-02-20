@@ -15,7 +15,7 @@
 #include <QVideoFrameFormat>
 #include <algorithm>
 #include <QDebug>
-#include "backend/domain/media/MediaSettingsPanel.h"
+#include "frontend/ui/overlays/canvas/CanvasMediaSettingsPanel.h"
 #include <cmath>
 #include <QVariantAnimation>
 #include <QEasingCurve>

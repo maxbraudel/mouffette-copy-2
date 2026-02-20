@@ -35,6 +35,7 @@ class QToolButton;
 class QScrollArea;
 class QScrollBar;
 class TextMediaItem;
+class CanvasGlobalOverlayHost;
 
 extern int gMediaListOverlayAbsoluteMaxWidthPx; // Absolute width cap (px) for media list overlay; 0 disables cap
 
@@ -377,16 +378,13 @@ private:
     QTimer* m_scrollbarHideTimer = nullptr; // timer to auto-hide scrollbar after inactivity
     QVBoxLayout* m_contentLayout = nullptr; // content layout (for media items)
     QWidget* m_overlayHeaderWidget = nullptr; // container for overlay header row (holds upload button)
-    QToolButton* m_settingsToggleButton = nullptr; // toggle to show/hide media settings panel
+    CanvasGlobalOverlayHost* m_globalOverlayHost = nullptr; // top-left global controls host
     bool m_settingsPanelPreferredVisible = false;
     class MediaSettingsPanel* m_globalSettingsPanel = nullptr; // global settings panel driven by toolbar toggle
     QTimer* m_settingsPanelHideTimer = nullptr; // defers hide to avoid flicker during selection transitions
     ResizableMediaBase* m_settingsPanelLastMedia = nullptr; // track last media applied to settings panel
     
     // Tool selector (segmented control) - positioned to right of settings button
-    QWidget* m_toolSelectorContainer = nullptr;
-    QToolButton* m_selectionToolButton = nullptr;
-    QToolButton* m_textToolButton = nullptr;
     CanvasTool m_currentTool = CanvasTool::Selection; // Current active tool
     
     QPushButton* m_launchSceneButton = nullptr; // new Launch Remote Scene toggle button
@@ -453,6 +451,7 @@ protected:
     QList<VideoPreState> m_prevVideoStates;
     void updateLaunchSceneButtonStyle();
     void updateLaunchTestSceneButtonStyle();
+    void runOverlayHardeningChecks(const char* context) const;
 
     // Persistent selection helpers: remember selection at press and restore after drags
     bool m_leftMouseActive = false;

@@ -7,7 +7,8 @@
 #include "frontend/ui/theme/AppColors.h"
 #include "backend/files/Theme.h"
 #include "backend/domain/media/MediaItems.h"
-#include "backend/domain/media/MediaSettingsPanel.h" // for settingsPanel() accessor usage
+#include "frontend/ui/overlays/canvas/CanvasMediaSettingsPanel.h" // for settings panel overlay
+#include "frontend/ui/overlays/canvas/CanvasGlobalOverlayHost.h"
 #include "backend/domain/media/TextMediaItem.h" // for text media creation
 #include "frontend/ui/notifications/ToastNotificationSystem.h" // for toast notifications
 #include "frontend/ui/widgets/ClippedContainer.h" // for ClippedContainer widget
@@ -3197,34 +3198,7 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
     }
     // Fresh user interaction cancels any momentum ignore state
     if (m_ignorePanMomentum) { m_ignorePanMomentum = false; m_momentumPrimed = false; }
-    // When pressing over the overlay, forward event to the overlay widget ONLY if we're not in the middle of drag/resize/pan operations
-    if (m_infoWidget && m_infoWidget->isVisible() && viewport()) {
-        bool anyResizing = false;
-        if (m_scene) {
-            for (QGraphicsItem* it : m_scene->items()) {
-                if (auto* rp = dynamic_cast<ResizableMediaBase*>(it)) { if (rp->isActivelyResizing()) { anyResizing = true; break; } }
-            }
-        }
-        const bool dragging = (m_draggingSelected != nullptr);
-        const bool panningNow = m_panning;
-        const QPoint vpPos = viewport()->mapFrom(this, event->pos());
-        if (!dragging && !anyResizing && !panningNow && m_infoWidget->geometry().contains(vpPos)) {
-            const QPoint overlayLocal = m_infoWidget->mapFrom(viewport(), vpPos);
-            QWidget* dst = m_infoWidget->childAt(overlayLocal);
-            if (!dst) dst = m_infoWidget;
-            const QPoint dstLocal = dst->mapFrom(m_infoWidget, overlayLocal);
-            const QPoint globalP = dst->mapToGlobal(dstLocal);
-            const QWidget* win = dst->window();
-            const QPoint windowP = win ? win->mapFromGlobal(globalP) : QPoint();
-            const QPointF localF = QPointF(dstLocal);
-            const QPointF windowF = QPointF(windowP);
-            const QPointF screenF = QPointF(globalP);
-            QMouseEvent forwarded(event->type(), localF, windowF, screenF, event->button(), event->buttons(), event->modifiers());
-            QCoreApplication::sendEvent(dst, &forwarded);
-            event->accept();
-            return;
-        }
-    }
+    // Viewport overlay widgets consume their own input events.
     // (Space-to-pan currently disabled; can be re-enabled with dedicated key tracking)
     const bool spaceHeld = false;
     if (event->button() == Qt::LeftButton) {
@@ -3319,34 +3293,7 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
 }
 
 void ScreenCanvas::mouseDoubleClickEvent(QMouseEvent* event) {
-    // Forward double-clicks to overlay when over it ONLY if we're not in the middle of drag/resize/pan operations
-    if (m_infoWidget && m_infoWidget->isVisible() && viewport()) {
-        bool anyResizing = false;
-        if (m_scene) {
-            for (QGraphicsItem* it : m_scene->items()) {
-                if (auto* rp = dynamic_cast<ResizableMediaBase*>(it)) { if (rp->isActivelyResizing()) { anyResizing = true; break; } }
-            }
-        }
-        const bool dragging = (m_draggingSelected != nullptr);
-        const bool panningNow = m_panning;
-        const QPoint vpPos = viewport()->mapFrom(this, event->pos());
-        if (!dragging && !anyResizing && !panningNow && m_infoWidget->geometry().contains(vpPos)) {
-            const QPoint overlayLocal = m_infoWidget->mapFrom(viewport(), vpPos);
-            QWidget* dst = m_infoWidget->childAt(overlayLocal);
-            if (!dst) dst = m_infoWidget;
-            const QPoint dstLocal = dst->mapFrom(m_infoWidget, overlayLocal);
-            const QPoint globalP = dst->mapToGlobal(dstLocal);
-            const QWidget* win = dst->window();
-            const QPoint windowP = win ? win->mapFromGlobal(globalP) : QPoint();
-            const QPointF localF = QPointF(dstLocal);
-            const QPointF windowF = QPointF(windowP);
-            const QPointF screenF = QPointF(globalP);
-            QMouseEvent forwarded(event->type(), localF, windowF, screenF, event->button(), event->buttons(), event->modifiers());
-            QCoreApplication::sendEvent(dst, &forwarded);
-            event->accept();
-            return;
-        }
-    }
+    // Viewport overlay widgets consume their own input events.
     if (event->button() == Qt::LeftButton) {
         // Do not change selection when double-clicking on overlay elements
         {
@@ -3391,35 +3338,7 @@ void ScreenCanvas::mouseDoubleClickEvent(QMouseEvent* event) {
 
 void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
     if (m_ignorePanMomentum) { m_ignorePanMomentum = false; m_momentumPrimed = false; }
-    // While over overlay, forward moves to overlay widget and block canvas handling ONLY if we're not dragging/resizing/panning
-    if (m_infoWidget && m_infoWidget->isVisible() && viewport()) {
-        bool anyResizing = false;
-        if (m_scene) {
-            for (QGraphicsItem* it : m_scene->items()) {
-                if (auto* rp = dynamic_cast<ResizableMediaBase*>(it)) { if (rp->isActivelyResizing()) { anyResizing = true; break; } }
-            }
-        }
-        const bool dragging = (m_draggingSelected != nullptr);
-        const bool panningNow = m_panning;
-        const QPoint vpPos = viewport()->mapFrom(this, event->pos());
-        // Also check m_draggingSincePress to prevent overlay interference during any drag operation
-        if (!dragging && !m_draggingSincePress && !anyResizing && !panningNow && m_infoWidget->geometry().contains(vpPos)) {
-            const QPoint overlayLocal = m_infoWidget->mapFrom(viewport(), vpPos);
-            QWidget* dst = m_infoWidget->childAt(overlayLocal);
-            if (!dst) dst = m_infoWidget;
-            const QPoint dstLocal = dst->mapFrom(m_infoWidget, overlayLocal);
-            const QPoint globalP = dst->mapToGlobal(dstLocal);
-            const QWidget* win = dst->window();
-            const QPoint windowP = win ? win->mapFromGlobal(globalP) : QPoint();
-            const QPointF localF = QPointF(dstLocal);
-            const QPointF windowF = QPointF(windowP);
-            const QPointF screenF = QPointF(globalP);
-            QMouseEvent forwarded(event->type(), localF, windowF, screenF, event->button(), event->buttons(), event->modifiers());
-            QCoreApplication::sendEvent(dst, &forwarded);
-            event->accept();
-            return;
-        }
-    }
+    // Viewport overlay widgets consume their own input events.
     // Slider interactions are now handled directly by SliderHandleItem in OverlayPanel
     m_lastMousePos = event->pos();
     const QPointF scenePos = mapToScene(event->pos());
@@ -3479,30 +3398,7 @@ void ScreenCanvas::mouseMoveEvent(QMouseEvent* event) {
 
 void ScreenCanvas::mouseReleaseEvent(QMouseEvent* event) {
     if (m_ignorePanMomentum) { m_ignorePanMomentum = false; m_momentumPrimed = false; }
-    // Forward release to overlay when over it ONLY if we're not dragging/resizing/panning
-    if (m_infoWidget && m_infoWidget->isVisible() && viewport()) {
-        bool anyResizing = false;
-        if (m_scene) {
-            for (QGraphicsItem* it : m_scene->items()) {
-                if (auto* rp = dynamic_cast<ResizableMediaBase*>(it)) { if (rp->isActivelyResizing()) { anyResizing = true; break; } }
-            }
-        }
-        const bool dragging = (m_draggingSelected != nullptr);
-        const bool panningNow = m_panning;
-        const QPoint vpPos = viewport()->mapFrom(this, event->pos());
-        if (!dragging && !anyResizing && !panningNow && m_infoWidget->geometry().contains(vpPos)) {
-            const QPoint overlayLocal = m_infoWidget->mapFrom(viewport(), vpPos);
-            QWidget* dst = m_infoWidget->childAt(overlayLocal);
-            if (!dst) dst = m_infoWidget;
-            const QPoint dstLocal = dst->mapFrom(m_infoWidget, overlayLocal);
-            const QPointF localF = QPointF(dstLocal);
-            const QPointF globalF = QPointF(dst->mapToGlobal(dstLocal));
-            QMouseEvent forwarded(event->type(), localF, QPointF(), globalF, event->button(), event->buttons(), event->modifiers());
-            QCoreApplication::sendEvent(dst, &forwarded);
-            event->accept();
-            return;
-        }
-    }
+    // Viewport overlay widgets consume their own input events.
     if (event->button() == Qt::LeftButton) {
         // If releasing over any blocking overlay item, deliver the event directly and avoid selection churn
         const QList<QGraphicsItem*> hitItems = items(event->pos());
@@ -3537,92 +3433,7 @@ void ScreenCanvas::mouseReleaseEvent(QMouseEvent* event) {
 
 void ScreenCanvas::wheelEvent(QWheelEvent* event) {
 #if 1
-    // If the cursor is over the media info overlay, route the scroll to its scroll area
-    if (m_infoWidget && m_infoWidget->isVisible() && m_contentScroll) {
-        // Map wheel position (relative to this view) to viewport, then to the overlay scroll viewport
-        QPointF vpPos = viewport() ? QPointF(viewport()->mapFrom(this, event->position().toPoint())) : event->position();
-        if (m_infoWidget->geometry().contains(vpPos.toPoint())) {
-            QWidget* dst = m_contentScroll->viewport() ? m_contentScroll->viewport() : static_cast<QWidget*>(m_contentScroll);
-            if (dst) {
-                const QPoint dstLocal = dst->mapFrom(viewport(), vpPos.toPoint());
-                const QPoint globalP = dst->mapToGlobal(dstLocal);
-                // Forward the wheel event so QScrollArea handles smooth scrolling
-                QWheelEvent forwarded(
-                    QPointF(dstLocal),
-                    QPointF(globalP),
-                    event->pixelDelta(),
-                    event->angleDelta(),
-                    event->buttons(),
-                    event->modifiers(),
-                    event->phase(),
-                    event->inverted(),
-                    event->source()
-                );
-                QCoreApplication::sendEvent(dst, &forwarded);
-                
-                // Show scrollbar and restart hide timer on wheel scroll over overlay
-                if (m_overlayVScroll && m_scrollbarHideTimer) {
-                    m_overlayVScroll->show();
-                    m_scrollbarHideTimer->start();
-                }
-            }
-            event->accept();
-            return; // Block canvas zoom/pan when wheel is over the overlay
-        }
-    }
-    
-    // Check for settings overlay widgets with scroll areas that should block canvas interaction
-    const QList<QGraphicsItem*> hitItems = items(event->position().toPoint());
-    for (QGraphicsItem* item : hitItems) {
-        if (item->data(0).toString() == QLatin1String("blocking-overlay")) {
-            // Found an overlay item - check if it's a proxy widget with a scroll area
-            if (auto* proxyWidget = dynamic_cast<QGraphicsProxyWidget*>(item)) {
-                if (auto* widget = proxyWidget->widget()) {
-                    // Look for a QScrollArea within the overlay widget
-                    QScrollArea* scrollArea = widget->findChild<QScrollArea*>();
-                    if (scrollArea && scrollArea->isVisible()) {
-                        // Forward wheel event to the scroll area's viewport
-                        QWidget* dst = scrollArea->viewport() ? scrollArea->viewport() : static_cast<QWidget*>(scrollArea);
-                        if (dst) {
-                            // Map coordinates from canvas to the scroll area viewport
-                            const QPointF scenePos = mapToScene(event->position().toPoint());
-                            const QPointF itemPos = item->mapFromScene(scenePos);
-                            const QPoint widgetPos = widget->mapFromParent(itemPos.toPoint());
-                            const QPoint dstLocal = dst->mapFrom(widget, widgetPos);
-                            const QPoint globalP = dst->mapToGlobal(dstLocal);
-                            
-                            // Forward the wheel event
-                            QWheelEvent forwarded(
-                                QPointF(dstLocal),
-                                QPointF(globalP),
-                                event->pixelDelta(),
-                                event->angleDelta(),
-                                event->buttons(),
-                                event->modifiers(),
-                                event->phase(),
-                                event->inverted(),
-                                event->source()
-                            );
-                            QCoreApplication::sendEvent(dst, &forwarded);
-                            
-                            // Show scrollbar if it exists and has a hide timer
-                            QScrollBar* vScrollBar = scrollArea->findChild<QScrollBar*>("overlayScrollBar");
-                            QTimer* hideTimer = scrollArea->findChild<QTimer*>("scrollbarHideTimer");
-                            if (vScrollBar && hideTimer) {
-                                vScrollBar->show();
-                                hideTimer->start();
-                            }
-                        }
-                        event->accept();
-                        return; // Block canvas zoom/pan when wheel is over settings overlay
-                    }
-                }
-            }
-            // If we found an overlay but no scroll area, still block canvas interaction
-            event->accept();
-            return;
-        }
-    }
+    // Viewport overlays and proxy widgets consume their own wheel events.
 #endif
 #ifdef Q_OS_MACOS
     if (m_nativePinchActive) { event->ignore(); return; }
@@ -4800,6 +4611,7 @@ void ScreenCanvas::updateLaunchSceneButtonStyle() {
         m_launchSceneButton->setStyleSheet(overlayDisabledButtonStyle());
     }
     m_launchSceneButton->setFixedHeight(40);
+    runOverlayHardeningChecks("updateLaunchSceneButtonStyle");
 }
 
 void ScreenCanvas::updateLaunchTestSceneButtonStyle() {
@@ -4856,23 +4668,25 @@ void ScreenCanvas::updateLaunchTestSceneButtonStyle() {
 
     // Check if remote scene is active (mutual exclusion with test scene)
     bool remoteSceneActive = m_sceneLaunched || m_sceneLaunching;
+    const bool uploadInProgress = m_uploadManager && (m_uploadManager->isUploading() || m_uploadManager->isFinalizing());
     
     if (m_testSceneLaunched) {
         m_launchTestSceneButton->setText("Stop Test Scene");
         m_launchTestSceneButton->setChecked(true);
         m_launchTestSceneButton->setStyleSheet(activeStyle);
-        m_launchTestSceneButton->setEnabled(m_overlayActionsEnabled);
+        m_launchTestSceneButton->setEnabled(m_overlayActionsEnabled && !uploadInProgress);
     } else {
         m_launchTestSceneButton->setText("Launch Test Scene");
         m_launchTestSceneButton->setChecked(false);
         m_launchTestSceneButton->setStyleSheet(idleStyle);
-        m_launchTestSceneButton->setEnabled(m_overlayActionsEnabled && !remoteSceneActive);
+        m_launchTestSceneButton->setEnabled(m_overlayActionsEnabled && !remoteSceneActive && !uploadInProgress);
     }
     // Greyed style for disabled state (offline or remote scene active)
     if (!m_launchTestSceneButton->isEnabled()) {
         m_launchTestSceneButton->setStyleSheet(overlayDisabledButtonStyle());
     }
     m_launchTestSceneButton->setFixedHeight(40);
+    runOverlayHardeningChecks("updateLaunchTestSceneButtonStyle");
 
 }
 
@@ -4926,6 +4740,70 @@ void ScreenCanvas::setOverlayActionsEnabled(bool enabled) {
         m_uploadButton->setFixedHeight(40);
         m_uploadButton->setMinimumWidth(0);
     }
+
+    runOverlayHardeningChecks("setOverlayActionsEnabled");
+}
+
+void ScreenCanvas::runOverlayHardeningChecks(const char* context) const {
+#ifdef QT_DEBUG
+    const bool uploadInProgress = m_uploadManager && (m_uploadManager->isUploading() || m_uploadManager->isFinalizing());
+
+    auto warn = [context](const QString& msg) {
+        qWarning() << "[Hardening]" << context << "-" << msg;
+    };
+
+    if (!m_overlayActionsEnabled) {
+        if (m_launchSceneButton && m_launchSceneButton->isEnabled()) {
+            warn("Launch Remote Scene is enabled while overlay actions are disabled");
+        }
+        if (m_launchTestSceneButton && m_launchTestSceneButton->isEnabled()) {
+            warn("Launch Test Scene is enabled while overlay actions are disabled");
+        }
+        if (m_uploadButton && m_uploadButton->isEnabled()) {
+            warn("Upload button is enabled while overlay actions are disabled");
+        }
+    }
+
+    if (uploadInProgress && !m_sceneLaunching && !m_sceneStopping) {
+        if (m_launchSceneButton && m_launchSceneButton->isEnabled()) {
+            warn("Launch Remote Scene is enabled while upload is in progress");
+        }
+        if (m_launchTestSceneButton && m_launchTestSceneButton->isEnabled()) {
+            warn("Launch Test Scene is enabled while upload is in progress");
+        }
+    }
+
+    if ((m_sceneLaunched || m_sceneLaunching) && m_testSceneLaunched) {
+        warn("Remote scene and test scene are active simultaneously");
+    }
+
+    if (!m_sceneLaunched && !m_sceneLaunching && !m_sceneStopping && m_launchSceneButton && m_launchSceneButton->isChecked()) {
+        warn("Launch Remote Scene button is checked while remote scene is inactive");
+    }
+
+    if (!m_testSceneLaunched && m_launchTestSceneButton && m_launchTestSceneButton->isChecked()) {
+        warn("Launch Test Scene button is checked while test scene is inactive");
+    }
+
+    if (m_globalSettingsPanel && m_scene) {
+        bool selectedMedia = false;
+        for (QGraphicsItem* item : m_scene->selectedItems()) {
+            if (dynamic_cast<ResizableMediaBase*>(item)) {
+                selectedMedia = true;
+                break;
+            }
+        }
+
+        if (!selectedMedia && m_globalSettingsPanel->isVisible()) {
+            const bool hidePending = m_settingsPanelHideTimer && m_settingsPanelHideTimer->isActive();
+            if (!hidePending) {
+                warn("Settings panel is visible without selected media and no pending hide timer");
+            }
+        }
+    }
+#else
+    Q_UNUSED(context);
+#endif
 }
 
 void ScreenCanvas::handleRemoteConnectionLost() {
@@ -5331,162 +5209,36 @@ void ScreenCanvas::stopHostSceneState(bool notifyRemote) {
 }
 
 void ScreenCanvas::ensureSettingsToggleButton() {
-    if (m_settingsToggleButton || !viewport()) return;
+    if (!viewport()) return;
 
-    m_settingsToggleButton = new QToolButton(viewport());
-    m_settingsToggleButton->setIcon(QIcon(QStringLiteral(":/icons/icons/settings.svg")));
-    m_settingsToggleButton->setObjectName("SettingsToggleButton");
-    m_settingsToggleButton->setCheckable(true);
-    m_settingsToggleButton->setAttribute(Qt::WA_NoMousePropagation, true);
-    m_settingsToggleButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    m_settingsToggleButton->setAutoRaise(false);
-    m_settingsToggleButton->setFocusPolicy(Qt::NoFocus);
-    m_settingsToggleButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    m_settingsToggleButton->setAccessibleName(tr("Media settings"));
+    if (!m_globalOverlayHost) {
+        m_globalOverlayHost = new CanvasGlobalOverlayHost(this);
+        connect(m_globalOverlayHost, &CanvasGlobalOverlayHost::settingsToggled, this, [this](bool checked) {
+            m_settingsPanelPreferredVisible = checked;
+            updateGlobalSettingsPanelVisibility();
+        });
+        connect(m_globalOverlayHost, &CanvasGlobalOverlayHost::toolSelected, this, [this](CanvasGlobalOverlayHost::ToolChoice choice) {
+            setCurrentTool(choice == CanvasGlobalOverlayHost::ToolChoice::Text ? CanvasTool::Text : CanvasTool::Selection);
+        });
+    }
 
-    const QString baseBg = AppColors::colorToCss(AppColors::gOverlayBackgroundColor);
-    const QString activeBg = AppColors::colorToCss(AppColors::gOverlayActiveBackgroundColor);
-    const QString borderColor = AppColors::colorToCss(AppColors::gOverlayBorderColor);
-    QColor disabledColor = AppColors::gOverlayBackgroundColor;
-    disabledColor.setAlphaF(std::clamp(disabledColor.alphaF() * 0.35, 0.0, 1.0));
-    const QString disabledBg = AppColors::colorToCss(disabledColor);
-
-    const QString cornerRadiusPx = QString::number(gOverlayCornerRadiusPx) + QStringLiteral("px");
-    const QString style = QStringLiteral(
-        "QToolButton#SettingsToggleButton {"
-        " background-color: %1;"
-        " border: 1px solid %2;"
-        " border-radius: %3;"
-        " padding: 0;"
-        " margin: 0;"
-        "}"
-        "QToolButton#SettingsToggleButton:hover:!disabled:!checked { background-color: %1; }"
-        "QToolButton#SettingsToggleButton:pressed { background-color: %4; }"
-        "QToolButton#SettingsToggleButton:checked { background-color: %4; }"
-        "QToolButton#SettingsToggleButton:checked:hover { background-color: %4; }"
-        "QToolButton#SettingsToggleButton:disabled { background-color: %5; border: 1px solid %2; }"
-    ).arg(baseBg, borderColor, cornerRadiusPx, activeBg, disabledBg);
-    m_settingsToggleButton->setStyleSheet(style);
-
-    connect(m_settingsToggleButton, &QToolButton::toggled, this, [this](bool checked) {
-        m_settingsPanelPreferredVisible = checked;
-        updateGlobalSettingsPanelVisibility();
-    });
-
-    m_settingsToggleButton->show();
+    m_globalOverlayHost->attachViewport(viewport());
+    m_globalOverlayHost->ensureSettingsToggleButton();
 }
 
 void ScreenCanvas::ensureToolSelector() {
-    if (m_toolSelectorContainer || !viewport()) return;
-
-    // Create container for segmented control
-    m_toolSelectorContainer = new QWidget(viewport());
-    m_toolSelectorContainer->setAttribute(Qt::WA_NoMousePropagation, true);
-    m_toolSelectorContainer->setAttribute(Qt::WA_TranslucentBackground, true);
-    m_toolSelectorContainer->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    m_toolSelectorContainer->setStyleSheet("background: transparent;");
-    
-    QHBoxLayout* layout = new QHBoxLayout(m_toolSelectorContainer);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(0); // Fused segments, no spacing
-    layout->setSizeConstraint(QLayout::SetFixedSize);
-    
-    // Selection Tool button (left segment)
-    m_selectionToolButton = new QToolButton(m_toolSelectorContainer);
-    m_selectionToolButton->setIcon(QIcon(QStringLiteral(":/icons/icons/tools/selection-tool.svg")));
-    m_selectionToolButton->setObjectName("SelectionToolButton");
-    m_selectionToolButton->setCheckable(true);
-    m_selectionToolButton->setChecked(true); // Default active tool
-    m_selectionToolButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    m_selectionToolButton->setAutoRaise(false);
-    m_selectionToolButton->setFocusPolicy(Qt::NoFocus);
-    m_selectionToolButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    
-    // Text Tool button (right segment)
-    m_textToolButton = new QToolButton(m_toolSelectorContainer);
-    m_textToolButton->setIcon(QIcon(QStringLiteral(":/icons/icons/tools/text-tool.svg")));
-    m_textToolButton->setObjectName("TextToolButton");
-    m_textToolButton->setCheckable(true);
-    m_textToolButton->setChecked(false);
-    m_textToolButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    m_textToolButton->setAutoRaise(false);
-    m_textToolButton->setFocusPolicy(Qt::NoFocus);
-    m_textToolButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    
-    // Visual divider between segments
-    QFrame* divider = new QFrame(m_toolSelectorContainer);
-    divider->setFrameShape(QFrame::VLine);
-    divider->setFixedWidth(1);
-    divider->setStyleSheet(QStringLiteral("background-color: %1;")
-        .arg(AppColors::colorToCss(AppColors::gOverlayBorderColor)));
-    
-    // Apply segmented control styling
-    const QString baseBg = AppColors::colorToCss(AppColors::gOverlayBackgroundColor);
-    const QString activeBg = AppColors::colorToCss(AppColors::gOverlayActiveBackgroundColor);
-    const QString borderColor = AppColors::colorToCss(AppColors::gOverlayBorderColor);
-    const QString cornerRadiusPx = QString::number(gOverlayCornerRadiusPx) + QStringLiteral("px");
-    
-    // Left segment style (rounded left corners only)
-    const QString leftStyle = QStringLiteral(
-        "QToolButton#SelectionToolButton {"
-        " background-color: %1;"
-        " border: 1px solid %2;"
-        " border-top-left-radius: %3;"
-        " border-bottom-left-radius: %3;"
-        " border-top-right-radius: 0px;"
-        " border-bottom-right-radius: 0px;"
-        " border-right: none;"
-        " padding: 0;"
-        " margin: 0;"
-        "}"
-        "QToolButton#SelectionToolButton:hover:!disabled:!checked { background-color: %1; }"
-        "QToolButton#SelectionToolButton:pressed { background-color: %4; }"
-        "QToolButton#SelectionToolButton:checked { background-color: %4; }"
-        "QToolButton#SelectionToolButton:checked:hover { background-color: %4; }"
-    ).arg(baseBg, borderColor, cornerRadiusPx, activeBg);
-    
-    // Right segment style (rounded right corners only)
-    const QString rightStyle = QStringLiteral(
-        "QToolButton#TextToolButton {"
-        " background-color: %1;"
-        " border: 1px solid %2;"
-        " border-top-left-radius: 0px;"
-        " border-bottom-left-radius: 0px;"
-        " border-top-right-radius: %3;"
-        " border-bottom-right-radius: %3;"
-        " border-left: none;"
-        " padding: 0;"
-        " margin: 0;"
-        "}"
-        "QToolButton#TextToolButton:hover:!disabled:!checked { background-color: %1; }"
-        "QToolButton#TextToolButton:pressed { background-color: %4; }"
-        "QToolButton#TextToolButton:checked { background-color: %4; }"
-        "QToolButton#TextToolButton:checked:hover { background-color: %4; }"
-    ).arg(baseBg, borderColor, cornerRadiusPx, activeBg);
-    
-    m_selectionToolButton->setStyleSheet(leftStyle);
-    m_textToolButton->setStyleSheet(rightStyle);
-    
-    // Add widgets to layout
-    layout->addWidget(m_selectionToolButton);
-    layout->addWidget(divider);
-    layout->addWidget(m_textToolButton);
-    
-    // Mutual exclusivity: only one tool can be active
-    connect(m_selectionToolButton, &QToolButton::clicked, this, [this]() {
-        setCurrentTool(CanvasTool::Selection);
-    });
-    connect(m_textToolButton, &QToolButton::clicked, this, [this]() {
-        setCurrentTool(CanvasTool::Text);
-    });
-
-    m_toolSelectorContainer->show();
+    if (!viewport()) return;
+    ensureSettingsToggleButton();
+    if (!m_globalOverlayHost) return;
+    m_globalOverlayHost->attachViewport(viewport());
+    m_globalOverlayHost->ensureToolSelector();
 }
 
 void ScreenCanvas::updateSettingsToggleButtonGeometry() {
     if (!viewport()) return;
     ensureSettingsToggleButton();
-    if (!m_settingsToggleButton) return;
+    ensureToolSelector();
+    if (!m_globalOverlayHost) return;
 
     const int margin = 16;
     const int spacing = 10;
@@ -5501,11 +5253,7 @@ void ScreenCanvas::updateSettingsToggleButtonGeometry() {
     const int maxIcon = std::max(16, buttonSize - 4);
     iconSize = std::clamp(iconSize, 16, maxIcon);
 
-    m_settingsToggleButton->setFixedSize(buttonSize, buttonSize);
-    m_settingsToggleButton->setIconSize(QSize(iconSize, iconSize));
-    m_settingsToggleButton->move(margin, margin);
-    m_settingsToggleButton->raise();
-    m_settingsToggleButton->show();
+    m_globalOverlayHost->updateGeometry(margin, spacing, buttonSize, iconSize);
 
     if (m_globalSettingsPanel) {
         const int panelTop = margin + buttonSize + spacing;
@@ -5521,8 +5269,9 @@ void ScreenCanvas::updateSettingsToggleButtonGeometry() {
 
 void ScreenCanvas::updateToolSelectorGeometry() {
     if (!viewport()) return;
+    ensureSettingsToggleButton();
     ensureToolSelector();
-    if (!m_toolSelectorContainer || !m_settingsToggleButton) return;
+    if (!m_globalOverlayHost) return;
 
     const int margin = 16;
     const int spacing = 10;
@@ -5536,32 +5285,19 @@ void ScreenCanvas::updateToolSelectorGeometry() {
     const int maxIcon = std::max(16, buttonSize - 4);
     iconSize = std::clamp(iconSize, 16, maxIcon);
 
-    // Size each button in the segmented control
-    m_selectionToolButton->setFixedSize(buttonSize, buttonSize);
-    m_selectionToolButton->setIconSize(QSize(iconSize, iconSize));
-    m_textToolButton->setFixedSize(buttonSize, buttonSize);
-    m_textToolButton->setIconSize(QSize(iconSize, iconSize));
-
-    const int dividerWidth = 1; // matches divider->setFixedWidth
-    const int totalWidth = (buttonSize * 2) + dividerWidth;
-    m_toolSelectorContainer->setFixedSize(totalWidth, buttonSize);
-    
-    // Position container to the right of settings button with spacing
-    int settingsButtonRight = m_settingsToggleButton->x() + m_settingsToggleButton->width();
-    m_toolSelectorContainer->move(settingsButtonRight + spacing, margin);
-    m_toolSelectorContainer->raise();
-    m_toolSelectorContainer->show();
+    m_globalOverlayHost->updateGeometry(margin, spacing, buttonSize, iconSize);
 }
 
 void ScreenCanvas::setCurrentTool(CanvasTool tool) {
     if (m_currentTool == tool) return;
     
     m_currentTool = tool;
-    
-    // Update button states
-    if (m_selectionToolButton && m_textToolButton) {
-        m_selectionToolButton->setChecked(tool == CanvasTool::Selection);
-        m_textToolButton->setChecked(tool == CanvasTool::Text);
+
+    if (m_globalOverlayHost) {
+        m_globalOverlayHost->setCurrentTool(
+            tool == CanvasTool::Text
+                ? CanvasGlobalOverlayHost::ToolChoice::Text
+                : CanvasGlobalOverlayHost::ToolChoice::Selection);
     }
     
     // Keep default arrow cursor for all tools
@@ -5661,10 +5397,9 @@ void ScreenCanvas::updateGlobalSettingsPanelVisibility() {
     }
     
     // Update button checked state to match preference
-    if (m_settingsToggleButton) {
-        if (m_settingsToggleButton->isChecked() != m_settingsPanelPreferredVisible) {
-            QSignalBlocker blocker(m_settingsToggleButton);
-            m_settingsToggleButton->setChecked(m_settingsPanelPreferredVisible);
+    if (m_globalOverlayHost) {
+        if (m_globalOverlayHost->isSettingsChecked() != m_settingsPanelPreferredVisible) {
+            m_globalOverlayHost->setSettingsChecked(m_settingsPanelPreferredVisible, true);
         }
     }
 
@@ -5676,6 +5411,7 @@ void ScreenCanvas::updateGlobalSettingsPanelVisibility() {
             m_settingsPanelLastMedia = nullptr;
             m_globalSettingsPanel->setMediaItem(nullptr);
         }
+        runOverlayHardeningChecks("updateGlobalSettingsPanelVisibility/no-selection");
         return;
     }
 
@@ -5685,11 +5421,13 @@ void ScreenCanvas::updateGlobalSettingsPanelVisibility() {
     // Media selected - show panel if button is checked
     m_globalSettingsPanel->setMediaItem(selectedMedia);
 
-    const bool shouldShowPanel = !m_settingsToggleButton || m_settingsToggleButton->isChecked();
+    const bool shouldShowPanel = !m_globalOverlayHost || m_globalOverlayHost->isSettingsChecked();
     m_globalSettingsPanel->setVisible(shouldShowPanel);
     if (shouldShowPanel) {
         m_globalSettingsPanel->updatePosition();
     }
+
+    runOverlayHardeningChecks("updateGlobalSettingsPanelVisibility");
 }
 
 void ScreenCanvas::refreshSettingsPanelVolumeDisplay() {
@@ -5720,6 +5458,7 @@ void ScreenCanvas::setUploadManager(UploadManager* manager) {
     // Disconnect old manager if any
     if (m_uploadManager) {
         disconnect(m_uploadManager, &UploadManager::uiStateChanged, this, &ScreenCanvas::updateLaunchSceneButtonStyle);
+        disconnect(m_uploadManager, &UploadManager::uiStateChanged, this, &ScreenCanvas::updateLaunchTestSceneButtonStyle);
     }
     
     m_uploadManager = manager;
@@ -5727,7 +5466,10 @@ void ScreenCanvas::setUploadManager(UploadManager* manager) {
     // Connect new manager signals
     if (m_uploadManager) {
         connect(m_uploadManager, &UploadManager::uiStateChanged, this, &ScreenCanvas::updateLaunchSceneButtonStyle);
+        connect(m_uploadManager, &UploadManager::uiStateChanged, this, &ScreenCanvas::updateLaunchTestSceneButtonStyle);
     }
+
+    runOverlayHardeningChecks("setUploadManager");
 }
 
 void ScreenCanvas::emitRemoteSceneLaunchStateChanged()

@@ -11,7 +11,7 @@
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
 #include "frontend/ui/pages/ClientListPage.h"
 #include "frontend/ui/pages/CanvasViewPage.h"
-#include "backend/domain/media/ResizableMediaItems.h"
+#include "backend/domain/media/MediaItems.h"
 #include <QStackedWidget>
 #include <QPushButton>
 #include <QTimer>

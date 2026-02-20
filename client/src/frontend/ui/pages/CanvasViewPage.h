@@ -191,13 +191,6 @@ public:
     ScreenCanvas* getCanvas() const { return m_screenCanvas; }
 
     /**
-     * @brief Refresh overlay actions state based on remote connection
-     * @param remoteConnected Whether the remote client is connected
-     * @param propagateLoss Whether to propagate connection loss
-     */
-    void refreshOverlayActionsState(bool remoteConnected, bool propagateLoss = true);
-
-    /**
      * @brief Set whether upload button is in overlay mode
      * @param inOverlay True if button is in overlay
      */

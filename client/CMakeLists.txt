@@ -56,7 +56,6 @@ set(SOURCES
     # Rendering - Canvas
     src/frontend/rendering/canvas/ScreenCanvas.cpp
     src/frontend/rendering/canvas/OverlayPanels.cpp
-    src/frontend/rendering/canvas/RoundedRectItem.cpp
     
     # Rendering - Remote
     src/frontend/rendering/remote/RemoteSceneController.cpp
@@ -85,9 +84,11 @@ set(SOURCES
     
     # Domain - Media
     src/backend/domain/media/MediaItems.cpp
-    src/backend/domain/media/MediaSettingsPanel.cpp
-    src/backend/domain/media/SelectionIndicators.cpp
     src/backend/domain/media/TextMediaItem.cpp
+
+    # UI - Overlays (Canvas)
+    src/frontend/ui/overlays/canvas/CanvasGlobalOverlayHost.cpp
+    src/frontend/ui/overlays/canvas/CanvasMediaSettingsPanel.cpp
     
     # Network
     src/backend/network/WebSocketClient.cpp
@@ -130,7 +131,6 @@ if(APPLE)
     list(APPEND SOURCES 
         src/backend/platform/macos/MacVideoThumbnailer.mm 
         src/backend/platform/macos/MacWindowManager.mm
-        src/backend/platform/macos/NativeMenu.mm
     )
 endif()
 
@@ -165,6 +165,10 @@ set(HEADERS
     
     # UI - Notifications
     src/frontend/ui/notifications/ToastNotificationSystem.h
+
+    # UI - Overlays (Canvas)
+    src/frontend/ui/overlays/canvas/CanvasGlobalOverlayHost.h
+    src/frontend/ui/overlays/canvas/CanvasMediaSettingsPanel.h
     
     # UI - Theme
     src/frontend/ui/theme/StyleConfig.h
@@ -204,9 +208,6 @@ set(HEADERS
     
     # Domain - Media
     src/backend/domain/media/MediaItems.h
-    src/backend/domain/media/ResizableMediaItems.h
-    src/backend/domain/media/MediaSettingsPanel.h
-    src/backend/domain/media/SelectionIndicators.h
     src/backend/domain/media/TextMediaItem.h
     
     # Network
@@ -250,7 +251,6 @@ if(APPLE)
     list(APPEND HEADERS
         src/backend/platform/macos/MacVideoThumbnailer.h
         src/backend/platform/macos/MacWindowManager.h
-        src/backend/platform/macos/NativeMenu.h
     )
 endif()
 

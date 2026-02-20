@@ -27,9 +27,6 @@ public:
     // Main style application method
     void applyUploadButtonStyle(QPushButton* uploadButton);
     
-    // Refresh overlay actions state
-    void refreshOverlayActionsState(bool remoteConnected, bool propagateLoss = true);
-    
     // Update button text during upload progress
     void updateUploadButtonProgress(QPushButton* uploadButton, int percent, int filesCompleted, int totalFiles);
 

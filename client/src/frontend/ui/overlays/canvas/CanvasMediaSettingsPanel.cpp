@@ -1,4 +1,4 @@
-#include "backend/domain/media/MediaSettingsPanel.h"
+#include "frontend/ui/overlays/canvas/CanvasMediaSettingsPanel.h"
 #include "backend/files/Theme.h"
 #include "frontend/ui/theme/AppColors.h"
 #include <QWidget>

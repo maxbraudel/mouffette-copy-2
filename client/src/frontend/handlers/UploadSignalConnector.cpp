@@ -2,7 +2,7 @@
 #include "MainWindow.h"
 #include "backend/network/UploadManager.h"
 #include "backend/network/WebSocketClient.h"
-#include "backend/domain/media/ResizableMediaItems.h"
+#include "backend/domain/media/MediaItems.h"
 #include "frontend/rendering/canvas/ScreenCanvas.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include <QHash>
