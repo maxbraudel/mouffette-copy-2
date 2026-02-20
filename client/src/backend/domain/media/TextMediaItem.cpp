@@ -856,6 +856,7 @@ public:
         setFlag(QGraphicsItem::ItemIsSelectable, false);
         setFlag(QGraphicsItem::ItemIsFocusable, true);
         setTextInteractionFlags(Qt::NoTextInteraction);
+        setAcceptedMouseButtons(Qt::NoButton);
 
         m_caretBlinkTimer.setSingleShot(false);
         m_caretBlinkTimer.setTimerType(Qt::CoarseTimer);
@@ -967,259 +968,12 @@ protected:
             return;
         }
 
-        QStyleOptionGraphicsItem opt(*option);
-        opt.state &= ~QStyle::State_HasFocus;
+        QGraphicsTextItem::paint(painter, option, widget);
 
-        const QRectF bounds = boundingRect();
-
-        const bool skipDocRendering = (m_owner && m_owner->isEditing());
-
-        if (!skipDocRendering) {
-            const QTransform world = painter->worldTransform();
-            qreal scaleX = std::hypot(world.m11(), world.m21());
-            qreal scaleY = std::hypot(world.m22(), world.m12());
-            if (scaleX <= 1e-6) scaleX = 1.0;
-            if (scaleY <= 1e-6) scaleY = 1.0;
-
-            qreal dpr = 1.0;
-            if (QPaintDevice* device = painter->device()) {
-                dpr = std::max<qreal>(1.0, device->devicePixelRatioF());
-            }
-
-            const qreal renderScale = std::max<qreal>(1.0, std::max(scaleX, scaleY) * dpr);
-            const int maxDimension = 8192;
-            const int width = std::clamp(static_cast<int>(std::ceil(bounds.width() * renderScale)), 1, maxDimension);
-            const int height = std::clamp(static_cast<int>(std::ceil(bounds.height() * renderScale)), 1, maxDimension);
-            const bool renderScaleChanged = std::abs(renderScale - m_cachedRenderScale) > 0.02;
-
-            if (m_cacheDirty || renderScaleChanged || m_cachedImage.size() != QSize(width, height)) {
-                m_cachedImage = QImage(width, height, QImage::Format_ARGB32_Premultiplied);
-                m_cachedImage.fill(Qt::transparent);
-
-                QPainter bufferPainter(&m_cachedImage);
-                bufferPainter.setRenderHint(QPainter::Antialiasing, true);
-                bufferPainter.setRenderHint(QPainter::TextAntialiasing, true);
-                bufferPainter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-                bufferPainter.scale(renderScale, renderScale);
-                bufferPainter.translate(-bounds.topLeft());
-                // Render only the base text content; caret and selection are drawn as overlays
-                if (QTextDocument* doc = document()) {
-                    const QColor fillColor = m_owner ? m_owner->textColor() : defaultTextColor();
-                    if (m_owner && m_owner->highlightEnabled()) {
-                        QColor highlight = m_owner->highlightColor();
-                        if (!highlight.isValid()) {
-                            highlight = TextMediaDefaults::TEXT_HIGHLIGHT_COLOR;
-                        }
-                        if (highlight.alpha() > 0) {
-                            bufferPainter.save();
-                            bufferPainter.setPen(Qt::NoPen);
-                            bufferPainter.setBrush(highlight);
-                            
-                            QAbstractTextDocumentLayout* docLayout = doc->documentLayout();
-                            if (docLayout) {
-                                // Draw highlight per-line, respecting document alignment
-                                const qreal docWidth = std::max<qreal>(docLayout->documentSize().width(), 1.0);
-                                const Qt::Alignment align = doc->defaultTextOption().alignment();
-                                for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
-                                    QTextLayout* textLayout = block.layout();
-                                    if (!textLayout) continue;
-                                    
-                                    const QRectF blockRect = docLayout->blockBoundingRect(block);
-                                    for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-                                        QTextLine line = textLayout->lineAt(lineIndex);
-                                        if (!line.isValid()) continue;
-
-                                        QRectF lineRect = line.naturalTextRect();
-                                        if (lineRect.isValid() && lineRect.width() > 0.0 && lineRect.height() > 0.0) {
-                                            lineRect.translate(blockRect.topLeft());
-                                        } else {
-                                            const qreal lineWidth = line.naturalTextWidth();
-                                            const qreal width = std::max<qreal>(lineWidth, 1.0);
-                                            qreal alignedX = line.x();
-                                            if (std::abs(alignedX) < 1e-4 && width < docWidth - 1e-4) {
-                                                const qreal horizontalSpace = std::max<qreal>(0.0, docWidth - width);
-                                                if (align.testFlag(Qt::AlignRight)) {
-                                                    alignedX += horizontalSpace;
-                                                } else if (align.testFlag(Qt::AlignHCenter)) {
-                                                    alignedX += horizontalSpace * 0.5;
-                                                }
-                                            }
-                                            const qreal height = std::max<qreal>(line.height(), 1.0);
-                                            lineRect = QRectF(blockRect.topLeft() + QPointF(alignedX, line.y()), QSizeF(width, height));
-                                        }
-
-                                        bufferPainter.drawRect(lineRect);
-                                    }
-                                }
-                            }
-                            
-                            bufferPainter.restore();
-                        }
-                    }
-                    QColor outlineColor = fillColor;
-                    if (m_owner) {
-                        const QColor ownerOutline = m_owner->textBorderColor();
-                        if (ownerOutline.isValid()) {
-                            outlineColor = ownerOutline;
-                        }
-                    }
-
-                    const QFont ownerFont = m_owner ? m_owner->font() : font();
-                    const qreal strokeWidth = m_owner ? computeStrokeWidthFromFont(ownerFont, m_owner->textBorderWidth()) : 0.0;
-
-                    // Clear outline formatting
-                    {
-                        QTextCursor cursor(doc);
-                        cursor.select(QTextCursor::Document);
-                        QTextCharFormat format;
-                        format.setForeground(fillColor);
-                        format.clearProperty(QTextFormat::TextOutline);
-                        cursor.mergeCharFormat(format);
-                    }
-
-                    if (strokeWidth > 0.0) {
-                        // Phase 2: Strict two-pass rendering in InlineTextEditor
-                        QAbstractTextDocumentLayout* docLayout = doc->documentLayout();
-                        QElapsedTimer strokeTimer;
-                        strokeTimer.start();
-                        int glyphCount = 0;
-                        
-                        // Pass 1: Render all strokes first (background)
-                        for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
-                            QTextLayout* textLayout = block.layout();
-                            if (!textLayout) continue;
-                            
-                            const QRectF blockRect = docLayout->blockBoundingRect(block);
-                            for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-                                QTextLine line = textLayout->lineAt(lineIndex);
-                                if (!line.isValid()) continue;
-
-                                QList<QGlyphRun> glyphRuns = line.glyphRuns();
-                                for (const QGlyphRun& run : glyphRuns) {
-                                    const QVector<quint32> indexes = run.glyphIndexes();
-                                    const QVector<QPointF> positions = run.positions();
-                                    if (indexes.size() != positions.size()) continue;
-                                    const QRawFont rawFont = run.rawFont();
-                                    
-                                    for (int gi = 0; gi < indexes.size(); ++gi) {
-                                        const QPointF glyphPos = blockRect.topLeft() + QPointF(0.0, line.y()) + positions[gi];
-                                        const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);                                        // Draw stroke for ALL glyphs
-                                        bufferPainter.save();
-                                        bufferPainter.translate(glyphPos);
-                                        bufferPainter.setPen(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                                        bufferPainter.setBrush(Qt::NoBrush);
-                                        bufferPainter.drawPath(glyphPath);
-                                        bufferPainter.restore();
-                                    }
-                                    glyphCount += indexes.size();
-                                }
-                            }
-                        }
-                        
-                        // Pass 2: Render all fills on top (foreground)
-                        for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
-                            QTextLayout* textLayout = block.layout();
-                            if (!textLayout) continue;
-                            
-                            const QRectF blockRect = docLayout->blockBoundingRect(block);
-                            for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-                                QTextLine line = textLayout->lineAt(lineIndex);
-                                if (!line.isValid()) continue;
-
-                                QList<QGlyphRun> glyphRuns = line.glyphRuns();
-                                for (const QGlyphRun& run : glyphRuns) {
-                                    const QVector<quint32> indexes = run.glyphIndexes();
-                                    const QVector<QPointF> positions = run.positions();
-                                    if (indexes.size() != positions.size()) continue;
-                                    const QRawFont rawFont = run.rawFont();
-                                    
-                                    for (int gi = 0; gi < indexes.size(); ++gi) {
-                                        const QPointF glyphPos = blockRect.topLeft() + QPointF(0.0, line.y()) + positions[gi];
-                                        const QPainterPath glyphPath = cachedGlyphPath(rawFont, indexes[gi]);                                        // Draw fill for ALL glyphs
-                                        bufferPainter.save();
-                                        bufferPainter.translate(glyphPos);
-                                        bufferPainter.setPen(Qt::NoPen);
-                                        bufferPainter.setBrush(fillColor);
-                                        bufferPainter.drawPath(glyphPath);
-                                        bufferPainter.restore();
-                                    }
-                                }
-                            }
-                        }
-                        
-                        const qint64 outlineMs = strokeTimer.elapsed();
-                        logStrokeDiagnostics("InlineEditorStroke",
-                                              m_owner ? m_owner->textBorderWidth() : 0.0,
-                                              strokeWidth,
-                                              glyphCount,
-                                              outlineMs,
-                                              outlineMs,
-                                              docLayout ? docLayout->documentSize() : QSizeF(),
-                                              QSize(width, height),
-                                              1.0,
-                                              previewTextForLog(doc->toPlainText()));
-                    } else {
-                        QAbstractTextDocumentLayout::PaintContext ctx;
-                        ctx.cursorPosition = -1;
-                        ctx.palette.setColor(QPalette::Text, fillColor);
-                        doc->documentLayout()->draw(&bufferPainter, ctx);
-                    }
-                } else {
-                    QGraphicsTextItem::paint(&bufferPainter, &opt, widget);
-                }
-                bufferPainter.end();
-
-                m_cachedRenderScale = renderScale;
-                m_cacheDirty = false;
-            }
-
-            const QRectF sourceRect(0.0, 0.0, static_cast<qreal>(m_cachedImage.width()), static_cast<qreal>(m_cachedImage.height()));
-            painter->drawImage(bounds, m_cachedImage, sourceRect);
-        }
-
-        // Draw active selection highlight as an overlay so it stays responsive to cursor movement
-        drawSelectionOverlay(painter, bounds);
-
-        const bool editing = (m_owner && m_owner->isEditing());
-
-        // Draw the caret on top using a high-contrast vector rectangle so it stays sharp
-        if (editing && (textInteractionFlags() & Qt::TextEditable) && m_caretVisible) {
-            QTextCursor cursor = textCursor();
-            if (!cursor.hasSelection()) {
-                const QRectF caretRect = cursorRectForPosition(cursor).translated(bounds.topLeft());
-                if (!caretRect.isEmpty()) {
-                    const qreal desiredSceneWidth = 3.0; // constant thickness in canvas pixels
-                    const QTransform world = painter->worldTransform();
-                    qreal scaleX = std::hypot(world.m11(), world.m21());
-                    if (scaleX <= 1e-6) {
-                        scaleX = 1.0;
-                    }
-                    const qreal caretHalfWidth = (desiredSceneWidth / scaleX) * 0.5;
-                    QRectF adjustedCaretRect = caretRect;
-                    const qreal caretCenterX = adjustedCaretRect.center().x();
-                    adjustedCaretRect.setLeft(caretCenterX - caretHalfWidth);
-                    adjustedCaretRect.setRight(caretCenterX + caretHalfWidth);
-
-                    painter->save();
-                    painter->setRenderHint(QPainter::Antialiasing, false);
-                    painter->setRenderHint(QPainter::TextAntialiasing, false);
-                    painter->setPen(Qt::NoPen);
-
-                    QColor caretColor = defaultTextColor();
-                    caretColor.setAlpha(255);
-
-                    // Add a subtle outline that contrasts with the text color for better visibility
-                    const int luminance = qGray(caretColor.rgb());
-                    QColor outlineColor = luminance > 128 ? QColor(0, 0, 0, 160) : QColor(255, 255, 255, 160);
-
-                    const qreal outlineInset = 1.0 / scaleX;
-                    QRectF outlineRect = adjustedCaretRect.adjusted(-outlineInset, 0.0, outlineInset, 0.0);
-                    painter->fillRect(outlineRect, outlineColor);
-                    painter->fillRect(adjustedCaretRect, caretColor);
-
-                    painter->restore();
-                }
-            }
+        m_cacheDirty = false;
+        m_cachedRenderScale = 1.0;
+        if (!m_cachedImage.isNull()) {
+            m_cachedImage = QImage();
         }
     }
 
@@ -3127,7 +2881,7 @@ TextMediaItem::TextMediaItem(
     
     // Create alignment controls (will be shown when selected)
     ensureAlignmentControls();
-    ensureTextRenderer();
+    ensureInlineEditor();
 
     setFitToTextEnabled(true);
     // Ensure initial geometry is already fit-to-text before first paint.
@@ -3618,6 +3372,7 @@ bool TextMediaItem::beginInlineEditing() {
     m_inlineEditor->setEnabled(true);
     m_inlineEditor->setVisible(true);
     m_inlineEditor->setTextInteractionFlags(Qt::TextEditorInteraction);
+    m_inlineEditor->setAcceptedMouseButtons(Qt::AllButtons);
 
     // Ensure editing is always visually available, even if the display layer
     // was previously faded out by transition logic.
@@ -3668,6 +3423,7 @@ void TextMediaItem::ensureInlineEditor() {
     editor->setFont(m_font);
     editor->setEnabled(false);
     editor->setVisible(false);
+    editor->setAcceptedMouseButtons(Qt::NoButton);
 
     if (QTextDocument* doc = editor->document()) {
         {
@@ -4029,9 +3785,10 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
     const QString editedText = m_inlineEditor->toPlainText();
 
     m_inlineEditor->setTextInteractionFlags(Qt::NoTextInteraction);
+    m_inlineEditor->setAcceptedMouseButtons(Qt::NoButton);
     m_inlineEditor->clearFocus();
     m_inlineEditor->setEnabled(false);
-    m_inlineEditor->setVisible(false);
+    m_inlineEditor->setVisible(true);
     {
         QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
         m_inlineEditor->setPlainText(m_text);
@@ -4058,13 +3815,7 @@ void TextMediaItem::finishInlineEditing(bool commitChanges) {
     }
     m_textBeforeEditing.clear();
 
-    // Rasterize text after editing completes
     invalidateRenderPipeline(InvalidationReason::Content, false);
-    
-    // Phase 5: Flatten composite overlay to base on commit
-    if (commitChanges && m_incrementalRenderValid) {
-        flattenCompositeToBase();
-    }
 
     updateInlineEditorGeometry();
     if (m_fitToTextEnabled) {
@@ -4765,379 +4516,37 @@ void TextMediaItem::handleRasterJobFinished(quint64 generation, QImage&& raster,
 void TextMediaItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) {
     Q_UNUSED(option);
     Q_UNUSED(widget);
-    
-    if (!painter) return;
-    
-    // Only update geometry when not editing and not actively resizing to avoid
-    // triggering expensive layout operations on every drag frame.
-    if (!m_isEditing && m_activeHandle == None) {
-        updateInlineEditorGeometry();
-    }
 
-    if (m_isEditing && m_inlineEditor) {
-        m_inlineEditor->setVisible(true);
-        m_inlineEditor->setOpacity(1.0);
-    }
-
-    painter->save();
-
-    // Get the item bounds
-    QRectF bounds = boundingRect();
-
-    // Apply content visibility and opacity
-    if (!m_contentVisible || m_contentOpacity <= 0.0 || m_contentDisplayOpacity <= 0.0) {
-        painter->restore();
-        // Still paint selection chrome and overlays
-        paintSelectionAndLabel(painter);
+    if (!painter) {
         return;
     }
-    
-    // Calculate effective opacity
-    qreal effectiveOpacity = m_contentOpacity * m_contentDisplayOpacity;
-    painter->setOpacity(effectiveOpacity);
 
-    const qreal currentScale = scale();
-    const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
-
-    qreal canvasZoom = 1.0;
-    if (scene() && !scene()->views().isEmpty()) {
-        if (QGraphicsView* view = scene()->views().first()) {
-            const QTransform viewTransform = view->transform();
-            const qreal scaleX = std::hypot(viewTransform.m11(), viewTransform.m21());
-            const qreal scaleY = std::hypot(viewTransform.m22(), viewTransform.m12());
-            if (scaleX > 1e-6 && scaleY > 1e-6) {
-                canvasZoom = (scaleX + scaleY) * 0.5;
-            } else if (scaleX > 1e-6) {
-                canvasZoom = scaleX;
-            } else if (scaleY > 1e-6) {
-                canvasZoom = scaleY;
-            }
-        }
-    }
-    if (canvasZoom <= 1e-6) {
-        canvasZoom = 1.0;
+    if (!m_inlineEditor) {
+        ensureInlineEditor();
     }
 
-    const qreal effectiveScale = std::max(std::abs(currentScale) * uniformScale * canvasZoom, 1e-4);
-    const bool resizingUniformly = (m_activeHandle != None);
-    const bool zoomed = std::abs(canvasZoom - 1.0) > 1e-4;
-    const bool needsScaledRaster = zoomed ||
-        std::abs(currentScale - 1.0) > 1e-4 ||
-        std::abs(m_uniformScaleFactor - 1.0) > 1e-4 ||
-        resizingUniformly;
-
-    if (needsScaledRaster) {
-        const bool interactiveResize = resizingUniformly;
-        const bool interactiveAltResize = interactiveResize && m_lastAxisAltStretch;
-        queueScaledRasterUpdate(effectiveScale, currentScale, canvasZoom);
-
-        if (m_lastScaledBaseSize != m_baseSize) {
-            // Keep presenting the last completed raster while a new raster is computed.
-            // Clearing it here causes a visible blank flash at ALT-resize start.
-            m_scaledRasterDirty = true;
-            queueScaledRasterUpdate(effectiveScale, currentScale, canvasZoom);
-        }
-
-        painter->save();
-        painter->setRenderHint(QPainter::SmoothPixmapTransform, false);
-        // Neutralize the item's local scale, uniform scale, and canvas/view zoom so the text
-        // keeps the same layout size inside the container while the raster image
-        // provides more pixels when zooming.
-        const qreal epsilon = 1e-4;
-        const qreal totalScale = std::max(std::abs(currentScale * uniformScale * canvasZoom), epsilon);
-        painter->scale(1.0 / totalScale, 1.0 / totalScale);
-
-        const QTransform scaleTransform = (std::abs(totalScale) > epsilon)
-            ? QTransform::fromScale(totalScale, totalScale)
-            : QTransform::fromScale(1.0, 1.0);
-        QRectF scaledBounds = scaleTransform.mapRect(bounds);
-        painter->setClipRect(scaledBounds);
-
-        const bool hasCurrentHighRes =
-            m_scaledRasterPixmapValid &&
-            !m_scaledRasterPixmap.isNull() &&
-            m_scaledRasterContentRevision == m_contentRevision;
-        const bool hasAnyScaledRaster =
-            m_scaledRasterPixmapValid &&
-            !m_scaledRasterPixmap.isNull();
-        const bool stateAllowsPresent =
-            m_renderState == RenderState::HighResPending ||
-            m_renderState == RenderState::HighResReady;
-        const bool hasPresentedScaledRaster = hasCurrentHighRes && stateAllowsPresent;
-        const bool staleScaledGeometry = (m_lastScaledBaseSize != m_baseSize);
-        const bool geometryFreshForPresentation = !staleScaledGeometry;
-        const bool canPresentCurrentHighRes = hasPresentedScaledRaster && geometryFreshForPresentation;
-        const bool hasVisibleRegionMetadata = m_scaledRasterVisibleRegion.isValid() && !m_scaledRasterVisibleRegion.isEmpty();
-        const bool coversFullItemRegion = !hasVisibleRegionMetadata || m_scaledRasterVisibleRegion.contains(bounds);
-
-        auto anchorRectToAlignment = [&](QRectF rect, const QRectF& boundsRect) {
-            if (!rect.isValid() || rect.isEmpty() || !boundsRect.isValid() || boundsRect.isEmpty()) {
-                return rect;
+    if (m_inlineEditor) {
+        if (!m_isEditing) {
+            QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
+            if (m_inlineEditor->toPlainText() != m_text) {
+                m_inlineEditor->setPlainText(m_text);
+                m_documentMetricsDirty = true;
+                m_cachedEditorPosValid = false;
             }
-
-            switch (m_horizontalAlignment) {
-                case HorizontalAlignment::Left:
-                    rect.moveLeft(boundsRect.left());
-                    break;
-                case HorizontalAlignment::Center:
-                    rect.moveCenter(QPointF(boundsRect.center().x(), rect.center().y()));
-                    break;
-                case HorizontalAlignment::Right:
-                    rect.moveRight(boundsRect.right());
-                    break;
-            }
-
-            switch (m_verticalAlignment) {
-                case VerticalAlignment::Top:
-                    rect.moveTop(boundsRect.top());
-                    break;
-                case VerticalAlignment::Center:
-                    rect.moveCenter(QPointF(rect.center().x(), boundsRect.center().y()));
-                    break;
-                case VerticalAlignment::Bottom:
-                    rect.moveBottom(boundsRect.bottom());
-                    break;
-            }
-
-            return rect;
-        };
-
-        auto drawPixmapWithoutDeformation = [&](const QPixmap& pixmap,
-                                                const QRectF& sourceRect,
-                                                const QRectF& preferredDestRect,
-                                                const QRectF& logicalSourceItemRect,
-                                                const QRectF& fullLogicalBounds,
-                                                bool anchorToAlignment) {
-            painter->save();
-            painter->setClipRect(scaledBounds);
-            QRectF destRect = logicalSourceItemRect.isValid() && !logicalSourceItemRect.isEmpty()
-                ? scaleTransform.mapRect(logicalSourceItemRect)
-                : preferredDestRect;
-            bool sourceIsFullBounds = true;
-            if (logicalSourceItemRect.isValid() && !logicalSourceItemRect.isEmpty() &&
-                fullLogicalBounds.isValid() && !fullLogicalBounds.isEmpty()) {
-                constexpr qreal kBoundsEpsilon = 0.5;
-                sourceIsFullBounds =
-                    std::abs(logicalSourceItemRect.left() - fullLogicalBounds.left()) <= kBoundsEpsilon &&
-                    std::abs(logicalSourceItemRect.top() - fullLogicalBounds.top()) <= kBoundsEpsilon &&
-                    std::abs(logicalSourceItemRect.width() - fullLogicalBounds.width()) <= kBoundsEpsilon &&
-                    std::abs(logicalSourceItemRect.height() - fullLogicalBounds.height()) <= kBoundsEpsilon;
-            }
-            if (anchorToAlignment && sourceIsFullBounds) {
-                destRect = anchorRectToAlignment(destRect, scaledBounds);
-            }
-            painter->drawPixmap(destRect, pixmap, sourceRect);
-            painter->restore();
-        };
-
-        auto drawImageWithoutDeformation = [&](const QImage& image,
-                                               const QRectF& preferredDestRect,
-                                               const QRectF& logicalSourceItemRect,
-                                               const QRectF& fullLogicalBounds,
-                                               bool anchorToAlignment) {
-            painter->save();
-            painter->setClipRect(scaledBounds);
-            QRectF destRect = logicalSourceItemRect.isValid() && !logicalSourceItemRect.isEmpty()
-                ? scaleTransform.mapRect(logicalSourceItemRect)
-                : preferredDestRect;
-            bool sourceIsFullBounds = true;
-            if (logicalSourceItemRect.isValid() && !logicalSourceItemRect.isEmpty() &&
-                fullLogicalBounds.isValid() && !fullLogicalBounds.isEmpty()) {
-                constexpr qreal kBoundsEpsilon = 0.5;
-                sourceIsFullBounds =
-                    std::abs(logicalSourceItemRect.left() - fullLogicalBounds.left()) <= kBoundsEpsilon &&
-                    std::abs(logicalSourceItemRect.top() - fullLogicalBounds.top()) <= kBoundsEpsilon &&
-                    std::abs(logicalSourceItemRect.width() - fullLogicalBounds.width()) <= kBoundsEpsilon &&
-                    std::abs(logicalSourceItemRect.height() - fullLogicalBounds.height()) <= kBoundsEpsilon;
-            }
-            if (anchorToAlignment && sourceIsFullBounds) {
-                destRect = anchorRectToAlignment(destRect, scaledBounds);
-            }
-            const QRectF sourceRect(QPointF(0.0, 0.0), QSizeF(static_cast<qreal>(image.width()), static_cast<qreal>(image.height())));
-            painter->drawImage(destRect, image, sourceRect);
-            painter->restore();
-        };
-
-        if (canPresentCurrentHighRes) {
-            // DPR is always 1.0, so source size equals physical pixel dimensions
-            const QSizeF sourceSize(
-                static_cast<qreal>(m_scaledRasterPixmap.width()),
-                static_cast<qreal>(m_scaledRasterPixmap.height())
-            );
-            const QRectF sourceRect(QPointF(0.0, 0.0), sourceSize);
-            
-            // If viewport optimization is active, draw at the correct offset
-            QRectF destRect = scaledBounds;
-            if (!m_scaledRasterVisibleRegion.isEmpty() && m_scaledRasterVisibleRegion.isValid()) {
-                // The rasterized image represents only m_scaledRasterVisibleRegion of the item
-                // Position it correctly in item coordinates
-                const QRectF scaledVisibleRegion = scaleTransform.mapRect(m_scaledRasterVisibleRegion);
-                destRect = scaledVisibleRegion;
-            }
-
-            if (interactiveResize && coversFullItemRegion) {
-                // During active handle drag, pin draw target to full bounds to prevent
-                // viewport-region wobble while geometry is changing every frame.
-                destRect = scaledBounds;
-            }
-
-            const bool shouldAvoidDeformation = staleScaledGeometry || (interactiveResize && !coversFullItemRegion);
-            if (shouldAvoidDeformation) {
-                QRectF logicalSourceItemRect;
-                if (!m_scaledRasterVisibleRegion.isEmpty() && m_scaledRasterVisibleRegion.isValid()) {
-                    logicalSourceItemRect = m_scaledRasterVisibleRegion;
-                } else if (m_lastScaledBaseSize.width() > 0 && m_lastScaledBaseSize.height() > 0) {
-                    logicalSourceItemRect = QRectF(0.0, 0.0,
-                                                   static_cast<qreal>(m_lastScaledBaseSize.width()),
-                                                   static_cast<qreal>(m_lastScaledBaseSize.height()));
-                }
-                const bool anchorToAlignment = m_lastAxisAltStretch;
-                QRectF fullLogicalBounds;
-                if (m_lastScaledBaseSize.width() > 0 && m_lastScaledBaseSize.height() > 0) {
-                    fullLogicalBounds = QRectF(0.0, 0.0,
-                                               static_cast<qreal>(m_lastScaledBaseSize.width()),
-                                               static_cast<qreal>(m_lastScaledBaseSize.height()));
-                }
-                drawPixmapWithoutDeformation(m_scaledRasterPixmap, sourceRect, destRect, logicalSourceItemRect, fullLogicalBounds, anchorToAlignment);
-            } else {
-                // Draw viewport at high resolution (8×+) - this overwrites the fallback in the visible area
-                painter->drawPixmap(destRect, m_scaledRasterPixmap, sourceRect);
-            }
-            
+            m_inlineEditor->setTextInteractionFlags(Qt::NoTextInteraction);
+            m_inlineEditor->setAcceptedMouseButtons(Qt::NoButton);
+            m_inlineEditor->setEnabled(false);
         } else {
-            // Keep UI thread smooth: present last completed frame while async refresh is in flight.
-            if (hasAnyScaledRaster) {
-                const QSizeF sourceSize(
-                    static_cast<qreal>(m_scaledRasterPixmap.width()),
-                    static_cast<qreal>(m_scaledRasterPixmap.height())
-                );
-                const QRectF sourceRect(QPointF(0.0, 0.0), sourceSize);
-
-                QRectF destRect = scaledBounds;
-                if (!m_scaledRasterVisibleRegion.isEmpty() && m_scaledRasterVisibleRegion.isValid()) {
-                    const QRectF scaledVisibleRegion = scaleTransform.mapRect(m_scaledRasterVisibleRegion);
-                    destRect = scaledVisibleRegion;
-                }
-
-                const bool shouldAvoidDeformation = interactiveResize || staleScaledGeometry;
-                if (shouldAvoidDeformation) {
-                    QRectF logicalSourceItemRect;
-                    if (!m_scaledRasterVisibleRegion.isEmpty() && m_scaledRasterVisibleRegion.isValid()) {
-                        logicalSourceItemRect = m_scaledRasterVisibleRegion;
-                    } else if (m_lastScaledBaseSize.width() > 0 && m_lastScaledBaseSize.height() > 0) {
-                        logicalSourceItemRect = QRectF(0.0, 0.0,
-                                                       static_cast<qreal>(m_lastScaledBaseSize.width()),
-                                                       static_cast<qreal>(m_lastScaledBaseSize.height()));
-                    }
-                    const bool anchorToAlignment = m_lastAxisAltStretch;
-                    QRectF fullLogicalBounds;
-                    if (m_lastScaledBaseSize.width() > 0 && m_lastScaledBaseSize.height() > 0) {
-                        fullLogicalBounds = QRectF(0.0, 0.0,
-                                                   static_cast<qreal>(m_lastScaledBaseSize.width()),
-                                                   static_cast<qreal>(m_lastScaledBaseSize.height()));
-                    }
-                    drawPixmapWithoutDeformation(m_scaledRasterPixmap, sourceRect, destRect, logicalSourceItemRect, fullLogicalBounds, anchorToAlignment);
-                } else {
-                    painter->drawPixmap(destRect, m_scaledRasterPixmap, sourceRect);
-                }
-            } else if (!m_rasterizedText.isNull()) {
-                const bool staleBaseGeometry =
-                    m_lastRasterizedSize.width() > 0 &&
-                    m_lastRasterizedSize.height() > 0 &&
-                    m_lastRasterizedSize != m_baseSize;
-                const bool shouldAvoidDeformation = interactiveResize || staleBaseGeometry;
-                if (shouldAvoidDeformation) {
-                    QRectF logicalSourceItemRect;
-                    if (m_lastRasterizedSize.width() > 0 && m_lastRasterizedSize.height() > 0) {
-                        logicalSourceItemRect = QRectF(0.0, 0.0,
-                                                       static_cast<qreal>(m_lastRasterizedSize.width()),
-                                                       static_cast<qreal>(m_lastRasterizedSize.height()));
-                    }
-                    const bool anchorToAlignment = m_lastAxisAltStretch;
-                    QRectF fullLogicalBounds;
-                    if (m_lastRasterizedSize.width() > 0 && m_lastRasterizedSize.height() > 0) {
-                        fullLogicalBounds = QRectF(0.0, 0.0,
-                                                   static_cast<qreal>(m_lastRasterizedSize.width()),
-                                                   static_cast<qreal>(m_lastRasterizedSize.height()));
-                    }
-                    drawImageWithoutDeformation(m_rasterizedText, scaledBounds, logicalSourceItemRect, fullLogicalBounds, anchorToAlignment);
-                } else {
-                    painter->drawImage(scaledBounds, m_rasterizedText);
-                }
-            }
+            m_inlineEditor->setAcceptedMouseButtons(Qt::AllButtons);
         }
-        painter->restore();
-    } else {
-        // Rasterize text if needed (once after editing/resizing)
-        rasterizeText();
-        m_renderState = RenderState::Idle;
 
-        // Only draw the base raster if it was produced for the CURRENT base size.
-        // After an alt-resize, m_lastRasterizedSize still refers to the pre-resize
-        // dimensions. Drawing the old (differently-sized) image into `bounds` would
-        // stretch or squish the text, producing a text-size flicker on every frame
-        // until the new base-raster job completes. When the sizes differ, fall through
-        // to the scaled-raster fallback instead (correct scale, possibly blurry) or
-        // accept a blank frame rather than show actively misleading wrong-scale text.
-        const bool baseRasterSizeMatch = !m_rasterizedText.isNull() && (m_lastRasterizedSize == m_baseSize);
-        if (baseRasterSizeMatch) {
-            painter->drawImage(bounds, m_rasterizedText);
-        } else if (m_scaledRasterPixmapValid && !m_scaledRasterPixmap.isNull()) {
-            // Fallback: present the last available scaled raster scaled to fit bounds
-            // while the base-raster job is in flight, OR while the base raster is stale
-            // (wrong size after alt-resize). Using the scaled raster here shows the text
-            // at approximately the right visual size rather than stretched wrong-size text.
-            const QRectF src(QPointF(0.0, 0.0),
-                             QSizeF(static_cast<qreal>(m_scaledRasterPixmap.width()),
-                                    static_cast<qreal>(m_scaledRasterPixmap.height())));
-            QRectF destRect = bounds;
-            if (m_lastScaledBaseSize.width() > 0 && m_lastScaledBaseSize.height() > 0) {
-                destRect = QRectF(0.0, 0.0,
-                                  static_cast<qreal>(m_lastScaledBaseSize.width()),
-                                  static_cast<qreal>(m_lastScaledBaseSize.height()));
-            } else if (m_lastRasterizedSize.width() > 0 && m_lastRasterizedSize.height() > 0) {
-                destRect = QRectF(0.0, 0.0,
-                                  static_cast<qreal>(m_lastRasterizedSize.width()),
-                                  static_cast<qreal>(m_lastRasterizedSize.height()));
-            }
+        updateInlineEditorGeometry();
 
-            if (m_lastAxisAltStretch && destRect.isValid() && !destRect.isEmpty()) {
-                switch (m_horizontalAlignment) {
-                    case HorizontalAlignment::Left:
-                        destRect.moveLeft(bounds.left());
-                        break;
-                    case HorizontalAlignment::Center:
-                        destRect.moveCenter(QPointF(bounds.center().x(), destRect.center().y()));
-                        break;
-                    case HorizontalAlignment::Right:
-                        destRect.moveRight(bounds.right());
-                        break;
-                }
-
-                switch (m_verticalAlignment) {
-                    case VerticalAlignment::Top:
-                        destRect.moveTop(bounds.top());
-                        break;
-                    case VerticalAlignment::Center:
-                        destRect.moveCenter(QPointF(destRect.center().x(), bounds.center().y()));
-                        break;
-                    case VerticalAlignment::Bottom:
-                        destRect.moveBottom(bounds.bottom());
-                        break;
-                }
-            }
-
-            painter->save();
-            painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
-            painter->setClipRect(bounds);
-            painter->drawPixmap(destRect, m_scaledRasterPixmap, src);
-            painter->restore();
-        }
+        const bool showContent = m_contentVisible && (m_contentOpacity > 0.0) && (m_contentDisplayOpacity > 0.0);
+        m_inlineEditor->setVisible(showContent);
+        m_inlineEditor->setOpacity(showContent ? (m_contentOpacity * m_contentDisplayOpacity) : 0.0);
     }
 
-    painter->restore();
-    
-    // Paint selection chrome and overlays (handles, buttons, etc.)
     paintSelectionAndLabel(painter);
 }
 
