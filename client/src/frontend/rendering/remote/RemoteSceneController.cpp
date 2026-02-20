@@ -1750,7 +1750,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
     if (item->type == "text") {
         bool renderedAllSpans = !item->spans.isEmpty();
         for (const auto& span : item->spans) {
-            if (!span.imageItem) {
+            if (!span.textItem) {
                 renderedAllSpans = false;
                 break;
             }
