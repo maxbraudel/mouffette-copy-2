@@ -139,36 +139,6 @@ public:
     void setRemoteConnectionStatus(const QString& status, bool propagateLoss = true);
 
     /**
-     * @brief Show the remote client info container
-     */
-    void showRemoteClientInfo();
-
-    /**
-     * @brief Hide the remote client info container
-     */
-    void hideRemoteClientInfo();
-
-    /**
-     * @brief Add volume indicator to the layout
-     */
-    void addVolumeIndicatorToLayout();
-
-    /**
-     * @brief Remove volume indicator from the layout
-     */
-    void removeVolumeIndicatorFromLayout();
-
-    /**
-     * @brief Add remote status to the layout
-     */
-    void addRemoteStatusToLayout();
-
-    /**
-     * @brief Remove remote status from the layout
-     */
-    void removeRemoteStatusFromLayout();
-
-    /**
      * @brief Set the active canvas
      * @param canvas The canvas to display
      */
