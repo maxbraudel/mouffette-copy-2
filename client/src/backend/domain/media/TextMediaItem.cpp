@@ -70,7 +70,6 @@ namespace {
 constexpr qreal kContentPadding = 4.0;
 constexpr qreal kStrokeOverflowScale = 0.75;
 constexpr qreal kStrokeOverflowMinPx = 1.5;
-constexpr int kScaledRasterThrottleIntervalMs = 20;
 constexpr qreal kFitToTextMinWidth = 24.0;
 constexpr int kFitToTextSizeStabilizationPx = 1;
 constexpr qreal kMaxOutlineThicknessFactor = 0.35;
@@ -1568,10 +1567,7 @@ void TextMediaItem::applyFontChange(const QFont& font) {
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
     invalidateRenderPipeline(InvalidationReason::Geometry, true);
-    
-    // Don't clear the scaled raster immediately - let ensureScaledRaster handle the transition
-    // to avoid showing empty frames during font changes
-    
+
     update();
 
     handleContentPaddingChanged(oldPadding, newPadding);
@@ -2466,9 +2462,6 @@ void TextMediaItem::setFitToTextEnabled(bool enabled) {
     m_fitToTextEnabled = enabled;
     // Invalidate all caches when fit mode changes because text layout is completely different
     invalidateRenderPipeline(InvalidationReason::Geometry, true);
-    // Keep the last completed scaled raster alive as visual fallback while the
-    // new async raster is computed. Clearing here causes a blank frame on the
-    // first Alt-resize transition (fit-to-text -> free resize).
     if (textHotLogsEnabled()) {
         qDebug() << "[TextMedia][FitMode] toggled" << (m_fitToTextEnabled ? "ON" : "OFF")
                  << "- invalidating caches for item" << mediaId();
@@ -2671,15 +2664,15 @@ void TextMediaItem::applyFitModeConstraintsToEditor() {
     const qreal margin = contentPaddingPx();
     const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
     // The inline editor is rendered with a transform of scale(uniformScale), so its
-    // document coordinates are in "logical" units. The raster (paintVectorSnapshot) wraps
+    // document coordinates are in "logical" units. The display wraps
     // at `m_baseSize.width() - 2*margin` (logical pixels, scale-independent). To produce
     // the same visual wrap width in the editor we need:
     //   desiredTextWidth * uniformScale == m_baseSize.width() - 2*margin
     //   → desiredTextWidth = (m_baseSize.width() - 2*margin) / uniformScale
     // The previous formula  (m_baseSize.width() / uniformScale - 2*margin) was wrong:
     // it gave visual wrap = m_baseSize.width() - 2*margin*uniformScale, which diverges
-    // from the raster when uniformScale != 1 and caused editors for scaled items to
-    // break lines at different points than the displayed raster.
+    // from the displayed text when uniformScale != 1 and caused editors for scaled items to
+    // break lines at different points than the displayed text.
     qreal desiredTextWidth = std::max<qreal>(1.0, (static_cast<qreal>(m_baseSize.width()) - 2.0 * margin) / uniformScale);
 
     bool widthModified = false;

@@ -121,7 +121,7 @@ signals:
     void sessionModified(const QString& persistentClientId);
 
 private:
-    // PHASE 1 OPTIMIZATION: Secondary indexes for O(1) lookups
+    // PHASE 1: Secondary indexes for O(1) lookups
     QHash<QString, CanvasSession> m_sessions; // persistentClientId → CanvasSession (primary storage)
     QHash<QString, QString> m_canvasSessionIdToClientId;       // canvasSessionId → persistentClientId (secondary index)
     QHash<QString, QString> m_serverIdToClientId;     // serverSessionId → persistentClientId (secondary index)
