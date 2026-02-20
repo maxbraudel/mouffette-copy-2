@@ -65,370 +65,6 @@ namespace {
 constexpr qint64 kStartPositionToleranceMs = 120;
 constexpr qint64 kDecoderSyncToleranceMs = 25;
 constexpr int kLivePlaybackWarmupFrames = 2;
-constexpr int kDefaultRemoteRenderedGlyphCacheCostKb = 32768;
-
-bool parseEnvBool(const QByteArray& raw, bool* valid = nullptr) {
-    const QByteArray lowered = raw.trimmed().toLower();
-    const bool isTrue = lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on";
-    const bool isFalse = lowered == "0" || lowered == "false" || lowered == "no" || lowered == "off";
-    if (valid) {
-        *valid = isTrue || isFalse;
-    }
-    return isTrue;
-}
-
-bool envFlagValue(const char* primary, const char* fallback, bool defaultValue) {
-    if (qEnvironmentVariableIsSet(primary)) {
-        bool valid = false;
-        const bool value = parseEnvBool(qgetenv(primary), &valid);
-        if (valid) {
-            return value;
-        }
-    }
-    if (fallback && qEnvironmentVariableIsSet(fallback)) {
-        bool valid = false;
-        const bool value = parseEnvBool(qgetenv(fallback), &valid);
-        if (valid) {
-            return value;
-        }
-    }
-    return defaultValue;
-}
-
-bool envFlagEnabled(const char* primary, const char* fallback = nullptr) {
-    return envFlagValue(primary, fallback, false);
-}
-
-bool textProfilingEnabled() {
-    static const bool enabled = envFlagEnabled("MOUFFETTE_TEXT_PROFILING");
-    return enabled;
-}
-
-bool textGlyphAtlasV1Enabled() {
-    static const bool enabled = envFlagValue("MOUFFETTE_TEXT_GLYPH_ATLAS_V1", "text.renderer.glyph_atlas.v1", true);
-    return enabled;
-}
-
-int renderedGlyphCacheMaxCostKb() {
-    static const int maxCostKb = []() {
-        const QByteArray raw = qgetenv("MOUFFETTE_TEXT_GLYPH_CACHE_MAX_COST_KB");
-        if (!raw.isEmpty()) {
-            bool ok = false;
-            const int parsed = raw.trimmed().toInt(&ok);
-            if (ok) {
-                return std::clamp(parsed, 1024, 262144);
-            }
-        }
-        return kDefaultRemoteRenderedGlyphCacheCostKb;
-    }();
-    return maxCostKb;
-}
-
-struct RemoteGlyphCacheStats {
-    quint64 hits = 0;
-    quint64 misses = 0;
-    quint64 glyphsDrawn = 0;
-    qint64 totalDurationMs = 0;
-    quint64 inserts = 0;
-    quint64 evictionHints = 0;
-    int currentCostKb = 0;
-    int maxCostKb = 0;
-    QVector<qint64> recentDurationsMs;
-    QElapsedTimer window;
-};
-
-RemoteGlyphCacheStats& remoteGlyphCacheStats() {
-    static RemoteGlyphCacheStats stats;
-    return stats;
-}
-
-void recordRemoteGlyphCacheInsert(bool evictionHint, int currentCostKb, int maxCostKb) {
-    if (!textProfilingEnabled()) {
-        return;
-    }
-
-    RemoteGlyphCacheStats& stats = remoteGlyphCacheStats();
-    ++stats.inserts;
-    if (evictionHint) {
-        ++stats.evictionHints;
-    }
-    stats.currentCostKb = std::max(0, currentCostKb);
-    stats.maxCostKb = std::max(0, maxCostKb);
-}
-
-void recordRemoteGlyphCacheStats(quint64 hits, quint64 misses, quint64 glyphsDrawn, qint64 durationMs) {
-    if (!textProfilingEnabled()) {
-        return;
-    }
-
-    RemoteGlyphCacheStats& stats = remoteGlyphCacheStats();
-    stats.hits += hits;
-    stats.misses += misses;
-    stats.glyphsDrawn += glyphsDrawn;
-    stats.totalDurationMs += std::max<qint64>(0, durationMs);
-    stats.recentDurationsMs.append(std::max<qint64>(0, durationMs));
-    if (stats.recentDurationsMs.size() > 256) {
-        stats.recentDurationsMs.remove(0, stats.recentDurationsMs.size() - 256);
-    }
-
-    if (!stats.window.isValid()) {
-        stats.window.start();
-        return;
-    }
-
-    if (stats.window.elapsed() < 1000) {
-        return;
-    }
-
-    const quint64 lookups = stats.hits + stats.misses;
-    const double hitRatePct = (lookups > 0)
-        ? (100.0 * static_cast<double>(stats.hits) / static_cast<double>(lookups))
-        : 0.0;
-    const qint64 avgMsPerGlyph = (stats.glyphsDrawn > 0)
-        ? static_cast<qint64>(std::llround(static_cast<double>(stats.totalDurationMs) / static_cast<double>(stats.glyphsDrawn)))
-        : 0;
-    qint64 p95Ms = 0;
-    if (!stats.recentDurationsMs.isEmpty()) {
-        QVector<qint64> sorted = stats.recentDurationsMs;
-        std::sort(sorted.begin(), sorted.end());
-        const int upperBound = static_cast<int>(sorted.size()) - 1;
-        const int candidateIdx = static_cast<int>(std::ceil(static_cast<double>(upperBound) * 0.95));
-        const int idx = std::clamp(candidateIdx, 0, upperBound);
-        p95Ms = sorted.at(idx);
-    }
-    const double occupancyPct = (stats.maxCostKb > 0)
-        ? (100.0 * static_cast<double>(stats.currentCostKb) / static_cast<double>(stats.maxCostKb))
-        : 0.0;
-
-    qInfo() << "[RemoteTextGlyphCache]"
-            << "hits" << stats.hits
-            << "misses" << stats.misses
-            << "hitRatePct" << hitRatePct
-            << "glyphs" << stats.glyphsDrawn
-            << "avgMsPerGlyph" << avgMsPerGlyph
-            << "p95Ms" << p95Ms
-            << "inserts" << stats.inserts
-            << "evictionHints" << stats.evictionHints
-            << "occupancyPct" << occupancyPct;
-
-    stats.hits = 0;
-    stats.misses = 0;
-    stats.glyphsDrawn = 0;
-    stats.totalDurationMs = 0;
-    stats.inserts = 0;
-    stats.evictionHints = 0;
-    stats.recentDurationsMs.clear();
-    stats.window.restart();
-}
-
-struct GlyphPathKey {
-    QString family;
-    QString style;
-    qint64 pixelSizeScaled = 0;
-    quint32 glyphIndex = 0;
-
-    friend bool operator==(const GlyphPathKey& a, const GlyphPathKey& b) {
-        return a.glyphIndex == b.glyphIndex &&
-               a.pixelSizeScaled == b.pixelSizeScaled &&
-               a.family == b.family &&
-               a.style == b.style;
-    }
-};
-
-uint qHash(const GlyphPathKey& key, uint seed = 0) {
-    seed = ::qHash(key.family, seed);
-    seed = ::qHash(key.style, seed);
-    seed = ::qHash(static_cast<quint64>(key.pixelSizeScaled), seed);
-    return ::qHash(key.glyphIndex, seed);
-}
-
-QPainterPath cachedGlyphPath(const QRawFont& font, quint32 glyphIndex) {
-    static QHash<GlyphPathKey, QPainterPath> s_cache;
-
-    const qreal pixelSize = font.pixelSize();
-    const qint64 pixelSizeScaled = static_cast<qint64>(std::llround(pixelSize * 1024.0));
-    const GlyphPathKey cacheKey{font.familyName(), font.styleName(), pixelSizeScaled, glyphIndex};
-    const auto it = s_cache.constFind(cacheKey);
-    if (it != s_cache.cend()) {
-        return *it;
-    }
-
-    QPainterPath path;
-    if (font.isValid()) {
-        path = font.pathForGlyph(glyphIndex);
-    }
-    s_cache.insert(cacheKey, path);
-    return path;
-}
-
-struct RemoteRenderedGlyphKey {
-    QString family;
-    QString style;
-    qint64 pixelSizeScaled = 0;
-    quint32 glyphIndex = 0;
-    QRgb fillColor = 0;
-    QRgb strokeColor = 0;
-    QRgb highlightColor = 0;
-    quint8 highlightEnabled = 0;
-    qint32 strokeWidthScaled = 0;
-    qint32 scaleBucket = 0;
-
-    friend bool operator==(const RemoteRenderedGlyphKey& a, const RemoteRenderedGlyphKey& b) {
-        return a.family == b.family &&
-               a.style == b.style &&
-               a.pixelSizeScaled == b.pixelSizeScaled &&
-               a.glyphIndex == b.glyphIndex &&
-               a.fillColor == b.fillColor &&
-               a.strokeColor == b.strokeColor &&
-               a.highlightColor == b.highlightColor &&
-               a.highlightEnabled == b.highlightEnabled &&
-               a.strokeWidthScaled == b.strokeWidthScaled &&
-               a.scaleBucket == b.scaleBucket;
-    }
-};
-
-uint qHash(const RemoteRenderedGlyphKey& key, uint seed = 0) {
-    seed = ::qHash(key.family, seed);
-    seed = ::qHash(key.style, seed);
-    seed = ::qHash(static_cast<quint64>(key.pixelSizeScaled), seed);
-    seed = ::qHash(key.glyphIndex, seed);
-    seed = ::qHash(key.fillColor, seed);
-    seed = ::qHash(key.strokeColor, seed);
-    seed = ::qHash(key.highlightColor, seed);
-    seed = ::qHash(key.highlightEnabled, seed);
-    seed = ::qHash(key.strokeWidthScaled, seed);
-    return ::qHash(key.scaleBucket, seed);
-}
-
-struct RemoteRenderedGlyphBitmap {
-    QPixmap strokePixmap;
-    QPixmap fillPixmap;
-    QPointF originOffset;
-};
-
-RemoteRenderedGlyphBitmap cachedRenderedGlyph(const QRawFont& font,
-                                              quint32 glyphIndex,
-                                              const QColor& fillColor,
-                                              const QColor& strokeColor,
-                                              const QColor& highlightColor,
-                                              bool highlightEnabled,
-                                              qreal strokeWidth,
-                                              qreal scaleFactor,
-                                              bool* cacheHit = nullptr) {
-    RemoteRenderedGlyphBitmap result;
-    if (!font.isValid() || strokeWidth < 0.0) {
-        if (cacheHit) {
-            *cacheHit = false;
-        }
-        return result;
-    }
-
-    static QCache<RemoteRenderedGlyphKey, RemoteRenderedGlyphBitmap> s_renderedGlyphCache(renderedGlyphCacheMaxCostKb());
-    static QMutex s_renderedGlyphCacheMutex;
-
-    const qreal pixelSize = font.pixelSize();
-    const qint64 pixelSizeScaled = static_cast<qint64>(std::llround(pixelSize * 1024.0));
-    RemoteRenderedGlyphKey cacheKey;
-    cacheKey.family = font.familyName();
-    cacheKey.style = font.styleName();
-    cacheKey.pixelSizeScaled = pixelSizeScaled;
-    cacheKey.glyphIndex = glyphIndex;
-    cacheKey.fillColor = fillColor.rgba();
-    cacheKey.strokeColor = strokeColor.rgba();
-    cacheKey.highlightColor = highlightColor.rgba();
-    cacheKey.highlightEnabled = highlightEnabled ? 1 : 0;
-    cacheKey.strokeWidthScaled = static_cast<qint32>(std::llround(strokeWidth * 1024.0));
-    cacheKey.scaleBucket = static_cast<qint32>(std::llround(std::max(std::abs(scaleFactor), 1e-4) * 256.0));
-
-    {
-        QMutexLocker locker(&s_renderedGlyphCacheMutex);
-        if (const RemoteRenderedGlyphBitmap* cached = s_renderedGlyphCache.object(cacheKey)) {
-            if (cacheHit) {
-                *cacheHit = true;
-            }
-            return *cached;
-        }
-    }
-
-    const QPainterPath glyphPath = cachedGlyphPath(font, glyphIndex);
-    if (glyphPath.isEmpty()) {
-        if (cacheHit) {
-            *cacheHit = false;
-        }
-        return result;
-    }
-
-    const QRectF pathBounds = glyphPath.boundingRect();
-    const qreal padding = std::ceil(strokeWidth * 2.0) + 2.0;
-    const QRectF renderBounds = pathBounds.adjusted(-padding, -padding, padding, padding);
-    const qreal rasterScale = std::max(std::abs(scaleFactor), 1e-4);
-    const int width = std::max(1, static_cast<int>(std::ceil(renderBounds.width() * rasterScale)));
-    const int height = std::max(1, static_cast<int>(std::ceil(renderBounds.height() * rasterScale)));
-
-    QImage fillImage(width, height, QImage::Format_ARGB32_Premultiplied);
-    fillImage.fill(Qt::transparent);
-
-    if (strokeWidth > 0.0) {
-        QImage strokeImage(width, height, QImage::Format_ARGB32_Premultiplied);
-        strokeImage.fill(Qt::transparent);
-        QPainter strokePainter(&strokeImage);
-        strokePainter.setRenderHint(QPainter::Antialiasing, true);
-        strokePainter.scale(rasterScale, rasterScale);
-        strokePainter.translate(-renderBounds.left(), -renderBounds.top());
-        strokePainter.setPen(QPen(strokeColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-        strokePainter.setBrush(Qt::NoBrush);
-        strokePainter.drawPath(glyphPath);
-        strokePainter.end();
-        result.strokePixmap = QPixmap::fromImage(strokeImage);
-        result.strokePixmap.setDevicePixelRatio(rasterScale);
-    }
-
-    QPainter fillPainter(&fillImage);
-    fillPainter.setRenderHint(QPainter::Antialiasing, true);
-    fillPainter.scale(rasterScale, rasterScale);
-    fillPainter.translate(-renderBounds.left(), -renderBounds.top());
-    fillPainter.setPen(Qt::NoPen);
-    fillPainter.setBrush(fillColor);
-    fillPainter.drawPath(glyphPath);
-    fillPainter.end();
-
-    result.fillPixmap = QPixmap::fromImage(fillImage);
-    result.fillPixmap.setDevicePixelRatio(rasterScale);
-    result.originOffset = renderBounds.topLeft();
-    if (result.fillPixmap.isNull() && result.strokePixmap.isNull()) {
-        if (cacheHit) {
-            *cacheHit = false;
-        }
-        return result;
-    }
-
-    {
-        QMutexLocker locker(&s_renderedGlyphCacheMutex);
-        const int countBefore = s_renderedGlyphCache.count();
-        const int totalCostBefore = s_renderedGlyphCache.totalCost();
-        if (!s_renderedGlyphCache.object(cacheKey)) {
-            const int strokeCostKb = result.strokePixmap.isNull()
-                ? 0
-                : (result.strokePixmap.width() * result.strokePixmap.height() * 4) / 1024;
-            const int fillCostKb = result.fillPixmap.isNull()
-                ? 0
-                : (result.fillPixmap.width() * result.fillPixmap.height() * 4) / 1024;
-            const int costKb = std::max(1, strokeCostKb + fillCostKb);
-            s_renderedGlyphCache.insert(cacheKey, new RemoteRenderedGlyphBitmap(result), costKb);
-            const int countAfter = s_renderedGlyphCache.count();
-            const int totalCostAfter = s_renderedGlyphCache.totalCost();
-            const bool evictionHint = (countAfter <= countBefore) ||
-                (totalCostAfter < (totalCostBefore + costKb));
-            recordRemoteGlyphCacheInsert(evictionHint, totalCostAfter, s_renderedGlyphCache.maxCost());
-        }
-    }
-
-    if (cacheHit) {
-        *cacheHit = false;
-    }
-    return result;
-}
-
 QRectF computeDocumentTextBounds(const QTextDocument& doc, QAbstractTextDocumentLayout* layout) {
     if (!layout) {
         return QRectF();
@@ -571,79 +207,6 @@ QImage convertFrameToImage(const QVideoFrame& frame) {
     return mapped;
 }
 
-class RemoteOutlineTextItem : public QGraphicsTextItem {
-public:
-    RemoteOutlineTextItem() : QGraphicsTextItem() {}
-    
-    explicit RemoteOutlineTextItem(QGraphicsItem* parent) : QGraphicsTextItem(parent) {}
-    
-    RemoteOutlineTextItem(const QString& text, QGraphicsItem* parent) : QGraphicsTextItem(text, parent) {}
-
-    void setOutlineParameters(const QColor& fillColor, const QColor& outlineColor, qreal strokeWidthPx) {
-        m_fillColor = fillColor;
-        m_outlineColor = outlineColor.isValid() ? outlineColor : fillColor;
-        m_strokeWidth = std::max<qreal>(0.0, strokeWidthPx);
-        applyDocumentFormatting();
-    }
-
-    void setHighlightParameters(bool enabled, const QColor& color) {
-        QColor resolved = color;
-        if (!resolved.isValid()) {
-            resolved = QColor(255, 255, 0, 160);
-        }
-        const bool active = enabled && resolved.alpha() > 0;
-        if (m_highlightEnabled != active || m_highlightColor != resolved) {
-            m_highlightEnabled = active;
-            m_highlightColor = active ? resolved : QColor(Qt::transparent);
-            applyDocumentFormatting();
-        }
-    }
-
-    void paintInto(QPainter* painter) {
-        if (!painter) {
-            return;
-        }
-        QStyleOptionGraphicsItem option;
-        option.state = QStyle::State_None;
-        QGraphicsTextItem::paint(painter, &option, nullptr);
-    }
-
-private:
-    void applyDocumentFormatting() {
-        QTextDocument* doc = document();
-        if (!doc) {
-            return;
-        }
-
-        QTextCursor cursor(doc);
-        cursor.select(QTextCursor::Document);
-        QTextCharFormat format;
-        format.setForeground(m_fillColor);
-
-        if (m_strokeWidth > 0.0) {
-            const QColor outline = m_outlineColor.isValid() ? m_outlineColor : m_fillColor;
-            format.setTextOutline(QPen(outline, m_strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-        } else {
-            format.clearProperty(QTextFormat::TextOutline);
-        }
-
-        if (m_highlightEnabled && m_highlightColor.isValid() && m_highlightColor.alpha() > 0) {
-            format.setBackground(QBrush(m_highlightColor));
-        } else {
-            format.clearBackground();
-        }
-
-        cursor.mergeCharFormat(format);
-        setDefaultTextColor(m_fillColor);
-        update();
-    }
-
-    QColor m_fillColor = Qt::white;
-    QColor m_outlineColor = Qt::white;
-    qreal m_strokeWidth = 0.0;
-    bool m_highlightEnabled = false;
-    QColor m_highlightColor = Qt::transparent;
-};
 } // namespace
 
 RemoteSceneController::RemoteSceneController(FileManager* fileManager, WebSocketClient* ws, QObject* parent)
@@ -1998,13 +1561,11 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
         if (!scene) continue;
         
         if (item->type == "text") {
-            RemoteOutlineTextItem preRaster;
-            preRaster.setOpacity(1.0);
-            if (QTextDocument* doc = preRaster.document()) {
-                doc->setDocumentMargin(0.0);
-            }
+            QGraphicsTextItem* textItem = new QGraphicsTextItem();
+            textItem->setOpacity(0.0);
+            textItem->setVisible(true);
+            textItem->setTextInteractionFlags(Qt::NoTextInteraction);
 
-            // Set up font
             QFont font(item->fontFamily, item->fontSize);
             font.setItalic(item->fontItalic);
             if (item->fontWeight > 0) {
@@ -2012,13 +1573,14 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             } else if (item->fontBold) {
                 font.setWeight(QFont::Bold);
             }
-            preRaster.setFont(font);
+            textItem->setFont(font);
 
-            // Set text color
             QColor color(item->textColor);
             if (!color.isValid()) {
                 color = QColor(Qt::white);
             }
+            textItem->setDefaultTextColor(color);
+            textItem->setPlainText(item->text);
 
             auto computeOutlineWidth = [](double percent, const QFont& baseFont) -> qreal {
                 if (percent <= 0.0) {
@@ -2056,75 +1618,73 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             };
 
             const qreal padding = std::max<qreal>(0.0, strokeWidth + outlineOverflowAllowance(strokeWidth));
+
             QColor outlineColor(item->textBorderColor);
             if (!outlineColor.isValid()) {
                 outlineColor = color;
             }
 
-            // Set text content
-            preRaster.setPlainText(item->text);
-
-            if (QTextDocument* doc = preRaster.document()) {
-                QTextCursor cursor(doc);
-                cursor.select(QTextCursor::Document);
-                QTextCharFormat format;
-                format.setForeground(color);
-                format.clearProperty(QTextFormat::TextOutline);
-                cursor.mergeCharFormat(format);
-            }
-
-            preRaster.setOutlineParameters(color, outlineColor, strokeWidth);
             QColor highlightColor(item->textHighlightColor);
             if (!highlightColor.isValid()) {
                 highlightColor = QColor(255, 255, 0, 160);
             }
-            preRaster.setHighlightParameters(item->highlightEnabled, highlightColor);
 
-            // Center alignment
-            QTextDocument* doc = preRaster.document();
-            QTextOption textOption = doc ? doc->defaultTextOption() : QTextOption();
-            textOption.setWrapMode(item->fitToTextEnabled ? QTextOption::NoWrap : QTextOption::WordWrap);
-            Qt::Alignment hAlign = Qt::AlignHCenter;
-            switch (item->horizontalAlignment) {
-                case RemoteMediaItem::HorizontalAlignment::Left:
-                    hAlign = Qt::AlignLeft;
-                    break;
-                case RemoteMediaItem::HorizontalAlignment::Center:
-                    hAlign = Qt::AlignHCenter;
-                    break;
-                case RemoteMediaItem::HorizontalAlignment::Right:
-                    hAlign = Qt::AlignRight;
-                    break;
-            }
-            textOption.setAlignment(hAlign);
-            if (doc) {
+            if (QTextDocument* doc = textItem->document()) {
+                doc->setDocumentMargin(0.0);
+
+                QTextOption textOption = doc->defaultTextOption();
+                textOption.setWrapMode(item->fitToTextEnabled ? QTextOption::NoWrap : QTextOption::WordWrap);
+                Qt::Alignment hAlign = Qt::AlignHCenter;
+                switch (item->horizontalAlignment) {
+                    case RemoteMediaItem::HorizontalAlignment::Left:
+                        hAlign = Qt::AlignLeft;
+                        break;
+                    case RemoteMediaItem::HorizontalAlignment::Center:
+                        hAlign = Qt::AlignHCenter;
+                        break;
+                    case RemoteMediaItem::HorizontalAlignment::Right:
+                        hAlign = Qt::AlignRight;
+                        break;
+                }
+                textOption.setAlignment(hAlign);
                 doc->setDefaultTextOption(textOption);
+
+                QTextCursor cursor(doc);
+                cursor.select(QTextCursor::Document);
+                QTextCharFormat format;
+                format.setForeground(color);
+                if (strokeWidth > 0.0) {
+                    format.setTextOutline(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                } else {
+                    format.clearProperty(QTextFormat::TextOutline);
+                }
+                if (item->highlightEnabled && highlightColor.alpha() > 0) {
+                    format.setBackground(QBrush(highlightColor));
+                } else {
+                    format.clearBackground();
+                }
+                cursor.mergeCharFormat(format);
             }
-            
-            // Reconstruct host layout: host renders text into a logical width that is
-            // reduced by the uniform scale factor, then applies that factor visually.
+
             const qreal baseWidth = static_cast<qreal>(item->baseWidth > 0 ? item->baseWidth : 200);
             const qreal baseHeight = static_cast<qreal>(item->baseHeight > 0 ? item->baseHeight : 100);
             const qreal uniformScale = std::max<qreal>(static_cast<qreal>(std::abs(item->uniformScale)), 1e-4);
-
-            // Match host calculation: divide base width by scale first, then subtract padding
-            // Host: logicalWidth = (baseWidth / uniformScale) - 2*padding
             const qreal logicalWidth = std::max<qreal>(1.0, (baseWidth / uniformScale) - 2.0 * padding);
+
             if (item->fitToTextEnabled) {
-                preRaster.setTextWidth(-1.0);
+                textItem->setTextWidth(-1.0);
             } else {
-                preRaster.setTextWidth(logicalWidth);
+                textItem->setTextWidth(logicalWidth);
             }
 
-            QSizeF docSize;
             QRectF docBounds;
-            if (doc && doc->documentLayout()) {
-                QAbstractTextDocumentLayout* docLayout = doc->documentLayout();
-                docSize = docLayout->documentSize();
-                docBounds = computeDocumentTextBounds(*doc, docLayout);
-            } else {
+            if (QTextDocument* doc = textItem->document()) {
+                if (QAbstractTextDocumentLayout* docLayout = doc->documentLayout()) {
+                    docBounds = computeDocumentTextBounds(*doc, docLayout);
+                }
+            }
+            if (!docBounds.isValid() || docBounds.isEmpty()) {
                 const qreal logicalHeight = std::max<qreal>(1.0, (baseHeight - 2.0 * padding) / uniformScale);
-                docSize = QSizeF(logicalWidth, logicalHeight);
                 docBounds = QRectF(0.0, 0.0, std::max<qreal>(logicalWidth, 1.0), logicalHeight);
             }
 
@@ -2137,17 +1697,15 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             const qreal scaleX = fullDisplayWidth / safeBaseWidth;
             const qreal scaleY = fullDisplayHeight / safeBaseHeight;
             const qreal appliedScale = scaleX * uniformScale;
-            
-            // Apply padding offsets to match host-side margin handling
+
             const qreal paddingX = padding * appliedScale;
             const qreal paddingY = padding * appliedScale;
-
-            // Center the text vertically within the padded height (matches host offset logic)
             const qreal docVisualTop = docBounds.top();
             const qreal docVisualHeight = std::max<qreal>(1.0, docBounds.height());
             const qreal scaledDocTop = docVisualTop * appliedScale;
             const qreal scaledDocHeight = docVisualHeight * appliedScale;
             const qreal availableHeightScene = std::max<qreal>(0.0, fullDisplayHeight - 2.0 * paddingY);
+
             qreal verticalOffset = paddingY;
             switch (item->verticalAlignment) {
                 case RemoteMediaItem::VerticalAlignment::Top:
@@ -2160,50 +1718,18 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                     verticalOffset = paddingY + std::max<qreal>(0.0, availableHeightScene - scaledDocHeight) - scaledDocTop;
                     break;
             }
-            
-            // Position the text with horizontal padding as well
+
             const qreal horizontalOffset = paddingX;
             const qreal sourcePixelOffsetX = s.srcNx * baseWidth * scaleX;
             const qreal sourcePixelOffsetY = s.srcNy * baseHeight * scaleY;
 
-            qreal spanDpr = 1.0;
-            if (QWidget* topLevel = container->window()) {
-                if (QScreen* screen = topLevel->screen()) {
-                    spanDpr = std::max<qreal>(1.0, screen->devicePixelRatio());
-                }
-            }
+            textItem->setPos(exactX + horizontalOffset - sourcePixelOffsetX,
+                             exactY + verticalOffset - sourcePixelOffsetY);
+            textItem->setScale(appliedScale);
 
-            const int rasterW = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(pw) * spanDpr)));
-            const int rasterH = std::max(1, static_cast<int>(std::ceil(static_cast<qreal>(ph) * spanDpr)));
-            QImage raster(rasterW, rasterH, QImage::Format_ARGB32_Premultiplied);
-            raster.fill(Qt::transparent);
-
-            {
-                QPainter p(&raster);
-                p.setRenderHint(QPainter::Antialiasing, true);
-                p.setRenderHint(QPainter::TextAntialiasing, true);
-                p.setRenderHint(QPainter::SmoothPixmapTransform, true);
-                p.scale(spanDpr, spanDpr);
-                constexpr qreal kTextClipGuardPx = 0.5;
-                p.setClipRect(QRectF(-kTextClipGuardPx,
-                                     -kTextClipGuardPx,
-                                     static_cast<qreal>(pw) + 2.0 * kTextClipGuardPx,
-                                     static_cast<qreal>(ph) + 2.0 * kTextClipGuardPx));
-                p.translate(horizontalOffset - sourcePixelOffsetX, verticalOffset - sourcePixelOffsetY);
-                p.scale(appliedScale, appliedScale);
-                preRaster.paintInto(&p);
-            }
-
-            QPixmap textPixmap = QPixmap::fromImage(raster);
-            textPixmap.setDevicePixelRatio(spanDpr);
-
-            QGraphicsPixmapItem* textPixmapItem = new QGraphicsPixmapItem();
-            textPixmapItem->setPos(exactX, exactY);
-            textPixmapItem->setOpacity(0.0);
-            textPixmapItem->setTransformationMode(Qt::SmoothTransformation);
-            textPixmapItem->setPixmap(textPixmap);
-            scene->addItem(textPixmapItem);
-            s.imageItem = textPixmapItem;
+            scene->addItem(textItem);
+            s.textItem = textItem;
+            s.imageItem = nullptr;
         } else if (item->type == "image") {
             // Create a pixmap item for host-provided still images
             QGraphicsPixmapItem* pixmapItem = new QGraphicsPixmapItem();

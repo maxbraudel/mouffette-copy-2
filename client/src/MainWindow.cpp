@@ -104,7 +104,6 @@ static BOOL CALLBACK MouffetteEnumMonProc(HMONITOR hMon, HDC, LPRECT, LPARAM lPa
     return TRUE;
 }
 #endif
-#include <QPainterPathStroker>
 #include <QFileInfo>
 #include <QFile>
 #include <QDir>

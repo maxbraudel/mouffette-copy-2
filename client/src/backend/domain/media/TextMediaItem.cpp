@@ -72,50 +72,7 @@ namespace TextMediaDefaults {
     const qreal DEFAULT_VIEWPORT_SCALE = 1.0;
 }
 
-// Static member definition
-int TextMediaItem::s_maxRasterDimension = 100000;
-
-void TextMediaItem::setMaxRasterDimension(int pixels) {
-    s_maxRasterDimension = std::max(256, std::min(pixels, 100000));
-}
-
-int TextMediaItem::maxRasterDimension() {
-    return s_maxRasterDimension;
-}
-
 namespace {
-
-bool parseEnvBool(const QByteArray& raw, bool* valid = nullptr) {
-    const QByteArray lowered = raw.trimmed().toLower();
-    const bool isTrue = lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on";
-    const bool isFalse = lowered == "0" || lowered == "false" || lowered == "no" || lowered == "off";
-    if (valid) {
-        *valid = isTrue || isFalse;
-    }
-    return isTrue;
-}
-
-bool envFlagValue(const char* primary, const char* fallback, bool defaultValue) {
-    if (qEnvironmentVariableIsSet(primary)) {
-        bool valid = false;
-        const bool value = parseEnvBool(qgetenv(primary), &valid);
-        if (valid) {
-            return value;
-        }
-    }
-    if (fallback && qEnvironmentVariableIsSet(fallback)) {
-        bool valid = false;
-        const bool value = parseEnvBool(qgetenv(fallback), &valid);
-        if (valid) {
-            return value;
-        }
-    }
-    return defaultValue;
-}
-
-bool envFlagEnabled(const char* primary, const char* fallback = nullptr) {
-    return envFlagValue(primary, fallback, false);
-}
 
 constexpr qreal kContentPadding = 4.0;
 constexpr qreal kStrokeOverflowScale = 0.75;
@@ -133,47 +90,37 @@ constexpr int kDefaultRenderedGlyphCacheMaxCostKb = 32768;
 constexpr int kFallbackFontPixelSize = 12;
 
 int renderedGlyphCacheMaxCostKb() {
-    static const int maxCostKb = []() {
-        const QByteArray raw = qgetenv("MOUFFETTE_TEXT_GLYPH_CACHE_MAX_COST_KB");
-        if (!raw.isEmpty()) {
-            bool ok = false;
-            const int parsed = raw.trimmed().toInt(&ok);
-            if (ok) {
-                return std::clamp(parsed, 1024, 262144);
-            }
-        }
-        return kDefaultRenderedGlyphCacheMaxCostKb;
-    }();
+    static const int maxCostKb = kDefaultRenderedGlyphCacheMaxCostKb;
     return maxCostKb;
 }
 
 bool textProfilingEnabled() {
-    static const bool enabled = envFlagEnabled("MOUFFETTE_TEXT_PROFILING");
+    static const bool enabled = false;
     return enabled;
 }
 
 bool textHotLogsEnabled() {
-    static const bool enabled = envFlagEnabled("MOUFFETTE_TEXT_HOT_LOGS");
+    static const bool enabled = false;
     return enabled;
 }
 
 bool textSchedulerV2Enabled() {
-    static const bool enabled = envFlagEnabled("MOUFFETTE_TEXT_RENDER_SCHEDULER_V2", "text.render.scheduler.v2");
+    static const bool enabled = false;
     return enabled;
 }
 
 bool textCachePolicyV2Enabled() {
-    static const bool enabled = envFlagEnabled("MOUFFETTE_TEXT_CACHE_POLICY_V2", "text.cache.policy.v2");
+    static const bool enabled = false;
     return enabled;
 }
 
 bool textRendererGpuEnabled() {
-    static const bool enabled = envFlagEnabled("MOUFFETTE_TEXT_RENDERER_GPU", "text.renderer.gpu");
+    static const bool enabled = false;
     return enabled;
 }
 
 bool textGlyphAtlasV1Enabled() {
-    static const bool enabled = envFlagValue("MOUFFETTE_TEXT_GLYPH_ATLAS_V1", "text.renderer.glyph_atlas.v1", true);
+    static const bool enabled = false;
     return enabled;
 }
 
@@ -970,7 +917,12 @@ protected:
 
         painter->save();
         if (m_owner) {
-            const QRectF ownerBoundsInEditor = mapRectFromParent(QRectF(QPointF(0.0, 0.0), QSizeF(m_owner->baseSizePx())));
+            const QSize ownerBaseSize = m_owner->baseSizePx();
+            const QRectF ownerBounds(0.0,
+                                     0.0,
+                                     std::max(1, ownerBaseSize.width()),
+                                     std::max(1, ownerBaseSize.height()));
+            const QRectF ownerBoundsInEditor = mapRectFromParent(ownerBounds);
             painter->setClipRect(ownerBoundsInEditor);
         }
         QGraphicsTextItem::paint(painter, option, widget);

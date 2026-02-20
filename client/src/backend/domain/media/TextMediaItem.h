@@ -110,9 +110,6 @@ public:
 
     qreal uniformScaleFactor() const { return m_uniformScaleFactor; }
 
-    static void setMaxRasterDimension(int pixels);
-    static int maxRasterDimension();
-    
     // Text alignment
     enum class HorizontalAlignment { Left, Center, Right };
     enum class VerticalAlignment { Top, Center, Bottom };
@@ -639,6 +636,5 @@ private:
     void flattenCompositeToBase();
     bool shouldUseIncrementalRender(const TextEditDiff& diff) const;
 
-    static int s_maxRasterDimension;
 };
 
