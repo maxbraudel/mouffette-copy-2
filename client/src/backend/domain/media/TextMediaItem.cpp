@@ -968,7 +968,13 @@ protected:
             return;
         }
 
+        painter->save();
+        if (m_owner) {
+            const QRectF ownerBoundsInEditor = mapRectFromParent(QRectF(QPointF(0.0, 0.0), QSizeF(m_owner->baseSizePx())));
+            painter->setClipRect(ownerBoundsInEditor);
+        }
         QGraphicsTextItem::paint(painter, option, widget);
+        painter->restore();
 
         m_cacheDirty = false;
         m_cachedRenderScale = 1.0;
@@ -2856,6 +2862,7 @@ TextMediaItem::TextMediaItem(
     // Text media should be selectable and movable
     setFlag(QGraphicsItem::ItemIsSelectable, true);
     setFlag(QGraphicsItem::ItemIsMovable, true);
+    setFlag(QGraphicsItem::ItemClipsChildrenToShape, true);
     setAcceptHoverEvents(true);
 
     m_wasMovableBeforeEditing = flags().testFlag(QGraphicsItem::ItemIsMovable);
