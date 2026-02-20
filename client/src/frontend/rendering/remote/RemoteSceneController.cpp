@@ -34,18 +34,11 @@
 #include <QAbstractTextDocumentLayout>
 #include <QTextBlock>
 #include <QTextLayout>
-#include <QGlyphRun>
-#include <QRawFont>
-#include <QPainterPath>
 #include <QPaintDevice>
 #include <QFontMetricsF>
 #include <QPen>
 #include <QPointer>
 #include <QHash>
-#include <QCache>
-#include <QMutex>
-#include <QMutexLocker>
-#include <QElapsedTimer>
 #include <QVariant>
 #include <QCoreApplication>
 #include <QEvent>
@@ -1764,7 +1757,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
         }
         item->loaded = renderedAllSpans;
         if (!renderedAllSpans) {
-            qWarning() << "RemoteSceneController: text pre-raster incomplete for" << item->mediaId;
+            qWarning() << "RemoteSceneController: text span setup incomplete for" << item->mediaId;
         }
         evaluateItemReadiness(item);
     } else if (item->type == "image") {

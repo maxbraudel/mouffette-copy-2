@@ -88,38 +88,17 @@ constexpr qreal kBorderWidthQuantizationStepPercent = 1.0;
 constexpr int kMaxCachedGlyphPaths = 60000;
 constexpr int kDefaultRenderedGlyphCacheMaxCostKb = 32768;
 constexpr int kFallbackFontPixelSize = 12;
+constexpr bool kTextOptimizationSchedulerEnabled = false;
+constexpr bool kTextOptimizationCachePolicyEnabled = false;
+constexpr bool kTextOptimizationGpuRendererEnabled = false;
+constexpr bool kTextOptimizationGlyphAtlasEnabled = false;
 
 int renderedGlyphCacheMaxCostKb() {
     static const int maxCostKb = kDefaultRenderedGlyphCacheMaxCostKb;
     return maxCostKb;
 }
 
-bool textProfilingEnabled() {
-    static const bool enabled = false;
-    return enabled;
-}
-
 bool textHotLogsEnabled() {
-    static const bool enabled = false;
-    return enabled;
-}
-
-bool textSchedulerV2Enabled() {
-    static const bool enabled = false;
-    return enabled;
-}
-
-bool textCachePolicyV2Enabled() {
-    static const bool enabled = false;
-    return enabled;
-}
-
-bool textRendererGpuEnabled() {
-    static const bool enabled = false;
-    return enabled;
-}
-
-bool textGlyphAtlasV1Enabled() {
     static const bool enabled = false;
     return enabled;
 }
@@ -138,188 +117,14 @@ QString alignmentPanelStyleSignature(const OverlayStyle& style) {
         .arg(style.textColor.rgba());
 }
 
-struct TextPerfStats {
-    quint64 started = 0;
-    quint64 completed = 0;
-    quint64 dropped = 0;
-    quint64 stale = 0;
-    quint64 queueDepthPeak = 0;
-    qint64 totalDurationMs = 0;
-    QVector<qint64> recentDurationsMs;
-    QElapsedTimer window;
-};
-
-TextPerfStats& textPerfStats() {
-    static TextPerfStats stats;
-    return stats;
-}
-
 void recordTextRasterStart(quint64 queueDepth) {
-    if (!textProfilingEnabled()) {
-        return;
-    }
-
-    TextPerfStats& stats = textPerfStats();
-    ++stats.started;
-    stats.queueDepthPeak = std::max(stats.queueDepthPeak, queueDepth);
-    if (!stats.window.isValid()) {
-        stats.window.start();
-    }
+    Q_UNUSED(queueDepth);
 }
 
 void recordTextRasterResult(qint64 durationMs, bool stale, bool dropped) {
-    if (!textProfilingEnabled()) {
-        return;
-    }
-
-    TextPerfStats& stats = textPerfStats();
-    if (stale) {
-        ++stats.stale;
-    }
-    if (dropped) {
-        ++stats.dropped;
-    }
-    if (!stale && !dropped) {
-        ++stats.completed;
-        stats.totalDurationMs += std::max<qint64>(0, durationMs);
-        stats.recentDurationsMs.append(std::max<qint64>(0, durationMs));
-        if (stats.recentDurationsMs.size() > 256) {
-            stats.recentDurationsMs.remove(0, stats.recentDurationsMs.size() - 256);
-        }
-    }
-
-    if (!stats.window.isValid() || stats.window.elapsed() < 1000) {
-        return;
-    }
-
-    qint64 p95 = 0;
-    if (!stats.recentDurationsMs.isEmpty()) {
-        QVector<qint64> sorted = stats.recentDurationsMs;
-        std::sort(sorted.begin(), sorted.end());
-        const int upperBound = static_cast<int>(sorted.size()) - 1;
-        const int candidateIdx = static_cast<int>(std::ceil(static_cast<double>(upperBound) * 0.95));
-        const int idx = std::clamp(candidateIdx, 0, upperBound);
-        p95 = sorted.at(idx);
-    }
-
-    const qint64 avg = (stats.completed > 0)
-        ? static_cast<qint64>(std::llround(static_cast<double>(stats.totalDurationMs) / static_cast<double>(stats.completed)))
-        : 0;
-
-    qInfo() << "[TextPerf]"
-            << "started" << stats.started
-            << "completed" << stats.completed
-            << "dropped" << stats.dropped
-            << "stale" << stats.stale
-            << "queuePeak" << stats.queueDepthPeak
-            << "avgMs" << avg
-            << "p95Ms" << p95;
-
-    stats.started = 0;
-    stats.completed = 0;
-    stats.dropped = 0;
-    stats.stale = 0;
-    stats.queueDepthPeak = 0;
-    stats.totalDurationMs = 0;
-    stats.recentDurationsMs.clear();
-    stats.window.restart();
-}
-
-struct TextGlyphCacheStats {
-    quint64 hits = 0;
-    quint64 misses = 0;
-    quint64 glyphsDrawn = 0;
-    qint64 totalDurationMs = 0;
-    quint64 inserts = 0;
-    quint64 evictionHints = 0;
-    int currentCostKb = 0;
-    int maxCostKb = 0;
-    QVector<qint64> recentDurationsMs;
-    QElapsedTimer window;
-};
-
-TextGlyphCacheStats& textGlyphCacheStats() {
-    static TextGlyphCacheStats stats;
-    return stats;
-}
-
-void recordTextGlyphCacheInsert(bool evictionHint, int currentCostKb, int maxCostKb) {
-    if (!textProfilingEnabled()) {
-        return;
-    }
-
-    TextGlyphCacheStats& stats = textGlyphCacheStats();
-    ++stats.inserts;
-    if (evictionHint) {
-        ++stats.evictionHints;
-    }
-    stats.currentCostKb = std::max(0, currentCostKb);
-    stats.maxCostKb = std::max(0, maxCostKb);
-}
-
-void recordTextGlyphCacheResult(quint64 hits, quint64 misses, quint64 glyphsDrawn, qint64 durationMs) {
-    if (!textProfilingEnabled()) {
-        return;
-    }
-
-    TextGlyphCacheStats& stats = textGlyphCacheStats();
-    stats.hits += hits;
-    stats.misses += misses;
-    stats.glyphsDrawn += glyphsDrawn;
-    stats.totalDurationMs += std::max<qint64>(0, durationMs);
-    stats.recentDurationsMs.append(std::max<qint64>(0, durationMs));
-    if (stats.recentDurationsMs.size() > 256) {
-        stats.recentDurationsMs.remove(0, stats.recentDurationsMs.size() - 256);
-    }
-
-    if (!stats.window.isValid()) {
-        stats.window.start();
-        return;
-    }
-
-    if (stats.window.elapsed() < 1000) {
-        return;
-    }
-
-    const quint64 totalLookups = stats.hits + stats.misses;
-    const double hitRate = (totalLookups > 0)
-        ? (100.0 * static_cast<double>(stats.hits) / static_cast<double>(totalLookups))
-        : 0.0;
-    const qint64 avgMs = (stats.glyphsDrawn > 0)
-        ? static_cast<qint64>(std::llround(static_cast<double>(stats.totalDurationMs) / static_cast<double>(stats.glyphsDrawn)))
-        : 0;
-    qint64 p95Ms = 0;
-    if (!stats.recentDurationsMs.isEmpty()) {
-        QVector<qint64> sorted = stats.recentDurationsMs;
-        std::sort(sorted.begin(), sorted.end());
-        const int upperBound = static_cast<int>(sorted.size()) - 1;
-        const int candidateIdx = static_cast<int>(std::ceil(static_cast<double>(upperBound) * 0.95));
-        const int idx = std::clamp(candidateIdx, 0, upperBound);
-        p95Ms = sorted.at(idx);
-    }
-    const double occupancyPct = (stats.maxCostKb > 0)
-        ? (100.0 * static_cast<double>(stats.currentCostKb) / static_cast<double>(stats.maxCostKb))
-        : 0.0;
-
-    qInfo() << "[TextGlyphCache]"
-            << "hits" << stats.hits
-            << "misses" << stats.misses
-            << "hitRatePct" << hitRate
-            << "glyphs" << stats.glyphsDrawn
-            << "avgMsPerGlyph" << avgMs
-            << "p95Ms" << p95Ms
-            << "inserts" << stats.inserts
-            << "evictionHints" << stats.evictionHints
-            << "occupancyPct" << occupancyPct;
-
-    stats.hits = 0;
-    stats.misses = 0;
-    stats.glyphsDrawn = 0;
-    stats.totalDurationMs = 0;
-    stats.inserts = 0;
-    stats.evictionHints = 0;
-    stats.recentDurationsMs.clear();
-    stats.window.restart();
+    Q_UNUSED(durationMs);
+    Q_UNUSED(stale);
+    Q_UNUSED(dropped);
 }
 
 struct CssWeightMapping {
@@ -779,7 +584,7 @@ RenderedGlyphBitmap renderGlyphToPixmap(const QPainterPath& glyphPath, const QCo
                 const int insertedCost = std::max(1, costKB);
                 const bool evictionHint = (countAfter <= countBefore) ||
                     (totalCostAfter < (totalCostBefore + insertedCost));
-                recordTextGlyphCacheInsert(evictionHint, totalCostAfter, s_renderedGlyphCache.maxCost());
+                Q_UNUSED(evictionHint);
             }
         }
 
@@ -1875,7 +1680,7 @@ bool TextMediaItem::cacheKeyMatches(const TextRenderCacheKey& lhs, const TextRen
 }
 
 void TextMediaItem::enforceCacheBudget() {
-    if (!textCachePolicyV2Enabled()) {
+    if (!kTextOptimizationCachePolicyEnabled) {
         return;
     }
 
@@ -2039,7 +1844,7 @@ void TextMediaItem::ensureTextRenderer() {
         }
     };
 
-    if (textRendererGpuEnabled()) {
+    if (kTextOptimizationGpuRendererEnabled) {
         m_textRenderer = std::make_shared<GpuTextRendererPrototype>();
     } else {
         m_textRenderer = std::make_shared<CpuTextRenderer>();
@@ -2299,7 +2104,7 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
             *glyphCountOut = 0;
         }
 
-        if (!textGlyphAtlasV1Enabled()) {
+        if (!kTextOptimizationGlyphAtlasEnabled) {
             return false;
         }
 
@@ -2567,7 +2372,10 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         }
 
         const qint64 durationMs = atlasTimer.elapsed();
-        recordTextGlyphCacheResult(cacheHits, cacheMisses, glyphDrawn, durationMs);
+        Q_UNUSED(cacheHits);
+        Q_UNUSED(cacheMisses);
+        Q_UNUSED(glyphDrawn);
+        Q_UNUSED(durationMs);
 
         if (outlineMsOut) {
             *outlineMsOut = durationMs;
@@ -3800,7 +3608,7 @@ void TextMediaItem::renderTextToImage(QImage& target,
 }
 
 void TextMediaItem::queueScaledRasterUpdate(qreal visualScaleFactor, qreal geometryScale, qreal canvasZoom) {
-    if (textSchedulerV2Enabled()) {
+    if (kTextOptimizationSchedulerEnabled) {
         TextRenderTarget target{visualScaleFactor, geometryScale, canvasZoom};
         m_renderScheduler.requestHighRes(target);
     }
@@ -3829,7 +3637,7 @@ void TextMediaItem::dispatchQueuedScaledRasterUpdate() {
     }
 
     m_scaledRasterUpdateQueued = false;
-    if (textSchedulerV2Enabled()) {
+    if (kTextOptimizationSchedulerEnabled) {
         const std::optional<TextRenderTarget> present = m_renderScheduler.takePresentTarget();
         if (!present.has_value()) {
             return;
@@ -3841,7 +3649,7 @@ void TextMediaItem::dispatchQueuedScaledRasterUpdate() {
 
     ensureScaledRaster(m_queuedVisualScaleFactor, m_queuedGeometryScale, m_queuedCanvasZoom);
 
-    if (textSchedulerV2Enabled()) {
+    if (kTextOptimizationSchedulerEnabled) {
         m_renderScheduler.markPresented();
         if (m_renderScheduler.hasPendingPresentation() && !m_scaledRasterUpdateQueued) {
             m_scaledRasterUpdateQueued = true;
@@ -4008,12 +3816,12 @@ void TextMediaItem::ensureScaledRaster(qreal visualScaleFactor, qreal geometrySc
     
     // If viewport didn't shift significantly AND target size AND base size unchanged, we can skip re-rasterization
     if (!forceRefresh && !viewportShiftedSignificantly && !targetSizeChanged && !baseSizeChanged && !m_scaledRasterDirty && m_scaledRasterPixmapValid) {
-        if (!textCachePolicyV2Enabled() || (m_activeHighResCacheKeyValid && cacheKeyMatches(m_activeHighResCacheKey, targetCacheKey))) {
+        if (!kTextOptimizationCachePolicyEnabled || (m_activeHighResCacheKeyValid && cacheKeyMatches(m_activeHighResCacheKey, targetCacheKey))) {
             return;
         }
     }
 
-    if (!m_scaledRasterDirty && m_scaledRasterPixmapValid && textCachePolicyV2Enabled() &&
+    if (!m_scaledRasterDirty && m_scaledRasterPixmapValid && kTextOptimizationCachePolicyEnabled &&
         m_activeHighResCacheKeyValid && cacheKeyMatches(m_activeHighResCacheKey, targetCacheKey) && !m_asyncRasterInProgress) {
         return;
     }
@@ -4444,7 +4252,7 @@ void TextMediaItem::handleRasterJobFinished(quint64 generation, QImage&& raster,
     m_pendingRasterRequestId = 0;
     m_lastScaledRasterUpdate = std::chrono::steady_clock::now();
     m_renderState = RenderState::HighResReady;
-    if (textCachePolicyV2Enabled()) {
+    if (kTextOptimizationCachePolicyEnabled) {
         qreal dpr = 1.0;
         if (scene() && !scene()->views().isEmpty()) {
             if (QGraphicsView* view = scene()->views().first()) {
