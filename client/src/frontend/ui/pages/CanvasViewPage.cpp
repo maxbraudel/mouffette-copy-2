@@ -15,30 +15,23 @@
 CanvasViewPage::CanvasViewPage(QWidget* parent)
     : QWidget(parent),
       m_layout(nullptr),
-      m_remoteClientInfoWrapper(nullptr),
       m_remoteClientInfoContainer(nullptr),
       m_clientNameLabel(nullptr),
       m_remoteConnectionStatusLabel(nullptr),
       m_volumeIndicator(nullptr),
       m_remoteInfoSep1(nullptr),
       m_remoteInfoSep2(nullptr),
-      m_inlineSpinner(nullptr),
       m_canvasContainer(nullptr),
       m_canvasStack(nullptr),
       m_canvasHostStack(nullptr),
       m_loadingSpinner(nullptr),
       m_screenCanvas(nullptr),
-      m_backButton(nullptr),
-      m_uploadButton(nullptr),
-      m_uploadButtonInOverlay(false),
       m_spinnerOpacity(nullptr),
       m_spinnerFade(nullptr),
       m_canvasOpacity(nullptr),
       m_canvasFade(nullptr),
       m_volumeOpacity(nullptr),
       m_volumeFade(nullptr),
-      m_remoteClientConnected(false),
-      m_remoteOverlayActionsEnabled(false),
       m_fadeDurationMs(200),
       m_loaderFadeDurationMs(150)
 {
@@ -329,23 +322,11 @@ void CanvasViewPage::setRemoteConnectionStatus(const QString& status, bool propa
     const QString up = status.toUpper();
     m_remoteConnectionStatusLabel->setText(up);
     
-    if (up == "CONNECTED") {
-        m_remoteClientConnected = true;
-    } else if (up == "DISCONNECTED") {
-        m_remoteClientConnected = false;
-    } else if (up.startsWith("CONNECTING") || up == "ERROR") {
-        m_remoteClientConnected = false;
-    }
-
     // Apply same styling as main connection status with colored background
     QString textColor, bgColor;
     if (up == "CONNECTED") {
         textColor = AppColors::colorToCss(AppColors::gStatusConnectedText);
         bgColor = AppColors::colorToCss(AppColors::gStatusConnectedBg);
-        if (m_inlineSpinner) {
-            // Stop spinner if it exists
-            m_inlineSpinner->hide();
-        }
     } else if (up == "ERROR" || up.startsWith("CONNECTING") || up.startsWith("RECONNECTING")) {
         textColor = AppColors::colorToCss(AppColors::gStatusWarningText);
         bgColor = AppColors::colorToCss(AppColors::gStatusWarningBg);

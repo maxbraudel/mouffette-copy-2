@@ -1344,7 +1344,7 @@ void MainWindow::setupUI() {
         w.stack = m_stackedWidget;
         w.clientListPage = m_clientListPage;
         w.screenViewPage = m_canvasViewPage;  // Phase 1.2: Use CanvasViewPage
-        w.backButton = m_canvasViewPage ? m_canvasViewPage->getBackButton() : nullptr;
+        w.backButton = m_backButton;
         w.canvasStack = m_canvasViewPage ? m_canvasViewPage->getCanvasStack() : nullptr;
         w.loadingSpinner = m_canvasViewPage ? m_canvasViewPage->getLoadingSpinner() : nullptr;
         w.spinnerOpacity = m_canvasViewPage ? m_canvasViewPage->getSpinnerOpacity() : nullptr;
@@ -1701,7 +1701,7 @@ QWidget* MainWindow::getLocalClientInfoContainer() const {
 }
 
 QPushButton* MainWindow::getBackButton() const {
-    return m_canvasViewPage ? m_canvasViewPage->getBackButton() : nullptr;
+    return m_backButton;
 }
 
 bool MainWindow::hasUnuploadedFilesForTarget(const QString& targetClientId) const {

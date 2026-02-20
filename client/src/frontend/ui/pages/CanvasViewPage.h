@@ -27,7 +27,6 @@
 class ClientInfo;
 class ScreenCanvas;
 class SpinnerWidget;
-class UploadManager;
 
 /**
  * @class CanvasViewPage
@@ -79,16 +78,6 @@ public:
      * @brief Get the loading spinner widget
      */
     SpinnerWidget* getLoadingSpinner() const { return m_loadingSpinner; }
-
-    /**
-     * @brief Get the back button
-     */
-    QPushButton* getBackButton() const { return m_backButton; }
-
-    /**
-     * @brief Get the upload button
-     */
-    QPushButton* getUploadButton() const { return m_uploadButton; }
 
     /**
      * @brief Get the remote client info container
@@ -190,38 +179,7 @@ public:
      */
     ScreenCanvas* getCanvas() const { return m_screenCanvas; }
 
-    /**
-     * @brief Set whether upload button is in overlay mode
-     * @param inOverlay True if button is in overlay
-     */
-    void setUploadButtonInOverlay(bool inOverlay) { m_uploadButtonInOverlay = inOverlay; }
-
-    /**
-     * @brief Check if upload button is in overlay mode
-     */
-    bool isUploadButtonInOverlay() const { return m_uploadButtonInOverlay; }
-
-    /**
-     * @brief Get the default font for upload button
-     */
-    QFont getUploadButtonDefaultFont() const { return m_uploadButtonDefaultFont; }
-
-    /**
-     * @brief Set the default font for upload button
-     */
-    void setUploadButtonDefaultFont(const QFont& font) { m_uploadButtonDefaultFont = font; }
-
 signals:
-    /**
-     * @brief Emitted when back button is clicked
-     */
-    void backButtonClicked();
-
-    /**
-     * @brief Emitted when upload button is clicked
-     */
-    void uploadButtonClicked();
-
 private:
     /**
      * @brief Setup the UI layout and widgets
@@ -247,14 +205,12 @@ private:
     QVBoxLayout* m_layout;
 
     // Remote client info section
-    QWidget* m_remoteClientInfoWrapper;
     QWidget* m_remoteClientInfoContainer;
     QLabel* m_clientNameLabel;
     QLabel* m_remoteConnectionStatusLabel;
     QLabel* m_volumeIndicator;
     QFrame* m_remoteInfoSep1; // Separator before status
     QFrame* m_remoteInfoSep2; // Separator before volume
-    QWidget* m_inlineSpinner;
 
     // Canvas container
     QWidget* m_canvasContainer;
@@ -262,12 +218,6 @@ private:
     QStackedWidget* m_canvasHostStack;
     SpinnerWidget* m_loadingSpinner;
     ScreenCanvas* m_screenCanvas;
-
-    // Buttons
-    QPushButton* m_backButton;
-    QPushButton* m_uploadButton;
-    QFont m_uploadButtonDefaultFont;
-    bool m_uploadButtonInOverlay;
 
     // Animations
     QGraphicsOpacityEffect* m_spinnerOpacity;
@@ -278,9 +228,6 @@ private:
     QPropertyAnimation* m_volumeFade;
 
     // State
-    bool m_remoteClientConnected;
-    bool m_remoteOverlayActionsEnabled;
-
     // Animation durations
     int m_fadeDurationMs;
     int m_loaderFadeDurationMs;
