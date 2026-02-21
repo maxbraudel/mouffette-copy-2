@@ -32,6 +32,7 @@ public:
     void recenterView();
     void setTextToolActive(bool active);
     qreal currentViewScale() const;
+    void ensureInitialFit(int marginPx = 53);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -61,6 +62,8 @@ private:
     QRectF scaleSceneRect(const QRectF& rect) const;
     void refreshSceneUnitScaleIfNeeded(bool force = false);
     QPointF mapViewPointToScene(const QPointF& viewPoint) const;
+    void scheduleInitialFitIfNeeded(int marginPx = 53);
+    bool tryInitialFitNow(int marginPx = 53);
 
     QQuickWidget* m_quickWidget = nullptr;
     QList<ScreenInfo> m_screens;
@@ -75,6 +78,11 @@ private:
     qreal m_sceneUnitScale = 1.0;
     bool m_pendingInitialSceneScaleRefresh = false;
     bool m_textToolActive = false;
+    bool m_initialFitCompleted = false;
+    bool m_initialFitPending = false;
+    int m_initialFitMarginPx = 53;
+    int m_initialFitRetryCount = 0;
+    QTimer* m_initialFitRetryTimer = nullptr;
 };
 
 #endif // QUICKCANVASCONTROLLER_H

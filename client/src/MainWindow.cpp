@@ -988,7 +988,8 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     markCanvasLoadRequest(session.persistentClientId);
     const bool sessionHasActiveScreens = session.canvas && session.canvas->hasActiveScreens();
     const bool sessionHasStoredScreens = !session.lastClientInfo.getScreens().isEmpty();
-    const bool hasCachedContent = sessionHasActiveScreens || sessionHasStoredScreens;
+    const bool hasRenderableCachedContent = sessionHasActiveScreens;
+    const bool hasCachedContent = hasRenderableCachedContent || sessionHasStoredScreens;
     switchToCanvasSession(session.persistentClientId);
     m_activeRemoteClientId = session.serverAssignedId;
     m_remoteClientConnected = false;
@@ -998,7 +999,7 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     const QString currentId = alreadyOnScreenView ? m_navigationManager->currentClientId() : QString();
     const bool alreadyOnThisClient = alreadyOnScreenView && currentId == effectiveClient.getId() && !effectiveClient.getId().isEmpty();
 
-    if (hasCachedContent) {
+    if (hasRenderableCachedContent) {
         m_canvasContentEverLoaded = true;
     }
 
@@ -1014,7 +1015,7 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     } else {
         // Same client: refresh subscriptions without resetting UI state
         m_navigationManager->refreshActiveClientPreservingCanvas(effectiveClient);
-        if (hasCachedContent && effectiveClient.isOnline()) {
+        if (hasRenderableCachedContent && effectiveClient.isOnline()) {
             m_navigationManager->enterLoadingStateImmediate();
         }
     }
@@ -1050,7 +1051,7 @@ void MainWindow::showScreenView(const ClientInfo& client) {
         setRemoteConnectionStatus("DISCONNECTED");
     }
 
-    if (hasCachedContent) {
+    if (hasRenderableCachedContent) {
         if (session.canvas) {
             session.canvas->showContentAfterReconnect();
             session.canvas->resetTransform();

@@ -74,6 +74,31 @@ QuickCanvasController::QuickCanvasController(QObject* parent)
     connect(m_mediaSyncTimer, &QTimer::timeout, this, [this]() {
         syncMediaModelFromScene();
     });
+
+    m_initialFitRetryTimer = new QTimer(this);
+    m_initialFitRetryTimer->setSingleShot(true);
+    m_initialFitRetryTimer->setInterval(16);
+    connect(m_initialFitRetryTimer, &QTimer::timeout, this, [this]() {
+        if (m_initialFitCompleted) {
+            m_initialFitPending = false;
+            m_initialFitRetryCount = 0;
+            return;
+        }
+
+        if (tryInitialFitNow(m_initialFitMarginPx)) {
+            m_initialFitPending = false;
+            m_initialFitRetryCount = 0;
+            return;
+        }
+
+        if (m_initialFitRetryCount < 90) {
+            ++m_initialFitRetryCount;
+            m_initialFitRetryTimer->start();
+            return;
+        }
+
+        m_initialFitPending = false;
+    });
 }
 
 bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMessage) {
@@ -141,6 +166,7 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
     });
 
     hideRemoteCursor();
+    scheduleInitialFitIfNeeded(53);
     return true;
 }
 
@@ -150,8 +176,10 @@ bool QuickCanvasController::eventFilter(QObject* watched, QEvent* event) {
         case QEvent::Show:
         case QEvent::Polish:
         case QEvent::PolishRequest:
+        case QEvent::Resize:
         case QEvent::ScreenChangeInternal:
             refreshSceneUnitScaleIfNeeded();
+            scheduleInitialFitIfNeeded(m_initialFitMarginPx);
             break;
         case QEvent::DragEnter: {
             auto* dragEnter = static_cast<QDragEnterEvent*>(event);
@@ -228,11 +256,19 @@ void QuickCanvasController::setShellActive(bool active) {
 
 void QuickCanvasController::setScreens(const QList<ScreenInfo>& screens) {
     m_screens = screens;
+    m_initialFitCompleted = false;
+    m_initialFitRetryCount = 0;
+    m_initialFitPending = false;
+    if (m_initialFitRetryTimer) {
+        m_initialFitRetryTimer->stop();
+    }
     setScreenCount(screens.size());
     rebuildScreenRects();
     pushStaticLayerModels();
     if (screens.isEmpty()) {
         hideRemoteCursor();
+    } else {
+        scheduleInitialFitIfNeeded(53);
     }
 }
 
@@ -314,6 +350,16 @@ void QuickCanvasController::recenterView() {
     }
 
     QMetaObject::invokeMethod(m_quickWidget->rootObject(), "recenterView", Q_ARG(QVariant, 53.0));
+}
+
+void QuickCanvasController::ensureInitialFit(int marginPx) {
+    if (m_initialFitCompleted) {
+        return;
+    }
+
+    if (!tryInitialFitNow(marginPx)) {
+        scheduleInitialFitIfNeeded(marginPx);
+    }
 }
 
 void QuickCanvasController::setTextToolActive(bool active) {
@@ -894,7 +940,11 @@ void QuickCanvasController::refreshSceneUnitScaleIfNeeded(bool force) {
         pushRemoteCursorState();
     }
 
-    recenterView();
+    if (!m_initialFitCompleted) {
+        scheduleInitialFitIfNeeded(m_initialFitMarginPx);
+    } else {
+        recenterView();
+    }
 }
 
 qreal QuickCanvasController::currentSceneUnitScale() const {
@@ -936,4 +986,66 @@ QPointF QuickCanvasController::mapViewPointToScene(const QPointF& viewPoint) con
     const qreal invSceneUnitScale = (m_sceneUnitScale > 1e-6) ? (1.0 / m_sceneUnitScale) : 1.0;
 
     return { quickSceneX * invSceneUnitScale, quickSceneY * invSceneUnitScale };
+}
+
+void QuickCanvasController::scheduleInitialFitIfNeeded(int marginPx) {
+    if (m_initialFitCompleted || m_screens.isEmpty()) {
+        return;
+    }
+
+    m_initialFitMarginPx = marginPx;
+
+    if (tryInitialFitNow(marginPx)) {
+        m_initialFitPending = false;
+        m_initialFitRetryCount = 0;
+        return;
+    }
+
+    if (m_initialFitPending) {
+        return;
+    }
+
+    m_initialFitPending = true;
+    m_initialFitRetryCount = 0;
+    if (m_initialFitRetryTimer) {
+        m_initialFitRetryTimer->start();
+    }
+}
+
+bool QuickCanvasController::tryInitialFitNow(int marginPx) {
+    if (!m_quickWidget || !m_quickWidget->rootObject() || m_screens.isEmpty()) {
+        return false;
+    }
+
+    const QSize widgetSize = m_quickWidget->size();
+    if (widgetSize.width() < 48 || widgetSize.height() < 48) {
+        return false;
+    }
+
+    QRectF bounds;
+    bool hasBounds = false;
+    for (auto it = m_sceneScreenRects.constBegin(); it != m_sceneScreenRects.constEnd(); ++it) {
+        if (!hasBounds) {
+            bounds = it.value();
+            hasBounds = true;
+        } else {
+            bounds = bounds.united(it.value());
+        }
+    }
+
+    if (!hasBounds || bounds.width() <= 0.0 || bounds.height() <= 0.0) {
+        return false;
+    }
+
+    QMetaObject::invokeMethod(
+        m_quickWidget->rootObject(),
+        "fitToBounds",
+        Q_ARG(QVariant, bounds.x()),
+        Q_ARG(QVariant, bounds.y()),
+        Q_ARG(QVariant, bounds.width()),
+        Q_ARG(QVariant, bounds.height()),
+        Q_ARG(QVariant, static_cast<qreal>(marginPx)));
+
+    m_initialFitCompleted = true;
+    return true;
 }

@@ -21,6 +21,9 @@ QuickCanvasHost::QuickCanvasHost(QuickCanvasController* controller, ScreenCanvas
     connect(m_controller, &QuickCanvasController::textMediaCreateRequested,
             m_mediaCanvas, [this](const QPointF& scenePos) {
                 if (!m_mediaCanvas) return;
+                if (m_controller) {
+                    m_controller->ensureInitialFit();
+                }
                 // Temporarily apply the Quick Canvas view scale to the hidden ScreenCanvas so
                 // createTextMediaAtPosition computes the correct adjustedScale (= 1/zoom), giving
                 // a constant ~400 px creation size regardless of camera zoom — matching Widget Canvas.
