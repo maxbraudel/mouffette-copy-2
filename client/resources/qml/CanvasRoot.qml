@@ -7,6 +7,15 @@ Rectangle {
 
     property int screenCount: 0
     property bool remoteActive: false
+    property var screensModel: []
+    property var uiZonesModel: []
+    property bool remoteCursorVisible: false
+    property real remoteCursorX: 0
+    property real remoteCursorY: 0
+    property int remoteCursorDiameter: 30
+    property color remoteCursorFill: "#FFFFFFFF"
+    property color remoteCursorBorder: "#E6000000"
+    property real remoteCursorBorderWidth: 2
     property real viewScale: 1.0
     property real panX: 0.0
     property real panY: 0.0
@@ -92,6 +101,38 @@ Rectangle {
                 color: "#7f8aa3"
                 text: "Quick Canvas Shell · screens: " + screenCount
                 font.pixelSize: 14
+            }
+
+            Repeater {
+                model: root.screensModel
+                delegate: ScreenItem {
+                    screenX: modelData.x
+                    screenY: modelData.y
+                    screenWidth: modelData.width
+                    screenHeight: modelData.height
+                    primary: modelData.primary
+                }
+            }
+
+            Repeater {
+                model: root.uiZonesModel
+                delegate: UiZone {
+                    zoneX: modelData.x
+                    zoneY: modelData.y
+                    zoneWidth: modelData.width
+                    zoneHeight: modelData.height
+                    fillColor: modelData.fillColor
+                }
+            }
+
+            RemoteCursor {
+                cursorVisible: root.remoteCursorVisible
+                cursorX: root.remoteCursorX
+                cursorY: root.remoteCursorY
+                diameter: root.remoteCursorDiameter
+                fillColor: root.remoteCursorFill
+                borderColor: root.remoteCursorBorder
+                borderWidth: root.remoteCursorBorderWidth
             }
         }
 

@@ -57,6 +57,7 @@ void QuickCanvasHost::setScreens(const QList<ScreenInfo>& screens) {
     m_hasActiveScreens = !screens.isEmpty();
     if (m_controller) {
         m_controller->setScreenCount(screens.size());
+        m_controller->setScreens(screens);
     }
 }
 
@@ -94,10 +95,16 @@ void QuickCanvasHost::resetTransform() {
     }
 }
 
-void QuickCanvasHost::updateRemoteCursor(int, int) {
+void QuickCanvasHost::updateRemoteCursor(int globalX, int globalY) {
+    if (m_controller) {
+        m_controller->updateRemoteCursor(globalX, globalY);
+    }
 }
 
 void QuickCanvasHost::hideRemoteCursor() {
+    if (m_controller) {
+        m_controller->hideRemoteCursor();
+    }
 }
 
 QPushButton* QuickCanvasHost::getUploadButton() const {

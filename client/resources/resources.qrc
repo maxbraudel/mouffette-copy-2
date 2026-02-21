@@ -25,5 +25,8 @@
     </qresource>
     <qresource prefix="/qml">
     <file alias="CanvasRoot.qml">qml/CanvasRoot.qml</file>
+    <file alias="ScreenItem.qml">qml/ScreenItem.qml</file>
+    <file alias="UiZone.qml">qml/UiZone.qml</file>
+    <file alias="RemoteCursor.qml">qml/RemoteCursor.qml</file>
     </qresource>
 </RCC>
