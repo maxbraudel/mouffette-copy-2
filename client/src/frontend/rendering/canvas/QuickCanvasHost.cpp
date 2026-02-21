@@ -2,6 +2,7 @@
 
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/ScreenCanvas.h"
+#include <QTransform>
 
 QuickCanvasHost::QuickCanvasHost(QuickCanvasController* controller, ScreenCanvas* mediaCanvas, QObject* parent)
     : ICanvasHost(parent)
@@ -19,9 +20,16 @@ QuickCanvasHost::QuickCanvasHost(QuickCanvasController* controller, ScreenCanvas
             m_controller, &QuickCanvasController::setTextToolActive);
     connect(m_controller, &QuickCanvasController::textMediaCreateRequested,
             m_mediaCanvas, [this](const QPointF& scenePos) {
-                if (m_mediaCanvas) {
-                    m_mediaCanvas->requestTextMediaCreateAt(scenePos, true);
+                if (!m_mediaCanvas) return;
+                // Temporarily apply the Quick Canvas view scale to the hidden ScreenCanvas so
+                // createTextMediaAtPosition computes the correct adjustedScale (= 1/zoom), giving
+                // a constant ~400 px creation size regardless of camera zoom — matching Widget Canvas.
+                const qreal zoom = m_controller ? m_controller->currentViewScale() : 1.0;
+                if (zoom > 1e-6 && std::abs(zoom - 1.0) > 1e-4) {
+                    m_mediaCanvas->setTransform(QTransform::fromScale(zoom, zoom));
                 }
+                m_mediaCanvas->requestTextMediaCreateAt(scenePos, true);
+                m_mediaCanvas->resetTransform();
             });
     connect(m_controller, &QuickCanvasController::localFilesDropRequested,
             m_mediaCanvas, [this](const QStringList& localPaths, const QPointF& scenePos) {
@@ -139,17 +147,11 @@ void QuickCanvasHost::hideContentPreservingState() {
     if (m_mediaCanvas) {
         m_mediaCanvas->hideContentPreservingState();
     }
-    if (QWidget* shell = asWidget()) {
-        shell->setVisible(false);
-    }
 }
 
 void QuickCanvasHost::showContentAfterReconnect() {
     if (m_mediaCanvas) {
         m_mediaCanvas->showContentAfterReconnect();
-    }
-    if (QWidget* shell = asWidget()) {
-        shell->setVisible(true);
     }
 }
 

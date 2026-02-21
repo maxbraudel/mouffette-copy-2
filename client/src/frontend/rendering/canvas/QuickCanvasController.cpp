@@ -396,24 +396,30 @@ void QuickCanvasController::syncMediaModelFromScene() {
                 continue;
             }
 
-            QRectF sceneRect;
             const QSize baseSize = media->baseSizePx();
-            if (baseSize.width() > 0 && baseSize.height() > 0) {
-                sceneRect = media->mapRectToScene(QRectF(QPointF(0.0, 0.0), QSizeF(baseSize)));
-            } else {
-                sceneRect = media->sceneBoundingRect();
+            const QPointF scenePos = media->scenePos();
+            const qreal mediaScale = std::abs(media->scale()) > 1e-6 ? std::abs(media->scale()) : 1.0;
+            qreal baseWidth = static_cast<qreal>(baseSize.width());
+            qreal baseHeight = static_cast<qreal>(baseSize.height());
+
+            if (baseWidth <= 0.0 || baseHeight <= 0.0) {
+                const QRectF sceneRect = media->sceneBoundingRect().normalized();
+                baseWidth = std::max<qreal>(1.0, sceneRect.width());
+                baseHeight = std::max<qreal>(1.0, sceneRect.height());
             }
-            sceneRect = scaleSceneRect(sceneRect.normalized());
+
+            const qreal sceneUnitScale = (m_sceneUnitScale > 1e-6) ? m_sceneUnitScale : 1.0;
 
             QVariantMap mediaEntry;
             mediaEntry.insert(QStringLiteral("mediaId"), media->mediaId());
             mediaEntry.insert(QStringLiteral("mediaType"), media->isTextMedia()
                 ? QStringLiteral("text")
                 : (media->isVideoMedia() ? QStringLiteral("video") : QStringLiteral("image")));
-            mediaEntry.insert(QStringLiteral("x"), sceneRect.x());
-            mediaEntry.insert(QStringLiteral("y"), sceneRect.y());
-            mediaEntry.insert(QStringLiteral("width"), sceneRect.width());
-            mediaEntry.insert(QStringLiteral("height"), sceneRect.height());
+            mediaEntry.insert(QStringLiteral("x"), scenePos.x() * sceneUnitScale);
+            mediaEntry.insert(QStringLiteral("y"), scenePos.y() * sceneUnitScale);
+            mediaEntry.insert(QStringLiteral("width"), std::max<qreal>(1.0, baseWidth * sceneUnitScale));
+            mediaEntry.insert(QStringLiteral("height"), std::max<qreal>(1.0, baseHeight * sceneUnitScale));
+            mediaEntry.insert(QStringLiteral("scale"), mediaScale);
             mediaEntry.insert(QStringLiteral("z"), media->zValue());
             mediaEntry.insert(QStringLiteral("selected"), media->isSelected());
             mediaEntry.insert(QStringLiteral("sourcePath"), media->sourcePath());
@@ -650,6 +656,14 @@ void QuickCanvasController::refreshSceneUnitScaleIfNeeded(bool force) {
 
 qreal QuickCanvasController::currentSceneUnitScale() const {
     return 1.0;
+}
+
+qreal QuickCanvasController::currentViewScale() const {
+    if (!m_quickWidget || !m_quickWidget->rootObject()) {
+        return 1.0;
+    }
+    const qreal scale = m_quickWidget->rootObject()->property("viewScale").toReal();
+    return scale > 1e-6 ? scale : 1.0;
 }
 
 QRectF QuickCanvasController::scaleSceneRect(const QRectF& rect) const {

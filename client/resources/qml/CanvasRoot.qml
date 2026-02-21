@@ -223,6 +223,7 @@ Rectangle {
                     mediaY: parent.media.y
                     mediaWidth: parent.media.width
                     mediaHeight: parent.media.height
+                    mediaScale: parent.media.scale || 1.0
                     mediaZ: parent.media.z
                     selected: !!parent.media.selected
                     imageSource: root.mediaSourceUrl(parent.media.sourcePath)
@@ -240,6 +241,7 @@ Rectangle {
                     mediaY: parent.media.y
                     mediaWidth: parent.media.width
                     mediaHeight: parent.media.height
+                    mediaScale: parent.media.scale || 1.0
                     mediaZ: parent.media.z
                     selected: !!parent.media.selected
                     source: root.mediaSourceUrl(parent.media.sourcePath)
@@ -257,6 +259,7 @@ Rectangle {
                     mediaY: parent.media.y
                     mediaWidth: parent.media.width
                     mediaHeight: parent.media.height
+                    mediaScale: parent.media.scale || 1.0
                     mediaZ: parent.media.z
                     selected: !!parent.media.selected
                     textContent: parent.media.textContent || ""
@@ -292,6 +295,71 @@ Rectangle {
                 fillColor: root.remoteCursorFill
                 borderColor: root.remoteCursorBorder
                 borderWidth: root.remoteCursorBorderWidth
+            }
+        }
+
+        Repeater {
+            id: mediaSelectionOverlay
+            model: root.mediaModel
+
+            delegate: Item {
+                property var media: modelData
+                readonly property bool selected: !!(media && media.selected)
+                readonly property real mediaScale: (media && media.scale) ? media.scale : 1.0
+                readonly property real _viewScale: root.viewScale
+                readonly property real _panX: root.panX
+                readonly property real _panY: root.panY
+                readonly property point p1: {
+                    var _vs = _viewScale
+                    var _px = _panX
+                    var _py = _panY
+                    return contentRoot.mapToItem(viewport,
+                                                 media ? media.x : 0,
+                                                 media ? media.y : 0)
+                }
+                readonly property point p2: {
+                    var _vs = _viewScale
+                    var _px = _panX
+                    var _py = _panY
+                    return contentRoot.mapToItem(viewport,
+                                                 media ? media.x + Math.max(1, media.width) * mediaScale : 1,
+                                                 media ? media.y + Math.max(1, media.height) * mediaScale : 1)
+                }
+
+                visible: selected
+                enabled: false
+                z: 90000
+
+                x: Math.round(Math.min(p1.x, p2.x))
+                y: Math.round(Math.min(p1.y, p2.y))
+                width: Math.max(1, Math.round(Math.abs(p2.x - p1.x)))
+                height: Math.max(1, Math.round(Math.abs(p2.y - p1.y)))
+
+                Canvas {
+                    anchors.fill: parent
+                    antialiasing: false
+
+                    onPaint: {
+                        var ctx = getContext("2d")
+                        ctx.reset()
+
+                        var w = width
+                        var h = height
+                        if (w <= 1 || h <= 1)
+                            return
+
+                        ctx.setLineDash([4, 4])
+                        ctx.lineWidth = 1
+
+                        ctx.strokeStyle = "#FFFFFF"
+                        ctx.lineDashOffset = 0
+                        ctx.strokeRect(0.5, 0.5, w - 1, h - 1)
+
+                        ctx.strokeStyle = "#4A90E2"
+                        ctx.lineDashOffset = 4
+                        ctx.strokeRect(0.5, 0.5, w - 1, h - 1)
+                    }
+                }
             }
         }
 

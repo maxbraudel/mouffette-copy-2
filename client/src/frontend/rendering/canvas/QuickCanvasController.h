@@ -31,6 +31,7 @@ public:
     void resetView();
     void recenterView();
     void setTextToolActive(bool active);
+    qreal currentViewScale() const;
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;

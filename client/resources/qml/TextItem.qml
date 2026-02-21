@@ -7,6 +7,7 @@ Item {
     property real mediaY: 0
     property real mediaWidth: 0
     property real mediaHeight: 0
+    property real mediaScale: 1.0
     property real mediaZ: 0
     property bool selected: false
     property string mediaId: ""
@@ -36,14 +37,9 @@ Item {
     y: mediaY
     width: mediaWidth
     height: mediaHeight
+    scale: mediaScale
+    transformOrigin: Item.TopLeft
     z: mediaZ
-
-    Rectangle {
-        anchors.fill: parent
-        color: "transparent"
-        border.width: root.selected ? 2 : 0
-        border.color: "#4A90E2"
-    }
 
     Rectangle {
         id: textBackground
