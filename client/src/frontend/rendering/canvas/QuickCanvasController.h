@@ -30,13 +30,19 @@ public:
     void hideRemoteCursor();
     void resetView();
     void recenterView();
+    void setTextToolActive(bool active);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
+signals:
+    void textMediaCreateRequested(const QPointF& scenePos);
+    void localFilesDropRequested(const QStringList& localPaths, const QPointF& scenePos);
+
 private slots:
     void handleMediaSelectRequested(const QString& mediaId, bool additive);
     void handleTextCommitRequested(const QString& mediaId, const QString& text);
+    void handleTextCreateRequested(qreal viewX, qreal viewY);
 
 private:
     void pushStaticLayerModels();
@@ -48,6 +54,7 @@ private:
     qreal currentSceneUnitScale() const;
     QRectF scaleSceneRect(const QRectF& rect) const;
     void refreshSceneUnitScaleIfNeeded(bool force = false);
+    QPointF mapViewPointToScene(const QPointF& viewPoint) const;
 
     QQuickWidget* m_quickWidget = nullptr;
     QList<ScreenInfo> m_screens;
@@ -60,6 +67,7 @@ private:
     bool m_mediaSyncPending = false;
     qreal m_sceneUnitScale = 1.0;
     bool m_pendingInitialSceneScaleRefresh = false;
+    bool m_textToolActive = false;
 };
 
 #endif // QUICKCANVASCONTROLLER_H

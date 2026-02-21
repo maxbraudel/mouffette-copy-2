@@ -124,6 +124,9 @@ public:
     
     CanvasTool currentTool() const { return m_currentTool; }
     void setCurrentTool(CanvasTool tool);
+    bool isTextToolActive() const { return m_currentTool == CanvasTool::Text; }
+    void requestTextMediaCreateAt(const QPointF& scenePos, bool beginInlineEditing = true);
+    void requestLocalFileDropAt(const QStringList& localPaths, const QPointF& scenePos);
     
     // Z-order management for media items (public interface)
     void moveMediaUp(QGraphicsItem* item);
@@ -162,6 +165,7 @@ signals:
     // Emitted when a media item is removed from the canvas
     void mediaItemRemoved(ResizableMediaBase* mediaItem);
     void remoteSceneLaunchStateChanged(bool active, const QString& targetClientId, const QString& targetMachineName);
+    void textToolActiveChanged(bool active);
 
 protected:
     bool event(QEvent* event) override;

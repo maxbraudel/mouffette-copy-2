@@ -6,6 +6,11 @@
 #include <QGraphicsItem>
 #include <QMetaObject>
 #include <QEvent>
+#include <QDropEvent>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QMimeData>
+#include <QMouseEvent>
 #include <QQuickItem>
 #include <QQuickWidget>
 #include <QScreen>
@@ -76,6 +81,7 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
 
     m_quickWidget = new QQuickWidget(parentWidget);
     m_quickWidget->installEventFilter(this);
+    m_quickWidget->setAcceptDrops(true);
     m_quickWidget->setResizeMode(QQuickWidget::SizeRootObjectToView);
     m_quickWidget->setSource(QUrl(QStringLiteral("qrc:/qml/CanvasRoot.qml")));
 
@@ -95,6 +101,7 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
 
     setScreenCount(0);
     setShellActive(false);
+    setTextToolActive(false);
     setScreens({});
     m_quickWidget->rootObject()->setProperty("mediaModel", QVariantList{});
 
@@ -104,6 +111,9 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
     QObject::connect(
         m_quickWidget->rootObject(), SIGNAL(textCommitRequested(QString,QString)),
         this, SLOT(handleTextCommitRequested(QString,QString)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(textCreateRequested(double,double)),
+        this, SLOT(handleTextCreateRequested(double,double)));
 
     m_pendingInitialSceneScaleRefresh = true;
     QTimer::singleShot(0, this, [this]() {
@@ -130,6 +140,53 @@ bool QuickCanvasController::eventFilter(QObject* watched, QEvent* event) {
         case QEvent::ScreenChangeInternal:
             refreshSceneUnitScaleIfNeeded();
             break;
+        case QEvent::DragEnter: {
+            auto* dragEnter = static_cast<QDragEnterEvent*>(event);
+            if (dragEnter && dragEnter->mimeData() && dragEnter->mimeData()->hasUrls()) {
+                dragEnter->acceptProposedAction();
+                return true;
+            }
+            break;
+        }
+        case QEvent::DragMove: {
+            auto* dragMove = static_cast<QDragMoveEvent*>(event);
+            if (dragMove && dragMove->mimeData() && dragMove->mimeData()->hasUrls()) {
+                dragMove->acceptProposedAction();
+                return true;
+            }
+            break;
+        }
+        case QEvent::Drop: {
+            auto* dropEvent = static_cast<QDropEvent*>(event);
+            if (dropEvent && dropEvent->mimeData() && dropEvent->mimeData()->hasUrls()) {
+                QStringList localPaths;
+                const QList<QUrl> urls = dropEvent->mimeData()->urls();
+                for (const QUrl& url : urls) {
+                    if (url.isLocalFile()) {
+                        const QString localPath = url.toLocalFile();
+                        if (!localPath.isEmpty()) {
+                            localPaths.append(localPath);
+                        }
+                    }
+                }
+
+                if (!localPaths.isEmpty()) {
+                    emit localFilesDropRequested(localPaths, mapViewPointToScene(dropEvent->position()));
+                    dropEvent->acceptProposedAction();
+                    return true;
+                }
+            }
+            break;
+        }
+        case QEvent::MouseButtonPress: {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (m_textToolActive && mouseEvent && mouseEvent->button() == Qt::LeftButton) {
+                emit textMediaCreateRequested(mapViewPointToScene(mouseEvent->position()));
+                mouseEvent->accept();
+                return true;
+            }
+            break;
+        }
         default:
             break;
         }
@@ -246,6 +303,14 @@ void QuickCanvasController::recenterView() {
     QMetaObject::invokeMethod(m_quickWidget->rootObject(), "recenterView", Q_ARG(QVariant, 53.0));
 }
 
+void QuickCanvasController::setTextToolActive(bool active) {
+    m_textToolActive = active;
+    if (!m_quickWidget || !m_quickWidget->rootObject()) {
+        return;
+    }
+    m_quickWidget->rootObject()->setProperty("textToolActive", active);
+}
+
 void QuickCanvasController::scheduleMediaModelSync() {
     if (m_mediaSyncPending) {
         return;
@@ -309,6 +374,10 @@ void QuickCanvasController::handleTextCommitRequested(const QString& mediaId, co
         scheduleMediaModelSync();
         return;
     }
+}
+
+void QuickCanvasController::handleTextCreateRequested(qreal viewX, qreal viewY) {
+    emit textMediaCreateRequested(mapViewPointToScene(QPointF(viewX, viewY)));
 }
 
 void QuickCanvasController::syncMediaModelFromScene() {
@@ -593,4 +662,21 @@ QRectF QuickCanvasController::scaleSceneRect(const QRectF& rect) const {
         rect.y() * m_sceneUnitScale,
         rect.width() * m_sceneUnitScale,
         rect.height() * m_sceneUnitScale);
+}
+
+QPointF QuickCanvasController::mapViewPointToScene(const QPointF& viewPoint) const {
+    if (!m_quickWidget || !m_quickWidget->rootObject()) {
+        return {};
+    }
+
+    const QObject* rootObject = m_quickWidget->rootObject();
+    const qreal viewScale = std::max<qreal>(1e-6, rootObject->property("viewScale").toReal());
+    const qreal panX = rootObject->property("panX").toReal();
+    const qreal panY = rootObject->property("panY").toReal();
+
+    const qreal quickSceneX = (viewPoint.x() - panX) / viewScale;
+    const qreal quickSceneY = (viewPoint.y() - panY) / viewScale;
+    const qreal invSceneUnitScale = (m_sceneUnitScale > 1e-6) ? (1.0 / m_sceneUnitScale) : 1.0;
+
+    return { quickSceneX * invSceneUnitScale, quickSceneY * invSceneUnitScale };
 }

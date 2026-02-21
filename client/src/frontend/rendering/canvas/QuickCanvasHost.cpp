@@ -15,6 +15,22 @@ QuickCanvasHost::QuickCanvasHost(QuickCanvasController* controller, ScreenCanvas
     connect(m_mediaCanvas, &ScreenCanvas::mediaItemRemoved, this, &QuickCanvasHost::mediaItemRemoved);
     connect(m_mediaCanvas, &ScreenCanvas::remoteSceneLaunchStateChanged,
             this, &QuickCanvasHost::remoteSceneLaunchStateChanged);
+    connect(m_mediaCanvas, &ScreenCanvas::textToolActiveChanged,
+            m_controller, &QuickCanvasController::setTextToolActive);
+    connect(m_controller, &QuickCanvasController::textMediaCreateRequested,
+            m_mediaCanvas, [this](const QPointF& scenePos) {
+                if (m_mediaCanvas) {
+                    m_mediaCanvas->requestTextMediaCreateAt(scenePos, true);
+                }
+            });
+    connect(m_controller, &QuickCanvasController::localFilesDropRequested,
+            m_mediaCanvas, [this](const QStringList& localPaths, const QPointF& scenePos) {
+                if (m_mediaCanvas) {
+                    m_mediaCanvas->requestLocalFileDropAt(localPaths, scenePos);
+                }
+            });
+
+    m_controller->setTextToolActive(m_mediaCanvas->isTextToolActive());
 }
 
 QuickCanvasHost::~QuickCanvasHost() {

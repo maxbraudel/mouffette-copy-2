@@ -5411,6 +5411,72 @@ void ScreenCanvas::setCurrentTool(CanvasTool tool) {
     
     // Keep default arrow cursor for all tools
     viewport()->setCursor(Qt::ArrowCursor);
+
+    emit textToolActiveChanged(m_currentTool == CanvasTool::Text);
+}
+
+void ScreenCanvas::requestTextMediaCreateAt(const QPointF& scenePos, bool beginInlineEditing) {
+    if (TextMediaItem* newText = createTextMediaAtPosition(scenePos)) {
+        if (beginInlineEditing) {
+            newText->beginInlineEditing();
+        }
+    }
+}
+
+void ScreenCanvas::requestLocalFileDropAt(const QStringList& localPaths, const QPointF& scenePos) {
+    if (!m_scene || localPaths.isEmpty()) {
+        return;
+    }
+
+    m_scene->clearSelection();
+
+    for (const QString& localPath : localPaths) {
+        if (localPath.isEmpty()) {
+            continue;
+        }
+
+        QFileInfo fi(localPath);
+        const QString suffix = fi.suffix().toLower();
+        const bool isVideo = suffix == "mp4" || suffix == "mov" || suffix == "m4v"
+            || suffix == "avi" || suffix == "mkv" || suffix == "webm";
+
+        if (isVideo) {
+            auto* v = new ResizableVideoItem(localPath, 12, 30, fi.fileName(), m_videoControlsFadeMs);
+            if (m_applicationSuspended) {
+                v->setApplicationSuspended(true);
+            }
+            v->setSourcePath(localPath);
+            v->setInitialScaleFactor(m_scaleFactor);
+
+            QSize videoSize(640, 360);
+            if (v->baseSizePx().isValid()) {
+                videoSize = v->baseSizePx();
+            }
+            Q_UNUSED(videoSize);
+
+            v->setScale(m_scaleFactor);
+            positionMediaCenteredAtScene(v, scenePos);
+            assignNextZValue(v);
+            m_scene->addItem(v);
+            v->setSelected(true);
+            emit mediaItemAdded(v);
+            continue;
+        }
+
+        QPixmap pm(localPath);
+        if (!pm.isNull()) {
+            auto* p = new ResizablePixmapItem(pm, 12, 30, fi.fileName());
+            p->setSourcePath(localPath);
+            p->setScale(m_scaleFactor);
+            positionMediaCenteredAtScene(p, scenePos);
+            assignNextZValue(p);
+            m_scene->addItem(p);
+            p->setSelected(true);
+            emit mediaItemAdded(p);
+        }
+    }
+
+    refreshInfoOverlay();
 }
 
 TextMediaItem* ScreenCanvas::createTextMediaAtPosition(const QPointF& scenePos) {

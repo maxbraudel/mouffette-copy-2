@@ -7,12 +7,14 @@ Rectangle {
 
     signal mediaSelectRequested(string mediaId, bool additive)
     signal textCommitRequested(string mediaId, string text)
+    signal textCreateRequested(real viewX, real viewY)
 
     property int screenCount: 0
     property bool remoteActive: false
     property var screensModel: []
     property var uiZonesModel: []
     property var mediaModel: []
+    property bool textToolActive: false
     property bool remoteCursorVisible: false
     property real remoteCursorX: 0
     property real remoteCursorY: 0
@@ -331,6 +333,18 @@ Rectangle {
                 if (isFiniteNumber(factor) && factor > 0.0)
                     root.applyZoomAt(centroid.position.x, centroid.position.y, factor)
                 lastScale = scale
+            }
+        }
+
+        TapHandler {
+            id: textToolTap
+            target: null
+            acceptedButtons: Qt.LeftButton
+
+            onTapped: function(eventPoint) {
+                if (!root.textToolActive)
+                    return
+                root.textCreateRequested(eventPoint.position.x, eventPoint.position.y)
             }
         }
 
