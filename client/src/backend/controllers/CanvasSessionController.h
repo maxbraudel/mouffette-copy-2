@@ -9,6 +9,7 @@
 class MainWindow;
 class ClientInfo;
 class QFont;
+class QuickCanvasHost;
 
 /**
  * @brief Controller for managing canvas sessions lifecycle and state
@@ -40,6 +41,7 @@ public:
 
     // Session lifecycle
     void* ensureCanvasSession(const ClientInfo& client);
+    void prewarmQuickCanvasHost();
     void configureCanvasSession(void* session);
     void switchToCanvasSession(const QString& persistentClientId);
     void rotateSessionIdea(void* session);
@@ -53,6 +55,7 @@ public:
 
 private:
     MainWindow* m_mainWindow;
+    QuickCanvasHost* m_prewarmedQuickCanvasHost = nullptr;
 };
 
 #endif // CANVASSESSIONCONTROLLER_H

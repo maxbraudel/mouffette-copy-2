@@ -85,17 +85,24 @@ void* CanvasSessionController::ensureCanvasSession(const ClientInfo& client) {
         QString reason = QStringLiteral("flag_off_legacy_default");
 
         if (quickRequested) {
-            QString quickError;
-            session.canvas = QuickCanvasHost::create(canvasHostStack, &quickError);
-            if (session.canvas) {
+            if (m_prewarmedQuickCanvasHost) {
+                session.canvas = m_prewarmedQuickCanvasHost;
+                m_prewarmedQuickCanvasHost = nullptr;
                 appliedRenderer = QStringLiteral("quick_canvas_shell");
-                reason = QStringLiteral("flag_on_phase1_shell");
+                reason = QStringLiteral("flag_on_prewarmed_shell");
             } else {
-                session.canvas = LegacyCanvasHost::create(canvasHostStack);
-                appliedRenderer = QStringLiteral("legacy_screen_canvas");
-                reason = quickError.isEmpty()
-                    ? QStringLiteral("quick_shell_init_failed_fallback")
-                    : QStringLiteral("quick_shell_error_fallback");
+                QString quickError;
+                session.canvas = QuickCanvasHost::create(canvasHostStack, &quickError);
+                if (session.canvas) {
+                    appliedRenderer = QStringLiteral("quick_canvas_shell");
+                    reason = QStringLiteral("flag_on_phase1_shell");
+                } else {
+                    session.canvas = LegacyCanvasHost::create(canvasHostStack);
+                    appliedRenderer = QStringLiteral("legacy_screen_canvas");
+                    reason = quickError.isEmpty()
+                        ? QStringLiteral("quick_shell_init_failed_fallback")
+                        : QStringLiteral("quick_shell_error_fallback");
+                }
             }
         } else {
             session.canvas = LegacyCanvasHost::create(canvasHostStack);
@@ -110,7 +117,9 @@ void* CanvasSessionController::ensureCanvasSession(const ClientInfo& client) {
         session.canvas->setActiveIdeaId(session.canvasSessionId); // Use canvasSessionId from SessionManager
         session.connectionsInitialized = false;
         configureCanvasSession(&session);
-        canvasHostStack->addWidget(session.canvas->asWidget());
+        if (canvasHostStack->indexOf(session.canvas->asWidget()) == -1) {
+            canvasHostStack->addWidget(session.canvas->asWidget());
+        }
     }
     
     // Update remote target
@@ -128,6 +137,32 @@ void* CanvasSessionController::ensureCanvasSession(const ClientInfo& client) {
         m_mainWindow->getClientListPage()->refreshOngoingScenesList();
     }
     return &session;
+}
+
+void CanvasSessionController::prewarmQuickCanvasHost() {
+    if (!m_mainWindow || !m_mainWindow->useQuickCanvasRenderer() || m_prewarmedQuickCanvasHost) {
+        return;
+    }
+
+    QStackedWidget* canvasHostStack = m_mainWindow->getCanvasViewPage() ? m_mainWindow->getCanvasViewPage()->getCanvasHostStack() : nullptr;
+    if (!canvasHostStack) {
+        return;
+    }
+
+    QString quickError;
+    QuickCanvasHost* prewarmedHost = QuickCanvasHost::create(canvasHostStack, &quickError);
+    if (!prewarmedHost) {
+        if (!quickError.isEmpty()) {
+            qWarning() << "CanvasSessionController: Quick prewarm failed:" << quickError;
+        }
+        return;
+    }
+
+    m_prewarmedQuickCanvasHost = prewarmedHost;
+    if (canvasHostStack->indexOf(prewarmedHost->asWidget()) == -1) {
+        canvasHostStack->addWidget(prewarmedHost->asWidget());
+    }
+    prewarmedHost->setOverlayActionsEnabled(false);
 }
 
 void CanvasSessionController::configureCanvasSession(void* sessionPtr) {

@@ -236,50 +236,11 @@ void ScreenEventHandler::onScreensInfoReceived(const ClientInfo& clientInfo)
     }
 
     if (!session->canvas) {
-        QStackedWidget* canvasHostStack = m_mainWindow->getCanvasViewPage() ? 
-            m_mainWindow->getCanvasViewPage()->getCanvasHostStack() : nullptr;
-        if (!canvasHostStack) {
-            qWarning() << "ScreenEventHandler: Cannot create canvas - CanvasViewPage not initialized";
+        session = &m_mainWindow->ensureCanvasSession(session->lastClientInfo);
+        if (!session || !session->canvas) {
+            qWarning() << "ScreenEventHandler: Cannot create canvas session for" << persistentId;
             return;
         }
-
-        const bool quickRequested = m_mainWindow->useQuickCanvasRenderer();
-        QString appliedRenderer = QStringLiteral("legacy_screen_canvas");
-        QString reason = QStringLiteral("flag_off_legacy_default");
-
-        if (quickRequested) {
-            QString quickError;
-            session->canvas = QuickCanvasHost::create(canvasHostStack, &quickError);
-            if (session->canvas) {
-                appliedRenderer = QStringLiteral("quick_canvas_shell");
-                reason = QStringLiteral("flag_on_phase1_shell");
-            } else {
-                session->canvas = LegacyCanvasHost::create(canvasHostStack);
-                appliedRenderer = QStringLiteral("legacy_screen_canvas");
-                reason = quickError.isEmpty()
-                    ? QStringLiteral("quick_shell_init_failed_fallback")
-                    : QStringLiteral("quick_shell_error_fallback");
-            }
-        } else {
-            session->canvas = LegacyCanvasHost::create(canvasHostStack);
-        }
-
-        MigrationTelemetryManager::logRendererPathResolved(
-            QStringLiteral("ScreenEventHandler::onScreensInfoReceived"),
-            quickRequested,
-            appliedRenderer,
-            reason);
-
-        session->canvas->setWebSocketClient(m_webSocketClient);
-        session->canvas->setUploadManager(m_mainWindow->getUploadManager());
-        session->canvas->setFileManager(m_mainWindow->getFileManager());
-        session->connectionsInitialized = false;
-        
-        if (canvasHostStack->indexOf(session->canvas->asWidget()) == -1) {
-            canvasHostStack->addWidget(session->canvas->asWidget());
-        }
-        
-        m_mainWindow->configureCanvasSession(*session);
     }
 
     const QList<ScreenInfo> screens = clientInfo.getScreens();

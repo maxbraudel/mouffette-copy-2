@@ -392,6 +392,13 @@ MainWindow::MainWindow(QWidget* parent)
     setWindowState(Qt::WindowMaximized);
     
     setupUI();
+    if (m_canvasSessionController && useQuickCanvasRenderer()) {
+        QTimer::singleShot(0, this, [this]() {
+            if (m_canvasSessionController) {
+                m_canvasSessionController->prewarmQuickCanvasHost();
+            }
+        });
+    }
     // Initialize remote scene controller once
     if (!g_remoteSceneController) {
         g_remoteSceneController = new RemoteSceneController(m_fileManager, m_webSocketClient, this);
@@ -1181,10 +1188,7 @@ void MainWindow::onBackToClientListClicked() { showClientListView(); }
 // Phase 1.1: New slot connected to ClientListPage::clientClicked signal
 void MainWindow::onClientSelected(const ClientInfo& client, int clientIndex) {
     Q_UNUSED(clientIndex);
-    CanvasSession& session = ensureCanvasSession(client);
-    switchToCanvasSession(session.persistentClientId);
-    m_selectedClient = session.lastClientInfo;
-    showScreenView(session.lastClientInfo);
+    showScreenView(client);
     // ScreenNavigationManager will request screens; no need to duplicate here
 }
 
@@ -1193,8 +1197,6 @@ void MainWindow::onOngoingSceneSelected(const QString& persistentClientId) {
     CanvasSession* session = findCanvasSession(persistentClientId);
     if (!session) return;
 
-    switchToCanvasSession(session->persistentClientId);
-    m_selectedClient = session->lastClientInfo;
     showScreenView(session->lastClientInfo);
 }
 
