@@ -31,7 +31,7 @@ QuickCanvasHost::QuickCanvasHost(QuickCanvasController* controller, ScreenCanvas
                 if (zoom > 1e-6 && std::abs(zoom - 1.0) > 1e-4) {
                     m_mediaCanvas->setTransform(QTransform::fromScale(zoom, zoom));
                 }
-                m_mediaCanvas->requestTextMediaCreateAt(scenePos, true);
+                m_mediaCanvas->requestTextMediaCreateAt(scenePos, false);
                 m_mediaCanvas->resetTransform();
             });
     connect(m_controller, &QuickCanvasController::localFilesDropRequested,

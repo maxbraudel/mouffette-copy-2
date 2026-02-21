@@ -260,6 +260,7 @@ Rectangle {
                         enabled: !!mediaDelegate.media
                                  && !!mediaDelegate.media.selected
                                  && !mediaDelegate.media.textEditable
+                                 && !(loader.item && loader.item.editing === true)
                                  && !root.textToolActive
 
                         property real startX: 0.0
