@@ -63,6 +63,48 @@ QString textVerticalAlignmentToString(TextMediaItem::VerticalAlignment alignment
     }
     return QStringLiteral("center");
 }
+
+bool uiZonesEquivalent(const QList<ScreenInfo::UIZone>& lhs, const QList<ScreenInfo::UIZone>& rhs) {
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+
+    for (int i = 0; i < lhs.size(); ++i) {
+        const ScreenInfo::UIZone& leftZone = lhs.at(i);
+        const ScreenInfo::UIZone& rightZone = rhs.at(i);
+        if (leftZone.type != rightZone.type
+            || leftZone.x != rightZone.x
+            || leftZone.y != rightZone.y
+            || leftZone.width != rightZone.width
+            || leftZone.height != rightZone.height) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool screenListsEquivalent(const QList<ScreenInfo>& lhs, const QList<ScreenInfo>& rhs) {
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+
+    for (int i = 0; i < lhs.size(); ++i) {
+        const ScreenInfo& leftScreen = lhs.at(i);
+        const ScreenInfo& rightScreen = rhs.at(i);
+        if (leftScreen.id != rightScreen.id
+            || leftScreen.width != rightScreen.width
+            || leftScreen.height != rightScreen.height
+            || leftScreen.x != rightScreen.x
+            || leftScreen.y != rightScreen.y
+            || leftScreen.primary != rightScreen.primary
+            || !uiZonesEquivalent(leftScreen.uiZones, rightScreen.uiZones)) {
+            return false;
+        }
+    }
+
+    return true;
+}
 }
 
 QuickCanvasController::QuickCanvasController(QObject* parent)
@@ -255,6 +297,10 @@ void QuickCanvasController::setShellActive(bool active) {
 }
 
 void QuickCanvasController::setScreens(const QList<ScreenInfo>& screens) {
+    if (screenListsEquivalent(m_screens, screens)) {
+        return;
+    }
+
     m_screens = screens;
     m_initialFitCompleted = false;
     m_initialFitRetryCount = 0;

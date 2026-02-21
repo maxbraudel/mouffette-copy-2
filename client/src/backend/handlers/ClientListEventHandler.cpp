@@ -122,7 +122,6 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                         m_mainWindow->addRemoteStatusToLayout();
                         m_mainWindow->setRemoteConnectionStatus("CONNECTING...", /*propagateLoss*/ false);
                         if (m_webSocketClient && m_webSocketClient->isConnected()) {
-                            m_mainWindow->setCanvasRevealedForCurrentClient(false);
                             m_webSocketClient->requestScreens(activeSession->serverAssignedId);
                             WatchManager* watchManager = m_mainWindow->getWatchManager();
                             if (watchManager) {
@@ -163,7 +162,6 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                             m_mainWindow->setRemoteConnectionStatus("CONNECTING...");
                             m_mainWindow->addRemoteStatusToLayout();
                             if (m_webSocketClient && m_webSocketClient->isConnected()) {
-                                m_mainWindow->setCanvasRevealedForCurrentClient(false);
                                 m_webSocketClient->requestScreens(activeSession->serverAssignedId);
                                 WatchManager* watchManager = m_mainWindow->getWatchManager();
                                 if (watchManager) {
