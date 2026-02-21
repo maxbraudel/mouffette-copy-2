@@ -1,0 +1,41 @@
+{
+  "generatedAt": "2026-02-21T12:40:59.195Z",
+  "gitCommit": "1554664058e55200b84d0cf6f136d1782741ebd7",
+  "inputs": {
+    "quickLog": "tests/baseline/fixtures/perf_logs/phase4_quick_auto_targeted.log",
+    "legacyLog": "tests/baseline/fixtures/perf_logs/phase4_legacy_auto.log"
+  },
+  "checks": [
+    {
+      "command": "bash ./tools/check_architecture_boundaries.sh",
+      "exitCode": 0,
+      "stdout": "[ARCH-CHECK] Running architecture boundary checks...\n[ARCH-CHECK] PASS: Boundary checks OK.\n",
+      "stderr": ""
+    },
+    {
+      "command": "node tests/baseline/run_baseline_checks.js",
+      "exitCode": 0,
+      "stdout": "[BASELINE] PASS\n{\n  \"results\": {\n    \"fixtures\": {\n      \"filesChecked\": 4\n    },\n    \"replays\": {\n      \"filesChecked\": 3\n    },\n    \"snapshots\": {\n      \"filesChecked\": 4\n    },\n    \"invariance\": {\n      \"filesChecked\": 5,\n      \"assertions\": 24\n    }\n  },\n  \"elapsedMs\": 13\n}\n",
+      "stderr": ""
+    },
+    {
+      "command": "node tests/baseline/run_phase2_interaction_parity.js",
+      "exitCode": 0,
+      "stdout": "[PHASE2_PARITY] PASS\n{\n  \"qmlCheck\": {\n    \"checkedTokens\": 8\n  },\n  \"replayCheck\": {\n    \"zoomCount\": 3,\n    \"panCount\": 2,\n    \"maxDriftPx\": 0,\n    \"tolerancePx\": 3,\n    \"finalState\": {\n      \"scale\": 1.1495000000000002,\n      \"panX\": -32.48000000000002,\n      \"panY\": -87.87000000000012\n    }\n  }\n}\n",
+      "stderr": ""
+    },
+    {
+      "command": "node tests/baseline/run_phase4_visual_parity.js",
+      "exitCode": 0,
+      "stdout": "[PHASE4_VISUAL_PARITY] PASS\n{\n  \"files\": {\n    \"filesChecked\": 4\n  },\n  \"resources\": {\n    \"aliasesChecked\": 3\n  },\n  \"canvas\": {\n    \"tokensChecked\": 9\n  },\n  \"delegates\": {\n    \"delegateChecks\": 6\n  },\n  \"dtoBridge\": {\n    \"controllerTokens\": 9,\n    \"hostChecks\": 2\n  },\n  \"snapshots\": {\n    \"snapshotAssets\": 4\n  }\n}\n",
+      "stderr": ""
+    },
+    {
+      "command": "node tests/baseline/run_phase4_perf_delta.js --quick-log /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 26/client/tests/baseline/fixtures/perf_logs/phase4_quick_auto_targeted.log --legacy-log /Users/maxbraudel/Personnel/Dev/Apps/mouffette copy 26/client/tests/baseline/fixtures/perf_logs/phase4_legacy_auto.log",
+      "exitCode": 0,
+      "stdout": "[PHASE4_PERF_DELTA] PASS\n{\n  \"quick\": {\n    \"windows\": 3,\n    \"zoomWindows\": 1,\n    \"totalZoomEvents\": 8,\n    \"totalRelayouts\": 9,\n    \"p95RelayoutPerZoom\": 1.125,\n    \"p95FullRelayoutPerZoom\": 0.25\n  },\n  \"legacy\": {\n    \"windows\": 10,\n    \"zoomWindows\": 4,\n    \"totalZoomEvents\": 81,\n    \"totalRelayouts\": 326,\n    \"p95RelayoutPerZoom\": 1.1,\n    \"p95FullRelayoutPerZoom\": 1.1\n  },\n  \"delta\": {\n    \"p95RelayoutPerZoomDelta\": 0.02499999999999991,\n    \"p95FullRelayoutPerZoomDelta\": -0.8500000000000001\n  }\n}\n",
+      "stderr": ""
+    }
+  ],
+  "allPassed": true
+}

@@ -1,0 +1,189 @@
+WebSocketClient: Initialized sessionId "b6225234-40d2-4695-9822-51b07fec61e3"
+SettingsManager: Loaded persistent client ID: "91511c59-8a48-491c-9263-f810a7d7477d" using key "persistentClientId_FCDEA468_71D0_5B16_92A3_22E8E81C513E_8296383ac50ee10c" machineId: "FCDEA468-71D0-5B16-92A3-22E8E81C513E" instanceSuffix: ""
+SettingsManager: Settings loaded - URL: "ws://localhost:8080" Auto-upload: false useQuickCanvasRenderer: true flagSource: "env:MOUFFETTE_USE_QUICK_CANVAS_RENDERER" Client ID: "91511c59-8a48-491c-9263-f810a7d7477d"
+[MIGRATION_TELEMETRY] {"event":"startup_flag_state","flagSource":"env:MOUFFETTE_USE_QUICK_CANVAS_RENDERER","useQuickCanvasRenderer":true}
+WebSocketMessageHandler: Connections established
+ScreenEventHandler: Connections established
+Connecting to server: "ws://localhost:8080"
+Connection status changed to: "Connecting..."
+Connecting to server: "ws://localhost:8080"
+Connected to server
+Connection status changed to: "Connected"
+SessionManager: Set local client ID to "91511c59-8a48-491c-9263-f810a7d7477d"
+UploadManager: Set local client ID to "91511c59-8a48-491c-9263-f810a7d7477d"
+ScreenEventHandler: Sync registration: "macbook-pro-de-max.tail93633.ts.net" on "macOS" with 0 screens
+Registering client: "macbook-pro-de-max.tail93633.ts.net" ( "macOS" ) with persistentId: "91511c59-8a48-491c-9263-f810a7d7477d"
+Received message type: "welcome"
+Received welcome with socket ID: "e272b1a6-1321-456e-b6e0-89bb3f4d00c8"
+Received message type: "client_list"
+Received client list with 1 clients
+New clients available: "1 new client available for sharing"
+Received message type: "registration_confirmed"
+Registration confirmed for session "b6225234-40d2-4695-9822-51b07fec61e3" persistent "91511c59-8a48-491c-9263-f810a7d7477d"
+Registration confirmed for: "macbook-pro-de-max.tail93633.ts.net"
+Received message type: "client_list"
+Received client list with 1 clients
+Received message type: "watch_status"
+ScreenEventHandler: Sync registration: "macbook-pro-de-max.tail93633.ts.net" on "macOS" with 1 screens
+Registering client: "macbook-pro-de-max.tail93633.ts.net" ( "macOS" ) with persistentId: "91511c59-8a48-491c-9263-f810a7d7477d"
+Watch status changed: watched
+Received message type: "data_request"
+Received message type: "registration_confirmed"
+Registration confirmed for session "b6225234-40d2-4695-9822-51b07fec61e3" persistent "91511c59-8a48-491c-9263-f810a7d7477d"
+Registration confirmed for: "macbook-pro-de-max.tail93633.ts.net"
+Received message type: "client_list"
+Received client list with 1 clients
+Received message type: "registration_confirmed"
+Registration confirmed for session "b6225234-40d2-4695-9822-51b07fec61e3" persistent "91511c59-8a48-491c-9263-f810a7d7477d"
+Registration confirmed for: "macbook-pro-de-max.tail93633.ts.net"
+Received message type: "client_list"
+Received client list with 1 clients
+ScreenEventHandler: Sync registration: "macbook-pro-de-max.tail93633.ts.net" on "macOS" with 1 screens
+Registering client: "macbook-pro-de-max.tail93633.ts.net" ( "macOS" ) with persistentId: "91511c59-8a48-491c-9263-f810a7d7477d"
+Received message type: "registration_confirmed"
+Registration confirmed for session "b6225234-40d2-4695-9822-51b07fec61e3" persistent "91511c59-8a48-491c-9263-f810a7d7477d"
+Registration confirmed for: "macbook-pro-de-max.tail93633.ts.net"
+Received message type: "client_list"
+Received client list with 1 clients
+SessionManager: Created new session for client "91511c59-8a48-491c-9263-f810a7d7477d" with directional canvasSessionId "91511c59-8a48-491c-9263-f810a7d7477d_TO_91511c59-8a48-491c-9263-f810a7d7477d_canvas_8f519763-1145-4ae1-b1d3-4f60416e1ff2"
+Notified server: canvas created for client: "91511c59-8a48-491c-9263-f810a7d7477d" canvasSessionId: "91511c59-8a48-491c-9263-f810a7d7477d_TO_91511c59-8a48-491c-9263-f810a7d7477d_canvas_8f519763-1145-4ae1-b1d3-4f60416e1ff2"
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+[MIGRATION_TELEMETRY] {"appliedRenderer":"quick_canvas_shell","event":"renderer_path_resolved","location":"CanvasSessionController::ensureCanvasSession","reason":"flag_on_phase1_shell","requestedQuickRenderer":true}
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+[MIGRATION_TELEMETRY] {"event":"canvas_load_request","persistentClientId":"91511c59-8a48-491c-9263-f810a7d7477d"}
+[Hardening] updateLaunchSceneButtonStyle - "Launch Test Scene is enabled while overlay actions are disabled"
+[Hardening] updateLaunchSceneButtonStyle - "Upload button is enabled while overlay actions are disabled"
+[Hardening] updateLaunchTestSceneButtonStyle - "Upload button is enabled while overlay actions are disabled"
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+QFont::setPixelSize: Pixel size <= 0 (0)
+Received message type: "screens_info"
+[MIGRATION_TELEMETRY] {"event":"canvas_load_ready","latencyMs":87,"persistentClientId":"91511c59-8a48-491c-9263-f810a7d7477d","screenCount":1}
+Received message type: "client_list"
+Received client list with 1 clients
+Received message type: "screens_info"
+[MIGRATION_TELEMETRY] {"event":"canvas_load_ready","latencyMs":-1,"persistentClientId":"91511c59-8a48-491c-9263-f810a7d7477d","screenCount":1}
+Received message type: "client_list"
+Received client list with 1 clients
+Received message type: "screens_info"
+[MIGRATION_TELEMETRY] {"event":"canvas_load_ready","latencyMs":-1,"persistentClientId":"91511c59-8a48-491c-9263-f810a7d7477d","screenCount":1}
+[CanvasPerf] zoomEvents 8 relayouts 9 fullRelayouts 2 selectionChrome 35 sceneChangedBatches 26 viewportMode 0
+ScreenEventHandler: Sync registration: "macbook-pro-de-max.tail93633.ts.net" on "macOS" with 1 screens
+Registering client: "macbook-pro-de-max.tail93633.ts.net" ( "macOS" ) with persistentId: "91511c59-8a48-491c-9263-f810a7d7477d"
+Received message type: "registration_confirmed"
+Registration confirmed for session "b6225234-40d2-4695-9822-51b07fec61e3" persistent "91511c59-8a48-491c-9263-f810a7d7477d"
+Registration confirmed for: "macbook-pro-de-max.tail93633.ts.net"
+Received message type: "client_list"
+Received client list with 1 clients
+[CanvasPerf] zoomEvents 0 relayouts 0 fullRelayouts 0 selectionChrome 5 sceneChangedBatches 5 viewportMode 0
+Received message type: "client_list"
+Received client list with 1 clients
+Received message type: "screens_info"
+[MIGRATION_TELEMETRY] {"event":"canvas_load_ready","latencyMs":-1,"persistentClientId":"91511c59-8a48-491c-9263-f810a7d7477d","screenCount":1}
+[CanvasPerf] zoomEvents 0 relayouts 0 fullRelayouts 0 selectionChrome 12 sceneChangedBatches 12 viewportMode 0
+ScreenEventHandler: Sync registration: "macbook-pro-de-max.tail93633.ts.net" on "macOS" with 1 screens
+Registering client: "macbook-pro-de-max.tail93633.ts.net" ( "macOS" ) with persistentId: "91511c59-8a48-491c-9263-f810a7d7477d"
+Received message type: "registration_confirmed"
+Registration confirmed for session "b6225234-40d2-4695-9822-51b07fec61e3" persistent "91511c59-8a48-491c-9263-f810a7d7477d"
+Registration confirmed for: "macbook-pro-de-max.tail93633.ts.net"
+Received message type: "client_list"
+Received client list with 1 clients
+ScreenEventHandler: Sync registration: "macbook-pro-de-max.tail93633.ts.net" on "macOS" with 1 screens
+Registering client: "macbook-pro-de-max.tail93633.ts.net" ( "macOS" ) with persistentId: "91511c59-8a48-491c-9263-f810a7d7477d"
+Received message type: "registration_confirmed"
+Registration confirmed for session "b6225234-40d2-4695-9822-51b07fec61e3" persistent "91511c59-8a48-491c-9263-f810a7d7477d"
+Registration confirmed for: "macbook-pro-de-max.tail93633.ts.net"
+Received message type: "client_list"
+Received client list with 1 clients
+ScreenEventHandler: Sync registration: "macbook-pro-de-max.tail93633.ts.net" on "macOS" with 1 screens
+Registering client: "macbook-pro-de-max.tail93633.ts.net" ( "macOS" ) with persistentId: "91511c59-8a48-491c-9263-f810a7d7477d"
+Received message type: "registration_confirmed"
+Registration confirmed for session "b6225234-40d2-4695-9822-51b07fec61e3" persistent "91511c59-8a48-491c-9263-f810a7d7477d"
+Registration confirmed for: "macbook-pro-de-max.tail93633.ts.net"
+Received message type: "client_list"
+Received client list with 1 clients

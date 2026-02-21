@@ -1,0 +1,71 @@
+name: quick-canvas-gates
+
+on:
+  pull_request:
+    paths:
+      - 'client/**'
+      - '.github/workflows/quick-canvas-gates.yml'
+      - '.github/PULL_REQUEST_TEMPLATE.md'
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'client/**'
+      - '.github/workflows/quick-canvas-gates.yml'
+
+jobs:
+  quick-canvas-gates:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Require migration phase label on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = context.payload.pull_request.labels.map(l => l.name);
+            const phaseLabel = labels.find((label) => /^phase-(?:-?\d+(?:\.\d+)?)$/.test(label));
+            if (!phaseLabel) {
+              core.setFailed(
+                `Missing required migration phase label. Expected one label matching phase--2, phase--1, phase-0.5, phase-1, ... ; found: ${labels.join(', ') || '(none)'}`
+              );
+            }
+
+      - name: Run architecture boundary checks
+        working-directory: client
+        run: |
+          chmod +x ./tools/check_architecture_boundaries.sh
+          ./tools/check_architecture_boundaries.sh
+
+      - name: Run baseline and phase gates
+        working-directory: client
+        run: |
+          node tests/baseline/run_baseline_checks.js
+          node tests/baseline/run_phase2_interaction_parity.js
+          node tests/baseline/run_phase4_visual_parity.js
+          node tests/baseline/run_phase4_perf_delta.js \
+            --quick-log tests/baseline/fixtures/perf_logs/phase4_quick_auto_targeted.log \
+            --legacy-log tests/baseline/fixtures/perf_logs/phase4_legacy_auto.log
+
+      - name: Generate gate report
+        working-directory: client
+        run: |
+          node tests/baseline/run_quick_canvas_gate_report.js \
+            --quick-log tests/baseline/fixtures/perf_logs/phase4_quick_auto_targeted.log \
+            --legacy-log tests/baseline/fixtures/perf_logs/phase4_legacy_auto.log \
+            --out tests/baseline/artifacts/quick_canvas_gate_report.ci.json
+
+      - name: Upload gate report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quick-canvas-gate-report
+          path: client/tests/baseline/artifacts/quick_canvas_gate_report.ci.json
