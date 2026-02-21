@@ -5,6 +5,7 @@
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
 #include "frontend/ui/layout/ResponsiveLayoutManager.h"
 #include "backend/domain/models/ClientInfo.h"
+#include "shared/rendering/ICanvasHost.h"
 #include "frontend/rendering/canvas/ScreenCanvas.h"
 #include "frontend/ui/pages/CanvasViewPage.h"
 #include <QDebug>
@@ -65,7 +66,7 @@ void WindowEventHandler::handleResizeEvent(QResizeEvent* event)
     // recenter the view to maintain good visibility only before first reveal or when no screens are present
     QStackedWidget* stackedWidget = m_mainWindow->getStackedWidget();
     CanvasViewPage* canvasViewPage = m_mainWindow->getCanvasViewPage();
-    ScreenCanvas* screenCanvas = m_mainWindow->getScreenCanvas();
+    ICanvasHost* screenCanvas = m_mainWindow->getScreenCanvas();
     
     if (stackedWidget && stackedWidget->currentWidget() == canvasViewPage && screenCanvas) {
         const bool hasScreens = !m_mainWindow->getSelectedClient().getScreens().isEmpty();

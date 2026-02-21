@@ -34,6 +34,8 @@ public:
     QString getServerUrl() const { return m_serverUrlConfig; }
     bool getAutoUploadImportedMedia() const { return m_autoUploadImportedMedia; }
     QString getPersistentClientId() const { return m_persistentClientId; }
+    bool getUseQuickCanvasRenderer() const { return m_useQuickCanvasRenderer; }
+    QString getQuickCanvasFlagSource() const { return m_quickCanvasFlagSource; }
     
     // Setters
     void setServerUrl(const QString& url);
@@ -50,7 +52,9 @@ private:
     // Settings values
     QString m_serverUrlConfig;
     bool m_autoUploadImportedMedia;
+    bool m_useQuickCanvasRenderer;
     QString m_persistentClientId;
+    QString m_quickCanvasFlagSource;
     
     // Persistent client ID generation
     QString generateOrLoadPersistentClientId();

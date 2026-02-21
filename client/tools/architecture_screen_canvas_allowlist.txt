@@ -1,0 +1,5 @@
+src/backend/controllers/CanvasSessionController.cpp
+src/backend/handlers/ClientListEventHandler.cpp
+src/backend/handlers/ScreenEventHandler.cpp
+src/backend/handlers/UploadEventHandler.cpp
+src/backend/managers/network/ClientListBuilder.cpp

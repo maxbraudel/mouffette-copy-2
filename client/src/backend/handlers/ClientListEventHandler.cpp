@@ -3,7 +3,7 @@
 #include "frontend/managers/ui/RemoteClientState.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/domain/models/ClientInfo.h"
-#include "frontend/rendering/canvas/ScreenCanvas.h"
+#include "shared/rendering/ICanvasHost.h"
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
 #include "backend/network/UploadManager.h"
 #include "backend/network/WatchManager.h"
@@ -30,7 +30,7 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
     qDebug() << "Received client list with" << clients.size() << "clients";
     
     // Update remote scene target ID if the target machine reconnected with a new ID
-    ScreenCanvas* screenCanvas = m_mainWindow->getScreenCanvas();
+    ICanvasHost* screenCanvas = m_mainWindow->getScreenCanvas();
     if (screenCanvas) {
         screenCanvas->updateRemoteSceneTargetFromClientList(clients);
     }

@@ -1,0 +1,31 @@
+{
+  "id": "reconnect_upload_active_scene",
+  "determinism": {
+    "seed": 424242,
+    "clock": "fixed"
+  },
+  "session": {
+    "persistentClientId": "sender_A",
+    "targetPersistentClientId": "target_B",
+    "canvasSessionId": "sender_A_TO_target_B_canvas_fixture",
+    "connectionState": "reconnecting"
+  },
+  "upload": {
+    "uploadId": "upload_fixture_001",
+    "active": true,
+    "files": [
+      { "fileId": "file_u_001", "sizeBytes": 1048576, "percent": 35 },
+      { "fileId": "file_u_002", "sizeBytes": 5242880, "percent": 10 }
+    ]
+  },
+  "scene": {
+    "screens": [
+      { "id": 0, "x": 0, "y": 0, "width": 2560, "height": 1440 }
+    ],
+    "camera": { "scale": 1.0, "centerX": 1280, "centerY": 720 },
+    "mediaItems": [
+      { "type": "image", "mediaId": "img_u_001", "fileId": "file_u_001", "x": 300, "y": 260, "w": 960, "h": 540 },
+      { "type": "video", "mediaId": "vid_u_001", "fileId": "file_u_002", "x": 1320, "y": 260, "w": 960, "h": 540 }
+    ]
+  }
+}

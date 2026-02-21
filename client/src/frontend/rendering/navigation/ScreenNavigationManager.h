@@ -5,7 +5,7 @@
 #include <QPointer>
 #include <QString>
 
-class QStackedWidget; class QWidget; class QPushButton; class QTimer; class QGraphicsOpacityEffect; class QPropertyAnimation; class ScreenCanvas; class SpinnerWidget; class ClientInfo;
+class QStackedWidget; class QWidget; class QPushButton; class QTimer; class QGraphicsOpacityEffect; class QPropertyAnimation; class ICanvasHost; class SpinnerWidget; class ClientInfo;
 
 // Manages navigation between client list and screen view and associated loading/animation UX.
 class ScreenNavigationManager : public QObject {
@@ -26,14 +26,14 @@ public:
         QPropertyAnimation* canvasFade = nullptr;
         QGraphicsOpacityEffect* volumeOpacity = nullptr;
         QPropertyAnimation* volumeFade = nullptr;
-        ScreenCanvas* screenCanvas = nullptr;
+        ICanvasHost* screenCanvas = nullptr;
         SpinnerWidget* inlineSpinner = nullptr; // Small spinner for reconnection
         bool* canvasContentEverLoaded = nullptr; // Pointer to flag tracking if content was loaded
     };
 
     void setWidgets(const Widgets& w); // must be called before usage
     void setDurations(int loaderDelayMs, int loaderFadeMs, int canvasFadeMs);
-    void setActiveCanvas(ScreenCanvas* canvas);
+    void setActiveCanvas(ICanvasHost* canvas);
 
     void showScreenView(const ClientInfo& client, bool hasCachedContent = false); // triggers requestScreens + watch
     void refreshActiveClientPreservingCanvas(const ClientInfo& client); // update client id without UI reset

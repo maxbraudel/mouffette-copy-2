@@ -1,7 +1,7 @@
 #include "backend/managers/network/ClientListBuilder.h"
 #include "MainWindow.h"
 #include "backend/domain/session/SessionManager.h"
-#include "frontend/rendering/canvas/ScreenCanvas.h"
+#include "shared/rendering/ICanvasHost.h"
 #include <QDebug>
 
 QList<ClientInfo> ClientListBuilder::buildDisplayClientList(

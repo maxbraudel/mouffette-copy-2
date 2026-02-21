@@ -121,6 +121,24 @@ The client is built with:
 - `ClientInfo`: Data structures for client information
 - `ScreenInfo`: Represents display/monitor information
 
+## Architecture Guardrails (Phase -2)
+
+To protect migration boundaries before the Quick renderer swap:
+
+- Backend must not include Quick/QML types.
+- Orchestration paths (`backend/controllers`, `backend/handlers`, `backend/managers`) must not add new concrete canvas-renderer includes.
+
+Run boundary checks:
+
+```bash
+./tools/check_architecture_boundaries.sh
+```
+
+Boundary ownership/rules documentation:
+
+- `docs/ARCHITECTURE_BOUNDARIES.md`
+- `tools/architecture_screen_canvas_allowlist.txt` (temporary legacy exceptions to shrink over migration)
+
 ## Next Steps (Phase 2)
 
 The next phase will add:

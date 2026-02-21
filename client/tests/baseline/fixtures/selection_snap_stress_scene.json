@@ -1,0 +1,19 @@
+{
+  "id": "selection_snap_stress_scene",
+  "determinism": {
+    "seed": 424242,
+    "clock": "fixed"
+  },
+  "scene": {
+    "screens": [
+      { "id": 0, "x": 0, "y": 0, "width": 3840, "height": 2160 }
+    ],
+    "camera": { "scale": 0.5, "centerX": 1920, "centerY": 1080 },
+    "mediaItems": [
+      { "type": "image", "mediaId": "img_snap_01", "fileId": "file_snap_01", "x": 300, "y": 300, "w": 640, "h": 360 },
+      { "type": "image", "mediaId": "img_snap_02", "fileId": "file_snap_02", "x": 1000, "y": 300, "w": 640, "h": 360 },
+      { "type": "image", "mediaId": "img_snap_03", "fileId": "file_snap_03", "x": 1700, "y": 300, "w": 640, "h": 360 },
+      { "type": "text", "mediaId": "txt_snap_01", "x": 420, "y": 820, "w": 1440, "h": 280, "text": "Snap/selection baseline", "fontPx": 54 }
+    ]
+  }
+}

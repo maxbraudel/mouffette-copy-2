@@ -1,0 +1,18 @@
+{
+  "id": "text_heavy_zoom_scene",
+  "determinism": {
+    "seed": 424242,
+    "clock": "fixed"
+  },
+  "scene": {
+    "screens": [
+      { "id": 0, "x": 0, "y": 0, "width": 2560, "height": 1440 }
+    ],
+    "camera": { "scale": 1.0, "centerX": 1280, "centerY": 720 },
+    "mediaItems": [
+      { "type": "text", "mediaId": "txt_001", "x": 100, "y": 120, "w": 640, "h": 200, "text": "Headline A", "fontPx": 72 },
+      { "type": "text", "mediaId": "txt_002", "x": 120, "y": 380, "w": 980, "h": 180, "text": "Sub-title B", "fontPx": 48 },
+      { "type": "text", "mediaId": "txt_003", "x": 140, "y": 600, "w": 1320, "h": 520, "text": "Paragraph block C", "fontPx": 32 }
+    ]
+  }
+}

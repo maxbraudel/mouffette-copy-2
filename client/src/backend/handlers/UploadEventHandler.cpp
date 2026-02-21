@@ -3,7 +3,7 @@
 #include "backend/network/UploadManager.h"
 #include "backend/files/FileManager.h"
 #include "backend/files/FileWatcher.h"
-#include "frontend/rendering/canvas/ScreenCanvas.h"
+#include "shared/rendering/ICanvasHost.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/domain/media/MediaItems.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
@@ -27,7 +27,7 @@ void UploadEventHandler::onUploadButtonClicked()
     MainWindow::CanvasSession* session = m_mainWindow->findCanvasSession(m_mainWindow->getActiveSessionIdentity());
     if (!session || !session->canvas) return;
 
-    ScreenCanvas* canvas = session->canvas;
+    ICanvasHost* canvas = session->canvas;
     auto& upload = session->upload;
 
     if (uploadManager->isUploading()) {

@@ -1,0 +1,19 @@
+{
+  "id": "replay_text_edit_lifecycle",
+  "determinism": {
+    "seed": 424242,
+    "inputRateHz": 60
+  },
+  "fixture": "text_heavy_zoom_scene",
+  "steps": [
+    { "tMs": 0, "action": "text-create", "x": 860, "y": 720, "initialText": "Draft" },
+    { "tMs": 16, "action": "text-edit-start", "mediaId": "txt_003" },
+    { "tMs": 33, "action": "text-input", "mediaId": "txt_003", "insert": "\nLine 2" },
+    { "tMs": 50, "action": "text-style", "mediaId": "txt_003", "fontPx": 36, "hAlign": "center" },
+    { "tMs": 66, "action": "text-commit", "mediaId": "txt_003" }
+  ],
+  "expected": {
+    "editSessionClosed": true,
+    "textNotEmpty": true
+  }
+}

@@ -8,7 +8,7 @@
 #include "frontend/ui/theme/ThemeManager.h"
 #include "frontend/ui/theme/AppColors.h"
 #include "frontend/ui/theme/StyleConfig.h"
-#include "frontend/rendering/canvas/ScreenCanvas.h"
+#include "shared/rendering/ICanvasHost.h"
 #include "backend/domain/session/SessionManager.h"
 #include "backend/domain/models/ClientInfo.h"
 #include <QListWidgetItem>
@@ -104,7 +104,7 @@ void ClientListPage::refreshOngoingScenesList() {
     m_ongoingScenesList->clear();
 
     for (SessionManager::CanvasSession* session : m_sessionManager->getAllSessions()) {
-        ScreenCanvas* canvas = session->canvas;
+        ICanvasHost* canvas = session->canvas;
         if (!canvas) continue;
         if (!canvas->isRemoteSceneLaunched()) continue;
 

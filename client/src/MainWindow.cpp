@@ -8,6 +8,7 @@
 #include "backend/files/FileWatcher.h"
 #include "frontend/ui/widgets/SpinnerWidget.h"
 #include "frontend/rendering/canvas/ScreenCanvas.h"
+#include "shared/rendering/ICanvasHost.h"
 #include "backend/domain/media/MediaItems.h"
 #include "frontend/rendering/canvas/OverlayPanels.h"
 #include "backend/files/Theme.h"
@@ -35,6 +36,7 @@
 #include "backend/controllers/TimerController.h"
 #include "frontend/managers/ui/UploadButtonStyleManager.h"
 #include "backend/managers/app/SettingsManager.h"
+#include "backend/managers/app/MigrationTelemetryManager.h"
 #include "backend/managers/network/ClientListBuilder.h"
 #include "frontend/handlers/UploadSignalConnector.h"
 #include <QMenuBar>
@@ -272,7 +274,7 @@ void MainWindow::setRemoteConnectionStatus(const QString& status, bool propagate
 void MainWindow::refreshOverlayActionsState(bool remoteConnected, bool propagateLoss) {
     m_remoteOverlayActionsEnabled = remoteConnected;
 
-    ScreenCanvas* screenCanvas = getScreenCanvas();
+    ICanvasHost* screenCanvas = getScreenCanvas();
     if (screenCanvas) {
         if (!remoteConnected && propagateLoss) {
             screenCanvas->handleRemoteConnectionLost();
@@ -290,7 +292,7 @@ void MainWindow::refreshOverlayActionsState(bool remoteConnected, bool propagate
             uploadButton->setEnabled(false);
             uploadButton->setCheckable(false);
             uploadButton->setChecked(false);
-            uploadButton->setStyleSheet(ScreenCanvas::overlayDisabledButtonStyle());
+            uploadButton->setStyleSheet(screenCanvas ? screenCanvas->overlayDisabledButtonStyle() : QString());
             QFont defaultFont = getUploadButtonDefaultFont();
             AppColors::applyCanvasButtonFont(defaultFont);
             uploadButton->setFont(defaultFont);
@@ -364,6 +366,9 @@ MainWindow::MainWindow(QWidget* parent)
 #endif
     // [Phase 12] Load persisted settings (server URL, auto-upload, persistent client ID)
     m_settingsManager->loadSettings();
+    MigrationTelemetryManager::logStartupFlag(
+        useQuickCanvasRenderer(),
+        m_settingsManager ? m_settingsManager->getQuickCanvasFlagSource() : QStringLiteral("unknown"));
     
     // Use standard OS window frame and title bar (no custom frameless window)
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
@@ -827,6 +832,30 @@ bool MainWindow::getAutoUploadImportedMedia() const {
     return m_settingsManager ? m_settingsManager->getAutoUploadImportedMedia() : false;
 }
 
+bool MainWindow::useQuickCanvasRenderer() const {
+    return m_settingsManager ? m_settingsManager->getUseQuickCanvasRenderer() : false;
+}
+
+void MainWindow::markCanvasLoadRequest(const QString& persistentClientId) {
+    if (persistentClientId.isEmpty()) {
+        return;
+    }
+    m_canvasLoadRequestMsBySession.insert(persistentClientId, QDateTime::currentMSecsSinceEpoch());
+    MigrationTelemetryManager::logCanvasLoadRequest(persistentClientId);
+}
+
+void MainWindow::recordCanvasLoadReady(const QString& persistentClientId, int screenCount) {
+    if (persistentClientId.isEmpty()) {
+        return;
+    }
+    const qint64 startedAt = m_canvasLoadRequestMsBySession.take(persistentClientId);
+    qint64 latencyMs = -1;
+    if (startedAt > 0) {
+        latencyMs = qMax<qint64>(0, QDateTime::currentMSecsSinceEpoch() - startedAt);
+    }
+    MigrationTelemetryManager::logCanvasLoadReady(persistentClientId, screenCount, latencyMs);
+}
+
 QString MainWindow::createIdeaId() const {
     return QUuid::createUuid().toString(QUuid::WithoutBraces);
 }
@@ -886,7 +915,7 @@ QList<ClientInfo> MainWindow::buildDisplayClientList(const QList<ClientInfo>& co
     return ClientListBuilder::buildDisplayClientList(this, connectedClients);
 }
 
-ScreenCanvas* MainWindow::canvasForClientId(const QString& clientId) const {
+ICanvasHost* MainWindow::canvasForClientId(const QString& clientId) const {
     if (clientId.isEmpty()) {
         const CanvasSession* active = findCanvasSession(m_activeSessionIdentity);
         return active ? active->canvas : nullptr;
@@ -941,6 +970,7 @@ void MainWindow::handleApplicationStateChanged(Qt::ApplicationState state) {
 void MainWindow::showScreenView(const ClientInfo& client) {
     if (!m_navigationManager) return;
     CanvasSession& session = ensureCanvasSession(client);
+    markCanvasLoadRequest(session.persistentClientId);
     const bool sessionHasActiveScreens = session.canvas && session.canvas->hasActiveScreens();
     const bool sessionHasStoredScreens = !session.lastClientInfo.getScreens().isEmpty();
     const bool hasCachedContent = sessionHasActiveScreens || sessionHasStoredScreens;
@@ -1401,13 +1431,6 @@ void MainWindow::setupUI() {
 
 // [PHASE 1.2] Canvas view page creation moved to CanvasViewPage class (~183 lines removed)
 
-// [PHASE 6.3] Delegate to MenuBarManager
-void MainWindow::setupMenuBar() {
-    if (m_menuBarManager) {
-        m_menuBarManager->setup();
-    }
-}
-
 // [PHASE 6.3] Handle quit request from menu
 void MainWindow::onMenuQuitRequested() {
     if (m_webSocketClient && m_webSocketClient->isConnected()) {
@@ -1419,13 +1442,6 @@ void MainWindow::onMenuQuitRequested() {
 // [PHASE 6.3] Handle about request from menu
 void MainWindow::onMenuAboutRequested() {
     qDebug() << "About dialog suppressed (no popup mode).";
-}
-
-// [PHASE 6.2] Delegate to SystemTrayManager
-void MainWindow::setupSystemTray() {
-    if (m_systemTrayManager) {
-        m_systemTrayManager->setup();
-    }
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
@@ -1705,7 +1721,7 @@ QPushButton* MainWindow::getBackButton() const {
 }
 
 bool MainWindow::hasUnuploadedFilesForTarget(const QString& targetClientId) const {
-    ScreenCanvas* canvas = canvasForClientId(targetClientId);
+    ICanvasHost* canvas = canvasForClientId(targetClientId);
     if (!canvas || !canvas->scene()) return false;
     const QList<QGraphicsItem*> allItems = canvas->scene()->items();
     for (QGraphicsItem* it : allItems) {

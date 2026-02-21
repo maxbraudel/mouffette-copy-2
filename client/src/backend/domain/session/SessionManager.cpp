@@ -1,6 +1,5 @@
 #include "backend/domain/session/SessionManager.h"
 #include <QUuid>
-#include "frontend/rendering/canvas/ScreenCanvas.h"
 #include <QPushButton>
 #include <QDebug>
 

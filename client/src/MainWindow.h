@@ -76,6 +76,7 @@ class QFrame; // forward declare for separators in remote info container
 
 // Forward declaration of extracted ScreenCanvas
 class ScreenCanvas;
+class ICanvasHost;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -138,7 +139,7 @@ public:
     QString getPlatformName();
     
     // [Phase 7.2] State management for ScreenEventHandler
-    void setActiveCanvas(ScreenCanvas* canvas) { m_screenCanvas = canvas; }
+    void setActiveCanvas(ICanvasHost* canvas) { m_screenCanvas = canvas; }
     void setSelectedClient(const ClientInfo& client) { m_selectedClient = client; }
     void setCanvasContentEverLoaded(bool loaded) { m_canvasContentEverLoaded = loaded; }
     void stopInlineSpinner();
@@ -165,7 +166,7 @@ public:
     void configureCanvasSession(CanvasSession& session);
     
     // [Phase 7.3] Accessor methods for ClientListEventHandler
-    ScreenCanvas* getScreenCanvas() const { return m_screenCanvas; }
+    ICanvasHost* getScreenCanvas() const { return m_screenCanvas; }
     QList<ClientInfo> buildDisplayClientList(const QList<ClientInfo>& connectedClients);
     void markAllSessionsOffline(); // [Phase 16] Made public for ClientListBuilder
     int getLastConnectedClientCount() const { return m_lastConnectedClientCount; }
@@ -203,7 +204,10 @@ public:
     void setUploadButtonDefaultFont(const QFont& font) { m_uploadButtonDefaultFont = font; }
     // [Phase 12] Delegate to SettingsManager
     bool getAutoUploadImportedMedia() const; // Implementation in .cpp to avoid incomplete type
+    bool useQuickCanvasRenderer() const;
     QString createIdeaId() const;
+    void markCanvasLoadRequest(const QString& persistentClientId);
+    void recordCanvasLoadReady(const QString& persistentClientId, int screenCount);
     
     // [Phase 14.3] Session management accessors
     CanvasSession* sessionForActiveUpload();
@@ -290,8 +294,6 @@ private:
     void setupConnections();
     void updateStylesheetsForTheme();
     void createScreenViewPage();
-    void setupMenuBar();
-    void setupSystemTray();
     // connectToServer() moved to public (Phase 12)
     // [Phase 7.1] scheduleReconnect, syncRegistration, setUIEnabled, setLocalNetworkStatus moved to public
     // [Phase 7.2] getLocalScreenInfo, getMachineName, getPlatformName, getSystemVolumePercent moved to public
@@ -325,7 +327,7 @@ private:
 
     void rotateSessionIdea(CanvasSession& session);
     // markAllSessionsOffline() moved to public (Phase 16)
-    ScreenCanvas* canvasForClientId(const QString& clientId) const;
+    ICanvasHost* canvasForClientId(const QString& clientId) const;
     // sessionForActiveUpload() moved to public (Phase 14.3)
     // sessionForUploadId() moved to public (Phase 14.3)
     // clearUploadTracking() moved to public (Phase 15)
@@ -381,7 +383,7 @@ private:
     SessionManager* m_sessionManager = nullptr;
     
     // Active canvas pointer (dynamically points to current session's canvas)
-    ScreenCanvas* m_screenCanvas = nullptr;
+    ICanvasHost* m_screenCanvas = nullptr;
     
     // Upload button state (dynamically points to current session's upload button)
     QPushButton* m_uploadButton = nullptr;
@@ -478,6 +480,7 @@ private:
     QString m_activeRemoteClientId;
     bool m_remoteClientConnected = false;
     bool m_applicationSuspended = false;
+    QHash<QString, qint64> m_canvasLoadRequestMsBySession;
     
     // Toast notification system
     ToastNotificationSystem* m_toastSystem = nullptr;

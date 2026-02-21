@@ -39,6 +39,7 @@ SettingsManager::SettingsManager(MainWindow* mainWindow, WebSocketClient* webSoc
     , m_webSocketClient(webSocketClient)
     , m_serverUrlConfig(DEFAULT_SERVER_URL)
     , m_autoUploadImportedMedia(false)
+    , m_useQuickCanvasRenderer(false)
 {
 }
 
@@ -46,6 +47,15 @@ void SettingsManager::loadSettings() {
     QSettings settings("Mouffette", "Client");
     m_serverUrlConfig = settings.value("serverUrl", DEFAULT_SERVER_URL).toString();
     m_autoUploadImportedMedia = settings.value("autoUploadImportedMedia", false).toBool();
+    m_useQuickCanvasRenderer = settings.value("useQuickCanvasRenderer", false).toBool();
+    m_quickCanvasFlagSource = QStringLiteral("QSettings");
+
+    const QString envQuickRenderer = qEnvironmentVariable("MOUFFETTE_USE_QUICK_CANVAS_RENDERER").trimmed().toLower();
+    if (!envQuickRenderer.isEmpty()) {
+        const bool envValue = (envQuickRenderer == "1" || envQuickRenderer == "true" || envQuickRenderer == "on" || envQuickRenderer == "yes");
+        m_useQuickCanvasRenderer = envValue;
+        m_quickCanvasFlagSource = QStringLiteral("env:MOUFFETTE_USE_QUICK_CANVAS_RENDERER");
+    }
     
     // Generate or load persistent client ID
     m_persistentClientId = generateOrLoadPersistentClientId();
@@ -57,6 +67,8 @@ void SettingsManager::loadSettings() {
     
     qDebug() << "SettingsManager: Settings loaded - URL:" << m_serverUrlConfig
              << "Auto-upload:" << m_autoUploadImportedMedia
+             << "useQuickCanvasRenderer:" << m_useQuickCanvasRenderer
+             << "flagSource:" << m_quickCanvasFlagSource
              << "Client ID:" << m_persistentClientId;
 }
 
@@ -64,6 +76,7 @@ void SettingsManager::saveSettings() {
     QSettings settings("Mouffette", "Client");
     settings.setValue("serverUrl", m_serverUrlConfig.isEmpty() ? DEFAULT_SERVER_URL : m_serverUrlConfig);
     settings.setValue("autoUploadImportedMedia", m_autoUploadImportedMedia);
+    settings.setValue("useQuickCanvasRenderer", m_useQuickCanvasRenderer);
     settings.sync();
     
     qDebug() << "SettingsManager: Settings saved";

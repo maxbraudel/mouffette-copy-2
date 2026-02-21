@@ -2,6 +2,15 @@
 
 echo "🔨 Building Mouffette Client..."
 
+if [ -x "./tools/check_architecture_boundaries.sh" ]; then
+    echo "🛡️ Running architecture boundary guardrails..."
+    ./tools/check_architecture_boundaries.sh
+    if [ $? -ne 0 ]; then
+        echo "❌ Architecture boundary checks failed!"
+        exit 1
+    fi
+fi
+
 # Create build directory
 mkdir -p build
 cd build

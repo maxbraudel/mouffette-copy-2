@@ -3,7 +3,7 @@
 #include "backend/network/UploadManager.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/domain/media/MediaItems.h"
-#include "frontend/rendering/canvas/ScreenCanvas.h"
+#include "shared/rendering/ICanvasHost.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include <QHash>
 #include <QString>

@@ -9,7 +9,7 @@
 #include <QList>
 #include "backend/domain/models/ClientInfo.h"
 
-class ScreenCanvas;
+class ICanvasHost;
 class QPushButton;
 class ResizableMediaBase;
 
@@ -51,7 +51,7 @@ public:
         QString persistentClientId; // stable client ID persisted across sessions
         QString serverAssignedId;   // temporary server session ID (for local lookup only, send persistentClientId to server)
         QString canvasSessionId;
-        ScreenCanvas* canvas = nullptr;
+        ICanvasHost* canvas = nullptr;
         QPushButton* uploadButton = nullptr;
         bool uploadButtonInOverlay = false;
         QFont uploadButtonDefaultFont;

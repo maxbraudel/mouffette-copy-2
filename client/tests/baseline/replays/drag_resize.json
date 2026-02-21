@@ -1,0 +1,19 @@
+{
+  "id": "replay_drag_resize",
+  "determinism": {
+    "seed": 424242,
+    "inputRateHz": 60
+  },
+  "fixture": "selection_snap_stress_scene",
+  "steps": [
+    { "tMs": 0, "action": "select", "mediaId": "img_snap_02" },
+    { "tMs": 16, "action": "drag", "mediaId": "img_snap_02", "dx": -45, "dy": 0 },
+    { "tMs": 33, "action": "drag", "mediaId": "img_snap_02", "dx": -50, "dy": 0 },
+    { "tMs": 50, "action": "resize", "mediaId": "img_snap_02", "handle": "bottom-right", "dw": 120, "dh": 68 },
+    { "tMs": 66, "action": "resize", "mediaId": "img_snap_02", "handle": "bottom-right", "dw": -10, "dh": -8 }
+  ],
+  "expected": {
+    "selectionVisible": true,
+    "snapEventsMin": 1
+  }
+}

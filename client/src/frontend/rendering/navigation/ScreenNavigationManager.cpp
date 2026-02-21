@@ -2,7 +2,7 @@
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
 #include "backend/domain/models/ClientInfo.h"
 #include "frontend/ui/widgets/SpinnerWidget.h"
-#include "frontend/rendering/canvas/ScreenCanvas.h"
+#include "shared/rendering/ICanvasHost.h"
 #include <QStackedWidget>
 #include <QPushButton>
 #include <QTimer>
@@ -20,7 +20,7 @@ void ScreenNavigationManager::setDurations(int loaderDelayMs, int loaderFadeMs, 
     m_canvasFadeDurationMs = qMax(0, canvasFadeMs);
 }
 
-void ScreenNavigationManager::setActiveCanvas(ScreenCanvas* canvas) {
+void ScreenNavigationManager::setActiveCanvas(ICanvasHost* canvas) {
     m_w.screenCanvas = canvas;
 }
 

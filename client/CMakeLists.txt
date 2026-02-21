@@ -55,6 +55,7 @@ set(SOURCES
     
     # Rendering - Canvas
     src/frontend/rendering/canvas/ScreenCanvas.cpp
+    src/frontend/rendering/canvas/LegacyCanvasHost.cpp
     src/frontend/rendering/canvas/OverlayPanels.cpp
     
     # Rendering - Remote
@@ -113,6 +114,7 @@ set(SOURCES
     src/backend/managers/app/SettingsManager.cpp
     src/backend/managers/app/SystemTrayManager.cpp
     src/backend/managers/app/MenuBarManager.cpp
+    src/backend/managers/app/MigrationTelemetryManager.cpp
     
     # Backend Managers - Network
     src/backend/managers/network/ConnectionManager.cpp
@@ -177,9 +179,15 @@ set(HEADERS
     
     # Rendering - Canvas
     src/frontend/rendering/canvas/ScreenCanvas.h
+    src/frontend/rendering/canvas/LegacyCanvasHost.h
     src/frontend/rendering/canvas/OverlayPanels.h
     src/frontend/rendering/canvas/RoundedRectItem.h
     src/frontend/rendering/canvas/SegmentedButtonItem.h
+
+    # Shared - Rendering Contracts
+    src/shared/rendering/ICanvasHost.h
+    src/shared/rendering/IMediaSceneAdapter.h
+    src/shared/rendering/IOverlayProjection.h
     
     # Rendering - Remote
     src/frontend/rendering/remote/RemoteSceneController.h
@@ -233,6 +241,7 @@ set(HEADERS
     src/backend/managers/app/SettingsManager.h
     src/backend/managers/app/SystemTrayManager.h
     src/backend/managers/app/MenuBarManager.h
+    src/backend/managers/app/MigrationTelemetryManager.h
     
     # Backend Managers - Network
     src/backend/managers/network/ConnectionManager.h

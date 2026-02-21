@@ -1,0 +1,19 @@
+{
+  "id": "mixed_media_scene",
+  "determinism": {
+    "seed": 424242,
+    "clock": "fixed"
+  },
+  "scene": {
+    "screens": [
+      { "id": 0, "x": 0, "y": 0, "width": 1920, "height": 1080 },
+      { "id": 1, "x": 1920, "y": 0, "width": 1920, "height": 1080 }
+    ],
+    "camera": { "scale": 0.75, "centerX": 1920, "centerY": 540 },
+    "mediaItems": [
+      { "type": "image", "mediaId": "img_001", "fileId": "file_image_001", "x": 240, "y": 180, "w": 960, "h": 540 },
+      { "type": "video", "mediaId": "vid_001", "fileId": "file_video_001", "x": 1260, "y": 210, "w": 960, "h": 540 },
+      { "type": "text", "mediaId": "txt_010", "x": 2360, "y": 220, "w": 840, "h": 300, "text": "Remote caption", "fontPx": 46 }
+    ]
+  }
+}

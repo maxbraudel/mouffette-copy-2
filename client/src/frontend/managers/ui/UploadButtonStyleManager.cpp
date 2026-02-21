@@ -2,6 +2,7 @@
 #include "MainWindow.h"
 #include "backend/network/UploadManager.h"
 #include "backend/domain/session/SessionManager.h"
+#include "shared/rendering/ICanvasHost.h"
 #include "frontend/rendering/canvas/ScreenCanvas.h"
 #include "frontend/ui/theme/AppColors.h"
 #include "frontend/ui/theme/ThemeManager.h"
