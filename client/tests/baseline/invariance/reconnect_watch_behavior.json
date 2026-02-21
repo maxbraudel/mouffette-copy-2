@@ -1,0 +1,20 @@
+{
+  "id": "reconnect_watch_behavior",
+  "rules": [
+    {
+      "file": "src/backend/handlers/ClientListEventHandler.cpp",
+      "mustContain": [
+        "requestScreens\\(",
+        "toggleWatch\\("
+      ]
+    },
+    {
+      "file": "src/frontend/handlers/WindowEventHandler.cpp",
+      "mustContain": [
+        "isWatching\\(",
+        "toggleWatch\\(",
+        "requestScreens\\("
+      ]
+    }
+  ]
+}

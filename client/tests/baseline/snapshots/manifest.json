@@ -1,0 +1,20 @@
+{
+  "assets": [
+    {
+      "file": "mixed_media_scene.snapshot.json",
+      "sha256": "ebd1ed2717c4d3c2c66c16a6538f8429bfc3f2c692282c5b5cfda7429c8391d5"
+    },
+    {
+      "file": "reconnect_upload_active_scene.snapshot.json",
+      "sha256": "ab8492acf2ae874672a82e2863a9d2beac9e0c5e96b6354aa71eb1c0b85882f9"
+    },
+    {
+      "file": "selection_snap_stress_scene.snapshot.json",
+      "sha256": "69b6b2927d4ee59a520c4fd47a035c13fc8e1ed452bae203d9fd87eaeafcfc22"
+    },
+    {
+      "file": "text_heavy_zoom_scene.snapshot.json",
+      "sha256": "89b43069b46b9c55d9d48c7174cc8eb13893066d867c2c723db2e56091f1e7e4"
+    }
+  ]
+}

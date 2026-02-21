@@ -1,0 +1,10 @@
+{
+  "fixtureId": "text_heavy_zoom_scene",
+  "textStats": {
+    "textItems": 3,
+    "maxFontPx": 72,
+    "cameraFinite": true
+  },
+  "renderer": "legacy_screen_canvas",
+  "version": 1
+}

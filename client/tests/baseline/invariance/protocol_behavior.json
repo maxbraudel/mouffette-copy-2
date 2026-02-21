@@ -1,0 +1,19 @@
+{
+  "id": "protocol_behavior",
+  "rules": [
+    {
+      "file": "src/backend/controllers/CanvasSessionController.cpp",
+      "mustContain": [
+        "sendCanvasCreated\\(",
+        "sendCanvasDeleted\\("
+      ]
+    },
+    {
+      "file": "src/backend/handlers/ScreenEventHandler.cpp",
+      "mustContain": [
+        "registerClient\\(",
+        "sendStateSnapshot\\("
+      ]
+    }
+  ]
+}

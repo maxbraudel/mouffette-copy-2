@@ -13,7 +13,7 @@ if(APPLE)
 endif()
 
 # Find Qt6
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia MultimediaWidgets Svg SvgWidgets Concurrent)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia MultimediaWidgets Svg SvgWidgets Concurrent Quick QuickWidgets Qml)
 
 # Enable Qt MOC
 set(CMAKE_AUTOMOC ON)
@@ -56,6 +56,8 @@ set(SOURCES
     # Rendering - Canvas
     src/frontend/rendering/canvas/ScreenCanvas.cpp
     src/frontend/rendering/canvas/LegacyCanvasHost.cpp
+    src/frontend/rendering/canvas/QuickCanvasHost.cpp
+    src/frontend/rendering/canvas/QuickCanvasController.cpp
     src/frontend/rendering/canvas/OverlayPanels.cpp
     
     # Rendering - Remote
@@ -180,6 +182,8 @@ set(HEADERS
     # Rendering - Canvas
     src/frontend/rendering/canvas/ScreenCanvas.h
     src/frontend/rendering/canvas/LegacyCanvasHost.h
+    src/frontend/rendering/canvas/QuickCanvasHost.h
+    src/frontend/rendering/canvas/QuickCanvasController.h
     src/frontend/rendering/canvas/OverlayPanels.h
     src/frontend/rendering/canvas/RoundedRectItem.h
     src/frontend/rendering/canvas/SegmentedButtonItem.h
@@ -291,6 +295,9 @@ target_link_libraries(MouffetteClient
     Qt6::Svg
     Qt6::SvgWidgets
     Qt6::Concurrent
+    Qt6::Quick
+    Qt6::QuickWidgets
+    Qt6::Qml
 )
 
 # Include directories

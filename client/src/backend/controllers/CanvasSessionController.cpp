@@ -3,6 +3,7 @@
 #include "backend/domain/models/ClientInfo.h"
 #include "shared/rendering/ICanvasHost.h"
 #include "frontend/rendering/canvas/LegacyCanvasHost.h"
+#include "frontend/rendering/canvas/QuickCanvasHost.h"
 #include "backend/domain/session/SessionManager.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/UploadManager.h"
@@ -80,14 +81,32 @@ void* CanvasSessionController::ensureCanvasSession(const ClientInfo& client) {
         }
 
         const bool quickRequested = m_mainWindow->useQuickCanvasRenderer();
+        QString appliedRenderer = QStringLiteral("legacy_screen_canvas");
+        QString reason = QStringLiteral("flag_off_legacy_default");
+
+        if (quickRequested) {
+            QString quickError;
+            session.canvas = QuickCanvasHost::create(canvasHostStack, &quickError);
+            if (session.canvas) {
+                appliedRenderer = QStringLiteral("quick_canvas_shell");
+                reason = QStringLiteral("flag_on_phase1_shell");
+            } else {
+                session.canvas = LegacyCanvasHost::create(canvasHostStack);
+                appliedRenderer = QStringLiteral("legacy_screen_canvas");
+                reason = quickError.isEmpty()
+                    ? QStringLiteral("quick_shell_init_failed_fallback")
+                    : QStringLiteral("quick_shell_error_fallback");
+            }
+        } else {
+            session.canvas = LegacyCanvasHost::create(canvasHostStack);
+        }
+
         MigrationTelemetryManager::logRendererPathResolved(
             QStringLiteral("CanvasSessionController::ensureCanvasSession"),
             quickRequested,
-            QStringLiteral("legacy_screen_canvas"),
-            quickRequested ? QStringLiteral("quick_renderer_not_integrated_phase0_fallback")
-                           : QStringLiteral("flag_off_legacy_default"));
+            appliedRenderer,
+            reason);
 
-        session.canvas = LegacyCanvasHost::create(canvasHostStack);
         session.canvas->setActiveIdeaId(session.canvasSessionId); // Use canvasSessionId from SessionManager
         session.connectionsInitialized = false;
         configureCanvasSession(&session);

@@ -1,0 +1,10 @@
+{
+  "fixtureId": "selection_snap_stress_scene",
+  "interaction": {
+    "selectionVisible": true,
+    "snapEventsMin": 1,
+    "cameraScale": 0.5
+  },
+  "renderer": "legacy_screen_canvas",
+  "version": 1
+}

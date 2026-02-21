@@ -1,0 +1,10 @@
+{
+  "fixtureId": "reconnect_upload_active_scene",
+  "session": {
+    "connectionState": "reconnecting",
+    "uploadActive": true,
+    "trackedFiles": 2
+  },
+  "renderer": "legacy_screen_canvas",
+  "version": 1
+}

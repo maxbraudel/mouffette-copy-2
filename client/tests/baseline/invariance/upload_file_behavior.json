@@ -1,0 +1,20 @@
+{
+  "id": "upload_file_behavior",
+  "rules": [
+    {
+      "file": "src/backend/handlers/UploadEventHandler.cpp",
+      "mustContain": [
+        "requestRemoval\\(",
+        "requestUnload\\(",
+        "toggleUpload\\(",
+        "associateFileWithIdea\\("
+      ]
+    },
+    {
+      "file": "src/backend/network/WebSocketClient.h",
+      "mustContain": [
+        "sendRemoveFile\\("
+      ]
+    }
+  ]
+}

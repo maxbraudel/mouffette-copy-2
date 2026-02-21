@@ -23,4 +23,7 @@
     <file>icons/text/vertical-align-bottom.svg</file>
     <file>icons/text/fit-to-text.svg</file>
     </qresource>
+    <qresource prefix="/qml">
+    <file alias="CanvasRoot.qml">qml/CanvasRoot.qml</file>
+    </qresource>
 </RCC>

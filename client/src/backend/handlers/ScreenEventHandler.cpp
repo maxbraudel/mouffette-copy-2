@@ -5,6 +5,7 @@
 #include "backend/managers/system/SystemMonitor.h"
 #include "shared/rendering/ICanvasHost.h"
 #include "frontend/rendering/canvas/LegacyCanvasHost.h"
+#include "frontend/rendering/canvas/QuickCanvasHost.h"
 #include "frontend/ui/pages/CanvasViewPage.h"
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
 #include "backend/network/UploadManager.h"
@@ -239,14 +240,32 @@ void ScreenEventHandler::onScreensInfoReceived(const ClientInfo& clientInfo)
         }
 
         const bool quickRequested = m_mainWindow->useQuickCanvasRenderer();
+        QString appliedRenderer = QStringLiteral("legacy_screen_canvas");
+        QString reason = QStringLiteral("flag_off_legacy_default");
+
+        if (quickRequested) {
+            QString quickError;
+            session->canvas = QuickCanvasHost::create(canvasHostStack, &quickError);
+            if (session->canvas) {
+                appliedRenderer = QStringLiteral("quick_canvas_shell");
+                reason = QStringLiteral("flag_on_phase1_shell");
+            } else {
+                session->canvas = LegacyCanvasHost::create(canvasHostStack);
+                appliedRenderer = QStringLiteral("legacy_screen_canvas");
+                reason = quickError.isEmpty()
+                    ? QStringLiteral("quick_shell_init_failed_fallback")
+                    : QStringLiteral("quick_shell_error_fallback");
+            }
+        } else {
+            session->canvas = LegacyCanvasHost::create(canvasHostStack);
+        }
+
         MigrationTelemetryManager::logRendererPathResolved(
             QStringLiteral("ScreenEventHandler::onScreensInfoReceived"),
             quickRequested,
-            QStringLiteral("legacy_screen_canvas"),
-            quickRequested ? QStringLiteral("quick_renderer_not_integrated_phase0_fallback")
-                           : QStringLiteral("flag_off_legacy_default"));
-        
-        session->canvas = LegacyCanvasHost::create(canvasHostStack);
+            appliedRenderer,
+            reason);
+
         session->canvas->setWebSocketClient(m_webSocketClient);
         session->canvas->setUploadManager(m_mainWindow->getUploadManager());
         session->canvas->setFileManager(m_mainWindow->getFileManager());

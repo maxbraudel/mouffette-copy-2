@@ -1,0 +1,19 @@
+{
+  "id": "session_behavior",
+  "rules": [
+    {
+      "file": "src/backend/domain/session/SessionManager.h",
+      "mustContain": [
+        "QString canvasSessionId",
+        "ICanvasHost\\* canvas"
+      ]
+    },
+    {
+      "file": "src/backend/controllers/CanvasSessionController.cpp",
+      "mustContain": [
+        "ensureCanvasSession",
+        "setActiveIdeaId\\(session\\.canvasSessionId\\)"
+      ]
+    }
+  ]
+}

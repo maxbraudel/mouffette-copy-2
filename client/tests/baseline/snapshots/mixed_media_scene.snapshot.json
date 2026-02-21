@@ -1,0 +1,10 @@
+{
+  "fixtureId": "mixed_media_scene",
+  "sceneHashInput": {
+    "screens": 2,
+    "mediaItems": 3,
+    "camera": { "scale": 0.75, "centerX": 1920, "centerY": 540 }
+  },
+  "renderer": "legacy_screen_canvas",
+  "version": 1
+}
