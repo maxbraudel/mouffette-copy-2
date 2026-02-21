@@ -18,6 +18,8 @@ public:
     QWidget* widget() const;
     void setScreenCount(int screenCount);
     void setShellActive(bool active);
+    void resetView();
+    void recenterView();
 
 private:
     QQuickWidget* m_quickWidget = nullptr;

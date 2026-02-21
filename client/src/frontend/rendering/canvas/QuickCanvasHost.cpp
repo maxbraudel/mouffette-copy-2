@@ -65,9 +65,15 @@ bool QuickCanvasHost::hasActiveScreens() const {
 }
 
 void QuickCanvasHost::requestDeferredInitialRecenter(int) {
+    if (m_controller) {
+        m_controller->recenterView();
+    }
 }
 
 void QuickCanvasHost::recenterWithMargin(int) {
+    if (m_controller) {
+        m_controller->recenterView();
+    }
 }
 
 void QuickCanvasHost::hideContentPreservingState() {
@@ -83,6 +89,9 @@ void QuickCanvasHost::showContentAfterReconnect() {
 }
 
 void QuickCanvasHost::resetTransform() {
+    if (m_controller) {
+        m_controller->resetView();
+    }
 }
 
 void QuickCanvasHost::updateRemoteCursor(int, int) {

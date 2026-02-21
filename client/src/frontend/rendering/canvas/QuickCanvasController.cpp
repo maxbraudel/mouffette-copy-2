@@ -1,5 +1,6 @@
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 
+#include <QMetaObject>
 #include <QQuickItem>
 #include <QQuickWidget>
 
@@ -52,4 +53,20 @@ void QuickCanvasController::setShellActive(bool active) {
         return;
     }
     m_quickWidget->rootObject()->setProperty("remoteActive", active);
+}
+
+void QuickCanvasController::resetView() {
+    if (!m_quickWidget || !m_quickWidget->rootObject()) {
+        return;
+    }
+    m_quickWidget->rootObject()->setProperty("viewScale", 1.0);
+    m_quickWidget->rootObject()->setProperty("panX", 0.0);
+    m_quickWidget->rootObject()->setProperty("panY", 0.0);
+}
+
+void QuickCanvasController::recenterView() {
+    if (!m_quickWidget || !m_quickWidget->rootObject()) {
+        return;
+    }
+    QMetaObject::invokeMethod(m_quickWidget->rootObject(), "recenterView");
 }
