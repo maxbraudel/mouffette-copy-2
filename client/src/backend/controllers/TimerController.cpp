@@ -151,7 +151,6 @@ void TimerController::onCursorTimeout() {
     qreal normalizedX = -1.0;
     qreal normalizedY = -1.0;
     QScreen* logicalScreen = nullptr;
-    QRect logicalScreenGeometry;
 
     auto computeNormalizedCursorFromLogical = [&](const QPoint& logicalPos) {
         QScreen* screen = QGuiApplication::screenAt(logicalPos);
@@ -172,7 +171,6 @@ void TimerController::onCursorTimeout() {
 
         screenId = idx;
         logicalScreen = screen;
-        logicalScreenGeometry = geometry;
 
         const int maxLogicalX = std::max(1, geometry.width() - 1);
         const int maxLogicalY = std::max(1, geometry.height() - 1);
@@ -265,24 +263,6 @@ void TimerController::onCursorTimeout() {
                 if (dist < bestDist) {
                     bestDist = dist;
                     targetScreen = s;
-                }
-            }
-            // Re-run logical normalisation clamped to the nearest screen so that
-            // screenId and normalizedX/Y are populated even at the screen edge.
-            if (targetScreen) {
-                const QList<QScreen*> allScreens = QGuiApplication::screens();
-                const int idx = allScreens.indexOf(targetScreen);
-                const QRect g = targetScreen->geometry();
-                if (idx >= 0 && g.width() > 0 && g.height() > 0) {
-                    screenId = idx;
-                    logicalScreen = targetScreen;
-                    logicalScreenGeometry = g;
-                    const int maxLX = std::max(1, g.width() - 1);
-                    const int maxLY = std::max(1, g.height() - 1);
-                    const int lx = std::clamp(logicalPos.x() - g.x(), 0, maxLX);
-                    const int ly = std::clamp(logicalPos.y() - g.y(), 0, maxLY);
-                    normalizedX = std::clamp(static_cast<qreal>(lx) / static_cast<qreal>(maxLX), 0.0, 1.0);
-                    normalizedY = std::clamp(static_cast<qreal>(ly) / static_cast<qreal>(maxLY), 0.0, 1.0);
                 }
             }
         }
