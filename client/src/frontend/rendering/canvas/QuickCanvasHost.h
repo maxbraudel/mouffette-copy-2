@@ -4,12 +4,13 @@
 #include "shared/rendering/ICanvasHost.h"
 
 class QuickCanvasController;
+class ScreenCanvas;
 
 class QuickCanvasHost : public ICanvasHost {
     Q_OBJECT
 
 public:
-    explicit QuickCanvasHost(QuickCanvasController* controller, QObject* parent = nullptr);
+    explicit QuickCanvasHost(QuickCanvasController* controller, ScreenCanvas* mediaCanvas, QObject* parent = nullptr);
     ~QuickCanvasHost() override;
 
     static QuickCanvasHost* create(QWidget* parentWidget, QString* errorMessage = nullptr);
@@ -52,7 +53,7 @@ public:
 
 private:
     QuickCanvasController* m_controller;
-    QGraphicsScene* m_placeholderScene;
+    ScreenCanvas* m_mediaCanvas;
     bool m_hasActiveScreens = false;
 };
 

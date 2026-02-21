@@ -48,6 +48,7 @@ public:
     
     // Access to upload button in media list overlay
     QPushButton* getUploadButton() const { return m_uploadButton; }
+    void setOverlayViewport(QWidget* overlayViewport);
     void setOverlayActionsEnabled(bool enabled);
     bool overlayActionsEnabled() const { return m_overlayActionsEnabled; }
     static QString overlayDisabledButtonStyle();
@@ -181,6 +182,10 @@ protected:
     void drawBackground(QPainter* painter, const QRectF& rect) override; // snap indicators drawn here (below overlays)
 
 private:
+    QWidget* overlayViewportWidget() const;
+    void maybeScheduleAutomatedPerfReplay();
+    void runAutomatedPerfReplay();
+
     static QSet<ScreenCanvas*> s_activeCanvases;
     static bool s_applicationSuspended;
     static void registerCanvas(ScreenCanvas* canvas);
@@ -306,6 +311,8 @@ private:
     quint64 m_perfFullRelayoutCount = 0;
     quint64 m_perfSelectionChromeCount = 0;
     quint64 m_perfSceneChangedBatchCount = 0;
+    bool m_perfReplayScheduled = false;
+    bool m_perfReplayCompleted = false;
     QSet<ResizableMediaBase*> m_pendingOverlayRelayoutSet;
     QGraphicsEllipseItem* m_remoteCursorDot = nullptr;
     // Remote cursor styling
@@ -378,6 +385,7 @@ private:
     QTimer* m_scrollbarHideTimer = nullptr; // timer to auto-hide scrollbar after inactivity
     QVBoxLayout* m_contentLayout = nullptr; // content layout (for media items)
     QWidget* m_overlayHeaderWidget = nullptr; // container for overlay header row (holds upload button)
+    QWidget* m_overlayViewportOverride = nullptr; // optional visible viewport host for QWidget overlays
     CanvasGlobalOverlayHost* m_globalOverlayHost = nullptr; // top-left global controls host
     bool m_settingsPanelPreferredVisible = false;
     class MediaSettingsPanel* m_globalSettingsPanel = nullptr; // global settings panel driven by toolbar toggle

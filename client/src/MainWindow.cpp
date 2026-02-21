@@ -115,6 +115,14 @@ static BOOL CALLBACK MouffetteEnumMonProc(HMONITOR hMon, HDC, LPRECT, LPARAM lPa
 #include <QFileDialog>
 #include <climits>
 #include <memory>
+
+namespace {
+bool cursorDebugEnabled() {
+    static const bool enabled = qEnvironmentVariableIsSet("MOUFFETTE_CURSOR_DEBUG");
+    return enabled;
+}
+}
+
 #ifdef Q_OS_MACOS
 #include "backend/platform/macos/MacVideoThumbnailer.h"
 #include "backend/platform/macos/MacWindowManager.h"
@@ -1404,12 +1412,84 @@ void MainWindow::setupUI() {
 
     // Receive remote cursor updates when watching
     connect(m_webSocketClient, &WebSocketClient::cursorPositionReceived, this,
-            [this](const QString& targetId, int x, int y) {
+            [this](const QString& targetId, int x, int y, int screenId, qreal normalizedX, qreal normalizedY) {
                 if (!m_screenCanvas) return;
                 if (m_stackedWidget->currentWidget() != m_canvasViewPage) return;  // Phase 1.2
                 bool matchWatch = (m_watchManager && targetId == m_watchManager->watchedClientId());
                 bool matchSelected = (!m_selectedClient.getId().isEmpty() && targetId == m_selectedClient.getId());
                 if (matchWatch || matchSelected) {
+                    const QPoint rawPoint(x, y);
+                    bool mapped = false;
+                    if (screenId >= 0 && normalizedX >= 0.0 && normalizedY >= 0.0) {
+                        CanvasSession* session = findCanvasSessionByServerClientId(targetId);
+                        QString resolutionPath = QStringLiteral("by_server_id");
+                        if (!session) {
+                            session = findCanvasSession(targetId);
+                            resolutionPath = QStringLiteral("by_persistent_id");
+                        }
+                        if (!session && m_watchManager && !m_watchManager->watchedClientId().isEmpty()) {
+                            session = findCanvasSessionByServerClientId(m_watchManager->watchedClientId());
+                            resolutionPath = QStringLiteral("by_watch_server_id");
+                            if (!session) {
+                                session = findCanvasSession(m_watchManager->watchedClientId());
+                                resolutionPath = QStringLiteral("by_watch_persistent_id");
+                            }
+                        }
+                        if (!session && !m_selectedClient.clientId().isEmpty()) {
+                            session = findCanvasSession(m_selectedClient.clientId());
+                            resolutionPath = QStringLiteral("by_selected_client_id");
+                        }
+                        if (!session && !m_activeSessionIdentity.isEmpty()) {
+                            session = findCanvasSession(m_activeSessionIdentity);
+                            resolutionPath = QStringLiteral("by_active_session");
+                        }
+
+                        if (cursorDebugEnabled()) {
+                            qDebug() << "[CursorDebug][Viewer][Lookup]"
+                                     << "targetId=" << targetId
+                                     << "watchId=" << (m_watchManager ? m_watchManager->watchedClientId() : QString())
+                                     << "selectedId=" << m_selectedClient.getId()
+                                     << "sessionResolved=" << (session != nullptr)
+                                     << "path=" << resolutionPath
+                                     << "rawGlobal=" << rawPoint
+                                     << "screenId=" << screenId
+                                     << "norm=" << normalizedX << normalizedY;
+                        }
+
+                        if (session) {
+                            const QList<ScreenInfo> screens = session->lastClientInfo.getScreens();
+                            for (const ScreenInfo& screen : screens) {
+                                if (screen.id != screenId || screen.width <= 0 || screen.height <= 0) {
+                                    continue;
+                                }
+
+                                const qreal clampedX = std::clamp(normalizedX, 0.0, 1.0);
+                                const qreal clampedY = std::clamp(normalizedY, 0.0, 1.0);
+                                const int maxDx = std::max(0, screen.width - 1);
+                                const int maxDy = std::max(0, screen.height - 1);
+                                x = screen.x + static_cast<int>(std::lround(clampedX * static_cast<qreal>(maxDx)));
+                                y = screen.y + static_cast<int>(std::lround(clampedY * static_cast<qreal>(maxDy)));
+                                mapped = true;
+                                if (cursorDebugEnabled()) {
+                                    qDebug() << "[CursorDebug][Viewer][Mapped]"
+                                             << "screenRect=" << QRect(screen.x, screen.y, screen.width, screen.height)
+                                             << "rawGlobal=" << rawPoint
+                                             << "mappedGlobal=" << QPoint(x, y)
+                                             << "screenId=" << screenId
+                                             << "norm=" << normalizedX << normalizedY;
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    if (cursorDebugEnabled() && !mapped) {
+                        qDebug() << "[CursorDebug][Viewer][FallbackRaw]"
+                                 << "rawGlobal=" << rawPoint
+                                 << "screenId=" << screenId
+                                 << "norm=" << normalizedX << normalizedY;
+                    }
+
                     m_screenCanvas->updateRemoteCursor(x, y);
                 }
             });

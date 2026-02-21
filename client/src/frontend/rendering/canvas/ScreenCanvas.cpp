@@ -241,6 +241,11 @@ static bool targetedZoomRelayoutEnabled() {
     return enabled;
 }
 
+static bool automatedPerfReplayEnabled() {
+    static const bool enabled = envFlagEnabled("MOUFFETTE_CANVAS_AUTOMATED_PERF_REPLAY");
+    return enabled;
+}
+
 static QString mediaListOverlayChromeStyle() {
     return QStringLiteral(
         "#MediaListOverlayWidget {"
@@ -441,6 +446,56 @@ ScreenCanvas::~ScreenCanvas() {
     if (m_infoWidget) {
         m_infoWidget->deleteLater();
         m_infoWidget = nullptr;
+    }
+}
+
+QWidget* ScreenCanvas::overlayViewportWidget() const {
+    return m_overlayViewportOverride ? m_overlayViewportOverride : viewport();
+}
+
+void ScreenCanvas::setOverlayViewport(QWidget* overlayViewport) {
+    QWidget* oldViewport = overlayViewportWidget();
+    m_overlayViewportOverride = overlayViewport;
+    QWidget* targetViewport = overlayViewportWidget();
+    if (!targetViewport) {
+        return;
+    }
+
+    if (oldViewport && oldViewport != targetViewport) {
+        oldViewport->removeEventFilter(this);
+    }
+    targetViewport->installEventFilter(this);
+
+    if (m_infoWidget && m_infoWidget->parentWidget() != targetViewport) {
+        const bool wasVisible = m_infoWidget->isVisible();
+        m_infoWidget->setParent(targetViewport);
+        if (wasVisible) {
+            m_infoWidget->show();
+        }
+    }
+
+    if (m_globalSettingsPanel && m_globalSettingsPanel->widget()) {
+        QWidget* settingsWidget = m_globalSettingsPanel->widget();
+        if (settingsWidget->parentWidget() != targetViewport) {
+            const bool wasVisible = settingsWidget->isVisible();
+            settingsWidget->setParent(targetViewport);
+            if (wasVisible) {
+                settingsWidget->show();
+            }
+        }
+    }
+
+    if (m_globalOverlayHost) {
+        m_globalOverlayHost->attachViewport(targetViewport);
+        m_globalOverlayHost->ensureSettingsToggleButton();
+        m_globalOverlayHost->ensureToolSelector();
+    }
+
+    updateSettingsToggleButtonGeometry();
+    updateInfoOverlayGeometryForViewport();
+    layoutInfoOverlay();
+    if (m_globalSettingsPanel && m_globalSettingsPanel->isVisible()) {
+        m_globalSettingsPanel->updatePosition();
     }
 }
 
@@ -677,10 +732,11 @@ void ScreenCanvas::maybeRefreshInfoOverlayOnSceneChanged() {
 }
 
 void ScreenCanvas::initInfoOverlay() {
-    if (!viewport()) return;
+    QWidget* overlayViewport = overlayViewportWidget();
+    if (!overlayViewport) return;
     if (!m_infoWidget) {
         // Create a clipped container to properly handle border-radius clipping
-        m_infoWidget = new ClippedContainer(viewport());
+        m_infoWidget = new ClippedContainer(overlayViewport);
         m_infoWidget->setObjectName("MediaListOverlayWidget");
         m_infoWidget->setAttribute(Qt::WA_StyledBackground, true);
         m_infoWidget->setAutoFillBackground(true);
@@ -1048,7 +1104,7 @@ void ScreenCanvas::initInfoOverlay() {
     // Ensure settings toggle button + detached panel are ready
     ensureSettingsToggleButton();
     if (!m_globalSettingsPanel) {
-        m_globalSettingsPanel = new MediaSettingsPanel(viewport());
+        m_globalSettingsPanel = new MediaSettingsPanel(overlayViewport);
         m_globalSettingsPanel->setVisible(false);
         m_globalSettingsPanel->updatePosition();
     }
@@ -1279,8 +1335,9 @@ void ScreenCanvas::refreshInfoOverlay() {
     // Use consolidated width calculation for consistency
     auto [desiredW, isWidthConstrained] = calculateDesiredWidthAndConstraint();
     const int margin = 16;
+    QWidget* overlayViewport = overlayViewportWidget();
     // Cap height to viewport height minus margins to avoid overlay exceeding canvas
-    const int maxOverlayH = viewport() ? std::max(0, viewport()->height() - margin*2) : naturalHeight;
+    const int maxOverlayH = overlayViewport ? std::max(0, overlayViewport->height() - margin*2) : naturalHeight;
     int overlayH = naturalHeight;
     if (overlayH > maxOverlayH) {
         // Clamp the scroll viewport height and show overlay scrollbar
@@ -1332,25 +1389,27 @@ void ScreenCanvas::refreshInfoOverlay() {
 }
 
 void ScreenCanvas::layoutInfoOverlay() {
-    if (!m_infoWidget || !viewport()) return;
+    QWidget* overlayViewport = overlayViewportWidget();
+    if (!m_infoWidget || !overlayViewport) return;
     const int margin = 16;
     const int w = m_infoWidget->width();
-    const int x = viewport()->width() - margin - w;
-    const int y = viewport()->height() - margin - m_infoWidget->height();
+    const int x = overlayViewport->width() - margin - w;
+    const int y = overlayViewport->height() - margin - m_infoWidget->height();
     m_infoWidget->move(std::max(0, x), std::max(0, y));
 
     updateOverlayVScrollVisibilityAndGeometry();
 }
 
 void ScreenCanvas::updateInfoOverlayGeometryForViewport() {
-    if (!m_infoWidget || !m_infoLayout || !viewport()) return;
+    QWidget* overlayViewport = overlayViewportWidget();
+    if (!m_infoWidget || !m_infoLayout || !overlayViewport) return;
     if (!m_infoWidget->isVisible()) return; // nothing to adjust if hidden
     // Compute current natural size based on existing content
     const QSize contentHint = m_contentLayout ? m_contentLayout->totalSizeHint() : (m_contentWidget ? m_contentWidget->sizeHint() : QSize());
     const QSize headerHint = m_overlayHeaderWidget ? m_overlayHeaderWidget->sizeHint() : QSize(0,0);
     const int naturalHeight = contentHint.height() + headerHint.height();
     const int margin = 16;
-    const int maxOverlayH = std::max(0, viewport()->height() - margin*2);
+    const int maxOverlayH = std::max(0, overlayViewport->height() - margin*2);
     int overlayH = naturalHeight;
     if (overlayH > maxOverlayH) {
         if (m_contentScroll) {
@@ -1442,7 +1501,8 @@ void ScreenCanvas::applyTextEllipsisIfConstrained(bool isWidthConstrained) {
 }
 
 std::pair<int, bool> ScreenCanvas::calculateDesiredWidthAndConstraint() {
-    if (!m_infoWidget || !viewport()) return {200, false};
+    QWidget* overlayViewport = overlayViewportWidget();
+    if (!m_infoWidget || !overlayViewport) return {200, false};
     
     // Measure content width from original text
     int measuredContentW = 0;
@@ -1462,7 +1522,7 @@ std::pair<int, bool> ScreenCanvas::calculateDesiredWidthAndConstraint() {
     int desiredW = std::max({contentWithMargins, headerHint.width(), m_infoWidget->minimumWidth()});
 
     // Apply relative (50% viewport) and absolute caps
-    const int viewportCap = static_cast<int>(viewport()->width() * 0.5);
+    const int viewportCap = static_cast<int>(overlayViewport->width() * 0.5);
     int effectiveCap = viewportCap;
     if (gMediaListOverlayAbsoluteMaxWidthPx > 0) {
         effectiveCap = (effectiveCap > 0)
@@ -1731,6 +1791,41 @@ void ScreenCanvas::maybeEmitCanvasPerfSnapshot() {
     m_perfSelectionChromeCount = 0;
     m_perfSceneChangedBatchCount = 0;
     m_canvasPerfWindow.restart();
+}
+
+void ScreenCanvas::maybeScheduleAutomatedPerfReplay() {
+    if (!automatedPerfReplayEnabled() || m_perfReplayScheduled || m_perfReplayCompleted || m_screens.isEmpty()) {
+        return;
+    }
+
+    m_perfReplayScheduled = true;
+    QTimer::singleShot(250, this, [this]() {
+        runAutomatedPerfReplay();
+    });
+}
+
+void ScreenCanvas::runAutomatedPerfReplay() {
+    if (m_perfReplayCompleted || m_screens.isEmpty()) {
+        return;
+    }
+
+    QPointF anchor(420.0, 320.0);
+    if (QWidget* vp = viewport()) {
+        if (vp->width() > 0 && vp->height() > 0) {
+            anchor = QPointF(vp->width() * 0.52, vp->height() * 0.47);
+        }
+    }
+
+    const qreal zoomSteps[] = {1.06, 1.05, 1.04, 0.96, 0.95, 1.03, 1.02, 0.97};
+    int delayMs = 0;
+    for (qreal factor : zoomSteps) {
+        QTimer::singleShot(delayMs, this, [this, anchor, factor]() {
+            queueZoomInput(anchor, factor);
+        });
+        delayMs += 45;
+    }
+
+    m_perfReplayCompleted = true;
 }
 
 QPointF ScreenCanvas::snapToMediaAndScreenTargets(const QPointF& scenePos, const QRectF& mediaBounds, bool shiftPressed, ResizableMediaBase* movingItem) const {
@@ -2199,6 +2294,8 @@ void ScreenCanvas::setScreens(const QList<ScreenInfo>& screens) {
             }
         });
     }
+
+    maybeScheduleAutomatedPerfReplay();
 }
 
 void ScreenCanvas::clearScreens() {
@@ -2818,6 +2915,16 @@ ScreenCanvas::CornerAltSnapResult ScreenCanvas::applyCornerAltSnapWithHysteresis
 }
 
 bool ScreenCanvas::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == overlayViewportWidget()) {
+        if (event->type() == QEvent::Resize || event->type() == QEvent::Show) {
+            layoutInfoOverlay();
+            updateSettingsToggleButtonGeometry();
+            if (m_globalSettingsPanel && m_globalSettingsPanel->isVisible()) {
+                m_globalSettingsPanel->updatePosition();
+            }
+        }
+    }
+
     // Disable media container interactions when remote scene is active
     bool remoteSceneActive = m_sceneLaunched || m_sceneLaunching;
     
@@ -5209,7 +5316,8 @@ void ScreenCanvas::stopHostSceneState(bool notifyRemote) {
 }
 
 void ScreenCanvas::ensureSettingsToggleButton() {
-    if (!viewport()) return;
+    QWidget* overlayViewport = overlayViewportWidget();
+    if (!overlayViewport) return;
 
     if (!m_globalOverlayHost) {
         m_globalOverlayHost = new CanvasGlobalOverlayHost(this);
@@ -5222,15 +5330,16 @@ void ScreenCanvas::ensureSettingsToggleButton() {
         });
     }
 
-    m_globalOverlayHost->attachViewport(viewport());
+    m_globalOverlayHost->attachViewport(overlayViewport);
     m_globalOverlayHost->ensureSettingsToggleButton();
 }
 
 void ScreenCanvas::ensureToolSelector() {
-    if (!viewport()) return;
+    QWidget* overlayViewport = overlayViewportWidget();
+    if (!overlayViewport) return;
     ensureSettingsToggleButton();
     if (!m_globalOverlayHost) return;
-    m_globalOverlayHost->attachViewport(viewport());
+    m_globalOverlayHost->attachViewport(overlayViewport);
     m_globalOverlayHost->ensureToolSelector();
 }
 

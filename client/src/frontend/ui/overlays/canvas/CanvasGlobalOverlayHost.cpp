@@ -20,11 +20,18 @@ void CanvasGlobalOverlayHost::attachViewport(QWidget* viewport) {
         return;
     }
 
+    if (m_toolSelectorContainer) {
+        m_toolSelectorContainer->deleteLater();
+        m_toolSelectorContainer = nullptr;
+        m_selectionToolButton = nullptr;
+        m_textToolButton = nullptr;
+    }
+    if (m_settingsToggleButton) {
+        m_settingsToggleButton->deleteLater();
+        m_settingsToggleButton = nullptr;
+    }
+
     m_viewport = viewport;
-    m_settingsToggleButton = nullptr;
-    m_toolSelectorContainer = nullptr;
-    m_selectionToolButton = nullptr;
-    m_textToolButton = nullptr;
 }
 
 void CanvasGlobalOverlayHost::ensureSettingsToggleButton() {

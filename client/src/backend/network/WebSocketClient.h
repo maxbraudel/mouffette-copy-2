@@ -36,8 +36,9 @@ public:
     void watchScreens(const QString& targetClientId);
     void unwatchScreens(const QString& targetClientId);
     void sendStateSnapshot(const QList<ScreenInfo>& screens, int volumePercent);
-        // Send current cursor position (global desktop coordinates) when this client is watched
-        void sendCursorUpdate(int globalX, int globalY);
+        // Send current cursor position when this client is watched.
+        // Optional screenId/normalized values provide DPI-agnostic mapping fidelity.
+        void sendCursorUpdate(int globalX, int globalY, int screenId = -1, qreal normalizedX = -1.0, qreal normalizedY = -1.0);
 
     // Upload/unload protocol (JSON relayed by server)
     void sendUploadStart(const QString& targetClientId, const QJsonArray& filesManifest, const QString& uploadId, const QString& canvasSessionId);
@@ -88,8 +89,9 @@ signals:
     void messageReceived(const QJsonObject& message);
     void watchStatusChanged(bool watched);
     void dataRequestReceived();
-        // Emitted to watchers with remote cursor position of the watched target
-        void cursorPositionReceived(const QString& targetClientId, int x, int y);
+        // Emitted to watchers with remote cursor position of the watched target.
+        // screenId/normalized values may be absent (-1).
+        void cursorPositionReceived(const QString& targetClientId, int x, int y, int screenId, qreal normalizedX, qreal normalizedY);
 
     // Upload progress signals (from target via server)
     void uploadProgressReceived(const QString& uploadId, int percent, int filesCompleted, int totalFiles);

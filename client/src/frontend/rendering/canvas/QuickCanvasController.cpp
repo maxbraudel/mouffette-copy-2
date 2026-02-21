@@ -2,19 +2,71 @@
 
 #include <algorithm>
 #include <limits>
+#include <QGraphicsScene>
+#include <QGraphicsItem>
 #include <QMetaObject>
+#include <QEvent>
 #include <QQuickItem>
 #include <QQuickWidget>
+#include <QScreen>
+#include <QTimer>
 #include <QVariantList>
+#include <QWindow>
+#include <QtMath>
+
+#include "backend/domain/media/MediaItems.h"
+#include "backend/domain/media/TextMediaItem.h"
 
 namespace {
 constexpr int kRemoteCursorDiameterPx = 30;
 constexpr qreal kRemoteCursorBorderWidthPx = 2.0;
+
+QString uploadStateToString(ResizableMediaBase::UploadState state) {
+    switch (state) {
+    case ResizableMediaBase::UploadState::NotUploaded:
+        return QStringLiteral("not_uploaded");
+    case ResizableMediaBase::UploadState::Uploading:
+        return QStringLiteral("uploading");
+    case ResizableMediaBase::UploadState::Uploaded:
+        return QStringLiteral("uploaded");
+    }
+    return QStringLiteral("not_uploaded");
+}
+
+QString textHorizontalAlignmentToString(TextMediaItem::HorizontalAlignment alignment) {
+    switch (alignment) {
+    case TextMediaItem::HorizontalAlignment::Left:
+        return QStringLiteral("left");
+    case TextMediaItem::HorizontalAlignment::Center:
+        return QStringLiteral("center");
+    case TextMediaItem::HorizontalAlignment::Right:
+        return QStringLiteral("right");
+    }
+    return QStringLiteral("center");
+}
+
+QString textVerticalAlignmentToString(TextMediaItem::VerticalAlignment alignment) {
+    switch (alignment) {
+    case TextMediaItem::VerticalAlignment::Top:
+        return QStringLiteral("top");
+    case TextMediaItem::VerticalAlignment::Center:
+        return QStringLiteral("center");
+    case TextMediaItem::VerticalAlignment::Bottom:
+        return QStringLiteral("bottom");
+    }
+    return QStringLiteral("center");
+}
 }
 
 QuickCanvasController::QuickCanvasController(QObject* parent)
     : QObject(parent)
 {
+    m_mediaSyncTimer = new QTimer(this);
+    m_mediaSyncTimer->setSingleShot(true);
+    m_mediaSyncTimer->setInterval(16);
+    connect(m_mediaSyncTimer, &QTimer::timeout, this, [this]() {
+        syncMediaModelFromScene();
+    });
 }
 
 bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMessage) {
@@ -23,6 +75,7 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
     }
 
     m_quickWidget = new QQuickWidget(parentWidget);
+    m_quickWidget->installEventFilter(this);
     m_quickWidget->setResizeMode(QQuickWidget::SizeRootObjectToView);
     m_quickWidget->setSource(QUrl(QStringLiteral("qrc:/qml/CanvasRoot.qml")));
 
@@ -43,8 +96,46 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
     setScreenCount(0);
     setShellActive(false);
     setScreens({});
+    m_quickWidget->rootObject()->setProperty("mediaModel", QVariantList{});
+
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(mediaSelectRequested(QString,bool)),
+        this, SLOT(handleMediaSelectRequested(QString,bool)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(textCommitRequested(QString,QString)),
+        this, SLOT(handleTextCommitRequested(QString,QString)));
+
+    m_pendingInitialSceneScaleRefresh = true;
+    QTimer::singleShot(0, this, [this]() {
+        if (m_pendingInitialSceneScaleRefresh) {
+            refreshSceneUnitScaleIfNeeded();
+        }
+    });
+    QTimer::singleShot(120, this, [this]() {
+        if (m_pendingInitialSceneScaleRefresh) {
+            refreshSceneUnitScaleIfNeeded();
+        }
+    });
+
     hideRemoteCursor();
     return true;
+}
+
+bool QuickCanvasController::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == m_quickWidget && event) {
+        switch (event->type()) {
+        case QEvent::Show:
+        case QEvent::Polish:
+        case QEvent::PolishRequest:
+        case QEvent::ScreenChangeInternal:
+            refreshSceneUnitScaleIfNeeded();
+            break;
+        default:
+            break;
+        }
+    }
+
+    return QObject::eventFilter(watched, event);
 }
 
 QWidget* QuickCanvasController::widget() const {
@@ -73,6 +164,29 @@ void QuickCanvasController::setScreens(const QList<ScreenInfo>& screens) {
     if (screens.isEmpty()) {
         hideRemoteCursor();
     }
+}
+
+void QuickCanvasController::setMediaScene(QGraphicsScene* scene) {
+    if (m_mediaScene == scene) {
+        return;
+    }
+
+    if (m_mediaScene) {
+        disconnect(m_mediaScene, nullptr, this, nullptr);
+    }
+
+    m_mediaScene = scene;
+
+    if (m_mediaScene) {
+        connect(m_mediaScene, &QGraphicsScene::changed, this, [this](const QList<QRectF>&) {
+            scheduleMediaModelSync();
+        });
+        connect(m_mediaScene, &QGraphicsScene::selectionChanged, this, [this]() {
+            scheduleMediaModelSync();
+        });
+    }
+
+    scheduleMediaModelSync();
 }
 
 void QuickCanvasController::updateRemoteCursor(int globalX, int globalY) {
@@ -105,7 +219,166 @@ void QuickCanvasController::recenterView() {
     if (!m_quickWidget || !m_quickWidget->rootObject()) {
         return;
     }
-    QMetaObject::invokeMethod(m_quickWidget->rootObject(), "recenterView");
+
+    QRectF bounds;
+    bool hasBounds = false;
+    for (auto it = m_sceneScreenRects.constBegin(); it != m_sceneScreenRects.constEnd(); ++it) {
+        if (!hasBounds) {
+            bounds = it.value();
+            hasBounds = true;
+        } else {
+            bounds = bounds.united(it.value());
+        }
+    }
+
+    if (hasBounds && bounds.width() > 0.0 && bounds.height() > 0.0) {
+        QMetaObject::invokeMethod(
+            m_quickWidget->rootObject(),
+            "fitToBounds",
+            Q_ARG(QVariant, bounds.x()),
+            Q_ARG(QVariant, bounds.y()),
+            Q_ARG(QVariant, bounds.width()),
+            Q_ARG(QVariant, bounds.height()),
+            Q_ARG(QVariant, 53.0));
+        return;
+    }
+
+    QMetaObject::invokeMethod(m_quickWidget->rootObject(), "recenterView", Q_ARG(QVariant, 53.0));
+}
+
+void QuickCanvasController::scheduleMediaModelSync() {
+    if (m_mediaSyncPending) {
+        return;
+    }
+    m_mediaSyncPending = true;
+    if (m_mediaSyncTimer) {
+        m_mediaSyncTimer->start();
+    } else {
+        syncMediaModelFromScene();
+    }
+}
+
+void QuickCanvasController::handleMediaSelectRequested(const QString& mediaId, bool additive) {
+    if (!m_mediaScene || mediaId.isEmpty()) {
+        return;
+    }
+
+    ResizableMediaBase* target = nullptr;
+    const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
+    for (QGraphicsItem* graphicsItem : sceneItems) {
+        auto* media = dynamic_cast<ResizableMediaBase*>(graphicsItem);
+        if (!media) {
+            continue;
+        }
+        if (media->mediaId() == mediaId) {
+            target = media;
+            break;
+        }
+    }
+
+    if (!target) {
+        return;
+    }
+
+    if (!additive) {
+        m_mediaScene->clearSelection();
+    }
+    target->setSelected(true);
+    scheduleMediaModelSync();
+}
+
+void QuickCanvasController::handleTextCommitRequested(const QString& mediaId, const QString& text) {
+    if (!m_mediaScene || mediaId.isEmpty()) {
+        return;
+    }
+
+    const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
+    for (QGraphicsItem* graphicsItem : sceneItems) {
+        auto* media = dynamic_cast<ResizableMediaBase*>(graphicsItem);
+        if (!media || media->mediaId() != mediaId) {
+            continue;
+        }
+
+        auto* textMedia = dynamic_cast<TextMediaItem*>(media);
+        if (!textMedia) {
+            return;
+        }
+
+        textMedia->setText(text);
+        textMedia->setSelected(true);
+        scheduleMediaModelSync();
+        return;
+    }
+}
+
+void QuickCanvasController::syncMediaModelFromScene() {
+    m_mediaSyncPending = false;
+
+    if (!m_quickWidget || !m_quickWidget->rootObject()) {
+        return;
+    }
+
+    QVariantList mediaModel;
+    if (m_mediaScene) {
+        const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
+        for (QGraphicsItem* graphicsItem : sceneItems) {
+            auto* media = dynamic_cast<ResizableMediaBase*>(graphicsItem);
+            if (!media) {
+                continue;
+            }
+
+            QRectF sceneRect;
+            const QSize baseSize = media->baseSizePx();
+            if (baseSize.width() > 0 && baseSize.height() > 0) {
+                sceneRect = media->mapRectToScene(QRectF(QPointF(0.0, 0.0), QSizeF(baseSize)));
+            } else {
+                sceneRect = media->sceneBoundingRect();
+            }
+            sceneRect = scaleSceneRect(sceneRect.normalized());
+
+            QVariantMap mediaEntry;
+            mediaEntry.insert(QStringLiteral("mediaId"), media->mediaId());
+            mediaEntry.insert(QStringLiteral("mediaType"), media->isTextMedia()
+                ? QStringLiteral("text")
+                : (media->isVideoMedia() ? QStringLiteral("video") : QStringLiteral("image")));
+            mediaEntry.insert(QStringLiteral("x"), sceneRect.x());
+            mediaEntry.insert(QStringLiteral("y"), sceneRect.y());
+            mediaEntry.insert(QStringLiteral("width"), sceneRect.width());
+            mediaEntry.insert(QStringLiteral("height"), sceneRect.height());
+            mediaEntry.insert(QStringLiteral("z"), media->zValue());
+            mediaEntry.insert(QStringLiteral("selected"), media->isSelected());
+            mediaEntry.insert(QStringLiteral("sourcePath"), media->sourcePath());
+            mediaEntry.insert(QStringLiteral("uploadState"), uploadStateToString(media->uploadState()));
+            mediaEntry.insert(QStringLiteral("displayName"), media->displayName());
+
+            if (auto* textMedia = dynamic_cast<TextMediaItem*>(media)) {
+                const QFont textFont = textMedia->font();
+                mediaEntry.insert(QStringLiteral("textContent"), textMedia->text());
+                mediaEntry.insert(QStringLiteral("textHorizontalAlignment"), textHorizontalAlignmentToString(textMedia->horizontalAlignment()));
+                mediaEntry.insert(QStringLiteral("textVerticalAlignment"), textVerticalAlignmentToString(textMedia->verticalAlignment()));
+                mediaEntry.insert(QStringLiteral("fitToTextEnabled"), textMedia->fitToTextEnabled());
+                mediaEntry.insert(QStringLiteral("textFontFamily"), textFont.family());
+                mediaEntry.insert(QStringLiteral("textFontPixelSize"), textFont.pixelSize() > 0 ? textFont.pixelSize() : textFont.pointSize());
+                mediaEntry.insert(QStringLiteral("textFontWeight"), textMedia->textFontWeightValue());
+                mediaEntry.insert(QStringLiteral("textItalic"), textMedia->italicEnabled());
+                mediaEntry.insert(QStringLiteral("textUnderline"), textMedia->underlineEnabled());
+                mediaEntry.insert(QStringLiteral("textUppercase"), textMedia->uppercaseEnabled());
+                mediaEntry.insert(QStringLiteral("textColor"), textMedia->textColor().name(QColor::HexArgb));
+                mediaEntry.insert(QStringLiteral("textOutlineWidthPercent"), textMedia->textBorderWidth());
+                mediaEntry.insert(QStringLiteral("textOutlineColor"), textMedia->textBorderColor().name(QColor::HexArgb));
+                mediaEntry.insert(QStringLiteral("textHighlightEnabled"), textMedia->highlightEnabled());
+                mediaEntry.insert(QStringLiteral("textHighlightColor"), textMedia->highlightColor().name(QColor::HexArgb));
+                mediaEntry.insert(QStringLiteral("textEditable"), textMedia->isEditing());
+            } else {
+                mediaEntry.insert(QStringLiteral("textContent"), QString());
+                mediaEntry.insert(QStringLiteral("textEditable"), false);
+            }
+
+            mediaModel.append(mediaEntry);
+        }
+    }
+
+    m_quickWidget->rootObject()->setProperty("mediaModel", mediaModel);
 }
 
 void QuickCanvasController::pushStaticLayerModels() {
@@ -203,7 +476,8 @@ QPointF QuickCanvasController::mapRemoteCursorToQuickScene(int globalX, int glob
     const ScreenInfo* containing = nullptr;
     for (const auto& screen : m_screens) {
         const QRect remoteRect(screen.x, screen.y, screen.width, screen.height);
-        if (remoteRect.contains(globalX, globalY)) {
+        const QRect tolerantRect = remoteRect.adjusted(-1, -1, 1, 1);
+        if (tolerantRect.contains(globalX, globalY)) {
             containing = &screen;
             break;
         }
@@ -222,10 +496,16 @@ QPointF QuickCanvasController::mapRemoteCursorToQuickScene(int globalX, int glob
         return {};
     }
 
-    qreal relX = static_cast<qreal>(globalX - remoteRect.x()) / static_cast<qreal>(remoteRect.width());
-    qreal relY = static_cast<qreal>(globalY - remoteRect.y()) / static_cast<qreal>(remoteRect.height());
-    relX = std::clamp(relX, 0.0, 1.0);
-    relY = std::clamp(relY, 0.0, 1.0);
+    const int maxDx = std::max(0, remoteRect.width() - 1);
+    const int maxDy = std::max(0, remoteRect.height() - 1);
+    const int localX = std::clamp(globalX - remoteRect.x(), 0, maxDx);
+    const int localY = std::clamp(globalY - remoteRect.y(), 0, maxDy);
+    const qreal relX = (maxDx > 0)
+        ? static_cast<qreal>(localX) / static_cast<qreal>(maxDx)
+        : 0.0;
+    const qreal relY = (maxDy > 0)
+        ? static_cast<qreal>(localY) / static_cast<qreal>(maxDy)
+        : 0.0;
 
     if (ok) {
         *ok = true;
@@ -241,8 +521,11 @@ QPointF QuickCanvasController::mapRemoteCursorToQuickScene(int globalX, int glob
 void QuickCanvasController::rebuildScreenRects() {
     m_sceneScreenRects.clear();
     if (m_screens.isEmpty()) {
+        m_sceneUnitScale = 1.0;
         return;
     }
+
+    m_sceneUnitScale = currentSceneUnitScale();
 
     int minX = std::numeric_limits<int>::max();
     int minY = std::numeric_limits<int>::max();
@@ -261,9 +544,53 @@ void QuickCanvasController::rebuildScreenRects() {
         m_sceneScreenRects.insert(
             screen.id,
             QRectF(
-                static_cast<qreal>(screen.x - minX),
-                static_cast<qreal>(screen.y - minY),
-                static_cast<qreal>(screen.width),
-                static_cast<qreal>(screen.height)));
+                static_cast<qreal>(screen.x - minX) * m_sceneUnitScale,
+                static_cast<qreal>(screen.y - minY) * m_sceneUnitScale,
+                static_cast<qreal>(screen.width) * m_sceneUnitScale,
+                static_cast<qreal>(screen.height) * m_sceneUnitScale));
     }
+}
+
+void QuickCanvasController::refreshSceneUnitScaleIfNeeded(bool force) {
+    m_pendingInitialSceneScaleRefresh = false;
+
+    const qreal nextScale = currentSceneUnitScale();
+    if (!force && qFuzzyCompare(1.0 + nextScale, 1.0 + m_sceneUnitScale)) {
+        return;
+    }
+
+    const qreal oldScale = m_sceneUnitScale;
+    if (m_screens.isEmpty()) {
+        m_sceneUnitScale = nextScale;
+        return;
+    }
+
+    rebuildScreenRects();
+    pushStaticLayerModels();
+    syncMediaModelFromScene();
+
+    if (m_remoteCursorVisible && oldScale > 0.0 && nextScale > 0.0) {
+        const qreal ratio = nextScale / oldScale;
+        m_remoteCursorX *= ratio;
+        m_remoteCursorY *= ratio;
+        pushRemoteCursorState();
+    }
+
+    recenterView();
+}
+
+qreal QuickCanvasController::currentSceneUnitScale() const {
+    return 1.0;
+}
+
+QRectF QuickCanvasController::scaleSceneRect(const QRectF& rect) const {
+    if (m_sceneUnitScale == 1.0) {
+        return rect;
+    }
+
+    return QRectF(
+        rect.x() * m_sceneUnitScale,
+        rect.y() * m_sceneUnitScale,
+        rect.width() * m_sceneUnitScale,
+        rect.height() * m_sceneUnitScale);
 }

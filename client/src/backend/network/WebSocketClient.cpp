@@ -6,6 +6,14 @@
 #include <QCoreApplication>
 #include <QThread>
 #include <QUuid>
+#include <QPoint>
+
+namespace {
+bool cursorDebugEnabled() {
+    static const bool enabled = qEnvironmentVariableIsSet("MOUFFETTE_CURSOR_DEBUG");
+    return enabled;
+}
+}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 🔐 MOUFFETTE IDENTIFICATION SYSTEM - TERMINOLOGY FIX
@@ -353,12 +361,25 @@ void WebSocketClient::sendStateSnapshot(const QList<ScreenInfo>& screens, int vo
     sendMessage(msg);
 }
 
-void WebSocketClient::sendCursorUpdate(int globalX, int globalY) {
+void WebSocketClient::sendCursorUpdate(int globalX, int globalY, int screenId, qreal normalizedX, qreal normalizedY) {
     if (!isConnected()) return;
     QJsonObject msg;
     msg["type"] = "cursor_update";
     msg["x"] = globalX;
     msg["y"] = globalY;
+    if (screenId >= 0) {
+        msg["screenId"] = screenId;
+    }
+    if (normalizedX >= 0.0 && normalizedY >= 0.0) {
+        msg["normalizedX"] = normalizedX;
+        msg["normalizedY"] = normalizedY;
+    }
+    if (cursorDebugEnabled()) {
+        qDebug() << "[CursorDebug][WS][Send]"
+                 << "global=" << QPoint(globalX, globalY)
+                 << "screenId=" << screenId
+                 << "norm=" << normalizedX << normalizedY;
+    }
     sendMessage(msg);
 }
 
@@ -760,7 +781,17 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         const QString targetId = message.value("targetClientId").toString();
         const int x = message.value("x").toInt();
         const int y = message.value("y").toInt();
-        emit cursorPositionReceived(targetId, x, y);
+        const int screenId = message.value("screenId").toInt(-1);
+        const qreal normalizedX = message.value("normalizedX").toDouble(-1.0);
+        const qreal normalizedY = message.value("normalizedY").toDouble(-1.0);
+        if (cursorDebugEnabled()) {
+            qDebug() << "[CursorDebug][WS][Recv]"
+                     << "targetId=" << targetId
+                     << "global=" << QPoint(x, y)
+                     << "screenId=" << screenId
+                     << "norm=" << normalizedX << normalizedY;
+        }
+        emit cursorPositionReceived(targetId, x, y, screenId, normalizedX, normalizedY);
     }
     else if (type == "upload_progress") {
         const QString uploadId = message.value("uploadId").toString();

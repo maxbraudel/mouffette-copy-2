@@ -224,7 +224,11 @@ void ScreenEventHandler::onScreensInfoReceived(const ClientInfo& clientInfo)
     if (!session) {
         session = &m_mainWindow->ensureCanvasSession(clientInfo);
     } else {
-        session->serverAssignedId = clientInfo.getId();
+        if (m_mainWindow->getSessionManager()) {
+            m_mainWindow->getSessionManager()->updateSessionServerId(persistentId, clientInfo.getId());
+        } else {
+            session->serverAssignedId = clientInfo.getId();
+        }
         session->lastClientInfo = clientInfo;
         session->lastClientInfo.setClientId(persistentId);
         session->lastClientInfo.setFromMemory(true);

@@ -1,14 +1,20 @@
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 
 #include "frontend/rendering/canvas/QuickCanvasController.h"
+#include "frontend/rendering/canvas/ScreenCanvas.h"
 
-#include <QGraphicsScene>
-
-QuickCanvasHost::QuickCanvasHost(QuickCanvasController* controller, QObject* parent)
+QuickCanvasHost::QuickCanvasHost(QuickCanvasController* controller, ScreenCanvas* mediaCanvas, QObject* parent)
     : ICanvasHost(parent)
     , m_controller(controller)
-    , m_placeholderScene(new QGraphicsScene(this))
+    , m_mediaCanvas(mediaCanvas)
 {
+    Q_ASSERT(m_controller);
+    Q_ASSERT(m_mediaCanvas);
+
+    connect(m_mediaCanvas, &ScreenCanvas::mediaItemAdded, this, &QuickCanvasHost::mediaItemAdded);
+    connect(m_mediaCanvas, &ScreenCanvas::mediaItemRemoved, this, &QuickCanvasHost::mediaItemRemoved);
+    connect(m_mediaCanvas, &ScreenCanvas::remoteSceneLaunchStateChanged,
+            this, &QuickCanvasHost::remoteSceneLaunchStateChanged);
 }
 
 QuickCanvasHost::~QuickCanvasHost() {
@@ -24,7 +30,13 @@ QuickCanvasHost* QuickCanvasHost::create(QWidget* parentWidget, QString* errorMe
         delete controller;
         return nullptr;
     }
-    return new QuickCanvasHost(controller, controller->widget());
+
+    ScreenCanvas* mediaCanvas = new ScreenCanvas(controller->widget());
+    mediaCanvas->setVisible(false);
+    mediaCanvas->setOverlayViewport(controller->widget());
+    controller->setMediaScene(mediaCanvas->scene());
+
+    return new QuickCanvasHost(controller, mediaCanvas, controller->widget());
 }
 
 QWidget* QuickCanvasHost::asWidget() const {
@@ -35,26 +47,47 @@ QWidget* QuickCanvasHost::viewportWidget() const {
     return asWidget();
 }
 
-void QuickCanvasHost::setActiveIdeaId(const QString&) {
+void QuickCanvasHost::setActiveIdeaId(const QString& canvasSessionId) {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->setActiveIdeaId(canvasSessionId);
+    }
 }
 
-void QuickCanvasHost::setWebSocketClient(WebSocketClient*) {
+void QuickCanvasHost::setWebSocketClient(WebSocketClient* client) {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->setWebSocketClient(client);
+    }
 }
 
-void QuickCanvasHost::setUploadManager(UploadManager*) {
+void QuickCanvasHost::setUploadManager(UploadManager* manager) {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->setUploadManager(manager);
+    }
 }
 
-void QuickCanvasHost::setFileManager(FileManager*) {
+void QuickCanvasHost::setFileManager(FileManager* manager) {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->setFileManager(manager);
+    }
 }
 
-void QuickCanvasHost::setRemoteSceneTarget(const QString&, const QString&) {
+void QuickCanvasHost::setRemoteSceneTarget(const QString& id, const QString& machineName) {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->setRemoteSceneTarget(id, machineName);
+    }
 }
 
-void QuickCanvasHost::updateRemoteSceneTargetFromClientList(const QList<ClientInfo>&) {
+void QuickCanvasHost::updateRemoteSceneTargetFromClientList(const QList<ClientInfo>& clients) {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->updateRemoteSceneTargetFromClientList(clients);
+    }
 }
 
 void QuickCanvasHost::setScreens(const QList<ScreenInfo>& screens) {
     m_hasActiveScreens = !screens.isEmpty();
+    if (m_mediaCanvas) {
+        m_mediaCanvas->setScreens(screens);
+    }
     if (m_controller) {
         m_controller->setScreenCount(screens.size());
         m_controller->setScreens(screens);
@@ -62,77 +95,100 @@ void QuickCanvasHost::setScreens(const QList<ScreenInfo>& screens) {
 }
 
 bool QuickCanvasHost::hasActiveScreens() const {
+    if (m_mediaCanvas) {
+        return m_mediaCanvas->hasActiveScreens();
+    }
     return m_hasActiveScreens;
 }
 
-void QuickCanvasHost::requestDeferredInitialRecenter(int) {
+void QuickCanvasHost::requestDeferredInitialRecenter(int marginPx) {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->requestDeferredInitialRecenter(marginPx);
+    }
     if (m_controller) {
         m_controller->recenterView();
     }
 }
 
-void QuickCanvasHost::recenterWithMargin(int) {
+void QuickCanvasHost::recenterWithMargin(int marginPx) {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->recenterWithMargin(marginPx);
+    }
     if (m_controller) {
         m_controller->recenterView();
     }
 }
 
 void QuickCanvasHost::hideContentPreservingState() {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->hideContentPreservingState();
+    }
     if (QWidget* shell = asWidget()) {
         shell->setVisible(false);
     }
 }
 
 void QuickCanvasHost::showContentAfterReconnect() {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->showContentAfterReconnect();
+    }
     if (QWidget* shell = asWidget()) {
         shell->setVisible(true);
     }
 }
 
 void QuickCanvasHost::resetTransform() {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->resetTransform();
+    }
     if (m_controller) {
         m_controller->resetView();
     }
 }
 
 void QuickCanvasHost::updateRemoteCursor(int globalX, int globalY) {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->updateRemoteCursor(globalX, globalY);
+    }
     if (m_controller) {
         m_controller->updateRemoteCursor(globalX, globalY);
     }
 }
 
 void QuickCanvasHost::hideRemoteCursor() {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->hideRemoteCursor();
+    }
     if (m_controller) {
         m_controller->hideRemoteCursor();
     }
 }
 
 QPushButton* QuickCanvasHost::getUploadButton() const {
-    return nullptr;
+    return m_mediaCanvas ? m_mediaCanvas->getUploadButton() : nullptr;
 }
 
 bool QuickCanvasHost::isRemoteSceneLaunched() const {
-    return false;
+    return m_mediaCanvas ? m_mediaCanvas->isRemoteSceneLaunched() : false;
 }
 
 QString QuickCanvasHost::overlayDisabledButtonStyle() const {
-    return QStringLiteral(
-        "QPushButton {"
-        "background-color: rgba(0,0,0,0.35);"
-        "color: rgba(255,255,255,0.6);"
-        "border: 1px solid rgba(255,255,255,0.2);"
-        "border-radius: 10px;"
-        "padding: 8px 14px;"
-        "}");
+    return ScreenCanvas::overlayDisabledButtonStyle();
 }
 
 void QuickCanvasHost::setOverlayActionsEnabled(bool enabled) {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->setOverlayActionsEnabled(enabled);
+    }
     if (m_controller) {
         m_controller->setShellActive(enabled);
     }
 }
 
 void QuickCanvasHost::handleRemoteConnectionLost() {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->handleRemoteConnectionLost();
+    }
     if (m_controller) {
         m_controller->setShellActive(false);
     }
@@ -144,7 +200,10 @@ void QuickCanvasHost::setSizePolicy(QSizePolicy::Policy horizontal, QSizePolicy:
     }
 }
 
-void QuickCanvasHost::setViewportUpdateMode(QGraphicsView::ViewportUpdateMode) {
+void QuickCanvasHost::setViewportUpdateMode(QGraphicsView::ViewportUpdateMode mode) {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->setViewportUpdateMode(mode);
+    }
 }
 
 void QuickCanvasHost::setFocusPolicy(Qt::FocusPolicy policy) {
@@ -166,8 +225,11 @@ void QuickCanvasHost::installEventFilter(QObject* filterObj) {
 }
 
 QGraphicsScene* QuickCanvasHost::scene() const {
-    return m_placeholderScene;
+    return m_mediaCanvas ? m_mediaCanvas->scene() : nullptr;
 }
 
 void QuickCanvasHost::refreshInfoOverlay() {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->refreshInfoOverlay();
+    }
 }

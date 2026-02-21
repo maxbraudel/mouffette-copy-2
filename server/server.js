@@ -1,6 +1,8 @@
 const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
 
+const CURSOR_DEBUG = !!process.env.MOUFFETTE_CURSOR_DEBUG;
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 🔐 MOUFFETTE SERVER - IDENTIFICATION SYSTEM & TERMINOLOGY FIX
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -934,14 +936,44 @@ class MouffetteServer {
         const x = typeof message.x === 'number' ? Math.round(message.x) : null;
         const y = typeof message.y === 'number' ? Math.round(message.y) : null;
         if (x === null || y === null) return;
+        const screenId = Number.isInteger(message.screenId) ? message.screenId : -1;
+        const normalizedX = (typeof message.normalizedX === 'number' && Number.isFinite(message.normalizedX))
+            ? Math.max(0, Math.min(1, message.normalizedX))
+            : null;
+        const normalizedY = (typeof message.normalizedY === 'number' && Number.isFinite(message.normalizedY))
+            ? Math.max(0, Math.min(1, message.normalizedY))
+            : null;
+        if (CURSOR_DEBUG) {
+            console.log('[CursorDebug][Server][Recv]', {
+                targetId,
+                watchers: watchers.size,
+                x,
+                y,
+                screenId,
+                normalizedX,
+                normalizedY,
+            });
+        }
         for (const watcherId of watchers) {
             const watcher = this.clients.get(watcherId);
             if (!watcher || !watcher.ws) continue;
-            watcher.ws.send(JSON.stringify({
+            const payload = {
                 type: 'cursor_update',
                 targetClientId: targetId,
                 x, y
-            }));
+            };
+            if (screenId >= 0 && normalizedX !== null && normalizedY !== null) {
+                payload.screenId = screenId;
+                payload.normalizedX = normalizedX;
+                payload.normalizedY = normalizedY;
+            }
+            if (CURSOR_DEBUG) {
+                console.log('[CursorDebug][Server][Send]', {
+                    watcherId,
+                    payload,
+                });
+            }
+            watcher.ws.send(JSON.stringify(payload));
         }
     }
     
