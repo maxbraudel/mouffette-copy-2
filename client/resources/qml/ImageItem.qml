@@ -43,8 +43,11 @@ Item {
         anchors.fill: parent
         scrollGestureEnabled: false
         onPressed: function(mouse) {
-            root.selectRequested(root.mediaId, (mouse.modifiers & Qt.ShiftModifier) !== 0)
-            mouse.accepted = true
+            var additive = (mouse.modifiers & Qt.ShiftModifier) !== 0
+            var shouldSelect = additive || !root.selected
+            if (shouldSelect)
+                root.selectRequested(root.mediaId, additive)
+            mouse.accepted = shouldSelect
         }
     }
 }

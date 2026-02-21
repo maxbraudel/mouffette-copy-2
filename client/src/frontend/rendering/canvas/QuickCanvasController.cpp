@@ -14,6 +14,7 @@
 #include <QQuickItem>
 #include <QQuickWidget>
 #include <QScreen>
+#include <QLineF>
 #include <QTimer>
 #include <QVariantList>
 #include <QWindow>
@@ -21,6 +22,7 @@
 
 #include "backend/domain/media/MediaItems.h"
 #include "backend/domain/media/TextMediaItem.h"
+#include "frontend/rendering/canvas/ScreenCanvas.h"
 
 namespace {
 constexpr int kRemoteCursorDiameterPx = 30;
@@ -104,10 +106,21 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
     setTextToolActive(false);
     setScreens({});
     m_quickWidget->rootObject()->setProperty("mediaModel", QVariantList{});
+    m_quickWidget->rootObject()->setProperty("selectionChromeModel", QVariantList{});
+    m_quickWidget->rootObject()->setProperty("snapGuidesModel", QVariantList{});
 
     QObject::connect(
         m_quickWidget->rootObject(), SIGNAL(mediaSelectRequested(QString,bool)),
         this, SLOT(handleMediaSelectRequested(QString,bool)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(mediaMoveEnded(QString,double,double)),
+        this, SLOT(handleMediaMoveEnded(QString,double,double)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(mediaResizeRequested(QString,QString,double,double,bool)),
+        this, SLOT(handleMediaResizeRequested(QString,QString,double,double,bool)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(mediaResizeEnded(QString)),
+        this, SLOT(handleMediaResizeEnded(QString)));
     QObject::connect(
         m_quickWidget->rootObject(), SIGNAL(textCommitRequested(QString,QString)),
         this, SLOT(handleTextCommitRequested(QString,QString)));
@@ -236,10 +249,10 @@ void QuickCanvasController::setMediaScene(QGraphicsScene* scene) {
 
     if (m_mediaScene) {
         connect(m_mediaScene, &QGraphicsScene::changed, this, [this](const QList<QRectF>&) {
-            scheduleMediaModelSync();
+            if (!m_draggingMedia) scheduleMediaModelSync();
         });
         connect(m_mediaScene, &QGraphicsScene::selectionChanged, this, [this]() {
-            scheduleMediaModelSync();
+            if (!m_draggingMedia) scheduleMediaModelSync();
         });
     }
 
@@ -345,10 +358,173 @@ void QuickCanvasController::handleMediaSelectRequested(const QString& mediaId, b
         return;
     }
 
+    const bool alreadyOnlySelected = target->isSelected()
+        && m_mediaScene->selectedItems().size() == 1;
+    if (!additive && alreadyOnlySelected) {
+        return;
+    }
+
+    if (additive && target->isSelected()) {
+        return;
+    }
+
     if (!additive) {
         m_mediaScene->clearSelection();
     }
     target->setSelected(true);
+    scheduleMediaModelSync();
+}
+
+// Move drag is now fully QML-native (DragHandler on each mediaDelegate inside contentRoot).
+// C++ is only notified once at drag-end to commit the final position.
+void QuickCanvasController::handleMediaMoveEnded(const QString& mediaId, qreal sceneX, qreal sceneY) {
+    if (!m_mediaScene || mediaId.isEmpty()) {
+        if (m_mediaSyncTimer) {
+            m_mediaSyncTimer->stop();
+        }
+        m_mediaSyncPending = false;
+        syncMediaModelFromScene();
+        return;
+    }
+
+    m_draggingMedia = true;
+    const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
+    for (QGraphicsItem* graphicsItem : sceneItems) {
+        auto* media = dynamic_cast<ResizableMediaBase*>(graphicsItem);
+        if (!media || media->mediaId() != mediaId) {
+            continue;
+        }
+        media->setPos(QPointF(sceneX, sceneY));
+        break;
+    }
+    m_draggingMedia = false;
+
+    if (m_mediaSyncTimer) {
+        m_mediaSyncTimer->stop();
+    }
+    m_mediaSyncPending = false;
+    syncMediaModelFromScene();
+}
+
+void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
+                                                       const QString& handleId,
+                                                       qreal sceneX,
+                                                       qreal sceneY,
+                                                       bool snap) {
+    if (!m_mediaScene || mediaId.isEmpty() || handleId.isEmpty()) {
+        return;
+    }
+    m_draggingMedia = true;
+
+    ResizableMediaBase* target = nullptr;
+    const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
+    for (QGraphicsItem* graphicsItem : sceneItems) {
+        auto* media = dynamic_cast<ResizableMediaBase*>(graphicsItem);
+        if (!media || media->mediaId() != mediaId) {
+            continue;
+        }
+        target = media;
+        break;
+    }
+    if (!target) {
+        return;
+    }
+
+    const QSize baseSize = target->baseSizePx();
+    if (baseSize.width() <= 0 || baseSize.height() <= 0) {
+        return;
+    }
+
+    ResizableMediaBase::Handle activeHandle = ResizableMediaBase::None;
+    QPointF fixedItemPoint;
+
+    if (handleId == QStringLiteral("top-left")) {
+        activeHandle = ResizableMediaBase::TopLeft;
+        fixedItemPoint = QPointF(baseSize.width(), baseSize.height());
+    } else if (handleId == QStringLiteral("top-mid")) {
+        activeHandle = ResizableMediaBase::TopMid;
+        fixedItemPoint = QPointF(baseSize.width() * 0.5, baseSize.height());
+    } else if (handleId == QStringLiteral("top-right")) {
+        activeHandle = ResizableMediaBase::TopRight;
+        fixedItemPoint = QPointF(0.0, baseSize.height());
+    } else if (handleId == QStringLiteral("left-mid")) {
+        activeHandle = ResizableMediaBase::LeftMid;
+        fixedItemPoint = QPointF(baseSize.width(), baseSize.height() * 0.5);
+    } else if (handleId == QStringLiteral("right-mid")) {
+        activeHandle = ResizableMediaBase::RightMid;
+        fixedItemPoint = QPointF(0.0, baseSize.height() * 0.5);
+    } else if (handleId == QStringLiteral("bottom-left")) {
+        activeHandle = ResizableMediaBase::BottomLeft;
+        fixedItemPoint = QPointF(baseSize.width(), 0.0);
+    } else if (handleId == QStringLiteral("bottom-mid")) {
+        activeHandle = ResizableMediaBase::BottomMid;
+        fixedItemPoint = QPointF(baseSize.width() * 0.5, 0.0);
+    } else if (handleId == QStringLiteral("bottom-right")) {
+        activeHandle = ResizableMediaBase::BottomRight;
+        fixedItemPoint = QPointF(0.0, 0.0);
+    } else {
+        return;
+    }
+
+    const qreal currentScale = std::abs(target->scale()) > 1e-6 ? std::abs(target->scale()) : 1.0;
+    const QPointF fixedScenePoint = target->scenePos() + fixedItemPoint * currentScale;
+    const QPointF movingScenePoint(sceneX, sceneY);
+
+    qreal proposedScale = currentScale;
+    if (activeHandle == ResizableMediaBase::LeftMid || activeHandle == ResizableMediaBase::RightMid) {
+        const qreal dx = std::abs(movingScenePoint.x() - fixedScenePoint.x());
+        proposedScale = std::max<qreal>(0.05, dx / std::max<qreal>(1.0, baseSize.width()));
+    } else if (activeHandle == ResizableMediaBase::TopMid || activeHandle == ResizableMediaBase::BottomMid) {
+        const qreal dy = std::abs(movingScenePoint.y() - fixedScenePoint.y());
+        proposedScale = std::max<qreal>(0.05, dy / std::max<qreal>(1.0, baseSize.height()));
+    } else {
+        const qreal dx = std::abs(movingScenePoint.x() - fixedScenePoint.x());
+        const qreal dy = std::abs(movingScenePoint.y() - fixedScenePoint.y());
+        const qreal sx = dx / std::max<qreal>(1.0, baseSize.width());
+        const qreal sy = dy / std::max<qreal>(1.0, baseSize.height());
+        proposedScale = std::max<qreal>(0.05, std::max(sx, sy));
+    }
+
+    if (snap && !m_mediaScene->views().isEmpty()) {
+        if (auto* screenCanvas = qobject_cast<ScreenCanvas*>(m_mediaScene->views().first())) {
+            if (activeHandle == ResizableMediaBase::LeftMid || activeHandle == ResizableMediaBase::RightMid
+                || activeHandle == ResizableMediaBase::TopMid || activeHandle == ResizableMediaBase::BottomMid) {
+                proposedScale = screenCanvas->applyAxisSnapWithHysteresis(
+                    target,
+                    proposedScale,
+                    fixedScenePoint,
+                    baseSize,
+                    activeHandle);
+            } else {
+                const qreal proposedW = proposedScale * baseSize.width();
+                const qreal proposedH = proposedScale * baseSize.height();
+                const auto cornerSnap = screenCanvas->applyCornerAltSnapWithHysteresis(
+                    target,
+                    activeHandle,
+                    fixedScenePoint,
+                    baseSize,
+                    proposedW,
+                    proposedH);
+                if (cornerSnap.cornerSnapped) {
+                    const qreal snappedScaleW = cornerSnap.snappedW / std::max<qreal>(1.0, baseSize.width());
+                    const qreal snappedScaleH = cornerSnap.snappedH / std::max<qreal>(1.0, baseSize.height());
+                    proposedScale = std::max<qreal>(0.05, std::max(snappedScaleW, snappedScaleH));
+                }
+            }
+        }
+    }
+
+    proposedScale = std::clamp<qreal>(proposedScale, 0.05, 100.0);
+    target->setScale(proposedScale);
+    const QPointF snappedPos = fixedScenePoint - fixedItemPoint * proposedScale;
+    target->setPos(snappedPos);
+    // Push only media positions — same reason as handleMediaMoveRequested.
+    pushMediaModelOnly();
+}
+
+void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId) {
+    Q_UNUSED(mediaId)
+    m_draggingMedia = false;
     scheduleMediaModelSync();
 }
 
@@ -383,6 +559,15 @@ void QuickCanvasController::handleTextCreateRequested(qreal viewX, qreal viewY) 
 void QuickCanvasController::syncMediaModelFromScene() {
     m_mediaSyncPending = false;
 
+    if (!m_quickWidget || !m_quickWidget->rootObject()) {
+        return;
+    }
+
+    pushMediaModelOnly();
+    pushSelectionAndSnapModels();
+}
+
+void QuickCanvasController::pushMediaModelOnly() {
     if (!m_quickWidget || !m_quickWidget->rootObject()) {
         return;
     }
@@ -454,6 +639,64 @@ void QuickCanvasController::syncMediaModelFromScene() {
     }
 
     m_quickWidget->rootObject()->setProperty("mediaModel", mediaModel);
+}
+
+void QuickCanvasController::pushSelectionAndSnapModels() {
+    if (!m_quickWidget || !m_quickWidget->rootObject()) {
+        return;
+    }
+
+    QVariantList selectionChromeModel;
+    QVariantList snapGuidesModel;
+
+    if (m_mediaScene) {
+        const qreal sceneUnitScale = (m_sceneUnitScale > 1e-6) ? m_sceneUnitScale : 1.0;
+
+        const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
+        for (QGraphicsItem* graphicsItem : sceneItems) {
+            auto* media = dynamic_cast<ResizableMediaBase*>(graphicsItem);
+            if (!media || !media->isSelected()) {
+                continue;
+            }
+
+            const QSize baseSize = media->baseSizePx();
+            const QPointF scenePos = media->scenePos();
+            const qreal mediaScale = std::abs(media->scale()) > 1e-6 ? std::abs(media->scale()) : 1.0;
+
+            qreal baseWidth = static_cast<qreal>(baseSize.width());
+            qreal baseHeight = static_cast<qreal>(baseSize.height());
+            if (baseWidth <= 0.0 || baseHeight <= 0.0) {
+                const QRectF sceneRect = media->sceneBoundingRect().normalized();
+                baseWidth = std::max<qreal>(1.0, sceneRect.width());
+                baseHeight = std::max<qreal>(1.0, sceneRect.height());
+            }
+
+            QVariantMap entry;
+            entry.insert(QStringLiteral("mediaId"), media->mediaId());
+            entry.insert(QStringLiteral("x"), scenePos.x() * sceneUnitScale);
+            entry.insert(QStringLiteral("y"), scenePos.y() * sceneUnitScale);
+            entry.insert(QStringLiteral("width"), std::max<qreal>(1.0, baseWidth * mediaScale * sceneUnitScale));
+            entry.insert(QStringLiteral("height"), std::max<qreal>(1.0, baseHeight * mediaScale * sceneUnitScale));
+            selectionChromeModel.append(entry);
+        }
+
+        if (!m_mediaScene->views().isEmpty()) {
+            if (auto* screenCanvas = qobject_cast<ScreenCanvas*>(m_mediaScene->views().first())) {
+                const QVector<QLineF> lines = screenCanvas->currentSnapGuideLines();
+                for (const QLineF& line : lines) {
+                    QVariantMap guideEntry;
+                    guideEntry.insert(QStringLiteral("x1"), line.x1() * sceneUnitScale);
+                    guideEntry.insert(QStringLiteral("y1"), line.y1() * sceneUnitScale);
+                    guideEntry.insert(QStringLiteral("x2"), line.x2() * sceneUnitScale);
+                    guideEntry.insert(QStringLiteral("y2"), line.y2() * sceneUnitScale);
+                    snapGuidesModel.append(guideEntry);
+                }
+            }
+        }
+    }
+
+    m_quickWidget->rootObject()->setProperty("selectionChromeModel", selectionChromeModel);
+    m_quickWidget->rootObject()->setProperty("snapGuidesModel", snapGuidesModel);
 }
 
 void QuickCanvasController::pushStaticLayerModels() {

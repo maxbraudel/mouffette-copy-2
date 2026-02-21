@@ -6,6 +6,9 @@ Rectangle {
     color: "#10131a"
 
     signal mediaSelectRequested(string mediaId, bool additive)
+    signal mediaMoveEnded(string mediaId, real sceneX, real sceneY)
+    signal mediaResizeRequested(string mediaId, string handleId, real sceneX, real sceneY, bool snap)
+    signal mediaResizeEnded(string mediaId)
     signal textCommitRequested(string mediaId, string text)
     signal textCreateRequested(real viewX, real viewY)
 
@@ -14,6 +17,12 @@ Rectangle {
     property var screensModel: []
     property var uiZonesModel: []
     property var mediaModel: []
+    property var selectionChromeModel: []
+    property var snapGuidesModel: []
+    // Live drag tracking — updated every frame during a move drag, purely in QML
+    property string liveDragMediaId: ""
+    property real liveDragViewOffsetX: 0.0
+    property real liveDragViewOffsetY: 0.0
     property bool textToolActive: false
     property bool remoteCursorVisible: false
     property real remoteCursorX: 0
@@ -199,34 +208,126 @@ Rectangle {
                 }
             }
 
+            // Each media item is a native QML Item with its own local x/y/scale.
+            // A DragHandler lives here (inside contentRoot, which has scale:viewScale)
+            // so DragHandler translation is already in scene coordinates — no C++ per frame.
             Repeater {
                 model: root.mediaModel
-                delegate: Loader {
+                delegate: Item {
+                    id: mediaDelegate
                     property var media: modelData
-                    sourceComponent: {
-                        if (!media)
-                            return null
-                        if (media.mediaType === "video")
-                            return videoDelegate
-                        if (media.mediaType === "text")
-                            return textDelegate
-                        return imageDelegate
+
+                    // Local position/scale — tracks model when idle, free during drag
+                    property real localX: media ? media.x : 0.0
+                    property real localY: media ? media.y : 0.0
+                    property real localScale: media ? (media.scale || 1.0) : 1.0
+                    property bool localDragging: false
+                    readonly property string currentMediaId: media ? (media.mediaId || "") : ""
+
+                    onMediaChanged: {
+                        if (!localDragging && media) {
+                            var syncedX = Math.abs(localX - media.x) < 0.01
+                            var syncedY = Math.abs(localY - media.y) < 0.01
+                            localX = media.x
+                            localY = media.y
+                            localScale = media.scale || 1.0
+                            if (root.liveDragMediaId === currentMediaId) {
+                                if (syncedX && syncedY) {
+                                    root.liveDragMediaId = ""
+                                    root.liveDragViewOffsetX = 0.0
+                                    root.liveDragViewOffsetY = 0.0
+                                }
+                            }
+                        }
+                    }
+
+                    x: localX
+                    y: localY
+                    width: media ? Math.max(1, media.width) : 1
+                    height: media ? Math.max(1, media.height) : 1
+                    scale: localScale
+                    transformOrigin: Item.TopLeft
+                    z: media ? media.z : 0
+                    visible: !!media
+
+                    // DragHandler inside contentRoot: translation is in scene coords (contentRoot
+                    // has scale:viewScale, so 1 unit here = 1 scene unit, not viewport pixel).
+                    DragHandler {
+                        id: mediaDrag
+                        target: null
+                        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                        acceptedButtons: Qt.LeftButton
+                        enabled: !!mediaDelegate.media
+                                 && !!mediaDelegate.media.selected
+                                 && !mediaDelegate.media.textEditable
+                                 && !root.textToolActive
+
+                        property real startX: 0.0
+                        property real startY: 0.0
+
+                        onActiveChanged: {
+                            if (active) {
+                                startX = mediaDelegate.localX
+                                startY = mediaDelegate.localY
+                                mediaDelegate.localDragging = true
+                                root.liveDragMediaId = mediaDelegate.currentMediaId
+                            } else {
+                                mediaDelegate.localDragging = false
+                                if (mediaDelegate.currentMediaId !== "") {
+                                    root.liveDragMediaId = mediaDelegate.currentMediaId
+                                    root.mediaMoveEnded(mediaDelegate.currentMediaId,
+                                                        mediaDelegate.localX,
+                                                        mediaDelegate.localY)
+                                } else {
+                                    root.liveDragMediaId = ""
+                                    root.liveDragViewOffsetX = 0.0
+                                    root.liveDragViewOffsetY = 0.0
+                                }
+                            }
+                        }
+
+                        onTranslationChanged: {
+                            if (!active) return
+                            // Use explicit scene-position mapping to avoid any coordinate
+                            // ambiguity from contentRoot's scale transform.
+                            var cur   = mediaDrag.centroid.scenePosition
+                            var press = mediaDrag.centroid.scenePressPosition
+                            var curScene   = contentRoot.mapFromItem(null, cur.x,   cur.y)
+                            var pressScene = contentRoot.mapFromItem(null, press.x, press.y)
+                            mediaDelegate.localX = startX + (curScene.x - pressScene.x)
+                            mediaDelegate.localY = startY + (curScene.y - pressScene.y)
+                            // Chrome viewport offset = scene delta * viewScale
+                            root.liveDragViewOffsetX = cur.x - press.x
+                            root.liveDragViewOffsetY = cur.y - press.y
+                        }
+                    }
+
+                    Loader {
+                        property var media: mediaDelegate.media
+                        sourceComponent: {
+                            if (!mediaDelegate.media) return null
+                            if (mediaDelegate.media.mediaType === "video") return videoDelegate
+                            if (mediaDelegate.media.mediaType === "text") return textDelegate
+                            return imageDelegate
+                        }
                     }
                 }
             }
 
+            // Components receive mediaX:0/mediaY:0 and mediaScale:1 — the parent
+            // mediaDelegate Item handles all position/scale/z transforms.
             Component {
                 id: imageDelegate
                 ImageItem {
-                    mediaId: parent.media.mediaId || ""
-                    mediaX: parent.media.x
-                    mediaY: parent.media.y
-                    mediaWidth: parent.media.width
-                    mediaHeight: parent.media.height
-                    mediaScale: parent.media.scale || 1.0
-                    mediaZ: parent.media.z
-                    selected: !!parent.media.selected
-                    imageSource: root.mediaSourceUrl(parent.media.sourcePath)
+                    mediaId: parent.media ? (parent.media.mediaId || "") : ""
+                    mediaX: 0
+                    mediaY: 0
+                    mediaWidth: parent.media ? parent.media.width : 0
+                    mediaHeight: parent.media ? parent.media.height : 0
+                    mediaScale: 1.0
+                    mediaZ: 0
+                    selected: !!(parent.media && parent.media.selected)
+                    imageSource: root.mediaSourceUrl(parent.media ? parent.media.sourcePath : "")
                     onSelectRequested: function(mediaId, additive) {
                         root.mediaSelectRequested(mediaId, additive)
                     }
@@ -236,15 +337,15 @@ Rectangle {
             Component {
                 id: videoDelegate
                 VideoItem {
-                    mediaId: parent.media.mediaId || ""
-                    mediaX: parent.media.x
-                    mediaY: parent.media.y
-                    mediaWidth: parent.media.width
-                    mediaHeight: parent.media.height
-                    mediaScale: parent.media.scale || 1.0
-                    mediaZ: parent.media.z
-                    selected: !!parent.media.selected
-                    source: root.mediaSourceUrl(parent.media.sourcePath)
+                    mediaId: parent.media ? (parent.media.mediaId || "") : ""
+                    mediaX: 0
+                    mediaY: 0
+                    mediaWidth: parent.media ? parent.media.width : 0
+                    mediaHeight: parent.media ? parent.media.height : 0
+                    mediaScale: 1.0
+                    mediaZ: 0
+                    selected: !!(parent.media && parent.media.selected)
+                    source: root.mediaSourceUrl(parent.media ? parent.media.sourcePath : "")
                     onSelectRequested: function(mediaId, additive) {
                         root.mediaSelectRequested(mediaId, additive)
                     }
@@ -254,30 +355,30 @@ Rectangle {
             Component {
                 id: textDelegate
                 TextItem {
-                    mediaId: parent.media.mediaId || ""
-                    mediaX: parent.media.x
-                    mediaY: parent.media.y
-                    mediaWidth: parent.media.width
-                    mediaHeight: parent.media.height
-                    mediaScale: parent.media.scale || 1.0
-                    mediaZ: parent.media.z
-                    selected: !!parent.media.selected
-                    textContent: parent.media.textContent || ""
-                    horizontalAlignment: parent.media.textHorizontalAlignment || "center"
-                    verticalAlignment: parent.media.textVerticalAlignment || "center"
-                    fitToTextEnabled: !!parent.media.fitToTextEnabled
-                    fontFamily: parent.media.textFontFamily || "Arial"
-                    fontPixelSize: Math.max(1, parent.media.textFontPixelSize || 22)
-                    fontWeight: parent.media.textFontWeight || 400
-                    fontItalic: !!parent.media.textItalic
-                    fontUnderline: !!parent.media.textUnderline
-                    fontUppercase: !!parent.media.textUppercase
-                    textColor: parent.media.textColor || "#FFFFFFFF"
-                    outlineWidthPercent: parent.media.textOutlineWidthPercent || 0.0
-                    outlineColor: parent.media.textOutlineColor || "#FF000000"
-                    highlightEnabled: !!parent.media.textHighlightEnabled
-                    highlightColor: parent.media.textHighlightColor || "#00000000"
-                    textEditable: !!parent.media.textEditable
+                    mediaId: parent.media ? (parent.media.mediaId || "") : ""
+                    mediaX: 0
+                    mediaY: 0
+                    mediaWidth: parent.media ? parent.media.width : 0
+                    mediaHeight: parent.media ? parent.media.height : 0
+                    mediaScale: 1.0
+                    mediaZ: 0
+                    selected: !!(parent.media && parent.media.selected)
+                    textContent: parent.media ? (parent.media.textContent || "") : ""
+                    horizontalAlignment: parent.media ? (parent.media.textHorizontalAlignment || "center") : "center"
+                    verticalAlignment: parent.media ? (parent.media.textVerticalAlignment || "center") : "center"
+                    fitToTextEnabled: !!(parent.media && parent.media.fitToTextEnabled)
+                    fontFamily: parent.media ? (parent.media.textFontFamily || "Arial") : "Arial"
+                    fontPixelSize: Math.max(1, parent.media ? (parent.media.textFontPixelSize || 22) : 22)
+                    fontWeight: parent.media ? (parent.media.textFontWeight || 400) : 400
+                    fontItalic: !!(parent.media && parent.media.textItalic)
+                    fontUnderline: !!(parent.media && parent.media.textUnderline)
+                    fontUppercase: !!(parent.media && parent.media.textUppercase)
+                    textColor: parent.media ? (parent.media.textColor || "#FFFFFFFF") : "#FFFFFFFF"
+                    outlineWidthPercent: parent.media ? (parent.media.textOutlineWidthPercent || 0.0) : 0.0
+                    outlineColor: parent.media ? (parent.media.textOutlineColor || "#FF000000") : "#FF000000"
+                    highlightEnabled: !!(parent.media && parent.media.textHighlightEnabled)
+                    highlightColor: parent.media ? (parent.media.textHighlightColor || "#00000000") : "#00000000"
+                    textEditable: !!(parent.media && parent.media.textEditable)
                     onSelectRequested: function(mediaId, additive) {
                         root.mediaSelectRequested(mediaId, additive)
                     }
@@ -298,73 +399,37 @@ Rectangle {
             }
         }
 
-        Repeater {
-            id: mediaSelectionOverlay
-            model: root.mediaModel
+        SnapGuides {
+            id: snapGuides
+            anchors.fill: parent
+            contentItem: contentRoot
+            viewportItem: viewport
+            guidesModel: root.snapGuidesModel
+            z: 89000
+        }
 
-            delegate: Item {
-                property var media: modelData
-                readonly property bool selected: !!(media && media.selected)
-                readonly property real mediaScale: (media && media.scale) ? media.scale : 1.0
-                readonly property real _viewScale: root.viewScale
-                readonly property real _panX: root.panX
-                readonly property real _panY: root.panY
-                readonly property point p1: {
-                    var _vs = _viewScale
-                    var _px = _panX
-                    var _py = _panY
-                    return contentRoot.mapToItem(viewport,
-                                                 media ? media.x : 0,
-                                                 media ? media.y : 0)
-                }
-                readonly property point p2: {
-                    var _vs = _viewScale
-                    var _px = _panX
-                    var _py = _panY
-                    return contentRoot.mapToItem(viewport,
-                                                 media ? media.x + Math.max(1, media.width) * mediaScale : 1,
-                                                 media ? media.y + Math.max(1, media.height) * mediaScale : 1)
-                }
-
-                visible: selected
-                enabled: false
-                z: 90000
-
-                x: Math.round(Math.min(p1.x, p2.x))
-                y: Math.round(Math.min(p1.y, p2.y))
-                width: Math.max(1, Math.round(Math.abs(p2.x - p1.x)))
-                height: Math.max(1, Math.round(Math.abs(p2.y - p1.y)))
-
-                Canvas {
-                    anchors.fill: parent
-                    antialiasing: false
-
-                    onPaint: {
-                        var ctx = getContext("2d")
-                        ctx.reset()
-
-                        var w = width
-                        var h = height
-                        if (w <= 1 || h <= 1)
-                            return
-
-                        ctx.setLineDash([4, 4])
-                        ctx.lineWidth = 1
-
-                        ctx.strokeStyle = "#FFFFFF"
-                        ctx.lineDashOffset = 0
-                        ctx.strokeRect(0.5, 0.5, w - 1, h - 1)
-
-                        ctx.strokeStyle = "#4A90E2"
-                        ctx.lineDashOffset = 4
-                        ctx.strokeRect(0.5, 0.5, w - 1, h - 1)
-                    }
-                }
+        SelectionChrome {
+            id: selectionChrome
+            anchors.fill: parent
+            contentItem: contentRoot
+            viewportItem: viewport
+            selectionModel: root.selectionChromeModel
+            // Live drag offset: chrome visually follows the moving item without model repush
+            draggedMediaId: root.liveDragMediaId
+            dragOffsetViewX: root.liveDragViewOffsetX
+            dragOffsetViewY: root.liveDragViewOffsetY
+            z: 90000
+            onResizeRequested: function(mediaId, handleId, sceneX, sceneY, snap) {
+                root.mediaResizeRequested(mediaId, handleId, sceneX, sceneY, snap)
+            }
+            onResizeEnded: function(mediaId) {
+                root.mediaResizeEnded(mediaId)
             }
         }
 
         DragHandler {
             id: panDrag
+            enabled: !selectionChrome.interacting && root.liveDragMediaId === ""
             target: null
             acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
             acceptedButtons: Qt.LeftButton

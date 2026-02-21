@@ -367,6 +367,7 @@ public:
     }
     void setLines(const QVector<QLineF>& lines) { prepareGeometryChange(); m_lines = lines; }
     void clearLines() { if (m_lines.isEmpty()) return; prepareGeometryChange(); m_lines.clear(); }
+    QVector<QLineF> lines() const { return m_lines; }
     void paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget*) override {
         if (!m_view || m_lines.isEmpty()) return;
         painter->save();
@@ -428,6 +429,13 @@ private:
 };
 
 // --- Snap indicator API (now that SnapGuideItem is defined) ---
+QVector<QLineF> ScreenCanvas::currentSnapGuideLines() const {
+    if (!m_snapGuides) {
+        return {};
+    }
+    return m_snapGuides->lines();
+}
+
 void ScreenCanvas::clearSnapIndicators() {
     if (m_snapGuides) { m_snapGuides->clearLines(); m_snapGuides->update(); }
 }

@@ -8,6 +8,8 @@
 #include <QElapsedTimer>
 #include <QMap>
 #include <QPixmap>
+#include <QVector>
+#include <QLineF>
 #include <QTimer>
 #include <QObject>
 #include <memory>
@@ -137,6 +139,7 @@ public:
     // Media list overlay management
     void refreshInfoOverlay();
     void refreshSettingsPanelVolumeDisplay(); // Update volume display in settings panel (for real-time slider sync)
+    QVector<QLineF> currentSnapGuideLines() const;
 
     // Snapping support for side (midpoint) resize handles: clamps scale so the moving edge
     // sticks to nearby screen borders when within snap distance.

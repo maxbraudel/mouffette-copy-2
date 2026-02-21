@@ -42,6 +42,9 @@ signals:
 
 private slots:
     void handleMediaSelectRequested(const QString& mediaId, bool additive);
+    void handleMediaMoveEnded(const QString& mediaId, qreal sceneX, qreal sceneY);
+    void handleMediaResizeRequested(const QString& mediaId, const QString& handleId, qreal sceneX, qreal sceneY, bool snap);
+    void handleMediaResizeEnded(const QString& mediaId);
     void handleTextCommitRequested(const QString& mediaId, const QString& text);
     void handleTextCreateRequested(qreal viewX, qreal viewY);
 
@@ -49,6 +52,8 @@ private:
     void pushStaticLayerModels();
     void scheduleMediaModelSync();
     void syncMediaModelFromScene();
+    void pushMediaModelOnly();
+    void pushSelectionAndSnapModels();
     void pushRemoteCursorState();
     QPointF mapRemoteCursorToQuickScene(int globalX, int globalY, bool* ok) const;
     void rebuildScreenRects();
@@ -66,6 +71,7 @@ private:
     QGraphicsScene* m_mediaScene = nullptr;
     QTimer* m_mediaSyncTimer = nullptr;
     bool m_mediaSyncPending = false;
+    bool m_draggingMedia = false;
     qreal m_sceneUnitScale = 1.0;
     bool m_pendingInitialSceneScaleRefresh = false;
     bool m_textToolActive = false;

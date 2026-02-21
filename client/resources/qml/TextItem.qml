@@ -128,11 +128,16 @@ Item {
         acceptedButtons: Qt.LeftButton
         scrollGestureEnabled: false
         onPressed: function(mouse) {
-            root.selectRequested(root.mediaId, (mouse.modifiers & Qt.ShiftModifier) !== 0)
-            mouse.accepted = true
+            var additive = (mouse.modifiers & Qt.ShiftModifier) !== 0
+            var shouldSelect = additive || !root.selected
+            if (shouldSelect)
+                root.selectRequested(root.mediaId, additive)
+            mouse.accepted = shouldSelect
         }
         onDoubleClicked: function(mouse) {
-            root.selectRequested(root.mediaId, (mouse.modifiers & Qt.ShiftModifier) !== 0)
+            var additive = (mouse.modifiers & Qt.ShiftModifier) !== 0
+            if (additive || !root.selected)
+                root.selectRequested(root.mediaId, additive)
             root.preEditText = root.textContent || ""
             root.editing = true
             textEditor.text = root.preEditText
