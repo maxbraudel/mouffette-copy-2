@@ -37,8 +37,6 @@ Rectangle {
     property real minScale: 0.25
     property real maxScale: 4.0
     property real wheelZoomBase: 1.0015
-    property bool cameraNavigationActive: false
-    property int cameraNavigationSettleMs: 80
     // Transient live-resize overlay state (avoids full model mutation per pointer tick)
     property bool liveResizeActive: false
     property string liveResizeMediaId: ""
@@ -194,19 +192,6 @@ Rectangle {
         return v !== Infinity && v !== -Infinity && !isNaN(v)
     }
 
-    function markCameraNavigationActive() {
-        cameraNavigationActive = true
-        if (cameraNavigationSettleTimer.running)
-            cameraNavigationSettleTimer.restart()
-    }
-
-    function settleCameraNavigationSoon() {
-        if (cameraNavigationSettleTimer.running)
-            cameraNavigationSettleTimer.restart()
-        else
-            cameraNavigationSettleTimer.start()
-    }
-
     function mediaSourceUrl(path) {
         if (!path || path.length === 0)
             return ""
@@ -276,13 +261,6 @@ Rectangle {
 
     function commitMediaTransform(mediaId, sceneX, sceneY, scale) {
         return commitMediaGeometry(mediaId, sceneX, sceneY, scale)
-    }
-
-    Timer {
-        id: cameraNavigationSettleTimer
-        interval: root.cameraNavigationSettleMs
-        repeat: false
-        onTriggered: root.cameraNavigationActive = false
     }
 
     CanvasViewport {
@@ -554,7 +532,6 @@ Rectangle {
             id: selectionLayer
             parent: viewport
             anchors.fill: parent
-            visible: !root.cameraNavigationActive
             contentItem: viewport.contentRootItem
             viewportItem: viewport
             interactionController: root
@@ -630,7 +607,6 @@ Rectangle {
 
                 onActiveChanged: {
                     if (active) {
-                        root.markCameraNavigationActive()
                         if (!root.beginInteraction("pan", "canvas")) {
                             panSessionActive = false
                             return
@@ -641,14 +617,12 @@ Rectangle {
                     } else {
                         panSessionActive = false
                         root.endInteraction("pan", "canvas")
-                        root.settleCameraNavigationSoon()
                     }
                 }
 
                 onTranslationChanged: {
                     if (!panSessionActive)
                         return
-                    root.markCameraNavigationActive()
                     root.panX = startPanX + translation.x
                     root.panY = startPanY + translation.y
                 }
@@ -656,7 +630,6 @@ Rectangle {
                 onCanceled: {
                     panSessionActive = false
                     root.endInteraction("pan", "canvas")
-                    root.settleCameraNavigationSoon()
                 }
             }
 
@@ -668,17 +641,13 @@ Rectangle {
 
                 onActiveChanged: {
                     if (active) {
-                        root.markCameraNavigationActive()
                         lastScale = 1.0
-                    } else {
-                        root.settleCameraNavigationSoon()
                     }
                 }
 
                 onScaleChanged: {
                     if (!active)
                         return
-                    root.markCameraNavigationActive()
                     var factor = scale / lastScale
                     if (isFiniteNumber(factor) && factor > 0.0)
                         root.applyZoomAt(centroid.position.x, centroid.position.y, factor)
@@ -712,10 +681,8 @@ Rectangle {
                     if (root.isZoomModifier(event.modifiers)) {
                         var dy = root.wheelDeltaY(event)
                         if (dy !== 0.0) {
-                            root.markCameraNavigationActive()
                             var factor = Math.pow(root.wheelZoomBase, dy)
                             root.applyZoomAt(event.x, event.y, factor)
-                            root.settleCameraNavigationSoon()
                             event.accepted = true
                             return
                         }
@@ -724,10 +691,8 @@ Rectangle {
                     var dx = root.wheelDeltaX(event)
                     var dyPan = root.wheelDeltaY(event)
                     if (dx !== 0.0 || dyPan !== 0.0) {
-                        root.markCameraNavigationActive()
                         root.panX += dx
                         root.panY += dyPan
-                        root.settleCameraNavigationSoon()
                         event.accepted = true
                     }
                 }
