@@ -10,6 +10,7 @@
 #include "frontend/rendering/canvas/ScreenCanvas.h"
 #include "shared/rendering/ICanvasHost.h"
 #include "backend/domain/media/MediaItems.h"
+#include "backend/domain/media/MediaRuntimeHooks.h"
 #include "frontend/rendering/canvas/OverlayPanels.h"
 #include "backend/files/Theme.h"
 #include "frontend/ui/theme/AppColors.h"
@@ -546,11 +547,11 @@ MainWindow::MainWindow(QWidget* parent)
         }
     });
     
-    // Phase 4.3: Inject FileManager into media items (static setter)
-    ResizableMediaBase::setFileManager(m_fileManager);
+    // Phase 4.3: Inject FileManager into media runtime hooks
+    MediaRuntimeHooks::setFileManager(m_fileManager);
     
     // File error callback: remove media items when playback detects missing/corrupted files
-    ResizableMediaBase::setFileErrorNotifier([this](ResizableMediaBase* mediaItem) {
+    MediaRuntimeHooks::setFileErrorNotifier([this](ResizableMediaBase* mediaItem) {
         if (!m_screenCanvas || !m_screenCanvas->scene() || !mediaItem) return;
         
         // Additional safety: check if mediaId is valid

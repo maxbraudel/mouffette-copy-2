@@ -24,6 +24,7 @@
 #include "frontend/rendering/canvas/OverlayPanels.h"
 #include "frontend/rendering/canvas/RoundedRectItem.h"
 #include "backend/files/FileManager.h"
+#include "backend/domain/media/MediaRuntimeHooks.h"
 
 class QMediaPlayer;
 class QAudioOutput;
@@ -87,20 +88,13 @@ public:
     // Native media base size in pixels (unscaled)
     QSize baseSizePx() const { return m_baseSize; }
 
-    // Upload status API (non-QObject notification via static callback)
+    // Upload status API
     UploadState uploadState() const { return m_uploadState; }
     int uploadProgress() const { return m_uploadProgress; } // 0..100 when Uploading
     void setUploadNotUploaded() { m_uploadState = UploadState::NotUploaded; m_uploadProgress = 0; notifyUploadChanged(); }
     void setUploadUploading(int progress) { m_uploadState = UploadState::Uploading; m_uploadProgress = std::clamp(progress, 0, 100); notifyUploadChanged(); }
     void setUploadUploaded() { m_uploadState = UploadState::Uploaded; m_uploadProgress = 100; notifyUploadChanged(); }
-    static void setUploadChangedNotifier(std::function<void()> cb) { s_uploadChangedNotifier = std::move(cb); }
-    
-    // Phase 4.3: FileManager injected (not singleton) - static setter for all media items
-    static void setFileManager(FileManager* manager) { s_fileManager = manager; }
-    
-    // File error callback: called when a media item detects its source file is missing/corrupted
-    static void setFileErrorNotifier(std::function<void(ResizableMediaBase*)> cb) { s_fileErrorNotifier = std::move(cb); }
-    void notifyFileError() { if (s_fileErrorNotifier) s_fileErrorNotifier(this); }
+    void notifyFileError();
 
     static void setHeightOfMediaOverlaysPx(int px); // global override height (px) for overlays
     static int  getHeightOfMediaOverlaysPx();
@@ -130,16 +124,7 @@ public:
     static void setSceneGridUnit(double u);
     static double sceneGridUnit();
     
-    // Snap-to-screen integration (set by ScreenCanvas)
-    static void setScreenSnapCallback(std::function<QPointF(const QPointF&, const QRectF&, bool, ResizableMediaBase*)> callback);
-    static std::function<QPointF(const QPointF&, const QRectF&, bool, ResizableMediaBase*)> screenSnapCallback();
-    struct ResizeSnapFeedback {
-        qreal scale;    // resulting scale
-        bool cornerSnapped; // true if a corner snap happened (implies we may need translation)
-        QPointF snappedMovingCornerScene; // desired scene position of moving corner when snapped
-    };
-    static void setResizeSnapCallback(std::function<ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool, ResizableMediaBase*)> callback);
-    static std::function<ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool, ResizableMediaBase*)> resizeSnapCallback();
+    using ResizeSnapFeedback = ::ResizeSnapFeedback;
 
     // Access to top overlay panel (filename + utility buttons).
     OverlayPanel* topPanel() const { return m_topPanel.get(); }
@@ -229,9 +214,6 @@ protected:
     static int heightOfMediaOverlays;
     static int cornerRadiusOfMediaOverlays;
     
-    // Phase 4.3: FileManager injected (not singleton) - shared by all media items
-    static FileManager* s_fileManager;
-
     // Core paint helpers
     void paintSelectionAndLabel(QPainter* painter);
 
@@ -259,14 +241,10 @@ protected:
     void hoverLeaveEvent(QGraphicsSceneHoverEvent* event) override;
 
 private:
-    void notifyUploadChanged() { if (s_uploadChangedNotifier) s_uploadChangedNotifier(); }
-    static std::function<void()> s_uploadChangedNotifier;
-    static std::function<void(ResizableMediaBase*)> s_fileErrorNotifier;
+    void notifyUploadChanged();
     UploadState m_uploadState = UploadState::NotUploaded;
     int m_uploadProgress = 0;
     static double s_sceneGridUnit;
-    static std::function<QPointF(const QPointF&, const QRectF&, bool, ResizableMediaBase*)> s_screenSnapCallback;
-    static std::function<ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool, ResizableMediaBase*)> s_resizeSnapCallback;
     static inline double snapToGrid(double v) { const double u = (s_sceneGridUnit > 1e-9 ? s_sceneGridUnit : 1.0); return std::round(v / u) * u; }
     static inline QPointF snapPointToGrid(const QPointF& p) { return QPointF(snapToGrid(p.x()), snapToGrid(p.y())); }
 protected:

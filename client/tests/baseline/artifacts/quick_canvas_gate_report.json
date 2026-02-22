@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-02-22T18:03:08.330Z",
-  "gitCommit": "81bcf7bba27836c7a3cc751cfadc621ce9170db4",
+  "generatedAt": "2026-02-22T18:18:30.537Z",
+  "gitCommit": "0231376ca95577c50ce027257350ea2fba1ffe58",
   "inputs": {
     "quickLog": "tests/baseline/fixtures/perf_logs/phase4_quick_auto_targeted.log",
     "legacyLog": "tests/baseline/fixtures/perf_logs/phase4_legacy_auto.log"

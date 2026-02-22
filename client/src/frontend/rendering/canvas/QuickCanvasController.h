@@ -21,6 +21,7 @@ class QuickCanvasViewAdapter;
 class PointerSession;
 class SelectionStore;
 class ModelPublisher;
+class SnapStore;
 
 class QuickCanvasController : public QObject {
     Q_OBJECT
@@ -99,6 +100,7 @@ private:
     PointerSession* m_pointerSession = nullptr;
     SelectionStore* m_selectionStore = nullptr;
     ModelPublisher* m_modelPublisher = nullptr;
+    SnapStore* m_snapStore = nullptr;
     QGraphicsScene* m_mediaScene = nullptr;
     QTimer* m_mediaSyncTimer = nullptr;
     bool m_mediaSyncPending = false;
@@ -108,10 +110,6 @@ private:
     qreal m_resizeLastSceneX = 0.0;
     qreal m_resizeLastSceneY = 0.0;
     qreal m_resizeLastScale = 1.0;
-    bool m_resizeSnapCacheReady = false;
-    QVector<qreal> m_resizeSnapEdgesX;
-    QVector<qreal> m_resizeSnapEdgesY;
-    QVector<QPointF> m_resizeSnapCorners;
     bool m_pendingInitialSceneScaleRefresh = false;
     bool m_textToolActive = false;
     bool m_initialFitCompleted = false;

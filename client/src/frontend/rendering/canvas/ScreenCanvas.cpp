@@ -7,6 +7,7 @@
 #include "frontend/ui/theme/AppColors.h"
 #include "backend/files/Theme.h"
 #include "backend/domain/media/MediaItems.h"
+#include "backend/domain/media/MediaRuntimeHooks.h"
 #include "frontend/ui/overlays/canvas/CanvasMediaSettingsPanel.h" // for settings panel overlay
 #include "frontend/ui/overlays/canvas/CanvasGlobalOverlayHost.h"
 #include "backend/domain/media/TextMediaItem.h" // for text media creation
@@ -84,7 +85,7 @@ void ScreenCanvas::registerCanvas(ScreenCanvas* canvas) {
     const bool wasEmpty = s_activeCanvases.isEmpty();
     s_activeCanvases.insert(canvas);
     if (wasEmpty) {
-        ResizableMediaBase::setUploadChangedNotifier([]() {
+        MediaRuntimeHooks::setUploadChangedNotifier([]() {
             ScreenCanvas::dispatchUploadStateChanged();
         });
     }
@@ -97,7 +98,7 @@ void ScreenCanvas::unregisterCanvas(ScreenCanvas* canvas) {
     if (!canvas) return;
     s_activeCanvases.remove(canvas);
     if (s_activeCanvases.isEmpty()) {
-        ResizableMediaBase::setUploadChangedNotifier(nullptr);
+        MediaRuntimeHooks::setUploadChangedNotifier(nullptr);
     }
 }
 
@@ -1593,19 +1594,19 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     });
     
     // Set up screen border snapping callbacks for media items
-    ResizableMediaBase::setScreenSnapCallback([this](const QPointF& pos, const QRectF& bounds, bool shift, ResizableMediaBase* item) {
+    MediaRuntimeHooks::setScreenSnapCallback([this](const QPointF& pos, const QRectF& bounds, bool shift, ResizableMediaBase* item) {
         return snapToMediaAndScreenTargets(pos, bounds, shift, item);
     });
 
     // Unified resize snap: screens + other media (corner precedence)
-    ResizableMediaBase::setResizeSnapCallback([this](qreal scale,
-                                                     const QPointF& fixed,
-                                                     const QPointF& movingItemPoint,
-                                                     const QSize& base,
-                                                     bool shift,
-                                                     ResizableMediaBase* item) {
+    MediaRuntimeHooks::setResizeSnapCallback([this](qreal scale,
+                                                    const QPointF& fixed,
+                                                    const QPointF& movingItemPoint,
+                                                    const QSize& base,
+                                                    bool shift,
+                                                    ResizableMediaBase* item) {
         auto r = snapResizeToScreenBorders(scale, fixed, movingItemPoint, base, shift, item);
-        return ResizableMediaBase::ResizeSnapFeedback{ r.scale, r.cornerSnapped, r.snappedMovingCornerScene };
+        return ResizeSnapFeedback{ r.scale, r.cornerSnapped, r.snappedMovingCornerScene };
     });
 
     // Initialize global info overlay (top-right)

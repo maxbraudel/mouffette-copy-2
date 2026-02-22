@@ -63,6 +63,8 @@ set(SOURCES
     src/frontend/rendering/canvas/PointerSession.cpp
     src/frontend/rendering/canvas/ModelPublisher.cpp
     src/frontend/rendering/canvas/SelectionStore.cpp
+    src/frontend/rendering/canvas/SnapStore.cpp
+    src/frontend/rendering/canvas/SnapEngine.cpp
     src/frontend/rendering/canvas/CanvasSceneStore.cpp
     src/frontend/rendering/canvas/QuickCanvasViewAdapter.cpp
     src/frontend/rendering/canvas/OverlayPanels.cpp
@@ -94,6 +96,7 @@ set(SOURCES
     
     # Domain - Media
     src/backend/domain/media/MediaItems.cpp
+    src/backend/domain/media/MediaRuntimeHooks.cpp
     src/backend/domain/media/TextMediaItem.cpp
 
     # UI - Overlays (Canvas)
@@ -196,6 +199,8 @@ set(HEADERS
     src/frontend/rendering/canvas/PointerSession.h
     src/frontend/rendering/canvas/ModelPublisher.h
     src/frontend/rendering/canvas/SelectionStore.h
+    src/frontend/rendering/canvas/SnapStore.h
+    src/frontend/rendering/canvas/SnapEngine.h
     src/frontend/rendering/canvas/CanvasSceneStore.h
     src/frontend/rendering/canvas/QuickCanvasViewAdapter.h
     src/frontend/rendering/canvas/OverlayPanels.h
@@ -234,6 +239,7 @@ set(HEADERS
     
     # Domain - Media
     src/backend/domain/media/MediaItems.h
+    src/backend/domain/media/MediaRuntimeHooks.h
     src/backend/domain/media/TextMediaItem.h
     
     # Network
