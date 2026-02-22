@@ -8,6 +8,7 @@ Item {
     property real panY: 0.0
     property real viewScale: 1.0
     default property alias viewportChildren: contentRoot.data
+    readonly property alias contentRootItem: contentRoot
 
     Item {
         id: contentRoot

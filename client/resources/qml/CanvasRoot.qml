@@ -263,19 +263,12 @@ Rectangle {
         return commitMediaGeometry(mediaId, sceneX, sceneY, scale)
     }
 
-    Item {
+    CanvasViewport {
         id: viewport
         anchors.fill: parent
-        clip: true
-
-        Item {
-            id: contentRoot
-            width: viewport.width
-            height: viewport.height
-            x: panX
-            y: panY
-            scale: viewScale
-            transformOrigin: Item.TopLeft
+        panX: root.panX
+        panY: root.panY
+        viewScale: root.viewScale
 
             Repeater {
                 model: root.screensModel
@@ -299,12 +292,28 @@ Rectangle {
                 }
             }
 
-            // Each media item is a native QML Item with its own local x/y/scale.
-            // A DragHandler lives here (inside contentRoot, which has scale:viewScale)
-            // so DragHandler translation is already in scene coordinates — no C++ per frame.
-            Repeater {
-                model: root.mediaModel
-                delegate: Item {
+            MediaLayer {
+                id: mediaLayer
+                anchors.fill: parent
+                mediaModel: root.mediaModel
+                contentItem: viewport.contentRootItem
+                sourceUrlResolver: root.mediaSourceUrl
+                onMediaSelectRequested: function(mediaId, additive) {
+                    root.mediaSelectRequested(mediaId, additive)
+                }
+                onMediaMoveEnded: function(mediaId, sceneX, sceneY) {
+                    root.mediaMoveEnded(mediaId, sceneX, sceneY)
+                }
+                onTextCommitRequested: function(mediaId, text) {
+                    root.textCommitRequested(mediaId, text)
+                }
+
+                // Each media item is a native QML Item with its own local x/y/scale.
+                // A DragHandler lives here (inside contentRoot, which has scale:viewScale)
+                // so DragHandler translation is already in scene coordinates — no C++ per frame.
+                Repeater {
+                    model: root.mediaModel
+                    delegate: Item {
                     id: mediaDelegate
                     property var media: modelData
 
@@ -402,8 +411,8 @@ Rectangle {
                             // ambiguity from contentRoot's scale transform.
                             var cur   = mediaDrag.centroid.scenePosition
                             var press = mediaDrag.centroid.scenePressPosition
-                            var curScene   = contentRoot.mapFromItem(null, cur.x,   cur.y)
-                            var pressScene = contentRoot.mapFromItem(null, press.x, press.y)
+                            var curScene   = viewport.contentRootItem.mapFromItem(null, cur.x,   cur.y)
+                            var pressScene = viewport.contentRootItem.mapFromItem(null, press.x, press.y)
                             mediaDelegate.localX = startX + (curScene.x - pressScene.x)
                             mediaDelegate.localY = startY + (curScene.y - pressScene.y)
                             // Chrome viewport offset = scene delta * viewScale
@@ -431,79 +440,80 @@ Rectangle {
                             return imageDelegate
                         }
                     }
-                }
-            }
-
-            // Components receive mediaX:0/mediaY:0 and mediaScale:1 — the parent
-            // mediaDelegate Item handles all position/scale/z transforms.
-            Component {
-                id: imageDelegate
-                ImageItem {
-                    mediaId: parent.media ? (parent.media.mediaId || "") : ""
-                    mediaX: 0
-                    mediaY: 0
-                    mediaWidth: parent.media ? parent.media.width : 0
-                    mediaHeight: parent.media ? parent.media.height : 0
-                    mediaScale: 1.0
-                    mediaZ: parent.media.z
-                    selected: !!parent.media.selected
-                    imageSource: root.mediaSourceUrl(parent.media ? parent.media.sourcePath : "")
-                    onSelectRequested: function(mediaId, additive) {
-                        root.mediaSelectRequested(mediaId, additive)
                     }
                 }
-            }
 
-            Component {
-                id: videoDelegate
-                VideoItem {
-                    mediaId: parent.media ? (parent.media.mediaId || "") : ""
-                    mediaX: 0
-                    mediaY: 0
-                    mediaWidth: parent.media ? parent.media.width : 0
-                    mediaHeight: parent.media ? parent.media.height : 0
-                    mediaScale: 1.0
-                    mediaZ: parent.media.z
-                    selected: !!parent.media.selected
-                    source: root.mediaSourceUrl(parent.media ? parent.media.sourcePath : "")
-                    onSelectRequested: function(mediaId, additive) {
-                        root.mediaSelectRequested(mediaId, additive)
+                // Components receive mediaX:0/mediaY:0 and mediaScale:1 — the parent
+                // mediaDelegate Item handles all position/scale/z transforms.
+                Component {
+                    id: imageDelegate
+                    ImageItem {
+                        mediaId: parent.media ? (parent.media.mediaId || "") : ""
+                        mediaX: 0
+                        mediaY: 0
+                        mediaWidth: parent.media ? parent.media.width : 0
+                        mediaHeight: parent.media ? parent.media.height : 0
+                        mediaScale: 1.0
+                        mediaZ: parent.media.z
+                        selected: !!parent.media.selected
+                        imageSource: root.mediaSourceUrl(parent.media ? parent.media.sourcePath : "")
+                        onSelectRequested: function(mediaId, additive) {
+                            root.mediaSelectRequested(mediaId, additive)
+                        }
                     }
                 }
-            }
 
-            Component {
-                id: textDelegate
-                TextItem {
-                    mediaId: parent.media ? (parent.media.mediaId || "") : ""
-                    mediaX: 0
-                    mediaY: 0
-                    mediaWidth: parent.media ? parent.media.width : 0
-                    mediaHeight: parent.media ? parent.media.height : 0
-                    mediaScale: 1.0
-                    mediaZ: parent.media.z
-                    selected: !!parent.media.selected
-                    textContent: parent.media ? (parent.media.textContent || "") : ""
-                    horizontalAlignment: parent.media ? (parent.media.textHorizontalAlignment || "center") : "center"
-                    verticalAlignment: parent.media ? (parent.media.textVerticalAlignment || "center") : "center"
-                    fitToTextEnabled: !!(parent.media && parent.media.fitToTextEnabled)
-                    fontFamily: parent.media ? (parent.media.textFontFamily || "Arial") : "Arial"
-                    fontPixelSize: Math.max(1, parent.media ? (parent.media.textFontPixelSize || 22) : 22)
-                    fontWeight: parent.media ? (parent.media.textFontWeight || 400) : 400
-                    fontItalic: !!(parent.media && parent.media.textItalic)
-                    fontUnderline: !!(parent.media && parent.media.textUnderline)
-                    fontUppercase: !!(parent.media && parent.media.textUppercase)
-                    textColor: parent.media ? (parent.media.textColor || "#FFFFFFFF") : "#FFFFFFFF"
-                    outlineWidthPercent: parent.media ? (parent.media.textOutlineWidthPercent || 0.0) : 0.0
-                    outlineColor: parent.media ? (parent.media.textOutlineColor || "#FF000000") : "#FF000000"
-                    highlightEnabled: !!(parent.media && parent.media.textHighlightEnabled)
-                    highlightColor: parent.media ? (parent.media.textHighlightColor || "#00000000") : "#00000000"
-                    textEditable: !!(parent.media && parent.media.textEditable)
-                    onSelectRequested: function(mediaId, additive) {
-                        root.mediaSelectRequested(mediaId, additive)
+                Component {
+                    id: videoDelegate
+                    VideoItem {
+                        mediaId: parent.media ? (parent.media.mediaId || "") : ""
+                        mediaX: 0
+                        mediaY: 0
+                        mediaWidth: parent.media ? parent.media.width : 0
+                        mediaHeight: parent.media ? parent.media.height : 0
+                        mediaScale: 1.0
+                        mediaZ: parent.media.z
+                        selected: !!parent.media.selected
+                        source: root.mediaSourceUrl(parent.media ? parent.media.sourcePath : "")
+                        onSelectRequested: function(mediaId, additive) {
+                            root.mediaSelectRequested(mediaId, additive)
+                        }
                     }
-                    onTextCommitRequested: function(mediaId, text) {
-                        root.textCommitRequested(mediaId, text)
+                }
+
+                Component {
+                    id: textDelegate
+                    TextItem {
+                        mediaId: parent.media ? (parent.media.mediaId || "") : ""
+                        mediaX: 0
+                        mediaY: 0
+                        mediaWidth: parent.media ? parent.media.width : 0
+                        mediaHeight: parent.media ? parent.media.height : 0
+                        mediaScale: 1.0
+                        mediaZ: parent.media.z
+                        selected: !!parent.media.selected
+                        textContent: parent.media ? (parent.media.textContent || "") : ""
+                        horizontalAlignment: parent.media ? (parent.media.textHorizontalAlignment || "center") : "center"
+                        verticalAlignment: parent.media ? (parent.media.textVerticalAlignment || "center") : "center"
+                        fitToTextEnabled: !!(parent.media && parent.media.fitToTextEnabled)
+                        fontFamily: parent.media ? (parent.media.textFontFamily || "Arial") : "Arial"
+                        fontPixelSize: Math.max(1, parent.media ? (parent.media.textFontPixelSize || 22) : 22)
+                        fontWeight: parent.media ? (parent.media.textFontWeight || 400) : 400
+                        fontItalic: !!(parent.media && parent.media.textItalic)
+                        fontUnderline: !!(parent.media && parent.media.textUnderline)
+                        fontUppercase: !!(parent.media && parent.media.textUppercase)
+                        textColor: parent.media ? (parent.media.textColor || "#FFFFFFFF") : "#FFFFFFFF"
+                        outlineWidthPercent: parent.media ? (parent.media.textOutlineWidthPercent || 0.0) : 0.0
+                        outlineColor: parent.media ? (parent.media.textOutlineColor || "#FF000000") : "#FF000000"
+                        highlightEnabled: !!(parent.media && parent.media.textHighlightEnabled)
+                        highlightColor: parent.media ? (parent.media.textHighlightColor || "#00000000") : "#00000000"
+                        textEditable: !!(parent.media && parent.media.textEditable)
+                        onSelectRequested: function(mediaId, additive) {
+                            root.mediaSelectRequested(mediaId, additive)
+                        }
+                        onTextCommitRequested: function(mediaId, text) {
+                            root.textCommitRequested(mediaId, text)
+                        }
                     }
                 }
             }
@@ -517,142 +527,173 @@ Rectangle {
                 borderColor: root.remoteCursorBorder
                 borderWidth: root.remoteCursorBorderWidth
             }
-        }
 
-        SnapGuides {
-            id: snapGuides
+        SelectionLayer {
+            id: selectionLayer
+            parent: viewport
             anchors.fill: parent
-            contentItem: contentRoot
-            viewportItem: viewport
-            guidesModel: root.snapGuidesModel
-            z: 89000
-        }
-
-        SelectionChrome {
-            id: selectionChrome
-            anchors.fill: parent
-            contentItem: contentRoot
+            contentItem: viewport.contentRootItem
             viewportItem: viewport
             interactionController: root
             mediaModel: root.mediaModel
             selectionModel: root.selectionChromeModel
-            // Live drag offset: chrome visually follows the moving item without model repush
+            snapGuidesModel: root.snapGuidesModel
             draggedMediaId: root.liveDragMediaId
             dragOffsetViewX: root.liveDragViewOffsetX
             dragOffsetViewY: root.liveDragViewOffsetY
-            z: 90000
-            onResizeRequested: function(mediaId, handleId, sceneX, sceneY, snap) {
+            onMediaResizeRequested: function(mediaId, handleId, sceneX, sceneY, snap) {
                 root.mediaResizeRequested(mediaId, handleId, sceneX, sceneY, snap)
             }
-            onResizeEnded: function(mediaId) {
+            onMediaResizeEnded: function(mediaId) {
                 root.mediaResizeEnded(mediaId)
+            }
+
+            SnapGuides {
+                id: snapGuides
+                anchors.fill: parent
+                contentItem: viewport.contentRootItem
+                viewportItem: viewport
+                guidesModel: root.snapGuidesModel
+                z: 89000
+            }
+
+            SelectionChrome {
+                id: selectionChrome
+                anchors.fill: parent
+                contentItem: viewport.contentRootItem
+                viewportItem: viewport
+                interactionController: root
+                mediaModel: root.mediaModel
+                selectionModel: root.selectionChromeModel
+                // Live drag offset: chrome visually follows the moving item without model repush
+                draggedMediaId: root.liveDragMediaId
+                dragOffsetViewX: root.liveDragViewOffsetX
+                dragOffsetViewY: root.liveDragViewOffsetY
+                z: 90000
+                onResizeRequested: function(mediaId, handleId, sceneX, sceneY, snap) {
+                    root.mediaResizeRequested(mediaId, handleId, sceneX, sceneY, snap)
+                }
+                onResizeEnded: function(mediaId) {
+                    root.mediaResizeEnded(mediaId)
+                }
             }
         }
 
-        DragHandler {
-            id: panDrag
-            enabled: panDrag.active
-                     || (root.isInteractionIdle()
-                         && !selectionChrome.interacting
-                         && !selectionChrome.handlePriorityActive
-                         && root.liveDragMediaId === "")
-            target: null
-            acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-            acceptedButtons: Qt.LeftButton
-            dragThreshold: 16
-            grabPermissions: PointerHandler.TakeOverForbidden
-            property real startPanX: 0.0
-            property real startPanY: 0.0
-            property bool panSessionActive: false
+        InputLayer {
+            id: inputLayer
+            parent: viewport
+            anchors.fill: parent
+            interactionController: root
+            textToolActive: root.textToolActive
+            onTextCreateRequested: function(viewX, viewY) {
+                root.textCreateRequested(viewX, viewY)
+            }
 
-            onActiveChanged: {
-                if (active) {
-                    if (!root.beginInteraction("pan", "canvas")) {
+            DragHandler {
+                id: panDrag
+                enabled: panDrag.active
+                         || (root.isInteractionIdle()
+                             && !selectionChrome.interacting
+                             && !selectionChrome.handlePriorityActive
+                             && root.liveDragMediaId === "")
+                target: null
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                acceptedButtons: Qt.LeftButton
+                dragThreshold: 16
+                grabPermissions: PointerHandler.TakeOverForbidden
+                property real startPanX: 0.0
+                property real startPanY: 0.0
+                property bool panSessionActive: false
+
+                onActiveChanged: {
+                    if (active) {
+                        if (!root.beginInteraction("pan", "canvas")) {
+                            panSessionActive = false
+                            return
+                        }
+                        panSessionActive = true
+                        startPanX = root.panX
+                        startPanY = root.panY
+                    } else {
                         panSessionActive = false
-                        return
+                        root.endInteraction("pan", "canvas")
                     }
-                    panSessionActive = true
-                    startPanX = root.panX
-                    startPanY = root.panY
-                } else {
+                }
+
+                onTranslationChanged: {
+                    if (!panSessionActive)
+                        return
+                    root.panX = startPanX + translation.x
+                    root.panY = startPanY + translation.y
+                }
+
+                onCanceled: {
                     panSessionActive = false
                     root.endInteraction("pan", "canvas")
                 }
             }
 
-            onTranslationChanged: {
-                if (!panSessionActive)
-                    return
-                root.panX = startPanX + translation.x
-                root.panY = startPanY + translation.y
-            }
+            PinchHandler {
+                id: pinchZoom
+                target: null
+                enabled: root.isInteractionIdle()
+                property real lastScale: 1.0
 
-            onCanceled: {
-                panSessionActive = false
-                root.endInteraction("pan", "canvas")
-            }
-        }
-
-        PinchHandler {
-            id: pinchZoom
-            target: null
-            enabled: root.isInteractionIdle()
-            property real lastScale: 1.0
-
-            onActiveChanged: {
-                if (active)
-                    lastScale = 1.0
-            }
-
-            onScaleChanged: {
-                if (!active)
-                    return
-                var factor = scale / lastScale
-                if (isFiniteNumber(factor) && factor > 0.0)
-                    root.applyZoomAt(centroid.position.x, centroid.position.y, factor)
-                lastScale = scale
-            }
-        }
-
-        TapHandler {
-            id: textToolTap
-            target: null
-            enabled: root.isInteractionIdle()
-            acceptedButtons: Qt.LeftButton
-
-            onTapped: function(eventPoint) {
-                if (!root.textToolActive)
-                    return
-                root.textCreateRequested(eventPoint.position.x, eventPoint.position.y)
-            }
-        }
-
-        WheelHandler {
-            id: wheelInput
-            target: null
-            acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-
-            onWheel: function(event) {
-                if (!root.isInteractionIdle()) {
-                    event.accepted = true
-                    return
+                onActiveChanged: {
+                    if (active)
+                        lastScale = 1.0
                 }
-                if (root.isZoomModifier(event.modifiers)) {
-                    var dy = root.wheelDeltaY(event)
-                    if (dy !== 0.0) {
-                        var factor = Math.pow(root.wheelZoomBase, dy)
-                        root.applyZoomAt(event.x, event.y, factor)
+
+                onScaleChanged: {
+                    if (!active)
+                        return
+                    var factor = scale / lastScale
+                    if (isFiniteNumber(factor) && factor > 0.0)
+                        root.applyZoomAt(centroid.position.x, centroid.position.y, factor)
+                    lastScale = scale
+                }
+            }
+
+            TapHandler {
+                id: textToolTap
+                target: null
+                enabled: root.isInteractionIdle()
+                acceptedButtons: Qt.LeftButton
+
+                onTapped: function(eventPoint) {
+                    if (!root.textToolActive)
+                        return
+                    root.textCreateRequested(eventPoint.position.x, eventPoint.position.y)
+                }
+            }
+
+            WheelHandler {
+                id: wheelInput
+                target: null
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+
+                onWheel: function(event) {
+                    if (!root.isInteractionIdle()) {
                         event.accepted = true
                         return
                     }
-                }
+                    if (root.isZoomModifier(event.modifiers)) {
+                        var dy = root.wheelDeltaY(event)
+                        if (dy !== 0.0) {
+                            var factor = Math.pow(root.wheelZoomBase, dy)
+                            root.applyZoomAt(event.x, event.y, factor)
+                            event.accepted = true
+                            return
+                        }
+                    }
 
-                var dx = root.wheelDeltaX(event)
-                var dyPan = root.wheelDeltaY(event)
-                if (dx !== 0.0 || dyPan !== 0.0) {
-                    root.panX += dx
-                    root.panY += dyPan
-                    event.accepted = true
+                    var dx = root.wheelDeltaX(event)
+                    var dyPan = root.wheelDeltaY(event)
+                    if (dx !== 0.0 || dyPan !== 0.0) {
+                        root.panX += dx
+                        root.panY += dyPan
+                        event.accepted = true
+                    }
                 }
             }
         }

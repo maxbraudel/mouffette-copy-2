@@ -19,6 +19,7 @@ class ResizableMediaBase;
 class CanvasSceneStore;
 class QuickCanvasViewAdapter;
 class PointerSession;
+class InputArbiter;
 class SelectionStore;
 class ModelPublisher;
 class SnapStore;
@@ -98,6 +99,7 @@ private:
     CanvasSceneStore* m_sceneStore = nullptr;
     QuickCanvasViewAdapter* m_viewAdapter = nullptr;
     PointerSession* m_pointerSession = nullptr;
+    InputArbiter* m_inputArbiter = nullptr;
     SelectionStore* m_selectionStore = nullptr;
     ModelPublisher* m_modelPublisher = nullptr;
     SnapStore* m_snapStore = nullptr;

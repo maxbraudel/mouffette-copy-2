@@ -12,36 +12,13 @@ Item {
     property string draggedMediaId: ""
     property real dragOffsetViewX: 0.0
     property real dragOffsetViewY: 0.0
+    default property alias layerChildren: layerRoot.data
 
     signal mediaResizeRequested(string mediaId, string handleId, real sceneX, real sceneY, bool snap)
     signal mediaResizeEnded(string mediaId)
 
-    SnapGuides {
-        id: snapGuides
+    Item {
+        id: layerRoot
         anchors.fill: parent
-        contentItem: selectionLayer.contentItem
-        viewportItem: selectionLayer.viewportItem
-        guidesModel: selectionLayer.snapGuidesModel
-        z: 89000
-    }
-
-    SelectionChrome {
-        id: selectionChrome
-        anchors.fill: parent
-        contentItem: selectionLayer.contentItem
-        viewportItem: selectionLayer.viewportItem
-        interactionController: selectionLayer.interactionController
-        mediaModel: selectionLayer.mediaModel
-        selectionModel: selectionLayer.selectionModel
-        draggedMediaId: selectionLayer.draggedMediaId
-        dragOffsetViewX: selectionLayer.dragOffsetViewX
-        dragOffsetViewY: selectionLayer.dragOffsetViewY
-        z: 90000
-        onResizeRequested: function(mediaId, handleId, sceneX, sceneY, snap) {
-            selectionLayer.mediaResizeRequested(mediaId, handleId, sceneX, sceneY, snap)
-        }
-        onResizeEnded: function(mediaId) {
-            selectionLayer.mediaResizeEnded(mediaId)
-        }
     }
 }

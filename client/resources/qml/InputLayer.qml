@@ -5,20 +5,12 @@ Item {
 
     property var interactionController: null
     property bool textToolActive: false
+    default property alias layerChildren: layerRoot.data
 
     signal textCreateRequested(real viewX, real viewY)
 
-    TapHandler {
-        id: textToolTap
-        target: null
-        enabled: !!inputLayer.interactionController
-                 && inputLayer.interactionController.isInteractionIdle()
-
-        acceptedButtons: Qt.LeftButton
-        onTapped: function(eventPoint) {
-            if (!inputLayer.textToolActive)
-                return
-            inputLayer.textCreateRequested(eventPoint.position.x, eventPoint.position.y)
-        }
+    Item {
+        id: layerRoot
+        anchors.fill: parent
     }
 }

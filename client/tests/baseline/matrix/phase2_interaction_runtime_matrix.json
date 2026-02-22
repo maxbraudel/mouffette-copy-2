@@ -1,0 +1,82 @@
+{
+  "id": "phase2_interaction_runtime_matrix",
+  "description": "Runtime interaction matrix covering pan/zoom/move/resize/text session ownership and determinism",
+  "cases": [
+    {
+      "id": "pan_zoom_empty_canvas",
+      "steps": [
+        { "action": "zoom", "anchorX": 640, "anchorY": 360, "delta": 1.1 },
+        { "action": "zoom", "anchorX": 700, "anchorY": 390, "delta": 1.1 },
+        { "action": "pan", "dx": 40, "dy": -20 },
+        { "action": "pan", "dx": 22, "dy": -16 },
+        { "action": "zoom", "anchorX": 840, "anchorY": 420, "delta": 0.95 }
+      ],
+      "expected": {
+        "cameraFinite": true,
+        "focalDriftPxMax": 3.0,
+        "zoomCount": 3,
+        "panCount": 2
+      }
+    },
+    {
+      "id": "move_priority_over_pan",
+      "steps": [
+        { "action": "beginMove", "mediaId": "m1" },
+        { "action": "tryBeginPan", "expectDenied": true },
+        { "action": "moveDelta", "mediaId": "m1", "dx": 120, "dy": -35 },
+        { "action": "modelRefresh" },
+        { "action": "moveDelta", "mediaId": "m1", "dx": -20, "dy": 10 },
+        { "action": "endMove", "mediaId": "m1" }
+      ],
+      "expected": {
+        "finalMediaX": 100,
+        "finalMediaY": -25,
+        "modelRefreshCanceledGesture": false
+      }
+    },
+    {
+      "id": "resize_priority_over_move_pan",
+      "steps": [
+        { "action": "beginResize", "mediaId": "m1", "handleId": "bottom-right" },
+        { "action": "tryBeginMove", "mediaId": "m1", "expectDenied": true },
+        { "action": "tryBeginPan", "expectDenied": true },
+        { "action": "resizeScale", "mediaId": "m1", "factor": 1.25 },
+        { "action": "resizeScale", "mediaId": "m1", "factor": 0.95 },
+        { "action": "endResize", "mediaId": "m1", "handleId": "bottom-right" }
+      ],
+      "expected": {
+        "finalScale": 1.1875
+      }
+    },
+    {
+      "id": "text_create_exclusive",
+      "steps": [
+        { "action": "beginTextCreate" },
+        { "action": "tryBeginPan", "expectDenied": true },
+        { "action": "tryBeginMove", "mediaId": "m1", "expectDenied": true },
+        { "action": "endTextCreate" }
+      ],
+      "expected": {
+        "returnsToIdle": true
+      }
+    },
+    {
+      "id": "high_velocity_determinism",
+      "runTwice": true,
+      "steps": [
+        { "action": "beginMove", "mediaId": "m1" },
+        { "action": "moveDelta", "mediaId": "m1", "dx": 1800, "dy": -920 },
+        { "action": "moveDelta", "mediaId": "m1", "dx": -640, "dy": 350 },
+        { "action": "endMove", "mediaId": "m1" },
+        { "action": "beginResize", "mediaId": "m1", "handleId": "bottom-right" },
+        { "action": "resizeScale", "mediaId": "m1", "factor": 2.2 },
+        { "action": "resizeScale", "mediaId": "m1", "factor": 0.5 },
+        { "action": "endResize", "mediaId": "m1", "handleId": "bottom-right" }
+      ],
+      "expected": {
+        "deterministic": true,
+        "finite": true
+      }
+    }
+  ]
+}
