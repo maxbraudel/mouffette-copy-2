@@ -8,7 +8,6 @@
 #include "backend/domain/media/MediaItems.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include "backend/domain/session/SessionManager.h"
-#include <QGraphicsItem>
 #include <QFileInfo>
 #include <QTimer>
 #include <QDebug>
@@ -79,50 +78,46 @@ void UploadEventHandler::onUploadButtonClicked()
     QSet<QString> currentFileIds;
 
     FileManager* fileManager = m_mainWindow->getFileManager();
-    if (canvas->scene()) {
-        const QList<QGraphicsItem*> allItems = canvas->scene()->items();
-        for (QGraphicsItem* it : allItems) {
-            auto* media = dynamic_cast<ResizableMediaBase*>(it);
-            if (!media) continue;
-            
-            // Skip text media items - they don't have associated files
-            if (media->isTextMedia()) continue;
+    const QList<ResizableMediaBase*> mediaItems = canvas->enumerateMediaItems();
+    for (ResizableMediaBase* media : mediaItems) {
+        if (!media) continue;
 
-            const QString path = media->sourcePath();
-            if (path.isEmpty()) continue;
+        if (media->isTextMedia()) continue;
 
-            QFileInfo fi(path);
-            if (!fi.exists() || !fi.isFile()) {
-                mediaItemsToRemove.append(media);
-                continue;
-            }
+        const QString path = media->sourcePath();
+        if (path.isEmpty()) continue;
 
-            const QString fileId = media->fileId();
-            if (fileId.isEmpty()) {
-                qWarning() << "MainWindow: Media item has no fileId, skipping:" << media->mediaId();
-                continue;
-            }
+        QFileInfo fi(path);
+        if (!fi.exists() || !fi.isFile()) {
+            mediaItemsToRemove.append(media);
+            continue;
+        }
 
-            currentFileIds.insert(fileId);
-            fileManager->associateFileWithIdea(fileId, session->canvasSessionId);
+        const QString fileId = media->fileId();
+        if (fileId.isEmpty()) {
+            qWarning() << "MainWindow: Media item has no fileId, skipping:" << media->mediaId();
+            continue;
+        }
 
-            const bool alreadyOnTarget = fileManager->isFileUploadedToClient(fileId, targetClientId);
-            if (!processedFileIds.contains(fileId) && !alreadyOnTarget) {
-                UploadFileInfo info;
-                info.fileId = fileId;
-                info.mediaId = media->mediaId();
-                info.path = fi.absoluteFilePath();
-                info.name = fi.fileName();
-                info.extension = fi.suffix();
-                info.size = fi.size();
-                files.push_back(info);
-                processedFileIds.insert(fileId);
-                upload.currentUploadFileOrder.append(fileId);
-            }
+        currentFileIds.insert(fileId);
+        fileManager->associateFileWithIdea(fileId, session->canvasSessionId);
 
-            if (!alreadyOnTarget) {
-                upload.itemsByFileId[fileId].append(media);
-            }
+        const bool alreadyOnTarget = fileManager->isFileUploadedToClient(fileId, targetClientId);
+        if (!processedFileIds.contains(fileId) && !alreadyOnTarget) {
+            UploadFileInfo info;
+            info.fileId = fileId;
+            info.mediaId = media->mediaId();
+            info.path = fi.absoluteFilePath();
+            info.name = fi.fileName();
+            info.extension = fi.suffix();
+            info.size = fi.size();
+            files.push_back(info);
+            processedFileIds.insert(fileId);
+            upload.currentUploadFileOrder.append(fileId);
+        }
+
+        if (!alreadyOnTarget) {
+            upload.itemsByFileId[fileId].append(media);
         }
     }
 
@@ -148,18 +143,16 @@ void UploadEventHandler::onUploadButtonClicked()
     if (files.isEmpty()) {
         if (hasRemoteFiles) {
             bool promotedAny = false;
-            if (canvas->scene()) {
-                const QList<QGraphicsItem*> allItems = canvas->scene()->items();
-                for (QGraphicsItem* it : allItems) {
-                    if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-                        const QString fileId = media->fileId();
-                        if (fileId.isEmpty()) continue;
-                        if (!fileManager->isFileUploadedToClient(fileId, targetClientId)) {
-                            fileManager->markFileUploadedToClient(fileId, targetClientId);
-                            media->setUploadUploaded();
-                            promotedAny = true;
-                        }
-                    }
+            for (ResizableMediaBase* media : canvas->enumerateMediaItems()) {
+                if (!media) {
+                    continue;
+                }
+                const QString fileId = media->fileId();
+                if (fileId.isEmpty()) continue;
+                if (!fileManager->isFileUploadedToClient(fileId, targetClientId)) {
+                    fileManager->markFileUploadedToClient(fileId, targetClientId);
+                    media->setUploadUploaded();
+                    promotedAny = true;
                 }
             }
             if (promotedAny) {
@@ -196,16 +189,13 @@ void UploadEventHandler::onUploadButtonClicked()
 
     uploadManager->clearLastRemovalClientId();
 
-    if (canvas->scene()) {
-        const QList<QGraphicsItem*> allItems = canvas->scene()->items();
-        for (QGraphicsItem* it : allItems) {
-            if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-                // Check if this media's file is being uploaded
-                const QString fileId = fileManager->getFileIdForMedia(media->mediaId());
-                if (!fileId.isEmpty() && fileIdsBeingUploaded.contains(fileId)) {
-                    media->setUploadUploading(0);
-                }
-            }
+    for (ResizableMediaBase* media : canvas->enumerateMediaItems()) {
+        if (!media) {
+            continue;
+        }
+        const QString fileId = fileManager->getFileIdForMedia(media->mediaId());
+        if (!fileId.isEmpty() && fileIdsBeingUploaded.contains(fileId)) {
+            media->setUploadUploading(0);
         }
     }
 
@@ -238,7 +228,7 @@ void UploadEventHandler::updateIndividualProgressFromServer(int globalPercent, i
     if (totalFiles == 0) return;
 
     auto* session = m_mainWindow->sessionForActiveUpload();
-    if (!session || !session->canvas || !session->canvas->scene()) return;
+    if (!session || !session->canvas) return;
 
     const int desired = qMax(0, filesCompleted);
     if (desired <= 0) return;

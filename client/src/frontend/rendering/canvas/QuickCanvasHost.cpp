@@ -1,47 +1,42 @@
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 
+#include "frontend/rendering/canvas/LegacySceneMirror.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/ScreenCanvas.h"
-#include <QTransform>
 
-QuickCanvasHost::QuickCanvasHost(QuickCanvasController* controller, ScreenCanvas* mediaCanvas, QObject* parent)
+QuickCanvasHost::QuickCanvasHost(QuickCanvasController* controller, LegacySceneMirror* legacyMirror, QObject* parent)
     : ICanvasHost(parent)
     , m_controller(controller)
-    , m_mediaCanvas(mediaCanvas)
+    , m_legacyMirror(legacyMirror)
 {
     Q_ASSERT(m_controller);
-    Q_ASSERT(m_mediaCanvas);
+    Q_ASSERT(m_legacyMirror);
 
-    connect(m_mediaCanvas, &ScreenCanvas::mediaItemAdded, this, &QuickCanvasHost::mediaItemAdded);
-    connect(m_mediaCanvas, &ScreenCanvas::mediaItemRemoved, this, &QuickCanvasHost::mediaItemRemoved);
-    connect(m_mediaCanvas, &ScreenCanvas::remoteSceneLaunchStateChanged,
+    connect(m_legacyMirror, &LegacySceneMirror::mediaItemAdded, this, &QuickCanvasHost::mediaItemAdded);
+    connect(m_legacyMirror, &LegacySceneMirror::mediaItemRemoved, this, &QuickCanvasHost::mediaItemRemoved);
+    connect(m_legacyMirror, &LegacySceneMirror::remoteSceneLaunchStateChanged,
             this, &QuickCanvasHost::remoteSceneLaunchStateChanged);
-    connect(m_mediaCanvas, &ScreenCanvas::textToolActiveChanged,
+    connect(m_legacyMirror, &LegacySceneMirror::textToolActiveChanged,
             m_controller, &QuickCanvasController::setTextToolActive);
-    connect(m_controller, &QuickCanvasController::textMediaCreateRequested,
-            m_mediaCanvas, [this](const QPointF& scenePos) {
-                if (!m_mediaCanvas) return;
+    connect(m_controller, &QuickCanvasController::textMediaCreateRequested, this,
+            [this](const QPointF& scenePos) {
+                if (!m_legacyMirror) {
+                    return;
+                }
                 if (m_controller) {
                     m_controller->ensureInitialFit();
                 }
-                // Temporarily apply the Quick Canvas view scale to the hidden ScreenCanvas so
-                // createTextMediaAtPosition computes the correct adjustedScale (= 1/zoom), giving
-                // a constant ~400 px creation size regardless of camera zoom — matching Widget Canvas.
                 const qreal zoom = m_controller ? m_controller->currentViewScale() : 1.0;
-                if (zoom > 1e-6 && std::abs(zoom - 1.0) > 1e-4) {
-                    m_mediaCanvas->setTransform(QTransform::fromScale(zoom, zoom));
-                }
-                m_mediaCanvas->requestTextMediaCreateAt(scenePos, false);
-                m_mediaCanvas->resetTransform();
+                m_legacyMirror->createTextAt(scenePos, zoom);
             });
-    connect(m_controller, &QuickCanvasController::localFilesDropRequested,
-            m_mediaCanvas, [this](const QStringList& localPaths, const QPointF& scenePos) {
-                if (m_mediaCanvas) {
-                    m_mediaCanvas->requestLocalFileDropAt(localPaths, scenePos);
+    connect(m_controller, &QuickCanvasController::localFilesDropRequested, this,
+            [this](const QStringList& localPaths, const QPointF& scenePos) {
+                if (m_legacyMirror) {
+                    m_legacyMirror->requestLocalFileDropAt(localPaths, scenePos);
                 }
             });
 
-    m_controller->setTextToolActive(m_mediaCanvas->isTextToolActive());
+    m_controller->setTextToolActive(m_legacyMirror->isTextToolActive());
 }
 
 QuickCanvasHost::~QuickCanvasHost() {
@@ -59,11 +54,12 @@ QuickCanvasHost* QuickCanvasHost::create(QWidget* parentWidget, QString* errorMe
     }
 
     ScreenCanvas* mediaCanvas = new ScreenCanvas(controller->widget());
-    mediaCanvas->setVisible(false);
-    mediaCanvas->setOverlayViewport(controller->widget());
+    LegacySceneMirror* legacyMirror = new LegacySceneMirror(mediaCanvas, controller->widget());
+    legacyMirror->setVisible(false);
+    legacyMirror->setOverlayViewport(controller->widget());
     controller->setMediaScene(mediaCanvas->scene());
 
-    return new QuickCanvasHost(controller, mediaCanvas, controller->widget());
+    return new QuickCanvasHost(controller, legacyMirror, controller->widget());
 }
 
 QWidget* QuickCanvasHost::asWidget() const {
@@ -75,45 +71,45 @@ QWidget* QuickCanvasHost::viewportWidget() const {
 }
 
 void QuickCanvasHost::setActiveIdeaId(const QString& canvasSessionId) {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->setActiveIdeaId(canvasSessionId);
+    if (m_legacyMirror) {
+        m_legacyMirror->setActiveIdeaId(canvasSessionId);
     }
 }
 
 void QuickCanvasHost::setWebSocketClient(WebSocketClient* client) {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->setWebSocketClient(client);
+    if (m_legacyMirror) {
+        m_legacyMirror->setWebSocketClient(client);
     }
 }
 
 void QuickCanvasHost::setUploadManager(UploadManager* manager) {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->setUploadManager(manager);
+    if (m_legacyMirror) {
+        m_legacyMirror->setUploadManager(manager);
     }
 }
 
 void QuickCanvasHost::setFileManager(FileManager* manager) {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->setFileManager(manager);
+    if (m_legacyMirror) {
+        m_legacyMirror->setFileManager(manager);
     }
 }
 
 void QuickCanvasHost::setRemoteSceneTarget(const QString& id, const QString& machineName) {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->setRemoteSceneTarget(id, machineName);
+    if (m_legacyMirror) {
+        m_legacyMirror->setRemoteSceneTarget(id, machineName);
     }
 }
 
 void QuickCanvasHost::updateRemoteSceneTargetFromClientList(const QList<ClientInfo>& clients) {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->updateRemoteSceneTargetFromClientList(clients);
+    if (m_legacyMirror) {
+        m_legacyMirror->updateRemoteSceneTargetFromClientList(clients);
     }
 }
 
 void QuickCanvasHost::setScreens(const QList<ScreenInfo>& screens) {
     m_hasActiveScreens = !screens.isEmpty();
-    if (m_mediaCanvas) {
-        m_mediaCanvas->setScreens(screens);
+    if (m_legacyMirror) {
+        m_legacyMirror->setScreens(screens);
     }
     if (m_controller) {
         m_controller->setScreenCount(screens.size());
@@ -122,84 +118,68 @@ void QuickCanvasHost::setScreens(const QList<ScreenInfo>& screens) {
 }
 
 bool QuickCanvasHost::hasActiveScreens() const {
-    if (m_mediaCanvas) {
-        return m_mediaCanvas->hasActiveScreens();
-    }
     return m_hasActiveScreens;
 }
 
 void QuickCanvasHost::requestDeferredInitialRecenter(int marginPx) {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->requestDeferredInitialRecenter(marginPx);
-    }
+    Q_UNUSED(marginPx);
     if (m_controller) {
         m_controller->recenterView();
     }
 }
 
 void QuickCanvasHost::recenterWithMargin(int marginPx) {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->recenterWithMargin(marginPx);
-    }
+    Q_UNUSED(marginPx);
     if (m_controller) {
         m_controller->recenterView();
     }
 }
 
 void QuickCanvasHost::hideContentPreservingState() {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->hideContentPreservingState();
+    if (m_legacyMirror) {
+        m_legacyMirror->hideContentPreservingState();
     }
 }
 
 void QuickCanvasHost::showContentAfterReconnect() {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->showContentAfterReconnect();
+    if (m_legacyMirror) {
+        m_legacyMirror->showContentAfterReconnect();
     }
 }
 
 void QuickCanvasHost::resetTransform() {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->resetTransform();
-    }
     if (m_controller) {
         m_controller->resetView();
     }
 }
 
 void QuickCanvasHost::updateRemoteCursor(int globalX, int globalY) {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->updateRemoteCursor(globalX, globalY);
-    }
     if (m_controller) {
         m_controller->updateRemoteCursor(globalX, globalY);
     }
 }
 
 void QuickCanvasHost::hideRemoteCursor() {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->hideRemoteCursor();
-    }
     if (m_controller) {
         m_controller->hideRemoteCursor();
     }
 }
 
 QPushButton* QuickCanvasHost::getUploadButton() const {
-    return m_mediaCanvas ? m_mediaCanvas->getUploadButton() : nullptr;
+    return m_legacyMirror ? m_legacyMirror->getUploadButton() : nullptr;
 }
 
 bool QuickCanvasHost::isRemoteSceneLaunched() const {
-    return m_mediaCanvas ? m_mediaCanvas->isRemoteSceneLaunched() : false;
+    return m_legacyMirror ? m_legacyMirror->isRemoteSceneLaunched() : false;
 }
 
 QString QuickCanvasHost::overlayDisabledButtonStyle() const {
-    return ScreenCanvas::overlayDisabledButtonStyle();
+    return m_legacyMirror ? m_legacyMirror->overlayDisabledButtonStyle() : QString();
 }
 
 void QuickCanvasHost::setOverlayActionsEnabled(bool enabled) {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->setOverlayActionsEnabled(enabled);
+    if (m_legacyMirror) {
+        m_legacyMirror->setOverlayActionsEnabled(enabled);
     }
     if (m_controller) {
         m_controller->setShellActive(enabled);
@@ -207,8 +187,8 @@ void QuickCanvasHost::setOverlayActionsEnabled(bool enabled) {
 }
 
 void QuickCanvasHost::handleRemoteConnectionLost() {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->handleRemoteConnectionLost();
+    if (m_legacyMirror) {
+        m_legacyMirror->handleRemoteConnectionLost();
     }
     if (m_controller) {
         m_controller->setShellActive(false);
@@ -222,8 +202,8 @@ void QuickCanvasHost::setSizePolicy(QSizePolicy::Policy horizontal, QSizePolicy:
 }
 
 void QuickCanvasHost::setViewportUpdateMode(QGraphicsView::ViewportUpdateMode mode) {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->setViewportUpdateMode(mode);
+    if (m_legacyMirror) {
+        m_legacyMirror->setViewportUpdateMode(mode);
     }
 }
 
@@ -246,11 +226,15 @@ void QuickCanvasHost::installEventFilter(QObject* filterObj) {
 }
 
 QGraphicsScene* QuickCanvasHost::scene() const {
-    return m_mediaCanvas ? m_mediaCanvas->scene() : nullptr;
+    return m_legacyMirror ? m_legacyMirror->scene() : nullptr;
+}
+
+QList<ResizableMediaBase*> QuickCanvasHost::enumerateMediaItems() const {
+    return m_legacyMirror ? m_legacyMirror->enumerateMediaItems() : QList<ResizableMediaBase*>();
 }
 
 void QuickCanvasHost::refreshInfoOverlay() {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->refreshInfoOverlay();
+    if (m_legacyMirror) {
+        m_legacyMirror->refreshInfoOverlay();
     }
 }

@@ -1,5 +1,6 @@
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/CanvasSceneStore.h"
+#include "frontend/rendering/canvas/GestureCommands.h"
 #include "frontend/rendering/canvas/QuickCanvasViewAdapter.h"
 
 #include <algorithm>
@@ -1160,14 +1161,14 @@ bool QuickCanvasController::endLiveResizeSession(const QString& mediaId,
         return false;
     }
 
-    const qreal sceneUnitScale = (m_sceneStore->sceneUnitScale() > 1e-6) ? m_sceneStore->sceneUnitScale() : 1.0;
-    return QMetaObject::invokeMethod(
+    return GestureCommands::invokeMediaTransformCommand(
         m_quickWidget->rootObject(),
         "endLiveResize",
-        Q_ARG(QVariant, mediaId),
-        Q_ARG(QVariant, sceneX * sceneUnitScale),
-        Q_ARG(QVariant, sceneY * sceneUnitScale),
-        Q_ARG(QVariant, scale));
+        mediaId,
+        sceneX,
+        sceneY,
+        scale,
+        m_sceneStore->sceneUnitScale());
 }
 
 bool QuickCanvasController::commitMediaTransform(const QString& mediaId,
@@ -1178,14 +1179,14 @@ bool QuickCanvasController::commitMediaTransform(const QString& mediaId,
         return false;
     }
 
-    const qreal sceneUnitScale = (m_sceneStore->sceneUnitScale() > 1e-6) ? m_sceneStore->sceneUnitScale() : 1.0;
-    return QMetaObject::invokeMethod(
+    return GestureCommands::invokeMediaTransformCommand(
         m_quickWidget->rootObject(),
         "commitMediaTransform",
-        Q_ARG(QVariant, mediaId),
-        Q_ARG(QVariant, sceneX * sceneUnitScale),
-        Q_ARG(QVariant, sceneY * sceneUnitScale),
-        Q_ARG(QVariant, scale));
+        mediaId,
+        sceneX,
+        sceneY,
+        scale,
+        m_sceneStore->sceneUnitScale());
 }
 
 bool QuickCanvasController::pushLiveResizeGeometry(const QString& mediaId,
@@ -1196,14 +1197,14 @@ bool QuickCanvasController::pushLiveResizeGeometry(const QString& mediaId,
         return false;
     }
 
-    const qreal sceneUnitScale = (m_sceneStore->sceneUnitScale() > 1e-6) ? m_sceneStore->sceneUnitScale() : 1.0;
-    return QMetaObject::invokeMethod(
+    return GestureCommands::invokeMediaTransformCommand(
         m_quickWidget->rootObject(),
         "applyLiveResizeGeometry",
-        Q_ARG(QVariant, mediaId),
-        Q_ARG(QVariant, sceneX * sceneUnitScale),
-        Q_ARG(QVariant, sceneY * sceneUnitScale),
-        Q_ARG(QVariant, scale));
+        mediaId,
+        sceneX,
+        sceneY,
+        scale,
+        m_sceneStore->sceneUnitScale());
 }
 
 void QuickCanvasController::pushSelectionAndSnapModels() {

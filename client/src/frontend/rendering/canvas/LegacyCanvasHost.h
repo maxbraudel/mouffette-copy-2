@@ -50,6 +50,7 @@ public:
     void installEventFilter(QObject* filterObj) override;
 
     QGraphicsScene* scene() const override;
+    QList<ResizableMediaBase*> enumerateMediaItems() const override;
     void refreshInfoOverlay() override;
 
 private:

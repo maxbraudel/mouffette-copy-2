@@ -4,13 +4,13 @@
 #include "shared/rendering/ICanvasHost.h"
 
 class QuickCanvasController;
-class ScreenCanvas;
+class LegacySceneMirror;
 
 class QuickCanvasHost : public ICanvasHost {
     Q_OBJECT
 
 public:
-    explicit QuickCanvasHost(QuickCanvasController* controller, ScreenCanvas* mediaCanvas, QObject* parent = nullptr);
+    explicit QuickCanvasHost(QuickCanvasController* controller, LegacySceneMirror* legacyMirror, QObject* parent = nullptr);
     ~QuickCanvasHost() override;
 
     static QuickCanvasHost* create(QWidget* parentWidget, QString* errorMessage = nullptr);
@@ -49,11 +49,12 @@ public:
     void installEventFilter(QObject* filterObj) override;
 
     QGraphicsScene* scene() const override;
+    QList<ResizableMediaBase*> enumerateMediaItems() const override;
     void refreshInfoOverlay() override;
 
 private:
     QuickCanvasController* m_controller;
-    ScreenCanvas* m_mediaCanvas;
+    LegacySceneMirror* m_legacyMirror;
     bool m_hasActiveScreens = false;
 };
 

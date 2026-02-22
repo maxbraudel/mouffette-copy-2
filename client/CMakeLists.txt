@@ -56,8 +56,10 @@ set(SOURCES
     # Rendering - Canvas
     src/frontend/rendering/canvas/ScreenCanvas.cpp
     src/frontend/rendering/canvas/LegacyCanvasHost.cpp
+    src/frontend/rendering/canvas/LegacySceneMirror.cpp
     src/frontend/rendering/canvas/QuickCanvasHost.cpp
     src/frontend/rendering/canvas/QuickCanvasController.cpp
+    src/frontend/rendering/canvas/GestureCommands.cpp
     src/frontend/rendering/canvas/CanvasSceneStore.cpp
     src/frontend/rendering/canvas/QuickCanvasViewAdapter.cpp
     src/frontend/rendering/canvas/OverlayPanels.cpp
@@ -184,8 +186,10 @@ set(HEADERS
     # Rendering - Canvas
     src/frontend/rendering/canvas/ScreenCanvas.h
     src/frontend/rendering/canvas/LegacyCanvasHost.h
+    src/frontend/rendering/canvas/LegacySceneMirror.h
     src/frontend/rendering/canvas/QuickCanvasHost.h
     src/frontend/rendering/canvas/QuickCanvasController.h
+    src/frontend/rendering/canvas/GestureCommands.h
     src/frontend/rendering/canvas/CanvasSceneStore.h
     src/frontend/rendering/canvas/QuickCanvasViewAdapter.h
     src/frontend/rendering/canvas/OverlayPanels.h

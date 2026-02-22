@@ -3,6 +3,8 @@
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/UploadManager.h"
 #include "backend/files/FileManager.h"
+#include <QGraphicsItem>
+#include <QGraphicsScene>
 
 LegacyCanvasHost::LegacyCanvasHost(ScreenCanvas* canvas, QObject* parent)
     : ICanvasHost(parent)
@@ -135,6 +137,22 @@ void LegacyCanvasHost::installEventFilter(QObject* filterObj) {
 
 QGraphicsScene* LegacyCanvasHost::scene() const {
     return m_canvas->scene();
+}
+
+QList<ResizableMediaBase*> LegacyCanvasHost::enumerateMediaItems() const {
+    QList<ResizableMediaBase*> mediaItems;
+    QGraphicsScene* currentScene = scene();
+    if (!currentScene) {
+        return mediaItems;
+    }
+
+    const QList<QGraphicsItem*> allItems = currentScene->items();
+    for (QGraphicsItem* item : allItems) {
+        if (auto* media = dynamic_cast<ResizableMediaBase*>(item)) {
+            mediaItems.append(media);
+        }
+    }
+    return mediaItems;
 }
 
 void LegacyCanvasHost::refreshInfoOverlay() {
