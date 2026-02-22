@@ -3,7 +3,9 @@
 #include "backend/domain/models/ClientInfo.h"
 #include "shared/rendering/ICanvasHost.h"
 #include "frontend/rendering/canvas/LegacyCanvasHost.h"
+#include "frontend/rendering/canvas/LegacySceneMirror.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
+#include "frontend/rendering/canvas/ScreenCanvas.h"
 #include "backend/domain/session/SessionManager.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/UploadManager.h"
@@ -19,6 +21,16 @@
 #include <QPushButton>
 #include <QTimer>
 #include <QDebug>
+
+namespace {
+LegacySceneMirror* createExplicitLegacyMirror(QWidget* parentWidget) {
+    if (!parentWidget) {
+        return nullptr;
+    }
+    ScreenCanvas* mediaCanvas = new ScreenCanvas(parentWidget);
+    return new LegacySceneMirror(mediaCanvas, parentWidget);
+}
+}
 
 CanvasSessionController::CanvasSessionController(MainWindow* mainWindow, QObject* parent)
     : QObject(parent)
@@ -92,10 +104,14 @@ void* CanvasSessionController::ensureCanvasSession(const ClientInfo& client) {
                 reason = QStringLiteral("flag_on_prewarmed_shell");
             } else {
                 QString quickError;
-                session.canvas = QuickCanvasHost::create(canvasHostStack, &quickError);
+                LegacySceneMirror* legacyBridge = createExplicitLegacyMirror(canvasHostStack);
+                session.canvas = QuickCanvasHost::create(canvasHostStack, legacyBridge, &quickError);
+                if (!session.canvas && legacyBridge) {
+                    delete legacyBridge;
+                }
                 if (session.canvas) {
                     appliedRenderer = QStringLiteral("quick_canvas_shell");
-                    reason = QStringLiteral("flag_on_phase1_shell");
+                    reason = QStringLiteral("flag_on_explicit_legacy_bridge");
                 } else {
                     session.canvas = LegacyCanvasHost::create(canvasHostStack);
                     appliedRenderer = QStringLiteral("legacy_screen_canvas");
@@ -150,8 +166,12 @@ void CanvasSessionController::prewarmQuickCanvasHost() {
     }
 
     QString quickError;
-    QuickCanvasHost* prewarmedHost = QuickCanvasHost::create(canvasHostStack, &quickError);
+    LegacySceneMirror* legacyBridge = createExplicitLegacyMirror(canvasHostStack);
+    QuickCanvasHost* prewarmedHost = QuickCanvasHost::create(canvasHostStack, legacyBridge, &quickError);
     if (!prewarmedHost) {
+        if (legacyBridge) {
+            delete legacyBridge;
+        }
         if (!quickError.isEmpty()) {
             qWarning() << "CanvasSessionController: Quick prewarm failed:" << quickError;
         }

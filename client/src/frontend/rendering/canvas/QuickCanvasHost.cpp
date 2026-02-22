@@ -2,7 +2,6 @@
 
 #include "frontend/rendering/canvas/LegacySceneMirror.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
-#include "frontend/rendering/canvas/ScreenCanvas.h"
 
 QuickCanvasHost::QuickCanvasHost(QuickCanvasController* controller, LegacySceneMirror* legacyMirror, QObject* parent)
     : ICanvasHost(parent)
@@ -46,18 +45,26 @@ QuickCanvasHost::~QuickCanvasHost() {
     }
 }
 
-QuickCanvasHost* QuickCanvasHost::create(QWidget* parentWidget, QString* errorMessage) {
+QuickCanvasHost* QuickCanvasHost::create(QWidget* parentWidget, LegacySceneMirror* legacyMirror, QString* errorMessage) {
+    if (!legacyMirror) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("missing explicit LegacySceneMirror bridge");
+        }
+        return nullptr;
+    }
+
     QuickCanvasController* controller = new QuickCanvasController();
     if (!controller->initialize(parentWidget, errorMessage)) {
         delete controller;
         return nullptr;
     }
 
-    ScreenCanvas* mediaCanvas = new ScreenCanvas(controller->widget());
-    LegacySceneMirror* legacyMirror = new LegacySceneMirror(mediaCanvas, controller->widget());
+    if (legacyMirror->parent() != controller->widget()) {
+        legacyMirror->setParent(controller->widget());
+    }
     legacyMirror->setVisible(false);
     legacyMirror->setOverlayViewport(controller->widget());
-    controller->setMediaScene(mediaCanvas->scene());
+    controller->setMediaScene(legacyMirror->scene());
 
     return new QuickCanvasHost(controller, legacyMirror, controller->widget());
 }

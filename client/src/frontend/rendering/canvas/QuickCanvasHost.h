@@ -13,7 +13,7 @@ public:
     explicit QuickCanvasHost(QuickCanvasController* controller, LegacySceneMirror* legacyMirror, QObject* parent = nullptr);
     ~QuickCanvasHost() override;
 
-    static QuickCanvasHost* create(QWidget* parentWidget, QString* errorMessage = nullptr);
+    static QuickCanvasHost* create(QWidget* parentWidget, LegacySceneMirror* legacyMirror, QString* errorMessage = nullptr);
 
     QWidget* asWidget() const override;
     QWidget* viewportWidget() const override;

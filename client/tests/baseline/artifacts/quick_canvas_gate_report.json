@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-02-22T18:23:06.255Z",
-  "gitCommit": "c57f845bccd8449f6d543098ed5a29ba8d01e41e",
+  "generatedAt": "2026-02-22T18:43:39.883Z",
+  "gitCommit": "524dbe58ad36c5db30272b15444bb071be981df2",
   "inputs": {
     "quickLog": "tests/baseline/fixtures/perf_logs/phase4_quick_auto_targeted.log",
     "legacyLog": "tests/baseline/fixtures/perf_logs/phase4_legacy_auto.log"
@@ -15,25 +15,13 @@
     {
       "command": "node tests/baseline/run_baseline_checks.js",
       "exitCode": 0,
-      "stdout": "[BASELINE] PASS\n{\n  \"results\": {\n    \"fixtures\": {\n      \"filesChecked\": 4\n    },\n    \"replays\": {\n      \"filesChecked\": 3\n    },\n    \"snapshots\": {\n      \"filesChecked\": 4\n    },\n    \"invariance\": {\n      \"filesChecked\": 5,\n      \"assertions\": 21\n    }\n  },\n  \"elapsedMs\": 4\n}\n",
+      "stdout": "[BASELINE] PASS\n{\n  \"results\": {\n    \"fixtures\": {\n      \"filesChecked\": 4\n    },\n    \"replays\": {\n      \"filesChecked\": 3\n    },\n    \"snapshots\": {\n      \"filesChecked\": 4\n    },\n    \"invariance\": {\n      \"filesChecked\": 5,\n      \"assertions\": 21\n    }\n  },\n  \"elapsedMs\": 6\n}\n",
       "stderr": ""
     },
     {
-      "command": "node tests/baseline/run_phase2_interaction_parity.js",
+      "command": "node tests/baseline/run_phase2_interaction_runtime_matrix.js",
       "exitCode": 0,
-      "stdout": "[PHASE2_PARITY] PASS\n{\n  \"qmlCheck\": {\n    \"checkedTokens\": 8\n  },\n  \"replayCheck\": {\n    \"zoomCount\": 3,\n    \"panCount\": 2,\n    \"maxDriftPx\": 0,\n    \"tolerancePx\": 3,\n    \"finalState\": {\n      \"scale\": 1.1495000000000002,\n      \"panX\": -32.48000000000002,\n      \"panY\": -87.87000000000012\n    }\n  }\n}\n",
-      "stderr": ""
-    },
-    {
-      "command": "node tests/baseline/run_phase2_interaction_ownership.js",
-      "exitCode": 0,
-      "stdout": "[PHASE2_INTERACTION_OWNERSHIP] PASS\n{\n  \"canvasRoot\": {\n    \"checkedTokens\": 9\n  },\n  \"selectionChrome\": {\n    \"checkedTokens\": 5\n  },\n  \"controllerOwnership\": {\n    \"checkedTokens\": 2\n  },\n  \"qrc\": {\n    \"checkedTokens\": 1\n  }\n}\n",
-      "stderr": ""
-    },
-    {
-      "command": "node tests/baseline/run_phase4_visual_parity.js",
-      "exitCode": 0,
-      "stdout": "[PHASE4_VISUAL_PARITY] PASS\n{\n  \"files\": {\n    \"filesChecked\": 4\n  },\n  \"resources\": {\n    \"aliasesChecked\": 3\n  },\n  \"canvas\": {\n    \"tokensChecked\": 9\n  },\n  \"delegates\": {\n    \"delegateChecks\": 6\n  },\n  \"dtoBridge\": {\n    \"controllerTokens\": 9,\n    \"hostChecks\": 2\n  },\n  \"snapshots\": {\n    \"snapshotAssets\": 4\n  }\n}\n",
+      "stdout": "[PHASE2_INTERACTION_RUNTIME_MATRIX] PASS\n{\n  \"matrixId\": \"phase2_interaction_runtime_matrix\",\n  \"matrixFile\": \"tests/baseline/matrix/phase2_interaction_runtime_matrix.json\",\n  \"casesChecked\": 5,\n  \"stepsChecked\": 29,\n  \"caseResults\": [\n    {\n      \"id\": \"pan_zoom_empty_canvas\",\n      \"steps\": 5,\n      \"finalMode\": \"Idle\",\n      \"maxFocalDriftPx\": 0,\n      \"final\": {\n        \"camera\": {\n          \"scale\": 1.1495000000000002,\n          \"panX\": -32.48000000000002,\n          \"panY\": -87.87000000000012\n        },\n        \"media\": {\n          \"x\": 0,\n          \"y\": 0,\n          \"scale\": 1\n        }\n      }\n    },\n    {\n      \"id\": \"move_priority_over_pan\",\n      \"steps\": 6,\n      \"finalMode\": \"Idle\",\n      \"maxFocalDriftPx\": 0,\n      \"final\": {\n        \"camera\": {\n          \"scale\": 1,\n          \"panX\": 0,\n          \"panY\": 0\n        },\n        \"media\": {\n          \"x\": 100,\n          \"y\": -25,\n          \"scale\": 1\n        }\n      }\n    },\n    {\n      \"id\": \"resize_priority_over_move_pan\",\n      \"steps\": 6,\n      \"finalMode\": \"Idle\",\n      \"maxFocalDriftPx\": 0,\n      \"final\": {\n        \"camera\": {\n          \"scale\": 1,\n          \"panX\": 0,\n          \"panY\": 0\n        },\n        \"media\": {\n          \"x\": 0,\n          \"y\": 0,\n          \"scale\": 1.1875\n        }\n      }\n    },\n    {\n      \"id\": \"text_create_exclusive\",\n      \"steps\": 4,\n      \"finalMode\": \"Idle\",\n      \"maxFocalDriftPx\": 0,\n      \"final\": {\n        \"camera\": {\n          \"scale\": 1,\n          \"panX\": 0,\n          \"panY\": 0\n        },\n        \"media\": {\n          \"x\": 0,\n          \"y\": 0,\n          \"scale\": 1\n        }\n      }\n    },\n    {\n      \"id\": \"high_velocity_determinism\",\n      \"steps\": 8,\n      \"finalMode\": \"Idle\",\n      \"maxFocalDriftPx\": 0,\n      \"final\": {\n        \"camera\": {\n          \"scale\": 1,\n          \"panX\": 0,\n          \"panY\": 0\n        },\n        \"media\": {\n          \"x\": 1160,\n          \"y\": -570,\n          \"scale\": 1.1\n        }\n      }\n    }\n  ]\n}\n",
       "stderr": ""
     },
     {
