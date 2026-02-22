@@ -192,6 +192,13 @@ Rectangle {
         return v !== Infinity && v !== -Infinity && !isNaN(v)
     }
 
+    function canProcessCameraWheel() {
+        if (isInteractionIdle())
+            return true
+        return interactionMode === "pan"
+            && (interactionOwnerId === "" || interactionOwnerId === "canvas")
+    }
+
     function mediaSourceUrl(path) {
         if (!path || path.length === 0)
             return ""
@@ -597,7 +604,7 @@ Rectangle {
                              && !selectionChrome.handlePriorityActive
                              && root.liveDragMediaId === "")
                 target: null
-                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                acceptedDevices: PointerDevice.Mouse
                 acceptedButtons: Qt.LeftButton
                 dragThreshold: 16
                 grabPermissions: PointerHandler.TakeOverForbidden
@@ -668,24 +675,28 @@ Rectangle {
                 }
             }
 
-            WheelHandler {
-                id: wheelInput
-                target: null
-                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+            MouseArea {
+                id: wheelInputArea
+                anchors.fill: parent
+                acceptedButtons: Qt.NoButton
+                hoverEnabled: false
+                scrollGestureEnabled: true
+                preventStealing: false
 
                 onWheel: function(event) {
-                    if (!root.isInteractionIdle()) {
+                    if (!root.canProcessCameraWheel()) {
                         event.accepted = true
                         return
                     }
+
                     if (root.isZoomModifier(event.modifiers)) {
                         var dy = root.wheelDeltaY(event)
                         if (dy !== 0.0) {
                             var factor = Math.pow(root.wheelZoomBase, dy)
                             root.applyZoomAt(event.x, event.y, factor)
-                            event.accepted = true
-                            return
                         }
+                        event.accepted = true
+                        return
                     }
 
                     var dx = root.wheelDeltaX(event)
@@ -693,8 +704,9 @@ Rectangle {
                     if (dx !== 0.0 || dyPan !== 0.0) {
                         root.panX += dx
                         root.panY += dyPan
-                        event.accepted = true
                     }
+
+                    event.accepted = true
                 }
             }
         }
