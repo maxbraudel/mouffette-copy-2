@@ -1618,6 +1618,10 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
 }
 
 void ScreenCanvas::scheduleSceneChangedMaintenance() {
+    if (m_visualMaintenanceSuppressed) {
+        return;
+    }
+
     m_sceneChangedWorkPending = true;
     if (!m_sceneChangedWorkTimer) {
         m_sceneChangedWorkTimer = new QTimer(this);
@@ -1679,6 +1683,11 @@ void ScreenCanvas::processSceneChangedMaintenance() {
 }
 
 void ScreenCanvas::requestZoomRelayout(bool forceFull) {
+    if (m_visualMaintenanceSuppressed) {
+        Q_UNUSED(forceFull);
+        return;
+    }
+
     m_zoomRelayoutPending = true;
     m_zoomRelayoutForceFull = m_zoomRelayoutForceFull || forceFull;
 

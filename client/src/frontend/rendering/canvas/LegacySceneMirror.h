@@ -45,6 +45,7 @@ public:
     void setOverlayActionsEnabled(bool enabled);
     void handleRemoteConnectionLost();
     void setViewportUpdateMode(QGraphicsView::ViewportUpdateMode mode);
+    void setVisualMaintenanceSuppressed(bool suppressed);
 
     bool isTextToolActive() const;
     void createTextAt(const QPointF& scenePos, qreal currentZoomScale);

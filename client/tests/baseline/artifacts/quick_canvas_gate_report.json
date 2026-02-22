@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-02-22T18:43:39.883Z",
-  "gitCommit": "524dbe58ad36c5db30272b15444bb071be981df2",
+  "generatedAt": "2026-02-22T18:58:00.633Z",
+  "gitCommit": "e364e3a65e882b09dc52f5d970fe3f088ba32699",
   "inputs": {
     "quickLog": "tests/baseline/fixtures/perf_logs/phase4_quick_auto_targeted.log",
     "legacyLog": "tests/baseline/fixtures/perf_logs/phase4_legacy_auto.log"
@@ -15,7 +15,7 @@
     {
       "command": "node tests/baseline/run_baseline_checks.js",
       "exitCode": 0,
-      "stdout": "[BASELINE] PASS\n{\n  \"results\": {\n    \"fixtures\": {\n      \"filesChecked\": 4\n    },\n    \"replays\": {\n      \"filesChecked\": 3\n    },\n    \"snapshots\": {\n      \"filesChecked\": 4\n    },\n    \"invariance\": {\n      \"filesChecked\": 5,\n      \"assertions\": 21\n    }\n  },\n  \"elapsedMs\": 6\n}\n",
+      "stdout": "[BASELINE] PASS\n{\n  \"results\": {\n    \"fixtures\": {\n      \"filesChecked\": 4\n    },\n    \"replays\": {\n      \"filesChecked\": 3\n    },\n    \"snapshots\": {\n      \"filesChecked\": 4\n    },\n    \"invariance\": {\n      \"filesChecked\": 5,\n      \"assertions\": 21\n    }\n  },\n  \"elapsedMs\": 5\n}\n",
       "stderr": ""
     },
     {

@@ -63,6 +63,7 @@ QuickCanvasHost* QuickCanvasHost::create(QWidget* parentWidget, LegacySceneMirro
         legacyMirror->setParent(controller->widget());
     }
     legacyMirror->setVisible(false);
+    legacyMirror->setVisualMaintenanceSuppressed(true);
     legacyMirror->setOverlayViewport(controller->widget());
     controller->setMediaScene(legacyMirror->scene());
 

@@ -105,7 +105,15 @@ private:
     SnapStore* m_snapStore = nullptr;
     QGraphicsScene* m_mediaScene = nullptr;
     QTimer* m_mediaSyncTimer = nullptr;
+    QTimer* m_resizeDispatchTimer = nullptr;
     bool m_mediaSyncPending = false;
+    bool m_executingQueuedResize = false;
+    bool m_hasQueuedResize = false;
+    QString m_queuedResizeMediaId;
+    QString m_queuedResizeHandleId;
+    qreal m_queuedResizeSceneX = 0.0;
+    qreal m_queuedResizeSceneY = 0.0;
+    bool m_queuedResizeSnap = false;
     QSize m_resizeBaseSize;
     QPointF m_resizeFixedItemPoint;
     QPointF m_resizeFixedScenePoint;

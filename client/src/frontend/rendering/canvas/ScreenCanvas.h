@@ -69,6 +69,8 @@ public:
     void setMediaHandleSelectionSizePx(int px); // hit area
     void setMediaHandleVisualSizePx(int px);    // drawn square
     void setMediaHandleSizePx(int px);          // convenience
+    void setVisualMaintenanceSuppressed(bool suppressed) { m_visualMaintenanceSuppressed = suppressed; }
+    bool visualMaintenanceSuppressed() const { return m_visualMaintenanceSuppressed; }
     void setScreenBorderWidthPx(int px);
     void setScreenLabelFontPointSize(int pt) { m_screenLabelFontPt = qMax(1, pt); createScreenItems(); }
     int screenLabelFontPointSize() const { return m_screenLabelFontPt; }
@@ -318,6 +320,7 @@ private:
     quint64 m_perfFullRelayoutCount = 0;
     quint64 m_perfSelectionChromeCount = 0;
     quint64 m_perfSceneChangedBatchCount = 0;
+    bool m_visualMaintenanceSuppressed = false;
     bool m_perfReplayScheduled = false;
     bool m_perfReplayCompleted = false;
     QSet<ResizableMediaBase*> m_pendingOverlayRelayoutSet;

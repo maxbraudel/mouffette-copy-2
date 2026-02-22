@@ -88,7 +88,7 @@ Item {
                 var _cy = _contentY
                 if (!root.contentItem || !root.viewportItem || !entry)
                     return Qt.point(0, 0)
-                return root.contentItem.mapToItem(root.viewportItem, sceneX, sceneY)
+                return Qt.point(_cx + sceneX * _vs, _cy + sceneY * _vs)
             }
 
             readonly property point p2: {
@@ -97,10 +97,8 @@ Item {
                 var _cy = _contentY
                 if (!root.contentItem || !root.viewportItem || !entry)
                     return Qt.point(1, 1)
-                return root.contentItem.mapToItem(
-                            root.viewportItem,
-                            sceneX + sceneW,
-                            sceneY + sceneH)
+                return Qt.point(_cx + (sceneX + sceneW) * _vs,
+                                _cy + (sceneY + sceneH) * _vs)
             }
 
             enabled: !!entry
@@ -115,7 +113,7 @@ Item {
             Shape {
                 anchors.fill: parent
                 antialiasing: false
-                preferredRendererType: Shape.CurveRenderer
+                preferredRendererType: Shape.GeometryRenderer
 
                 ShapePath {
                     strokeWidth: 1

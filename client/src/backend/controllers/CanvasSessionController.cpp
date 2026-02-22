@@ -194,7 +194,11 @@ void CanvasSessionController::configureCanvasSession(void* sessionPtr) {
     session->canvas->setUploadManager(m_mainWindow->getUploadManager());
     session->canvas->setFileManager(m_mainWindow->getFileManager());
     session->canvas->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    session->canvas->setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
+    if (dynamic_cast<QuickCanvasHost*>(session->canvas) != nullptr) {
+        session->canvas->setViewportUpdateMode(QGraphicsView::BoundingRectViewportUpdate);
+    } else {
+        session->canvas->setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
+    }
     session->canvas->setFocusPolicy(Qt::StrongFocus);
     session->canvas->installEventFilter(m_mainWindow);
 

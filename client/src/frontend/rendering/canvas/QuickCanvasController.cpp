@@ -145,6 +145,30 @@ QuickCanvasController::QuickCanvasController(QObject* parent)
         syncMediaModelFromScene();
     });
 
+    m_resizeDispatchTimer = new QTimer(this);
+    m_resizeDispatchTimer->setSingleShot(true);
+    m_resizeDispatchTimer->setInterval(8);
+    connect(m_resizeDispatchTimer, &QTimer::timeout, this, [this]() {
+        if (!m_hasQueuedResize) {
+            return;
+        }
+
+        const QString mediaId = m_queuedResizeMediaId;
+        const QString handleId = m_queuedResizeHandleId;
+        const qreal sceneX = m_queuedResizeSceneX;
+        const qreal sceneY = m_queuedResizeSceneY;
+        const bool snap = m_queuedResizeSnap;
+
+        m_hasQueuedResize = false;
+        m_executingQueuedResize = true;
+        handleMediaResizeRequested(mediaId, handleId, sceneX, sceneY, snap);
+        m_executingQueuedResize = false;
+
+        if (m_hasQueuedResize) {
+            m_resizeDispatchTimer->start();
+        }
+    });
+
     m_initialFitRetryTimer = new QTimer(this);
     m_initialFitRetryTimer->setSingleShot(true);
     m_initialFitRetryTimer->setInterval(16);
@@ -557,6 +581,19 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                                                        qreal sceneX,
                                                        qreal sceneY,
                                                        bool snap) {
+    if (!m_executingQueuedResize) {
+        m_queuedResizeMediaId = mediaId;
+        m_queuedResizeHandleId = handleId;
+        m_queuedResizeSceneX = sceneX;
+        m_queuedResizeSceneY = sceneY;
+        m_queuedResizeSnap = snap;
+        m_hasQueuedResize = true;
+        if (m_resizeDispatchTimer && !m_resizeDispatchTimer->isActive()) {
+            m_resizeDispatchTimer->start();
+        }
+        return;
+    }
+
     if (!m_mediaScene || mediaId.isEmpty() || handleId.isEmpty() || !m_inputArbiter) {
         m_pointerSession->setDraggingMedia(false);
         return;
@@ -752,6 +789,11 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
 }
 
 void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId) {
+    m_hasQueuedResize = false;
+    if (m_resizeDispatchTimer) {
+        m_resizeDispatchTimer->stop();
+    }
+
     if (m_pointerSession->resizeActive() && !mediaId.isEmpty() && mediaId != m_pointerSession->resizeMediaId()) {
         return;
     }

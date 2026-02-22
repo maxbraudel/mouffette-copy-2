@@ -10,7 +10,7 @@ Item {
     Repeater {
         model: root.guidesModel
 
-        delegate: Canvas {
+        delegate: Item {
             property var entry: modelData
             readonly property real _viewScale: root.contentItem ? root.contentItem.scale : 1.0
             readonly property real _contentX: root.contentItem ? root.contentItem.x : 0.0
@@ -22,7 +22,7 @@ Item {
                 var _cy = _contentY
                 if (!root.contentItem || !root.viewportItem || !entry)
                     return Qt.point(0, 0)
-                return root.contentItem.mapToItem(root.viewportItem, entry.x1, entry.y1)
+                return Qt.point(_cx + entry.x1 * _vs, _cy + entry.y1 * _vs)
             }
 
             readonly property point p2: {
@@ -31,46 +31,26 @@ Item {
                 var _cy = _contentY
                 if (!root.contentItem || !root.viewportItem || !entry)
                     return Qt.point(0, 0)
-                return root.contentItem.mapToItem(root.viewportItem, entry.x2, entry.y2)
+                return Qt.point(_cx + entry.x2 * _vs, _cy + entry.y2 * _vs)
             }
+
+            readonly property bool vertical: Math.abs(p2.x - p1.x) < Math.abs(p2.y - p1.y)
+            readonly property real minX: Math.min(p1.x, p2.x)
+            readonly property real minY: Math.min(p1.y, p2.y)
+            readonly property real guideLength: vertical ? Math.abs(p2.y - p1.y) : Math.abs(p2.x - p1.x)
 
             anchors.fill: parent
             enabled: false
-            visible: !!entry
-            antialiasing: false
+            visible: !!entry && guideLength >= 0.5
 
-            onPaint: {
-                var ctx = getContext("2d")
-                ctx.reset()
-
-                var dx = p2.x - p1.x
-                var dy = p2.y - p1.y
-                var length = Math.sqrt(dx * dx + dy * dy)
-                if (length < 0.5)
-                    return
-
-                var startX = p1.x
-                var startY = p1.y
-                var endX = p2.x
-                var endY = p2.y
-
-                if (Math.abs(dx) < Math.abs(dy)) {
-                    var snappedX = Math.round(startX) + 0.5
-                    startX = snappedX
-                    endX = snappedX
-                } else {
-                    var snappedY = Math.round(startY) + 0.5
-                    startY = snappedY
-                    endY = snappedY
-                }
-
-                ctx.setLineDash([4, 4])
-                ctx.lineWidth = 1
-                ctx.strokeStyle = "#48C2FF"
-                ctx.beginPath()
-                ctx.moveTo(startX, startY)
-                ctx.lineTo(endX, endY)
-                ctx.stroke()
+            Rectangle {
+                x: vertical ? Math.round(minX) : Math.round(minX)
+                y: vertical ? Math.round(minY) : Math.round(minY)
+                width: vertical ? 1 : Math.max(1, Math.round(parent.guideLength))
+                height: vertical ? Math.max(1, Math.round(parent.guideLength)) : 1
+                color: "#48C2FF"
+                opacity: 0.95
+                antialiasing: false
             }
         }
     }

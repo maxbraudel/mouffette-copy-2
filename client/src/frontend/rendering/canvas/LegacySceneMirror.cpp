@@ -112,6 +112,12 @@ void LegacySceneMirror::setViewportUpdateMode(QGraphicsView::ViewportUpdateMode 
     }
 }
 
+void LegacySceneMirror::setVisualMaintenanceSuppressed(bool suppressed) {
+    if (m_mediaCanvas) {
+        m_mediaCanvas->setVisualMaintenanceSuppressed(suppressed);
+    }
+}
+
 bool LegacySceneMirror::isTextToolActive() const {
     return m_mediaCanvas ? m_mediaCanvas->isTextToolActive() : false;
 }
