@@ -1,7 +1,10 @@
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/CanvasSceneStore.h"
 #include "frontend/rendering/canvas/GestureCommands.h"
+#include "frontend/rendering/canvas/ModelPublisher.h"
+#include "frontend/rendering/canvas/PointerSession.h"
 #include "frontend/rendering/canvas/QuickCanvasViewAdapter.h"
+#include "frontend/rendering/canvas/SelectionStore.h"
 
 #include <algorithm>
 #include <limits>
@@ -126,6 +129,9 @@ QuickCanvasController::QuickCanvasController(QObject* parent)
     : QObject(parent)
 {
     m_sceneStore = new CanvasSceneStore(this);
+    m_pointerSession = new PointerSession();
+    m_selectionStore = new SelectionStore();
+    m_modelPublisher = new ModelPublisher();
 
     m_mediaSyncTimer = new QTimer(this);
     m_mediaSyncTimer->setSingleShot(true);
@@ -160,6 +166,15 @@ QuickCanvasController::QuickCanvasController(QObject* parent)
     });
 }
 
+QuickCanvasController::~QuickCanvasController() {
+    delete m_modelPublisher;
+    m_modelPublisher = nullptr;
+    delete m_pointerSession;
+    m_pointerSession = nullptr;
+    delete m_selectionStore;
+    m_selectionStore = nullptr;
+}
+
 bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMessage) {
     if (m_quickWidget) {
         return true;
@@ -191,9 +206,8 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
     setShellActive(false);
     setTextToolActive(false);
     setScreens({});
-    m_viewAdapter->setMediaModel(QVariantList{});
-    m_viewAdapter->setSelectionChromeModel(QVariantList{});
-    m_viewAdapter->setSnapGuidesModel(QVariantList{});
+    m_modelPublisher->publishMediaModel(m_viewAdapter, QVariantList{});
+    m_modelPublisher->publishSelectionAndSnapModels(m_viewAdapter, QVariantList{}, QVariantList{});
 
     QObject::connect(
         m_quickWidget->rootObject(), SIGNAL(mediaSelectRequested(QString,bool)),
@@ -341,10 +355,10 @@ void QuickCanvasController::setMediaScene(QGraphicsScene* scene) {
 
     if (m_mediaScene) {
         connect(m_mediaScene, &QGraphicsScene::changed, this, [this](const QList<QRectF>&) {
-            if (!m_draggingMedia) scheduleMediaModelSync();
+            if (!m_pointerSession->draggingMedia()) scheduleMediaModelSync();
         });
         connect(m_mediaScene, &QGraphicsScene::selectionChanged, this, [this]() {
-            if (!m_draggingMedia) scheduleMediaModelSync();
+            if (!m_pointerSession->draggingMedia()) scheduleMediaModelSync();
         });
     }
 
@@ -472,6 +486,7 @@ void QuickCanvasController::handleMediaSelectRequested(const QString& mediaId, b
         m_mediaScene->clearSelection();
     }
     target->setSelected(true);
+    m_selectionStore->setSelectedMediaId(mediaId);
     scheduleMediaModelSync();
 }
 
@@ -487,7 +502,7 @@ void QuickCanvasController::handleMediaMoveEnded(const QString& mediaId, qreal s
         return;
     }
 
-    m_draggingMedia = true;
+    m_pointerSession->setDraggingMedia(true);
     ResizableMediaBase* movedTarget = nullptr;
     const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
     for (QGraphicsItem* graphicsItem : sceneItems) {
@@ -499,7 +514,7 @@ void QuickCanvasController::handleMediaMoveEnded(const QString& mediaId, qreal s
         media->setPos(QPointF(sceneX, sceneY));
         break;
     }
-    m_draggingMedia = false;
+    m_pointerSession->setDraggingMedia(false);
 
     if (m_mediaSyncTimer) {
         m_mediaSyncTimer->stop();
@@ -524,23 +539,21 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                                                        qreal sceneY,
                                                        bool snap) {
     if (!m_mediaScene || mediaId.isEmpty() || handleId.isEmpty()) {
-        m_draggingMedia = false;
+        m_pointerSession->setDraggingMedia(false);
         return;
     }
 
-    if (m_resizeActive) {
-        if (mediaId != m_resizeMediaId || handleId != m_resizeHandleId) {
+    if (m_pointerSession->resizeActive()) {
+        if (mediaId != m_pointerSession->resizeMediaId() || handleId != m_pointerSession->resizeHandleId()) {
             if (quickCanvasInteractionDebugEnabled()) {
                 qInfo() << "[QuickCanvas][Resize] Ignored mismatched request"
-                        << "active" << m_resizeMediaId << m_resizeHandleId
+                        << "active" << m_pointerSession->resizeMediaId() << m_pointerSession->resizeHandleId()
                         << "incoming" << mediaId << handleId;
             }
             return;
         }
     } else {
-        m_resizeActive = true;
-        m_resizeMediaId = mediaId;
-        m_resizeHandleId = handleId;
+        m_pointerSession->beginResize(mediaId, handleId);
         m_resizeBaseSize = QSize();
         m_resizeFixedItemPoint = QPointF();
         m_resizeFixedScenePoint = QPointF();
@@ -554,7 +567,7 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
         m_mediaSyncPending = false;
     }
 
-    m_draggingMedia = true;
+    m_pointerSession->setDraggingMedia(true);
 
     ResizableMediaBase* target = nullptr;
     const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
@@ -567,11 +580,9 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
         break;
     }
     if (!target) {
-        m_draggingMedia = false;
-        endLiveResizeSession(m_resizeMediaId, m_resizeLastSceneX, m_resizeLastSceneY, m_resizeLastScale);
-        m_resizeActive = false;
-        m_resizeMediaId.clear();
-        m_resizeHandleId.clear();
+        m_pointerSession->setDraggingMedia(false);
+        endLiveResizeSession(m_pointerSession->resizeMediaId(), m_resizeLastSceneX, m_resizeLastSceneY, m_resizeLastScale);
+        m_pointerSession->clearResize();
         m_resizeBaseSize = QSize();
         m_resizeFixedItemPoint = QPointF();
         m_resizeFixedScenePoint = QPointF();
@@ -580,11 +591,9 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
 
     const QSize baseSizeNow = target->baseSizePx();
     if (baseSizeNow.width() <= 0 || baseSizeNow.height() <= 0) {
-        m_draggingMedia = false;
-        endLiveResizeSession(m_resizeMediaId, m_resizeLastSceneX, m_resizeLastSceneY, m_resizeLastScale);
-        m_resizeActive = false;
-        m_resizeMediaId.clear();
-        m_resizeHandleId.clear();
+        m_pointerSession->setDraggingMedia(false);
+        endLiveResizeSession(m_pointerSession->resizeMediaId(), m_resizeLastSceneX, m_resizeLastSceneY, m_resizeLastScale);
+        m_pointerSession->clearResize();
         m_resizeBaseSize = QSize();
         m_resizeFixedItemPoint = QPointF();
         m_resizeFixedScenePoint = QPointF();
@@ -619,11 +628,9 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
         activeHandle = ResizableMediaBase::BottomRight;
         fixedItemPoint = QPointF(0.0, 0.0);
     } else {
-        m_draggingMedia = false;
-        endLiveResizeSession(m_resizeMediaId, m_resizeLastSceneX, m_resizeLastSceneY, m_resizeLastScale);
-        m_resizeActive = false;
-        m_resizeMediaId.clear();
-        m_resizeHandleId.clear();
+        m_pointerSession->setDraggingMedia(false);
+        endLiveResizeSession(m_pointerSession->resizeMediaId(), m_resizeLastSceneX, m_resizeLastSceneY, m_resizeLastScale);
+        m_pointerSession->clearResize();
         m_resizeBaseSize = QSize();
         m_resizeFixedItemPoint = QPointF();
         m_resizeFixedScenePoint = QPointF();
@@ -720,11 +727,11 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
 }
 
 void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId) {
-    if (m_resizeActive && !mediaId.isEmpty() && mediaId != m_resizeMediaId) {
+    if (m_pointerSession->resizeActive() && !mediaId.isEmpty() && mediaId != m_pointerSession->resizeMediaId()) {
         return;
     }
 
-    const QString finalMediaId = !mediaId.isEmpty() ? mediaId : m_resizeMediaId;
+    const QString finalMediaId = !mediaId.isEmpty() ? mediaId : m_pointerSession->resizeMediaId();
     qreal finalX = m_resizeLastSceneX;
     qreal finalY = m_resizeLastSceneY;
     qreal finalScale = m_resizeLastScale;
@@ -744,10 +751,8 @@ void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId) {
         }
     }
 
-    m_draggingMedia = false;
-    m_resizeActive = false;
-    m_resizeMediaId.clear();
-    m_resizeHandleId.clear();
+    m_pointerSession->setDraggingMedia(false);
+    m_pointerSession->clearResize();
     m_resizeBaseSize = QSize();
     m_resizeFixedItemPoint = QPointF();
     m_resizeFixedScenePoint = QPointF();
@@ -802,7 +807,7 @@ void QuickCanvasController::handleTextCreateRequested(qreal viewX, qreal viewY) 
 }
 
 void QuickCanvasController::syncMediaModelFromScene() {
-    if (m_draggingMedia || m_resizeActive) {
+    if (m_pointerSession->draggingMedia() || m_pointerSession->resizeActive()) {
         if (m_mediaSyncTimer) {
             m_mediaSyncPending = true;
             m_mediaSyncTimer->start();
@@ -891,7 +896,7 @@ void QuickCanvasController::pushMediaModelOnly() {
         }
     }
 
-    m_viewAdapter->setMediaModel(mediaModel);
+    m_modelPublisher->publishMediaModel(m_viewAdapter, mediaModel);
 }
 
 bool QuickCanvasController::beginLiveResizeSession(const QString& mediaId) {
@@ -1261,8 +1266,7 @@ void QuickCanvasController::pushSelectionAndSnapModels() {
         }
     }
 
-    m_viewAdapter->setSelectionChromeModel(selectionChromeModel);
-    m_viewAdapter->setSnapGuidesModel(snapGuidesModel);
+    m_modelPublisher->publishSelectionAndSnapModels(m_viewAdapter, selectionChromeModel, snapGuidesModel);
 }
 
 void QuickCanvasController::pushStaticLayerModels() {

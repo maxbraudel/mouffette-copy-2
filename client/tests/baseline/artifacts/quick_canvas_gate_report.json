@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-02-22T17:55:20.622Z",
-  "gitCommit": "815989593ef75276da2a474fd61784fa8fb2e668",
+  "generatedAt": "2026-02-22T18:03:08.330Z",
+  "gitCommit": "81bcf7bba27836c7a3cc751cfadc621ce9170db4",
   "inputs": {
     "quickLog": "tests/baseline/fixtures/perf_logs/phase4_quick_auto_targeted.log",
     "legacyLog": "tests/baseline/fixtures/perf_logs/phase4_legacy_auto.log"
@@ -15,7 +15,7 @@
     {
       "command": "node tests/baseline/run_baseline_checks.js",
       "exitCode": 0,
-      "stdout": "[BASELINE] PASS\n{\n  \"results\": {\n    \"fixtures\": {\n      \"filesChecked\": 4\n    },\n    \"replays\": {\n      \"filesChecked\": 3\n    },\n    \"snapshots\": {\n      \"filesChecked\": 4\n    },\n    \"invariance\": {\n      \"filesChecked\": 5,\n      \"assertions\": 21\n    }\n  },\n  \"elapsedMs\": 2\n}\n",
+      "stdout": "[BASELINE] PASS\n{\n  \"results\": {\n    \"fixtures\": {\n      \"filesChecked\": 4\n    },\n    \"replays\": {\n      \"filesChecked\": 3\n    },\n    \"snapshots\": {\n      \"filesChecked\": 4\n    },\n    \"invariance\": {\n      \"filesChecked\": 5,\n      \"assertions\": 21\n    }\n  },\n  \"elapsedMs\": 5\n}\n",
       "stderr": ""
     },
     {
@@ -32,9 +32,9 @@
     },
     {
       "command": "node tests/baseline/run_phase4_visual_parity.js",
-      "exitCode": 1,
-      "stdout": "",
-      "stderr": "[PHASE4_VISUAL_PARITY] FAIL\nQuickCanvasHost must bind media scene to controller\n"
+      "exitCode": 0,
+      "stdout": "[PHASE4_VISUAL_PARITY] PASS\n{\n  \"files\": {\n    \"filesChecked\": 4\n  },\n  \"resources\": {\n    \"aliasesChecked\": 3\n  },\n  \"canvas\": {\n    \"tokensChecked\": 9\n  },\n  \"delegates\": {\n    \"delegateChecks\": 6\n  },\n  \"dtoBridge\": {\n    \"controllerTokens\": 9,\n    \"hostChecks\": 2\n  },\n  \"snapshots\": {\n    \"snapshotAssets\": 4\n  }\n}\n",
+      "stderr": ""
     },
     {
       "command": "node tests/baseline/run_phase7_integration_hardening.js",
@@ -49,5 +49,5 @@
       "stderr": ""
     }
   ],
-  "allPassed": false
+  "allPassed": true
 }

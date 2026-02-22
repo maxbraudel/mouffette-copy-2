@@ -60,6 +60,9 @@ set(SOURCES
     src/frontend/rendering/canvas/QuickCanvasHost.cpp
     src/frontend/rendering/canvas/QuickCanvasController.cpp
     src/frontend/rendering/canvas/GestureCommands.cpp
+    src/frontend/rendering/canvas/PointerSession.cpp
+    src/frontend/rendering/canvas/ModelPublisher.cpp
+    src/frontend/rendering/canvas/SelectionStore.cpp
     src/frontend/rendering/canvas/CanvasSceneStore.cpp
     src/frontend/rendering/canvas/QuickCanvasViewAdapter.cpp
     src/frontend/rendering/canvas/OverlayPanels.cpp
@@ -190,6 +193,9 @@ set(HEADERS
     src/frontend/rendering/canvas/QuickCanvasHost.h
     src/frontend/rendering/canvas/QuickCanvasController.h
     src/frontend/rendering/canvas/GestureCommands.h
+    src/frontend/rendering/canvas/PointerSession.h
+    src/frontend/rendering/canvas/ModelPublisher.h
+    src/frontend/rendering/canvas/SelectionStore.h
     src/frontend/rendering/canvas/CanvasSceneStore.h
     src/frontend/rendering/canvas/QuickCanvasViewAdapter.h
     src/frontend/rendering/canvas/OverlayPanels.h

@@ -26,7 +26,7 @@ void UploadSignalConnector::connectAllSignals(
     // Signal: File upload started - mark items as uploading
     connect(uploadManager, &UploadManager::fileUploadStarted, mainWindow, [mainWindow](const QString& fileId) {
         if (MainWindow::CanvasSession* session = mainWindow->sessionForActiveUpload()) {
-            if (!session->canvas || !session->canvas->scene()) return;
+            if (!session->canvas) return;
             session->upload.perFileProgress[fileId] = 0;
             const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
             for (ResizableMediaBase* item : items) {
@@ -40,7 +40,7 @@ void UploadSignalConnector::connectAllSignals(
     // Signal: File upload progress - update upload progress on items
     connect(uploadManager, &UploadManager::fileUploadProgress, mainWindow, [mainWindow](const QString& fileId, int percent) {
         if (MainWindow::CanvasSession* session = mainWindow->sessionForActiveUpload()) {
-            if (!session->canvas || !session->canvas->scene()) return;
+            if (!session->canvas) return;
             if (percent >= 100) {
                 session->upload.perFileProgress[fileId] = 100;
                 const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
@@ -67,7 +67,7 @@ void UploadSignalConnector::connectAllSignals(
     connect(webSocketClient, &WebSocketClient::uploadPerFileProgressReceived, mainWindow,
             [mainWindow](const QString& uploadId, const QHash<QString, int>& filePercents) {
         MainWindow::CanvasSession* session = mainWindow->sessionForUploadId(uploadId);
-        if (!session || !session->canvas || !session->canvas->scene()) return;
+        if (!session || !session->canvas) return;
 
         if (!session->upload.receivingFilesToastShown && !filePercents.isEmpty()) {
             const QString label = session->lastClientInfo.getDisplayText().isEmpty()
@@ -111,7 +111,7 @@ void UploadSignalConnector::connectAllSignals(
     // Signal: Upload completed file IDs - mark files as uploaded
     connect(uploadManager, &UploadManager::uploadCompletedFileIds, mainWindow, [mainWindow](const QStringList& fileIds) {
         if (MainWindow::CanvasSession* session = mainWindow->sessionForActiveUpload()) {
-            if (!session->canvas || !session->canvas->scene()) return;
+            if (!session->canvas) return;
             for (const QString& fileId : fileIds) {
                 if (session->upload.serverCompletedFileIds.contains(fileId)) continue;
                 const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
@@ -146,10 +146,9 @@ void UploadSignalConnector::connectAllSignals(
             TOAST_INFO(QString("All files removed from %1").arg(label));
 
             session->upload.remoteFilesPresent = false;
-            if (session->canvas && session->canvas->scene()) {
-                const QList<QGraphicsItem*> allItems = session->canvas->scene()->items();
-                for (QGraphicsItem* it : allItems) {
-                    if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
+            if (session->canvas) {
+                for (ResizableMediaBase* media : session->canvas->enumerateMediaItems()) {
+                    if (media) {
                         media->setUploadNotUploaded();
                     }
                 }

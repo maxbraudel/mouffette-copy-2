@@ -18,13 +18,16 @@ class ScreenCanvas;
 class ResizableMediaBase;
 class CanvasSceneStore;
 class QuickCanvasViewAdapter;
+class PointerSession;
+class SelectionStore;
+class ModelPublisher;
 
 class QuickCanvasController : public QObject {
     Q_OBJECT
 
 public:
     explicit QuickCanvasController(QObject* parent = nullptr);
-    ~QuickCanvasController() override = default;
+    ~QuickCanvasController() override;
 
     bool initialize(QWidget* parentWidget, QString* errorMessage = nullptr);
 
@@ -93,13 +96,12 @@ private:
     QQuickWidget* m_quickWidget = nullptr;
     CanvasSceneStore* m_sceneStore = nullptr;
     QuickCanvasViewAdapter* m_viewAdapter = nullptr;
+    PointerSession* m_pointerSession = nullptr;
+    SelectionStore* m_selectionStore = nullptr;
+    ModelPublisher* m_modelPublisher = nullptr;
     QGraphicsScene* m_mediaScene = nullptr;
     QTimer* m_mediaSyncTimer = nullptr;
     bool m_mediaSyncPending = false;
-    bool m_draggingMedia = false;
-    bool m_resizeActive = false;
-    QString m_resizeMediaId;
-    QString m_resizeHandleId;
     QSize m_resizeBaseSize;
     QPointF m_resizeFixedItemPoint;
     QPointF m_resizeFixedScenePoint;

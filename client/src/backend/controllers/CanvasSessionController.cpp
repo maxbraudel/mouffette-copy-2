@@ -356,10 +356,9 @@ void CanvasSessionController::unloadUploadsForSession(void* sessionPtr, bool att
 
     m_mainWindow->getFileManager()->unmarkAllForClient(targetId);
 
-    if (session->canvas && session->canvas->scene()) {
-        const QList<QGraphicsItem*> items = session->canvas->scene()->items();
-        for (QGraphicsItem* item : items) {
-            if (auto* media = dynamic_cast<ResizableMediaBase*>(item)) {
+    if (session->canvas) {
+        for (ResizableMediaBase* media : session->canvas->enumerateMediaItems()) {
+            if (media) {
                 media->setUploadNotUploaded();
             }
         }

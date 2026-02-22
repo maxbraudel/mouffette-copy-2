@@ -128,7 +128,6 @@ bool cursorDebugEnabled() {
 #include "backend/platform/macos/MacWindowManager.h"
 #endif
 #include "frontend/ui/layout/ResponsiveLayoutManager.h"
-#include <QGraphicsItem>
 #include <QSet>
 #include <QElapsedTimer>
 #include <QDateTime>
@@ -1613,13 +1612,13 @@ void MainWindow::resetReconnectState() {
 
 void MainWindow::resetAllSessionUploadStates() {
     for (CanvasSession* session : m_sessionManager->getAllSessions()) {
-        if (session->canvas && session->canvas->scene()) {
-            const QList<QGraphicsItem*> allItems = session->canvas->scene()->items();
-            for (QGraphicsItem* item : allItems) {
-                if (auto* media = dynamic_cast<ResizableMediaBase*>(item)) {
-                    if (media->uploadState() == ResizableMediaBase::UploadState::Uploading) {
-                        media->setUploadNotUploaded();
-                    }
+        if (session->canvas) {
+            for (ResizableMediaBase* media : session->canvas->enumerateMediaItems()) {
+                if (!media) {
+                    continue;
+                }
+                if (media->uploadState() == ResizableMediaBase::UploadState::Uploading) {
+                    media->setUploadNotUploaded();
                 }
             }
         }
@@ -1805,13 +1804,20 @@ QPushButton* MainWindow::getBackButton() const {
 
 bool MainWindow::hasUnuploadedFilesForTarget(const QString& targetClientId) const {
     ICanvasHost* canvas = canvasForClientId(targetClientId);
-    if (!canvas || !canvas->scene()) return false;
-    const QList<QGraphicsItem*> allItems = canvas->scene()->items();
-    for (QGraphicsItem* it : allItems) {
-        if (auto* media = dynamic_cast<ResizableMediaBase*>(it)) {
-            const QString fileId = media->fileId();
-            if (fileId.isEmpty()) continue;
-            if (!m_fileManager->isFileUploadedToClient(fileId, targetClientId)) return true;
+    if (!canvas) {
+        return false;
+    }
+
+    for (ResizableMediaBase* media : canvas->enumerateMediaItems()) {
+        if (!media) {
+            continue;
+        }
+        const QString fileId = media->fileId();
+        if (fileId.isEmpty()) {
+            continue;
+        }
+        if (!m_fileManager->isFileUploadedToClient(fileId, targetClientId)) {
+            return true;
         }
     }
     return false;
