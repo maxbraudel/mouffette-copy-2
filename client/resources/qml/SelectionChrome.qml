@@ -1,4 +1,5 @@
 import QtQuick 2.15
+import QtQuick.Shapes 1.15
 
 // Renders the selection border and resize handles as a viewport-space overlay.
 // Move drag is handled natively by each media item's DragHandler in contentRoot.
@@ -111,32 +112,43 @@ Item {
             width: Math.max(1, Math.round(Math.abs(p2.x - p1.x)))
             height: Math.max(1, Math.round(Math.abs(p2.y - p1.y)))
 
-            Canvas {
+            Shape {
                 anchors.fill: parent
                 antialiasing: false
-                enabled: false
+                preferredRendererType: Shape.CurveRenderer
 
-                Component.onCompleted: requestPaint()
+                ShapePath {
+                    strokeWidth: 1
+                    strokeColor: "#FFFFFF"
+                    fillColor: "transparent"
+                    strokeStyle: ShapePath.DashLine
+                    dashPattern: [4, 4]
+                    dashOffset: 0
+                    joinStyle: ShapePath.MiterJoin
+                    capStyle: ShapePath.FlatCap
+                    startX: 0.5
+                    startY: 0.5
+                    PathLine { x: Math.max(0.5, chrome.width - 0.5); y: 0.5 }
+                    PathLine { x: Math.max(0.5, chrome.width - 0.5); y: Math.max(0.5, chrome.height - 0.5) }
+                    PathLine { x: 0.5; y: Math.max(0.5, chrome.height - 0.5) }
+                    PathLine { x: 0.5; y: 0.5 }
+                }
 
-                onPaint: {
-                    var ctx = getContext("2d")
-                    ctx.reset()
-
-                    var w = width
-                    var h = height
-                    if (w <= 1 || h <= 1)
-                        return
-
-                    ctx.setLineDash([4, 4])
-                    ctx.lineWidth = 1
-
-                    ctx.strokeStyle = "#FFFFFF"
-                    ctx.lineDashOffset = 0
-                    ctx.strokeRect(0.5, 0.5, w - 1, h - 1)
-
-                    ctx.strokeStyle = "#4A90E2"
-                    ctx.lineDashOffset = 4
-                    ctx.strokeRect(0.5, 0.5, w - 1, h - 1)
+                ShapePath {
+                    strokeWidth: 1
+                    strokeColor: "#4A90E2"
+                    fillColor: "transparent"
+                    strokeStyle: ShapePath.DashLine
+                    dashPattern: [4, 4]
+                    dashOffset: 4
+                    joinStyle: ShapePath.MiterJoin
+                    capStyle: ShapePath.FlatCap
+                    startX: 0.5
+                    startY: 0.5
+                    PathLine { x: Math.max(0.5, chrome.width - 0.5); y: 0.5 }
+                    PathLine { x: Math.max(0.5, chrome.width - 0.5); y: Math.max(0.5, chrome.height - 0.5) }
+                    PathLine { x: 0.5; y: Math.max(0.5, chrome.height - 0.5) }
+                    PathLine { x: 0.5; y: 0.5 }
                 }
             }
 
