@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-02-22T16:12:23.422Z",
-  "gitCommit": "2e4b211fd23560ad7fd6ecc86447d295b9992b87",
+  "generatedAt": "2026-02-22T17:38:48.700Z",
+  "gitCommit": "7d23eecb10b447aa578c054b460691a590073ec1",
   "inputs": {
     "quickLog": "tests/baseline/fixtures/perf_logs/phase4_quick_auto_targeted.log",
     "legacyLog": "tests/baseline/fixtures/perf_logs/phase4_legacy_auto.log"
@@ -22,6 +22,12 @@
       "command": "node tests/baseline/run_phase2_interaction_parity.js",
       "exitCode": 0,
       "stdout": "[PHASE2_PARITY] PASS\n{\n  \"qmlCheck\": {\n    \"checkedTokens\": 8\n  },\n  \"replayCheck\": {\n    \"zoomCount\": 3,\n    \"panCount\": 2,\n    \"maxDriftPx\": 0,\n    \"tolerancePx\": 3,\n    \"finalState\": {\n      \"scale\": 1.1495000000000002,\n      \"panX\": -32.48000000000002,\n      \"panY\": -87.87000000000012\n    }\n  }\n}\n",
+      "stderr": ""
+    },
+    {
+      "command": "node tests/baseline/run_phase2_interaction_ownership.js",
+      "exitCode": 0,
+      "stdout": "[PHASE2_INTERACTION_OWNERSHIP] PASS\n{\n  \"canvasRoot\": {\n    \"checkedTokens\": 9\n  },\n  \"selectionChrome\": {\n    \"checkedTokens\": 5\n  },\n  \"controllerOwnership\": {\n    \"checkedTokens\": 2\n  },\n  \"qrc\": {\n    \"checkedTokens\": 1\n  }\n}\n",
       "stderr": ""
     },
     {

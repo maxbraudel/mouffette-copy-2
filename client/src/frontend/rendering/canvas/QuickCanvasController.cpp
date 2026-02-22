@@ -1,5 +1,6 @@
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/CanvasSceneStore.h"
+#include "frontend/rendering/canvas/QuickCanvasViewAdapter.h"
 
 #include <algorithm>
 #include <limits>
@@ -183,13 +184,15 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
         return false;
     }
 
+    m_viewAdapter = new QuickCanvasViewAdapter(m_quickWidget, this);
+
     setScreenCount(0);
     setShellActive(false);
     setTextToolActive(false);
     setScreens({});
-    m_quickWidget->rootObject()->setProperty("mediaModel", QVariantList{});
-    m_quickWidget->rootObject()->setProperty("selectionChromeModel", QVariantList{});
-    m_quickWidget->rootObject()->setProperty("snapGuidesModel", QVariantList{});
+    m_viewAdapter->setMediaModel(QVariantList{});
+    m_viewAdapter->setSelectionChromeModel(QVariantList{});
+    m_viewAdapter->setSnapGuidesModel(QVariantList{});
 
     QObject::connect(
         m_quickWidget->rootObject(), SIGNAL(mediaSelectRequested(QString,bool)),
@@ -887,7 +890,7 @@ void QuickCanvasController::pushMediaModelOnly() {
         }
     }
 
-    m_quickWidget->rootObject()->setProperty("mediaModel", mediaModel);
+    m_viewAdapter->setMediaModel(mediaModel);
 }
 
 bool QuickCanvasController::beginLiveResizeSession(const QString& mediaId) {
@@ -1257,8 +1260,8 @@ void QuickCanvasController::pushSelectionAndSnapModels() {
         }
     }
 
-    m_quickWidget->rootObject()->setProperty("selectionChromeModel", selectionChromeModel);
-    m_quickWidget->rootObject()->setProperty("snapGuidesModel", snapGuidesModel);
+    m_viewAdapter->setSelectionChromeModel(selectionChromeModel);
+    m_viewAdapter->setSnapGuidesModel(snapGuidesModel);
 }
 
 void QuickCanvasController::pushStaticLayerModels() {

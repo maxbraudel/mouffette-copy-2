@@ -17,6 +17,7 @@ class QTimer;
 class ScreenCanvas;
 class ResizableMediaBase;
 class CanvasSceneStore;
+class QuickCanvasViewAdapter;
 
 class QuickCanvasController : public QObject {
     Q_OBJECT
@@ -91,6 +92,7 @@ private:
 
     QQuickWidget* m_quickWidget = nullptr;
     CanvasSceneStore* m_sceneStore = nullptr;
+    QuickCanvasViewAdapter* m_viewAdapter = nullptr;
     QGraphicsScene* m_mediaScene = nullptr;
     QTimer* m_mediaSyncTimer = nullptr;
     bool m_mediaSyncPending = false;
