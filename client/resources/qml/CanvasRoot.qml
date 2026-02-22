@@ -676,7 +676,6 @@ Rectangle {
             }
 
             MouseArea {
-                id: wheelInputArea
                 anchors.fill: parent
                 acceptedButtons: Qt.NoButton
                 hoverEnabled: false
