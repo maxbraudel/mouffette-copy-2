@@ -8,14 +8,6 @@
         "quick_shell_init_failed_fallback",
         "flag_off_legacy_default"
       ]
-    },
-    {
-      "file": "src/backend/handlers/ScreenEventHandler.cpp",
-      "mustContain": [
-        "LegacyCanvasHost::create",
-        "quick_shell_init_failed_fallback",
-        "flag_off_legacy_default"
-      ]
     }
   ]
 }

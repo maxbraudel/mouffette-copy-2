@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-02-21T12:48:48.387Z",
-  "gitCommit": "e33cedfbd1b7fa7a5ba7bf685315497d080e588f",
+  "generatedAt": "2026-02-22T16:12:23.422Z",
+  "gitCommit": "2e4b211fd23560ad7fd6ecc86447d295b9992b87",
   "inputs": {
     "quickLog": "tests/baseline/fixtures/perf_logs/phase4_quick_auto_targeted.log",
     "legacyLog": "tests/baseline/fixtures/perf_logs/phase4_legacy_auto.log"
@@ -15,7 +15,7 @@
     {
       "command": "node tests/baseline/run_baseline_checks.js",
       "exitCode": 0,
-      "stdout": "[BASELINE] PASS\n{\n  \"results\": {\n    \"fixtures\": {\n      \"filesChecked\": 4\n    },\n    \"replays\": {\n      \"filesChecked\": 3\n    },\n    \"snapshots\": {\n      \"filesChecked\": 4\n    },\n    \"invariance\": {\n      \"filesChecked\": 5,\n      \"assertions\": 24\n    }\n  },\n  \"elapsedMs\": 5\n}\n",
+      "stdout": "[BASELINE] PASS\n{\n  \"results\": {\n    \"fixtures\": {\n      \"filesChecked\": 4\n    },\n    \"replays\": {\n      \"filesChecked\": 3\n    },\n    \"snapshots\": {\n      \"filesChecked\": 4\n    },\n    \"invariance\": {\n      \"filesChecked\": 5,\n      \"assertions\": 21\n    }\n  },\n  \"elapsedMs\": 5\n}\n",
       "stderr": ""
     },
     {
@@ -28,6 +28,12 @@
       "command": "node tests/baseline/run_phase4_visual_parity.js",
       "exitCode": 0,
       "stdout": "[PHASE4_VISUAL_PARITY] PASS\n{\n  \"files\": {\n    \"filesChecked\": 4\n  },\n  \"resources\": {\n    \"aliasesChecked\": 3\n  },\n  \"canvas\": {\n    \"tokensChecked\": 9\n  },\n  \"delegates\": {\n    \"delegateChecks\": 6\n  },\n  \"dtoBridge\": {\n    \"controllerTokens\": 9,\n    \"hostChecks\": 2\n  },\n  \"snapshots\": {\n    \"snapshotAssets\": 4\n  }\n}\n",
+      "stderr": ""
+    },
+    {
+      "command": "node tests/baseline/run_phase7_integration_hardening.js",
+      "exitCode": 0,
+      "stdout": "[PHASE7_INTEGRATION_HARDENING] PASS\n{\n  \"matrixId\": \"phase7_integration_hardening\",\n  \"casesChecked\": 5,\n  \"rulesChecked\": 9,\n  \"assertions\": 27,\n  \"matrixFile\": \"tests/baseline/matrix/phase7_integration_hardening.json\"\n}\n",
       "stderr": ""
     },
     {

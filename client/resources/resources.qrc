@@ -33,5 +33,6 @@
     <file alias="TextItem.qml">qml/TextItem.qml</file>
     <file alias="SelectionChrome.qml">qml/SelectionChrome.qml</file>
     <file alias="SnapGuides.qml">qml/SnapGuides.qml</file>
+    <file alias="InteractionArbiter.qml">qml/InteractionArbiter.qml</file>
     </qresource>
 </RCC>

@@ -58,6 +58,7 @@ set(SOURCES
     src/frontend/rendering/canvas/LegacyCanvasHost.cpp
     src/frontend/rendering/canvas/QuickCanvasHost.cpp
     src/frontend/rendering/canvas/QuickCanvasController.cpp
+    src/frontend/rendering/canvas/CanvasSceneStore.cpp
     src/frontend/rendering/canvas/OverlayPanels.cpp
     
     # Rendering - Remote
@@ -184,6 +185,7 @@ set(HEADERS
     src/frontend/rendering/canvas/LegacyCanvasHost.h
     src/frontend/rendering/canvas/QuickCanvasHost.h
     src/frontend/rendering/canvas/QuickCanvasController.h
+    src/frontend/rendering/canvas/CanvasSceneStore.h
     src/frontend/rendering/canvas/OverlayPanels.h
     src/frontend/rendering/canvas/RoundedRectItem.h
     src/frontend/rendering/canvas/SegmentedButtonItem.h

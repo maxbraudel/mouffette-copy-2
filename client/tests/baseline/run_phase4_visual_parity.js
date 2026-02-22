@@ -82,10 +82,10 @@ function checkDtoBridge() {
   const controllerTokens = [
     'setMediaScene(',
     'syncMediaModelFromScene(',
-    'mediaEntry.insert(QStringLiteral("x"), sceneRect.x())',
-    'mediaEntry.insert(QStringLiteral("y"), sceneRect.y())',
-    'mediaEntry.insert(QStringLiteral("width"), sceneRect.width())',
-    'mediaEntry.insert(QStringLiteral("height"), sceneRect.height())',
+    'mediaEntry.insert(QStringLiteral("x"), scenePos.x() * sceneUnitScale)',
+    'mediaEntry.insert(QStringLiteral("y"), scenePos.y() * sceneUnitScale)',
+    'mediaEntry.insert(QStringLiteral("width"), std::max<qreal>(1.0, baseWidth * sceneUnitScale))',
+    'mediaEntry.insert(QStringLiteral("height"), std::max<qreal>(1.0, baseHeight * sceneUnitScale))',
     'mediaEntry.insert(QStringLiteral("z"), media->zValue())',
     'mediaEntry.insert(QStringLiteral("selected"), media->isSelected())',
     'handleTextCommitRequested('

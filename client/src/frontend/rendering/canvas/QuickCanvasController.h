@@ -3,7 +3,10 @@
 
 #include <QObject>
 #include <QHash>
+#include <QPointF>
 #include <QRectF>
+#include <QSize>
+#include <QVector>
 
 #include "backend/domain/models/ClientInfo.h"
 
@@ -11,6 +14,9 @@ class QQuickWidget;
 class QWidget;
 class QGraphicsScene;
 class QTimer;
+class ScreenCanvas;
+class ResizableMediaBase;
+class CanvasSceneStore;
 
 class QuickCanvasController : public QObject {
     Q_OBJECT
@@ -54,28 +60,54 @@ private:
     void scheduleMediaModelSync();
     void syncMediaModelFromScene();
     void pushMediaModelOnly();
+    bool beginLiveResizeSession(const QString& mediaId);
+    bool endLiveResizeSession(const QString& mediaId, qreal sceneX, qreal sceneY, qreal scale);
+    bool commitMediaTransform(const QString& mediaId, qreal sceneX, qreal sceneY, qreal scale);
+    bool pushLiveResizeGeometry(const QString& mediaId, qreal sceneX, qreal sceneY, qreal scale);
     void pushSelectionAndSnapModels();
     void pushRemoteCursorState();
     QPointF mapRemoteCursorToQuickScene(int globalX, int globalY, bool* ok) const;
     void rebuildScreenRects();
     qreal currentSceneUnitScale() const;
-    QRectF scaleSceneRect(const QRectF& rect) const;
     void refreshSceneUnitScaleIfNeeded(bool force = false);
     QPointF mapViewPointToScene(const QPointF& viewPoint) const;
     void scheduleInitialFitIfNeeded(int marginPx = 53);
     bool tryInitialFitNow(int marginPx = 53);
+    void buildResizeSnapCaches(ResizableMediaBase* resizingItem);
+    qreal applyAxisSnapWithCachedTargets(ResizableMediaBase* target,
+                                         qreal proposedScale,
+                                         const QPointF& fixedScenePoint,
+                                         const QSize& baseSize,
+                                         int activeHandle,
+                                         ScreenCanvas* screenCanvas) const;
+    bool applyCornerSnapWithCachedTargets(int activeHandle,
+                                          const QPointF& fixedScenePoint,
+                                          qreal proposedW,
+                                          qreal proposedH,
+                                          qreal& snappedW,
+                                          qreal& snappedH,
+                                          QPointF& snappedCorner,
+                                          ScreenCanvas* screenCanvas) const;
 
     QQuickWidget* m_quickWidget = nullptr;
-    QList<ScreenInfo> m_screens;
-    QHash<int, QRectF> m_sceneScreenRects;
-    bool m_remoteCursorVisible = false;
-    qreal m_remoteCursorX = 0.0;
-    qreal m_remoteCursorY = 0.0;
+    CanvasSceneStore* m_sceneStore = nullptr;
     QGraphicsScene* m_mediaScene = nullptr;
     QTimer* m_mediaSyncTimer = nullptr;
     bool m_mediaSyncPending = false;
     bool m_draggingMedia = false;
-    qreal m_sceneUnitScale = 1.0;
+    bool m_resizeActive = false;
+    QString m_resizeMediaId;
+    QString m_resizeHandleId;
+    QSize m_resizeBaseSize;
+    QPointF m_resizeFixedItemPoint;
+    QPointF m_resizeFixedScenePoint;
+    qreal m_resizeLastSceneX = 0.0;
+    qreal m_resizeLastSceneY = 0.0;
+    qreal m_resizeLastScale = 1.0;
+    bool m_resizeSnapCacheReady = false;
+    QVector<qreal> m_resizeSnapEdgesX;
+    QVector<qreal> m_resizeSnapEdgesY;
+    QVector<QPointF> m_resizeSnapCorners;
     bool m_pendingInitialSceneScaleRefresh = false;
     bool m_textToolActive = false;
     bool m_initialFitCompleted = false;

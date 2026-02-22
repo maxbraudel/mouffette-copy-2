@@ -37,6 +37,34 @@ Rectangle {
     property real minScale: 0.25
     property real maxScale: 4.0
     property real wheelZoomBase: 1.0015
+    // Transient live-resize overlay state (avoids full model mutation per pointer tick)
+    property bool liveResizeActive: false
+    property string liveResizeMediaId: ""
+    property real liveResizeX: 0.0
+    property real liveResizeY: 0.0
+    property real liveResizeScale: 1.0
+    readonly property string interactionMode: interactionArbiter.mode
+    readonly property string interactionOwnerId: interactionArbiter.ownerId
+
+    InteractionArbiter {
+        id: interactionArbiter
+    }
+
+    function isInteractionIdle() {
+        return interactionArbiter.isIdle()
+    }
+
+    function canStartInteraction(mode, ownerId) {
+        return interactionArbiter.canStart(mode, ownerId)
+    }
+
+    function beginInteraction(mode, ownerId) {
+        return interactionArbiter.begin(mode, ownerId)
+    }
+
+    function endInteraction(mode, ownerId) {
+        interactionArbiter.end(mode, ownerId)
+    }
 
     function clampScale(value) {
         return Math.max(minScale, Math.min(maxScale, value))
@@ -172,6 +200,69 @@ Rectangle {
         return "file://" + path
     }
 
+    function applyLiveResizeGeometry(mediaId, sceneX, sceneY, scale) {
+        if (!mediaId)
+            return false
+
+        liveResizeActive = true
+        liveResizeMediaId = mediaId
+        liveResizeX = sceneX
+        liveResizeY = sceneY
+        liveResizeScale = scale
+        return true
+    }
+
+    function commitMediaGeometry(mediaId, sceneX, sceneY, scale) {
+        if (!mediaId || !mediaModel || mediaModel.length === 0)
+            return false
+
+        for (var index = 0; index < mediaModel.length; ++index) {
+            var entry = mediaModel[index]
+            if (!entry || entry.mediaId !== mediaId)
+                continue
+
+            var updated = ({})
+            for (var key in entry)
+                updated[key] = entry[key]
+
+            updated.x = sceneX
+            updated.y = sceneY
+            updated.scale = scale
+
+            var next = mediaModel.slice(0)
+            next[index] = updated
+            mediaModel = next
+            return true
+        }
+
+        return false
+    }
+
+    function beginLiveResize(mediaId) {
+        if (!mediaId)
+            return false
+        liveResizeActive = true
+        liveResizeMediaId = mediaId
+        return true
+    }
+
+    function endLiveResize(mediaId, sceneX, sceneY, scale) {
+        if (!mediaId)
+            return false
+
+        var committed = commitMediaGeometry(mediaId, sceneX, sceneY, scale)
+        liveResizeActive = false
+        liveResizeMediaId = ""
+        liveResizeX = 0.0
+        liveResizeY = 0.0
+        liveResizeScale = 1.0
+        return committed
+    }
+
+    function commitMediaTransform(mediaId, sceneX, sceneY, scale) {
+        return commitMediaGeometry(mediaId, sceneX, sceneY, scale)
+    }
+
     Item {
         id: viewport
         anchors.fill: parent
@@ -241,11 +332,14 @@ Rectangle {
                         }
                     }
 
-                    x: localX
-                    y: localY
                     width: media ? Math.max(1, media.width) : 1
                     height: media ? Math.max(1, media.height) : 1
-                    scale: localScale
+                    readonly property bool usesLiveResize: root.liveResizeActive
+                                                         && root.liveResizeMediaId === currentMediaId
+                                                         && !localDragging
+                    x: usesLiveResize ? root.liveResizeX : localX
+                    y: usesLiveResize ? root.liveResizeY : localY
+                    scale: usesLiveResize ? root.liveResizeScale : localScale
                     transformOrigin: Item.TopLeft
                     z: media ? media.z : 0
                     visible: !!media
@@ -260,35 +354,50 @@ Rectangle {
                         enabled: !!mediaDelegate.media
                                  && !!mediaDelegate.media.selected
                                  && !mediaDelegate.media.textEditable
-                                 && !(loader.item && loader.item.editing === true)
+                                 && !(mediaContentLoader.item && mediaContentLoader.item.editing === true)
                                  && !root.textToolActive
+                                 && !selectionChrome.handlePriorityActive
+                                 && (mediaDrag.active
+                                     || root.canStartInteraction("move", mediaDelegate.currentMediaId))
+                        dragThreshold: 0
 
                         property real startX: 0.0
                         property real startY: 0.0
+                        property string activeMoveMediaId: ""
 
                         onActiveChanged: {
                             if (active) {
-                                startX = mediaDelegate.localX
-                                startY = mediaDelegate.localY
-                                mediaDelegate.localDragging = true
-                                root.liveDragMediaId = mediaDelegate.currentMediaId
-                            } else {
-                                mediaDelegate.localDragging = false
-                                if (mediaDelegate.currentMediaId !== "") {
-                                    root.liveDragMediaId = mediaDelegate.currentMediaId
-                                    root.mediaMoveEnded(mediaDelegate.currentMediaId,
-                                                        mediaDelegate.localX,
-                                                        mediaDelegate.localY)
-                                } else {
+                                activeMoveMediaId = mediaDelegate.currentMediaId
+                                if (!root.beginInteraction("move", activeMoveMediaId)) {
+                                    activeMoveMediaId = ""
+                                    mediaDelegate.localDragging = false
                                     root.liveDragMediaId = ""
                                     root.liveDragViewOffsetX = 0.0
                                     root.liveDragViewOffsetY = 0.0
+                                    return
                                 }
+                                startX = mediaDelegate.localX
+                                startY = mediaDelegate.localY
+                                mediaDelegate.localDragging = true
+                                root.liveDragMediaId = activeMoveMediaId
+                            } else {
+                                var finalMediaId = activeMoveMediaId
+                                mediaDelegate.localDragging = false
+                                root.liveDragMediaId = ""
+                                root.liveDragViewOffsetX = 0.0
+                                root.liveDragViewOffsetY = 0.0
+                                root.endInteraction("move", finalMediaId)
+                                if (finalMediaId !== "") {
+                                    root.mediaMoveEnded(finalMediaId,
+                                                        mediaDelegate.localX,
+                                                        mediaDelegate.localY)
+                                }
+                                activeMoveMediaId = ""
                             }
                         }
 
                         onTranslationChanged: {
-                            if (!active) return
+                            if (!active || !mediaDelegate.localDragging) return
                             // Use explicit scene-position mapping to avoid any coordinate
                             // ambiguity from contentRoot's scale transform.
                             var cur   = mediaDrag.centroid.scenePosition
@@ -301,9 +410,19 @@ Rectangle {
                             root.liveDragViewOffsetX = cur.x - press.x
                             root.liveDragViewOffsetY = cur.y - press.y
                         }
+
+                        onCanceled: {
+                            mediaDelegate.localDragging = false
+                            root.liveDragMediaId = ""
+                            root.liveDragViewOffsetX = 0.0
+                            root.liveDragViewOffsetY = 0.0
+                            root.endInteraction("move", activeMoveMediaId)
+                            activeMoveMediaId = ""
+                        }
                     }
 
                     Loader {
+                        id: mediaContentLoader
                         property var media: mediaDelegate.media
                         sourceComponent: {
                             if (!mediaDelegate.media) return null
@@ -326,8 +445,8 @@ Rectangle {
                     mediaWidth: parent.media ? parent.media.width : 0
                     mediaHeight: parent.media ? parent.media.height : 0
                     mediaScale: 1.0
-                    mediaZ: 0
-                    selected: !!(parent.media && parent.media.selected)
+                    mediaZ: parent.media.z
+                    selected: !!parent.media.selected
                     imageSource: root.mediaSourceUrl(parent.media ? parent.media.sourcePath : "")
                     onSelectRequested: function(mediaId, additive) {
                         root.mediaSelectRequested(mediaId, additive)
@@ -344,8 +463,8 @@ Rectangle {
                     mediaWidth: parent.media ? parent.media.width : 0
                     mediaHeight: parent.media ? parent.media.height : 0
                     mediaScale: 1.0
-                    mediaZ: 0
-                    selected: !!(parent.media && parent.media.selected)
+                    mediaZ: parent.media.z
+                    selected: !!parent.media.selected
                     source: root.mediaSourceUrl(parent.media ? parent.media.sourcePath : "")
                     onSelectRequested: function(mediaId, additive) {
                         root.mediaSelectRequested(mediaId, additive)
@@ -362,8 +481,8 @@ Rectangle {
                     mediaWidth: parent.media ? parent.media.width : 0
                     mediaHeight: parent.media ? parent.media.height : 0
                     mediaScale: 1.0
-                    mediaZ: 0
-                    selected: !!(parent.media && parent.media.selected)
+                    mediaZ: parent.media.z
+                    selected: !!parent.media.selected
                     textContent: parent.media ? (parent.media.textContent || "") : ""
                     horizontalAlignment: parent.media ? (parent.media.textHorizontalAlignment || "center") : "center"
                     verticalAlignment: parent.media ? (parent.media.textVerticalAlignment || "center") : "center"
@@ -414,6 +533,8 @@ Rectangle {
             anchors.fill: parent
             contentItem: contentRoot
             viewportItem: viewport
+            interactionController: root
+            mediaModel: root.mediaModel
             selectionModel: root.selectionChromeModel
             // Live drag offset: chrome visually follows the moving item without model repush
             draggedMediaId: root.liveDragMediaId
@@ -430,29 +551,52 @@ Rectangle {
 
         DragHandler {
             id: panDrag
-            enabled: !selectionChrome.interacting && root.liveDragMediaId === ""
+            enabled: panDrag.active
+                     || (root.isInteractionIdle()
+                         && !selectionChrome.interacting
+                         && !selectionChrome.handlePriorityActive
+                         && root.liveDragMediaId === "")
             target: null
             acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
             acceptedButtons: Qt.LeftButton
+            dragThreshold: 16
+            grabPermissions: PointerHandler.TakeOverForbidden
             property real startPanX: 0.0
             property real startPanY: 0.0
+            property bool panSessionActive: false
 
             onActiveChanged: {
                 if (active) {
+                    if (!root.beginInteraction("pan", "canvas")) {
+                        panSessionActive = false
+                        return
+                    }
+                    panSessionActive = true
                     startPanX = root.panX
                     startPanY = root.panY
+                } else {
+                    panSessionActive = false
+                    root.endInteraction("pan", "canvas")
                 }
             }
 
             onTranslationChanged: {
+                if (!panSessionActive)
+                    return
                 root.panX = startPanX + translation.x
                 root.panY = startPanY + translation.y
+            }
+
+            onCanceled: {
+                panSessionActive = false
+                root.endInteraction("pan", "canvas")
             }
         }
 
         PinchHandler {
             id: pinchZoom
             target: null
+            enabled: root.isInteractionIdle()
             property real lastScale: 1.0
 
             onActiveChanged: {
@@ -473,6 +617,7 @@ Rectangle {
         TapHandler {
             id: textToolTap
             target: null
+            enabled: root.isInteractionIdle()
             acceptedButtons: Qt.LeftButton
 
             onTapped: function(eventPoint) {
@@ -488,6 +633,10 @@ Rectangle {
             acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
 
             onWheel: function(event) {
+                if (!root.isInteractionIdle()) {
+                    event.accepted = true
+                    return
+                }
                 if (root.isZoomModifier(event.modifiers)) {
                     var dy = root.wheelDeltaY(event)
                     if (dy !== 0.0) {

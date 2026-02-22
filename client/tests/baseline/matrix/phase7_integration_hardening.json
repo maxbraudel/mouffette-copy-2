@@ -1,0 +1,103 @@
+{
+  "id": "phase7_integration_hardening",
+  "description": "Static integration-hardening evidence matrix for sessions/uploads/reconnect/remote-scene flows",
+  "cases": [
+    {
+      "id": "session_switch_persistence",
+      "rules": [
+        {
+          "file": "src/backend/controllers/CanvasSessionController.cpp",
+          "mustContain": [
+            "ensureCanvasSession",
+            "setActiveIdeaId\\(session\\.canvasSessionId\\)",
+            "remoteSceneLaunchStateChanged"
+          ]
+        },
+        {
+          "file": "src/backend/domain/session/SessionManager.h",
+          "mustContain": [
+            "QString canvasSessionId",
+            "ICanvasHost\\* canvas"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "upload_cancel_unload_reconcile",
+      "rules": [
+        {
+          "file": "src/backend/handlers/UploadEventHandler.cpp",
+          "mustContain": [
+            "requestRemoval\\(",
+            "requestUnload\\(",
+            "toggleUpload\\(",
+            "associateFileWithIdea\\("
+          ]
+        },
+        {
+          "file": "src/backend/network/WebSocketClient.h",
+          "mustContain": [
+            "sendRemoveFile\\("
+          ]
+        }
+      ]
+    },
+    {
+      "id": "watch_unwatch_reconnect",
+      "rules": [
+        {
+          "file": "src/backend/handlers/ClientListEventHandler.cpp",
+          "mustContain": [
+            "requestScreens\\(",
+            "toggleWatch\\("
+          ]
+        },
+        {
+          "file": "src/frontend/handlers/WindowEventHandler.cpp",
+          "mustContain": [
+            "isWatching\\(",
+            "toggleWatch\\(",
+            "requestScreens\\("
+          ]
+        }
+      ]
+    },
+    {
+      "id": "remote_scene_launch_stop",
+      "rules": [
+        {
+          "file": "src/backend/network/WebSocketClient.cpp",
+          "mustContain": [
+            "sendRemoteSceneStart\\(",
+            "sendRemoteSceneStop\\(",
+            "msg\\[\\\"type\\\"\\] = \\\"remote_scene_stop\\\"",
+            "emit remoteSceneStartReceived\\(",
+            "emit remoteSceneStopReceived\\("
+          ]
+        },
+        {
+          "file": "src/frontend/rendering/remote/RemoteSceneController.cpp",
+          "mustContain": [
+            "onRemoteSceneStart\\(",
+            "onRemoteSceneStop\\(",
+            "sendRemoteSceneValidationResult\\(",
+            "sendRemoteSceneStopResult\\("
+          ]
+        }
+      ]
+    },
+    {
+      "id": "quick_host_remote_scene_bridge",
+      "rules": [
+        {
+          "file": "src/frontend/rendering/canvas/QuickCanvasHost.cpp",
+          "mustContain": [
+            "remoteSceneLaunchStateChanged",
+            "setRemoteSceneTarget\\(",
+            "isRemoteSceneLaunched\\("
+          ]
+        }
+      ]
+    }
+  ]
+}

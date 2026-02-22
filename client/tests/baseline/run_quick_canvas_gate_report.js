@@ -68,7 +68,9 @@ function main() {
     runCommand('bash', ['./tools/check_architecture_boundaries.sh'], projectRoot),
     runCommand('node', ['tests/baseline/run_baseline_checks.js'], projectRoot),
     runCommand('node', ['tests/baseline/run_phase2_interaction_parity.js'], projectRoot),
+    runCommand('node', ['tests/baseline/run_phase2_interaction_ownership.js'], projectRoot),
     runCommand('node', ['tests/baseline/run_phase4_visual_parity.js'], projectRoot),
+    runCommand('node', ['tests/baseline/run_phase7_integration_hardening.js'], projectRoot),
     runCommand('node', [
       'tests/baseline/run_phase4_perf_delta.js',
       '--quick-log', absoluteQuickLog,
