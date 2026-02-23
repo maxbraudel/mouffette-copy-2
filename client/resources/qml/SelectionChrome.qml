@@ -307,76 +307,22 @@ Item {
             width: Math.max(1, sceneW)
             height: Math.max(1, sceneH)
 
-            Item {
-                anchors.fill: parent
+            // Use 4 separate opaque strips rather than a single transparent-fill Rectangle.
+            // A transparent-fill Rectangle with an opaque border can enter the opaque render
+            // batch in Qt Quick's scene graph — writes depth for the entire item bounds at
+            // chrome z=90000, causing the underlying Image (z≈0) to fail the depth test and
+            // render as black at high zoom levels. Pure opaque strips carry no fill, so they
+            // only occlude the exact edge pixels they cover.
+            readonly property real _bw: 1.0 / chrome._viewScale
 
-                readonly property real lineWidthScene: 1.0 / chrome._viewScale
-                readonly property real dashOnScene: 4.0 / chrome._viewScale
-                readonly property real dashOffScene: 4.0 / chrome._viewScale
-                readonly property real dashPeriodScene: dashOnScene + dashOffScene
-                readonly property int horizontalDashCount: Math.max(1, Math.ceil(chrome.width / Math.max(0.0001, dashPeriodScene)))
-                readonly property int verticalDashCount: Math.max(1, Math.ceil(chrome.height / Math.max(0.0001, dashPeriodScene)))
-
-                Repeater {
-                    model: parent.horizontalDashCount
-                    delegate: Rectangle {
-                        readonly property real period: parent.dashPeriodScene
-                        readonly property real start: index * period
-                        x: start
-                        y: 0
-                        width: Math.max(0, Math.min(parent.dashOnScene, chrome.width - start))
-                        height: parent.lineWidthScene
-                        color: (index % 2 === 0) ? "#FFFFFF" : "#4A90E2"
-                        visible: width > 0
-                        antialiasing: false
-                    }
-                }
-
-                Repeater {
-                    model: parent.horizontalDashCount
-                    delegate: Rectangle {
-                        readonly property real period: parent.dashPeriodScene
-                        readonly property real start: index * period
-                        x: start
-                        y: Math.max(0, chrome.height - parent.lineWidthScene)
-                        width: Math.max(0, Math.min(parent.dashOnScene, chrome.width - start))
-                        height: parent.lineWidthScene
-                        color: (index % 2 === 0) ? "#FFFFFF" : "#4A90E2"
-                        visible: width > 0
-                        antialiasing: false
-                    }
-                }
-
-                Repeater {
-                    model: parent.verticalDashCount
-                    delegate: Rectangle {
-                        readonly property real period: parent.dashPeriodScene
-                        readonly property real start: index * period
-                        x: 0
-                        y: start
-                        width: parent.lineWidthScene
-                        height: Math.max(0, Math.min(parent.dashOnScene, chrome.height - start))
-                        color: (index % 2 === 0) ? "#FFFFFF" : "#4A90E2"
-                        visible: height > 0
-                        antialiasing: false
-                    }
-                }
-
-                Repeater {
-                    model: parent.verticalDashCount
-                    delegate: Rectangle {
-                        readonly property real period: parent.dashPeriodScene
-                        readonly property real start: index * period
-                        x: Math.max(0, chrome.width - parent.lineWidthScene)
-                        y: start
-                        width: parent.lineWidthScene
-                        height: Math.max(0, Math.min(parent.dashOnScene, chrome.height - start))
-                        color: (index % 2 === 0) ? "#FFFFFF" : "#4A90E2"
-                        visible: height > 0
-                        antialiasing: false
-                    }
-                }
-            }
+            // Top
+            Rectangle { x: 0; y: 0;                              width: chrome.width;  height: chrome._bw; color: "#4A90E2"; antialiasing: false }
+            // Bottom
+            Rectangle { x: 0; y: chrome.height - chrome._bw;     width: chrome.width;  height: chrome._bw; color: "#4A90E2"; antialiasing: false }
+            // Left
+            Rectangle { x: 0; y: chrome._bw;                     width: chrome._bw;    height: Math.max(0, chrome.height - 2 * chrome._bw); color: "#4A90E2"; antialiasing: false }
+            // Right
+            Rectangle { x: chrome.width - chrome._bw; y: chrome._bw; width: chrome._bw; height: Math.max(0, chrome.height - 2 * chrome._bw); color: "#4A90E2"; antialiasing: false }
 
             Repeater {
                 model: root.handleDefs

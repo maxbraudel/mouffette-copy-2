@@ -36,7 +36,9 @@ Item {
         fillMode: Image.PreserveAspectFit
         smooth: true
         asynchronous: true
-        mipmap: true
+        // mipmap is beneficial for downscaling only; at high zoom (upscaling) it wastes
+        // GPU memory on a full mip chain and can cause allocation failures → black render.
+        mipmap: false
     }
 
     MouseArea {
