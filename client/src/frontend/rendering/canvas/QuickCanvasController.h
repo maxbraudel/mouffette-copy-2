@@ -110,6 +110,7 @@ private:
     QTimer* m_mediaSyncTimer = nullptr;
     QTimer* m_resizeDispatchTimer = nullptr;
     bool m_mediaSyncPending = false;
+    bool m_selectionMutationInProgress = false;
     bool m_executingQueuedResize = false;
     bool m_hasQueuedResize = false;
     QString m_queuedResizeMediaId;

@@ -38,7 +38,8 @@ constexpr int kRemoteCursorDiameterPx = 30;
 constexpr qreal kRemoteCursorBorderWidthPx = 2.0;
 
 bool quickCanvasInteractionDebugEnabled() {
-    static const bool enabled = qEnvironmentVariableIntValue("MOUFFETTE_CURSOR_DEBUG") > 0;
+    static const bool enabled = qEnvironmentVariableIntValue("MOUFFETTE_CURSOR_DEBUG") > 0
+        || qEnvironmentVariableIntValue("MOUFFETTE_INPUT_DEBUG") > 0;
     return enabled;
 }
 
@@ -231,6 +232,10 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
 
     m_viewAdapter = new QuickCanvasViewAdapter(m_quickWidget, this);
 
+    if (m_quickWidget->rootObject()) {
+        m_quickWidget->rootObject()->setProperty("inputDebugEnabled", quickCanvasInteractionDebugEnabled());
+    }
+
     setScreenCount(0);
     setShellActive(false);
     setTextToolActive(false);
@@ -262,6 +267,13 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
     QObject::connect(
         m_quickWidget->rootObject(), SIGNAL(textCreateRequested(double,double)),
         this, SLOT(handleTextCreateRequested(double,double)));
+
+    if (quickCanvasInteractionDebugEnabled()) {
+        qInfo() << "[QuickCanvas][Input] Initialized controller"
+                << "inputDebugEnabled=" << (m_quickWidget->rootObject()
+                    ? m_quickWidget->rootObject()->property("inputDebugEnabled").toBool()
+                    : false);
+    }
 
     m_pendingInitialSceneScaleRefresh = true;
     QTimer::singleShot(0, this, [this]() {
@@ -391,10 +403,15 @@ void QuickCanvasController::setMediaScene(QGraphicsScene* scene) {
 
     if (m_mediaScene) {
         connect(m_mediaScene, &QGraphicsScene::changed, this, [this](const QList<QRectF>&) {
-            if (!m_pointerSession->draggingMedia()) scheduleMediaModelSync();
+            if (!m_pointerSession->draggingMedia() && !m_selectionMutationInProgress) {
+                scheduleMediaModelSync();
+            }
         });
         connect(m_mediaScene, &QGraphicsScene::selectionChanged, this, [this]() {
-            if (!m_pointerSession->draggingMedia()) scheduleMediaModelSync();
+            if (m_selectionMutationInProgress) {
+                return;
+            }
+            pushSelectionAndSnapModels();
         });
     }
 
@@ -513,9 +530,15 @@ void QuickCanvasController::setTextToolActive(bool active) {
 
 void QuickCanvasController::scheduleMediaModelSync() {
     if (m_mediaSyncPending) {
+        if (quickCanvasInteractionDebugEnabled()) {
+            qInfo() << "[QuickCanvas][Input] Skipped media sync scheduling because one is already pending";
+        }
         return;
     }
     m_mediaSyncPending = true;
+    if (quickCanvasInteractionDebugEnabled()) {
+        qInfo() << "[QuickCanvas][Input] Scheduled media model sync";
+    }
     if (m_mediaSyncTimer) {
         m_mediaSyncTimer->start();
     } else {
@@ -528,14 +551,6 @@ void QuickCanvasController::handleMediaSelectRequested(const QString& mediaId, b
         return;
     }
 
-    auto syncSelectionNow = [this]() {
-        if (m_mediaSyncTimer) {
-            m_mediaSyncTimer->stop();
-        }
-        m_mediaSyncPending = false;
-        syncMediaModelFromScene();
-    };
-
     ResizableMediaBase* target = mediaItemById(mediaId);
 
     if (!target) {
@@ -545,26 +560,52 @@ void QuickCanvasController::handleMediaSelectRequested(const QString& mediaId, b
     const bool alreadyOnlySelected = target->isSelected()
         && m_mediaScene->selectedItems().size() == 1;
     if (!additive && alreadyOnlySelected) {
-        syncSelectionNow();
+        pushSelectionAndSnapModels();
         return;
     }
 
     if (additive && target->isSelected()) {
-        syncSelectionNow();
+        pushSelectionAndSnapModels();
         return;
     }
 
+    // Suppress both scene::changed and scene::selectionChanged during the mutation
+    // so neither triggers a full media-model republish that would destroy QML delegates.
+    m_selectionMutationInProgress = true;
     if (!additive) {
         m_mediaScene->clearSelection();
     }
     target->setSelected(true);
+    m_selectionMutationInProgress = false;
+
+    // Cancel any pending media sync that was scheduled before this call
+    // (e.g. from a scene::changed fired by a prior selection repaint).
+    if (m_mediaSyncTimer) {
+        m_mediaSyncTimer->stop();
+    }
+    m_mediaSyncPending = false;
+
     m_selectionStore->setSelectedMediaId(mediaId);
-    syncSelectionNow();
+    pushSelectionAndSnapModels();
+
+    if (quickCanvasInteractionDebugEnabled()) {
+        qInfo() << "[QuickCanvas][Input] Selection updated"
+                << "mediaId=" << mediaId
+                << "additive=" << additive
+                << "selectedCount=" << m_mediaScene->selectedItems().size();
+    }
 }
 
 // Move drag is now fully QML-native (DragHandler on each mediaDelegate inside contentRoot).
 // C++ is only notified once at drag-end to commit the final position.
 void QuickCanvasController::handleMediaMoveEnded(const QString& mediaId, qreal sceneX, qreal sceneY) {
+    if (quickCanvasInteractionDebugEnabled()) {
+        qInfo() << "[QuickCanvas][Input] Move ended"
+                << "mediaId=" << mediaId
+                << "sceneX=" << sceneX
+                << "sceneY=" << sceneY;
+    }
+
     if (!m_mediaScene || mediaId.isEmpty()) {
         if (m_mediaSyncTimer) {
             m_mediaSyncTimer->stop();
@@ -599,8 +640,12 @@ void QuickCanvasController::handleMediaMoveEnded(const QString& mediaId, qreal s
 }
 
 void QuickCanvasController::handleMediaMoveStarted(const QString& mediaId, qreal sceneX, qreal sceneY) {
-    Q_UNUSED(sceneX)
-    Q_UNUSED(sceneY)
+    if (quickCanvasInteractionDebugEnabled()) {
+        qInfo() << "[QuickCanvas][Input] Move started"
+                << "mediaId=" << mediaId
+                << "sceneX=" << sceneX
+                << "sceneY=" << sceneY;
+    }
     if (!m_mediaScene || mediaId.isEmpty()) {
         return;
     }
@@ -608,8 +653,12 @@ void QuickCanvasController::handleMediaMoveStarted(const QString& mediaId, qreal
 }
 
 void QuickCanvasController::handleMediaMoveUpdated(const QString& mediaId, qreal sceneX, qreal sceneY) {
-    Q_UNUSED(sceneX)
-    Q_UNUSED(sceneY)
+    if (quickCanvasInteractionDebugEnabled()) {
+        qInfo() << "[QuickCanvas][Input] Move updated"
+                << "mediaId=" << mediaId
+                << "sceneX=" << sceneX
+                << "sceneY=" << sceneY;
+    }
     if (!m_mediaScene || mediaId.isEmpty()) {
         return;
     }
@@ -621,6 +670,16 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                                                        qreal sceneX,
                                                        qreal sceneY,
                                                        bool snap) {
+    if (quickCanvasInteractionDebugEnabled()) {
+        qInfo() << "[QuickCanvas][Input] Resize requested"
+                << "mediaId=" << mediaId
+                << "handleId=" << handleId
+                << "sceneX=" << sceneX
+                << "sceneY=" << sceneY
+                << "snap=" << snap
+                << "queuedExecution=" << m_executingQueuedResize;
+    }
+
     if (!m_executingQueuedResize) {
         m_queuedResizeMediaId = mediaId;
         m_queuedResizeHandleId = handleId;
@@ -812,6 +871,12 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
 }
 
 void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId) {
+    if (quickCanvasInteractionDebugEnabled()) {
+        qInfo() << "[QuickCanvas][Input] Resize ended"
+                << "mediaId=" << mediaId
+                << "activeResizeMediaId=" << m_pointerSession->resizeMediaId();
+    }
+
     m_hasQueuedResize = false;
     if (m_resizeDispatchTimer) {
         m_resizeDispatchTimer->stop();
@@ -881,7 +946,15 @@ void QuickCanvasController::handleTextCommitRequested(const QString& mediaId, co
 }
 
 void QuickCanvasController::handleTextCreateRequested(qreal viewX, qreal viewY) {
-    emit textMediaCreateRequested(mapViewPointToScene(QPointF(viewX, viewY)));
+    const QPointF scenePos = mapViewPointToScene(QPointF(viewX, viewY));
+    if (quickCanvasInteractionDebugEnabled()) {
+        qInfo() << "[QuickCanvas][Input] Text create requested"
+                << "viewX=" << viewX
+                << "viewY=" << viewY
+                << "sceneX=" << scenePos.x()
+                << "sceneY=" << scenePos.y();
+    }
+    emit textMediaCreateRequested(scenePos);
 
     // Force an immediate model sync so the newly-created text item appears in
     // the QML Repeater right away. Without this, creation only schedules a
@@ -901,6 +974,12 @@ void QuickCanvasController::handleTextCreateRequested(qreal viewX, qreal viewY) 
 
 void QuickCanvasController::syncMediaModelFromScene() {
     if (m_pointerSession->draggingMedia() || m_pointerSession->resizeActive()) {
+        if (quickCanvasInteractionDebugEnabled()) {
+            qInfo() << "[QuickCanvas][Input] Deferred media sync due to active pointer session"
+                    << "draggingMedia=" << m_pointerSession->draggingMedia()
+                    << "resizeActive=" << m_pointerSession->resizeActive()
+                    << "resizeMediaId=" << m_pointerSession->resizeMediaId();
+        }
         if (m_mediaSyncTimer) {
             m_mediaSyncPending = true;
             m_mediaSyncTimer->start();
@@ -964,7 +1043,10 @@ void QuickCanvasController::pushMediaModelOnly() {
             mediaEntry.insert(QStringLiteral("height"), std::max<qreal>(1.0, baseHeight * sceneUnitScale));
             mediaEntry.insert(QStringLiteral("scale"), mediaScale);
             mediaEntry.insert(QStringLiteral("z"), media->zValue());
-            mediaEntry.insert(QStringLiteral("selected"), media->isSelected());
+            // NOTE: 'selected' is intentionally NOT included here.
+            // Selection state is published separately via selectionChromeModel.
+            // Including it here would cause the entire mediaModel to be replaced
+            // on every selection change, destroying all QML delegates mid-gesture.
             mediaEntry.insert(QStringLiteral("sourcePath"), media->sourcePath());
             mediaEntry.insert(QStringLiteral("uploadState"), uploadStateToString(media->uploadState()));
             mediaEntry.insert(QStringLiteral("displayName"), media->displayName());
@@ -997,6 +1079,11 @@ void QuickCanvasController::pushMediaModelOnly() {
     }
 
     m_modelPublisher->publishMediaModel(m_viewAdapter, mediaModel);
+
+    if (quickCanvasInteractionDebugEnabled()) {
+        qInfo() << "[QuickCanvas][Input] Published media model"
+                << "entryCount=" << mediaModel.size();
+    }
 }
 
 bool QuickCanvasController::beginLiveResizeSession(const QString& mediaId) {
@@ -1159,6 +1246,12 @@ void QuickCanvasController::pushSelectionAndSnapModels() {
     }
 
     m_modelPublisher->publishSelectionAndSnapModels(m_viewAdapter, selectionChromeModel, snapGuidesModel);
+
+    if (quickCanvasInteractionDebugEnabled()) {
+        qInfo() << "[QuickCanvas][Input] Published selection/snap models"
+                << "selectionCount=" << selectionChromeModel.size()
+                << "snapCount=" << snapGuidesModel.size();
+    }
 }
 
 void QuickCanvasController::pushStaticLayerModels() {
