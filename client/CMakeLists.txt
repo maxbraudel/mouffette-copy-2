@@ -59,7 +59,6 @@ set(SOURCES
     src/frontend/rendering/canvas/LegacySceneMirror.cpp
     src/frontend/rendering/canvas/QuickCanvasHost.cpp
     src/frontend/rendering/canvas/QuickCanvasController.cpp
-    src/frontend/rendering/canvas/InputArbiter.cpp
     src/frontend/rendering/canvas/GestureCommands.cpp
     src/frontend/rendering/canvas/PointerSession.cpp
     src/frontend/rendering/canvas/ModelPublisher.cpp
@@ -196,7 +195,6 @@ set(HEADERS
     src/frontend/rendering/canvas/LegacySceneMirror.h
     src/frontend/rendering/canvas/QuickCanvasHost.h
     src/frontend/rendering/canvas/QuickCanvasController.h
-    src/frontend/rendering/canvas/InputArbiter.h
     src/frontend/rendering/canvas/GestureCommands.h
     src/frontend/rendering/canvas/PointerSession.h
     src/frontend/rendering/canvas/ModelPublisher.h
