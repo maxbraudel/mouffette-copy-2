@@ -18,18 +18,17 @@ Item {
     signal deleteRequested(string mediaId)
     signal overlayHoveredChanged(bool hovered)
 
-    // Fixed panel dimensions — must NOT depend on media item size.
-    // 4 buttons × 26px + 3 gaps × 4px = 116px content; + 2×8 padding = 132px.
-    // Label row adds height but not width (clamped to 160px, elided).
-    readonly property real panelWidth: 148
-    readonly property real panelHeight: displayName.length > 0 ? 72 : 46
-
     readonly property real paddingH: 8
     readonly property real paddingV: 6
     readonly property real itemSpacing: 4
+    readonly property real btnSize: 28
 
-    width: panelWidth
-    height: panelHeight
+    // panelWidth/panelHeight exposed so CanvasRoot can read them for centering.
+    readonly property real panelWidth: implicitWidth
+    readonly property real panelHeight: implicitHeight
+
+    implicitWidth:  btnRow.implicitWidth + paddingH * 2
+    implicitHeight: (displayName.length > 0 ? btnSize + itemSpacing + 16 : btnSize) + paddingV * 2
 
     // Background pill
     Rectangle {
@@ -51,64 +50,54 @@ Item {
         onExited: root.overlayHoveredChanged(false)
     }
 
-    Column {
-        id: contentColumn
+    // Filename label — stretches to container width, only shown when name is set
+    Text {
+        id: nameLabel
+        visible: root.displayName.length > 0
+        text: root.displayName
+        color: "#FFFFFF"
+        font.pixelSize: 11
+        elide: Text.ElideRight
+        maximumLineCount: 1
         x: root.paddingH
         y: root.paddingV
-        width: root.panelWidth - root.paddingH * 2
+        width: root.width - root.paddingH * 2
+    }
+
+    // Buttons row — defines the container width
+    Row {
+        id: btnRow
+        x: root.paddingH
+        y: root.paddingV + (root.displayName.length > 0 ? 16 + root.itemSpacing : 0)
         spacing: root.itemSpacing
 
-        // Row 1: filename label
-        Text {
-            id: nameLabel
-            text: root.displayName
-            color: "#FFFFFF"
-            font.pixelSize: 11
-            font.family: "system-ui, -apple-system, sans-serif"
-            elide: Text.ElideRight
-            maximumLineCount: 1
-            width: Math.min(implicitWidth, 160)
-            visible: root.displayName.length > 0
+        OverlayButton {
+            iconSource: root.contentVisible
+                ? "qrc:/icons/icons/visibility-on.svg"
+                : "qrc:/icons/icons/visibility-off.svg"
+            isToggle: true
+            toggled: root.contentVisible
+            implicitWidth: root.btnSize
+            implicitHeight: root.btnSize
+            onClicked: root.visibilityToggleRequested(root.mediaId, !root.contentVisible)
         }
-
-        // Row 2: action buttons
-        Row {
-            spacing: root.itemSpacing
-
-            OverlayButton {
-                id: visibilityBtn
-                iconSource: root.contentVisible
-                    ? "qrc:/icons/icons/visibility-on.svg"
-                    : "qrc:/icons/icons/visibility-off.svg"
-                isToggle: true
-                toggled: root.contentVisible
-                implicitWidth: 26
-                implicitHeight: 26
-                onClicked: {
-                    root.visibilityToggleRequested(root.mediaId, !root.contentVisible)
-                }
-            }
-
-            OverlayButton {
-                iconSource: "qrc:/icons/icons/arrow-up.svg"
-                implicitWidth: 26
-                implicitHeight: 26
-                onClicked: root.bringForwardRequested(root.mediaId)
-            }
-
-            OverlayButton {
-                iconSource: "qrc:/icons/icons/arrow-down.svg"
-                implicitWidth: 26
-                implicitHeight: 26
-                onClicked: root.bringBackwardRequested(root.mediaId)
-            }
-
-            OverlayButton {
-                iconSource: "qrc:/icons/icons/delete.svg"
-                implicitWidth: 26
-                implicitHeight: 26
-                onClicked: root.deleteRequested(root.mediaId)
-            }
+        OverlayButton {
+            iconSource: "qrc:/icons/icons/arrow-up.svg"
+            implicitWidth: root.btnSize
+            implicitHeight: root.btnSize
+            onClicked: root.bringForwardRequested(root.mediaId)
+        }
+        OverlayButton {
+            iconSource: "qrc:/icons/icons/arrow-down.svg"
+            implicitWidth: root.btnSize
+            implicitHeight: root.btnSize
+            onClicked: root.bringBackwardRequested(root.mediaId)
+        }
+        OverlayButton {
+            iconSource: "qrc:/icons/icons/delete.svg"
+            implicitWidth: root.btnSize
+            implicitHeight: root.btnSize
+            onClicked: root.deleteRequested(root.mediaId)
         }
     }
 }

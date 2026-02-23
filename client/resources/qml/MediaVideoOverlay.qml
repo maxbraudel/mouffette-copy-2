@@ -1,4 +1,5 @@
 import QtQuick 2.15
+import QtQuick.Layouts 1.15
 
 // Bottom overlay panel attached below a selected video media item.
 // Mirrors the legacy ResizableVideoItem controls panel:
@@ -26,16 +27,15 @@ Item {
     readonly property real paddingH: 8
     readonly property real paddingV: 6
     readonly property real itemSpacing: 4
+    readonly property real btnSize: 28
+    readonly property real sliderMinWidth: 60
 
-    // Fixed panel dimensions — must NOT depend on media item size.
-    // Row 1: 4 buttons×26 + slider×60 + 4 gaps×4 = 210px content; +2×8 padding = 226px.
-    // Row 2: progress bar = same content width.
-    // Total height: 2 rows × 26px + 1 gap × 4px + 2×6 padding = 68px.
-    readonly property real panelWidth: 226
-    readonly property real panelHeight: 68
+    // panelWidth/panelHeight exposed so CanvasRoot can read them for centering.
+    readonly property real panelWidth: implicitWidth
+    readonly property real panelHeight: implicitHeight
 
-    width: panelWidth
-    height: panelHeight
+    implicitWidth:  controlsRow.implicitWidth + paddingH * 2
+    implicitHeight: btnSize + 14 + itemSpacing + paddingV * 2  // row + progress + gap + padding
 
     // Background pill
     Rectangle {
@@ -57,81 +57,64 @@ Item {
         onExited: root.overlayHoveredChanged(false)
     }
 
-    Column {
-        id: contentColumn
+    // Controls row — defines the container width.
+    // Buttons are fixed square; volume slider expands to fill remaining space.
+    RowLayout {
+        id: controlsRow
         x: root.paddingH
         y: root.paddingV
-        width: root.panelWidth - root.paddingH * 2
+        // Width = container width minus padding (container sizes from our implicitWidth)
+        width: root.width - root.paddingH * 2
         spacing: root.itemSpacing
 
-        // Row 1: transport controls + volume
-        Row {
-            spacing: root.itemSpacing
-
-            // Play / Pause
-            OverlayButton {
-                iconSource: root.isPlaying
-                    ? "qrc:/icons/icons/pause.svg"
-                    : "qrc:/icons/icons/play.svg"
-                implicitWidth: 26
-                implicitHeight: 26
-                onClicked: root.playPauseRequested(root.mediaId)
-            }
-
-            // Stop
-            OverlayButton {
-                iconSource: "qrc:/icons/icons/stop.svg"
-                implicitWidth: 26
-                implicitHeight: 26
-                onClicked: root.stopRequested(root.mediaId)
-            }
-
-            // Repeat toggle
-            OverlayButton {
-                iconSource: "qrc:/icons/icons/loop.svg"
-                isToggle: true
-                toggled: root.isLooping
-                implicitWidth: 26
-                implicitHeight: 26
-                onClicked: root.repeatToggleRequested(root.mediaId)
-            }
-
-            // Mute toggle
-            OverlayButton {
-                iconSource: root.isMuted
-                    ? "qrc:/icons/icons/volume-off.svg"
-                    : "qrc:/icons/icons/volume-on.svg"
-                isToggle: true
-                toggled: root.isMuted
-                implicitWidth: 26
-                implicitHeight: 26
-                onClicked: root.muteToggleRequested(root.mediaId)
-            }
-
-            // Volume slider
-            OverlaySlider {
-                id: volumeSlider
-                value: root.isMuted ? 0.0 : root.volume
-                implicitWidth: 60
-                implicitHeight: 26
-                onSeeked: function(r) {
-                    root.volumeChangeRequested(root.mediaId, r)
-                }
-            }
+        OverlayButton {
+            iconSource: root.isPlaying ? "qrc:/icons/icons/pause.svg" : "qrc:/icons/icons/play.svg"
+            Layout.preferredWidth: root.btnSize
+            Layout.preferredHeight: root.btnSize
+            onClicked: root.playPauseRequested(root.mediaId)
         }
-
-        // Row 2: progress bar (stretches full content width)
+        OverlayButton {
+            iconSource: "qrc:/icons/icons/stop.svg"
+            Layout.preferredWidth: root.btnSize
+            Layout.preferredHeight: root.btnSize
+            onClicked: root.stopRequested(root.mediaId)
+        }
+        OverlayButton {
+            iconSource: "qrc:/icons/icons/loop.svg"
+            isToggle: true
+            toggled: root.isLooping
+            Layout.preferredWidth: root.btnSize
+            Layout.preferredHeight: root.btnSize
+            onClicked: root.repeatToggleRequested(root.mediaId)
+        }
+        OverlayButton {
+            iconSource: root.isMuted ? "qrc:/icons/icons/volume-off.svg" : "qrc:/icons/icons/volume-on.svg"
+            isToggle: true
+            toggled: root.isMuted
+            Layout.preferredWidth: root.btnSize
+            Layout.preferredHeight: root.btnSize
+            onClicked: root.muteToggleRequested(root.mediaId)
+        }
+        // Volume slider: minimum width, expands to fill remaining space
         OverlaySlider {
-            id: progressSlider
-            value: root.progress
-            width: root.panelWidth - root.paddingH * 2
-            implicitHeight: 16
-            onDragStarted: function(r) {
-                root.seekRequested(root.mediaId, r)
-            }
-            onSeeked: function(r) {
-                root.seekRequested(root.mediaId, r)
-            }
+            id: volumeSlider
+            value: root.isMuted ? 0.0 : root.volume
+            Layout.fillWidth: true
+            Layout.minimumWidth: root.sliderMinWidth
+            Layout.preferredHeight: root.btnSize
+            onSeeked: function(r) { root.volumeChangeRequested(root.mediaId, r) }
         }
+    }
+
+    // Progress bar — full container width
+    OverlaySlider {
+        id: progressSlider
+        value: root.progress
+        x: root.paddingH
+        y: root.paddingV + root.btnSize + root.itemSpacing
+        width: root.width - root.paddingH * 2
+        height: 14
+        onDragStarted: function(r) { root.seekRequested(root.mediaId, r) }
+        onSeeked:      function(r) { root.seekRequested(root.mediaId, r) }
     }
 }
