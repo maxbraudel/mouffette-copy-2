@@ -160,7 +160,7 @@ Item {
                 hoveredHandleId = ""
                 return
             }
-        } else if (interactionController && !interactionController.isInteractionIdle()) {
+        } else if (inputCoordinator && !inputCoordinator.isIdle()) {
             hoveredMediaId = ""
             hoveredHandleId = ""
             return
@@ -209,8 +209,8 @@ Item {
                           && !!root.inputCoordinator
                           && root.inputCoordinator.canStartResize(false, root.hoveredMediaId))
                          || (!root.useInputCoordinator
-                             && (!root.interactionController
-                                 || root.interactionController.isInteractionIdle()))))
+                             && !!root.inputCoordinator
+                             && root.inputCoordinator.isIdle())))
         dragThreshold: 0
 
         onActiveChanged: {
@@ -235,8 +235,8 @@ Item {
                 if (root.useInputCoordinator) {
                     resizeGranted = !!root.inputCoordinator
                         && root.inputCoordinator.tryBeginResize(root.activeResizeMediaId)
-                } else if (root.interactionController) {
-                    resizeGranted = root.interactionController.beginInteraction("resize", root.activeResizeMediaId)
+                } else if (root.inputCoordinator) {
+                    resizeGranted = root.inputCoordinator.beginMode("resize", root.activeResizeMediaId)
                 }
 
                 if (!resizeGranted) {
@@ -254,8 +254,8 @@ Item {
                 root.interacting = false
                 if (root.useInputCoordinator) {
                     root.inputCoordinator.endResize(finalMediaId)
-                } else if (root.interactionController) {
-                    root.interactionController.endInteraction("resize", finalMediaId)
+                } else if (root.inputCoordinator) {
+                    root.inputCoordinator.endMode("resize", finalMediaId)
                 }
                 root.resizeEnded(finalMediaId)
                 root.activeResizeMediaId = ""
@@ -268,8 +268,8 @@ Item {
             root.interacting = false
             if (root.useInputCoordinator && root.inputCoordinator) {
                 root.inputCoordinator.endResize(canceledMediaId)
-            } else if (!root.useInputCoordinator && root.interactionController) {
-                root.interactionController.endInteraction("resize", canceledMediaId)
+            } else if (!root.useInputCoordinator && root.inputCoordinator) {
+                root.inputCoordinator.endMode("resize", canceledMediaId)
             }
             root.resizeEnded(canceledMediaId)
             root.activeResizeMediaId = ""

@@ -31,12 +31,26 @@ Item {
             pressTargetMediaId = ""
         }
 
+        function isIdle() {
+            return mode === "idle"
+        }
+
+        function canStart(requestedMode, requestedOwnerId) {
+            var owner = requestedOwnerId || ""
+            return mode === "idle"
+                || (mode === requestedMode && ownerId === owner)
+        }
+
         function beginMode(requestedMode, requestedOwnerId) {
             var owner = requestedOwnerId || ""
-            if (!inputLayer.interactionController)
+            if (!canStart(requestedMode, owner)) {
+                console.warn("[QuickCanvas][InputCoordinator] denied begin",
+                             "requestedMode=", requestedMode,
+                             "requestedOwner=", owner,
+                             "currentMode=", mode,
+                             "currentOwner=", ownerId)
                 return false
-            if (!inputLayer.interactionController.beginInteraction(requestedMode, owner))
-                return false
+            }
             mode = requestedMode
             ownerId = owner
             return true
@@ -44,15 +58,23 @@ Item {
 
         function endMode(expectedMode, expectedOwnerId) {
             var owner = expectedOwnerId || ""
-            if (!inputLayer.interactionController)
+            if (mode !== expectedMode) {
+                console.warn("[QuickCanvas][InputCoordinator] ignored end due to mode mismatch",
+                             "expectedMode=", expectedMode,
+                             "currentMode=", mode,
+                             "owner=", owner,
+                             "currentOwner=", ownerId)
                 return
-            inputLayer.interactionController.endInteraction(expectedMode, owner)
-            if (mode === expectedMode) {
-                if (ownerId === "" || owner === "" || ownerId === owner) {
-                    mode = "idle"
-                    ownerId = ""
-                }
             }
+            if (ownerId !== "" && owner !== "" && ownerId !== owner) {
+                console.warn("[QuickCanvas][InputCoordinator] ignored end due to owner mismatch",
+                             "expectedMode=", expectedMode,
+                             "expectedOwner=", owner,
+                             "currentOwner=", ownerId)
+                return
+            }
+            mode = "idle"
+            ownerId = ""
         }
 
         function isPointInsideMedia(viewX, viewY) {
@@ -111,8 +133,7 @@ Item {
                 return true
             if (pressTargetKind !== "media" || pressTargetMediaId !== mediaId)
                 return false
-            return !!inputLayer.interactionController
-                && inputLayer.interactionController.canStartInteraction("move", mediaId)
+            return canStart("move", mediaId)
         }
 
         function tryBeginMove(mediaId) {
@@ -127,8 +148,7 @@ Item {
         }
 
         function canEnablePan(panActive) {
-            return panActive || (!!inputLayer.interactionController
-                && inputLayer.interactionController.isInteractionIdle()
+            return panActive || (isIdle()
                 && !inputLayer.textToolActive
                 && !inputLayer.selectionHandlePriorityActive
                 && inputLayer.liveDragMediaId === "")
@@ -155,9 +175,7 @@ Item {
         function canStartResize(active, mediaId) {
             if (active)
                 return true
-            if (!inputLayer.interactionController)
-                return false
-            if (!inputLayer.interactionController.isInteractionIdle())
+            if (!isIdle())
                 return false
             if (pressTargetKind === "handle") {
                 return pressTargetMediaId === "" || pressTargetMediaId === mediaId
@@ -177,8 +195,7 @@ Item {
         }
 
         function canStartTextToolTap() {
-            return !!inputLayer.interactionController
-                && inputLayer.interactionController.isInteractionIdle()
+            return isIdle()
                 && inputLayer.textToolActive
                 && !inputLayer.selectionHandlePriorityActive
                 && inputLayer.liveDragMediaId === ""

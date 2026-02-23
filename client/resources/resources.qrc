@@ -34,7 +34,6 @@
     <file alias="TextItem.qml">qml/TextItem.qml</file>
     <file alias="SelectionChrome.qml">qml/SelectionChrome.qml</file>
     <file alias="SnapGuides.qml">qml/SnapGuides.qml</file>
-    <file alias="InteractionArbiter.qml">qml/InteractionArbiter.qml</file>
     <file alias="CanvasViewport.qml">qml/CanvasViewport.qml</file>
     <file alias="MediaLayer.qml">qml/MediaLayer.qml</file>
     <file alias="SelectionLayer.qml">qml/SelectionLayer.qml</file>

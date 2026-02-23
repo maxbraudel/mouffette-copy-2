@@ -45,28 +45,12 @@ Rectangle {
     property real liveResizeX: 0.0
     property real liveResizeY: 0.0
     property real liveResizeScale: 1.0
-    readonly property string interactionMode: interactionArbiter.mode
-    readonly property string interactionOwnerId: interactionArbiter.ownerId
-
-    InteractionArbiter {
-        id: interactionArbiter
-    }
-
-    function isInteractionIdle() {
-        return interactionArbiter.isIdle()
-    }
-
-    function canStartInteraction(mode, ownerId) {
-        return interactionArbiter.canStart(mode, ownerId)
-    }
-
-    function beginInteraction(mode, ownerId) {
-        return interactionArbiter.begin(mode, ownerId)
-    }
-
-    function endInteraction(mode, ownerId) {
-        interactionArbiter.end(mode, ownerId)
-    }
+    readonly property string interactionMode: (inputLayer && inputLayer.inputCoordinator)
+                                       ? inputLayer.inputCoordinator.mode
+                                       : "idle"
+    readonly property string interactionOwnerId: (inputLayer && inputLayer.inputCoordinator)
+                                          ? inputLayer.inputCoordinator.ownerId
+                                          : ""
 
     function requestMediaSelection(mediaId, additive) {
         if (!mediaId || mediaId.length === 0)
@@ -88,7 +72,7 @@ Rectangle {
                 return false
             if (selectionChrome.handlePriorityActive)
                 return false
-            return dragActive || root.canStartInteraction("move", mediaId)
+            return dragActive || inputLayer.inputCoordinator.canStart("move", mediaId)
         }
         return !!inputLayer
             && !!inputLayer.inputCoordinator
@@ -97,7 +81,7 @@ Rectangle {
 
     function canStartCanvasPan(panActive) {
         if (!inputLayer || !inputLayer.useInputCoordinator) {
-            return panActive || (root.isInteractionIdle()
+            return panActive || (interactionMode === "idle"
                 && !root.textToolActive
                 && !selectionChrome.interacting
                 && !selectionChrome.handlePriorityActive
@@ -110,7 +94,7 @@ Rectangle {
 
     function canStartTextToolTap() {
         if (!inputLayer || !inputLayer.useInputCoordinator) {
-            return root.isInteractionIdle()
+            return interactionMode === "idle"
                 && root.textToolActive
                 && !selectionChrome.interacting
                 && !selectionChrome.handlePriorityActive
@@ -248,7 +232,7 @@ Rectangle {
     }
 
     function canProcessCameraWheel() {
-        if (isInteractionIdle())
+        if (interactionMode === "idle")
             return true
         return interactionMode === "pan"
             && (interactionOwnerId === "" || interactionOwnerId === "canvas")
@@ -441,7 +425,7 @@ Rectangle {
                                 activeMoveMediaId = mediaDelegate.currentMediaId
                                 var moveGranted = inputLayer.useInputCoordinator
                                     ? inputLayer.inputCoordinator.tryBeginMove(activeMoveMediaId)
-                                    : root.beginInteraction("move", activeMoveMediaId)
+                                    : inputLayer.inputCoordinator.beginMode("move", activeMoveMediaId)
                                 if (!moveGranted) {
                                     activeMoveMediaId = ""
                                     mediaDelegate.localDragging = false
@@ -476,7 +460,7 @@ Rectangle {
                                 if (inputLayer.useInputCoordinator) {
                                     inputLayer.inputCoordinator.endMove(finalMediaId)
                                 } else {
-                                    root.endInteraction("move", finalMediaId)
+                                    inputLayer.inputCoordinator.endMode("move", finalMediaId)
                                 }
                                 if (finalMediaId !== "") {
                                     root.mediaMoveEnded(finalMediaId,
@@ -517,7 +501,7 @@ Rectangle {
                             if (inputLayer.useInputCoordinator) {
                                 inputLayer.inputCoordinator.endMove(activeMoveMediaId)
                             } else {
-                                root.endInteraction("move", activeMoveMediaId)
+                                inputLayer.inputCoordinator.endMode("move", activeMoveMediaId)
                             }
                             activeMoveMediaId = ""
                         }
@@ -722,7 +706,7 @@ Rectangle {
                             var pressPoint = panDrag.centroid.scenePressPosition
                             panGranted = inputLayer.inputCoordinator.tryBeginPanAt(pressPoint.x, pressPoint.y)
                         } else {
-                            panGranted = root.beginInteraction("pan", "canvas")
+                            panGranted = inputLayer.inputCoordinator.beginMode("pan", "canvas")
                         }
                         if (!panGranted) {
                             panSessionActive = false
@@ -736,7 +720,7 @@ Rectangle {
                         if (inputLayer.useInputCoordinator) {
                             inputLayer.inputCoordinator.endPan()
                         } else {
-                            root.endInteraction("pan", "canvas")
+                            inputLayer.inputCoordinator.endMode("pan", "canvas")
                         }
                     }
                 }
@@ -753,7 +737,7 @@ Rectangle {
                     if (inputLayer.useInputCoordinator) {
                         inputLayer.inputCoordinator.endPan()
                     } else {
-                        root.endInteraction("pan", "canvas")
+                        inputLayer.inputCoordinator.endMode("pan", "canvas")
                     }
                 }
             }
@@ -761,7 +745,7 @@ Rectangle {
             PinchHandler {
                 id: pinchZoom
                 target: null
-                enabled: root.isInteractionIdle()
+                enabled: interactionMode === "idle"
                 property real lastScale: 1.0
 
                 onActiveChanged: {
