@@ -18,8 +18,8 @@ Item {
     signal overlayHoveredChanged(bool hovered)
 
     readonly property real itemSpacing: 4
-    readonly property real btnSize: 28
-    readonly property real namePillHeight: 24
+    readonly property real btnSize: 36
+    readonly property real namePillHeight: btnSize
 
     // panelWidth/panelHeight exposed so CanvasRoot can read them for centering.
     readonly property real panelWidth: implicitWidth
@@ -55,13 +55,12 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.leftMargin: 8
-            anchors.rightMargin: 8
             text: root.displayName
             color: "#FFFFFF"
-            font.pixelSize: 11
+            font.pixelSize: 16
             elide: Text.ElideRight
             maximumLineCount: 1
+            horizontalAlignment: Text.AlignHCenter
         }
     }
 

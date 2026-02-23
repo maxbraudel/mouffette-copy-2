@@ -25,7 +25,7 @@ Item {
     signal overlayHoveredChanged(bool hovered)
 
     readonly property real itemSpacing: 4
-    readonly property real btnSize: 28
+    readonly property real btnSize: 36
     readonly property real sliderMinWidth: 60
     readonly property real progressHeight: 14
 

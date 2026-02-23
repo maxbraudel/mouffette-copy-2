@@ -12,8 +12,8 @@ Item {
 
     signal clicked()
 
-    implicitWidth: 28
-    implicitHeight: 28
+    implicitWidth: 36
+    implicitHeight: 36
 
     // Background pill
     Rectangle {
