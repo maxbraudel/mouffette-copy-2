@@ -1019,29 +1019,33 @@ Rectangle {
     }
 
     // ---- Unclipped overlay layer ----
-    // Sits above viewport (which has clip:true). Position is computed purely
-    // from modelData scene coords + root.viewScale/panX/panY — no delegate
-    // reference needed, so there are no timing or scoping issues.
+    // Driven by selectionChromeModel whose x/y/width/height already have
+    // item scale baked in (width = base * itemScale * sceneUnitScale).
+    // Extra metadata (displayName, mediaType, etc.) is looked up from mediaModel.
     Item {
         id: overlayLayer
         anchors.fill: parent
         z: 99000
 
         Repeater {
-            model: root.mediaModel
+            // One overlay pair per selected item — selectionChromeModel
+            // is the authoritative source for selected-item geometry.
+            model: root.selectionChromeModel
             delegate: Item {
                 id: overlayDelegate
 
-                readonly property string mid: modelData ? (modelData.mediaId || "") : ""
+                // selectionChromeModel entry — has baked width/height
+                readonly property var chromeEntry: modelData
+                readonly property string mid: chromeEntry ? (chromeEntry.mediaId || "") : ""
 
-                // Is this item currently selected? Check selectionChromeModel.
-                readonly property bool isSelected: {
+                // Look up the matching mediaModel entry for metadata
+                readonly property var mediaEntry: {
                     var m = mid
-                    if (!m) return false
-                    for (var i = 0; i < root.selectionChromeModel.length; ++i) {
-                        if (root.selectionChromeModel[i].mediaId === m) return true
+                    if (!m) return null
+                    for (var i = 0; i < root.mediaModel.length; ++i) {
+                        if (root.mediaModel[i].mediaId === m) return root.mediaModel[i]
                     }
-                    return false
+                    return null
                 }
 
                 // Is a live resize active for this item?
@@ -1050,28 +1054,36 @@ Rectangle {
                 // Is this item being dragged?
                 readonly property bool isDragging: root.liveDragMediaId === mid
 
-                // Effective scene position and scale (accounts for live resize and drag)
-                readonly property real sceneX:     isLiveResizing ? root.liveResizeX     : (modelData ? modelData.x     : 0)
-                readonly property real sceneY:     isLiveResizing ? root.liveResizeY     : (modelData ? modelData.y     : 0)
-                readonly property real itemScale:  isLiveResizing ? root.liveResizeScale : (modelData ? (modelData.scale || 1.0) : 1.0)
-                readonly property real baseWidth:  modelData ? (modelData.width  || 0) : 0
-                readonly property real baseHeight: modelData ? (modelData.height || 0) : 0
+                // Scene position — switch to live resize coords when resizing.
+                // chromeEntry.x/y are already in QML scene units (scenePos * sceneUnitScale).
+                readonly property real sceneX: isLiveResizing ? root.liveResizeX : (chromeEntry ? (chromeEntry.x || 0) : 0)
+                readonly property real sceneY: isLiveResizing ? root.liveResizeY : (chromeEntry ? (chromeEntry.y || 0) : 0)
 
-                // Screen-space rendered dimensions
-                readonly property real screenW: baseWidth  * itemScale * root.viewScale
-                readonly property real screenH: baseHeight * itemScale * root.viewScale
+                // Rendered screen size — chromeEntry.width/height = base * itemScale * sceneUnitScale,
+                // so multiply by viewScale only to get screen pixels.
+                // During live resize, recompute from mediaEntry base size * liveResizeScale.
+                readonly property real screenW: {
+                    if (isLiveResizing && mediaEntry)
+                        return (mediaEntry.width || 0) * root.liveResizeScale * root.viewScale
+                    return (chromeEntry ? (chromeEntry.width || 0) : 0) * root.viewScale
+                }
+                readonly property real screenH: {
+                    if (isLiveResizing && mediaEntry)
+                        return (mediaEntry.height || 0) * root.liveResizeScale * root.viewScale
+                    return (chromeEntry ? (chromeEntry.height || 0) : 0) * root.viewScale
+                }
 
-                // Screen-space top-left of the item (add live drag offset if dragging)
+                // Screen-space top-left (add live drag offset if dragging)
                 readonly property real screenLeft: sceneX * root.viewScale + root.panX
                                                    + (isDragging ? root.liveDragViewOffsetX : 0)
                 readonly property real screenTop:  sceneY * root.viewScale + root.panY
                                                    + (isDragging ? root.liveDragViewOffsetY : 0)
 
-                // Screen-space centre-x and bottom-y
+                // Derived screen anchors
                 readonly property real screenCentreX: screenLeft + screenW * 0.5
                 readonly property real screenBottom:  screenTop  + screenH
 
-                // Video state from the live model
+                // Video state
                 readonly property var videoState: {
                     var vs = root.videoStateModel
                     if (vs && vs.mediaId && vs.mediaId === mid) return vs
@@ -1082,9 +1094,9 @@ Rectangle {
                 MediaTopOverlay {
                     id: topOverlay
                     mediaId: overlayDelegate.mid
-                    displayName: modelData ? (modelData.displayName || "") : ""
-                    contentVisible: modelData ? (modelData.contentVisible !== false) : true
-                    visible: overlayDelegate.isSelected
+                    displayName: overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.displayName || "") : ""
+                    contentVisible: overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.contentVisible !== false) : true
+                    visible: true
 
                     x: overlayDelegate.screenCentreX - panelWidth  * 0.5
                     y: overlayDelegate.screenTop      - panelHeight - 8
@@ -1093,16 +1105,15 @@ Rectangle {
                     onBringForwardRequested:     function(m)    { root.overlayBringForwardRequested(m) }
                     onBringBackwardRequested:    function(m)    { root.overlayBringBackwardRequested(m) }
                     onDeleteRequested:           function(m)    { root.overlayDeleteRequested(m) }
-                    onOverlayHoveredChanged:     function(h)    { /* no delegate ref needed */ }
+                    onOverlayHoveredChanged:     function(h)    { /* input handled by overlay's own MouseArea */ }
                 }
 
                 // Bottom overlay: video transport controls
                 MediaVideoOverlay {
                     id: bottomOverlay
                     mediaId: overlayDelegate.mid
-                    visible: overlayDelegate.isSelected
-                             && modelData
-                             && modelData.mediaType === "video"
+                    visible: overlayDelegate.mediaEntry
+                             && overlayDelegate.mediaEntry.mediaType === "video"
 
                     isPlaying: overlayDelegate.videoState ? !!overlayDelegate.videoState.isPlaying : false
                     isMuted:   overlayDelegate.videoState ? !!overlayDelegate.videoState.isMuted   : false
@@ -1119,7 +1130,7 @@ Rectangle {
                     onMuteToggleRequested:   function(m)    { root.overlayMuteToggleRequested(m) }
                     onVolumeChangeRequested: function(m, v) { root.overlayVolumeChangeRequested(m, v) }
                     onSeekRequested:         function(m, r) { root.overlaySeekRequested(m, r) }
-                    onOverlayHoveredChanged: function(h)    { /* no delegate ref needed */ }
+                    onOverlayHoveredChanged: function(h)    { /* input handled by overlay's own MouseArea */ }
                 }
             }
         }
