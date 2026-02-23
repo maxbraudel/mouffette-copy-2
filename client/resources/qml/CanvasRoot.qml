@@ -433,6 +433,7 @@ Rectangle {
                 // A DragHandler lives here (inside contentRoot, which has scale:viewScale)
                 // so DragHandler translation is already in scene coordinates — no C++ per frame.
                 Repeater {
+                    id: mediaRepeater
                     model: root.mediaModel
                     delegate: Item {
                     id: mediaDelegate
@@ -444,6 +445,9 @@ Rectangle {
                     property real localScale: media ? (media.scale || 1.0) : 1.0
                     property bool localDragging: false
                     property bool overlayHovered: false
+                    // Actual rendered scale — switches to liveResizeScale during resize
+                    // so overlay counter-scale stays correct every frame.
+                    readonly property real effectiveScale: usesLiveResize ? root.liveResizeScale : localScale
                     readonly property string currentMediaId: media ? (media.mediaId || "") : ""
                     // Derived from selectionChromeModel — NOT from media.selected.
                     // This avoids mediaModel churn (and delegate destruction) on selection changes.
@@ -722,109 +726,12 @@ Rectangle {
                         }
                     }
 
-                    // ---- Media-attached overlays ----
                     // Resolved video state for this delegate (updated by 50ms timer in C++)
                     readonly property var delegateVideoState: {
                         var vs = root.videoStateModel
                         if (vs && vs.mediaId && vs.mediaId === mediaDelegate.currentMediaId)
                             return vs
                         return null
-                    }
-
-                    // Top overlay: filename + utility buttons (all media types)
-                    MediaTopOverlay {
-                        id: topOverlay
-                        mediaId: mediaDelegate.currentMediaId
-                        displayName: mediaDelegate.media ? (mediaDelegate.media.displayName || "") : ""
-                        contentVisible: mediaDelegate.media ? (mediaDelegate.media.contentVisible !== false) : true
-                        visible: mediaDelegate.isSelected && !mediaDelegate.localDragging
-                        // Fixed screen-pixel size: cancel both contentRoot viewScale and
-                        // mediaDelegate localScale so the overlay is always 1:1 screen pixels.
-                        scale: {
-                            var s = root.viewScale * mediaDelegate.localScale
-                            return s > 1e-6 ? 1.0 / s : 1.0
-                        }
-                        transformOrigin: Item.TopLeft
-                        // x/y are in mediaDelegate-local coords (before localScale is applied).
-                        // Centre horizontally over the rendered media item, gap above top edge.
-                        x: {
-                            var s = root.viewScale * mediaDelegate.localScale
-                            return s > 1e-6 ? mediaDelegate.width * 0.5 - panelWidth * 0.5 / s : 0
-                        }
-                        y: {
-                            var s = root.viewScale * mediaDelegate.localScale
-                            return s > 1e-6 ? -(panelHeight + 8) / s : 0
-                        }
-                        z: 100
-
-                        onVisibilityToggleRequested: function(mid, v) {
-                            root.overlayVisibilityToggleRequested(mid, v)
-                        }
-                        onBringForwardRequested: function(mid) {
-                            root.overlayBringForwardRequested(mid)
-                        }
-                        onBringBackwardRequested: function(mid) {
-                            root.overlayBringBackwardRequested(mid)
-                        }
-                        onDeleteRequested: function(mid) {
-                            root.overlayDeleteRequested(mid)
-                        }
-                        onOverlayHoveredChanged: function(h) {
-                            mediaDelegate.overlayHovered = h
-                        }
-                    }
-
-                    // Bottom overlay: video transport controls (video only)
-                    MediaVideoOverlay {
-                        id: bottomOverlay
-                        mediaId: mediaDelegate.currentMediaId
-                        visible: mediaDelegate.isSelected
-                                 && !mediaDelegate.localDragging
-                                 && mediaDelegate.media
-                                 && mediaDelegate.media.mediaType === "video"
-                        isPlaying: mediaDelegate.delegateVideoState ? !!mediaDelegate.delegateVideoState.isPlaying : false
-                        isMuted: mediaDelegate.delegateVideoState ? !!mediaDelegate.delegateVideoState.isMuted : false
-                        isLooping: mediaDelegate.delegateVideoState ? !!mediaDelegate.delegateVideoState.isLooping : false
-                        progress: mediaDelegate.delegateVideoState ? (mediaDelegate.delegateVideoState.progress || 0.0) : 0.0
-                        volume: mediaDelegate.delegateVideoState ? (mediaDelegate.delegateVideoState.volume || 1.0) : 1.0
-                        // Fixed screen-pixel size: cancel both contentRoot viewScale and
-                        // mediaDelegate localScale so the overlay is always 1:1 screen pixels.
-                        scale: {
-                            var s = root.viewScale * mediaDelegate.localScale
-                            return s > 1e-6 ? 1.0 / s : 1.0
-                        }
-                        transformOrigin: Item.TopLeft
-                        x: {
-                            var s = root.viewScale * mediaDelegate.localScale
-                            return s > 1e-6 ? mediaDelegate.width * 0.5 - panelWidth * 0.5 / s : 0
-                        }
-                        y: {
-                            var s = root.viewScale * mediaDelegate.localScale
-                            return s > 1e-6 ? mediaDelegate.height + 8.0 / s : mediaDelegate.height
-                        }
-                        z: 100
-
-                        onPlayPauseRequested: function(mid) {
-                            root.overlayPlayPauseRequested(mid)
-                        }
-                        onStopRequested: function(mid) {
-                            root.overlayStopRequested(mid)
-                        }
-                        onRepeatToggleRequested: function(mid) {
-                            root.overlayRepeatToggleRequested(mid)
-                        }
-                        onMuteToggleRequested: function(mid) {
-                            root.overlayMuteToggleRequested(mid)
-                        }
-                        onVolumeChangeRequested: function(mid, v) {
-                            root.overlayVolumeChangeRequested(mid, v)
-                        }
-                        onSeekRequested: function(mid, r) {
-                            root.overlaySeekRequested(mid, r)
-                        }
-                        onOverlayHoveredChanged: function(h) {
-                            mediaDelegate.overlayHovered = h
-                        }
                     }
                     }
                 }
@@ -1106,6 +1013,113 @@ Rectangle {
                 running: inputLayer.useInputCoordinator
                 onTriggered: {
                     root.reconcileInputCoordinatorState("watchdog")
+                }
+            }
+        }
+    }
+
+    // ---- Unclipped overlay layer ----
+    // Sits above viewport (which has clip:true). Position is computed purely
+    // from modelData scene coords + root.viewScale/panX/panY — no delegate
+    // reference needed, so there are no timing or scoping issues.
+    Item {
+        id: overlayLayer
+        anchors.fill: parent
+        z: 99000
+
+        Repeater {
+            model: root.mediaModel
+            delegate: Item {
+                id: overlayDelegate
+
+                readonly property string mid: modelData ? (modelData.mediaId || "") : ""
+
+                // Is this item currently selected? Check selectionChromeModel.
+                readonly property bool isSelected: {
+                    var m = mid
+                    if (!m) return false
+                    for (var i = 0; i < root.selectionChromeModel.length; ++i) {
+                        if (root.selectionChromeModel[i].mediaId === m) return true
+                    }
+                    return false
+                }
+
+                // Is a live resize active for this item?
+                readonly property bool isLiveResizing: root.liveResizeActive && root.liveResizeMediaId === mid
+
+                // Is this item being dragged?
+                readonly property bool isDragging: root.liveDragMediaId === mid
+
+                // Effective scene position and scale (accounts for live resize and drag)
+                readonly property real sceneX:     isLiveResizing ? root.liveResizeX     : (modelData ? modelData.x     : 0)
+                readonly property real sceneY:     isLiveResizing ? root.liveResizeY     : (modelData ? modelData.y     : 0)
+                readonly property real itemScale:  isLiveResizing ? root.liveResizeScale : (modelData ? (modelData.scale || 1.0) : 1.0)
+                readonly property real baseWidth:  modelData ? (modelData.width  || 0) : 0
+                readonly property real baseHeight: modelData ? (modelData.height || 0) : 0
+
+                // Screen-space rendered dimensions
+                readonly property real screenW: baseWidth  * itemScale * root.viewScale
+                readonly property real screenH: baseHeight * itemScale * root.viewScale
+
+                // Screen-space top-left of the item (add live drag offset if dragging)
+                readonly property real screenLeft: sceneX * root.viewScale + root.panX
+                                                   + (isDragging ? root.liveDragViewOffsetX : 0)
+                readonly property real screenTop:  sceneY * root.viewScale + root.panY
+                                                   + (isDragging ? root.liveDragViewOffsetY : 0)
+
+                // Screen-space centre-x and bottom-y
+                readonly property real screenCentreX: screenLeft + screenW * 0.5
+                readonly property real screenBottom:  screenTop  + screenH
+
+                // Video state from the live model
+                readonly property var videoState: {
+                    var vs = root.videoStateModel
+                    if (vs && vs.mediaId && vs.mediaId === mid) return vs
+                    return null
+                }
+
+                // Top overlay: filename + utility buttons
+                MediaTopOverlay {
+                    id: topOverlay
+                    mediaId: overlayDelegate.mid
+                    displayName: modelData ? (modelData.displayName || "") : ""
+                    contentVisible: modelData ? (modelData.contentVisible !== false) : true
+                    visible: overlayDelegate.isSelected
+
+                    x: overlayDelegate.screenCentreX - panelWidth  * 0.5
+                    y: overlayDelegate.screenTop      - panelHeight - 8
+
+                    onVisibilityToggleRequested: function(m, v) { root.overlayVisibilityToggleRequested(m, v) }
+                    onBringForwardRequested:     function(m)    { root.overlayBringForwardRequested(m) }
+                    onBringBackwardRequested:    function(m)    { root.overlayBringBackwardRequested(m) }
+                    onDeleteRequested:           function(m)    { root.overlayDeleteRequested(m) }
+                    onOverlayHoveredChanged:     function(h)    { /* no delegate ref needed */ }
+                }
+
+                // Bottom overlay: video transport controls
+                MediaVideoOverlay {
+                    id: bottomOverlay
+                    mediaId: overlayDelegate.mid
+                    visible: overlayDelegate.isSelected
+                             && modelData
+                             && modelData.mediaType === "video"
+
+                    isPlaying: overlayDelegate.videoState ? !!overlayDelegate.videoState.isPlaying : false
+                    isMuted:   overlayDelegate.videoState ? !!overlayDelegate.videoState.isMuted   : false
+                    isLooping: overlayDelegate.videoState ? !!overlayDelegate.videoState.isLooping : false
+                    progress:  overlayDelegate.videoState ? (overlayDelegate.videoState.progress || 0.0) : 0.0
+                    volume:    overlayDelegate.videoState ? (overlayDelegate.videoState.volume   || 1.0) : 1.0
+
+                    x: overlayDelegate.screenCentreX - panelWidth * 0.5
+                    y: overlayDelegate.screenBottom   + 8
+
+                    onPlayPauseRequested:    function(m)    { root.overlayPlayPauseRequested(m) }
+                    onStopRequested:         function(m)    { root.overlayStopRequested(m) }
+                    onRepeatToggleRequested: function(m)    { root.overlayRepeatToggleRequested(m) }
+                    onMuteToggleRequested:   function(m)    { root.overlayMuteToggleRequested(m) }
+                    onVolumeChangeRequested: function(m, v) { root.overlayVolumeChangeRequested(m, v) }
+                    onSeekRequested:         function(m, r) { root.overlaySeekRequested(m, r) }
+                    onOverlayHoveredChanged: function(h)    { /* no delegate ref needed */ }
                 }
             }
         }

@@ -1,5 +1,4 @@
 import QtQuick 2.15
-import QtQuick.Layouts 1.15
 
 // Top overlay panel attached above a selected media item.
 // Mirrors the legacy ResizableMediaBase top panel:
@@ -19,14 +18,14 @@ Item {
     signal deleteRequested(string mediaId)
     signal overlayHoveredChanged(bool hovered)
 
-    // Measured size — parent positions us using this
-    readonly property real panelWidth: Math.max(minWidth, contentColumn.width + paddingH * 2)
-    readonly property real panelHeight: contentColumn.height + paddingV * 2
+    // Fixed panel dimensions — must NOT depend on media item size.
+    // 4 buttons × 26px + 3 gaps × 4px = 116px content; + 2×8 padding = 132px.
+    // Label row adds height but not width (clamped to 160px, elided).
+    readonly property real panelWidth: 148
+    readonly property real panelHeight: displayName.length > 0 ? 72 : 46
 
     readonly property real paddingH: 8
     readonly property real paddingV: 6
-    readonly property real gap: 8
-    readonly property real minWidth: 120
     readonly property real itemSpacing: 4
 
     width: panelWidth
@@ -54,10 +53,9 @@ Item {
 
     Column {
         id: contentColumn
-        anchors.top: parent.top
-        anchors.topMargin: root.paddingV
-        anchors.left: parent.left
-        anchors.leftMargin: root.paddingH
+        x: root.paddingH
+        y: root.paddingV
+        width: root.panelWidth - root.paddingH * 2
         spacing: root.itemSpacing
 
         // Row 1: filename label

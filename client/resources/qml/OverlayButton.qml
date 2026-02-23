@@ -37,16 +37,18 @@ Item {
         Behavior on color { ColorAnimation { duration: 80 } }
     }
 
-    // SVG icon — white, centered
+    // SVG icon — rasterized at 4× source size so it stays sharp at any
+    // display scale. Displayed at 16×16 logical px, downscaled smoothly.
     Image {
         id: icon
         anchors.centerIn: parent
-        width: 14
-        height: 14
+        width: 16
+        height: 16
         source: root.iconSource
-        sourceSize: Qt.size(14, 14)
+        sourceSize: Qt.size(64, 64)
         fillMode: Image.PreserveAspectFit
         smooth: true
+        mipmap: true
         opacity: root.enabled ? 1.0 : 0.35
     }
 

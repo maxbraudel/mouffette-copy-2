@@ -1,5 +1,4 @@
 import QtQuick 2.15
-import QtQuick.Layouts 1.15
 
 // Bottom overlay panel attached below a selected video media item.
 // Mirrors the legacy ResizableVideoItem controls panel:
@@ -27,10 +26,13 @@ Item {
     readonly property real paddingH: 8
     readonly property real paddingV: 6
     readonly property real itemSpacing: 4
-    readonly property real minWidth: 200
 
-    readonly property real panelWidth: Math.max(minWidth, contentColumn.implicitWidth + paddingH * 2)
-    readonly property real panelHeight: contentColumn.implicitHeight + paddingV * 2
+    // Fixed panel dimensions — must NOT depend on media item size.
+    // Row 1: 4 buttons×26 + slider×60 + 4 gaps×4 = 210px content; +2×8 padding = 226px.
+    // Row 2: progress bar = same content width.
+    // Total height: 2 rows × 26px + 1 gap × 4px + 2×6 padding = 68px.
+    readonly property real panelWidth: 226
+    readonly property real panelHeight: 68
 
     width: panelWidth
     height: panelHeight
@@ -57,12 +59,9 @@ Item {
 
     Column {
         id: contentColumn
-        anchors.top: parent.top
-        anchors.topMargin: root.paddingV
-        anchors.left: parent.left
-        anchors.leftMargin: root.paddingH
-        anchors.right: parent.right
-        anchors.rightMargin: root.paddingH
+        x: root.paddingH
+        y: root.paddingV
+        width: root.panelWidth - root.paddingH * 2
         spacing: root.itemSpacing
 
         // Row 1: transport controls + volume
@@ -121,11 +120,11 @@ Item {
             }
         }
 
-        // Row 2: progress bar (stretches full available width)
+        // Row 2: progress bar (stretches full content width)
         OverlaySlider {
             id: progressSlider
             value: root.progress
-            width: contentColumn.width
+            width: root.panelWidth - root.paddingH * 2
             implicitHeight: 16
             onDragStarted: function(r) {
                 root.seekRequested(root.mediaId, r)
