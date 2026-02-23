@@ -75,35 +75,50 @@ Rectangle {
     }
 
     function canStartMediaMove(media, contentItem, dragActive, mediaId) {
-        if (!media)
-            return false
-        if (!media.selected)
-            return false
-        if (media.textEditable)
-            return false
-        if (contentItem && contentItem.editing === true)
-            return false
-        if (root.textToolActive)
-            return false
-        if (selectionChrome.handlePriorityActive)
-            return false
-        return dragActive || root.canStartInteraction("move", mediaId)
+        if (!inputLayer || !inputLayer.useInputCoordinator) {
+            if (!media)
+                return false
+            if (!media.selected)
+                return false
+            if (media.textEditable)
+                return false
+            if (contentItem && contentItem.editing === true)
+                return false
+            if (root.textToolActive)
+                return false
+            if (selectionChrome.handlePriorityActive)
+                return false
+            return dragActive || root.canStartInteraction("move", mediaId)
+        }
+        return !!inputLayer
+            && !!inputLayer.inputCoordinator
+            && inputLayer.inputCoordinator.canStartMove(media, contentItem, dragActive, mediaId)
     }
 
     function canStartCanvasPan(panActive) {
-        return panActive || (root.isInteractionIdle()
-            && !root.textToolActive
-            && !selectionChrome.interacting
-            && !selectionChrome.handlePriorityActive
-            && root.liveDragMediaId === "")
+        if (!inputLayer || !inputLayer.useInputCoordinator) {
+            return panActive || (root.isInteractionIdle()
+                && !root.textToolActive
+                && !selectionChrome.interacting
+                && !selectionChrome.handlePriorityActive
+                && root.liveDragMediaId === "")
+        }
+        return !!inputLayer
+            && !!inputLayer.inputCoordinator
+            && inputLayer.inputCoordinator.canEnablePan(panActive)
     }
 
     function canStartTextToolTap() {
-        return root.isInteractionIdle()
-            && root.textToolActive
-            && !selectionChrome.interacting
-            && !selectionChrome.handlePriorityActive
-            && root.liveDragMediaId === ""
+        if (!inputLayer || !inputLayer.useInputCoordinator) {
+            return root.isInteractionIdle()
+                && root.textToolActive
+                && !selectionChrome.interacting
+                && !selectionChrome.handlePriorityActive
+                && root.liveDragMediaId === ""
+        }
+        return !!inputLayer
+            && !!inputLayer.inputCoordinator
+            && inputLayer.inputCoordinator.canStartTextToolTap()
     }
 
     function clampScale(value) {
@@ -424,7 +439,10 @@ Rectangle {
                         onActiveChanged: {
                             if (active) {
                                 activeMoveMediaId = mediaDelegate.currentMediaId
-                                if (!root.beginInteraction("move", activeMoveMediaId)) {
+                                var moveGranted = inputLayer.useInputCoordinator
+                                    ? inputLayer.inputCoordinator.tryBeginMove(activeMoveMediaId)
+                                    : root.beginInteraction("move", activeMoveMediaId)
+                                if (!moveGranted) {
                                     activeMoveMediaId = ""
                                     mediaDelegate.localDragging = false
                                     root.liveDragMediaId = ""
@@ -455,7 +473,11 @@ Rectangle {
                                 root.liveDragMediaId = ""
                                 root.liveDragViewOffsetX = 0.0
                                 root.liveDragViewOffsetY = 0.0
-                                root.endInteraction("move", finalMediaId)
+                                if (inputLayer.useInputCoordinator) {
+                                    inputLayer.inputCoordinator.endMove(finalMediaId)
+                                } else {
+                                    root.endInteraction("move", finalMediaId)
+                                }
                                 if (finalMediaId !== "") {
                                     root.mediaMoveEnded(finalMediaId,
                                                         mediaDelegate.localX,
@@ -492,7 +514,11 @@ Rectangle {
                             root.liveDragMediaId = ""
                             root.liveDragViewOffsetX = 0.0
                             root.liveDragViewOffsetY = 0.0
-                            root.endInteraction("move", activeMoveMediaId)
+                            if (inputLayer.useInputCoordinator) {
+                                inputLayer.inputCoordinator.endMove(activeMoveMediaId)
+                            } else {
+                                root.endInteraction("move", activeMoveMediaId)
+                            }
                             activeMoveMediaId = ""
                         }
                     }
@@ -515,7 +541,18 @@ Rectangle {
                         target: mediaContentLoader.item
                         ignoreUnknownSignals: true
                         function onSelectRequested(mediaId, additive) {
-                            root.requestMediaSelection(mediaId, additive)
+                            if (inputLayer.useInputCoordinator) {
+                                inputLayer.inputCoordinator.noteMediaPrimaryPress(mediaId, additive)
+                            } else {
+                                root.requestMediaSelection(mediaId, additive)
+                            }
+                        }
+                        function onPrimaryPressed(mediaId, additive) {
+                            if (inputLayer.useInputCoordinator) {
+                                inputLayer.inputCoordinator.noteMediaPrimaryPress(mediaId, additive)
+                            } else {
+                                root.requestMediaSelection(mediaId, additive)
+                            }
                         }
                         function onTextCommitRequested(mediaId, text) {
                             root.textCommitRequested(mediaId, text)
@@ -604,6 +641,7 @@ Rectangle {
             contentItem: viewport.contentRootItem
             viewportItem: viewport
             interactionController: root
+            inputCoordinator: inputLayer ? inputLayer.inputCoordinator : null
             mediaModel: root.mediaModel
             selectionModel: root.selectionChromeModel
             snapGuidesModel: root.snapGuidesModel
@@ -632,6 +670,8 @@ Rectangle {
                 contentItem: viewport.contentRootItem
                 viewportItem: viewport
                 interactionController: root
+                inputCoordinator: inputLayer ? inputLayer.inputCoordinator : null
+                useInputCoordinator: inputLayer ? inputLayer.useInputCoordinator : true
                 mediaModel: root.mediaModel
                 selectionModel: root.selectionChromeModel
                 // Live drag offset: chrome visually follows the moving item without model repush
@@ -654,6 +694,10 @@ Rectangle {
             anchors.fill: parent
             interactionController: root
             textToolActive: root.textToolActive
+            mediaModel: root.mediaModel
+            contentItem: viewport.contentRootItem
+            selectionHandlePriorityActive: selectionChrome.handlePriorityActive
+            liveDragMediaId: root.liveDragMediaId
             onTextCreateRequested: function(viewX, viewY) {
                 root.textCreateRequested(viewX, viewY)
             }
@@ -673,7 +717,14 @@ Rectangle {
 
                 onActiveChanged: {
                     if (active) {
-                        if (!root.beginInteraction("pan", "canvas")) {
+                        var panGranted = false
+                        if (inputLayer.useInputCoordinator) {
+                            var pressPoint = panDrag.centroid.scenePressPosition
+                            panGranted = inputLayer.inputCoordinator.tryBeginPanAt(pressPoint.x, pressPoint.y)
+                        } else {
+                            panGranted = root.beginInteraction("pan", "canvas")
+                        }
+                        if (!panGranted) {
                             panSessionActive = false
                             return
                         }
@@ -682,7 +733,11 @@ Rectangle {
                         startPanY = root.panY
                     } else {
                         panSessionActive = false
-                        root.endInteraction("pan", "canvas")
+                        if (inputLayer.useInputCoordinator) {
+                            inputLayer.inputCoordinator.endPan()
+                        } else {
+                            root.endInteraction("pan", "canvas")
+                        }
                     }
                 }
 
@@ -695,7 +750,11 @@ Rectangle {
 
                 onCanceled: {
                     panSessionActive = false
-                    root.endInteraction("pan", "canvas")
+                    if (inputLayer.useInputCoordinator) {
+                        inputLayer.inputCoordinator.endPan()
+                    } else {
+                        root.endInteraction("pan", "canvas")
+                    }
                 }
             }
 
@@ -729,7 +788,12 @@ Rectangle {
                 acceptedButtons: Qt.LeftButton
 
                 onTapped: function(eventPoint) {
-                    root.textCreateRequested(eventPoint.position.x, eventPoint.position.y)
+                    if (inputLayer.useInputCoordinator) {
+                        inputLayer.inputCoordinator.tryBeginTextCreateAt(eventPoint.position.x,
+                                                                          eventPoint.position.y)
+                    } else {
+                        root.textCreateRequested(eventPoint.position.x, eventPoint.position.y)
+                    }
                 }
             }
 

@@ -76,6 +76,20 @@
       }
     },
     {
+      "id": "media_press_blocks_pan_until_background_press",
+      "steps": [
+        { "action": "selectPress", "mediaId": "m2", "additive": false },
+        { "action": "tryBeginPan", "expectDenied": true },
+        { "action": "backgroundPress" },
+        { "action": "pan", "dx": 14, "dy": -9 }
+      ],
+      "expected": {
+        "panCount": 1,
+        "selectedMediaIds": ["m2"],
+        "returnsToIdle": true
+      }
+    },
+    {
       "id": "high_velocity_determinism",
       "runTwice": true,
       "steps": [

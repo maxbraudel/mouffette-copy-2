@@ -43,9 +43,27 @@ function checkResourceRegistration() {
 function checkCanvasBindings() {
   const qmlPath = path.join(projectRoot, 'resources/qml/CanvasRoot.qml');
   assert(fs.existsSync(qmlPath), 'CanvasRoot.qml must exist');
+  const qml = fs.readFileSync(qmlPath, 'utf8');
   const stat = fs.statSync(qmlPath);
   assert(stat.size > 0, 'CanvasRoot.qml must not be empty');
-  return { fileExists: true, bytes: stat.size };
+  assert(qml.includes('inputLayer.inputCoordinator.tryBeginMove('),
+    'CanvasRoot move ownership must route through InputCoordinator');
+  assert(qml.includes('inputLayer.inputCoordinator.tryBeginPanAt('),
+    'CanvasRoot pan ownership must route through InputCoordinator');
+  assert(qml.includes('inputLayer.inputCoordinator.tryBeginTextCreateAt('),
+    'CanvasRoot text-create ownership must route through InputCoordinator');
+  assert(qml.includes('inputLayer.useInputCoordinator'),
+    'CanvasRoot must support rollout flag for input coordinator');
+  return { fileExists: true, bytes: stat.size, inputCoordinatorBindings: 3, rolloutFlagBindings: 1 };
+}
+
+function checkCoordinatorFlag() {
+  const inputLayer = readText('resources/qml/InputLayer.qml');
+  assert(inputLayer.includes('useInputCoordinator'),
+    'InputLayer must expose useInputCoordinator rollout flag');
+  assert(inputLayer.includes('--legacy-input-arbitration'),
+    'InputLayer rollout flag must support --legacy-input-arbitration runtime arg');
+  return { rolloutFlagChecks: 2 };
 }
 
 function checkMediaDelegates() {
@@ -56,6 +74,10 @@ function checkMediaDelegates() {
 
   assert(baseItem.includes('signal selectRequested'), 'BaseMediaItem must provide selectRequested contract');
   assert(baseItem.includes('onPressed'), 'BaseMediaItem must own primary press handling');
+  assert(baseItem.includes('root.primaryPressed(root.mediaId, additive)'),
+    'BaseMediaItem press path must emit primaryPressed intent');
+  assert(!baseItem.includes('root.selectRequested(root.mediaId, additive)'),
+    'BaseMediaItem primary press must not directly select; selection must be coordinator-routed');
   assert(imageItem.includes('BaseMediaItem {'), 'ImageItem must derive from BaseMediaItem');
   assert(videoItem.includes('BaseMediaItem {'), 'VideoItem must derive from BaseMediaItem');
   assert(textItem.includes('BaseMediaItem {'), 'TextItem must derive from BaseMediaItem');
@@ -102,6 +124,7 @@ function main() {
     files: checkFilesPresent(),
     resources: checkResourceRegistration(),
     canvas: checkCanvasBindings(),
+    coordinatorFlag: checkCoordinatorFlag(),
     delegates: checkMediaDelegates(),
     dtoBridge: checkDtoBridge(),
     snapshots: checkBaselineSnapshotsPresence()

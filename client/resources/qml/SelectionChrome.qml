@@ -7,6 +7,8 @@ Item {
     id: root
 
     property var interactionController: null
+    property var inputCoordinator: null
+    property bool useInputCoordinator: true
     property var selectionModel: []
     property var mediaModel: []
     property var mediaIndexById: ({})
@@ -152,7 +154,13 @@ Item {
     function updateHoveredHandle(viewX, viewY) {
         if (interacting)
             return
-        if (interactionController && !interactionController.isInteractionIdle()) {
+        if (useInputCoordinator) {
+            if (!inputCoordinator || inputCoordinator.mode !== "idle") {
+                hoveredMediaId = ""
+                hoveredHandleId = ""
+                return
+            }
+        } else if (interactionController && !interactionController.isInteractionIdle()) {
             hoveredMediaId = ""
             hoveredHandleId = ""
             return
@@ -197,8 +205,12 @@ Item {
         acceptedButtons: Qt.LeftButton
         enabled: globalResizeDrag.active
                  || (root.hoveredHandleId !== ""
-                     && (!root.interactionController
-                         || root.interactionController.isInteractionIdle()))
+                     && ((root.useInputCoordinator
+                          && !!root.inputCoordinator
+                          && root.inputCoordinator.canStartResize(false, root.hoveredMediaId))
+                         || (!root.useInputCoordinator
+                             && (!root.interactionController
+                                 || root.interactionController.isInteractionIdle()))))
         dragThreshold: 0
 
         onActiveChanged: {
@@ -219,8 +231,15 @@ Item {
                 root.pressEntryW = pressHit.sceneW
                 root.pressEntryH = pressHit.sceneH
 
-                if (root.interactionController
-                        && !root.interactionController.beginInteraction("resize", root.activeResizeMediaId)) {
+                var resizeGranted = false
+                if (root.useInputCoordinator) {
+                    resizeGranted = !!root.inputCoordinator
+                        && root.inputCoordinator.tryBeginResize(root.activeResizeMediaId)
+                } else if (root.interactionController) {
+                    resizeGranted = root.interactionController.beginInteraction("resize", root.activeResizeMediaId)
+                }
+
+                if (!resizeGranted) {
                     root.interacting = false
                     root.activeResizeMediaId = ""
                     root.activeResizeHandleId = ""
@@ -233,7 +252,9 @@ Item {
             } else {
                 var finalMediaId = root.activeResizeMediaId
                 root.interacting = false
-                if (root.interactionController) {
+                if (root.useInputCoordinator) {
+                    root.inputCoordinator.endResize(finalMediaId)
+                } else if (root.interactionController) {
                     root.interactionController.endInteraction("resize", finalMediaId)
                 }
                 root.resizeEnded(finalMediaId)
@@ -245,7 +266,9 @@ Item {
         onCanceled: {
             var canceledMediaId = root.activeResizeMediaId
             root.interacting = false
-            if (root.interactionController) {
+            if (root.useInputCoordinator && root.inputCoordinator) {
+                root.inputCoordinator.endResize(canceledMediaId)
+            } else if (!root.useInputCoordinator && root.interactionController) {
                 root.interactionController.endInteraction("resize", canceledMediaId)
             }
             root.resizeEnded(canceledMediaId)

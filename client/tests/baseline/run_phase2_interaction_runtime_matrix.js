@@ -104,6 +104,7 @@ function createState() {
         m2: { x: 320.0, y: 140.0, scale: 1.0 }
       },
       selectedById: { m1: true, m2: false },
+    pressTargetKind: 'background',
     moveRefreshCanceled: false,
     metrics: {
       zoomCount: 0,
@@ -118,6 +119,7 @@ function executeStep(state, step, expected) {
     case 'selectPress': {
       assert(state.media[step.mediaId], `select target not found: ${step.mediaId}`);
       const additive = !!step.additive;
+      state.pressTargetKind = 'media';
       if (!additive) {
         Object.keys(state.selectedById).forEach((id) => {
           state.selectedById[id] = false;
@@ -126,6 +128,10 @@ function executeStep(state, step, expected) {
       } else if (!state.selectedById[step.mediaId]) {
         state.selectedById[step.mediaId] = true;
       }
+      break;
+    }
+    case 'backgroundPress': {
+      state.pressTargetKind = 'background';
       break;
     }
     case 'zoom': {
@@ -142,6 +148,8 @@ function executeStep(state, step, expected) {
       break;
     }
     case 'pan': {
+      assert(state.pressTargetKind === 'background',
+        'pan begin requires background press target');
       assert(state.arbiter.beginPan(), 'pan should start from idle');
       state.metrics.panCount += 1;
       state.camera.panX += step.dx;
@@ -150,7 +158,10 @@ function executeStep(state, step, expected) {
       break;
     }
     case 'tryBeginPan': {
-      const granted = state.arbiter.beginPan();
+      let granted = false;
+      if (state.pressTargetKind === 'background') {
+        granted = state.arbiter.beginPan();
+      }
       if (step.expectDenied) {
         assert(!granted, 'pan must be denied due to active higher-priority session');
       }

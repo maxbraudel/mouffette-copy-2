@@ -42,7 +42,6 @@ Item {
 
         onPressed: function(mouse) {
             var additive = (mouse.modifiers & Qt.ShiftModifier) !== 0
-            root.selectRequested(root.mediaId, additive)
             root.primaryPressed(root.mediaId, additive)
             mouse.accepted = true
         }

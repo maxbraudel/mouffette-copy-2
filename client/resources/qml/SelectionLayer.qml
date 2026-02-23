@@ -9,6 +9,7 @@ Item {
     property var selectionModel: []
     property var snapGuidesModel: []
     property var interactionController: null
+    property var inputCoordinator: null
     property string draggedMediaId: ""
     property real dragOffsetViewX: 0.0
     property real dragOffsetViewY: 0.0
