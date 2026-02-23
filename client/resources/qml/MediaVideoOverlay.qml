@@ -24,47 +24,27 @@ Item {
     signal seekRequested(string mediaId, real ratio)
     signal overlayHoveredChanged(bool hovered)
 
-    readonly property real paddingH: 8
-    readonly property real paddingV: 6
     readonly property real itemSpacing: 4
     readonly property real btnSize: 28
     readonly property real sliderMinWidth: 60
+    readonly property real progressHeight: 14
 
     // panelWidth/panelHeight exposed so CanvasRoot can read them for centering.
     readonly property real panelWidth: implicitWidth
     readonly property real panelHeight: implicitHeight
 
-    implicitWidth:  controlsRow.implicitWidth + paddingH * 2
-    implicitHeight: btnSize + 14 + itemSpacing + paddingV * 2  // row + progress + gap + padding
-
-    // Background pill
-    Rectangle {
-        anchors.fill: parent
-        radius: 8
-        color: "#CC1e2535"
-        border.color: "#40FFFFFF"
-        border.width: 1
-    }
-
-    // Block all pointer events from reaching canvas below
-    MouseArea {
-        anchors.fill: parent
-        acceptedButtons: Qt.LeftButton | Qt.RightButton
-        hoverEnabled: true
-        onPressed: mouse.accepted = true
-        onReleased: mouse.accepted = true
-        onEntered: root.overlayHoveredChanged(true)
-        onExited: root.overlayHoveredChanged(false)
-    }
+    // Width = controls row natural width (no outer padding).
+    // Height = buttons row + gap + progress bar.
+    implicitWidth:  controlsRow.implicitWidth
+    implicitHeight: btnSize + itemSpacing + progressHeight
 
     // Controls row — defines the container width.
     // Buttons are fixed square; volume slider expands to fill remaining space.
     RowLayout {
         id: controlsRow
-        x: root.paddingH
-        y: root.paddingV
-        // Width = container width minus padding (container sizes from our implicitWidth)
-        width: root.width - root.paddingH * 2
+        x: 0
+        y: 0
+        width: root.width
         spacing: root.itemSpacing
 
         OverlayButton {
@@ -110,10 +90,10 @@ Item {
     OverlaySlider {
         id: progressSlider
         value: root.progress
-        x: root.paddingH
-        y: root.paddingV + root.btnSize + root.itemSpacing
-        width: root.width - root.paddingH * 2
-        height: 14
+        x: 0
+        y: root.btnSize + root.itemSpacing
+        width: root.width
+        height: root.progressHeight
         onDragStarted: function(r) { root.seekRequested(root.mediaId, r) }
         onSeeked:      function(r) { root.seekRequested(root.mediaId, r) }
     }

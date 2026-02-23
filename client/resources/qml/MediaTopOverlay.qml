@@ -1,10 +1,9 @@
 import QtQuick 2.15
 
 // Top overlay panel attached above a selected media item.
-// Mirrors the legacy ResizableMediaBase top panel:
-//   Row 1: filename label
-//   Row 2: visibility toggle | bring-forward | bring-backward | delete
-// Positioned in item-local coordinates: y = -height - gap
+//   Row 1: media name pill (full width, adaptive with ellipsis)
+//   Row 2: show/hide | bring-forward | bring-backward | delete
+// Container width is driven by the buttons row.
 Item {
     id: root
 
@@ -18,57 +17,59 @@ Item {
     signal deleteRequested(string mediaId)
     signal overlayHoveredChanged(bool hovered)
 
-    readonly property real paddingH: 8
-    readonly property real paddingV: 6
     readonly property real itemSpacing: 4
     readonly property real btnSize: 28
+    readonly property real namePillHeight: 24
 
     // panelWidth/panelHeight exposed so CanvasRoot can read them for centering.
     readonly property real panelWidth: implicitWidth
     readonly property real panelHeight: implicitHeight
 
-    implicitWidth:  btnRow.implicitWidth + paddingH * 2
-    implicitHeight: (displayName.length > 0 ? btnSize + itemSpacing + 16 : btnSize) + paddingV * 2
+    // Width = buttons row natural width (no outer padding).
+    // Height = name pill (if present) + gap + buttons row.
+    implicitWidth:  btnRow.implicitWidth
+    implicitHeight: (displayName.length > 0 ? namePillHeight + itemSpacing : 0) + btnSize
 
-    // Background pill
+    // Row 1: media name in a styled pill.
+    // Stretches to the full container width (= buttons row width).
     Rectangle {
-        anchors.fill: parent
-        radius: 8
+        id: namePill
+        visible: root.displayName.length > 0
+        x: 0
+        y: 0
+        width: root.width
+        height: root.namePillHeight
+        radius: 6
         color: "#CC1e2535"
         border.color: "#40FFFFFF"
         border.width: 1
+
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
+            onPressed: mouse.accepted = true
+            onReleased: mouse.accepted = true
+        }
+
+        Text {
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: 8
+            anchors.rightMargin: 8
+            text: root.displayName
+            color: "#FFFFFF"
+            font.pixelSize: 11
+            elide: Text.ElideRight
+            maximumLineCount: 1
+        }
     }
 
-    // Block all pointer events from reaching canvas below
-    MouseArea {
-        anchors.fill: parent
-        acceptedButtons: Qt.LeftButton | Qt.RightButton
-        hoverEnabled: true
-        onPressed: mouse.accepted = true
-        onReleased: mouse.accepted = true
-        onEntered: root.overlayHoveredChanged(true)
-        onExited: root.overlayHoveredChanged(false)
-    }
-
-    // Filename label — stretches to container width, only shown when name is set
-    Text {
-        id: nameLabel
-        visible: root.displayName.length > 0
-        text: root.displayName
-        color: "#FFFFFF"
-        font.pixelSize: 11
-        elide: Text.ElideRight
-        maximumLineCount: 1
-        x: root.paddingH
-        y: root.paddingV
-        width: root.width - root.paddingH * 2
-    }
-
-    // Buttons row — defines the container width
+    // Row 2: action buttons — defines the container width
     Row {
         id: btnRow
-        x: root.paddingH
-        y: root.paddingV + (root.displayName.length > 0 ? 16 + root.itemSpacing : 0)
+        x: 0
+        y: (root.displayName.length > 0 ? root.namePillHeight + root.itemSpacing : 0)
         spacing: root.itemSpacing
 
         OverlayButton {
