@@ -55,6 +55,8 @@ signals:
 
 private slots:
     void handleMediaSelectRequested(const QString& mediaId, bool additive);
+    void handleMediaMoveStarted(const QString& mediaId, qreal sceneX, qreal sceneY);
+    void handleMediaMoveUpdated(const QString& mediaId, qreal sceneX, qreal sceneY);
     void handleMediaMoveEnded(const QString& mediaId, qreal sceneX, qreal sceneY);
     void handleMediaResizeRequested(const QString& mediaId, const QString& handleId, qreal sceneX, qreal sceneY, bool snap);
     void handleMediaResizeEnded(const QString& mediaId);
@@ -62,6 +64,8 @@ private slots:
     void handleTextCreateRequested(qreal viewX, qreal viewY);
 
 private:
+    void rebuildMediaItemIndex();
+    ResizableMediaBase* mediaItemById(const QString& mediaId);
     void pushStaticLayerModels();
     void scheduleMediaModelSync();
     void syncMediaModelFromScene();
@@ -104,6 +108,7 @@ private:
     ModelPublisher* m_modelPublisher = nullptr;
     SnapStore* m_snapStore = nullptr;
     QGraphicsScene* m_mediaScene = nullptr;
+    QHash<QString, ResizableMediaBase*> m_mediaItemsById;
     QTimer* m_mediaSyncTimer = nullptr;
     QTimer* m_resizeDispatchTimer = nullptr;
     bool m_mediaSyncPending = false;

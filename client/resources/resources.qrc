@@ -28,6 +28,7 @@
     <file alias="ScreenItem.qml">qml/ScreenItem.qml</file>
     <file alias="UiZone.qml">qml/UiZone.qml</file>
     <file alias="RemoteCursor.qml">qml/RemoteCursor.qml</file>
+    <file alias="BaseMediaItem.qml">qml/BaseMediaItem.qml</file>
     <file alias="ImageItem.qml">qml/ImageItem.qml</file>
     <file alias="VideoItem.qml">qml/VideoItem.qml</file>
     <file alias="TextItem.qml">qml/TextItem.qml</file>

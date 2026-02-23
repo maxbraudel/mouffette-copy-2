@@ -1,28 +1,9 @@
 import QtQuick 2.15
 import QtMultimedia
 
-Item {
+BaseMediaItem {
     id: root
-
-    property real mediaX: 0
-    property real mediaY: 0
-    property real mediaWidth: 0
-    property real mediaHeight: 0
-    property real mediaScale: 1.0
-    property real mediaZ: 0
-    property bool selected: false
-    property string mediaId: ""
     property url source: ""
-
-    signal selectRequested(string mediaId, bool additive)
-
-    x: mediaX
-    y: mediaY
-    width: mediaWidth
-    height: mediaHeight
-    scale: mediaScale
-    transformOrigin: Item.TopLeft
-    z: mediaZ
 
     Rectangle {
         anchors.fill: parent
@@ -43,18 +24,6 @@ Item {
         id: videoOutput
         anchors.fill: parent
         fillMode: VideoOutput.PreserveAspectFit
-    }
-
-    MouseArea {
-        anchors.fill: parent
-        scrollGestureEnabled: false
-        onPressed: function(mouse) {
-            var additive = (mouse.modifiers & Qt.ShiftModifier) !== 0
-            var shouldSelect = additive || !root.selected
-            if (shouldSelect)
-                root.selectRequested(root.mediaId, additive)
-            mouse.accepted = shouldSelect
-        }
     }
 
     onVisibleChanged: {

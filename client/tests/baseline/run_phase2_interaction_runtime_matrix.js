@@ -99,7 +99,11 @@ function createState() {
   return {
     arbiter: new InputArbiterModel(),
     camera: { scale: 1.0, panX: 0.0, panY: 0.0 },
-    media: { m1: { x: 0.0, y: 0.0, scale: 1.0 } },
+      media: {
+        m1: { x: 0.0, y: 0.0, scale: 1.0 },
+        m2: { x: 320.0, y: 140.0, scale: 1.0 }
+      },
+      selectedById: { m1: true, m2: false },
     moveRefreshCanceled: false,
     metrics: {
       zoomCount: 0,
@@ -111,6 +115,19 @@ function createState() {
 
 function executeStep(state, step, expected) {
   switch (step.action) {
+    case 'selectPress': {
+      assert(state.media[step.mediaId], `select target not found: ${step.mediaId}`);
+      const additive = !!step.additive;
+      if (!additive) {
+        Object.keys(state.selectedById).forEach((id) => {
+          state.selectedById[id] = false;
+        });
+        state.selectedById[step.mediaId] = true;
+      } else if (!state.selectedById[step.mediaId]) {
+        state.selectedById[step.mediaId] = true;
+      }
+      break;
+    }
     case 'zoom': {
       state.metrics.zoomCount += 1;
       const beforeX = (step.anchorX - state.camera.panX) / state.camera.scale;
@@ -140,6 +157,8 @@ function executeStep(state, step, expected) {
       break;
     }
     case 'beginMove': {
+      assert(!!state.selectedById[step.mediaId],
+        `move begin requires media to be selected: ${step.mediaId}`);
       assert(state.arbiter.beginMove(step.mediaId), `move begin denied for ${step.mediaId}`);
       break;
     }
@@ -153,6 +172,7 @@ function executeStep(state, step, expected) {
     case 'moveDelta': {
       assert(state.arbiter.mode === 'Move' && state.arbiter.mediaId === step.mediaId,
         `move delta applied without active move session for ${step.mediaId}`);
+      assert(state.media[step.mediaId], `move target not found: ${step.mediaId}`);
       state.media[step.mediaId].x += step.dx;
       state.media[step.mediaId].y += step.dy;
       break;
@@ -200,7 +220,10 @@ function executeStep(state, step, expected) {
     && Number.isFinite(state.camera.panY)
     && Number.isFinite(state.media.m1.x)
     && Number.isFinite(state.media.m1.y)
-    && Number.isFinite(state.media.m1.scale);
+    && Number.isFinite(state.media.m1.scale)
+    && Number.isFinite(state.media.m2.x)
+    && Number.isFinite(state.media.m2.y)
+    && Number.isFinite(state.media.m2.scale);
   assert(finite, `non-finite numeric state after action ${step.action}`);
 
   if (expected && typeof expected.focalDriftPxMax === 'number') {
@@ -248,6 +271,22 @@ function runCase(testCase) {
     assert(Math.abs(first.media.m1.scale - expected.finalScale) < 1e-6,
       `${testCase.id}: unexpected final media scale ${first.media.m1.scale}`);
   }
+  if (typeof expected.finalMedia2X === 'number') {
+    assert(Math.abs(first.media.m2.x - expected.finalMedia2X) < 1e-6,
+      `${testCase.id}: unexpected final media2 X ${first.media.m2.x}`);
+  }
+  if (typeof expected.finalMedia2Y === 'number') {
+    assert(Math.abs(first.media.m2.y - expected.finalMedia2Y) < 1e-6,
+      `${testCase.id}: unexpected final media2 Y ${first.media.m2.y}`);
+  }
+  if (Array.isArray(expected.selectedMediaIds)) {
+    const selected = Object.keys(first.selectedById)
+      .filter((id) => first.selectedById[id])
+      .sort();
+    const expectedSelected = expected.selectedMediaIds.slice().sort();
+    assert(JSON.stringify(selected) === JSON.stringify(expectedSelected),
+      `${testCase.id}: expected selected ${expectedSelected.join(',')} got ${selected.join(',')}`);
+  }
   if (typeof expected.modelRefreshCanceledGesture === 'boolean') {
     assert(first.moveRefreshCanceled === expected.modelRefreshCanceledGesture,
       `${testCase.id}: model refresh cancellation mismatch`);
@@ -268,7 +307,8 @@ function runCase(testCase) {
     maxFocalDriftPx: Number(first.metrics.maxFocalDriftPx.toFixed(6)),
     final: {
       camera: first.camera,
-      media: first.media.m1
+      media: first.media,
+      selectedMediaIds: Object.keys(first.selectedById).filter((id) => first.selectedById[id]).sort()
     }
   };
 }

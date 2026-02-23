@@ -17,6 +17,7 @@ function readText(relativePath) {
 
 function checkFilesPresent() {
   const required = [
+    'resources/qml/BaseMediaItem.qml',
     'resources/qml/ImageItem.qml',
     'resources/qml/VideoItem.qml',
     'resources/qml/TextItem.qml',
@@ -32,7 +33,7 @@ function checkFilesPresent() {
 
 function checkResourceRegistration() {
   const qrc = readText('resources/resources.qrc');
-  const requiredAliases = ['ImageItem.qml', 'VideoItem.qml', 'TextItem.qml'];
+  const requiredAliases = ['BaseMediaItem.qml', 'ImageItem.qml', 'VideoItem.qml', 'TextItem.qml'];
   for (const alias of requiredAliases) {
     assert(qrc.includes(`alias="${alias}"`), `resources.qrc missing alias ${alias}`);
   }
@@ -48,18 +49,24 @@ function checkCanvasBindings() {
 }
 
 function checkMediaDelegates() {
+  const baseItem = readText('resources/qml/BaseMediaItem.qml');
   const imageItem = readText('resources/qml/ImageItem.qml');
   const videoItem = readText('resources/qml/VideoItem.qml');
   const textItem = readText('resources/qml/TextItem.qml');
 
+  assert(baseItem.includes('signal selectRequested'), 'BaseMediaItem must provide selectRequested contract');
+  assert(baseItem.includes('onPressed'), 'BaseMediaItem must own primary press handling');
+  assert(imageItem.includes('BaseMediaItem {'), 'ImageItem must derive from BaseMediaItem');
+  assert(videoItem.includes('BaseMediaItem {'), 'VideoItem must derive from BaseMediaItem');
+  assert(textItem.includes('BaseMediaItem {'), 'TextItem must derive from BaseMediaItem');
   assert(imageItem.includes('Image {'), 'ImageItem must contain Image element');
   assert(videoItem.includes('VideoOutput {'), 'VideoItem must contain VideoOutput element');
   assert(textItem.includes('Text {'), 'TextItem must contain Text element');
   assert(textItem.includes('TextEdit {'), 'TextItem must contain TextEdit for edit contract');
-  assert(textItem.includes('onDoubleClicked'), 'TextItem must support double-click edit start');
+  assert(textItem.includes('onPrimaryDoubleClicked'), 'TextItem must support double-click edit start via base signal');
   assert(textItem.includes('textCommitRequested'), 'TextItem must emit text commit signal');
 
-  return { delegateChecks: 6 };
+  return { delegateChecks: 11 };
 }
 
 function checkDtoBridge() {

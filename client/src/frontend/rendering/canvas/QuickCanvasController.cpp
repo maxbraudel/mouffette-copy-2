@@ -246,6 +246,12 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
         m_quickWidget->rootObject(), SIGNAL(mediaSelectRequested(QString,bool)),
         this, SLOT(handleMediaSelectRequested(QString,bool)));
     QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(mediaMoveStarted(QString,double,double)),
+        this, SLOT(handleMediaMoveStarted(QString,double,double)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(mediaMoveUpdated(QString,double,double)),
+        this, SLOT(handleMediaMoveUpdated(QString,double,double)));
+    QObject::connect(
         m_quickWidget->rootObject(), SIGNAL(mediaMoveEnded(QString,double,double)),
         this, SLOT(handleMediaMoveEnded(QString,double,double)));
     QObject::connect(
@@ -385,6 +391,7 @@ void QuickCanvasController::setMediaScene(QGraphicsScene* scene) {
     }
 
     m_mediaScene = scene;
+    m_mediaItemsById.clear();
 
     if (m_mediaScene) {
         connect(m_mediaScene, &QGraphicsScene::changed, this, [this](const QList<QRectF>&) {
@@ -396,6 +403,43 @@ void QuickCanvasController::setMediaScene(QGraphicsScene* scene) {
     }
 
     scheduleMediaModelSync();
+}
+
+void QuickCanvasController::rebuildMediaItemIndex() {
+    m_mediaItemsById.clear();
+    if (!m_mediaScene) {
+        return;
+    }
+
+    const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
+    for (QGraphicsItem* graphicsItem : sceneItems) {
+        auto* media = dynamic_cast<ResizableMediaBase*>(graphicsItem);
+        if (!media) {
+            continue;
+        }
+        const QString mediaId = media->mediaId();
+        if (mediaId.isEmpty()) {
+            continue;
+        }
+        m_mediaItemsById.insert(mediaId, media);
+    }
+}
+
+ResizableMediaBase* QuickCanvasController::mediaItemById(const QString& mediaId) {
+    if (!m_mediaScene || mediaId.isEmpty()) {
+        return nullptr;
+    }
+
+    auto it = m_mediaItemsById.constFind(mediaId);
+    if (it != m_mediaItemsById.constEnd()) {
+        ResizableMediaBase* candidate = it.value();
+        if (candidate && candidate->scene() == m_mediaScene) {
+            return candidate;
+        }
+    }
+
+    rebuildMediaItemIndex();
+    return m_mediaItemsById.value(mediaId, nullptr);
 }
 
 void QuickCanvasController::updateRemoteCursor(int globalX, int globalY) {
@@ -488,18 +532,15 @@ void QuickCanvasController::handleMediaSelectRequested(const QString& mediaId, b
         return;
     }
 
-    ResizableMediaBase* target = nullptr;
-    const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
-    for (QGraphicsItem* graphicsItem : sceneItems) {
-        auto* media = dynamic_cast<ResizableMediaBase*>(graphicsItem);
-        if (!media) {
-            continue;
+    auto syncSelectionNow = [this]() {
+        if (m_mediaSyncTimer) {
+            m_mediaSyncTimer->stop();
         }
-        if (media->mediaId() == mediaId) {
-            target = media;
-            break;
-        }
-    }
+        m_mediaSyncPending = false;
+        syncMediaModelFromScene();
+    };
+
+    ResizableMediaBase* target = mediaItemById(mediaId);
 
     if (!target) {
         return;
@@ -508,10 +549,12 @@ void QuickCanvasController::handleMediaSelectRequested(const QString& mediaId, b
     const bool alreadyOnlySelected = target->isSelected()
         && m_mediaScene->selectedItems().size() == 1;
     if (!additive && alreadyOnlySelected) {
+        syncSelectionNow();
         return;
     }
 
     if (additive && target->isSelected()) {
+        syncSelectionNow();
         return;
     }
 
@@ -520,7 +563,7 @@ void QuickCanvasController::handleMediaSelectRequested(const QString& mediaId, b
     }
     target->setSelected(true);
     m_selectionStore->setSelectedMediaId(mediaId);
-    scheduleMediaModelSync();
+    syncSelectionNow();
 }
 
 // Move drag is now fully QML-native (DragHandler on each mediaDelegate inside contentRoot).
@@ -545,16 +588,9 @@ void QuickCanvasController::handleMediaMoveEnded(const QString& mediaId, qreal s
     }
 
     m_pointerSession->setDraggingMedia(true);
-    ResizableMediaBase* movedTarget = nullptr;
-    const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
-    for (QGraphicsItem* graphicsItem : sceneItems) {
-        auto* media = dynamic_cast<ResizableMediaBase*>(graphicsItem);
-        if (!media || media->mediaId() != mediaId) {
-            continue;
-        }
-        movedTarget = media;
-        media->setPos(QPointF(sceneX, sceneY));
-        break;
+    ResizableMediaBase* movedTarget = mediaItemById(mediaId);
+    if (movedTarget) {
+        movedTarget->setPos(QPointF(sceneX, sceneY));
     }
     m_pointerSession->setDraggingMedia(false);
     m_inputArbiter->endMove(mediaId);
@@ -574,6 +610,24 @@ void QuickCanvasController::handleMediaMoveEnded(const QString& mediaId, qreal s
         pushMediaModelOnly();
     }
     pushSelectionAndSnapModels();
+}
+
+void QuickCanvasController::handleMediaMoveStarted(const QString& mediaId, qreal sceneX, qreal sceneY) {
+    Q_UNUSED(sceneX)
+    Q_UNUSED(sceneY)
+    if (!m_mediaScene || mediaId.isEmpty()) {
+        return;
+    }
+    mediaItemById(mediaId);
+}
+
+void QuickCanvasController::handleMediaMoveUpdated(const QString& mediaId, qreal sceneX, qreal sceneY) {
+    Q_UNUSED(sceneX)
+    Q_UNUSED(sceneY)
+    if (!m_mediaScene || mediaId.isEmpty()) {
+        return;
+    }
+    mediaItemById(mediaId);
 }
 
 void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
@@ -628,16 +682,7 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
 
     m_pointerSession->setDraggingMedia(true);
 
-    ResizableMediaBase* target = nullptr;
-    const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
-    for (QGraphicsItem* graphicsItem : sceneItems) {
-        auto* media = dynamic_cast<ResizableMediaBase*>(graphicsItem);
-        if (!media || media->mediaId() != mediaId) {
-            continue;
-        }
-        target = media;
-        break;
-    }
+    ResizableMediaBase* target = mediaItemById(mediaId);
     if (!target) {
         m_pointerSession->setDraggingMedia(false);
         endLiveResizeSession(m_pointerSession->resizeMediaId(), m_resizeLastSceneX, m_resizeLastSceneY, m_resizeLastScale);
@@ -804,17 +849,12 @@ void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId) {
     qreal finalScale = m_resizeLastScale;
     bool haveFinal = !finalMediaId.isEmpty();
     if (m_mediaScene && !finalMediaId.isEmpty()) {
-        const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
-        for (QGraphicsItem* graphicsItem : sceneItems) {
-            auto* media = dynamic_cast<ResizableMediaBase*>(graphicsItem);
-            if (!media || media->mediaId() != finalMediaId) {
-                continue;
-            }
+        const ResizableMediaBase* media = mediaItemById(finalMediaId);
+        if (media) {
             finalX = media->scenePos().x();
             finalY = media->scenePos().y();
             finalScale = std::abs(media->scale()) > 1e-6 ? std::abs(media->scale()) : 1.0;
             haveFinal = true;
-            break;
         }
     }
 
@@ -852,23 +892,19 @@ void QuickCanvasController::handleTextCommitRequested(const QString& mediaId, co
         return;
     }
 
-    const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
-    for (QGraphicsItem* graphicsItem : sceneItems) {
-        auto* media = dynamic_cast<ResizableMediaBase*>(graphicsItem);
-        if (!media || media->mediaId() != mediaId) {
-            continue;
-        }
-
-        auto* textMedia = dynamic_cast<TextMediaItem*>(media);
-        if (!textMedia) {
-            return;
-        }
-
-        textMedia->setText(text);
-        textMedia->setSelected(true);
-        scheduleMediaModelSync();
+    ResizableMediaBase* media = mediaItemById(mediaId);
+    if (!media) {
         return;
     }
+
+    auto* textMedia = dynamic_cast<TextMediaItem*>(media);
+    if (!textMedia) {
+        return;
+    }
+
+    textMedia->setText(text);
+    textMedia->setSelected(true);
+    scheduleMediaModelSync();
 }
 
 void QuickCanvasController::handleTextCreateRequested(qreal viewX, qreal viewY) {
@@ -899,6 +935,8 @@ void QuickCanvasController::pushMediaModelOnly() {
         return;
     }
 
+    m_mediaItemsById.clear();
+
     QVariantList mediaModel;
     if (m_mediaScene) {
         const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
@@ -906,6 +944,11 @@ void QuickCanvasController::pushMediaModelOnly() {
             auto* media = dynamic_cast<ResizableMediaBase*>(graphicsItem);
             if (!media) {
                 continue;
+            }
+
+            const QString mediaId = media->mediaId();
+            if (!mediaId.isEmpty()) {
+                m_mediaItemsById.insert(mediaId, media);
             }
 
             const QSize baseSize = media->baseSizePx();
@@ -923,7 +966,7 @@ void QuickCanvasController::pushMediaModelOnly() {
             const qreal sceneUnitScale = (m_sceneStore->sceneUnitScale() > 1e-6) ? m_sceneStore->sceneUnitScale() : 1.0;
 
             QVariantMap mediaEntry;
-            mediaEntry.insert(QStringLiteral("mediaId"), media->mediaId());
+            mediaEntry.insert(QStringLiteral("mediaId"), mediaId);
             mediaEntry.insert(QStringLiteral("mediaType"), media->isTextMedia()
                 ? QStringLiteral("text")
                 : (media->isVideoMedia() ? QStringLiteral("video") : QStringLiteral("image")));

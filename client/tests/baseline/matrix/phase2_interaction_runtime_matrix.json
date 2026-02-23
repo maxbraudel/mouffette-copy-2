@@ -61,6 +61,21 @@
       }
     },
     {
+      "id": "select_before_drag_switches_single_selection",
+      "steps": [
+        { "action": "selectPress", "mediaId": "m2", "additive": false },
+        { "action": "beginMove", "mediaId": "m2" },
+        { "action": "moveDelta", "mediaId": "m2", "dx": 50, "dy": -20 },
+        { "action": "endMove", "mediaId": "m2" }
+      ],
+      "expected": {
+        "selectedMediaIds": ["m2"],
+        "finalMedia2X": 370,
+        "finalMedia2Y": 120,
+        "returnsToIdle": true
+      }
+    },
+    {
       "id": "high_velocity_determinism",
       "runTwice": true,
       "steps": [

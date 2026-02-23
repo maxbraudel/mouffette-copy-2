@@ -6,6 +6,8 @@ Rectangle {
     color: "#10131a"
 
     signal mediaSelectRequested(string mediaId, bool additive)
+    signal mediaMoveStarted(string mediaId, real sceneX, real sceneY)
+    signal mediaMoveUpdated(string mediaId, real sceneX, real sceneY)
     signal mediaMoveEnded(string mediaId, real sceneX, real sceneY)
     signal mediaResizeRequested(string mediaId, string handleId, real sceneX, real sceneY, bool snap)
     signal mediaResizeEnded(string mediaId)
@@ -64,6 +66,44 @@ Rectangle {
 
     function endInteraction(mode, ownerId) {
         interactionArbiter.end(mode, ownerId)
+    }
+
+    function requestMediaSelection(mediaId, additive) {
+        if (!mediaId || mediaId.length === 0)
+            return
+        root.mediaSelectRequested(mediaId, !!additive)
+    }
+
+    function canStartMediaMove(media, contentItem, dragActive, mediaId) {
+        if (!media)
+            return false
+        if (!media.selected)
+            return false
+        if (media.textEditable)
+            return false
+        if (contentItem && contentItem.editing === true)
+            return false
+        if (root.textToolActive)
+            return false
+        if (selectionChrome.handlePriorityActive)
+            return false
+        return dragActive || root.canStartInteraction("move", mediaId)
+    }
+
+    function canStartCanvasPan(panActive) {
+        return panActive || (root.isInteractionIdle()
+            && !root.textToolActive
+            && !selectionChrome.interacting
+            && !selectionChrome.handlePriorityActive
+            && root.liveDragMediaId === "")
+    }
+
+    function canStartTextToolTap() {
+        return root.isInteractionIdle()
+            && root.textToolActive
+            && !selectionChrome.interacting
+            && !selectionChrome.handlePriorityActive
+            && root.liveDragMediaId === ""
     }
 
     function clampScale(value) {
@@ -367,18 +407,18 @@ Rectangle {
                         target: null
                         acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
                         acceptedButtons: Qt.LeftButton
-                        enabled: !!mediaDelegate.media
-                                 && !!mediaDelegate.media.selected
-                                 && !mediaDelegate.media.textEditable
-                                 && !(mediaContentLoader.item && mediaContentLoader.item.editing === true)
-                                 && !root.textToolActive
-                                 && !selectionChrome.handlePriorityActive
-                                 && (mediaDrag.active
-                                     || root.canStartInteraction("move", mediaDelegate.currentMediaId))
-                        dragThreshold: 0
+                        enabled: root.canStartMediaMove(mediaDelegate.media,
+                                                        mediaContentLoader.item,
+                                                        mediaDrag.active,
+                                                        mediaDelegate.currentMediaId)
+                        dragThreshold: 4
 
                         property real startX: 0.0
                         property real startY: 0.0
+                        property real dragOriginSceneX: 0.0
+                        property real dragOriginSceneY: 0.0
+                        property real dragOriginViewX: 0.0
+                        property real dragOriginViewY: 0.0
                         property string activeMoveMediaId: ""
 
                         onActiveChanged: {
@@ -394,11 +434,24 @@ Rectangle {
                                 }
                                 startX = mediaDelegate.localX
                                 startY = mediaDelegate.localY
+                                var startPoint = mediaDrag.centroid.scenePosition
+                                var startScene = viewport.contentRootItem.mapFromItem(null, startPoint.x, startPoint.y)
+                                dragOriginSceneX = startScene.x
+                                dragOriginSceneY = startScene.y
+                                dragOriginViewX = startPoint.x
+                                dragOriginViewY = startPoint.y
                                 mediaDelegate.localDragging = true
                                 root.liveDragMediaId = activeMoveMediaId
+                                root.mediaMoveStarted(activeMoveMediaId,
+                                                      mediaDelegate.localX,
+                                                      mediaDelegate.localY)
                             } else {
                                 var finalMediaId = activeMoveMediaId
                                 mediaDelegate.localDragging = false
+                                dragOriginSceneX = 0.0
+                                dragOriginSceneY = 0.0
+                                dragOriginViewX = 0.0
+                                dragOriginViewY = 0.0
                                 root.liveDragMediaId = ""
                                 root.liveDragViewOffsetX = 0.0
                                 root.liveDragViewOffsetY = 0.0
@@ -416,19 +469,26 @@ Rectangle {
                             if (!active || !mediaDelegate.localDragging) return
                             // Use explicit scene-position mapping to avoid any coordinate
                             // ambiguity from contentRoot's scale transform.
-                            var cur   = mediaDrag.centroid.scenePosition
-                            var press = mediaDrag.centroid.scenePressPosition
-                            var curScene   = viewport.contentRootItem.mapFromItem(null, cur.x,   cur.y)
-                            var pressScene = viewport.contentRootItem.mapFromItem(null, press.x, press.y)
-                            mediaDelegate.localX = startX + (curScene.x - pressScene.x)
-                            mediaDelegate.localY = startY + (curScene.y - pressScene.y)
+                            var cur = mediaDrag.centroid.scenePosition
+                            var curScene = viewport.contentRootItem.mapFromItem(null, cur.x, cur.y)
+                            mediaDelegate.localX = startX + (curScene.x - dragOriginSceneX)
+                            mediaDelegate.localY = startY + (curScene.y - dragOriginSceneY)
+                            if (activeMoveMediaId !== "") {
+                                root.mediaMoveUpdated(activeMoveMediaId,
+                                                      mediaDelegate.localX,
+                                                      mediaDelegate.localY)
+                            }
                             // Chrome viewport offset = scene delta * viewScale
-                            root.liveDragViewOffsetX = cur.x - press.x
-                            root.liveDragViewOffsetY = cur.y - press.y
+                            root.liveDragViewOffsetX = cur.x - dragOriginViewX
+                            root.liveDragViewOffsetY = cur.y - dragOriginViewY
                         }
 
                         onCanceled: {
                             mediaDelegate.localDragging = false
+                            dragOriginSceneX = 0.0
+                            dragOriginSceneY = 0.0
+                            dragOriginViewX = 0.0
+                            dragOriginViewY = 0.0
                             root.liveDragMediaId = ""
                             root.liveDragViewOffsetX = 0.0
                             root.liveDragViewOffsetY = 0.0
@@ -445,6 +505,20 @@ Rectangle {
                             if (mediaDelegate.media.mediaType === "video") return videoDelegate
                             if (mediaDelegate.media.mediaType === "text") return textDelegate
                             return imageDelegate
+                        }
+                    }
+
+                    // Connections lives inside mediaDelegate so both `mediaDelegate` and
+                    // `root` ids are in scope — Components defined outside the Repeater
+                    // cannot access the delegate's id directly.
+                    Connections {
+                        target: mediaContentLoader.item
+                        ignoreUnknownSignals: true
+                        function onSelectRequested(mediaId, additive) {
+                            root.requestMediaSelection(mediaId, additive)
+                        }
+                        function onTextCommitRequested(mediaId, text) {
+                            root.textCommitRequested(mediaId, text)
                         }
                     }
                     }
@@ -464,9 +538,6 @@ Rectangle {
                         mediaZ: parent.media.z
                         selected: !!parent.media.selected
                         imageSource: root.mediaSourceUrl(parent.media ? parent.media.sourcePath : "")
-                        onSelectRequested: function(mediaId, additive) {
-                            root.mediaSelectRequested(mediaId, additive)
-                        }
                     }
                 }
 
@@ -482,9 +553,6 @@ Rectangle {
                         mediaZ: parent.media.z
                         selected: !!parent.media.selected
                         source: root.mediaSourceUrl(parent.media ? parent.media.sourcePath : "")
-                        onSelectRequested: function(mediaId, additive) {
-                            root.mediaSelectRequested(mediaId, additive)
-                        }
                     }
                 }
 
@@ -515,12 +583,6 @@ Rectangle {
                         highlightEnabled: !!(parent.media && parent.media.textHighlightEnabled)
                         highlightColor: parent.media ? (parent.media.textHighlightColor || "#00000000") : "#00000000"
                         textEditable: !!(parent.media && parent.media.textEditable)
-                        onSelectRequested: function(mediaId, additive) {
-                            root.mediaSelectRequested(mediaId, additive)
-                        }
-                        onTextCommitRequested: function(mediaId, text) {
-                            root.textCommitRequested(mediaId, text)
-                        }
                     }
                 }
             }
@@ -598,11 +660,8 @@ Rectangle {
 
             DragHandler {
                 id: panDrag
-                enabled: panDrag.active
-                         || (root.isInteractionIdle()
-                             && !selectionChrome.interacting
-                             && !selectionChrome.handlePriorityActive
-                             && root.liveDragMediaId === "")
+                // Background pan must never preempt media press-selection.
+                enabled: root.canStartCanvasPan(panDrag.active)
                 target: null
                 acceptedDevices: PointerDevice.Mouse
                 acceptedButtons: Qt.LeftButton
@@ -665,12 +724,11 @@ Rectangle {
             TapHandler {
                 id: textToolTap
                 target: null
-                enabled: root.isInteractionIdle()
+                // Text-create tap is only active in text tool mode.
+                enabled: root.canStartTextToolTap()
                 acceptedButtons: Qt.LeftButton
 
                 onTapped: function(eventPoint) {
-                    if (!root.textToolActive)
-                        return
                     root.textCreateRequested(eventPoint.position.x, eventPoint.position.y)
                 }
             }

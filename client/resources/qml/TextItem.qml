@@ -1,16 +1,7 @@
 import QtQuick 2.15
 
-Item {
+BaseMediaItem {
     id: root
-
-    property real mediaX: 0
-    property real mediaY: 0
-    property real mediaWidth: 0
-    property real mediaHeight: 0
-    property real mediaScale: 1.0
-    property real mediaZ: 0
-    property bool selected: false
-    property string mediaId: ""
     property string textContent: ""
     property string horizontalAlignment: "center"
     property string verticalAlignment: "center"
@@ -29,17 +20,18 @@ Item {
     property bool textEditable: false
     property bool editing: false
     property string preEditText: ""
-
-    signal selectRequested(string mediaId, bool additive)
     signal textCommitRequested(string mediaId, string text)
 
-    x: mediaX
-    y: mediaY
-    width: mediaWidth
-    height: mediaHeight
-    scale: mediaScale
-    transformOrigin: Item.TopLeft
-    z: mediaZ
+    pointerEnabled: !root.editing
+    doubleClickEnabled: true
+
+    onPrimaryDoubleClicked: function(mediaId, additive) {
+        root.selectRequested(mediaId, additive)
+        root.preEditText = root.textContent || ""
+        root.editing = true
+        textEditor.text = root.preEditText
+        textEditor.forceActiveFocus()
+    }
 
     Rectangle {
         id: textBackground
@@ -121,28 +113,5 @@ Item {
         border.width: root.editing ? 1 : 0
         border.color: "#66FFFFFF"
         visible: root.editing
-    }
-
-    MouseArea {
-        anchors.fill: parent
-        acceptedButtons: Qt.LeftButton
-        scrollGestureEnabled: false
-        onPressed: function(mouse) {
-            var additive = (mouse.modifiers & Qt.ShiftModifier) !== 0
-            var shouldSelect = additive || !root.selected
-            if (shouldSelect)
-                root.selectRequested(root.mediaId, additive)
-            mouse.accepted = shouldSelect
-        }
-        onDoubleClicked: function(mouse) {
-            var additive = (mouse.modifiers & Qt.ShiftModifier) !== 0
-            if (additive || !root.selected)
-                root.selectRequested(root.mediaId, additive)
-            root.preEditText = root.textContent || ""
-            root.editing = true
-            textEditor.text = root.preEditText
-            textEditor.forceActiveFocus()
-            mouse.accepted = true
-        }
     }
 }
