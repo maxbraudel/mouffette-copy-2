@@ -123,6 +123,7 @@ void ResizableMediaBase::fadeContentIn(double seconds) {
     m_fadeAnimation->setEasingCurve(QEasingCurve::Linear);
     QObject::connect(m_fadeAnimation, &QVariantAnimation::valueChanged, [this](const QVariant& v){
         m_contentDisplayOpacity = v.toDouble();
+        if (auto tick = MediaRuntimeHooks::mediaOpacityAnimationTickNotifier()) { tick(); }
         update();
     });
     QObject::connect(m_fadeAnimation, &QVariantAnimation::finished, [this](){
@@ -148,6 +149,7 @@ void ResizableMediaBase::fadeContentOut(double seconds) {
     m_fadeAnimation->setEasingCurve(QEasingCurve::Linear);
     QObject::connect(m_fadeAnimation, &QVariantAnimation::valueChanged, [this](const QVariant& v){
         m_contentDisplayOpacity = v.toDouble();
+        if (auto tick = MediaRuntimeHooks::mediaOpacityAnimationTickNotifier()) { tick(); }
         update();
     });
     QObject::connect(m_fadeAnimation, &QVariantAnimation::finished, [this](){
@@ -173,7 +175,11 @@ void ResizableMediaBase::setMediaSettingsState(const MediaSettingsState& state) 
     onMediaSettingsChanged();
 }
 
-void ResizableMediaBase::onMediaSettingsChanged() {}
+void ResizableMediaBase::onMediaSettingsChanged() {
+    if (auto notifier = MediaRuntimeHooks::mediaSettingsChangedNotifier()) {
+        notifier(this);
+    }
+}
 
 bool ResizableMediaBase::autoDisplayEnabled() const {
     return m_mediaSettings.displayAutomatically;

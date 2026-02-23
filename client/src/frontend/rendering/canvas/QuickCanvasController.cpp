@@ -1,5 +1,6 @@
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/CanvasSceneStore.h"
+#include "backend/domain/media/MediaRuntimeHooks.h"
 #include "frontend/rendering/canvas/GestureCommands.h"
 #include "frontend/rendering/canvas/ModelPublisher.h"
 #include "frontend/rendering/canvas/PointerSession.h"
@@ -32,6 +33,7 @@
 #include "backend/domain/media/MediaItems.h"
 #include "backend/domain/media/TextMediaItem.h"
 #include "frontend/rendering/canvas/ScreenCanvas.h"
+#include <QMediaPlayer>
 
 namespace {
 constexpr int kRemoteCursorDiameterPx = 30;
@@ -169,6 +171,13 @@ QuickCanvasController::QuickCanvasController(QObject* parent)
         pushVideoStateModel();
     });
 
+    m_fadeTickTimer = new QTimer(this);
+    m_fadeTickTimer->setSingleShot(true);
+    m_fadeTickTimer->setInterval(16);
+    connect(m_fadeTickTimer, &QTimer::timeout, this, [this]() {
+        pushMediaModelOnly();
+    });
+
     m_initialFitRetryTimer = new QTimer(this);
     m_initialFitRetryTimer->setSingleShot(true);
     m_initialFitRetryTimer->setInterval(16);
@@ -296,6 +305,15 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
         this, SLOT(handleOverlaySeek(QString,double)));
 
     m_videoStateTimer->start();
+
+    // Phase 3: fade animation tick → republish animatedDisplayOpacity each frame
+    MediaRuntimeHooks::setMediaOpacityAnimationTickNotifier([this]() {
+        handleFadeAnimationTick();
+    });
+    // Phase 6: settings change → republish contentOpacity immediately
+    MediaRuntimeHooks::setMediaSettingsChangedNotifier([this](ResizableMediaBase* media) {
+        handleMediaSettingsChanged(media);
+    });
 
     m_pendingInitialSceneScaleRefresh = true;
     QTimer::singleShot(0, this, [this]() {
@@ -1000,6 +1018,13 @@ void QuickCanvasController::pushMediaModelOnly() {
             mediaEntry.insert(QStringLiteral("uploadState"), uploadStateToString(media->uploadState()));
             mediaEntry.insert(QStringLiteral("displayName"), media->displayName());
             mediaEntry.insert(QStringLiteral("contentVisible"), media->isContentVisible());
+            mediaEntry.insert(QStringLiteral("contentOpacity"), media->contentOpacity());
+            mediaEntry.insert(QStringLiteral("animatedDisplayOpacity"), media->animatedDisplayOpacity());
+
+            if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
+                mediaEntry.insert(QStringLiteral("videoSinkPtr"),
+                    QVariant::fromValue<QObject*>(vid->videoSink()));
+            }
 
             if (auto* textMedia = dynamic_cast<TextMediaItem*>(media)) {
                 const QFont textFont = textMedia->font();
@@ -1314,6 +1339,235 @@ void QuickCanvasController::handleOverlaySeek(const QString& mediaId, qreal rati
         v->seekToRatio(std::clamp(ratio, 0.0, 1.0));
         emit mediaSeekRequested(mediaId, ratio);
     }
+}
+
+void QuickCanvasController::handleFadeAnimationTick() {
+    if (!m_fadeTickTimer) return;
+    if (!m_fadeTickTimer->isActive()) {
+        m_fadeTickTimer->start();
+    }
+}
+
+void QuickCanvasController::handleMediaSettingsChanged(ResizableMediaBase* /*media*/) {
+    scheduleMediaModelSync();
+}
+
+void QuickCanvasController::startHostSceneState() {
+    if (m_hostSceneActive) return;
+    m_hostSceneActive = true;
+
+    // Disconnect any leftover automation connections from a previous session
+    for (auto& conn : m_sceneAutomationConnections) QObject::disconnect(conn);
+    m_sceneAutomationConnections.clear();
+    m_prevVideoStates.clear();
+
+    if (!m_mediaScene) return;
+
+    const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
+    for (QGraphicsItem* gi : sceneItems) {
+        auto* media = dynamic_cast<ResizableMediaBase*>(gi);
+        if (!media) continue;
+
+        const bool shouldAutoDisplay   = media->autoDisplayEnabled();
+        const int  displayDelayMs      = media->autoDisplayDelayMs();
+        const bool shouldAutoHide      = media->autoHideEnabled();
+        const int  hideDelayMs         = media->autoHideDelayMs();
+        const bool hideOnEnd           = media->hideWhenVideoEnds();
+        const bool muteOnEnd           = media->muteWhenVideoEnds();
+        const bool scheduleHideFromDisplay = shouldAutoHide && !hideOnEnd;
+
+        if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
+            VideoPreState ps;
+            ps.video      = vid;
+            ps.guard      = vid->lifetimeGuard();
+            ps.posMs      = vid->currentPositionMs();
+            ps.wasPlaying = vid->isPlaying();
+            ps.wasMuted   = vid->isMuted();
+            m_prevVideoStates.append(ps);
+
+            const bool shouldAutoPlay   = media->autoPlayEnabled();
+            const int  playDelayMs      = media->autoPlayDelayMs();
+            const bool shouldAutoPause  = media->autoPauseEnabled();
+            const int  pauseDelayMs     = media->autoPauseDelayMs();
+            const bool shouldAutoMute   = media->autoMuteEnabled();
+            const int  muteDelayMs      = media->autoMuteDelayMs();
+            const bool shouldAutoUnmute = media->autoUnmuteEnabled();
+            const int  unmuteDelayMs    = media->autoUnmuteDelayMs();
+
+            vid->pauseAndSetPosition(0);
+            vid->setMuted(true, true);
+
+            QMediaPlayer* player = vid->mediaPlayer();
+
+            // --- hide/mute on video end ---
+            if ((hideOnEnd || muteOnEnd) && player) {
+                auto hideTriggered = std::make_shared<bool>(false);
+                auto triggerHide = [this, media, guard = ps.guard, hideTriggered]() {
+                    if (*hideTriggered) return;
+                    if (!m_hostSceneActive) return;
+                    if (guard.expired()) return;
+                    if (!media || media->isBeingDeleted()) return;
+                    if (!media->mediaSettingsState().hideWhenVideoEnds) return;
+                    if (auto* v = dynamic_cast<ResizableVideoItem*>(media)) {
+                        if (v->settingsRepeatAvailable()) return;
+                    }
+                    *hideTriggered = true;
+                    media->hideWithConfiguredFade();
+                    scheduleMediaModelSync();
+                };
+
+                auto muteTriggered = std::make_shared<bool>(false);
+                auto triggerMute = [this, vid, guard = ps.guard, muteTriggered]() {
+                    if (*muteTriggered) return;
+                    if (!m_hostSceneActive) return;
+                    if (guard.expired()) return;
+                    if (!vid || vid->isBeingDeleted()) return;
+                    if (!vid->mediaSettingsState().muteWhenVideoEnds) return;
+                    if (vid->settingsRepeatAvailable()) return;
+                    *muteTriggered = true;
+                    vid->setMuted(true);
+                };
+
+                if (hideOnEnd) {
+                    auto conn = QObject::connect(player, &QMediaPlayer::mediaStatusChanged, this,
+                        [this, triggerHide, hideDelayMs, shouldAutoHide](QMediaPlayer::MediaStatus status) {
+                            if (!m_hostSceneActive) return;
+                            if (status != QMediaPlayer::EndOfMedia) return;
+                            if (shouldAutoHide && hideDelayMs > 0) {
+                                QTimer::singleShot(hideDelayMs, this, [this, triggerHide]() { triggerHide(); });
+                            } else {
+                                triggerHide();
+                            }
+                        });
+                    m_sceneAutomationConnections.append(conn);
+                }
+
+                if (muteOnEnd) {
+                    auto conn = QObject::connect(player, &QMediaPlayer::mediaStatusChanged, this,
+                        [this, triggerMute, muteDelayMs, shouldAutoMute](QMediaPlayer::MediaStatus status) {
+                            if (!m_hostSceneActive) return;
+                            if (status != QMediaPlayer::EndOfMedia) return;
+                            if (shouldAutoMute && muteDelayMs > 0) {
+                                QTimer::singleShot(muteDelayMs, this, [this, triggerMute]() { triggerMute(); });
+                            } else {
+                                triggerMute();
+                            }
+                        });
+                    m_sceneAutomationConnections.append(conn);
+                }
+            }
+
+            // --- auto unmute ---
+            if (shouldAutoUnmute) {
+                const auto unmuteGuard = vid->lifetimeGuard();
+                ResizableVideoItem* videoPtr = vid;
+                auto unmuteNow = [this, videoPtr, unmuteGuard]() {
+                    if (!m_hostSceneActive) return;
+                    if (unmuteGuard.expired()) return;
+                    if (!videoPtr || videoPtr->isBeingDeleted()) return;
+                    if (!videoPtr->mediaSettingsState().unmuteAutomatically) return;
+                    videoPtr->setMuted(false);
+                };
+                QTimer::singleShot(std::max(0, unmuteDelayMs), this, unmuteNow);
+            }
+
+            // --- auto mute (non-end) ---
+            if (shouldAutoMute && !muteOnEnd) {
+                const auto muteGuard = vid->lifetimeGuard();
+                ResizableVideoItem* videoPtr = vid;
+                QTimer::singleShot(std::max(0, muteDelayMs), this, [this, videoPtr, muteGuard]() {
+                    if (!m_hostSceneActive) return;
+                    if (muteGuard.expired()) return;
+                    if (!videoPtr || videoPtr->isBeingDeleted()) return;
+                    if (!videoPtr->mediaSettingsState().muteDelayEnabled) return;
+                    videoPtr->setMuted(true);
+                });
+            }
+
+            // --- auto play ---
+            if (shouldAutoPlay) {
+                const auto playGuard = vid->lifetimeGuard();
+                ResizableVideoItem* videoPtr = vid;
+                auto startPlayback = [this, videoPtr, playGuard, shouldAutoPause, pauseDelayMs]() {
+                    if (!m_hostSceneActive) return;
+                    if (playGuard.expired()) return;
+                    if (!videoPtr || videoPtr->isBeingDeleted()) return;
+                    if (!videoPtr->isPlaying()) {
+                        videoPtr->initializeSettingsRepeatSessionForPlaybackStart();
+                        videoPtr->togglePlayPause();
+                        if (shouldAutoPause) {
+                            const auto pauseGuard = videoPtr->lifetimeGuard();
+                            QTimer::singleShot(std::max(0, pauseDelayMs), this, [this, videoPtr, pauseGuard]() {
+                                if (!m_hostSceneActive) return;
+                                if (pauseGuard.expired()) return;
+                                if (!videoPtr || videoPtr->isBeingDeleted()) return;
+                                if (videoPtr->isPlaying()) videoPtr->togglePlayPause();
+                            });
+                        }
+                    }
+                };
+                QTimer::singleShot(std::max(0, playDelayMs), this, startPlayback);
+            }
+        }
+
+        // --- hide immediately, then schedule auto display ---
+        media->hideImmediateNoFade();
+
+        if (shouldAutoDisplay) {
+            const auto displayGuard = media->lifetimeGuard();
+            auto showNow = [this, media, displayGuard, scheduleHideFromDisplay, hideDelayMs]() {
+                if (!m_hostSceneActive) return;
+                if (displayGuard.expired()) return;
+                if (media->isBeingDeleted()) return;
+                media->showWithConfiguredFade();
+                if (scheduleHideFromDisplay) {
+                    const auto hideGuard = media->lifetimeGuard();
+                    QTimer::singleShot(std::max(0, hideDelayMs), this, [this, media, hideGuard]() {
+                        if (!m_hostSceneActive) return;
+                        if (hideGuard.expired()) return;
+                        if (!media || media->isBeingDeleted()) return;
+                        media->hideWithConfiguredFade();
+                        scheduleMediaModelSync();
+                    });
+                }
+                scheduleMediaModelSync();
+            };
+            QTimer::singleShot(std::max(0, displayDelayMs), this, showNow);
+        }
+    }
+
+    scheduleMediaModelSync();
+}
+
+void QuickCanvasController::stopHostSceneState() {
+    if (!m_hostSceneActive) return;
+    m_hostSceneActive = false;
+
+    // Disconnect all automation connections
+    for (auto& conn : m_sceneAutomationConnections) QObject::disconnect(conn);
+    m_sceneAutomationConnections.clear();
+
+    // Restore video states
+    for (const VideoPreState& ps : m_prevVideoStates) {
+        if (ps.guard.expired()) continue;
+        if (!ps.video || ps.video->isBeingDeleted()) continue;
+        ps.video->pauseAndSetPosition(ps.posMs);
+        ps.video->setMuted(ps.wasMuted, true);
+        if (ps.wasPlaying) ps.video->togglePlayPause();
+    }
+    m_prevVideoStates.clear();
+
+    // Restore all media to visible
+    if (m_mediaScene) {
+        for (QGraphicsItem* gi : m_mediaScene->items()) {
+            if (auto* media = dynamic_cast<ResizableMediaBase*>(gi)) {
+                media->cancelFade();
+                media->showImmediateNoFade();
+            }
+        }
+    }
+
+    scheduleMediaModelSync();
 }
 
 void QuickCanvasController::pushStaticLayerModels() {

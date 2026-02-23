@@ -297,6 +297,7 @@ public:
     void requestOverlayRelayout() { updateControlsLayout(); }
     void setApplicationSuspended(bool suspended);
     QMediaPlayer* mediaPlayer() const { return m_player; }
+    QVideoSink* videoSink() const { return m_sink; }
     void applyVolumeOverrideFromState();
 
     // Performance / diagnostics

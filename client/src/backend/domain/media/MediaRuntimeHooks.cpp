@@ -6,6 +6,8 @@ MediaRuntimeHooks::FileErrorNotifier g_fileErrorNotifier;
 MediaRuntimeHooks::ScreenSnapCallback g_screenSnapCallback;
 MediaRuntimeHooks::ResizeSnapCallback g_resizeSnapCallback;
 FileManager* g_fileManager = nullptr;
+MediaRuntimeHooks::MediaSettingsChangedNotifier g_mediaSettingsChangedNotifier;
+MediaRuntimeHooks::MediaOpacityAnimationTickNotifier g_mediaOpacityAnimationTickNotifier;
 }
 
 namespace MediaRuntimeHooks {
@@ -47,5 +49,21 @@ void setFileManager(FileManager* manager) {
 
 FileManager* fileManager() {
     return g_fileManager;
+}
+
+void setMediaSettingsChangedNotifier(MediaSettingsChangedNotifier cb) {
+    g_mediaSettingsChangedNotifier = std::move(cb);
+}
+
+MediaSettingsChangedNotifier mediaSettingsChangedNotifier() {
+    return g_mediaSettingsChangedNotifier;
+}
+
+void setMediaOpacityAnimationTickNotifier(MediaOpacityAnimationTickNotifier cb) {
+    g_mediaOpacityAnimationTickNotifier = std::move(cb);
+}
+
+MediaOpacityAnimationTickNotifier mediaOpacityAnimationTickNotifier() {
+    return g_mediaOpacityAnimationTickNotifier;
 }
 } // namespace MediaRuntimeHooks

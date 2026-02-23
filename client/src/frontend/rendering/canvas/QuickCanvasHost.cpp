@@ -15,6 +15,12 @@ QuickCanvasHost::QuickCanvasHost(QuickCanvasController* controller, LegacySceneM
     connect(m_legacyMirror, &LegacySceneMirror::mediaItemRemoved, this, &QuickCanvasHost::mediaItemRemoved);
     connect(m_legacyMirror, &LegacySceneMirror::remoteSceneLaunchStateChanged,
             this, &QuickCanvasHost::remoteSceneLaunchStateChanged);
+    connect(m_legacyMirror, &LegacySceneMirror::remoteSceneLaunchStateChanged,
+            this, [this](bool active, const QString&, const QString&) {
+                if (!m_controller) return;
+                if (active) m_controller->startHostSceneState();
+                else        m_controller->stopHostSceneState();
+            });
     connect(m_legacyMirror, &LegacySceneMirror::textToolActiveChanged,
             m_controller, &QuickCanvasController::setTextToolActive);
     connect(m_controller, &QuickCanvasController::textMediaCreateRequested, this,

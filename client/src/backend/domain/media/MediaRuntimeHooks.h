@@ -20,6 +20,8 @@ using UploadChangedNotifier = std::function<void()>;
 using FileErrorNotifier = std::function<void(ResizableMediaBase*)>;
 using ScreenSnapCallback = std::function<QPointF(const QPointF&, const QRectF&, bool, ResizableMediaBase*)>;
 using ResizeSnapCallback = std::function<ResizeSnapFeedback(qreal, const QPointF&, const QPointF&, const QSize&, bool, ResizableMediaBase*)>;
+using MediaSettingsChangedNotifier = std::function<void(ResizableMediaBase*)>;
+using MediaOpacityAnimationTickNotifier = std::function<void()>;
 
 void setUploadChangedNotifier(UploadChangedNotifier cb);
 UploadChangedNotifier uploadChangedNotifier();
@@ -35,4 +37,10 @@ ResizeSnapCallback resizeSnapCallback();
 
 void setFileManager(FileManager* manager);
 FileManager* fileManager();
+
+void setMediaSettingsChangedNotifier(MediaSettingsChangedNotifier cb);
+MediaSettingsChangedNotifier mediaSettingsChangedNotifier();
+
+void setMediaOpacityAnimationTickNotifier(MediaOpacityAnimationTickNotifier cb);
+MediaOpacityAnimationTickNotifier mediaOpacityAnimationTickNotifier();
 } // namespace MediaRuntimeHooks

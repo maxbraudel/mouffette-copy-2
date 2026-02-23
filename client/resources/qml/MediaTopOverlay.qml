@@ -76,7 +76,7 @@ Item {
                 ? "qrc:/icons/icons/visibility-on.svg"
                 : "qrc:/icons/icons/visibility-off.svg"
             isToggle: true
-            toggled: root.contentVisible
+            toggled: !root.contentVisible
             implicitWidth: root.btnSize
             implicitHeight: root.btnSize
             onClicked: root.visibilityToggleRequested(root.mediaId, !root.contentVisible)

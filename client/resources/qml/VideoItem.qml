@@ -3,21 +3,12 @@ import QtMultimedia
 
 BaseMediaItem {
     id: root
-    property url source: ""
+
+    property var cppVideoSink: null
 
     Rectangle {
         anchors.fill: parent
         color: "#141a24"
-    }
-
-    MediaPlayer {
-        id: mediaPlayer
-        source: root.source
-        videoOutput: videoOutput
-        audioOutput: AudioOutput {
-            muted: true
-            volume: 0.0
-        }
     }
 
     VideoOutput {
@@ -26,19 +17,9 @@ BaseMediaItem {
         fillMode: VideoOutput.PreserveAspectFit
     }
 
-    onVisibleChanged: {
-        if (!visible) {
-            mediaPlayer.pause()
-            return
+    onCppVideoSinkChanged: {
+        if (root.cppVideoSink) {
+            videoOutput.videoSink = root.cppVideoSink
         }
-        if (root.source && root.source.toString().length > 0)
-            mediaPlayer.play()
-    }
-
-    onSourceChanged: {
-        if (!visible)
-            return
-        if (root.source && root.source.toString().length > 0)
-            mediaPlayer.play()
     }
 }

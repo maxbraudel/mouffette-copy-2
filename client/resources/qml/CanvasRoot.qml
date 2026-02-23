@@ -517,7 +517,10 @@ Rectangle {
                     scale: usesLiveResize ? root.liveResizeScale : localScale
                     transformOrigin: Item.TopLeft
                     z: media ? media.z : 0
-                    visible: !!media
+                    visible: !!media && (media.contentVisible !== false)
+                    opacity: media ? ((media.contentOpacity !== undefined ? media.contentOpacity : 1.0)
+                                    * (media.animatedDisplayOpacity !== undefined ? media.animatedDisplayOpacity : 1.0))
+                                   : 1.0
 
                     // DragHandler inside contentRoot: translation is in scene coords (contentRoot
                     // has scale:viewScale, so 1 unit here = 1 scene unit, not viewport pixel).
@@ -764,7 +767,7 @@ Rectangle {
                         mediaScale: 1.0
                         mediaZ: parent.media.z
                         selected: mediaDelegate.isSelected
-                        source: root.mediaSourceUrl(parent.media ? parent.media.sourcePath : "")
+                        cppVideoSink: parent.media ? (parent.media.videoSinkPtr || null) : null
                     }
                 }
 
