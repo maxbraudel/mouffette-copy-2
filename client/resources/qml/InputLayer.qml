@@ -119,8 +119,6 @@ Item {
         function canStartMove(media, contentItem, dragActive, mediaId) {
             if (!media)
                 return false
-            if (!media.selected)
-                return false
             if (media.textEditable)
                 return false
             if (contentItem && contentItem.editing === true)
@@ -131,8 +129,15 @@ Item {
                 return false
             if (dragActive)
                 return true
-            if (pressTargetKind !== "media" || pressTargetMediaId !== mediaId)
-                return false
+            // Do not require pressTargetKind === "media" here: when the DragHandler is
+            // disabled at press time (because pressTargetKind is still "unknown"), it
+            // misses the press event and can no longer track the drag threshold.  The
+            // panDrag DragHandler in the InputLayer (above the media) grabs the press
+            // with TakeOverForbidden, blocking any retroactive grab by mediaDrag.
+            // Instead, allow the DragHandler to be enabled whenever the coordinator is
+            // idle so it participates in the press from the start.  The real per-media
+            // lock-in happens in onActiveChanged via tryBeginMove / beginMode, which
+            // already checks mode === "idle" and ensures only one drag runs at a time.
             return canStart("move", mediaId)
         }
 

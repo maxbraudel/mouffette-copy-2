@@ -882,6 +882,21 @@ void QuickCanvasController::handleTextCommitRequested(const QString& mediaId, co
 
 void QuickCanvasController::handleTextCreateRequested(qreal viewX, qreal viewY) {
     emit textMediaCreateRequested(mapViewPointToScene(QPointF(viewX, viewY)));
+
+    // Force an immediate model sync so the newly-created text item appears in
+    // the QML Repeater right away. Without this, creation only schedules a
+    // debounced timer and the item stays invisible/non-interactive until the
+    // timer fires — which can take tens of milliseconds after the user already
+    // tried to interact with it.
+    if (m_mediaSyncTimer) {
+        m_mediaSyncTimer->stop();
+    }
+    m_mediaSyncPending = false;
+    syncMediaModelFromScene();
+
+    if (m_textToolActive) {
+        setTextToolActive(false);
+    }
 }
 
 void QuickCanvasController::syncMediaModelFromScene() {
