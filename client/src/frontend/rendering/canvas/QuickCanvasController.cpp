@@ -162,6 +162,13 @@ QuickCanvasController::QuickCanvasController(QObject* parent)
         }
     });
 
+    m_videoStateTimer = new QTimer(this);
+    m_videoStateTimer->setSingleShot(false);
+    m_videoStateTimer->setInterval(50);
+    connect(m_videoStateTimer, &QTimer::timeout, this, [this]() {
+        pushVideoStateModel();
+    });
+
     m_initialFitRetryTimer = new QTimer(this);
     m_initialFitRetryTimer->setSingleShot(true);
     m_initialFitRetryTimer->setInterval(16);
@@ -257,6 +264,38 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
     QObject::connect(
         m_quickWidget->rootObject(), SIGNAL(textCreateRequested(double,double)),
         this, SLOT(handleTextCreateRequested(double,double)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(overlayVisibilityToggleRequested(QString,bool)),
+        this, SLOT(handleOverlayVisibilityToggle(QString,bool)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(overlayBringForwardRequested(QString)),
+        this, SLOT(handleOverlayBringForward(QString)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(overlayBringBackwardRequested(QString)),
+        this, SLOT(handleOverlayBringBackward(QString)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(overlayDeleteRequested(QString)),
+        this, SLOT(handleOverlayDelete(QString)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(overlayPlayPauseRequested(QString)),
+        this, SLOT(handleOverlayPlayPause(QString)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(overlayStopRequested(QString)),
+        this, SLOT(handleOverlayStop(QString)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(overlayRepeatToggleRequested(QString)),
+        this, SLOT(handleOverlayRepeatToggle(QString)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(overlayMuteToggleRequested(QString)),
+        this, SLOT(handleOverlayMuteToggle(QString)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(overlayVolumeChangeRequested(QString,double)),
+        this, SLOT(handleOverlayVolumeChange(QString,double)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(overlaySeekRequested(QString,double)),
+        this, SLOT(handleOverlaySeek(QString,double)));
+
+    m_videoStateTimer->start();
 
     m_pendingInitialSceneScaleRefresh = true;
     QTimer::singleShot(0, this, [this]() {
@@ -960,6 +999,7 @@ void QuickCanvasController::pushMediaModelOnly() {
             mediaEntry.insert(QStringLiteral("sourcePath"), media->sourcePath());
             mediaEntry.insert(QStringLiteral("uploadState"), uploadStateToString(media->uploadState()));
             mediaEntry.insert(QStringLiteral("displayName"), media->displayName());
+            mediaEntry.insert(QStringLiteral("contentVisible"), media->isContentVisible());
 
             if (auto* textMedia = dynamic_cast<TextMediaItem*>(media)) {
                 const QFont textFont = textMedia->font();
@@ -1151,6 +1191,129 @@ void QuickCanvasController::pushSelectionAndSnapModels() {
     }
 
     m_modelPublisher->publishSelectionAndSnapModels(m_viewAdapter, selectionChromeModel, snapGuidesModel);
+}
+
+void QuickCanvasController::pushVideoStateModel() {
+    if (!m_quickWidget || !m_quickWidget->rootObject() || !m_mediaScene) {
+        return;
+    }
+
+    // Find the currently selected video item (if any)
+    ResizableVideoItem* videoItem = nullptr;
+    const QList<QGraphicsItem*> selectedItems = m_mediaScene->selectedItems();
+    for (QGraphicsItem* gi : selectedItems) {
+        if (auto* v = dynamic_cast<ResizableVideoItem*>(gi)) {
+            videoItem = v;
+            break;
+        }
+    }
+
+    QVariantMap state;
+    if (videoItem) {
+        const qint64 durationMs = videoItem->mediaPlayer() ? videoItem->mediaPlayer()->duration() : 0;
+        const qint64 positionMs = videoItem->currentPositionMs();
+        const qreal progress = (durationMs > 0) ? std::clamp<qreal>(static_cast<qreal>(positionMs) / static_cast<qreal>(durationMs), 0.0, 1.0) : 0.0;
+        state.insert(QStringLiteral("mediaId"), videoItem->mediaId());
+        state.insert(QStringLiteral("isPlaying"), videoItem->isPlaying());
+        state.insert(QStringLiteral("isMuted"), videoItem->isMuted());
+        state.insert(QStringLiteral("isLooping"), videoItem->shouldAutoRepeat());
+        state.insert(QStringLiteral("progress"), progress);
+        state.insert(QStringLiteral("volume"), videoItem->volume());
+    }
+
+    m_quickWidget->rootObject()->setProperty("videoStateModel", state);
+}
+
+// ---- Overlay action slots ----
+
+void QuickCanvasController::handleOverlayVisibilityToggle(const QString& mediaId, bool visible) {
+    ResizableMediaBase* media = mediaItemById(mediaId);
+    if (!media) return;
+    if (visible) {
+        media->setContentVisible(true);
+    } else {
+        media->setContentVisible(false);
+    }
+    emit mediaVisibilityToggleRequested(mediaId, visible);
+    scheduleMediaModelSync();
+}
+
+void QuickCanvasController::handleOverlayBringForward(const QString& mediaId) {
+    ResizableMediaBase* media = mediaItemById(mediaId);
+    if (!media || !m_mediaScene || m_mediaScene->views().isEmpty()) return;
+    if (auto* sc = qobject_cast<ScreenCanvas*>(m_mediaScene->views().first())) {
+        sc->moveMediaUp(media);
+    }
+    emit mediaBringForwardRequested(mediaId);
+    scheduleMediaModelSync();
+}
+
+void QuickCanvasController::handleOverlayBringBackward(const QString& mediaId) {
+    ResizableMediaBase* media = mediaItemById(mediaId);
+    if (!media || !m_mediaScene || m_mediaScene->views().isEmpty()) return;
+    if (auto* sc = qobject_cast<ScreenCanvas*>(m_mediaScene->views().first())) {
+        sc->moveMediaDown(media);
+    }
+    emit mediaBringBackwardRequested(mediaId);
+    scheduleMediaModelSync();
+}
+
+void QuickCanvasController::handleOverlayDelete(const QString& mediaId) {
+    ResizableMediaBase* media = mediaItemById(mediaId);
+    if (!media) return;
+    emit mediaDeleteRequested(mediaId);
+    if (m_mediaScene && !m_mediaScene->views().isEmpty()) {
+        if (auto* sc = qobject_cast<ScreenCanvas*>(m_mediaScene->views().first())) {
+            ScreenCanvas::requestMediaDeletion(sc, media);
+            return;
+        }
+    }
+    media->prepareForDeletion();
+    if (m_mediaScene) m_mediaScene->removeItem(media);
+    delete media;
+    scheduleMediaModelSync();
+}
+
+void QuickCanvasController::handleOverlayPlayPause(const QString& mediaId) {
+    if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
+        v->togglePlayPause();
+        emit mediaPlayPauseRequested(mediaId);
+    }
+}
+
+void QuickCanvasController::handleOverlayStop(const QString& mediaId) {
+    if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
+        v->stopToBeginning();
+        emit mediaStopRequested(mediaId);
+    }
+}
+
+void QuickCanvasController::handleOverlayRepeatToggle(const QString& mediaId) {
+    if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
+        v->toggleRepeat();
+        emit mediaRepeatToggleRequested(mediaId);
+    }
+}
+
+void QuickCanvasController::handleOverlayMuteToggle(const QString& mediaId) {
+    if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
+        v->toggleMute();
+        emit mediaMuteToggleRequested(mediaId);
+    }
+}
+
+void QuickCanvasController::handleOverlayVolumeChange(const QString& mediaId, qreal value) {
+    if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
+        v->setVolume(value);
+        emit mediaVolumeChangeRequested(mediaId, value);
+    }
+}
+
+void QuickCanvasController::handleOverlaySeek(const QString& mediaId, qreal ratio) {
+    if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
+        v->seekToRatio(std::clamp(ratio, 0.0, 1.0));
+        emit mediaSeekRequested(mediaId, ratio);
+    }
 }
 
 void QuickCanvasController::pushStaticLayerModels() {

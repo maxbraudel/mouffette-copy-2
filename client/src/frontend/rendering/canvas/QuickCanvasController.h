@@ -52,6 +52,18 @@ signals:
     void textMediaCreateRequested(const QPointF& scenePos);
     void localFilesDropRequested(const QStringList& localPaths, const QPointF& scenePos);
 
+    // Overlay action signals (QML → C++)
+    void mediaVisibilityToggleRequested(const QString& mediaId, bool visible);
+    void mediaBringForwardRequested(const QString& mediaId);
+    void mediaBringBackwardRequested(const QString& mediaId);
+    void mediaDeleteRequested(const QString& mediaId);
+    void mediaPlayPauseRequested(const QString& mediaId);
+    void mediaStopRequested(const QString& mediaId);
+    void mediaRepeatToggleRequested(const QString& mediaId);
+    void mediaMuteToggleRequested(const QString& mediaId);
+    void mediaVolumeChangeRequested(const QString& mediaId, qreal value);
+    void mediaSeekRequested(const QString& mediaId, qreal ratio);
+
 private slots:
     void handleMediaSelectRequested(const QString& mediaId, bool additive);
     void handleMediaMoveStarted(const QString& mediaId, qreal sceneX, qreal sceneY);
@@ -61,6 +73,17 @@ private slots:
     void handleMediaResizeEnded(const QString& mediaId);
     void handleTextCommitRequested(const QString& mediaId, const QString& text);
     void handleTextCreateRequested(qreal viewX, qreal viewY);
+    // Overlay action slots (wired from QML signals)
+    void handleOverlayVisibilityToggle(const QString& mediaId, bool visible);
+    void handleOverlayBringForward(const QString& mediaId);
+    void handleOverlayBringBackward(const QString& mediaId);
+    void handleOverlayDelete(const QString& mediaId);
+    void handleOverlayPlayPause(const QString& mediaId);
+    void handleOverlayStop(const QString& mediaId);
+    void handleOverlayRepeatToggle(const QString& mediaId);
+    void handleOverlayMuteToggle(const QString& mediaId);
+    void handleOverlayVolumeChange(const QString& mediaId, qreal value);
+    void handleOverlaySeek(const QString& mediaId, qreal ratio);
 
 private:
     void rebuildMediaItemIndex();
@@ -74,6 +97,7 @@ private:
     bool commitMediaTransform(const QString& mediaId, qreal sceneX, qreal sceneY, qreal scale);
     bool pushLiveResizeGeometry(const QString& mediaId, qreal sceneX, qreal sceneY, qreal scale);
     void pushSelectionAndSnapModels();
+    void pushVideoStateModel();
     void pushRemoteCursorState();
     QPointF mapRemoteCursorToQuickScene(int globalX, int globalY, bool* ok) const;
     void rebuildScreenRects();
@@ -109,6 +133,7 @@ private:
     QHash<QString, ResizableMediaBase*> m_mediaItemsById;
     QTimer* m_mediaSyncTimer = nullptr;
     QTimer* m_resizeDispatchTimer = nullptr;
+    QTimer* m_videoStateTimer = nullptr;
     bool m_mediaSyncPending = false;
     bool m_selectionMutationInProgress = false;
     bool m_executingQueuedResize = false;

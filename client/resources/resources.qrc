@@ -38,5 +38,9 @@
     <file alias="MediaLayer.qml">qml/MediaLayer.qml</file>
     <file alias="SelectionLayer.qml">qml/SelectionLayer.qml</file>
     <file alias="InputLayer.qml">qml/InputLayer.qml</file>
+    <file alias="OverlayButton.qml">qml/OverlayButton.qml</file>
+    <file alias="OverlaySlider.qml">qml/OverlaySlider.qml</file>
+    <file alias="MediaTopOverlay.qml">qml/MediaTopOverlay.qml</file>
+    <file alias="MediaVideoOverlay.qml">qml/MediaVideoOverlay.qml</file>
     </qresource>
 </RCC>

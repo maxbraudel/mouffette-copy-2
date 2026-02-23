@@ -14,6 +14,18 @@ Rectangle {
     signal textCommitRequested(string mediaId, string text)
     signal textCreateRequested(real viewX, real viewY)
 
+    // Overlay action signals (forwarded to C++)
+    signal overlayVisibilityToggleRequested(string mediaId, bool visible)
+    signal overlayBringForwardRequested(string mediaId)
+    signal overlayBringBackwardRequested(string mediaId)
+    signal overlayDeleteRequested(string mediaId)
+    signal overlayPlayPauseRequested(string mediaId)
+    signal overlayStopRequested(string mediaId)
+    signal overlayRepeatToggleRequested(string mediaId)
+    signal overlayMuteToggleRequested(string mediaId)
+    signal overlayVolumeChangeRequested(string mediaId, real value)
+    signal overlaySeekRequested(string mediaId, real ratio)
+
     property int screenCount: 0
     property bool remoteActive: false
     property var screensModel: []
@@ -52,6 +64,7 @@ Rectangle {
                                           ? inputLayer.inputCoordinator.ownerId
                                           : ""
     property int activeMediaDragCount: 0
+    property var videoStateModel: ({})
 
     function requestMediaSelection(mediaId, additive) {
         if (!mediaId || mediaId.length === 0)
@@ -430,6 +443,7 @@ Rectangle {
                     property real localY: media ? media.y : 0.0
                     property real localScale: media ? (media.scale || 1.0) : 1.0
                     property bool localDragging: false
+                    property bool overlayHovered: false
                     readonly property string currentMediaId: media ? (media.mediaId || "") : ""
                     // Derived from selectionChromeModel — NOT from media.selected.
                     // This avoids mediaModel churn (and delegate destruction) on selection changes.
@@ -510,6 +524,7 @@ Rectangle {
                         acceptedButtons: Qt.LeftButton
                         grabPermissions: PointerHandler.TakeOverForbidden
                         enabled: !!mediaDelegate.media
+                                 && !mediaDelegate.overlayHovered
                                  && !(mediaContentLoader.item && mediaContentLoader.item.editing === true)
 
                         function selectNow(modifiers) {
@@ -543,7 +558,8 @@ Rectangle {
                         target: null
                         acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
                         acceptedButtons: Qt.LeftButton
-                        enabled: root.canStartMediaMove(mediaDelegate.media,
+                        enabled: !mediaDelegate.overlayHovered
+                                 && root.canStartMediaMove(mediaDelegate.media,
                                                         mediaContentLoader.item,
                                                         mediaDrag.active,
                                                         mediaDelegate.currentMediaId)
@@ -703,6 +719,85 @@ Rectangle {
                         }
                         function onTextCommitRequested(mediaId, text) {
                             root.textCommitRequested(mediaId, text)
+                        }
+                    }
+
+                    // ---- Media-attached overlays ----
+                    // Resolved video state for this delegate (updated by 50ms timer in C++)
+                    readonly property var delegateVideoState: {
+                        var vs = root.videoStateModel
+                        if (vs && vs.mediaId && vs.mediaId === mediaDelegate.currentMediaId)
+                            return vs
+                        return null
+                    }
+
+                    // Top overlay: filename + utility buttons (all media types)
+                    MediaTopOverlay {
+                        id: topOverlay
+                        mediaId: mediaDelegate.currentMediaId
+                        displayName: mediaDelegate.media ? (mediaDelegate.media.displayName || "") : ""
+                        contentVisible: mediaDelegate.media ? (mediaDelegate.media.contentVisible !== false) : true
+                        visible: mediaDelegate.isSelected && !mediaDelegate.localDragging
+                        // Position above the media item, centred horizontally
+                        x: (mediaDelegate.width - width) * 0.5
+                        y: -height - 8
+                        z: 100
+
+                        onVisibilityToggleRequested: function(mid, v) {
+                            root.overlayVisibilityToggleRequested(mid, v)
+                        }
+                        onBringForwardRequested: function(mid) {
+                            root.overlayBringForwardRequested(mid)
+                        }
+                        onBringBackwardRequested: function(mid) {
+                            root.overlayBringBackwardRequested(mid)
+                        }
+                        onDeleteRequested: function(mid) {
+                            root.overlayDeleteRequested(mid)
+                        }
+                        onOverlayHoveredChanged: function(h) {
+                            mediaDelegate.overlayHovered = h
+                        }
+                    }
+
+                    // Bottom overlay: video transport controls (video only)
+                    MediaVideoOverlay {
+                        id: bottomOverlay
+                        mediaId: mediaDelegate.currentMediaId
+                        visible: mediaDelegate.isSelected
+                                 && !mediaDelegate.localDragging
+                                 && mediaDelegate.media
+                                 && mediaDelegate.media.mediaType === "video"
+                        isPlaying: mediaDelegate.delegateVideoState ? !!mediaDelegate.delegateVideoState.isPlaying : false
+                        isMuted: mediaDelegate.delegateVideoState ? !!mediaDelegate.delegateVideoState.isMuted : false
+                        isLooping: mediaDelegate.delegateVideoState ? !!mediaDelegate.delegateVideoState.isLooping : false
+                        progress: mediaDelegate.delegateVideoState ? (mediaDelegate.delegateVideoState.progress || 0.0) : 0.0
+                        volume: mediaDelegate.delegateVideoState ? (mediaDelegate.delegateVideoState.volume || 1.0) : 1.0
+                        // Position below the media item, centred horizontally
+                        x: (mediaDelegate.width - width) * 0.5
+                        y: mediaDelegate.height + 8
+                        z: 100
+
+                        onPlayPauseRequested: function(mid) {
+                            root.overlayPlayPauseRequested(mid)
+                        }
+                        onStopRequested: function(mid) {
+                            root.overlayStopRequested(mid)
+                        }
+                        onRepeatToggleRequested: function(mid) {
+                            root.overlayRepeatToggleRequested(mid)
+                        }
+                        onMuteToggleRequested: function(mid) {
+                            root.overlayMuteToggleRequested(mid)
+                        }
+                        onVolumeChangeRequested: function(mid, v) {
+                            root.overlayVolumeChangeRequested(mid, v)
+                        }
+                        onSeekRequested: function(mid, r) {
+                            root.overlaySeekRequested(mid, r)
+                        }
+                        onOverlayHoveredChanged: function(h) {
+                            mediaDelegate.overlayHovered = h
                         }
                     }
                     }

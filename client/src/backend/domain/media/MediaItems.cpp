@@ -1501,6 +1501,10 @@ void ResizableVideoItem::toggleMute() {
     setMuted(!m_effectiveMuted);
 }
 
+void ResizableVideoItem::setVolume(qreal ratio) {
+    setVolumeFromControl(std::clamp(ratio, 0.0, 1.0), false);
+}
+
 void ResizableVideoItem::setMuted(bool muted, bool skipFade) {
     if (!m_audio) return;
 

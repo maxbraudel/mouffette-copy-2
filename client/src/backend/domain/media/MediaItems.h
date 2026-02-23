@@ -307,6 +307,7 @@ public:
     // Audio state accessors for scene serialization
     bool isMuted() const { return m_effectiveMuted; }
     qreal volume() const { return m_userVolumeRatio; }
+    void setVolume(qreal ratio);
     
     // Repeat session management (public for host scene automation)
     void initializeSettingsRepeatSessionForPlaybackStart();
