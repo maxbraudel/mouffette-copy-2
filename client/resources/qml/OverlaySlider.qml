@@ -16,7 +16,7 @@ Item {
     implicitWidth: 120
     implicitHeight: 16
 
-    // Track background
+    // Track background — gOverlayBorderColor = QColor(100,100,100,255)
     Rectangle {
         id: track
         anchors.verticalCenter: parent.verticalCenter
@@ -24,10 +24,10 @@ Item {
         anchors.right: parent.right
         height: 4
         radius: 2
-        color: "#40FFFFFF"
+        color: "#FF646464"
     }
 
-    // Fill
+    // Fill — gOverlayActiveBackgroundColor = QColor(52,87,128,240)
     Rectangle {
         id: fill
         anchors.verticalCenter: track.verticalCenter
@@ -35,8 +35,7 @@ Item {
         width: Math.max(0, Math.min(track.width, root.value * track.width))
         height: track.height
         radius: track.radius
-        color: sliderArea.pressed ? "#CC4A90E2" : "#99FFFFFF"
-        Behavior on color { ColorAnimation { duration: 80 } }
+        color: "#F2345780"
     }
 
     // Thumb
@@ -45,10 +44,9 @@ Item {
         width: 12
         height: 12
         radius: 6
-        color: sliderArea.pressed ? "#4A90E2" : "#FFFFFF"
+        color: "#FFFFFF"
         anchors.verticalCenter: track.verticalCenter
         x: Math.max(0, Math.min(track.width - width, root.value * track.width - width * 0.5))
-        Behavior on color { ColorAnimation { duration: 80 } }
     }
 
     // Input capture

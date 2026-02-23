@@ -40,8 +40,8 @@ Item {
         width: root.width
         height: root.namePillHeight
         radius: 6
-        color: "#CC1e2535"
-        border.color: "#40FFFFFF"
+        color: "#F2323232"   // gOverlayBackgroundColor
+        border.color: "#FF646464"  // gOverlayBorderColor
         border.width: 1
 
         MouseArea {

@@ -20,32 +20,31 @@ Item {
         id: bg
         anchors.fill: parent
         radius: 6
+        // Colors match AppColors: gOverlayBackgroundColor = QColor(50,50,50,240)
+        //                          gOverlayActiveBackgroundColor = QColor(52,87,128,240)
+        //                          gOverlayBorderColor = QColor(100,100,100,255)
         color: {
             if (!root.enabled)
-                return "#55111827"
-            if (root.isToggle && root.toggled)
-                return "#CC4A90E2"
-            if (pressArea.containsPress)
-                return "#CC4A90E2"
-            if (pressArea.containsMouse)
-                return "#CC2a3a50"
-            return "#CC1e2535"
+                return "#61323232"  // base at 35% alpha
+            if ((root.isToggle && root.toggled) || pressArea.containsPress)
+                return "#F2345780"  // gOverlayActiveBackgroundColor
+            return "#F2323232"      // gOverlayBackgroundColor (hover = same as idle)
         }
-        border.color: "#40FFFFFF"
+        border.color: "#FF646464"  // gOverlayBorderColor
         border.width: 1
 
         Behavior on color { ColorAnimation { duration: 80 } }
     }
 
-    // SVG icon — rasterized at 4× source size so it stays sharp at any
-    // display scale. Displayed at 16×16 logical px, downscaled smoothly.
+    // SVG icon — 60% of button size matches legacy OverlayButtonElement (buttonSize * 0.6).
+    // sourceSize at 4× for sharp rendering on HiDPI displays.
     Image {
         id: icon
         anchors.centerIn: parent
-        width: 16
-        height: 16
+        width: Math.round(root.width * 0.6)
+        height: Math.round(root.height * 0.6)
         source: root.iconSource
-        sourceSize: Qt.size(64, 64)
+        sourceSize: Qt.size(width * 4, height * 4)
         fillMode: Image.PreserveAspectFit
         smooth: true
         mipmap: true
