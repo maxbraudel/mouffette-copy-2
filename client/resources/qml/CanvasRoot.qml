@@ -738,9 +738,23 @@ Rectangle {
                         displayName: mediaDelegate.media ? (mediaDelegate.media.displayName || "") : ""
                         contentVisible: mediaDelegate.media ? (mediaDelegate.media.contentVisible !== false) : true
                         visible: mediaDelegate.isSelected && !mediaDelegate.localDragging
-                        // Position above the media item, centred horizontally
-                        x: (mediaDelegate.width - width) * 0.5
-                        y: -height - 8
+                        // Fixed screen-pixel size: cancel both contentRoot viewScale and
+                        // mediaDelegate localScale so the overlay is always 1:1 screen pixels.
+                        scale: {
+                            var s = root.viewScale * mediaDelegate.localScale
+                            return s > 1e-6 ? 1.0 / s : 1.0
+                        }
+                        transformOrigin: Item.TopLeft
+                        // x/y are in mediaDelegate-local coords (before localScale is applied).
+                        // Centre horizontally over the rendered media item, gap above top edge.
+                        x: {
+                            var s = root.viewScale * mediaDelegate.localScale
+                            return s > 1e-6 ? mediaDelegate.width * 0.5 - panelWidth * 0.5 / s : 0
+                        }
+                        y: {
+                            var s = root.viewScale * mediaDelegate.localScale
+                            return s > 1e-6 ? -(panelHeight + 8) / s : 0
+                        }
                         z: 100
 
                         onVisibilityToggleRequested: function(mid, v) {
@@ -773,9 +787,21 @@ Rectangle {
                         isLooping: mediaDelegate.delegateVideoState ? !!mediaDelegate.delegateVideoState.isLooping : false
                         progress: mediaDelegate.delegateVideoState ? (mediaDelegate.delegateVideoState.progress || 0.0) : 0.0
                         volume: mediaDelegate.delegateVideoState ? (mediaDelegate.delegateVideoState.volume || 1.0) : 1.0
-                        // Position below the media item, centred horizontally
-                        x: (mediaDelegate.width - width) * 0.5
-                        y: mediaDelegate.height + 8
+                        // Fixed screen-pixel size: cancel both contentRoot viewScale and
+                        // mediaDelegate localScale so the overlay is always 1:1 screen pixels.
+                        scale: {
+                            var s = root.viewScale * mediaDelegate.localScale
+                            return s > 1e-6 ? 1.0 / s : 1.0
+                        }
+                        transformOrigin: Item.TopLeft
+                        x: {
+                            var s = root.viewScale * mediaDelegate.localScale
+                            return s > 1e-6 ? mediaDelegate.width * 0.5 - panelWidth * 0.5 / s : 0
+                        }
+                        y: {
+                            var s = root.viewScale * mediaDelegate.localScale
+                            return s > 1e-6 ? mediaDelegate.height + 8.0 / s : mediaDelegate.height
+                        }
                         z: 100
 
                         onPlayPauseRequested: function(mid) {
