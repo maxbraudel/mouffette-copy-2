@@ -23,7 +23,7 @@ Item {
 
         property string mode: "idle"
         property string ownerId: ""
-        property string pressTargetKind: "unknown" // unknown | background | media | handle
+        property string pressTargetKind: "unknown" // unknown | handle
         property string pressTargetMediaId: ""
 
         function resetPressTarget() {
@@ -108,8 +108,6 @@ Item {
         function noteMediaPrimaryPress(mediaId, additive) {
             if (!mediaId)
                 return false
-            pressTargetKind = "media"
-            pressTargetMediaId = mediaId
             if (inputLayer.interactionController) {
                 inputLayer.interactionController.requestMediaSelection(mediaId, !!additive)
             }
@@ -129,15 +127,6 @@ Item {
                 return false
             if (dragActive)
                 return true
-            // Do not require pressTargetKind === "media" here: when the DragHandler is
-            // disabled at press time (because pressTargetKind is still "unknown"), it
-            // misses the press event and can no longer track the drag threshold.  The
-            // panDrag DragHandler in the InputLayer (above the media) grabs the press
-            // with TakeOverForbidden, blocking any retroactive grab by mediaDrag.
-            // Instead, allow the DragHandler to be enabled whenever the coordinator is
-            // idle so it participates in the press from the start.  The real per-media
-            // lock-in happens in onActiveChanged via tryBeginMove / beginMode, which
-            // already checks mode === "idle" and ensures only one drag runs at a time.
             return canStart("move", mediaId)
         }
 
@@ -149,7 +138,6 @@ Item {
 
         function endMove(mediaId) {
             endMode("move", mediaId)
-            resetPressTarget()
         }
 
         function canEnablePan(panActive) {
@@ -162,19 +150,13 @@ Item {
         function tryBeginPanAt(viewX, viewY) {
             if (!canEnablePan(false))
                 return false
-            if (isPointInsideMedia(viewX, viewY)) {
-                pressTargetKind = "media"
-                pressTargetMediaId = ""
+            if (isPointInsideMedia(viewX, viewY))
                 return false
-            }
-            pressTargetKind = "background"
-            pressTargetMediaId = ""
             return beginMode("pan", "canvas")
         }
 
         function endPan() {
             endMode("pan", "canvas")
-            resetPressTarget()
         }
 
         function canStartResize(active, mediaId) {
@@ -209,18 +191,12 @@ Item {
         function tryBeginTextCreateAt(viewX, viewY) {
             if (!canStartTextToolTap())
                 return false
-            if (isPointInsideMedia(viewX, viewY)) {
-                pressTargetKind = "media"
-                pressTargetMediaId = ""
+            if (isPointInsideMedia(viewX, viewY))
                 return false
-            }
-            pressTargetKind = "background"
-            pressTargetMediaId = ""
             if (!beginMode("text", "canvas"))
                 return false
             inputLayer.textCreateRequested(viewX, viewY)
             endMode("text", "canvas")
-            resetPressTarget()
             return true
         }
     }

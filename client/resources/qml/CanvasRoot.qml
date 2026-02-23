@@ -421,13 +421,11 @@ Rectangle {
                         onActiveChanged: {
                             if (active) {
                                 activeMoveMediaId = mediaDelegate.currentMediaId
-                                // Acquire the move lock FIRST before touching selection.
-                                // Multiple DragHandlers can fire onActiveChanged for the same
-                                // pointer event (e.g. when media items overlap). tryBeginMove
-                                // uses the coordinator to guarantee only one succeeds.
-                                // We must NOT change selection if tryBeginMove fails — doing
-                                // so would re-select the wrong item (A) and deselect the item
-                                // that legitimately won the move (B).
+                                // Acquire the coordinator lock first. Multiple DragHandlers
+                                // can fire simultaneously (overlapping items); only the first
+                                // caller to tryBeginMove wins. Do NOT touch selection before
+                                // this check — if we lose the lock the wrong item would be
+                                // selected.
                                 var moveGranted = inputLayer.useInputCoordinator
                                     ? inputLayer.inputCoordinator.tryBeginMove(activeMoveMediaId)
                                     : inputLayer.inputCoordinator.beginMode("move", activeMoveMediaId)
@@ -439,10 +437,8 @@ Rectangle {
                                     root.liveDragViewOffsetY = 0.0
                                     return
                                 }
-                                // Move granted — exclusively select the item being dragged.
-                                // This covers the case where the onPrimaryPressed selection
-                                // was too early (model not yet synced) and ensures the dragged
-                                // item is always the single selected item during a move.
+                                // Select the item being dragged (handles cases where the press
+                                // selection signal hasn't been processed by C++ yet).
                                 if (inputLayer && inputLayer.useInputCoordinator) {
                                     inputLayer.inputCoordinator.noteMediaPrimaryPress(activeMoveMediaId, false)
                                 } else if (activeMoveMediaId) {
