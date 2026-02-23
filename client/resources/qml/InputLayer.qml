@@ -14,30 +14,10 @@ Item {
     property bool selectionHandlePriorityActive: false
     property string selectionHandleHoveredMediaId: ""
     property string liveDragMediaId: ""
-    property bool inputDebugEnabled: !!interactionController && !!interactionController.inputDebugEnabled
     readonly property alias inputCoordinator: coordinator
     default property alias layerChildren: layerRoot.data
 
     signal textCreateRequested(real viewX, real viewY)
-
-    function debugLog(eventName,
-                      arg1,
-                      arg2,
-                      arg3,
-                      arg4,
-                      arg5,
-                      arg6) {
-        if (!inputDebugEnabled)
-            return
-        console.log("[QuickCanvas][InputCoordinator]",
-                    eventName,
-                    arg1 === undefined ? "" : arg1,
-                    arg2 === undefined ? "" : arg2,
-                    arg3 === undefined ? "" : arg3,
-                    arg4 === undefined ? "" : arg4,
-                    arg5 === undefined ? "" : arg5,
-                    arg6 === undefined ? "" : arg6)
-    }
 
     QtObject {
         id: coordinator
@@ -72,15 +52,8 @@ Item {
                              "currentOwner=", ownerId)
                 return false
             }
-            var previousMode = mode
-            var previousOwner = ownerId
             mode = requestedMode
             ownerId = owner
-            inputLayer.debugLog("begin",
-                                "previousMode=", previousMode,
-                                "previousOwner=", previousOwner,
-                                "nextMode=", mode,
-                                "nextOwner=", ownerId)
             return true
         }
 
@@ -101,15 +74,8 @@ Item {
                              "currentOwner=", ownerId)
                 return
             }
-            var previousMode = mode
-            var previousOwner = ownerId
             mode = "idle"
             ownerId = ""
-            inputLayer.debugLog("end",
-                                "previousMode=", previousMode,
-                                "previousOwner=", previousOwner,
-                                "nextMode=", mode,
-                                "nextOwner=", ownerId)
         }
 
         function forceReset(reason) {
@@ -122,9 +88,6 @@ Item {
             mode = "idle"
             ownerId = ""
             resetPressTarget()
-            inputLayer.debugLog("force-reset",
-                                "reason=", reason || "unknown",
-                                "nextMode=", mode)
         }
 
         function isPointInsideMedia(viewX, viewY) {
@@ -158,11 +121,6 @@ Item {
         function noteMediaPrimaryPress(mediaId, additive) {
             if (!mediaId)
                 return false
-            inputLayer.debugLog("primary-press",
-                                "mediaId=", mediaId,
-                                "additive=", !!additive,
-                                "mode=", mode,
-                                "owner=", ownerId)
             if (inputLayer.interactionController) {
                 inputLayer.interactionController.requestMediaSelection(mediaId, !!additive)
             }
@@ -215,20 +173,10 @@ Item {
         }
 
         function tryBeginPanAt(viewX, viewY) {
-            if (!canEnablePan(false)) {
-                inputLayer.debugLog("pan-begin-blocked",
-                                    "reason=coordinator-busy-or-tool-constraint",
-                                    "mode=", mode,
-                                    "owner=", ownerId,
-                                    "view=", viewX + "," + viewY)
+            if (!canEnablePan(false))
                 return false
-            }
-            if (isPointInsideMedia(viewX, viewY)) {
-                inputLayer.debugLog("pan-begin-blocked",
-                                    "reason=point-inside-media",
-                                    "view=", viewX + "," + viewY)
+            if (isPointInsideMedia(viewX, viewY))
                 return false
-            }
             return beginMode("pan", "canvas")
         }
 
@@ -266,26 +214,12 @@ Item {
         }
 
         function tryBeginTextCreateAt(viewX, viewY) {
-            if (!canStartTextToolTap()) {
-                inputLayer.debugLog("text-create-blocked",
-                                    "reason=coordinator-busy-or-tool-constraint",
-                                    "mode=", mode,
-                                    "owner=", ownerId,
-                                    "view=", viewX + "," + viewY)
+            if (!canStartTextToolTap())
                 return false
-            }
-            if (isPointInsideMedia(viewX, viewY)) {
-                inputLayer.debugLog("text-create-blocked",
-                                    "reason=point-inside-media",
-                                    "view=", viewX + "," + viewY)
+            if (isPointInsideMedia(viewX, viewY))
                 return false
-            }
-            if (!beginMode("text", "canvas")) {
-                inputLayer.debugLog("text-create-blocked",
-                                    "reason=failed-begin-mode",
-                                    "view=", viewX + "," + viewY)
+            if (!beginMode("text", "canvas"))
                 return false
-            }
             inputLayer.textCreateRequested(viewX, viewY)
             endMode("text", "canvas")
             return true

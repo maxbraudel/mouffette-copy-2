@@ -51,31 +51,7 @@ Rectangle {
     readonly property string interactionOwnerId: (inputLayer && inputLayer.inputCoordinator)
                                           ? inputLayer.inputCoordinator.ownerId
                                           : ""
-    property bool inputDebugEnabled: false
     property int activeMediaDragCount: 0
-
-    function inputDebugLog(eventName,
-                           arg1,
-                           arg2,
-                           arg3,
-                           arg4,
-                           arg5,
-                           arg6,
-                           arg7,
-                           arg8) {
-        if (!inputDebugEnabled)
-            return
-        console.log("[QuickCanvas][Input]",
-                    eventName,
-                    arg1 === undefined ? "" : arg1,
-                    arg2 === undefined ? "" : arg2,
-                    arg3 === undefined ? "" : arg3,
-                    arg4 === undefined ? "" : arg4,
-                    arg5 === undefined ? "" : arg5,
-                    arg6 === undefined ? "" : arg6,
-                    arg7 === undefined ? "" : arg7,
-                    arg8 === undefined ? "" : arg8)
-    }
 
     function requestMediaSelection(mediaId, additive) {
         if (!mediaId || mediaId.length === 0)
@@ -292,12 +268,6 @@ Rectangle {
                     || owner === ""
                     || liveDragMediaId !== owner
                     || !mediaModelContainsId(owner)) {
-                inputDebugLog("reconcile-reset",
-                              "reason=", reason + ":stale-move",
-                              "mode=", mode,
-                              "owner=", owner,
-                              "liveDragMediaId=", liveDragMediaId,
-                              "activeMediaDragCount=", activeMediaDragCount)
                 coordinator.forceReset(reason + ":stale-move")
             }
             return
@@ -323,37 +293,11 @@ Rectangle {
     }
 
     onMediaModelChanged: {
-        inputDebugLog("media-model-changed",
-                      "count=", mediaModel ? mediaModel.length : 0,
-                      "mode=", interactionMode,
-                      "owner=", interactionOwnerId,
-                      "liveDragMediaId=", liveDragMediaId,
-                      "activeMediaDragCount=", activeMediaDragCount)
         reconcileInputCoordinatorState("media-model-changed")
     }
 
     onSelectionChromeModelChanged: {
-        inputDebugLog("selection-model-changed",
-                      "count=", selectionChromeModel ? selectionChromeModel.length : 0,
-                      "mode=", interactionMode,
-                      "owner=", interactionOwnerId)
         reconcileInputCoordinatorState("selection-model-changed")
-    }
-
-    onInteractionModeChanged: {
-        inputDebugLog("coordinator-mode-changed",
-                      "mode=", interactionMode,
-                      "owner=", interactionOwnerId,
-                      "liveDragMediaId=", liveDragMediaId,
-                      "activeMediaDragCount=", activeMediaDragCount)
-    }
-
-    onInteractionOwnerIdChanged: {
-        inputDebugLog("coordinator-owner-changed",
-                      "mode=", interactionMode,
-                      "owner=", interactionOwnerId,
-                      "liveDragMediaId=", liveDragMediaId,
-                      "activeMediaDragCount=", activeMediaDragCount)
     }
 
     function mediaSourceUrl(path) {
@@ -513,13 +457,6 @@ Rectangle {
                                     root.liveDragViewOffsetY = 0.0
                                 }
                             }
-                        } else if (localDragging && media) {
-                            root.inputDebugLog("media-model-updated-during-local-drag",
-                                               "mediaId=", currentMediaId,
-                                               "localX=", localX,
-                                               "localY=", localY,
-                                               "modelX=", media.x,
-                                               "modelY=", media.y)
                         }
                     }
 
@@ -532,13 +469,6 @@ Rectangle {
                         var orphanMediaId = mediaDrag.activeMoveMediaId
                         if (!orphanMediaId || orphanMediaId.length === 0)
                             orphanMediaId = mediaDelegate.currentMediaId
-
-                        root.inputDebugLog("media-delegate-destroyed-during-drag",
-                                           "mediaId=", orphanMediaId,
-                                           "mode=", root.interactionMode,
-                                           "owner=", root.interactionOwnerId,
-                                           "active=", mediaDrag.active,
-                                           "activeMediaDragCount=", root.activeMediaDragCount)
 
                         if (mediaDrag.countedAsActive) {
                             root.activeMediaDragCount = Math.max(0, root.activeMediaDragCount - 1)
@@ -594,12 +524,6 @@ Rectangle {
                             } else {
                                 root.requestMediaSelection(mediaId, additive)
                             }
-
-                            root.inputDebugLog("media-press-select",
-                                               "mediaId=", mediaId,
-                                               "additive=", additive,
-                                               "mode=", root.interactionMode,
-                                               "owner=", root.interactionOwnerId)
                         }
 
                         onActiveChanged: {
@@ -646,20 +570,6 @@ Rectangle {
                                     ? inputLayer.inputCoordinator.tryBeginMove(activeMoveMediaId)
                                     : inputLayer.inputCoordinator.beginMode("move", activeMoveMediaId)
                                 if (!moveGranted) {
-                                    var moveBlockReason = ""
-                                    if (inputLayer && inputLayer.inputCoordinator
-                                            && inputLayer.inputCoordinator.describeMoveBlock) {
-                                        moveBlockReason = inputLayer.inputCoordinator.describeMoveBlock(
-                                            mediaDelegate.media,
-                                            mediaContentLoader.item,
-                                            mediaDrag.active,
-                                            activeMoveMediaId)
-                                    }
-                                    root.inputDebugLog("media-drag-begin-denied",
-                                                       "mediaId=", activeMoveMediaId,
-                                                       "reason=", moveBlockReason,
-                                                       "mode=", root.interactionMode,
-                                                       "owner=", root.interactionOwnerId)
                                     activeMoveMediaId = ""
                                     mediaDelegate.localDragging = false
                                     root.liveDragMediaId = ""
@@ -672,11 +582,6 @@ Rectangle {
                                     root.activeMediaDragCount += 1
                                     countedAsActive = true
                                 }
-                                root.inputDebugLog("media-drag-begin",
-                                                   "mediaId=", activeMoveMediaId,
-                                                   "activeMediaDragCount=", root.activeMediaDragCount,
-                                                   "mode=", root.interactionMode,
-                                                   "owner=", root.interactionOwnerId)
                                 // Select the item being dragged (handles cases where the press
                                 // selection signal hasn't been processed by C++ yet).
                                 if (inputLayer && inputLayer.useInputCoordinator) {
@@ -721,13 +626,6 @@ Rectangle {
                                                         mediaDelegate.localX,
                                                         mediaDelegate.localY)
                                 }
-                                root.inputDebugLog("media-drag-end",
-                                                   "mediaId=", finalMediaId,
-                                                   "activeMediaDragCount=", root.activeMediaDragCount,
-                                                   "mode=", root.interactionMode,
-                                                   "owner=", root.interactionOwnerId,
-                                                   "finalX=", mediaDelegate.localX,
-                                                   "finalY=", mediaDelegate.localY)
                                 activeMoveMediaId = ""
                             }
                         }
@@ -768,11 +666,6 @@ Rectangle {
                             } else {
                                 inputLayer.inputCoordinator.endMode("move", activeMoveMediaId)
                             }
-                            root.inputDebugLog("media-drag-canceled",
-                                               "mediaId=", activeMoveMediaId,
-                                               "activeMediaDragCount=", root.activeMediaDragCount,
-                                               "mode=", root.interactionMode,
-                                               "owner=", root.interactionOwnerId)
                             activeMoveMediaId = ""
                         }
                     }
@@ -980,22 +873,12 @@ Rectangle {
                             panGranted = inputLayer.inputCoordinator.beginMode("pan", "canvas")
                         }
                         if (!panGranted) {
-                            root.inputDebugLog("pan-begin-denied",
-                                               "mode=", root.interactionMode,
-                                               "owner=", root.interactionOwnerId,
-                                               "selectionHandlePriorityActive=", selectionChrome.handlePriorityActive,
-                                               "liveDragMediaId=", root.liveDragMediaId)
                             panSessionActive = false
                             return
                         }
                         panSessionActive = true
                         startPanX = root.panX
                         startPanY = root.panY
-                        root.inputDebugLog("pan-begin",
-                                           "mode=", root.interactionMode,
-                                           "owner=", root.interactionOwnerId,
-                                           "startPanX=", startPanX,
-                                           "startPanY=", startPanY)
                     } else {
                         panSessionActive = false
                         if (inputLayer.useInputCoordinator) {
@@ -1003,11 +886,6 @@ Rectangle {
                         } else {
                             inputLayer.inputCoordinator.endMode("pan", "canvas")
                         }
-                        root.inputDebugLog("pan-end",
-                                           "mode=", root.interactionMode,
-                                           "owner=", root.interactionOwnerId,
-                                           "panX=", root.panX,
-                                           "panY=", root.panY)
                     }
                 }
 
@@ -1025,11 +903,6 @@ Rectangle {
                     } else {
                         inputLayer.inputCoordinator.endMode("pan", "canvas")
                     }
-                    root.inputDebugLog("pan-canceled",
-                                       "mode=", root.interactionMode,
-                                       "owner=", root.interactionOwnerId,
-                                       "panX=", root.panX,
-                                       "panY=", root.panY)
                 }
             }
 
@@ -1111,15 +984,6 @@ Rectangle {
                 repeat: true
                 running: inputLayer.useInputCoordinator
                 onTriggered: {
-                    if (root.inputDebugEnabled && root.interactionMode !== "idle") {
-                        root.inputDebugLog("watchdog",
-                                           "mode=", root.interactionMode,
-                                           "owner=", root.interactionOwnerId,
-                                           "liveDragMediaId=", root.liveDragMediaId,
-                                           "activeMediaDragCount=", root.activeMediaDragCount,
-                                           "panActive=", panDrag.active,
-                                           "resizeInteracting=", selectionChrome.interacting)
-                    }
                     root.reconcileInputCoordinatorState("watchdog")
                 }
             }
