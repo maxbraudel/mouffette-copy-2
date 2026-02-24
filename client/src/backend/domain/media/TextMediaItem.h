@@ -211,7 +211,7 @@ private:
     // Text alignment settings
     HorizontalAlignment m_horizontalAlignment = HorizontalAlignment::Center;
     VerticalAlignment m_verticalAlignment = VerticalAlignment::Center;
-    bool m_fitToTextEnabled = false;
+    bool m_fitToTextEnabled = true;
     bool m_fitToTextUpdatePending = false;
     bool m_applyingFitToText = false;
     std::optional<QSize> m_pendingGeometryCommitSize;
@@ -240,7 +240,7 @@ private:
         bool highlightEnabled = false;
         QColor highlightColor;
         qreal contentPaddingPx = 0.0;
-        bool fitToTextEnabled = false;
+        bool fitToTextEnabled = true;
         HorizontalAlignment horizontalAlignment = HorizontalAlignment::Center;
         VerticalAlignment verticalAlignment = VerticalAlignment::Center;
         qreal uniformScaleFactor = 1.0;

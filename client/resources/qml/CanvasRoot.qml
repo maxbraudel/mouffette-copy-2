@@ -25,6 +25,9 @@ Rectangle {
     signal overlayMuteToggleRequested(string mediaId)
     signal overlayVolumeChangeRequested(string mediaId, real value)
     signal overlaySeekRequested(string mediaId, real ratio)
+    signal overlayFitToTextToggleRequested(string mediaId)
+    signal overlayHorizontalAlignRequested(string mediaId, string alignment)
+    signal overlayVerticalAlignRequested(string mediaId, string alignment)
 
     property int screenCount: 0
     property bool remoteActive: false
@@ -1111,7 +1114,7 @@ Rectangle {
                     onOverlayHoveredChanged:     function(h)    { /* input handled by overlay's own MouseArea */ }
                 }
 
-                // Bottom overlay: video transport controls
+                // Bottom overlay: video transport controls (video only)
                 MediaVideoOverlay {
                     id: bottomOverlay
                     mediaId: overlayDelegate.mid
@@ -1134,6 +1137,33 @@ Rectangle {
                     onVolumeChangeRequested: function(m, v) { root.overlayVolumeChangeRequested(m, v) }
                     onSeekRequested:         function(m, r) { root.overlaySeekRequested(m, r) }
                     onOverlayHoveredChanged: function(h)    { /* input handled by overlay's own MouseArea */ }
+                }
+
+                // Bottom overlay: text alignment controls (text only)
+                MediaTextOverlay {
+                    id: textOverlay
+                    mediaId: overlayDelegate.mid
+                    visible: overlayDelegate.mediaEntry
+                             && overlayDelegate.mediaEntry.mediaType === "text"
+
+                    fitToTextEnabled: {
+                        var entry = overlayDelegate.mediaEntry
+                        if (!entry)
+                            return true
+                        if (entry.fitToTextEnabled === undefined || entry.fitToTextEnabled === null)
+                            return true
+                        return !!entry.fitToTextEnabled
+                    }
+                    horizontalAlignment: overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.textHorizontalAlignment || "center") : "center"
+                    verticalAlignment:   overlayDelegate.mediaEntry ? (overlayDelegate.mediaEntry.textVerticalAlignment   || "center") : "center"
+
+                    x: overlayDelegate.screenCentreX - panelWidth * 0.5
+                    y: overlayDelegate.screenBottom   + 8
+
+                    onFitToTextToggleRequested:  function(m)    { root.overlayFitToTextToggleRequested(m) }
+                    onHorizontalAlignRequested:  function(m, a) { root.overlayHorizontalAlignRequested(m, a) }
+                    onVerticalAlignRequested:    function(m, a) { root.overlayVerticalAlignRequested(m, a) }
+                    onOverlayHoveredChanged:     function(h)    { /* input handled by overlay's own MouseArea */ }
                 }
             }
         }

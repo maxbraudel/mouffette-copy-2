@@ -6,34 +6,70 @@ Item {
     id: root
 
     property string iconSource: ""
-    property bool isToggle: false
-    property bool toggled: false
-    property bool enabled: true
+    property bool   isToggle:    false
+    property bool   toggled:     false
+    property bool   enabled:     true
+    // "solo" | "leading" | "middle" | "trailing"
+    // Controls which corners are rounded, matching legacy SegmentRole behavior.
+    property string segmentRole: "solo"
 
     signal clicked()
 
     implicitWidth: 36
     implicitHeight: 36
 
-    // Background pill
-    Rectangle {
-        id: bg
-        anchors.fill: parent
-        radius: 6
-        // Colors match AppColors: gOverlayBackgroundColor = QColor(50,50,50,240)
-        //                          gOverlayActiveBackgroundColor = QColor(52,87,128,240)
-        //                          gOverlayBorderColor = QColor(100,100,100,255)
-        color: {
-            if (!root.enabled)
-                return "#61323232"  // base at 35% alpha
-            if ((root.isToggle && root.toggled) || pressArea.containsPress)
-                return "#F2345780"  // gOverlayActiveBackgroundColor
-            return "#F2323232"      // gOverlayBackgroundColor (hover = same as idle)
-        }
-        border.color: "#FF646464"  // gOverlayBorderColor
-        border.width: 1
+    readonly property real _r: 6
 
-        Behavior on color { ColorAnimation { duration: 80 } }
+    // Which sides are flat (square corners)
+    readonly property bool _flatLeft:  segmentRole === "trailing" || segmentRole === "middle"
+    readonly property bool _flatRight: segmentRole === "leading"  || segmentRole === "middle"
+
+    // Resolved background fill color
+    readonly property color _bgColor: {
+        if (!root.enabled)
+            return "#61323232"
+        if ((root.isToggle && root.toggled) || pressArea.containsPress)
+            return "#F2345780"
+        return "#F2323232"
+    }
+
+    // Clipping container — clips away the rounded corners that should be flat.
+    // The bg rect is oversized/shifted so those corners extend outside the clip.
+    Item {
+        id: bgClip
+        anchors.fill: parent
+        clip: true
+
+        Rectangle {
+            id: bg
+            // Shift/extend so rounded corners on flat sides are pushed outside clip.
+            x:      root._flatLeft  ? -root._r : 0
+            y:      0
+            width:  root.width
+                    + (root._flatLeft  ? root._r : 0)
+                    + (root._flatRight ? root._r : 0)
+            height: root.height
+            radius: root._r
+            color:  root._bgColor
+            border.color: "#FF646464"
+            border.width: 1
+            Behavior on color { ColorAnimation { duration: 80 } }
+        }
+    }
+
+    // Explicit border lines on flat sides — drawn outside the clip so they are
+    // always visible. These are the seam dividers between segmented buttons.
+    Rectangle {
+        visible: root._flatLeft
+        anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
+        width: 1
+        color: "#FF646464"
+    }
+    Rectangle {
+        visible: root._flatRight
+        anchors { right: parent.right; top: parent.top; bottom: parent.bottom }
+        width: 1
+        color: "#FF646464"
     }
 
     // SVG icon — 60% of button size matches legacy OverlayButtonElement (buttonSize * 0.6).

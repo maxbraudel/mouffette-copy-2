@@ -303,6 +303,15 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
     QObject::connect(
         m_quickWidget->rootObject(), SIGNAL(overlaySeekRequested(QString,double)),
         this, SLOT(handleOverlaySeek(QString,double)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(overlayFitToTextToggleRequested(QString)),
+        this, SLOT(handleOverlayFitToTextToggle(QString)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(overlayHorizontalAlignRequested(QString,QString)),
+        this, SLOT(handleOverlayHorizontalAlign(QString,QString)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(overlayVerticalAlignRequested(QString,QString)),
+        this, SLOT(handleOverlayVerticalAlign(QString,QString)));
 
     m_videoStateTimer->start();
 
@@ -1339,6 +1348,34 @@ void QuickCanvasController::handleOverlaySeek(const QString& mediaId, qreal rati
         v->seekToRatio(std::clamp(ratio, 0.0, 1.0));
         emit mediaSeekRequested(mediaId, ratio);
     }
+}
+
+void QuickCanvasController::handleOverlayFitToTextToggle(const QString& mediaId) {
+    if (auto* t = dynamic_cast<TextMediaItem*>(mediaItemById(mediaId))) {
+        t->setFitToTextEnabled(!t->fitToTextEnabled());
+        emit mediaFitToTextToggleRequested(mediaId);
+        scheduleMediaModelSync();
+    }
+}
+
+void QuickCanvasController::handleOverlayHorizontalAlign(const QString& mediaId, const QString& alignment) {
+    auto* t = dynamic_cast<TextMediaItem*>(mediaItemById(mediaId));
+    if (!t) return;
+    if      (alignment == QStringLiteral("left"))   t->setHorizontalAlignment(TextMediaItem::HorizontalAlignment::Left);
+    else if (alignment == QStringLiteral("center")) t->setHorizontalAlignment(TextMediaItem::HorizontalAlignment::Center);
+    else if (alignment == QStringLiteral("right"))  t->setHorizontalAlignment(TextMediaItem::HorizontalAlignment::Right);
+    emit mediaHorizontalAlignRequested(mediaId, alignment);
+    scheduleMediaModelSync();
+}
+
+void QuickCanvasController::handleOverlayVerticalAlign(const QString& mediaId, const QString& alignment) {
+    auto* t = dynamic_cast<TextMediaItem*>(mediaItemById(mediaId));
+    if (!t) return;
+    if      (alignment == QStringLiteral("top"))    t->setVerticalAlignment(TextMediaItem::VerticalAlignment::Top);
+    else if (alignment == QStringLiteral("center")) t->setVerticalAlignment(TextMediaItem::VerticalAlignment::Center);
+    else if (alignment == QStringLiteral("bottom")) t->setVerticalAlignment(TextMediaItem::VerticalAlignment::Bottom);
+    emit mediaVerticalAlignRequested(mediaId, alignment);
+    scheduleMediaModelSync();
 }
 
 void QuickCanvasController::handleFadeAnimationTick() {

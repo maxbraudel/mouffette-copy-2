@@ -68,6 +68,9 @@ signals:
     void mediaMuteToggleRequested(const QString& mediaId);
     void mediaVolumeChangeRequested(const QString& mediaId, qreal value);
     void mediaSeekRequested(const QString& mediaId, qreal ratio);
+    void mediaFitToTextToggleRequested(const QString& mediaId);
+    void mediaHorizontalAlignRequested(const QString& mediaId, const QString& alignment);
+    void mediaVerticalAlignRequested(const QString& mediaId, const QString& alignment);
 
 private slots:
     void handleMediaSelectRequested(const QString& mediaId, bool additive);
@@ -89,6 +92,9 @@ private slots:
     void handleOverlayMuteToggle(const QString& mediaId);
     void handleOverlayVolumeChange(const QString& mediaId, qreal value);
     void handleOverlaySeek(const QString& mediaId, qreal ratio);
+    void handleOverlayFitToTextToggle(const QString& mediaId);
+    void handleOverlayHorizontalAlign(const QString& mediaId, const QString& alignment);
+    void handleOverlayVerticalAlign(const QString& mediaId, const QString& alignment);
     void handleFadeAnimationTick();
     void handleMediaSettingsChanged(ResizableMediaBase* media);
 

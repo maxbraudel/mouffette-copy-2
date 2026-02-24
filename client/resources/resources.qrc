@@ -42,5 +42,6 @@
     <file alias="OverlaySlider.qml">qml/OverlaySlider.qml</file>
     <file alias="MediaTopOverlay.qml">qml/MediaTopOverlay.qml</file>
     <file alias="MediaVideoOverlay.qml">qml/MediaVideoOverlay.qml</file>
+    <file alias="MediaTextOverlay.qml">qml/MediaTextOverlay.qml</file>
     </qresource>
 </RCC>
