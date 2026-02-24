@@ -93,6 +93,10 @@ void ResizableMediaBase::notifyInteractiveGeometryChanged() {
     onInteractiveGeometryChanged();
 }
 
+void ResizableMediaBase::suppressNextItemPositionSnap() {
+    m_suppressNextItemPositionSnap = true;
+}
+
 ResizableMediaBase::ResizableMediaBase(const QSize& baseSizePx, int visualSizePx, int selectionSizePx, const QString& filename)
 {
     m_lifetimeToken = std::make_shared<bool>(true);
@@ -440,6 +444,13 @@ QVariant ResizableMediaBase::itemChange(GraphicsItemChange change, const QVarian
     // Snap requested position changes to the scene pixel grid
     if (change == ItemPositionChange && value.canConvert<QPointF>()) {
         QPointF p = value.toPointF();
+
+        // QuickCanvas computes and applies snapped positions explicitly in controller code.
+        // Bypass legacy ScreenCanvas/grid snapping once to avoid double-snapping jitter.
+        if (m_suppressNextItemPositionSnap) {
+            m_suppressNextItemPositionSnap = false;
+            return QVariant(p);
+        }
         
         // First apply pixel grid snapping
         p = snapPointToGrid(p);

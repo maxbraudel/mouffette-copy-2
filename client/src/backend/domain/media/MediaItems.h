@@ -95,6 +95,9 @@ public:
     bool beginAltResizeMode();
     // Public wrapper: notifies the item that interactive geometry has changed.
     void notifyInteractiveGeometryChanged();
+    // One-shot bypass for legacy ItemPositionChange snapping (grid + screen callback).
+    // Used by QuickCanvasController, which already computes snapped positions.
+    void suppressNextItemPositionSnap();
 
     // Upload status API
     UploadState uploadState() const { return m_uploadState; }
@@ -257,6 +260,7 @@ private:
     static inline QPointF snapPointToGrid(const QPointF& p) { return QPointF(snapToGrid(p.x()), snapToGrid(p.y())); }
 protected:
     bool m_beingDeleted = false;
+    bool m_suppressNextItemPositionSnap = false;
     bool m_contentVisible = true; // controlled by visibility toggle overlay button
     qreal m_contentOpacity = 1.0; // multiplicative opacity for content only
     qreal m_contentDisplayOpacity = 1.0; // animated multiplier (0..1) for fade in/out

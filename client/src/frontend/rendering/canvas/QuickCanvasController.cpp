@@ -680,6 +680,7 @@ void QuickCanvasController::handleMediaMoveEnded(const QString& mediaId, qreal s
     m_pointerSession->setDraggingMedia(true);
     ResizableMediaBase* movedTarget = mediaItemById(mediaId);
     if (movedTarget) {
+        movedTarget->suppressNextItemPositionSnap();
         movedTarget->setPos(QPointF(finalX, finalY));
     }
     m_pointerSession->setDraggingMedia(false);
@@ -997,6 +998,7 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                                                                    ResizableMediaBase::TopMid),
                 newBase);
             const QPointF newPos = m_altFixedScenePoint - newFixedItem * s;
+            target->suppressNextItemPositionSnap();
             target->setPos(newPos);
             target->notifyInteractiveGeometryChanged();
 
@@ -1114,12 +1116,14 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
 
             // Reposition to keep fixed corner anchored
             using H2 = ResizableMediaBase;
-            H2::Handle oppHandle2 = (activeHandle == H2::TopLeft)     ? H2::BottomRight :
-                                    (activeHandle == H2::TopRight)    ? H2::BottomLeft  :
-                                    (activeHandle == H2::BottomLeft)  ? H2::TopRight    :
-                                                                        H2::TopLeft;
+            const auto oppHandle2 = (activeHandle == static_cast<int>(ResizableMediaBase::TopLeft))
+                ? H2::BottomRight : (activeHandle == static_cast<int>(ResizableMediaBase::TopRight))
+                ? H2::BottomLeft : (activeHandle == static_cast<int>(ResizableMediaBase::BottomLeft))
+                ? H2::TopRight
+                : H2::TopLeft;
             const QPointF newFixedItem = computeHandleItemPoint(static_cast<int>(oppHandle2), newBase);
             const QPointF newPos = m_altFixedScenePoint - newFixedItem * s;
+            target->suppressNextItemPositionSnap();
             target->setPos(newPos);
             target->notifyInteractiveGeometryChanged();
 
@@ -1257,6 +1261,7 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
         finalPos = fixedScenePoint - fixedItemPoint * proposedScale;
     }
 
+    target->suppressNextItemPositionSnap();
     target->setPos(finalPos);
     m_resizeLastSceneX = finalPos.x();
     m_resizeLastSceneY = finalPos.y();
