@@ -817,7 +817,6 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
     if (wasAlt && !altPressed) {
         m_altAxisCaptured   = false;
         m_altCornerCaptured = false;
-        m_altResizeActive   = false;
         // Rebase uniform resize metrics from current item geometry
         const qreal s = std::abs(target->scale()) > 1e-6 ? std::abs(target->scale()) : 1.0;
         m_resizeBaseSize = target->baseSizePx();
@@ -831,7 +830,6 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
 
     // ── ALT-RESIZE PATH ─────────────────────────────────────────────────────
     if (altPressed && (axisHandle || cornerHandle)) {
-        m_altResizeActive = true;
         const qreal currentScale = std::abs(target->scale()) > 1e-6 ? std::abs(target->scale()) : 1.0;
 
         if (axisHandle) {
@@ -879,10 +877,6 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                     cursorToEdge = -cursorToEdge;
                 m_altAxisInitialOffset = cursorToEdge;
                 m_altAxisCaptured = true;
-
-                if (!target->isTextMedia()) {
-                    target->setFillContentWithoutAspect(true);
-                }
             }
 
             // Compute desired new size along the axis
@@ -986,10 +980,6 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                 m_altCornerInitialOffsetX = dxRaw;
                 m_altCornerInitialOffsetY = dyRaw;
                 m_altCornerCaptured = true;
-
-                if (!target->isTextMedia()) {
-                    target->setFillContentWithoutAspect(true);
-                }
             }
 
             const qreal s = std::abs(target->scale()) > 1e-6 ? std::abs(target->scale()) : 1.0;
@@ -1301,7 +1291,6 @@ void QuickCanvasController::pushMediaModelOnly() {
             mediaEntry.insert(QStringLiteral("contentVisible"), media->isContentVisible());
             mediaEntry.insert(QStringLiteral("contentOpacity"), media->contentOpacity());
             mediaEntry.insert(QStringLiteral("animatedDisplayOpacity"), media->animatedDisplayOpacity());
-            mediaEntry.insert(QStringLiteral("fillContentWithoutAspect"), media->fillContentWithoutAspect());
 
             if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
                 mediaEntry.insert(QStringLiteral("videoSinkPtr"),
@@ -2199,7 +2188,6 @@ bool QuickCanvasController::pushLiveAltResizeGeometry(const QString& mediaId,
 }
 
 void QuickCanvasController::resetAltResizeState() {
-    m_altResizeActive         = false;
     m_lastResizeWasAlt        = false;
     m_altAxisCaptured         = false;
     m_altCornerCaptured       = false;

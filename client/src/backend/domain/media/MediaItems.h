@@ -90,9 +90,6 @@ public:
     // Direct base-size mutation used by QuickCanvasController for alt-resize.
     // Calls prepareGeometryChange() before mutating.
     void setBaseSizePx(const QSize& size);
-    // Expose fill-without-aspect flag for alt-resize (image/video deform)
-    void setFillContentWithoutAspect(bool v) { m_fillContentWithoutAspect = v; }
-    bool fillContentWithoutAspect() const { return m_fillContentWithoutAspect; }
     // Public wrapper: engages alt-resize mode (calls onAltResizeModeEngaged).
     // Returns true if derived class handles scale baking internally.
     bool beginAltResizeMode();

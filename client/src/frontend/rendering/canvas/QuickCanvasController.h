@@ -169,7 +169,6 @@ private:
     qreal m_resizeLastSceneY = 0.0;
     qreal m_resizeLastScale = 1.0;
     // Alt-resize session state (axis or corner non-uniform stretch)
-    bool   m_altResizeActive           = false;
     bool   m_lastResizeWasAlt          = false;
     bool   m_altAxisCaptured           = false;
     bool   m_altCornerCaptured         = false;
