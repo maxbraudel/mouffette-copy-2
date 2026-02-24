@@ -88,7 +88,8 @@ Item {
                        ? (interactionController.liveResizeY || 0)
                        : (liveMedia ? (liveMedia.y || 0) : (entry ? (entry.y || 0) : 0)))
         var sceneW = usesLiveAltResize
-                   ? Math.max(1, interactionController.liveAltResizeWidth || 1)
+                   ? Math.max(1, (interactionController.liveAltResizeWidth || 1)
+                                 * (interactionController.liveAltResizeScale || 1.0))
                    : (usesLiveResize
                        ? Math.max(1, (liveMedia ? (liveMedia.width || 1) : (entry ? (entry.width || 1) : 1))
                                       * (interactionController.liveResizeScale || 1.0))
@@ -96,7 +97,8 @@ Item {
                            ? Math.max(1, (liveMedia.width || 1) * (liveMedia.scale || 1.0))
                            : Math.max(1, entry ? (entry.width || 1) : 1)))
         var sceneH = usesLiveAltResize
-                   ? Math.max(1, interactionController.liveAltResizeHeight || 1)
+                   ? Math.max(1, (interactionController.liveAltResizeHeight || 1)
+                                 * (interactionController.liveAltResizeScale || 1.0))
                    : (usesLiveResize
                        ? Math.max(1, (liveMedia ? (liveMedia.height || 1) : (entry ? (entry.height || 1) : 1))
                                       * (interactionController.liveResizeScale || 1.0))
@@ -335,13 +337,30 @@ Item {
             readonly property real sceneH: geometry.sceneH
             readonly property real _viewScale: root.contentItem ? root.contentItem.scale : 1.0
             readonly property bool beingDragged: !!entry && root.draggedMediaId !== "" && root.draggedMediaId === entry.mediaId
+            // snapDragActive intentionally does NOT require beingDragged.
+            // liveDragMediaId is cleared synchronously at drag-end (before commitMediaTransform
+            // pushes the snapped position into selectionChromeModel). If we gated on beingDragged,
+            // the chrome would jump back to entry.x/y for 1+ frames until the model updates.
+            // The snap freeze is cleared by QML onMediaChanged once the model catches up.
+            readonly property bool snapDragActive: !!interactionController
+                                                   && !!interactionController.liveSnapDragActive
+                                                   && interactionController.liveSnapDragMediaId === (entry ? entry.mediaId : "")
+            // When snap is active: derive viewport offset from snapped scene position delta.
+            // liveSnapDragX/Y and sceneX are both in canvas QML units (scene * sceneUnitScale).
+            // Multiply by viewScale to get viewport pixels, matching dragOffsetViewX/Y units.
+            readonly property real effectiveDragOffsetX: snapDragActive
+                ? (interactionController.liveSnapDragX - sceneX) * _viewScale
+                : root.dragOffsetViewX
+            readonly property real effectiveDragOffsetY: snapDragActive
+                ? (interactionController.liveSnapDragY - sceneY) * _viewScale
+                : root.dragOffsetViewY
 
             enabled: !!entry
             visible: !!entry
             z: 90000
 
-            x: sceneX + (beingDragged ? (root.dragOffsetViewX / _viewScale) : 0)
-            y: sceneY + (beingDragged ? (root.dragOffsetViewY / _viewScale) : 0)
+            x: sceneX + (beingDragged ? (effectiveDragOffsetX / _viewScale) : 0)
+            y: sceneY + (beingDragged ? (effectiveDragOffsetY / _viewScale) : 0)
             width: Math.max(1, sceneW)
             height: Math.max(1, sceneH)
 

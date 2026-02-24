@@ -6,9 +6,9 @@ Rectangle {
     color: "#10131a"
 
     signal mediaSelectRequested(string mediaId, bool additive)
-    signal mediaMoveStarted(string mediaId, real sceneX, real sceneY)
-    signal mediaMoveUpdated(string mediaId, real sceneX, real sceneY)
-    signal mediaMoveEnded(string mediaId, real sceneX, real sceneY)
+    signal mediaMoveStarted(string mediaId, real sceneX, real sceneY, bool snap)
+    signal mediaMoveUpdated(string mediaId, real sceneX, real sceneY, bool snap)
+    signal mediaMoveEnded(string mediaId, real sceneX, real sceneY, bool snap)
     signal mediaResizeRequested(string mediaId, string handleId, real sceneX, real sceneY, bool snap, bool altPressed)
     signal mediaResizeEnded(string mediaId)
     signal textCommitRequested(string mediaId, string text)
@@ -40,6 +40,11 @@ Rectangle {
     property string liveDragMediaId: ""
     property real liveDragViewOffsetX: 0.0
     property real liveDragViewOffsetY: 0.0
+    // Snap-corrected live drag position — set by C++ per tick when Shift+drag snap is active
+    property bool   liveSnapDragActive:  false
+    property string liveSnapDragMediaId: ""
+    property real   liveSnapDragX:       0.0
+    property real   liveSnapDragY:       0.0
     property bool textToolActive: false
     property bool remoteCursorVisible: false
     property real remoteCursorX: 0
@@ -76,6 +81,15 @@ Rectangle {
                                           : ""
     property int activeMediaDragCount: 0
     property var videoStateModel: ({})
+
+    focus: true
+    Keys.onReleased: function(event) {
+        if (event.key === Qt.Key_Shift) {
+            root.snapGuidesModel = []
+            root.liveSnapDragActive  = false
+            root.liveSnapDragMediaId = ""
+        }
+    }
 
     function requestMediaSelection(mediaId, additive) {
         if (!mediaId || mediaId.length === 0)
@@ -524,6 +538,14 @@ Rectangle {
                                     root.liveDragViewOffsetY = 0.0
                                 }
                             }
+                            // Clear snap drag freeze on any model update while not dragging.
+                            // Do NOT gate on position match — the committed position may be the
+                            // raw unsnapped pos (e.g. Shift released before mouse), which would
+                            // never match liveSnapDragX/Y and leave the freeze permanently stuck.
+                            if (root.liveSnapDragMediaId === currentMediaId) {
+                                root.liveSnapDragActive  = false
+                                root.liveSnapDragMediaId = ""
+                            }
                         }
                     }
 
@@ -562,14 +584,25 @@ Rectangle {
                     readonly property bool usesLiveAltResize: root.liveAltResizeActive
                                                              && root.liveAltResizeMediaId === currentMediaId
                                                              && !localDragging
+                    // usesSnapDrag: intentionally has NO && localDragging guard.
+                    // The snap position freeze must survive the localDragging=false transition
+                    // at drag-end (mouse release) until onMediaChanged fires with the committed
+                    // snapped position. Removing the guard prevents the one-frame flicker where
+                    // effectiveLocalX/Y would fall back to the raw unsnapped localX/Y.
+                    // The freeze is cleared by onMediaChanged once media.x/y match liveSnapDragX/Y.
+                    readonly property bool usesSnapDrag: root.liveSnapDragActive
+                                                        && root.liveSnapDragMediaId === currentMediaId
+                    // When C++ has computed a snapped position, use it; otherwise use raw QML drag coords
+                    readonly property real effectiveLocalX: usesSnapDrag ? root.liveSnapDragX : localX
+                    readonly property real effectiveLocalY: usesSnapDrag ? root.liveSnapDragY : localY
                     width:  usesLiveAltResize ? Math.max(1, root.liveAltResizeWidth)
                                               : (media ? Math.max(1, media.width) : 1)
                     height: usesLiveAltResize ? Math.max(1, root.liveAltResizeHeight)
                                               : (media ? Math.max(1, media.height) : 1)
                     x: usesLiveAltResize ? root.liveAltResizeX
-                                         : (usesLiveResize ? root.liveResizeX : localX)
+                                         : (usesLiveResize ? root.liveResizeX : effectiveLocalX)
                     y: usesLiveAltResize ? root.liveAltResizeY
-                                         : (usesLiveResize ? root.liveResizeY : localY)
+                                         : (usesLiveResize ? root.liveResizeY : effectiveLocalY)
                     scale: usesLiveAltResize ? root.liveAltResizeScale
                                              : (usesLiveResize ? root.liveResizeScale : localScale)
                     transformOrigin: Item.TopLeft
@@ -679,9 +712,11 @@ Rectangle {
                                 dragOriginViewY = startPoint.y
                                 mediaDelegate.localDragging = true
                                 root.liveDragMediaId = activeMoveMediaId
+                                var snapAtStart = (mediaDrag.centroid.modifiers & Qt.ShiftModifier) !== 0
                                 root.mediaMoveStarted(activeMoveMediaId,
                                                       mediaDelegate.localX,
-                                                      mediaDelegate.localY)
+                                                      mediaDelegate.localY,
+                                                      snapAtStart)
                             } else {
                                 var finalMediaId = activeMoveMediaId
                                 if (countedAsActive) {
@@ -702,10 +737,16 @@ Rectangle {
                                     inputLayer.inputCoordinator.endMode("move", finalMediaId)
                                 }
                                 if (finalMediaId !== "") {
+                                    var snapAtEnd = (mediaDrag.centroid.modifiers & Qt.ShiftModifier) !== 0
                                     root.mediaMoveEnded(finalMediaId,
                                                         mediaDelegate.localX,
-                                                        mediaDelegate.localY)
+                                                        mediaDelegate.localY,
+                                                        snapAtEnd)
                                 }
+                                // NOTE: do NOT clear liveSnapDragActive here — keep the snap
+                                // position frozen until onMediaChanged confirms the model has
+                                // updated to the committed snapped position, preventing a
+                                // one-frame flicker back to the unsnapped localX/Y.
                                 activeMoveMediaId = ""
                             }
                         }
@@ -719,9 +760,11 @@ Rectangle {
                             mediaDelegate.localX = startX + (curScene.x - dragOriginSceneX)
                             mediaDelegate.localY = startY + (curScene.y - dragOriginSceneY)
                             if (activeMoveMediaId !== "") {
+                                var snapNow = (mediaDrag.centroid.modifiers & Qt.ShiftModifier) !== 0
                                 root.mediaMoveUpdated(activeMoveMediaId,
                                                       mediaDelegate.localX,
-                                                      mediaDelegate.localY)
+                                                      mediaDelegate.localY,
+                                                      snapNow)
                             }
                             // Chrome viewport offset = scene delta * viewScale
                             root.liveDragViewOffsetX = cur.x - dragOriginViewX
@@ -741,6 +784,8 @@ Rectangle {
                             root.liveDragMediaId = ""
                             root.liveDragViewOffsetX = 0.0
                             root.liveDragViewOffsetY = 0.0
+                            // NOTE: do NOT clear liveSnapDragActive here — same reasoning as
+                            // the normal drag-end path: let onMediaChanged clear it safely.
                             if (inputLayer.useInputCoordinator) {
                                 inputLayer.inputCoordinator.endMove(activeMoveMediaId)
                             } else {
@@ -1135,6 +1180,12 @@ Rectangle {
 
                 // Is this item being dragged?
                 readonly property bool isDragging: root.liveDragMediaId === mid
+                // isSnapDragging intentionally does NOT require isDragging.
+                // liveDragMediaId is cleared before commitMediaTransform updates the model,
+                // so gating on isDragging causes a flicker. The snap freeze clears via
+                // onMediaChanged once the committed position arrives in the model.
+                readonly property bool isSnapDragging: root.liveSnapDragActive
+                                                       && root.liveSnapDragMediaId === mid
 
                 // Scene position — switch to live resize/alt-resize coords when active.
                 // chromeEntry.x/y are already in QML scene units (scenePos * sceneUnitScale).
@@ -1151,24 +1202,34 @@ Rectangle {
                 // During live uniform resize, recompute from mediaEntry base size * liveResizeScale.
                 readonly property real screenW: {
                     if (isLiveAltResizing)
-                        return root.liveAltResizeWidth * root.viewScale
+                        return root.liveAltResizeWidth * root.liveAltResizeScale * root.viewScale
                     if (isLiveResizing && mediaEntry)
                         return (mediaEntry.width || 0) * root.liveResizeScale * root.viewScale
                     return (chromeEntry ? (chromeEntry.width || 0) : 0) * root.viewScale
                 }
                 readonly property real screenH: {
                     if (isLiveAltResizing)
-                        return root.liveAltResizeHeight * root.viewScale
+                        return root.liveAltResizeHeight * root.liveAltResizeScale * root.viewScale
                     if (isLiveResizing && mediaEntry)
                         return (mediaEntry.height || 0) * root.liveResizeScale * root.viewScale
                     return (chromeEntry ? (chromeEntry.height || 0) : 0) * root.viewScale
                 }
 
+                // Effective drag offset in screen pixels.
+                // When snap is active, derive from snapped scene position so overlay
+                // tracks the item precisely; otherwise use raw viewport delta.
+                readonly property real effectiveDragOffsetX: isSnapDragging
+                    ? (root.liveSnapDragX - sceneX) * root.viewScale
+                    : root.liveDragViewOffsetX
+                readonly property real effectiveDragOffsetY: isSnapDragging
+                    ? (root.liveSnapDragY - sceneY) * root.viewScale
+                    : root.liveDragViewOffsetY
+
                 // Screen-space top-left (add live drag offset if dragging)
                 readonly property real screenLeft: sceneX * root.viewScale + root.panX
-                                                   + (isDragging ? root.liveDragViewOffsetX : 0)
+                                                   + (isDragging ? effectiveDragOffsetX : 0)
                 readonly property real screenTop:  sceneY * root.viewScale + root.panY
-                                                   + (isDragging ? root.liveDragViewOffsetY : 0)
+                                                   + (isDragging ? effectiveDragOffsetY : 0)
 
                 // Derived screen anchors
                 readonly property real screenCentreX: screenLeft + screenW * 0.5

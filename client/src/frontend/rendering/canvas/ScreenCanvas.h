@@ -142,6 +142,7 @@ public:
     void refreshInfoOverlay();
     void refreshSettingsPanelVolumeDisplay(); // Update volume display in settings panel (for real-time slider sync)
     QVector<QLineF> currentSnapGuideLines() const;
+    void clearSnapGuides();
 
     // Snapping support for side (midpoint) resize handles: clamps scale so the moving edge
     // sticks to nearby screen borders when within snap distance.

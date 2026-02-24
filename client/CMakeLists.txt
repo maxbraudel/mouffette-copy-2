@@ -65,6 +65,9 @@ set(SOURCES
     src/frontend/rendering/canvas/SelectionStore.cpp
     src/frontend/rendering/canvas/SnapStore.cpp
     src/frontend/rendering/canvas/SnapEngine.cpp
+    src/frontend/rendering/canvas/SnapGuidePublisher.cpp
+    src/frontend/rendering/canvas/DragSnapEngine.cpp
+    src/frontend/rendering/canvas/QuickDragSnapSession.cpp
     src/frontend/rendering/canvas/CanvasSceneStore.cpp
     src/frontend/rendering/canvas/QuickCanvasViewAdapter.cpp
     src/frontend/rendering/canvas/OverlayPanels.cpp
@@ -201,6 +204,9 @@ set(HEADERS
     src/frontend/rendering/canvas/SelectionStore.h
     src/frontend/rendering/canvas/SnapStore.h
     src/frontend/rendering/canvas/SnapEngine.h
+    src/frontend/rendering/canvas/SnapGuidePublisher.h
+    src/frontend/rendering/canvas/DragSnapEngine.h
+    src/frontend/rendering/canvas/QuickDragSnapSession.h
     src/frontend/rendering/canvas/CanvasSceneStore.h
     src/frontend/rendering/canvas/QuickCanvasViewAdapter.h
     src/frontend/rendering/canvas/OverlayPanels.h

@@ -18,3 +18,11 @@ void ModelPublisher::publishSelectionAndSnapModels(QuickCanvasViewAdapter* adapt
     adapter->setSelectionChromeModel(selectionChromeModel);
     adapter->setSnapGuidesModel(snapGuidesModel);
 }
+
+void ModelPublisher::publishSnapGuidesOnly(QuickCanvasViewAdapter* adapter,
+                                           const QVariantList& snapGuidesModel) const {
+    if (!adapter) {
+        return;
+    }
+    adapter->setSnapGuidesModel(snapGuidesModel);
+}

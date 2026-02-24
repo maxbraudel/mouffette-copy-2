@@ -441,6 +441,10 @@ void ScreenCanvas::clearSnapIndicators() {
     if (m_snapGuides) { m_snapGuides->clearLines(); m_snapGuides->update(); }
 }
 
+void ScreenCanvas::clearSnapGuides() {
+    clearSnapIndicators();
+}
+
 void ScreenCanvas::updateSnapIndicators(const QVector<QLineF>& lines) {
     if (!m_scene) return;
     if (m_snapGuides) { m_snapGuides->setLines(lines); m_snapGuides->update(); }

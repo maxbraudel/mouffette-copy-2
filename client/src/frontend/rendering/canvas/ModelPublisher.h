@@ -11,6 +11,7 @@ public:
     void publishSelectionAndSnapModels(QuickCanvasViewAdapter* adapter,
                                        const QVariantList& selectionChromeModel,
                                        const QVariantList& snapGuidesModel) const;
+    void publishSnapGuidesOnly(QuickCanvasViewAdapter* adapter, const QVariantList& snapGuidesModel) const;
 };
 
 #endif // MODELPUBLISHER_H

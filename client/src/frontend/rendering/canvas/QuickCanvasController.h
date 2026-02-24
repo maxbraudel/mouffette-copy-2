@@ -10,6 +10,7 @@
 #include <QMetaObject>
 
 #include "backend/domain/models/ClientInfo.h"
+#include "frontend/rendering/canvas/QuickDragSnapSession.h"
 
 class QQuickWidget;
 class QWidget;
@@ -74,9 +75,9 @@ signals:
 
 private slots:
     void handleMediaSelectRequested(const QString& mediaId, bool additive);
-    void handleMediaMoveStarted(const QString& mediaId, qreal sceneX, qreal sceneY);
-    void handleMediaMoveUpdated(const QString& mediaId, qreal sceneX, qreal sceneY);
-    void handleMediaMoveEnded(const QString& mediaId, qreal sceneX, qreal sceneY);
+    void handleMediaMoveStarted(const QString& mediaId, qreal sceneX, qreal sceneY, bool snap);
+    void handleMediaMoveUpdated(const QString& mediaId, qreal sceneX, qreal sceneY, bool snap);
+    void handleMediaMoveEnded(const QString& mediaId, qreal sceneX, qreal sceneY, bool snap);
     void handleMediaResizeRequested(const QString& mediaId, const QString& handleId, qreal sceneX, qreal sceneY, bool snap, bool altPressed);
     void handleMediaResizeEnded(const QString& mediaId);
     void handleTextCommitRequested(const QString& mediaId, const QString& text);
@@ -115,6 +116,9 @@ private:
     static bool isCornerHandle(int handleValue);
     static QPointF computeHandleItemPoint(int handleValue, const QSize& baseSize);
     void pushSelectionAndSnapModels();
+    void pushSnapGuidesFromScreenCanvas();
+    void pushLiveDragSnapPosition(const QString& mediaId, qreal sceneX, qreal sceneY);
+    void clearLiveDragSnapPosition();
     void pushVideoStateModel();
     void pushRemoteCursorState();
     QPointF mapRemoteCursorToQuickScene(int globalX, int globalY, bool* ok) const;
@@ -147,6 +151,7 @@ private:
     SelectionStore* m_selectionStore = nullptr;
     ModelPublisher* m_modelPublisher = nullptr;
     SnapStore* m_snapStore = nullptr;
+    QuickDragSnapSession* m_dragSnapSession = nullptr;
     QGraphicsScene* m_mediaScene = nullptr;
     QHash<QString, ResizableMediaBase*> m_mediaItemsById;
     QTimer* m_mediaSyncTimer = nullptr;
@@ -177,6 +182,9 @@ private:
     qreal  m_altAxisInitialOffset      = 0.0;       // cursor-to-moving-edge offset (axis)
     qreal  m_altCornerInitialOffsetX   = 0.0;       // cursor-to-moving-corner offset X (corner)
     qreal  m_altCornerInitialOffsetY   = 0.0;       // cursor-to-moving-corner offset Y (corner)
+    // Uniform corner snap result — set inside the snap block, consumed by guide publishing below
+    bool   m_uniformCornerSnapped    = false;
+    QPointF m_uniformCornerSnappedPt;
     bool m_pendingInitialSceneScaleRefresh = false;
     bool m_textToolActive = false;
     bool m_initialFitCompleted = false;
