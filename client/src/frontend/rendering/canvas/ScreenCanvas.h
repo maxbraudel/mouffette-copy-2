@@ -119,6 +119,15 @@ public:
     int snapDistancePx() const { return m_snapDistancePx; }
     void setCornerSnapDistancePx(int px) { m_cornerSnapDistancePx = qMax(1, px); }
     int cornerSnapDistancePx() const { return m_cornerSnapDistancePx; }
+    // Override view scale used for snap-distance conversion (used by QuickCanvas whose
+    // backing ScreenCanvas is hidden and always has transform().m11() == 1.0).
+    // When set to a positive value, effectiveViewScale() returns it instead of transform().m11().
+    void setExternalViewScale(qreal scale) { m_externalViewScale = (scale > 1e-9 ? scale : 0.0); }
+    qreal effectiveViewScale() const {
+        if (m_externalViewScale > 1e-9) return m_externalViewScale;
+        const qreal t = transform().m11();
+        return t > 1e-9 ? t : 1.0;
+    }
     
     // Canvas tool management
     enum class CanvasTool {
@@ -366,6 +375,7 @@ private:
     // Snap-to-screen settings
     int m_snapDistancePx = 10; // pixels within which snapping occurs
     int m_cornerSnapDistancePx = 20; // larger region for corner snapping precedence
+    qreal m_externalViewScale = 0.0; // when >0, overrides transform().m11() for snap distance conversion
     
     // Z-order management for media items
     qreal m_nextMediaZValue = 1.0;

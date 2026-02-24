@@ -36,8 +36,7 @@ qreal SnapEngine::applyAxisSnapWithTargets(ResizableMediaBase* target,
         return proposedScale;
     }
 
-    const QTransform t = screenCanvas->transform();
-    const qreal snapDistanceScene = screenCanvas->snapDistancePx() / (t.m11() > 1e-6 ? t.m11() : 1.0);
+    const qreal snapDistanceScene = screenCanvas->snapDistancePx() / screenCanvas->effectiveViewScale();
     constexpr qreal releaseFactor = 1.4;
     const qreal releaseDist = snapDistanceScene * releaseFactor;
 
@@ -136,8 +135,7 @@ bool SnapEngine::applyCornerSnapWithTargets(int activeHandleValue,
         return false;
     }
 
-    const QTransform t = screenCanvas->transform();
-    const qreal cornerZone = screenCanvas->cornerSnapDistancePx() / (t.m11() > 1e-6 ? t.m11() : 1.0);
+    const qreal cornerZone = screenCanvas->cornerSnapDistancePx() / screenCanvas->effectiveViewScale();
 
     auto movingCornerPoint = [&](qreal w, qreal h) {
         QPointF tl;

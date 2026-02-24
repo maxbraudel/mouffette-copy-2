@@ -34,10 +34,11 @@ DragSnapResult QuickDragSnapSession::update(const QPointF& proposedScenePos,
         return DragSnapResult{ proposedScenePos, {}, false };
     }
 
-    // Convert pixel snap distances to scene units using the current view transform
-    const QTransform t = m_screenCanvas->transform();
-    const qreal viewScale = (t.m11() > 1e-9) ? t.m11() : 1.0;
-    const qreal snapDistScene       = m_screenCanvas->snapDistancePx()       / viewScale;
+    // Convert pixel snap distances to scene units using the effective view scale.
+    // In QuickCanvas mode the backing ScreenCanvas is hidden (transform().m11() == 1.0),
+    // so we use effectiveViewScale() which returns the QML viewScale override when set.
+    const qreal viewScale       = m_screenCanvas->effectiveViewScale();
+    const qreal snapDistScene   = m_screenCanvas->snapDistancePx()       / viewScale;
     const qreal cornerSnapDistScene = m_screenCanvas->cornerSnapDistancePx() / viewScale;
 
     return DragSnapEngine::applyDragSnap(

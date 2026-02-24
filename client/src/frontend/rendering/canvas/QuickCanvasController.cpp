@@ -719,6 +719,7 @@ void QuickCanvasController::handleMediaMoveStarted(const QString& mediaId, qreal
     if (!item || m_mediaScene->views().isEmpty()) {
         return;
     }
+    syncSnapViewScale();
     auto* sc = qobject_cast<ScreenCanvas*>(m_mediaScene->views().first());
     m_dragSnapSession->begin(item, m_mediaScene, m_sceneStore->sceneScreenRects(), sc);
 }
@@ -730,6 +731,7 @@ void QuickCanvasController::handleMediaMoveUpdated(const QString& mediaId, qreal
     if (!m_dragSnapSession->active()) {
         return;
     }
+    syncSnapViewScale();
     const DragSnapResult result = m_dragSnapSession->update(QPointF(sceneX, sceneY), snap);
     if (result.snapped) {
         pushLiveDragSnapPosition(mediaId, result.snappedPos.x(), result.snappedPos.y());
@@ -956,6 +958,7 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
             // Apply snap if requested
             if (snap && !m_mediaScene->views().isEmpty()) {
             if (auto* sc = qobject_cast<ScreenCanvas*>(m_mediaScene->views().first())) {
+                    syncSnapViewScale();
                     const qreal origSize = horizontal ? bs.width() : bs.height();
                     qreal eqScale = (origSize > 0) ? (desiredAxisSize / origSize) : 1.0;
                     eqScale = std::clamp<qreal>(eqScale, 0.05, 100.0);
@@ -1083,6 +1086,7 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
             QPointF altSnappedCornerPt;
             if (snap && !m_mediaScene->views().isEmpty()) {
                 if (auto* sc = qobject_cast<ScreenCanvas*>(m_mediaScene->views().first())) {
+                    syncSnapViewScale();
                     qreal snappedW = desiredW, snappedH = desiredH;
                     QPointF snappedCorner;
                     if (applyCornerSnapWithCachedTargets(
@@ -1185,6 +1189,7 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
     m_uniformCornerSnapped = false;
     if (snap && !m_mediaScene->views().isEmpty()) {
         if (auto* screenCanvas = qobject_cast<ScreenCanvas*>(m_mediaScene->views().first())) {
+            syncSnapViewScale();
             if (activeHandle == ResizableMediaBase::LeftMid || activeHandle == ResizableMediaBase::RightMid
                 || activeHandle == ResizableMediaBase::TopMid || activeHandle == ResizableMediaBase::BottomMid) {
                 proposedScale = applyAxisSnapWithCachedTargets(
@@ -1212,8 +1217,7 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                         break;
                 }
                 // Find nearest target corner within cornerSnapZone
-                const QTransform t = screenCanvas->transform();
-                const qreal cornerZone = screenCanvas->cornerSnapDistancePx() / (t.m11() > 1e-6 ? t.m11() : 1.0);
+                const qreal cornerZone = screenCanvas->cornerSnapDistancePx() / screenCanvas->effectiveViewScale();
                 qreal bestErr = std::numeric_limits<qreal>::max();
                 QPointF bestTarget;
                 for (const QPointF& targetCorner : m_snapStore->corners()) {
@@ -1531,6 +1535,15 @@ bool QuickCanvasController::beginLiveResizeSession(const QString& mediaId) {
 
 void QuickCanvasController::buildResizeSnapCaches(ResizableMediaBase* resizingItem) {
     m_snapStore->rebuild(m_sceneStore->sceneScreenRects(), m_mediaScene, resizingItem);
+}
+
+void QuickCanvasController::syncSnapViewScale() const {
+    if (!m_mediaScene || m_mediaScene->views().isEmpty()) {
+        return;
+    }
+    if (auto* sc = qobject_cast<ScreenCanvas*>(m_mediaScene->views().first())) {
+        sc->setExternalViewScale(currentViewScale());
+    }
 }
 
 qreal QuickCanvasController::applyAxisSnapWithCachedTargets(ResizableMediaBase* target,

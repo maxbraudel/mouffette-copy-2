@@ -129,6 +129,7 @@ private:
     void scheduleInitialFitIfNeeded(int marginPx = 53);
     bool tryInitialFitNow(int marginPx = 53);
     void buildResizeSnapCaches(ResizableMediaBase* resizingItem);
+    void syncSnapViewScale() const; // pushes currentViewScale() into the backing ScreenCanvas
     qreal applyAxisSnapWithCachedTargets(ResizableMediaBase* target,
                                          qreal proposedScale,
                                          const QPointF& fixedScenePoint,
