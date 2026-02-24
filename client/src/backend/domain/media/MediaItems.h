@@ -87,6 +87,17 @@ public:
     QString displayName() const;
     // Native media base size in pixels (unscaled)
     QSize baseSizePx() const { return m_baseSize; }
+    // Direct base-size mutation used by QuickCanvasController for alt-resize.
+    // Calls prepareGeometryChange() before mutating.
+    void setBaseSizePx(const QSize& size);
+    // Expose fill-without-aspect flag for alt-resize (image/video deform)
+    void setFillContentWithoutAspect(bool v) { m_fillContentWithoutAspect = v; }
+    bool fillContentWithoutAspect() const { return m_fillContentWithoutAspect; }
+    // Public wrapper: engages alt-resize mode (calls onAltResizeModeEngaged).
+    // Returns true if derived class handles scale baking internally.
+    bool beginAltResizeMode();
+    // Public wrapper: notifies the item that interactive geometry has changed.
+    void notifyInteractiveGeometryChanged();
 
     // Upload status API
     UploadState uploadState() const { return m_uploadState; }

@@ -77,6 +77,22 @@ void ResizableMediaBase::notifyFileError() {
     }
 }
 
+void ResizableMediaBase::setBaseSizePx(const QSize& size) {
+    if (size == m_baseSize || size.width() <= 0 || size.height() <= 0)
+        return;
+    prepareGeometryChange();
+    m_baseSize = size;
+    update();
+}
+
+bool ResizableMediaBase::beginAltResizeMode() {
+    return onAltResizeModeEngaged();
+}
+
+void ResizableMediaBase::notifyInteractiveGeometryChanged() {
+    onInteractiveGeometryChanged();
+}
+
 ResizableMediaBase::ResizableMediaBase(const QSize& baseSizePx, int visualSizePx, int selectionSizePx, const QString& filename)
 {
     m_lifetimeToken = std::make_shared<bool>(true);

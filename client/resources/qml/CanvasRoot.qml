@@ -9,7 +9,7 @@ Rectangle {
     signal mediaMoveStarted(string mediaId, real sceneX, real sceneY)
     signal mediaMoveUpdated(string mediaId, real sceneX, real sceneY)
     signal mediaMoveEnded(string mediaId, real sceneX, real sceneY)
-    signal mediaResizeRequested(string mediaId, string handleId, real sceneX, real sceneY, bool snap)
+    signal mediaResizeRequested(string mediaId, string handleId, real sceneX, real sceneY, bool snap, bool altPressed)
     signal mediaResizeEnded(string mediaId)
     signal textCommitRequested(string mediaId, string text)
     signal textCreateRequested(real viewX, real viewY)
@@ -60,6 +60,14 @@ Rectangle {
     property real liveResizeX: 0.0
     property real liveResizeY: 0.0
     property real liveResizeScale: 1.0
+    // Transient live alt-resize state (base-size changes, not scale)
+    property bool liveAltResizeActive: false
+    property string liveAltResizeMediaId: ""
+    property real liveAltResizeX: 0.0
+    property real liveAltResizeY: 0.0
+    property real liveAltResizeWidth: 0.0
+    property real liveAltResizeHeight: 0.0
+    property real liveAltResizeScale: 1.0
     readonly property string interactionMode: (inputLayer && inputLayer.inputCoordinator)
                                        ? inputLayer.inputCoordinator.mode
                                        : "idle"
@@ -328,11 +336,25 @@ Rectangle {
         if (!mediaId)
             return false
 
-        liveResizeActive = true
         liveResizeMediaId = mediaId
         liveResizeX = sceneX
         liveResizeY = sceneY
         liveResizeScale = scale
+        liveResizeActive = true
+        return true
+    }
+
+    function applyLiveAltResizeGeometry(mediaId, sceneX, sceneY, width, height, scale) {
+        if (!mediaId)
+            return false
+
+        liveAltResizeMediaId = mediaId
+        liveAltResizeX = sceneX
+        liveAltResizeY = sceneY
+        liveAltResizeWidth = width
+        liveAltResizeHeight = height
+        liveAltResizeScale = scale
+        liveAltResizeActive = true
         return true
     }
 
@@ -365,8 +387,22 @@ Rectangle {
     function beginLiveResize(mediaId) {
         if (!mediaId)
             return false
-        liveResizeActive = true
+
+        // Initialize geometry first so turning the live flag on never renders
+        // a transient frame at (0,0) with scale=1.
+        if (mediaModel && mediaModel.length > 0) {
+            for (var i = 0; i < mediaModel.length; ++i) {
+                var entry = mediaModel[i]
+                if (!entry || entry.mediaId !== mediaId)
+                    continue
+                liveResizeX = entry.x
+                liveResizeY = entry.y
+                liveResizeScale = entry.scale || 1.0
+                break
+            }
+        }
         liveResizeMediaId = mediaId
+        liveResizeActive = true
         return true
     }
 
@@ -380,6 +416,15 @@ Rectangle {
         liveResizeX = 0.0
         liveResizeY = 0.0
         liveResizeScale = 1.0
+        if (liveAltResizeMediaId === mediaId) {
+            liveAltResizeActive = false
+            liveAltResizeMediaId = ""
+            liveAltResizeX = 0.0
+            liveAltResizeY = 0.0
+            liveAltResizeWidth = 0.0
+            liveAltResizeHeight = 0.0
+            liveAltResizeScale = 1.0
+        }
         return committed
     }
 
@@ -448,9 +493,10 @@ Rectangle {
                     property real localScale: media ? (media.scale || 1.0) : 1.0
                     property bool localDragging: false
                     property bool overlayHovered: false
-                    // Actual rendered scale — switches to liveResizeScale during resize
+                    // Actual rendered scale — switches to live scale during resize/alt-resize
                     // so overlay counter-scale stays correct every frame.
-                    readonly property real effectiveScale: usesLiveResize ? root.liveResizeScale : localScale
+                    readonly property real effectiveScale: usesLiveAltResize ? root.liveAltResizeScale
+                                                         : (usesLiveResize ? root.liveResizeScale : localScale)
                     readonly property string currentMediaId: media ? (media.mediaId || "") : ""
                     // Derived from selectionChromeModel — NOT from media.selected.
                     // This avoids mediaModel churn (and delegate destruction) on selection changes.
@@ -510,14 +556,22 @@ Rectangle {
                         }
                     }
 
-                    width: media ? Math.max(1, media.width) : 1
-                    height: media ? Math.max(1, media.height) : 1
                     readonly property bool usesLiveResize: root.liveResizeActive
                                                          && root.liveResizeMediaId === currentMediaId
                                                          && !localDragging
-                    x: usesLiveResize ? root.liveResizeX : localX
-                    y: usesLiveResize ? root.liveResizeY : localY
-                    scale: usesLiveResize ? root.liveResizeScale : localScale
+                    readonly property bool usesLiveAltResize: root.liveAltResizeActive
+                                                             && root.liveAltResizeMediaId === currentMediaId
+                                                             && !localDragging
+                    width:  usesLiveAltResize ? Math.max(1, root.liveAltResizeWidth)
+                                              : (media ? Math.max(1, media.width) : 1)
+                    height: usesLiveAltResize ? Math.max(1, root.liveAltResizeHeight)
+                                              : (media ? Math.max(1, media.height) : 1)
+                    x: usesLiveAltResize ? root.liveAltResizeX
+                                         : (usesLiveResize ? root.liveResizeX : localX)
+                    y: usesLiveAltResize ? root.liveAltResizeY
+                                         : (usesLiveResize ? root.liveResizeY : localY)
+                    scale: usesLiveAltResize ? root.liveAltResizeScale
+                                             : (usesLiveResize ? root.liveResizeScale : localScale)
                     transformOrigin: Item.TopLeft
                     z: media ? media.z : 0
                     visible: !!media && (media.contentVisible !== false)
@@ -699,12 +753,32 @@ Rectangle {
                     Loader {
                         id: mediaContentLoader
                         property var media: mediaDelegate.media
+                        readonly property real liveWidth:  mediaDelegate.usesLiveAltResize
+                                                          ? root.liveAltResizeWidth
+                                                          : (media ? media.width : 0)
+                        readonly property real liveHeight: mediaDelegate.usesLiveAltResize
+                                                          ? root.liveAltResizeHeight
+                                                          : (media ? media.height : 0)
                         sourceComponent: {
                             if (!mediaDelegate.media) return null
                             if (mediaDelegate.media.mediaType === "video") return videoDelegate
                             if (mediaDelegate.media.mediaType === "text") return textDelegate
                             return imageDelegate
                         }
+                    }
+
+                    Binding {
+                        target: mediaContentLoader.item
+                        property: "mediaWidth"
+                        value: mediaContentLoader.liveWidth
+                        when: mediaContentLoader.item !== null && mediaDelegate.usesLiveAltResize
+                    }
+
+                    Binding {
+                        target: mediaContentLoader.item
+                        property: "mediaHeight"
+                        value: mediaContentLoader.liveHeight
+                        when: mediaContentLoader.item !== null && mediaDelegate.usesLiveAltResize
                     }
 
                     // Connections lives inside mediaDelegate so both `mediaDelegate` and
@@ -829,8 +903,8 @@ Rectangle {
             draggedMediaId: root.liveDragMediaId
             dragOffsetViewX: root.liveDragViewOffsetX
             dragOffsetViewY: root.liveDragViewOffsetY
-            onMediaResizeRequested: function(mediaId, handleId, sceneX, sceneY, snap) {
-                root.mediaResizeRequested(mediaId, handleId, sceneX, sceneY, snap)
+            onMediaResizeRequested: function(mediaId, handleId, sceneX, sceneY, snap, altPressed) {
+                root.mediaResizeRequested(mediaId, handleId, sceneX, sceneY, snap, altPressed)
             }
             onMediaResizeEnded: function(mediaId) {
                 root.mediaResizeEnded(mediaId)
@@ -860,8 +934,8 @@ Rectangle {
                 dragOffsetViewX: root.liveDragViewOffsetX
                 dragOffsetViewY: root.liveDragViewOffsetY
                 z: 90000
-                onResizeRequested: function(mediaId, handleId, sceneX, sceneY, snap) {
-                    root.mediaResizeRequested(mediaId, handleId, sceneX, sceneY, snap)
+                onResizeRequested: function(mediaId, handleId, sceneX, sceneY, snap, altPressed) {
+                    root.mediaResizeRequested(mediaId, handleId, sceneX, sceneY, snap, altPressed)
                 }
                 onResizeEnded: function(mediaId) {
                     root.mediaResizeEnded(mediaId)
@@ -1054,26 +1128,37 @@ Rectangle {
                     return null
                 }
 
-                // Is a live resize active for this item?
+                // Is a live (uniform) resize active for this item?
                 readonly property bool isLiveResizing: root.liveResizeActive && root.liveResizeMediaId === mid
+                // Is a live alt-resize (base-size change) active for this item?
+                readonly property bool isLiveAltResizing: root.liveAltResizeActive && root.liveAltResizeMediaId === mid
 
                 // Is this item being dragged?
                 readonly property bool isDragging: root.liveDragMediaId === mid
 
-                // Scene position — switch to live resize coords when resizing.
+                // Scene position — switch to live resize/alt-resize coords when active.
                 // chromeEntry.x/y are already in QML scene units (scenePos * sceneUnitScale).
-                readonly property real sceneX: isLiveResizing ? root.liveResizeX : (chromeEntry ? (chromeEntry.x || 0) : 0)
-                readonly property real sceneY: isLiveResizing ? root.liveResizeY : (chromeEntry ? (chromeEntry.y || 0) : 0)
+                readonly property real sceneX: isLiveAltResizing ? root.liveAltResizeX
+                                             : (isLiveResizing   ? root.liveResizeX
+                                                                  : (chromeEntry ? (chromeEntry.x || 0) : 0))
+                readonly property real sceneY: isLiveAltResizing ? root.liveAltResizeY
+                                             : (isLiveResizing   ? root.liveResizeY
+                                                                  : (chromeEntry ? (chromeEntry.y || 0) : 0))
 
                 // Rendered screen size — chromeEntry.width/height = base * itemScale * sceneUnitScale,
                 // so multiply by viewScale only to get screen pixels.
-                // During live resize, recompute from mediaEntry base size * liveResizeScale.
+                // During live alt-resize use the live width/height directly (already in scene units).
+                // During live uniform resize, recompute from mediaEntry base size * liveResizeScale.
                 readonly property real screenW: {
+                    if (isLiveAltResizing)
+                        return root.liveAltResizeWidth * root.viewScale
                     if (isLiveResizing && mediaEntry)
                         return (mediaEntry.width || 0) * root.liveResizeScale * root.viewScale
                     return (chromeEntry ? (chromeEntry.width || 0) : 0) * root.viewScale
                 }
                 readonly property real screenH: {
+                    if (isLiveAltResizing)
+                        return root.liveAltResizeHeight * root.viewScale
                     if (isLiveResizing && mediaEntry)
                         return (mediaEntry.height || 0) * root.liveResizeScale * root.viewScale
                     return (chromeEntry ? (chromeEntry.height || 0) : 0) * root.viewScale

@@ -43,7 +43,7 @@ Item {
     property real dragOffsetViewX: 0.0
     property real dragOffsetViewY: 0.0
 
-    signal resizeRequested(string mediaId, string handleId, real sceneX, real sceneY, bool snap)
+    signal resizeRequested(string mediaId, string handleId, real sceneX, real sceneY, bool snap, bool altPressed)
     signal resizeEnded(string mediaId)
 
     onMediaModelChanged: {
@@ -73,24 +73,36 @@ Item {
                           && !!entry
                           && !!interactionController.liveResizeActive
                           && (interactionController.liveResizeMediaId || "") === mediaId
-        var sceneX = usesLiveResize
-                   ? (interactionController.liveResizeX || 0)
-                   : (liveMedia ? (liveMedia.x || 0) : (entry ? (entry.x || 0) : 0))
-        var sceneY = usesLiveResize
-                   ? (interactionController.liveResizeY || 0)
-                   : (liveMedia ? (liveMedia.y || 0) : (entry ? (entry.y || 0) : 0))
-        var sceneW = usesLiveResize
-                   ? Math.max(1, (liveMedia ? (liveMedia.width || 1) : (entry ? (entry.width || 1) : 1))
-                                  * (interactionController.liveResizeScale || 1.0))
-                   : (liveMedia
-                       ? Math.max(1, (liveMedia.width || 1) * (liveMedia.scale || 1.0))
-                       : Math.max(1, entry ? (entry.width || 1) : 1))
-        var sceneH = usesLiveResize
-                   ? Math.max(1, (liveMedia ? (liveMedia.height || 1) : (entry ? (entry.height || 1) : 1))
-                                  * (interactionController.liveResizeScale || 1.0))
-                   : (liveMedia
-                       ? Math.max(1, (liveMedia.height || 1) * (liveMedia.scale || 1.0))
-                       : Math.max(1, entry ? (entry.height || 1) : 1))
+        var usesLiveAltResize = !!interactionController
+                          && !!entry
+                          && !!interactionController.liveAltResizeActive
+                          && (interactionController.liveAltResizeMediaId || "") === mediaId
+        var sceneX = usesLiveAltResize
+                   ? (interactionController.liveAltResizeX || 0)
+                   : (usesLiveResize
+                       ? (interactionController.liveResizeX || 0)
+                       : (liveMedia ? (liveMedia.x || 0) : (entry ? (entry.x || 0) : 0)))
+        var sceneY = usesLiveAltResize
+                   ? (interactionController.liveAltResizeY || 0)
+                   : (usesLiveResize
+                       ? (interactionController.liveResizeY || 0)
+                       : (liveMedia ? (liveMedia.y || 0) : (entry ? (entry.y || 0) : 0)))
+        var sceneW = usesLiveAltResize
+                   ? Math.max(1, interactionController.liveAltResizeWidth || 1)
+                   : (usesLiveResize
+                       ? Math.max(1, (liveMedia ? (liveMedia.width || 1) : (entry ? (entry.width || 1) : 1))
+                                      * (interactionController.liveResizeScale || 1.0))
+                       : (liveMedia
+                           ? Math.max(1, (liveMedia.width || 1) * (liveMedia.scale || 1.0))
+                           : Math.max(1, entry ? (entry.width || 1) : 1)))
+        var sceneH = usesLiveAltResize
+                   ? Math.max(1, interactionController.liveAltResizeHeight || 1)
+                   : (usesLiveResize
+                       ? Math.max(1, (liveMedia ? (liveMedia.height || 1) : (entry ? (entry.height || 1) : 1))
+                                      * (interactionController.liveResizeScale || 1.0))
+                       : (liveMedia
+                           ? Math.max(1, (liveMedia.height || 1) * (liveMedia.scale || 1.0))
+                           : Math.max(1, entry ? (entry.height || 1) : 1)))
 
         return {
             mediaId: mediaId,
@@ -297,12 +309,15 @@ Item {
 
             var centerSceneX = (root.pressEntryX + ux * root.pressEntryW) + (curScene.x - pressScene.x)
             var centerSceneY = (root.pressEntryY + uy * root.pressEntryH) + (curScene.y - pressScene.y)
-            var snapEnabled = (Qt.application.keyboardModifiers & Qt.ShiftModifier) !== 0
+            var mods = globalResizeDrag.centroid.modifiers
+            var snapEnabled = (mods & Qt.ShiftModifier) !== 0
+            var altEnabled  = (mods & Qt.AltModifier)   !== 0
             root.resizeRequested(root.activeResizeMediaId,
                                  root.activeResizeHandleId,
                                  centerSceneX,
                                  centerSceneY,
-                                 snapEnabled)
+                                 snapEnabled,
+                                 altEnabled)
         }
     }
 

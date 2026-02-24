@@ -15,7 +15,7 @@ Item {
     property real dragOffsetViewY: 0.0
     default property alias layerChildren: layerRoot.data
 
-    signal mediaResizeRequested(string mediaId, string handleId, real sceneX, real sceneY, bool snap)
+    signal mediaResizeRequested(string mediaId, string handleId, real sceneX, real sceneY, bool snap, bool altPressed)
     signal mediaResizeEnded(string mediaId)
 
     Item {

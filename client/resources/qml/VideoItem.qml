@@ -14,7 +14,7 @@ BaseMediaItem {
     VideoOutput {
         id: videoOutput
         anchors.fill: parent
-        fillMode: VideoOutput.PreserveAspectFit
+        fillMode: VideoOutput.Stretch
     }
 
     onCppVideoSinkChanged: {

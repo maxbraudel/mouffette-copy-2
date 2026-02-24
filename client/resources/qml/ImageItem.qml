@@ -14,7 +14,7 @@ BaseMediaItem {
         id: image
         anchors.fill: parent
         source: root.imageSource
-        fillMode: Image.PreserveAspectFit
+        fillMode: Image.Stretch
         smooth: true
         asynchronous: true
         // mipmap is beneficial for downscaling only; at high zoom (upscaling) it wastes

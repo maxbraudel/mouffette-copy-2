@@ -77,7 +77,7 @@ private slots:
     void handleMediaMoveStarted(const QString& mediaId, qreal sceneX, qreal sceneY);
     void handleMediaMoveUpdated(const QString& mediaId, qreal sceneX, qreal sceneY);
     void handleMediaMoveEnded(const QString& mediaId, qreal sceneX, qreal sceneY);
-    void handleMediaResizeRequested(const QString& mediaId, const QString& handleId, qreal sceneX, qreal sceneY, bool snap);
+    void handleMediaResizeRequested(const QString& mediaId, const QString& handleId, qreal sceneX, qreal sceneY, bool snap, bool altPressed);
     void handleMediaResizeEnded(const QString& mediaId);
     void handleTextCommitRequested(const QString& mediaId, const QString& text);
     void handleTextCreateRequested(qreal viewX, qreal viewY);
@@ -109,6 +109,11 @@ private:
     bool endLiveResizeSession(const QString& mediaId, qreal sceneX, qreal sceneY, qreal scale);
     bool commitMediaTransform(const QString& mediaId, qreal sceneX, qreal sceneY, qreal scale);
     bool pushLiveResizeGeometry(const QString& mediaId, qreal sceneX, qreal sceneY, qreal scale);
+    bool pushLiveAltResizeGeometry(const QString& mediaId, qreal sceneX, qreal sceneY, int width, int height, qreal scale);
+    void resetAltResizeState();
+    static bool isAxisHandle(int handleValue);
+    static bool isCornerHandle(int handleValue);
+    static QPointF computeHandleItemPoint(int handleValue, const QSize& baseSize);
     void pushSelectionAndSnapModels();
     void pushVideoStateModel();
     void pushRemoteCursorState();
@@ -156,12 +161,23 @@ private:
     qreal m_queuedResizeSceneX = 0.0;
     qreal m_queuedResizeSceneY = 0.0;
     bool m_queuedResizeSnap = false;
+    bool m_queuedResizeAlt = false;
     QSize m_resizeBaseSize;
     QPointF m_resizeFixedItemPoint;
     QPointF m_resizeFixedScenePoint;
     qreal m_resizeLastSceneX = 0.0;
     qreal m_resizeLastSceneY = 0.0;
     qreal m_resizeLastScale = 1.0;
+    // Alt-resize session state (axis or corner non-uniform stretch)
+    bool   m_altResizeActive           = false;
+    bool   m_lastResizeWasAlt          = false;
+    bool   m_altAxisCaptured           = false;
+    bool   m_altCornerCaptured         = false;
+    QSize  m_altOrigBaseSize;                       // base size at start of alt capture
+    QPointF m_altFixedScenePoint;                   // fixed corner scene point (after any bake)
+    qreal  m_altAxisInitialOffset      = 0.0;       // cursor-to-moving-edge offset (axis)
+    qreal  m_altCornerInitialOffsetX   = 0.0;       // cursor-to-moving-corner offset X (corner)
+    qreal  m_altCornerInitialOffsetY   = 0.0;       // cursor-to-moving-corner offset Y (corner)
     bool m_pendingInitialSceneScaleRefresh = false;
     bool m_textToolActive = false;
     bool m_initialFitCompleted = false;
