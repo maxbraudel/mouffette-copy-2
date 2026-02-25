@@ -87,8 +87,12 @@ Rectangle {
     focus: true
     Keys.onReleased: function(event) {
         if (event.key === Qt.Key_Shift) {
-            // Clear visual snap guide lines immediately — they are purely cosmetic.
-            root.snapGuidesModel = []
+            // Clear guides only when no active snapped interaction is alive.
+            // During fast Shift-release + mouse-release races, clearing unconditionally
+            // can hide guides while snap state is still authoritative for the current gesture.
+            if (!root.liveSnapDragActive && !selectionChrome.interacting) {
+                root.snapGuidesModel = []
+            }
             // Do NOT touch liveSnapDragMediaId here. liveSnapDragActive is derived
             // (readonly) and the freeze lifecycle is owned exclusively by:
             //   • C++ handleMediaMoveUpdated — clears freeze when snap disengages during drag

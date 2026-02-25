@@ -640,15 +640,18 @@ void QuickCanvasController::handleMediaSelectRequested(const QString& mediaId, b
 // Move drag is now fully QML-native (DragHandler on each mediaDelegate inside contentRoot).
 // C++ is only notified once at drag-end to commit the final position.
 void QuickCanvasController::handleMediaMoveEnded(const QString& mediaId, qreal sceneX, qreal sceneY, bool snap) {
-    Q_UNUSED(snap)
-
     // Commit exactly what was displayed: use the last snapped position that was
     // pushed to QML via pushLiveDragSnapPosition, stored in m_lastSnapSceneX/Y.
     // This avoids re-running the snap engine (which could yield a slightly different
     // result) and guarantees "commit what the user saw on screen".
     // If no snap was active during this drag, fall back to the raw QML position.
-    qreal finalX = (m_lastSnapWasSnapped) ? m_lastSnapSceneX : sceneX;
-    qreal finalY = (m_lastSnapWasSnapped) ? m_lastSnapSceneY : sceneY;
+    const bool keepSnappedCommit = snap && m_lastSnapWasSnapped;
+    qreal finalX = keepSnappedCommit ? m_lastSnapSceneX : sceneX;
+    qreal finalY = keepSnappedCommit ? m_lastSnapSceneY : sceneY;
+
+    if (!snap && m_lastSnapWasSnapped) {
+        clearLiveDragSnapPosition();
+    }
 
     // End the snap session. The freeze stays alive until QML's onMediaChanged fires,
     // which happens when pushMediaModelOnly() publishes the updated mediaModel below.
@@ -941,23 +944,24 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                     const qreal origSize = horizontal ? bs.width() : bs.height();
                     qreal eqScale = (origSize > 0) ? (desiredAxisSize / origSize) : 1.0;
                     eqScale = std::clamp<qreal>(eqScale, 0.05, 100.0);
-                    const qreal snappedScale = applyAxisSnapWithCachedTargets(
-                        target, eqScale, m_altFixedScenePoint, bs, activeHandle, sc);
+                    const auto axisSnap = applyAxisSnapWithCachedTargets(
+                        target, eqScale, m_altFixedScenePoint, bs, activeHandle, snap, sc);
+                    const qreal snappedScale = axisSnap.scale;
                     desiredAxisSize = snappedScale * origSize;
-                    // Build snap guide line directly from the snapped edge position.
+                    // Build snap guide line only when the snap engine actually engaged a target.
                     const qreal sceneUnitScale2 = (m_sceneStore->sceneUnitScale() > 1e-6) ? m_sceneStore->sceneUnitScale() : 1.0;
-                    const qreal snappedHalfW = (bs.width()  * snappedScale) / 2.0;
-                    const qreal snappedHalfH = (bs.height() * snappedScale) / 2.0;
-                    QVector<QLineF> altAxisLines;
-                    switch (activeHandle) {
-                        case ResizableMediaBase::LeftMid:   altAxisLines.append(QLineF(m_altFixedScenePoint.x() - 2*snappedHalfW, -1e6, m_altFixedScenePoint.x() - 2*snappedHalfW, 1e6)); break;
-                        case ResizableMediaBase::RightMid:  altAxisLines.append(QLineF(m_altFixedScenePoint.x() + 2*snappedHalfW, -1e6, m_altFixedScenePoint.x() + 2*snappedHalfW, 1e6)); break;
-                        case ResizableMediaBase::TopMid:    altAxisLines.append(QLineF(-1e6, m_altFixedScenePoint.y() - 2*snappedHalfH, 1e6, m_altFixedScenePoint.y() - 2*snappedHalfH)); break;
-                        case ResizableMediaBase::BottomMid: altAxisLines.append(QLineF(-1e6, m_altFixedScenePoint.y() + 2*snappedHalfH, 1e6, m_altFixedScenePoint.y() + 2*snappedHalfH)); break;
-                        default: break;
-                    }
-                    if (!altAxisLines.isEmpty()) {
-                        m_modelPublisher->publishSnapGuidesOnly(m_viewAdapter, SnapGuidePublisher::buildFromLines(altAxisLines, sceneUnitScale2));
+                    if (axisSnap.snapped) {
+                        QVector<QLineF> altAxisLines;
+                        if (horizontal) {
+                            altAxisLines.append(QLineF(axisSnap.snappedEdgeScenePos, -1e6,
+                                                       axisSnap.snappedEdgeScenePos, 1e6));
+                        } else {
+                            altAxisLines.append(QLineF(-1e6, axisSnap.snappedEdgeScenePos,
+                                                       1e6, axisSnap.snappedEdgeScenePos));
+                        }
+                        m_modelPublisher->publishSnapGuidesOnly(
+                            m_viewAdapter,
+                            SnapGuidePublisher::buildFromLines(altAxisLines, sceneUnitScale2));
                     } else {
                         m_modelPublisher->publishSnapGuidesOnly(m_viewAdapter, SnapGuidePublisher::emptyModel());
                     }
@@ -1083,9 +1087,9 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                     syncSnapViewScale();
                     qreal snappedW = desiredW, snappedH = desiredH;
                     QPointF snappedCorner;
-                    if (applyCornerSnapWithCachedTargets(
+                        if (applyCornerSnapWithCachedTargets(
                             static_cast<int>(activeHandle), m_altFixedScenePoint,
-                            desiredW, desiredH, snappedW, snappedH, snappedCorner, sc)) {
+                            desiredW, desiredH, snappedW, snappedH, snappedCorner, snap, sc)) {
                         altCornerSnapped = true;
                         altSnappedCornerPt = snappedCorner;
                     } else {
@@ -1098,8 +1102,8 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                         qreal eqScaleY = bs.height() > 0 ? desiredH / bs.height() : 1.0;
                         eqScaleX = std::clamp<qreal>(eqScaleX, 0.05, 100.0);
                         eqScaleY = std::clamp<qreal>(eqScaleY, 0.05, 100.0);
-                        snappedW = applyAxisSnapWithCachedTargets(target, eqScaleX, m_altFixedScenePoint, bs, static_cast<int>(hForX), sc) * bs.width();
-                        snappedH = applyAxisSnapWithCachedTargets(target, eqScaleY, m_altFixedScenePoint, bs, static_cast<int>(hForY), sc) * bs.height();
+                        snappedW = applyAxisSnapWithCachedTargets(target, eqScaleX, m_altFixedScenePoint, bs, static_cast<int>(hForX), snap, sc).scale * bs.width();
+                        snappedH = applyAxisSnapWithCachedTargets(target, eqScaleY, m_altFixedScenePoint, bs, static_cast<int>(hForY), snap, sc).scale * bs.height();
                     }
                     desiredW = snappedW;
                     desiredH = snappedH;
@@ -1192,13 +1196,18 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
     // For corner handles, snapping works like drag-snap: keep proposedScale, move the item
     // so the moving corner lands exactly on the nearest target corner.
     m_uniformCornerSnapped = false;
+    bool m_uniformAxisSnapped = false;
+    qreal m_uniformAxisSnappedEdge = 0.0;
     if (snap && !m_mediaScene->views().isEmpty()) {
         if (auto* screenCanvas = qobject_cast<ScreenCanvas*>(m_mediaScene->views().first())) {
             syncSnapViewScale();
             if (activeHandle == ResizableMediaBase::LeftMid || activeHandle == ResizableMediaBase::RightMid
                 || activeHandle == ResizableMediaBase::TopMid || activeHandle == ResizableMediaBase::BottomMid) {
-                proposedScale = applyAxisSnapWithCachedTargets(
-                    target, proposedScale, fixedScenePoint, baseSize, activeHandle, screenCanvas);
+                const auto axisSnap = applyAxisSnapWithCachedTargets(
+                    target, proposedScale, fixedScenePoint, baseSize, activeHandle, snap, screenCanvas);
+                proposedScale = axisSnap.scale;
+                m_uniformAxisSnapped = axisSnap.snapped;
+                m_uniformAxisSnappedEdge = axisSnap.snappedEdgeScenePos;
             } else {
                 // Corner handle: compute where the moving corner is at proposedScale,
                 // then find the nearest target corner within snap zone.
@@ -1289,17 +1298,13 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
             || activeHandle == ResizableMediaBase::TopMid
             || activeHandle == ResizableMediaBase::BottomMid);
         if (isAxisHandleU) {
-            // One line at the snapped moving edge.
-            const qreal snappedHalfW = (baseSize.width()  * proposedScale) / 2.0;
-            const qreal snappedHalfH = (baseSize.height() * proposedScale) / 2.0;
             QVector<QLineF> lines;
-            const QPointF fsp = m_resizeFixedScenePoint;
-            switch (activeHandle) {
-                case ResizableMediaBase::LeftMid:   lines.append(QLineF(fsp.x() - 2*snappedHalfW, -1e6, fsp.x() - 2*snappedHalfW,  1e6)); break;
-                case ResizableMediaBase::RightMid:  lines.append(QLineF(fsp.x() + 2*snappedHalfW, -1e6, fsp.x() + 2*snappedHalfW,  1e6)); break;
-                case ResizableMediaBase::TopMid:    lines.append(QLineF(-1e6, fsp.y() - 2*snappedHalfH,  1e6, fsp.y() - 2*snappedHalfH)); break;
-                case ResizableMediaBase::BottomMid: lines.append(QLineF(-1e6, fsp.y() + 2*snappedHalfH,  1e6, fsp.y() + 2*snappedHalfH)); break;
-                default: break;
+            if (m_uniformAxisSnapped) {
+                if (activeHandle == ResizableMediaBase::LeftMid || activeHandle == ResizableMediaBase::RightMid) {
+                    lines.append(QLineF(m_uniformAxisSnappedEdge, -1e6, m_uniformAxisSnappedEdge,  1e6));
+                } else {
+                    lines.append(QLineF(-1e6, m_uniformAxisSnappedEdge,  1e6, m_uniformAxisSnappedEdge));
+                }
             }
             if (!lines.isEmpty()) {
                 m_modelPublisher->publishSnapGuidesOnly(m_viewAdapter, SnapGuidePublisher::buildFromLines(lines, unitScaleU));
@@ -1333,6 +1338,23 @@ void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId) {
     }
 
     const QString finalMediaId = !mediaId.isEmpty() ? mediaId : m_pointerSession->resizeMediaId();
+
+    if (!finalMediaId.isEmpty()
+        && m_pointerSession->resizeActive()
+        && !QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier)
+        && m_queuedResizeMediaId == finalMediaId
+        && !m_queuedResizeHandleId.isEmpty()) {
+        m_executingQueuedResize = true;
+        handleMediaResizeRequested(
+            m_queuedResizeMediaId,
+            m_queuedResizeHandleId,
+            m_queuedResizeSceneX,
+            m_queuedResizeSceneY,
+            false,
+            m_queuedResizeAlt);
+        m_executingQueuedResize = false;
+    }
+
     qreal finalX = m_resizeLastSceneX;
     qreal finalY = m_resizeLastSceneY;
     qreal finalScale = m_resizeLastScale;
@@ -1551,18 +1573,20 @@ void QuickCanvasController::syncSnapViewScale() const {
     }
 }
 
-qreal QuickCanvasController::applyAxisSnapWithCachedTargets(ResizableMediaBase* target,
-                                                            qreal proposedScale,
-                                                            const QPointF& fixedScenePoint,
-                                                            const QSize& baseSize,
-                                                            int activeHandleValue,
-                                                            ScreenCanvas* screenCanvas) const {
+SnapEngine::AxisSnapResult QuickCanvasController::applyAxisSnapWithCachedTargets(ResizableMediaBase* target,
+                                                                                  qreal proposedScale,
+                                                                                  const QPointF& fixedScenePoint,
+                                                                                  const QSize& baseSize,
+                                                                                  int activeHandleValue,
+                                                                                  bool shiftPressed,
+                                                                                  ScreenCanvas* screenCanvas) const {
     return SnapEngine::applyAxisSnapWithTargets(
         target,
         proposedScale,
         fixedScenePoint,
         baseSize,
         activeHandleValue,
+        shiftPressed,
         screenCanvas,
         *m_snapStore);
 }
@@ -1574,6 +1598,7 @@ bool QuickCanvasController::applyCornerSnapWithCachedTargets(int activeHandleVal
                                                               qreal& snappedW,
                                                               qreal& snappedH,
                                                               QPointF& snappedCorner,
+                                                              bool shiftPressed,
                                                               ScreenCanvas* screenCanvas) const {
     return SnapEngine::applyCornerSnapWithTargets(
         activeHandleValue,
@@ -1583,6 +1608,7 @@ bool QuickCanvasController::applyCornerSnapWithCachedTargets(int activeHandleVal
         snappedW,
         snappedH,
         snappedCorner,
+        shiftPressed,
         screenCanvas,
         *m_snapStore);
 }

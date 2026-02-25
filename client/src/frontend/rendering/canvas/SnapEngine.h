@@ -10,13 +10,20 @@ class SnapStore;
 
 class SnapEngine {
 public:
-    static qreal applyAxisSnapWithTargets(ResizableMediaBase* target,
-                                          qreal proposedScale,
-                                          const QPointF& fixedScenePoint,
-                                          const QSize& baseSize,
-                                          int activeHandleValue,
-                                          ScreenCanvas* screenCanvas,
-                                          const SnapStore& snapStore);
+    struct AxisSnapResult {
+        qreal scale = 1.0;
+        bool snapped = false;
+        qreal snappedEdgeScenePos = 0.0;
+    };
+
+    static AxisSnapResult applyAxisSnapWithTargets(ResizableMediaBase* target,
+                                                    qreal proposedScale,
+                                                    const QPointF& fixedScenePoint,
+                                                    const QSize& baseSize,
+                                                    int activeHandleValue,
+                                                    bool shiftPressed,
+                                                    ScreenCanvas* screenCanvas,
+                                                    const SnapStore& snapStore);
 
     static bool applyCornerSnapWithTargets(int activeHandleValue,
                                            const QPointF& fixedScenePoint,
@@ -25,6 +32,7 @@ public:
                                            qreal& snappedW,
                                            qreal& snappedH,
                                            QPointF& snappedCorner,
+                                           bool shiftPressed,
                                            ScreenCanvas* screenCanvas,
                                            const SnapStore& snapStore);
 };

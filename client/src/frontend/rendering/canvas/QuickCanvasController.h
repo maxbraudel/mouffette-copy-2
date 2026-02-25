@@ -11,6 +11,7 @@
 
 #include "backend/domain/models/ClientInfo.h"
 #include "frontend/rendering/canvas/QuickDragSnapSession.h"
+#include "frontend/rendering/canvas/SnapEngine.h"
 
 class QQuickWidget;
 class QWidget;
@@ -129,12 +130,13 @@ private:
     bool tryInitialFitNow(int marginPx = 53);
     void buildResizeSnapCaches(ResizableMediaBase* resizingItem);
     void syncSnapViewScale() const; // pushes currentViewScale() into the backing ScreenCanvas
-    qreal applyAxisSnapWithCachedTargets(ResizableMediaBase* target,
-                                         qreal proposedScale,
-                                         const QPointF& fixedScenePoint,
-                                         const QSize& baseSize,
-                                         int activeHandle,
-                                         ScreenCanvas* screenCanvas) const;
+    SnapEngine::AxisSnapResult applyAxisSnapWithCachedTargets(ResizableMediaBase* target,
+                                                               qreal proposedScale,
+                                                               const QPointF& fixedScenePoint,
+                                                               const QSize& baseSize,
+                                                               int activeHandle,
+                                                               bool shiftPressed,
+                                                               ScreenCanvas* screenCanvas) const;
     bool applyCornerSnapWithCachedTargets(int activeHandle,
                                           const QPointF& fixedScenePoint,
                                           qreal proposedW,
@@ -142,6 +144,7 @@ private:
                                           qreal& snappedW,
                                           qreal& snappedH,
                                           QPointF& snappedCorner,
+                                          bool shiftPressed,
                                           ScreenCanvas* screenCanvas) const;
 
     QQuickWidget* m_quickWidget = nullptr;

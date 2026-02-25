@@ -4,20 +4,23 @@
 #include "backend/domain/media/MediaItems.h"
 #include "frontend/rendering/canvas/ScreenCanvas.h"
 
-#include <QGuiApplication>
 #include <QTransform>
 #include <cmath>
 #include <limits>
 
-qreal SnapEngine::applyAxisSnapWithTargets(ResizableMediaBase* target,
-                                           qreal proposedScale,
-                                           const QPointF& fixedScenePoint,
-                                           const QSize& baseSize,
-                                           int activeHandleValue,
-                                           ScreenCanvas* screenCanvas,
-                                           const SnapStore& snapStore) {
+SnapEngine::AxisSnapResult SnapEngine::applyAxisSnapWithTargets(ResizableMediaBase* target,
+                                                                 qreal proposedScale,
+                                                                 const QPointF& fixedScenePoint,
+                                                                 const QSize& baseSize,
+                                                                 int activeHandleValue,
+                                                                 bool shiftPressed,
+                                                                 ScreenCanvas* screenCanvas,
+                                                                 const SnapStore& snapStore) {
+    AxisSnapResult result;
+    result.scale = proposedScale;
+
     if (!target || !screenCanvas || !snapStore.ready()) {
-        return proposedScale;
+        return result;
     }
 
     using H = ResizableMediaBase::Handle;
@@ -25,15 +28,15 @@ qreal SnapEngine::applyAxisSnapWithTargets(ResizableMediaBase* target,
     const bool isHorizontal = (activeHandle == H::LeftMid || activeHandle == H::RightMid);
     const bool isVertical = (activeHandle == H::TopMid || activeHandle == H::BottomMid);
     if (!isHorizontal && !isVertical) {
-        return proposedScale;
+        return result;
     }
-    if (!QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier)) {
-        return proposedScale;
+    if (!shiftPressed) {
+        return result;
     }
 
     const QVector<qreal>& axisTargets = isHorizontal ? snapStore.edgesX() : snapStore.edgesY();
     if (axisTargets.isEmpty()) {
-        return proposedScale;
+        return result;
     }
 
     const qreal snapDistanceScene = screenCanvas->snapDistancePx() / screenCanvas->effectiveViewScale();
@@ -85,7 +88,10 @@ qreal SnapEngine::applyAxisSnapWithTargets(ResizableMediaBase* target,
         const qreal snappedEdgePos = snappedEdgePosForScale(snapTargetScale);
         const qreal distToLocked = std::abs(movingEdgePos - snappedEdgePos);
         if (distToLocked <= releaseDist) {
-            return snapTargetScale;
+            result.scale = snapTargetScale;
+            result.snapped = true;
+            result.snappedEdgeScenePos = snappedEdgePos;
+            return result;
         }
         target->setAxisSnapActive(false, H::None, 0.0);
         snapActive = false;
@@ -93,6 +99,7 @@ qreal SnapEngine::applyAxisSnapWithTargets(ResizableMediaBase* target,
 
     qreal bestDist = snapDistanceScene;
     qreal bestScale = proposedScale;
+    qreal bestEdge = 0.0;
     for (qreal edge : axisTargets) {
         const qreal dist = std::abs(movingEdgePos - edge);
         if (dist < bestDist) {
@@ -100,15 +107,23 @@ qreal SnapEngine::applyAxisSnapWithTargets(ResizableMediaBase* target,
             if (candidateScale > 0.0) {
                 bestDist = dist;
                 bestScale = candidateScale;
+                bestEdge = edge;
             }
         }
     }
 
     if (!snapActive && bestScale != proposedScale && bestDist < snapDistanceScene) {
         target->setAxisSnapActive(true, activeHandle, bestScale);
+        result.scale = bestScale;
+        result.snapped = true;
+        result.snappedEdgeScenePos = bestEdge;
+        return result;
     }
 
-    return bestScale;
+    result.scale = proposedScale;
+    result.snapped = false;
+    result.snappedEdgeScenePos = 0.0;
+    return result;
 }
 
 bool SnapEngine::applyCornerSnapWithTargets(int activeHandleValue,
@@ -118,6 +133,7 @@ bool SnapEngine::applyCornerSnapWithTargets(int activeHandleValue,
                                              qreal& snappedW,
                                              qreal& snappedH,
                                              QPointF& snappedCorner,
+                                             bool shiftPressed,
                                              ScreenCanvas* screenCanvas,
                                              const SnapStore& snapStore) {
     const ResizableMediaBase::Handle activeHandleEnum = static_cast<ResizableMediaBase::Handle>(activeHandleValue);
@@ -131,7 +147,7 @@ bool SnapEngine::applyCornerSnapWithTargets(int activeHandleValue,
     if (!isCorner) {
         return false;
     }
-    if (!QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier)) {
+    if (!shiftPressed) {
         return false;
     }
 
