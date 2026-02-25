@@ -338,17 +338,17 @@ Item {
             readonly property real sceneH: geometry.sceneH
             readonly property real _viewScale: root.contentItem ? root.contentItem.scale : 1.0
             readonly property bool beingDragged: !!entry && root.draggedMediaId !== "" && root.draggedMediaId === entry.mediaId
-            // snapDragActive intentionally does NOT require beingDragged.
-            // liveDragMediaId is cleared synchronously at drag-end (before commitMediaTransform
-            // pushes the snapped position into selectionChromeModel). If we gated on beingDragged,
-            // the chrome would jump back to entry.x/y for 1+ frames until the model updates.
-            // The snap freeze is cleared by QML onMediaChanged once the model catches up.
+            // snapDragActive does NOT require beingDragged.
+            // liveDragMediaId (draggedMediaId) is cleared BEFORE mediaMoveEnded is signalled,
+            // so beingDragged becomes false before the snap freeze is lifted. The freeze
+            // (liveSnapDragActive) stays active until onMediaChanged fires and clears it.
+            // During that window we must keep the chrome at the snapped position, which is
+            // done by applying the snap offset independently of beingDragged.
             readonly property bool snapDragActive: !!interactionController
                                                    && !!interactionController.liveSnapDragActive
                                                    && interactionController.liveSnapDragMediaId === (entry ? entry.mediaId : "")
-            // When snap is active: derive viewport offset from snapped scene position delta.
+            // When snap is active: derive position offset from snapped scene position delta.
             // liveSnapDragX/Y and sceneX are both in canvas QML units (scene * sceneUnitScale).
-            // Multiply by viewScale to get viewport pixels, matching dragOffsetViewX/Y units.
             readonly property real effectiveDragOffsetX: snapDragActive
                 ? (interactionController.liveSnapDragX - sceneX) * _viewScale
                 : root.dragOffsetViewX
@@ -360,8 +360,12 @@ Item {
             visible: !!entry
             z: 90000
 
-            x: sceneX + (beingDragged ? (effectiveDragOffsetX / _viewScale) : 0)
-            y: sceneY + (beingDragged ? (effectiveDragOffsetY / _viewScale) : 0)
+            // Apply offset when dragging OR when the snap freeze is active.
+            // The snap freeze outlives the drag by design (cleared by onMediaChanged),
+            // so gating on beingDragged alone would cause a 1-frame jump to the stale
+            // model sceneX/Y before selectionChromeModel is updated by C++.
+            x: sceneX + ((beingDragged || snapDragActive) ? (effectiveDragOffsetX / _viewScale) : 0)
+            y: sceneY + ((beingDragged || snapDragActive) ? (effectiveDragOffsetY / _viewScale) : 0)
             width: Math.max(1, sceneW)
             height: Math.max(1, sceneH)
 

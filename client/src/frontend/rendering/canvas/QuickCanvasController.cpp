@@ -641,33 +641,20 @@ void QuickCanvasController::handleMediaSelectRequested(const QString& mediaId, b
 // C++ is only notified once at drag-end to commit the final position.
 void QuickCanvasController::handleMediaMoveEnded(const QString& mediaId, qreal sceneX, qreal sceneY, bool snap) {
     Q_UNUSED(snap)
-    // Determine final committed position.
-    // Always query the session if it is active — do NOT gate on the QML snap flag.
-    // The flag reflects Shift state at the exact release instant; if the user releases
-    // Shift a moment before the mouse, snap=false arrives here but the session still
-    // holds a valid snapped position that must be committed.
-    qreal finalX = sceneX;
-    qreal finalY = sceneY;
-    if (m_dragSnapSession->active()) {
-        // Pass snap=true to force the engine to return the last snapped result.
-        const DragSnapResult result = m_dragSnapSession->update(QPointF(sceneX, sceneY), true);
-        if (result.snapped) {
-            finalX = result.snappedPos.x();
-            finalY = result.snappedPos.y();
-        }
-    }
 
-    // End the snap session. Snap guide lines are cleared implicitly because
-    // pushSelectionAndSnapModels (called below) now always publishes empty guides.
-    // Do NOT call clearLiveDragSnapPosition() here — the snap position freeze
-    // (liveSnapDragActive/X/Y) must remain until QML's onMediaChanged fires with
-    // the committed snapped position, otherwise effectiveLocalX/Y falls back to
-    // the raw unsnapped localX/Y for one frame (visible flicker).
-    // QML onMediaChanged clears the snap freeze once media.x/y match liveSnapDragX/Y.
+    // Commit exactly what was displayed: use the last snapped position that was
+    // pushed to QML via pushLiveDragSnapPosition, stored in m_lastSnapSceneX/Y.
+    // This avoids re-running the snap engine (which could yield a slightly different
+    // result) and guarantees "commit what the user saw on screen".
+    // If no snap was active during this drag, fall back to the raw QML position.
+    qreal finalX = (m_lastSnapWasSnapped) ? m_lastSnapSceneX : sceneX;
+    qreal finalY = (m_lastSnapWasSnapped) ? m_lastSnapSceneY : sceneY;
+
+    // End the snap session. The freeze stays alive until QML's onMediaChanged fires,
+    // which happens when pushMediaModelOnly() publishes the updated mediaModel below.
     m_dragSnapSession->end();
 
     if (!m_mediaScene || mediaId.isEmpty()) {
-        // No item to commit — safe to clear the position freeze immediately.
         clearLiveDragSnapPosition();
         if (m_mediaSyncTimer) {
             m_mediaSyncTimer->stop();
@@ -689,18 +676,13 @@ void QuickCanvasController::handleMediaMoveEnded(const QString& mediaId, qreal s
         m_mediaSyncTimer->stop();
     }
     m_mediaSyncPending = false;
-    if (movedTarget) {
-        const qreal currentScale = std::abs(movedTarget->scale()) > 1e-6
-            ? std::abs(movedTarget->scale())
-            : 1.0;
-        if (!commitMediaTransform(mediaId, finalX, finalY, currentScale)) {
-            pushMediaModelOnly();
-        }
-    } else {
-        // No item found — nothing will trigger onMediaChanged, clear immediately.
-        clearLiveDragSnapPosition();
-        pushMediaModelOnly();
-    }
+
+    // Push the full model from authoritative C++ scene state.
+    // setPos was called above so media->scenePos() already returns finalX/Y.
+    // pushMediaModelOnly triggers onMediaChanged on the delegate which syncs
+    // localX/Y to the committed position and clears the snap freeze in the
+    // correct order (localX updated first, then freeze cleared).
+    pushMediaModelOnly();
     pushSelectionAndSnapModels();
 }
 
@@ -709,6 +691,7 @@ void QuickCanvasController::handleMediaMoveStarted(const QString& mediaId, qreal
     Q_UNUSED(sceneY)
     Q_UNUSED(snap)
     // Always clear any stale snap state from a previous session before starting a new one.
+    // clearLiveDragSnapPosition also resets m_lastSnapWasSnapped/X/Y.
     clearLiveDragSnapPosition();
     m_modelPublisher->publishSnapGuidesOnly(m_viewAdapter, SnapGuidePublisher::emptyModel());
 
@@ -1600,23 +1583,6 @@ bool QuickCanvasController::endLiveResizeSession(const QString& mediaId,
         m_sceneStore->sceneUnitScale());
 }
 
-bool QuickCanvasController::commitMediaTransform(const QString& mediaId,
-                                                 qreal sceneX,
-                                                 qreal sceneY,
-                                                 qreal scale) {
-    if (!m_quickWidget || !m_quickWidget->rootObject() || mediaId.isEmpty()) {
-        return false;
-    }
-
-    return GestureCommands::invokeMediaTransformCommand(
-        m_quickWidget->rootObject(),
-        "commitMediaTransform",
-        mediaId,
-        sceneX,
-        sceneY,
-        scale,
-        m_sceneStore->sceneUnitScale());
-}
 
 bool QuickCanvasController::pushLiveResizeGeometry(const QString& mediaId,
                                                    qreal sceneX,
@@ -1642,10 +1608,15 @@ void QuickCanvasController::pushLiveDragSnapPosition(const QString& mediaId, qre
     }
     const qreal unitScale = (m_sceneStore->sceneUnitScale() > 1e-6) ? m_sceneStore->sceneUnitScale() : 1.0;
     QObject* root = m_quickWidget->rootObject();
-    root->setProperty("liveSnapDragActive",  true);
+    // liveSnapDragActive is derived from liveSnapDragMediaId in QML, no need to set it.
     root->setProperty("liveSnapDragMediaId", mediaId);
     root->setProperty("liveSnapDragX",       sceneX * unitScale);
     root->setProperty("liveSnapDragY",       sceneY * unitScale);
+    // Record the scene-unit values so handleMediaMoveEnded can commit exactly
+    // what was displayed without re-running the snap engine.
+    m_lastSnapSceneX     = sceneX;
+    m_lastSnapSceneY     = sceneY;
+    m_lastSnapWasSnapped = true;
 }
 
 void QuickCanvasController::clearLiveDragSnapPosition() {
@@ -1653,8 +1624,12 @@ void QuickCanvasController::clearLiveDragSnapPosition() {
         return;
     }
     QObject* root = m_quickWidget->rootObject();
-    root->setProperty("liveSnapDragActive",  false);
+    // liveSnapDragActive is a derived readonly property in QML (liveSnapDragMediaId !== ""),
+    // so clearing liveSnapDragMediaId is sufficient — active updates automatically.
     root->setProperty("liveSnapDragMediaId", QString());
+    m_lastSnapSceneX     = 0.0;
+    m_lastSnapSceneY     = 0.0;
+    m_lastSnapWasSnapped = false;
 }
 
 void QuickCanvasController::pushSnapGuidesFromScreenCanvas() {

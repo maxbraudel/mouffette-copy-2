@@ -108,7 +108,6 @@ private:
     void pushMediaModelOnly();
     bool beginLiveResizeSession(const QString& mediaId);
     bool endLiveResizeSession(const QString& mediaId, qreal sceneX, qreal sceneY, qreal scale);
-    bool commitMediaTransform(const QString& mediaId, qreal sceneX, qreal sceneY, qreal scale);
     bool pushLiveResizeGeometry(const QString& mediaId, qreal sceneX, qreal sceneY, qreal scale);
     bool pushLiveAltResizeGeometry(const QString& mediaId, qreal sceneX, qreal sceneY, int width, int height, qreal scale);
     void resetAltResizeState();
@@ -186,6 +185,12 @@ private:
     // Uniform corner snap result — set inside the snap block, consumed by guide publishing below
     bool   m_uniformCornerSnapped    = false;
     QPointF m_uniformCornerSnappedPt;
+    // Last snapped scene position pushed to QML via pushLiveDragSnapPosition.
+    // Used by handleMediaMoveEnded to commit exactly what was displayed rather
+    // than re-running the snap engine (which could yield a different result).
+    qreal m_lastSnapSceneX = 0.0;
+    qreal m_lastSnapSceneY = 0.0;
+    bool  m_lastSnapWasSnapped = false;
     bool m_pendingInitialSceneScaleRefresh = false;
     bool m_textToolActive = false;
     bool m_initialFitCompleted = false;

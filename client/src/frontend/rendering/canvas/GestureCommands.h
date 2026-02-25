@@ -7,6 +7,8 @@ class QObject;
 
 class GestureCommands {
 public:
+    // Invokes a QML transform command (e.g. applyLiveResizeGeometry).
+    // Returns true if the method was found and called successfully.
     static bool invokeMediaTransformCommand(QObject* quickRootObject,
                                             const char* commandName,
                                             const QString& mediaId,

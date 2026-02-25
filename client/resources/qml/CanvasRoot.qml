@@ -40,9 +40,11 @@ Rectangle {
     property string liveDragMediaId: ""
     property real liveDragViewOffsetX: 0.0
     property real liveDragViewOffsetY: 0.0
-    // Snap-corrected live drag position — set by C++ per tick when Shift+drag snap is active
-    property bool   liveSnapDragActive:  false
+    // Snap-corrected live drag position — set by C++ per tick when Shift+drag snap is active.
+    // liveSnapDragActive is DERIVED from liveSnapDragMediaId so both are always in sync:
+    // setting liveSnapDragMediaId = "" is the one and only way to clear the freeze.
     property string liveSnapDragMediaId: ""
+    readonly property bool liveSnapDragActive: liveSnapDragMediaId !== ""
     property real   liveSnapDragX:       0.0
     property real   liveSnapDragY:       0.0
     property bool textToolActive: false
@@ -85,9 +87,14 @@ Rectangle {
     focus: true
     Keys.onReleased: function(event) {
         if (event.key === Qt.Key_Shift) {
+            // Clear visual snap guide lines immediately — they are purely cosmetic.
             root.snapGuidesModel = []
-            root.liveSnapDragActive  = false
-            root.liveSnapDragMediaId = ""
+            // Do NOT touch liveSnapDragMediaId here. liveSnapDragActive is derived
+            // (readonly) and the freeze lifecycle is owned exclusively by:
+            //   • C++ handleMediaMoveUpdated — clears freeze when snap disengages during drag
+            //   • QML onMediaChanged          — clears freeze after committed position arrives
+            //   • snapFreezeCleanupTimer      — safety-net for stuck freeze after drag end
+            // Clearing early would expose stale localX/Y before onMediaChanged syncs it.
         }
     }
 
@@ -442,10 +449,6 @@ Rectangle {
         return committed
     }
 
-    function commitMediaTransform(mediaId, sceneX, sceneY, scale) {
-        return commitMediaGeometry(mediaId, sceneX, sceneY, scale)
-    }
-
     CanvasViewport {
         id: viewport
         anchors.fill: parent
@@ -526,24 +529,45 @@ Rectangle {
 
                     onMediaChanged: {
                         if (!localDragging && media) {
-                            var syncedX = Math.abs(localX - media.x) < 0.01
-                            var syncedY = Math.abs(localY - media.y) < 0.01
+                            // Always sync local position to the committed model value.
+                            // Safe because localDragging=false means no active drag is
+                            // writing to localX/Y, so overwriting never causes a jump.
                             localX = media.x
                             localY = media.y
                             localScale = media.scale || 1.0
-                            if (root.liveDragMediaId === currentMediaId) {
-                                if (syncedX && syncedY) {
-                                    root.liveDragMediaId = ""
-                                    root.liveDragViewOffsetX = 0.0
-                                    root.liveDragViewOffsetY = 0.0
-                                }
+
+                            // Release the snap freeze whenever this item's drag is over.
+                            // liveDragMediaId is cleared BEFORE mediaMoveEnded is signalled,
+                            // so by the time onMediaChanged fires the drag is always ended
+                            // and the condition below is always satisfied post-drag.
+                            // During an active drag the freeze must stay so effectiveLocalX/Y
+                            // keeps showing the snapped position — hence the guard.
+                            // The safety-net timer covers the rare edge case where this
+                            // handler never fires at all (delegate destroyed, etc.).
+                            if (root.liveSnapDragMediaId === currentMediaId
+                                    && root.liveDragMediaId !== currentMediaId) {
+                                root.liveSnapDragMediaId = ""
+                                snapFreezeCleanupTimer.stop()
                             }
-                            // Clear snap drag freeze on any model update while not dragging.
-                            // Do NOT gate on position match — the committed position may be the
-                            // raw unsnapped pos (e.g. Shift released before mouse), which would
-                            // never match liveSnapDragX/Y and leave the freeze permanently stuck.
-                            if (root.liveSnapDragMediaId === currentMediaId) {
-                                root.liveSnapDragActive  = false
+                        }
+                    }
+
+                    // Safety-net: if onMediaChanged never fires after drag end (edge
+                    // case: delegate destroyed, model update suppressed, etc.) this timer
+                    // force-clears the snap freeze so content is never permanently stuck.
+                    Timer {
+                        id: snapFreezeCleanupTimer
+                        interval: 300
+                        repeat: false
+                        onTriggered: {
+                            if (root.liveSnapDragMediaId === mediaDelegate.currentMediaId) {
+                                // Sync localX/Y to the snapped position BEFORE clearing the
+                                // freeze so that effectiveLocalX falls back to the correct
+                                // snapped value, not the stale raw cursor position.
+                                if (!mediaDelegate.localDragging) {
+                                    mediaDelegate.localX = root.liveSnapDragX
+                                    mediaDelegate.localY = root.liveSnapDragY
+                                }
                                 root.liveSnapDragMediaId = ""
                             }
                         }
@@ -584,12 +608,12 @@ Rectangle {
                     readonly property bool usesLiveAltResize: root.liveAltResizeActive
                                                              && root.liveAltResizeMediaId === currentMediaId
                                                              && !localDragging
-                    // usesSnapDrag: intentionally has NO && localDragging guard.
-                    // The snap position freeze must survive the localDragging=false transition
-                    // at drag-end (mouse release) until onMediaChanged fires with the committed
-                    // snapped position. Removing the guard prevents the one-frame flicker where
-                    // effectiveLocalX/Y would fall back to the raw unsnapped localX/Y.
-                    // The freeze is cleared by onMediaChanged once media.x/y match liveSnapDragX/Y.
+                    // usesSnapDrag has NO localDragging guard by design.
+                    // liveDragMediaId is cleared before mediaMoveEnded is called, so the
+                    // snap freeze must also survive across the localDragging=false transition
+                    // until onMediaChanged fires and clears liveSnapDragActive. Without this,
+                    // effectiveLocalX/Y would fall back to the raw unsnapped localX/Y for
+                    // one frame before the committed model position arrives.
                     readonly property bool usesSnapDrag: root.liveSnapDragActive
                                                         && root.liveSnapDragMediaId === currentMediaId
                     // When C++ has computed a snapped position, use it; otherwise use raw QML drag coords
@@ -729,7 +753,7 @@ Rectangle {
                                 dragOriginSceneY = 0.0
                                 dragOriginViewX = 0.0
                                 dragOriginViewY = 0.0
-                                root.liveDragMediaId = ""
+                                // liveDragViewOffsetX/Y are cleared now (no longer needed visually).
                                 root.liveDragViewOffsetX = 0.0
                                 root.liveDragViewOffsetY = 0.0
                                 if (inputLayer.useInputCoordinator) {
@@ -737,18 +761,32 @@ Rectangle {
                                 } else {
                                     inputLayer.inputCoordinator.endMode("move", finalMediaId)
                                 }
+                                // Clear liveDragMediaId BEFORE mediaMoveEnded so that when
+                                // onMediaChanged fires synchronously inside C++ handleMediaMoveEnded
+                                // (triggered by commitMediaTransform → commitMediaGeometry), the
+                                // snap freeze check in onMediaChanged sees liveDragMediaId=="" and
+                                // reliably clears the freeze via the fallback branch.
+                                // This eliminates the race where the fallback was skipped because
+                                // liveDragMediaId was still set at the time onMediaChanged evaluated.
+                                root.liveDragMediaId = ""
+                                activeMoveMediaId = ""
+
                                 if (finalMediaId !== "") {
                                     var snapAtEnd = (mediaDrag.centroid.modifiers & Qt.ShiftModifier) !== 0
+                                    // Send effectiveLocalX/Y (the snapped position the user sees)
+                                    // instead of raw localX/Y (raw cursor position). This ensures
+                                    // C++ commits the position that matches the visual.
                                     root.mediaMoveEnded(finalMediaId,
-                                                        mediaDelegate.localX,
-                                                        mediaDelegate.localY,
+                                                        mediaDelegate.effectiveLocalX,
+                                                        mediaDelegate.effectiveLocalY,
                                                         snapAtEnd)
                                 }
-                                // NOTE: do NOT clear liveSnapDragActive here — keep the snap
-                                // position frozen until onMediaChanged confirms the model has
-                                // updated to the committed snapped position, preventing a
-                                // one-frame flicker back to the unsnapped localX/Y.
-                                activeMoveMediaId = ""
+                                // Arm the safety-net timer in case onMediaChanged never fires
+                                // (e.g. commitMediaGeometry found no matching entry in mediaModel).
+                                if (root.liveSnapDragActive
+                                        && root.liveSnapDragMediaId === finalMediaId) {
+                                    snapFreezeCleanupTimer.restart()
+                                }
                             }
                         }
 
@@ -766,6 +804,16 @@ Rectangle {
                                                       mediaDelegate.localX,
                                                       mediaDelegate.localY,
                                                       snapNow)
+                            }
+                            // After mediaMoveUpdated returns, C++ has synchronously pushed
+                            // liveSnapDragX/Y to the snapped position (or cleared the freeze
+                            // if snap is no longer active). Keep localX/Y in sync with the
+                            // snapped position so that whenever usesSnapDrag flips to false
+                            // for any reason, effectiveLocalX falls back to localX which
+                            // already holds the correct snapped value — not the raw cursor.
+                            if (mediaDelegate.usesSnapDrag) {
+                                mediaDelegate.localX = root.liveSnapDragX
+                                mediaDelegate.localY = root.liveSnapDragY
                             }
                             // Chrome viewport offset = scene delta * viewScale
                             root.liveDragViewOffsetX = cur.x - dragOriginViewX
@@ -785,8 +833,13 @@ Rectangle {
                             root.liveDragMediaId = ""
                             root.liveDragViewOffsetX = 0.0
                             root.liveDragViewOffsetY = 0.0
-                            // NOTE: do NOT clear liveSnapDragActive here — same reasoning as
-                            // the normal drag-end path: let onMediaChanged clear it safely.
+                            // No commit path on cancel — onMediaChanged may never fire.
+                            // Arm the safety-net timer so the freeze is force-cleared after
+                            // a short window if nothing else clears it first.
+                            if (root.liveSnapDragActive
+                                    && root.liveSnapDragMediaId === activeMoveMediaId) {
+                                snapFreezeCleanupTimer.restart()
+                            }
                             if (inputLayer.useInputCoordinator) {
                                 inputLayer.inputCoordinator.endMove(activeMoveMediaId)
                             } else {
@@ -1226,11 +1279,13 @@ Rectangle {
                     ? (root.liveSnapDragY - sceneY) * root.viewScale
                     : root.liveDragViewOffsetY
 
-                // Screen-space top-left (add live drag offset if dragging)
+                // Screen-space top-left (add live drag offset if dragging or snap-frozen).
+                // isSnapDragging outlives isDragging by design (snap freeze is cleared by
+                // onMediaChanged after drag ends), so we apply the offset for both states.
                 readonly property real screenLeft: sceneX * root.viewScale + root.panX
-                                                   + (isDragging ? effectiveDragOffsetX : 0)
+                                                   + ((isDragging || isSnapDragging) ? effectiveDragOffsetX : 0)
                 readonly property real screenTop:  sceneY * root.viewScale + root.panY
-                                                   + (isDragging ? effectiveDragOffsetY : 0)
+                                                   + ((isDragging || isSnapDragging) ? effectiveDragOffsetY : 0)
 
                 // Derived screen anchors
                 readonly property real screenCentreX: screenLeft + screenW * 0.5
