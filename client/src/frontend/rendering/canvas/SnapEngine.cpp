@@ -4,6 +4,7 @@
 #include "backend/domain/media/MediaItems.h"
 #include "frontend/rendering/canvas/ScreenCanvas.h"
 
+#include <algorithm>
 #include <QTransform>
 #include <cmath>
 #include <limits>
@@ -126,32 +127,31 @@ SnapEngine::AxisSnapResult SnapEngine::applyAxisSnapWithTargets(ResizableMediaBa
     return result;
 }
 
-bool SnapEngine::applyCornerSnapWithTargets(int activeHandleValue,
-                                             const QPointF& fixedScenePoint,
-                                             qreal proposedW,
-                                             qreal proposedH,
-                                             qreal& snappedW,
-                                             qreal& snappedH,
-                                             QPointF& snappedCorner,
-                                             bool shiftPressed,
-                                             ScreenCanvas* screenCanvas,
-                                             const SnapStore& snapStore) {
+SnapEngine::CornerSnapResult SnapEngine::applyCornerSnapWithTargets(int activeHandleValue,
+                                                                     const QPointF& fixedScenePoint,
+                                                                     qreal proposedW,
+                                                                     qreal proposedH,
+                                                                     bool shiftPressed,
+                                                                     ScreenCanvas* screenCanvas,
+                                                                     const SnapStore& snapStore) {
+    CornerSnapResult result;
     const ResizableMediaBase::Handle activeHandleEnum = static_cast<ResizableMediaBase::Handle>(activeHandleValue);
     if (!screenCanvas || !snapStore.ready() || snapStore.corners().isEmpty()) {
-        return false;
+        return result;
     }
 
     using H = ResizableMediaBase::Handle;
     const bool isCorner = (activeHandleEnum == H::TopLeft || activeHandleEnum == H::TopRight
         || activeHandleEnum == H::BottomLeft || activeHandleEnum == H::BottomRight);
     if (!isCorner) {
-        return false;
+        return result;
     }
     if (!shiftPressed) {
-        return false;
+        return result;
     }
 
     const qreal cornerZone = screenCanvas->cornerSnapDistancePx() / screenCanvas->effectiveViewScale();
+    const qreal edgeZone = screenCanvas->snapDistancePx() / screenCanvas->effectiveViewScale();
 
     auto movingCornerPoint = [&](qreal w, qreal h) {
         QPointF tl;
@@ -172,8 +172,9 @@ bool SnapEngine::applyCornerSnapWithTargets(int activeHandleValue,
     };
 
     const QPointF candidate = movingCornerPoint(proposedW, proposedH);
-    qreal bestErr = std::numeric_limits<qreal>::max();
-    QPointF bestTarget;
+
+    qreal bestCornerErr = std::numeric_limits<qreal>::max();
+    QPointF bestCornerTarget;
     for (const QPointF& targetCorner : snapStore.corners()) {
         const qreal dx = std::abs(candidate.x() - targetCorner.x());
         const qreal dy = std::abs(candidate.y() - targetCorner.y());
@@ -181,38 +182,101 @@ bool SnapEngine::applyCornerSnapWithTargets(int activeHandleValue,
             continue;
         }
         const qreal err = std::hypot(dx, dy);
-        if (err < bestErr) {
-            bestErr = err;
-            bestTarget = targetCorner;
+        if (err < bestCornerErr) {
+            bestCornerErr = err;
+            bestCornerTarget = targetCorner;
         }
     }
 
-    if (bestErr == std::numeric_limits<qreal>::max()) {
-        return false;
+    qreal bestEdgeXDist = std::numeric_limits<qreal>::max();
+    qreal bestEdgeX = 0.0;
+    for (qreal edgeX : snapStore.edgesX()) {
+        const qreal dist = std::abs(candidate.x() - edgeX);
+        if (dist <= edgeZone && dist < bestEdgeXDist) {
+            bestEdgeXDist = dist;
+            bestEdgeX = edgeX;
+        }
+    }
+
+    qreal bestEdgeYDist = std::numeric_limits<qreal>::max();
+    qreal bestEdgeY = 0.0;
+    for (qreal edgeY : snapStore.edgesY()) {
+        const qreal dist = std::abs(candidate.y() - edgeY);
+        if (dist <= edgeZone && dist < bestEdgeYDist) {
+            bestEdgeYDist = dist;
+            bestEdgeY = edgeY;
+        }
+    }
+
+    const bool hasCorner = bestCornerErr < std::numeric_limits<qreal>::max();
+    const bool hasEdgeX = bestEdgeXDist < std::numeric_limits<qreal>::max();
+    const bool hasEdgeY = bestEdgeYDist < std::numeric_limits<qreal>::max();
+
+    if (!hasCorner && !hasEdgeX && !hasEdgeY) {
+        return result;
+    }
+
+    enum class Choice { None, Corner, EdgeX, EdgeY, EdgeXY };
+    Choice choice = Choice::None;
+
+    // Priority rule: if a valid corner snap exists, it ALWAYS wins over border snaps.
+    // This prevents border/corner overlap conflicts where edge candidates could override
+    // an intended corner capture.
+    if (hasCorner) {
+        choice = Choice::Corner;
+    } else if (hasEdgeX && hasEdgeY) {
+        choice = Choice::EdgeXY;
+    } else if (hasEdgeX) {
+        choice = Choice::EdgeX;
+    } else if (hasEdgeY) {
+        choice = Choice::EdgeY;
+    }
+
+    qreal snappedCornerX = candidate.x();
+    qreal snappedCornerY = candidate.y();
+    if (choice == Choice::Corner) {
+        snappedCornerX = bestCornerTarget.x();
+        snappedCornerY = bestCornerTarget.y();
+    } else if (choice == Choice::EdgeX) {
+        snappedCornerX = bestEdgeX;
+    } else if (choice == Choice::EdgeY) {
+        snappedCornerY = bestEdgeY;
+    } else if (choice == Choice::EdgeXY) {
+        snappedCornerX = bestEdgeX;
+        snappedCornerY = bestEdgeY;
     }
 
     qreal outW = proposedW;
     qreal outH = proposedH;
     if (activeHandleEnum == H::TopLeft) {
-        outW = fixedScenePoint.x() - bestTarget.x();
-        outH = fixedScenePoint.y() - bestTarget.y();
+        outW = fixedScenePoint.x() - snappedCornerX;
+        outH = fixedScenePoint.y() - snappedCornerY;
     } else if (activeHandleEnum == H::TopRight) {
-        outW = bestTarget.x() - fixedScenePoint.x();
-        outH = fixedScenePoint.y() - bestTarget.y();
+        outW = snappedCornerX - fixedScenePoint.x();
+        outH = fixedScenePoint.y() - snappedCornerY;
     } else if (activeHandleEnum == H::BottomLeft) {
-        outW = fixedScenePoint.x() - bestTarget.x();
-        outH = bestTarget.y() - fixedScenePoint.y();
+        outW = fixedScenePoint.x() - snappedCornerX;
+        outH = snappedCornerY - fixedScenePoint.y();
     } else {
-        outW = bestTarget.x() - fixedScenePoint.x();
-        outH = bestTarget.y() - fixedScenePoint.y();
+        outW = snappedCornerX - fixedScenePoint.x();
+        outH = snappedCornerY - fixedScenePoint.y();
     }
 
     if (outW <= 0.0 || outH <= 0.0) {
-        return false;
+        return result;
     }
 
-    snappedW = outW;
-    snappedH = outH;
-    snappedCorner = bestTarget;
-    return true;
+    result.snapped = true;
+    result.snappedW = outW;
+    result.snappedH = outH;
+    result.snappedEdgeX = snappedCornerX;
+    result.snappedEdgeY = snappedCornerY;
+    switch (choice) {
+        case Choice::Corner: result.kind = CornerSnapKind::Corner; break;
+        case Choice::EdgeX:  result.kind = CornerSnapKind::EdgeX; break;
+        case Choice::EdgeY:  result.kind = CornerSnapKind::EdgeY; break;
+        case Choice::EdgeXY: result.kind = CornerSnapKind::EdgeXY; break;
+        default:             result.kind = CornerSnapKind::None; break;
+    }
+    return result;
 }

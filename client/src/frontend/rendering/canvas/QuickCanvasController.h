@@ -137,15 +137,12 @@ private:
                                                                int activeHandle,
                                                                bool shiftPressed,
                                                                ScreenCanvas* screenCanvas) const;
-    bool applyCornerSnapWithCachedTargets(int activeHandle,
-                                          const QPointF& fixedScenePoint,
-                                          qreal proposedW,
-                                          qreal proposedH,
-                                          qreal& snappedW,
-                                          qreal& snappedH,
-                                          QPointF& snappedCorner,
-                                          bool shiftPressed,
-                                          ScreenCanvas* screenCanvas) const;
+    SnapEngine::CornerSnapResult applyCornerSnapWithCachedTargets(int activeHandle,
+                                                                   const QPointF& fixedScenePoint,
+                                                                   qreal proposedW,
+                                                                   qreal proposedH,
+                                                                   bool shiftPressed,
+                                                                   ScreenCanvas* screenCanvas) const;
 
     QQuickWidget* m_quickWidget = nullptr;
     CanvasSceneStore* m_sceneStore = nullptr;

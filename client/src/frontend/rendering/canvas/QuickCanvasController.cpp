@@ -1080,33 +1080,17 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
             desiredH = std::max<qreal>(1.0, desiredH);
 
             // Apply snap if requested
-            bool altCornerSnapped = false;
-            QPointF altSnappedCornerPt;
+            SnapEngine::CornerSnapResult altCornerSnapResult;
             if (snap && !m_mediaScene->views().isEmpty()) {
                 if (auto* sc = qobject_cast<ScreenCanvas*>(m_mediaScene->views().first())) {
                     syncSnapViewScale();
-                    qreal snappedW = desiredW, snappedH = desiredH;
-                    QPointF snappedCorner;
-                        if (applyCornerSnapWithCachedTargets(
-                            static_cast<int>(activeHandle), m_altFixedScenePoint,
-                            desiredW, desiredH, snappedW, snappedH, snappedCorner, snap, sc)) {
-                        altCornerSnapped = true;
-                        altSnappedCornerPt = snappedCorner;
-                    } else {
-                        // fallback: per-axis snap
-                        H::Handle hForX = (activeHandle == H::TopLeft || activeHandle == H::BottomLeft)
-                            ? H::LeftMid : H::RightMid;
-                        H::Handle hForY = (activeHandle == H::TopLeft || activeHandle == H::TopRight)
-                            ? H::TopMid : H::BottomMid;
-                        qreal eqScaleX = bs.width()  > 0 ? desiredW / bs.width()  : 1.0;
-                        qreal eqScaleY = bs.height() > 0 ? desiredH / bs.height() : 1.0;
-                        eqScaleX = std::clamp<qreal>(eqScaleX, 0.05, 100.0);
-                        eqScaleY = std::clamp<qreal>(eqScaleY, 0.05, 100.0);
-                        snappedW = applyAxisSnapWithCachedTargets(target, eqScaleX, m_altFixedScenePoint, bs, static_cast<int>(hForX), snap, sc).scale * bs.width();
-                        snappedH = applyAxisSnapWithCachedTargets(target, eqScaleY, m_altFixedScenePoint, bs, static_cast<int>(hForY), snap, sc).scale * bs.height();
+                    altCornerSnapResult = applyCornerSnapWithCachedTargets(
+                        static_cast<int>(activeHandle), m_altFixedScenePoint,
+                        desiredW, desiredH, snap, sc);
+                    if (altCornerSnapResult.snapped) {
+                        desiredW = altCornerSnapResult.snappedW;
+                        desiredH = altCornerSnapResult.snappedH;
                     }
-                    desiredW = snappedW;
-                    desiredH = snappedH;
                 }
             }
 
@@ -1154,10 +1138,24 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
             }
             if (snap) {
                 const qreal unitScaleAC = (m_sceneStore->sceneUnitScale() > 1e-6) ? m_sceneStore->sceneUnitScale() : 1.0;
-                if (altCornerSnapped) {
+                if (altCornerSnapResult.snapped) {
                     QVector<QLineF> lines;
-                    lines.append(QLineF(altSnappedCornerPt.x(), -1e6, altSnappedCornerPt.x(),  1e6));
-                    lines.append(QLineF(-1e6, altSnappedCornerPt.y(),  1e6, altSnappedCornerPt.y()));
+                    switch (altCornerSnapResult.kind) {
+                        case SnapEngine::CornerSnapKind::Corner:
+                        case SnapEngine::CornerSnapKind::EdgeXY:
+                            lines.append(QLineF(altCornerSnapResult.snappedEdgeX, -1e6, altCornerSnapResult.snappedEdgeX,  1e6));
+                            lines.append(QLineF(-1e6, altCornerSnapResult.snappedEdgeY,  1e6, altCornerSnapResult.snappedEdgeY));
+                            break;
+                        case SnapEngine::CornerSnapKind::EdgeX:
+                            lines.append(QLineF(altCornerSnapResult.snappedEdgeX, -1e6, altCornerSnapResult.snappedEdgeX,  1e6));
+                            break;
+                        case SnapEngine::CornerSnapKind::EdgeY:
+                            lines.append(QLineF(-1e6, altCornerSnapResult.snappedEdgeY,  1e6, altCornerSnapResult.snappedEdgeY));
+                            break;
+                        case SnapEngine::CornerSnapKind::None:
+                        default:
+                            break;
+                    }
                     m_modelPublisher->publishSnapGuidesOnly(m_viewAdapter, SnapGuidePublisher::buildFromLines(lines, unitScaleAC));
                 } else {
                     m_modelPublisher->publishSnapGuidesOnly(m_viewAdapter, SnapGuidePublisher::emptyModel());
@@ -1591,23 +1589,17 @@ SnapEngine::AxisSnapResult QuickCanvasController::applyAxisSnapWithCachedTargets
         *m_snapStore);
 }
 
-bool QuickCanvasController::applyCornerSnapWithCachedTargets(int activeHandleValue,
-                                                              const QPointF& fixedScenePoint,
-                                                              qreal proposedW,
-                                                              qreal proposedH,
-                                                              qreal& snappedW,
-                                                              qreal& snappedH,
-                                                              QPointF& snappedCorner,
-                                                              bool shiftPressed,
-                                                              ScreenCanvas* screenCanvas) const {
+SnapEngine::CornerSnapResult QuickCanvasController::applyCornerSnapWithCachedTargets(int activeHandleValue,
+                                                                                       const QPointF& fixedScenePoint,
+                                                                                       qreal proposedW,
+                                                                                       qreal proposedH,
+                                                                                       bool shiftPressed,
+                                                                                       ScreenCanvas* screenCanvas) const {
     return SnapEngine::applyCornerSnapWithTargets(
         activeHandleValue,
         fixedScenePoint,
         proposedW,
         proposedH,
-        snappedW,
-        snappedH,
-        snappedCorner,
         shiftPressed,
         screenCanvas,
         *m_snapStore);

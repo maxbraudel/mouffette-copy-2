@@ -2844,7 +2844,9 @@ ScreenCanvas::CornerAltSnapResult ScreenCanvas::applyCornerAltSnapWithHysteresis
                                                          const QSize& originalBaseSize,
                                                          qreal proposedW,
                                                          qreal proposedH) const {
-    CornerAltSnapResult result; result.cornerSnapped = false;
+    Q_UNUSED(originalBaseSize)
+    CornerAltSnapResult result;
+    result.cornerSnapped = false;
     using H = ResizableMediaBase::Handle;
     bool isCorner = (activeHandle == H::TopLeft || activeHandle == H::TopRight || activeHandle == H::BottomLeft || activeHandle == H::BottomRight);
     if (!isCorner) return result;
@@ -2855,8 +2857,6 @@ ScreenCanvas::CornerAltSnapResult ScreenCanvas::applyCornerAltSnapWithHysteresis
     const QTransform t = transform();
     const qreal snapDist = m_snapDistancePx / (t.m11() > 1e-6 ? t.m11() : 1.0);
     const qreal cornerZone = m_cornerSnapDistancePx / (t.m11() > 1e-6 ? t.m11() : 1.0);
-    constexpr qreal releaseFactor = 1.4;
-    const qreal releaseDist = cornerZone * releaseFactor;
 
     // Derive current moving corner scene point from proposedW/H keeping fixed corner anchored.
     auto movingCornerSceneFor = [&](qreal w, qreal h) -> QPointF {
@@ -2888,50 +2888,132 @@ ScreenCanvas::CornerAltSnapResult ScreenCanvas::applyCornerAltSnapWithHysteresis
 
     QPointF candidate = movingCornerPoint(proposedW, proposedH);
 
-    // Collect potential corner targets (screen corners + other media corners)
-    QList<QPointF> targets;
+    // Collect potential targets (screen + other media)
+    QList<QPointF> cornerTargets;
+    QList<qreal> edgeTargetsX;
+    QList<qreal> edgeTargetsY;
     for (const QRectF& sr : getScreenBorderRects()) {
-        targets << sr.topLeft() << sr.topRight() << sr.bottomLeft() << sr.bottomRight();
+        cornerTargets << sr.topLeft() << sr.topRight() << sr.bottomLeft() << sr.bottomRight();
+        edgeTargetsX << sr.left() << sr.right();
+        edgeTargetsY << sr.top() << sr.bottom();
     }
     for (QGraphicsItem* gi : m_scene->items()) {
         auto* other = dynamic_cast<ResizableMediaBase*>(gi);
         if (!other || other == item) continue;
         QRectF r = other->sceneBoundingRect();
-        targets << r.topLeft() << r.topRight() << r.bottomLeft() << r.bottomRight();
+        cornerTargets << r.topLeft() << r.topRight() << r.bottomLeft() << r.bottomRight();
+        edgeTargetsX << r.left() << r.right();
+        edgeTargetsY << r.top() << r.bottom();
     }
-    if (targets.isEmpty()) return result;
+    if (cornerTargets.isEmpty() && edgeTargetsX.isEmpty() && edgeTargetsY.isEmpty()) {
+        return result;
+    }
 
-    struct Cand { qreal err; QPointF target; } best{ std::numeric_limits<qreal>::max(), QPointF() };
-    for (const QPointF& tpt : targets) {
+    struct Cand { qreal err; QPointF target; } bestCorner{ std::numeric_limits<qreal>::max(), QPointF() };
+    for (const QPointF& tpt : cornerTargets) {
         qreal dx = std::abs(candidate.x() - tpt.x());
         qreal dy = std::abs(candidate.y() - tpt.y());
         if (dx > cornerZone || dy > cornerZone) continue; // outside snapping zone
         qreal err = std::hypot(dx, dy);
-        if (err < best.err) { best.err = err; best.target = tpt; }
+        if (err < bestCorner.err) { bestCorner.err = err; bestCorner.target = tpt; }
     }
-    if (best.err == std::numeric_limits<qreal>::max()) return result; // no candidate
 
-    // Hysteresis: if already corner-snapped (tracked globally via axis flags?), rely on axis system for release.
-    // For now simple engage without persistent state: treat like immediate corner snap.
-    if (best.err <= cornerZone) {
-        // Compute snapped dimensions from fixed corner to snapped target
-        qreal snappedW = proposedW;
-        qreal snappedH = proposedH;
-        if (activeHandle == H::TopLeft) { snappedW = fixedScenePoint.x() - best.target.x(); snappedH = fixedScenePoint.y() - best.target.y(); }
-        else if (activeHandle == H::TopRight) { snappedW = best.target.x() - fixedScenePoint.x(); snappedH = fixedScenePoint.y() - best.target.y(); }
-        else if (activeHandle == H::BottomLeft) { snappedW = fixedScenePoint.x() - best.target.x(); snappedH = best.target.y() - fixedScenePoint.y(); }
-        else { snappedW = best.target.x() - fixedScenePoint.x(); snappedH = best.target.y() - fixedScenePoint.y(); }
-        if (snappedW > 0 && snappedH > 0) {
-            result.cornerSnapped = true;
-            result.snappedW = snappedW;
-            result.snappedH = snappedH;
-            result.snappedCorner = best.target;
-            // Visual: reuse existing updateSnapIndicators with two orthogonal lines
-            QVector<QLineF> lines;
-            lines.append(QLineF(best.target.x(), -1e6, best.target.x(), 1e6));
-            lines.append(QLineF(-1e6, best.target.y(), 1e6, best.target.y()));
-            const_cast<ScreenCanvas*>(this)->updateSnapIndicators(lines);
+    qreal bestEdgeXDist = std::numeric_limits<qreal>::max();
+    qreal bestEdgeX = 0.0;
+    for (qreal edgeX : edgeTargetsX) {
+        qreal dist = std::abs(candidate.x() - edgeX);
+        if (dist <= snapDist && dist < bestEdgeXDist) {
+            bestEdgeXDist = dist;
+            bestEdgeX = edgeX;
         }
+    }
+
+    qreal bestEdgeYDist = std::numeric_limits<qreal>::max();
+    qreal bestEdgeY = 0.0;
+    for (qreal edgeY : edgeTargetsY) {
+        qreal dist = std::abs(candidate.y() - edgeY);
+        if (dist <= snapDist && dist < bestEdgeYDist) {
+            bestEdgeYDist = dist;
+            bestEdgeY = edgeY;
+        }
+    }
+
+    const bool hasCorner = bestCorner.err < std::numeric_limits<qreal>::max();
+    const bool hasEdgeX = bestEdgeXDist < std::numeric_limits<qreal>::max();
+    const bool hasEdgeY = bestEdgeYDist < std::numeric_limits<qreal>::max();
+
+    if (!hasCorner && !hasEdgeX && !hasEdgeY) {
+        const_cast<ScreenCanvas*>(this)->clearSnapIndicators();
+        return result;
+    }
+
+    const qreal cornerScore = hasCorner ? (bestCorner.err / std::max<qreal>(cornerZone, 1e-6))
+                                        : std::numeric_limits<qreal>::max();
+    const qreal edgeXScore = hasEdgeX ? (bestEdgeXDist / std::max<qreal>(snapDist, 1e-6))
+                                      : std::numeric_limits<qreal>::max();
+    const qreal edgeYScore = hasEdgeY ? (bestEdgeYDist / std::max<qreal>(snapDist, 1e-6))
+                                      : std::numeric_limits<qreal>::max();
+    const qreal edgeXYScore = (hasEdgeX && hasEdgeY)
+        ? (std::hypot(edgeXScore, edgeYScore) * 0.92)
+        : std::numeric_limits<qreal>::max();
+
+    enum class Choice { None, Corner, EdgeX, EdgeY, EdgeXY };
+    Choice choice = Choice::None;
+    qreal bestScore = std::numeric_limits<qreal>::max();
+    auto considerChoice = [&](Choice c, qreal score) {
+        if (score < bestScore) {
+            bestScore = score;
+            choice = c;
+        }
+    };
+    considerChoice(Choice::Corner, cornerScore);
+    considerChoice(Choice::EdgeX, edgeXScore);
+    considerChoice(Choice::EdgeY, edgeYScore);
+    considerChoice(Choice::EdgeXY, edgeXYScore);
+
+    qreal snappedCornerX = candidate.x();
+    qreal snappedCornerY = candidate.y();
+    if (choice == Choice::Corner) {
+        snappedCornerX = bestCorner.target.x();
+        snappedCornerY = bestCorner.target.y();
+    } else if (choice == Choice::EdgeX) {
+        snappedCornerX = bestEdgeX;
+    } else if (choice == Choice::EdgeY) {
+        snappedCornerY = bestEdgeY;
+    } else if (choice == Choice::EdgeXY) {
+        snappedCornerX = bestEdgeX;
+        snappedCornerY = bestEdgeY;
+    }
+
+    // Compute snapped dimensions from fixed corner to chosen snapped corner projection
+    qreal snappedW = proposedW;
+    qreal snappedH = proposedH;
+    if (activeHandle == H::TopLeft) { snappedW = fixedScenePoint.x() - snappedCornerX; snappedH = fixedScenePoint.y() - snappedCornerY; }
+    else if (activeHandle == H::TopRight) { snappedW = snappedCornerX - fixedScenePoint.x(); snappedH = fixedScenePoint.y() - snappedCornerY; }
+    else if (activeHandle == H::BottomLeft) { snappedW = fixedScenePoint.x() - snappedCornerX; snappedH = snappedCornerY - fixedScenePoint.y(); }
+    else { snappedW = snappedCornerX - fixedScenePoint.x(); snappedH = snappedCornerY - fixedScenePoint.y(); }
+
+    if (snappedW <= 0.0 || snappedH <= 0.0) {
+        const_cast<ScreenCanvas*>(this)->clearSnapIndicators();
+        return result;
+    }
+
+    result.cornerSnapped = true;
+    result.snappedW = snappedW;
+    result.snappedH = snappedH;
+    result.snappedCorner = QPointF(snappedCornerX, snappedCornerY);
+
+    QVector<QLineF> lines;
+    if (choice == Choice::Corner || choice == Choice::EdgeXY || choice == Choice::EdgeX) {
+        lines.append(QLineF(snappedCornerX, -1e6, snappedCornerX, 1e6));
+    }
+    if (choice == Choice::Corner || choice == Choice::EdgeXY || choice == Choice::EdgeY) {
+        lines.append(QLineF(-1e6, snappedCornerY, 1e6, snappedCornerY));
+    }
+    if (!lines.isEmpty()) {
+        const_cast<ScreenCanvas*>(this)->updateSnapIndicators(lines);
+    } else {
+        const_cast<ScreenCanvas*>(this)->clearSnapIndicators();
     }
     return result;
 }
