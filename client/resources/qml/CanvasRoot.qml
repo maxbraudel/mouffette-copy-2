@@ -851,7 +851,7 @@ Rectangle {
                             // No commit path on cancel — onMediaChanged may never fire.
                             // Arm the safety-net timer so the freeze is force-cleared after
                             // a short window if nothing else clears it first.
-                            if (typeof root !== "undefined" && root.liveSnapDragActive
+                            if (root.liveSnapDragActive
                                     && root.liveSnapDragMediaId === activeMoveMediaId) {
                                 snapFreezeCleanupTimer.restart()
                             }
@@ -968,7 +968,6 @@ Rectangle {
                         videoHasRenderedFrame: !!(parent.media && parent.media.videoHasRenderedFrame)
                         videoHasPosterFrame: !!(parent.media && parent.media.videoHasPosterFrame)
                         videoFirstFramePrimed: !!(parent.media && parent.media.videoFirstFramePrimed)
-                        videoLastFrameTimestampMs: parent.media ? (parent.media.videoLastFrameTimestampMs || -1) : -1
                     }
                 }
 

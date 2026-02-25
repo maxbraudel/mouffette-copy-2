@@ -1583,7 +1583,6 @@ void QuickCanvasController::pushMediaModelOnly() {
                 mediaEntry.insert(QStringLiteral("videoHasRenderedFrame"), vid->hasRenderedFrame());
                 mediaEntry.insert(QStringLiteral("videoHasPosterFrame"), vid->hasPosterFrame());
                 mediaEntry.insert(QStringLiteral("videoFirstFramePrimed"), vid->firstFramePrimed());
-                mediaEntry.insert(QStringLiteral("videoLastFrameTimestampMs"), vid->displayedFrameTimestampMs());
                 mediaEntry.insert(QStringLiteral("videoPlaybackErrorCode"), static_cast<int>(vid->lastPlaybackError()));
                 mediaEntry.insert(QStringLiteral("videoPlaybackErrorString"), vid->lastPlaybackErrorString());
             }

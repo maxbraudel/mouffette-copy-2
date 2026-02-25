@@ -13,7 +13,6 @@ BaseMediaItem {
     property bool videoHasRenderedFrame: false
     property bool videoHasPosterFrame: false
     property bool videoFirstFramePrimed: false
-    property int videoLastFrameTimestampMs: -1
     readonly property bool showFallbackOverlay: !hasLiveFrame
     readonly property bool hasLiveFrame: videoHasRenderedFrame || localFrameSeen
     property bool localFrameSeen: false
