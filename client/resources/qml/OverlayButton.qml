@@ -98,7 +98,7 @@ Item {
             root.clicked()
         }
         // Consume the event so it never reaches the canvas DragHandler
-        onPressed: mouse.accepted = true
-        onReleased: mouse.accepted = true
+        onPressed: function(mouse) { mouse.accepted = true }
+        onReleased: function(mouse) { mouse.accepted = true }
     }
 }

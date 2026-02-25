@@ -20,5 +20,13 @@ BaseMediaItem {
         // mipmap is beneficial for downscaling only; at high zoom (upscaling) it wastes
         // GPU memory on a full mip chain and can cause allocation failures → black render.
         mipmap: false
+
+        onStatusChanged: {
+            if (status === Image.Error) {
+                console.warn("[QuickCanvas][ImageItem] load failed",
+                             "mediaId=", root.mediaId,
+                             "source=", root.imageSource)
+            }
+        }
     }
 }

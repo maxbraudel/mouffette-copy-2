@@ -52,9 +52,18 @@ void SettingsManager::loadSettings() {
 
     const QString envQuickRenderer = qEnvironmentVariable("MOUFFETTE_USE_QUICK_CANVAS_RENDERER").trimmed().toLower();
     if (!envQuickRenderer.isEmpty()) {
-        const bool envValue = (envQuickRenderer == "1" || envQuickRenderer == "true" || envQuickRenderer == "on" || envQuickRenderer == "yes");
-        m_useQuickCanvasRenderer = envValue;
-        m_quickCanvasFlagSource = QStringLiteral("env:MOUFFETTE_USE_QUICK_CANVAS_RENDERER");
+        const bool matchesTrue = (envQuickRenderer == "1"
+                                  || envQuickRenderer == "true"
+                                  || envQuickRenderer == "on"
+                                  || envQuickRenderer == "yes");
+        const bool matchesFalse = (envQuickRenderer == "0"
+                                   || envQuickRenderer == "false"
+                                   || envQuickRenderer == "off"
+                                   || envQuickRenderer == "no");
+        if (matchesTrue || matchesFalse) {
+            m_useQuickCanvasRenderer = matchesTrue;
+            m_quickCanvasFlagSource = QStringLiteral("env:MOUFFETTE_USE_QUICK_CANVAS_RENDERER");
+        }
     }
     
     // Generate or load persistent client ID

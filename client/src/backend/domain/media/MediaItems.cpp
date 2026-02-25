@@ -1277,6 +1277,8 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
     });
     QObject::connect(m_player, &QMediaPlayer::mediaStatusChanged, m_player, [this](QMediaPlayer::MediaStatus s){
         if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
+            m_lastPlaybackError = QMediaPlayer::NoError;
+            m_lastPlaybackErrorString.clear();
             if (!m_adoptedSize) {
                 const QMediaMetaData md = m_player->metaData();
                 
@@ -1436,6 +1438,8 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
     
     // Connect to error signals to detect missing/corrupted source files
     QObject::connect(m_player, &QMediaPlayer::errorOccurred, m_player, [this](QMediaPlayer::Error error, const QString& errorString) {
+        m_lastPlaybackError = error;
+        m_lastPlaybackErrorString = errorString;
         qDebug() << "ResizableVideoItem: Media player error occurred for" << sourcePath() 
                  << "- Error:" << error << "Message:" << errorString;
         

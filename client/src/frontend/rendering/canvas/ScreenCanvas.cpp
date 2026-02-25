@@ -61,6 +61,8 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QDebug>
+#include <QStandardPaths>
+#include <QUuid>
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -3854,7 +3856,25 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
             QPixmap pm = QPixmap::fromImage(img);
             if (!pm.isNull()) {
                 auto* p = new ResizablePixmapItem(pm, 12, 30, QString());
-                p->setSourcePath(QString()); // Set sourcePath to empty string for images
+                QString cacheRoot = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+                if (cacheRoot.isEmpty()) {
+                    cacheRoot = QDir::tempPath();
+                }
+                const QString quickImageDir = QDir::cleanPath(cacheRoot + QStringLiteral("/Mouffette/QuickCanvasTempImages"));
+                QDir dir;
+                if (dir.mkpath(quickImageDir)) {
+                    const QString fileName = QStringLiteral("image_drop_%1.png").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+                    const QString localPath = QDir(quickImageDir).filePath(fileName);
+                    if (img.save(localPath, "PNG")) {
+                        p->setSourcePath(localPath);
+                    } else {
+                        qWarning() << "ScreenCanvas: failed to persist image drop to" << localPath;
+                        p->setSourcePath(QString());
+                    }
+                } else {
+                    qWarning() << "ScreenCanvas: failed to create temp image directory" << quickImageDir;
+                    p->setSourcePath(QString());
+                }
                 p->setScale(m_scaleFactor);
                 positionMediaCenteredAtScene(p, scenePos);
                 assignNextZValue(p);

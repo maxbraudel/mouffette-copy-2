@@ -30,6 +30,7 @@
 #include <QVariantList>
 #include <QWindow>
 #include <QtMath>
+#include <QUrl>
 
 #include "backend/domain/media/MediaItems.h"
 #include "backend/domain/media/TextMediaItem.h"
@@ -122,6 +123,36 @@ template <typename T, typename Equals>
 void sortAndDeduplicate(QVector<T>& values, Equals equals) {
     std::sort(values.begin(), values.end());
     values.erase(std::unique(values.begin(), values.end(), equals), values.end());
+}
+
+QString toCanonicalMediaSourceUrl(const QString& sourcePath) {
+    if (sourcePath.isEmpty()) {
+        return QString();
+    }
+
+    const QString lower = sourcePath.left(8).toLower();
+    if (lower.startsWith(QStringLiteral("file://"))
+        || lower.startsWith(QStringLiteral("qrc:"))
+        || lower.startsWith(QStringLiteral("http://"))
+        || lower.startsWith(QStringLiteral("https://"))) {
+        return sourcePath;
+    }
+
+    const bool isWindowsDrivePath = sourcePath.size() >= 3
+        && sourcePath.at(1) == QChar(':')
+        && (sourcePath.at(2) == QChar('\\') || sourcePath.at(2) == QChar('/'));
+    const bool isWindowsUncPath = sourcePath.startsWith(QStringLiteral("\\\\"));
+
+    if (isWindowsDrivePath || isWindowsUncPath) {
+        return QUrl::fromLocalFile(sourcePath).toString();
+    }
+
+    const QUrl maybeUrl(sourcePath);
+    if (maybeUrl.isValid() && !maybeUrl.scheme().isEmpty()) {
+        return maybeUrl.toString();
+    }
+
+    return QUrl::fromLocalFile(sourcePath).toString();
 }
 }
 
@@ -1537,6 +1568,7 @@ void QuickCanvasController::pushMediaModelOnly() {
             // Including it here would cause the entire mediaModel to be replaced
             // on every selection change, destroying all QML delegates mid-gesture.
             mediaEntry.insert(QStringLiteral("sourcePath"), media->sourcePath());
+            mediaEntry.insert(QStringLiteral("sourceUrl"), toCanonicalMediaSourceUrl(media->sourcePath()));
             mediaEntry.insert(QStringLiteral("uploadState"), uploadStateToString(media->uploadState()));
             mediaEntry.insert(QStringLiteral("displayName"), media->displayName());
             mediaEntry.insert(QStringLiteral("contentVisible"), media->isContentVisible());
@@ -1544,8 +1576,16 @@ void QuickCanvasController::pushMediaModelOnly() {
             mediaEntry.insert(QStringLiteral("animatedDisplayOpacity"), media->animatedDisplayOpacity());
 
             if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
+                mediaEntry.insert(QStringLiteral("videoPlayerPtr"),
+                    QVariant::fromValue<QObject*>(vid->mediaPlayer()));
                 mediaEntry.insert(QStringLiteral("videoSinkPtr"),
                     QVariant::fromValue<QObject*>(vid->videoSink()));
+                mediaEntry.insert(QStringLiteral("videoHasRenderedFrame"), vid->hasRenderedFrame());
+                mediaEntry.insert(QStringLiteral("videoHasPosterFrame"), vid->hasPosterFrame());
+                mediaEntry.insert(QStringLiteral("videoFirstFramePrimed"), vid->firstFramePrimed());
+                mediaEntry.insert(QStringLiteral("videoLastFrameTimestampMs"), vid->displayedFrameTimestampMs());
+                mediaEntry.insert(QStringLiteral("videoPlaybackErrorCode"), static_cast<int>(vid->lastPlaybackError()));
+                mediaEntry.insert(QStringLiteral("videoPlaybackErrorString"), vid->lastPlaybackErrorString());
             }
 
             if (auto* textMedia = dynamic_cast<TextMediaItem*>(media)) {

@@ -300,6 +300,11 @@ public:
     void seekToRatio(qreal r);
     qint64 currentPositionMs() const { return m_positionMs; }
     qint64 displayedFrameTimestampMs() const { return m_lastFrameTimestampMs; }
+    bool hasRenderedFrame() const { return !m_lastFrameImage.isNull(); }
+    bool hasPosterFrame() const { return m_posterImageSet && !m_posterImage.isNull(); }
+    bool firstFramePrimed() const { return m_firstFramePrimed; }
+    QMediaPlayer::Error lastPlaybackError() const { return m_lastPlaybackError; }
+    QString lastPlaybackErrorString() const { return m_lastPlaybackErrorString; }
     bool isPlaying() const { return m_player && m_player->playbackState() == QMediaPlayer::PlayingState; }
     void pauseAndSetPosition(qint64 posMs);
     void setInitialScaleFactor(qreal f) { m_initialScaleFactor = f; }
@@ -430,5 +435,7 @@ private:
     QTimer* m_warmupKeepAliveTimer = nullptr;
     qint64 m_lastWarmupCompletionMs = 0;
     bool m_keepAlivePulseActive = false;
+    QMediaPlayer::Error m_lastPlaybackError = QMediaPlayer::NoError;
+    QString m_lastPlaybackErrorString;
 };
 

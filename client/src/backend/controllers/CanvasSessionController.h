@@ -56,6 +56,7 @@ public:
 private:
     MainWindow* m_mainWindow;
     QuickCanvasHost* m_prewarmedQuickCanvasHost = nullptr;
+    QString m_lastQuickInitError;
 };
 
 #endif // CANVASSESSIONCONTROLLER_H

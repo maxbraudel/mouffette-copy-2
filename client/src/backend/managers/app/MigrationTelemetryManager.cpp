@@ -4,7 +4,15 @@
 #include <QDebug>
 
 namespace {
+bool migrationTelemetryEnabled() {
+    static const bool enabled = qEnvironmentVariableIntValue("MOUFFETTE_MIGRATION_TELEMETRY") == 1;
+    return enabled;
+}
+
 void logTelemetry(const QJsonObject& payload) {
+    if (!migrationTelemetryEnabled()) {
+        return;
+    }
     qInfo().noquote() << "[MIGRATION_TELEMETRY]"
                       << QString::fromUtf8(QJsonDocument(payload).toJson(QJsonDocument::Compact));
 }

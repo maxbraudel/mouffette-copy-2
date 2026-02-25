@@ -354,7 +354,18 @@ Rectangle {
             return ""
         if (path.indexOf("file:") === 0 || path.indexOf("qrc:") === 0 || path.indexOf("http:") === 0 || path.indexOf("https:") === 0)
             return path
-        return "file://" + path
+
+        var normalized = path.replace(/\\/g, "/")
+        if (/^[A-Za-z]:\//.test(normalized)) {
+            return "file:///" + encodeURI(normalized)
+        }
+        if (normalized.indexOf("//") === 0) {
+            return "file:" + encodeURI(normalized)
+        }
+        if (normalized.indexOf("/") === 0) {
+            return "file://" + encodeURI(normalized)
+        }
+        return "file:///" + encodeURI(normalized)
     }
 
     function applyLiveResizeGeometry(mediaId, sceneX, sceneY, scale) {
@@ -787,7 +798,7 @@ Rectangle {
                                 }
                                 // Arm the safety-net timer in case onMediaChanged never fires
                                 // (e.g. commitMediaGeometry found no matching entry in mediaModel).
-                                if (root.liveSnapDragActive
+                                if (typeof root !== "undefined" && root.liveSnapDragActive
                                         && root.liveSnapDragMediaId === finalMediaId) {
                                     snapFreezeCleanupTimer.restart()
                                 }
@@ -840,7 +851,7 @@ Rectangle {
                             // No commit path on cancel — onMediaChanged may never fire.
                             // Arm the safety-net timer so the freeze is force-cleared after
                             // a short window if nothing else clears it first.
-                            if (root.liveSnapDragActive
+                            if (typeof root !== "undefined" && root.liveSnapDragActive
                                     && root.liveSnapDragMediaId === activeMoveMediaId) {
                                 snapFreezeCleanupTimer.restart()
                             }
@@ -856,6 +867,7 @@ Rectangle {
                     Loader {
                         id: mediaContentLoader
                         property var media: mediaDelegate.media
+                        property bool selected: mediaDelegate.isSelected
                         readonly property real liveWidth:  mediaDelegate.usesLiveAltResize
                                                           ? root.liveAltResizeWidth
                                                           : (media ? media.width : 0)
@@ -912,7 +924,7 @@ Rectangle {
                     // Resolved video state for this delegate (updated by 50ms timer in C++)
                     readonly property var delegateVideoState: {
                         var vs = root.videoStateModel
-                        if (vs && vs.mediaId && vs.mediaId === mediaDelegate.currentMediaId)
+                        if (vs && vs.mediaId && vs.mediaId === currentMediaId)
                             return vs
                         return null
                     }
@@ -931,8 +943,10 @@ Rectangle {
                         mediaHeight: parent.media ? parent.media.height : 0
                         mediaScale: 1.0
                         mediaZ: parent.media.z
-                        selected: mediaDelegate.isSelected
-                        imageSource: root.mediaSourceUrl(parent.media ? parent.media.sourcePath : "")
+                        selected: !!parent.selected
+                        imageSource: parent.media
+                                   ? (parent.media.sourceUrl || root.mediaSourceUrl(parent.media.sourcePath || ""))
+                                   : ""
                     }
                 }
 
@@ -946,8 +960,15 @@ Rectangle {
                         mediaHeight: parent.media ? parent.media.height : 0
                         mediaScale: 1.0
                         mediaZ: parent.media.z
-                        selected: mediaDelegate.isSelected
+                        selected: !!parent.selected
+                        cppMediaPlayer: parent.media ? (parent.media.videoPlayerPtr || null) : null
                         cppVideoSink: parent.media ? (parent.media.videoSinkPtr || null) : null
+                        videoPlaybackErrorCode: parent.media ? (parent.media.videoPlaybackErrorCode || 0) : 0
+                        videoPlaybackErrorString: parent.media ? (parent.media.videoPlaybackErrorString || "") : ""
+                        videoHasRenderedFrame: !!(parent.media && parent.media.videoHasRenderedFrame)
+                        videoHasPosterFrame: !!(parent.media && parent.media.videoHasPosterFrame)
+                        videoFirstFramePrimed: !!(parent.media && parent.media.videoFirstFramePrimed)
+                        videoLastFrameTimestampMs: parent.media ? (parent.media.videoLastFrameTimestampMs || -1) : -1
                     }
                 }
 
@@ -961,7 +982,7 @@ Rectangle {
                         mediaHeight: parent.media ? parent.media.height : 0
                         mediaScale: 1.0
                         mediaZ: parent.media.z
-                        selected: mediaDelegate.isSelected
+                        selected: !!parent.selected
                         textContent: parent.media ? (parent.media.textContent || "") : ""
                         horizontalAlignment: parent.media ? (parent.media.textHorizontalAlignment || "center") : "center"
                         verticalAlignment: parent.media ? (parent.media.textVerticalAlignment || "center") : "center"

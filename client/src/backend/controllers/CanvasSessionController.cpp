@@ -112,12 +112,17 @@ void* CanvasSessionController::ensureCanvasSession(const ClientInfo& client) {
                 if (session.canvas) {
                     appliedRenderer = QStringLiteral("quick_canvas_shell");
                     reason = QStringLiteral("flag_on_explicit_legacy_bridge");
+                    m_lastQuickInitError.clear();
                 } else {
                     session.canvas = LegacyCanvasHost::create(canvasHostStack);
                     appliedRenderer = QStringLiteral("legacy_screen_canvas");
                     reason = quickError.isEmpty()
                         ? QStringLiteral("quick_shell_init_failed_fallback")
                         : QStringLiteral("quick_shell_error_fallback");
+                    m_lastQuickInitError = quickError;
+                    qWarning() << "CanvasSessionController: Quick canvas unavailable, using legacy fallback."
+                               << "reason=" << reason
+                               << "error=" << (quickError.isEmpty() ? QStringLiteral("<none>") : quickError);
                 }
             }
         } else {
@@ -172,12 +177,16 @@ void CanvasSessionController::prewarmQuickCanvasHost() {
         if (legacyBridge) {
             delete legacyBridge;
         }
+        m_lastQuickInitError = quickError;
         if (!quickError.isEmpty()) {
             qWarning() << "CanvasSessionController: Quick prewarm failed:" << quickError;
+        } else {
+            qWarning() << "CanvasSessionController: Quick prewarm failed with unknown error";
         }
         return;
     }
 
+    m_lastQuickInitError.clear();
     m_prewarmedQuickCanvasHost = prewarmedHost;
     if (canvasHostStack->indexOf(prewarmedHost->asWidget()) == -1) {
         canvasHostStack->addWidget(prewarmedHost->asWidget());
