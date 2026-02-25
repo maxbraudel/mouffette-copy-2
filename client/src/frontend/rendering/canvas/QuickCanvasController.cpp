@@ -766,6 +766,9 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
         m_resizeBaseSize = QSize();
         m_resizeFixedItemPoint = QPointF();
         m_resizeFixedScenePoint = QPointF();
+        m_uniformCornerSnapActive = false;
+        m_uniformCornerSnapHandle = static_cast<int>(ResizableMediaBase::None);
+        m_uniformCornerSnapScale = 1.0;
         m_snapStore->clear();
         // Clear any stale snap drag freeze from a prior drag that wasn't fully resolved.
         clearLiveDragSnapPosition();
@@ -1190,25 +1193,30 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
         proposedScale = std::max<qreal>(0.05, std::max(sx, sy));
     }
 
-    // Snap — axis handles: resize to border. Corner handles: TRANSLATE to corner (no resize).
-    // For corner handles, snapping works like drag-snap: keep proposedScale, move the item
-    // so the moving corner lands exactly on the nearest target corner.
+    // Snap — axis handles: resize to border. Corner handles: snap to corner with lock/hysteresis.
+    // While corner snap is active, both position and scale are frozen to avoid size jitter.
     m_uniformCornerSnapped = false;
     bool m_uniformAxisSnapped = false;
     qreal m_uniformAxisSnappedEdge = 0.0;
+    if (!snap) {
+        m_uniformCornerSnapActive = false;
+        m_uniformCornerSnapHandle = static_cast<int>(ResizableMediaBase::None);
+        m_uniformCornerSnapScale = 1.0;
+    }
     if (snap && !m_mediaScene->views().isEmpty()) {
         if (auto* screenCanvas = qobject_cast<ScreenCanvas*>(m_mediaScene->views().first())) {
             syncSnapViewScale();
             if (activeHandle == ResizableMediaBase::LeftMid || activeHandle == ResizableMediaBase::RightMid
                 || activeHandle == ResizableMediaBase::TopMid || activeHandle == ResizableMediaBase::BottomMid) {
+                m_uniformCornerSnapActive = false;
+                m_uniformCornerSnapHandle = static_cast<int>(ResizableMediaBase::None);
+                m_uniformCornerSnapScale = 1.0;
                 const auto axisSnap = applyAxisSnapWithCachedTargets(
                     target, proposedScale, fixedScenePoint, baseSize, activeHandle, snap, screenCanvas);
                 proposedScale = axisSnap.scale;
                 m_uniformAxisSnapped = axisSnap.snapped;
                 m_uniformAxisSnappedEdge = axisSnap.snappedEdgeScenePos;
             } else {
-                // Corner handle: compute where the moving corner is at proposedScale,
-                // then find the nearest target corner within snap zone.
                 proposedScale = std::clamp<qreal>(proposedScale, 0.05, 100.0);
                 const QPointF unsnappedTopLeft = fixedScenePoint - fixedItemPoint * proposedScale;
                 QPointF movingCornerScene;
@@ -1228,24 +1236,47 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                                                                         baseSize.height() * proposedScale);
                         break;
                 }
-                // Find nearest target corner within cornerSnapZone
                 const qreal cornerZone = screenCanvas->cornerSnapDistancePx() / screenCanvas->effectiveViewScale();
-                qreal bestErr = std::numeric_limits<qreal>::max();
-                QPointF bestTarget;
-                for (const QPointF& targetCorner : m_snapStore->corners()) {
-                    const qreal dx = std::abs(movingCornerScene.x() - targetCorner.x());
-                    const qreal dy = std::abs(movingCornerScene.y() - targetCorner.y());
-                    if (dx > cornerZone || dy > cornerZone) continue;
-                    const qreal err = std::hypot(dx, dy);
-                    if (err < bestErr) {
-                        bestErr = err;
-                        bestTarget = targetCorner;
+                const qreal releaseZone = cornerZone * 1.4;
+
+                if (m_uniformCornerSnapActive
+                    && m_uniformCornerSnapHandle == static_cast<int>(activeHandle)) {
+                    const qreal dx = movingCornerScene.x() - m_uniformCornerSnappedPt.x();
+                    const qreal dy = movingCornerScene.y() - m_uniformCornerSnappedPt.y();
+                    const qreal distToLocked = std::hypot(dx, dy);
+                    if (distToLocked <= releaseZone) {
+                        proposedScale = m_uniformCornerSnapScale;
+                        m_uniformCornerSnapped = true;
+                    } else {
+                        m_uniformCornerSnapActive = false;
+                        m_uniformCornerSnapHandle = static_cast<int>(ResizableMediaBase::None);
+                        m_uniformCornerSnapScale = 1.0;
                     }
                 }
-                if (bestErr < std::numeric_limits<qreal>::max()) {
-                    // Translate: move item so moving corner lands on bestTarget
-                    m_uniformCornerSnappedPt = bestTarget;
-                    m_uniformCornerSnapped   = true;
+
+                if (!m_uniformCornerSnapActive) {
+                    qreal bestErr = std::numeric_limits<qreal>::max();
+                    QPointF bestTarget;
+                    for (const QPointF& targetCorner : m_snapStore->corners()) {
+                        const qreal dx = std::abs(movingCornerScene.x() - targetCorner.x());
+                        const qreal dy = std::abs(movingCornerScene.y() - targetCorner.y());
+                        if (dx > cornerZone || dy > cornerZone) {
+                            continue;
+                        }
+                        const qreal err = std::hypot(dx, dy);
+                        if (err < bestErr) {
+                            bestErr = err;
+                            bestTarget = targetCorner;
+                        }
+                    }
+
+                    if (bestErr < std::numeric_limits<qreal>::max()) {
+                        m_uniformCornerSnapActive = true;
+                        m_uniformCornerSnapHandle = static_cast<int>(activeHandle);
+                        m_uniformCornerSnapScale = proposedScale;
+                        m_uniformCornerSnappedPt = bestTarget;
+                        m_uniformCornerSnapped = true;
+                    }
                 }
             }
         }
@@ -2444,6 +2475,9 @@ void QuickCanvasController::resetAltResizeState() {
     m_altCornerInitialOffsetY = 0.0;
     m_uniformCornerSnapped    = false;
     m_uniformCornerSnappedPt  = QPointF();
+    m_uniformCornerSnapActive = false;
+    m_uniformCornerSnapHandle = static_cast<int>(ResizableMediaBase::None);
+    m_uniformCornerSnapScale  = 1.0;
 }
 
 bool QuickCanvasController::isAxisHandle(int handleValue) {

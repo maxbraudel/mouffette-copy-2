@@ -185,6 +185,9 @@ private:
     // Uniform corner snap result — set inside the snap block, consumed by guide publishing below
     bool   m_uniformCornerSnapped    = false;
     QPointF m_uniformCornerSnappedPt;
+    bool   m_uniformCornerSnapActive = false;
+    int    m_uniformCornerSnapHandle = 0;
+    qreal  m_uniformCornerSnapScale  = 1.0;
     // Last snapped scene position pushed to QML via pushLiveDragSnapPosition.
     // Used by handleMediaMoveEnded to commit exactly what was displayed rather
     // than re-running the snap engine (which could yield a different result).
