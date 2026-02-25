@@ -11,34 +11,36 @@
 // ---------------------------------------------------------------------------
 namespace {
 
-struct EdgeSnapAccum {
-    qreal bestDx    = 0.0;
-    qreal bestDy    = 0.0;
-    qreal bestDxAbs = std::numeric_limits<qreal>::max();
-    qreal bestDyAbs = std::numeric_limits<qreal>::max();
-    qreal indicatorX = std::numeric_limits<qreal>::quiet_NaN();
-    qreal indicatorY = std::numeric_limits<qreal>::quiet_NaN();
-    bool  adjusted   = false;
+// Accumulates the best (minimum absolute delta) snap correction for one axis,
+// and collects ALL target edge positions that produce that same best delta.
+// This ensures that when both left and right edges of the moving item snap
+// simultaneously (e.g. width match), both indicator lines are emitted.
+struct AxisSnapAccum {
+    qreal bestDelta    = 0.0;
+    qreal bestDeltaAbs = std::numeric_limits<qreal>::max();
+    QVector<qreal> indicators; // all target edge X (or Y) values at bestDelta
+    bool adjusted = false;
 
-    void considerX(qreal fromEdge, qreal toEdge, qreal indicatorXVal, qreal threshold) {
+    // Consider snapping fromEdge → toEdge. indicatorVal is the target edge coordinate
+    // to display as a guide line if this snap wins.
+    void consider(qreal fromEdge, qreal toEdge, qreal threshold) {
         const qreal delta = toEdge - fromEdge;
         const qreal absd  = std::abs(delta);
-        if (absd < threshold && absd < bestDxAbs) {
-            bestDxAbs    = absd;
-            bestDx       = delta;
-            adjusted     = true;
-            indicatorX   = indicatorXVal;
-        }
-    }
+        if (absd >= threshold) return;
 
-    void considerY(qreal fromEdge, qreal toEdge, qreal indicatorYVal, qreal threshold) {
-        const qreal delta = toEdge - fromEdge;
-        const qreal absd  = std::abs(delta);
-        if (absd < threshold && absd < bestDyAbs) {
-            bestDyAbs    = absd;
-            bestDy       = delta;
-            adjusted     = true;
-            indicatorY   = indicatorYVal;
+        if (absd < bestDeltaAbs - 1e-6) {
+            // Strictly better — replace
+            bestDeltaAbs = absd;
+            bestDelta    = delta;
+            indicators.clear();
+            indicators.append(toEdge);
+            adjusted = true;
+        } else if (absd <= bestDeltaAbs + 1e-6) {
+            // Equally good — accumulate (same snap distance, extra aligned edge)
+            if (!indicators.contains(toEdge)) {
+                indicators.append(toEdge);
+            }
+            adjusted = true;
         }
     }
 };
@@ -74,112 +76,117 @@ DragSnapResult DragSnapEngine::applyDragSnap(
         movingRect.bottomRight()
     };
 
-    // ── 1. Corner-to-corner snapping (highest priority) ──────────────────
+    const QVector<qreal>& edgesX = snapStore.edgesX();
+    const QVector<qreal>& edgesY = snapStore.edgesY();
+
+    // ── 1. Corner-to-corner snapping (seeds bestDx/bestDy) ───────────────
+    // Find the single nearest corner match to establish the translation vector.
+    // Then fall through to edge accumulation (which also picks up all aligned
+    // edges at the snapped position, including opposite-side matches).
     bool cornerCaptured = false;
     qreal bestCornerErr = std::numeric_limits<qreal>::max();
-    QPointF bestCornerTranslation;
-    QPointF bestCornerIndicator;
+    qreal cornerSeedDx  = 0.0;
+    qreal cornerSeedDy  = 0.0;
 
     for (const QPointF& targetCorner : snapStore.corners()) {
         for (int i = 0; i < 4; ++i) {
             const qreal dx = std::abs(movingCorners[i].x() - targetCorner.x());
             const qreal dy = std::abs(movingCorners[i].y() - targetCorner.y());
-            if (dx > cornerSnapDistScene || dy > cornerSnapDistScene) {
-                continue;
-            }
+            if (dx > cornerSnapDistScene || dy > cornerSnapDistScene) continue;
             const qreal err = std::hypot(dx, dy);
             if (err < bestCornerErr) {
-                bestCornerErr = err;
-                cornerCaptured = true;
-                bestCornerTranslation = targetCorner - movingCorners[i];
-                bestCornerIndicator   = targetCorner;
+                bestCornerErr    = err;
+                cornerCaptured   = true;
+                cornerSeedDx     = targetCorner.x() - movingCorners[i].x();
+                cornerSeedDy     = targetCorner.y() - movingCorners[i].y();
             }
         }
     }
+
+    // ── 2. Build axis accumulators ────────────────────────────────────────
+    // For corners, seed the accumulators with the corner translation so that
+    // additional aligned edges at the snapped position are also collected.
+    // For pure edge snapping, start fresh from all target edges.
+    AxisSnapAccum accumX, accumY;
 
     if (cornerCaptured) {
-        const QPointF snappedPos  = proposedPos + bestCornerTranslation;
-        const QRectF  snappedRect(snappedPos, QSizeF(mW, mH));
+        // Seed X accumulator: the corner snap gives us a specific dx.
+        // We "pre-accept" it by treating it as a consider() result.
+        const qreal absDx = std::abs(cornerSeedDx);
+        accumX.bestDelta    = cornerSeedDx;
+        accumX.bestDeltaAbs = absDx;
+        accumX.adjusted     = true;
+        // Seed Y similarly
+        const qreal absDy = std::abs(cornerSeedDy);
+        accumY.bestDelta    = cornerSeedDy;
+        accumY.bestDeltaAbs = absDy;
+        accumY.adjusted     = true;
 
-        // Detect full overlap: check if all four borders align with any target rect
-        // Full-overlap tolerance is tight to avoid false positives
-        const qreal fullTol = std::min<qreal>(0.75, cornerSnapDistScene * 0.15);
-        auto isFullOverlap = [&](const QRectF& r) {
-            return std::abs(r.left()   - snappedRect.left())   < fullTol &&
-                   std::abs(r.right()  - snappedRect.right())  < fullTol &&
-                   std::abs(r.top()    - snappedRect.top())    < fullTol &&
-                   std::abs(r.bottom() - snappedRect.bottom()) < fullTol;
-        };
-
-        // Check all target rects by reconstructing from corner pairs
-        // (SnapStore doesn't expose rects directly; we detect overlap via edge proximity)
-        const QVector<qreal>& edgesX = snapStore.edgesX();
-        const QVector<qreal>& edgesY = snapStore.edgesY();
-        bool fullOverlap = false;
+        // Now collect all X edges aligned with the snapped rect (within tight tolerance)
+        const qreal snappedLeft  = movingRect.left()  + cornerSeedDx;
+        const qreal snappedRight = movingRect.right() + cornerSeedDx;
+        const qreal tightTol = std::min<qreal>(1.0, cornerSnapDistScene * 0.1);
         for (qreal ex : edgesX) {
-            for (qreal ey : edgesY) {
-                // We already matched one corner at bestCornerIndicator; if this ex,ey
-                // forms the opposite corner, we have a full-overlap candidate
-                const QPointF opp(ex, ey);
-                const qreal diagDist = std::hypot(
-                    std::abs(opp.x() - bestCornerIndicator.x()),
-                    std::abs(opp.y() - bestCornerIndicator.y()));
-                if (diagDist < 1.0) continue; // same corner
-                // Construct candidate rect from these two corner coordinates
-                QRectF candidate(
-                    std::min(bestCornerIndicator.x(), ex),
-                    std::min(bestCornerIndicator.y(), ey),
-                    std::abs(ex - bestCornerIndicator.x()),
-                    std::abs(ey - bestCornerIndicator.y()));
-                if (isFullOverlap(candidate)) {
-                    fullOverlap = true;
-                    break;
-                }
+            if (std::abs(ex - snappedLeft)  < tightTol) { if (!accumX.indicators.contains(ex)) accumX.indicators.append(ex); }
+            if (std::abs(ex - snappedRight) < tightTol) { if (!accumX.indicators.contains(ex)) accumX.indicators.append(ex); }
+        }
+        // All Y edges aligned with the snapped rect
+        const qreal snappedTop    = movingRect.top()    + cornerSeedDy;
+        const qreal snappedBottom = movingRect.bottom() + cornerSeedDy;
+        for (qreal ey : edgesY) {
+            if (std::abs(ey - snappedTop)    < tightTol) { if (!accumY.indicators.contains(ey)) accumY.indicators.append(ey); }
+            if (std::abs(ey - snappedBottom) < tightTol) { if (!accumY.indicators.contains(ey)) accumY.indicators.append(ey); }
+        }
+    } else {
+        // Pure edge snapping: consider all four moving edges against all target edges
+        for (qreal ex : edgesX) {
+            accumX.consider(movingRect.left(),  ex, snapDistanceScene);
+            accumX.consider(movingRect.right(), ex, snapDistanceScene);
+        }
+        for (qreal ey : edgesY) {
+            accumY.consider(movingRect.top(),    ey, snapDistanceScene);
+            accumY.consider(movingRect.bottom(), ey, snapDistanceScene);
+        }
+
+        // After finding the best X delta, collect ALL X edges that produce
+        // the same delta from either moving edge (catches left+right simultaneous snaps)
+        if (accumX.adjusted) {
+            const qreal snappedLeft  = movingRect.left()  + accumX.bestDelta;
+            const qreal snappedRight = movingRect.right() + accumX.bestDelta;
+            const qreal tightTol = snapDistanceScene * 0.05;
+            for (qreal ex : edgesX) {
+                if (std::abs(ex - snappedLeft)  < tightTol && !accumX.indicators.contains(ex)) accumX.indicators.append(ex);
+                if (std::abs(ex - snappedRight) < tightTol && !accumX.indicators.contains(ex)) accumX.indicators.append(ex);
             }
-            if (fullOverlap) break;
         }
-
-        QVector<QLineF> guides;
-        if (fullOverlap) {
-            guides.append(QLineF(snappedRect.left(),  snappedRect.top(),    snappedRect.right(), snappedRect.top()));
-            guides.append(QLineF(snappedRect.left(),  snappedRect.bottom(), snappedRect.right(), snappedRect.bottom()));
-            guides.append(QLineF(snappedRect.left(),  snappedRect.top(),    snappedRect.left(),  snappedRect.bottom()));
-            guides.append(QLineF(snappedRect.right(), snappedRect.top(),    snappedRect.right(), snappedRect.bottom()));
-        } else {
-            // Infinite cross through the snapped corner point
-            guides.append(QLineF(bestCornerIndicator.x(), -1e6, bestCornerIndicator.x(),  1e6));
-            guides.append(QLineF(-1e6, bestCornerIndicator.y(),  1e6, bestCornerIndicator.y()));
+        if (accumY.adjusted) {
+            const qreal snappedTop    = movingRect.top()    + accumY.bestDelta;
+            const qreal snappedBottom = movingRect.bottom() + accumY.bestDelta;
+            const qreal tightTol = snapDistanceScene * 0.05;
+            for (qreal ey : edgesY) {
+                if (std::abs(ey - snappedTop)    < tightTol && !accumY.indicators.contains(ey)) accumY.indicators.append(ey);
+                if (std::abs(ey - snappedBottom) < tightTol && !accumY.indicators.contains(ey)) accumY.indicators.append(ey);
+            }
         }
-        return DragSnapResult{ snappedPos, guides, true };
     }
 
-    // ── 2. Edge (axis-aligned) snapping ──────────────────────────────────
-    EdgeSnapAccum accum;
-    const QVector<qreal>& edgesX = snapStore.edgesX();
-    const QVector<qreal>& edgesY = snapStore.edgesY();
-
-    for (qreal ex : edgesX) {
-        accum.considerX(movingRect.left(),  ex, ex, snapDistanceScene);
-        accum.considerX(movingRect.right(), ex, ex, snapDistanceScene);
-    }
-    for (qreal ey : edgesY) {
-        accum.considerY(movingRect.top(),    ey, ey, snapDistanceScene);
-        accum.considerY(movingRect.bottom(), ey, ey, snapDistanceScene);
+    if (!accumX.adjusted && !accumY.adjusted) {
+        return DragSnapResult{ proposedPos, {}, false };
     }
 
-    if (accum.adjusted) {
-        const QPointF snappedPos(proposedPos.x() + accum.bestDx,
-                                 proposedPos.y() + accum.bestDy);
-        QVector<QLineF> guides;
-        if (!std::isnan(accum.indicatorX)) {
-            guides.append(QLineF(accum.indicatorX, -1e6, accum.indicatorX, 1e6));
-        }
-        if (!std::isnan(accum.indicatorY)) {
-            guides.append(QLineF(-1e6, accum.indicatorY, 1e6, accum.indicatorY));
-        }
-        return DragSnapResult{ snappedPos, guides, true };
+    // ── 3. Build result ───────────────────────────────────────────────────
+    const QPointF snappedPos(proposedPos.x() + (accumX.adjusted ? accumX.bestDelta : 0.0),
+                             proposedPos.y() + (accumY.adjusted ? accumY.bestDelta : 0.0));
+
+    QVector<QLineF> guides;
+    // One vertical indicator line per unique snapped X edge
+    for (qreal ix : accumX.indicators) {
+        guides.append(QLineF(ix, -1e6, ix, 1e6));
+    }
+    // One horizontal indicator line per unique snapped Y edge
+    for (qreal iy : accumY.indicators) {
+        guides.append(QLineF(-1e6, iy, 1e6, iy));
     }
 
-    // ── 3. No snap ───────────────────────────────────────────────────────
-    return DragSnapResult{ proposedPos, {}, false };
+    return DragSnapResult{ snappedPos, guides, true };
 }
