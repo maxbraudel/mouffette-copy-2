@@ -217,6 +217,7 @@ Item {
         target: null
         acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
         acceptedButtons: Qt.LeftButton
+        grabPermissions: PointerHandler.CanTakeOverFromAnything
         enabled: globalResizeDrag.active
                  || (root.hoveredHandleId !== ""
                      && ((root.useInputCoordinator

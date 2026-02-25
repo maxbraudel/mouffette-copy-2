@@ -136,14 +136,15 @@ Item {
                 return "content-editing"
             if (inputLayer.textToolActive)
                 return "text-tool-active"
-            // Only block drag if a resize is actively in progress (interacting),
-            // OR if the hovered handle belongs to THIS specific item.
-            // Never block drag on a different item just because another item's handle is hovered.
+            // Block drag if a resize is actively in progress, OR if ANY selected item's handle
+            // is hovered — this prevents occluding media items from stealing press events when
+            // the pointer is over a selected item's resize handle zone (even if that item has
+            // lower z-order than the item whose DragHandler would otherwise fire).
             if (inputLayer.selectionHandlePriorityActive)
                 return "selection-handle-priority"
             var hoveredId = inputLayer.selectionHandleHoveredMediaId || ""
-            if (hoveredId !== "" && hoveredId === mediaId)
-                return "selection-handle-hovered-on-this-item"
+            if (hoveredId !== "")
+                return "selection-handle-hovered"
             if (dragActive)
                 return ""
             if (!canStart("move", mediaId))

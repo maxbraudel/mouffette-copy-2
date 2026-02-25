@@ -110,7 +110,7 @@ Rectangle {
             if (selectionChrome.interacting)
                 return false
             var hoveredId = selectionChrome.hoveredMediaId || ""
-            if (hoveredId !== "" && hoveredId === mediaId)
+            if (hoveredId !== "")
                 return false
             return dragActive || inputLayer.inputCoordinator.canStart("move", mediaId)
         }
@@ -623,6 +623,7 @@ Rectangle {
                         enabled: !!mediaDelegate.media
                                  && !mediaDelegate.overlayHovered
                                  && !(mediaContentLoader.item && mediaContentLoader.item.editing === true)
+                                 && selectionChrome.hoveredHandleId === ""
 
                         function selectNow(modifiers) {
                             var mediaId = mediaDelegate.currentMediaId
