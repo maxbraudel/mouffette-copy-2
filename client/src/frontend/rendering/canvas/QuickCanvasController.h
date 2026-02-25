@@ -109,7 +109,7 @@ private:
     bool beginLiveResizeSession(const QString& mediaId);
     bool endLiveResizeSession(const QString& mediaId, qreal sceneX, qreal sceneY, qreal scale);
     bool pushLiveResizeGeometry(const QString& mediaId, qreal sceneX, qreal sceneY, qreal scale);
-    bool pushLiveAltResizeGeometry(const QString& mediaId, qreal sceneX, qreal sceneY, int width, int height, qreal scale);
+    bool pushLiveAltResizeGeometry(const QString& mediaId, qreal sceneX, qreal sceneY, qreal width, qreal height, qreal scale);
     void resetAltResizeState();
     static bool isAxisHandle(int handleValue);
     static bool isCornerHandle(int handleValue);

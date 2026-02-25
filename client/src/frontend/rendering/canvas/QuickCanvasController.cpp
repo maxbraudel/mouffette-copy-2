@@ -922,20 +922,16 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                 m_altAxisCaptured = true;
             }
 
-            // Compute desired new size along the axis
+            // Compute desired new size along the axis from the fixed anchor (absolute formula).
+            // This avoids feedback against already-quantized geometry and keeps motion smooth.
             const qreal s = std::abs(target->scale()) > 1e-6 ? std::abs(target->scale()) : 1.0;
             const QSize bs = m_altOrigBaseSize;
-            const QPointF movingEdgeItem = computeHandleItemPoint(static_cast<int>(activeHandle), bs);
-            const QPointF movingEdgeScene = target->scenePos() + movingEdgeItem * s;
-            qreal rawDelta = horizontal
-                ? (sceneX - movingEdgeScene.x())
-                : (sceneY - movingEdgeScene.y());
-            if (activeHandle == ResizableMediaBase::LeftMid || activeHandle == ResizableMediaBase::TopMid)
-                rawDelta = -rawDelta;
-            const qreal currentExtent = horizontal
-                ? std::abs(m_altFixedScenePoint.x() - movingEdgeScene.x())
-                : std::abs(m_altFixedScenePoint.y() - movingEdgeScene.y());
-            qreal desiredAxisSize = currentExtent + rawDelta - m_altAxisInitialOffset;
+            const bool negativeDirection = (activeHandle == ResizableMediaBase::LeftMid
+                                         || activeHandle == ResizableMediaBase::TopMid);
+            const qreal dir = negativeDirection ? -1.0 : 1.0;
+            const qreal pointerAlongAxis = horizontal ? sceneX : sceneY;
+            const qreal fixedAlongAxis = horizontal ? m_altFixedScenePoint.x() : m_altFixedScenePoint.y();
+            qreal desiredAxisSize = dir * (pointerAlongAxis - fixedAlongAxis) - m_altAxisInitialOffset;
             desiredAxisSize = std::max<qreal>(1.0, desiredAxisSize);
 
             // Apply snap if requested
@@ -993,10 +989,25 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
             m_resizeLastScale  = s;
 
             const qreal unitScale = (m_sceneStore->sceneUnitScale() > 1e-6) ? m_sceneStore->sceneUnitScale() : 1.0;
+            const qreal liveBaseW = horizontal ? std::max<qreal>(1.0, desiredAxisSize / s)
+                                               : static_cast<qreal>(bs.width());
+            const qreal liveBaseH = horizontal ? static_cast<qreal>(bs.height())
+                                               : std::max<qreal>(1.0, desiredAxisSize / s);
+            const qreal liveSceneW = liveBaseW * s;
+            const qreal liveSceneH = liveBaseH * s;
+            const qreal liveSceneX = horizontal
+                ? ((activeHandle == ResizableMediaBase::LeftMid) ? (m_altFixedScenePoint.x() - liveSceneW)
+                                                                 : m_altFixedScenePoint.x())
+                : (m_altFixedScenePoint.x() - liveSceneW * 0.5);
+            const qreal liveSceneY = horizontal
+                ? (m_altFixedScenePoint.y() - liveSceneH * 0.5)
+                : ((activeHandle == ResizableMediaBase::TopMid) ? (m_altFixedScenePoint.y() - liveSceneH)
+                                                                : m_altFixedScenePoint.y());
+
             if (!pushLiveAltResizeGeometry(mediaId,
-                    newPos.x() * unitScale, newPos.y() * unitScale,
-                    int(std::round(newBase.width()  * unitScale)),
-                    int(std::round(newBase.height() * unitScale)),
+                    liveSceneX * unitScale, liveSceneY * unitScale,
+                    liveBaseW * unitScale,
+                    liveBaseH * unitScale,
                     s)) {
                 pushMediaModelOnly();
             }
@@ -1057,10 +1068,10 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
             if (activeHandle == H::TopLeft  || activeHandle == H::BottomLeft)  dxRaw = -dxRaw;
             if (activeHandle == H::TopLeft  || activeHandle == H::TopRight)    dyRaw = -dyRaw;
 
-            const qreal currentExtentX = std::abs(m_altFixedScenePoint.x() - movingCornerScene.x());
-            const qreal currentExtentY = std::abs(m_altFixedScenePoint.y() - movingCornerScene.y());
-            qreal desiredW = currentExtentX + dxRaw - m_altCornerInitialOffsetX;
-            qreal desiredH = currentExtentY + dyRaw - m_altCornerInitialOffsetY;
+            const qreal dirX = (activeHandle == H::TopLeft || activeHandle == H::BottomLeft) ? -1.0 : 1.0;
+            const qreal dirY = (activeHandle == H::TopLeft || activeHandle == H::TopRight) ? -1.0 : 1.0;
+            qreal desiredW = dirX * (sceneX - m_altFixedScenePoint.x()) - m_altCornerInitialOffsetX;
+            qreal desiredH = dirY * (sceneY - m_altFixedScenePoint.y()) - m_altCornerInitialOffsetY;
             desiredW = std::max<qreal>(1.0, desiredW);
             desiredH = std::max<qreal>(1.0, desiredH);
 
@@ -1119,10 +1130,21 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
             m_resizeLastScale  = s;
 
             const qreal unitScale = (m_sceneStore->sceneUnitScale() > 1e-6) ? m_sceneStore->sceneUnitScale() : 1.0;
+            const qreal liveBaseW = std::max<qreal>(1.0, desiredW / s);
+            const qreal liveBaseH = std::max<qreal>(1.0, desiredH / s);
+            const qreal liveSceneW = liveBaseW * s;
+            const qreal liveSceneH = liveBaseH * s;
+            const qreal liveSceneX = (activeHandle == H::TopLeft || activeHandle == H::BottomLeft)
+                ? (m_altFixedScenePoint.x() - liveSceneW)
+                : m_altFixedScenePoint.x();
+            const qreal liveSceneY = (activeHandle == H::TopLeft || activeHandle == H::TopRight)
+                ? (m_altFixedScenePoint.y() - liveSceneH)
+                : m_altFixedScenePoint.y();
+
             if (!pushLiveAltResizeGeometry(mediaId,
-                    newPos.x() * unitScale, newPos.y() * unitScale,
-                    int(std::round(newBase.width()  * unitScale)),
-                    int(std::round(newBase.height() * unitScale)),
+                    liveSceneX * unitScale, liveSceneY * unitScale,
+                    liveBaseW * unitScale,
+                    liveBaseH * unitScale,
                     s)) {
                 pushMediaModelOnly();
             }
@@ -2376,8 +2398,8 @@ bool QuickCanvasController::tryInitialFitNow(int marginPx) {
 bool QuickCanvasController::pushLiveAltResizeGeometry(const QString& mediaId,
                                                       qreal sceneX,
                                                       qreal sceneY,
-                                                      int width,
-                                                      int height,
+                                                      qreal width,
+                                                      qreal height,
                                                       qreal scale) {
     if (!m_quickWidget || !m_quickWidget->rootObject() || mediaId.isEmpty()) {
         return false;
