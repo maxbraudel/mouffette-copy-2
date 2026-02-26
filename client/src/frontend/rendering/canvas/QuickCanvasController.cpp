@@ -336,9 +336,18 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
     QObject::connect(
         m_quickWidget->rootObject(), SIGNAL(overlayVolumeChangeRequested(QString,double)),
         this, SLOT(handleOverlayVolumeChange(QString,double)));
+    // Three-phase seek — begin sets the drag-lock flag before any seek reaches the
+    // player, update performs live preview seeks, end commits the final position and
+    // releases the lock.  All three use Qt::AutoConnection (synchronous from GUI thread).
     QObject::connect(
-        m_quickWidget->rootObject(), SIGNAL(overlaySeekRequested(QString,double)),
-        this, SLOT(handleOverlaySeek(QString,double)));
+        m_quickWidget->rootObject(), SIGNAL(overlaySeekBeginRequested(QString,double)),
+        this, SLOT(handleOverlaySeekBegin(QString,double)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(overlaySeekUpdateRequested(QString,double)),
+        this, SLOT(handleOverlaySeekUpdate(QString,double)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(overlaySeekEndRequested(QString,double)),
+        this, SLOT(handleOverlaySeekEnd(QString,double)));
     QObject::connect(
         m_quickWidget->rootObject(), SIGNAL(overlayFitToTextToggleRequested(QString)),
         this, SLOT(handleOverlayFitToTextToggle(QString)));
@@ -1810,30 +1819,42 @@ void QuickCanvasController::pushVideoStateModel() {
         return;
     }
 
-    // Find the currently selected video item (if any)
-    ResizableVideoItem* videoItem = nullptr;
-    const QList<QGraphicsItem*> selectedItems = m_mediaScene->selectedItems();
-    for (QGraphicsItem* gi : selectedItems) {
-        if (auto* v = dynamic_cast<ResizableVideoItem*>(gi)) {
-            videoItem = v;
-            break;
-        }
+    // Publish state for ALL video items present in the scene, not only the selected
+    // one.  The result is a QVariantMap (JavaScript object) keyed by mediaId, so each
+    // overlay can look up its own state with videoStateModel[mediaId] regardless of
+    // which items are selected.
+    //
+    // Position is read live from QMediaPlayer::position() rather than the cached
+    // m_positionMs field, which can be up to 100 ms stale (positionChanged cadence).
+    // This halves the worst-case display lag from ~150 ms to ~50 ms (poll interval).
+    QVariantMap stateDict;
+    const QList<QGraphicsItem*> allItems = m_mediaScene->items();
+    for (QGraphicsItem* gi : allItems) {
+        auto* v = dynamic_cast<ResizableVideoItem*>(gi);
+        if (!v || !v->mediaPlayer()) continue;
+        const QString mid = v->mediaId();
+        if (mid.isEmpty()) continue;
+
+        const qint64 durationMs = v->mediaPlayer()->duration();
+        // Use the live player position rather than the stale cached value.
+        const qint64 positionMs = v->mediaPlayer()->position();
+        const qreal progress = (durationMs > 0)
+            ? std::clamp<qreal>(static_cast<qreal>(positionMs) / static_cast<qreal>(durationMs), 0.0, 1.0)
+            : 0.0;
+
+        QVariantMap state;
+        state.insert(QStringLiteral("mediaId"),   mid);
+        state.insert(QStringLiteral("isPlaying"),  v->isPlaying());
+        state.insert(QStringLiteral("isMuted"),    v->isMuted());
+        // Use the direct m_repeatEnabled flag rather than shouldAutoRepeat() so the
+        // loop button always reflects the last user toggle, not settings-layer logic.
+        state.insert(QStringLiteral("isLooping"),  v->isRepeatEnabled());
+        state.insert(QStringLiteral("progress"),   progress);
+        state.insert(QStringLiteral("volume"),     v->volume());
+        stateDict.insert(mid, state);
     }
 
-    QVariantMap state;
-    if (videoItem) {
-        const qint64 durationMs = videoItem->mediaPlayer() ? videoItem->mediaPlayer()->duration() : 0;
-        const qint64 positionMs = videoItem->currentPositionMs();
-        const qreal progress = (durationMs > 0) ? std::clamp<qreal>(static_cast<qreal>(positionMs) / static_cast<qreal>(durationMs), 0.0, 1.0) : 0.0;
-        state.insert(QStringLiteral("mediaId"), videoItem->mediaId());
-        state.insert(QStringLiteral("isPlaying"), videoItem->isPlaying());
-        state.insert(QStringLiteral("isMuted"), videoItem->isMuted());
-        state.insert(QStringLiteral("isLooping"), videoItem->shouldAutoRepeat());
-        state.insert(QStringLiteral("progress"), progress);
-        state.insert(QStringLiteral("volume"), videoItem->volume());
-    }
-
-    m_quickWidget->rootObject()->setProperty("videoStateModel", state);
+    m_quickWidget->rootObject()->setProperty("videoStateModel", stateDict);
 }
 
 // ---- Overlay action slots ----
@@ -1921,9 +1942,31 @@ void QuickCanvasController::handleOverlayVolumeChange(const QString& mediaId, qr
     }
 }
 
-void QuickCanvasController::handleOverlaySeek(const QString& mediaId, qreal ratio) {
+// ---- Three-phase seek handlers ----
+// Phase 1: pointer pressed.  Set the drag-in-progress flag BEFORE issuing the
+// initial seek so that m_progressTimer and positionChanged handlers both see
+// m_draggingProgress=true and suppress conflicting pushes for the duration.
+void QuickCanvasController::handleOverlaySeekBegin(const QString& mediaId, qreal ratio) {
+    if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
+        v->setDraggingProgress(true);
+        v->seekToRatio(std::clamp(ratio, 0.0, 1.0));
+    }
+}
+
+// Phase 2: pointer moved.  Seek to the live scrub position for visual preview.
+// m_draggingProgress remains true so C++ push-back is suppressed.
+void QuickCanvasController::handleOverlaySeekUpdate(const QString& mediaId, qreal ratio) {
     if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
         v->seekToRatio(std::clamp(ratio, 0.0, 1.0));
+    }
+}
+
+// Phase 3: pointer released.  Commit the final position then clear the drag lock.
+// setDraggingProgress(false) also restarts m_progressTimer if playing and !m_seeking.
+void QuickCanvasController::handleOverlaySeekEnd(const QString& mediaId, qreal ratio) {
+    if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
+        v->seekToRatio(std::clamp(ratio, 0.0, 1.0));
+        v->setDraggingProgress(false);
         emit mediaSeekRequested(mediaId, ratio);
     }
 }

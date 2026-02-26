@@ -24,7 +24,13 @@ Rectangle {
     signal overlayRepeatToggleRequested(string mediaId)
     signal overlayMuteToggleRequested(string mediaId)
     signal overlayVolumeChangeRequested(string mediaId, real value)
-    signal overlaySeekRequested(string mediaId, real ratio)
+    // Three-phase seek protocol — maps directly onto C++ drag-lock handlers:
+    //   Begin  : C++ sets m_draggingProgress=true before any seek is issued
+    //   Update : C++ seeks to the live scrub position (fires frequently)
+    //   End    : C++ issues final seek then clears m_draggingProgress
+    signal overlaySeekBeginRequested(string mediaId, real ratio)
+    signal overlaySeekUpdateRequested(string mediaId, real ratio)
+    signal overlaySeekEndRequested(string mediaId, real ratio)
     signal overlayFitToTextToggleRequested(string mediaId)
     signal overlayHorizontalAlignRequested(string mediaId, string alignment)
     signal overlayVerticalAlignRequested(string mediaId, string alignment)
@@ -82,6 +88,9 @@ Rectangle {
                                           ? inputLayer.inputCoordinator.ownerId
                                           : ""
     property int activeMediaDragCount: 0
+    // Video state dictionary: keys are mediaId strings, values are state maps.
+    // Published every 50 ms by QuickCanvasController for ALL video items
+    // (not just the selected one), so overlays remain live after deselection.
     property var videoStateModel: ({})
 
     focus: true
@@ -921,13 +930,6 @@ Rectangle {
                         }
                     }
 
-                    // Resolved video state for this delegate (updated by 50ms timer in C++)
-                    readonly property var delegateVideoState: {
-                        var vs = root.videoStateModel
-                        if (vs && vs.mediaId && vs.mediaId === currentMediaId)
-                            return vs
-                        return null
-                    }
                     }
                 }
 
@@ -1315,12 +1317,9 @@ Rectangle {
                 readonly property real screenCentreX: screenLeft + screenW * 0.5
                 readonly property real screenBottom:  screenTop  + screenH
 
-                // Video state
-                readonly property var videoState: {
-                    var vs = root.videoStateModel
-                    if (vs && vs.mediaId && vs.mediaId === mid) return vs
-                    return null
-                }
+                // Video state for this item — looked up by mediaId in the state dictionary.
+                // Evaluates to null when no state has been pushed for this id.
+                readonly property var videoState: root.videoStateModel[mid] || null
 
                 // Top overlay: filename + utility buttons
                 MediaTopOverlay {
@@ -1360,9 +1359,11 @@ Rectangle {
                     onStopRequested:         function(m)    { root.overlayStopRequested(m) }
                     onRepeatToggleRequested: function(m)    { root.overlayRepeatToggleRequested(m) }
                     onMuteToggleRequested:   function(m)    { root.overlayMuteToggleRequested(m) }
-                    onVolumeChangeRequested: function(m, v) { root.overlayVolumeChangeRequested(m, v) }
-                    onSeekRequested:         function(m, r) { root.overlaySeekRequested(m, r) }
-                    onOverlayHoveredChanged: function(h)    { /* input handled by overlay's own MouseArea */ }
+                    onVolumeChangeRequested:  function(m, v) { root.overlayVolumeChangeRequested(m, v) }
+                    onSeekBeginRequested:     function(m, r) { root.overlaySeekBeginRequested(m, r) }
+                    onSeekUpdateRequested:    function(m, r) { root.overlaySeekUpdateRequested(m, r) }
+                    onSeekEndRequested:       function(m, r) { root.overlaySeekEndRequested(m, r) }
+                    onOverlayHoveredChanged:  function(h)    { /* input handled by overlay's own MouseArea */ }
                 }
 
                 // Bottom overlay: text alignment controls (text only)

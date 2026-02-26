@@ -93,7 +93,13 @@ private slots:
     void handleOverlayRepeatToggle(const QString& mediaId);
     void handleOverlayMuteToggle(const QString& mediaId);
     void handleOverlayVolumeChange(const QString& mediaId, qreal value);
-    void handleOverlaySeek(const QString& mediaId, qreal ratio);
+    // Three-phase seek handlers — mirror the QML three-phase seek protocol so that
+    // m_draggingProgress is set before any seek reaches the player (begin), live
+    // scrub previews work without conflicting C++ position pushes (update), and the
+    // drag lock is cleanly released after the final position is committed (end).
+    void handleOverlaySeekBegin(const QString& mediaId, qreal ratio);
+    void handleOverlaySeekUpdate(const QString& mediaId, qreal ratio);
+    void handleOverlaySeekEnd(const QString& mediaId, qreal ratio);
     void handleOverlayFitToTextToggle(const QString& mediaId);
     void handleOverlayHorizontalAlign(const QString& mediaId, const QString& alignment);
     void handleOverlayVerticalAlign(const QString& mediaId, const QString& alignment);

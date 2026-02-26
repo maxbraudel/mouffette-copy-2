@@ -310,6 +310,13 @@ public:
     void setInitialScaleFactor(qreal f) { m_initialScaleFactor = f; }
     void setExternalPosterImage(const QImage& img);
     bool isDraggingProgress() const { return m_draggingProgress; }
+
+    // Lock/unlock the drag-in-progress flag from the QML path.
+    // When dragging=false the method also restarts m_progressTimer if the player
+    // is currently in PlayingState and m_seeking has already cleared — this ensures
+    // the 33 ms progress timer resumes cleanly as soon as scrubbing ends.
+    void setDraggingProgress(bool dragging);
+
     bool isDraggingVolume() const { return m_draggingVolume; }
     void requestOverlayRelayout() { updateControlsLayout(); }
     void setApplicationSuspended(bool suspended);
@@ -332,6 +339,11 @@ public:
     void cancelSettingsRepeatSession();
     bool settingsRepeatAvailable() const;
     bool shouldAutoRepeat() const;
+
+    // Direct read of the user-toggled repeat flag — use this for UI state.
+    // shouldAutoRepeat() applies additional settings-layer logic and is not
+    // suitable for reflecting the simple toggle button state in the overlay.
+    bool isRepeatEnabled() const { return m_repeatEnabled; }
 
     // QGraphicsItem
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override;
@@ -379,12 +391,6 @@ private:
     void finalizeAudioFade(bool targetMuted);
     void ensureControlsPanel();
     void updateControlsVisualState();
-    void startWarmup();
-    void finishWarmup(bool forceImmediate);
-    void startWarmupKeepAlive();
-    void stopWarmupKeepAlive();
-    void handleWarmupKeepAlive();
-    void performWarmupPulse();
 
     qreal baseWidth() const { return static_cast<qreal>(m_baseSize.width()); }
     qreal baseHeight() const { return static_cast<qreal>(m_baseSize.height()); }
@@ -398,9 +404,6 @@ private:
     qint64 m_durationMs = 0;
     qint64 m_positionMs = 0;
     bool m_firstFramePrimed = false;
-    bool m_warmupActive = false;
-    bool m_warmupFrameCaptured = false;
-    qint64 m_warmupTargetPositionMs = 0;
     bool m_savedMuted = false;
     bool m_effectiveMuted = false;
     bool m_pendingMuteTarget = false;
@@ -432,9 +435,6 @@ private:
     bool m_settingsRepeatSessionActive = false;
     bool m_volumeChangeFromSettings = false;
     bool m_displaySizeLocked = false; // When true, prevent frame dimensions from overriding display size
-    QTimer* m_warmupKeepAliveTimer = nullptr;
-    qint64 m_lastWarmupCompletionMs = 0;
-    bool m_keepAlivePulseActive = false;
     QMediaPlayer::Error m_lastPlaybackError = QMediaPlayer::NoError;
     QString m_lastPlaybackErrorString;
 };

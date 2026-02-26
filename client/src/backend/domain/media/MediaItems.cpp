@@ -1234,11 +1234,13 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
                     m_lastFrameTimestampMs = m_player->position();
                 }
                 ++m_framesProcessed;
-                if (m_warmupActive) {
-                    if (!m_warmupFrameCaptured) {
-                        m_warmupFrameCaptured = true;
-                    } else {
-                        allowVisualUpdate = false;
+                if (!m_firstFramePrimed) {
+                    m_firstFramePrimed = true;
+                    m_controlsLockedUntilReady = false;
+                    m_controlsDidInitialFade = false;
+                    if (isSelected()) {
+                        setControlsVisible(true);
+                        updateControlsLayout();
                     }
                 }
             }
@@ -1268,12 +1270,6 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
         if (m_player && m_player->playbackState() == QMediaPlayer::PlayingState && !m_draggingProgress && !m_holdLastFrameAtEnd && !m_seeking && m_durationMs > 0) {
             qint64 currentPos = m_player->position(); qreal newRatio = static_cast<qreal>(currentPos) / m_durationMs; m_smoothProgressRatio = std::clamp<qreal>(newRatio, 0.0, 1.0); updateProgressBar(); update();
         }
-    });
-    m_warmupKeepAliveTimer = new QTimer();
-    m_warmupKeepAliveTimer->setInterval(3500);
-    m_warmupKeepAliveTimer->setTimerType(Qt::CoarseTimer);
-    QObject::connect(m_warmupKeepAliveTimer, &QTimer::timeout, m_player, [this]() {
-        handleWarmupKeepAlive();
     });
     QObject::connect(m_player, &QMediaPlayer::mediaStatusChanged, m_player, [this](QMediaPlayer::MediaStatus s){
         if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
@@ -1316,9 +1312,6 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
                         adoptBaseSize(sz);
                     }
                 }
-            }
-            if (!m_firstFramePrimed && !m_warmupActive) {
-                startWarmup();
             }
         }
         if (s == QMediaPlayer::EndOfMedia) {
@@ -1371,16 +1364,6 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
     });
     QObject::connect(m_player, &QMediaPlayer::durationChanged, m_player, [this](qint64 d){ m_durationMs = d; update(); });
     QObject::connect(m_player, &QMediaPlayer::positionChanged, m_player, [this](qint64 p){
-        if (m_warmupActive) {
-            const qreal bufferProgress = m_player ? m_player->bufferProgress() : 0.0;
-            if (p >= m_warmupTargetPositionMs || bufferProgress >= 0.95) {
-                finishWarmup(false);
-                // After finishing warmup, position will be reset to 0
-                p = m_player ? m_player->position() : 0;
-            } else {
-                return;
-            }
-        }
         if (m_holdLastFrameAtEnd) {
             return;
         }
@@ -1453,11 +1436,6 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
 
 ResizableVideoItem::~ResizableVideoItem() {
     teardownPlayback();
-    if (m_warmupKeepAliveTimer) {
-        m_warmupKeepAliveTimer->stop();
-        delete m_warmupKeepAliveTimer;
-        m_warmupKeepAliveTimer = nullptr;
-    }
     if (m_player) QObject::disconnect(m_player, nullptr, nullptr, nullptr);
     if (m_sink) QObject::disconnect(m_sink, nullptr, nullptr, nullptr);
     delete m_player; delete m_audio; delete m_sink; delete m_controlsFadeAnim;
@@ -1465,14 +1443,6 @@ ResizableVideoItem::~ResizableVideoItem() {
 
 void ResizableVideoItem::togglePlayPause() {
     if (!m_player) return;
-    stopWarmupKeepAlive();
-    if (m_warmupActive) {
-        finishWarmup(true);
-    }
-    if (!m_firstFramePrimed) {
-        startWarmup();
-        finishWarmup(true);
-    }
     m_seamlessLoopJumpPending = false;
     m_lastSeamlessLoopTriggerMs = 0;
     bool nowPlaying = false;
@@ -1519,9 +1489,6 @@ void ResizableVideoItem::togglePlayPause() {
     m_expectedPlayingState = nowPlaying;
     updatePlayPauseIconState(nowPlaying);
     updateControlsLayout(); update();
-    if (!nowPlaying) {
-        startWarmupKeepAlive();
-    }
 }
 
 void ResizableVideoItem::toggleRepeat() {
@@ -1620,7 +1587,6 @@ void ResizableVideoItem::stopToBeginning() {
     cancelSettingsRepeatSession();
     m_expectedPlayingState = false; updatePlayPauseIconState(false);
     updateControlsLayout(); update();
-    startWarmupKeepAlive();
 }
 
 void ResizableVideoItem::seekToRatio(qreal r) {
@@ -1636,10 +1602,30 @@ void ResizableVideoItem::seekToRatio(qreal r) {
     updateProgressBar(); updateControlsLayout(); update();
     const qint64 pos = m_positionMs; m_player->setPosition(pos);
     cancelSettingsRepeatSession();
+    // After the async setPosition() completes, clear the seeking flag and
+    // restart the progress timer — but only when NOT still dragging. If the
+    // user is mid-scrub, setDraggingProgress(false) will restart the timer
+    // once the drag actually ends, preventing a start/stop oscillation.
     QTimer::singleShot(30, [this]() {
         m_seeking = false;
-        if (m_progressTimer && m_player && m_player->playbackState() == QMediaPlayer::PlayingState) m_progressTimer->start();
+        if (!m_draggingProgress && m_progressTimer && m_player
+                && m_player->playbackState() == QMediaPlayer::PlayingState) {
+            m_progressTimer->start();
+        }
     });
+}
+
+void ResizableVideoItem::setDraggingProgress(bool dragging) {
+    if (m_draggingProgress == dragging) return;
+    m_draggingProgress = dragging;
+    if (!m_draggingProgress && !m_seeking) {
+        // Drag ended and no pending seek recovery: restart the progress timer
+        // immediately so the display updates without waiting for the next tick.
+        if (m_progressTimer && m_player
+                && m_player->playbackState() == QMediaPlayer::PlayingState) {
+            m_progressTimer->start();
+        }
+    }
 }
 
 void ResizableVideoItem::pauseAndSetPosition(qint64 posMs) {
@@ -1658,7 +1644,6 @@ void ResizableVideoItem::pauseAndSetPosition(qint64 posMs) {
     cancelSettingsRepeatSession();
     m_expectedPlayingState = false; updatePlayPauseIconState(false);
     updateControlsLayout(); update();
-    startWarmupKeepAlive();
 }
 
 void ResizableVideoItem::setExternalPosterImage(const QImage& img) {
@@ -1682,7 +1667,6 @@ void ResizableVideoItem::setApplicationSuspended(bool suspended) {
     m_lastSeamlessLoopTriggerMs = 0;
     if (m_appSuspended) {
         cancelSettingsRepeatSession();
-        stopWarmupKeepAlive();
     }
     if (m_appSuspended) {
         m_wasPlayingBeforeSuspend = m_player && m_player->playbackState() == QMediaPlayer::PlayingState;
@@ -1727,9 +1711,6 @@ void ResizableVideoItem::setApplicationSuspended(bool suspended) {
         m_needsReprimeAfterResume = false;
         m_resumePositionMs = 0;
         update();
-        if (!isPlaying()) {
-            startWarmupKeepAlive();
-        }
     }
 }
 
@@ -1992,170 +1973,6 @@ void ResizableVideoItem::updateControlsVisualState() {
             progressSlider->setState(OverlayElement::Normal);
         }
     }
-}
-
-void ResizableVideoItem::startWarmup() {
-    if (!m_player || m_warmupActive) {
-        return;
-    }
-
-    stopWarmupKeepAlive();
-    m_warmupActive = true;
-    m_warmupFrameCaptured = false;
-    m_firstFramePrimed = false;
-    m_holdLastFrameAtEnd = false;
-    m_controlsLockedUntilReady = true;
-    m_savedMuted = m_effectiveMuted;
-    m_effectiveMuted = true;
-    if (m_audio) {
-        m_audio->setMuted(true);
-    }
-
-    qint64 target = 500; // default warmup duration in ms
-    if (m_durationMs > 0) {
-        target = std::clamp<qint64>(m_durationMs / 20, 250LL, 800LL);
-    }
-    m_warmupTargetPositionMs = target;
-
-    if (m_player) {
-        m_player->setPlaybackRate(1.0);
-        m_player->setPosition(0);
-        m_player->play();
-    }
-}
-
-void ResizableVideoItem::finishWarmup(bool forceImmediate) {
-    if (!m_player || !m_warmupActive) {
-        return;
-    }
-
-    m_warmupActive = false;
-
-    m_player->pause();
-    m_player->setPlaybackRate(1.0);
-    m_player->setPosition(0);
-
-    m_positionMs = 0;
-    m_smoothProgressRatio = 0.0;
-    updateProgressBar();
-
-    qDebug() << "ResizableVideoItem: warmup primed for" << m_sourcePath
-             << "targetMs=" << m_warmupTargetPositionMs
-             << "bufferProgress=" << m_player->bufferProgress();
-
-    if (m_audio) {
-        m_audio->setMuted(m_savedMuted);
-        if (!m_savedMuted) {
-            const bool guardPrev = m_volumeChangeFromSettings;
-            m_volumeChangeFromSettings = true;
-            m_audio->setVolume(m_userVolumeRatio);
-            m_volumeChangeFromSettings = guardPrev;
-        }
-    }
-
-    m_effectiveMuted = m_savedMuted;
-    m_firstFramePrimed = true;
-    m_controlsLockedUntilReady = false;
-    m_controlsDidInitialFade = false;
-
-    if (isSelected() || forceImmediate) {
-        setControlsVisible(true);
-        updateControlsLayout();
-    }
-
-    m_lastRepaintMs = 0;
-    update();
-    m_lastWarmupCompletionMs = QDateTime::currentMSecsSinceEpoch();
-    startWarmupKeepAlive();
-}
-
-void ResizableVideoItem::startWarmupKeepAlive() {
-    if (!m_warmupKeepAliveTimer) {
-        return;
-    }
-    if (!m_firstFramePrimed || m_warmupActive || isPlaying() || m_appSuspended) {
-        stopWarmupKeepAlive();
-        return;
-    }
-    if (!m_warmupKeepAliveTimer->isActive()) {
-        m_warmupKeepAliveTimer->start();
-    }
-}
-
-void ResizableVideoItem::stopWarmupKeepAlive() {
-    if (m_warmupKeepAliveTimer && m_warmupKeepAliveTimer->isActive()) {
-        m_warmupKeepAliveTimer->stop();
-    }
-}
-
-void ResizableVideoItem::handleWarmupKeepAlive() {
-    if (!m_player || m_warmupActive || m_keepAlivePulseActive) {
-        return;
-    }
-    if (isPlaying() || m_appSuspended) {
-        stopWarmupKeepAlive();
-        return;
-    }
-    if (!m_firstFramePrimed) {
-        stopWarmupKeepAlive();
-        return;
-    }
-    if (m_holdLastFrameAtEnd || m_draggingProgress || m_draggingVolume || m_seeking) {
-        return;
-    }
-    if (!isVisibleInAnyView()) {
-        return;
-    }
-    if (m_positionMs > nearStartThresholdMs()) {
-        return;
-    }
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    if (now - m_lastWarmupCompletionMs < 1500) {
-        return;
-    }
-    performWarmupPulse();
-}
-
-void ResizableVideoItem::performWarmupPulse() {
-    if (!m_player || m_keepAlivePulseActive) {
-        return;
-    }
-
-    m_keepAlivePulseActive = true;
-    stopWarmupKeepAlive();
-
-    const bool temporarilyMuted = m_audio && !m_effectiveMuted;
-    if (temporarilyMuted) {
-        m_audio->setMuted(true);
-    }
-
-    const qreal previousRate = m_player->playbackRate();
-    m_player->setPlaybackRate(2.0);
-    m_player->setPosition(0);
-    m_player->play();
-
-    const std::weak_ptr<bool> guard = lifetimeGuard();
-    QTimer::singleShot(280, [this, guard, temporarilyMuted, previousRate]() {
-        if (auto alive = guard.lock(); !alive || !m_player) {
-            return;
-        }
-
-        m_player->pause();
-        m_player->setPlaybackRate(previousRate > 0.0 ? previousRate : 1.0);
-        m_player->setPosition(0);
-
-        if (temporarilyMuted && m_audio) {
-            m_audio->setMuted(false);
-            const bool guardPrev = m_volumeChangeFromSettings;
-            m_volumeChangeFromSettings = true;
-            m_audio->setVolume(m_userVolumeRatio);
-            m_volumeChangeFromSettings = guardPrev;
-        }
-
-        m_lastWarmupCompletionMs = QDateTime::currentMSecsSinceEpoch();
-        m_keepAlivePulseActive = false;
-        startWarmupKeepAlive();
-    });
 }
 
 QRectF ResizableVideoItem::boundingRect() const {
@@ -2678,8 +2495,6 @@ void ResizableVideoItem::restartPrimingSequence() {
     }
 
     m_firstFramePrimed = false;
-    m_warmupActive = false;
-    m_warmupFrameCaptured = false;
     m_holdLastFrameAtEnd = false;
     m_lastFrameImage = QImage();
     m_lastFrameDisplaySize = QSizeF();
@@ -2692,7 +2507,6 @@ void ResizableVideoItem::restartPrimingSequence() {
     }
     m_controlsLockedUntilReady = true;
     m_controlsDidInitialFade = false;
-    startWarmup();
 }
 
 void ResizableVideoItem::teardownPlayback() {
@@ -2701,10 +2515,6 @@ void ResizableVideoItem::teardownPlayback() {
     }
     m_playbackTornDown = true;
     cancelSettingsRepeatSession();
-    stopWarmupKeepAlive();
-
-    m_warmupActive = false;
-    m_warmupFrameCaptured = false;
 
     if (m_progressTimer) {
         m_progressTimer->stop();
