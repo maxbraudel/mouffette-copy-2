@@ -19,6 +19,13 @@ Item {
     signal primaryPressed(string mediaId, bool additive)
     signal primaryDoubleClicked(string mediaId, bool additive)
 
+    // Called by the parent delegate's TapHandler (which sits at a higher level
+    // in the scene graph and receives events before child MouseAreas).
+    function fireDoubleClick(additive) {
+        if (root.doubleClickEnabled)
+            root.primaryDoubleClicked(root.mediaId, !!additive)
+    }
+
     x: mediaX
     y: mediaY
     width: mediaWidth
@@ -34,6 +41,10 @@ Item {
         anchors.fill: parent
     }
 
+    // Single-press + double-click: both handled in the same MouseArea.
+    // onDoubleClicked maps to WM_LBUTTONDBLCLK on Windows (the most reliable
+    // path) and to QEvent::MouseButtonDblClick on all platforms — far more
+    // robust than TapHandler when onPressed accepts the event exclusively.
     MouseArea {
         anchors.fill: parent
         enabled: root.pointerEnabled

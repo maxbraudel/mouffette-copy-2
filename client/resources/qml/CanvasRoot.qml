@@ -671,6 +671,39 @@ Rectangle {
 
                     // DragHandler inside contentRoot: translation is in scene coords (contentRoot
                     // has scale:viewScale, so 1 unit here = 1 scene unit, not viewport pixel).
+
+                    // Double-click handler: lives at the mediaDelegate PointerHandler level
+                    // because parent PointerHandlers receive events BEFORE child MouseAreas
+                    // in Qt Quick 6's event delivery order. tapCount===2 is the reliable
+                    // cross-platform double-click detection path for PointerHandlers.
+                    TapHandler {
+                        id: mediaDoubleClick
+                        target: null
+                        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                        acceptedButtons: Qt.LeftButton
+                        // ApprovesTakeOverByAnything: TapHandler will not steal grabs from
+                        // DragHandler/PointHandler, but will immediately yield its grab
+                        // to the DragHandler once the drag threshold is exceeded. This
+                        // prevents double-click detection from blocking media drag.
+                        grabPermissions: PointerHandler.ApprovesTakeOverByAnything
+                        enabled: !!mediaDelegate.media
+                                 && !mediaDelegate.overlayHovered
+                                 && !(mediaContentLoader.item && mediaContentLoader.item.editing === true)
+                                 && selectionChrome.hoveredHandleId === ""
+
+                        onTapped: function(eventPoint) {
+                            console.log("[DBG TapHandler] onTapped tapCount=", tapCount,
+                                        "mediaId=", mediaDelegate.currentMediaId)
+                            if (tapCount !== 2)
+                                return
+                            var item = mediaContentLoader.item
+                            if (!item || typeof item.fireDoubleClick !== "function")
+                                return
+                            var additive = (eventPoint.modifiers & Qt.ShiftModifier) !== 0
+                            item.fireDoubleClick(additive)
+                        }
+                    }
+
                     PointHandler {
                         id: mediaPressSelect
                         target: null

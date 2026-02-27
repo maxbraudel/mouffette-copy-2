@@ -1686,7 +1686,11 @@ void QuickCanvasController::pushMediaModelOnly() {
                 mediaEntry.insert(QStringLiteral("textOutlineColor"), textMedia->textBorderColor().name(QColor::HexArgb));
                 mediaEntry.insert(QStringLiteral("textHighlightEnabled"), textMedia->highlightEnabled());
                 mediaEntry.insert(QStringLiteral("textHighlightColor"), textMedia->highlightColor().name(QColor::HexArgb));
-                mediaEntry.insert(QStringLiteral("textEditable"), textMedia->isEditing());
+                // All text media items are editable in the Quick Canvas.
+                // isEditing() reflects the legacy widget-canvas inline editor state,
+                // which is always false in the Quick Canvas path. QML handles editing
+                // entirely via TextItem.editing + textCommitRequested signal.
+                mediaEntry.insert(QStringLiteral("textEditable"), true);
             } else {
                 mediaEntry.insert(QStringLiteral("textContent"), QString());
                 mediaEntry.insert(QStringLiteral("textEditable"), false);

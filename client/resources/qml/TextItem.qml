@@ -26,6 +26,8 @@ BaseMediaItem {
     doubleClickEnabled: true
 
     onPrimaryDoubleClicked: function(mediaId, additive) {
+        if (!root.textEditable)
+            return
         root.selectRequested(mediaId, additive)
         root.preEditText = root.textContent || ""
         root.editing = true
@@ -112,28 +114,13 @@ BaseMediaItem {
         font.underline: root.fontUnderline
         selectByMouse: true
 
-        Keys.onReturnPressed: function(event) {
-            root.textCommitRequested(root.mediaId, textEditor.text)
-            root.editing = false
-            event.accepted = true
-        }
-
-        Keys.onEnterPressed: function(event) {
-            root.textCommitRequested(root.mediaId, textEditor.text)
-            root.editing = false
-            event.accepted = true
-        }
-
-        Keys.onEscapePressed: function(event) {
-            textEditor.text = root.preEditText
-            root.editing = false
-            event.accepted = true
-        }
-
-        onActiveFocusChanged: {
-            if (!activeFocus && root.editing) {
+        Keys.onPressed: function(event) {
+            var isEnter = (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+            var hasCommitModifier = (event.modifiers & Qt.ControlModifier) || (event.modifiers & Qt.MetaModifier)
+            if (isEnter && hasCommitModifier) {
                 root.textCommitRequested(root.mediaId, textEditor.text)
                 root.editing = false
+                event.accepted = true
             }
         }
     }

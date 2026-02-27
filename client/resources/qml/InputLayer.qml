@@ -130,8 +130,6 @@ Item {
         function describeMoveBlock(media, contentItem, dragActive, mediaId) {
             if (!media)
                 return "no-media"
-            if (media.textEditable)
-                return "media-text-editable"
             if (contentItem && contentItem.editing === true)
                 return "content-editing"
             if (inputLayer.textToolActive)
