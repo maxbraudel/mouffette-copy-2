@@ -196,9 +196,34 @@ Item {
         hoveredHandleId = ""
     }
 
+    function resizeCursorForHandle(handleId) {
+        switch (handleId) {
+        case "top-left":
+        case "bottom-right":
+            return Qt.SizeFDiagCursor
+        case "top-right":
+        case "bottom-left":
+            return Qt.SizeBDiagCursor
+        case "top-mid":
+        case "bottom-mid":
+            return Qt.SizeVerCursor
+        case "left-mid":
+        case "right-mid":
+            return Qt.SizeHorCursor
+        default:
+            return Qt.ArrowCursor
+        }
+    }
+
+    readonly property string effectiveResizeHandleId: interacting
+                                                  ? activeResizeHandleId
+                                                  : hoveredHandleId
+    readonly property int effectiveResizeCursorShape: resizeCursorForHandle(effectiveResizeHandleId)
+
     HoverHandler {
         id: globalHover
         acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+        cursorShape: root.effectiveResizeCursorShape
 
         onHoveredChanged: {
             if (!hovered)
@@ -217,6 +242,7 @@ Item {
         target: null
         acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
         acceptedButtons: Qt.LeftButton
+        cursorShape: root.effectiveResizeCursorShape
         grabPermissions: PointerHandler.CanTakeOverFromAnything
         enabled: globalResizeDrag.active
                  || (root.hoveredHandleId !== ""
