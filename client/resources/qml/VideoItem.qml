@@ -14,7 +14,7 @@ BaseMediaItem {
     property bool videoHasPosterFrame: false
     property bool videoFirstFramePrimed: false
     readonly property bool showFallbackOverlay: !hasLiveFrame
-    readonly property bool hasLiveFrame: videoHasRenderedFrame || localFrameSeen
+    readonly property bool hasLiveFrame: videoHasRenderedFrame || videoFirstFramePrimed || localFrameSeen
     property bool localFrameSeen: false
 
     function fallbackStatusText() {
@@ -149,7 +149,7 @@ BaseMediaItem {
         target: !root.boundViaSinkPath ? root.cppMediaPlayer : null
         ignoreUnknownSignals: true
         function onPositionChanged(position) {
-            if (position > 0)
+            if (position >= 0)
                 root.localFrameSeen = true
         }
         // Reset when the user stops/rewinds so the overlay re-appears if needed
@@ -157,6 +157,14 @@ BaseMediaItem {
             // 0 = StoppedState – re-arm so overlay shows on next play start
             if (state === 0)
                 root.localFrameSeen = false
+        }
+    }
+
+    Connections {
+        target: (!root.boundViaSinkPath && videoOutput && videoOutput.videoSink) ? videoOutput.videoSink : null
+        ignoreUnknownSignals: true
+        function onVideoFrameChanged(frame) {
+            root.localFrameSeen = true
         }
     }
 

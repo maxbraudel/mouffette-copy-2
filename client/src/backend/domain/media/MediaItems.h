@@ -364,6 +364,7 @@ protected:
     void onInteractiveGeometryChanged() override;
 
 private:
+    void requestFirstFramePrime();
     void maybeAdoptFrameSize(const QVideoFrame& f);
     QSizeF computeFrameDisplaySize(const QVideoFrame& frame) const;
     QImage applyViewportCrop(const QImage& image, const QVideoFrame& frame) const;
@@ -404,6 +405,8 @@ private:
     qint64 m_durationMs = 0;
     qint64 m_positionMs = 0;
     bool m_firstFramePrimed = false;
+    bool m_firstFramePrimeRequested = false;
+    bool m_primingNeedsUnmute = false;
     bool m_savedMuted = false;
     bool m_effectiveMuted = false;
     bool m_pendingMuteTarget = false;

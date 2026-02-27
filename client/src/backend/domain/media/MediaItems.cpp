@@ -1205,8 +1205,23 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
             ++m_framesSkipped;
             return;
         }
+
+        // Priming path: if playback was started only to wake the decoder,
+        // force it back to paused immediately on the first frame callback
+        // so imported videos never appear to auto-play.
+        if (m_firstFramePrimeRequested
+            && !m_expectedPlayingState
+            && m_player) {
+            m_player->pause();
+            m_player->setPosition(0);
+            m_expectedPlayingState = false;
+            updatePlayPauseIconState(false);
+        }
+
         if (!m_holdLastFrameAtEnd && f.isValid()) {
-            if (!isVisibleInAnyView()) {
+            const bool mustProcessFrame = !m_firstFramePrimed || m_seeking
+                || (m_player && m_player->playbackState() != QMediaPlayer::PlayingState);
+            if (!mustProcessFrame && !isVisibleInAnyView()) {
                 ++m_framesSkipped;
                 logFrameStats();
                 return;
@@ -1222,11 +1237,30 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
                                << "pixelFormat=" << f.pixelFormat()
                                << "surface=" << f.surfaceFormat().pixelFormat();
                 }
+                // Even when conversion fails we must still stop a priming-triggered play; otherwise
+                // the player runs indefinitely because m_firstFramePrimed is never set.
+                if (!m_firstFramePrimed && m_firstFramePrimeRequested) {
+                    m_firstFramePrimed = true;
+                    m_firstFramePrimeRequested = false;
+                    m_controlsLockedUntilReady = false;
+                    m_controlsDidInitialFade = false;
+                    if (!m_expectedPlayingState && m_player) {
+                        m_player->pause();
+                    }
+                    if (m_primingNeedsUnmute && m_audio) {
+                        m_audio->setMuted(false);
+                        m_primingNeedsUnmute = false;
+                    }
+                }
             } else {
                 m_conversionFailures = 0;
                 maybeAdoptFrameSize(f);
                 converted = applyViewportCrop(converted, f);
                 m_lastFrameImage = std::move(converted);
+                if (m_posterImageSet) {
+                    m_posterImage = QImage();
+                    m_posterImageSet = false;
+                }
                 const qint64 ts = frameTimestampMs(f);
                 if (ts >= 0) {
                     m_lastFrameTimestampMs = ts;
@@ -1236,8 +1270,22 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
                 ++m_framesProcessed;
                 if (!m_firstFramePrimed) {
                     m_firstFramePrimed = true;
+                    m_firstFramePrimeRequested = false;
                     m_controlsLockedUntilReady = false;
                     m_controlsDidInitialFade = false;
+
+                    // If we started playback only for priming (user never pressed play),
+                    // pause immediately now that we have the first decoded frame.
+                    if (!m_expectedPlayingState && m_player) {
+                        m_player->pause();
+                        m_player->setPosition(0);
+                    }
+                    // Restore audio if we muted it for the priming decode pass.
+                    if (m_primingNeedsUnmute && m_audio) {
+                        m_audio->setMuted(false);
+                        m_primingNeedsUnmute = false;
+                    }
+
                     if (isSelected()) {
                         setControlsVisible(true);
                         updateControlsLayout();
@@ -1312,6 +1360,10 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
                         adoptBaseSize(sz);
                     }
                 }
+            }
+
+            if (!m_firstFramePrimed) {
+                requestFirstFramePrime();
             }
         }
         if (s == QMediaPlayer::EndOfMedia) {
@@ -2501,12 +2553,61 @@ void ResizableVideoItem::restartPrimingSequence() {
     m_lastFrameTimestampMs = -1;
     m_smoothProgressRatio = 0.0;
     m_positionMs = 0;
+    m_firstFramePrimeRequested = false;
+    if (m_primingNeedsUnmute && m_audio) {
+        m_audio->setMuted(false);
+        m_primingNeedsUnmute = false;
+    }
     cancelSettingsRepeatSession();
     if (m_progressTimer) {
         m_progressTimer->stop();
     }
     m_controlsLockedUntilReady = true;
     m_controlsDidInitialFade = false;
+
+    requestFirstFramePrime();
+}
+
+void ResizableVideoItem::requestFirstFramePrime() {
+    if (!m_player || m_firstFramePrimed || m_firstFramePrimeRequested) {
+        return;
+    }
+
+    const QMediaPlayer::MediaStatus status = m_player->mediaStatus();
+    if (status != QMediaPlayer::LoadedMedia
+        && status != QMediaPlayer::BufferedMedia
+        && status != QMediaPlayer::EndOfMedia) {
+        return;
+    }
+
+    m_firstFramePrimeRequested = true;
+    m_holdLastFrameAtEnd = false;
+    m_expectedPlayingState = false;
+
+    // On Windows WMF (and most backends), setPosition() on a StoppedState player
+    // never triggers frame decoding. The decoder only initialises when the player
+    // enters PlayingState. We therefore briefly call play() here and auto-pause
+    // in videoFrameChanged the moment the first frame arrives.
+    // Mute audio first so the brief decode pass is completely silent.
+    if (m_audio && !m_effectiveMuted) {
+        m_audio->setMuted(true);
+        m_primingNeedsUnmute = true;
+    }
+    m_player->setPosition(0);
+    m_player->play();
+
+    // Fallback safety-net: if the backend delays or misses the first frame callback,
+    // ensure priming playback cannot continue visibly.
+    QTimer::singleShot(120, m_player, [this]() {
+        if (!m_player) {
+            return;
+        }
+        if (m_firstFramePrimeRequested && !m_expectedPlayingState) {
+            m_player->pause();
+            m_player->setPosition(0);
+            updatePlayPauseIconState(false);
+        }
+    });
 }
 
 void ResizableVideoItem::teardownPlayback() {
