@@ -513,18 +513,6 @@ Rectangle {
             MediaLayer {
                 id: mediaLayer
                 anchors.fill: parent
-                mediaModel: root.mediaModel
-                contentItem: viewport.contentRootItem
-                sourceUrlResolver: root.mediaSourceUrl
-                onMediaSelectRequested: function(mediaId, additive) {
-                    root.mediaSelectRequested(mediaId, additive)
-                }
-                onMediaMoveEnded: function(mediaId, sceneX, sceneY) {
-                    root.mediaMoveEnded(mediaId, sceneX, sceneY)
-                }
-                onTextCommitRequested: function(mediaId, text) {
-                    root.textCommitRequested(mediaId, text)
-                }
 
                 // Each media item is a native QML Item with its own local x/y/scale.
                 // A DragHandler lives here (inside contentRoot, which has scale:viewScale)
