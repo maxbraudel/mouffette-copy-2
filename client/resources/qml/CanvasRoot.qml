@@ -69,9 +69,10 @@ Rectangle {
     property real viewScale: 1.0
     property real panX: 0.0
     property real panY: 0.0
-    property real minScale: 0.25
-    property real maxScale: 4.0
+    property real minScale: 0.2
+    property real maxScale: 10.0
     property real wheelZoomBase: 1.0015
+    property real wheelZoomSensitivity: 5.0
     // Transient live-resize overlay state (avoids full model mutation per pointer tick)
     property bool liveResizeActive: false
     property string liveResizeMediaId: ""
@@ -1152,6 +1153,62 @@ Rectangle {
                 }
             }
 
+            DragHandler {
+                id: middlePanDrag
+                // Middle mouse always pans the camera (including over media).
+                enabled: root.canStartCanvasPan(middlePanDrag.active)
+                target: null
+                acceptedDevices: PointerDevice.Mouse
+                acceptedButtons: Qt.MiddleButton
+                dragThreshold: 0
+                grabPermissions: PointerHandler.TakeOverForbidden
+                cursorShape: active ? Qt.ClosedHandCursor : Qt.ArrowCursor
+                property real startPanX: 0.0
+                property real startPanY: 0.0
+                property bool panSessionActive: false
+
+                onActiveChanged: {
+                    if (active) {
+                        var panGranted = false
+                        if (inputLayer.useInputCoordinator) {
+                            panGranted = inputLayer.inputCoordinator.beginMode("pan", "canvas")
+                        } else {
+                            panGranted = inputLayer.inputCoordinator.beginMode("pan", "canvas")
+                        }
+                        if (!panGranted) {
+                            panSessionActive = false
+                            return
+                        }
+                        panSessionActive = true
+                        startPanX = root.panX
+                        startPanY = root.panY
+                    } else {
+                        panSessionActive = false
+                        if (inputLayer.useInputCoordinator) {
+                            inputLayer.inputCoordinator.endPan()
+                        } else {
+                            inputLayer.inputCoordinator.endMode("pan", "canvas")
+                        }
+                    }
+                }
+
+                onTranslationChanged: {
+                    if (!panSessionActive)
+                        return
+                    root.panX = startPanX + translation.x
+                    root.panY = startPanY + translation.y
+                }
+
+                onCanceled: {
+                    panSessionActive = false
+                    if (inputLayer.useInputCoordinator) {
+                        inputLayer.inputCoordinator.endPan()
+                    } else {
+                        inputLayer.inputCoordinator.endMode("pan", "canvas")
+                    }
+                }
+            }
+
             PinchHandler {
                 id: pinchZoom
                 target: null
@@ -1204,21 +1261,10 @@ Rectangle {
                         return
                     }
 
-                    if (root.isZoomModifier(event.modifiers)) {
-                        var dy = root.wheelDeltaY(event)
-                        if (dy !== 0.0) {
-                            var factor = Math.pow(root.wheelZoomBase, dy)
-                            root.applyZoomAt(event.x, event.y, factor)
-                        }
-                        event.accepted = true
-                        return
-                    }
-
-                    var dx = root.wheelDeltaX(event)
-                    var dyPan = root.wheelDeltaY(event)
-                    if (dx !== 0.0 || dyPan !== 0.0) {
-                        root.panX += dx
-                        root.panY += dyPan
+                    var dy = root.wheelDeltaY(event)
+                    if (dy !== 0.0) {
+                        var factor = Math.pow(root.wheelZoomBase, dy * root.wheelZoomSensitivity)
+                        root.applyZoomAt(event.x, event.y, factor)
                     }
 
                     event.accepted = true
