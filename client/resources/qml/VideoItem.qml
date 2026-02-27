@@ -30,6 +30,19 @@ BaseMediaItem {
     }
 
     function bindPlayerToOutput() {
+        if (!videoOutput)
+            return
+
+        if (boundViaSinkPath && cppVideoSink && videoOutput.videoSink === cppVideoSink)
+            return
+
+        if (!boundViaSinkPath && boundMediaPlayer === cppMediaPlayer && cppMediaPlayer && ("videoOutput" in cppMediaPlayer)) {
+            try {
+                if (cppMediaPlayer.videoOutput === videoOutput)
+                    return
+            } catch (e) { }
+        }
+
         // Clear any old binding
         if (boundViaSinkPath) {
             try { videoOutput.videoSink = null } catch (e) { }
@@ -38,9 +51,6 @@ BaseMediaItem {
         }
         boundMediaPlayer = null
         boundViaSinkPath = false
-
-        if (!videoOutput)
-            return
 
         // Primary path: assign C++ QVideoSink directly to the VideoOutput so it
         // renders every frame the C++ QMediaPlayer delivers to m_sink.  Read-only
@@ -101,12 +111,10 @@ BaseMediaItem {
     }
 
     onCppMediaPlayerChanged: {
-        root.localFrameSeen = false
         bindPlayerToOutput()
     }
 
     onCppVideoSinkChanged: {
-        root.localFrameSeen = false
         bindPlayerToOutput()
     }
 

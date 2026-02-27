@@ -40,6 +40,11 @@ Rectangle {
     property var screensModel: []
     property var uiZonesModel: []
     property var mediaModel: []
+    // Stable C++ QAbstractListModel — the Repeater binds here so delegates are
+    // NEVER destroyed on move/resize commits.  Only dataChanged fires per row.
+    // The legacy mediaModel JS-array above is kept for all utility consumers
+    // (hit-testing, selection chrome, input layer, etc.).
+    property var mediaListModel: null
     property var selectionChromeModel: []
     property var snapGuidesModel: []
     // Live drag tracking — updated every frame during a move drag, purely in QML
@@ -523,7 +528,10 @@ Rectangle {
                 // so DragHandler translation is already in scene coordinates — no C++ per frame.
                 Repeater {
                     id: mediaRepeater
-                    model: root.mediaModel
+                    // Use the stable C++ QAbstractListModel so that move/resize
+                    // commits issue dataChanged per row rather than a full
+                    // model replacement that would destroy every delegate.
+                    model: root.mediaListModel
                     delegate: Item {
                     id: mediaDelegate
                     property var media: modelData

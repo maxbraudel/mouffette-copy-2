@@ -26,6 +26,7 @@ class PointerSession;
 class SelectionStore;
 class ModelPublisher;
 class SnapStore;
+class MediaListModel;
 
 class QuickCanvasController : public QObject {
     Q_OBJECT
@@ -153,6 +154,7 @@ private:
     QQuickWidget* m_quickWidget = nullptr;
     CanvasSceneStore* m_sceneStore = nullptr;
     QuickCanvasViewAdapter* m_viewAdapter = nullptr;
+    MediaListModel*         m_mediaListModel = nullptr;
     PointerSession* m_pointerSession = nullptr;
     SelectionStore* m_selectionStore = nullptr;
     ModelPublisher* m_modelPublisher = nullptr;

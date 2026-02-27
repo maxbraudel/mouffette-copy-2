@@ -5,6 +5,7 @@
 #include "frontend/rendering/canvas/ModelPublisher.h"
 #include "frontend/rendering/canvas/PointerSession.h"
 #include "frontend/rendering/canvas/QuickCanvasViewAdapter.h"
+#include "frontend/rendering/canvas/MediaListModel.h"
 #include "frontend/rendering/canvas/SelectionStore.h"
 #include "frontend/rendering/canvas/SnapEngine.h"
 #include "frontend/rendering/canvas/SnapStore.h"
@@ -165,6 +166,7 @@ QuickCanvasController::QuickCanvasController(QObject* parent)
     m_modelPublisher = new ModelPublisher();
     m_snapStore = new SnapStore();
     m_dragSnapSession = new QuickDragSnapSession();
+    m_mediaListModel = new MediaListModel(this);
 
     m_mediaSyncTimer = new QTimer(this);
     m_mediaSyncTimer->setSingleShot(true);
@@ -277,6 +279,7 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
     }
 
     m_viewAdapter = new QuickCanvasViewAdapter(m_quickWidget, this);
+    m_viewAdapter->initMediaListModel(m_mediaListModel);
 
     setScreenCount(0);
     setShellActive(false);
@@ -1536,8 +1539,29 @@ void QuickCanvasController::pushMediaModelOnly() {
     QVariantList mediaModel;
     if (m_mediaScene) {
         const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
+        QVector<ResizableMediaBase*> orderedMedia;
+        orderedMedia.reserve(sceneItems.size());
         for (QGraphicsItem* graphicsItem : sceneItems) {
             auto* media = dynamic_cast<ResizableMediaBase*>(graphicsItem);
+            if (!media) {
+                continue;
+            }
+            orderedMedia.push_back(media);
+        }
+
+        std::sort(orderedMedia.begin(), orderedMedia.end(), [](const ResizableMediaBase* lhs, const ResizableMediaBase* rhs) {
+            if (!lhs || !rhs) {
+                return lhs < rhs;
+            }
+            const QString lhsId = lhs->mediaId();
+            const QString rhsId = rhs->mediaId();
+            if (lhsId == rhsId) {
+                return lhs < rhs;
+            }
+            return lhsId < rhsId;
+        });
+
+        for (ResizableMediaBase* media : orderedMedia) {
             if (!media) {
                 continue;
             }
