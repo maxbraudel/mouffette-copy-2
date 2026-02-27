@@ -98,6 +98,9 @@ Rectangle {
                                           ? inputLayer.inputCoordinator.ownerId
                                           : ""
     property int activeMediaDragCount: 0
+    // True while any text media item is in text-edit mode. Used to disable canvas
+    // pan so parent DragHandlers don't interfere with TextEdit cursor placement.
+    property bool anyMediaEditing: false
     // Video state dictionary: keys are mediaId strings, values are state maps.
     // Published every 50 ms by QuickCanvasController for ALL video items
     // (not just the selected one), so overlays remain live after deselection.
@@ -966,6 +969,12 @@ Rectangle {
                         function onTextCommitRequested(mediaId, text) {
                             root.textCommitRequested(mediaId, text)
                         }
+                        // Track whether any text item is currently in edit mode so
+                        // canvas pan handlers can be disabled while editing.
+                        function onEditingChanged() {
+                            root.anyMediaEditing = !!(mediaContentLoader.item
+                                                     && mediaContentLoader.item.editing === true)
+                        }
                     }
 
                     }
@@ -1124,7 +1133,9 @@ Rectangle {
             DragHandler {
                 id: panDrag
                 // Background pan must never preempt media press-selection.
-                enabled: root.canStartCanvasPan(panDrag.active)
+                // Also disabled while any text item is in edit mode so the passive
+                // grab from this DragHandler doesn't block TextEdit cursor placement.
+                enabled: !root.anyMediaEditing && root.canStartCanvasPan(panDrag.active)
                 target: null
                 acceptedDevices: PointerDevice.Mouse
                 acceptedButtons: Qt.LeftButton
@@ -1180,7 +1191,7 @@ Rectangle {
             DragHandler {
                 id: middlePanDrag
                 // Middle mouse always pans the camera (including over media).
-                enabled: root.canStartCanvasPan(middlePanDrag.active)
+                enabled: !root.anyMediaEditing && root.canStartCanvasPan(middlePanDrag.active)
                 target: null
                 acceptedDevices: PointerDevice.Mouse
                 acceptedButtons: Qt.MiddleButton

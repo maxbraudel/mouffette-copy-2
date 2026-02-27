@@ -96,40 +96,82 @@ BaseMediaItem {
         renderType: Text.QtRendering
     }
 
-    TextEdit {
-        id: textEditor
+    Item {
+        id: editViewport
         visible: root.editing
         anchors.fill: parent
         anchors.margins: 4
-        text: root.preEditText
-        color: root.textColor
-        wrapMode: root.fitToTextEnabled ? TextEdit.NoWrap : TextEdit.Wrap
-        horizontalAlignment: root.horizontalAlignment === "left"
-            ? Text.AlignLeft
-            : (root.horizontalAlignment === "right" ? Text.AlignRight : Text.AlignHCenter)
-        font.family: root.fontFamily
-        font.pixelSize: Math.max(1, root.fontPixelSize)
-        font.weight: root.fontWeight
-        font.italic: root.fontItalic
-        font.underline: root.fontUnderline
-        selectByMouse: true
+        clip: true
 
-        Keys.onPressed: function(event) {
-            var isEnter = (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
-            var hasCommitModifier = (event.modifiers & Qt.ControlModifier) || (event.modifiers & Qt.MetaModifier)
-            if (isEnter && hasCommitModifier) {
-                root.textCommitRequested(root.mediaId, textEditor.text)
-                root.editing = false
-                event.accepted = true
+        TextEdit {
+            id: textEditor
+            // anchors.fill gives TextEdit the full viewport hit area.
+            // With only width+y, height = contentHeight only, so click-to-place-cursor
+            // fails in empty space and PointerHandlers can steal grabs.
+            anchors.fill: parent
+            // Vertical alignment via topPadding. contentHeight = raw text height
+            // (excludes padding), so there is no binding loop.
+            topPadding: {
+                var extra = Math.max(0, height - contentHeight)
+                if (root.verticalAlignment === "top")    return 0
+                if (root.verticalAlignment === "bottom") return extra
+                return Math.floor(extra * 0.5)
+            }
+            text: root.preEditText
+            color: root.textColor
+            wrapMode: root.fitToTextEnabled ? TextEdit.NoWrap : TextEdit.Wrap
+            focus: root.editing
+            activeFocusOnPress: true
+            cursorVisible: root.editing
+            // selectByMouse is unreliable when TextEdit sits inside a scaled viewport
+            // because Qt6 passes raw screen coordinates to the internal selection handler
+            // instead of item-local coordinates. We use an explicit MouseArea below.
+            selectByMouse: false
+            horizontalAlignment: root.horizontalAlignment === "left"
+                ? Text.AlignLeft
+                : (root.horizontalAlignment === "right" ? Text.AlignRight : Text.AlignHCenter)
+            font.family: root.fontFamily
+            font.pixelSize: Math.max(1, root.fontPixelSize)
+            font.weight: root.fontWeight
+            font.italic: root.fontItalic
+            font.underline: root.fontUnderline
+
+            Keys.onPressed: function(event) {
+                var isEnter = (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                var hasCommitModifier = (event.modifiers & Qt.ControlModifier) || (event.modifiers & Qt.MetaModifier)
+                if (isEnter && hasCommitModifier) {
+                    root.textCommitRequested(root.mediaId, textEditor.text)
+                    root.editing = false
+                    event.accepted = true
+                }
+            }
+        }
+
+        // Explicit mouse handler for cursor placement and drag selection.
+        // Required because TextEdit.selectByMouse is unreliable when the item lives
+        // inside a scaled/transformed viewport (Qt6 coordinate mapping issue).
+        MouseArea {
+            id: textEditMouseArea
+            anchors.fill: parent
+            acceptedButtons: Qt.LeftButton
+            // Track the anchor position when a drag-select begins.
+            property int pressCharPos: 0
+
+            onPressed: function(mouse) {
+                textEditor.forceActiveFocus()
+                var pos = textEditor.positionAt(mouse.x, mouse.y)
+                pressCharPos = pos
+                textEditor.cursorPosition = pos
+                mouse.accepted = true
+            }
+
+            onPositionChanged: function(mouse) {
+                if (pressed) {
+                    var pos = textEditor.positionAt(mouse.x, mouse.y)
+                    textEditor.select(pressCharPos, pos)
+                }
             }
         }
     }
 
-    Rectangle {
-        anchors.fill: parent
-        color: "transparent"
-        border.width: root.editing ? 1 : 0
-        border.color: "#66FFFFFF"
-        visible: root.editing
-    }
 }
