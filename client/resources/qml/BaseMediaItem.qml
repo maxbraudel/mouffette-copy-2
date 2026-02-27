@@ -41,10 +41,10 @@ Item {
         anchors.fill: parent
     }
 
-    // Single-press + double-click: both handled in the same MouseArea.
-    // onDoubleClicked maps to WM_LBUTTONDBLCLK on Windows (the most reliable
-    // path) and to QEvent::MouseButtonDblClick on all platforms — far more
-    // robust than TapHandler when onPressed accepts the event exclusively.
+    // Single-press handling for selection/primary press.
+    // Double-click is handled at delegate level (CanvasRoot mediaDoubleClick)
+    // and forwarded via fireDoubleClick() so it can coexist with parent
+    // PointerHandlers used for selection/drag arbitration.
     MouseArea {
         anchors.fill: parent
         enabled: root.pointerEnabled
@@ -54,14 +54,6 @@ Item {
         onPressed: function(mouse) {
             var additive = (mouse.modifiers & Qt.ShiftModifier) !== 0
             root.primaryPressed(root.mediaId, additive)
-            mouse.accepted = true
-        }
-
-        onDoubleClicked: function(mouse) {
-            if (!root.doubleClickEnabled)
-                return
-            var additive = (mouse.modifiers & Qt.ShiftModifier) !== 0
-            root.primaryDoubleClicked(root.mediaId, additive)
             mouse.accepted = true
         }
     }

@@ -131,8 +131,6 @@ Rectangle {
         if (!inputLayer || !inputLayer.useInputCoordinator) {
             if (!media)
                 return false
-            if (media.textEditable)
-                return false
             if (contentItem && contentItem.editing === true)
                 return false
             if (root.textToolActive)
@@ -692,8 +690,6 @@ Rectangle {
                                  && selectionChrome.hoveredHandleId === ""
 
                         onTapped: function(eventPoint) {
-                            console.log("[DBG TapHandler] onTapped tapCount=", tapCount,
-                                        "mediaId=", mediaDelegate.currentMediaId)
                             if (tapCount !== 2)
                                 return
                             var item = mediaContentLoader.item
