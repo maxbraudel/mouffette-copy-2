@@ -504,17 +504,7 @@ Rectangle {
                     screenId:    modelData.screenId !== undefined ? modelData.screenId : -1
                     pixelWidth:  modelData.pixelWidth  || 0
                     pixelHeight: modelData.pixelHeight || 0
-                }
-            }
-
-            Repeater {
-                model: root.uiZonesModel
-                delegate: UiZone {
-                    zoneX: modelData.x
-                    zoneY: modelData.y
-                    zoneWidth: modelData.width
-                    zoneHeight: modelData.height
-                    fillColor: modelData.fillColor
+                    uiZonesModel: root.uiZonesModel
                 }
             }
 
