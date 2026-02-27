@@ -41,8 +41,11 @@ Item {
     // --- Layout constants ---
     readonly property real itemSpacing:   4
     readonly property real btnSize:       36
-    readonly property real sliderMinWidth: 60
-    readonly property real progressHeight: 14
+    readonly property real sliderMinWidth: 120
+    readonly property real progressHeight: btnSize
+    readonly property real chromeRadius: 6
+    readonly property color chromeBackground: "#F2323232"
+    readonly property color chromeBorder: "#FF646464"
 
     // panelWidth/panelHeight exposed so CanvasRoot can read them for centering.
     readonly property real panelWidth:  implicitWidth
@@ -93,29 +96,53 @@ Item {
         // Volume slider: minimum width, expands to fill remaining space.
         // 'progress' (not 'value') is the binding-safe input property — see OverlaySlider.
         // Live volume update on every drag frame gives immediate audio feedback.
-        OverlaySlider {
-            id: volumeSlider
-            progress: root.isMuted ? 0.0 : root.volume
+        Rectangle {
             Layout.fillWidth: true
             Layout.minimumWidth: root.sliderMinWidth
             Layout.preferredHeight: root.btnSize
-            onSeeked:    function(r) { root.volumeChangeRequested(root.mediaId, r) }
-            onDragEnded: function(r) { root.volumeChangeRequested(root.mediaId, r) }
+            radius: root.chromeRadius
+            color: root.chromeBackground
+            border.color: root.chromeBorder
+            border.width: 1
+
+            OverlaySlider {
+                id: volumeSlider
+                progress: root.isMuted ? 0.0 : root.volume
+                anchors.fill: parent
+                anchors.leftMargin: 8
+                anchors.rightMargin: 8
+                anchors.topMargin: 0
+                anchors.bottomMargin: 0
+                onSeeked:    function(r) { root.volumeChangeRequested(root.mediaId, r) }
+                onDragEnded: function(r) { root.volumeChangeRequested(root.mediaId, r) }
+            }
         }
     }
 
     // ---- Progress bar ----
     // Full container width. Uses the three-phase seek protocol so C++ can set
     // the drag-lock flag before any seek call reaches the player.
-    OverlaySlider {
-        id: progressSlider
-        progress: root.progress
+    Rectangle {
         x: 0
         y: root.btnSize + root.itemSpacing
         width: root.width
         height: root.progressHeight
-        onDragStarted: function(r) { root.seekBeginRequested(root.mediaId, r) }
-        onSeeked:      function(r) { root.seekUpdateRequested(root.mediaId, r) }
-        onDragEnded:   function(r) { root.seekEndRequested(root.mediaId, r) }
+        radius: root.chromeRadius
+        color: root.chromeBackground
+        border.color: root.chromeBorder
+        border.width: 1
+
+        OverlaySlider {
+            id: progressSlider
+            progress: root.progress
+            anchors.fill: parent
+            anchors.leftMargin: 8
+            anchors.rightMargin: 8
+            anchors.topMargin: 0
+            anchors.bottomMargin: 0
+            onDragStarted: function(r) { root.seekBeginRequested(root.mediaId, r) }
+            onSeeked:      function(r) { root.seekUpdateRequested(root.mediaId, r) }
+            onDragEnded:   function(r) { root.seekEndRequested(root.mediaId, r) }
+        }
     }
 }
