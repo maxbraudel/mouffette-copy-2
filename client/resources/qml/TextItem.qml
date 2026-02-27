@@ -23,6 +23,7 @@ BaseMediaItem {
     signal textCommitRequested(string mediaId, string text)
     signal textLiveUpdateRequested(string mediaId, string text)
 
+    clip: true
     pointerEnabled: !root.editing
     doubleClickEnabled: true
 
@@ -75,6 +76,7 @@ BaseMediaItem {
     Text {
         id: textNode
         visible: !root.editing
+        clip: true
         anchors.fill: parent
         anchors.margins: 4
         text: root.fontUppercase ? (root.textContent || "").toUpperCase() : root.textContent
