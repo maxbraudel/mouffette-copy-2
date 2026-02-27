@@ -1314,10 +1314,20 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                     }
 
                     if (bestErr < std::numeric_limits<qreal>::max()) {
+                        const qreal baseW = std::max<qreal>(1.0, static_cast<qreal>(baseSize.width()));
+                        const qreal baseH = std::max<qreal>(1.0, static_cast<qreal>(baseSize.height()));
+                        const qreal targetDx = std::abs(bestTarget.x() - fixedScenePoint.x());
+                        const qreal targetDy = std::abs(bestTarget.y() - fixedScenePoint.y());
+                        const qreal snappedTargetScale = std::max<qreal>(0.05,
+                            std::max(targetDx / baseW, targetDy / baseH));
+
                         m_uniformCornerSnapActive = true;
                         m_uniformCornerSnapHandle = static_cast<int>(activeHandle);
-                        m_uniformCornerSnapScale = proposedScale;
+                        // Lock AFTER snap acquisition: use the scale implied by the snapped corner target,
+                        // not the pre-snap pointer scale at zone entry.
+                        m_uniformCornerSnapScale = std::clamp<qreal>(snappedTargetScale, 0.05, 100.0);
                         m_uniformCornerSnappedPt = bestTarget;
+                        proposedScale = m_uniformCornerSnapScale;
                         m_uniformCornerSnapped = true;
                     }
                 }
