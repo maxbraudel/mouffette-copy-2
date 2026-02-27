@@ -24,8 +24,6 @@ Rectangle {
     clip: false
 
     color: primary ? "#B44A90E2" : "#B4505050"
-    border.color: primary ? "#4A90E2" : "#A0A0A0"
-    border.width: 1
 
     // ── Screen name label ──────────────────────────────────────────────────
     // Rendered at a fixed screen-pixel size regardless of canvas zoom,

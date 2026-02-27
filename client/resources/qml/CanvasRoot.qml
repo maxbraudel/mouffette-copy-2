@@ -4,6 +4,10 @@ import QtQuick.Window 2.15
 Rectangle {
     id: root
     color: "#10131a"
+    border.width: 1
+    border.color: "#2A2E33"
+    radius: 5
+    clip: true
 
     signal mediaSelectRequested(string mediaId, bool additive)
     signal mediaMoveStarted(string mediaId, real sceneX, real sceneY, bool snap)
