@@ -496,7 +496,8 @@ Rectangle {
                     primary: modelData.primary
                     // Label: zoom-invariant rendering, matches old widget canvas
                     viewScale:   root.viewScale
-                    screenIndex: index + 1
+                    screenIndex: modelData.displayIndex || (index + 1)
+                    screenId:    modelData.screenId !== undefined ? modelData.screenId : -1
                     pixelWidth:  modelData.pixelWidth  || 0
                     pixelHeight: modelData.pixelHeight || 0
                 }

@@ -2260,11 +2260,27 @@ void QuickCanvasController::pushStaticLayerModels() {
     QVariantList screensModel;
     QVariantList uiZonesModel;
 
-    for (const auto& screen : m_sceneStore->screens()) {
+    QList<ScreenInfo> orderedScreens = m_sceneStore->screens();
+    std::sort(orderedScreens.begin(), orderedScreens.end(), [](const ScreenInfo& a, const ScreenInfo& b) {
+        // Deterministic visual order for labels/delegates:
+        // top-to-bottom rows, then left-to-right within each row.
+        constexpr int kRowTolerancePx = 80;
+        if (std::abs(a.y - b.y) > kRowTolerancePx) {
+            return a.y < b.y;
+        }
+        if (a.x != b.x) {
+            return a.x < b.x;
+        }
+        return a.id < b.id;
+    });
+
+    int displayIndex = 1;
+    for (const auto& screen : orderedScreens) {
         const QRectF rect = m_sceneStore->sceneScreenRects().value(screen.id);
 
         QVariantMap screenEntry;
         screenEntry.insert(QStringLiteral("screenId"), screen.id);
+        screenEntry.insert(QStringLiteral("displayIndex"), displayIndex++);
         screenEntry.insert(QStringLiteral("x"), rect.x());
         screenEntry.insert(QStringLiteral("y"), rect.y());
         screenEntry.insert(QStringLiteral("width"), rect.width());

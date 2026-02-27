@@ -150,8 +150,62 @@ void TimerController::onCursorTimeout() {
     int screenId = -1;
     qreal normalizedX = -1.0;
     qreal normalizedY = -1.0;
-    QScreen* logicalScreen = nullptr;
+    const QList<ScreenInfo> localScreens = m_mainWindow->getLocalScreenInfo();
 
+    auto computeNormalizedCursorFromPhysical = [&](int physicalX, int physicalY) {
+        for (const ScreenInfo& screen : localScreens) {
+            if (screen.width <= 0 || screen.height <= 0) {
+                continue;
+            }
+
+            const QRect screenRect(screen.x, screen.y, screen.width, screen.height);
+            if (!screenRect.contains(physicalX, physicalY)) {
+                continue;
+            }
+
+            screenId = screen.id;
+            const int maxPhysicalX = std::max(1, screen.width - 1);
+            const int maxPhysicalY = std::max(1, screen.height - 1);
+            const int localPhysicalX = std::clamp(physicalX - screen.x, 0, maxPhysicalX);
+            const int localPhysicalY = std::clamp(physicalY - screen.y, 0, maxPhysicalY);
+            normalizedX = static_cast<qreal>(localPhysicalX) / static_cast<qreal>(maxPhysicalX);
+            normalizedY = static_cast<qreal>(localPhysicalY) / static_cast<qreal>(maxPhysicalY);
+            normalizedX = std::clamp(normalizedX, 0.0, 1.0);
+            normalizedY = std::clamp(normalizedY, 0.0, 1.0);
+            if (cursorDebugEnabled()) {
+                qDebug() << "[CursorDebug][Sender][PhysicalBasis]"
+                         << "physical=" << QPoint(physicalX, physicalY)
+                         << "screenId=" << screenId
+                         << "screenRect=" << screenRect
+                         << "norm=" << normalizedX << normalizedY;
+            }
+            return;
+        }
+    };
+
+#ifdef Q_OS_WIN
+    POINT pt{0,0};
+    const BOOL ok = GetCursorPos(&pt);
+    const int gx = ok ? static_cast<int>(pt.x) : QCursor::pos().x();
+    const int gy = ok ? static_cast<int>(pt.y) : QCursor::pos().y();
+    // IMPORTANT: on Windows we always derive screenId from physical ScreenInfo.id
+    // so cursor_update uses the same ID namespace as advertised screens payload.
+    computeNormalizedCursorFromPhysical(gx, gy);
+    if (gx != lastX || gy != lastY) {
+        lastX = gx; lastY = gy;
+        WebSocketClient* client = m_mainWindow->getWebSocketClient();
+        if (client && client->isConnected() && m_mainWindow->isWatched()) {
+            if (cursorDebugEnabled()) {
+                qDebug() << "[CursorDebug][Sender][Emit]"
+                         << "global=" << QPoint(gx, gy)
+                         << "screenId=" << screenId
+                         << "norm=" << normalizedX << normalizedY;
+            }
+            client->sendCursorUpdate(gx, gy, screenId, normalizedX, normalizedY);
+        }
+    }
+#else
+    QScreen* logicalScreen = nullptr;
     auto computeNormalizedCursorFromLogical = [&](const QPoint& logicalPos) {
         QScreen* screen = QGuiApplication::screenAt(logicalPos);
         if (!screen) {
@@ -189,61 +243,6 @@ void TimerController::onCursorTimeout() {
         }
     };
 
-    auto computeNormalizedCursorFromPhysical = [&](int physicalX, int physicalY) {
-        const QList<ScreenInfo> screens = m_mainWindow->getLocalScreenInfo();
-        for (const ScreenInfo& screen : screens) {
-            if (screen.width <= 0 || screen.height <= 0) {
-                continue;
-            }
-
-            const QRect screenRect(screen.x, screen.y, screen.width, screen.height);
-            if (!screenRect.contains(physicalX, physicalY)) {
-                continue;
-            }
-
-            screenId = screen.id;
-            const int maxPhysicalX = std::max(1, screen.width - 1);
-            const int maxPhysicalY = std::max(1, screen.height - 1);
-            const int localPhysicalX = std::clamp(physicalX - screen.x, 0, maxPhysicalX);
-            const int localPhysicalY = std::clamp(physicalY - screen.y, 0, maxPhysicalY);
-            normalizedX = static_cast<qreal>(localPhysicalX) / static_cast<qreal>(maxPhysicalX);
-            normalizedY = static_cast<qreal>(localPhysicalY) / static_cast<qreal>(maxPhysicalY);
-            normalizedX = std::clamp(normalizedX, 0.0, 1.0);
-            normalizedY = std::clamp(normalizedY, 0.0, 1.0);
-            if (cursorDebugEnabled()) {
-                qDebug() << "[CursorDebug][Sender][PhysicalBasis]"
-                         << "physical=" << QPoint(physicalX, physicalY)
-                         << "screenId=" << screenId
-                         << "screenRect=" << screenRect
-                         << "norm=" << normalizedX << normalizedY;
-            }
-            return;
-        }
-    };
-
-#ifdef Q_OS_WIN
-    POINT pt{0,0};
-    const BOOL ok = GetCursorPos(&pt);
-    const int gx = ok ? static_cast<int>(pt.x) : QCursor::pos().x();
-    const int gy = ok ? static_cast<int>(pt.y) : QCursor::pos().y();
-    computeNormalizedCursorFromLogical(QCursor::pos());
-    if (screenId < 0) {
-        computeNormalizedCursorFromPhysical(gx, gy);
-    }
-    if (gx != lastX || gy != lastY) {
-        lastX = gx; lastY = gy;
-        WebSocketClient* client = m_mainWindow->getWebSocketClient();
-        if (client && client->isConnected() && m_mainWindow->isWatched()) {
-            if (cursorDebugEnabled()) {
-                qDebug() << "[CursorDebug][Sender][Emit]"
-                         << "global=" << QPoint(gx, gy)
-                         << "screenId=" << screenId
-                         << "norm=" << normalizedX << normalizedY;
-            }
-            client->sendCursorUpdate(gx, gy, screenId, normalizedX, normalizedY);
-        }
-    }
-#else
     const QPoint logicalPos = QCursor::pos();
     computeNormalizedCursorFromLogical(logicalPos);
     QPoint p = logicalPos;

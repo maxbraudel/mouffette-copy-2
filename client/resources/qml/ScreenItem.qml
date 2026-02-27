@@ -12,6 +12,7 @@ Rectangle {
     // Label properties — set by the parent Repeater delegate
     property real viewScale: 1.0
     property int  screenIndex: 1
+    property int  screenId: -1
     property int  pixelWidth: 0
     property int  pixelHeight: 0
 

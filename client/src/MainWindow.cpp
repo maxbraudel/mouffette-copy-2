@@ -1423,27 +1423,28 @@ void MainWindow::setupUI() {
                 if (matchWatch || matchSelected) {
                     const QPoint rawPoint(x, y);
                     bool mapped = false;
+                    CanvasSession* resolvedSession = nullptr;
                     if (screenId >= 0 && normalizedX >= 0.0 && normalizedY >= 0.0) {
-                        CanvasSession* session = findCanvasSessionByServerClientId(targetId);
+                        resolvedSession = findCanvasSessionByServerClientId(targetId);
                         QString resolutionPath = QStringLiteral("by_server_id");
-                        if (!session) {
-                            session = findCanvasSession(targetId);
+                        if (!resolvedSession) {
+                            resolvedSession = findCanvasSession(targetId);
                             resolutionPath = QStringLiteral("by_persistent_id");
                         }
-                        if (!session && m_watchManager && !m_watchManager->watchedClientId().isEmpty()) {
-                            session = findCanvasSessionByServerClientId(m_watchManager->watchedClientId());
+                        if (!resolvedSession && m_watchManager && !m_watchManager->watchedClientId().isEmpty()) {
+                            resolvedSession = findCanvasSessionByServerClientId(m_watchManager->watchedClientId());
                             resolutionPath = QStringLiteral("by_watch_server_id");
-                            if (!session) {
-                                session = findCanvasSession(m_watchManager->watchedClientId());
+                            if (!resolvedSession) {
+                                resolvedSession = findCanvasSession(m_watchManager->watchedClientId());
                                 resolutionPath = QStringLiteral("by_watch_persistent_id");
                             }
                         }
-                        if (!session && !m_selectedClient.clientId().isEmpty()) {
-                            session = findCanvasSession(m_selectedClient.clientId());
+                        if (!resolvedSession && !m_selectedClient.clientId().isEmpty()) {
+                            resolvedSession = findCanvasSession(m_selectedClient.clientId());
                             resolutionPath = QStringLiteral("by_selected_client_id");
                         }
-                        if (!session && !m_activeSessionIdentity.isEmpty()) {
-                            session = findCanvasSession(m_activeSessionIdentity);
+                        if (!resolvedSession && !m_activeSessionIdentity.isEmpty()) {
+                            resolvedSession = findCanvasSession(m_activeSessionIdentity);
                             resolutionPath = QStringLiteral("by_active_session");
                         }
 
@@ -1452,15 +1453,15 @@ void MainWindow::setupUI() {
                                      << "targetId=" << targetId
                                      << "watchId=" << (m_watchManager ? m_watchManager->watchedClientId() : QString())
                                      << "selectedId=" << m_selectedClient.getId()
-                                     << "sessionResolved=" << (session != nullptr)
+                                     << "sessionResolved=" << (resolvedSession != nullptr)
                                      << "path=" << resolutionPath
                                      << "rawGlobal=" << rawPoint
                                      << "screenId=" << screenId
                                      << "norm=" << normalizedX << normalizedY;
                         }
 
-                        if (session) {
-                            const QList<ScreenInfo> screens = session->lastClientInfo.getScreens();
+                        if (resolvedSession) {
+                            const QList<ScreenInfo> screens = resolvedSession->lastClientInfo.getScreens();
                             for (const ScreenInfo& screen : screens) {
                                 if (screen.id != screenId || screen.width <= 0 || screen.height <= 0) {
                                     continue;
@@ -1491,6 +1492,21 @@ void MainWindow::setupUI() {
                                  << "rawGlobal=" << rawPoint
                                  << "screenId=" << screenId
                                  << "norm=" << normalizedX << normalizedY;
+                    }
+
+                    if (!mapped && screenId >= 0 && normalizedX >= 0.0 && normalizedY >= 0.0) {
+                        static QString s_lastCursorMapMissKey;
+                        const QString sessionKey = resolvedSession ? resolvedSession->persistentClientId : QStringLiteral("<none>");
+                        const QString missKey = targetId + QStringLiteral("|") + QString::number(screenId)
+                                              + QStringLiteral("|") + sessionKey;
+                        if (missKey != s_lastCursorMapMissKey) {
+                            s_lastCursorMapMissKey = missKey;
+                            qWarning() << "[CursorMapWarning] screenId not found in viewer session screens"
+                                       << "targetId=" << targetId
+                                       << "session=" << sessionKey
+                                       << "screenId=" << screenId
+                                       << "norm=" << normalizedX << normalizedY;
+                        }
                     }
 
                     m_screenCanvas->updateRemoteCursor(x, y);
