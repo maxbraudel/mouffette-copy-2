@@ -493,6 +493,11 @@ Rectangle {
                     screenWidth: modelData.width
                     screenHeight: modelData.height
                     primary: modelData.primary
+                    // Label: zoom-invariant rendering, matches old widget canvas
+                    viewScale:   root.viewScale
+                    screenIndex: index + 1
+                    pixelWidth:  modelData.pixelWidth  || 0
+                    pixelHeight: modelData.pixelHeight || 0
                 }
             }
 

@@ -2270,6 +2270,9 @@ void QuickCanvasController::pushStaticLayerModels() {
         screenEntry.insert(QStringLiteral("width"), rect.width());
         screenEntry.insert(QStringLiteral("height"), rect.height());
         screenEntry.insert(QStringLiteral("primary"), screen.primary);
+        // Actual pixel resolution — used for the «Screen N (WxH)» label
+        screenEntry.insert(QStringLiteral("pixelWidth"),  screen.width);
+        screenEntry.insert(QStringLiteral("pixelHeight"), screen.height);
         screensModel.append(screenEntry);
 
         for (const auto& zone : screen.uiZones) {
