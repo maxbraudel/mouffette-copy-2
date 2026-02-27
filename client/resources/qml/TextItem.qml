@@ -31,7 +31,6 @@ BaseMediaItem {
         root.selectRequested(mediaId, additive)
         root.preEditText = root.textContent || ""
         root.editing = true
-        textEditor.text = root.preEditText
         textEditor.forceActiveFocus()
     }
 
@@ -121,7 +120,6 @@ BaseMediaItem {
             color: root.textColor
             wrapMode: root.fitToTextEnabled ? TextEdit.NoWrap : TextEdit.Wrap
             focus: root.editing
-            activeFocusOnPress: true
             cursorVisible: root.editing
             // selectByMouse is unreliable when TextEdit sits inside a scaled viewport
             // because Qt6 passes raw screen coordinates to the internal selection handler
