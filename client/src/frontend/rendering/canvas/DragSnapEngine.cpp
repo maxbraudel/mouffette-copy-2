@@ -79,6 +79,78 @@ DragSnapResult DragSnapEngine::applyDragSnap(
     const QVector<qreal>& edgesX = snapStore.edgesX();
     const QVector<qreal>& edgesY = snapStore.edgesY();
 
+    // ── 0. Full box-fit snapping (all directions) ─────────────────────────
+    // If the moving item dimensions match a target rectangular slot formed by
+    // snap borders, snap translation atomically on both axes and emit all 4 guides.
+    if (edgesX.size() >= 2 && edgesY.size() >= 2) {
+        const qreal sizeTol = std::max<qreal>(0.75, snapDistanceScene * 0.15);
+        qreal bestErr = std::numeric_limits<qreal>::max();
+        qreal bestDx = 0.0;
+        qreal bestDy = 0.0;
+        qreal bestLeft = 0.0;
+        qreal bestRight = 0.0;
+        qreal bestTop = 0.0;
+        qreal bestBottom = 0.0;
+        bool foundBoxFit = false;
+
+        for (int lx = 0; lx < edgesX.size(); ++lx) {
+            for (int rx = lx + 1; rx < edgesX.size(); ++rx) {
+                const qreal slotLeft = edgesX[lx];
+                const qreal slotRight = edgesX[rx];
+                const qreal slotW = slotRight - slotLeft;
+                if (slotW <= 0.0 || std::abs(slotW - mW) > sizeTol)
+                    continue;
+
+                const qreal dx = slotLeft - movingRect.left();
+                if (std::abs(dx) >= snapDistanceScene)
+                    continue;
+                if (std::abs((movingRect.right() + dx) - slotRight) > sizeTol)
+                    continue;
+
+                for (int ty = 0; ty < edgesY.size(); ++ty) {
+                    for (int by = ty + 1; by < edgesY.size(); ++by) {
+                        const qreal slotTop = edgesY[ty];
+                        const qreal slotBottom = edgesY[by];
+                        const qreal slotH = slotBottom - slotTop;
+                        if (slotH <= 0.0 || std::abs(slotH - mH) > sizeTol)
+                            continue;
+
+                        const qreal dy = slotTop - movingRect.top();
+                        if (std::abs(dy) >= snapDistanceScene)
+                            continue;
+                        if (std::abs((movingRect.bottom() + dy) - slotBottom) > sizeTol)
+                            continue;
+
+                        const qreal err = std::hypot(dx, dy);
+                        if (err < bestErr) {
+                            bestErr = err;
+                            bestDx = dx;
+                            bestDy = dy;
+                            bestLeft = slotLeft;
+                            bestRight = slotRight;
+                            bestTop = slotTop;
+                            bestBottom = slotBottom;
+                            foundBoxFit = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (foundBoxFit) {
+            QVector<QLineF> boxGuides;
+            boxGuides.append(QLineF(bestLeft, -1e6, bestLeft, 1e6));
+            boxGuides.append(QLineF(bestRight, -1e6, bestRight, 1e6));
+            boxGuides.append(QLineF(-1e6, bestTop, 1e6, bestTop));
+            boxGuides.append(QLineF(-1e6, bestBottom, 1e6, bestBottom));
+            return DragSnapResult{
+                QPointF(proposedPos.x() + bestDx, proposedPos.y() + bestDy),
+                boxGuides,
+                true
+            };
+        }
+    }
+
     // ── 1. Corner-to-corner snapping (seeds bestDx/bestDy) ───────────────
     // Find the single nearest corner match to establish the translation vector.
     // Then fall through to edge accumulation (which also picks up all aligned

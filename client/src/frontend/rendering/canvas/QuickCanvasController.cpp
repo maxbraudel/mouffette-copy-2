@@ -1397,8 +1397,47 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
             // Corner handle: use m_uniformCornerSnapped / m_uniformCornerSnappedPt set above.
             if (m_uniformCornerSnapped) {
                 QVector<QLineF> cornerLines;
-                cornerLines.append(QLineF(m_uniformCornerSnappedPt.x(), -1e6, m_uniformCornerSnappedPt.x(),  1e6));
-                cornerLines.append(QLineF(-1e6, m_uniformCornerSnappedPt.y(),  1e6, m_uniformCornerSnappedPt.y()));
+                const qreal finalLeft = finalPos.x();
+                const qreal finalTop = finalPos.y();
+                const qreal finalRight = finalLeft + baseSize.width() * proposedScale;
+                const qreal finalBottom = finalTop + baseSize.height() * proposedScale;
+
+                qreal edgeGuideTol = 0.75;
+                if (m_mediaScene && !m_mediaScene->views().isEmpty()) {
+                    if (auto* sc = qobject_cast<ScreenCanvas*>(m_mediaScene->views().first())) {
+                        edgeGuideTol = std::max<qreal>(0.75,
+                            (sc->snapDistancePx() / sc->effectiveViewScale()) * 0.15);
+                    }
+                }
+
+                QVector<qreal> xMatches;
+                QVector<qreal> yMatches;
+                for (qreal edgeX : m_snapStore->edgesX()) {
+                    if (std::abs(edgeX - finalLeft) <= edgeGuideTol || std::abs(edgeX - finalRight) <= edgeGuideTol) {
+                        if (!xMatches.contains(edgeX)) {
+                            xMatches.append(edgeX);
+                        }
+                    }
+                }
+                for (qreal edgeY : m_snapStore->edgesY()) {
+                    if (std::abs(edgeY - finalTop) <= edgeGuideTol || std::abs(edgeY - finalBottom) <= edgeGuideTol) {
+                        if (!yMatches.contains(edgeY)) {
+                            yMatches.append(edgeY);
+                        }
+                    }
+                }
+
+                if (xMatches.size() >= 2 && yMatches.size() >= 2) {
+                    for (qreal xGuide : xMatches) {
+                        cornerLines.append(QLineF(xGuide, -1e6, xGuide, 1e6));
+                    }
+                    for (qreal yGuide : yMatches) {
+                        cornerLines.append(QLineF(-1e6, yGuide, 1e6, yGuide));
+                    }
+                } else {
+                    cornerLines.append(QLineF(m_uniformCornerSnappedPt.x(), -1e6, m_uniformCornerSnappedPt.x(),  1e6));
+                    cornerLines.append(QLineF(-1e6, m_uniformCornerSnappedPt.y(),  1e6, m_uniformCornerSnappedPt.y()));
+                }
                 m_modelPublisher->publishSnapGuidesOnly(m_viewAdapter, SnapGuidePublisher::buildFromLines(cornerLines, unitScaleU));
             } else {
                 m_modelPublisher->publishSnapGuidesOnly(m_viewAdapter, SnapGuidePublisher::emptyModel());
