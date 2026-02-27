@@ -32,6 +32,7 @@
 #include <QWindow>
 #include <QtMath>
 #include <QUrl>
+#include <QFontInfo>
 
 #include "backend/domain/media/MediaItems.h"
 #include "backend/domain/media/TextMediaItem.h"
@@ -76,6 +77,46 @@ QString textVerticalAlignmentToString(TextMediaItem::VerticalAlignment alignment
         return QStringLiteral("bottom");
     }
     return QStringLiteral("center");
+}
+
+int textFontPixelSizeForQuickCanvas(const TextMediaItem* textMedia) {
+    if (!textMedia) {
+        return 1;
+    }
+
+    const QFont font = textMedia->font();
+
+    qreal pixelSize = 0.0;
+    if (font.pixelSize() > 0) {
+        pixelSize = static_cast<qreal>(font.pixelSize());
+    } else if (font.pointSizeF() > 0.0) {
+        qreal logicalDpiY = 96.0;
+        if (QScreen* screen = QGuiApplication::primaryScreen()) {
+            logicalDpiY = std::max<qreal>(screen->logicalDotsPerInchY(), 1.0);
+        }
+        pixelSize = font.pointSizeF() * logicalDpiY / 72.0;
+    } else {
+        QFontInfo info(font);
+        if (info.pixelSize() > 0) {
+            pixelSize = static_cast<qreal>(info.pixelSize());
+        } else if (info.pointSizeF() > 0.0) {
+            qreal logicalDpiY = 96.0;
+            if (QScreen* screen = QGuiApplication::primaryScreen()) {
+                logicalDpiY = std::max<qreal>(screen->logicalDotsPerInchY(), 1.0);
+            }
+            pixelSize = info.pointSizeF() * logicalDpiY / 72.0;
+        }
+    }
+
+    if (pixelSize <= 0.0) {
+        pixelSize = 12.0;
+    }
+
+    // Keep QML text rendering in sync with backend fit-to-text geometry math,
+    // which is based on TextMediaItem::uniformScaleFactor().
+    const qreal uniformScale = std::max<qreal>(std::abs(textMedia->uniformScaleFactor()), 1e-4);
+    const int effectivePixelSize = qMax(1, qRound(pixelSize * uniformScale));
+    return effectivePixelSize;
 }
 
 bool uiZonesEquivalent(const QList<ScreenInfo::UIZone>& lhs, const QList<ScreenInfo::UIZone>& rhs) {
@@ -309,6 +350,9 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
     QObject::connect(
         m_quickWidget->rootObject(), SIGNAL(textCommitRequested(QString,QString)),
         this, SLOT(handleTextCommitRequested(QString,QString)));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(textLiveUpdateRequested(QString,QString)),
+        this, SLOT(handleTextLiveUpdateRequested(QString,QString)));
     QObject::connect(
         m_quickWidget->rootObject(), SIGNAL(textCreateRequested(double,double)),
         this, SLOT(handleTextCreateRequested(double,double)));
@@ -1539,6 +1583,28 @@ void QuickCanvasController::handleTextCommitRequested(const QString& mediaId, co
     scheduleMediaModelSync();
 }
 
+void QuickCanvasController::handleTextLiveUpdateRequested(const QString& mediaId, const QString& text) {
+    if (!m_mediaScene || mediaId.isEmpty()) {
+        return;
+    }
+
+    ResizableMediaBase* media = mediaItemById(mediaId);
+    if (!media) {
+        return;
+    }
+
+    auto* textMedia = dynamic_cast<TextMediaItem*>(media);
+    if (!textMedia) {
+        return;
+    }
+
+    // Live edit path: push content changes into C++ immediately so fit-to-text
+    // can recompute geometry while typing. Repaint/model publication remains
+    // debounced by the existing 16 ms media sync timer.
+    textMedia->setText(text);
+    scheduleMediaModelSync();
+}
+
 void QuickCanvasController::handleTextCreateRequested(qreal viewX, qreal viewY) {
     const QPointF scenePos = mapViewPointToScene(QPointF(viewX, viewY));
     emit textMediaCreateRequested(scenePos);
@@ -1676,7 +1742,7 @@ void QuickCanvasController::pushMediaModelOnly() {
                 mediaEntry.insert(QStringLiteral("textVerticalAlignment"), textVerticalAlignmentToString(textMedia->verticalAlignment()));
                 mediaEntry.insert(QStringLiteral("fitToTextEnabled"), textMedia->fitToTextEnabled());
                 mediaEntry.insert(QStringLiteral("textFontFamily"), textFont.family());
-                mediaEntry.insert(QStringLiteral("textFontPixelSize"), textFont.pixelSize() > 0 ? textFont.pixelSize() : textFont.pointSize());
+                mediaEntry.insert(QStringLiteral("textFontPixelSize"), textFontPixelSizeForQuickCanvas(textMedia));
                 mediaEntry.insert(QStringLiteral("textFontWeight"), textMedia->textFontWeightValue());
                 mediaEntry.insert(QStringLiteral("textItalic"), textMedia->italicEnabled());
                 mediaEntry.insert(QStringLiteral("textUnderline"), textMedia->underlineEnabled());

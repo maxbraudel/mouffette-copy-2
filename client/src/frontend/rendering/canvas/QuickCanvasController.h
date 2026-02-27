@@ -83,6 +83,7 @@ private slots:
     void handleMediaResizeRequested(const QString& mediaId, const QString& handleId, qreal sceneX, qreal sceneY, bool snap, bool altPressed);
     void handleMediaResizeEnded(const QString& mediaId);
     void handleTextCommitRequested(const QString& mediaId, const QString& text);
+    void handleTextLiveUpdateRequested(const QString& mediaId, const QString& text);
     void handleTextCreateRequested(qreal viewX, qreal viewY);
     // Overlay action slots (wired from QML signals)
     void handleOverlayVisibilityToggle(const QString& mediaId, bool visible);

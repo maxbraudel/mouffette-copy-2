@@ -16,6 +16,7 @@ Rectangle {
     signal mediaResizeRequested(string mediaId, string handleId, real sceneX, real sceneY, bool snap, bool altPressed)
     signal mediaResizeEnded(string mediaId)
     signal textCommitRequested(string mediaId, string text)
+    signal textLiveUpdateRequested(string mediaId, string text)
     signal textCreateRequested(real viewX, real viewY)
 
     // Overlay action signals (forwarded to C++)
@@ -968,6 +969,9 @@ Rectangle {
                         }
                         function onTextCommitRequested(mediaId, text) {
                             root.textCommitRequested(mediaId, text)
+                        }
+                        function onTextLiveUpdateRequested(mediaId, text) {
+                            root.textLiveUpdateRequested(mediaId, text)
                         }
                         // Track whether any text item is currently in edit mode so
                         // canvas pan handlers can be disabled while editing.

@@ -21,6 +21,7 @@ BaseMediaItem {
     property bool editing: false
     property string preEditText: ""
     signal textCommitRequested(string mediaId, string text)
+    signal textLiveUpdateRequested(string mediaId, string text)
 
     pointerEnabled: !root.editing
     doubleClickEnabled: true
@@ -141,6 +142,12 @@ BaseMediaItem {
                     root.textCommitRequested(root.mediaId, textEditor.text)
                     root.editing = false
                     event.accepted = true
+                }
+            }
+
+            onTextChanged: {
+                if (root.editing) {
+                    root.textLiveUpdateRequested(root.mediaId, textEditor.text)
                 }
             }
         }

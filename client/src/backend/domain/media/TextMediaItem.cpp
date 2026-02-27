@@ -2523,53 +2523,15 @@ void TextMediaItem::applyFitToTextNow() {
 
     doc->adjustSize();
 
-    const auto measureLogicalWidth = [doc]() -> qreal {
-        qreal minLeft = 0.0;
-        qreal maxRight = 0.0;
-        bool haveLine = false;
-
-        for (QTextBlock block = doc->begin(); block != doc->end(); block = block.next()) {
-            QTextLayout* layout = block.layout();
-            if (!layout) {
-                continue;
-            }
-
-            const int lineCount = layout->lineCount();
-            for (int lineIndex = 0; lineIndex < lineCount; ++lineIndex) {
-                QTextLine line = layout->lineAt(lineIndex);
-                if (!line.isValid()) {
-                    continue;
-                }
-
-                const qreal left = line.x();
-                const qreal right = line.x() + line.naturalTextWidth();
-                if (!haveLine) {
-                    minLeft = left;
-                    maxRight = right;
-                    haveLine = true;
-                } else {
-                    if (left < minLeft) {
-                        minLeft = left;
-                    }
-                    if (right > maxRight) {
-                        maxRight = right;
-                    }
-                }
-            }
-        }
-
-        if (!haveLine) {
-            const qreal width = doc->idealWidth();
-            return std::max<qreal>(1.0, width);
-        }
-
-        const qreal logicalWidth = std::max<qreal>(1.0, maxRight - minLeft);
-        return logicalWidth;
-    };
-
-    const qreal logicalContentWidth = measureLogicalWidth();
-
     QAbstractTextDocumentLayout* layout = doc->documentLayout();
+    qreal logicalContentWidth = 0.0;
+    if (layout) {
+        const QRectF docBounds = computeDocumentTextBounds(*doc, layout);
+        logicalContentWidth = std::max<qreal>(1.0, docBounds.width());
+    } else {
+        logicalContentWidth = std::max<qreal>(1.0, doc->idealWidth());
+    }
+
     qreal logicalContentHeight = 0.0;
     if (layout) {
         const QRectF docBounds = computeDocumentTextBounds(*doc, layout);
@@ -2691,20 +2653,14 @@ void TextMediaItem::applyFitModeConstraintsToEditor() {
 
             if (m_fitToTextEnabled) {
                 doc->adjustSize();
-                qreal maxLineWidth = 1.0;
-                for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
-                    if (QTextLayout* textLayout = block.layout()) {
-                        for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-                            const QTextLine line = textLayout->lineAt(lineIndex);
-                            if (!line.isValid()) {
-                                continue;
-                            }
-                            maxLineWidth = std::max(maxLineWidth, line.naturalTextWidth());
-                        }
-                    }
+                qreal measuredWidth = 1.0;
+                if (QAbstractTextDocumentLayout* layout = doc->documentLayout()) {
+                    const QRectF docBounds = computeDocumentTextBounds(*doc, layout);
+                    measuredWidth = std::max<qreal>(1.0, docBounds.width());
+                } else {
+                    measuredWidth = std::max<qreal>(1.0, doc->idealWidth());
                 }
-                maxLineWidth = std::max(maxLineWidth, doc->idealWidth());
-                desiredTextWidth = std::max<qreal>(1.0, maxLineWidth);
+                desiredTextWidth = measuredWidth;
             }
         }
 
