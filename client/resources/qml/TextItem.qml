@@ -35,8 +35,39 @@ BaseMediaItem {
 
     Rectangle {
         id: textBackground
-        anchors.fill: parent
-        color: root.highlightEnabled ? root.highlightColor : "transparent"
+        visible: root.highlightEnabled && (root.textContent || "").length > 0 && !root.editing
+        color: root.highlightColor
+        radius: 2
+
+        readonly property real contentMargin: 4
+        readonly property real highlightPadding: 2
+        readonly property real contentWidth: Math.max(0, root.width - contentMargin * 2)
+        readonly property real contentHeight: Math.max(0, root.height - contentMargin * 2)
+        readonly property real paintedW: Math.max(0, Math.min(contentWidth, textNode.paintedWidth))
+        readonly property real paintedH: Math.max(0, Math.min(contentHeight, textNode.paintedHeight))
+
+        width: paintedW + highlightPadding * 2
+        height: paintedH + highlightPadding * 2
+
+        x: {
+            if (root.horizontalAlignment === "left") {
+                return contentMargin - highlightPadding
+            }
+            if (root.horizontalAlignment === "right") {
+                return contentMargin + (contentWidth - paintedW) - highlightPadding
+            }
+            return contentMargin + (contentWidth - paintedW) * 0.5 - highlightPadding
+        }
+
+        y: {
+            if (root.verticalAlignment === "top") {
+                return contentMargin - highlightPadding
+            }
+            if (root.verticalAlignment === "bottom") {
+                return contentMargin + (contentHeight - paintedH) - highlightPadding
+            }
+            return contentMargin + (contentHeight - paintedH) * 0.5 - highlightPadding
+        }
     }
 
     Text {
