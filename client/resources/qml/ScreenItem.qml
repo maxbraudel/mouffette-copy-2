@@ -68,7 +68,7 @@ Rectangle {
             origin.y: 0
         }
 
-        readonly property color strokeColor: root.primary ? "#4A90E2" : "#A0A0A0"
+        readonly property color strokeColor: "#A0A0A0"
 
         Rectangle {
             x: 0
