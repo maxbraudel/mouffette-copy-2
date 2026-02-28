@@ -3,10 +3,7 @@ import QtQuick 2.15
 Item {
     id: inputLayer
 
-    // Temporary rollout switch:
-    //  - default: coordinator enabled
-    //  - pass --legacy-input-arbitration to disable coordinator paths
-    property bool useInputCoordinator: Qt.application.arguments.indexOf("--legacy-input-arbitration") === -1
+    property bool useInputCoordinator: true
     property var interactionController: null
     property bool textToolActive: false
     property var mediaModel: []
@@ -48,32 +45,44 @@ Item {
             lastPrimaryPressMediaId = ""
         }
 
+        function assertInvariants(stage) {
+            if (mode === "idle" && ownerId !== "") {
+                console.warn("[QuickCanvas][InputCoordinator][Invariant] idle mode with owner", stage, ownerId)
+            }
+            if (mode !== "idle" && mode !== "pan" && ownerId === "") {
+                console.warn("[QuickCanvas][InputCoordinator][Invariant] non-canvas active mode without owner", stage, mode)
+            }
+            if (primaryGestureActive && primaryOwnerKind === "none") {
+                console.warn("[QuickCanvas][InputCoordinator][Invariant] active gesture without owner kind", stage)
+            }
+            if (!primaryGestureActive && primaryOwnerKind !== "none") {
+                console.warn("[QuickCanvas][InputCoordinator][Invariant] inactive gesture with owner kind", stage, primaryOwnerKind)
+            }
+        }
+
         function mediaIdAtPoint(viewX, viewY) {
-            if (!inputLayer.contentItem || !inputLayer.mediaModel)
+            if (!inputLayer.contentItem)
                 return ""
 
-            var viewScale = inputLayer.contentItem.scale || 1.0
-            var contentX = inputLayer.contentItem.x || 0.0
-            var contentY = inputLayer.contentItem.y || 0.0
+            var currentItem = inputLayer.contentItem
+            var localPoint = currentItem.mapFromItem(inputLayer, viewX, viewY)
+            var mediaId = ""
 
-            for (var i = inputLayer.mediaModel.length - 1; i >= 0; --i) {
-                var entry = inputLayer.mediaModel[i]
-                if (!entry)
-                    continue
+            while (currentItem) {
+                var child = currentItem.childAt(localPoint.x, localPoint.y)
+                if (!child)
+                    break
 
-                var mediaScale = entry.scale || 1.0
-                var sceneW = Math.max(1, (entry.width || 1) * mediaScale)
-                var sceneH = Math.max(1, (entry.height || 1) * mediaScale)
-                var left = contentX + (entry.x || 0) * viewScale
-                var top = contentY + (entry.y || 0) * viewScale
-                var width = sceneW * viewScale
-                var height = sceneH * viewScale
-                if (viewX >= left && viewX <= (left + width)
-                        && viewY >= top && viewY <= (top + height)) {
-                    return entry.mediaId || ""
-                }
+                if (child.currentMediaId !== undefined && child.currentMediaId)
+                    mediaId = child.currentMediaId
+                else if (child.mediaId !== undefined && child.mediaId)
+                    mediaId = child.mediaId
+
+                localPoint = child.mapFromItem(currentItem, localPoint.x, localPoint.y)
+                currentItem = child
             }
-            return ""
+
+            return mediaId || ""
         }
 
         function beginPrimaryGesture(viewX, viewY, hoveredHandleId, hoveredHandleMediaId) {
@@ -81,6 +90,7 @@ Item {
             resetLastPrimaryPressTarget()
 
             var handleId = hoveredHandleId || ""
+            console.log("[DBG][beginPrimaryGesture] viewX=", viewX, "viewY=", viewY, "handleId=", handleId)
             if (inputLayer.selectionHandlePriorityActive || handleId !== "") {
                 primaryOwnerKind = "handle"
                 primaryOwnerMediaId = hoveredHandleMediaId || ""
@@ -90,6 +100,7 @@ Item {
             }
 
             var hitMediaId = mediaIdAtPoint(viewX, viewY)
+            console.log("[DBG][beginPrimaryGesture] hitMediaId=", hitMediaId)
             if (hitMediaId !== "") {
                 primaryOwnerKind = "media"
                 primaryOwnerMediaId = hitMediaId
@@ -102,6 +113,7 @@ Item {
             primaryOwnerMediaId = ""
             pressTargetKind = "canvas"
             pressTargetMediaId = ""
+            assertInvariants("beginPrimaryGesture")
             return primaryOwnerKind
         }
 
@@ -110,6 +122,7 @@ Item {
             lastPrimaryPressMediaId = pressTargetMediaId
             resetPrimaryOwner()
             resetPressTarget()
+            assertInvariants("endPrimaryGesture")
         }
 
         function ownerAllowsMedia(mediaId, active) {
@@ -160,6 +173,7 @@ Item {
             }
             mode = requestedMode
             ownerId = owner
+            assertInvariants("beginMode")
             return true
         }
 
@@ -182,6 +196,7 @@ Item {
             }
             mode = "idle"
             ownerId = ""
+            assertInvariants("endMode")
         }
 
         function forceReset(reason) {
@@ -195,6 +210,7 @@ Item {
             ownerId = ""
             resetPressTarget()
             resetLastPrimaryPressTarget()
+            assertInvariants("forceReset")
         }
 
         function isPointInsideMedia(viewX, viewY) {

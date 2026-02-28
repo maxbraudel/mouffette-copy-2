@@ -8,7 +8,6 @@ Item {
 
     property var interactionController: null
     property var inputCoordinator: null
-    property bool useInputCoordinator: true
     property var selectionModel: []
     property var mediaModel: []
     property var mediaIndexById: ({})
@@ -168,13 +167,7 @@ Item {
     function updateHoveredHandle(viewX, viewY) {
         if (interacting)
             return
-        if (useInputCoordinator) {
-            if (!inputCoordinator || inputCoordinator.mode !== "idle") {
-                hoveredMediaId = ""
-                hoveredHandleId = ""
-                return
-            }
-        } else if (inputCoordinator && !inputCoordinator.isIdle()) {
+        if (!inputCoordinator || inputCoordinator.mode !== "idle") {
             hoveredMediaId = ""
             hoveredHandleId = ""
             return
@@ -246,12 +239,8 @@ Item {
         grabPermissions: PointerHandler.CanTakeOverFromAnything
         enabled: globalResizeDrag.active
                  || (root.hoveredHandleId !== ""
-                     && ((root.useInputCoordinator
-                          && !!root.inputCoordinator
-                          && root.inputCoordinator.canStartResize(false, root.hoveredMediaId))
-                         || (!root.useInputCoordinator
-                             && !!root.inputCoordinator
-                             && root.inputCoordinator.isIdle())))
+                     && (!!root.inputCoordinator
+                         && root.inputCoordinator.canStartResize(false, root.hoveredMediaId)))
         dragThreshold: 0
 
         onActiveChanged: {
@@ -273,12 +262,8 @@ Item {
                 root.pressEntryH = pressHit.sceneH
 
                 var resizeGranted = false
-                if (root.useInputCoordinator) {
-                    resizeGranted = !!root.inputCoordinator
-                        && root.inputCoordinator.tryBeginResize(root.activeResizeMediaId)
-                } else if (root.inputCoordinator) {
-                    resizeGranted = root.inputCoordinator.beginMode("resize", root.activeResizeMediaId)
-                }
+                resizeGranted = !!root.inputCoordinator
+                    && root.inputCoordinator.tryBeginResize(root.activeResizeMediaId)
 
                 if (!resizeGranted) {
                     root.interacting = false
@@ -293,11 +278,8 @@ Item {
             } else {
                 var finalMediaId = root.activeResizeMediaId
                 root.interacting = false
-                if (root.useInputCoordinator) {
+                if (root.inputCoordinator)
                     root.inputCoordinator.endResize(finalMediaId)
-                } else if (root.inputCoordinator) {
-                    root.inputCoordinator.endMode("resize", finalMediaId)
-                }
                 root.resizeEnded(finalMediaId)
                 root.activeResizeMediaId = ""
                 root.activeResizeHandleId = ""
@@ -307,10 +289,8 @@ Item {
         onCanceled: {
             var canceledMediaId = root.activeResizeMediaId
             root.interacting = false
-            if (root.useInputCoordinator && root.inputCoordinator) {
+            if (root.inputCoordinator) {
                 root.inputCoordinator.endResize(canceledMediaId)
-            } else if (!root.useInputCoordinator && root.inputCoordinator) {
-                root.inputCoordinator.endMode("resize", canceledMediaId)
             }
             root.resizeEnded(canceledMediaId)
             root.activeResizeMediaId = ""

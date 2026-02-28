@@ -133,46 +133,18 @@ Rectangle {
     }
 
     function canStartMediaMove(media, contentItem, dragActive, mediaId) {
-        if (!inputLayer || !inputLayer.useInputCoordinator) {
-            if (!media)
-                return false
-            if (contentItem && contentItem.editing === true)
-                return false
-            if (root.textToolActive)
-                return false
-            if (selectionChrome.interacting)
-                return false
-            var hoveredId = selectionChrome.hoveredMediaId || ""
-            if (hoveredId !== "")
-                return false
-            return dragActive || inputLayer.inputCoordinator.canStart("move", mediaId)
-        }
         return !!inputLayer
             && !!inputLayer.inputCoordinator
             && inputLayer.inputCoordinator.canStartMove(media, contentItem, dragActive, mediaId)
     }
 
     function canStartCanvasPan(panActive) {
-        if (!inputLayer || !inputLayer.useInputCoordinator) {
-            return panActive || (interactionMode === "idle"
-                && !root.textToolActive
-                && !selectionChrome.interacting
-                && !selectionChrome.handlePriorityActive
-                && root.liveDragMediaId === "")
-        }
         return !!inputLayer
             && !!inputLayer.inputCoordinator
             && inputLayer.inputCoordinator.canEnablePan(panActive)
     }
 
     function canStartTextToolTap() {
-        if (!inputLayer || !inputLayer.useInputCoordinator) {
-            return interactionMode === "idle"
-                && root.textToolActive
-                && !selectionChrome.interacting
-                && !selectionChrome.handlePriorityActive
-                && root.liveDragMediaId === ""
-        }
         return !!inputLayer
             && !!inputLayer.inputCoordinator
             && inputLayer.inputCoordinator.canStartTextToolTap()
@@ -323,7 +295,7 @@ Rectangle {
     }
 
     function reconcileInputCoordinatorState(reason) {
-        if (!inputLayer || !inputLayer.useInputCoordinator || !inputLayer.inputCoordinator)
+        if (!inputLayer || !inputLayer.inputCoordinator)
             return
 
         var coordinator = inputLayer.inputCoordinator
@@ -598,32 +570,8 @@ Rectangle {
                     }
 
                     Component.onDestruction: {
-                        if (!mediaDrag)
-                            return
-                        if (!mediaDrag.active && mediaDrag.activeMoveMediaId === "" && !mediaDelegate.localDragging)
-                            return
-
-                        var orphanMediaId = mediaDrag.activeMoveMediaId
-                        if (!orphanMediaId || orphanMediaId.length === 0)
-                            orphanMediaId = mediaDelegate.currentMediaId
-
-                        if (mediaDrag.countedAsActive) {
-                            root.activeMediaDragCount = Math.max(0, root.activeMediaDragCount - 1)
-                            mediaDrag.countedAsActive = false
-                        }
-
-                        mediaDelegate.localDragging = false
-                        root.liveDragMediaId = ""
-                        root.liveDragViewOffsetX = 0.0
-                        root.liveDragViewOffsetY = 0.0
-
-                        if (inputLayer && inputLayer.inputCoordinator) {
-                            if (inputLayer.useInputCoordinator) {
-                                inputLayer.inputCoordinator.forceReset("media-delegate-destroyed")
-                            } else {
-                                inputLayer.inputCoordinator.endMode("move", orphanMediaId)
-                            }
-                        }
+                        if (mediaInteraction)
+                            mediaInteraction.releaseOrphanedDrag()
                     }
 
                     readonly property bool usesLiveResize: root.liveResizeActive
@@ -660,315 +608,16 @@ Rectangle {
                                     * (media.animatedDisplayOpacity !== undefined ? media.animatedDisplayOpacity : 1.0))
                                    : 1.0
 
-                    // DragHandler inside contentRoot: translation is in scene coords (contentRoot
-                    // has scale:viewScale, so 1 unit here = 1 scene unit, not viewport pixel).
-
-                    // Double-click handler: lives at the mediaDelegate PointerHandler level
-                    // because parent PointerHandlers receive events BEFORE child MouseAreas
-                    // in Qt Quick 6's event delivery order. tapCount===2 is the reliable
-                    // cross-platform double-click detection path for PointerHandlers.
-                    TapHandler {
-                        id: mediaDoubleClick
-                        target: null
-                        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-                        acceptedButtons: Qt.LeftButton
-                        // ApprovesTakeOverByAnything: TapHandler will not steal grabs from
-                        // DragHandler/PointHandler, but will immediately yield its grab
-                        // to the DragHandler once the drag threshold is exceeded. This
-                        // prevents double-click detection from blocking media drag.
-                        grabPermissions: PointerHandler.ApprovesTakeOverByAnything
-                        enabled: !!mediaDelegate.media
-                                 && !mediaDelegate.overlayHovered
-                                 && !(mediaContentLoader.item && mediaContentLoader.item.editing === true)
-                                 && selectionChrome.hoveredHandleId === ""
-                                 && (!inputLayer || !inputLayer.useInputCoordinator
-                                     || inputLayer.inputCoordinator.ownerAllowsMedia(mediaDelegate.currentMediaId, false))
-
-                        onTapped: function(eventPoint) {
-                            if (tapCount !== 2)
-                                return
-                            var item = mediaContentLoader.item
-                            if (!item || typeof item.fireDoubleClick !== "function")
-                                return
-                            var additive = (eventPoint.modifiers & Qt.ShiftModifier) !== 0
-                            item.fireDoubleClick(additive)
-                        }
-                    }
-
-                    PointHandler {
-                        id: mediaPressSelect
-                        target: null
-                        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-                        acceptedButtons: Qt.LeftButton
-                        // Select on press, but never block drag acquisition.
-                        grabPermissions: PointerHandler.ApprovesTakeOverByAnything
-                        enabled: !!mediaDelegate.media
-                                 && !mediaDelegate.overlayHovered
-                                 && !(mediaContentLoader.item && mediaContentLoader.item.editing === true)
-                                 && selectionChrome.hoveredHandleId === ""
-                                 && (!inputLayer || !inputLayer.useInputCoordinator
-                                     || inputLayer.inputCoordinator.ownerAllowsMedia(mediaDelegate.currentMediaId, mediaPressSelect.active))
-
-                        function selectNow(modifiers) {
-                            var mediaId = mediaDelegate.currentMediaId
-                            if (!mediaId || mediaId.length === 0)
-                                return
-
-                            var additive = (modifiers & Qt.ShiftModifier) !== 0
-
-                            if (inputLayer && inputLayer.useInputCoordinator) {
-                                inputLayer.inputCoordinator.noteMediaPrimaryPress(mediaId, additive)
-                            } else {
-                                root.requestMediaSelection(mediaId, additive)
-                            }
-                        }
-
-                        onActiveChanged: {
-                            if (!active)
-                                return
-
-                            var modifiers = Qt.application.keyboardModifiers
-                            if (mediaPressSelect.point && mediaPressSelect.point.modifiers !== undefined)
-                                modifiers = mediaPressSelect.point.modifiers
-
-                                var pressScenePoint = mediaPressSelect.point
-                                    ? mediaPressSelect.point.scenePosition
-                                    : mediaDrag.centroid.scenePressPosition
-                                var pressContentPoint = viewport.contentRootItem.mapFromItem(null,
-                                                             pressScenePoint.x,
-                                                             pressScenePoint.y)
-                                mediaDrag.pressPointerSceneX = pressContentPoint.x
-                                mediaDrag.pressPointerSceneY = pressContentPoint.y
-                                mediaDrag.pressPointerViewX = pressScenePoint.x
-                                mediaDrag.pressPointerViewY = pressScenePoint.y
-                            mediaDrag.pressMediaSceneX = mediaDelegate.localX
-                            mediaDrag.pressMediaSceneY = mediaDelegate.localY
-                            mediaDrag.pressAnchorValid = true
-
-                            selectNow(modifiers)
-                        }
-                    }
-
-                    DragHandler {
-                        id: mediaDrag
-                        target: null
-                        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-                        acceptedButtons: Qt.LeftButton
-                        // Critical arbitration rule: media drag must be able to take over
-                        // from press-selection/background handlers in the SAME gesture.
-                        grabPermissions: PointerHandler.CanTakeOverFromAnything
-                        enabled: !mediaDelegate.overlayHovered
-                                 && (!inputLayer || !inputLayer.useInputCoordinator
-                                     || inputLayer.inputCoordinator.ownerAllowsMedia(mediaDelegate.currentMediaId, mediaDrag.active))
-                                 && root.canStartMediaMove(mediaDelegate.media,
-                                                        mediaContentLoader.item,
-                                                        mediaDrag.active,
-                                                        mediaDelegate.currentMediaId)
-                        dragThreshold: 4
-
-                        property real startX: 0.0
-                        property real startY: 0.0
-                        property real pressMediaSceneX: 0.0
-                        property real pressMediaSceneY: 0.0
-                        property real dragOriginSceneX: 0.0
-                        property real dragOriginSceneY: 0.0
-                        property real pressPointerSceneX: 0.0
-                        property real pressPointerSceneY: 0.0
-                        property real dragOriginViewX: 0.0
-                        property real dragOriginViewY: 0.0
-                        property real pressPointerViewX: 0.0
-                        property real pressPointerViewY: 0.0
-                        property bool pressAnchorValid: false
-                        property string activeMoveMediaId: ""
-                        property bool countedAsActive: false
-
-                        onActiveChanged: {
-                            if (active) {
-                                activeMoveMediaId = mediaDelegate.currentMediaId
-                                // Acquire the coordinator lock first. Multiple DragHandlers
-                                // can fire simultaneously (overlapping items); only the first
-                                // caller to tryBeginMove wins. Do NOT touch selection before
-                                // this check — if we lose the lock the wrong item would be
-                                // selected.
-                                var moveGranted = inputLayer.useInputCoordinator
-                                    ? inputLayer.inputCoordinator.tryBeginMove(activeMoveMediaId)
-                                    : inputLayer.inputCoordinator.beginMode("move", activeMoveMediaId)
-                                if (!moveGranted) {
-                                    activeMoveMediaId = ""
-                                    mediaDelegate.localDragging = false
-                                    root.liveDragMediaId = ""
-                                    root.liveDragViewOffsetX = 0.0
-                                    root.liveDragViewOffsetY = 0.0
-                                    countedAsActive = false
-                                    return
-                                }
-                                if (!countedAsActive) {
-                                    root.activeMediaDragCount += 1
-                                    countedAsActive = true
-                                }
-                                // Selection is already handled at media press for this gesture.
-                                // Only issue a drag-start fallback selection if this drag did not
-                                // originate from the same media press target.
-                                var sameGestureMediaPress = false
-                                if (inputLayer && inputLayer.useInputCoordinator) {
-                                    sameGestureMediaPress = inputLayer.inputCoordinator.primaryGestureActive
-                                            && inputLayer.inputCoordinator.pressTargetKind === "media"
-                                            && inputLayer.inputCoordinator.pressTargetMediaId === activeMoveMediaId
-                                }
-                                if (!sameGestureMediaPress && inputLayer && inputLayer.useInputCoordinator) {
-                                    inputLayer.inputCoordinator.noteMediaPrimaryPress(activeMoveMediaId, false)
-                                } else if (!sameGestureMediaPress && activeMoveMediaId) {
-                                    root.mediaSelectRequested(activeMoveMediaId, false)
-                                }
-                                var pressSceneX = pressPointerSceneX
-                                var pressSceneY = pressPointerSceneY
-                                var pressViewX = pressPointerViewX
-                                var pressViewY = pressPointerViewY
-                                if (!pressAnchorValid) {
-                                    var pressPoint = mediaDrag.centroid.scenePressPosition
-                                    pressSceneX = pressPoint.x
-                                    pressSceneY = pressPoint.y
-                                    pressViewX = pressPoint.x
-                                    pressViewY = pressPoint.y
-                                    var pressContentPoint = viewport.contentRootItem.mapFromItem(null,
-                                                                                                 pressSceneX,
-                                                                                                 pressSceneY)
-                                    pressPointerSceneX = pressContentPoint.x
-                                    pressPointerSceneY = pressContentPoint.y
-                                    pressPointerViewX = pressViewX
-                                    pressPointerViewY = pressViewY
-                                    pressMediaSceneX = mediaDelegate.localX
-                                    pressMediaSceneY = mediaDelegate.localY
-                                    pressAnchorValid = true
-                                }
-
-                                dragOriginSceneX = pressMediaSceneX
-                                dragOriginSceneY = pressMediaSceneY
-                                startX = dragOriginSceneX
-                                startY = dragOriginSceneY
-                                dragOriginViewX = pressViewX
-                                dragOriginViewY = pressViewY
-                                mediaDelegate.localDragging = true
-                                root.liveDragMediaId = activeMoveMediaId
-                                var snapAtStart = (mediaDrag.centroid.modifiers & Qt.ShiftModifier) !== 0
-                                root.mediaMoveStarted(activeMoveMediaId,
-                                                      mediaDelegate.localX,
-                                                      mediaDelegate.localY,
-                                                      snapAtStart)
-                            } else {
-                                var finalMediaId = activeMoveMediaId
-                                if (countedAsActive) {
-                                    root.activeMediaDragCount = Math.max(0, root.activeMediaDragCount - 1)
-                                    countedAsActive = false
-                                }
-                                mediaDelegate.localDragging = false
-                                pressAnchorValid = false
-                                dragOriginSceneX = 0.0
-                                dragOriginSceneY = 0.0
-                                pressPointerSceneX = 0.0
-                                pressPointerSceneY = 0.0
-                                dragOriginViewX = 0.0
-                                dragOriginViewY = 0.0
-                                pressPointerViewX = 0.0
-                                pressPointerViewY = 0.0
-                                // liveDragViewOffsetX/Y are cleared now (no longer needed visually).
-                                root.liveDragViewOffsetX = 0.0
-                                root.liveDragViewOffsetY = 0.0
-                                if (inputLayer.useInputCoordinator) {
-                                    inputLayer.inputCoordinator.endMove(finalMediaId)
-                                } else {
-                                    inputLayer.inputCoordinator.endMode("move", finalMediaId)
-                                }
-                                // Clear liveDragMediaId BEFORE mediaMoveEnded so that when
-                                // onMediaChanged fires synchronously inside C++ handleMediaMoveEnded
-                                // (triggered by commitMediaTransform → commitMediaGeometry), the
-                                // snap freeze check in onMediaChanged sees liveDragMediaId=="" and
-                                // reliably clears the freeze via the fallback branch.
-                                // This eliminates the race where the fallback was skipped because
-                                // liveDragMediaId was still set at the time onMediaChanged evaluated.
-                                root.liveDragMediaId = ""
-                                activeMoveMediaId = ""
-
-                                if (finalMediaId !== "") {
-                                    var snapAtEnd = (mediaDrag.centroid.modifiers & Qt.ShiftModifier) !== 0
-                                    // Send effectiveLocalX/Y (the snapped position the user sees)
-                                    // instead of raw localX/Y (raw cursor position). This ensures
-                                    // C++ commits the position that matches the visual.
-                                    root.mediaMoveEnded(finalMediaId,
-                                                        mediaDelegate.effectiveLocalX,
-                                                        mediaDelegate.effectiveLocalY,
-                                                        snapAtEnd)
-                                }
-                                // Arm the safety-net timer in case onMediaChanged never fires
-                                // (e.g. commitMediaGeometry found no matching entry in mediaModel).
-                                if (typeof root !== "undefined" && root.liveSnapDragActive
-                                        && root.liveSnapDragMediaId === finalMediaId) {
-                                    snapFreezeCleanupTimer.restart()
-                                }
-                            }
-                        }
-
-                        onTranslationChanged: {
-                            if (!active || !mediaDelegate.localDragging) return
-                            // Use explicit scene-position mapping to avoid any coordinate
-                            // ambiguity from contentRoot's scale transform.
-                            var cur = mediaDrag.centroid.scenePosition
-                            var curScene = viewport.contentRootItem.mapFromItem(null, cur.x, cur.y)
-                            mediaDelegate.localX = startX + (curScene.x - pressPointerSceneX)
-                            mediaDelegate.localY = startY + (curScene.y - pressPointerSceneY)
-                            if (activeMoveMediaId !== "") {
-                                var snapNow = (mediaDrag.centroid.modifiers & Qt.ShiftModifier) !== 0
-                                root.mediaMoveUpdated(activeMoveMediaId,
-                                                      mediaDelegate.localX,
-                                                      mediaDelegate.localY,
-                                                      snapNow)
-                            }
-                            // After mediaMoveUpdated returns, C++ has synchronously pushed
-                            // liveSnapDragX/Y to the snapped position (or cleared the freeze
-                            // if snap is no longer active). Keep localX/Y in sync with the
-                            // snapped position so that whenever usesSnapDrag flips to false
-                            // for any reason, effectiveLocalX falls back to localX which
-                            // already holds the correct snapped value — not the raw cursor.
-                            if (mediaDelegate.usesSnapDrag) {
-                                mediaDelegate.localX = root.liveSnapDragX
-                                mediaDelegate.localY = root.liveSnapDragY
-                            }
-                            // Chrome viewport offset = scene delta * viewScale
-                            root.liveDragViewOffsetX = cur.x - dragOriginViewX
-                            root.liveDragViewOffsetY = cur.y - dragOriginViewY
-                        }
-
-                        onCanceled: {
-                            if (countedAsActive) {
-                                root.activeMediaDragCount = Math.max(0, root.activeMediaDragCount - 1)
-                                countedAsActive = false
-                            }
-                            mediaDelegate.localDragging = false
-                            pressAnchorValid = false
-                            dragOriginSceneX = 0.0
-                            dragOriginSceneY = 0.0
-                            pressPointerSceneX = 0.0
-                            pressPointerSceneY = 0.0
-                            dragOriginViewX = 0.0
-                            dragOriginViewY = 0.0
-                            pressPointerViewX = 0.0
-                            pressPointerViewY = 0.0
-                            root.liveDragMediaId = ""
-                            root.liveDragViewOffsetX = 0.0
-                            root.liveDragViewOffsetY = 0.0
-                            // No commit path on cancel — onMediaChanged may never fire.
-                            // Arm the safety-net timer so the freeze is force-cleared after
-                            // a short window if nothing else clears it first.
-                            if (root.liveSnapDragActive
-                                    && root.liveSnapDragMediaId === activeMoveMediaId) {
-                                snapFreezeCleanupTimer.restart()
-                            }
-                            if (inputLayer.useInputCoordinator) {
-                                inputLayer.inputCoordinator.endMove(activeMoveMediaId)
-                            } else {
-                                inputLayer.inputCoordinator.endMode("move", activeMoveMediaId)
-                            }
-                            activeMoveMediaId = ""
+                    MediaInteractionHandlers {
+                        id: mediaInteraction
+                        rootController: root
+                        inputLayer: inputLayer
+                        selectionChrome: selectionChrome
+                        viewport: viewport
+                        delegateItem: mediaDelegate
+                        mediaContentItem: mediaContentLoader.item
+                        onRequestSnapFreezeCleanup: {
+                            snapFreezeCleanupTimer.restart()
                         }
                     }
 
@@ -1010,20 +659,6 @@ Rectangle {
                     Connections {
                         target: mediaContentLoader.item
                         ignoreUnknownSignals: true
-                        function onSelectRequested(mediaId, additive) {
-                            if (inputLayer.useInputCoordinator) {
-                                inputLayer.inputCoordinator.noteMediaPrimaryPress(mediaId, additive)
-                            } else {
-                                root.requestMediaSelection(mediaId, additive)
-                            }
-                        }
-                        function onPrimaryPressed(mediaId, additive) {
-                            if (inputLayer.useInputCoordinator) {
-                                inputLayer.inputCoordinator.noteMediaPrimaryPress(mediaId, additive)
-                            } else {
-                                root.requestMediaSelection(mediaId, additive)
-                            }
-                        }
                         function onTextCommitRequested(mediaId, text) {
                             root.textCommitRequested(mediaId, text)
                         }
@@ -1159,7 +794,6 @@ Rectangle {
                 viewportItem: viewport
                 interactionController: root
                 inputCoordinator: inputLayer ? inputLayer.inputCoordinator : null
-                useInputCoordinator: inputLayer ? inputLayer.useInputCoordinator : true
                 mediaModel: root.mediaModel
                 selectionModel: root.selectionChromeModel
                 // Live drag offset: chrome visually follows the moving item without model repush
@@ -1200,7 +834,7 @@ Rectangle {
                 enabled: !root.anyMediaEditing
 
                 onActiveChanged: {
-                    if (!inputLayer || !inputLayer.useInputCoordinator)
+                    if (!inputLayer || !inputLayer.inputCoordinator)
                         return
 
                     if (active) {
@@ -1217,7 +851,7 @@ Rectangle {
                 }
 
                 onCanceled: {
-                    if (!inputLayer || !inputLayer.useInputCoordinator)
+                    if (!inputLayer || !inputLayer.inputCoordinator)
                         return
                     inputLayer.inputCoordinator.endPrimaryGesture()
                 }
@@ -1230,8 +864,7 @@ Rectangle {
                 // grab from this DragHandler doesn't block TextEdit cursor placement.
                 enabled: !root.anyMediaEditing
                          && root.canStartCanvasPan(panDrag.active)
-                         && (!inputLayer.useInputCoordinator
-                             || inputLayer.inputCoordinator.ownerAllowsCanvasPan(panDrag.active))
+                         && inputLayer.inputCoordinator.ownerAllowsCanvasPan(panDrag.active)
                 target: null
                 acceptedDevices: PointerDevice.Mouse
                 acceptedButtons: Qt.LeftButton
@@ -1245,12 +878,8 @@ Rectangle {
                 onActiveChanged: {
                     if (active) {
                         var panGranted = false
-                        if (inputLayer.useInputCoordinator) {
-                            var pressPoint = panDrag.centroid.pressPosition
-                            panGranted = inputLayer.inputCoordinator.tryBeginPanAt(pressPoint.x, pressPoint.y)
-                        } else {
-                            panGranted = inputLayer.inputCoordinator.beginMode("pan", "canvas")
-                        }
+                        var pressPoint = panDrag.centroid.pressPosition
+                        panGranted = inputLayer.inputCoordinator.tryBeginPanAt(pressPoint.x, pressPoint.y)
                         if (!panGranted) {
                             panSessionActive = false
                             return
@@ -1260,11 +889,7 @@ Rectangle {
                         startPanY = root.panY
                     } else {
                         panSessionActive = false
-                        if (inputLayer.useInputCoordinator) {
-                            inputLayer.inputCoordinator.endPan()
-                        } else {
-                            inputLayer.inputCoordinator.endMode("pan", "canvas")
-                        }
+                        inputLayer.inputCoordinator.endPan()
                     }
                 }
 
@@ -1277,11 +902,7 @@ Rectangle {
 
                 onCanceled: {
                     panSessionActive = false
-                    if (inputLayer.useInputCoordinator) {
-                        inputLayer.inputCoordinator.endPan()
-                    } else {
-                        inputLayer.inputCoordinator.endMode("pan", "canvas")
-                    }
+                    inputLayer.inputCoordinator.endPan()
                 }
             }
 
@@ -1301,12 +922,7 @@ Rectangle {
 
                 onActiveChanged: {
                     if (active) {
-                        var panGranted = false
-                        if (inputLayer.useInputCoordinator) {
-                            panGranted = inputLayer.inputCoordinator.beginMode("pan", "canvas")
-                        } else {
-                            panGranted = inputLayer.inputCoordinator.beginMode("pan", "canvas")
-                        }
+                        var panGranted = inputLayer.inputCoordinator.beginMode("pan", "canvas")
                         if (!panGranted) {
                             panSessionActive = false
                             return
@@ -1316,11 +932,7 @@ Rectangle {
                         startPanY = root.panY
                     } else {
                         panSessionActive = false
-                        if (inputLayer.useInputCoordinator) {
-                            inputLayer.inputCoordinator.endPan()
-                        } else {
-                            inputLayer.inputCoordinator.endMode("pan", "canvas")
-                        }
+                        inputLayer.inputCoordinator.endPan()
                     }
                 }
 
@@ -1333,11 +945,7 @@ Rectangle {
 
                 onCanceled: {
                     panSessionActive = false
-                    if (inputLayer.useInputCoordinator) {
-                        inputLayer.inputCoordinator.endPan()
-                    } else {
-                        inputLayer.inputCoordinator.endMode("pan", "canvas")
-                    }
+                    inputLayer.inputCoordinator.endPan()
                 }
             }
 
@@ -1382,14 +990,7 @@ Rectangle {
                     if (!root.selectionChromeModel || root.selectionChromeModel.length === 0)
                         return
 
-                    if (inputLayer.useInputCoordinator
-                            && !inputLayer.inputCoordinator.ownerAllowsEmptyTap())
-                        return
-
-                    var overMedia = inputLayer && inputLayer.inputCoordinator
-                        ? inputLayer.inputCoordinator.isPointInsideMedia(eventPoint.position.x, eventPoint.position.y)
-                        : false
-                    if (overMedia)
+                    if (!inputLayer.inputCoordinator.ownerAllowsEmptyTap())
                         return
 
                     root.clearSelectionRequested()
@@ -1404,12 +1005,8 @@ Rectangle {
                 acceptedButtons: Qt.LeftButton
 
                 onTapped: function(eventPoint) {
-                    if (inputLayer.useInputCoordinator) {
-                        inputLayer.inputCoordinator.tryBeginTextCreateAt(eventPoint.position.x,
-                                                                          eventPoint.position.y)
-                    } else {
-                        root.textCreateRequested(eventPoint.position.x, eventPoint.position.y)
-                    }
+                    inputLayer.inputCoordinator.tryBeginTextCreateAt(eventPoint.position.x,
+                                                                      eventPoint.position.y)
                 }
             }
 
@@ -1439,7 +1036,7 @@ Rectangle {
             Timer {
                 interval: 120
                 repeat: true
-                running: inputLayer.useInputCoordinator
+                running: true
                 onTriggered: {
                     root.reconcileInputCoordinatorState("watchdog")
                 }

@@ -1,0 +1,11 @@
+{
+  "inputLatencyMs": {
+    "target": 16,
+    "max": 33
+  },
+  "dragFrameBudgetMs": {
+    "target": 8,
+    "max": 16
+  },
+  "longDragDurationSec": 30
+}
