@@ -24,12 +24,118 @@ Item {
 
         property string mode: "idle"
         property string ownerId: ""
-        property string pressTargetKind: "unknown" // unknown | handle
+        property string pressTargetKind: "unknown" // unknown | handle | media | canvas
         property string pressTargetMediaId: ""
+        property string lastPrimaryPressKind: "unknown" // unknown | handle | media | canvas
+        property string lastPrimaryPressMediaId: ""
+        property bool primaryGestureActive: false
+        property string primaryOwnerKind: "none" // none | handle | media | canvas
+        property string primaryOwnerMediaId: ""
+
+        function resetPrimaryOwner() {
+            primaryGestureActive = false
+            primaryOwnerKind = "none"
+            primaryOwnerMediaId = ""
+        }
 
         function resetPressTarget() {
             pressTargetKind = "unknown"
             pressTargetMediaId = ""
+        }
+
+        function resetLastPrimaryPressTarget() {
+            lastPrimaryPressKind = "unknown"
+            lastPrimaryPressMediaId = ""
+        }
+
+        function mediaIdAtPoint(viewX, viewY) {
+            if (!inputLayer.contentItem || !inputLayer.mediaModel)
+                return ""
+
+            var viewScale = inputLayer.contentItem.scale || 1.0
+            var contentX = inputLayer.contentItem.x || 0.0
+            var contentY = inputLayer.contentItem.y || 0.0
+
+            for (var i = inputLayer.mediaModel.length - 1; i >= 0; --i) {
+                var entry = inputLayer.mediaModel[i]
+                if (!entry)
+                    continue
+
+                var mediaScale = entry.scale || 1.0
+                var sceneW = Math.max(1, (entry.width || 1) * mediaScale)
+                var sceneH = Math.max(1, (entry.height || 1) * mediaScale)
+                var left = contentX + (entry.x || 0) * viewScale
+                var top = contentY + (entry.y || 0) * viewScale
+                var width = sceneW * viewScale
+                var height = sceneH * viewScale
+                if (viewX >= left && viewX <= (left + width)
+                        && viewY >= top && viewY <= (top + height)) {
+                    return entry.mediaId || ""
+                }
+            }
+            return ""
+        }
+
+        function beginPrimaryGesture(viewX, viewY, hoveredHandleId, hoveredHandleMediaId) {
+            primaryGestureActive = true
+            resetLastPrimaryPressTarget()
+
+            var handleId = hoveredHandleId || ""
+            if (inputLayer.selectionHandlePriorityActive || handleId !== "") {
+                primaryOwnerKind = "handle"
+                primaryOwnerMediaId = hoveredHandleMediaId || ""
+                pressTargetKind = "handle"
+                pressTargetMediaId = primaryOwnerMediaId
+                return primaryOwnerKind
+            }
+
+            var hitMediaId = mediaIdAtPoint(viewX, viewY)
+            if (hitMediaId !== "") {
+                primaryOwnerKind = "media"
+                primaryOwnerMediaId = hitMediaId
+                pressTargetKind = "media"
+                pressTargetMediaId = hitMediaId
+                return primaryOwnerKind
+            }
+
+            primaryOwnerKind = "canvas"
+            primaryOwnerMediaId = ""
+            pressTargetKind = "canvas"
+            pressTargetMediaId = ""
+            return primaryOwnerKind
+        }
+
+        function endPrimaryGesture() {
+            lastPrimaryPressKind = pressTargetKind
+            lastPrimaryPressMediaId = pressTargetMediaId
+            resetPrimaryOwner()
+            resetPressTarget()
+        }
+
+        function ownerAllowsMedia(mediaId, active) {
+            if (active)
+                return true
+            if (!primaryGestureActive)
+                return true
+            if (primaryOwnerKind !== "media")
+                return false
+            return primaryOwnerMediaId === "" || primaryOwnerMediaId === (mediaId || "")
+        }
+
+        function ownerAllowsCanvasPan(active) {
+            if (active)
+                return true
+            if (!primaryGestureActive)
+                return true
+            return primaryOwnerKind === "canvas"
+        }
+
+        function ownerAllowsEmptyTap() {
+            if (primaryGestureActive)
+                return primaryOwnerKind === "canvas"
+            // Tap is evaluated on release, after primary gesture has ended.
+            // Use the snapshot of the most recent press origin.
+            return lastPrimaryPressKind === "canvas"
         }
 
         function isIdle() {
@@ -88,34 +194,11 @@ Item {
             mode = "idle"
             ownerId = ""
             resetPressTarget()
+            resetLastPrimaryPressTarget()
         }
 
         function isPointInsideMedia(viewX, viewY) {
-            if (!inputLayer.contentItem || !inputLayer.mediaModel)
-                return false
-
-            var viewScale = inputLayer.contentItem.scale || 1.0
-            var contentX = inputLayer.contentItem.x || 0.0
-            var contentY = inputLayer.contentItem.y || 0.0
-
-            for (var i = inputLayer.mediaModel.length - 1; i >= 0; --i) {
-                var entry = inputLayer.mediaModel[i]
-                if (!entry)
-                    continue
-
-                var mediaScale = entry.scale || 1.0
-                var sceneW = Math.max(1, (entry.width || 1) * mediaScale)
-                var sceneH = Math.max(1, (entry.height || 1) * mediaScale)
-                var left = contentX + (entry.x || 0) * viewScale
-                var top = contentY + (entry.y || 0) * viewScale
-                var width = sceneW * viewScale
-                var height = sceneH * viewScale
-                if (viewX >= left && viewX <= (left + width)
-                        && viewY >= top && viewY <= (top + height)) {
-                    return true
-                }
-            }
-            return false
+            return mediaIdAtPoint(viewX, viewY) !== ""
         }
 
         function noteMediaPrimaryPress(mediaId, additive) {
@@ -134,6 +217,8 @@ Item {
                 return "content-editing"
             if (inputLayer.textToolActive)
                 return "text-tool-active"
+            if (!ownerAllowsMedia(mediaId, dragActive))
+                return "gesture-owner-not-media"
             // Block drag if a resize is actively in progress, OR if ANY selected item's handle
             // is hovered — this prevents occluding media items from stealing press events when
             // the pointer is over a selected item's resize handle zone (even if that item has
@@ -165,10 +250,11 @@ Item {
         }
 
         function canEnablePan(panActive) {
-            return panActive || (isIdle()
+            return ownerAllowsCanvasPan(panActive)
+                && (panActive || (isIdle()
                 && !inputLayer.textToolActive
                 && !inputLayer.selectionHandlePriorityActive
-                && inputLayer.liveDragMediaId === "")
+                && inputLayer.liveDragMediaId === ""))
         }
 
         function tryBeginPanAt(viewX, viewY) {
@@ -203,11 +289,13 @@ Item {
         function endResize(mediaId) {
             endMode("resize", mediaId)
             resetPressTarget()
+            resetLastPrimaryPressTarget()
         }
 
         function canStartTextToolTap() {
             return isIdle()
                 && inputLayer.textToolActive
+                && ownerAllowsCanvasPan(false)
                 && !inputLayer.selectionHandlePriorityActive
                 && inputLayer.liveDragMediaId === ""
         }

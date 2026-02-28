@@ -77,6 +77,7 @@ signals:
 
 private slots:
     void handleMediaSelectRequested(const QString& mediaId, bool additive);
+    void handleClearSelectionRequested();
     void handleMediaMoveStarted(const QString& mediaId, qreal sceneX, qreal sceneY, bool snap);
     void handleMediaMoveUpdated(const QString& mediaId, qreal sceneX, qreal sceneY, bool snap);
     void handleMediaMoveEnded(const QString& mediaId, qreal sceneX, qreal sceneY, bool snap);

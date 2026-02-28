@@ -333,6 +333,9 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
         m_quickWidget->rootObject(), SIGNAL(mediaSelectRequested(QString,bool)),
         this, SLOT(handleMediaSelectRequested(QString,bool)));
     QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(clearSelectionRequested()),
+        this, SLOT(handleClearSelectionRequested()));
+    QObject::connect(
         m_quickWidget->rootObject(), SIGNAL(mediaMoveStarted(QString,double,double,bool)),
         this, SLOT(handleMediaMoveStarted(QString,double,double,bool)));
     QObject::connect(
@@ -721,6 +724,28 @@ void QuickCanvasController::handleMediaSelectRequested(const QString& mediaId, b
     m_mediaSyncPending = false;
 
     m_selectionStore->setSelectedMediaId(mediaId);
+    pushSelectionAndSnapModels();
+}
+
+void QuickCanvasController::handleClearSelectionRequested() {
+    if (!m_mediaScene) {
+        return;
+    }
+
+    if (m_mediaScene->selectedItems().isEmpty()) {
+        return;
+    }
+
+    m_selectionMutationInProgress = true;
+    m_mediaScene->clearSelection();
+    m_selectionMutationInProgress = false;
+
+    if (m_mediaSyncTimer) {
+        m_mediaSyncTimer->stop();
+    }
+    m_mediaSyncPending = false;
+
+    m_selectionStore->setSelectedMediaId(QString());
     pushSelectionAndSnapModels();
 }
 
