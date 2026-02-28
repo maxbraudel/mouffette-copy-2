@@ -77,17 +77,21 @@ Item {
         acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
         acceptedButtons: Qt.LeftButton
         grabPermissions: PointerHandler.ApprovesTakeOverByAnything
+        // NOTE: ownerAllowsMedia is intentionally NOT checked here.
+        // mediaPressSelect is parented to the media delegate — if it fires, the
+        // press is by definition on media. Gating on the coordinator here would
+        // create a race with primaryGestureRouter (which fires first on higher-z
+        // InputLayer) and can falsely block selection when mediaIdAtPoint fails.
+        // Instead, onActiveChanged corrects the coordinator state itself.
         enabled: !!delegateItem.media
                  && !delegateItem.overlayHovered
                  && !(mediaContentItem && mediaContentItem.editing === true)
                  && selectionChrome.hoveredHandleId === ""
-                 && (!!inputLayer
-                     && !!inputLayer.inputCoordinator
-                     && inputLayer.inputCoordinator.ownerAllowsMedia(delegateItem.currentMediaId, mediaPressSelect.active))
+                 && !!inputLayer
+                 && !!inputLayer.inputCoordinator
 
         function selectNow(modifiers) {
             var mediaId = delegateItem.currentMediaId
-            console.log("[DBG][selectNow] mediaId=", mediaId, "inputLayer=", !!inputLayer, "coordinator=", !!(inputLayer && inputLayer.inputCoordinator), "interactionCtrl=", !!(inputLayer && inputLayer.interactionController))
             if (!mediaId || mediaId.length === 0)
                 return
 
@@ -99,7 +103,25 @@ Item {
             if (!active)
                 return
 
-            console.log("[DBG][mediaPressSelect] onActiveChanged active=true, mediaId=", delegateItem ? delegateItem.currentMediaId : "NO_DELEGATE", "enabled=", mediaPressSelect.enabled)
+            // Ensure the coordinator correctly identifies this press as on-media.
+            // primaryGestureRouter (on higher-z InputLayer) fires first; if its
+            // mediaIdAtPoint traversal missed this item, primaryOwnerKind may be
+            // "canvas".  Correct it here — mediaPressSelect firing IS proof the
+            // press landed on this media delegate.
+            var coord = inputLayer.inputCoordinator
+            var myMediaId = delegateItem.currentMediaId
+            if (myMediaId && myMediaId.length > 0) {
+                if (!coord.primaryGestureActive) {
+                    coord.primaryGestureActive = true
+                }
+                if (coord.primaryOwnerKind !== "media"
+                        || (coord.primaryOwnerMediaId !== "" && coord.primaryOwnerMediaId !== myMediaId)) {
+                    coord.primaryOwnerKind = "media"
+                    coord.primaryOwnerMediaId = myMediaId
+                    coord.pressTargetKind = "media"
+                    coord.pressTargetMediaId = myMediaId
+                }
+            }
 
             var modifiers = Qt.application.keyboardModifiers
             if (mediaPressSelect.point && mediaPressSelect.point.modifiers !== undefined)

@@ -90,7 +90,6 @@ Item {
             resetLastPrimaryPressTarget()
 
             var handleId = hoveredHandleId || ""
-            console.log("[DBG][beginPrimaryGesture] viewX=", viewX, "viewY=", viewY, "handleId=", handleId)
             if (inputLayer.selectionHandlePriorityActive || handleId !== "") {
                 primaryOwnerKind = "handle"
                 primaryOwnerMediaId = hoveredHandleMediaId || ""
@@ -100,7 +99,6 @@ Item {
             }
 
             var hitMediaId = mediaIdAtPoint(viewX, viewY)
-            console.log("[DBG][beginPrimaryGesture] hitMediaId=", hitMediaId)
             if (hitMediaId !== "") {
                 primaryOwnerKind = "media"
                 primaryOwnerMediaId = hitMediaId
