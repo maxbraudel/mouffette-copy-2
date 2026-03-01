@@ -131,12 +131,6 @@ Rectangle {
         root.mediaSelectRequested(mediaId, !!additive)
     }
 
-    function canStartMediaMove(media, contentItem, dragActive, mediaId) {
-        return !!inputLayer
-            && !!inputLayer.inputCoordinator
-            && inputLayer.inputCoordinator.canStartMove(media, contentItem, dragActive, mediaId)
-    }
-
     function canStartCanvasPan(panActive) {
         return !!inputLayer
             && !!inputLayer.inputCoordinator

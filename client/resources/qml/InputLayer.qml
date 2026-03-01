@@ -3,7 +3,6 @@ import QtQuick 2.15
 Item {
     id: inputLayer
 
-    property bool useInputCoordinator: true
     property var interactionController: null
     property bool textToolActive: false
     property var mediaModel: []
@@ -11,7 +10,6 @@ Item {
     property bool selectionHandlePriorityActive: false
     property string selectionHandleHoveredMediaId: ""
     property string liveDragMediaId: ""
-    property bool debugInput: false
     readonly property alias inputCoordinator: coordinator
     default property alias layerChildren: layerRoot.data
 
@@ -19,15 +17,6 @@ Item {
 
     QtObject {
         id: coordinator
-
-        function logInput() {
-            if (!inputLayer.debugInput)
-                return
-            var args = ["[QuickCanvas][InputDebug][Coordinator]"]
-            for (var i = 0; i < arguments.length; ++i)
-                args.push(arguments[i])
-            console.warn.apply(console, args)
-        }
 
         property string mode: "idle"
         property string ownerId: ""
@@ -137,29 +126,14 @@ Item {
 
             if (mediaId === "") {
                 mediaId = mediaIdFromModelBounds(scenePoint.x, scenePoint.y)
-                if (mediaId !== "") {
-                    logInput("mediaIdAtPoint.fallbackModel",
-                             "scene=", scenePoint.x, scenePoint.y,
-                             "resolved=", mediaId)
-                }
             }
 
-            var resolved = mediaId || ""
-            logInput("mediaIdAtPoint", "view=", viewX, viewY, "resolved=", resolved)
-            return resolved
+            return mediaId || ""
         }
 
         function beginPrimaryGesture(viewX, viewY, hoveredHandleId, hoveredHandleMediaId) {
             primaryGestureActive = true
             resetLastPrimaryPressTarget()
-
-            logInput("beginPrimaryGesture",
-                     "view=", viewX, viewY,
-                     "hoveredHandleId=", hoveredHandleId || "",
-                     "hoveredHandleMediaId=", hoveredHandleMediaId || "",
-                     "handlePriority=", inputLayer.selectionHandlePriorityActive,
-                     "mode=", mode,
-                     "owner=", ownerId)
 
             var handleId = hoveredHandleId || ""
             if (inputLayer.selectionHandlePriorityActive || handleId !== "") {
@@ -167,7 +141,6 @@ Item {
                 primaryOwnerMediaId = hoveredHandleMediaId || ""
                 pressTargetKind = "handle"
                 pressTargetMediaId = primaryOwnerMediaId
-                logInput("beginPrimaryGesture.owner", "handle", "media=", primaryOwnerMediaId)
                 return primaryOwnerKind
             }
 
@@ -177,7 +150,6 @@ Item {
                 primaryOwnerMediaId = hitMediaId
                 pressTargetKind = "media"
                 pressTargetMediaId = hitMediaId
-                logInput("beginPrimaryGesture.owner", "media", "media=", hitMediaId)
                 return primaryOwnerKind
             }
 
@@ -185,17 +157,11 @@ Item {
             primaryOwnerMediaId = ""
             pressTargetKind = "canvas"
             pressTargetMediaId = ""
-            logInput("beginPrimaryGesture.owner", "canvas")
             assertInvariants("beginPrimaryGesture")
             return primaryOwnerKind
         }
 
         function endPrimaryGesture() {
-            logInput("endPrimaryGesture",
-                     "pressTarget=", pressTargetKind,
-                     "pressMedia=", pressTargetMediaId,
-                     "mode=", mode,
-                     "owner=", ownerId)
             lastPrimaryPressKind = pressTargetKind
             lastPrimaryPressMediaId = pressTargetMediaId
             resetPrimaryOwner()
@@ -208,17 +174,9 @@ Item {
                 return true
             if (!primaryGestureActive)
                 return true
-            if (primaryOwnerKind !== "media") {
-                logInput("ownerAllowsMedia.blocked", "reason=owner-kind", "ownerKind=", primaryOwnerKind, "mediaId=", mediaId || "")
+            if (primaryOwnerKind !== "media")
                 return false
-            }
-            var allowed = primaryOwnerMediaId === "" || primaryOwnerMediaId === (mediaId || "")
-            if (!allowed) {
-                logInput("ownerAllowsMedia.blocked", "reason=owner-media-mismatch",
-                         "primaryOwnerMediaId=", primaryOwnerMediaId,
-                         "mediaId=", mediaId || "")
-            }
-            return allowed
+            return primaryOwnerMediaId === "" || primaryOwnerMediaId === (mediaId || "")
         }
 
         function ownerAllowsCanvasPan(active) {
@@ -234,13 +192,7 @@ Item {
                 return primaryOwnerKind === "canvas"
             // Tap is evaluated on release, after primary gesture has ended.
             // Use the snapshot of the most recent press origin.
-            var allowed = lastPrimaryPressKind === "canvas"
-            if (!allowed) {
-                logInput("ownerAllowsEmptyTap.blocked",
-                         "lastPrimaryPressKind=", lastPrimaryPressKind,
-                         "lastPrimaryPressMediaId=", lastPrimaryPressMediaId)
-            }
-            return allowed
+            return lastPrimaryPressKind === "canvas"
         }
 
         function isIdle() {
@@ -313,14 +265,6 @@ Item {
             if (!mediaId)
                 return false
 
-            logInput("noteMediaPrimaryPress",
-                     "mediaId=", mediaId,
-                     "additive=", !!additive,
-                     "primaryOwnerKind=", primaryOwnerKind,
-                     "primaryOwnerMediaId=", primaryOwnerMediaId,
-                     "mode=", mode,
-                     "ownerId=", ownerId)
-
             pressTargetKind = "media"
             pressTargetMediaId = mediaId
             lastPrimaryPressKind = "media"
@@ -328,47 +272,14 @@ Item {
 
             if (inputLayer.interactionController) {
                 inputLayer.interactionController.requestMediaSelection(mediaId, !!additive)
-            } else {
-                logInput("noteMediaPrimaryPress.missingController", "mediaId=", mediaId)
             }
             return true
-        }
-
-        function describeMoveBlock(media, contentItem, dragActive, mediaId) {
-            if (!media)
-                return "no-media"
-            if (contentItem && contentItem.editing === true)
-                return "content-editing"
-            if (inputLayer.textToolActive)
-                return "text-tool-active"
-            if (!ownerAllowsMedia(mediaId, dragActive))
-                return "gesture-owner-not-media"
-            // Block drag if a resize is actively in progress, OR if ANY selected item's handle
-            // is hovered — this prevents occluding media items from stealing press events when
-            // the pointer is over a selected item's resize handle zone (even if that item has
-            // lower z-order than the item whose DragHandler would otherwise fire).
-            if (inputLayer.selectionHandlePriorityActive)
-                return "selection-handle-priority"
-            var hoveredId = inputLayer.selectionHandleHoveredMediaId || ""
-            if (hoveredId !== "")
-                return "selection-handle-hovered"
-            if (dragActive)
-                return ""
-            if (!canStart("move", mediaId))
-                return "coordinator-busy"
-            return ""
-        }
-
-        function canStartMove(media, contentItem, dragActive, mediaId) {
-            return describeMoveBlock(media, contentItem, dragActive, mediaId) === ""
         }
 
         function tryBeginMove(mediaId) {
             if (!mediaId)
                 return false
-            var granted = beginMode("move", mediaId)
-            logInput("tryBeginMove", "mediaId=", mediaId, "granted=", granted)
-            return granted
+            return beginMode("move", mediaId)
         }
 
         function endMove(mediaId) {
@@ -388,9 +299,7 @@ Item {
                 return false
             if (isPointInsideMedia(viewX, viewY))
                 return false
-            var granted = beginMode("pan", "canvas")
-            logInput("tryBeginPanAt", "view=", viewX, viewY, "granted=", granted)
-            return granted
+            return beginMode("pan", "canvas")
         }
 
         function endPan() {
@@ -411,9 +320,7 @@ Item {
         function tryBeginResize(mediaId) {
             pressTargetKind = "handle"
             pressTargetMediaId = mediaId || ""
-            var granted = beginMode("resize", mediaId)
-            logInput("tryBeginResize", "mediaId=", mediaId || "", "granted=", granted)
-            return granted
+            return beginMode("resize", mediaId)
         }
 
         function endResize(mediaId) {
