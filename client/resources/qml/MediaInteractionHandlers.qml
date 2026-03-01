@@ -159,7 +159,7 @@ Item {
         acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
         acceptedButtons: Qt.LeftButton
         grabPermissions: PointerHandler.CanTakeOverFromAnything
-        // NOTE: ownerAllowsMedia / canStartMediaMove are intentionally NOT checked here.
+        // NOTE: ownerAllowsMedia is intentionally NOT checked here.
         // DragHandlers get their passive grab at press-time, BEFORE beginPrimaryGesture
         // has run and set coordinator ownership. Gating on ownership here creates a
         // race that prevents mediaDrag from ever getting a passive grab, making drag

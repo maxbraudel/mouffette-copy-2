@@ -111,13 +111,15 @@ BaseMediaItem {
             // With only width+y, height = contentHeight only, so click-to-place-cursor
             // fails in empty space and PointerHandlers can steal grabs.
             anchors.fill: parent
-            // Vertical alignment via topPadding. contentHeight = raw text height
-            // (excludes padding), so there is no binding loop.
+            // Vertical alignment via topPadding. We use textNode.paintedHeight
+            // (the exact same metric the display Text item uses for AlignVCenter)
+            // rather than contentHeight, so the text position is pixel-identical
+            // between display mode and edit mode.
             topPadding: {
-                var extra = Math.max(0, height - contentHeight)
+                var extra = Math.max(0, height - textNode.paintedHeight)
                 if (root.verticalAlignment === "top")    return 0
                 if (root.verticalAlignment === "bottom") return extra
-                return Math.floor(extra * 0.5)
+                return extra * 0.5
             }
             text: root.preEditText
             color: root.textColor
@@ -128,6 +130,7 @@ BaseMediaItem {
             // because Qt6 passes raw screen coordinates to the internal selection handler
             // instead of item-local coordinates. We use an explicit MouseArea below.
             selectByMouse: false
+            renderType: Text.QtRendering
             horizontalAlignment: root.horizontalAlignment === "left"
                 ? Text.AlignLeft
                 : (root.horizontalAlignment === "right" ? Text.AlignRight : Text.AlignHCenter)
