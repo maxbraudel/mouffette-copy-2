@@ -6,16 +6,6 @@ import QtQuick 2.15
 Item {
     id: root
 
-    function debugInputLog() {
-        var controllerDebug = interactionController && interactionController.debugInput
-        if (!controllerDebug)
-            return
-        var args = ["[QuickCanvas][InputDebug][SelectionChrome]"]
-        for (var i = 0; i < arguments.length; ++i)
-            args.push(arguments[i])
-        console.warn.apply(console, args)
-    }
-
     property var interactionController: null
     property var inputCoordinator: null
     property var selectionModel: []
@@ -186,14 +176,7 @@ Item {
         if (hit) {
             hoveredMediaId = hit.mediaId
             hoveredHandleId = hit.handleId
-            debugInputLog("hover.handle",
-                          "view=", viewX, viewY,
-                          "mediaId=", hit.mediaId,
-                          "handleId=", hit.handleId)
         } else {
-            if (hoveredHandleId !== "" || hoveredMediaId !== "") {
-                debugInputLog("hover.clear", "view=", viewX, viewY)
-            }
             hoveredMediaId = ""
             hoveredHandleId = ""
         }
@@ -202,9 +185,6 @@ Item {
     function clearHoveredHandle() {
         if (interacting)
             return
-        if (hoveredHandleId !== "" || hoveredMediaId !== "") {
-            debugInputLog("hover.clear.explicit")
-        }
         hoveredMediaId = ""
         hoveredHandleId = ""
     }
@@ -239,7 +219,6 @@ Item {
         cursorShape: root.effectiveResizeCursorShape
 
         onHoveredChanged: {
-            root.debugInputLog("hover.hoveredChanged", "hovered=", hovered)
             if (!hovered)
                 root.clearHoveredHandle()
         }
@@ -247,7 +226,6 @@ Item {
         onPointChanged: {
             if (!point)
                 return
-            root.debugInputLog("hover.pointChanged", "view=", point.position.x, point.position.y)
             root.updateHoveredHandle(point.position.x, point.position.y)
         }
     }
@@ -266,17 +244,10 @@ Item {
         dragThreshold: 0
 
         onActiveChanged: {
-            root.debugInputLog("resizeDrag.activeChanged",
-                               "active=", active,
-                               "enabled=", enabled,
-                               "hoveredHandleId=", root.hoveredHandleId,
-                               "hoveredMediaId=", root.hoveredMediaId)
             if (active) {
                 var pressPoint = globalResizeDrag.centroid.scenePressPosition
-                root.debugInputLog("resizeDrag.press", "view=", pressPoint.x, pressPoint.y)
                 var pressHit = root.hitTestHandle(pressPoint.x, pressPoint.y)
                 if (!pressHit) {
-                    root.debugInputLog("resizeDrag.blocked", "reason=no-handle-hit", "press=", pressPoint.x, pressPoint.y)
                     root.interacting = false
                     root.activeResizeMediaId = ""
                     root.activeResizeHandleId = ""
@@ -290,12 +261,10 @@ Item {
                 root.pressEntryW = pressHit.sceneW
                 root.pressEntryH = pressHit.sceneH
 
-                var resizeGranted = false
-                resizeGranted = !!root.inputCoordinator
+                var resizeGranted = !!root.inputCoordinator
                     && root.inputCoordinator.tryBeginResize(root.activeResizeMediaId)
 
                 if (!resizeGranted) {
-                    root.debugInputLog("resizeDrag.blocked", "reason=coordinator-denied", "mediaId=", root.activeResizeMediaId)
                     root.interacting = false
                     root.activeResizeMediaId = ""
                     root.activeResizeHandleId = ""
@@ -305,12 +274,8 @@ Item {
                 root.interacting = true
                 root.hoveredMediaId = root.activeResizeMediaId
                 root.hoveredHandleId = root.activeResizeHandleId
-                root.debugInputLog("resizeDrag.begin",
-                                   "mediaId=", root.activeResizeMediaId,
-                                   "handleId=", root.activeResizeHandleId)
             } else {
                 var finalMediaId = root.activeResizeMediaId
-                root.debugInputLog("resizeDrag.end", "mediaId=", finalMediaId)
                 root.interacting = false
                 if (root.inputCoordinator)
                     root.inputCoordinator.endResize(finalMediaId)
@@ -321,9 +286,6 @@ Item {
         }
 
         onCanceled: {
-            root.debugInputLog("resizeDrag.canceled",
-                               "mediaId=", root.activeResizeMediaId,
-                               "handleId=", root.activeResizeHandleId)
             var canceledMediaId = root.activeResizeMediaId
             root.interacting = false
             if (root.inputCoordinator) {
@@ -335,12 +297,6 @@ Item {
         }
 
         onTranslationChanged: {
-            root.debugInputLog("resizeDrag.translation",
-                               "active=", active,
-                               "interacting=", root.interacting,
-                               "mediaId=", root.activeResizeMediaId,
-                               "handleId=", root.activeResizeHandleId,
-                               "translation=", globalResizeDrag.translation.x, globalResizeDrag.translation.y)
             if (!active || !root.interacting || !root.contentItem || !root.viewportItem)
                 return
 
@@ -372,13 +328,6 @@ Item {
                                  altEnabled)
         }
 
-        onGrabChanged: function(transition, point) {
-            root.debugInputLog("resizeDrag.grabChanged",
-                               "transition=", transition,
-                               "point=", point ? (point.position.x + "," + point.position.y) : "",
-                               "active=", active,
-                               "enabled=", enabled)
-        }
     }
 
     Repeater {

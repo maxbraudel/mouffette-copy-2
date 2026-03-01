@@ -11,7 +11,7 @@ Item {
     property bool selectionHandlePriorityActive: false
     property string selectionHandleHoveredMediaId: ""
     property string liveDragMediaId: ""
-    property bool debugInput: true
+    property bool debugInput: false
     readonly property alias inputCoordinator: coordinator
     default property alias layerChildren: layerRoot.data
 

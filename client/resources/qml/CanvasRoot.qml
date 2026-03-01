@@ -107,17 +107,6 @@ Rectangle {
     // Published every 50 ms by QuickCanvasController for ALL video items
     // (not just the selected one), so overlays remain live after deselection.
     property var videoStateModel: ({})
-    property bool debugInput: true
-
-    function debugInputLog() {
-        if (!debugInput)
-            return
-        var args = ["[QuickCanvas][InputDebug][Root]"]
-        for (var i = 0; i < arguments.length; ++i)
-            args.push(arguments[i])
-        console.warn.apply(console, args)
-    }
-
     focus: true
     Keys.onReleased: function(event) {
         if (event.key === Qt.Key_Shift) {
@@ -137,11 +126,8 @@ Rectangle {
     }
 
     function requestMediaSelection(mediaId, additive) {
-        if (!mediaId || mediaId.length === 0) {
-            debugInputLog("requestMediaSelection.skipped", "reason=empty-media-id")
+        if (!mediaId || mediaId.length === 0)
             return
-        }
-        debugInputLog("requestMediaSelection.emit", "mediaId=", mediaId, "additive=", !!additive)
         root.mediaSelectRequested(mediaId, !!additive)
     }
 
@@ -874,19 +860,11 @@ Rectangle {
                 enabled: !root.anyMediaEditing
 
                 onActiveChanged: {
-                    root.debugInputLog("primaryGestureRouter.activeChanged",
-                                       "active=", active,
-                                       "enabled=", enabled)
                     if (!inputLayer || !inputLayer.inputCoordinator)
                         return
 
                     if (active) {
                         var viewPoint = point ? point.position : centroid.position
-                        root.debugInputLog("primaryGestureRouter.down",
-                                           "view=", viewPoint.x, viewPoint.y,
-                                           "hoveredHandleId=", selectionChrome.hoveredHandleId,
-                                           "hoveredMediaId=", selectionChrome.hoveredMediaId,
-                                           "handlePriorityActive=", selectionChrome.handlePriorityActive)
                         inputLayer.inputCoordinator.beginPrimaryGesture(
                             viewPoint.x,
                             viewPoint.y,
@@ -894,9 +872,6 @@ Rectangle {
                             selectionChrome.hoveredMediaId
                         )
                     } else {
-                        root.debugInputLog("primaryGestureRouter.up",
-                                           "lastPressKind(before-end)=", inputLayer.inputCoordinator.pressTargetKind,
-                                           "lastPressMedia(before-end)=", inputLayer.inputCoordinator.pressTargetMediaId)
                         inputLayer.inputCoordinator.endPrimaryGesture()
                     }
                 }
@@ -904,14 +879,7 @@ Rectangle {
                 onCanceled: {
                     if (!inputLayer || !inputLayer.inputCoordinator)
                         return
-                    root.debugInputLog("primaryGestureRouter.canceled")
                     inputLayer.inputCoordinator.endPrimaryGesture()
-                }
-
-                onGrabChanged: function(transition, point) {
-                    root.debugInputLog("primaryGestureRouter.grabChanged",
-                                       "transition=", transition,
-                                       "point=", point ? (point.position.x + "," + point.position.y) : "")
                 }
             }
 
@@ -934,18 +902,9 @@ Rectangle {
                 property bool panSessionActive: false
 
                 onActiveChanged: {
-                    root.debugInputLog("panDrag.activeChanged",
-                                       "active=", active,
-                                       "enabled=", enabled,
-                                       "translation=", translation.x, translation.y)
                     if (active) {
-                        var panGranted = false
                         var pressPoint = panDrag.centroid.pressPosition
-                        root.debugInputLog("panDrag.press",
-                                           "view=", pressPoint.x, pressPoint.y)
-                        panGranted = inputLayer.inputCoordinator.tryBeginPanAt(pressPoint.x, pressPoint.y)
-                        root.debugInputLog("panDrag.begin.result",
-                                           "granted=", panGranted)
+                        var panGranted = inputLayer.inputCoordinator.tryBeginPanAt(pressPoint.x, pressPoint.y)
                         if (!panGranted) {
                             panSessionActive = false
                             return
@@ -960,10 +919,6 @@ Rectangle {
                 }
 
                 onTranslationChanged: {
-                    root.debugInputLog("panDrag.translation",
-                                       "active=", active,
-                                       "panSessionActive=", panSessionActive,
-                                       "translation=", translation.x, translation.y)
                     if (!panSessionActive)
                         return
                     root.panX = startPanX + translation.x
@@ -971,16 +926,8 @@ Rectangle {
                 }
 
                 onCanceled: {
-                    root.debugInputLog("panDrag.canceled")
                     panSessionActive = false
                     inputLayer.inputCoordinator.endPan()
-                }
-
-                onGrabChanged: function(transition, point) {
-                    root.debugInputLog("panDrag.grabChanged",
-                                       "transition=", transition,
-                                       "active=", active,
-                                       "point=", point ? (point.position.x + "," + point.position.y) : "")
                 }
             }
 
@@ -999,14 +946,8 @@ Rectangle {
                 property bool panSessionActive: false
 
                 onActiveChanged: {
-                    root.debugInputLog("middlePanDrag.activeChanged",
-                                       "active=", active,
-                                       "enabled=", enabled,
-                                       "translation=", translation.x, translation.y)
                     if (active) {
                         var panGranted = inputLayer.inputCoordinator.beginMode("pan", "canvas")
-                        root.debugInputLog("middlePanDrag.begin.result",
-                                           "granted=", panGranted)
                         if (!panGranted) {
                             panSessionActive = false
                             return
@@ -1021,10 +962,6 @@ Rectangle {
                 }
 
                 onTranslationChanged: {
-                    root.debugInputLog("middlePanDrag.translation",
-                                       "active=", active,
-                                       "panSessionActive=", panSessionActive,
-                                       "translation=", translation.x, translation.y)
                     if (!panSessionActive)
                         return
                     root.panX = startPanX + translation.x
@@ -1032,16 +969,8 @@ Rectangle {
                 }
 
                 onCanceled: {
-                    root.debugInputLog("middlePanDrag.canceled")
                     panSessionActive = false
                     inputLayer.inputCoordinator.endPan()
-                }
-
-                onGrabChanged: function(transition, point) {
-                    root.debugInputLog("middlePanDrag.grabChanged",
-                                       "transition=", transition,
-                                       "active=", active,
-                                       "point=", point ? (point.position.x + "," + point.position.y) : "")
                 }
             }
 
@@ -1083,28 +1012,15 @@ Rectangle {
                          && selectionChrome.hoveredHandleId === ""
 
                 onTapped: function(eventPoint) {
-                    root.debugInputLog("emptyCanvasTap.tapped",
-                                       "view=", eventPoint.position.x, eventPoint.position.y,
-                                       "tapCount=", tapCount)
                     if (!root.selectionChromeModel || root.selectionChromeModel.length === 0)
                         return
 
                     if (inputLayer.inputCoordinator.isPointInsideMedia(eventPoint.position.x,
-                                                                       eventPoint.position.y)) {
-                        root.debugInputLog("emptyCanvasTap.blocked", "reason=point-inside-media",
-                                           "view=", eventPoint.position.x, eventPoint.position.y)
+                                                                       eventPoint.position.y))
                         return
-                    }
 
-                    if (!inputLayer.inputCoordinator.ownerAllowsEmptyTap()) {
-                        root.debugInputLog("emptyCanvasTap.blocked", "reason=owner-disallows-empty-tap",
-                                           "lastPrimaryPressKind=", inputLayer.inputCoordinator.lastPrimaryPressKind,
-                                           "lastPrimaryPressMediaId=", inputLayer.inputCoordinator.lastPrimaryPressMediaId)
+                    if (!inputLayer.inputCoordinator.ownerAllowsEmptyTap())
                         return
-                    }
-
-                    root.debugInputLog("emptyCanvasTap.emit.clearSelection",
-                                       "view=", eventPoint.position.x, eventPoint.position.y)
 
                     root.clearSelectionRequested()
                 }
@@ -1118,16 +1034,8 @@ Rectangle {
                 acceptedButtons: Qt.LeftButton
 
                 onTapped: function(eventPoint) {
-                    root.debugInputLog("textToolTap.tapped",
-                                       "view=", eventPoint.position.x, eventPoint.position.y)
                     inputLayer.inputCoordinator.tryBeginTextCreateAt(eventPoint.position.x,
                                                                       eventPoint.position.y)
-                }
-
-                onGrabChanged: function(transition, point) {
-                    root.debugInputLog("textToolTap.grabChanged",
-                                       "transition=", transition,
-                                       "point=", point ? (point.position.x + "," + point.position.y) : "")
                 }
             }
 
