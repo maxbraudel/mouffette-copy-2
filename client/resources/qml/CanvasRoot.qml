@@ -1005,17 +1005,13 @@ Rectangle {
                          && !selectionChrome.interacting
                          && selectionChrome.hoveredHandleId === ""
 
-                onTapped: function(eventPoint) {
+                onPressedChanged: {
+                    if (!pressed) return
                     if (!root.selectionChromeModel || root.selectionChromeModel.length === 0)
                         return
-
-                    if (inputLayer.inputCoordinator.isPointInsideMedia(eventPoint.position.x,
-                                                                       eventPoint.position.y))
+                    if (inputLayer.inputCoordinator.isPointInsideMedia(point.position.x,
+                                                                       point.position.y))
                         return
-
-                    if (!inputLayer.inputCoordinator.ownerAllowsEmptyTap())
-                        return
-
                     root.clearSelectionRequested()
                 }
             }

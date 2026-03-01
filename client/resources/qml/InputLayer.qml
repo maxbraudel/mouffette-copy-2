@@ -22,8 +22,6 @@ Item {
         property string ownerId: ""
         property string pressTargetKind: "unknown" // unknown | handle | media | canvas
         property string pressTargetMediaId: ""
-        property string lastPrimaryPressKind: "unknown" // unknown | handle | media | canvas
-        property string lastPrimaryPressMediaId: ""
         property bool primaryGestureActive: false
         property string primaryOwnerKind: "none" // none | handle | media | canvas
         property string primaryOwnerMediaId: ""
@@ -37,11 +35,6 @@ Item {
         function resetPressTarget() {
             pressTargetKind = "unknown"
             pressTargetMediaId = ""
-        }
-
-        function resetLastPrimaryPressTarget() {
-            lastPrimaryPressKind = "unknown"
-            lastPrimaryPressMediaId = ""
         }
 
         function assertInvariants(stage) {
@@ -133,7 +126,6 @@ Item {
 
         function beginPrimaryGesture(viewX, viewY, hoveredHandleId, hoveredHandleMediaId) {
             primaryGestureActive = true
-            resetLastPrimaryPressTarget()
 
             var handleId = hoveredHandleId || ""
             if (inputLayer.selectionHandlePriorityActive || handleId !== "") {
@@ -162,8 +154,6 @@ Item {
         }
 
         function endPrimaryGesture() {
-            lastPrimaryPressKind = pressTargetKind
-            lastPrimaryPressMediaId = pressTargetMediaId
             resetPrimaryOwner()
             resetPressTarget()
             assertInvariants("endPrimaryGesture")
@@ -185,14 +175,6 @@ Item {
             if (!primaryGestureActive)
                 return true
             return primaryOwnerKind === "canvas"
-        }
-
-        function ownerAllowsEmptyTap() {
-            if (primaryGestureActive)
-                return primaryOwnerKind === "canvas"
-            // Tap is evaluated on release, after primary gesture has ended.
-            // Use the snapshot of the most recent press origin.
-            return lastPrimaryPressKind === "canvas"
         }
 
         function isIdle() {
@@ -253,7 +235,6 @@ Item {
             mode = "idle"
             ownerId = ""
             resetPressTarget()
-            resetLastPrimaryPressTarget()
             assertInvariants("forceReset")
         }
 
@@ -267,8 +248,6 @@ Item {
 
             pressTargetKind = "media"
             pressTargetMediaId = mediaId
-            lastPrimaryPressKind = "media"
-            lastPrimaryPressMediaId = mediaId
 
             if (inputLayer.interactionController) {
                 inputLayer.interactionController.requestMediaSelection(mediaId, !!additive)
@@ -326,7 +305,6 @@ Item {
         function endResize(mediaId) {
             endMode("resize", mediaId)
             resetPressTarget()
-            resetLastPrimaryPressTarget()
         }
 
         function canStartTextToolTap() {
