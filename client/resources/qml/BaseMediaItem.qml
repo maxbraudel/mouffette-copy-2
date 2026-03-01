@@ -3,6 +3,17 @@ import QtQuick 2.15
 Item {
     id: root
 
+    function debugInputLog() {
+        console.warn("[QuickCanvas][InputDebug][BaseMediaItem]",
+                     "mediaId=", root.mediaId,
+                     "pointerEnabled=", root.pointerEnabled,
+                     "selected=", root.selected,
+                     "x=", root.x,
+                     "y=", root.y,
+                     "w=", root.width,
+                     "h=", root.height)
+    }
+
     property real mediaX: 0
     property real mediaY: 0
     property real mediaWidth: 0
@@ -53,8 +64,34 @@ Item {
 
         onPressed: function(mouse) {
             var additive = (mouse.modifiers & Qt.ShiftModifier) !== 0
+            root.debugInputLog()
+            console.warn("[QuickCanvas][InputDebug][BaseMediaItem] onPressed",
+                         "mouse=", mouse.x, mouse.y,
+                         "button=", mouse.button,
+                         "modifiers=", mouse.modifiers,
+                         "additive=", additive)
             root.primaryPressed(root.mediaId, additive)
             mouse.accepted = true
+        }
+
+        onPositionChanged: function(mouse) {
+            if (!pressed)
+                return
+            console.warn("[QuickCanvas][InputDebug][BaseMediaItem] onPositionChanged",
+                         "mouse=", mouse.x, mouse.y,
+                         "mediaId=", root.mediaId,
+                         "buttons=", mouse.buttons)
+        }
+
+        onReleased: function(mouse) {
+            console.warn("[QuickCanvas][InputDebug][BaseMediaItem] onReleased",
+                         "mouse=", mouse.x, mouse.y,
+                         "mediaId=", root.mediaId)
+        }
+
+        onCanceled: {
+            console.warn("[QuickCanvas][InputDebug][BaseMediaItem] onCanceled",
+                         "mediaId=", root.mediaId)
         }
     }
 }

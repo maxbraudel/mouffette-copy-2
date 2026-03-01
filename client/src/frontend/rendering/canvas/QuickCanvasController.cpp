@@ -30,6 +30,7 @@
 #include <QTimer>
 #include <QVariantList>
 #include <QWindow>
+#include <QDebug>
 #include <QtMath>
 #include <QUrl>
 #include <QFontInfo>
@@ -685,24 +686,50 @@ void QuickCanvasController::scheduleMediaModelSync() {
 }
 
 void QuickCanvasController::handleMediaSelectRequested(const QString& mediaId, bool additive) {
+    qWarning().noquote()
+        << "[QuickCanvas][InputDebug][Controller] handleMediaSelectRequested"
+        << "mediaId=" << mediaId
+        << "additive=" << additive
+        << "hasScene=" << (m_mediaScene != nullptr);
+
     if (!m_mediaScene || mediaId.isEmpty()) {
+        qWarning().noquote()
+            << "[QuickCanvas][InputDebug][Controller] select request rejected"
+            << "reason=" << (!m_mediaScene ? "missing-scene" : "empty-media-id");
         return;
     }
 
     ResizableMediaBase* target = mediaItemById(mediaId);
 
     if (!target) {
+        qWarning().noquote()
+            << "[QuickCanvas][InputDebug][Controller] select request rejected"
+            << "reason=media-not-found"
+            << "mediaId=" << mediaId;
         return;
     }
+
+    qWarning().noquote()
+        << "[QuickCanvas][InputDebug][Controller] target state"
+        << "alreadySelected=" << target->isSelected()
+        << "currentSelectedCount=" << m_mediaScene->selectedItems().size();
 
     const bool alreadyOnlySelected = target->isSelected()
         && m_mediaScene->selectedItems().size() == 1;
     if (!additive && alreadyOnlySelected) {
+        qWarning().noquote()
+            << "[QuickCanvas][InputDebug][Controller] select request no-op"
+            << "reason=already-only-selected"
+            << "mediaId=" << mediaId;
         pushSelectionAndSnapModels();
         return;
     }
 
     if (additive && target->isSelected()) {
+        qWarning().noquote()
+            << "[QuickCanvas][InputDebug][Controller] select request no-op"
+            << "reason=already-selected-additive"
+            << "mediaId=" << mediaId;
         pushSelectionAndSnapModels();
         return;
     }
@@ -725,9 +752,19 @@ void QuickCanvasController::handleMediaSelectRequested(const QString& mediaId, b
 
     m_selectionStore->setSelectedMediaId(mediaId);
     pushSelectionAndSnapModels();
+
+    qWarning().noquote()
+        << "[QuickCanvas][InputDebug][Controller] selection applied"
+        << "mediaId=" << mediaId
+        << "selectedCountAfter=" << m_mediaScene->selectedItems().size();
 }
 
 void QuickCanvasController::handleClearSelectionRequested() {
+    qWarning().noquote()
+        << "[QuickCanvas][InputDebug][Controller] handleClearSelectionRequested"
+        << "hasScene=" << (m_mediaScene != nullptr)
+        << "selectedCountBefore=" << (m_mediaScene ? m_mediaScene->selectedItems().size() : 0);
+
     if (!m_mediaScene) {
         return;
     }

@@ -1,4 +1,4 @@
-rrrr#!/bin/bash
+#!/bin/bash
 
 echo "🚀 Launching Mouffette Client..."
 

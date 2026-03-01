@@ -11,6 +11,7 @@ Item {
     property bool selectionHandlePriorityActive: false
     property string selectionHandleHoveredMediaId: ""
     property string liveDragMediaId: ""
+    property bool debugInput: true
     readonly property alias inputCoordinator: coordinator
     default property alias layerChildren: layerRoot.data
 
@@ -18,6 +19,15 @@ Item {
 
     QtObject {
         id: coordinator
+
+        function logInput() {
+            if (!inputLayer.debugInput)
+                return
+            var args = ["[QuickCanvas][InputDebug][Coordinator]"]
+            for (var i = 0; i < arguments.length; ++i)
+                args.push(arguments[i])
+            console.warn.apply(console, args)
+        }
 
         property string mode: "idle"
         property string ownerId: ""
@@ -64,8 +74,52 @@ Item {
             if (!inputLayer.contentItem)
                 return ""
 
+            function resolveMediaIdFromItemHierarchy(item) {
+                var node = item
+                while (node) {
+                    if (node.currentMediaId !== undefined && node.currentMediaId)
+                        return node.currentMediaId
+                    if (node.mediaId !== undefined && node.mediaId)
+                        return node.mediaId
+                    node = node.parent
+                }
+                return ""
+            }
+
+            function mediaIdFromModelBounds(sceneX, sceneY) {
+                if (!inputLayer.mediaModel || inputLayer.mediaModel.length === 0)
+                    return ""
+
+                var bestMediaId = ""
+                var bestZ = -Infinity
+                var bestIndex = -1
+
+                for (var i = 0; i < inputLayer.mediaModel.length; ++i) {
+                    var entry = inputLayer.mediaModel[i]
+                    if (!entry || !entry.mediaId)
+                        continue
+
+                    var ex = entry.x || 0
+                    var ey = entry.y || 0
+                    var ew = Math.max(1, (entry.width || 1) * (entry.scale || 1.0))
+                    var eh = Math.max(1, (entry.height || 1) * (entry.scale || 1.0))
+                    if (sceneX < ex || sceneX > (ex + ew) || sceneY < ey || sceneY > (ey + eh))
+                        continue
+
+                    var z = entry.z !== undefined ? entry.z : 0
+                    if (z > bestZ || (z === bestZ && i > bestIndex)) {
+                        bestZ = z
+                        bestIndex = i
+                        bestMediaId = entry.mediaId
+                    }
+                }
+
+                return bestMediaId
+            }
+
             var currentItem = inputLayer.contentItem
-            var localPoint = currentItem.mapFromItem(inputLayer, viewX, viewY)
+            var scenePoint = currentItem.mapFromItem(inputLayer, viewX, viewY)
+            var localPoint = Qt.point(scenePoint.x, scenePoint.y)
             var mediaId = ""
 
             while (currentItem) {
@@ -73,21 +127,39 @@ Item {
                 if (!child)
                     break
 
-                if (child.currentMediaId !== undefined && child.currentMediaId)
-                    mediaId = child.currentMediaId
-                else if (child.mediaId !== undefined && child.mediaId)
-                    mediaId = child.mediaId
+                mediaId = resolveMediaIdFromItemHierarchy(child)
+                if (mediaId !== "")
+                    break
 
                 localPoint = child.mapFromItem(currentItem, localPoint.x, localPoint.y)
                 currentItem = child
             }
 
-            return mediaId || ""
+            if (mediaId === "") {
+                mediaId = mediaIdFromModelBounds(scenePoint.x, scenePoint.y)
+                if (mediaId !== "") {
+                    logInput("mediaIdAtPoint.fallbackModel",
+                             "scene=", scenePoint.x, scenePoint.y,
+                             "resolved=", mediaId)
+                }
+            }
+
+            var resolved = mediaId || ""
+            logInput("mediaIdAtPoint", "view=", viewX, viewY, "resolved=", resolved)
+            return resolved
         }
 
         function beginPrimaryGesture(viewX, viewY, hoveredHandleId, hoveredHandleMediaId) {
             primaryGestureActive = true
             resetLastPrimaryPressTarget()
+
+            logInput("beginPrimaryGesture",
+                     "view=", viewX, viewY,
+                     "hoveredHandleId=", hoveredHandleId || "",
+                     "hoveredHandleMediaId=", hoveredHandleMediaId || "",
+                     "handlePriority=", inputLayer.selectionHandlePriorityActive,
+                     "mode=", mode,
+                     "owner=", ownerId)
 
             var handleId = hoveredHandleId || ""
             if (inputLayer.selectionHandlePriorityActive || handleId !== "") {
@@ -95,6 +167,7 @@ Item {
                 primaryOwnerMediaId = hoveredHandleMediaId || ""
                 pressTargetKind = "handle"
                 pressTargetMediaId = primaryOwnerMediaId
+                logInput("beginPrimaryGesture.owner", "handle", "media=", primaryOwnerMediaId)
                 return primaryOwnerKind
             }
 
@@ -104,6 +177,7 @@ Item {
                 primaryOwnerMediaId = hitMediaId
                 pressTargetKind = "media"
                 pressTargetMediaId = hitMediaId
+                logInput("beginPrimaryGesture.owner", "media", "media=", hitMediaId)
                 return primaryOwnerKind
             }
 
@@ -111,11 +185,17 @@ Item {
             primaryOwnerMediaId = ""
             pressTargetKind = "canvas"
             pressTargetMediaId = ""
+            logInput("beginPrimaryGesture.owner", "canvas")
             assertInvariants("beginPrimaryGesture")
             return primaryOwnerKind
         }
 
         function endPrimaryGesture() {
+            logInput("endPrimaryGesture",
+                     "pressTarget=", pressTargetKind,
+                     "pressMedia=", pressTargetMediaId,
+                     "mode=", mode,
+                     "owner=", ownerId)
             lastPrimaryPressKind = pressTargetKind
             lastPrimaryPressMediaId = pressTargetMediaId
             resetPrimaryOwner()
@@ -128,9 +208,17 @@ Item {
                 return true
             if (!primaryGestureActive)
                 return true
-            if (primaryOwnerKind !== "media")
+            if (primaryOwnerKind !== "media") {
+                logInput("ownerAllowsMedia.blocked", "reason=owner-kind", "ownerKind=", primaryOwnerKind, "mediaId=", mediaId || "")
                 return false
-            return primaryOwnerMediaId === "" || primaryOwnerMediaId === (mediaId || "")
+            }
+            var allowed = primaryOwnerMediaId === "" || primaryOwnerMediaId === (mediaId || "")
+            if (!allowed) {
+                logInput("ownerAllowsMedia.blocked", "reason=owner-media-mismatch",
+                         "primaryOwnerMediaId=", primaryOwnerMediaId,
+                         "mediaId=", mediaId || "")
+            }
+            return allowed
         }
 
         function ownerAllowsCanvasPan(active) {
@@ -146,7 +234,13 @@ Item {
                 return primaryOwnerKind === "canvas"
             // Tap is evaluated on release, after primary gesture has ended.
             // Use the snapshot of the most recent press origin.
-            return lastPrimaryPressKind === "canvas"
+            var allowed = lastPrimaryPressKind === "canvas"
+            if (!allowed) {
+                logInput("ownerAllowsEmptyTap.blocked",
+                         "lastPrimaryPressKind=", lastPrimaryPressKind,
+                         "lastPrimaryPressMediaId=", lastPrimaryPressMediaId)
+            }
+            return allowed
         }
 
         function isIdle() {
@@ -218,8 +312,24 @@ Item {
         function noteMediaPrimaryPress(mediaId, additive) {
             if (!mediaId)
                 return false
+
+            logInput("noteMediaPrimaryPress",
+                     "mediaId=", mediaId,
+                     "additive=", !!additive,
+                     "primaryOwnerKind=", primaryOwnerKind,
+                     "primaryOwnerMediaId=", primaryOwnerMediaId,
+                     "mode=", mode,
+                     "ownerId=", ownerId)
+
+            pressTargetKind = "media"
+            pressTargetMediaId = mediaId
+            lastPrimaryPressKind = "media"
+            lastPrimaryPressMediaId = mediaId
+
             if (inputLayer.interactionController) {
                 inputLayer.interactionController.requestMediaSelection(mediaId, !!additive)
+            } else {
+                logInput("noteMediaPrimaryPress.missingController", "mediaId=", mediaId)
             }
             return true
         }
@@ -256,7 +366,9 @@ Item {
         function tryBeginMove(mediaId) {
             if (!mediaId)
                 return false
-            return beginMode("move", mediaId)
+            var granted = beginMode("move", mediaId)
+            logInput("tryBeginMove", "mediaId=", mediaId, "granted=", granted)
+            return granted
         }
 
         function endMove(mediaId) {
@@ -276,7 +388,9 @@ Item {
                 return false
             if (isPointInsideMedia(viewX, viewY))
                 return false
-            return beginMode("pan", "canvas")
+            var granted = beginMode("pan", "canvas")
+            logInput("tryBeginPanAt", "view=", viewX, viewY, "granted=", granted)
+            return granted
         }
 
         function endPan() {
@@ -297,7 +411,9 @@ Item {
         function tryBeginResize(mediaId) {
             pressTargetKind = "handle"
             pressTargetMediaId = mediaId || ""
-            return beginMode("resize", mediaId)
+            var granted = beginMode("resize", mediaId)
+            logInput("tryBeginResize", "mediaId=", mediaId || "", "granted=", granted)
+            return granted
         }
 
         function endResize(mediaId) {

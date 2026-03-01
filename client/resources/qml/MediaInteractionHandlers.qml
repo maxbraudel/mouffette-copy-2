@@ -4,21 +4,65 @@ Item {
     id: interaction
     anchors.fill: parent
 
+    function debugInputLog() {
+        var rootDebug = rootController && rootController.debugInput
+        if (!rootDebug)
+            return
+        var args = ["[QuickCanvas][InputDebug][MediaHandlers]"]
+        for (var i = 0; i < arguments.length; ++i)
+            args.push(arguments[i])
+        console.warn.apply(console, args)
+    }
+
     property var rootController: null
-    property var inputLayer: null
-    property var selectionChrome: null
-    property var viewport: null
+    property var coordinatorRef: null
+    property bool textToolActive: false
+    property bool selectionInteracting: false
+    property bool selectionHandlePriorityActive: false
+    property var contentRootRef: null
     property var delegateItem: null
     property var mediaContentItem: null
+
+    readonly property var activeCoordinator: coordinatorRef
 
     signal requestSnapFreezeCleanup()
 
     readonly property bool active: mediaDrag.active
     readonly property string activeMoveMediaId: mediaDrag.activeMoveMediaId
     readonly property bool countedAsActive: mediaDrag.countedAsActive
+    readonly property bool mediaPressSelectEnabledState: !!delegateItem.media
+                                                     && !delegateItem.overlayHovered
+                                                     && !(mediaContentItem && mediaContentItem.editing === true)
+                                                     && !!activeCoordinator
+    readonly property bool mediaDragEnabledState: !!delegateItem.media
+                                            && !delegateItem.overlayHovered
+                                            && !(mediaContentItem && mediaContentItem.editing === true)
+                                            && !textToolActive
+                                            && !selectionInteracting
+                                            && !!activeCoordinator
+
+    Component.onCompleted: {
+        console.warn("[QuickCanvas][InputDebug][MediaHandlers] init.raw",
+                     "mediaId=", delegateItem ? delegateItem.currentMediaId : "",
+                     "hasRootController=", !!rootController,
+                     "rootDebug=", !!(rootController && rootController.debugInput),
+                     "hasContentRoot=", !!contentRootRef,
+                     "hasCoordinator=", !!activeCoordinator)
+        interaction.debugInputLog("init",
+                                  "mediaId=", delegateItem ? delegateItem.currentMediaId : "",
+                                  "hasCoordinator=", !!activeCoordinator,
+                                  "pressEnabled=", mediaPressSelectEnabledState,
+                                  "dragEnabled=", mediaDragEnabledState,
+                                  "overlayHovered=", delegateItem ? delegateItem.overlayHovered : false,
+                                  "editing=", !!(mediaContentItem && mediaContentItem.editing === true),
+                                  "textToolActive=", textToolActive,
+                                  "selectionInteracting=", selectionInteracting)
+    }
 
     function contentPointFromScene(sceneX, sceneY) {
-        return viewport.contentRootItem.mapFromItem(null, sceneX, sceneY)
+        if (!contentRootRef)
+            return Qt.point(sceneX, sceneY)
+        return contentRootRef.mapFromItem(null, sceneX, sceneY)
     }
 
     function releaseOrphanedDrag() {
@@ -41,8 +85,8 @@ Item {
         rootController.liveDragViewOffsetX = 0.0
         rootController.liveDragViewOffsetY = 0.0
 
-        if (inputLayer && inputLayer.inputCoordinator) {
-            inputLayer.inputCoordinator.forceReset("media-delegate-destroyed")
+        if (activeCoordinator) {
+            activeCoordinator.forceReset("media-delegate-destroyed")
         }
     }
 
@@ -55,12 +99,21 @@ Item {
         enabled: !!delegateItem.media
                  && !delegateItem.overlayHovered
                  && !(mediaContentItem && mediaContentItem.editing === true)
-                 && selectionChrome.hoveredHandleId === ""
-                 && (!!inputLayer
-                     && !!inputLayer.inputCoordinator
-                     && inputLayer.inputCoordinator.ownerAllowsMedia(delegateItem.currentMediaId, false))
+                 && !!activeCoordinator
+                 && activeCoordinator.ownerAllowsMedia(delegateItem.currentMediaId, false)
+
+        onGrabChanged: function(transition, point) {
+            console.warn("[QuickCanvas][InputDebug][MediaHandlers] mediaDoubleClick.grabChanged.raw",
+                         "transition=", transition,
+                         "mediaId=", delegateItem ? delegateItem.currentMediaId : "",
+                         "point=", point ? (point.position.x + "," + point.position.y) : "")
+        }
 
         onTapped: function(eventPoint) {
+            console.warn("[QuickCanvas][InputDebug][MediaHandlers] mediaDoubleClick.tapped.raw",
+                         "tapCount=", tapCount,
+                         "mediaId=", delegateItem ? delegateItem.currentMediaId : "",
+                         "view=", eventPoint.position.x, eventPoint.position.y)
             if (tapCount !== 2)
                 return
             var item = mediaContentItem
@@ -83,36 +136,78 @@ Item {
         // create a race with primaryGestureRouter (which fires first on higher-z
         // InputLayer) and can falsely block selection when mediaIdAtPoint fails.
         // Instead, onActiveChanged corrects the coordinator state itself.
-        enabled: !!delegateItem.media
-                 && !delegateItem.overlayHovered
-                 && !(mediaContentItem && mediaContentItem.editing === true)
-                 && selectionChrome.hoveredHandleId === ""
-                 && !!inputLayer
-                 && !!inputLayer.inputCoordinator
+        enabled: interaction.mediaPressSelectEnabledState
+
+        onEnabledChanged: {
+            console.warn("[QuickCanvas][InputDebug][MediaHandlers] mediaPressSelect.enabled.raw",
+                         "enabled=", enabled,
+                         "mediaId=", delegateItem ? delegateItem.currentMediaId : "",
+                         "hasCoordinator=", !!activeCoordinator)
+            interaction.debugInputLog("mediaPressSelect.enabled", "enabled=", enabled,
+                                      "mediaId=", delegateItem.currentMediaId,
+                                      "overlayHovered=", delegateItem.overlayHovered,
+                                      "editing=", !!(mediaContentItem && mediaContentItem.editing === true),
+                                      "hasCoordinator=", !!activeCoordinator)
+        }
+
+        onGrabChanged: function(transition, point) {
+            console.warn("[QuickCanvas][InputDebug][MediaHandlers] mediaPressSelect.grabChanged.raw",
+                         "transition=", transition,
+                         "mediaId=", delegateItem ? delegateItem.currentMediaId : "",
+                         "point=", point ? (point.position.x + "," + point.position.y) : "")
+            interaction.debugInputLog("mediaPressSelect.grabChanged",
+                                      "transition=", transition,
+                                      "mediaId=", delegateItem.currentMediaId,
+                                      "point=", point ? (point.position.x + "," + point.position.y) : "")
+        }
 
         function selectNow(modifiers) {
             var mediaId = delegateItem.currentMediaId
-            if (!mediaId || mediaId.length === 0)
+            if (!mediaId || mediaId.length === 0) {
+                interaction.debugInputLog("mediaPressSelect.selectNow.skipped", "reason=empty-media-id")
                 return
+            }
 
             var additive = (modifiers & Qt.ShiftModifier) !== 0
-            inputLayer.inputCoordinator.noteMediaPrimaryPress(mediaId, additive)
+            interaction.debugInputLog("mediaPressSelect.selectNow", "mediaId=", mediaId, "additive=", additive)
+            activeCoordinator.noteMediaPrimaryPress(mediaId, additive)
         }
 
         onActiveChanged: {
-            if (!active)
+            console.warn("[QuickCanvas][InputDebug][MediaHandlers] mediaPressSelect.activeChanged.raw",
+                         "active=", active,
+                         "mediaId=", delegateItem ? delegateItem.currentMediaId : "",
+                         "enabled=", enabled)
+            if (!active) {
+                interaction.debugInputLog("mediaPressSelect.inactive",
+                                          "mediaId=", delegateItem.currentMediaId)
                 return
+            }
+
+            interaction.debugInputLog("mediaPressSelect.active",
+                                      "mediaId=", delegateItem.currentMediaId,
+                                      "overlayHovered=", delegateItem.overlayHovered,
+                                      "editing=", !!(mediaContentItem && mediaContentItem.editing === true),
+                                      "ownerKind=", activeCoordinator ? activeCoordinator.primaryOwnerKind : "none",
+                                      "ownerMediaId=", activeCoordinator ? activeCoordinator.primaryOwnerMediaId : "",
+                                      "primaryGestureActive=", activeCoordinator ? activeCoordinator.primaryGestureActive : false)
+
+            if (!activeCoordinator) {
+                interaction.debugInputLog("mediaPressSelect.blocked", "reason=missing-coordinator")
+                return
+            }
 
             // Ensure the coordinator correctly identifies this press as on-media.
             // primaryGestureRouter (on higher-z InputLayer) fires first; if its
             // mediaIdAtPoint traversal missed this item, primaryOwnerKind may be
             // "canvas".  Correct it here — mediaPressSelect firing IS proof the
             // press landed on this media delegate.
-            var coord = inputLayer.inputCoordinator
+            var coord = activeCoordinator
             var myMediaId = delegateItem.currentMediaId
             if (myMediaId && myMediaId.length > 0) {
                 if (!coord.primaryGestureActive) {
                     coord.primaryGestureActive = true
+                    interaction.debugInputLog("mediaPressSelect.recover", "set-primaryGestureActive=true")
                 }
                 if (coord.primaryOwnerKind !== "media"
                         || (coord.primaryOwnerMediaId !== "" && coord.primaryOwnerMediaId !== myMediaId)) {
@@ -120,6 +215,9 @@ Item {
                     coord.primaryOwnerMediaId = myMediaId
                     coord.pressTargetKind = "media"
                     coord.pressTargetMediaId = myMediaId
+                    interaction.debugInputLog("mediaPressSelect.recover",
+                                              "ownerKind=media",
+                                              "ownerMediaId=", myMediaId)
                 }
             }
 
@@ -139,6 +237,11 @@ Item {
             mediaDrag.pressMediaSceneY = delegateItem.localY
             mediaDrag.pressAnchorValid = true
 
+            interaction.debugInputLog("mediaPressSelect.anchor",
+                                      "pressView=", pressScenePoint.x, pressScenePoint.y,
+                                      "pressScene=", pressContentPoint.x, pressContentPoint.y,
+                                      "mediaScene=", delegateItem.localX, delegateItem.localY)
+
             selectNow(modifiers)
         }
     }
@@ -149,14 +252,47 @@ Item {
         acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
         acceptedButtons: Qt.LeftButton
         grabPermissions: PointerHandler.CanTakeOverFromAnything
-        enabled: !delegateItem.overlayHovered
-                 && (!!inputLayer
-                     && !!inputLayer.inputCoordinator
-                     && inputLayer.inputCoordinator.ownerAllowsMedia(delegateItem.currentMediaId, mediaDrag.active))
-                 && rootController.canStartMediaMove(delegateItem.media,
-                                                     mediaContentItem,
-                                                     mediaDrag.active,
-                                                     delegateItem.currentMediaId)
+        // NOTE: ownerAllowsMedia / canStartMediaMove are intentionally NOT checked here.
+        // DragHandlers get their passive grab at press-time, BEFORE beginPrimaryGesture
+        // has run and set coordinator ownership. Gating on ownership here creates a
+        // race that prevents mediaDrag from ever getting a passive grab, making drag
+        // impossible whenever the coordinator starts from a "canvas" classification.
+        // Instead, ownership correctness is enforced inside onActiveChanged (below),
+        // which runs only after the drag threshold is crossed — by then, mediaPressSelect
+        // has already corrected the coordinator. Block only conditions that are truly
+        // incompatible with drag at press time:
+        //   • overlayHovered  — pointer is on the media overlay UI, not the item body
+        //   • editing         — text item in edit mode
+        //   • textToolActive  — text-create tool active on canvas
+        //   • selectionChrome.interacting — a resize gesture is already in progress
+        enabled: interaction.mediaDragEnabledState
+
+        onEnabledChanged: {
+            console.warn("[QuickCanvas][InputDebug][MediaHandlers] mediaDrag.enabled.raw",
+                         "enabled=", enabled,
+                         "mediaId=", delegateItem ? delegateItem.currentMediaId : "",
+                         "hasCoordinator=", !!activeCoordinator,
+                         "selectionInteracting=", selectionInteracting,
+                         "textToolActive=", textToolActive)
+            interaction.debugInputLog("mediaDrag.enabled", "enabled=", enabled,
+                                      "mediaId=", delegateItem.currentMediaId,
+                                      "overlayHovered=", delegateItem.overlayHovered,
+                                      "editing=", !!(mediaContentItem && mediaContentItem.editing === true),
+                                      "textToolActive=", textToolActive,
+                                      "selectionInteracting=", selectionInteracting,
+                                      "hasCoordinator=", !!activeCoordinator)
+        }
+
+        onGrabChanged: function(transition, point) {
+            console.warn("[QuickCanvas][InputDebug][MediaHandlers] mediaDrag.grabChanged.raw",
+                         "transition=", transition,
+                         "mediaId=", delegateItem ? delegateItem.currentMediaId : "",
+                         "point=", point ? (point.position.x + "," + point.position.y) : "")
+            interaction.debugInputLog("mediaDrag.grabChanged",
+                                      "transition=", transition,
+                                      "mediaId=", delegateItem.currentMediaId,
+                                      "point=", point ? (point.position.x + "," + point.position.y) : "")
+        }
         dragThreshold: 4
 
         property real startX: 0.0
@@ -176,10 +312,20 @@ Item {
         property bool countedAsActive: false
 
         onActiveChanged: {
+            console.warn("[QuickCanvas][InputDebug][MediaHandlers] mediaDrag.activeChanged.raw",
+                         "active=", active,
+                         "mediaId=", delegateItem ? delegateItem.currentMediaId : "",
+                         "enabled=", enabled,
+                         "translation=", mediaDrag.translation.x, mediaDrag.translation.y,
+                         "threshold=", mediaDrag.dragThreshold)
+            interaction.debugInputLog("mediaDrag.activeChanged",
+                                      "active=", active,
+                                      "mediaId=", delegateItem.currentMediaId,
+                                      "translation=", mediaDrag.translation.x, mediaDrag.translation.y,
+                                      "threshold=", mediaDrag.dragThreshold)
             if (active) {
-                activeMoveMediaId = delegateItem.currentMediaId
-                var moveGranted = inputLayer.inputCoordinator.tryBeginMove(activeMoveMediaId)
-                if (!moveGranted) {
+                if (!activeCoordinator) {
+                    interaction.debugInputLog("mediaDrag.blocked", "reason=missing-coordinator")
                     activeMoveMediaId = ""
                     delegateItem.localDragging = false
                     rootController.liveDragMediaId = ""
@@ -188,6 +334,71 @@ Item {
                     countedAsActive = false
                     return
                 }
+                activeMoveMediaId = delegateItem.currentMediaId
+                interaction.debugInputLog("mediaDrag.active", "mediaId=", activeMoveMediaId,
+                                          "ownerKind=", activeCoordinator.primaryOwnerKind,
+                                          "ownerMediaId=", activeCoordinator.primaryOwnerMediaId,
+                                          "selectionHandlePriority=", selectionHandlePriorityActive,
+                                          "selectionChrome.interacting=", selectionInteracting)
+
+                // Guard: if a resize gesture is already in progress (handle actively being dragged),
+                // abort — the drag threshold was reached before the enabled binding could fire.
+                if (selectionInteracting) {
+                    interaction.debugInputLog("mediaDrag.blocked.resize-in-progress", "mediaId=", activeMoveMediaId)
+                    activeMoveMediaId = ""
+                    delegateItem.localDragging = false
+                    rootController.liveDragMediaId = ""
+                    rootController.liveDragViewOffsetX = 0.0
+                    rootController.liveDragViewOffsetY = 0.0
+                    countedAsActive = false
+                    return
+                }
+
+                // Guard: if the press landed on a resize handle, let the resize handler
+                // take it — do not start a body drag.
+                if (selectionHandlePriorityActive) {
+                    interaction.debugInputLog("mediaDrag.blocked.handle-priority", "mediaId=", activeMoveMediaId)
+                    activeMoveMediaId = ""
+                    delegateItem.localDragging = false
+                    rootController.liveDragMediaId = ""
+                    rootController.liveDragViewOffsetX = 0.0
+                    rootController.liveDragViewOffsetY = 0.0
+                    countedAsActive = false
+                    return
+                }
+
+                // Correct ownership if primaryGestureRouter misclassified the press as
+                // "canvas" (same pattern as mediaPressSelect.onActiveChanged).
+                // By the time the drag threshold is crossed mediaPressSelect will have
+                // already run, but just in case it hasn't (e.g. extremely fast flicks),
+                // we self-correct here as well. We only correct when the press target
+                // is definitively this media item.
+                var coord = activeCoordinator
+                if (coord.primaryOwnerKind !== "media"
+                        || (coord.primaryOwnerMediaId !== "" && coord.primaryOwnerMediaId !== activeMoveMediaId)) {
+                    interaction.debugInputLog("mediaDrag.correct-ownership",
+                                              "from=", coord.primaryOwnerKind,
+                                              "+", coord.primaryOwnerMediaId,
+                                              "to=media+", activeMoveMediaId)
+                    coord.primaryOwnerKind    = "media"
+                    coord.primaryOwnerMediaId = activeMoveMediaId
+                    coord.pressTargetKind     = "media"
+                    coord.pressTargetMediaId  = activeMoveMediaId
+                    coord.primaryGestureActive = true
+                }
+
+                var moveGranted = coord.tryBeginMove(activeMoveMediaId)
+                if (!moveGranted) {
+                    interaction.debugInputLog("mediaDrag.blocked", "mediaId=", activeMoveMediaId)
+                    activeMoveMediaId = ""
+                    delegateItem.localDragging = false
+                    rootController.liveDragMediaId = ""
+                    rootController.liveDragViewOffsetX = 0.0
+                    rootController.liveDragViewOffsetY = 0.0
+                    countedAsActive = false
+                    return
+                }
+                interaction.debugInputLog("mediaDrag.begin", "mediaId=", activeMoveMediaId)
                 if (!countedAsActive) {
                     rootController.activeMediaDragCount += 1
                     countedAsActive = true
@@ -228,6 +439,7 @@ Item {
                                                 snapAtStart)
             } else {
                 var finalMediaId = activeMoveMediaId
+                interaction.debugInputLog("mediaDrag.end", "mediaId=", finalMediaId)
                 if (countedAsActive) {
                     rootController.activeMediaDragCount = Math.max(0, rootController.activeMediaDragCount - 1)
                     countedAsActive = false
@@ -244,7 +456,9 @@ Item {
                 pressPointerViewY = 0.0
                 rootController.liveDragViewOffsetX = 0.0
                 rootController.liveDragViewOffsetY = 0.0
-                inputLayer.inputCoordinator.endMove(finalMediaId)
+                if (activeCoordinator) {
+                    activeCoordinator.endMove(finalMediaId)
+                }
                 rootController.liveDragMediaId = ""
                 activeMoveMediaId = ""
 
@@ -263,11 +477,23 @@ Item {
         }
 
         onTranslationChanged: {
+            console.warn("[QuickCanvas][InputDebug][MediaHandlers] mediaDrag.translation.raw",
+                         "active=", active,
+                         "mediaId=", activeMoveMediaId,
+                         "translation=", mediaDrag.translation.x, mediaDrag.translation.y,
+                         "localDragging=", delegateItem ? delegateItem.localDragging : false)
             if (!active || !delegateItem.localDragging)
                 return
 
-            delegateItem.localX = pressMediaSceneX + mediaDrag.translation.x
-            delegateItem.localY = pressMediaSceneY + mediaDrag.translation.y
+            var currentViewPoint = mediaDrag.centroid.scenePosition
+            var currentContentPoint = contentPointFromScene(currentViewPoint.x, currentViewPoint.y)
+            var deltaSceneX = currentContentPoint.x - pressPointerSceneX
+            var deltaSceneY = currentContentPoint.y - pressPointerSceneY
+            var deltaViewX = currentViewPoint.x - pressPointerViewX
+            var deltaViewY = currentViewPoint.y - pressPointerViewY
+
+            delegateItem.localX = pressMediaSceneX + deltaSceneX
+            delegateItem.localY = pressMediaSceneY + deltaSceneY
             if (activeMoveMediaId !== "") {
                 var snapNow = (mediaDrag.centroid.modifiers & Qt.ShiftModifier) !== 0
                 rootController.mediaMoveUpdated(activeMoveMediaId,
@@ -279,11 +505,19 @@ Item {
                 delegateItem.localX = rootController.liveSnapDragX
                 delegateItem.localY = rootController.liveSnapDragY
             }
-            rootController.liveDragViewOffsetX = mediaDrag.translation.x * rootController.viewScale
-            rootController.liveDragViewOffsetY = mediaDrag.translation.y * rootController.viewScale
+            rootController.liveDragViewOffsetX = deltaViewX
+            rootController.liveDragViewOffsetY = deltaViewY
+
+            interaction.debugInputLog("mediaDrag.translation.mapped",
+                                      "deltaScene=", deltaSceneX, deltaSceneY,
+                                      "deltaView=", deltaViewX, deltaViewY,
+                                      "local=", delegateItem.localX, delegateItem.localY)
         }
 
         onCanceled: {
+            console.warn("[QuickCanvas][InputDebug][MediaHandlers] mediaDrag.canceled.raw",
+                         "mediaId=", activeMoveMediaId,
+                         "countedAsActive=", countedAsActive)
             if (countedAsActive) {
                 rootController.activeMediaDragCount = Math.max(0, rootController.activeMediaDragCount - 1)
                 countedAsActive = false
@@ -305,7 +539,9 @@ Item {
                     && rootController.liveSnapDragMediaId === activeMoveMediaId) {
                 requestSnapFreezeCleanup()
             }
-            inputLayer.inputCoordinator.endMove(activeMoveMediaId)
+            if (activeCoordinator) {
+                activeCoordinator.endMove(activeMoveMediaId)
+            }
             activeMoveMediaId = ""
         }
     }
