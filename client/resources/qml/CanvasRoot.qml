@@ -103,6 +103,9 @@ Rectangle {
     // True while any text media item is in text-edit mode. Used to disable canvas
     // pan so parent DragHandlers don't interfere with TextEdit cursor placement.
     property bool anyMediaEditing: false
+    // Reference to the TextItem currently in edit mode, or null. Used to commit
+    // and exit editing when the user presses outside the item.
+    property var currentEditingMediaItem: null
     // Video state dictionary: keys are mediaId strings, values are state maps.
     // Published every 50 ms by QuickCanvasController for ALL video items
     // (not just the selected one), so overlays remain live after deselection.
@@ -686,8 +689,10 @@ Rectangle {
                         // Track whether any text item is currently in edit mode so
                         // canvas pan handlers can be disabled while editing.
                         function onEditingChanged() {
-                            root.anyMediaEditing = !!(mediaContentLoader.item
-                                                     && mediaContentLoader.item.editing === true)
+                            var isEditing = !!(mediaContentLoader.item
+                                              && mediaContentLoader.item.editing === true)
+                            root.anyMediaEditing = isEditing
+                            root.currentEditingMediaItem = isEditing ? mediaContentLoader.item : null
                         }
                     }
 
@@ -1013,6 +1018,30 @@ Rectangle {
                                                                        point.position.y))
                         return
                     root.clearSelectionRequested()
+                }
+            }
+
+            // Passive press observer active only during text-edit mode.
+            // PointHandler takes a passive grab by design (never steals events from
+            // child items), so TextEdit's MouseArea continues to work normally for
+            // cursor placement and text selection. When the press lands outside the
+            // editing item, we commit the edit and clear selection.
+            PointHandler {
+                id: editExitPress
+                target: null
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                acceptedButtons: Qt.LeftButton
+                enabled: root.anyMediaEditing
+
+                onActiveChanged: {
+                    if (!active) return
+                    if (inputLayer.inputCoordinator.isPointInsideMedia(point.position.x,
+                                                                       point.position.y))
+                        return
+                    if (root.currentEditingMediaItem)
+                        root.currentEditingMediaItem.commitAndStopEditing()
+                    if (root.selectionChromeModel && root.selectionChromeModel.length > 0)
+                        root.clearSelectionRequested()
                 }
             }
 

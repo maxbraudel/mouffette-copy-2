@@ -27,6 +27,12 @@ BaseMediaItem {
     pointerEnabled: !root.editing
     doubleClickEnabled: true
 
+    function commitAndStopEditing() {
+        if (!root.editing) return
+        root.textCommitRequested(root.mediaId, textEditor.text)
+        root.editing = false
+    }
+
     onPrimaryDoubleClicked: function(mediaId, additive) {
         if (!root.textEditable)
             return
