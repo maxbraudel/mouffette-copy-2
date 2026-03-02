@@ -20,7 +20,6 @@ BaseMediaItem {
     property bool highlightEnabled: false
     property color highlightColor: "#00000000"
     property bool textEditable: false
-    property real viewScale: 1.0
     property bool editing: false
     property string preEditText: ""
     signal textCommitRequested(string mediaId, string text)

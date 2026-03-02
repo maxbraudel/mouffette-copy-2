@@ -766,7 +766,6 @@ Rectangle {
                         highlightEnabled: !!(parent.media && parent.media.textHighlightEnabled)
                         highlightColor: parent.media ? (parent.media.textHighlightColor || "#00000000") : "#00000000"
                         textEditable: !!(parent.media && parent.media.textEditable)
-                        viewScale: root.viewScale
                     }
                 }
             }

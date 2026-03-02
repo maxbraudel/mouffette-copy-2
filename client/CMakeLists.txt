@@ -314,13 +314,6 @@ set(RESOURCE_FILES
 # Create executable
 add_executable(MouffetteClient ${SOURCES} ${HEADERS} ${UI_FILES} ${RESOURCE_FILES})
 
-qt_add_shaders(MouffetteClient "mouffette_shaders"
-    PREFIX "/shaders"
-    BASE resources/shaders
-    FILES
-        resources/shaders/text_outline.frag
-)
-
 # Link Qt libraries
 target_link_libraries(MouffetteClient 
     Qt6::Core 

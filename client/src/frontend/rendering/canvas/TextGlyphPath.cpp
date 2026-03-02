@@ -84,9 +84,9 @@ void TextGlyphPath::recompute()
         vertOffset = m_itemHeight - totalHeight;
 
     // ── 4. Extract glyph paths → unified fill path ───────────────────────────
-    // QRawFont::pathForGlyph() returns paths in font coordinates (y-up, baseline
-    // at y=0).  QGlyphRun::positions() are in layout coordinates (y-down).
-    // Transform per glyph: x' = x + pos.x,  y' = -y + pos.y + vertOffset
+    // Qt6: QRawFont::pathForGlyph() already returns paths in y-down screen
+    // coordinates, consistent with QGlyphRun::positions(). Transform per glyph
+    // is a plain translation: x' = x + pos.x, y' = y + pos.y + vertOffset.
     QPainterPath fillPath;
     const QList<QGlyphRun> glyphRuns = layout.glyphRuns();
     for (const QGlyphRun& run : glyphRuns) {
