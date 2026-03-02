@@ -13,7 +13,7 @@ if(APPLE)
 endif()
 
 # Find Qt6
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia MultimediaWidgets Svg SvgWidgets Concurrent Quick QuickWidgets Qml)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia MultimediaWidgets Svg SvgWidgets Concurrent Quick QuickWidgets Qml ShaderTools)
 
 # Enable Qt MOC
 set(CMAKE_AUTOMOC ON)
@@ -72,6 +72,7 @@ set(SOURCES
     src/frontend/rendering/canvas/QuickCanvasViewAdapter.cpp
     src/frontend/rendering/canvas/MediaListModel.cpp
     src/frontend/rendering/canvas/OverlayPanels.cpp
+    src/frontend/rendering/canvas/TextGlyphPath.cpp
     
     # Rendering - Remote
     src/frontend/rendering/remote/RemoteSceneController.cpp
@@ -212,6 +213,7 @@ set(HEADERS
     src/frontend/rendering/canvas/QuickCanvasViewAdapter.h
     src/frontend/rendering/canvas/MediaListModel.h
     src/frontend/rendering/canvas/OverlayPanels.h
+    src/frontend/rendering/canvas/TextGlyphPath.h
     src/frontend/rendering/canvas/RoundedRectItem.h
     src/frontend/rendering/canvas/SegmentedButtonItem.h
 
@@ -311,6 +313,13 @@ set(RESOURCE_FILES
 
 # Create executable
 add_executable(MouffetteClient ${SOURCES} ${HEADERS} ${UI_FILES} ${RESOURCE_FILES})
+
+qt_add_shaders(MouffetteClient "mouffette_shaders"
+    PREFIX "/shaders"
+    BASE resources/shaders
+    FILES
+        resources/shaders/text_outline.frag
+)
 
 # Link Qt libraries
 target_link_libraries(MouffetteClient 

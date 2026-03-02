@@ -1,5 +1,7 @@
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/CanvasSceneStore.h"
+#include "frontend/rendering/canvas/TextGlyphPath.h"
+#include <QtQml/qqml.h>
 #include "backend/domain/media/MediaRuntimeHooks.h"
 #include "frontend/rendering/canvas/GestureCommands.h"
 #include "frontend/rendering/canvas/ModelPublisher.h"
@@ -304,6 +306,10 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
     m_quickWidget->installEventFilter(this);
     m_quickWidget->setAcceptDrops(true);
     m_quickWidget->setResizeMode(QQuickWidget::SizeRootObjectToView);
+
+    // Register custom QML types before the QML source is loaded.
+    qmlRegisterType<TextGlyphPath>("Mouffette.Canvas", 1, 0, "TextGlyphPath");
+
     m_quickWidget->setSource(QUrl(QStringLiteral("qrc:/qml/CanvasRoot.qml")));
 
     if (m_quickWidget->status() == QQuickWidget::Error) {

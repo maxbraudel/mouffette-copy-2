@@ -1,4 +1,6 @@
 import QtQuick 2.15
+import QtQuick.Shapes 1.0
+import Mouffette.Canvas 1.0
 
 BaseMediaItem {
     id: root
@@ -18,6 +20,7 @@ BaseMediaItem {
     property bool highlightEnabled: false
     property color highlightColor: "#00000000"
     property bool textEditable: false
+    property real viewScale: 1.0
     property bool editing: false
     property string preEditText: ""
     signal textCommitRequested(string mediaId, string text)
@@ -26,6 +29,12 @@ BaseMediaItem {
     clip: true
     pointerEnabled: !root.editing
     doubleClickEnabled: true
+
+    // Outline thickness in scene-space pixels derived from font size.
+    // styleSize on Qt6 Text.Outline accepts pixel values directly.
+    readonly property real outlinePixels: root.outlineWidthPercent > 0
+        ? Math.max(1, Math.round(root.outlineWidthPercent * Math.max(1, root.fontPixelSize) / 100.0))
+        : 0
 
     function commitAndStopEditing() {
         if (!root.editing) return
@@ -40,6 +49,31 @@ BaseMediaItem {
         root.preEditText = root.textContent || ""
         root.editing = true
         textEditor.forceActiveFocus()
+    }
+
+    // Metrics node — invisible, used only for paintedWidth/paintedHeight by
+    // the highlight background rectangle. Kept separate so the highlight
+    // geometry remains stable whether border is on or off.
+    Text {
+        id: textNode
+        visible: false
+        anchors.fill: parent
+        anchors.margins: 4
+        text: root.fontUppercase ? (root.textContent || "").toUpperCase() : root.textContent
+        color: "white"
+        wrapMode: root.fitToTextEnabled ? Text.NoWrap : Text.WordWrap
+        horizontalAlignment: root.horizontalAlignment === "left"
+            ? Text.AlignLeft
+            : (root.horizontalAlignment === "right" ? Text.AlignRight : Text.AlignHCenter)
+        verticalAlignment: root.verticalAlignment === "top"
+            ? Text.AlignTop
+            : (root.verticalAlignment === "bottom" ? Text.AlignBottom : Text.AlignVCenter)
+        font.family: root.fontFamily
+        font.pixelSize: Math.max(1, root.fontPixelSize)
+        font.weight: root.fontWeight
+        font.italic: root.fontItalic
+        font.underline: root.fontUnderline
+        renderType: Text.QtRendering
     }
 
     Rectangle {
@@ -59,49 +93,91 @@ BaseMediaItem {
         height: paintedH + highlightPadding * 2
 
         x: {
-            if (root.horizontalAlignment === "left") {
+            if (root.horizontalAlignment === "left")
                 return contentMargin - highlightPadding
-            }
-            if (root.horizontalAlignment === "right") {
+            if (root.horizontalAlignment === "right")
                 return contentMargin + (contentWidth - paintedW) - highlightPadding
-            }
             return contentMargin + (contentWidth - paintedW) * 0.5 - highlightPadding
         }
-
         y: {
-            if (root.verticalAlignment === "top") {
+            if (root.verticalAlignment === "top")
                 return contentMargin - highlightPadding
-            }
-            if (root.verticalAlignment === "bottom") {
+            if (root.verticalAlignment === "bottom")
                 return contentMargin + (contentHeight - paintedH) - highlightPadding
-            }
             return contentMargin + (contentHeight - paintedH) * 0.5 - highlightPadding
         }
     }
 
+    // No-border display path: direct Text item in Qt's retained scene graph.
     Text {
-        id: textNode
-        visible: !root.editing
-        clip: true
-        anchors.fill: parent
-        anchors.margins: 4
-        text: root.fontUppercase ? (root.textContent || "").toUpperCase() : root.textContent
+        id: textPlainNode
+        visible: !root.editing && root.outlinePixels <= 0
+        anchors.fill: textNode
+        text: textNode.text
         color: root.textColor
-        wrapMode: root.fitToTextEnabled ? Text.NoWrap : Text.WordWrap
-        horizontalAlignment: root.horizontalAlignment === "left"
-            ? Text.AlignLeft
-            : (root.horizontalAlignment === "right" ? Text.AlignRight : Text.AlignHCenter)
-        verticalAlignment: root.verticalAlignment === "top"
-            ? Text.AlignTop
-            : (root.verticalAlignment === "bottom" ? Text.AlignBottom : Text.AlignVCenter)
-        font.family: root.fontFamily
-        font.pixelSize: Math.max(1, root.fontPixelSize)
-        font.weight: root.fontWeight
-        font.italic: root.fontItalic
-        font.underline: root.fontUnderline
-        style: root.outlineWidthPercent > 0 ? Text.Outline : Text.Normal
-        styleColor: root.outlineColor
+        wrapMode: textNode.wrapMode
+        horizontalAlignment: textNode.horizontalAlignment
+        verticalAlignment: textNode.verticalAlignment
+        font.family: textNode.font.family
+        font.pixelSize: textNode.font.pixelSize
+        font.weight: textNode.font.weight
+        font.italic: textNode.font.italic
+        font.underline: textNode.font.underline
         renderType: Text.QtRendering
+    }
+
+    // Glyph path engine — computes fill + stroke SVG paths once per content/style
+    // change using QTextLayout + QRawFont + QPainterPathStroker (C++ retained).
+    // Camera pan/zoom never triggers recompute: Shape caches GPU geometry and
+    // moves it via transforms only.
+    TextGlyphPath {
+        id: glyphPath
+        textContent:        root.textContent || ""
+        fontFamily:         root.fontFamily
+        fontPixelSize:      Math.max(1, root.fontPixelSize)
+        fontWeight:         root.fontWeight
+        fontItalic:         root.fontItalic
+        fontUppercase:      root.fontUppercase
+        outlinePixels:     root.outlinePixels
+        itemWidth:         Math.max(1, textNode.width)
+        itemHeight:        Math.max(1, textNode.height)
+        horizontalAlignment: root.horizontalAlignment
+        verticalAlignment:   root.verticalAlignment
+        fitToText:         root.fitToTextEnabled
+    }
+
+    // Border display path — bottom layer rendered with outlineColor.
+    // Uses QtQuick.Shapes which tessellates the SVG path once into GPU geometry;
+    // subsequent pan/zoom uses scene graph matrix transforms — no re-rasterization.
+    Shape {
+        id: textStrokeShape
+        visible: !root.editing && root.outlinePixels > 0
+        anchors.fill: textNode
+        // Disable anti-aliasing at the Shape level; Qt Quick's curve renderer
+        // handles sub-pixel quality internally.
+        layer.enabled: false
+        ShapePath {
+            fillColor:   root.outlineColor
+            strokeColor: "transparent"
+            strokeWidth: 0
+            fillRule:    ShapePath.WindingFill
+            PathSvg { path: glyphPath.strokePath }
+        }
+    }
+
+    // Glyph fill layer — top layer rendered with text fill color.
+    Shape {
+        id: textFillShape
+        visible: !root.editing && root.outlinePixels > 0
+        anchors.fill: textNode
+        layer.enabled: false
+        ShapePath {
+            fillColor:   root.textColor
+            strokeColor: "transparent"
+            strokeWidth: 0
+            fillRule:    ShapePath.WindingFill
+            PathSvg { path: glyphPath.fillPath }
+        }
     }
 
     Item {
