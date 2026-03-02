@@ -1,6 +1,7 @@
 #include "frontend/rendering/canvas/TextGlyphPath.h"
 
 #include <QFont>
+#include <QFontMetricsF>
 #include <QGlyphRun>
 #include <QPainterPath>
 #include <QPainterPathStroker>
@@ -34,100 +35,197 @@ void TextGlyphPath::scheduleRecompute()
         m_recomputeTimer->start();
 }
 
+void TextGlyphPath::clearGlyphCaches()
+{
+    m_glyphPathCache.clear();
+    m_strokeGlyphCache.clear();
+    m_cachedOutlinePixels = -1.0;
+}
+
+void TextGlyphPath::clearStrokeCache()
+{
+    m_strokeGlyphCache.clear();
+    m_cachedOutlinePixels = -1.0;
+}
+
 // ---------------------------------------------------------------------------
 // Core computation
 // ---------------------------------------------------------------------------
 
 void TextGlyphPath::recompute()
 {
-    // ── 1. Font ─────────────────────────────────────────────────────────────
+    // ── 1. Font ──────────────────────────────────────────────────────────────
     QFont font;
     font.setFamily(m_fontFamily);
     font.setPixelSize(qMax(1, m_fontPixelSize));
     font.setWeight(QFont::Weight(m_fontWeight));
     font.setItalic(m_fontItalic);
+    font.setKerning(true);
+    font.setHintingPreference(QFont::PreferNoHinting);
 
     const QString text = m_fontUppercase ? m_textContent.toUpper() : m_textContent;
 
-    // ── 2. Text layout (handles wrapping, alignment, multi-line) ────────────
-    QTextLayout layout(text, font);
+    // ── 2. Split text into paragraphs, lay each out separately ───────────────
+    // QTextLayout is a SINGLE-PARAGRAPH engine. '\n' (U+000A) is NOT treated as
+    // a hard break by createLine() — it is simply ignored, causing all content
+    // to appear on one line. QML Text splits on '\n' and stacks one QTextLayout
+    // per paragraph. We must mirror that here so line-break behaviour matches.
+    QString normalizedText = text;
+    normalizedText.replace(QLatin1String("\r\n"), QLatin1String("\n"));
+    const QStringList paragraphs = normalizedText.split(QLatin1Char('\n'));
 
     QTextOption textOption;
     textOption.setWrapMode(m_fitToText ? QTextOption::NoWrap : QTextOption::WordWrap);
-
+    textOption.setUseDesignMetrics(true);
     Qt::Alignment hAlign = Qt::AlignHCenter;
     if (m_horizontalAlignment == QLatin1String("left"))       hAlign = Qt::AlignLeft;
     else if (m_horizontalAlignment == QLatin1String("right")) hAlign = Qt::AlignRight;
     textOption.setAlignment(hAlign);
+    // Qt Quick internally sets UseDesignMetrics on every QTextLayout it creates
+    // (both QQuickText and QQuickTextEdit).  Without this flag QTextLayout rounds
+    // each glyph's advance width to the nearest pixel before placing the next
+    // glyph.  With the flag, fractional sub-pixel advances are used — matching
+    // exactly what TextEdit shows.  Without it the accumulated rounding error
+    // over a word produces visually different inter-character spacing between
+    // display mode (our glyph paths) and edit mode (TextEdit).
+    textOption.setUseDesignMetrics(true);
 
-    layout.setTextOption(textOption);
-
-    layout.beginLayout();
     const qreal availWidth = qMax(1.0, m_itemWidth);
-    qreal lineY = 0.0;
-    while (true) {
-        QTextLine line = layout.createLine();
-        if (!line.isValid())
-            break;
-        line.setLineWidth(availWidth);
-        line.setPosition(QPointF(0.0, lineY));
-        lineY += line.height();
-    }
-    layout.endLayout();
+    const QFontMetricsF fm(font);
+    // QTextDocumentLayout (used by TextEdit) inserts fm.leading() between
+    // consecutive wrapped lines WITHIN a paragraph (not before the first,
+    // not after the last).  We must mirror this exactly so that multi-line
+    // glyph-path positions match what TextEdit places on screen.
+    const qreal interLineLeading = qMax(qreal(0), fm.leading());
+    // Height of a blank-line paragraph.  In QTextDocument, an empty block
+    // contains exactly one zero-glyph line whose height = ascent + descent.
+    // That is fm.height(), NOT fm.lineSpacing() (which adds leading on top
+    // and would over-count for a single-line block).
+    const qreal emptyLineHeight = fm.height();
 
-    // ── 3. Vertical alignment offset ────────────────────────────────────────
-    const qreal totalHeight = layout.boundingRect().height();
+    struct ParaData {
+        QList<QGlyphRun> glyphRuns;
+        qreal startY;   // cumulative Y offset within the overall text block
+    };
+    QList<ParaData> allParas;
+    allParas.reserve(paragraphs.size());
+
+    qreal totalHeight = 0.0;
+    for (const QString& para : paragraphs) {
+        ParaData pd;
+        pd.startY = totalHeight;
+        if (para.isEmpty()) {
+            // Blank line: no glyphs but must advance Y by one line height.
+            totalHeight += emptyLineHeight;
+            allParas.append(std::move(pd));
+            continue;
+        }
+        QTextLayout layout(para, font);
+        layout.setTextOption(textOption);
+        layout.beginLayout();
+        qreal lineY = 0.0;
+        bool firstLine = true;
+        while (true) {
+            QTextLine line = layout.createLine();
+            if (!line.isValid()) break;
+            line.setLineWidth(availWidth);
+            // Mirror QTextDocumentLayout: add inter-line leading BEFORE every
+            // line except the first (i.e. between lines, never trailing).
+            if (!firstLine)
+                lineY += interLineLeading;
+            line.setPosition(QPointF(0.0, lineY));
+            lineY += line.height();
+            firstLine = false;
+        }
+        layout.endLayout();
+        pd.glyphRuns = layout.glyphRuns();
+        totalHeight += (lineY > 0.0 ? lineY : emptyLineHeight);
+        allParas.append(std::move(pd));
+    }
+
+    // ── 3. Vertical alignment offset ─────────────────────────────────────────
     qreal vertOffset = 0.0;
     if (m_verticalAlignment == QLatin1String("center"))
         vertOffset = (m_itemHeight - totalHeight) * 0.5;
     else if (m_verticalAlignment == QLatin1String("bottom"))
         vertOffset = m_itemHeight - totalHeight;
 
-    // ── 4. Extract glyph paths → unified fill path ───────────────────────────
-    // Qt6: QRawFont::pathForGlyph() already returns paths in y-down screen
-    // coordinates, consistent with QGlyphRun::positions(). Transform per glyph
-    // is a plain translation: x' = x + pos.x, y' = y + pos.y + vertOffset.
+    // ── 4. Extract glyph paths using per-unique-glyph cache ──────────────────
+    // m_glyphPathCache   : raw glyph shape at origin — invalidated on font change.
+    // m_strokeGlyphCache : stroked+filled shape at origin — invalidated on font
+    //                      or outlinePixels change.
+    //
+    // QPainterPathStroker and united() are called on ONE glyph (~50–100 elements)
+    // at a time, never on the fully merged text. Each unique glyph ID is computed
+    // once and reused for every repeated instance across all paragraphs.
+    // pd.startY offsets each paragraph's glyphs to the correct vertical position.
     QPainterPath fillPath;
-    const QList<QGlyphRun> glyphRuns = layout.glyphRuns();
-    for (const QGlyphRun& run : glyphRuns) {
-        const QRawFont rawFont      = run.rawFont();
-        const QList<quint32>& ids   = run.glyphIndexes();
-        const QList<QPointF>& poses = run.positions();
-        const int count = qMin(ids.size(), poses.size());
-        for (int i = 0; i < count; ++i) {
-            QPainterPath glyph = rawFont.pathForGlyph(ids[i]);
-            if (glyph.isEmpty())
-                continue;
-            QTransform t(1.0, 0.0, 0.0, 1.0,
-                         poses[i].x(),
-                         poses[i].y() + vertOffset);
-            fillPath.addPath(t.map(glyph));
+    QPainterPath strokePath;
+
+    const bool needsStroke = (m_outlinePixels > 0.0);
+    for (const ParaData& pd : allParas) {
+        for (const QGlyphRun& run : pd.glyphRuns) {
+            const QRawFont rawFont      = run.rawFont();
+            const QList<quint32>& ids   = run.glyphIndexes();
+            const QList<QPointF>& poses = run.positions();
+            const QString runKeyPrefix = rawFont.familyName()
+                    + QLatin1Char('|')
+                    + rawFont.styleName()
+                    + QLatin1Char('|')
+                    + QString::number(rawFont.pixelSize(), 'f', 3)
+                    + QLatin1Char('|');
+            const int count = qMin(ids.size(), poses.size());
+            for (int i = 0; i < count; ++i) {
+                const quint32 id = ids[i];
+                const QString cacheKey = runKeyPrefix + QString::number(id);
+
+                // ── Fill glyph (cache lookup / populate on miss) ──────────────
+                auto fillIt = m_glyphPathCache.find(cacheKey);
+                if (fillIt == m_glyphPathCache.end())
+                    fillIt = m_glyphPathCache.insert(cacheKey, rawFont.pathForGlyph(id));
+
+                const QPainterPath& cachedGlyph = fillIt.value();
+                if (cachedGlyph.isEmpty())
+                    continue;
+
+                // poses[i] is relative to the paragraph's layout origin.
+                // pd.startY stacks paragraphs; vertOffset applies v-alignment.
+                const QTransform t(1.0, 0.0, 0.0, 1.0,
+                                   poses[i].x(),
+                                   poses[i].y() + pd.startY + vertOffset);
+                fillPath.addPath(t.map(cachedGlyph));
+
+                // ── Stroke glyph (cache lookup / populate on miss) ────────────
+                if (needsStroke) {
+                    auto strokeIt = m_strokeGlyphCache.find(cacheKey);
+                    if (strokeIt == m_strokeGlyphCache.end()) {
+                        QPainterPathStroker stroker;
+                        stroker.setWidth(m_outlinePixels * 2.0);
+                        stroker.setJoinStyle(Qt::MiterJoin);
+                        stroker.setCapStyle(Qt::FlatCap);
+                        QPainterPath expanded = stroker.createStroke(cachedGlyph);
+                        strokeIt = m_strokeGlyphCache.insert(cacheKey, cachedGlyph.united(expanded));
+                    }
+                    strokePath.addPath(t.map(strokeIt.value()));
+                }
+            }
         }
     }
 
-    // ── 5. Convert to SVG strings ────────────────────────────────────────────
+    // ── 5. Convert to SVG strings ─────────────────────────────────────────────
     QString newFill;
     QString newStroke;
 
     if (!fillPath.isEmpty()) {
         newFill = painterPathToSvg(fillPath);
-
-        if (m_outlinePixels > 0.0) {
-            // Expand the glyph outlines outward by outlinePixels on each side.
-            QPainterPathStroker stroker;
-            stroker.setWidth(m_outlinePixels * 2.0);
-            stroker.setJoinStyle(Qt::MiterJoin);
-            stroker.setCapStyle(Qt::FlatCap);
-            QPainterPath expandedRing = stroker.createStroke(fillPath);
-            // Unite with fill so the interior of the glyph is fully covered.
-            QPainterPath fullOutline = fillPath.united(expandedRing);
-            newStroke = painterPathToSvg(fullOutline);
-        }
+        if (needsStroke && !strokePath.isEmpty())
+            newStroke = painterPathToSvg(strokePath);
     }
 
-    if (newFill != m_fillPath || newStroke != m_strokePath) {
-        m_fillPath   = newFill;
-        m_strokePath = newStroke;
+    if (newFill != m_fillPath || newStroke != m_strokePath || totalHeight != m_textBlockHeight) {
+        m_fillPath        = newFill;
+        m_strokePath      = newStroke;
+        m_textBlockHeight = totalHeight;
         emit pathsChanged();
     }
 }
@@ -191,8 +289,11 @@ static QString painterPathToSvg(const QPainterPath& path)
 }
 
 // ---------------------------------------------------------------------------
-// Setters — all follow identical pattern: guard equality, update, emit signal
+// Setters
 // ---------------------------------------------------------------------------
+// Font-shape setters: clear both caches because glyph paths change entirely.
+// Outline setter: clear only the stroke cache (fill paths are unaffected).
+// All other setters: no cache clearing needed (layout/position changes only).
 
 #define SETTER_IMPL(Type, name, member)       \
 void TextGlyphPath::set##name(Type v) {       \
@@ -201,17 +302,55 @@ void TextGlyphPath::set##name(Type v) {       \
     emit inputChanged();                      \
 }
 
-SETTER_IMPL(const QString&, TextContent,       textContent)
-SETTER_IMPL(const QString&, FontFamily,        fontFamily)
-SETTER_IMPL(int,            FontPixelSize,     fontPixelSize)
-SETTER_IMPL(int,            FontWeight,        fontWeight)
-SETTER_IMPL(bool,           FontItalic,        fontItalic)
-SETTER_IMPL(bool,           FontUppercase,     fontUppercase)
-SETTER_IMPL(qreal,          OutlinePixels,    outlinePixels)
-SETTER_IMPL(qreal,          ItemWidth,        itemWidth)
-SETTER_IMPL(qreal,          ItemHeight,       itemHeight)
-SETTER_IMPL(const QString&, HorizontalAlignment, horizontalAlignment)
-SETTER_IMPL(const QString&, VerticalAlignment,   verticalAlignment)
-SETTER_IMPL(bool,           FitToText,        fitToText)
+// ── Font setters (glyph shapes change — invalidate both caches) ──────────────
+void TextGlyphPath::setFontFamily(const QString& v)
+{
+    if (m_fontFamily == v) return;
+    m_fontFamily = v;
+    clearGlyphCaches();
+    emit inputChanged();
+}
+
+void TextGlyphPath::setFontPixelSize(int v)
+{
+    if (m_fontPixelSize == v) return;
+    m_fontPixelSize = v;
+    clearGlyphCaches();
+    emit inputChanged();
+}
+
+void TextGlyphPath::setFontWeight(int v)
+{
+    if (m_fontWeight == v) return;
+    m_fontWeight = v;
+    clearGlyphCaches();
+    emit inputChanged();
+}
+
+void TextGlyphPath::setFontItalic(bool v)
+{
+    if (m_fontItalic == v) return;
+    m_fontItalic = v;
+    clearGlyphCaches();
+    emit inputChanged();
+}
+
+// ── Outline setter (fill shapes unchanged — invalidate stroke cache only) ────
+void TextGlyphPath::setOutlinePixels(qreal v)
+{
+    if (m_outlinePixels == v) return;
+    m_outlinePixels = v;
+    clearStrokeCache();
+    emit inputChanged();
+}
+
+// ── Remaining setters (layout/position changes, no cache impact) ─────────────
+SETTER_IMPL(const QString&, TextContent,          textContent)
+SETTER_IMPL(bool,           FontUppercase,         fontUppercase)
+SETTER_IMPL(qreal,          ItemWidth,             itemWidth)
+SETTER_IMPL(qreal,          ItemHeight,            itemHeight)
+SETTER_IMPL(const QString&, HorizontalAlignment,   horizontalAlignment)
+SETTER_IMPL(const QString&, VerticalAlignment,     verticalAlignment)
+SETTER_IMPL(bool,           FitToText,             fitToText)
 
 #undef SETTER_IMPL

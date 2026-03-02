@@ -1,6 +1,8 @@
 #pragma once
 
+#include <QHash>
 #include <QObject>
+#include <QPainterPath>
 #include <QString>
 
 class QTimer;
@@ -45,8 +47,12 @@ class TextGlyphPath : public QObject
     Q_PROPERTY(bool    fitToText        READ fitToText        WRITE setFitToText        NOTIFY inputChanged)
 
     // ── Outputs ─────────────────────────────────────────────────────────────
-    Q_PROPERTY(QString fillPath   READ fillPath   NOTIFY pathsChanged)
-    Q_PROPERTY(QString strokePath READ strokePath NOTIFY pathsChanged)
+    Q_PROPERTY(QString fillPath        READ fillPath        NOTIFY pathsChanged)
+    Q_PROPERTY(QString strokePath      READ strokePath      NOTIFY pathsChanged)
+    // Height of the laid-out text block (total content height, before vertical
+    // alignment offset). Use this instead of QML Text.paintedHeight so that
+    // edit-mode topPadding matches the display-mode glyph positions exactly.
+    Q_PROPERTY(qreal   textBlockHeight READ textBlockHeight NOTIFY pathsChanged)
 
 public:
     explicit TextGlyphPath(QObject* parent = nullptr);
@@ -66,6 +72,7 @@ public:
     bool    fitToText()        const { return m_fitToText; }
     QString fillPath()         const { return m_fillPath; }
     QString strokePath()       const { return m_strokePath; }
+    qreal   textBlockHeight()  const { return m_textBlockHeight; }
 
     // Setters
     void setTextContent      (const QString& v);
@@ -89,8 +96,8 @@ private slots:
     void recompute();
 
 private:
-    void scheduleRecompute();
-
+    void scheduleRecompute();    void clearGlyphCaches();      // invalidates both fill + stroke caches
+    void clearStrokeCache();      // invalidates stroke cache only (outlinePixels changed)
     // ── Input state ─────────────────────────────────────────────────────────
     QString m_textContent;
     QString m_fontFamily        { QStringLiteral("Arial") };
@@ -108,6 +115,20 @@ private:
     // ── Output state ────────────────────────────────────────────────────────
     QString m_fillPath;
     QString m_strokePath;
+    qreal   m_textBlockHeight { 0.0 };
+
+    // ── Per-unique-glyph path caches ─────────────────────────────────────────
+    // Keyed by "raw-font identity + glyph index". Glyph IDs are local to each
+    // font face, so using only the numeric ID can collide across fallback
+    // fonts (same ID in two different fonts means different outlines).
+    // Invalidated on font property change.
+    // m_glyphPathCache  : raw glyph shape at origin
+    // m_strokeGlyphCache: stroked+filled shape at origin
+    // m_cachedOutlinePixels: the outlinePixels value the stroke cache was built
+    //                        for; -1 means the stroke cache is empty/invalid.
+    QHash<QString, QPainterPath> m_glyphPathCache;
+    QHash<QString, QPainterPath> m_strokeGlyphCache;
+    qreal m_cachedOutlinePixels { -1.0 };
 
     QTimer* m_recomputeTimer { nullptr };
 };

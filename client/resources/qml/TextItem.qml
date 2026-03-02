@@ -30,7 +30,7 @@ BaseMediaItem {
     doubleClickEnabled: true
 
     // Outline thickness in scene-space pixels derived from font size.
-    // styleSize on Qt6 Text.Outline accepts pixel values directly.
+    // Fed into TextGlyphPath.outlinePixels which drives the QPainterPathStroker width.
     readonly property real outlinePixels: root.outlineWidthPercent > 0
         ? Math.max(1, Math.round(root.outlineWidthPercent * Math.max(1, root.fontPixelSize) / 100.0))
         : 0
@@ -47,32 +47,62 @@ BaseMediaItem {
         root.selectRequested(mediaId, additive)
         root.preEditText = root.textContent || ""
         root.editing = true
+        // Explicitly reset the editor text every time we enter edit mode.
+        // The declarative `text: root.preEditText` binding on textEditor is
+        // broken by user input after the first keystroke; subsequent sessions
+        // would therefore show stale content if we relied only on the binding.
+        textEditor.text = root.preEditText
         textEditor.forceActiveFocus()
     }
 
-    // Metrics node — invisible, used only for paintedWidth/paintedHeight by
-    // the highlight background rectangle. Kept separate so the highlight
-    // geometry remains stable whether border is on or off.
-    Text {
-        id: textNode
-        visible: false
+    // Display text node — renders the fill color using a READ-ONLY TextEdit.
+    // Critical architecture note: Text (QML) uses QTextLayout internally;
+    // TextEdit uses QTextDocument → QTextDocumentLayout which adds fm.leading()
+    // between wrapped lines.  On macOS leading ≈ 4-5 px per line, so a Text
+    // item always renders taller than a TextEdit.  Using a readonly TextEdit
+    // here guarantees pixel-identical line heights and spacing when switching
+    // into edit mode because both paths go through the same engine.
+    // z:1 keeps the fill on top of the stroke Shape (which is at default z:0).
+    TextEdit {
+        id: textDisplayNode
+        visible: !root.editing
+        z: 1
         anchors.fill: parent
         anchors.margins: 4
-        text: root.fontUppercase ? (root.textContent || "").toUpperCase() : root.textContent
-        color: "white"
-        wrapMode: root.fitToTextEnabled ? Text.NoWrap : Text.WordWrap
+        readOnly: true
+        activeFocusOnTab: false
+        // enabled: false prevents this item from intercepting mouse/touch events
+        // so clicks still reach BaseMediaItem's handlers for selection/edit entry.
+        enabled: false
+        // Vertical alignment: TextEdit has no verticalAlignment property;
+        // simulate it with topPadding exactly as textEditor does, so the
+        // transition between display and edit is seamless.
+        topPadding: {
+            var extra = Math.max(0, height - contentHeight)
+            if (root.verticalAlignment === "top")    return 0
+            if (root.verticalAlignment === "bottom") return extra
+            return extra * 0.5
+        }
+        leftPadding:   0
+        rightPadding:  0
+        bottomPadding: 0
+        text: root.textContent || ""
+        color: root.textColor
+        textFormat: TextEdit.PlainText
+        wrapMode: root.fitToTextEnabled ? TextEdit.NoWrap : TextEdit.Wrap
+        renderType: Text.QtRendering
         horizontalAlignment: root.horizontalAlignment === "left"
             ? Text.AlignLeft
             : (root.horizontalAlignment === "right" ? Text.AlignRight : Text.AlignHCenter)
-        verticalAlignment: root.verticalAlignment === "top"
-            ? Text.AlignTop
-            : (root.verticalAlignment === "bottom" ? Text.AlignBottom : Text.AlignVCenter)
         font.family: root.fontFamily
         font.pixelSize: Math.max(1, root.fontPixelSize)
         font.weight: root.fontWeight
         font.italic: root.fontItalic
         font.underline: root.fontUnderline
-        renderType: Text.QtRendering
+        font.capitalization: root.fontUppercase ? Font.AllUppercase : Font.MixedCase
+        font.kerning: true
+        font.preferShaping: true
+        font.hintingPreference: Font.PreferNoHinting
     }
 
     Rectangle {
@@ -85,8 +115,9 @@ BaseMediaItem {
         readonly property real highlightPadding: 2
         readonly property real contentWidth: Math.max(0, root.width - contentMargin * 2)
         readonly property real contentHeight: Math.max(0, root.height - contentMargin * 2)
-        readonly property real paintedW: Math.max(0, Math.min(contentWidth, textNode.paintedWidth))
-        readonly property real paintedH: Math.max(0, Math.min(contentHeight, textNode.paintedHeight))
+        // contentWidth/Height on TextEdit is equivalent to paintedWidth/Height on Text.
+        readonly property real paintedW: Math.max(0, Math.min(contentWidth, textDisplayNode.contentWidth))
+        readonly property real paintedH: Math.max(0, Math.min(contentHeight, textDisplayNode.contentHeight))
 
         width: paintedW + highlightPadding * 2
         height: paintedH + highlightPadding * 2
@@ -107,24 +138,6 @@ BaseMediaItem {
         }
     }
 
-    // No-border display path: direct Text item in Qt's retained scene graph.
-    Text {
-        id: textPlainNode
-        visible: !root.editing && root.outlinePixels <= 0
-        anchors.fill: textNode
-        text: textNode.text
-        color: root.textColor
-        wrapMode: textNode.wrapMode
-        horizontalAlignment: textNode.horizontalAlignment
-        verticalAlignment: textNode.verticalAlignment
-        font.family: textNode.font.family
-        font.pixelSize: textNode.font.pixelSize
-        font.weight: textNode.font.weight
-        font.italic: textNode.font.italic
-        font.underline: textNode.font.underline
-        renderType: Text.QtRendering
-    }
-
     // Glyph path engine — computes fill + stroke SVG paths once per content/style
     // change using QTextLayout + QRawFont + QPainterPathStroker (C++ retained).
     // Camera pan/zoom never triggers recompute: Shape caches GPU geometry and
@@ -138,8 +151,8 @@ BaseMediaItem {
         fontItalic:         root.fontItalic
         fontUppercase:      root.fontUppercase
         outlinePixels:     root.outlinePixels
-        itemWidth:         Math.max(1, textNode.width)
-        itemHeight:        Math.max(1, textNode.height)
+        itemWidth:         Math.max(1, textDisplayNode.width)
+        itemHeight:        Math.max(1, textDisplayNode.height)
         horizontalAlignment: root.horizontalAlignment
         verticalAlignment:   root.verticalAlignment
         fitToText:         root.fitToTextEnabled
@@ -151,7 +164,7 @@ BaseMediaItem {
     Shape {
         id: textStrokeShape
         visible: !root.editing && root.outlinePixels > 0
-        anchors.fill: textNode
+        anchors.fill: textDisplayNode
         // Disable anti-aliasing at the Shape level; Qt Quick's curve renderer
         // handles sub-pixel quality internally.
         layer.enabled: false
@@ -161,21 +174,6 @@ BaseMediaItem {
             strokeWidth: 0
             fillRule:    ShapePath.WindingFill
             PathSvg { path: glyphPath.strokePath }
-        }
-    }
-
-    // Glyph fill layer — top layer rendered with text fill color.
-    Shape {
-        id: textFillShape
-        visible: !root.editing && root.outlinePixels > 0
-        anchors.fill: textNode
-        layer.enabled: false
-        ShapePath {
-            fillColor:   root.textColor
-            strokeColor: "transparent"
-            strokeWidth: 0
-            fillRule:    ShapePath.WindingFill
-            PathSvg { path: glyphPath.fillPath }
         }
     }
 
@@ -192,21 +190,37 @@ BaseMediaItem {
             // With only width+y, height = contentHeight only, so click-to-place-cursor
             // fails in empty space and PointerHandlers can steal grabs.
             anchors.fill: parent
-            // Vertical alignment via topPadding. We use textNode.paintedHeight
-            // (the exact same metric the display Text item uses for AlignVCenter)
-            // rather than contentHeight, so the text position is pixel-identical
-            // between display mode and edit mode.
+            // Vertical alignment via topPadding.
+            // Both textDisplayNode and textEditor are TextEdit items with
+            // identical font/padding settings, so contentHeight is the same
+            // engine, same value — the transition is pixel-identical.
+            // Using our own contentHeight (not textDisplayNode's) keeps the
+            // padding live as the user types new lines.
             topPadding: {
-                var extra = Math.max(0, height - textNode.paintedHeight)
+                var extra = Math.max(0, height - contentHeight)
                 if (root.verticalAlignment === "top")    return 0
                 if (root.verticalAlignment === "bottom") return extra
                 return extra * 0.5
             }
             text: root.preEditText
             color: root.textColor
+            textFormat: TextEdit.PlainText
             wrapMode: root.fitToTextEnabled ? TextEdit.NoWrap : TextEdit.Wrap
             focus: root.editing
             cursorVisible: root.editing
+            // Zero out all implicit paddings so the text layout width exactly
+            // equals the item width and matches TextGlyphPath's availWidth.
+            // Without explicit zeroes a platform style could inject non-zero
+            // left/right padding, breaking word-wrap point parity.
+            leftPadding:   0
+            rightPadding:  0
+            bottomPadding: 0
+            // Mirror the uppercase transformation that TextGlyphPath applies
+            // via .toUpper() so that the edit view shows the same uppercase
+            // glyphs (with their different advance widths) that the display
+            // mode renders.  Without this, a fontUppercase:true item would
+            // show lowercase in edit mode — completely different spacing.
+            font.capitalization: root.fontUppercase ? Font.AllUppercase : Font.MixedCase
             // selectByMouse is unreliable when TextEdit sits inside a scaled viewport
             // because Qt6 passes raw screen coordinates to the internal selection handler
             // instead of item-local coordinates. We use an explicit MouseArea below.
@@ -219,6 +233,9 @@ BaseMediaItem {
             font.pixelSize: Math.max(1, root.fontPixelSize)
             font.weight: root.fontWeight
             font.italic: root.fontItalic
+            font.kerning: true
+            font.preferShaping: true
+            font.hintingPreference: Font.PreferNoHinting
             font.underline: root.fontUnderline
 
             Keys.onPressed: function(event) {
