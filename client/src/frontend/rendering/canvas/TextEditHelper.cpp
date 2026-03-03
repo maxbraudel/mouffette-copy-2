@@ -68,11 +68,6 @@ void TextEditHelper::applyIncludeTrailingSpaces(QObject* obj)
     if (!obj)
         return;
 
-    // Reading implicitWidth forces QQuickTextEditPrivate::requireImplicitWidth
-    // to true, which makes updateDefaultTextOption() preserve (rather than
-    // strip) IncludeTrailingSpaces on every subsequent call.
-    obj->property("implicitWidth");
-
     QVariant prop = obj->property("textDocument");
     if (!prop.isValid())
         return;
