@@ -13,7 +13,7 @@ if(APPLE)
 endif()
 
 # Find Qt6
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia MultimediaWidgets Svg SvgWidgets Concurrent Quick QuickWidgets Qml ShaderTools)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia MultimediaWidgets Svg SvgWidgets Concurrent Quick QuickWidgets Qml ShaderTools GuiPrivate)
 
 # Enable Qt MOC
 set(CMAKE_AUTOMOC ON)
@@ -73,6 +73,7 @@ set(SOURCES
     src/frontend/rendering/canvas/MediaListModel.cpp
     src/frontend/rendering/canvas/OverlayPanels.cpp
     src/frontend/rendering/canvas/TextGlyphPath.cpp
+    src/frontend/rendering/canvas/TextEditHelper.cpp
     
     # Rendering - Remote
     src/frontend/rendering/remote/RemoteSceneController.cpp
@@ -214,6 +215,7 @@ set(HEADERS
     src/frontend/rendering/canvas/MediaListModel.h
     src/frontend/rendering/canvas/OverlayPanels.h
     src/frontend/rendering/canvas/TextGlyphPath.h
+    src/frontend/rendering/canvas/TextEditHelper.h
     src/frontend/rendering/canvas/RoundedRectItem.h
     src/frontend/rendering/canvas/SegmentedButtonItem.h
 
@@ -328,6 +330,7 @@ target_link_libraries(MouffetteClient
     Qt6::Quick
     Qt6::QuickWidgets
     Qt6::Qml
+    Qt6::GuiPrivate
 )
 
 # Include directories

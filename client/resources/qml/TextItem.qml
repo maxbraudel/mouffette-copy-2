@@ -41,6 +41,20 @@ BaseMediaItem {
         root.editing = false
     }
 
+    function patchEditorTrailingSpacesOption() {
+        // Called synchronously (no Qt.callLater) so the flag is in place
+        // BEFORE Qt's layout engine runs for the first frame.
+        //
+        // Qt6 QQuickTextEdit::updateDefaultTextOption() never strips
+        // QTextOption::IncludeTrailingSpaces — it only touches alignment,
+        // wrap mode, text direction and design metrics.  Once set on the
+        // document's defaultTextOption the flag propagates into every
+        // per-block QTextLayout (via QTextDocumentLayout::layoutBlock) on
+        // every relayout, so it only needs to be applied once per document
+        // instance.  applyIncludeTrailingSpaces has an idempotency guard.
+        TextEditHelper.applyIncludeTrailingSpaces(textEditor)
+    }
+
     onPrimaryDoubleClicked: function(mediaId, additive) {
         if (!root.textEditable)
             return
@@ -52,17 +66,22 @@ BaseMediaItem {
         // broken by user input after the first keystroke; subsequent sessions
         // would therefore show stale content if we relied only on the binding.
         textEditor.text = root.preEditText
+        // Apply IncludeTrailingSpaces AFTER text is set so the document has
+        // blocks and markContentsDirty covers the full content.
+        patchEditorTrailingSpacesOption()
         textEditor.forceActiveFocus()
     }
 
+    onEditingChanged: {
+        if (root.editing)
+            patchEditorTrailingSpacesOption()
+    }
+
     // Display text node — renders the fill color using a READ-ONLY TextEdit.
-    // Critical architecture note: Text (QML) uses QTextLayout internally;
-    // TextEdit uses QTextDocument → QTextDocumentLayout which adds fm.leading()
-    // between wrapped lines.  On macOS leading ≈ 4-5 px per line, so a Text
-    // item always renders taller than a TextEdit.  Using a readonly TextEdit
-    // here guarantees pixel-identical line heights and spacing when switching
-    // into edit mode because both paths go through the same engine.
-    // z:1 keeps the fill on top of the stroke Shape (which is at default z:0).
+    // Uses TextEdit (not Text) so both display and edit mode use the same
+    // QTextDocumentLayout engine, giving pixel-identical line heights.
+    // enabled:false prevents mouse event interception.
+    // z:1 keeps it on top of the stroke Shape (z:0 default).
     TextEdit {
         id: textDisplayNode
         visible: !root.editing
@@ -71,12 +90,7 @@ BaseMediaItem {
         anchors.margins: 4
         readOnly: true
         activeFocusOnTab: false
-        // enabled: false prevents this item from intercepting mouse/touch events
-        // so clicks still reach BaseMediaItem's handlers for selection/edit entry.
         enabled: false
-        // Vertical alignment: TextEdit has no verticalAlignment property;
-        // simulate it with topPadding exactly as textEditor does, so the
-        // transition between display and edit is seamless.
         topPadding: {
             var extra = Math.max(0, height - contentHeight)
             if (root.verticalAlignment === "top")    return 0
@@ -186,44 +200,27 @@ BaseMediaItem {
 
         TextEdit {
             id: textEditor
-            // anchors.fill gives TextEdit the full viewport hit area.
-            // With only width+y, height = contentHeight only, so click-to-place-cursor
-            // fails in empty space and PointerHandlers can steal grabs.
             anchors.fill: parent
-            // Vertical alignment via topPadding.
-            // Both textDisplayNode and textEditor are TextEdit items with
-            // identical font/padding settings, so contentHeight is the same
-            // engine, same value — the transition is pixel-identical.
-            // Using our own contentHeight (not textDisplayNode's) keeps the
-            // padding live as the user types new lines.
+            // applyIncludeTrailingSpaces sets IncludeTrailingSpaces on the
+            // QTextDocument's defaultTextOption.  In Qt6 this flag is never
+            // stripped by updateDefaultTextOption, so one call is enough.
+            Component.onCompleted: patchEditorTrailingSpacesOption()
+            onVisibleChanged: if (visible) patchEditorTrailingSpacesOption()
             topPadding: {
                 var extra = Math.max(0, height - contentHeight)
                 if (root.verticalAlignment === "top")    return 0
                 if (root.verticalAlignment === "bottom") return extra
                 return extra * 0.5
             }
+            leftPadding:   0
+            rightPadding:  0
+            bottomPadding: 0
             text: root.preEditText
             color: root.textColor
             textFormat: TextEdit.PlainText
             wrapMode: root.fitToTextEnabled ? TextEdit.NoWrap : TextEdit.Wrap
             focus: root.editing
             cursorVisible: root.editing
-            // Zero out all implicit paddings so the text layout width exactly
-            // equals the item width and matches TextGlyphPath's availWidth.
-            // Without explicit zeroes a platform style could inject non-zero
-            // left/right padding, breaking word-wrap point parity.
-            leftPadding:   0
-            rightPadding:  0
-            bottomPadding: 0
-            // Mirror the uppercase transformation that TextGlyphPath applies
-            // via .toUpper() so that the edit view shows the same uppercase
-            // glyphs (with their different advance widths) that the display
-            // mode renders.  Without this, a fontUppercase:true item would
-            // show lowercase in edit mode — completely different spacing.
-            font.capitalization: root.fontUppercase ? Font.AllUppercase : Font.MixedCase
-            // selectByMouse is unreliable when TextEdit sits inside a scaled viewport
-            // because Qt6 passes raw screen coordinates to the internal selection handler
-            // instead of item-local coordinates. We use an explicit MouseArea below.
             selectByMouse: false
             renderType: Text.QtRendering
             horizontalAlignment: root.horizontalAlignment === "left"
@@ -233,6 +230,7 @@ BaseMediaItem {
             font.pixelSize: Math.max(1, root.fontPixelSize)
             font.weight: root.fontWeight
             font.italic: root.fontItalic
+            font.capitalization: root.fontUppercase ? Font.AllUppercase : Font.MixedCase
             font.kerning: true
             font.preferShaping: true
             font.hintingPreference: Font.PreferNoHinting
@@ -267,7 +265,10 @@ BaseMediaItem {
 
             onPressed: function(mouse) {
                 textEditor.forceActiveFocus()
-                var pos = textEditor.positionAt(mouse.x, mouse.y)
+                // mapToItem accounts for textEditor's Translate transform so
+                // positionAt receives correct local-space coordinates.
+                var mapped = mapToItem(textEditor, mouse.x, mouse.y)
+                var pos = textEditor.positionAt(mapped.x, mapped.y)
                 pressCharPos = pos
                 textEditor.cursorPosition = pos
                 mouse.accepted = true
@@ -275,7 +276,8 @@ BaseMediaItem {
 
             onPositionChanged: function(mouse) {
                 if (pressed) {
-                    var pos = textEditor.positionAt(mouse.x, mouse.y)
+                    var mapped = mapToItem(textEditor, mouse.x, mouse.y)
+                    var pos = textEditor.positionAt(mapped.x, mapped.y)
                     textEditor.select(pressCharPos, pos)
                 }
             }

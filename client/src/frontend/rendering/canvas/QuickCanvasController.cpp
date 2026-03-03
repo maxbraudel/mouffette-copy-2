@@ -1,6 +1,7 @@
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/CanvasSceneStore.h"
 #include "frontend/rendering/canvas/TextGlyphPath.h"
+#include "frontend/rendering/canvas/TextEditHelper.h"
 #include <QtQml/qqml.h>
 #include "backend/domain/media/MediaRuntimeHooks.h"
 #include "frontend/rendering/canvas/GestureCommands.h"
@@ -309,6 +310,8 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
 
     // Register custom QML types before the QML source is loaded.
     qmlRegisterType<TextGlyphPath>("Mouffette.Canvas", 1, 0, "TextGlyphPath");
+    qmlRegisterSingletonType<TextEditHelper>("Mouffette.Canvas", 1, 0, "TextEditHelper",
+        [](QQmlEngine*, QJSEngine*) -> QObject* { return new TextEditHelper(); });
 
     m_quickWidget->setSource(QUrl(QStringLiteral("qrc:/qml/CanvasRoot.qml")));
 
