@@ -41,20 +41,6 @@ BaseMediaItem {
         root.editing = false
     }
 
-    function patchEditorTrailingSpacesOption() {
-        // Called synchronously (no Qt.callLater) so the flag is in place
-        // BEFORE Qt's layout engine runs for the first frame.
-        //
-        // Qt6 QQuickTextEdit::updateDefaultTextOption() never strips
-        // QTextOption::IncludeTrailingSpaces — it only touches alignment,
-        // wrap mode, text direction and design metrics.  Once set on the
-        // document's defaultTextOption the flag propagates into every
-        // per-block QTextLayout (via QTextDocumentLayout::layoutBlock) on
-        // every relayout, so it only needs to be applied once per document
-        // instance.  applyIncludeTrailingSpaces has an idempotency guard.
-        TextEditHelper.applyIncludeTrailingSpaces(textEditor)
-    }
-
     onPrimaryDoubleClicked: function(mediaId, additive) {
         if (!root.textEditable)
             return
@@ -66,15 +52,7 @@ BaseMediaItem {
         // broken by user input after the first keystroke; subsequent sessions
         // would therefore show stale content if we relied only on the binding.
         textEditor.text = root.preEditText
-        // Apply IncludeTrailingSpaces AFTER text is set so the document has
-        // blocks and markContentsDirty covers the full content.
-        patchEditorTrailingSpacesOption()
         textEditor.forceActiveFocus()
-    }
-
-    onEditingChanged: {
-        if (root.editing)
-            patchEditorTrailingSpacesOption()
     }
 
     // Display text node — renders the fill color using a READ-ONLY TextEdit.
@@ -201,11 +179,9 @@ BaseMediaItem {
         TextEdit {
             id: textEditor
             anchors.fill: parent
-            // applyIncludeTrailingSpaces sets IncludeTrailingSpaces on the
-            // QTextDocument's defaultTextOption.  In Qt6 this flag is never
-            // stripped by updateDefaultTextOption, so one call is enough.
-            Component.onCompleted: patchEditorTrailingSpacesOption()
-            onVisibleChanged: if (visible) patchEditorTrailingSpacesOption()
+            // Installs the trailing-space alignment fix once; the persistent
+            // post-layout hook it registers keeps every relayout correct.
+            Component.onCompleted: TextEditHelper.applyIncludeTrailingSpaces(textEditor)
             topPadding: {
                 var extra = Math.max(0, height - contentHeight)
                 if (root.verticalAlignment === "top")    return 0
@@ -265,8 +241,6 @@ BaseMediaItem {
 
             onPressed: function(mouse) {
                 textEditor.forceActiveFocus()
-                // mapToItem accounts for textEditor's Translate transform so
-                // positionAt receives correct local-space coordinates.
                 var mapped = mapToItem(textEditor, mouse.x, mouse.y)
                 var pos = textEditor.positionAt(mapped.x, mapped.y)
                 pressCharPos = pos

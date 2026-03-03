@@ -6,18 +6,17 @@
 /**
  * TextEditHelper
  *
- * QML singleton that patches a TextEdit's underlying QTextDocument to include
- * trailing spaces when computing line alignment widths.
+ * QML singleton that fixes horizontal alignment of lines with trailing spaces
+ * in an editable TextEdit.
  *
- * By default Qt's QTextDocument uses QTextLine::naturalTextWidth() for
- * horizontal alignment, which STRIPS trailing whitespace.  This means a line
- * like "hello   " (with trailing spaces) is centred/right-aligned as if those
- * spaces don't exist — causing a visible left-shift versus a read-only TextEdit
- * (which internally sets QTextOption::IncludeTrailingSpaces).
+ * Root cause (Qt 6, qtextlayout.cpp): QTextEngine::alignLine() uses
+ * line.textAdvance for centering, but layout_helper sets textAdvance BEFORE
+ * adding the trailing-space contribution to textWidth — so textAdvance never
+ * includes trailing spaces regardless of QTextOption::IncludeTrailingSpaces.
  *
- * Call applyIncludeTrailingSpaces(this) in QML from the TextEdit's
- * Component.onCompleted handler to make its document behave identically to the
- * display-mode node.
+ * Fix: sets IncludeTrailingSpaces on the document so textWidth includes
+ * trailing spaces, then installs a persistent post-layout hook that copies
+ * textWidth → textAdvance for every line that has trailing spaces.
  *
  * QML usage:
  *   import Mouffette.Canvas 1.0
@@ -34,17 +33,8 @@ class TextEditHelper : public QObject
 public:
     explicit TextEditHelper(QObject* parent = nullptr);
 
-    // Parameter is QObject* (not QQuickItem*) so MOC can register it as a
-    // complete metatype without pulling in QtQuick private headers.  The
-    // implementation casts via qobject_cast<QQuickItem*> internally.
-    Q_INVOKABLE void applyIncludeTrailingSpaces(QObject* item);
-
-    // Returns the horizontal pixel offset needed to compensate alignment in
-    // editable TextEdit when trailing spaces on the first line are ignored by
-    // the internal layout's naturalTextWidth() logic.
-    //
-    // For center alignment: offset = trailingWidth / 2
-    // For right alignment:  offset = trailingWidth
-    // For left alignment:   offset = 0
-    Q_INVOKABLE qreal trailingSpaceAlignmentOffset(QObject* item) const;
+    // Call once from the TextEdit's Component.onCompleted.  Installs a
+    // persistent post-layout hook so every subsequent layout pass is
+    // automatically corrected.
+    Q_INVOKABLE void applyIncludeTrailingSpaces(QObject* textEdit);
 };

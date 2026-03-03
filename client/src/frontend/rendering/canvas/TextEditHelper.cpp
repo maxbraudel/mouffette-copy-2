@@ -1,8 +1,6 @@
 #include "frontend/rendering/canvas/TextEditHelper.h"
 
 #include <QAbstractTextDocumentLayout>
-#include <QFont>
-#include <QFontMetricsF>
 #include <QPointer>
 #include <QQuickTextDocument>
 #include <QTextBlock>
@@ -122,50 +120,3 @@ void TextEditHelper::applyIncludeTrailingSpaces(QObject* obj)
     fixTextAdvancesForTrailingSpaces(doc);
 }
 
-qreal TextEditHelper::trailingSpaceAlignmentOffset(QObject* obj) const
-{
-    if (!obj)
-        return 0.0;
-
-    const QString text = obj->property("text").toString();
-    if (text.isEmpty())
-        return 0.0;
-
-    // Only first visual line as requested. Keep CRLF-safe behavior.
-    QString firstLine = text;
-    const int lfIndex = firstLine.indexOf(QLatin1Char('\n'));
-    if (lfIndex >= 0)
-        firstLine = firstLine.left(lfIndex);
-    if (firstLine.endsWith(QLatin1Char('\r')))
-        firstLine.chop(1);
-
-    int trailingSpaces = 0;
-    for (int i = firstLine.size() - 1; i >= 0; --i) {
-        if (firstLine.at(i) == QLatin1Char(' '))
-            ++trailingSpaces;
-        else
-            break;
-    }
-
-    if (trailingSpaces <= 0)
-        return 0.0;
-
-    QFont font = qvariant_cast<QFont>(obj->property("font"));
-    if (font.pixelSize() <= 0)
-        font.setPixelSize(22);
-
-    const QFontMetricsF fm(font);
-    const qreal trailingWidth = fm.horizontalAdvance(QString(trailingSpaces, QLatin1Char(' ')));
-    if (trailingWidth <= 0.0)
-        return 0.0;
-
-    const int hAlign = obj->property("horizontalAlignment").toInt();
-    const bool isCenter = (hAlign & Qt::AlignHCenter) != 0;
-    const bool isRight  = (hAlign & Qt::AlignRight) != 0;
-
-    if (isCenter)
-        return trailingWidth * 0.5;
-    if (isRight)
-        return trailingWidth;
-    return 0.0;
-}
