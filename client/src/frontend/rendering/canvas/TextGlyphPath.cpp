@@ -92,16 +92,13 @@ void TextGlyphPath::recompute()
 
     const qreal availWidth = qMax(1.0, m_itemWidth);
     const QFontMetricsF fm(font);
-    // QTextDocumentLayout (used by TextEdit) inserts fm.leading() between
-    // consecutive wrapped lines WITHIN a paragraph (not before the first,
-    // not after the last).  We must mirror this exactly so that multi-line
-    // glyph-path positions match what TextEdit places on screen.
-    const qreal interLineLeading = qMax(qreal(0), fm.leading());
-    // Height of a blank-line paragraph.  In QTextDocument, an empty block
-    // contains exactly one zero-glyph line whose height = ascent + descent.
-    // That is fm.height(), NOT fm.lineSpacing() (which adds leading on top
-    // and would over-count for a single-line block).
-    const qreal emptyLineHeight = fm.height();
+    // QTextDocumentLayout (used by TextEdit) calls line.setLeadingIncluded(true)
+    // on every line and then advances Y by qCeil(ascent+descent+leading) per line
+    // (see getLineHeightParams() in qtextdocumentlayout.cpp).  The qCeil() snaps
+    // each line height to an integer pixel boundary, accumulating cleanly.
+    // We must mirror this exactly — NOT add leading separately after each
+    // non-first line — otherwise the per-line Y positions diverge progressively.
+    const qreal emptyLineHeight = qCeil(fm.ascent() + fm.descent() + fm.leading());
 
     struct ParaData {
         QList<QGlyphRun> glyphRuns;
@@ -124,18 +121,15 @@ void TextGlyphPath::recompute()
         layout.setTextOption(textOption);
         layout.beginLayout();
         qreal lineY = 0.0;
-        bool firstLine = true;
         while (true) {
             QTextLine line = layout.createLine();
             if (!line.isValid()) break;
             line.setLineWidth(availWidth);
-            // Mirror QTextDocumentLayout: add inter-line leading BEFORE every
-            // line except the first (i.e. between lines, never trailing).
-            if (!firstLine)
-                lineY += interLineLeading;
             line.setPosition(QPointF(0.0, lineY));
-            lineY += line.height();
-            firstLine = false;
+            // Mirror QTextDocumentLayout exactly: advance by qCeil(ascent+descent+leading)
+            // so that each line snaps to an integer pixel boundary, matching the
+            // integer-ceiled rawHeight used by getLineHeightParams() internally.
+            lineY += qCeil(line.ascent() + line.descent() + line.leading());
         }
         layout.endLayout();
         pd.glyphRuns = layout.glyphRuns();
