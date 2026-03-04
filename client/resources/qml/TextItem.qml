@@ -37,8 +37,11 @@ BaseMediaItem {
 
     function commitAndStopEditing() {
         if (!root.editing) return
-        root.textCommitRequested(root.mediaId, textEditor.text)
+        root.textCommitRequested(root.mediaId, textDisplayNode.text)
         root.editing = false
+        // Clear any selection left over from edit mode so it doesn't bleed
+        // into display mode under the stroke shape.
+        textDisplayNode.select(0, 0)
     }
 
     onPrimaryDoubleClicked: function(mediaId, additive) {
@@ -47,28 +50,34 @@ BaseMediaItem {
         root.selectRequested(mediaId, additive)
         root.preEditText = root.textContent || ""
         root.editing = true
-        // Explicitly reset the editor text every time we enter edit mode.
-        // The declarative `text: root.preEditText` binding on textEditor is
-        // broken by user input after the first keystroke; subsequent sessions
-        // would therefore show stale content if we relied only on the binding.
-        textEditor.text = root.preEditText
-        textEditor.forceActiveFocus()
+        // The Binding on textDisplayNode.text is inactive while root.editing
+        // is true, so this imperative assignment is the source-of-truth for
+        // the initial edit content.
+        textDisplayNode.text = root.preEditText
+        textDisplayNode.forceActiveFocus()
     }
 
-    // Display text node — renders the fill color using a READ-ONLY TextEdit.
-    // Uses TextEdit (not Text) so both display and edit mode use the same
-    // QTextDocumentLayout engine, giving pixel-identical line heights.
-    // enabled:false prevents mouse event interception.
-    // z:1 keeps it on top of the stroke Shape (z:0 default).
+    // ── Single TextEdit for both display and edit mode ──────────────────────
+    // Using one document eliminates every class of display↔edit sync bug:
+    // font metrics, line heights, contentHeight, topPadding, and wrapMode
+    // are all computed once by a single QTextDocumentLayout instance.
+    //
+    // Display mode: readOnly:true, enabled:false (no event capture),
+    //               cursorVisible:false. Text is kept in sync with
+    //               root.textContent via the Binding below.
+    // Edit mode:    readOnly:false, enabled:true, cursorVisible:true.
+    //               Text is set imperatively in onPrimaryDoubleClicked and
+    //               the Binding is inactive (when:!root.editing is false).
     TextEdit {
         id: textDisplayNode
-        visible: !root.editing
         z: 1
         anchors.fill: parent
         anchors.margins: 4
-        readOnly: true
-        activeFocusOnTab: false
-        enabled: false
+        readOnly:           !root.editing
+        enabled:            root.editing   // false in display mode → no event capture
+        activeFocusOnTab:   false          // focus managed imperatively
+        cursorVisible:      root.editing
+        selectByMouse:      false          // custom MouseArea handles selection
         topPadding: {
             var extra = Math.max(0, height - contentHeight)
             if (root.verticalAlignment === "top")    return 0
@@ -78,7 +87,6 @@ BaseMediaItem {
         leftPadding:   0
         rightPadding:  0
         bottomPadding: 0
-        text: root.textContent || ""
         color: root.textColor
         textFormat: TextEdit.PlainText
         wrapMode: root.fitToTextEnabled ? TextEdit.NoWrap : TextEdit.Wrap
@@ -86,15 +94,77 @@ BaseMediaItem {
         horizontalAlignment: root.horizontalAlignment === "left"
             ? Text.AlignLeft
             : (root.horizontalAlignment === "right" ? Text.AlignRight : Text.AlignHCenter)
-        font.family: root.fontFamily
-        font.pixelSize: Math.max(1, root.fontPixelSize)
-        font.weight: root.fontWeight
-        font.italic: root.fontItalic
-        font.underline: root.fontUnderline
-        font.capitalization: root.fontUppercase ? Font.AllUppercase : Font.MixedCase
-        font.kerning: true
-        font.preferShaping: true
+        font.family:          root.fontFamily
+        font.pixelSize:       Math.max(1, root.fontPixelSize)
+        font.weight:          root.fontWeight
+        font.italic:          root.fontItalic
+        font.underline:       root.fontUnderline
+        font.capitalization:  root.fontUppercase ? Font.AllUppercase : Font.MixedCase
+        font.kerning:         true
+        font.preferShaping:   true
         font.hintingPreference: Font.PreferNoHinting
+
+        // Installs the trailing-space alignment fix once on this document.
+        // A single document means the fix is applied exactly once and covers
+        // both display and edit modes.
+        Component.onCompleted: TextEditHelper.applyIncludeTrailingSpaces(textDisplayNode)
+
+        Keys.onPressed: function(event) {
+            var isEnter = (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+            var hasCommitModifier = (event.modifiers & Qt.ControlModifier) || (event.modifiers & Qt.MetaModifier)
+            if (isEnter && hasCommitModifier) {
+                root.textCommitRequested(root.mediaId, textDisplayNode.text)
+                root.editing = false
+                textDisplayNode.select(0, 0)
+                event.accepted = true
+            }
+        }
+
+        onTextChanged: {
+            if (root.editing) {
+                root.textLiveUpdateRequested(root.mediaId, textDisplayNode.text)
+            }
+        }
+    }
+
+    // Keep text in sync with the committed model value while not editing.
+    // The Binding is inactive (when:false) during edit mode so user keystrokes
+    // are not overwritten by model updates that arrive via live-update round-trips.
+    Binding {
+        target:   textDisplayNode
+        property: "text"
+        value:    root.textContent || ""
+        when:     !root.editing
+    }
+
+    // Cursor placement and drag-select.
+    // selectByMouse:false on textDisplayNode avoids Qt6 coordinate-mapping
+    // issues in scaled/transformed viewports; this area provides equivalent
+    // behaviour with explicit positionAt() calls.
+    MouseArea {
+        id: textEditMouseArea
+        anchors.fill: textDisplayNode
+        visible:         root.editing
+        z:               2   // above textDisplayNode (z:1)
+        acceptedButtons: Qt.LeftButton
+        property int pressCharPos: 0
+
+        onPressed: function(mouse) {
+            textDisplayNode.forceActiveFocus()
+            // textEditMouseArea and textDisplayNode share the same coordinate
+            // space (same parent, same anchors), so no mapToItem is needed.
+            var pos = textDisplayNode.positionAt(mouse.x, mouse.y)
+            pressCharPos = pos
+            textDisplayNode.cursorPosition = pos
+            mouse.accepted = true
+        }
+
+        onPositionChanged: function(mouse) {
+            if (pressed) {
+                var pos = textDisplayNode.positionAt(mouse.x, mouse.y)
+                textDisplayNode.select(pressCharPos, pos)
+            }
+        }
     }
 
     Rectangle {
@@ -179,93 +249,5 @@ BaseMediaItem {
         }
     }
 
-    Item {
-        id: editViewport
-        visible: root.editing
-        anchors.fill: parent
-        anchors.margins: 4
-        clip: true
-
-        TextEdit {
-            id: textEditor
-            anchors.fill: parent
-            // Installs the trailing-space alignment fix once; the persistent
-            // post-layout hook it registers keeps every relayout correct.
-            Component.onCompleted: TextEditHelper.applyIncludeTrailingSpaces(textEditor)
-            topPadding: {
-                var extra = Math.max(0, height - contentHeight)
-                if (root.verticalAlignment === "top")    return 0
-                if (root.verticalAlignment === "bottom") return extra
-                return extra * 0.5
-            }
-            leftPadding:   0
-            rightPadding:  0
-            bottomPadding: 0
-            text: root.preEditText
-            color: root.textColor
-            textFormat: TextEdit.PlainText
-            wrapMode: root.fitToTextEnabled ? TextEdit.NoWrap : TextEdit.Wrap
-            focus: root.editing
-            cursorVisible: root.editing
-            selectByMouse: false
-            renderType: Text.QtRendering
-            horizontalAlignment: root.horizontalAlignment === "left"
-                ? Text.AlignLeft
-                : (root.horizontalAlignment === "right" ? Text.AlignRight : Text.AlignHCenter)
-            font.family: root.fontFamily
-            font.pixelSize: Math.max(1, root.fontPixelSize)
-            font.weight: root.fontWeight
-            font.italic: root.fontItalic
-            font.capitalization: root.fontUppercase ? Font.AllUppercase : Font.MixedCase
-            font.kerning: true
-            font.preferShaping: true
-            font.hintingPreference: Font.PreferNoHinting
-            font.underline: root.fontUnderline
-
-            Keys.onPressed: function(event) {
-                var isEnter = (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
-                var hasCommitModifier = (event.modifiers & Qt.ControlModifier) || (event.modifiers & Qt.MetaModifier)
-                if (isEnter && hasCommitModifier) {
-                    root.textCommitRequested(root.mediaId, textEditor.text)
-                    root.editing = false
-                    event.accepted = true
-                }
-            }
-
-            onTextChanged: {
-                if (root.editing) {
-                    root.textLiveUpdateRequested(root.mediaId, textEditor.text)
-                }
-            }
-        }
-
-        // Explicit mouse handler for cursor placement and drag selection.
-        // Required because TextEdit.selectByMouse is unreliable when the item lives
-        // inside a scaled/transformed viewport (Qt6 coordinate mapping issue).
-        MouseArea {
-            id: textEditMouseArea
-            anchors.fill: parent
-            acceptedButtons: Qt.LeftButton
-            // Track the anchor position when a drag-select begins.
-            property int pressCharPos: 0
-
-            onPressed: function(mouse) {
-                textEditor.forceActiveFocus()
-                var mapped = mapToItem(textEditor, mouse.x, mouse.y)
-                var pos = textEditor.positionAt(mapped.x, mapped.y)
-                pressCharPos = pos
-                textEditor.cursorPosition = pos
-                mouse.accepted = true
-            }
-
-            onPositionChanged: function(mouse) {
-                if (pressed) {
-                    var mapped = mapToItem(textEditor, mouse.x, mouse.y)
-                    var pos = textEditor.positionAt(mapped.x, mapped.y)
-                    textEditor.select(pressCharPos, pos)
-                }
-            }
-        }
-    }
 
 }
