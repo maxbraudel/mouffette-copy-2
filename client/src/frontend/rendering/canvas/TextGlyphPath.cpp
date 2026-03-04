@@ -9,7 +9,6 @@
 #include <QString>
 #include <QTextLayout>
 #include <QTextOption>
-#include <QTimer>
 #include <QTransform>
 
 // Forward declaration for file-local helper defined after recompute().
@@ -19,20 +18,27 @@ static QString painterPathToSvg(const QPainterPath& path);
 // Construction
 // ---------------------------------------------------------------------------
 
-TextGlyphPath::TextGlyphPath(QObject* parent)
-    : QObject(parent)
+TextGlyphPath::TextGlyphPath(QQuickItem* parent)
+    : QQuickItem(parent)
 {
-    m_recomputeTimer = new QTimer(this);
-    m_recomputeTimer->setSingleShot(true);
-    m_recomputeTimer->setInterval(0);  // fire on the next event-loop tick
-    connect(m_recomputeTimer, &QTimer::timeout, this, &TextGlyphPath::recompute);
-    connect(this, &TextGlyphPath::inputChanged, this, &TextGlyphPath::scheduleRecompute);
-}
+    // This item is purely a computation engine — it has no visual content,
+    // no size, and does not participate in layout.
+    // ItemHasContents is NOT set (it is off by default), which tells the
+    // scene graph there is nothing to paint — the correct way to declare
+    // a non-visual QQuickItem in Qt 6.
 
-void TextGlyphPath::scheduleRecompute()
-{
-    if (!m_recomputeTimer->isActive())
-        m_recomputeTimer->start();
+    // Each setter emits inputChanged(). Connecting it to polish() requests a
+    // polish event for this item.  The Qt scene-graph guarantees that
+    // updatePolish() fires once per frame, after ALL QML bindings have
+    // evaluated but before tessellation — so multiple setters firing in one
+    // frame collapse to exactly one recompute at the right time.
+    //
+    // If polish() is called before the item has a QQuickWindow (e.g. during
+    // initial property setup), Qt sets the polishScheduled flag and
+    // automatically adds the item to the window's polish list as soon as it
+    // enters the scene — so the initial computation is also handled correctly.
+    connect(this, &TextGlyphPath::inputChanged,
+            this, [this]() { polish(); });
 }
 
 void TextGlyphPath::clearGlyphCaches()
@@ -49,10 +55,10 @@ void TextGlyphPath::clearStrokeCache()
 }
 
 // ---------------------------------------------------------------------------
-// Core computation
+// Core computation  (polish-phase callback — same frame as property changes)
 // ---------------------------------------------------------------------------
 
-void TextGlyphPath::recompute()
+void TextGlyphPath::updatePolish()
 {
     // ── 1. Font ──────────────────────────────────────────────────────────────
     QFont font;

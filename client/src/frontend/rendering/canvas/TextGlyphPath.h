@@ -1,11 +1,9 @@
 #pragma once
 
 #include <QHash>
-#include <QObject>
 #include <QPainterPath>
+#include <QQuickItem>
 #include <QString>
-
-class QTimer;
 
 /**
  * TextGlyphPath
@@ -14,10 +12,15 @@ class QTimer;
  *   - fillPath   : the filled glyph contours (for text color)
  *   - strokePath : the expanded glyph region (for border/outline color)
  *
- * Paths are recomputed only when an input property changes (batched via a
- * zero-interval timer so multiple bindings firing in the same frame collapse
- * to a single recompute).  Camera pan/zoom never triggers a recompute: the
- * QtQuick.Shapes renderer caches tessellated geometry and uses GPU transforms.
+ * Paths are recomputed only when an input property changes.  Recomputation is
+ * deferred to the scene-graph polish phase (QQuickItem::updatePolish) so that
+ * all QML bindings that fire in a single frame are batched into exactly one
+ * recompute call — which runs BEFORE updatePaintNode/tessellation in the same
+ * frame.  This makes the stroke shape pixel-perfect in sync with the TextEdit
+ * fill on every frame, including during live resize operations.
+ *
+ * The item has zero size and ItemHasNoContents so it is invisible and does not
+ * participate in layout.  Camera pan/zoom never triggers a recompute.
  *
  * Register as QML type:
  *   qmlRegisterType<TextGlyphPath>("Mouffette.Canvas", 1, 0, "TextGlyphPath");
@@ -28,7 +31,7 @@ class QTimer;
  *   Shape { ShapePath { fillColor: ...; PathSvg { path: gp.strokePath } } }
  *   Shape { ShapePath { fillColor: ...; PathSvg { path: gp.fillPath   } } }
  */
-class TextGlyphPath : public QObject
+class TextGlyphPath : public QQuickItem
 {
     Q_OBJECT
 
@@ -55,7 +58,7 @@ class TextGlyphPath : public QObject
     Q_PROPERTY(qreal   textBlockHeight READ textBlockHeight NOTIFY pathsChanged)
 
 public:
-    explicit TextGlyphPath(QObject* parent = nullptr);
+    explicit TextGlyphPath(QQuickItem* parent = nullptr);
 
     // Getters
     QString textContent()       const { return m_textContent; }
@@ -92,11 +95,15 @@ signals:
     void inputChanged();
     void pathsChanged();
 
-private slots:
-    void recompute();
+protected:
+    // Called by the Qt scene-graph polish mechanism once per frame, after all
+    // QML bindings have fired but before tessellation (updatePaintNode).  This
+    // guarantees the stroke path is always up-to-date in the same frame as the
+    // property changes that triggered it.
+    void updatePolish() override;
 
 private:
-    void scheduleRecompute();    void clearGlyphCaches();      // invalidates both fill + stroke caches
+    void clearGlyphCaches();      // invalidates both fill + stroke caches
     void clearStrokeCache();      // invalidates stroke cache only (outlinePixels changed)
     // ── Input state ─────────────────────────────────────────────────────────
     QString m_textContent;
@@ -129,6 +136,4 @@ private:
     QHash<QString, QPainterPath> m_glyphPathCache;
     QHash<QString, QPainterPath> m_strokeGlyphCache;
     qreal m_cachedOutlinePixels { -1.0 };
-
-    QTimer* m_recomputeTimer { nullptr };
 };
