@@ -82,7 +82,6 @@ void TextGlyphPath::updatePolish()
 
     QTextOption textOption;
     textOption.setWrapMode(m_fitToText ? QTextOption::NoWrap : QTextOption::WordWrap);
-    textOption.setUseDesignMetrics(true);
     Qt::Alignment hAlign = Qt::AlignHCenter;
     if (m_horizontalAlignment == QLatin1String("left"))       hAlign = Qt::AlignLeft;
     else if (m_horizontalAlignment == QLatin1String("right")) hAlign = Qt::AlignRight;
@@ -340,7 +339,6 @@ SETTER_IMPL(const QString&, TextContent,          textContent)
 SETTER_IMPL(bool,           FontUppercase,         fontUppercase)
 SETTER_IMPL(qreal,          ItemWidth,             itemWidth)
 SETTER_IMPL(const QString&, HorizontalAlignment,   horizontalAlignment)
-SETTER_IMPL(const QString&, VerticalAlignment,     verticalAlignment)
 SETTER_IMPL(bool,           FitToText,             fitToText)
 
 #undef SETTER_IMPL

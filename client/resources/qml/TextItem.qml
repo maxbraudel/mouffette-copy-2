@@ -198,8 +198,9 @@ BaseMediaItem {
         }
     }
 
-    // Glyph path engine — computes fill + stroke SVG paths once per content/style
+    // Glyph path engine — computes the stroke SVG path once per content/style
     // change using QTextLayout + QRawFont + QPainterPathStroker (C++ retained).
+    // Fill text is rendered natively by textDisplayNode (shared TextEdit).
     // Camera pan/zoom never triggers recompute: Shape caches GPU geometry and
     // moves it via transforms only.
     TextGlyphPath {
@@ -213,7 +214,6 @@ BaseMediaItem {
         outlinePixels:     root.outlinePixels
         itemWidth:         Math.max(1, textDisplayNode.width)
         horizontalAlignment: root.horizontalAlignment
-        verticalAlignment:   root.verticalAlignment
         fitToText:         root.fitToTextEnabled
     }
 
@@ -245,6 +245,4 @@ BaseMediaItem {
             PathSvg { path: glyphPath.strokePath }
         }
     }
-
-
 }

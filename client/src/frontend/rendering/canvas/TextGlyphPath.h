@@ -8,9 +8,9 @@
 /**
  * TextGlyphPath
  *
- * Computes two SVG path strings from QTextLayout + QRawFont glyph outlines:
- *   - fillPath   : the filled glyph contours (for text color)
- *   - strokePath : the expanded glyph region (for border/outline color)
+ * Computes the stroke SVG path string from QTextLayout + QRawFont glyph outlines.
+ * The stroke (expanded glyph region) is used for the border/outline colour.
+ * Fill text is rendered natively by the single shared TextEdit in TextItem.qml.
  *
  * Paths are recomputed only when an input property changes.  Recomputation is
  * deferred to the scene-graph polish phase (QQuickItem::updatePolish) so that
@@ -29,7 +29,7 @@
  * QML usage:
  *   import Mouffette.Canvas 1.0
  *   TextGlyphPath { id: gp; ... }
- *   Shape { ShapePath { fillColor: ...; PathSvg { path: gp.strokePath } } }
+ *   Shape { ShapePath { fillColor: outlineColor; PathSvg { path: gp.strokePath } } }
  */
 class TextGlyphPath : public QQuickItem
 {
@@ -45,7 +45,6 @@ class TextGlyphPath : public QQuickItem
     Q_PROPERTY(qreal   outlinePixels    READ outlinePixels    WRITE setOutlinePixels    NOTIFY inputChanged)
     Q_PROPERTY(qreal   itemWidth        READ itemWidth        WRITE setItemWidth        NOTIFY inputChanged)
     Q_PROPERTY(QString horizontalAlignment READ horizontalAlignment WRITE setHorizontalAlignment NOTIFY inputChanged)
-    Q_PROPERTY(QString verticalAlignment   READ verticalAlignment   WRITE setVerticalAlignment   NOTIFY inputChanged)
     Q_PROPERTY(bool    fitToText        READ fitToText        WRITE setFitToText        NOTIFY inputChanged)
 
     // ── Outputs ─────────────────────────────────────────────────────────────
@@ -64,7 +63,6 @@ public:
     qreal   outlinePixels()    const { return m_outlinePixels; }
     qreal   itemWidth()        const { return m_itemWidth; }
     QString horizontalAlignment() const { return m_horizontalAlignment; }
-    QString verticalAlignment()   const { return m_verticalAlignment; }
     bool    fitToText()        const { return m_fitToText; }
     QString strokePath()       const { return m_strokePath; }
 
@@ -78,7 +76,6 @@ public:
     void setOutlinePixels   (qreal v);
     void setItemWidth       (qreal v);
     void setHorizontalAlignment(const QString& v);
-    void setVerticalAlignment  (const QString& v);
     void setFitToText       (bool v);
 
 signals:
@@ -105,7 +102,6 @@ private:
     qreal   m_outlinePixels    { 0.0 };
     qreal   m_itemWidth        { 100.0 };
     QString m_horizontalAlignment { QStringLiteral("center") };
-    QString m_verticalAlignment   { QStringLiteral("center") };
     bool    m_fitToText        { false };
 
     // ── Output state ────────────────────────────────────────────────────────
