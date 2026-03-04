@@ -19,8 +19,9 @@
  * frame.  This makes the stroke shape pixel-perfect in sync with the TextEdit
  * fill on every frame, including during live resize operations.
  *
- * The item has zero size and ItemHasNoContents so it is invisible and does not
- * participate in layout.  Camera pan/zoom never triggers a recompute.
+ * The item has zero size and does not participate in layout (ItemHasContents is
+ * NOT set, which is the off-by-default state for QQuickItem in Qt 6).
+ * Camera pan/zoom never triggers a recompute.
  *
  * Register as QML type:
  *   qmlRegisterType<TextGlyphPath>("Mouffette.Canvas", 1, 0, "TextGlyphPath");
@@ -29,7 +30,6 @@
  *   import Mouffette.Canvas 1.0
  *   TextGlyphPath { id: gp; ... }
  *   Shape { ShapePath { fillColor: ...; PathSvg { path: gp.strokePath } } }
- *   Shape { ShapePath { fillColor: ...; PathSvg { path: gp.fillPath   } } }
  */
 class TextGlyphPath : public QQuickItem
 {
@@ -44,18 +44,12 @@ class TextGlyphPath : public QQuickItem
     Q_PROPERTY(bool    fontUppercase     READ fontUppercase     WRITE setFontUppercase     NOTIFY inputChanged)
     Q_PROPERTY(qreal   outlinePixels    READ outlinePixels    WRITE setOutlinePixels    NOTIFY inputChanged)
     Q_PROPERTY(qreal   itemWidth        READ itemWidth        WRITE setItemWidth        NOTIFY inputChanged)
-    Q_PROPERTY(qreal   itemHeight       READ itemHeight       WRITE setItemHeight       NOTIFY inputChanged)
     Q_PROPERTY(QString horizontalAlignment READ horizontalAlignment WRITE setHorizontalAlignment NOTIFY inputChanged)
     Q_PROPERTY(QString verticalAlignment   READ verticalAlignment   WRITE setVerticalAlignment   NOTIFY inputChanged)
     Q_PROPERTY(bool    fitToText        READ fitToText        WRITE setFitToText        NOTIFY inputChanged)
 
     // ── Outputs ─────────────────────────────────────────────────────────────
-    Q_PROPERTY(QString fillPath        READ fillPath        NOTIFY pathsChanged)
     Q_PROPERTY(QString strokePath      READ strokePath      NOTIFY pathsChanged)
-    // Height of the laid-out text block (total content height, before vertical
-    // alignment offset). Use this instead of QML Text.paintedHeight so that
-    // edit-mode topPadding matches the display-mode glyph positions exactly.
-    Q_PROPERTY(qreal   textBlockHeight READ textBlockHeight NOTIFY pathsChanged)
 
 public:
     explicit TextGlyphPath(QQuickItem* parent = nullptr);
@@ -69,13 +63,10 @@ public:
     bool    fontUppercase()     const { return m_fontUppercase; }
     qreal   outlinePixels()    const { return m_outlinePixels; }
     qreal   itemWidth()        const { return m_itemWidth; }
-    qreal   itemHeight()       const { return m_itemHeight; }
     QString horizontalAlignment() const { return m_horizontalAlignment; }
     QString verticalAlignment()   const { return m_verticalAlignment; }
     bool    fitToText()        const { return m_fitToText; }
-    QString fillPath()         const { return m_fillPath; }
     QString strokePath()       const { return m_strokePath; }
-    qreal   textBlockHeight()  const { return m_textBlockHeight; }
 
     // Setters
     void setTextContent      (const QString& v);
@@ -86,7 +77,6 @@ public:
     void setFontUppercase    (bool v);
     void setOutlinePixels   (qreal v);
     void setItemWidth       (qreal v);
-    void setItemHeight      (qreal v);
     void setHorizontalAlignment(const QString& v);
     void setVerticalAlignment  (const QString& v);
     void setFitToText       (bool v);
@@ -114,15 +104,12 @@ private:
     bool    m_fontUppercase     { false };
     qreal   m_outlinePixels    { 0.0 };
     qreal   m_itemWidth        { 100.0 };
-    qreal   m_itemHeight       { 100.0 };
     QString m_horizontalAlignment { QStringLiteral("center") };
     QString m_verticalAlignment   { QStringLiteral("center") };
     bool    m_fitToText        { false };
 
     // ── Output state ────────────────────────────────────────────────────────
-    QString m_fillPath;
     QString m_strokePath;
-    qreal   m_textBlockHeight { 0.0 };
 
     // ── Per-unique-glyph path caches ─────────────────────────────────────────
     // Keyed by "raw-font identity + glyph index". Glyph IDs are local to each

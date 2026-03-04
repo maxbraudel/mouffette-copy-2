@@ -143,18 +143,10 @@ void TextGlyphPath::updatePolish()
         allParas.append(std::move(pd));
     }
 
-    // ── 3. Vertical alignment offset ─────────────────────────────────────────
-    // vertOffset is intentionally NOT baked into the SVG paths here.
-    // QML applies the same vertical-centering offset via textDisplayNode.topPadding
-    // (which is a synchronous QML binding on height/contentHeight).  Baking it here
-    // would desync the stroke from the text fill because TextGlyphPath updates on a
-    // 0-interval timer (one event-loop tick later), while textDisplayNode.topPadding
-    // updates immediately — causing visible border drift during any resize operation.
-    // The textStrokeShape Shape applies `transform: Translate { y: textDisplayNode.topPadding }`
-    // to place the top-aligned paths at the correct vertical offset.
-    const qreal vertOffset = 0.0;
-
-    // ── 4. Extract glyph paths using per-unique-glyph cache ──────────────────
+    // ── 3. Extract glyph paths using per-unique-glyph cache ──────────────────
+    // Note: vertical alignment is intentionally NOT baked into these paths.
+    // textStrokeShape in QML applies `transform: Translate { y: textDisplayNode.topPadding }`
+    // so vertical centering is a synchronous QML binding — zero offset is correct here.
     // m_glyphPathCache   : raw glyph shape at origin — invalidated on font change.
     // m_strokeGlyphCache : stroked+filled shape at origin — invalidated on font
     //                      or outlinePixels change.
@@ -163,7 +155,6 @@ void TextGlyphPath::updatePolish()
     // at a time, never on the fully merged text. Each unique glyph ID is computed
     // once and reused for every repeated instance across all paragraphs.
     // pd.startY offsets each paragraph's glyphs to the correct vertical position.
-    QPainterPath fillPath;
     QPainterPath strokePath;
 
     const bool needsStroke = (m_outlinePixels > 0.0);
@@ -183,7 +174,8 @@ void TextGlyphPath::updatePolish()
                 const quint32 id = ids[i];
                 const QString cacheKey = runKeyPrefix + QString::number(id);
 
-                // ── Fill glyph (cache lookup / populate on miss) ──────────────
+                // ── Glyph cache lookup / populate on miss ─────────────────────
+                // cachedGlyph is needed for stroke expansion below.
                 auto fillIt = m_glyphPathCache.find(cacheKey);
                 if (fillIt == m_glyphPathCache.end())
                     fillIt = m_glyphPathCache.insert(cacheKey, rawFont.pathForGlyph(id));
@@ -193,11 +185,11 @@ void TextGlyphPath::updatePolish()
                     continue;
 
                 // poses[i] is relative to the paragraph's layout origin.
-                // pd.startY stacks paragraphs; vertOffset applies v-alignment.
+                // pd.startY stacks paragraphs; vertical alignment is applied
+                // by the QML transform on textStrokeShape (not baked here).
                 const QTransform t(1.0, 0.0, 0.0, 1.0,
                                    poses[i].x(),
-                                   poses[i].y() + pd.startY + vertOffset);
-                fillPath.addPath(t.map(cachedGlyph));
+                                   poses[i].y() + pd.startY);
 
                 // ── Stroke glyph (cache lookup / populate on miss) ────────────
                 if (needsStroke) {
@@ -216,20 +208,15 @@ void TextGlyphPath::updatePolish()
         }
     }
 
-    // ── 5. Convert to SVG strings ─────────────────────────────────────────────
-    QString newFill;
+    // ── 4. Convert stroke path to SVG string ────────────────────────────────
+    // fillPath is not exposed as a Q_PROPERTY: the TextEdit renders fill text
+    // natively; only the stroke (border/outline) shape needs a QPainterPath.
     QString newStroke;
+    if (needsStroke && !strokePath.isEmpty())
+        newStroke = painterPathToSvg(strokePath);
 
-    if (!fillPath.isEmpty()) {
-        newFill = painterPathToSvg(fillPath);
-        if (needsStroke && !strokePath.isEmpty())
-            newStroke = painterPathToSvg(strokePath);
-    }
-
-    if (newFill != m_fillPath || newStroke != m_strokePath || totalHeight != m_textBlockHeight) {
-        m_fillPath        = newFill;
-        m_strokePath      = newStroke;
-        m_textBlockHeight = totalHeight;
+    if (newStroke != m_strokePath) {
+        m_strokePath = newStroke;
         emit pathsChanged();
     }
 }
@@ -352,7 +339,6 @@ void TextGlyphPath::setOutlinePixels(qreal v)
 SETTER_IMPL(const QString&, TextContent,          textContent)
 SETTER_IMPL(bool,           FontUppercase,         fontUppercase)
 SETTER_IMPL(qreal,          ItemWidth,             itemWidth)
-SETTER_IMPL(qreal,          ItemHeight,            itemHeight)
 SETTER_IMPL(const QString&, HorizontalAlignment,   horizontalAlignment)
 SETTER_IMPL(const QString&, VerticalAlignment,     verticalAlignment)
 SETTER_IMPL(bool,           FitToText,             fitToText)

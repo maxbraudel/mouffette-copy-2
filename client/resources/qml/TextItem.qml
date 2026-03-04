@@ -21,7 +21,6 @@ BaseMediaItem {
     property color highlightColor: "#00000000"
     property bool textEditable: false
     property bool editing: false
-    property string preEditText: ""
     signal textCommitRequested(string mediaId, string text)
     signal textLiveUpdateRequested(string mediaId, string text)
 
@@ -48,12 +47,11 @@ BaseMediaItem {
         if (!root.textEditable)
             return
         root.selectRequested(mediaId, additive)
-        root.preEditText = root.textContent || ""
         root.editing = true
         // The Binding on textDisplayNode.text is inactive while root.editing
         // is true, so this imperative assignment is the source-of-truth for
         // the initial edit content.
-        textDisplayNode.text = root.preEditText
+        textDisplayNode.text = root.textContent || ""
         textDisplayNode.forceActiveFocus()
     }
 
@@ -214,7 +212,6 @@ BaseMediaItem {
         fontUppercase:      root.fontUppercase
         outlinePixels:     root.outlinePixels
         itemWidth:         Math.max(1, textDisplayNode.width)
-        itemHeight:        Math.max(1, textDisplayNode.height)
         horizontalAlignment: root.horizontalAlignment
         verticalAlignment:   root.verticalAlignment
         fitToText:         root.fitToTextEnabled
