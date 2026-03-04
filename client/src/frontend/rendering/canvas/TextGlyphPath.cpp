@@ -138,11 +138,15 @@ void TextGlyphPath::recompute()
     }
 
     // ── 3. Vertical alignment offset ─────────────────────────────────────────
-    qreal vertOffset = 0.0;
-    if (m_verticalAlignment == QLatin1String("center"))
-        vertOffset = (m_itemHeight - totalHeight) * 0.5;
-    else if (m_verticalAlignment == QLatin1String("bottom"))
-        vertOffset = m_itemHeight - totalHeight;
+    // vertOffset is intentionally NOT baked into the SVG paths here.
+    // QML applies the same vertical-centering offset via textDisplayNode.topPadding
+    // (which is a synchronous QML binding on height/contentHeight).  Baking it here
+    // would desync the stroke from the text fill because TextGlyphPath updates on a
+    // 0-interval timer (one event-loop tick later), while textDisplayNode.topPadding
+    // updates immediately — causing visible border drift during any resize operation.
+    // The textStrokeShape Shape applies `transform: Translate { y: textDisplayNode.topPadding }`
+    // to place the top-aligned paths at the correct vertical offset.
+    const qreal vertOffset = 0.0;
 
     // ── 4. Extract glyph paths using per-unique-glyph cache ──────────────────
     // m_glyphPathCache   : raw glyph shape at origin — invalidated on font change.

@@ -153,10 +153,20 @@ BaseMediaItem {
     // Border display path — bottom layer rendered with outlineColor.
     // Uses QtQuick.Shapes which tessellates the SVG path once into GPU geometry;
     // subsequent pan/zoom uses scene graph matrix transforms — no re-rasterization.
+    //
+    // TextGlyphPath always produces top-aligned paths (vertOffset=0 baked in).
+    // Vertical centering is applied here via the same topPadding that textDisplayNode
+    // uses, so both the fill text and the stroke shape shift in the same QML binding
+    // evaluation — eliminating the one-tick timer lag that caused border drift during
+    // any resize operation.
     Shape {
         id: textStrokeShape
         visible: !root.editing && root.outlinePixels > 0
         anchors.fill: textDisplayNode
+        // Shift the Shape's coordinate origin down by textDisplayNode.topPadding so
+        // that y=0 in path space maps to the top of the first rendered glyph line,
+        // exactly matching where textDisplayNode places its content.
+        transform: Translate { y: textDisplayNode.topPadding }
         // Disable anti-aliasing at the Shape level; Qt Quick's curve renderer
         // handles sub-pixel quality internally.
         layer.enabled: false
