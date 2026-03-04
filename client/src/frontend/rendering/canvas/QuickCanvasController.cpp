@@ -1084,6 +1084,13 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                     cursorToEdge = -cursorToEdge;
                 m_altAxisInitialOffset = cursorToEdge;
                 m_altAxisCaptured = true;
+
+                // On the first tick, beginAltResizeMode() may have changed backend
+                // state (e.g. fitToTextEnabled=false for text items). Push the full
+                // model now so QML picks up those changes immediately. The live
+                // geometry override (liveAltResizeActive=true) ensures the delegate
+                // ignores the model's stale width/height, so there is no visual jump.
+                pushMediaModelOnly();
             }
 
             // Compute desired new size along the axis from the fixed anchor (absolute formula).
@@ -1197,6 +1204,13 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
 
                 m_altOrigBaseSize = target->baseSizePx();
                 const qreal s2 = std::abs(target->scale()) > 1e-6 ? std::abs(target->scale()) : 1.0;
+
+                // On the first tick, beginAltResizeMode() may have changed backend
+                // state (e.g. fitToTextEnabled=false for text items). Push the full
+                // model now so QML picks up those changes immediately. The live
+                // geometry override (liveAltResizeActive=true) ensures the delegate
+                // ignores the model's stale width/height, so there is no visual jump.
+                pushMediaModelOnly();
 
                 // Fixed corner is opposite to the dragged corner
                 using H = ResizableMediaBase;
