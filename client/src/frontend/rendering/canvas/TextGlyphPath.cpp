@@ -1,5 +1,7 @@
 #include "frontend/rendering/canvas/TextGlyphPath.h"
 
+#include <cstdio>
+
 #include <QFont>
 #include <QFontMetricsF>
 #include <QGlyphRun>
@@ -9,10 +11,12 @@
 #include <QString>
 #include <QTextLayout>
 #include <QTextOption>
-#include <QTransform>
 
-// Forward declaration for file-local helper defined after recompute().
-static QString painterPathToSvg(const QPainterPath& path);
+// Forward declarations for file-local helpers defined after recompute().
+static QPainterPath extractLargestSubpath(const QPainterPath& path);
+static QVector<float> compileGlyphElements(const QPainterPath& path);
+static void appendGlyphSvgWithOffset(const QVector<float>& elems,
+                                     qreal tx, qreal ty, QByteArray& out);
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -44,13 +48,15 @@ TextGlyphPath::TextGlyphPath(QQuickItem* parent)
 void TextGlyphPath::clearGlyphCaches()
 {
     m_glyphPathCache.clear();
-    m_strokeGlyphCache.clear();
+    m_strokeElemCache.clear();
+    m_cachedGlyphRuns.clear();
+    m_layoutCacheKey.clear();
     m_cachedOutlinePixels = -1.0;
 }
 
 void TextGlyphPath::clearStrokeCache()
 {
-    m_strokeGlyphCache.clear();
+    m_strokeElemCache.clear();
     m_cachedOutlinePixels = -1.0;
 }
 
@@ -71,149 +77,210 @@ void TextGlyphPath::updatePolish()
 
     const QString text = m_fontUppercase ? m_textContent.toUpper() : m_textContent;
 
-    // ── 2. Split text into paragraphs, lay each out separately ───────────────
-    // QTextLayout is a SINGLE-PARAGRAPH engine. '\n' (U+000A) is NOT treated as
-    // a hard break by createLine() — it is simply ignored, causing all content
-    // to appear on one line. QML Text splits on '\n' and stacks one QTextLayout
-    // per paragraph. We must mirror that here so line-break behaviour matches.
-    QString normalizedText = text;
-    normalizedText.replace(QLatin1String("\r\n"), QLatin1String("\n"));
-    const QStringList paragraphs = normalizedText.split(QLatin1Char('\n'));
+    // ── 2. Layout positions (cached by text+font+layout inputs) ─────────────
+    // Glyph positions are independent of outlinePixels.  When the user drags
+    // the border-width slider, only m_outlinePixels changes — there is no need
+    // to run QTextLayout again.  The layout cache key includes all inputs that
+    // can affect glyph positions: text content, font, wrapping width, alignment.
+    {
+        const QString layoutKey = text
+            + QLatin1Char('\0') + m_fontFamily
+            + QLatin1Char('\0') + QString::number(m_fontPixelSize)
+            + QLatin1Char('\0') + QString::number(m_fontWeight)
+            + QLatin1Char('\0') + (m_fontItalic ? QLatin1Char('1') : QLatin1Char('0'))
+            + QLatin1Char('\0') + QString::number(m_itemWidth, 'f', 1)
+            + QLatin1Char('\0') + m_horizontalAlignment
+            + QLatin1Char('\0') + (m_fitToText ? QLatin1Char('1') : QLatin1Char('0'));
 
-    QTextOption textOption;
-    textOption.setWrapMode(m_fitToText ? QTextOption::NoWrap : QTextOption::WordWrap);
-    Qt::Alignment hAlign = Qt::AlignHCenter;
-    if (m_horizontalAlignment == QLatin1String("left"))       hAlign = Qt::AlignLeft;
-    else if (m_horizontalAlignment == QLatin1String("right")) hAlign = Qt::AlignRight;
-    textOption.setAlignment(hAlign);
-    // Qt Quick internally sets UseDesignMetrics on every QTextLayout it creates
-    // (both QQuickText and QQuickTextEdit).  Without this flag QTextLayout rounds
-    // each glyph's advance width to the nearest pixel before placing the next
-    // glyph.  With the flag, fractional sub-pixel advances are used — matching
-    // exactly what TextEdit shows.  Without it the accumulated rounding error
-    // over a word produces visually different inter-character spacing between
-    // display mode (our glyph paths) and edit mode (TextEdit).
-    textOption.setUseDesignMetrics(true);
+        if (layoutKey != m_layoutCacheKey) {
+            // QTextLayout is a SINGLE-PARAGRAPH engine. '\n' (U+000A) is NOT treated
+            // as a hard break by createLine() — it is simply ignored, causing all
+            // content to appear on one line. QML Text splits on '\n' and stacks one
+            // QTextLayout per paragraph. We must mirror that here exactly.
+            QString normalizedText = text;
+            normalizedText.replace(QLatin1String("\r\n"), QLatin1String("\n"));
+            const QStringList paragraphs = normalizedText.split(QLatin1Char('\n'));
 
-    const qreal availWidth = qMax(1.0, m_itemWidth);
-    const QFontMetricsF fm(font);
-    // QTextDocumentLayout (used by TextEdit) calls line.setLeadingIncluded(true)
-    // on every line and then advances Y by qCeil(ascent+descent+leading) per line
-    // (see getLineHeightParams() in qtextdocumentlayout.cpp).  The qCeil() snaps
-    // each line height to an integer pixel boundary, accumulating cleanly.
-    // We must mirror this exactly — NOT add leading separately after each
-    // non-first line — otherwise the per-line Y positions diverge progressively.
-    const qreal emptyLineHeight = qCeil(fm.ascent() + fm.descent() + fm.leading());
+            QTextOption textOption;
+            textOption.setWrapMode(m_fitToText ? QTextOption::NoWrap : QTextOption::WordWrap);
+            Qt::Alignment hAlign = Qt::AlignHCenter;
+            if (m_horizontalAlignment == QLatin1String("left"))       hAlign = Qt::AlignLeft;
+            else if (m_horizontalAlignment == QLatin1String("right")) hAlign = Qt::AlignRight;
+            textOption.setAlignment(hAlign);
+            // Qt Quick internally sets UseDesignMetrics on every QTextLayout it creates
+            // (both QQuickText and QQuickTextEdit).  Without this flag QTextLayout rounds
+            // each glyph's advance width to the nearest pixel before placing the next
+            // glyph.  With the flag, fractional sub-pixel advances are used — matching
+            // exactly what TextEdit shows.  Without it the accumulated rounding error
+            // over a word produces visually different inter-character spacing between
+            // display mode (our glyph paths) and edit mode (TextEdit).
+            textOption.setUseDesignMetrics(true);
 
-    struct ParaData {
-        QList<QGlyphRun> glyphRuns;
-        qreal startY;   // cumulative Y offset within the overall text block
-    };
-    QList<ParaData> allParas;
-    allParas.reserve(paragraphs.size());
+            const qreal availWidth = qMax(1.0, m_itemWidth);
+            const QFontMetricsF fm(font);
+            // QTextDocumentLayout (used by TextEdit) calls line.setLeadingIncluded(true)
+            // on every line and then advances Y by qCeil(ascent+descent+leading) per line
+            // (see getLineHeightParams() in qtextdocumentlayout.cpp).  The qCeil() snaps
+            // each line height to an integer pixel boundary, accumulating cleanly.
+            // We must mirror this exactly — NOT add leading separately after each
+            // non-first line — otherwise the per-line Y positions diverge progressively.
+            const qreal emptyLineHeight = qCeil(fm.ascent() + fm.descent() + fm.leading());
 
-    qreal totalHeight = 0.0;
-    for (const QString& para : paragraphs) {
-        ParaData pd;
-        pd.startY = totalHeight;
-        if (para.isEmpty()) {
-            // Blank line: no glyphs but must advance Y by one line height.
-            totalHeight += emptyLineHeight;
-            allParas.append(std::move(pd));
-            continue;
+            m_cachedGlyphRuns.clear();
+            qreal totalHeight = 0.0;
+            for (const QString& para : paragraphs) {
+                if (para.isEmpty()) {
+                    totalHeight += emptyLineHeight;
+                    continue;
+                }
+                QTextLayout layout(para, font);
+                layout.setTextOption(textOption);
+                layout.beginLayout();
+                qreal lineY = 0.0;
+                while (true) {
+                    QTextLine line = layout.createLine();
+                    if (!line.isValid()) break;
+                    line.setLineWidth(availWidth);
+                    line.setPosition(QPointF(0.0, lineY));
+                    // Mirror QTextDocumentLayout exactly: advance by qCeil(ascent+descent+leading)
+                    // so that each line snaps to an integer pixel boundary, matching the
+                    // integer-ceiled rawHeight used by getLineHeightParams() internally.
+                    lineY += qCeil(line.ascent() + line.descent() + line.leading());
+                }
+                layout.endLayout();
+                for (const QGlyphRun& run : layout.glyphRuns()) {
+                    const QRawFont rf    = run.rawFont();
+                    const QString keyPfx = rf.familyName()
+                        + QLatin1Char('|') + rf.styleName()
+                        + QLatin1Char('|') + QString::number(rf.pixelSize(), 'f', 3)
+                        + QLatin1Char('|');
+                    CachedGlyphRun cgr;
+                    cgr.rawFont       = rf;
+                    cgr.ids           = run.glyphIndexes();
+                    cgr.positions     = run.positions();
+                    cgr.runPrefixHash = static_cast<quint32>(qHash(keyPfx) & 0xFFFFFFFFu);
+                    cgr.startY        = totalHeight;
+                    m_cachedGlyphRuns.append(std::move(cgr));
+                }
+                totalHeight += (lineY > 0.0 ? lineY : emptyLineHeight);
+            }
+            m_layoutCacheKey = layoutKey;
         }
-        QTextLayout layout(para, font);
-        layout.setTextOption(textOption);
-        layout.beginLayout();
-        qreal lineY = 0.0;
-        while (true) {
-            QTextLine line = layout.createLine();
-            if (!line.isValid()) break;
-            line.setLineWidth(availWidth);
-            line.setPosition(QPointF(0.0, lineY));
-            // Mirror QTextDocumentLayout exactly: advance by qCeil(ascent+descent+leading)
-            // so that each line snaps to an integer pixel boundary, matching the
-            // integer-ceiled rawHeight used by getLineHeightParams() internally.
-            lineY += qCeil(line.ascent() + line.descent() + line.leading());
-        }
-        layout.endLayout();
-        pd.glyphRuns = layout.glyphRuns();
-        totalHeight += (lineY > 0.0 ? lineY : emptyLineHeight);
-        allParas.append(std::move(pd));
     }
 
     // ── 3. Extract glyph paths using per-unique-glyph cache ──────────────────
-    // Note: vertical alignment is intentionally NOT baked into these paths.
     // textStrokeShape in QML applies `transform: Translate { y: textDisplayNode.topPadding }`
     // so vertical centering is a synchronous QML binding — zero offset is correct here.
-    // m_glyphPathCache   : raw glyph shape at origin — invalidated on font change.
-    // m_strokeGlyphCache : stroked+filled shape at origin — invalidated on font
-    //                      or outlinePixels change.
+    // m_glyphPathCache  : raw glyph shape at origin — invalidated on font change.
+    // m_strokeElemCache : compact flat float array per unique glyph — invalidated
+    //                     on font or outlinePixels change.
+    // m_cachedGlyphRuns : flattened glyph positions from step 2 — reused on cache hit.
     //
-    // QPainterPathStroker and united() are called on ONE glyph (~50–100 elements)
-    // at a time, never on the fully merged text. Each unique glyph ID is computed
-    // once and reused for every repeated instance across all paragraphs.
-    // pd.startY offsets each paragraph's glyphs to the correct vertical position.
-    QPainterPath strokePath;
-
+    // Per-instance cost in the hot loop below: one quint64 hash-lookup + one call
+    // to appendGlyphSvgWithOffset() which iterates the pre-compiled float array
+    // and writes coordinates (via snprintf to a stack buffer) into a QByteArray.
+    // No QPainterPath copies, no QString allocations per glyph.
     const bool needsStroke = (m_outlinePixels > 0.0);
-    for (const ParaData& pd : allParas) {
-        for (const QGlyphRun& run : pd.glyphRuns) {
-            const QRawFont rawFont      = run.rawFont();
-            const QList<quint32>& ids   = run.glyphIndexes();
-            const QList<QPointF>& poses = run.positions();
-            const QString runKeyPrefix = rawFont.familyName()
-                    + QLatin1Char('|')
-                    + rawFont.styleName()
-                    + QLatin1Char('|')
-                    + QString::number(rawFont.pixelSize(), 'f', 3)
-                    + QLatin1Char('|');
-            const int count = qMin(ids.size(), poses.size());
-            for (int i = 0; i < count; ++i) {
-                const quint32 id = ids[i];
-                const QString cacheKey = runKeyPrefix + QString::number(id);
+    // Pre-reserve the output byte array to avoid repeated reallocations.
+    // QByteArray is cheaper than QString for pure-ASCII SVG data; it is converted
+    // to QString::fromLatin1 (a memcopy) once at the end.
+    QByteArray svgOut;
+    if (needsStroke)
+        svgOut.reserve(qMax(0, m_textContent.length()) * 300);
 
-                // ── Glyph cache lookup / populate on miss ─────────────────────
-                // cachedGlyph is needed for stroke expansion below.
-                auto fillIt = m_glyphPathCache.find(cacheKey);
-                if (fillIt == m_glyphPathCache.end())
-                    fillIt = m_glyphPathCache.insert(cacheKey, rawFont.pathForGlyph(id));
+    for (const CachedGlyphRun& cgr : m_cachedGlyphRuns) {
+        // runPrefixHash was computed once at layout-cache populate time.
+        // Combining it with the 32-bit glyph ID gives a collision-resistant
+        // quint64 key for the path caches — no per-glyph QString construction.
+        const quint32 runHash       = cgr.runPrefixHash;
+        const QList<quint32>& ids   = cgr.ids;
+        const QList<QPointF>& poses = cgr.positions;
+        const int count = qMin(ids.size(), poses.size());
+        for (int i = 0; i < count; ++i) {
+            const quint32 id       = ids[i];
+            const quint64 cacheKey = (quint64(runHash) << 32) | quint64(id);
 
-                const QPainterPath& cachedGlyph = fillIt.value();
-                if (cachedGlyph.isEmpty())
-                    continue;
+            // ── Glyph cache lookup / populate on miss ─────────────────────────
+            // cachedGlyph is needed for stroke expansion below.
+            auto fillIt = m_glyphPathCache.find(cacheKey);
+            if (fillIt == m_glyphPathCache.end())
+                fillIt = m_glyphPathCache.insert(cacheKey, cgr.rawFont.pathForGlyph(id));
 
-                // poses[i] is relative to the paragraph's layout origin.
-                // pd.startY stacks paragraphs; vertical alignment is applied
-                // by the QML transform on textStrokeShape (not baked here).
-                const QTransform t(1.0, 0.0, 0.0, 1.0,
-                                   poses[i].x(),
-                                   poses[i].y() + pd.startY);
+            const QPainterPath& cachedGlyph = fillIt.value();
+            if (cachedGlyph.isEmpty())
+                continue;
 
-                // ── Stroke glyph (cache lookup / populate on miss) ────────────
-                if (needsStroke) {
-                    auto strokeIt = m_strokeGlyphCache.find(cacheKey);
-                    if (strokeIt == m_strokeGlyphCache.end()) {
-                        QPainterPathStroker stroker;
-                        stroker.setWidth(m_outlinePixels * 2.0);
-                        stroker.setJoinStyle(Qt::MiterJoin);
-                        stroker.setCapStyle(Qt::FlatCap);
-                        QPainterPath expanded = stroker.createStroke(cachedGlyph);
-                        strokeIt = m_strokeGlyphCache.insert(cacheKey, cachedGlyph.united(expanded));
-                    }
-                    strokePath.addPath(t.map(strokeIt.value()));
+            // poses[i] is relative to the paragraph's layout origin;
+            // cgr.startY stacks paragraphs.  Vertical alignment is applied
+            // by the QML Translate on textStrokeShape (not baked here).
+            const qreal tx = poses[i].x();
+            const qreal ty = poses[i].y() + cgr.startY;
+
+            // ── Stroke glyph (cache lookup / populate on miss) ────────────────
+            if (needsStroke) {
+                auto strokeIt = m_strokeElemCache.find(cacheKey);
+                if (strokeIt == m_strokeElemCache.end()) {
+                    QPainterPathStroker stroker;
+                    stroker.setWidth(m_outlinePixels * 2.0);
+                    // RoundJoin prevents miter spikes on sharp convex vertices
+                    // (the apex of A, V, W, M, N, etc.). RoundCap is consistent;
+                    // it has no geometric effect on closed glyph contours.
+                    stroker.setJoinStyle(Qt::RoundJoin);
+                    stroker.setCapStyle(Qt::RoundCap);
+                    // Belt-and-suspenders: explicit miter limit guards against
+                    // accidental spikes if join style is ever changed.
+                    stroker.setMiterLimit(1.5);
+                    // Stroke only the outer silhouette contour.
+                    //
+                    // Font glyph paths for counter letters (A, B, D, O, P, Q,
+                    // R, e, g, …) contain one subpath per counter hole in addition
+                    // to the main outer silhouette.  Stroking ALL subpaths with
+                    // QPainterPathStroker creates a stroke ring around every
+                    // counter too — including an inward expansion that pushes
+                    // stroke geometry INTO the counter hole region.  Because the
+                    // fill TextEdit renders on top (z:1) and the stroke Shape is
+                    // below (z:0), any geometry inside the counter hole is visible
+                    // through the transparent counter and appears as the artefact
+                    // the user sees.
+                    //
+                    // extractLargestSubpath() keeps only the outer silhouette
+                    // (the subpath with the largest absolute area).  Stroking
+                    // that single contour expands purely outward and never touches
+                    // the counter hole interior.
+                    QPainterPath outerContour = extractLargestSubpath(cachedGlyph);
+                    QPainterPath expanded = stroker.createStroke(outerContour);
+                    //
+                    // Store the stroke ring directly WITHOUT calling united().
+                    //
+                    // united() was previously used to merge the expanded ring with
+                    // the original glyph fill, but it is not needed: the inner
+                    // wall of the stroke ring (which contracts into the glyph body)
+                    // is covered by the fill TextEdit on top (z:1) and is never
+                    // visible.  Skipping united() has two important benefits:
+                    //
+                    //  1. Speed — removes the O(n²) QPathClipper boolean operation
+                    //             per unique glyph.
+                    //
+                    //  2. No overlap holes — united() produced a per-glyph path
+                    //     with OddEvenFill topology.  When adjacent-glyph stroke
+                    //     blobs were concatenated via addPath() and the QML Shape
+                    //     applied OddEvenFill, overlapping border regions had
+                    //     winding count 2 (even) → rendered as transparent holes.
+                    //     Without united(), the cached shape is a clean annular
+                    //     stroke ring; with ShapePath.WindingFill in QML, every
+                    //     overlap region adds winding values (≥1 = non-zero =
+                    //     filled), so no holes ever appear.
+                    strokeIt = m_strokeElemCache.insert(cacheKey, compileGlyphElements(expanded));
                 }
+                appendGlyphSvgWithOffset(strokeIt.value(), tx, ty, svgOut);
             }
         }
     }
 
-    // ── 4. Convert stroke path to SVG string ────────────────────────────────
-    // fillPath is not exposed as a Q_PROPERTY: the TextEdit renders fill text
-    // natively; only the stroke (border/outline) shape needs a QPainterPath.
-    QString newStroke;
-    if (needsStroke && !strokePath.isEmpty())
-        newStroke = painterPathToSvg(strokePath);
-
+    // ── 4. SVG output already assembled inline ───────────────────────────────
+    // svgOut (QByteArray, pure ASCII) was built directly during the glyph loop;
+    // convert to QString via fromLatin1 — a single memcopy, no per-char work.
+    const QString newStroke = svgOut.isEmpty() ? QString() : QString::fromLatin1(svgOut);
     if (newStroke != m_strokePath) {
         m_strokePath = newStroke;
         emit pathsChanged();
@@ -221,61 +288,192 @@ void TextGlyphPath::updatePolish()
 }
 
 // ---------------------------------------------------------------------------
-// QPainterPath → SVG path string (file-local helper)
+// Extracts the subpath with the largest absolute area from a multi-contour
+// glyph path.
+//
+// Font paths for letters with counter holes (A, B, D, O, P, Q, R, e, g, …)
+// contain one closed subpath per counter in addition to the outer silhouette.
+// Only the outer silhouette should be widened when building an outline stroke —
+// widening counter subpaths inward creates geometry inside the transparent
+// counter hole that bleeds through the fill text and produces the artefact.
+//
+// Area is approximated via the shoelace formula over every element's coordinate
+// (treating Bézier handles as polygon vertices).  The approximation is coarse
+// but always sufficient to distinguish a large outer silhouette (hundreds of
+// sq-px) from small inner counters (tens of sq-px).
 // ---------------------------------------------------------------------------
-static QString painterPathToSvg(const QPainterPath& path)
+static QPainterPath extractLargestSubpath(const QPainterPath& path)
 {
-    QString svg;
-    svg.reserve(path.elementCount() * 24);
+    const int total = path.elementCount();
+    if (total == 0)
+        return path;
 
-    bool hasOpenSubpath = false;
+    // Locate the start index of each subpath (each MoveToElement opens one).
+    QVector<int> starts;
+    for (int i = 0; i < total; ++i) {
+        if (path.elementAt(i).type == QPainterPath::MoveToElement)
+            starts.append(i);
+    }
+    if (starts.size() <= 1)
+        return path; // single contour — nothing to choose between
 
-    for (int i = 0; i < path.elementCount(); ++i) {
-        const QPainterPath::Element el = path.elementAt(i);
-        switch (el.type) {
-        case QPainterPath::MoveToElement:
-            if (hasOpenSubpath) svg += QLatin1String("Z ");
-            svg += QLatin1Char('M');
-            svg += QString::number(el.x, 'f', 3);
-            svg += QLatin1Char(' ');
-            svg += QString::number(el.y, 'f', 3);
-            svg += QLatin1Char(' ');
-            hasOpenSubpath = true;
-            break;
-
-        case QPainterPath::LineToElement:
-            svg += QLatin1Char('L');
-            svg += QString::number(el.x, 'f', 3);
-            svg += QLatin1Char(' ');
-            svg += QString::number(el.y, 'f', 3);
-            svg += QLatin1Char(' ');
-            break;
-
-        case QPainterPath::CurveToElement: {
-            // Followed by exactly 2 CurveToDataElements (control point 2, end point)
-            const QPainterPath::Element& cp2 = path.elementAt(i + 1);
-            const QPainterPath::Element& ep  = path.elementAt(i + 2);
-            svg += QLatin1Char('C');
-            svg += QString::number(el.x,  'f', 3); svg += QLatin1Char(' ');
-            svg += QString::number(el.y,  'f', 3); svg += QLatin1Char(' ');
-            svg += QString::number(cp2.x, 'f', 3); svg += QLatin1Char(' ');
-            svg += QString::number(cp2.y, 'f', 3); svg += QLatin1Char(' ');
-            svg += QString::number(ep.x,  'f', 3); svg += QLatin1Char(' ');
-            svg += QString::number(ep.y,  'f', 3); svg += QLatin1Char(' ');
-            i += 2;
-            break;
+    // Compute approximate signed area for each subpath via shoelace formula.
+    int   bestIdx  = 0;
+    qreal bestArea = 0.0;
+    for (int si = 0; si < starts.size(); ++si) {
+        const int from = starts[si];
+        const int to   = (si + 1 < starts.size()) ? starts[si + 1] - 1 : total - 1;
+        qreal area = 0.0;
+        qreal px = path.elementAt(from).x;
+        qreal py = path.elementAt(from).y;
+        for (int ei = from + 1; ei <= to; ++ei) {
+            const qreal cx = path.elementAt(ei).x;
+            const qreal cy = path.elementAt(ei).y;
+            area += px * cy - cx * py;
+            px = cx;
+            py = cy;
         }
-
-        case QPainterPath::CurveToDataElement:
-            // Consumed above — should not be reached.
-            break;
+        area = qAbs(area) * 0.5;
+        if (area > bestArea) {
+            bestArea = area;
+            bestIdx  = si;
         }
     }
 
-    if (hasOpenSubpath)
-        svg += QLatin1Char('Z');
+    // Reconstruct the winning subpath as a new QPainterPath.
+    const int from = starts[bestIdx];
+    const int to   = (bestIdx + 1 < starts.size()) ? starts[bestIdx + 1] - 1 : total - 1;
+    QPainterPath result;
+    result.setFillRule(path.fillRule());
+    for (int ei = from; ei <= to; ) {
+        const QPainterPath::Element& el = path.elementAt(ei);
+        switch (el.type) {
+        case QPainterPath::MoveToElement:
+            result.moveTo(el.x, el.y);
+            ++ei;
+            break;
+        case QPainterPath::LineToElement:
+            result.lineTo(el.x, el.y);
+            ++ei;
+            break;
+        case QPainterPath::CurveToElement: {
+            const QPainterPath::Element& cp2 = path.elementAt(ei + 1);
+            const QPainterPath::Element& ep  = path.elementAt(ei + 2);
+            result.cubicTo(el.x, el.y, cp2.x, cp2.y, ep.x, ep.y);
+            ei += 3;
+            break;
+        }
+        default: // CurveToDataElement — already consumed by CurveToElement
+            ++ei;
+            break;
+        }
+    }
+    result.closeSubpath();
+    return result;
+}
 
-    return svg;
+// ---------------------------------------------------------------------------
+// Compile a QPainterPath into a compact flat float array for fast per-instance
+// SVG serialisation.
+//
+// Format (read sequentially):
+//   MoveTo  : tag 1.0f + 2 coords  (x, y)
+//   LineTo  : tag 2.0f + 2 coords  (x, y)
+//   CurveTo : tag 3.0f + 6 coords  (cp1x, cp1y, cp2x, cp2y, ex, ey)
+// Subpaths are implicitly closed: appendGlyphSvgWithOffset() writes a 'Z'
+// before each MoveTo (if a subpath is open) and after the last element.
+// ---------------------------------------------------------------------------
+static QVector<float> compileGlyphElements(const QPainterPath& path)
+{
+    const int n = path.elementCount();
+    QVector<float> elems;
+    // Conservative reserve: each element needs at most 7 floats (CurveTo).
+    elems.reserve(n * 4);
+    for (int i = 0; i < n; ) {
+        const QPainterPath::Element& el = path.elementAt(i);
+        switch (el.type) {
+        case QPainterPath::MoveToElement:
+            elems.append(1.0f);
+            elems.append(static_cast<float>(el.x));
+            elems.append(static_cast<float>(el.y));
+            ++i;
+            break;
+        case QPainterPath::LineToElement:
+            elems.append(2.0f);
+            elems.append(static_cast<float>(el.x));
+            elems.append(static_cast<float>(el.y));
+            ++i;
+            break;
+        case QPainterPath::CurveToElement: {
+            // Qt emits CurveToElement (cp1) followed by two CurveToDataElements
+            // (cp2 and endpoint).  Consume all three here.
+            const QPainterPath::Element& cp2 = path.elementAt(i + 1);
+            const QPainterPath::Element& ep  = path.elementAt(i + 2);
+            elems.append(3.0f);
+            elems.append(static_cast<float>(el.x));
+            elems.append(static_cast<float>(el.y));
+            elems.append(static_cast<float>(cp2.x));
+            elems.append(static_cast<float>(cp2.y));
+            elems.append(static_cast<float>(ep.x));
+            elems.append(static_cast<float>(ep.y));
+            i += 3;
+            break;
+        }
+        default: // CurveToDataElement — already consumed above
+            ++i;
+            break;
+        }
+    }
+    return elems;
+}
+
+// ---------------------------------------------------------------------------
+// Append one glyph instance's translated SVG path data directly to `out`.
+//
+// For each element in the pre-compiled float array, coordinates are output as
+// (stored_coord + tx) or (stored_coord + ty) without creating any intermediate
+// QPainterPath or string copy.  This is called once per character instance;
+// the element array is shared across all instances of the same glyph.
+// ---------------------------------------------------------------------------
+static void appendGlyphSvgWithOffset(const QVector<float>& elems,
+                                     qreal tx, qreal ty, QByteArray& out)
+{
+    // Write SVG path data using snprintf into a 32-byte stack buffer, then
+    // append the stack buffer to `out`.  This avoids the per-number QString
+    // heap allocation that QString::number() creates, and the per-character
+    // UTF-16 overhead of QString::operator+=.  All SVG path data is pure
+    // ASCII, so QByteArray is the correct container.
+    const float* d   = elems.constData();
+    const float* end = d + elems.size();
+    char buf[32];
+    int  n;
+    bool hasOpen = false;
+    while (d < end) {
+        const float tag = *d++;
+        if (tag == 1.0f) {                              // MoveTo
+            if (hasOpen) out.append("Z ", 2);
+            n = snprintf(buf, sizeof(buf), "M%.3f ", static_cast<double>(*d++) + tx);
+            out.append(buf, n);
+            n = snprintf(buf, sizeof(buf), "%.3f ",  static_cast<double>(*d++) + ty);
+            out.append(buf, n);
+            hasOpen = true;
+        } else if (tag == 2.0f) {                       // LineTo
+            n = snprintf(buf, sizeof(buf), "L%.3f ", static_cast<double>(*d++) + tx);
+            out.append(buf, n);
+            n = snprintf(buf, sizeof(buf), "%.3f ",  static_cast<double>(*d++) + ty);
+            out.append(buf, n);
+        } else if (tag == 3.0f) {                       // CurveTo (cp1x cp1y cp2x cp2y ex ey)
+            out.append('C');
+            for (int k = 0; k < 3; ++k) {
+                n = snprintf(buf, sizeof(buf), "%.3f ", static_cast<double>(*d++) + tx);
+                out.append(buf, n);
+                n = snprintf(buf, sizeof(buf), "%.3f ", static_cast<double>(*d++) + ty);
+                out.append(buf, n);
+            }
+        }
+    }
+    if (hasOpen)
+        out.append("Z ", 2);
 }
 
 // ---------------------------------------------------------------------------

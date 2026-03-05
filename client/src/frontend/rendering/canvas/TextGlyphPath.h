@@ -1,9 +1,13 @@
 #pragma once
 
+#include <QByteArray>
 #include <QHash>
 #include <QPainterPath>
+#include <QPointF>
 #include <QQuickItem>
+#include <QRawFont>
 #include <QString>
+#include <QVector>
 
 /**
  * TextGlyphPath
@@ -112,11 +116,42 @@ private:
     // font face, so using only the numeric ID can collide across fallback
     // fonts (same ID in two different fonts means different outlines).
     // Invalidated on font property change.
-    // m_glyphPathCache  : raw glyph shape at origin
-    // m_strokeGlyphCache: stroked+filled shape at origin
-    // m_cachedOutlinePixels: the outlinePixels value the stroke cache was built
-    //                        for; -1 means the stroke cache is empty/invalid.
-    QHash<QString, QPainterPath> m_glyphPathCache;
-    QHash<QString, QPainterPath> m_strokeGlyphCache;
+    // ── Layout position cache ────────────────────────────────────────────────
+    // Glyph positions are independent of outlinePixels.  The layout cache key
+    // covers all inputs that affect glyph placement (text, font, width, …).
+    // On a cache hit the entire QTextLayout step is skipped — the dominant win
+    // when the user drags the border-width slider frame after frame.
+    //
+    // Each CachedGlyphRun stores one QGlyphRun's worth of data plus the
+    // paragraph startY offset and a pre-computed font-identity hash, so the
+    // hot per-glyph loop does no string work at all.
+    struct CachedGlyphRun {
+        QRawFont       rawFont;
+        QList<quint32> ids;           // glyph indexes
+        QList<QPointF> positions;     // positions relative to paragraph origin
+        quint32        runPrefixHash; // qHash("family|style|size|") at populate time
+        qreal          startY;        // cumulative paragraph Y offset
+    };
+    QList<CachedGlyphRun> m_cachedGlyphRuns;
+    QString               m_layoutCacheKey;
+
+    // ── Per-unique-glyph path caches (keyed by packed quint64) ───────────────
+    // Key format: upper 32 bits = truncated font-identity hash (runPrefixHash),
+    //             lower 32 bits = glyph ID.
+    // Avoids one QString heap allocation per glyph lookup vs the old
+    // QString-keyed design.  Qt's qHash(quint64) is built-in, no custom hasher.
+    //
+    // m_glyphPathCache  : raw glyph outline at origin (QRawFont::pathForGlyph).
+    //                     Needed when populating m_strokeElemCache.
+    //                     Invalidated on any font property change.
+    // m_strokeElemCache : stroke ring encoded as compact flat QVector<float>.
+    //                     Iterated once per instance; SVG coords written with
+    //                     per-instance (tx,ty) offset via snprintf — zero heap
+    //                     allocation per glyph instance.
+    //                     Invalidated on font or outlinePixels change.
+    // m_cachedOutlinePixels: the outlinePixels value used to build the stroke
+    //                        cache (-1 = empty/invalid).
+    QHash<quint64, QPainterPath>    m_glyphPathCache;
+    QHash<quint64, QVector<float>>  m_strokeElemCache;
     qreal m_cachedOutlinePixels { -1.0 };
 };
