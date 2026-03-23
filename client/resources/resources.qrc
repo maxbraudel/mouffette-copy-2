@@ -45,4 +45,7 @@
     <file alias="MediaVideoOverlay.qml">qml/MediaVideoOverlay.qml</file>
     <file alias="MediaTextOverlay.qml">qml/MediaTextOverlay.qml</file>
     </qresource>
+    <qresource prefix="/fonts">
+    <file alias="impact.ttf">fonts/impact.ttf</file>
+    </qresource>
 </RCC>

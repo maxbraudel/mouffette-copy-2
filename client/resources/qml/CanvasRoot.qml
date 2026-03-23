@@ -754,7 +754,7 @@ Rectangle {
                         horizontalAlignment: parent.media ? (parent.media.textHorizontalAlignment || "center") : "center"
                         verticalAlignment: parent.media ? (parent.media.textVerticalAlignment || "center") : "center"
                         fitToTextEnabled: !!(parent.media && parent.media.fitToTextEnabled)
-                        fontFamily: parent.media ? (parent.media.textFontFamily || "Arial") : "Arial"
+                        fontFamily: "Impact"
                         fontPixelSize: Math.max(1, parent.media ? (parent.media.textFontPixelSize || 22) : 22)
                         fontWeight: parent.media ? (parent.media.textFontWeight || 400) : 400
                         fontItalic: !!(parent.media && parent.media.textItalic)

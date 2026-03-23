@@ -41,13 +41,18 @@
 #include <QScopedValueRollback>
 #include <QTimer>
 #include <QPalette>
+#include <QGuiApplication>
+#include <QScreen>
 #include <chrono>
 #include <memory>
 #include <utility>
 
 // TextMediaDefaults namespace implementation
 namespace TextMediaDefaults {
-    const QString FONT_FAMILY = QStringLiteral("Arial");
+    // Impact is the hardcoded display font in CanvasRoot.qml / TextItem.qml.
+    // The backend must use the same family for fit-to-text geometry measurement
+    // or the container will be sized for a wider typeface and text will never fill it.
+    const QString FONT_FAMILY = QStringLiteral("Impact");
     const int FONT_SIZE = 48;
     const QFont::Weight FONT_WEIGHT = QFont::Normal;
     const int FONT_WEIGHT_VALUE = 400;
@@ -1139,9 +1144,12 @@ TextMediaItem::TextMediaItem(
     , m_highlightEnabled(TextMediaDefaults::TEXT_HIGHLIGHT_ENABLED)
     , m_highlightColor(TextMediaDefaults::TEXT_HIGHLIGHT_COLOR)
 {
-    // Set up default font from global configuration
-    // Try system font first, with fallbacks to fonts known to have good weight support
+    // Set up default font from global configuration.
+    // Impact is first because it is the hardcoded display font in CanvasRoot.qml.
+    // Fallbacks are used only if Impact is somehow missing (should never happen
+    // because impact.ttf is bundled in the app resources).
     QStringList fontCandidates = {
+        QStringLiteral("Impact"),
         TextMediaDefaults::FONT_FAMILY,
         QStringLiteral(".SF NS Text"),          // macOS system font (alternate name)
         QStringLiteral("Helvetica Neue"),       // Good weight support on macOS
@@ -2516,31 +2524,93 @@ void TextMediaItem::applyFitToTextNow() {
         m_inlineEditor->setPlainText(m_text);
     }
 
-    QTextDocument* doc = m_inlineEditor->document();
-    if (!doc) {
+    if (!m_inlineEditor->document()) {
         return;
     }
 
-    doc->adjustSize();
-
-    QAbstractTextDocumentLayout* layout = doc->documentLayout();
-    qreal logicalContentWidth = 0.0;
-    if (layout) {
-        const QRectF docBounds = computeDocumentTextBounds(*doc, layout);
-        logicalContentWidth = std::max<qreal>(1.0, docBounds.width());
-    } else {
-        logicalContentWidth = std::max<qreal>(1.0, doc->idealWidth());
-    }
-
-    qreal logicalContentHeight = 0.0;
-    if (layout) {
-        const QRectF docBounds = computeDocumentTextBounds(*doc, layout);
-        logicalContentHeight = std::max<qreal>(1.0, docBounds.height());
-    } else {
-        logicalContentHeight = std::max<qreal>(1.0, doc->size().height());
-    }
-
+    // Measure width and height using QTextLayout with the exact same rendering
+    // flags as QML TextEdit: PreferNoHinting + UseDesignMetrics + naturalTextWidth.
+    // The InlineEditor document uses default pixel hinting (PreferNoHinting never set)
+    // and no UseDesignMetrics flag, which systematically over-estimates the text width
+    // by 2–5 px for a typical Impact word — making the fit-to-text container
+    // consistently wider than the rendered text.  Using QTextLayout directly mirrors
+    // exactly what TextGlyphPath::updatePolish() and Qt Quick's internal layout do.
+    // uniformScale is needed both for the measurement font pixel size and for
+    // the container size calculation below — declare it once here.
     const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
+
+    qreal logicalContentWidth  = 0.0;
+    qreal logicalContentHeight = 0.0;
+    {
+        // Build the measurement font to exactly match what TextItem.qml's textDisplayNode
+        // renders.  Two properties must be right:
+        //   1. Family = "Impact" (hardcoded in CanvasRoot.qml delegate, line 764).
+        //      m_font defaults to Arial, which is ~20-40% wider than Impact for typical
+        //      text — that was the direct cause of the oversized fit-to-text container.
+        //   2. Pixel size = QML's textFontPixelSize = round(rawPx * uniformScale).
+        //      Using m_font's point size (48pt) directly would produce wrong metrics
+        //      when uniformScale ≠ 1, because fit-to-text containers are sized in
+        //      scene pixels, not logical pixels.
+        qreal rawPixelSize = 0.0;
+        if (m_font.pixelSize() > 0) {
+            rawPixelSize = static_cast<qreal>(m_font.pixelSize());
+        } else if (m_font.pointSizeF() > 0.0) {
+            qreal dpi = 96.0;
+            if (QScreen* scr = QGuiApplication::primaryScreen())
+                dpi = std::max<qreal>(scr->logicalDotsPerInchY(), 1.0);
+            rawPixelSize = m_font.pointSizeF() * dpi / 72.0;
+        }
+        if (rawPixelSize <= 0.0) rawPixelSize = 12.0;
+        const int measurePixelSize = std::max(1, qRound(rawPixelSize * uniformScale));
+
+        QFont measureFont;
+        measureFont.setFamily(QStringLiteral("Impact"));
+        measureFont.setPixelSize(measurePixelSize);
+        measureFont.setItalic(m_font.italic());
+        measureFont.setWeight(m_font.weight());
+        measureFont.setCapitalization(m_font.capitalization());
+        measureFont.setKerning(true);
+        measureFont.setHintingPreference(QFont::PreferNoHinting);
+
+        const QString& effectiveText = m_isEditing ? textForRendering() : m_text;
+        QString normalizedText = effectiveText;
+        normalizedText.replace(QLatin1String("\r\n"), QLatin1String("\n"));
+        const QStringList paragraphs = normalizedText.split(QLatin1Char('\n'));
+
+        QTextOption measureOption;
+        measureOption.setWrapMode(QTextOption::NoWrap);
+        measureOption.setUseDesignMetrics(true);
+
+        const QFontMetricsF fm(measureFont);
+        // Mirror QTextDocumentLayout: line height = qCeil(ascent + descent + leading).
+        const qreal emptyLineHeight = qCeil(fm.ascent() + fm.descent() + fm.leading());
+
+        qreal measuredWidth  = 0.0;
+        qreal measuredHeight = 0.0;
+        for (const QString& para : paragraphs) {
+            if (para.isEmpty()) {
+                measuredHeight += emptyLineHeight;
+                continue;
+            }
+            QTextLayout lineLayout(para, measureFont);
+            lineLayout.setTextOption(measureOption);
+            lineLayout.beginLayout();
+            qreal lineY = 0.0;
+            while (true) {
+                QTextLine line = lineLayout.createLine();
+                if (!line.isValid()) break;
+                line.setLineWidth(1e6);  // unlimited — NoWrap, single line per paragraph
+                line.setPosition(QPointF(0.0, lineY));
+                measuredWidth = std::max(measuredWidth, line.naturalTextWidth());
+                lineY += qCeil(line.ascent() + line.descent() + line.leading());
+            }
+            lineLayout.endLayout();
+            measuredHeight += (lineY > 0.0 ? lineY : emptyLineHeight);
+        }
+        logicalContentWidth  = std::max<qreal>(1.0, measuredWidth);
+        logicalContentHeight = std::max<qreal>(1.0, measuredHeight);
+    }
+
     const qreal marginLogical = contentPaddingPx();
     const qreal marginScene = marginLogical * uniformScale;
 

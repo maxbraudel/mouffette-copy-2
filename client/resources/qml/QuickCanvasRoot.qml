@@ -1,6 +1,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtMultimedia
+import Mouffette.Canvas 1.0
 
 Rectangle {
     id: root
@@ -292,6 +293,9 @@ Rectangle {
                     font.italic: mediaRoot.textItalic
                     font.underline: mediaRoot.textUnderline
                     font.capitalization: mediaRoot.textUppercase ? Font.AllUppercase : Font.MixedCase
+                    horizontalAlignment: mediaRoot.textHorizontalAlignment === "left"
+                        ? TextEdit.AlignLeft
+                        : (mediaRoot.textHorizontalAlignment === "right" ? TextEdit.AlignRight : TextEdit.AlignHCenter)
                     wrapMode: TextEdit.Wrap
                     selectByMouse: true
                     readOnly: !(model.textEditable && model.selected)
@@ -300,6 +304,7 @@ Rectangle {
                             quickCanvasModel.requestTextUpdate(model.mediaId, text)
                         }
                     }
+                    Component.onCompleted: TextEditHelper.applyIncludeTrailingSpaces(textEditor)
                 }
 
                 MouseArea {

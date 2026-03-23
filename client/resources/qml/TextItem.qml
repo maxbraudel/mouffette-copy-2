@@ -8,7 +8,7 @@ BaseMediaItem {
     property string horizontalAlignment: "center"
     property string verticalAlignment: "center"
     property bool fitToTextEnabled: false
-    property string fontFamily: "Arial"
+    property string fontFamily: "Impact"
     property int fontPixelSize: 22
     property int fontWeight: 400
     property bool fontItalic: false
@@ -213,7 +213,9 @@ BaseMediaItem {
         fontUppercase:      root.fontUppercase
         outlinePixels:     root.outlinePixels
         itemWidth:         Math.max(1, textDisplayNode.width)
+        itemHeight:        Math.max(1, textDisplayNode.height)
         horizontalAlignment: root.horizontalAlignment
+        verticalAlignment: root.verticalAlignment
         fitToText:         root.fitToTextEnabled
     }
 
@@ -221,22 +223,31 @@ BaseMediaItem {
     // Uses QtQuick.Shapes which tessellates the SVG path once into GPU geometry;
     // subsequent pan/zoom uses scene graph matrix transforms — no re-rasterization.
     //
-    // TextGlyphPath always produces top-aligned paths (vertOffset=0 baked in).
-    // Vertical centering is applied here via the same topPadding that textDisplayNode
-    // uses, so both the fill text and the stroke shape shift in the same QML binding
-    // evaluation — eliminating the one-tick timer lag that caused border drift during
-    // any resize operation.
+    // TextGlyphPath bakes BOTH horizontal and vertical alignment offsets directly
+    // into the SVG glyph coordinates (m_vertOffset in C++), so no external QML
+    // Translate is needed for vertical correction.  This eliminates the former
+    // topPadding binding timing race that caused border drift on any alignment
+    // other than top-left.
     Shape {
         id: textStrokeShape
-        visible: !root.editing && root.outlinePixels > 0
+        // Hidden via opacity instead of visible so the Shape stays in the scene
+        // graph and Qt keeps tessellating the pre-warmed path in the background
+        // (asynchronous:true).  When the user enables the border the geometry is
+        // already resident in the GPU — no blank-frame delay.
+        visible: !root.editing
+        opacity: root.outlinePixels > 0 ? 1.0 : 0.0
+        // Smooth fade masks any residual tessellation latency on first enable.
+        Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
         anchors.fill: textDisplayNode
-        // Shift the Shape's coordinate origin down by textDisplayNode.topPadding so
-        // that y=0 in path space maps to the top of the first rendered glyph line,
-        // exactly matching where textDisplayNode places its content.
-        transform: Translate { y: textDisplayNode.topPadding }
-        // Disable anti-aliasing at the Shape level; Qt Quick's curve renderer
-        // handles sub-pixel quality internally.
+        // strokeXOffset handles the center/right-alignment container-resize fast path
+        // (no retessellation on pure width change).  Vertical offset is already baked
+        // into the SVG coordinates by TextGlyphPath, so no y translate is needed.
+        transform: Translate { x: glyphPath.strokeXOffset }
         layer.enabled: false
+        // Tessellate asynchronously so path changes never block the render thread.
+        // The previous tessellated geometry stays visible until the new one is ready,
+        // giving a smooth experience when border width or text changes.
+        asynchronous: true
         ShapePath {
             fillColor:   root.outlineColor
             strokeColor: "transparent"

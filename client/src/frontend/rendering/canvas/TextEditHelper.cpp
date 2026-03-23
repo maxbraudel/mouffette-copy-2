@@ -70,19 +70,19 @@ static void fixTextAdvancesForTrailingSpaces(QTextDocument* doc)
         const Qt::Alignment effectiveAlign =
             (rawBlockAlign != Qt::AlignLeft) ? rawBlockAlign : docAlign;
 
-        // For center and right alignment, Qt's default textAdvance already
-        // excludes trailing-space width, which is exactly what alignLine()
-        // needs to position lines correctly:
+        // Apply the patch for ALL alignments (left, center, right).
+        // Qt's alignLine() computes line position as:
         //   center: x = (lineWidth - textAdvance) / 2
         //   right:  x = lineWidth - textAdvance
-        // Overwriting textAdvance with the larger textWidth (which includes
-        // trailing spaces) would subtract more from the available space and
-        // shift the visible text inward (left for center, toward left for
-        // right), producing the visible offset between display and edit mode.
-        // Only apply the patch for left-aligned text, where the trailing-space
-        // advance is needed for correct cursor hit-testing at line ends.
-        if (effectiveAlign == Qt::AlignHCenter || effectiveAlign == Qt::AlignRight)
-            continue;
+        // Since textAdvance is assigned BEFORE trailing spaces are added to
+        // textWidth, it never contains trailing-space width.  Patching
+        // textAdvance = textWidth makes alignLine() treat the whole string
+        // (including trailing spaces) as the line's effective width, so
+        // "text here     " is centered as a complete unit rather than as
+        // "text here" — which is the correct and expected behaviour.
+        // This patch is applied to the same QTextDocument used for both
+        // display and edit mode, so both modes are affected identically
+        // and there is no visual offset between them.
 
         QTextLayout* tl = block.layout();
         if (!tl)

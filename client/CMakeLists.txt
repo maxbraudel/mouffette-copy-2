@@ -74,6 +74,7 @@ set(SOURCES
     src/frontend/rendering/canvas/OverlayPanels.cpp
     src/frontend/rendering/canvas/TextGlyphPath.cpp
     src/frontend/rendering/canvas/TextEditHelper.cpp
+    src/frontend/rendering/canvas/GlyphBorderAtlas.cpp
     
     # Rendering - Remote
     src/frontend/rendering/remote/RemoteSceneController.cpp
@@ -216,6 +217,7 @@ set(HEADERS
     src/frontend/rendering/canvas/OverlayPanels.h
     src/frontend/rendering/canvas/TextGlyphPath.h
     src/frontend/rendering/canvas/TextEditHelper.h
+    src/frontend/rendering/canvas/GlyphBorderAtlas.h
     src/frontend/rendering/canvas/RoundedRectItem.h
     src/frontend/rendering/canvas/SegmentedButtonItem.h
 
@@ -312,6 +314,23 @@ set(UI_FILES
 set(RESOURCE_FILES
     resources/resources.qrc
 )
+
+# Conditionally bundle the pre-baked glyph border atlas (.gba).
+# Generate it first by running: ./scripts/gen_impact_atlas.sh
+# Once the file exists, it will be bundled automatically on every build.
+set(ATLAS_GBA "${CMAKE_SOURCE_DIR}/resources/fonts/impact_border_atlas.gba")
+if(EXISTS "${ATLAS_GBA}")
+    message(STATUS "[GlyphBorderAtlas] Bundling atlas: ${ATLAS_GBA}")
+    set(ATLAS_QRC "${CMAKE_BINARY_DIR}/atlas.qrc")
+    file(WRITE "${ATLAS_QRC}"
+        "<RCC><qresource prefix=\"/fonts\">"
+        "<file alias=\"impact_border_atlas.gba\">${ATLAS_GBA}</file>"
+        "</qresource></RCC>"
+    )
+    list(APPEND RESOURCE_FILES "${ATLAS_QRC}")
+else()
+    message(STATUS "[GlyphBorderAtlas] Atlas not found — run ./scripts/gen_impact_atlas.sh to generate it")
+endif()
 
 # Create executable
 add_executable(MouffetteClient ${SOURCES} ${HEADERS} ${UI_FILES} ${RESOURCE_FILES})
