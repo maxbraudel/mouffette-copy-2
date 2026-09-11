@@ -134,10 +134,13 @@ void LegacySceneMirror::createTextAt(const QPointF& scenePos, qreal currentZoomS
     m_mediaCanvas->resetTransform();
 }
 
-void LegacySceneMirror::requestLocalFileDropAt(const QStringList& localPaths, const QPointF& scenePos) {
-    if (m_mediaCanvas) {
-        m_mediaCanvas->requestLocalFileDropAt(localPaths, scenePos);
-    }
+ResizableMediaBase* LegacySceneMirror::requestPreparedLocalFileDropAt(
+    const QString& localPath, const QSize& nativeSize,
+    const QImage& previewFrame, const QPointF& scenePos) {
+    return m_mediaCanvas
+        ? m_mediaCanvas->requestPreparedLocalFileDropAt(localPath, nativeSize,
+                                                        previewFrame, scenePos)
+        : nullptr;
 }
 
 QPushButton* LegacySceneMirror::getUploadButton() const {

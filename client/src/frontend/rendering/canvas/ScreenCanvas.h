@@ -8,7 +8,6 @@
 #include <QElapsedTimer>
 #include <QMap>
 #include <QHash>
-#include <QPixmap>
 #include <QVector>
 #include <QLineF>
 #include <QTimer>
@@ -20,18 +19,11 @@
 #include <QGestureEvent>
 #include <QPinchGesture>
 #include <QString>
-#ifdef Q_OS_MACOS
-template<typename T> class QFutureWatcher;
-#endif
 class QLabel;
 class QVBoxLayout;
 class QGraphicsProxyWidget; // kept for other uses, but not used by info overlay anymore
 
-class QMimeData;
 class QMediaPlayer;
-class QVideoSink;
-class QAudioOutput;
-class QVariantAnimation;
 class QResizeEvent;
 class QPushButton;
 class QToolButton;
@@ -42,7 +34,7 @@ class CanvasGlobalOverlayHost;
 
 extern int gMediaListOverlayAbsoluteMaxWidthPx; // Absolute width cap (px) for media list overlay; 0 disables cap
 
-// Extracted canvas that manages screen layout, zoom/pan, drag&drop previews, and media interaction.
+// Extracted backing scene that manages screen layout and authoritative media state.
 class ScreenCanvas : public QGraphicsView {
     Q_OBJECT
 public:
@@ -63,7 +55,6 @@ public:
     void hideContentPreservingState(); // Hide content without clearing, preserving viewport
     void showContentAfterReconnect();  // Show content after reconnection
     void recenterWithMargin(int marginPx = 33);
-    void setDragPreviewFadeDurationMs(int ms) { m_dragPreviewFadeMs = qMax(0, ms); }
     void setVideoControlsFadeDurationMs(int ms) { m_videoControlsFadeMs = qMax(0, ms); }
     void updateRemoteCursor(int globalX, int globalY);
     void hideRemoteCursor();
@@ -141,7 +132,10 @@ public:
     void setCurrentTool(CanvasTool tool);
     bool isTextToolActive() const { return m_currentTool == CanvasTool::Text; }
     void requestTextMediaCreateAt(const QPointF& scenePos, bool beginInlineEditing = true);
-    void requestLocalFileDropAt(const QStringList& localPaths, const QPointF& scenePos);
+    ResizableMediaBase* requestPreparedLocalFileDropAt(const QString& localPath,
+                                                       const QSize& nativeSize,
+                                                       const QImage& previewFrame,
+                                                       const QPointF& scenePos);
     
     // Z-order management for media items (public interface)
     void moveMediaUp(QGraphicsItem* item);
@@ -195,10 +189,6 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void showEvent(QShowEvent* event) override;
-    void dragEnterEvent(QDragEnterEvent* event) override;
-    void dragMoveEvent(QDragMoveEvent* event) override;
-    void dragLeaveEvent(QDragLeaveEvent* event) override;
-    void dropEvent(QDropEvent* event) override;
     void drawForeground(QPainter* painter, const QRectF& rect) override; // may be used for future overlay-specific painting
     void drawBackground(QPainter* painter, const QRectF& rect) override; // snap indicators drawn here (below overlays)
 
@@ -215,20 +205,6 @@ private:
     void applyApplicationSuspended(bool suspended);
 
     bool gestureEvent(QGestureEvent* event);
-    void ensureDragPreview(const QMimeData* mime);
-    void updateDragPreviewPos(const QPointF& scenePos);
-    void clearDragPreview();
-    void startVideoPreviewProbe(const QString& localFilePath);
-    void startVideoPreviewProbeFallback(const QString& localFilePath);
-    void stopVideoPreviewProbe();
-    void startDragPreviewFadeIn();
-    void stopDragPreviewFade();
-    void onFastVideoThumbnailReady(const QImage& img);
-#ifdef Q_OS_MACOS
-    void startFastMacThumbnailProbe(const QString& localFilePath);
-    void cancelFastMacThumbnailProbe();
-#endif
-
     void createScreenItems();
     QGraphicsRectItem* createScreenItem(const ScreenInfo& screen, int index, const QRectF& position);
     QMap<int, QRectF> calculateCompactPositions(double scaleFactor) const;
@@ -352,27 +328,7 @@ private:
     int m_screenLabelFontPt = 48;
     bool m_applicationSuspended = false;
 
-    QGraphicsItem* m_dragPreviewItem = nullptr;
-    QSize m_dragPreviewBaseSize;
-    QSize m_dragPreviewVideoSize; // actual video dimensions (if video)
-    bool m_dragPreviewIsVideo = false;
-    QPixmap m_dragPreviewPixmap;
-    bool m_dragCursorHidden = false;
-    QPointF m_dragPreviewLastScenePos;
-    int m_dragPreviewFadeMs = 180;
-    QVariantAnimation* m_dragPreviewFadeAnim = nullptr;
-    qreal m_dragPreviewTargetOpacity = 0.85;
     int m_videoControlsFadeMs = 140;
-    QMediaPlayer* m_dragPreviewPlayer = nullptr;
-    QVideoSink* m_dragPreviewSink = nullptr;
-    QAudioOutput* m_dragPreviewAudio = nullptr;
-    bool m_dragPreviewGotFrame = false;
-    QTimer* m_dragPreviewFallbackTimer = nullptr;
-#ifdef Q_OS_MACOS
-    QFutureWatcher<QImage>* m_dragPreviewThumbnailWatcher = nullptr;
-    QString m_dragPreviewPendingVideoPath;
-    QTimer* m_dragPreviewFallbackDelayTimer = nullptr;
-#endif
     
     // Snap-to-screen settings
     int m_snapDistancePx = 10; // pixels within which snapping occurs

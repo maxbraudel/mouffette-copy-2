@@ -2,6 +2,7 @@
 
 #include "frontend/rendering/canvas/LegacySceneMirror.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
+#include "backend/domain/media/MediaItems.h"
 
 QuickCanvasHost::QuickCanvasHost(QuickCanvasController* controller, LegacySceneMirror* legacyMirror, QObject* parent)
     : ICanvasHost(parent)
@@ -33,10 +34,16 @@ QuickCanvasHost::QuickCanvasHost(QuickCanvasController* controller, LegacySceneM
                 const qreal zoom = m_controller ? m_controller->currentViewScale() : 1.0;
                 m_legacyMirror->createTextAt(scenePos, zoom);
             });
-    connect(m_controller, &QuickCanvasController::localFilesDropRequested, this,
-            [this](const QStringList& localPaths, const QPointF& scenePos) {
-                if (m_legacyMirror) {
-                    m_legacyMirror->requestLocalFileDropAt(localPaths, scenePos);
+    connect(m_controller, &QuickCanvasController::preparedLocalFileDropRequested, this,
+            [this](const QString& localPath, const QSize& nativeSize,
+                   const QImage& previewFrame, const QPointF& scenePos) {
+                ResizableMediaBase* media = m_legacyMirror
+                    ? m_legacyMirror->requestPreparedLocalFileDropAt(
+                          localPath, nativeSize, previewFrame, scenePos)
+                    : nullptr;
+                if (m_controller) {
+                    m_controller->beginDropPreviewHandoff(
+                        media ? media->mediaId() : QString());
                 }
             });
 

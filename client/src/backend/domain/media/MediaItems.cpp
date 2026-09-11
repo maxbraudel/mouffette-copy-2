@@ -1132,6 +1132,13 @@ void ResizableMediaBase::updateOverlayLayout() {
 ResizablePixmapItem::ResizablePixmapItem(const QPixmap& pm, int visualSizePx, int selectionSizePx, const QString& filename)
     : ResizableMediaBase(pm.size(), visualSizePx, selectionSizePx, filename), m_pix(pm) {}
 
+ResizablePixmapItem::ResizablePixmapItem(const QPixmap& previewPixmap, const QSize& nativeSize,
+                                         int visualSizePx, int selectionSizePx,
+                                         const QString& filename)
+    : ResizableMediaBase(nativeSize.isEmpty() ? previewPixmap.size() : nativeSize,
+                         visualSizePx, selectionSizePx, filename)
+    , m_pix(previewPixmap) {}
+
 void ResizablePixmapItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) {
     Q_UNUSED(option); Q_UNUSED(widget);
     if (isContentVisible() || m_contentDisplayOpacity > 0.0) {
@@ -1182,9 +1189,15 @@ qint64 frameTimestampMs(const QVideoFrame& frame) {
 }
 }
 
-ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx, int selectionSizePx, const QString& filename, int controlsFadeMs)
-    : ResizableMediaBase(QSize(640,360), visualSizePx, selectionSizePx, filename)
+ResizableVideoItem::ResizableVideoItem(const QString& filePath, const QSize& nativeDisplaySize,
+                                       int visualSizePx, int selectionSizePx,
+                                       const QString& filename, int controlsFadeMs)
+    : ResizableMediaBase(nativeDisplaySize, visualSizePx, selectionSizePx, filename)
 {
+    Q_ASSERT(!nativeDisplaySize.isEmpty());
+    m_adoptedSize = true;
+    m_displaySizeLocked = true;
+    m_lastFrameDisplaySize = QSizeF(nativeDisplaySize);
     m_controlsFadeMs = std::max(0, controlsFadeMs);
     m_player = new QMediaPlayer();
     // QMediaPlayer is the QObject lifetime root for the complete playback
@@ -1264,6 +1277,11 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
             }
         }
     });
+    m_scrubWatchdog = new QTimer(m_player);
+    m_scrubWatchdog->setSingleShot(true);
+    m_scrubWatchdog->setInterval(1500);
+    QObject::connect(m_scrubWatchdog, &QTimer::timeout, m_player,
+                     [this]() { handleScrubWatchdog(); });
     QObject::connect(m_player, &QMediaPlayer::mediaStatusChanged, m_player, [this](QMediaPlayer::MediaStatus s){
         if (s == QMediaPlayer::LoadedMedia || s == QMediaPlayer::BufferedMedia) {
             m_lastPlaybackError = QMediaPlayer::NoError;
@@ -1412,7 +1430,9 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
             }
         }
 
-        m_positionMs = p;
+        if (!m_scrubActive) {
+            m_positionMs = p;
+        }
     });
     
     // Connect to error signals to detect missing/corrupted source files
@@ -1421,6 +1441,10 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
         m_lastPlaybackErrorString = errorString;
         if (error != QMediaPlayer::NoError) {
             m_expectedPlayingState = false;
+            if (m_scrubActive) {
+                m_scrubResumePlayback = false;
+                finishScrubSession();
+            }
             // An error is terminal for both the live intent and any suspended
             // resume transaction. Otherwise resume could replay/re-prime a
             // source after this handler had already declared it stopped.
@@ -1496,14 +1520,23 @@ void ResizableVideoItem::handleVideoFrame(const QVideoFrame& frame) {
         m_lastFrameTimestampMs = frameTimestamp >= 0
             ? frameTimestamp
             : (m_player ? m_player->position() : -1);
+        acknowledgeScrubFrame(frame, m_lastFrameTimestampMs);
 
-        const bool mustProcessFrame = !m_firstFramePrimed || m_seeking
-            || (m_player && m_player->playbackState() != QMediaPlayer::PlayingState);
         // Qt Quick's VideoOutput already renders the native QVideoFrame on the
         // scene graph. Converting every 1080p frame back to a QImage here would
         // force a costly CPU/GPU readback and duplicate the rendering work.
-        // The fallback sink still keeps the legacy QGraphicsView path alive.
+        // In particular, scrubbing is acknowledged from the native frame PTS;
+        // it must not turn each paused seek into a GPU-to-CPU readback. The
+        // fallback sink still keeps the legacy QGraphicsView path alive.
         const bool renderedByQtQuick = m_observedSink && m_sink && m_observedSink != m_sink;
+        if (renderedByQtQuick && m_firstFramePrimed) {
+            ++m_framesSkipped;
+            logFrameStats();
+            return;
+        }
+
+        const bool mustProcessFrame = !m_firstFramePrimed || m_seeking
+            || (m_player && m_player->playbackState() != QMediaPlayer::PlayingState);
         if (!mustProcessFrame && (renderedByQtQuick || !isVisibleInAnyView())) {
             ++m_framesSkipped;
             logFrameStats();
@@ -1593,6 +1626,9 @@ ResizableVideoItem::~ResizableVideoItem() {
 
 void ResizableVideoItem::togglePlayPause() {
     if (!m_player) return;
+    if (m_scrubActive) {
+        finishScrubSession();
+    }
     if (m_firstFramePrimeRequested && !m_expectedPlayingState) {
         // Promote the decoder's technical priming play to an intentional play
         // instead of interpreting its raw PlayingState as a user pause.
@@ -1675,6 +1711,19 @@ void ResizableVideoItem::setMuted(bool muted, bool skipFade) {
     stopAudioFadeAnimation(true);
 
     const bool targetMuted = muted;
+
+    // A backend may need a silent decoder pulse to advance from its seek
+    // keyframe to the exact target frame. Keep the hardware output muted for
+    // the complete scrub even if the logical mute control changes meanwhile.
+    if (m_scrubActive && m_scrubHardwareMuteApplied) {
+        m_effectiveMuted = targetMuted;
+        m_savedMuted = targetMuted;
+        m_audio->setMuted(true);
+        updateControlsVisualState();
+        updateControlsLayout();
+        update();
+        return;
+    }
 
     // First-frame priming deliberately runs the decoder while keeping the
     // physical audio output muted. A settings update or a click on the mute
@@ -1767,6 +1816,10 @@ void ResizableVideoItem::setMuted(bool muted, bool skipFade) {
 
 void ResizableVideoItem::stopToBeginning() {
     if (!m_player) return;
+    if (m_scrubActive) {
+        m_scrubResumePlayback = false;
+        finishScrubSession();
+    }
     m_firstFramePrimeRequested = false;
     if (m_primingNeedsUnmute && m_audio) {
         m_audio->setMuted(m_effectiveMuted);
@@ -1784,51 +1837,223 @@ void ResizableVideoItem::stopToBeginning() {
 }
 
 void ResizableVideoItem::seekToRatio(qreal r) {
-    if (!m_player || m_durationMs <= 0) return;
+    beginScrub(r);
+    endScrub(r);
+}
+
+void ResizableVideoItem::beginScrub(qreal r) {
+    if (!m_player || m_durationMs <= 0) {
+        return;
+    }
+
+    if (m_scrubActive) {
+        updateScrub(r);
+        return;
+    }
+
     m_firstFramePrimeRequested = false;
+    ++m_primingGeneration;
     if (m_primingNeedsUnmute && m_audio) {
         m_audio->setMuted(m_effectiveMuted);
         m_primingNeedsUnmute = false;
     }
     m_seamlessLoopJumpPending = false;
     m_lastSeamlessLoopTriggerMs = 0;
-    r = std::clamp<qreal>(r, 0.0, 1.0);
     m_holdLastFrameAtEnd = false;
-    m_seeking = true;
-    if (m_progressTimer) m_progressTimer->stop();
-    m_smoothProgressRatio = r;
-    m_positionMs = static_cast<qint64>(r * m_durationMs);
-    updateProgressBar(); updateControlsLayout(); update();
-    const qint64 pos = m_positionMs; m_player->setPosition(pos);
+    m_scrubActive = true;
+    m_scrubResumePlayback = m_expectedPlayingState;
+    m_scrubSeekInFlight = false;
+    m_scrubEndRequested = false;
+    m_scrubDecoderAdvanceActive = false;
+    m_scrubHardwareMuteApplied = false;
+    m_scrubInFlightTargetMs = -1;
+    m_scrubLatestTargetMs = -1;
+    m_draggingProgress = true;
+
+    // Start from a physically paused player while preserving
+    // m_expectedPlayingState as the user's intent. A backend-specific silent
+    // decoder advance is enabled later only if the paused seek exposes a
+    // preceding keyframe instead of the requested frame.
+    m_player->pause();
+    if (m_progressTimer) {
+        m_progressTimer->stop();
+    }
     cancelSettingsRepeatSession();
-    // After the async setPosition() completes, clear the seeking flag and
-    // restart the progress timer — but only when NOT still dragging. If the
-    // user is mid-scrub, setDraggingProgress(false) will restart the timer
-    // once the drag actually ends, preventing a start/stop oscillation.
-    QTimer::singleShot(30, m_player, [this]() {
-        m_seeking = false;
-        if (!m_draggingProgress && m_progressTimer && m_player
-                && m_player->playbackState() == QMediaPlayer::PlayingState) {
-            m_progressTimer->start();
-        }
-    });
+    queueScrubTarget(r);
 }
 
-void ResizableVideoItem::setDraggingProgress(bool dragging) {
-    if (m_draggingProgress == dragging) return;
-    m_draggingProgress = dragging;
-    if (!m_draggingProgress && !m_seeking) {
-        // Drag ended and no pending seek recovery: restart the progress timer
-        // immediately so the display updates without waiting for the next tick.
-        if (m_progressTimer && m_player
-                && m_player->playbackState() == QMediaPlayer::PlayingState) {
+void ResizableVideoItem::updateScrub(qreal r) {
+    if (!m_scrubActive) {
+        beginScrub(r);
+        return;
+    }
+    queueScrubTarget(r);
+}
+
+void ResizableVideoItem::endScrub(qreal r) {
+    if (!m_scrubActive) {
+        beginScrub(r);
+        if (!m_scrubActive) {
+            return;
+        }
+    }
+    m_scrubEndRequested = true;
+    queueScrubTarget(r);
+    if (!m_scrubSeekInFlight && m_scrubLatestTargetMs < 0) {
+        finishScrubSession();
+    }
+}
+
+void ResizableVideoItem::queueScrubTarget(qreal ratio) {
+    if (!m_player || !m_scrubActive || m_durationMs <= 0) {
+        return;
+    }
+
+    ratio = std::clamp<qreal>(ratio, 0.0, 1.0);
+    const qint64 targetMs = std::clamp<qint64>(
+        static_cast<qint64>(std::llround(ratio * static_cast<qreal>(m_durationMs))),
+        0, m_durationMs);
+    m_scrubLatestTargetMs = targetMs;
+    m_positionMs = targetMs;
+    m_smoothProgressRatio = ratio;
+    updateControlsLayout();
+    update();
+
+    if (!m_scrubSeekInFlight) {
+        issueLatestScrubSeek();
+    }
+}
+
+void ResizableVideoItem::issueLatestScrubSeek() {
+    if (!m_player || !m_scrubActive || m_scrubSeekInFlight
+        || m_scrubLatestTargetMs < 0) {
+        return;
+    }
+
+    m_scrubInFlightTargetMs = m_scrubLatestTargetMs;
+    m_scrubSeekInFlight = true;
+    m_seeking = true;
+    ++m_scrubSeekRequestsIssued;
+    m_scrubDecoderAdvanceActive = false;
+    m_player->pause();
+    m_player->setPosition(m_scrubInFlightTargetMs);
+    if (m_scrubWatchdog) {
+        m_scrubWatchdog->start();
+    }
+}
+
+void ResizableVideoItem::acknowledgeScrubFrame(const QVideoFrame& frame,
+                                                qint64 timestampMs) {
+    if (!m_scrubActive || !m_scrubSeekInFlight || timestampMs < 0) {
+        return;
+    }
+
+    const qint64 targetMs = m_scrubInFlightTargetMs;
+    const qint64 endTimeUs = frame.endTime();
+    const qint64 endMs = endTimeUs >= 0 ? endTimeUs / 1000 : -1;
+    const qint64 durationMs = endMs > timestampMs ? endMs - timestampMs : 0;
+    const qint64 toleranceMs = std::clamp<qint64>(durationMs > 0 ? durationMs : 34,
+                                                  2, 100);
+    const bool targetInsideFrame = timestampMs <= targetMs
+        && endMs > timestampMs && targetMs < endMs;
+    const bool targetAtFrameBoundary = std::abs(timestampMs - targetMs) <= toleranceMs;
+    if (!targetInsideFrame && !targetAtFrameBoundary) {
+        // AVFoundation/WMF can initially expose the preceding keyframe for a
+        // paused setPosition(). If so, advance only the decoder, with physical
+        // audio forcibly muted, until the target's own frame arrives.
+        if (timestampMs < targetMs - toleranceMs && !m_scrubDecoderAdvanceActive
+            && m_player) {
+            if (m_audio) {
+                m_audio->setMuted(true);
+                m_scrubHardwareMuteApplied = true;
+            }
+            m_scrubDecoderAdvanceActive = true;
+            m_player->play();
+        }
+        return;
+    }
+
+    if (m_scrubWatchdog) {
+        m_scrubWatchdog->stop();
+    }
+    m_scrubSeekInFlight = false;
+    m_seeking = false;
+    if (m_player) {
+        m_player->pause();
+    }
+    m_scrubDecoderAdvanceActive = false;
+
+    if (m_scrubLatestTargetMs != targetMs) {
+        issueLatestScrubSeek();
+        return;
+    }
+
+    if (m_scrubEndRequested) {
+        finishScrubSession();
+    }
+}
+
+void ResizableVideoItem::handleScrubWatchdog() {
+    if (!m_scrubActive || !m_scrubSeekInFlight) {
+        return;
+    }
+
+    const qint64 timedOutTargetMs = m_scrubInFlightTargetMs;
+    m_scrubSeekInFlight = false;
+    m_seeking = false;
+
+    // A backend that missed the acknowledgement must never make us replay the
+    // stale request. Jump straight to the newest coalesced target, or release
+    // the completed gesture while keeping its last requested position.
+    if (m_scrubLatestTargetMs != timedOutTargetMs) {
+        issueLatestScrubSeek();
+    } else if (m_scrubEndRequested) {
+        finishScrubSession();
+    }
+}
+
+void ResizableVideoItem::finishScrubSession() {
+    if (!m_scrubActive) {
+        return;
+    }
+
+    if (m_scrubWatchdog) {
+        m_scrubWatchdog->stop();
+    }
+    const bool resumePlayback = m_scrubResumePlayback && !m_appSuspended;
+    if (m_player && !resumePlayback) {
+        m_player->pause();
+    }
+    m_scrubActive = false;
+    m_scrubResumePlayback = false;
+    m_scrubSeekInFlight = false;
+    m_scrubEndRequested = false;
+    m_scrubDecoderAdvanceActive = false;
+    m_scrubInFlightTargetMs = -1;
+    m_scrubLatestTargetMs = -1;
+    m_draggingProgress = false;
+    m_seeking = false;
+
+    if (resumePlayback && m_player) {
+        m_player->play();
+        if (m_progressTimer) {
             m_progressTimer->start();
         }
     }
+    if (m_scrubHardwareMuteApplied && m_audio) {
+        m_audio->setMuted(m_effectiveMuted);
+    }
+    m_scrubHardwareMuteApplied = false;
+    updateControlsLayout();
+    update();
 }
 
 void ResizableVideoItem::pauseAndSetPosition(qint64 posMs) {
     if (!m_player) return;
+    if (m_scrubActive) {
+        m_scrubResumePlayback = false;
+        finishScrubSession();
+    }
     if (posMs < 0) posMs = 0;
     if (m_durationMs > 0 && posMs > m_durationMs) posMs = m_durationMs;
     m_seamlessLoopJumpPending = false;
@@ -1850,16 +2075,17 @@ void ResizableVideoItem::pauseAndSetPosition(qint64 posMs) {
     updateControlsLayout(); update();
 }
 
-void ResizableVideoItem::setExternalPosterImage(const QImage& img) {
+void ResizableVideoItem::setExternalPosterImage(const QImage& img, const QSize& nativeDisplaySize) {
     if (img.isNull()) {
         return;
     }
     m_posterImage = img;
     m_posterImageSet = true;
-    m_lastFrameDisplaySize = QSizeF(img.size());
+    const QSize displaySize = nativeDisplaySize.isEmpty() ? baseSizePx() : nativeDisplaySize;
+    m_lastFrameDisplaySize = QSizeF(displaySize);
     m_displaySizeLocked = true; // Lock display size to prevent frame dimensions from overriding
     if (!m_adoptedSize) {
-        adoptBaseSize(img.size());
+        adoptBaseSize(displaySize);
     }
     update();
 }
@@ -2158,15 +2384,16 @@ void ResizableVideoItem::ensureControlsPanel() {
             }
         };
         callbacks.onProgressBegin = [this](qreal ratio) {
-            m_draggingProgress = true;
             m_holdLastFrameAtEnd = false;
-            seekToRatio(ratio);
+            beginScrub(ratio);
             if (auto slider = m_controlsPanel->getSlider("progress")) slider->setState(OverlayElement::Active);
         };
-        callbacks.onProgressUpdate = [this](qreal ratio) { m_holdLastFrameAtEnd = false; seekToRatio(ratio); };
+        callbacks.onProgressUpdate = [this](qreal ratio) {
+            m_holdLastFrameAtEnd = false;
+            updateScrub(ratio);
+        };
         callbacks.onProgressEnd = [this](qreal ratio) {
-            seekToRatio(ratio);
-            m_draggingProgress = false;
+            endScrub(ratio);
             if (auto slider = m_controlsPanel->getSlider("progress")) slider->setState(OverlayElement::Normal);
         };
         
@@ -2819,6 +3046,10 @@ void ResizableVideoItem::teardownPlayback() {
         return;
     }
     m_playbackTornDown = true;
+    if (m_scrubActive) {
+        m_scrubResumePlayback = false;
+        finishScrubSession();
+    }
     cancelSettingsRepeatSession();
     stopAudioFadeAnimation(true);
     ++m_primingGeneration;

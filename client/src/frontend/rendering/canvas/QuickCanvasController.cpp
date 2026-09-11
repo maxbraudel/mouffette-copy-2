@@ -13,6 +13,14 @@
 #include "frontend/rendering/canvas/SnapEngine.h"
 #include "frontend/rendering/canvas/SnapStore.h"
 #include "frontend/rendering/canvas/SnapGuidePublisher.h"
+#include "frontend/rendering/remote/RemoteVideoFrameItem.h"
+#include "frontend/ui/notifications/ToastNotificationSystem.h"
+
+#ifdef Q_OS_MACOS
+#include "backend/platform/macos/MacVideoThumbnailer.h"
+#elif defined(Q_OS_WIN)
+#include "backend/platform/windows/WindowsVideoThumbnailer.h"
+#endif
 
 #include <algorithm>
 #include <limits>
@@ -24,6 +32,7 @@
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
 #include <QMimeData>
+#include <QDragLeaveEvent>
 #include <QMouseEvent>
 #include <QQuickItem>
 #include <QQuickWidget>
@@ -38,6 +47,15 @@
 #include <QtMath>
 #include <QUrl>
 #include <QFontInfo>
+#include <QFileInfo>
+#include <QImageIOHandler>
+#include <QImageReader>
+#include <QMediaMetaData>
+#include <QAudioOutput>
+#include <QVideoFrame>
+#include <QVideoSink>
+#include <QFutureWatcher>
+#include <QtConcurrent/QtConcurrentRun>
 
 #include "backend/domain/media/MediaItems.h"
 #include "backend/domain/media/TextMediaItem.h"
@@ -48,14 +66,68 @@ namespace {
 constexpr int kRemoteCursorDiameterPx = 30;
 constexpr qreal kRemoteCursorBorderWidthPx = 2.0;
 
-bool containsAcceptedLocalMedia(const QMimeData* mimeData) {
-    if (!mimeData || !mimeData->hasUrls()) return false;
-    for (const QUrl& url : mimeData->urls()) {
-        if (url.isLocalFile() && MediaFilePolicy::isAcceptedLocalFile(url.toLocalFile())) {
-            return true;
-        }
+QSize orientedImageSize(QImageReader& reader) {
+    QSize size = reader.size();
+    if (size.isEmpty()) {
+        return {};
     }
-    return false;
+
+    switch (reader.transformation()) {
+    case QImageIOHandler::TransformationRotate90:
+    case QImageIOHandler::TransformationRotate270:
+    case QImageIOHandler::TransformationMirrorAndRotate90:
+    case QImageIOHandler::TransformationFlipAndRotate90:
+        size.transpose();
+        break;
+    default:
+        break;
+    }
+    return size;
+}
+
+QImage limitPreviewImage(QImage image) {
+    constexpr int kMaximumPreviewEdge = 2048;
+    if (image.isNull()) {
+        return {};
+    }
+    if (image.width() <= kMaximumPreviewEdge && image.height() <= kMaximumPreviewEdge) {
+        return image;
+    }
+    return image.scaled(QSize(kMaximumPreviewEdge, kMaximumPreviewEdge),
+                        Qt::KeepAspectRatio, Qt::SmoothTransformation);
+}
+
+QImage decodeImagePreview(const QString& localPath) {
+    QImageReader reader(localPath);
+    reader.setAutoTransform(true);
+    QSize requested = reader.size();
+    if (!requested.isEmpty() && (requested.width() > 2048 || requested.height() > 2048)) {
+        requested.scale(QSize(2048, 2048), Qt::KeepAspectRatio);
+        reader.setScaledSize(requested);
+    }
+    return limitPreviewImage(reader.read());
+}
+
+QSize nativeVideoDimensions(const QString& localPath) {
+#ifdef Q_OS_MACOS
+    return MacVideoThumbnailer::videoDimensions(localPath);
+#elif defined(Q_OS_WIN)
+    return WindowsVideoThumbnailer::videoDimensions(localPath);
+#else
+    Q_UNUSED(localPath);
+    return {};
+#endif
+}
+
+QImage nativeVideoFirstFrame(const QString& localPath) {
+#ifdef Q_OS_MACOS
+    return limitPreviewImage(MacVideoThumbnailer::firstFrame(localPath));
+#elif defined(Q_OS_WIN)
+    return limitPreviewImage(WindowsVideoThumbnailer::firstFrame(localPath));
+#else
+    Q_UNUSED(localPath);
+    return {};
+#endif
 }
 
 QString uploadStateToString(ResizableMediaBase::UploadState state) {
@@ -158,6 +230,7 @@ QuickCanvasController::QuickCanvasController(QObject* parent)
     m_snapStore = new SnapStore();
     m_dragSnapSession = new QuickDragSnapSession();
     m_mediaListModel = new MediaListModel(this);
+    m_localDragFrameSource = new RemoteVideoFrameSource(this);
 
     m_mediaSyncTimer = new QTimer(this);
     m_mediaSyncTimer->setSingleShot(true);
@@ -232,6 +305,7 @@ QuickCanvasController::QuickCanvasController(QObject* parent)
 }
 
 QuickCanvasController::~QuickCanvasController() {
+    clearLocalDragPreview(false);
     // The controller can be torn down while a pointer is still held. Release
     // the mirrored backend lifecycle before destroying its session state.
     if (m_pointerSession && m_pointerSession->resizeActive()) {
@@ -285,6 +359,9 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
 
     m_viewAdapter = new QuickCanvasViewAdapter(m_quickWidget, this);
     m_viewAdapter->initMediaListModel(m_mediaListModel);
+    m_quickWidget->rootObject()->setProperty(
+        "dropPreviewFrameSource",
+        QVariant::fromValue<QObject*>(m_localDragFrameSource));
 
     setScreenCount(0);
     setShellActive(false);
@@ -299,6 +376,9 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
     QObject::connect(
         m_quickWidget->rootObject(), SIGNAL(clearSelectionRequested()),
         this, SLOT(handleClearSelectionRequested()));
+    QObject::connect(
+        m_quickWidget->rootObject(), SIGNAL(dropPreviewContentReady(QString)),
+        this, SLOT(handleDropPreviewContentReady(QString)));
     QObject::connect(
         m_quickWidget->rootObject(), SIGNAL(mediaMoveStarted(QString,double,double,bool)),
         this, SLOT(handleMediaMoveStarted(QString,double,double,bool)));
@@ -405,54 +485,74 @@ bool QuickCanvasController::eventFilter(QObject* watched, QEvent* event) {
         case QEvent::DragEnter: {
             auto* dragEnter = static_cast<QDragEnterEvent*>(event);
             if (remoteSceneLocksEdits()) {
+                clearLocalDragPreview(false);
                 if (dragEnter) dragEnter->ignore();
                 return true;
             }
-            if (dragEnter && containsAcceptedLocalMedia(dragEnter->mimeData())) {
+            QString localPath;
+            bool isVideo = false;
+            if (dragEnter
+                && acceptedSingleLocalMedia(dragEnter->mimeData(), &localPath, &isVideo)) {
+                startLocalDragPreview(localPath, isVideo,
+                    mapViewPointToScene(dragEnter->position()));
                 dragEnter->acceptProposedAction();
                 return true;
             }
-            break;
+            clearLocalDragPreview(false);
+            if (dragEnter) dragEnter->ignore();
+            return true;
         }
+        case QEvent::DragLeave: {
+            clearLocalDragPreview(true);
+            if (auto* dragLeave = static_cast<QDragLeaveEvent*>(event)) {
+                dragLeave->accept();
+            }
+            return true;
+        }
+        case QEvent::Hide:
+        case QEvent::Close:
+        case QEvent::WindowDeactivate:
+            if (m_localDragAccepted || m_localDragCursorHidden) {
+                clearLocalDragPreview(false);
+            }
+            break;
         case QEvent::DragMove: {
             auto* dragMove = static_cast<QDragMoveEvent*>(event);
-            if (remoteSceneLocksEdits()) {
+            if (remoteSceneLocksEdits() || !m_localDragAccepted) {
+                clearLocalDragPreview(false);
                 if (dragMove) dragMove->ignore();
                 return true;
             }
-            // DragEnter already performed content validation; avoid reopening
-            // large media files for every pointer move.
-            if (dragMove && dragMove->mimeData() && dragMove->mimeData()->hasUrls()) {
+            // Validation and all file work happen once at DragEnter. Movement is
+            // deliberately restricted to two coordinates on the QML model.
+            if (dragMove) {
+                updateLocalDragPreviewCenter(mapViewPointToScene(dragMove->position()));
                 dragMove->acceptProposedAction();
                 return true;
             }
-            break;
+            return true;
         }
         case QEvent::Drop: {
             auto* dropEvent = static_cast<QDropEvent*>(event);
-            if (remoteSceneLocksEdits()) {
+            if (remoteSceneLocksEdits() || !m_localDragAccepted) {
+                clearLocalDragPreview(false);
                 if (dropEvent) dropEvent->ignore();
                 return true;
             }
-            if (dropEvent && dropEvent->mimeData() && dropEvent->mimeData()->hasUrls()) {
-                QStringList localPaths;
-                const QList<QUrl> urls = dropEvent->mimeData()->urls();
-                for (const QUrl& url : urls) {
-                    if (url.isLocalFile()) {
-                        const QString localPath = url.toLocalFile();
-                        if (!localPath.isEmpty()) {
-                            localPaths.append(localPath);
-                        }
-                    }
+            if (dropEvent) {
+                m_localDropPending = true;
+                m_localDropSceneCenter = mapViewPointToScene(dropEvent->position());
+                m_localDragSceneCenter = m_localDropSceneCenter;
+                publishLocalDragPreview(!m_localDragNativeSize.isEmpty());
+                if (m_localDragCursorHidden && m_quickWidget) {
+                    m_quickWidget->unsetCursor();
+                    m_localDragCursorHidden = false;
                 }
-
-                if (!localPaths.isEmpty()) {
-                    emit localFilesDropRequested(localPaths, mapViewPointToScene(dropEvent->position()));
-                    dropEvent->acceptProposedAction();
-                    return true;
-                }
+                maybeCompleteLocalDragPreparation(m_localDragGeneration);
+                dropEvent->acceptProposedAction();
+                return true;
             }
-            break;
+            return true;
         }
         default:
             break;
@@ -460,6 +560,418 @@ bool QuickCanvasController::eventFilter(QObject* watched, QEvent* event) {
     }
 
     return QObject::eventFilter(watched, event);
+}
+
+bool QuickCanvasController::acceptedSingleLocalMedia(const QMimeData* mimeData,
+                                                     QString* localPath,
+                                                     bool* isVideo) const {
+    if (!mimeData || !mimeData->hasUrls()) {
+        return false;
+    }
+    const QList<QUrl> urls = mimeData->urls();
+    if (urls.size() != 1 || !urls.first().isLocalFile()) {
+        return false;
+    }
+
+    const QString path = urls.first().toLocalFile();
+    const MediaFilePolicy::Kind kind = MediaFilePolicy::classifyLocalFile(path);
+    if (kind != MediaFilePolicy::Kind::Image
+        && kind != MediaFilePolicy::Kind::Mp4Video) {
+        return false;
+    }
+
+    if (localPath) {
+        *localPath = QFileInfo(path).canonicalFilePath();
+        if (localPath->isEmpty()) {
+            *localPath = QFileInfo(path).absoluteFilePath();
+        }
+    }
+    if (isVideo) {
+        *isVideo = kind == MediaFilePolicy::Kind::Mp4Video;
+    }
+    return true;
+}
+
+QString QuickCanvasController::localPreviewCacheKey(const QString& localPath) const {
+    const QFileInfo info(localPath);
+    return QStringLiteral("%1|%2|%3")
+        .arg(info.canonicalFilePath().isEmpty() ? info.absoluteFilePath() : info.canonicalFilePath())
+        .arg(info.size())
+        .arg(info.lastModified().toMSecsSinceEpoch());
+}
+
+bool QuickCanvasController::restoreLocalPreviewFromCache(const QString& cacheKey) {
+    auto it = m_localPreviewCache.constFind(cacheKey);
+    if (it == m_localPreviewCache.constEnd()
+        || it->nativeSize.isEmpty() || it->frame.isNull()
+        || it->video != m_localDragIsVideo) {
+        return false;
+    }
+
+    m_localDragNativeSize = it->nativeSize;
+    m_localDragFrame = it->frame;
+    m_localDragFrameSource->setFrame(m_localDragFrame);
+    m_localPreviewCacheLru.removeAll(cacheKey);
+    m_localPreviewCacheLru.append(cacheKey);
+    return true;
+}
+
+void QuickCanvasController::storeLocalPreviewInCache() {
+    if (m_localDragCacheKey.isEmpty() || m_localDragNativeSize.isEmpty()
+        || m_localDragFrame.isNull()) {
+        return;
+    }
+
+    constexpr qsizetype kMaximumCacheBytes = 64 * 1024 * 1024;
+    constexpr int kMaximumCacheEntries = 16;
+
+    if (auto old = m_localPreviewCache.find(m_localDragCacheKey);
+        old != m_localPreviewCache.end()) {
+        m_localPreviewCacheBytes -= old->byteCost;
+        m_localPreviewCache.erase(old);
+    }
+
+    LocalPreviewCacheEntry entry;
+    entry.nativeSize = m_localDragNativeSize;
+    entry.frame = m_localDragFrame;
+    entry.video = m_localDragIsVideo;
+    entry.byteCost = std::max<qsizetype>(1, entry.frame.sizeInBytes());
+    m_localPreviewCache.insert(m_localDragCacheKey, entry);
+    m_localPreviewCacheBytes += entry.byteCost;
+    m_localPreviewCacheLru.removeAll(m_localDragCacheKey);
+    m_localPreviewCacheLru.append(m_localDragCacheKey);
+
+    while ((!m_localPreviewCacheLru.isEmpty())
+           && (m_localPreviewCacheLru.size() > kMaximumCacheEntries
+               || m_localPreviewCacheBytes > kMaximumCacheBytes)) {
+        const QString oldest = m_localPreviewCacheLru.takeFirst();
+        auto old = m_localPreviewCache.find(oldest);
+        if (old == m_localPreviewCache.end()) {
+            continue;
+        }
+        m_localPreviewCacheBytes -= old->byteCost;
+        m_localPreviewCache.erase(old);
+    }
+}
+
+void QuickCanvasController::startLocalDragPreview(const QString& localPath,
+                                                  bool isVideo,
+                                                  const QPointF& sceneCenter) {
+    clearLocalDragPreview(false);
+    const quint64 generation = ++m_localDragGeneration;
+
+    m_localDragAccepted = true;
+    m_localDragIsVideo = isVideo;
+    m_localDragPath = localPath;
+    m_localDragDisplayName = QFileInfo(localPath).fileName();
+    m_localDragCacheKey = localPreviewCacheKey(localPath);
+    m_localDragSceneCenter = sceneCenter;
+    m_localDropPending = false;
+    m_localDropHandoffMediaId.clear();
+
+    if (m_quickWidget && !m_localDragCursorHidden) {
+        m_quickWidget->setCursor(Qt::BlankCursor);
+        m_localDragCursorHidden = true;
+    }
+
+    if (restoreLocalPreviewFromCache(m_localDragCacheKey)) {
+        publishLocalDragPreview(true);
+        return;
+    }
+
+    m_localDragFrameSource->clear();
+    publishLocalDragPreview(false);
+
+    if (!isVideo) {
+        QImageReader headerReader(localPath);
+        headerReader.setAutoTransform(true);
+        m_localDragNativeSize = orientedImageSize(headerReader);
+        if (m_localDragNativeSize.isEmpty()) {
+            failLocalDragPreview(QStringLiteral("Unable to read image dimensions"), generation);
+            return;
+        }
+        publishLocalDragPreview(true);
+
+        auto* watcher = new QFutureWatcher<QImage>(this);
+        connect(watcher, &QFutureWatcher<QImage>::finished, this,
+                [this, watcher, generation]() {
+            const QImage frame = watcher->result();
+            watcher->deleteLater();
+            if (generation != m_localDragGeneration || !m_localDragAccepted) {
+                return;
+            }
+            if (frame.isNull()) {
+                failLocalDragPreview(QStringLiteral("Unable to decode image preview"), generation);
+                return;
+            }
+            m_localDragFrame = frame;
+            m_localDragFrameSource->setFrame(frame);
+            maybeCompleteLocalDragPreparation(generation);
+        });
+        watcher->setFuture(QtConcurrent::run([localPath]() {
+            return decodeImagePreview(localPath);
+        }));
+        return;
+    }
+
+    auto* sizeWatcher = new QFutureWatcher<QSize>(this);
+    connect(sizeWatcher, &QFutureWatcher<QSize>::finished, this,
+            [this, sizeWatcher, generation]() {
+        const QSize size = sizeWatcher->result();
+        sizeWatcher->deleteLater();
+        if (generation != m_localDragGeneration || !m_localDragAccepted) {
+            return;
+        }
+        if (m_localDragNativeSize.isEmpty() && !size.isEmpty()) {
+            m_localDragNativeSize = size;
+        }
+        maybeCompleteLocalDragPreparation(generation);
+    });
+    sizeWatcher->setFuture(QtConcurrent::run([localPath]() {
+        return nativeVideoDimensions(localPath);
+    }));
+
+    auto* frameWatcher = new QFutureWatcher<QImage>(this);
+    connect(frameWatcher, &QFutureWatcher<QImage>::finished, this,
+            [this, frameWatcher, generation]() {
+        const QImage frame = frameWatcher->result();
+        frameWatcher->deleteLater();
+        if (generation != m_localDragGeneration || !m_localDragAccepted) {
+            return;
+        }
+        if (m_localDragFrame.isNull() && !frame.isNull()) {
+            m_localDragFrame = frame;
+            m_localDragFrameSource->setFrame(frame);
+        }
+        maybeCompleteLocalDragPreparation(generation);
+    });
+    frameWatcher->setFuture(QtConcurrent::run([localPath]() {
+        return nativeVideoFirstFrame(localPath);
+    }));
+
+    QTimer::singleShot(150, this, [this, generation]() {
+        if (generation == m_localDragGeneration && m_localDragAccepted
+            && (m_localDragNativeSize.isEmpty() || m_localDragFrame.isNull())) {
+            startVideoPreviewFallback(generation);
+        }
+    });
+    QTimer::singleShot(5000, this, [this, generation]() {
+        if (generation == m_localDragGeneration && m_localDragAccepted
+            && (m_localDragNativeSize.isEmpty() || m_localDragFrame.isNull())) {
+            failLocalDragPreview(QStringLiteral("Unable to read the MP4 dimensions or first frame"),
+                                 generation);
+        }
+    });
+}
+
+void QuickCanvasController::startVideoPreviewFallback(quint64 generation) {
+    if (generation != m_localDragGeneration || m_localDragFallbackPlayer) {
+        return;
+    }
+
+    m_localDragFallbackPlayer = new QMediaPlayer(this);
+    m_localDragFallbackAudio = new QAudioOutput(m_localDragFallbackPlayer);
+    m_localDragFallbackAudio->setMuted(true);
+    m_localDragFallbackSink = new QVideoSink(m_localDragFallbackPlayer);
+    m_localDragFallbackPlayer->setAudioOutput(m_localDragFallbackAudio);
+    m_localDragFallbackPlayer->setVideoSink(m_localDragFallbackSink);
+
+    auto readMetadataSize = [this, generation]() {
+        if (generation != m_localDragGeneration || !m_localDragFallbackPlayer
+            || !m_localDragNativeSize.isEmpty()) {
+            return;
+        }
+        const QSize size = m_localDragFallbackPlayer->metaData()
+                               .value(QMediaMetaData::Resolution).toSize();
+        if (!size.isEmpty()) {
+            m_localDragNativeSize = size;
+            maybeCompleteLocalDragPreparation(generation);
+        }
+    };
+    connect(m_localDragFallbackPlayer, &QMediaPlayer::mediaStatusChanged,
+            this, [readMetadataSize](QMediaPlayer::MediaStatus) { readMetadataSize(); });
+    connect(m_localDragFallbackPlayer, &QMediaPlayer::metaDataChanged,
+            this, readMetadataSize);
+    connect(m_localDragFallbackSink, &QVideoSink::videoFrameChanged,
+            this, [this, generation](const QVideoFrame& videoFrame) {
+        if (generation != m_localDragGeneration || !videoFrame.isValid()
+            || !m_localDragFrame.isNull()) {
+            return;
+        }
+        QImage frame = limitPreviewImage(videoFrame.toImage());
+        if (frame.isNull()) {
+            return;
+        }
+        m_localDragFrame = frame;
+        m_localDragFrameSource->setFrame(frame);
+        maybeCompleteLocalDragPreparation(generation);
+    });
+
+    m_localDragFallbackPlayer->setSource(QUrl::fromLocalFile(m_localDragPath));
+    m_localDragFallbackPlayer->setPosition(0);
+    m_localDragFallbackPlayer->play();
+}
+
+void QuickCanvasController::stopVideoPreviewFallback() {
+    if (m_localDragFallbackPlayer) {
+        m_localDragFallbackPlayer->stop();
+        m_localDragFallbackPlayer->deleteLater();
+    }
+    m_localDragFallbackPlayer = nullptr;
+    m_localDragFallbackSink = nullptr;
+    m_localDragFallbackAudio = nullptr;
+}
+
+void QuickCanvasController::updateLocalDragPreviewCenter(const QPointF& sceneCenter) {
+    if (!m_localDragAccepted || m_localDropPending) {
+        return;
+    }
+    m_localDragSceneCenter = sceneCenter;
+    if (!m_localDragNativeSize.isEmpty()) {
+        publishLocalDragPreview(true);
+    }
+}
+
+void QuickCanvasController::publishLocalDragPreview(bool visible) {
+    if (!m_quickWidget || !m_quickWidget->rootObject()) {
+        return;
+    }
+
+    const qreal unitScale = m_sceneStore && m_sceneStore->sceneUnitScale() > 1e-6
+        ? m_sceneStore->sceneUnitScale() : 1.0;
+    const QSize size = m_localDragNativeSize;
+    const QPointF topLeft = m_localDragSceneCenter
+        - QPointF(size.width() * 0.5, size.height() * 0.5);
+
+    QVariantMap preview;
+    preview.insert(QStringLiteral("visible"), visible && !size.isEmpty());
+    preview.insert(QStringLiteral("pending"), m_localDragAccepted && size.isEmpty());
+    const QString phase = !visible || size.isEmpty()
+        ? (m_localDragAccepted ? QStringLiteral("preparing") : QStringLiteral("hidden"))
+        : (!m_localDropHandoffMediaId.isEmpty()
+               ? QStringLiteral("handoff")
+               : (m_localDragFrame.isNull()
+                      ? QStringLiteral("skeleton")
+                      : QStringLiteral("ready")));
+    preview.insert(QStringLiteral("phase"), phase);
+    preview.insert(QStringLiteral("mediaType"),
+                   m_localDragIsVideo ? QStringLiteral("video") : QStringLiteral("image"));
+    preview.insert(QStringLiteral("displayName"), m_localDragDisplayName);
+    preview.insert(QStringLiteral("x"), topLeft.x() * unitScale);
+    preview.insert(QStringLiteral("y"), topLeft.y() * unitScale);
+    preview.insert(QStringLiteral("width"), size.width() * unitScale);
+    preview.insert(QStringLiteral("height"), size.height() * unitScale);
+    preview.insert(QStringLiteral("frameReady"), !m_localDragFrame.isNull());
+    preview.insert(QStringLiteral("handoffMediaId"), m_localDropHandoffMediaId);
+    m_quickWidget->rootObject()->setProperty("dropPreviewModel", preview);
+}
+
+void QuickCanvasController::maybeCompleteLocalDragPreparation(quint64 generation) {
+    if (generation != m_localDragGeneration || !m_localDragAccepted) {
+        return;
+    }
+    if (!m_localDragNativeSize.isEmpty()) {
+        publishLocalDragPreview(true);
+    }
+    if (m_localDragNativeSize.isEmpty() || m_localDragFrame.isNull()) {
+        return;
+    }
+
+    stopVideoPreviewFallback();
+    storeLocalPreviewInCache();
+    if (m_localDropPending) {
+        performPreparedLocalDrop();
+    }
+}
+
+void QuickCanvasController::performPreparedLocalDrop() {
+    if (!m_localDragAccepted || !m_localDropPending
+        || m_localDragNativeSize.isEmpty() || m_localDragFrame.isNull()) {
+        return;
+    }
+
+    m_localDropPending = false;
+    m_localDragAccepted = false;
+    m_localDragSceneCenter = m_localDropSceneCenter;
+    publishLocalDragPreview(true);
+    emit preparedLocalFileDropRequested(m_localDragPath,
+                                        m_localDragNativeSize,
+                                        m_localDragFrame,
+                                        m_localDropSceneCenter);
+
+    // The host normally assigns the handoff id synchronously. Treat a missing
+    // id as an import failure rather than leaving a permanent preview behind.
+    if (m_localDropHandoffMediaId.isEmpty()) {
+        failLocalDragPreview(QStringLiteral("The media could not be added to the canvas"),
+                             m_localDragGeneration);
+    }
+}
+
+void QuickCanvasController::beginDropPreviewHandoff(const QString& mediaId) {
+    if (mediaId.isEmpty() || m_localDragNativeSize.isEmpty()) {
+        return;
+    }
+    m_localDropHandoffMediaId = mediaId;
+    publishLocalDragPreview(true);
+}
+
+void QuickCanvasController::handleDropPreviewContentReady(const QString& mediaId) {
+    if (mediaId.isEmpty() || mediaId != m_localDropHandoffMediaId) {
+        return;
+    }
+    const quint64 generation = m_localDragGeneration;
+    publishLocalDragPreview(false);
+    QTimer::singleShot(100, this, [this, generation]() {
+        if (generation == m_localDragGeneration) {
+            clearLocalDragPreview(false);
+        }
+    });
+}
+
+void QuickCanvasController::failLocalDragPreview(const QString& message,
+                                                 quint64 generation) {
+    if (generation != m_localDragGeneration) {
+        return;
+    }
+    if (!message.isEmpty()) {
+        TOAST_WARNING(message);
+    }
+    clearLocalDragPreview(true);
+}
+
+void QuickCanvasController::clearLocalDragPreview(bool animate, bool restoreCursor) {
+    const quint64 generation = ++m_localDragGeneration;
+    stopVideoPreviewFallback();
+
+    if (restoreCursor && m_localDragCursorHidden && m_quickWidget) {
+        m_quickWidget->unsetCursor();
+        m_localDragCursorHidden = false;
+    }
+
+    m_localDragAccepted = false;
+    m_localDropPending = false;
+    if (animate && !m_localDragNativeSize.isEmpty()) {
+        publishLocalDragPreview(false);
+        QTimer::singleShot(100, this, [this, generation]() {
+            if (generation == m_localDragGeneration) {
+                clearLocalDragPreview(false);
+            }
+        });
+        return;
+    }
+
+    m_localDragPath.clear();
+    m_localDragDisplayName.clear();
+    m_localDragCacheKey.clear();
+    m_localDragNativeSize = {};
+    m_localDragFrame = {};
+    m_localDragSceneCenter = {};
+    m_localDropSceneCenter = {};
+    m_localDropHandoffMediaId.clear();
+    if (m_localDragFrameSource) {
+        m_localDragFrameSource->clear();
+    }
+    publishLocalDragPreview(false);
 }
 
 QWidget* QuickCanvasController::widget() const {
@@ -506,6 +1018,8 @@ void QuickCanvasController::setMediaScene(QGraphicsScene* scene) {
     if (m_mediaScene == scene) {
         return;
     }
+
+    clearLocalDragPreview(false);
 
     // Finish the backend-side resize lifecycle while the old scene/index are
     // still available. A detached scene can otherwise leave a surviving text
@@ -610,7 +1124,9 @@ bool QuickCanvasController::remoteSceneLocksEdits() const {
             // The remote manifest is immutable from PREPARE until STOP. This
             // also covers the stopping handshake because launched remains true
             // until the matching acknowledgement is accepted.
-            if (canvas->isRemoteSceneLaunching() || canvas->isRemoteSceneLaunched()) {
+            if (canvas->isHostSceneActive()
+                || canvas->isRemoteSceneLaunching()
+                || canvas->isRemoteSceneLaunched()) {
                 return true;
             }
         }
@@ -2087,6 +2603,9 @@ void QuickCanvasController::pushSelectionAndSnapModels() {
 }
 
 void QuickCanvasController::pushVideoStateModel() {
+    if ((m_localDragAccepted || m_localDragCursorHidden) && remoteSceneLocksEdits()) {
+        clearLocalDragPreview(false);
+    }
     if (!m_quickWidget || !m_quickWidget->rootObject() || !m_mediaScene) {
         return;
     }
@@ -2108,8 +2627,12 @@ void QuickCanvasController::pushVideoStateModel() {
         if (mid.isEmpty()) continue;
 
         const qint64 durationMs = v->mediaPlayer()->duration();
-        // Use the live player position rather than the stale cached value.
-        const qint64 positionMs = v->mediaPlayer()->position();
+        // During a scrub the player may still be acknowledging an older
+        // coalesced seek. Keep the thumb at the newest user target until its
+        // native frame has actually arrived.
+        const qint64 positionMs = v->isDraggingProgress()
+            ? v->currentPositionMs()
+            : v->mediaPlayer()->position();
         const qreal progress = (durationMs > 0)
             ? std::clamp<qreal>(static_cast<qreal>(positionMs) / static_cast<qreal>(durationMs), 0.0, 1.0)
             : 0.0;
@@ -2224,38 +2747,33 @@ void QuickCanvasController::handleOverlayVolumeChange(const QString& mediaId, qr
 }
 
 // ---- Three-phase seek handlers ----
-// Phase 1: pointer pressed.  Set the drag-in-progress flag BEFORE issuing the
-// initial seek so that m_progressTimer and positionChanged handlers both see
-// m_draggingProgress=true and suppress conflicting pushes for the duration.
+// Phase 1 starts one frame-acknowledged scrub session.
 void QuickCanvasController::handleOverlaySeekBegin(const QString& mediaId, qreal ratio) {
     if (remoteSceneLocksEdits()) return;
     if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
-        v->setDraggingProgress(true);
-        v->seekToRatio(std::clamp(ratio, 0.0, 1.0));
+        v->beginScrub(std::clamp(ratio, 0.0, 1.0));
     }
 }
 
-// Phase 2: pointer moved.  Seek to the live scrub position for visual preview.
-// m_draggingProgress remains true so C++ push-back is suppressed.
+// Phase 2 retains only the newest pointer position while one seek is in flight.
 void QuickCanvasController::handleOverlaySeekUpdate(const QString& mediaId, qreal ratio) {
     if (remoteSceneLocksEdits()) return;
     if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
-        v->seekToRatio(std::clamp(ratio, 0.0, 1.0));
+        v->updateScrub(std::clamp(ratio, 0.0, 1.0));
     }
 }
 
-// Phase 3: pointer released.  Commit the final position then clear the drag lock.
-// setDraggingProgress(false) also restarts m_progressTimer if playing and !m_seeking.
+// Phase 3 marks the newest target as final; the video resumes, if necessary,
+// only after that target's native frame has arrived.
 void QuickCanvasController::handleOverlaySeekEnd(const QString& mediaId, qreal ratio) {
     if (remoteSceneLocksEdits()) {
         if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
-            v->setDraggingProgress(false);
+            v->endScrub(std::clamp(ratio, 0.0, 1.0));
         }
         return;
     }
     if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
-        v->seekToRatio(std::clamp(ratio, 0.0, 1.0));
-        v->setDraggingProgress(false);
+        v->endScrub(std::clamp(ratio, 0.0, 1.0));
         emit mediaSeekRequested(mediaId, ratio);
     }
 }

@@ -82,28 +82,30 @@ BaseMediaItem {
         }
     }
 
-    Rectangle {
+    MediaSurface {
+        id: mediaSurface
         anchors.fill: parent
-        color: "#141a24"
-    }
+        contentReady: root.hasLiveFrame
+        fadeDuration: 80
 
-    VideoOutput {
-        id: videoOutput
-        anchors.fill: parent
-        fillMode: VideoOutput.Stretch
-        visible: !root.remoteFrameMode
+        VideoOutput {
+            id: videoOutput
+            anchors.fill: parent
+            fillMode: VideoOutput.Stretch
+            visible: !root.remoteFrameMode
 
-        onWindowChanged: function(window) {
-            if (window)
-                Qt.callLater(root.bindPlayerToOutput)
+            onWindowChanged: function(window) {
+                if (window)
+                    Qt.callLater(root.bindPlayerToOutput)
+            }
         }
-    }
 
-    RemoteVideoFrameItem {
-        id: remoteFrameSurface
-        anchors.fill: parent
-        visible: root.remoteFrameMode
-        frameSource: root.remoteFrameSource
+        RemoteVideoFrameItem {
+            id: remoteFrameSurface
+            anchors.fill: parent
+            visible: root.remoteFrameMode
+            frameSource: root.remoteFrameSource
+        }
     }
 
     onCppMediaPlayerChanged: {
@@ -150,9 +152,8 @@ BaseMediaItem {
     Rectangle {
         anchors.fill: parent
         visible: root.showFallbackOverlay && !root.remoteFrameMode
-        color: "#141a24"
-        border.width: 1
-        border.color: "#2a3240"
+        color: "transparent"
+        border.width: 0
 
         Text {
             anchors.centerIn: parent

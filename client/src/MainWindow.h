@@ -36,7 +36,6 @@ QT_BEGIN_NAMESPACE
 class QAction;
 class QMenu;
 QT_END_NAMESPACE
-class QMimeData; // fwd declare for drag preview helpers
 class QMediaPlayer;
 class QListWidgetItem;
 class OverlayPanel;

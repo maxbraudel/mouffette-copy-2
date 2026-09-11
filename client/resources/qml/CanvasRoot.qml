@@ -19,6 +19,7 @@ Rectangle {
     signal textCommitRequested(string mediaId, string text)
     signal textLiveUpdateRequested(string mediaId, string text)
     signal textCreateRequested(real viewX, real viewY)
+    signal dropPreviewContentReady(string mediaId)
 
     // Overlay action signals (forwarded to C++)
     signal overlayVisibilityToggleRequested(string mediaId, bool visible)
@@ -30,10 +31,8 @@ Rectangle {
     signal overlayRepeatToggleRequested(string mediaId)
     signal overlayMuteToggleRequested(string mediaId)
     signal overlayVolumeChangeRequested(string mediaId, real value)
-    // Three-phase seek protocol — maps directly onto C++ drag-lock handlers:
-    //   Begin  : C++ sets m_draggingProgress=true before any seek is issued
-    //   Update : C++ seeks to the live scrub position (fires frequently)
-    //   End    : C++ issues final seek then clears m_draggingProgress
+    // Three-phase seek protocol. C++ coalesces frequent updates and releases
+    // the scrub session only when the final native frame is acknowledged.
     signal overlaySeekBeginRequested(string mediaId, real ratio)
     signal overlaySeekUpdateRequested(string mediaId, real ratio)
     signal overlaySeekEndRequested(string mediaId, real ratio)
@@ -51,6 +50,8 @@ Rectangle {
     // The mediaModel JS-array above supplies metadata to chrome and overlays;
     // pointer picking uses the actual live delegates, not that snapshot.
     property var mediaListModel: null
+    property var dropPreviewModel: ({ "visible": false })
+    property var dropPreviewFrameSource: null
     property var selectionChromeModel: []
     property var snapGuidesModel: []
     // Live drag tracking — updated every frame during a move drag, purely in QML
@@ -564,6 +565,7 @@ Rectangle {
                     property real localScale: media ? (media.scale || 1.0) : 1.0
                     property bool localDragging: false
                     property bool overlayHovered: false
+                    property bool dropHandoffReadyReported: false
                     // Actual rendered scale — switches to live scale during resize/alt-resize
                     // so overlay counter-scale stays correct every frame.
                     readonly property real effectiveScale: usesLiveAltResize ? root.liveAltResizeScale
@@ -582,6 +584,7 @@ Rectangle {
                     }
 
                     onMediaChanged: {
+                        dropHandoffReadyReported = false
                         if (!localDragging && media) {
                             // Always sync local position to the committed model value.
                             // Safe because localDragging=false means no active drag is
@@ -701,6 +704,26 @@ Rectangle {
                         editingSession: textEditSession
                     }
 
+                    function reportDropHandoffReady() {
+                        if (dropHandoffReadyReported || !mediaContentLoader.contentReady)
+                            return
+                        var preview = root.dropPreviewModel
+                        if (!preview || !preview.handoffMediaId
+                                || preview.handoffMediaId !== currentMediaId)
+                            return
+                        dropHandoffReadyReported = true
+                        root.dropPreviewContentReady(currentMediaId)
+                    }
+
+                    Connections {
+                        target: mediaContentLoader
+                        function onContentReadyChanged() {
+                            mediaDelegate.reportDropHandoffReady()
+                        }
+                    }
+
+                    Component.onCompleted: Qt.callLater(reportDropHandoffReady)
+
                     Binding {
                         target: mediaContentLoader.item
                         property: "mediaWidth"
@@ -740,6 +763,12 @@ Rectangle {
                     }
                 }
 
+            }
+
+            MediaDropPreview {
+                id: mediaDropPreview
+                preview: root.dropPreviewModel
+                frameSource: root.dropPreviewFrameSource
             }
 
             RemoteCursor {
@@ -1062,6 +1091,36 @@ Rectangle {
         id: overlayLayer
         anchors.fill: parent
         z: 99000
+
+        Item {
+            id: dropPreviewTitle
+            objectName: "dropPreviewTitle"
+            readonly property var preview: root.dropPreviewModel
+            readonly property bool shown: !!preview && preview.visible === true
+            readonly property real sceneLeft: preview && preview.x !== undefined ? preview.x : 0
+            readonly property real sceneTop: preview && preview.y !== undefined ? preview.y : 0
+            readonly property real sceneWidth: preview && preview.width !== undefined ? preview.width : 0
+            readonly property real screenCenterX: (sceneLeft + sceneWidth * 0.5) * root.viewScale + root.panX
+
+            x: screenCenterX - width * 0.5
+            y: sceneTop * root.viewScale + root.panY - 76 - 8
+            width: 156
+            height: 36
+            z: -1
+            opacity: shown ? 1.0 : 0.0
+            visible: opacity > 0.001 && preview && (preview.displayName || "").length > 0
+            enabled: false
+
+            Behavior on opacity {
+                NumberAnimation { duration: 80; easing.type: Easing.OutCubic }
+            }
+
+            MediaNamePill {
+                anchors.fill: parent
+                displayName: dropPreviewTitle.preview
+                             ? (dropPreviewTitle.preview.displayName || "") : ""
+            }
+        }
 
         Repeater {
             // One overlay pair per selected item — selectionChromeModel

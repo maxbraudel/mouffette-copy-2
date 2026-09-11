@@ -2,8 +2,10 @@
 #include <QAudioOutput>
 #include <QFile>
 #include <QGraphicsScene>
+#include <QJSValue>
 #include <QMediaMetaData>
 #include <QMediaPlayer>
+#include <QQuickItem>
 #include <QQuickWidget>
 #include <QVideoSink>
 #include <QWidget>
@@ -11,11 +13,51 @@
 
 #include "backend/domain/media/MediaItems.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
+#ifdef Q_OS_MACOS
+#include "backend/platform/macos/MacVideoThumbnailer.h"
+#elif defined(Q_OS_WIN)
+#include "backend/platform/windows/WindowsVideoThumbnailer.h"
+#endif
+
+namespace {
+QVariantMap publishedMedia(QObject* root, const QString& mediaId)
+{
+    QVariant value = root->property("mediaModel");
+    if (value.metaType() == QMetaType::fromType<QJSValue>())
+        value = value.value<QJSValue>().toVariant();
+    for (const QVariant& entryValue : value.toList()) {
+        const QVariantMap entry = entryValue.toMap();
+        if (entry.value(QStringLiteral("mediaId")).toString() == mediaId)
+            return entry;
+    }
+    return {};
+}
+}
 
 class VideoPlaybackBackendTest final : public QObject {
     Q_OBJECT
 
 private slots:
+    void nativePreparationReadsDisplaySizeAndFirstFrame() {
+        const QString fixture = QString::fromUtf8(TEST_VIDEO_FILE);
+        if (!QFile::exists(fixture)) {
+            QSKIP(qPrintable(QStringLiteral("Optional real-video fixture is missing: %1").arg(fixture)));
+        }
+
+#ifdef Q_OS_MACOS
+        const QSize dimensions = MacVideoThumbnailer::videoDimensions(fixture);
+        const QImage firstFrame = MacVideoThumbnailer::firstFrame(fixture);
+#elif defined(Q_OS_WIN)
+        const QSize dimensions = WindowsVideoThumbnailer::videoDimensions(fixture);
+        const QImage firstFrame = WindowsVideoThumbnailer::firstFrame(fixture);
+#else
+        QSKIP("Native first-frame preparation is implemented on macOS and Windows");
+#endif
+        QCOMPARE(dimensions, QSize(1920, 1080));
+        QVERIFY(!firstFrame.isNull());
+        QCOMPARE(firstFrame.size(), dimensions);
+    }
+
     void quickVideoOutputRestoresAudioAndAvoidsContinuousReadback() {
         const QString fixture = QString::fromUtf8(TEST_VIDEO_FILE);
         if (!QFile::exists(fixture)) {
@@ -34,10 +76,12 @@ private slots:
         quickWidget->resize(host.size());
         controller.setMediaScene(&scene);
 
-        auto* video = new ResizableVideoItem(fixture, 8, 16, QStringLiteral("video-1080p.mp4"));
+        auto* video = new ResizableVideoItem(fixture, QSize(1920, 1080),
+                                             8, 16, QStringLiteral("video-1080p.mp4"));
         video->setSourcePath(fixture);
         video->setVolume(0.31);
         scene.addItem(video);
+        QCOMPARE(video->baseSizePx(), QSize(1920, 1080));
 
         QMediaPlayer* player = video->mediaPlayer();
         QVERIFY(player);
@@ -60,6 +104,35 @@ private slots:
         QCOMPARE(audio->isMuted(), video->isMuted());
         QVERIFY(!audio->isMuted());
         QVERIFY(qAbs(audio->volume() - 0.31) < 0.02);
+        QTRY_VERIFY_WITH_TIMEOUT(!publishedMedia(quickWidget->rootObject(),
+                                                 video->mediaId()).isEmpty(), 3000);
+        const QVariantMap initialModel = publishedMedia(quickWidget->rootObject(),
+                                                        video->mediaId());
+        QCOMPARE(initialModel.value("width").toInt(), 1920);
+        QCOMPARE(initialModel.value("height").toInt(), 1080);
+        QCOMPARE(video->baseSizePx(), QSize(1920, 1080));
+
+        // A burst issues the first seek immediately and retains only the final
+        // target while that frame is in flight. The paused state is preserved.
+        const int pausedRequestsBefore = video->scrubSeekRequestsIssued();
+        video->beginScrub(0.10);
+        video->updateScrub(0.25);
+        video->updateScrub(0.55);
+        video->updateScrub(0.80);
+        video->endScrub(0.83);
+        QCOMPARE(video->scrubSeekRequestsIssued() - pausedRequestsBefore, 1);
+        QVERIFY(video->scrubSeekInFlight());
+        QVERIFY(video->isDraggingProgress());
+        QTRY_VERIFY_WITH_TIMEOUT(!video->isDraggingProgress(), 4000);
+        QVERIFY(!video->scrubSeekInFlight());
+        QVERIFY(!video->isPlaying());
+        QVERIFY(player->playbackState() != QMediaPlayer::PlayingState);
+        const qint64 pausedTarget = qRound64(player->duration() * 0.83);
+        QVERIFY2(qAbs(video->displayedFrameTimestampMs() - pausedTarget) <= 100,
+                 qPrintable(QStringLiteral("Final paused scrub frame %1ms, target %2ms")
+                                .arg(video->displayedFrameTimestampMs()).arg(pausedTarget)));
+        QVERIFY(video->scrubSeekRequestsIssued() - pausedRequestsBefore <= 2);
+        QCOMPARE(video->baseSizePx(), QSize(1920, 1080));
 
         video->resetFrameStats();
         const qint64 initialPosition = player->position();
@@ -69,6 +142,21 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(player->position() > initialPosition + 500, 5000);
         QTRY_VERIFY_WITH_TIMEOUT(video->displayedFrameTimestampMs() > initialPosition + 300, 5000);
         QVERIFY(!audio->isMuted());
+
+        // A playing video is paused technically during scrub and resumes only
+        // after the final target frame has acknowledged the gesture.
+        const int playingRequestsBefore = video->scrubSeekRequestsIssued();
+        video->beginScrub(0.20);
+        video->updateScrub(0.42);
+        video->updateScrub(0.68);
+        video->endScrub(0.71);
+        QVERIFY(video->isPlaying()); // logical user intent is retained
+        QVERIFY(player->playbackState() != QMediaPlayer::PlayingState || audio->isMuted());
+        QTRY_VERIFY_WITH_TIMEOUT(!video->isDraggingProgress(), 4000);
+        QTRY_COMPARE_WITH_TIMEOUT(player->playbackState(), QMediaPlayer::PlayingState, 3000);
+        QVERIFY(video->scrubSeekRequestsIssued() - playingRequestsBefore <= 2);
+        QVERIFY(!audio->isMuted());
+        QCOMPARE(video->baseSizePx(), QSize(1920, 1080));
 
         // Let enough 1080p frames pass to distinguish GPU rendering from an
         // accidental per-frame QVideoFrame -> QImage conversion loop.
@@ -126,7 +214,8 @@ private slots:
         quickWidget->resize(host.size());
         controller.setMediaScene(&scene);
 
-        auto* video = new ResizableVideoItem(fixture, 8, 16, QStringLiteral("video-1080p.mp4"));
+        auto* video = new ResizableVideoItem(fixture, QSize(1920, 1080),
+                                             8, 16, QStringLiteral("video-1080p.mp4"));
         video->setSourcePath(fixture);
         video->setVolume(0.27);
         scene.addItem(video);
@@ -168,7 +257,8 @@ private slots:
         }
 
         QGraphicsScene scene;
-        auto* video = new ResizableVideoItem(fixture, 8, 16, QStringLiteral("video-1080p.mp4"));
+        auto* video = new ResizableVideoItem(fixture, QSize(1920, 1080),
+                                             8, 16, QStringLiteral("video-1080p.mp4"));
         video->setSourcePath(fixture);
         scene.addItem(video);
 

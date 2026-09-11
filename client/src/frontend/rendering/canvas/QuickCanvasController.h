@@ -3,11 +3,14 @@
 
 #include <QObject>
 #include <QHash>
+#include <QImage>
 #include <QPointF>
 #include <QRectF>
 #include <QSize>
+#include <QStringList>
 #include <QVector>
 #include <QMetaObject>
+#include <QPointer>
 #include <memory>
 
 #include "backend/domain/models/ClientInfo.h"
@@ -18,6 +21,10 @@ class QQuickWidget;
 class QWidget;
 class QGraphicsScene;
 class QTimer;
+class QMimeData;
+class QMediaPlayer;
+class QVideoSink;
+class QAudioOutput;
 class ScreenCanvas;
 class ResizableMediaBase;
 class ResizableVideoItem;
@@ -27,6 +34,7 @@ class PointerSession;
 class ModelPublisher;
 class SnapStore;
 class MediaListModel;
+class RemoteVideoFrameSource;
 
 class QuickCanvasController : public QObject {
     Q_OBJECT
@@ -49,13 +57,19 @@ public:
     void setTextToolActive(bool active);
     qreal currentViewScale() const;
     void ensureInitialFit(int marginPx = 53);
+    // Called synchronously by QuickCanvasHost after the prepared media has
+    // entered the authoritative scene.
+    void beginDropPreviewHandoff(const QString& mediaId);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 signals:
     void textMediaCreateRequested(const QPointF& scenePos);
-    void localFilesDropRequested(const QStringList& localPaths, const QPointF& scenePos);
+    void preparedLocalFileDropRequested(const QString& localPath,
+                                        const QSize& nativeSize,
+                                        const QImage& previewFrame,
+                                        const QPointF& scenePos);
 
     // Overlay action signals (QML → C++)
     void mediaVisibilityToggleRequested(const QString& mediaId, bool visible);
@@ -93,10 +107,8 @@ private slots:
     void handleOverlayRepeatToggle(const QString& mediaId);
     void handleOverlayMuteToggle(const QString& mediaId);
     void handleOverlayVolumeChange(const QString& mediaId, qreal value);
-    // Three-phase seek handlers — mirror the QML three-phase seek protocol so that
-    // m_draggingProgress is set before any seek reaches the player (begin), live
-    // scrub previews work without conflicting C++ position pushes (update), and the
-    // drag lock is cleanly released after the final position is committed (end).
+    // Three-phase frame-acknowledged scrub protocol. Updates are coalesced while
+    // one target is in flight; end releases only after the final native frame.
     void handleOverlaySeekBegin(const QString& mediaId, qreal ratio);
     void handleOverlaySeekUpdate(const QString& mediaId, qreal ratio);
     void handleOverlaySeekEnd(const QString& mediaId, qreal ratio);
@@ -105,6 +117,7 @@ private slots:
     void handleOverlayVerticalAlign(const QString& mediaId, const QString& alignment);
     void handleFadeAnimationTick();
     void handleMediaSettingsChanged(ResizableMediaBase* media);
+    void handleDropPreviewContentReady(const QString& mediaId);
 
 private:
     void rebuildMediaItemIndex();
@@ -139,6 +152,19 @@ private:
     void scheduleInitialFitIfNeeded(int marginPx = 53);
     bool tryInitialFitNow(int marginPx = 53);
     void buildResizeSnapCaches(ResizableMediaBase* resizingItem);
+    bool acceptedSingleLocalMedia(const QMimeData* mimeData, QString* localPath, bool* isVideo) const;
+    void startLocalDragPreview(const QString& localPath, bool isVideo, const QPointF& sceneCenter);
+    void updateLocalDragPreviewCenter(const QPointF& sceneCenter);
+    void publishLocalDragPreview(bool visible);
+    void startVideoPreviewFallback(quint64 generation);
+    void stopVideoPreviewFallback();
+    void maybeCompleteLocalDragPreparation(quint64 generation);
+    void performPreparedLocalDrop();
+    void failLocalDragPreview(const QString& message, quint64 generation);
+    void clearLocalDragPreview(bool animate, bool restoreCursor = true);
+    QString localPreviewCacheKey(const QString& localPath) const;
+    bool restoreLocalPreviewFromCache(const QString& cacheKey);
+    void storeLocalPreviewInCache();
     void syncSnapViewScale() const; // pushes currentViewScale() into the backing ScreenCanvas
     SnapEngine::AxisSnapResult applyAxisSnapWithCachedTargets(ResizableMediaBase* target,
                                                                qreal proposedScale,
@@ -154,7 +180,7 @@ private:
                                                                    bool shiftPressed,
                                                                    ScreenCanvas* screenCanvas) const;
 
-    QQuickWidget* m_quickWidget = nullptr;
+    QPointer<QQuickWidget> m_quickWidget;
     CanvasSceneStore* m_sceneStore = nullptr;
     QuickCanvasViewAdapter* m_viewAdapter = nullptr;
     MediaListModel*         m_mediaListModel = nullptr;
@@ -225,6 +251,33 @@ private:
     int m_initialFitRetryCount = 0;
     QTimer* m_initialFitRetryTimer = nullptr;
     QTimer* m_fadeTickTimer = nullptr;
+
+    struct LocalPreviewCacheEntry {
+        QSize nativeSize;
+        QImage frame;
+        bool video = false;
+        qsizetype byteCost = 0;
+    };
+    QHash<QString, LocalPreviewCacheEntry> m_localPreviewCache;
+    QStringList m_localPreviewCacheLru;
+    qsizetype m_localPreviewCacheBytes = 0;
+    quint64 m_localDragGeneration = 0;
+    bool m_localDragAccepted = false;
+    bool m_localDragIsVideo = false;
+    bool m_localDropPending = false;
+    QString m_localDragPath;
+    QString m_localDragDisplayName;
+    QString m_localDragCacheKey;
+    QSize m_localDragNativeSize;
+    QImage m_localDragFrame;
+    QPointF m_localDragSceneCenter;
+    QPointF m_localDropSceneCenter;
+    QString m_localDropHandoffMediaId;
+    RemoteVideoFrameSource* m_localDragFrameSource = nullptr;
+    QMediaPlayer* m_localDragFallbackPlayer = nullptr;
+    QVideoSink* m_localDragFallbackSink = nullptr;
+    QAudioOutput* m_localDragFallbackAudio = nullptr;
+    bool m_localDragCursorHidden = false;
 };
 
 #endif // QUICKCANVASCONTROLLER_H

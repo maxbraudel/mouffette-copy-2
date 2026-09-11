@@ -18,15 +18,9 @@
 #include <QGraphicsScene>
 #include <QGraphicsSceneMouseEvent>
 #include <QGraphicsSceneHoverEvent>
-#include <QGraphicsPixmapItem>
 #include <QGraphicsProxyWidget>
 #include <QGraphicsTextItem>
 #include <QApplication>
-#include <QMimeData>
-#include <QDragEnterEvent>
-#include <QDragMoveEvent>
-#include <QDragLeaveEvent>
-#include <QDropEvent>
 #include <QScrollBar>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -54,28 +48,16 @@
 #include <QSignalBlocker>
 #include <QRandomGenerator>
 #include <QSizePolicy>
-#include <QFutureWatcher>
-#include <QtConcurrent/QtConcurrentRun>
 #include <QMediaPlayer>
-#include <QAudioOutput>
-#include <QVideoSink>
 #include <QRegion>
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QDateTime>
 #include <QDebug>
-#include <QStandardPaths>
 #include <QUuid>
 #include <cmath>
 #include <algorithm>
 #include <limits>
-
-#ifdef Q_OS_MACOS
-#include "backend/platform/macos/MacVideoThumbnailer.h"
-#endif
-#ifdef Q_OS_WIN
-#include "backend/platform/windows/WindowsVideoThumbnailer.h"
-#endif
 
 // (Trimmed includes to essentials; further pruning can be done if desired.)
 
@@ -1560,7 +1542,6 @@ std::pair<int, bool> ScreenCanvas::calculateDesiredWidthAndConstraint() {
 
 ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     m_mediaRuntimeContext = new MediaRuntimeHooks::Context(this);
-    setAcceptDrops(true);
     setDragMode(QGraphicsView::NoDrag); // manual panning / selection logic
     m_scene = new QGraphicsScene(this);
     setScene(m_scene);
@@ -3771,458 +3752,6 @@ void ScreenCanvas::resizeEvent(QResizeEvent* event) {
     updateToolSelectorGeometry();
 }
 
-void ScreenCanvas::dragEnterEvent(QDragEnterEvent* event) {
-    if (m_hostSceneActive || m_sceneLaunching || m_sceneLaunched || m_sceneStopping) {
-        event->ignore();
-        return;
-    }
-    if (!event->mimeData()) { event->ignore(); return; }
-    const QMimeData* mime = event->mimeData();
-    bool hasAcceptedUrl = false;
-    if (mime->hasUrls()) {
-        for (const QUrl& url : mime->urls()) {
-            if (url.isLocalFile() && MediaFilePolicy::isAcceptedLocalFile(url.toLocalFile())) {
-                hasAcceptedUrl = true;
-                break;
-            }
-        }
-    }
-    if (hasAcceptedUrl) { event->acceptProposedAction(); ensureDragPreview(mime); }
-    else if (mime->hasImage()) { event->acceptProposedAction(); ensureDragPreview(mime); }
-    else event->ignore();
-}
-
-void ScreenCanvas::dragMoveEvent(QDragMoveEvent* event) {
-    const QMimeData* mime = event->mimeData(); if (!mime) { event->ignore(); return; }
-    if (!m_dragPreviewItem) ensureDragPreview(mime);
-    QPointF scenePos = mapToScene(event->position().toPoint()); m_dragPreviewLastScenePos = scenePos; updateDragPreviewPos(scenePos);
-    if (!m_dragCursorHidden) { viewport()->setCursor(Qt::BlankCursor); m_dragCursorHidden = true; }
-    event->acceptProposedAction();
-}
-
-void ScreenCanvas::dragLeaveEvent(QDragLeaveEvent* event) {
-    clearDragPreview(); if (m_dragCursorHidden) { viewport()->unsetCursor(); m_dragCursorHidden = false; } event->accept();
-}
-
-void ScreenCanvas::dropEvent(QDropEvent* event) {
-    if (m_hostSceneActive || m_sceneLaunching || m_sceneLaunched || m_sceneStopping) {
-        clearDragPreview();
-        if (m_dragCursorHidden) {
-            viewport()->unsetCursor();
-            m_dragCursorHidden = false;
-        }
-        event->ignore();
-        return;
-    }
-
-    const QTransform originalTransform = transform();
-    QPointF originalCenter;
-    if (viewport()) {
-        originalCenter = mapToScene(viewport()->rect().center());
-    } else {
-        originalCenter = mapToScene(rect().center());
-    }
-
-    const QMimeData* mime = event->mimeData(); if (!mime) { event->ignore(); return; }
-    QPointF scenePos = mapToScene(event->position().toPoint());
-    
-    // Clear any existing selection before adding new media
-    if (m_scene) {
-        m_scene->clearSelection();
-    }
-    if (mime->hasUrls()) {
-        const QList<QUrl> urls = mime->urls();
-        for (const QUrl& url : urls) {
-            if (url.isLocalFile()) {
-                QString localPath = url.toLocalFile();
-                if (localPath.isEmpty()) continue;
-                QFileInfo fi(localPath);
-                const MediaFilePolicy::Kind mediaKind = MediaFilePolicy::classifyLocalFile(localPath);
-                if (mediaKind == MediaFilePolicy::Kind::Mp4Video) {
-                    // Use default handle sizes similar to previous inline defaults (visual 12, selection 30)
-                    auto* v = new ResizableVideoItem(localPath, 12, 30, fi.fileName(), m_videoControlsFadeMs);
-                    v->setRuntimeContext(m_mediaRuntimeContext);
-                    if (m_applicationSuspended) {
-                        v->setApplicationSuspended(true);
-                    }
-                    // Record original file path for later upload manifest collection
-                    v->setSourcePath(localPath);
-                    // Preserve global canvas media scale (so video size matches screens & images 1:1)
-                    v->setInitialScaleFactor(m_scaleFactor);
-                    
-                    // If a drag preview frame was captured for this video, use it immediately as a poster to avoid flicker gap
-                    // Scale the poster to match the actual video dimensions so adoptBaseSize gets the right size
-                    // IMPORTANT: Set poster BEFORE positioning, because setExternalPosterImage calls adoptBaseSize which repositions
-                    if (m_dragPreviewIsVideo && m_dragPreviewGotFrame && !m_dragPreviewPixmap.isNull()) {
-                        QImage poster = m_dragPreviewPixmap.toImage();
-                        if (!poster.isNull()) {
-                            qDebug() << "ScreenCanvas: drag preview poster.size=" << poster.size()
-                                     << "m_dragPreviewVideoSize=" << m_dragPreviewVideoSize
-                                     << "for" << localPath;
-                            // If we know the actual video size and it differs from the thumbnail, scale the poster
-                            if (!m_dragPreviewVideoSize.isEmpty() && poster.size() != m_dragPreviewVideoSize) {
-                                poster = poster.scaled(m_dragPreviewVideoSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-                                qDebug() << "ScreenCanvas: scaled poster to" << poster.size();
-                            }
-                            v->setExternalPosterImage(poster);
-                        }
-                    }
-                    
-                    // Use actual video dimensions from preview if available, otherwise use default placeholder
-                    QSize videoSize = m_dragPreviewVideoSize.isEmpty() ? QSize(640, 360) : m_dragPreviewVideoSize;
-                    Q_UNUSED(videoSize);
-                    v->setScale(m_scaleFactor); // adoptBaseSize already called by setExternalPosterImage
-                    positionMediaCenteredAtScene(v, scenePos);
-                    
-                    assignNextZValue(v);
-                    m_scene->addItem(v);
-                    v->setSelected(true);
-                    emit mediaItemAdded(v);
-                } else if (mediaKind == MediaFilePolicy::Kind::Image) {
-                    QPixmap pm(localPath);
-                    if (!pm.isNull()) {
-                        auto* p = new ResizablePixmapItem(pm, 12, 30, QFileInfo(localPath).fileName());
-                        p->setRuntimeContext(m_mediaRuntimeContext);
-                        p->setSourcePath(localPath);
-                        p->setScale(m_scaleFactor);
-                        positionMediaCenteredAtScene(p, scenePos);
-                        assignNextZValue(p);
-                        m_scene->addItem(p);
-                        p->setSelected(true);
-                        emit mediaItemAdded(p);
-                    }
-                } else if (mediaKind == MediaFilePolicy::Kind::UnsupportedVideo) {
-                    TOAST_WARNING(QStringLiteral("Unsupported video format: only MP4 video files are accepted"));
-                }
-            }
-        }
-    } else if (mime->hasImage()) {
-        QImage img = qvariant_cast<QImage>(mime->imageData());
-        if (!img.isNull()) {
-            QPixmap pm = QPixmap::fromImage(img);
-            if (!pm.isNull()) {
-                auto* p = new ResizablePixmapItem(pm, 12, 30, QString());
-                p->setRuntimeContext(m_mediaRuntimeContext);
-                QString cacheRoot = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-                if (cacheRoot.isEmpty()) {
-                    cacheRoot = QDir::tempPath();
-                }
-                const QString quickImageDir = QDir::cleanPath(cacheRoot + QStringLiteral("/Mouffette/QuickCanvasTempImages"));
-                QDir dir;
-                if (dir.mkpath(quickImageDir)) {
-                    const QString fileName = QStringLiteral("image_drop_%1.png").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
-                    const QString localPath = QDir(quickImageDir).filePath(fileName);
-                    if (img.save(localPath, "PNG")) {
-                        p->setSourcePath(localPath);
-                    } else {
-                        qWarning() << "ScreenCanvas: failed to persist image drop to" << localPath;
-                        p->setSourcePath(QString());
-                    }
-                } else {
-                    qWarning() << "ScreenCanvas: failed to create temp image directory" << quickImageDir;
-                    p->setSourcePath(QString());
-                }
-                p->setScale(m_scaleFactor);
-                positionMediaCenteredAtScene(p, scenePos);
-                assignNextZValue(p);
-                m_scene->addItem(p);
-                p->setSelected(true);
-                emit mediaItemAdded(p);
-            }
-        }
-    }
-    clearDragPreview(); if (m_dragCursorHidden) { viewport()->unsetCursor(); m_dragCursorHidden = false; }
-    event->acceptProposedAction();
-    refreshInfoOverlay();
-
-    QPointF currentCenter;
-    if (viewport()) {
-        currentCenter = mapToScene(viewport()->rect().center());
-    } else {
-        currentCenter = mapToScene(rect().center());
-    }
-    const qreal dx = currentCenter.x() - originalCenter.x();
-    const qreal dy = currentCenter.y() - originalCenter.y();
-    const bool transformChanged = !(transform() == originalTransform);
-    const bool centerShifted = std::hypot(dx, dy) > 0.5;
-    if (transformChanged || centerShifted) {
-        setTransform(originalTransform);
-        centerOn(originalCenter);
-        if (m_scene) {
-            requestZoomRelayout(true);
-        }
-    }
-}
-
-void ScreenCanvas::positionMediaCenteredAtScene(ResizableMediaBase* media, const QPointF& scenePos) {
-    if (!media) {
-        return;
-    }
-
-    const QSize baseSize = media->baseSizePx();
-    const qreal mediaScale = std::max<qreal>(std::abs(media->scale()), 1e-6);
-    const qreal width = static_cast<qreal>(baseSize.width()) * mediaScale;
-    const qreal height = static_cast<qreal>(baseSize.height()) * mediaScale;
-    media->setPos(scenePos - QPointF(width * 0.5, height * 0.5));
-}
-
-void ScreenCanvas::ensureDragPreview(const QMimeData* mime) {
-    if (!mime) return; if (m_dragPreviewItem) return; m_dragPreviewGotFrame = false; m_dragPreviewIsVideo = false;
-    if (mime->hasUrls()) {
-        QList<QUrl> urls = mime->urls(); if (!urls.isEmpty() && urls.first().isLocalFile()) {
-            QFileInfo fi(urls.first().toLocalFile());
-            const MediaFilePolicy::Kind mediaKind = MediaFilePolicy::classifyLocalFile(fi.absoluteFilePath());
-            if (mediaKind == MediaFilePolicy::Kind::Mp4Video) { m_dragPreviewIsVideo = true; startVideoPreviewProbe(fi.absoluteFilePath()); return; }
-            if (mediaKind != MediaFilePolicy::Kind::Image) return;
-            QPixmap pm(fi.absoluteFilePath()); if (!pm.isNull()) { m_dragPreviewPixmap = pm; m_dragPreviewBaseSize = pm.size(); }
-        }
-    } else if (mime->hasImage()) {
-        QImage img = qvariant_cast<QImage>(mime->imageData()); if (!img.isNull()) { m_dragPreviewPixmap = QPixmap::fromImage(img); m_dragPreviewBaseSize = m_dragPreviewPixmap.size(); }
-    }
-    if (!m_dragPreviewPixmap.isNull()) {
-        auto* pmItem = new QGraphicsPixmapItem(m_dragPreviewPixmap); 
-        pmItem->setOpacity(0.0); 
-        pmItem->setZValue(5000.0); 
-        // Don't set scale here for non-video - updateDragPreviewPos will handle it
-        pmItem->setScale(m_scaleFactor); 
-        m_scene->addItem(pmItem); 
-        m_dragPreviewItem = pmItem; 
-        startDragPreviewFadeIn();
-    }
-}
-
-void ScreenCanvas::updateDragPreviewPos(const QPointF& scenePos) {
-    if (!m_dragPreviewItem) return; 
-    
-    auto* pmItem = qgraphicsitem_cast<QGraphicsPixmapItem*>(m_dragPreviewItem);
-    
-    // Determine the scale factor for the preview item
-    qreal itemScale = m_scaleFactor;
-    QSize displaySize = m_dragPreviewBaseSize;
-    
-    // If we have video dimensions and they differ from the pixmap size, scale accordingly
-    if (pmItem && !m_dragPreviewVideoSize.isEmpty() && !m_dragPreviewPixmap.isNull()) {
-        QSize thumbSize = m_dragPreviewPixmap.size();
-        if (!thumbSize.isEmpty() && thumbSize.width() > 0 && thumbSize.height() > 0) {
-            // Scale thumbnail to display at actual video dimensions
-            qreal scaleX = static_cast<qreal>(m_dragPreviewVideoSize.width()) / thumbSize.width();
-            qreal scaleY = static_cast<qreal>(m_dragPreviewVideoSize.height()) / thumbSize.height();
-            itemScale = scaleX * m_scaleFactor; // Use X scale (they should be proportional)
-            displaySize = m_dragPreviewVideoSize;
-        }
-    }
-    
-    if (displaySize.isEmpty()) displaySize = QSize(400, 240);
-    
-    if (pmItem) {
-        pmItem->setScale(itemScale);
-    }
-    
-    QPointF topLeft = scenePos - QPointF(displaySize.width()/2.0 * m_scaleFactor, displaySize.height()/2.0 * m_scaleFactor);
-    m_dragPreviewItem->setPos(topLeft);
-}
-
-void ScreenCanvas::clearDragPreview() {
-    stopVideoPreviewProbe(); stopDragPreviewFade(); if (m_dragPreviewItem) { m_scene->removeItem(m_dragPreviewItem); delete m_dragPreviewItem; m_dragPreviewItem = nullptr; }
-    m_dragPreviewPixmap = QPixmap(); m_dragPreviewGotFrame = false; m_dragPreviewIsVideo = false; m_dragPreviewVideoSize = QSize();
-}
-
-
-void ScreenCanvas::startVideoPreviewProbe(const QString& localFilePath) {
-#ifdef Q_OS_MACOS
-    startFastMacThumbnailProbe(localFilePath);
-#elif defined(Q_OS_WIN)
-    if (m_dragPreviewGotFrame) {
-        return;
-    }
-    // Get actual video dimensions first
-    QSize dims = WindowsVideoThumbnailer::videoDimensions(localFilePath);
-    if (!dims.isEmpty()) {
-        m_dragPreviewVideoSize = dims;
-        m_dragPreviewBaseSize = dims;
-    }
-    QImage thumb = WindowsVideoThumbnailer::firstFrame(localFilePath);
-    if (!thumb.isNull()) {
-        onFastVideoThumbnailReady(thumb);
-        return;
-    }
-    startVideoPreviewProbeFallback(localFilePath);
-#else
-    startVideoPreviewProbeFallback(localFilePath);
-#endif
-}
-
-void ScreenCanvas::startVideoPreviewProbeFallback(const QString& localFilePath) {
-    if (m_dragPreviewPlayer) return; 
-    m_dragPreviewPlayer = new QMediaPlayer(this); 
-    m_dragPreviewAudio = new QAudioOutput(this); 
-    m_dragPreviewAudio->setMuted(true); 
-    m_dragPreviewPlayer->setAudioOutput(m_dragPreviewAudio); 
-    m_dragPreviewSink = new QVideoSink(this); 
-    m_dragPreviewPlayer->setVideoSink(m_dragPreviewSink); 
-    m_dragPreviewPlayer->setSource(QUrl::fromLocalFile(localFilePath));
-    
-    // Capture actual video dimensions from first frame
-    connect(m_dragPreviewSink, &QVideoSink::videoFrameChanged, this, [this](const QVideoFrame& f){ 
-        if (m_dragPreviewGotFrame || !f.isValid()) return; 
-        QImage img = f.toImage(); 
-        if (img.isNull()) return; 
-        m_dragPreviewGotFrame = true; 
-        QPixmap newPm = QPixmap::fromImage(img); 
-        if (newPm.isNull()) return; 
-        m_dragPreviewPixmap = newPm; 
-        m_dragPreviewVideoSize = newPm.size(); // store actual video dimensions
-        m_dragPreviewBaseSize = newPm.size(); // use video dimensions for preview
-        if (!m_dragPreviewItem) { 
-            auto* pmItem = new QGraphicsPixmapItem(m_dragPreviewPixmap); 
-            pmItem->setOpacity(0.0); 
-            pmItem->setZValue(5000.0); 
-            // Don't set scale here - updateDragPreviewPos will handle it
-            m_scene->addItem(pmItem); 
-            m_dragPreviewItem = pmItem; 
-            updateDragPreviewPos(m_dragPreviewLastScenePos); 
-            startDragPreviewFadeIn(); 
-        } else if (auto* pmItem = qgraphicsitem_cast<QGraphicsPixmapItem*>(m_dragPreviewItem)) { 
-            pmItem->setPixmap(m_dragPreviewPixmap); 
-            updateDragPreviewPos(m_dragPreviewLastScenePos); 
-        } 
-        if (m_dragPreviewPlayer) m_dragPreviewPlayer->pause(); 
-        if (m_dragPreviewFallbackTimer) { 
-            m_dragPreviewFallbackTimer->stop(); 
-            m_dragPreviewFallbackTimer->deleteLater(); 
-            m_dragPreviewFallbackTimer = nullptr; 
-        } 
-    });
-    m_dragPreviewPlayer->play();
-}
-
-#ifdef Q_OS_MACOS
-void ScreenCanvas::startFastMacThumbnailProbe(const QString& localFilePath) {
-    cancelFastMacThumbnailProbe();
-    m_dragPreviewPendingVideoPath = localFilePath;
-
-    // Get actual video dimensions immediately (very fast, no frame extraction)
-    QSize dims = MacVideoThumbnailer::videoDimensions(localFilePath);
-    qDebug() << "ScreenCanvas: MacVideoThumbnailer dimensions =" << dims << "for" << localFilePath;
-    if (!dims.isEmpty()) {
-        m_dragPreviewVideoSize = dims;
-        m_dragPreviewBaseSize = dims;
-    }
-
-    auto* watcher = new QFutureWatcher<QImage>(this);
-    m_dragPreviewThumbnailWatcher = watcher;
-
-    connect(watcher, &QFutureWatcher<QImage>::finished, this, [this, watcher]() {
-        QImage img = watcher->result();
-        watcher->deleteLater();
-        m_dragPreviewThumbnailWatcher = nullptr;
-
-        if (m_dragPreviewFallbackDelayTimer) {
-            m_dragPreviewFallbackDelayTimer->stop();
-        }
-
-        if (!img.isNull()) {
-            onFastVideoThumbnailReady(img);
-        } else if (!m_dragPreviewPlayer && !m_dragPreviewPendingVideoPath.isEmpty()) {
-            startVideoPreviewProbeFallback(m_dragPreviewPendingVideoPath);
-        }
-
-        m_dragPreviewPendingVideoPath.clear();
-    });
-
-    watcher->setFuture(QtConcurrent::run([path = localFilePath]() {
-        return MacVideoThumbnailer::firstFrame(path);
-    }));
-
-    if (!m_dragPreviewFallbackDelayTimer) {
-        m_dragPreviewFallbackDelayTimer = new QTimer(this);
-        m_dragPreviewFallbackDelayTimer->setSingleShot(true);
-        connect(m_dragPreviewFallbackDelayTimer, &QTimer::timeout, this, [this]() {
-            if (m_dragPreviewPlayer || m_dragPreviewGotFrame) {
-                return;
-            }
-            if (m_dragPreviewPendingVideoPath.isEmpty()) {
-                return;
-            }
-            startVideoPreviewProbeFallback(m_dragPreviewPendingVideoPath);
-        });
-    }
-
-    m_dragPreviewFallbackDelayTimer->start(250);
-}
-
-void ScreenCanvas::cancelFastMacThumbnailProbe() {
-    if (m_dragPreviewThumbnailWatcher) {
-        disconnect(m_dragPreviewThumbnailWatcher, nullptr, this, nullptr);
-        m_dragPreviewThumbnailWatcher->cancel();
-        m_dragPreviewThumbnailWatcher->deleteLater();
-        m_dragPreviewThumbnailWatcher = nullptr;
-    }
-    if (m_dragPreviewFallbackDelayTimer) {
-        m_dragPreviewFallbackDelayTimer->stop();
-    }
-    m_dragPreviewPendingVideoPath.clear();
-}
-#endif
-
-void ScreenCanvas::stopVideoPreviewProbe() {
-#ifdef Q_OS_MACOS
-    cancelFastMacThumbnailProbe();
-    if (m_dragPreviewFallbackDelayTimer) {
-        m_dragPreviewFallbackDelayTimer->stop();
-    }
-#endif
-    if (m_dragPreviewFallbackTimer) { m_dragPreviewFallbackTimer->stop(); m_dragPreviewFallbackTimer->deleteLater(); m_dragPreviewFallbackTimer = nullptr; }
-    if (m_dragPreviewPlayer) { m_dragPreviewPlayer->stop(); m_dragPreviewPlayer->deleteLater(); m_dragPreviewPlayer = nullptr; }
-    if (m_dragPreviewSink) { m_dragPreviewSink->deleteLater(); m_dragPreviewSink = nullptr; }
-    if (m_dragPreviewAudio) { m_dragPreviewAudio->deleteLater(); m_dragPreviewAudio = nullptr; }
-}
-
-void ScreenCanvas::startDragPreviewFadeIn() {
-    stopDragPreviewFade(); if (!m_dragPreviewItem) return; const qreal target = m_dragPreviewTargetOpacity; if (m_dragPreviewItem->opacity() >= target - 0.001) return; auto* anim = new QVariantAnimation(this); m_dragPreviewFadeAnim = anim; anim->setStartValue(0.0); anim->setEndValue(target); anim->setDuration(m_dragPreviewFadeMs); anim->setEasingCurve(QEasingCurve::OutCubic); connect(anim, &QVariantAnimation::valueChanged, this, [this](const QVariant& v){ if (m_dragPreviewItem) m_dragPreviewItem->setOpacity(v.toReal()); }); connect(anim, &QVariantAnimation::finished, this, [this](){ m_dragPreviewFadeAnim = nullptr; }); anim->start(QAbstractAnimation::DeleteWhenStopped);
-}
-
-void ScreenCanvas::stopDragPreviewFade() { if (m_dragPreviewFadeAnim) { m_dragPreviewFadeAnim->stop(); m_dragPreviewFadeAnim = nullptr; } }
-
-void ScreenCanvas::onFastVideoThumbnailReady(const QImage& img) {
-    if (img.isNull()) return; 
-    if (m_dragPreviewGotFrame) return; 
-    m_dragPreviewGotFrame = true; 
-    QPixmap pm = QPixmap::fromImage(img); 
-    if (pm.isNull()) return; 
-    m_dragPreviewPixmap = pm; 
-    qDebug() << "ScreenCanvas: onFastVideoThumbnailReady - thumbnail.size=" << pm.size()
-             << "m_dragPreviewVideoSize=" << m_dragPreviewVideoSize;
-    // Only use thumbnail size if we don't already have actual video dimensions
-    if (m_dragPreviewVideoSize.isEmpty()) {
-        m_dragPreviewVideoSize = pm.size();
-        m_dragPreviewBaseSize = pm.size();
-    }
-    if (!m_dragPreviewItem) { 
-        auto* pmItem = new QGraphicsPixmapItem(m_dragPreviewPixmap); 
-        pmItem->setOpacity(0.0); 
-        pmItem->setZValue(5000.0); 
-        // Don't set scale here - updateDragPreviewPos will handle it
-        if (m_scene) m_scene->addItem(pmItem); 
-        m_dragPreviewItem = pmItem; 
-        updateDragPreviewPos(m_dragPreviewLastScenePos); 
-        startDragPreviewFadeIn(); 
-    } else if (auto* pix = qgraphicsitem_cast<QGraphicsPixmapItem*>(m_dragPreviewItem)) { 
-        pix->setPixmap(m_dragPreviewPixmap); 
-        updateDragPreviewPos(m_dragPreviewLastScenePos); 
-    }
-#ifdef Q_OS_MACOS
-    if (m_dragPreviewFallbackDelayTimer) {
-        m_dragPreviewFallbackDelayTimer->stop();
-    }
-    m_dragPreviewPendingVideoPath.clear();
-#endif
-    if (m_dragPreviewFallbackTimer) { m_dragPreviewFallbackTimer->stop(); m_dragPreviewFallbackTimer->deleteLater(); m_dragPreviewFallbackTimer = nullptr; }
-    if (m_dragPreviewPlayer) { m_dragPreviewPlayer->stop(); m_dragPreviewPlayer->deleteLater(); m_dragPreviewPlayer = nullptr; }
-    if (m_dragPreviewSink) { m_dragPreviewSink->deleteLater(); m_dragPreviewSink = nullptr; }
-    if (m_dragPreviewAudio) { m_dragPreviewAudio->deleteLater(); m_dragPreviewAudio = nullptr; }
-}
-
 static void updateScreenItemGeometry(QGraphicsRectItem* item,
                                      const ScreenInfo& screen,
                                      int index,
@@ -5688,69 +5217,68 @@ void ScreenCanvas::requestTextMediaCreateAt(const QPointF& scenePos, bool beginI
     }
 }
 
-void ScreenCanvas::requestLocalFileDropAt(const QStringList& localPaths, const QPointF& scenePos) {
-    if (m_hostSceneActive || m_sceneLaunching || m_sceneLaunched || m_sceneStopping
-        || !m_scene || localPaths.isEmpty()) {
+void ScreenCanvas::positionMediaCenteredAtScene(ResizableMediaBase* media,
+                                                 const QPointF& scenePos) {
+    if (!media) {
         return;
     }
 
-    m_scene->clearSelection();
+    const QSize baseSize = media->baseSizePx();
+    const qreal mediaScale = std::max<qreal>(std::abs(media->scale()), 1e-6);
+    const qreal width = static_cast<qreal>(baseSize.width()) * mediaScale;
+    const qreal height = static_cast<qreal>(baseSize.height()) * mediaScale;
+    media->setPos(scenePos - QPointF(width * 0.5, height * 0.5));
+}
 
-    for (const QString& localPath : localPaths) {
-        if (localPath.isEmpty()) {
-            continue;
-        }
-
-        QFileInfo fi(localPath);
-        const MediaFilePolicy::Kind mediaKind = MediaFilePolicy::classifyLocalFile(localPath);
-
-        if (mediaKind == MediaFilePolicy::Kind::Mp4Video) {
-            auto* v = new ResizableVideoItem(localPath, 12, 30, fi.fileName(), m_videoControlsFadeMs);
-            v->setRuntimeContext(m_mediaRuntimeContext);
-            if (m_applicationSuspended) {
-                v->setApplicationSuspended(true);
-            }
-            v->setSourcePath(localPath);
-            v->setInitialScaleFactor(m_scaleFactor);
-
-            QSize videoSize(640, 360);
-            if (v->baseSizePx().isValid()) {
-                videoSize = v->baseSizePx();
-            }
-            Q_UNUSED(videoSize);
-
-            v->setScale(m_scaleFactor);
-            positionMediaCenteredAtScene(v, scenePos);
-            assignNextZValue(v);
-            m_scene->addItem(v);
-            v->setSelected(true);
-            emit mediaItemAdded(v);
-            continue;
-        }
-
-        if (mediaKind == MediaFilePolicy::Kind::UnsupportedVideo) {
-            TOAST_WARNING(QStringLiteral("Unsupported video format: only MP4 video files are accepted"));
-            continue;
-        }
-        if (mediaKind != MediaFilePolicy::Kind::Image) {
-            continue;
-        }
-
-        QPixmap pm(localPath);
-        if (!pm.isNull()) {
-            auto* p = new ResizablePixmapItem(pm, 12, 30, fi.fileName());
-            p->setRuntimeContext(m_mediaRuntimeContext);
-            p->setSourcePath(localPath);
-            p->setScale(m_scaleFactor);
-            positionMediaCenteredAtScene(p, scenePos);
-            assignNextZValue(p);
-            m_scene->addItem(p);
-            p->setSelected(true);
-            emit mediaItemAdded(p);
-        }
+ResizableMediaBase* ScreenCanvas::requestPreparedLocalFileDropAt(
+    const QString& localPath, const QSize& nativeSize,
+    const QImage& previewFrame, const QPointF& scenePos) {
+    if (m_hostSceneActive || m_sceneLaunching || m_sceneLaunched || m_sceneStopping
+        || !m_scene || localPath.isEmpty() || nativeSize.isEmpty()
+        || previewFrame.isNull()) {
+        return nullptr;
     }
 
+    m_scene->clearSelection();
+    QFileInfo fi(localPath);
+    const MediaFilePolicy::Kind mediaKind = MediaFilePolicy::classifyLocalFile(localPath);
+    ResizableMediaBase* media = nullptr;
+
+    if (mediaKind == MediaFilePolicy::Kind::Mp4Video) {
+        auto* video = new ResizableVideoItem(localPath, nativeSize, 12, 30,
+                                             fi.fileName(), m_videoControlsFadeMs);
+        video->setRuntimeContext(m_mediaRuntimeContext);
+        if (m_applicationSuspended) {
+            video->setApplicationSuspended(true);
+        }
+        video->setSourcePath(localPath);
+        video->setInitialScaleFactor(m_scaleFactor);
+        video->setExternalPosterImage(previewFrame, nativeSize);
+        media = video;
+    } else if (mediaKind == MediaFilePolicy::Kind::Image) {
+        const QPixmap previewPixmap = QPixmap::fromImage(previewFrame);
+        if (previewPixmap.isNull()) {
+            return nullptr;
+        }
+        auto* image = new ResizablePixmapItem(previewPixmap, nativeSize,
+                                              12, 30, fi.fileName());
+        image->setRuntimeContext(m_mediaRuntimeContext);
+        image->setSourcePath(localPath);
+        media = image;
+    }
+
+    if (!media) {
+        return nullptr;
+    }
+
+    media->setScale(m_scaleFactor);
+    positionMediaCenteredAtScene(media, scenePos);
+    assignNextZValue(media);
+    m_scene->addItem(media);
+    media->setSelected(true);
+    emit mediaItemAdded(media);
     refreshInfoOverlay();
+    return media;
 }
 
 TextMediaItem* ScreenCanvas::createTextMediaAtPosition(const QPointF& scenePos) {

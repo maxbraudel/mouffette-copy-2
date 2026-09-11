@@ -8,7 +8,7 @@ import QtQuick.Layouts 1.15
 // Positioned in item-local coordinates: y = parent.height + gap
 //
 // Seek protocol (three-phase to match C++ drag-lock pattern):
-//   seekBeginRequested  — pointer pressed on progress bar (C++ sets m_draggingProgress=true)
+//   seekBeginRequested  — pointer pressed on progress bar (starts one scrub session)
 //   seekUpdateRequested — pointer moved during drag (live preview, fires frequently)
 //   seekEndRequested    — pointer released (C++ clears m_draggingProgress, commits position)
 Item {

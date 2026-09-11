@@ -2,9 +2,6 @@
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <wrl/client.h>
-#include <wincodec.h>
-#include <shobjidl.h>
-#include <shlwapi.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
@@ -12,6 +9,8 @@
 #include <QDir>
 #include <QFile>
 #include <QDebug>
+#include <QTransform>
+#include <algorithm>
 
 #ifndef MFSTARTUP_LITE
 #define MFSTARTUP_LITE 0x1
@@ -63,94 +62,149 @@ private:
     bool m_ok = false;
 };
 
-QImage convertBitmapSourceToImage(IWICBitmapSource* source) {
-    if (!source) return QImage();
-
-    UINT width = 0, height = 0;
-    if (FAILED(source->GetSize(&width, &height)) || width == 0 || height == 0) {
-        return QImage();
+QSize displaySizeForMediaType(IMFMediaType* mediaType) {
+    if (!mediaType) {
+        return {};
     }
 
-    ComPtr<IWICImagingFactory> factory;
-    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))) {
-        return QImage();
+    UINT32 width = 0;
+    UINT32 height = 0;
+    if (FAILED(MFGetAttributeSize(mediaType, MF_MT_FRAME_SIZE, &width, &height))
+        || width == 0 || height == 0) {
+        return {};
     }
 
-    ComPtr<IWICFormatConverter> converter;
-    if (FAILED(factory->CreateFormatConverter(&converter))) {
-        return QImage();
+    UINT32 parNumerator = 1;
+    UINT32 parDenominator = 1;
+    if (FAILED(MFGetAttributeRatio(mediaType, MF_MT_PIXEL_ASPECT_RATIO,
+                                   &parNumerator, &parDenominator))
+        || parNumerator == 0 || parDenominator == 0) {
+        parNumerator = 1;
+        parDenominator = 1;
     }
+    int displayWidth = qMax(1, qRound(static_cast<double>(width)
+                                     * parNumerator / parDenominator));
+    int displayHeight = static_cast<int>(height);
 
-    if (FAILED(converter->Initialize(source, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0.0f, WICBitmapPaletteTypeCustom))) {
-        return QImage();
+    UINT32 rotation = MFVideoRotationFormat_0;
+    mediaType->GetUINT32(MF_MT_VIDEO_ROTATION, &rotation);
+    if (rotation == MFVideoRotationFormat_90
+        || rotation == MFVideoRotationFormat_270) {
+        std::swap(displayWidth, displayHeight);
     }
-
-    const UINT stride = width * 4;
-    const UINT bufferSize = stride * height;
-    QImage image(width, height, QImage::Format_ARGB32_Premultiplied);
-    if (image.isNull()) {
-        return QImage();
-    }
-
-    if (FAILED(converter->CopyPixels(nullptr, stride, bufferSize, image.bits()))) {
-        return QImage();
-    }
-
-    return image;
+    return QSize(displayWidth, displayHeight);
 }
 
-ComPtr<IWICBitmapSource> captureFirstFrameWithWmp(const QString& path) {
-    ComPtr<IWICBitmapSource> bitmap;
-    ComPtr<IWICImagingFactory> wicFactory;
-    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wicFactory)))) {
-        return nullptr;
+QImage decodeExactFirstFrame(const QString& path) {
+    if (!MediaFoundationGuard::instance().ok()) {
+        return {};
     }
 
-    ComPtr<IWICBitmapDecoder> decoder;
-    if (FAILED(wicFactory->CreateDecoderFromFilename(reinterpret_cast<LPCWSTR>(path.utf16()), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder))) {
-        return nullptr;
+    ComPtr<IMFAttributes> attributes;
+    if (FAILED(MFCreateAttributes(&attributes, 2))) {
+        return {};
+    }
+    // Let Source Reader insert the colour converter needed for a CPU-readable
+    // RGB frame. This is a one-shot import operation, not the playback path.
+    attributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+
+    ComPtr<IMFSourceReader> reader;
+    if (FAILED(MFCreateSourceReaderFromURL(reinterpret_cast<LPCWSTR>(path.utf16()),
+                                           attributes.Get(), &reader))) {
+        return {};
+    }
+    reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
+    reader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
+
+    UINT32 nativeRotation = MFVideoRotationFormat_0;
+    ComPtr<IMFMediaType> nativeType;
+    if (SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                              &nativeType))) {
+        nativeType->GetUINT32(MF_MT_VIDEO_ROTATION, &nativeRotation);
     }
 
-    ComPtr<IWICBitmapFrameDecode> frame;
-    if (FAILED(decoder->GetFrame(0, &frame))) {
-        return nullptr;
+    ComPtr<IMFMediaType> requestedType;
+    if (FAILED(MFCreateMediaType(&requestedType))
+        || FAILED(requestedType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video))
+        || FAILED(requestedType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32))
+        || FAILED(reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                              nullptr, requestedType.Get()))) {
+        return {};
     }
 
-    // Some video containers expose the first frame via the decoder directly.
-    return frame;
-}
+    // A fresh Source Reader starts at presentation time zero. Read only until
+    // the first actual video sample; unlike Shell thumbnails this cannot choose
+    // a later representative frame.
+    for (int attempt = 0; attempt < 64; ++attempt) {
+        DWORD streamIndex = 0;
+        DWORD flags = 0;
+        LONGLONG timestamp100ns = 0;
+        ComPtr<IMFSample> sample;
+        const HRESULT readResult = reader->ReadSample(
+            MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &streamIndex, &flags,
+            &timestamp100ns, &sample);
+        if (FAILED(readResult)
+            || (flags & (MF_SOURCE_READERF_ERROR | MF_SOURCE_READERF_ENDOFSTREAM))) {
+            return {};
+        }
+        if (!sample) {
+            continue;
+        }
 
-ComPtr<IWICBitmapSource> captureFirstFrameWithShell(const QString& path) {
-    ComPtr<IShellItem> item;
-    if (FAILED(SHCreateItemFromParsingName(reinterpret_cast<LPCWSTR>(path.utf16()), nullptr, IID_PPV_ARGS(&item)))) {
-        return nullptr;
+        ComPtr<IMFMediaType> outputType;
+        if (FAILED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                               &outputType))) {
+            return {};
+        }
+        UINT32 width = 0;
+        UINT32 height = 0;
+        if (FAILED(MFGetAttributeSize(outputType.Get(), MF_MT_FRAME_SIZE,
+                                      &width, &height))
+            || width == 0 || height == 0) {
+            return {};
+        }
+
+        LONG sourceStride = 0;
+        UINT32 strideValue = 0;
+        if (SUCCEEDED(outputType->GetUINT32(MF_MT_DEFAULT_STRIDE, &strideValue))) {
+            sourceStride = static_cast<LONG>(strideValue);
+        } else if (FAILED(MFGetStrideForBitmapInfoHeader(
+                       MFVideoFormat_RGB32.Data1, width, &sourceStride))) {
+            sourceStride = static_cast<LONG>(width * 4);
+        }
+
+        ComPtr<IMFMediaBuffer> buffer;
+        if (FAILED(sample->ConvertToContiguousBuffer(&buffer))) {
+            return {};
+        }
+        BYTE* bytes = nullptr;
+        DWORD maximumLength = 0;
+        DWORD currentLength = 0;
+        if (FAILED(buffer->Lock(&bytes, &maximumLength, &currentLength)) || !bytes) {
+            return {};
+        }
+
+        QImage image(static_cast<int>(width), static_cast<int>(height),
+                     QImage::Format_RGB32);
+        HRESULT copyResult = E_FAIL;
+        if (!image.isNull()) {
+            copyResult = MFCopyImage(image.bits(), image.bytesPerLine(), bytes,
+                                     sourceStride, width * 4, height);
+        }
+        buffer->Unlock();
+        if (SUCCEEDED(copyResult)) {
+            if (nativeRotation == MFVideoRotationFormat_90
+                || nativeRotation == MFVideoRotationFormat_180
+                || nativeRotation == MFVideoRotationFormat_270) {
+                QTransform transform;
+                transform.rotate(static_cast<qreal>(nativeRotation));
+                image = image.transformed(transform, Qt::SmoothTransformation);
+            }
+            return image;
+        }
+        return {};
     }
-
-    ComPtr<IShellItemImageFactory> imageFactory;
-    if (FAILED(item.As(&imageFactory))) {
-        return nullptr;
-    }
-
-    SIZE size = { 640, 360 };
-    HBITMAP hBitmap = nullptr;
-    if (FAILED(imageFactory->GetImage(size, SIIGBF_BIGGERSIZEOK | SIIGBF_THUMBNAILONLY | SIIGBF_INCACHEONLY, &hBitmap))) {
-        return nullptr;
-    }
-
-    ComPtr<IWICImagingFactory> wicFactory;
-    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wicFactory)))) {
-        DeleteObject(hBitmap);
-        return nullptr;
-    }
-
-    ComPtr<IWICBitmap> wicBitmap;
-    if (FAILED(wicFactory->CreateBitmapFromHBITMAP(hBitmap, nullptr, WICBitmapUseAlpha, &wicBitmap))) {
-        DeleteObject(hBitmap);
-        return nullptr;
-    }
-
-    DeleteObject(hBitmap);
-    return wicBitmap;
+    return {};
 }
 
 } // namespace
@@ -185,14 +239,7 @@ QSize WindowsVideoThumbnailer::videoDimensions(const QString& localFilePath) {
         return QSize();
     }
 
-    UINT32 width = 0, height = 0;
-    MFGetAttributeSize(mediaType.Get(), MF_MT_FRAME_SIZE, &width, &height);
-    
-    if (width > 0 && height > 0) {
-        return QSize(width, height);
-    }
-    
-    return QSize();
+    return displaySizeForMediaType(mediaType.Get());
 }
 
 QImage WindowsVideoThumbnailer::firstFrame(const QString& localFilePath) {
@@ -212,21 +259,7 @@ QImage WindowsVideoThumbnailer::firstFrame(const QString& localFilePath) {
 
     const QString path = QDir::toNativeSeparators(localFilePath);
 
-    if (ComPtr<IWICBitmapSource> wmpFrame = captureFirstFrameWithWmp(path)) {
-        QImage img = convertBitmapSourceToImage(wmpFrame.Get());
-        if (!img.isNull()) {
-            return img;
-        }
-    }
-
-    if (ComPtr<IWICBitmapSource> shellThumb = captureFirstFrameWithShell(path)) {
-        QImage img = convertBitmapSourceToImage(shellThumb.Get());
-        if (!img.isNull()) {
-            return img;
-        }
-    }
-
-    return QImage();
+    return decodeExactFirstFrame(path);
 }
 
 #endif

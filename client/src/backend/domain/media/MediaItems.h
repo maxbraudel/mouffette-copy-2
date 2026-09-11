@@ -293,6 +293,9 @@ protected:
 class ResizablePixmapItem : public ResizableMediaBase {
 public:
     explicit ResizablePixmapItem(const QPixmap& pm, int visualSizePx, int selectionSizePx, const QString& filename = QString());
+    ResizablePixmapItem(const QPixmap& previewPixmap, const QSize& nativeSize,
+                        int visualSizePx, int selectionSizePx,
+                        const QString& filename = QString());
     void paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) override;
 private:
     QPixmap m_pix;
@@ -301,7 +304,9 @@ private:
 // Video media item with in-item controls overlays & performance instrumentation
 class ResizableVideoItem : public ResizableMediaBase {
 public:
-    explicit ResizableVideoItem(const QString& filePath, int visualSizePx, int selectionSizePx, const QString& filename = QString(), int controlsFadeMs = 140);
+    explicit ResizableVideoItem(const QString& filePath, const QSize& nativeDisplaySize,
+                                int visualSizePx, int selectionSizePx,
+                                const QString& filename = QString(), int controlsFadeMs = 140);
     ~ResizableVideoItem() override;
 
     // Public control helpers used by ScreenCanvas (drag gestures etc.)
@@ -311,6 +316,9 @@ public:
     void setMuted(bool muted, bool skipFade = false);
     void stopToBeginning();
     void seekToRatio(qreal r);
+    void beginScrub(qreal r);
+    void updateScrub(qreal r);
+    void endScrub(qreal r);
     qint64 currentPositionMs() const { return m_positionMs; }
     qint64 displayedFrameTimestampMs() const { return m_lastFrameTimestampMs; }
     bool hasRenderedFrame() const { return !m_lastFrameImage.isNull(); }
@@ -323,14 +331,10 @@ public:
     bool isPlaying() const { return m_expectedPlayingState; }
     void pauseAndSetPosition(qint64 posMs);
     void setInitialScaleFactor(qreal f) { m_initialScaleFactor = f; }
-    void setExternalPosterImage(const QImage& img);
+    void setExternalPosterImage(const QImage& img, const QSize& nativeDisplaySize = {});
     bool isDraggingProgress() const { return m_draggingProgress; }
-
-    // Lock/unlock the drag-in-progress flag from the QML path.
-    // When dragging=false the method also restarts m_progressTimer if the player
-    // is currently in PlayingState and m_seeking has already cleared — this ensures
-    // the 33 ms progress timer resumes cleanly as soon as scrubbing ends.
-    void setDraggingProgress(bool dragging);
+    bool scrubSeekInFlight() const { return m_scrubSeekInFlight; }
+    int scrubSeekRequestsIssued() const { return m_scrubSeekRequestsIssued; }
 
     bool isDraggingVolume() const { return m_draggingVolume; }
     void requestOverlayRelayout() { updateControlsLayout(); }
@@ -382,6 +386,11 @@ private:
     void requestFirstFramePrime();
     void bindFrameObserverToActiveSink();
     void handleVideoFrame(const QVideoFrame& frame);
+    void queueScrubTarget(qreal ratio);
+    void issueLatestScrubSeek();
+    void acknowledgeScrubFrame(const QVideoFrame& frame, qint64 timestampMs);
+    void handleScrubWatchdog();
+    void finishScrubSession();
     void maybeAdoptFrameSize(const QVideoFrame& f);
     QSizeF computeFrameDisplaySize(const QVideoFrame& frame) const;
     QImage applyViewportCrop(const QImage& image, const QVideoFrame& frame) const;
@@ -443,6 +452,16 @@ private:
     bool m_repeatEnabled = false;
     bool m_draggingProgress = false; bool m_draggingVolume = false; bool m_holdLastFrameAtEnd = false;
     QTimer* m_progressTimer = nullptr; qreal m_smoothProgressRatio = 0.0; bool m_seeking = false;
+    QTimer* m_scrubWatchdog = nullptr;
+    bool m_scrubActive = false;
+    bool m_scrubResumePlayback = false;
+    bool m_scrubSeekInFlight = false;
+    bool m_scrubEndRequested = false;
+    bool m_scrubDecoderAdvanceActive = false;
+    bool m_scrubHardwareMuteApplied = false;
+    qint64 m_scrubInFlightTargetMs = -1;
+    qint64 m_scrubLatestTargetMs = -1;
+    int m_scrubSeekRequestsIssued = 0;
     bool m_controlsLockedUntilReady = true; int m_controlsFadeMs = 140; QVariantAnimation* m_controlsFadeAnim = nullptr; bool m_controlsDidInitialFade = false;
     qint64 m_lastRepaintMs = 0; int m_repaintBudgetMs = 16;
     mutable int m_framesReceived = 0; mutable int m_framesProcessed = 0; mutable int m_framesSkipped = 0;

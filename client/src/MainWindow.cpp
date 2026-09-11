@@ -64,10 +64,6 @@
 #include <QVariantAnimation>
 #include <QEasingCurve>
 #include <QTimer>
-#include <QDragEnterEvent>
-#include <QDropEvent>
-#include <QDragMoveEvent>
-#include <QMimeData>
 #include <QStatusBar>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsSceneMouseEvent>
@@ -76,7 +72,6 @@
 #include <QUrl>
 #include <QImage>
 #include <QAbstractItemView>
-#include <QPixmap>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QRegularExpression>

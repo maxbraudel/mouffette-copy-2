@@ -386,6 +386,7 @@ if(WIN32)
         ole32
         uuid
         windowscodecs
+        evr
         mfplat
         mfreadwrite
         mfuuid
@@ -398,7 +399,7 @@ if(APPLE)
         MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/Info.plist
     )
     # Link with macOS frameworks used by native integrations
-    target_link_libraries(MouffetteClient "-framework AppKit" "-framework AVFoundation" "-framework CoreMedia" "-framework CoreGraphics" "-framework QuickLookThumbnailing")
+    target_link_libraries(MouffetteClient "-framework AppKit" "-framework AVFoundation" "-framework CoreMedia" "-framework CoreGraphics")
     
     # Set Objective-C++ properties for .mm files (updated paths for backend/platform)
     set_source_files_properties(src/backend/platform/macos/MacVideoThumbnailer.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
@@ -474,7 +475,8 @@ if(BUILD_TESTING)
     target_include_directories(tst_CanvasSelectionBackend PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
     target_compile_definitions(tst_CanvasSelectionBackend PRIVATE
-        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>")
+        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>"
+        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../video-1080p.mp4")
     target_link_libraries(tst_CanvasSelectionBackend PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
     add_test(NAME CanvasSelectionBackend COMMAND tst_CanvasSelectionBackend)

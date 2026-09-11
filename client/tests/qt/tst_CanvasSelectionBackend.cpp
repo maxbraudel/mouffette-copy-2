@@ -1,11 +1,23 @@
 #include <QApplication>
+#include <QDragEnterEvent>
+#include <QDragLeaveEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
+#include <QFileInfo>
 #include <QGraphicsScene>
+#include <QImage>
+#include <QImageIOHandler>
+#include <QImageReader>
+#include <QImageWriter>
 #include <QJSValue>
+#include <QMimeData>
 #include <QQuickItem>
 #include <QQuickWidget>
 #include <QRegularExpression>
 #include <QSet>
 #include <QTimer>
+#include <QTemporaryDir>
+#include <QUrl>
 #include <QVariantList>
 #include <QWidget>
 #include <QtTest>
@@ -21,6 +33,14 @@ QVariantList listProperty(QObject* object, const char* name)
     if (value.metaType() == QMetaType::fromType<QJSValue>())
         value = value.value<QJSValue>().toVariant();
     return value.toList();
+}
+
+QVariantMap mapProperty(QObject* object, const char* name)
+{
+    QVariant value = object->property(name);
+    if (value.metaType() == QMetaType::fromType<QJSValue>())
+        value = value.value<QJSValue>().toVariant();
+    return value.toMap();
 }
 
 QQuickItem* mediaDelegate(QQuickItem* root, const QString& mediaId)
@@ -458,6 +478,237 @@ private slots:
         const qreal publishedWidth = published.value("width").toReal() * published.value("scale").toReal();
         QVERIFY(qAbs(publishedWidth - m_second->sceneBoundingRect().width()) < 0.01);
         QCOMPARE(published.value("textContent").toString(), QStringLiteral("Second"));
+    }
+
+    void localImageDragUsesNativeGeometryAndRestoresCursor()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString path = directory.filePath(QStringLiteral("image-320.png"));
+        QImage source(320, 180, QImage::Format_ARGB32_Premultiplied);
+        source.fill(QColor(QStringLiteral("#ff5a7a")));
+        QVERIFY(source.save(path));
+
+        auto* quick = qobject_cast<QQuickWidget*>(m_canvas->controller.widget());
+        QVERIFY(quick);
+        m_canvas->host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&m_canvas->host));
+        m_canvas->root->setProperty("viewScale", 0.5);
+        m_canvas->root->setProperty("panX", 40.0);
+        m_canvas->root->setProperty("panY", 25.0);
+
+        QMimeData mime;
+        mime.setUrls({QUrl::fromLocalFile(path)});
+        QSignalSpy prepared(&m_canvas->controller,
+                            &QuickCanvasController::preparedLocalFileDropRequested);
+        connect(&m_canvas->controller,
+                &QuickCanvasController::preparedLocalFileDropRequested,
+                &m_canvas->controller,
+                [this](const QString&, const QSize&, const QImage&, const QPointF&) {
+                    m_canvas->controller.beginDropPreviewHandoff(
+                        QStringLiteral("prepared-image"));
+                });
+
+        QDragEnterEvent enter(QPoint(300, 200), Qt::CopyAction, &mime,
+                              Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(quick, &enter);
+        QVERIFY(enter.isAccepted());
+        QCOMPARE(quick->cursor().shape(), Qt::BlankCursor);
+
+        QTRY_VERIFY_WITH_TIMEOUT(
+            mapProperty(m_canvas->root, "dropPreviewModel").value("visible").toBool(),
+            3000);
+        QTRY_VERIFY_WITH_TIMEOUT(
+            mapProperty(m_canvas->root, "dropPreviewModel").value("frameReady").toBool(),
+            3000);
+        QVariantMap preview = mapProperty(m_canvas->root, "dropPreviewModel");
+        QCOMPARE(preview.value("width").toInt(), 320);
+        QCOMPARE(preview.value("height").toInt(), 180);
+        QCOMPARE(preview.value("x").toDouble(), 360.0); // ((300-40)/.5) - 160
+        QCOMPARE(preview.value("y").toDouble(), 260.0); // ((200-25)/.5) - 90
+
+        auto* previewItem = m_canvas->root->findChild<QQuickItem*>(
+            QStringLiteral("mediaDropPreview"));
+        auto* previewSurface = m_canvas->root->findChild<QQuickItem*>(
+            QStringLiteral("dropPreviewSurface"));
+        auto* previewTitle = m_canvas->root->findChild<QQuickItem*>(
+            QStringLiteral("dropPreviewTitle"));
+        QVERIFY(previewItem);
+        QVERIFY(previewSurface);
+        QVERIFY(previewTitle);
+        QCOMPARE(previewSurface->property("placeholderColor").value<QColor>(),
+                 QColor(QStringLiteral("#F2323232")));
+        QCOMPARE(previewSurface->property("fadeDuration").toInt(), 80);
+        QCOMPARE(previewTitle->height(), 36.0);
+        QCOMPARE(previewTitle->y(), 25.0 + 260.0 * 0.5 - 76.0 - 8.0);
+
+        QDragMoveEvent move(QPoint(420, 260), Qt::CopyAction, &mime,
+                            Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(quick, &move);
+        QVERIFY(move.isAccepted());
+        preview = mapProperty(m_canvas->root, "dropPreviewModel");
+        QCOMPARE(preview.value("x").toDouble(), 600.0); // ((420-40)/.5) - 160
+        QCOMPARE(preview.value("y").toDouble(), 380.0); // ((260-25)/.5) - 90
+
+        QDropEvent drop(QPointF(420, 260), Qt::CopyAction, &mime,
+                        Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(quick, &drop);
+        QVERIFY(drop.isAccepted());
+        QTRY_COMPARE(prepared.size(), 1);
+        QCOMPARE(prepared.first().at(0).toString(), QFileInfo(path).canonicalFilePath());
+        QCOMPARE(prepared.first().at(1).toSize(), QSize(320, 180));
+        QCOMPARE(prepared.first().at(3).toPointF(), QPointF(760, 470));
+        QCOMPARE(quick->cursor().shape(), Qt::ArrowCursor);
+        QCOMPARE(mapProperty(m_canvas->root, "dropPreviewModel")
+                     .value("handoffMediaId").toString(),
+                 QStringLiteral("prepared-image"));
+
+        QVERIFY(QMetaObject::invokeMethod(&m_canvas->controller,
+                                          "handleDropPreviewContentReady",
+                                          Qt::DirectConnection,
+                                          Q_ARG(QString, QStringLiteral("prepared-image"))));
+        QTRY_VERIFY_WITH_TIMEOUT(
+            !mapProperty(m_canvas->root, "dropPreviewModel").value("visible").toBool(),
+            500);
+
+        // The identity-based cache makes a second enter ready synchronously.
+        QDragEnterEvent cachedEnter(QPoint(200, 160), Qt::CopyAction, &mime,
+                                    Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(quick, &cachedEnter);
+        QVERIFY(cachedEnter.isAccepted());
+        preview = mapProperty(m_canvas->root, "dropPreviewModel");
+        QVERIFY(preview.value("visible").toBool());
+        QVERIFY(preview.value("frameReady").toBool());
+        QDragLeaveEvent leave;
+        QApplication::sendEvent(quick, &leave);
+        QVERIFY(leave.isAccepted());
+        QCOMPARE(quick->cursor().shape(), Qt::ArrowCursor);
+
+        // Replacing the same path changes its identity and cannot reuse stale
+        // geometry or pixels from the previous cache entry.
+        QTest::qWait(5);
+        QImage replacement(401, 203, QImage::Format_ARGB32_Premultiplied);
+        replacement.fill(QColor(QStringLiteral("#27364c")));
+        QVERIFY(replacement.save(path));
+        QDragEnterEvent invalidatedEnter(QPoint(200, 160), Qt::CopyAction, &mime,
+                                         Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(quick, &invalidatedEnter);
+        QVERIFY(invalidatedEnter.isAccepted());
+        QTRY_COMPARE(mapProperty(m_canvas->root, "dropPreviewModel")
+                         .value("width").toInt(), 401);
+        QCOMPARE(mapProperty(m_canvas->root, "dropPreviewModel")
+                     .value("height").toInt(), 203);
+        QDragLeaveEvent invalidatedLeave;
+        QApplication::sendEvent(quick, &invalidatedLeave);
+        QVERIFY(invalidatedLeave.isAccepted());
+
+        // Batches are intentionally refused and cannot hide the pointer.
+        QMimeData batchMime;
+        batchMime.setUrls({QUrl::fromLocalFile(path), QUrl::fromLocalFile(path)});
+        QDragEnterEvent batchEnter(QPoint(100, 100), Qt::CopyAction, &batchMime,
+                                   Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(quick, &batchEnter);
+        QVERIFY(!batchEnter.isAccepted());
+        QCOMPARE(quick->cursor().shape(), Qt::ArrowCursor);
+    }
+
+    void localVideoDragPublishesExactGeometryBeforeDrop()
+    {
+        const QString path = QString::fromUtf8(TEST_VIDEO_FILE);
+        if (!QFileInfo::exists(path)) {
+            QSKIP(qPrintable(QStringLiteral("Optional real-video fixture is missing: %1")
+                                 .arg(path)));
+        }
+
+        auto* quick = qobject_cast<QQuickWidget*>(m_canvas->controller.widget());
+        QVERIFY(quick);
+        m_canvas->host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&m_canvas->host));
+
+        QMimeData mime;
+        mime.setUrls({QUrl::fromLocalFile(path)});
+        QSignalSpy prepared(&m_canvas->controller,
+                            &QuickCanvasController::preparedLocalFileDropRequested);
+        connect(&m_canvas->controller,
+                &QuickCanvasController::preparedLocalFileDropRequested,
+                &m_canvas->controller,
+                [this](const QString&, const QSize&, const QImage&, const QPointF&) {
+                    m_canvas->controller.beginDropPreviewHandoff(
+                        QStringLiteral("prepared-video"));
+                });
+
+        QDragEnterEvent enter(QPoint(500, 350), Qt::CopyAction, &mime,
+                              Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(quick, &enter);
+        QVERIFY(enter.isAccepted());
+        QCOMPARE(prepared.size(), 0);
+        QCOMPARE(quick->cursor().shape(), Qt::BlankCursor);
+        QTRY_VERIFY_WITH_TIMEOUT(
+            mapProperty(m_canvas->root, "dropPreviewModel").value("visible").toBool(),
+            5000);
+        QTRY_VERIFY_WITH_TIMEOUT(
+            mapProperty(m_canvas->root, "dropPreviewModel").value("frameReady").toBool(),
+            5000);
+        const QVariantMap preview = mapProperty(m_canvas->root, "dropPreviewModel");
+        QCOMPARE(preview.value("phase").toString(), QStringLiteral("ready"));
+        QCOMPARE(preview.value("mediaType").toString(), QStringLiteral("video"));
+        QCOMPARE(preview.value("width").toInt(), 1920);
+        QCOMPARE(preview.value("height").toInt(), 1080);
+        QCOMPARE(preview.value("x").toDouble(), -460.0);
+        QCOMPARE(preview.value("y").toDouble(), -190.0);
+
+        QDropEvent drop(QPointF(500, 350), Qt::CopyAction, &mime,
+                        Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(quick, &drop);
+        QVERIFY(drop.isAccepted());
+        QTRY_COMPARE(prepared.size(), 1);
+        QCOMPARE(prepared.first().at(1).toSize(), QSize(1920, 1080));
+        QVERIFY(!prepared.first().at(2).value<QImage>().isNull());
+        QCOMPARE(prepared.first().at(3).toPointF(), QPointF(500, 350));
+        QCOMPARE(quick->cursor().shape(), Qt::ArrowCursor);
+        const QVariantMap handoff = mapProperty(m_canvas->root, "dropPreviewModel");
+        QCOMPARE(handoff.value("phase").toString(), QStringLiteral("handoff"));
+        QCOMPARE(handoff.value("width").toInt(), 1920);
+        QCOMPARE(handoff.value("height").toInt(), 1080);
+    }
+
+    void localImageDragRespectsStoredOrientation()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString path = directory.filePath(QStringLiteral("oriented.jpg"));
+        QImage source(120, 60, QImage::Format_RGB32);
+        source.fill(QColor(QStringLiteral("#d59344")));
+        QImageWriter writer(path, "jpeg");
+        if (!writer.supportsOption(QImageIOHandler::ImageTransformation)) {
+            QSKIP("The active JPEG plugin cannot write orientation metadata");
+        }
+        writer.setTransformation(QImageIOHandler::TransformationRotate90);
+        QVERIFY2(writer.write(source), qPrintable(writer.errorString()));
+
+        QImageReader verification(path);
+        verification.setAutoTransform(true);
+        const QImage decoded = verification.read();
+        QVERIFY(!decoded.isNull());
+        QCOMPARE(decoded.size(), QSize(60, 120));
+
+        auto* quick = qobject_cast<QQuickWidget*>(m_canvas->controller.widget());
+        QVERIFY(quick);
+        QMimeData mime;
+        mime.setUrls({QUrl::fromLocalFile(path)});
+        QDragEnterEvent enter(QPoint(300, 220), Qt::CopyAction, &mime,
+                              Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(quick, &enter);
+        QVERIFY(enter.isAccepted());
+        QTRY_VERIFY_WITH_TIMEOUT(
+            mapProperty(m_canvas->root, "dropPreviewModel").value("frameReady").toBool(),
+            3000);
+        const QVariantMap preview = mapProperty(m_canvas->root, "dropPreviewModel");
+        QCOMPARE(preview.value("width").toInt(), 60);
+        QCOMPARE(preview.value("height").toInt(), 120);
+        QDragLeaveEvent leave;
+        QApplication::sendEvent(quick, &leave);
+        QCOMPARE(quick->cursor().shape(), Qt::ArrowCursor);
     }
 
 private:

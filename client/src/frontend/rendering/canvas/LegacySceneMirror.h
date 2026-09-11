@@ -5,7 +5,8 @@
 #include <QGraphicsView>
 #include <QString>
 #include <QList>
-#include <QStringList>
+#include <QImage>
+#include <QSize>
 #include "backend/domain/models/ClientInfo.h"
 
 class ScreenCanvas;
@@ -49,7 +50,10 @@ public:
 
     bool isTextToolActive() const;
     void createTextAt(const QPointF& scenePos, qreal currentZoomScale);
-    void requestLocalFileDropAt(const QStringList& localPaths, const QPointF& scenePos);
+    ResizableMediaBase* requestPreparedLocalFileDropAt(const QString& localPath,
+                                                       const QSize& nativeSize,
+                                                       const QImage& previewFrame,
+                                                       const QPointF& scenePos);
 
     QPushButton* getUploadButton() const;
     bool isRemoteSceneLaunched() const;

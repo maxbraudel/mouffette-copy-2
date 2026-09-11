@@ -18,7 +18,7 @@ import QtQuick 2.15
 // Signals:
 //   dragStarted(ratio) — pointer pressed; begin scrub, C++ should lock drag state
 //   seeked(ratio)      — pointer moved during drag (frequent, use for live preview)
-//   dragEnded(ratio)   — pointer released; commit final position, unlock drag state
+//   dragEnded(ratio)   — pointer released; request the final acknowledged frame
 Item {
     id: root
 
@@ -110,7 +110,6 @@ Item {
             root._dragging = true
             root._visualValue = r
             root.dragStarted(r)
-            root.seeked(r)
         }
 
         onPositionChanged: function(mouse) {

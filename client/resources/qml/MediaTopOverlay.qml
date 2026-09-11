@@ -32,17 +32,14 @@ Item {
 
     // Row 1: media name in a styled pill.
     // Stretches to the full container width (= buttons row width).
-    Rectangle {
+    MediaNamePill {
         id: namePill
         visible: root.displayName.length > 0
         x: 0
         y: 0
         width: root.width
         height: root.namePillHeight
-        radius: 6
-        color: "#F2323232"   // gOverlayBackgroundColor
-        border.color: "#FF646464"  // gOverlayBorderColor
-        border.width: 1
+        displayName: root.displayName
 
         MouseArea {
             anchors.fill: parent
@@ -51,17 +48,6 @@ Item {
             onReleased: mouse.accepted = true
         }
 
-        Text {
-            anchors.verticalCenter: parent.verticalCenter
-            anchors.left: parent.left
-            anchors.right: parent.right
-            text: root.displayName
-            color: "#FFFFFF"
-            font.pixelSize: 16
-            elide: Text.ElideRight
-            maximumLineCount: 1
-            horizontalAlignment: Text.AlignHCenter
-        }
     }
 
     // Row 2: action buttons — defines the container width

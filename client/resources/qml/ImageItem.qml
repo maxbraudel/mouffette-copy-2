@@ -5,28 +5,28 @@ BaseMediaItem {
     property string imageSource: ""
     contentReady: image.status === Image.Ready
 
-    Rectangle {
+    MediaSurface {
         anchors.fill: parent
-        color: "#141a24"
-        visible: image.status !== Image.Ready
-    }
+        contentReady: image.status === Image.Ready
+        fadeDuration: 80
 
-    Image {
-        id: image
-        anchors.fill: parent
-        source: root.imageSource
-        fillMode: Image.Stretch
-        smooth: true
-        asynchronous: true
-        // mipmap is beneficial for downscaling only; at high zoom (upscaling) it wastes
-        // GPU memory on a full mip chain and can cause allocation failures → black render.
-        mipmap: false
+        Image {
+            id: image
+            anchors.fill: parent
+            source: root.imageSource
+            fillMode: Image.Stretch
+            smooth: true
+            asynchronous: true
+            // mipmap is beneficial for downscaling only; at high zoom (upscaling) it wastes
+            // GPU memory on a full mip chain and can cause allocation failures → black render.
+            mipmap: false
 
-        onStatusChanged: {
-            if (status === Image.Error) {
-                console.warn("[QuickCanvas][ImageItem] load failed",
-                             "mediaId=", root.mediaId,
-                             "source=", root.imageSource)
+            onStatusChanged: {
+                if (status === Image.Error) {
+                    console.warn("[QuickCanvas][ImageItem] load failed",
+                                 "mediaId=", root.mediaId,
+                                 "source=", root.imageSource)
+                }
             }
         }
     }
