@@ -118,6 +118,9 @@ private:
     bool endLiveResizeSession(const QString& mediaId, qreal sceneX, qreal sceneY, qreal scale);
     bool pushLiveResizeGeometry(const QString& mediaId, qreal sceneX, qreal sceneY, qreal scale);
     bool pushLiveAltResizeGeometry(const QString& mediaId, qreal sceneX, qreal sceneY, qreal width, qreal height, qreal scale);
+    void stagePendingAltResize(const QString& mediaId, const QSize& baseSize, const QPointF& scenePos);
+    bool commitPendingAltResize(ResizableMediaBase* target);
+    void clearPendingAltResize();
     void resetAltResizeState();
     static bool isAxisHandle(int handleValue);
     static bool isCornerHandle(int handleValue);
@@ -197,6 +200,11 @@ private:
     qreal  m_altAxisInitialOffset      = 0.0;       // cursor-to-moving-edge offset (axis)
     qreal  m_altCornerInitialOffsetX   = 0.0;       // cursor-to-moving-corner offset X (corner)
     qreal  m_altCornerInitialOffsetY   = 0.0;       // cursor-to-moving-corner offset Y (corner)
+    // QML owns the live non-uniform geometry. Keep the legacy QGraphics item
+    // unchanged during the gesture and commit this final value once on release.
+    QString m_pendingAltResizeMediaId;
+    QSize m_pendingAltResizeBaseSize;
+    QPointF m_pendingAltResizeScenePos;
     // Uniform corner snap result — set inside the snap block, consumed by guide publishing below
     bool   m_uniformCornerSnapped    = false;
     QPointF m_uniformCornerSnappedPt;

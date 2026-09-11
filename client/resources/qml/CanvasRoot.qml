@@ -463,6 +463,19 @@ Rectangle {
         if (!mediaId)
             return false
 
+        // Alt may be released without ending the pointer gesture. The backend
+        // commits that pending non-uniform geometry before entering this path;
+        // remove its visual override so uniform updates become authoritative.
+        if (liveAltResizeMediaId === mediaId) {
+            liveAltResizeActive = false
+            liveAltResizeMediaId = ""
+            liveAltResizeX = 0.0
+            liveAltResizeY = 0.0
+            liveAltResizeWidth = 0.0
+            liveAltResizeHeight = 0.0
+            liveAltResizeScale = 1.0
+        }
+
         // Initialize geometry first so turning the live flag on never renders
         // a transient frame at (0,0) with scale=1.
         if (mediaModel && mediaModel.length > 0) {

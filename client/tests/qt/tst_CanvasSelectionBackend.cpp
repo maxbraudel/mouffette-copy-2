@@ -287,6 +287,70 @@ private slots:
         QTest::newRow("detached-alt") << true << true;
     }
 
+    void altResizeCommitsLegacyGeometryOnlyOnRelease()
+    {
+        const QString wrappedText = QStringLiteral("Live bordered text reflow ").repeated(40);
+        m_first->setText(wrappedText);
+        m_first->setTextBorderWidthOverrideEnabled(true);
+        m_first->setTextBorderWidth(100);
+        QTRY_COMPARE(m_canvas->publishedMedia(m_firstId)
+                         .value("textOutlineWidthPercent").toReal(), qreal(100));
+        QTRY_COMPARE(m_canvas->publishedMedia(m_firstId)
+                         .value("textContent").toString(), wrappedText);
+
+        const QSize initialSize = m_first->baseSizePx();
+        const QPointF initialPos = m_first->scenePos();
+        const QPointF initialCorner = initialPos
+            + QPointF(initialSize.width(), initialSize.height()) * m_first->scale();
+
+        // First tick captures the pointer offset; the second produces a real
+        // non-uniform size change and live text reflow in QML.
+        QVERIFY(m_canvas->resize(m_firstId, initialCorner + QPointF(40, 30), true));
+        QTRY_VERIFY(m_canvas->root->property("liveAltResizeActive").toBool());
+        const qreal capturedWidth = m_canvas->root->property("liveAltResizeWidth").toReal();
+        QVERIFY(m_canvas->resize(m_firstId, initialCorner + QPointF(120, 80), true));
+        QTRY_VERIFY(m_canvas->root->property("liveAltResizeWidth").toReal()
+                    > capturedWidth + 1);
+
+        // The visible delegate owns transient geometry. The hidden QGraphics
+        // mirror must not relayout or update its scene index on pointer ticks.
+        QCOMPARE(m_first->baseSizePx(), initialSize);
+        QCOMPARE(m_first->scenePos(), initialPos);
+
+        QVERIFY(m_canvas->endResize(m_firstId));
+        QVERIFY(!m_first->isActivelyResizing());
+        QVERIFY(m_first->baseSizePx().width() > initialSize.width());
+        QVERIFY(m_first->baseSizePx().height() > initialSize.height());
+        const auto published = m_canvas->publishedMedia(m_firstId);
+        QCOMPARE(published.value("width").toInt(), m_first->baseSizePx().width());
+        QCOMPARE(published.value("height").toInt(), m_first->baseSizePx().height());
+    }
+
+    void releasingAltHandsLiveGeometryBackToUniformResize()
+    {
+        const QSize initialSize = m_first->baseSizePx();
+        const QPointF initialCorner = m_first->scenePos()
+            + QPointF(initialSize.width(), initialSize.height()) * m_first->scale();
+
+        QVERIFY(m_canvas->resize(m_firstId, initialCorner + QPointF(30, 20), true));
+        QTRY_VERIFY(m_canvas->root->property("liveAltResizeActive").toBool());
+        QVERIFY(m_canvas->resize(m_firstId, initialCorner + QPointF(100, 70), true));
+        QTRY_VERIFY(m_canvas->root->property("liveAltResizeWidth").toReal()
+                    > initialSize.width() + 1);
+
+        // Releasing Alt without releasing the mouse commits the staged base
+        // size and removes the Alt visual override before uniform scaling takes
+        // over. Otherwise the delegate appears frozen on its previous ratio.
+        QVERIFY(m_canvas->resize(m_firstId, initialCorner + QPointF(120, 90), false));
+        QTRY_VERIFY(m_canvas->root->property("liveResizeActive").toBool());
+        QVERIFY(!m_canvas->root->property("liveAltResizeActive").toBool());
+        QVERIFY(m_first->baseSizePx() != initialSize);
+
+        QVERIFY(m_canvas->endResize(m_firstId));
+        QVERIFY(!m_canvas->root->property("liveResizeActive").toBool());
+        QVERIFY(!m_canvas->root->property("liveAltResizeActive").toBool());
+    }
+
     void resizeEndAfterTargetRemoval()
     {
         QFETCH(bool, detachScene);

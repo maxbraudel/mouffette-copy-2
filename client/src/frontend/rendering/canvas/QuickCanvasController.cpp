@@ -238,6 +238,7 @@ QuickCanvasController::~QuickCanvasController() {
         const auto target = m_mediaItemsById.constFind(m_pointerSession->resizeMediaId());
         if (target != m_mediaItemsById.constEnd() && !target->lifetime.expired()
             && target->item && !target->item->isBeingDeleted()) {
+            commitPendingAltResize(target->item);
             target->item->endExternalInteractiveResize();
         }
     }
@@ -510,8 +511,12 @@ void QuickCanvasController::setMediaScene(QGraphicsScene* scene) {
     // still available. A detached scene can otherwise leave a surviving text
     // item permanently suppressing its one-time legacy layout synchronization.
     if (m_mediaScene && m_pointerSession->resizeActive()) {
-        if (ResizableMediaBase* target = mediaItemById(m_pointerSession->resizeMediaId()))
+        if (ResizableMediaBase* target = mediaItemById(m_pointerSession->resizeMediaId())) {
+            commitPendingAltResize(target);
             target->endExternalInteractiveResize();
+        } else {
+            clearPendingAltResize();
+        }
     }
 
     if (m_mediaScene) {
@@ -940,6 +945,7 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
         m_resizeBaseSize = QSize();
         m_resizeFixedItemPoint = QPointF();
         m_resizeFixedScenePoint = QPointF();
+        resetAltResizeState();
         return;
     }
 
@@ -951,6 +957,7 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
         m_resizeBaseSize = QSize();
         m_resizeFixedItemPoint = QPointF();
         m_resizeFixedScenePoint = QPointF();
+        resetAltResizeState();
         return;
     }
 
@@ -988,10 +995,12 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
         m_resizeBaseSize = QSize();
         m_resizeFixedItemPoint = QPointF();
         m_resizeFixedScenePoint = QPointF();
+        resetAltResizeState();
         return;
     }
 
     if (m_resizeBaseSize.isEmpty()) {
+        clearPendingAltResize();
         target->beginExternalInteractiveResize();
         m_resizeBaseSize = baseSizeNow;
         m_resizeFixedItemPoint = fixedItemPoint;
@@ -1017,6 +1026,9 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
     // If Alt was released, reset alt capture state so next Alt press re-captures correctly.
     // Also rebase uniform-scale metrics from current item state.
     if (wasAlt && !altPressed) {
+        // The QML delegate has owned non-uniform geometry so far. Commit its
+        // last value once, then rebase the uniform path from that exact result.
+        commitPendingAltResize(target);
         m_altAxisCaptured   = false;
         m_altCornerCaptured = false;
         // Rebase uniform resize metrics from current item geometry
@@ -1025,6 +1037,8 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
         m_resizeFixedItemPoint = computeHandleItemPoint(static_cast<int>(activeHandle), m_resizeBaseSize);
         m_resizeFixedScenePoint = target->scenePos() + m_resizeFixedItemPoint * s;
         m_resizeLastScale = s;
+        pushMediaModelOnly();
+        beginLiveResizeSession(mediaId);
     }
 
     const bool axisHandle   = isAxisHandle(static_cast<int>(activeHandle));
@@ -1131,14 +1145,14 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                 }
             }
 
-            // Mutate base size on the relevant axis
-            QSize newBase = target->baseSizePx();
+            // QML already renders the live size. Stage only the final backend
+            // geometry so QGraphicsScene indexing and hidden legacy overlays
+            // do not run for every pointer tick.
+            QSize newBase = bs;
             if (horizontal)
                 newBase.setWidth(std::max(1, int(std::round(desiredAxisSize / s))));
             else
                 newBase.setHeight(std::max(1, int(std::round(desiredAxisSize / s))));
-            target->setBaseSizePx(newBase);
-
             // Reposition to keep fixed side anchored
             const QPointF newFixedItem = computeHandleItemPoint(static_cast<int>(
                     activeHandle == ResizableMediaBase::LeftMid  ? ResizableMediaBase::RightMid :
@@ -1147,9 +1161,7 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                                                                    ResizableMediaBase::TopMid),
                 newBase);
             const QPointF newPos = m_altFixedScenePoint - newFixedItem * s;
-            target->suppressNextItemPositionSnap();
-            target->setPos(newPos);
-            target->notifyInteractiveGeometryChanged();
+            stagePendingAltResize(mediaId, newBase, newPos);
 
             m_resizeLastSceneX = newPos.x();
             m_resizeLastSceneY = newPos.y();
@@ -1176,6 +1188,8 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                     liveBaseW * unitScale,
                     liveBaseH * unitScale,
                     s)) {
+                // Exceptional fallback for an unavailable QML live surface.
+                commitPendingAltResize(target);
                 pushMediaModelOnly();
             }
             return;
@@ -1232,16 +1246,7 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
             const qreal s = std::abs(target->scale()) > 1e-6 ? std::abs(target->scale()) : 1.0;
             const QSize bs = m_altOrigBaseSize;
 
-            // Moving corner scene position
-            const QPointF movingCornerItem  = computeHandleItemPoint(static_cast<int>(activeHandle), bs);
-            const QPointF movingCornerScene = target->scenePos() + movingCornerItem * s;
-
-            qreal dxRaw = sceneX - movingCornerScene.x();
-            qreal dyRaw = sceneY - movingCornerScene.y();
             using H = ResizableMediaBase;
-            if (activeHandle == H::TopLeft  || activeHandle == H::BottomLeft)  dxRaw = -dxRaw;
-            if (activeHandle == H::TopLeft  || activeHandle == H::TopRight)    dyRaw = -dyRaw;
-
             const qreal dirX = (activeHandle == H::TopLeft || activeHandle == H::BottomLeft) ? -1.0 : 1.0;
             const qreal dirY = (activeHandle == H::TopLeft || activeHandle == H::TopRight) ? -1.0 : 1.0;
             qreal desiredW = dirX * (sceneX - m_altFixedScenePoint.x()) - m_altCornerInitialOffsetX;
@@ -1264,12 +1269,10 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                 }
             }
 
-            // Mutate base size (both axes)
-            QSize newBase = target->baseSizePx();
+            // Stage both axes without touching the legacy scene per tick.
+            QSize newBase = bs;
             newBase.setWidth(std::max(1,  int(std::round(desiredW / s))));
             newBase.setHeight(std::max(1, int(std::round(desiredH / s))));
-            target->setBaseSizePx(newBase);
-
             // Reposition to keep fixed corner anchored
             using H2 = ResizableMediaBase;
             const auto oppHandle2 = (activeHandle == static_cast<int>(ResizableMediaBase::TopLeft))
@@ -1279,9 +1282,7 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                 : H2::TopLeft;
             const QPointF newFixedItem = computeHandleItemPoint(static_cast<int>(oppHandle2), newBase);
             const QPointF newPos = m_altFixedScenePoint - newFixedItem * s;
-            target->suppressNextItemPositionSnap();
-            target->setPos(newPos);
-            target->notifyInteractiveGeometryChanged();
+            stagePendingAltResize(mediaId, newBase, newPos);
 
             m_resizeLastSceneX = newPos.x();
             m_resizeLastSceneY = newPos.y();
@@ -1304,6 +1305,7 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                     liveBaseW * unitScale,
                     liveBaseH * unitScale,
                     s)) {
+                commitPendingAltResize(target);
                 pushMediaModelOnly();
             }
             if (snap) {
@@ -1575,8 +1577,12 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
 void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId) {
     if (remoteSceneLocksEdits()) {
         if (m_pointerSession->resizeActive()) {
-            if (ResizableMediaBase* target = mediaItemById(m_pointerSession->resizeMediaId()))
+            if (ResizableMediaBase* target = mediaItemById(m_pointerSession->resizeMediaId())) {
+                commitPendingAltResize(target);
                 target->endExternalInteractiveResize();
+            } else {
+                clearPendingAltResize();
+            }
         }
         m_hasQueuedResize = false;
         if (m_resizeDispatchTimer) m_resizeDispatchTimer->stop();
@@ -1631,6 +1637,10 @@ void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId) {
     ResizableMediaBase* finalMedia = nullptr;
     if (m_mediaScene && !finalMediaId.isEmpty()) {
         finalMedia = mediaItemById(finalMediaId);
+        if (finalMedia)
+            commitPendingAltResize(finalMedia);
+        else
+            clearPendingAltResize();
         const ResizableMediaBase* media = finalMedia;
         if (media) {
             finalX = media->scenePos().x();
@@ -2629,6 +2639,42 @@ bool QuickCanvasController::pushLiveAltResizeGeometry(const QString& mediaId,
         Q_ARG(QVariant, scale));
 }
 
+void QuickCanvasController::stagePendingAltResize(const QString& mediaId,
+                                                  const QSize& baseSize,
+                                                  const QPointF& scenePos) {
+    m_pendingAltResizeMediaId = mediaId;
+    m_pendingAltResizeBaseSize = baseSize;
+    m_pendingAltResizeScenePos = scenePos;
+}
+
+bool QuickCanvasController::commitPendingAltResize(ResizableMediaBase* target) {
+    if (m_pendingAltResizeMediaId.isEmpty()) {
+        return false;
+    }
+
+    if (!target || target->mediaId() != m_pendingAltResizeMediaId
+        || target->isBeingDeleted()) {
+        clearPendingAltResize();
+        return false;
+    }
+
+    const QSize finalBaseSize = m_pendingAltResizeBaseSize;
+    const QPointF finalScenePos = m_pendingAltResizeScenePos;
+    clearPendingAltResize();
+
+    target->setBaseSizePx(finalBaseSize);
+    target->suppressNextItemPositionSnap();
+    target->setPos(finalScenePos);
+    target->notifyInteractiveGeometryChanged();
+    return true;
+}
+
+void QuickCanvasController::clearPendingAltResize() {
+    m_pendingAltResizeMediaId.clear();
+    m_pendingAltResizeBaseSize = QSize();
+    m_pendingAltResizeScenePos = QPointF();
+}
+
 void QuickCanvasController::resetAltResizeState() {
     m_lastResizeWasAlt        = false;
     m_altAxisCaptured         = false;
@@ -2638,6 +2684,7 @@ void QuickCanvasController::resetAltResizeState() {
     m_altAxisInitialOffset    = 0.0;
     m_altCornerInitialOffsetX = 0.0;
     m_altCornerInitialOffsetY = 0.0;
+    clearPendingAltResize();
     m_uniformCornerSnapped    = false;
     m_uniformCornerSnappedPt  = QPointF();
     m_uniformCornerSnapActive = false;

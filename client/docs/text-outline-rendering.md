@@ -99,6 +99,15 @@ deferred to commit. Quick Canvas resize gestures now mirror the native resize
 lifecycle into the backend, so this unused document is also laid out once at
 pointer release instead of once per queued pointer tick. Returning to the legacy
 editor restores synchronization.
+
+Non-uniform Alt-resize geometry is transactional. The visible QML delegate owns
+the live width, height and position, including native text reflow and outline
+updates. The hidden `QGraphicsItem` mirror keeps its original geometry during
+pointer movement, avoiding repeated scene-index updates and legacy overlay
+layout, then receives the final base size and position once on pointer release.
+Releasing Alt mid-gesture commits that pending value before handing authority
+back to uniform resize.
+
 Translucent borders use a viewport-sized `ShaderEffectSource`, applying alpha
 once instead of accumulating it at overlapping strokes. Its destination matches
 the source crop exactly; simply changing `layer.sourceRect` would stretch the
