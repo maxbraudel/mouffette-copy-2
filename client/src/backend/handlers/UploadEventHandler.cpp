@@ -30,12 +30,16 @@ void UploadEventHandler::onUploadButtonClicked()
     ICanvasHost* canvas = session->canvas;
     auto& upload = session->upload;
 
-    if (uploadManager->isUploading()) {
-        if (m_mainWindow->getActiveUploadSessionIdentity() == session->persistentClientId) {
+    if (uploadManager->isBusy()) {
+        if (uploadManager->isUploading()
+            && m_mainWindow->getActiveUploadSessionIdentity() == session->persistentClientId
+            && uploadManager->canRequestCancel()) {
             uploadManager->requestCancel();
-            TOAST_WARNING("Upload cancelled");
-        } else {
+        } else if (m_mainWindow->getActiveUploadSessionIdentity() != session->persistentClientId) {
             TOAST_WARNING("Another client upload is currently in progress. Please wait for it to finish.");
+        } else {
+            qInfo() << "UploadManager: Duplicate upload click ignored in state"
+                    << static_cast<int>(uploadManager->outgoingState());
         }
         return;
     }
@@ -189,8 +193,9 @@ void UploadEventHandler::onUploadButtonClicked()
             if (sessionHasRemote) {
                 qDebug() << "Requesting remote removal for" << targetClientId << "(session" << session->persistentClientId << ")";
                 uploadManager->setActiveSessionIdentity(session->persistentClientId);
-                uploadManager->requestRemoval(targetClientId);
-                TOAST_INFO(QString("Requesting remote removal from %1…").arg(clientLabel));
+                if (uploadManager->requestRemoval(targetClientId)) {
+                    TOAST_INFO(QString("Requesting remote removal from %1…").arg(clientLabel));
+                }
                 return;
             }
 
@@ -214,33 +219,31 @@ void UploadEventHandler::onUploadButtonClicked()
 
     uploadManager->clearLastRemovalClientId();
 
-    for (ResizableMediaBase* media : canvas->enumerateMediaItems()) {
-        if (!media) {
-            continue;
-        }
-        const QString fileId = fileManager->getFileIdForMedia(media->mediaId());
-        if (!fileId.isEmpty() && fileIdsBeingUploaded.contains(fileId)) {
-            media->setUploadUploading(0);
-        }
-    }
-
     if (!m_mainWindow->areUploadSignalsConnected()) {
         m_mainWindow->connectUploadSignals();
     }
 
-    TOAST_INFO(QString("Starting upload of %1 file(s) to %2...").arg(files.size()).arg(clientLabel));
-
-    upload.remoteFilesPresent = false;
+    upload.remoteFilesPresent = hasRemoteFiles;
     m_mainWindow->setActiveUploadSessionIdentity(session->persistentClientId);
     uploadManager->setActiveSessionIdentity(session->persistentClientId);
 
-    uploadManager->toggleUpload(files);
+    const bool accepted = uploadManager->toggleUpload(files);
 
-    if (uploadManager->isUploading()) {
+    if (accepted && uploadManager->isUploading()) {
         upload.activeUploadId = uploadManager->currentUploadId();
         if (!upload.activeUploadId.isEmpty()) {
             m_mainWindow->setUploadSessionByUploadId(upload.activeUploadId, session->persistentClientId);
         }
+
+        for (ResizableMediaBase* media : canvas->enumerateMediaItems()) {
+            if (!media) continue;
+            const QString fileId = fileManager->getFileIdForMedia(media->mediaId());
+            if (!fileId.isEmpty() && fileIdsBeingUploaded.contains(fileId)) {
+                media->setUploadUploading(0);
+            }
+        }
+        TOAST_INFO(QString("Starting upload of %1 file(s) to %2...")
+                       .arg(files.size()).arg(clientLabel));
     } else if (m_mainWindow->getActiveUploadSessionIdentity() == session->persistentClientId) {
         m_mainWindow->setActiveUploadSessionIdentity(QString());
         uploadManager->setActiveSessionIdentity(QString());

@@ -31,10 +31,6 @@
 #include <QHash>
 #include <QSet>
 #include <QVariant>
-#include <QCoreApplication>
-#include <QEvent>
-#include <QEventLoop>
-#include <QAccessible>
 #include <QDateTime>
 #include <cmath>
 #include "backend/files/FileManager.h"
@@ -761,8 +757,16 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
 
     const quint64 epoch = ++m_sceneEpoch;
     clearScene();
-    // Flush deferred deletions multiple times to ensure ALL nested widget deletions complete
-    drainDeferredDeletes(5, true);
+    if (m_teardownInProgress) {
+        // clearScene() deliberately lets Qt retire multimedia/QML/native-window
+        // objects after control returns to the event loop. Re-run this validated
+        // request after that bounded teardown barrier instead of pumping a nested
+        // event loop from inside the WebSocket callback.
+        m_deferredSceneStart.senderId = senderClientId;
+        m_deferredSceneStart.scene = scene;
+        m_deferredSceneStart.valid = true;
+        return;
+    }
     if (!m_enabled || epoch != m_sceneEpoch) {
         qDebug() << "RemoteSceneController: scene start superseded during teardown" << sceneInstanceId;
         clearScene();
@@ -832,9 +836,6 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
         // Abort if scene changed (stop/start happened during deferral)
         if (epoch != m_sceneEpoch) return;
         
-        // Process any remaining deferred deletions before showing windows
-        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
-
         startSceneActivationIfReady();
     });
     
@@ -1200,6 +1201,20 @@ void RemoteSceneController::clearScene() {
         return;
     }
 
+    // Teardown is idempotent. In particular, a duplicate STOP or a connection
+    // notification must not enter destruction again while deleteLater() events
+    // from the first request are still pending.
+    if (m_teardownInProgress) {
+        return;
+    }
+
+    const bool requiresDeferredCleanup =
+        m_windowShowTimer
+        || m_sceneReadyTimeout
+        || m_activationTimer
+        || m_videoSyncWatchdog
+        || !m_mediaItems.isEmpty()
+        || !m_screenWindows.isEmpty();
     m_teardownInProgress = true;
 
     // CRITICAL: Cancel pending window show timer to prevent showing windows after scene cleared
@@ -1211,26 +1226,15 @@ void RemoteSceneController::clearScene() {
 
     resetSceneSynchronization();
     
-    // CRITICAL: Stop all fade animations first to prevent accessing deleted graphics items
-    // Find all QVariantAnimation children and stop them immediately
-    QList<QVariantAnimation*> animations = findChildren<QVariantAnimation*>();
-    for (QVariantAnimation* anim : animations) {
-        if (anim) {
-            anim->stop();
-            QObject::disconnect(anim, nullptr, nullptr, nullptr);
-            anim->deleteLater();
-        }
-    }
-    
     // Defensive teardown to handle rapid start/stop without use-after-free
     for (const auto& item : m_mediaItems) {
         teardownMediaItem(item);
     }
     m_mediaItems.clear();
     
-    // Close remote screen windows so overlays disappear immediately after stop.
-    // This releases their native cocoa windows while coordinating with Qt's
-    // accessibility bridge to avoid macOS crashes when rapidly restarting scenes.
+    // Hide remote screen windows immediately. Their QObject trees are retired
+    // asynchronously below so QML, the scene graph, multimedia and Cocoa can
+    // unwind on the normal Qt event-loop boundary.
     for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
         ScreenWindow& sw = it.value();
         if (!sw.window) {
@@ -1243,40 +1247,25 @@ void RemoteSceneController::clearScene() {
         QObject::disconnect(window, nullptr, nullptr, nullptr);
         window->hide();
 
-        // Notify accessibility clients that the overlay is no longer visible.
-        QAccessibleEvent hideEvent(window, QAccessible::ObjectHide);
-        QAccessible::updateAccessibility(&hideEvent);
-
 #ifdef Q_OS_MAC
         MacWindowManager::orderOutWindow(window);
 #endif
 
-        // Manually purge Qt's accessibility cache for this widget (fix for QTBUG-95134)
-        QAccessibleInterface* iface = QAccessible::queryAccessibleInterface(window);
-        if (iface) {
-            QAccessible::Id id = QAccessible::uniqueId(iface);
-            QAccessible::deleteAccessibleInterface(id);
-        }
-
-        if (sw.mediaModel) {
-            sw.mediaModel->clearAll();
-            sw.mediaModel = nullptr;
-        }
+        // Do not synchronously reset the QML model or source here. VideoItem
+        // may have Qt.callLater work queued from component creation; destroying
+        // its context in the middle of this network callback makes that work run
+        // against an invalid QML object. The hidden window owns the quick widget
+        // and model, so one deleteLater() on the window retires the entire tree
+        // safely at the normal event-loop boundary.
+        sw.mediaModel = nullptr;
         sw.mediaEntries.clear();
         if (sw.quickWidget) {
             QObject::disconnect(sw.quickWidget, nullptr, nullptr, nullptr);
-            sw.quickWidget->setSource(QUrl());
-            sw.quickWidget->deleteLater();
             sw.quickWidget = nullptr;
         }
 
         window->close();
         window->lower();
-
-        QAccessibleEvent destroyEvent(window, QAccessible::ObjectDestroyed);
-        QAccessible::updateAccessibility(&destroyEvent);
-
-        window->setParent(nullptr);
         window->deleteLater();
 
         sw.window = nullptr;
@@ -1284,31 +1273,19 @@ void RemoteSceneController::clearScene() {
 
     m_screenWindows.clear();
 
-    // Make sure deferred deletions run to completion before allowing another scene start
-    // On macOS, process more cycles to ensure accessibility cleanup (QTBUG-95134)
-#ifdef Q_OS_MAC
-    drainDeferredDeletes(6, true);
-#else
-    drainDeferredDeletes(4, true);
-#endif
-
-    m_teardownInProgress = false;
-
-    // Cancel any pending restart cooldown timer and restart if we still have a deferred request
-    if (m_sceneRestartDelayTimer) {
-        m_sceneRestartDelayTimer->stop();
-        m_sceneRestartDelayTimer->deleteLater();
-        m_sceneRestartDelayTimer = nullptr;
-    }
-
-    if (!m_sceneStartInProgress) {
-        if (m_deferredSceneStart.valid) {
-            m_restartCooldownActive = true;
-            scheduleSceneRestartCooldown();
-        } else {
+    if (!requiresDeferredCleanup) {
+        m_teardownInProgress = false;
+        if (!m_sceneStartInProgress) {
             dispatchDeferredSceneStart();
         }
+        return;
     }
+
+    // Never force DeferredDelete delivery or process arbitrary application
+    // events here. Keep START gated briefly while Qt destroys the object trees
+    // naturally after this WebSocket callback returns.
+    m_restartCooldownActive = true;
+    scheduleSceneRestartCooldown();
 }
 
 void RemoteSceneController::dispatchDeferredSceneStart() {
@@ -1340,19 +1317,6 @@ void RemoteSceneController::dispatchDeferredSceneStart() {
     }, Qt::QueuedConnection);
 }
 
-void RemoteSceneController::drainDeferredDeletes(int passes, bool allowEventProcessing) {
-    if (passes <= 0) {
-        return;
-    }
-
-    for (int i = 0; i < passes; ++i) {
-        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
-        if (allowEventProcessing) {
-            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
-        }
-    }
-}
-
 void RemoteSceneController::scheduleSceneRestartCooldown() {
     // Increase cooldown on macOS to give accessibility bridge more time to clear (QTBUG-95134)
 #ifdef Q_OS_MAC
@@ -1365,6 +1329,7 @@ void RemoteSceneController::scheduleSceneRestartCooldown() {
         m_sceneRestartDelayTimer = new QTimer(this);
         m_sceneRestartDelayTimer->setSingleShot(true);
         connect(m_sceneRestartDelayTimer, &QTimer::timeout, this, [this]() {
+            m_teardownInProgress = false;
             m_restartCooldownActive = false;
             if (m_sceneRestartDelayTimer) {
                 m_sceneRestartDelayTimer->deleteLater();
@@ -1415,26 +1380,29 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     item->hideEndTriggered = false;
     item->muteEndTriggered = false;
 
+    if (item->player) {
+        QMediaPlayer* player = item->player;
+        QObject::disconnect(player, nullptr, nullptr, nullptr);
+        if (player->playbackState() != QMediaPlayer::StoppedState) {
+            player->stop();
+        }
+        player->setVideoSink(nullptr);
+        player->setAudioOutput(nullptr);
+        player->setSource(QUrl());
+    }
+
+    // Both sinks are QObject children of the player. Disconnect them and let
+    // deletion of that single ownership root retire the complete video-output
+    // tree; independently posting deletes for children and parent makes teardown
+    // ordering needlessly fragile.
     if (item->primingSink) {
         QObject::disconnect(item->primingSink, nullptr, nullptr, nullptr);
-        item->primingSink->deleteLater();
         item->primingSink = nullptr;
     }
 
     if (item->liveSink) {
         QObject::disconnect(item->liveSink, nullptr, nullptr, nullptr);
-        item->liveSink->deleteLater();
         item->liveSink = nullptr;
-    }
-
-    if (item->player) {
-        QMediaPlayer* player = item->player;
-        QObject::disconnect(player, nullptr, nullptr, nullptr);
-        if (player->playbackState() != QMediaPlayer::StoppedState) {
-        player->stop();
-        }
-        player->setVideoSink(nullptr);
-        player->setSource(QUrl());
     }
 
     if (item->audio) {

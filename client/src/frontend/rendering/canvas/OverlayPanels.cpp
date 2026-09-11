@@ -330,6 +330,9 @@ void OverlayButtonElement::setState(ElementState s) {
 
 void OverlayButtonElement::setSvgIcon(const QString& resourcePath) {
     createGraphicsItems();
+    if (m_svgIcon && m_svgIconResourcePath == resourcePath) {
+        return;
+    }
     if (m_textItem) {
         // If label and icon both requested, prefer icon only for now
         m_textItem->setVisible(false);
@@ -347,6 +350,7 @@ void OverlayButtonElement::setSvgIcon(const QString& resourcePath) {
         m_svgIcon->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
         m_svgIcon->setData(0, QStringLiteral("overlay"));
     }
+    m_svgIconResourcePath = resourcePath;
     // Trigger size/layout recompute using current background size
     if (m_background) setSize(m_background->rect().size());
 }

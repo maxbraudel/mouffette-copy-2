@@ -5,6 +5,7 @@ const { MouffetteServer } = require('./server');
 function fakeSocket() {
     return {
         readyState: WebSocket.OPEN,
+        bufferedAmount: 0,
         messages: [],
         send(payload) {
             this.messages.push(JSON.parse(payload));
@@ -31,6 +32,22 @@ function manifest(fileId = 'a'.repeat(64), mediaId = '11111111-1111-4111-8111-11
         sizeBytes: 128,
         mediaIds: [mediaId]
     }];
+}
+
+function markTargetReady(server, targetId, uploadId) {
+    server.handleUploadReady(targetId, { uploadId, canvasSessionId });
+}
+
+function relayDefaultManifestPayload(server, senderId, targetId, uploadId,
+    fileId = 'a'.repeat(64)) {
+    markTargetReady(server, targetId, uploadId);
+    server.handleUploadChunk(senderId, {
+        uploadId,
+        canvasSessionId,
+        fileId,
+        chunkIndex: 0,
+        data: Buffer.alloc(128, 0x5a).toString('base64')
+    });
 }
 
 const senderId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -94,6 +111,7 @@ const canvasSessionId = `${senderId}_TO_${targetId}_canvas_dddddddd-dddd-4ddd-8d
         canvasSessionId,
         files: manifest()
     });
+    relayDefaultManifestPayload(server, senderId, targetId, uploadId);
     server.handleUploadComplete(senderId, { uploadId, canvasSessionId });
 
     assert.equal(server.uploads.has(uploadId), true, 'upload_complete must remain pending');
@@ -132,6 +150,7 @@ const canvasSessionId = `${senderId}_TO_${targetId}_canvas_dddddddd-dddd-4ddd-8d
         canvasSessionId,
         files: manifest(fileId)
     });
+    relayDefaultManifestPayload(server, senderId, targetId, uploadId, fileId);
     server.handleUploadComplete(senderId, { uploadId, canvasSessionId });
     server.handleUploadFinished(targetId, { uploadId, canvasSessionId, fileIds: [fileId] });
 
@@ -160,9 +179,18 @@ const canvasSessionId = `${senderId}_TO_${targetId}_canvas_dddddddd-dddd-4ddd-8d
         'an attacker remove_all_files must not mutate server inventory');
     assert.equal(server.clientFileOwners.get(targetId).get(canvasSessionId).get(fileId), senderId,
         'an attacker remove_all_files must not mutate ownership metadata');
-    assert.equal(target.messages.length, targetMessageCount,
-        'an attacker remove_all_files must not be relayed to the target');
-    assert.equal(attacker.messages.at(-1).type, 'error');
+    assert.equal(target.messages.length, targetMessageCount + 1,
+        'an empty authenticated cleanup must be relayed for idempotent recovery');
+    assert.equal(target.messages.at(-1).type, 'remove_all_files');
+    assert.equal(target.messages.at(-1).senderPersistentClientId, attackerId,
+        'an empty cleanup must remain confined to the authenticated attacker namespace');
+    server.handleAllFilesRemoved(targetId, {
+        removalId: '24681357-1357-4246-8246-246813572468',
+        canvasSessionId,
+        senderClientId: attackerId
+    });
+    assert.equal(server.clientFiles.get(targetId).get(canvasSessionId).has(fileId), true,
+        'acknowledging an empty foreign cleanup must not remove the owner file');
 
     server.handleRemoveFile(senderId, {
         type: 'remove_file',
@@ -195,6 +223,7 @@ const canvasSessionId = `${senderId}_TO_${targetId}_canvas_dddddddd-dddd-4ddd-8d
         canvasSessionId,
         files: manifest(fileId)
     });
+    relayDefaultManifestPayload(server, oldSenderSession, targetId, uploadId, fileId);
     server.handleUploadComplete(oldSenderSession, { uploadId, canvasSessionId });
     server.handleUploadFinished(targetId, { uploadId, canvasSessionId, fileIds: [fileId] });
     assert.equal(server.clientFileOwners.get(targetId).get(canvasSessionId).get(fileId),
@@ -248,6 +277,7 @@ const canvasSessionId = `${senderId}_TO_${targetId}_canvas_dddddddd-dddd-4ddd-8d
         canvasSessionId,
         files: manifest(fileId)
     });
+    relayDefaultManifestPayload(server, newSenderSession, targetId, retryUploadId, fileId);
     server.handleUploadComplete(newSenderSession, {
         uploadId: retryUploadId,
         canvasSessionId
@@ -302,6 +332,7 @@ const canvasSessionId = `${senderId}_TO_${targetId}_canvas_dddddddd-dddd-4ddd-8d
         canvasSessionId,
         files: manifest()
     });
+    relayDefaultManifestPayload(server, senderId, targetId, uploadId);
     server.handleUploadComplete(senderId, { uploadId, canvasSessionId });
     server.handleUploadFinished(targetId, {
         uploadId,
@@ -378,6 +409,7 @@ const canvasSessionId = `${senderId}_TO_${targetId}_canvas_dddddddd-dddd-4ddd-8d
         canvasSessionId,
         files: manifest()
     });
+    relayDefaultManifestPayload(server, senderId, targetId, uploadId);
     server.handleUploadComplete(senderId, { uploadId, canvasSessionId });
     const upload = server.uploads.get(uploadId);
     upload.awaitingTargetValidationSince = Date.now() - 5000;
@@ -495,8 +527,308 @@ const canvasSessionId = `${senderId}_TO_${targetId}_canvas_dddddddd-dddd-4ddd-8d
     assert.equal(owner.messages.some(message => message.type === 'remote_scene_stopped'
         && message.senderClientId === targetId
         && message.sceneInstanceId === sceneInstanceId
-        && message.success === false), true,
-    'atomic target replacement must notify the scene owner of correlated loss');
+        && message.success === true), true,
+    'atomic target replacement must converge the owner after target cleanup');
+}
+
+{
+    const server = new MouffetteServer(0);
+    const sender = addClient(server, senderId);
+    const target = addClient(server, targetId);
+    const uploadId = '10101010-1010-4010-8010-101010101010';
+
+    server.handleUploadStart(senderId, {
+        targetPersistentClientId: targetId,
+        uploadId,
+        canvasSessionId,
+        files: manifest()
+    });
+    server.handleUploadChunk(senderId, {
+        uploadId,
+        canvasSessionId,
+        fileId: 'a'.repeat(64),
+        chunkIndex: 0,
+        data: Buffer.from('premature').toString('base64')
+    });
+
+    assert.equal(server.uploads.has(uploadId), false,
+        'payload sent before target readiness must close the protocol session');
+    assert.equal(sender.messages.at(-1).type, 'upload_rejected');
+    assert.equal(target.messages.at(-1).type, 'upload_abort',
+        'a premature payload must explicitly clean target staging');
+}
+
+{
+    const server = new MouffetteServer(0);
+    const sender = addClient(server, senderId);
+    const target = addClient(server, targetId);
+    const uploadId = '11110000-2222-4333-8444-555566667777';
+
+    server.handleUploadStart(senderId, {
+        targetPersistentClientId: targetId,
+        uploadId,
+        canvasSessionId,
+        files: manifest()
+    });
+    markTargetReady(server, targetId, uploadId);
+    server.handleUploadChunk(senderId, {
+        uploadId,
+        canvasSessionId,
+        fileId: 'a'.repeat(64),
+        chunkIndex: 0,
+        data: Buffer.alloc(64, 0x2a).toString('base64')
+    });
+    server.handleUploadComplete(senderId, { uploadId, canvasSessionId });
+
+    assert.equal(server.uploads.has(uploadId), false,
+        'completion before the manifest byte count must be rejected');
+    assert.equal(sender.messages.at(-1).type, 'upload_rejected');
+    assert.match(sender.messages.at(-1).reason, /every declared byte/i);
+    assert.equal(target.messages.at(-1).type, 'upload_abort');
+}
+
+{
+    const server = new MouffetteServer(0);
+    const sender = addClient(server, senderId);
+    const target = addClient(server, targetId);
+    const uploadSocket = fakeSocket();
+    const uploadId = '20202020-2020-4020-8020-202020202020';
+
+    server.handleUploadStart(senderId, {
+        targetPersistentClientId: targetId,
+        uploadId,
+        canvasSessionId,
+        files: manifest()
+    }, uploadSocket);
+    markTargetReady(server, targetId, uploadId);
+    server.abortUploadsForUploadSocket(senderId, uploadSocket,
+        'Dedicated upload transport disconnected');
+
+    assert.equal(server.uploads.has(uploadId), false,
+        'losing the pinned payload socket must immediately close its upload');
+    assert.equal(target.messages.at(-1).type, 'upload_abort');
+    assert.equal(target.messages.at(-1).protocolRejected, true);
+    assert.equal(sender.messages.at(-1).type, 'upload_rejected');
+    assert.match(sender.messages.at(-1).reason, /transport disconnected/i);
+}
+
+{
+    const server = new MouffetteServer(0);
+    const sender = addClient(server, senderId);
+    const target = addClient(server, targetId);
+    const uploadId = '30303030-3030-4030-8030-303030303030';
+
+    server.handleUploadStart(senderId, {
+        targetPersistentClientId: targetId,
+        uploadId,
+        canvasSessionId,
+        files: manifest()
+    });
+    markTargetReady(server, targetId, uploadId);
+    server.handleUploadAbort(senderId, { uploadId, canvasSessionId });
+
+    assert.equal(server.uploads.has(uploadId), false);
+    assert.equal(server.pendingUploadAborts.has(uploadId), true,
+        'sender cancellation must wait for correlated target cleanup');
+    assert.equal(target.messages.at(-1).type, 'upload_abort');
+
+    server.handleUploadAbortAcknowledgement(targetId, {
+        uploadId,
+        canvasSessionId,
+        senderClientId: senderId
+    });
+    assert.equal(server.pendingUploadAborts.has(uploadId), false);
+    assert.equal(sender.messages.at(-1).type, 'upload_aborted');
+    assert.equal(sender.messages.at(-1).uploadId, uploadId);
+    const targetMessageCount = target.messages.length;
+    server.handleUploadAbortAcknowledgement(targetId, {
+        uploadId,
+        canvasSessionId,
+        senderClientId: senderId
+    });
+    assert.equal(target.messages.length, targetMessageCount,
+        'a duplicate cleanup acknowledgement must be an idempotent no-op');
+}
+
+{
+    const server = new MouffetteServer(0);
+    const sender = addClient(server, senderId);
+    const target = addClient(server, targetId);
+    const removalId = '40404040-4040-4040-8040-404040404040';
+
+    server.handleRemoveAllFiles(senderId, {
+        type: 'remove_all_files',
+        targetPersistentClientId: targetId,
+        canvasSessionId,
+        removalId
+    });
+
+    assert.equal(server.pendingRemovals.has(removalId), true,
+        'empty removal must still reach the target after a server restart');
+    assert.equal(target.messages.at(-1).type, 'remove_all_files');
+    assert.equal(target.messages.at(-1).senderPersistentClientId, senderId);
+    server.handleAllFilesRemoved(targetId, {
+        removalId,
+        canvasSessionId,
+        senderClientId: senderId
+    });
+    assert.equal(server.pendingRemovals.has(removalId), false);
+    assert.equal(sender.messages.at(-1).type, 'all_files_removed');
+}
+
+{
+    const server = new MouffetteServer(0);
+    const sender = addClient(server, senderId);
+    const target = addClient(server, targetId);
+    const uploadId = '50505050-5050-4050-8050-505050505050';
+
+    server.handleUploadStart(senderId, {
+        targetPersistentClientId: targetId,
+        uploadId,
+        canvasSessionId,
+        files: manifest()
+    });
+    markTargetReady(server, targetId, uploadId);
+    target.bufferedAmount = server.MAX_TARGET_BUFFERED_UPLOAD_BYTES + 1;
+    server.handleUploadChunk(senderId, {
+        uploadId,
+        canvasSessionId,
+        fileId: 'a'.repeat(64),
+        chunkIndex: 0,
+        data: Buffer.from('bounded').toString('base64')
+    });
+
+    assert.equal(server.uploads.has(uploadId), false,
+        'a non-consuming target must be rejected instead of growing relay memory');
+    assert.equal(sender.messages.at(-1).type, 'upload_rejected');
+    assert.match(sender.messages.at(-1).reason, /not consuming/i);
+}
+
+{
+    const server = new MouffetteServer(0);
+    const sender = addClient(server, senderId);
+    addClient(server, targetId);
+    const firstUploadId = '60606060-6060-4060-8060-606060606060';
+    const spamUploadId = '70707070-7070-4070-8070-707070707070';
+
+    server.handleUploadStart(senderId, {
+        targetPersistentClientId: targetId,
+        uploadId: firstUploadId,
+        canvasSessionId,
+        files: manifest()
+    });
+    server.handleUploadStart(senderId, {
+        targetPersistentClientId: targetId,
+        uploadId: spamUploadId,
+        canvasSessionId,
+        files: manifest('b'.repeat(64), '22222222-2222-4222-8222-222222222222')
+    });
+
+    assert.equal(server.uploads.has(firstUploadId), true,
+        'a duplicate start must not disturb the accepted transfer');
+    assert.equal(server.uploads.has(spamUploadId), false,
+        'one sender cannot create concurrent upload sessions by spamming');
+    assert.equal(sender.messages.at(-1).type, 'upload_rejected');
+    assert.match(sender.messages.at(-1).reason, /already active/i);
+}
+
+{
+    const server = new MouffetteServer(0);
+    const sender = addClient(server, senderId);
+    addClient(server, targetId);
+    const removalId = '80808080-8080-4080-8080-808080808080';
+
+    server.handleRemoveAllFiles(senderId, {
+        type: 'remove_all_files',
+        targetPersistentClientId: targetId,
+        canvasSessionId,
+        removalId
+    });
+    server.handleAllFilesRemovalFailed(targetId, {
+        removalId,
+        canvasSessionId,
+        senderClientId: senderId,
+        reason: 'disk is read-only'
+    });
+
+    assert.equal(server.pendingRemovals.has(removalId), false,
+        'a correlated target failure must close the removal immediately');
+    assert.equal(sender.messages.at(-1).type, 'removal_rejected');
+    assert.equal(sender.messages.at(-1).reason, 'disk is read-only');
+}
+
+{
+    const server = new MouffetteServer(0);
+    const sender = addClient(server, senderId);
+    addClient(server, targetId);
+    const removalId = '81818181-8181-4181-8181-818181818181';
+
+    server.handleRemoveAllFiles(senderId, {
+        type: 'remove_all_files',
+        targetPersistentClientId: targetId,
+        canvasSessionId,
+        removalId
+    });
+    server.abortUploadsForClient(targetId);
+
+    assert.equal(server.pendingRemovals.has(removalId), false);
+    assert.equal(sender.messages.at(-1).type, 'removal_rejected',
+        'target loss must reject unload without waiting for the client timer');
+    assert.match(sender.messages.at(-1).reason, /target disconnected/i);
+}
+
+{
+    const server = new MouffetteServer(0);
+    const sender = addClient(server, senderId);
+    addClient(server, targetId);
+    const removalId = '82828282-8282-4282-8282-828282828282';
+    const uploadId = '83838383-8383-4383-8383-838383838383';
+
+    server.handleRemoveAllFiles(senderId, {
+        type: 'remove_all_files',
+        targetPersistentClientId: targetId,
+        canvasSessionId,
+        removalId
+    });
+    server.handleUploadStart(senderId, {
+        targetPersistentClientId: targetId,
+        uploadId,
+        canvasSessionId,
+        files: manifest()
+    });
+
+    assert.equal(server.pendingRemovals.has(removalId), true);
+    assert.equal(server.uploads.has(uploadId), false,
+        'upload and unload may not overlap in the same remote namespace');
+    assert.equal(sender.messages.at(-1).type, 'upload_rejected');
+    assert.match(sender.messages.at(-1).reason, /removal.*pending/i);
+}
+
+{
+    const server = new MouffetteServer(0);
+    const sender = addClient(server, senderId);
+    addClient(server, targetId);
+    const uploadId = '84848484-8484-4484-8484-848484848484';
+    const removalId = '85858585-8585-4585-8585-858585858585';
+
+    server.handleUploadStart(senderId, {
+        targetPersistentClientId: targetId,
+        uploadId,
+        canvasSessionId,
+        files: manifest()
+    });
+    server.handleRemoveAllFiles(senderId, {
+        type: 'remove_all_files',
+        targetPersistentClientId: targetId,
+        canvasSessionId,
+        removalId
+    });
+
+    assert.equal(server.uploads.has(uploadId), true,
+        'a spurious unload must not disturb the active upload');
+    assert.equal(server.pendingRemovals.has(removalId), false);
+    assert.equal(sender.messages.at(-1).type, 'removal_rejected');
+    assert.match(sender.messages.at(-1).reason, /upload is active/i);
 }
 
 console.log('upload protocol tests passed');

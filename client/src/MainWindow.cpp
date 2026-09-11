@@ -455,12 +455,16 @@ MainWindow::MainWindow(QWidget* parent)
     // Forward all generic messages to UploadManager so it can handle incoming upload_* and remove_all_files when we are the target
     connect(m_webSocketClient, &WebSocketClient::messageReceived, m_uploadManager, &UploadManager::handleIncomingMessage);
     // Upload progress forwards
+    connect(m_webSocketClient, &WebSocketClient::uploadReadyReceived, m_uploadManager, &UploadManager::onUploadReady);
     connect(m_webSocketClient, &WebSocketClient::uploadProgressReceived, m_uploadManager, &UploadManager::onUploadProgress);
+    connect(m_webSocketClient, &WebSocketClient::uploadBytesAcknowledgedReceived, m_uploadManager, &UploadManager::onUploadBytesAcknowledged);
     connect(m_webSocketClient, &WebSocketClient::uploadFinishedReceived, m_uploadManager, &UploadManager::onUploadFinished);
     connect(m_webSocketClient, &WebSocketClient::uploadRejectedReceived, m_uploadManager, &UploadManager::onUploadRejected);
+    connect(m_webSocketClient, &WebSocketClient::uploadAbortedReceived, m_uploadManager, &UploadManager::onUploadAborted);
     // New: per-file completion ids
     connect(m_webSocketClient, &WebSocketClient::uploadCompletedFileIdsReceived, m_uploadManager, &UploadManager::onUploadCompletedFileIds);
     connect(m_webSocketClient, &WebSocketClient::allFilesRemovedReceived, m_uploadManager, &UploadManager::onAllFilesRemovedRemote);
+    connect(m_webSocketClient, &WebSocketClient::removalRejectedReceived, m_uploadManager, &UploadManager::onRemovalRejected);
 
     // Managers wiring
     m_uploadManager->setWebSocketClient(m_webSocketClient);

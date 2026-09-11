@@ -108,6 +108,21 @@ void UploadSignalConnector::connectAllSignals(
         }
     });
 
+    connect(uploadManager, &UploadManager::uploadCancelled, mainWindow,
+            [mainWindow](const QString& uploadId) {
+        if (MainWindow::CanvasSession* session = mainWindow->sessionForUploadId(uploadId)) {
+            for (auto it = session->upload.itemsByFileId.constBegin();
+                 it != session->upload.itemsByFileId.constEnd(); ++it) {
+                for (ResizableMediaBase* item : it.value()) {
+                    if (item) item->setUploadNotUploaded();
+                }
+            }
+            session->upload.remoteFilesPresent = !session->knownRemoteFileIds.isEmpty();
+            mainWindow->clearUploadTracking(*session);
+        }
+        TOAST_WARNING("Upload cancelled; incomplete remote data is being cleaned automatically");
+    });
+
     // Signal: the target rejected the transfer. Roll back only this batch; files
     // already known on the remote remain synchronized and keep their state.
     connect(uploadManager, &UploadManager::uploadRejected, mainWindow,
@@ -128,6 +143,11 @@ void UploadSignalConnector::connectAllSignals(
             ? QStringLiteral("Remote client rejected the upload")
             : reason.trimmed();
         TOAST_ERROR(QStringLiteral("Upload failed: %1").arg(detail), 5000);
+    });
+
+    connect(uploadManager, &UploadManager::removalFailed, mainWindow,
+            [](const QString& reason) {
+        TOAST_ERROR(QStringLiteral("Unload failed: %1").arg(reason), 5000);
     });
     
     // Signal: Upload completed file IDs - mark files as uploaded

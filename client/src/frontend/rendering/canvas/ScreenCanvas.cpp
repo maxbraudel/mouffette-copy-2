@@ -5014,21 +5014,48 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
 
 void ScreenCanvas::stopHostSceneState(bool notifyRemote) {
     const QString remoteSceneInstanceId = m_pendingRemoteSceneInstanceId;
+    const bool wasHostSceneActive = m_hostSceneActive;
+    const HostSceneMode previousMode = m_hostSceneMode;
+    const bool wasRemoteSceneLaunched = m_sceneLaunched;
+    const bool hadRemoteFlow = previousMode == HostSceneMode::Remote
+        || m_sceneLaunching
+        || m_sceneLaunched
+        || m_sceneStopping
+        || !remoteSceneInstanceId.isEmpty();
+
     stopRemoteVideoStateSync();
     if (m_sceneStopTimeoutTimer) {
         m_sceneStopTimeoutTimer->stop();
     }
+    if (hadRemoteFlow && m_sceneLaunchTimeoutTimer) {
+        m_sceneLaunchTimeoutTimer->stop();
+    }
+    if (hadRemoteFlow && m_remoteSceneActivationTimer) {
+        m_remoteSceneActivationTimer->stop();
+    }
+
+    // Converge the lifecycle flags before restoring selection or video state.
+    // Selection restoration emits synchronous UI signals; observers must see an
+    // already-unlocked canvas and must never try to roll settings back into an
+    // apparently active remote scene while teardown is in progress.
+    if (hadRemoteFlow) {
+        m_sceneLaunching = false;
+        m_sceneLaunched = false;
+        if (m_launchSceneButton) {
+            QSignalBlocker buttonSignals(m_launchSceneButton);
+            m_launchSceneButton->setChecked(false);
+        }
+    }
     m_sceneStopping = false;
     m_remoteSceneStopRetrySent = false;
-
-    if (!m_hostSceneActive) return;
     m_hostSceneActive = false;
+    m_hostSceneMode = HostSceneMode::None;
+
     delete m_hostSceneRunContext;
     m_hostSceneRunContext = nullptr;
-    HostSceneMode prevMode = m_hostSceneMode;
-    m_hostSceneMode = HostSceneMode::None;
+
     // Restore visibility of media items (leave videos stopped).
-    if (m_scene) {
+    if (wasHostSceneActive && m_scene) {
         for (QGraphicsItem* gi : m_scene->items()) {
             if (auto* media = dynamic_cast<ResizableMediaBase*>(gi)) media->showImmediateNoFade();
         }
@@ -5091,13 +5118,13 @@ void ScreenCanvas::stopHostSceneState(bool notifyRemote) {
     m_pendingRemoteStartPositionsMs.clear();
     m_pendingRemoteSceneInstanceId.clear();
 
-    // Notify remote client to stop scene only if Remote mode was active
-    if (prevMode == HostSceneMode::Remote) {
-        bool wasLaunched = m_sceneLaunched;
-        m_sceneLaunched = false;
-        if (wasLaunched) {
-            emitRemoteSceneLaunchStateChanged();
-        }
+    if (wasRemoteSceneLaunched) {
+        emitRemoteSceneLaunchStateChanged();
+    }
+
+    // Notify only after local state is fully quiescent. The captured run id is
+    // retained even though the live correlation state has already been cleared.
+    if (hadRemoteFlow) {
         if (notifyRemote && m_wsClient && !m_remoteSceneTargetClientId.isEmpty()) {
             qDebug() << "ScreenCanvas: sending remote_scene_stop to" << m_remoteSceneTargetClientId;
             m_wsClient->sendRemoteSceneStop(
@@ -5590,17 +5617,22 @@ void ScreenCanvas::onRemoteSceneStoppedReceived(const QString& targetClientId,
                                                 bool success,
                                                 const QString& errorMessage) {
     if (targetClientId != m_remoteSceneTargetClientId) return;
-    // STOPPED is an acknowledgement, never an unsolicited state command. Both
-    // the current run and the local STOP phase must match before it may mutate
-    // host state; this makes delayed acknowledgements harmless.
-    if (!m_sceneStopping) return;
     if (sceneInstanceId.isEmpty() || sceneInstanceId != m_pendingRemoteSceneInstanceId) return;
+
+    const bool wasStopping = m_sceneStopping;
+    const bool hasMatchingRemoteRun = m_sceneLaunching
+        || m_sceneLaunched
+        || (m_hostSceneActive && m_hostSceneMode == HostSceneMode::Remote);
+    // A successful correlated terminal event may also be server-authored when
+    // the target disconnects. Accept it even without a local STOP request so A
+    // cannot remain in a ghost-running state. Failures remain acknowledgements
+    // to an explicit local request and do not tear down a potentially live B.
+    if (!wasStopping && (!success || !hasMatchingRemoteRun)) return;
 
     if (m_sceneStopTimeoutTimer) {
         m_sceneStopTimeoutTimer->stop();
     }
 
-    const bool wasStopping = m_sceneStopping;
     m_sceneStopping = false;
     m_remoteSceneStopRetrySent = false;
 
@@ -5627,7 +5659,7 @@ void ScreenCanvas::onRemoteSceneStoppedReceived(const QString& targetClientId,
     if (wasStopping) {
         TOAST_SUCCESS("Remote scene stopped successfully", 3000);
     } else {
-        TOAST_INFO("Remote scene stopped", 2500);
+        TOAST_WARNING("Remote scene ended on the target", 3500);
     }
 }
 

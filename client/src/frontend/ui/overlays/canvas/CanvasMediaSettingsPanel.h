@@ -175,6 +175,7 @@ private:
     QTimer* m_textBorderWidthDebounceTimer = nullptr;
     bool m_textBorderWidthPushPending = false;
     bool m_updatingFromMedia = false;
+    bool m_pushingToMedia = false;
     
     // Video-only option widgets (for show/hide based on media type)
     QWidget* m_autoPlayRow = nullptr;

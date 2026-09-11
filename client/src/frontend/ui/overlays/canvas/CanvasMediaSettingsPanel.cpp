@@ -15,6 +15,7 @@
 #include <QTimer>
 #include <QSizePolicy>
 #include <QSignalBlocker>
+#include <QScopedValueRollback>
 #include <QSpacerItem>
 #include <QColorDialog>
 #include <algorithm>
@@ -2019,50 +2020,26 @@ bool MediaSettingsPanel::isValidInputForBox(QLabel* box, QChar character) {
 
 void MediaSettingsPanel::onOpacityToggled(bool checked) {
     Q_UNUSED(checked);
+    if (m_updatingFromMedia) return;
     applyOpacityFromUi();
-    if (!m_updatingFromMedia) {
-        pushSettingsToMedia();
-    }
 }
 
 void MediaSettingsPanel::applyOpacityFromUi() {
-    if (!m_mediaItem) return;
-
-    if (m_updatingFromMedia) {
-        const auto state = m_mediaItem->mediaSettingsState();
-        if (state.opacityOverrideEnabled) {
-            bool ok = false;
-            int val = state.opacityText.trimmed().toInt(&ok);
-            if (!ok) val = 100;
-            val = std::clamp(val, 0, 100);
-            m_mediaItem->setContentOpacity(static_cast<qreal>(val) / 100.0);
-        } else {
-            m_mediaItem->setContentOpacity(1.0);
-        }
-        return;
-    }
-
+    if (m_updatingFromMedia || !m_mediaItem) return;
     if (!m_opacityCheck || !m_opacityBox) return;
     pushSettingsToMedia();
 }
 
 void MediaSettingsPanel::onVolumeToggled(bool checked) {
     Q_UNUSED(checked);
+    if (m_updatingFromMedia) return;
     applyVolumeFromUi();
-    if (!m_updatingFromMedia) {
-        pushSettingsToMedia();
-    }
 }
 
 void MediaSettingsPanel::applyVolumeFromUi() {
-    if (!m_mediaItem) return;
+    if (m_updatingFromMedia || !m_mediaItem) return;
     auto* videoItem = dynamic_cast<ResizableVideoItem*>(m_mediaItem);
     if (!videoItem) return;
-
-    if (m_updatingFromMedia) {
-        videoItem->applyVolumeOverrideFromState();
-        return;
-    }
 
     if (!m_volumeCheck || !m_volumeBox) return;
     pushSettingsToMedia();
@@ -2570,41 +2547,41 @@ void MediaSettingsPanel::onPauseDelayToggled(bool checked) {
 }
 
 void MediaSettingsPanel::setMediaItem(ResizableMediaBase* item) {
-    clearActiveBox();
-    if (m_mediaItem == item) {
-        if (m_mediaItem) {
-            pullSettingsFromMedia();
+    if (m_updatingFromMedia) return;
+
+    {
+        // Changing the inspected item is a model-to-UI operation. In particular,
+        // ending an in-place edit must not commit back into the old item while a
+        // selection change is still being delivered.
+        QScopedValueRollback<bool> updateGuard(m_updatingFromMedia, true);
+        clearActiveBox();
+
+        if (m_mediaItem != item) {
+            m_mediaItem = item;
+
+            // Detect media type and update section visibility.
+            if (m_mediaItem) {
+                const bool isVideo = dynamic_cast<ResizableVideoItem*>(m_mediaItem) != nullptr;
+                const bool isText = dynamic_cast<TextMediaItem*>(m_mediaItem) != nullptr;
+                setMediaType(isVideo);
+                updateTextSectionVisibility(isText);
+            } else {
+                setMediaType(false);
+                updateTextSectionVisibility(false);
+            }
         }
-        return;
     }
-    m_mediaItem = item;
-
-    // Temporarily suppress pushes while we realign the UI for the new target item.
-    const bool previousGuard = m_updatingFromMedia;
-    m_updatingFromMedia = true;
-
-    // Detect media type and update section visibility
-    if (m_mediaItem) {
-        const bool isVideo = dynamic_cast<ResizableVideoItem*>(m_mediaItem) != nullptr;
-        const bool isText = dynamic_cast<TextMediaItem*>(m_mediaItem) != nullptr;
-        setMediaType(isVideo);
-        updateTextSectionVisibility(isText);
-    } else {
-        setMediaType(false);
-        updateTextSectionVisibility(false);
-    }
-
-    m_updatingFromMedia = previousGuard;
 
     pullSettingsFromMedia();
 }
 
 void MediaSettingsPanel::pullSettingsFromMedia() {
-    m_updatingFromMedia = true;
-    if (!m_mediaItem) {
-        m_updatingFromMedia = false;
-        return;
-    }
+    // This path only projects the authoritative media state into controls. It
+    // must never call the UI-to-model path: doing so used to recurse forever
+    // when a remote scene STOP restored the selected media while edits remained
+    // locked for that scene.
+    if (m_updatingFromMedia || !m_mediaItem) return;
+    QScopedValueRollback<bool> updateGuard(m_updatingFromMedia, true);
 
     const auto state = m_mediaItem->mediaSettingsState();
 
@@ -2828,18 +2805,10 @@ void MediaSettingsPanel::pullSettingsFromMedia() {
     onDisplayAutomaticallyToggled(m_displayAfterCheck ? m_displayAfterCheck->isChecked() : false);
     onPlayAutomaticallyToggled(m_autoPlayCheck ? m_autoPlayCheck->isChecked() : false);
     onUnmuteAutomaticallyToggled(m_unmuteCheck ? m_unmuteCheck->isChecked() : false);
-    onOpacityToggled(m_opacityCheck ? m_opacityCheck->isChecked() : false);
-    onVolumeToggled(m_volumeCheck ? m_volumeCheck->isChecked() : false);
     onHideDelayToggled(m_hideDelayCheck ? m_hideDelayCheck->isChecked() : false);
     onMuteDelayToggled(m_muteDelayCheck ? m_muteDelayCheck->isChecked() : false);
     onPauseDelayToggled(m_pauseDelayCheck ? m_pauseDelayCheck->isChecked() : false);
     onTextColorToggled(m_textColorCheck ? m_textColorCheck->isChecked() : false);
-
-    m_updatingFromMedia = false;
-
-    // Ensure opacity is immediately applied (uses stored state when guard is false)
-    applyOpacityFromUi();
-    applyVolumeFromUi();
 
     if (m_widget && m_contentLayout) {
         m_contentLayout->invalidate();
@@ -2879,8 +2848,9 @@ void MediaSettingsPanel::refreshVolumeDisplay() {
 }
 
 void MediaSettingsPanel::pushSettingsToMedia() {
-    if (m_updatingFromMedia) return;
+    if (m_updatingFromMedia || m_pushingToMedia) return;
     if (!m_mediaItem) return;
+    QScopedValueRollback<bool> pushGuard(m_pushingToMedia, true);
 
     if (m_mediaItem->scene()) {
         for (QGraphicsView* view : m_mediaItem->scene()->views()) {

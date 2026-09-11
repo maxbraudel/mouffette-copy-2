@@ -40,6 +40,7 @@ struct IncomingUploadSession {
     QHash<QString, QString> fileIdToExtension; // fileId -> original file extension
     qint64 totalSize = 0;
     qint64 received = 0;
+    qint64 lastProgressBytesReported = 0;
     int totalFiles = 0;
 };
 
@@ -53,6 +54,15 @@ struct IncomingUploadSession {
 class UploadManager : public QObject {
     Q_OBJECT
 public:
+    enum class OutgoingState {
+        Idle,
+        AwaitingTargetReady,
+        Streaming,
+        AwaitingValidation,
+        Cancelling
+    };
+    Q_ENUM(OutgoingState)
+
     explicit UploadManager(FileManager* fileManager, QObject* parent = nullptr);
     void setWebSocketClient(WebSocketClient* client);
     void setTargetClientId(const QString& id);
@@ -70,19 +80,24 @@ public:
 
     // Outbound (sender side)
     bool hasActiveUpload() const { return m_uploadActive; }
-    bool isUploading() const { return m_uploadInProgress; }
-    bool isCancelling() const { return m_cancelRequested; }
-    bool isFinalizing() const { return m_finalizing; }
+    bool isUploading() const {
+        return m_outgoingState == OutgoingState::AwaitingTargetReady
+            || m_outgoingState == OutgoingState::Streaming;
+    }
+    bool isCancelling() const { return m_outgoingState == OutgoingState::Cancelling; }
+    bool isFinalizing() const { return m_outgoingState == OutgoingState::AwaitingValidation; }
+    bool isRemoving() const { return !m_pendingRemovalId.isEmpty(); }
+    bool isBusy() const { return m_outgoingState != OutgoingState::Idle || isRemoving(); }
+    bool canRequestCancel() const;
+    OutgoingState outgoingState() const { return m_outgoingState; }
     QString currentUploadId() const { return m_currentUploadId; }
 
-    // Toggle behavior (call from UI):
-    //  - if active (already uploaded): unload
-    //  - else if uploading: cancel
-    //  - else start new upload with provided files
-    void toggleUpload(const QVector<UploadFileInfo>& files);
-    void requestUnload();
+    // Starts a new/incremental upload, or unloads when already synchronized and
+    // no new files are supplied. Cancellation is an explicit guarded action.
+    bool toggleUpload(const QVector<UploadFileInfo>& files);
+    bool requestUnload();
     void requestCancel();
-    void requestRemoval(const QString& clientId);
+    bool requestRemoval(const QString& clientId);
 
     // Incoming (target side) handling entry point
     void handleIncomingMessage(const QJsonObject& message);
@@ -91,7 +106,9 @@ signals:
     void uiStateChanged(); // generic signal to refresh button text/state
     void uploadProgress(int percent, int filesCompleted, int totalFiles); // forwarded from server
     void uploadFinished();
+    void uploadCancelled(const QString& uploadId);
     void uploadRejected(const QString& uploadId, const QString& reason);
+    void removalFailed(const QString& reason);
     // New: subset of files confirmed complete by target so far
     void uploadCompletedFileIds(const QStringList& fileIds);
     void allFilesRemoved();
@@ -103,26 +120,33 @@ signals:
 public slots:
     // Forwarded from WebSocket layer
     void onUploadProgress(const QString& uploadId, int percent, int filesCompleted, int totalFiles);
+    void onUploadReady(const QString& uploadId, const QString& canvasSessionId);
+    void onUploadBytesAcknowledged(const QString& uploadId, qint64 receivedBytes);
     void onUploadCompletedFileIds(const QString& uploadId, const QStringList& fileIds);
     void onUploadFinished(const QString& uploadId);
     void onUploadRejected(const QString& uploadId, const QString& reason);
+    void onUploadAborted(const QString& uploadId, const QString& canvasSessionId);
     void onAllFilesRemovedRemote(const QString& removalId,
                                  const QString& targetClientId,
                                  const QString& canvasSessionId);
+    void onRemovalRejected(const QString& removalId, const QString& reason);
     // Handle network connection loss while uploading/finalizing
     void onConnectionLost();
 
 private:
     void startUpload(const QVector<UploadFileInfo>& files);
+    void setOutgoingState(OutgoingState state);
     void resetToInitial();
+    void cleanupOrphanedIncomingCache();
     void cleanupIncomingCacheForConnectionLoss();
-    void discardActiveIncomingSession(bool rememberRejectedUpload);
+    bool discardActiveIncomingSession(bool rememberRejectedUpload);
+    bool removeResidualIncomingStaging(const QString& senderId,
+                                       const QString& uploadId);
     void rejectIncomingUpload(const QString& senderId,
                               const QString& uploadId,
                               const QString& reason,
                               bool discardMatchingSession);
     void clearIncomingChunkTracking(const QString& uploadId);
-    void finalizeLocalCancelState();
     bool cleanupIncomingSession(bool deleteDiskContents,
                                 bool notifySender,
                                 const QString& senderOverride = QString(),
@@ -134,6 +158,7 @@ private:
     void pumpOutgoingUpload();
     void stopOutgoingPump();
     void failOutgoingUpload(const QString& reason);
+    void finishLocalCancellation();
     void updateLocalProgress(int percent, int filesCompleted);
     void updateRemoteProgress(int percent, int filesCompleted);
     void emitEffectiveProgressIfChanged();
@@ -141,7 +166,8 @@ private:
     void updatePerFileRemoteProgress(const QString& fileId, int percent);
     void emitEffectivePerFileProgress(const QString& fileId);
     bool canAcceptNewAction() const;
-    void scheduleActionDebounce();
+    void recordAcceptedAction();
+    void restartIncomingStallTimer();
 
     QPointer<WebSocketClient> m_ws;
     QString m_targetClientId;
@@ -152,12 +178,8 @@ private:
 
     // Sender side state
     bool m_uploadActive = false;      // true after remote finished (acts as toggle to unload)
-    bool m_uploadInProgress = false;  // true while streaming chunks
-    bool m_cancelRequested = false;   // user pressed cancel mid-stream
-    bool m_uploadRejectedDuringSend = false; // target rejected while the send loop was yielding
+    OutgoingState m_outgoingState = OutgoingState::Idle;
     bool m_uploadWasActiveBeforeStart = false; // preserve earlier synchronized files on incremental failure
-    bool m_finalizing = false;        // true after all bytes sent, awaiting server ack
-    bool m_cancelFinalizePending = false; // true while local cancellation cleanup is outstanding
     QString m_currentUploadId;        // uuid
     int m_lastPercent = 0;
     int m_filesCompleted = 0;
@@ -184,9 +206,11 @@ private:
     qint64 m_outgoingSentForFile = 0;
     QTimer* m_outgoingPumpTimer = nullptr;
     QTimer* m_outgoingStallTimer = nullptr;
+    QTimer* m_outgoingStartAckTimer = nullptr;
     QTimer* m_outgoingAckTimer = nullptr;
     bool m_outgoingPumpRunning = false;
     bool m_outgoingPayloadCompleteSent = false;
+    qint64 m_remoteAcknowledgedBytes = 0;
     QMetaObject::Connection m_uploadBytesWrittenConnection;
     QMetaObject::Connection m_uploadTransportLostConnection;
     QHash<QString, int> m_localFilePercents;
@@ -203,6 +227,7 @@ private:
 
     // Incoming session (target side)
     IncomingUploadSession m_incoming;
+    QTimer* m_incomingStallTimer = nullptr;
     QSet<QString> m_canceledIncoming; // uploadIds canceled by sender
     // Track next expected chunk index per (uploadId:fileId) on the target side
     QHash<QString, int> m_expectedChunkIndex;
@@ -210,12 +235,12 @@ private:
     // Local client ID for directional session generation
     QString m_myClientId; 
 
-    // Anti-spam protection
-    QTimer* m_actionDebounceTimer = nullptr;
-    QElapsedTimer m_lastActionTime;
-    bool m_actionInProgress = false;
-    static constexpr int ACTION_DEBOUNCE_MS = 500;
+    // Anti-spam protection. State, rather than a short-lived boolean lock, is
+    // authoritative; timing only filters accidental double-clicks.
+    QElapsedTimer m_lastAcceptedAction;
+    QElapsedTimer m_outgoingStateAge;
     static constexpr int MIN_ACTION_INTERVAL_MS = 300;
+    static constexpr int CANCEL_GUARD_MS = 1000;
 };
 
 #endif // UPLOADMANAGER_H

@@ -259,6 +259,7 @@ private:
     MouseBlockingRoundedRectItem* m_background = nullptr;
     MouseBlockingTextItem* m_textItem = nullptr; // optional text placeholder
     QGraphicsSvgItem* m_svgIcon = nullptr; // optional icon
+    QString m_svgIconResourcePath;
     OverlayStyle m_currentStyle;
     std::function<void()> m_onClicked;
     bool m_toggleOnly = false; // disables hover/press transient states if true

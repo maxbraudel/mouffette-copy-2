@@ -50,24 +50,28 @@ void UploadButtonStyleManager::applyUploadButtonStyle(QPushButton* uploadButton)
         
         bool remoteSceneLaunched = isRemoteSceneLaunchedForButton(uploadButton);
 
-        if (uploadManager->isUploading()) {
-            if (uploadManager->isCancelling()) {
-                uploadButton->setText("Cancelling…");
-                uploadButton->setEnabled(false);
-                uploadButton->setFont(defaultFont);
-            } else {
-                if (uploadButton->text() == "Upload") {
-                    uploadButton->setText("Preparing");
-                }
-                uploadButton->setEnabled(true);
-                uploadButton->setFont(getMonospaceFont());
-            }
+        if (uploadManager->isCancelling()) {
+            uploadButton->setText("Cancelling…");
+            uploadButton->setEnabled(false);
             uploadButton->setStyleSheet(generateOverlayUploadingStyle());
+            uploadButton->setFont(defaultFont);
+        } else if (uploadManager->isRemoving()) {
+            uploadButton->setText("Removing…");
+            uploadButton->setEnabled(false);
+            uploadButton->setStyleSheet(generateOverlayDisabledStyle());
+            uploadButton->setFont(defaultFont);
         } else if (uploadManager->isFinalizing()) {
             uploadButton->setText("Finalizing…");
             uploadButton->setEnabled(false);
             uploadButton->setStyleSheet(generateOverlayUploadingStyle());
             uploadButton->setFont(defaultFont);
+        } else if (uploadManager->isUploading()) {
+            if (uploadManager->outgoingState() == UploadManager::OutgoingState::AwaitingTargetReady) {
+                uploadButton->setText("Preparing…");
+            }
+            uploadButton->setEnabled(true);
+            uploadButton->setStyleSheet(generateOverlayUploadingStyle());
+            uploadButton->setFont(getMonospaceFont());
         } else if (remoteActive) {
             const bool hasUnuploaded = hasUnuploadedFilesForTarget(target);
             if (target.isEmpty() || hasUnuploaded) {
@@ -108,22 +112,24 @@ void UploadButtonStyleManager::applyUploadButtonStyle(QPushButton* uploadButton)
                                            uploadManager->activeUploadTargetClientId() == target;
     const bool remoteActive = sessionHasRemote || managerHasActiveForTarget;
 
-    if (uploadManager->isUploading()) {
-        if (uploadManager->isCancelling()) {
-            uploadButton->setText("Cancelling…");
-            uploadButton->setEnabled(false);
-        } else {
-            if (uploadButton->text() == "Upload to Client") {
-                uploadButton->setText("Preparing download");
-            }
-            uploadButton->setEnabled(true);
-        }
+    if (uploadManager->isCancelling()) {
+        uploadButton->setText("Cancelling…");
+        uploadButton->setEnabled(false);
         uploadButton->setCheckable(true);
         uploadButton->setChecked(true);
         uploadButton->setStyleSheet(generateRegularBlueStyle());
         uploadButton->setFixedHeight(gDynamicBoxHeight);
         uploadButton->setMaximumWidth(ThemeManager::instance()->getUploadButtonMaxWidth());
-        uploadButton->setFont(getMonospaceFont());
+        uploadButton->setFont(defaultFont);
+    } else if (uploadManager->isRemoving()) {
+        uploadButton->setCheckable(false);
+        uploadButton->setChecked(false);
+        uploadButton->setEnabled(false);
+        uploadButton->setText("Removing…");
+        uploadButton->setStyleSheet(generateRegularGreyStyle());
+        uploadButton->setFixedHeight(gDynamicBoxHeight);
+        uploadButton->setMaximumWidth(ThemeManager::instance()->getUploadButtonMaxWidth());
+        uploadButton->setFont(defaultFont);
     } else if (uploadManager->isFinalizing()) {
         uploadButton->setCheckable(true);
         uploadButton->setChecked(true);
@@ -133,6 +139,17 @@ void UploadButtonStyleManager::applyUploadButtonStyle(QPushButton* uploadButton)
         uploadButton->setFixedHeight(gDynamicBoxHeight);
         uploadButton->setMaximumWidth(ThemeManager::instance()->getUploadButtonMaxWidth());
         uploadButton->setFont(defaultFont);
+    } else if (uploadManager->isUploading()) {
+        uploadButton->setCheckable(true);
+        uploadButton->setChecked(true);
+        uploadButton->setEnabled(true);
+        if (uploadManager->outgoingState() == UploadManager::OutgoingState::AwaitingTargetReady) {
+            uploadButton->setText("Preparing…");
+        }
+        uploadButton->setStyleSheet(generateRegularBlueStyle());
+        uploadButton->setFixedHeight(gDynamicBoxHeight);
+        uploadButton->setMaximumWidth(ThemeManager::instance()->getUploadButtonMaxWidth());
+        uploadButton->setFont(getMonospaceFont());
     } else if (remoteActive) {
         if (target.isEmpty() || hasUnuploadedFilesForTarget(target)) {
             uploadButton->setCheckable(false);

@@ -4,6 +4,8 @@ const crypto = require('node:crypto');
 
 const CURSOR_DEBUG = !!process.env.MOUFFETTE_CURSOR_DEBUG;
 const CANONICAL_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const CANVAS_SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,512}$/;
+const REMOTE_SCENE_INSTANCE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 🔐 MOUFFETTE SERVER - IDENTIFICATION SYSTEM & TERMINOLOGY FIX
@@ -55,23 +57,43 @@ class MouffetteServer {
         this.clientFileOwners = new Map(); // persistentClientId -> Map(canvasSessionId -> Map(fileId -> senderPersistentId))
         this.clientFileGenerations = new Map(); // same shape, fileId -> validated uploadId
         this.pendingRemovals = new Map(); // removalId -> authenticated sender/target/canvas correlation
+        this.pendingUploadAborts = new Map(); // uploadId -> correlated target cleanup acknowledgement
         this.sessionsByPersistent = new Map(); // persistentClientId -> Set(sessionId)
-        // target session -> { ownerId, sceneInstanceId }. This is intentionally
-        // small protocol state used only to terminate orphaned remote scenes
-        // when their authenticated control owner disconnects.
+        // target session -> authoritative scene lifecycle state. Remote-scene
+        // messages are accepted only when their authenticated socket and phase
+        // match this entry.
         this.remoteScenesByTarget = new Map();
+        // Successful STOP results remain briefly replayable so a retry never
+        // asks the target to tear down the same multimedia graph twice.
+        this.remoteSceneStopTombstones = new Map();
+        this.remoteSceneAuxiliaryReplyRates = new Map();
         
         // PHASE 2: Active canvas tracking (CRITICAL for canvasSessionId validation)
         this.activeCanvases = new Map(); // persistentClientId -> Set(canvasSessionId)
         
         // PHASE 1: Upload timeout configuration
-        this.UPLOAD_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+        this.UPLOAD_TIMEOUT_MS = 45 * 1000; // inactivity timeout, refreshed by chunks and acknowledgements
         this.UPLOAD_TARGET_ACK_TIMEOUT_MS = 30 * 1000;
         this.REMOVAL_ACK_TIMEOUT_MS = 30 * 1000;
         this.MAX_UPLOAD_FILES = 256;
         this.MAX_UPLOAD_FILE_BYTES = 16 * 1024 * 1024 * 1024;
         this.MAX_UPLOAD_TOTAL_BYTES = 64 * 1024 * 1024 * 1024;
         this.MAX_UPLOAD_CHUNK_BASE64_LENGTH = Math.ceil((128 * 1024) / 3) * 4;
+        this.MAX_TARGET_BUFFERED_UPLOAD_BYTES = 8 * 1024 * 1024;
+        this.MAX_PENDING_REMOVALS = 4096;
+        this.MAX_REMOTE_SCENE_BYTES = 8 * 1024 * 1024;
+        this.MAX_REMOTE_SCENE_SYNC_BYTES = 256 * 1024;
+        this.MAX_REMOTE_SCENE_SCREENS = 64;
+        this.MAX_REMOTE_SCENE_MEDIA = 512;
+        this.MAX_REMOTE_SCENE_SYNC_ITEMS = 512;
+        this.MAX_REMOTE_SCENE_BUFFERED_BYTES = 1024 * 1024;
+        this.MAX_REMOTE_SCENE_TOMBSTONES = 4096;
+        this.MAX_REMOTE_SCENE_AUXILIARY_REPLIES_PER_SECOND = 20;
+        this.REMOTE_SCENE_SYNC_MIN_INTERVAL_MS = 50;
+        this.REMOTE_SCENE_PREPARE_TIMEOUT_MS = 45 * 1000;
+        this.REMOTE_SCENE_ACTIVATE_TIMEOUT_MS = 15 * 1000;
+        this.REMOTE_SCENE_STOP_TIMEOUT_MS = 30 * 1000;
+        this.REMOTE_SCENE_TOMBSTONE_TTL_MS = 60 * 1000;
         this.UPLOAD_CHANNEL_TOKEN_TTL_MS = 30 * 1000;
         this.uploadChannelTokens = new Map();
         this.uploadSocketsByClient = new Map();
@@ -83,14 +105,21 @@ class MouffetteServer {
 
     start() {
         // Bind explicitly to 0.0.0.0 to listen on all IPv4 interfaces (LAN accessible)
-        this.wss = new WebSocket.Server({ port: this.port, host: '0.0.0.0' });
+        this.wss = new WebSocket.Server({
+            port: this.port,
+            host: '0.0.0.0',
+            // Upload chunks are much smaller, while legitimate scene-control
+            // payloads can exceed 512 KiB on complex canvases.
+            maxPayload: 16 * 1024 * 1024,
+            perMessageDeflate: false
+        });
         
         console.log(`🎯 Mouffette Server started on ws://0.0.0.0:${this.port}`);
         
-        // PHASE 1: Start upload cleanup interval (every minute)
+        // Sweep frequently so stalled partial state is released promptly.
         this.uploadCleanupInterval = setInterval(() => {
             this.cleanupStalledUploads();
-        }, 60000); // 1 minute
+        }, 5000);
         console.log(`🧹 Upload timeout cleanup started (timeout: ${this.UPLOAD_TIMEOUT_MS}ms)`);
         
         this.wss.on('connection', (ws, req) => {
@@ -128,11 +157,15 @@ class MouffetteServer {
                 });
                 
                 ws.on('close', () => {
+                    this.abortUploadsForUploadSocket(boundClient.id, ws,
+                        'Dedicated upload connection closed');
                     this.unregisterUploadSocket(boundClient, ws);
                     console.log(`📤 Upload channel disconnected for ${boundClient.id}`);
                 });
                 
                 ws.on('error', (error) => {
+                    this.abortUploadsForUploadSocket(boundClient.id, ws,
+                        'Dedicated upload connection failed');
                     this.unregisterUploadSocket(boundClient, ws);
                     console.error(`❌ Upload channel error for ${boundClient.id}:`, error);
                 });
@@ -341,6 +374,16 @@ class MouffetteServer {
             sockets = new Set();
             this.uploadSocketsByClient.set(client, sockets);
         }
+        // A control client owns one high-throughput channel. Replacing it is
+        // explicit and closes any transfer pinned to the obsolete socket.
+        for (const existing of Array.from(sockets)) {
+            if (existing === ws) continue;
+            sockets.delete(existing);
+            if (existing && (existing.readyState === WebSocket.OPEN
+                || existing.readyState === WebSocket.CONNECTING)) {
+                existing.close(1008, 'Upload channel replaced');
+            }
+        }
         sockets.add(ws);
     }
 
@@ -392,61 +435,542 @@ class MouffetteServer {
             ...message,
             senderClientId: boundClient.id,
             senderPersistentClientId: boundClient.persistentId
+        }, ws);
+    }
+
+    isValidRemoteSceneInstanceId(sceneInstanceId) {
+        return typeof sceneInstanceId === 'string'
+            && REMOTE_SCENE_INSTANCE_ID_PATTERN.test(sceneInstanceId);
+    }
+
+    serializedJsonWithinLimit(value, byteLimit) {
+        try {
+            const serialized = JSON.stringify(value);
+            if (typeof serialized !== 'string'
+                || Buffer.byteLength(serialized, 'utf8') > byteLimit) {
+                return null;
+            }
+            return serialized;
+        } catch (_error) {
+            return null;
+        }
+    }
+
+    sendRemoteSceneMessage(clientId, message, maximumBufferedBytes = null) {
+        const client = this.clients.get(clientId);
+        if (!client || !client.ws || client.ws.readyState !== WebSocket.OPEN) {
+            return false;
+        }
+        const bufferedAmount = Number(client.ws.bufferedAmount) || 0;
+        if (Number.isFinite(maximumBufferedBytes)
+            && bufferedAmount > maximumBufferedBytes) {
+            return false;
+        }
+        const encoded = this.serializedJsonWithinLimit(
+            message, this.MAX_REMOTE_SCENE_BYTES + 4096);
+        if (!encoded) return false;
+        try {
+            client.ws.send(encoded);
+            return true;
+        } catch (error) {
+            console.error('❌ Remote-scene send failed:', error);
+            return false;
+        }
+    }
+
+    sendRemoteSceneValidation(ownerId, targetId, sceneInstanceId, success, error = '') {
+        const result = {
+            type: 'remote_scene_validation',
+            senderClientId: typeof targetId === 'string' ? targetId.slice(0, 512) : '',
+            targetClientId: ownerId,
+            sceneInstanceId: this.isValidRemoteSceneInstanceId(sceneInstanceId)
+                ? sceneInstanceId : '',
+            success: success === true
+        };
+        if (!result.success && error) result.error = String(error).slice(0, 512);
+        return this.sendRemoteSceneMessage(ownerId, result);
+    }
+
+    sendRemoteSceneStopped(ownerId, targetId, sceneInstanceId, success, error = '') {
+        const result = {
+            type: 'remote_scene_stopped',
+            senderClientId: typeof targetId === 'string' ? targetId.slice(0, 512) : '',
+            targetClientId: ownerId,
+            sceneInstanceId: this.isValidRemoteSceneInstanceId(sceneInstanceId)
+                ? sceneInstanceId : '',
+            success: success === true
+        };
+        if (!result.success && error) result.error = String(error).slice(0, 512);
+        return this.sendRemoteSceneMessage(ownerId, result);
+    }
+
+    sendRemoteSceneLaunched(ownerId, targetId, sceneInstanceId) {
+        return this.sendRemoteSceneMessage(ownerId, {
+            type: 'remote_scene_launched',
+            senderClientId: targetId,
+            targetClientId: ownerId,
+            sceneInstanceId
         });
+    }
+
+    remoteSceneTombstoneKey(ownerId, targetId, sceneInstanceId) {
+        return JSON.stringify([ownerId, targetId, sceneInstanceId]);
+    }
+
+    pruneRemoteSceneStopTombstones(now = Date.now()) {
+        for (const [key, tombstone] of this.remoteSceneStopTombstones) {
+            if (!tombstone || tombstone.expiresAt <= now) {
+                this.remoteSceneStopTombstones.delete(key);
+            }
+        }
+        while (this.remoteSceneStopTombstones.size > this.MAX_REMOTE_SCENE_TOMBSTONES) {
+            const oldestKey = this.remoteSceneStopTombstones.keys().next().value;
+            if (oldestKey === undefined) break;
+            this.remoteSceneStopTombstones.delete(oldestKey);
+        }
+    }
+
+    rememberRemoteSceneStopped(run, now = Date.now()) {
+        this.pruneRemoteSceneStopTombstones(now);
+        const key = this.remoteSceneTombstoneKey(
+            run.ownerId, run.targetId, run.sceneInstanceId);
+        this.remoteSceneStopTombstones.delete(key);
+        this.remoteSceneStopTombstones.set(key, {
+            ownerId: run.ownerId,
+            targetId: run.targetId,
+            sceneInstanceId: run.sceneInstanceId,
+            lastReplayedAt: 0,
+            expiresAt: now + this.REMOTE_SCENE_TOMBSTONE_TTL_MS
+        });
+        this.pruneRemoteSceneStopTombstones(now);
+    }
+
+    getRemoteSceneStopTombstone(ownerId, targetId, sceneInstanceId, now = Date.now()) {
+        this.pruneRemoteSceneStopTombstones(now);
+        return this.remoteSceneStopTombstones.get(
+            this.remoteSceneTombstoneKey(ownerId, targetId, sceneInstanceId)) || null;
+    }
+
+    allowRemoteSceneAuxiliaryReply(ownerId, now = Date.now()) {
+        let rate = this.remoteSceneAuxiliaryReplyRates.get(ownerId);
+        if (!rate || now - rate.windowStartedAt >= 1000) {
+            rate = { windowStartedAt: now, count: 0 };
+            this.remoteSceneAuxiliaryReplyRates.set(ownerId, rate);
+        }
+        if (rate.count >= this.MAX_REMOTE_SCENE_AUXILIARY_REPLIES_PER_SECOND) {
+            return false;
+        }
+        rate.count++;
+        return true;
+    }
+
+    rejectRemoteSceneStart(ownerId, targetId, sceneInstanceId, reason) {
+        if (!this.allowRemoteSceneAuxiliaryReply(ownerId)) return;
+        this.sendRemoteSceneValidation(
+            ownerId, targetId || '', sceneInstanceId, false, reason);
+    }
+
+    handleRemoteSceneStart(ownerId, message) {
+        const requestedTargetId = typeof message.targetClientId === 'string'
+            ? message.targetClientId : '';
+        const targetId = this.resolveClientId(requestedTargetId);
+        const scene = message.scene;
+        const sceneInstanceId = scene && typeof scene === 'object' && !Array.isArray(scene)
+            ? scene.sceneInstanceId : '';
+        const owner = this.clients.get(ownerId);
+        const target = targetId ? this.clients.get(targetId) : null;
+        const reject = reason => this.rejectRemoteSceneStart(
+            ownerId, targetId || requestedTargetId, sceneInstanceId, reason);
+
+        if (!owner || !owner.persistentId || !target || !target.persistentId
+            || ownerId === targetId || !this.isValidRemoteSceneInstanceId(sceneInstanceId)
+            || !scene || typeof scene !== 'object' || Array.isArray(scene)
+            || !Array.isArray(scene.screens)
+            || scene.screens.length > this.MAX_REMOTE_SCENE_SCREENS
+            || !Array.isArray(scene.media)
+            || scene.media.length > this.MAX_REMOTE_SCENE_MEDIA
+            || !this.serializedJsonWithinLimit(scene, this.MAX_REMOTE_SCENE_BYTES)) {
+            reject('Invalid remote scene target, identifier, or payload');
+            return;
+        }
+
+        const activeRun = this.remoteScenesByTarget.get(targetId);
+        if (activeRun) {
+            if (activeRun.ownerId === ownerId
+                && activeRun.sceneInstanceId === sceneInstanceId) {
+                // The first START owns the immutable payload. Replays never ask
+                // Qt multimedia to prepare the same graph a second time.
+                return;
+            }
+            reject('Remote scene target is already busy');
+            return;
+        }
+        if (this.getRemoteSceneStopTombstone(ownerId, targetId, sceneInstanceId)) {
+            reject('Remote scene instance has already been stopped');
+            return;
+        }
+
+        const now = Date.now();
+        const run = {
+            ownerId,
+            targetId,
+            sceneInstanceId,
+            phase: 'preparing',
+            createdAt: now,
+            lastActivity: now,
+            lastVideoSequence: 0,
+            lastVideoRelayAt: 0,
+            previousPhase: null
+        };
+        this.remoteScenesByTarget.set(targetId, run);
+        const relayed = this.sendRemoteSceneMessage(targetId, {
+            type: 'remote_scene_start',
+            targetClientId: targetId,
+            senderClientId: ownerId,
+            scene
+        }, this.MAX_REMOTE_SCENE_BUFFERED_BYTES);
+        if (!relayed) {
+            this.remoteScenesByTarget.delete(targetId);
+            reject('Remote scene target is unavailable or congested');
+        }
+    }
+
+    handleRemoteSceneValidation(targetId, message) {
+        const run = this.remoteScenesByTarget.get(targetId);
+        if (!run || !this.isValidRemoteSceneInstanceId(message.sceneInstanceId)
+            || run.sceneInstanceId !== message.sceneInstanceId
+            || typeof message.success !== 'boolean') {
+            return;
+        }
+        if (run.phase !== 'preparing') {
+            // A delayed or duplicate validation result must not make the owner
+            // issue another ACTIVATE command.
+            return;
+        }
+
+        const error = typeof message.error === 'string'
+            ? message.error.slice(0, 512) : '';
+        if (!message.success) {
+            this.remoteScenesByTarget.delete(targetId);
+            this.sendRemoteSceneValidation(
+                run.ownerId, targetId, run.sceneInstanceId, false,
+                error || 'Remote scene validation failed');
+            return;
+        }
+
+        run.phase = 'prepared';
+        run.lastActivity = Date.now();
+        this.sendRemoteSceneValidation(
+            run.ownerId, targetId, run.sceneInstanceId, true);
+    }
+
+    handleRemoteSceneActivate(ownerId, message) {
+        const targetId = typeof message.targetClientId === 'string'
+            ? this.resolveClientId(message.targetClientId) : null;
+        const run = targetId ? this.remoteScenesByTarget.get(targetId) : null;
+        const activationEpochMs = message.activationEpochMs;
+        const activationDelayMs = message.activationDelayMs;
+        if (!run || run.ownerId !== ownerId
+            || run.sceneInstanceId !== message.sceneInstanceId
+            || !this.isValidRemoteSceneInstanceId(message.sceneInstanceId)
+            || !Number.isSafeInteger(activationEpochMs) || activationEpochMs <= 0
+            || !Number.isSafeInteger(activationDelayMs)
+            || activationDelayMs < 0 || activationDelayMs > 5000) {
+            return;
+        }
+        if (run.phase === 'running') {
+            // Converge an owner that retried after losing LAUNCHED without
+            // reactivating the target.
+            this.sendRemoteSceneLaunched(ownerId, targetId, run.sceneInstanceId);
+            return;
+        }
+        if (run.phase === 'activating') return;
+        if (run.phase !== 'prepared') return;
+
+        run.phase = 'activating';
+        run.lastActivity = Date.now();
+        const relayed = this.sendRemoteSceneMessage(targetId, {
+            type: 'remote_scene_activate',
+            targetClientId: targetId,
+            senderClientId: ownerId,
+            sceneInstanceId: run.sceneInstanceId,
+            activationEpochMs,
+            activationDelayMs
+        }, this.MAX_REMOTE_SCENE_BUFFERED_BYTES);
+        if (!relayed) {
+            this.remoteScenesByTarget.delete(targetId);
+            this.sendRemoteSceneValidation(
+                ownerId, targetId, run.sceneInstanceId, false,
+                'Remote scene activation could not be delivered');
+        }
+    }
+
+    handleRemoteSceneLaunched(targetId, message) {
+        const run = this.remoteScenesByTarget.get(targetId);
+        if (!run || run.sceneInstanceId !== message.sceneInstanceId
+            || run.phase !== 'activating') {
+            return;
+        }
+        run.phase = 'running';
+        run.lastActivity = Date.now();
+        this.sendRemoteSceneLaunched(run.ownerId, targetId, run.sceneInstanceId);
+    }
+
+    isValidRemoteSceneVideoSync(message) {
+        if (!this.isValidRemoteSceneInstanceId(message.sceneInstanceId)
+            || !Number.isSafeInteger(message.sequence) || message.sequence <= 0
+            || !Number.isSafeInteger(message.sampledEpochMs) || message.sampledEpochMs <= 0
+            || !Array.isArray(message.videos)
+            || message.videos.length > this.MAX_REMOTE_SCENE_SYNC_ITEMS
+            || !this.serializedJsonWithinLimit(message.videos, this.MAX_REMOTE_SCENE_SYNC_BYTES)) {
+            return false;
+        }
+        const maximumPositionMs = 7 * 24 * 60 * 60 * 1000;
+        return message.videos.every(state => state && typeof state === 'object'
+            && !Array.isArray(state)
+            && typeof state.mediaId === 'string'
+            && state.mediaId.length >= 1 && state.mediaId.length <= 128
+            && Number.isFinite(state.positionMs)
+            && state.positionMs >= 0 && state.positionMs <= maximumPositionMs
+            && Number.isFinite(state.durationMs)
+            && state.durationMs >= 0 && state.durationMs <= maximumPositionMs
+            && typeof state.playing === 'boolean'
+            && typeof state.muted === 'boolean'
+            && typeof state.visible === 'boolean'
+            && typeof state.repeatAvailable === 'boolean');
+    }
+
+    handleRemoteSceneVideoSync(ownerId, message) {
+        const targetId = typeof message.targetClientId === 'string'
+            ? this.resolveClientId(message.targetClientId) : null;
+        const run = targetId ? this.remoteScenesByTarget.get(targetId) : null;
+        if (!run || run.ownerId !== ownerId || run.phase !== 'running'
+            || run.sceneInstanceId !== message.sceneInstanceId
+            || !this.isValidRemoteSceneVideoSync(message)
+            || message.sequence <= run.lastVideoSequence) {
+            return;
+        }
+
+        const now = Date.now();
+        run.lastVideoSequence = message.sequence;
+        if (now - run.lastVideoRelayAt < this.REMOTE_SCENE_SYNC_MIN_INTERVAL_MS) {
+            return;
+        }
+        const target = this.clients.get(targetId);
+        if (!target || !target.ws || target.ws.readyState !== WebSocket.OPEN
+            || (Number(target.ws.bufferedAmount) || 0) > this.MAX_REMOTE_SCENE_BUFFERED_BYTES) {
+            return;
+        }
+
+        if (this.sendRemoteSceneMessage(targetId, {
+            type: 'remote_scene_video_sync',
+            targetClientId: targetId,
+            senderClientId: ownerId,
+            sceneInstanceId: run.sceneInstanceId,
+            sequence: message.sequence,
+            sampledEpochMs: message.sampledEpochMs,
+            videos: message.videos
+        }, this.MAX_REMOTE_SCENE_BUFFERED_BYTES)) {
+            run.lastVideoRelayAt = now;
+            run.lastActivity = now;
+        }
+    }
+
+    handleRemoteSceneStop(ownerId, message) {
+        const requestedTargetId = typeof message.targetClientId === 'string'
+            ? message.targetClientId : '';
+        const targetId = this.resolveClientId(requestedTargetId);
+        if (!targetId || ownerId === targetId) return;
+
+        const run = this.remoteScenesByTarget.get(targetId);
+        let sceneInstanceId = typeof message.sceneInstanceId === 'string'
+            ? message.sceneInstanceId : '';
+        if (!sceneInstanceId && run && run.ownerId === ownerId) {
+            // Compatibility for old clients: correlation is supplied only from
+            // authenticated server state, never from another client's payload.
+            sceneInstanceId = run.sceneInstanceId;
+        }
+        if (!this.isValidRemoteSceneInstanceId(sceneInstanceId)) return;
+
+        let tombstone = this.getRemoteSceneStopTombstone(
+            ownerId, targetId, sceneInstanceId);
+        if (!run) {
+            const now = Date.now();
+            if (!this.allowRemoteSceneAuxiliaryReply(ownerId, now)) return;
+            if (!tombstone) {
+                // No active run also means there is nothing left to tear down:
+                // this is the safe, idempotent answer after a server restart or
+                // a target reconnect, both of which close the target socket and
+                // make its controller clear the scene locally.
+                this.rememberRemoteSceneStopped({
+                    ownerId,
+                    targetId,
+                    sceneInstanceId
+                }, now);
+                tombstone = this.getRemoteSceneStopTombstone(
+                    ownerId, targetId, sceneInstanceId, now);
+            }
+            if (tombstone && now - tombstone.lastReplayedAt >= 1000) {
+                tombstone.lastReplayedAt = now;
+                this.sendRemoteSceneStopped(
+                    ownerId, targetId, sceneInstanceId, true);
+            }
+            return;
+        }
+        if (run.ownerId !== ownerId || run.sceneInstanceId !== sceneInstanceId) {
+            return;
+        }
+        if (run.phase === 'stopping') return;
+
+        run.previousPhase = run.phase;
+        run.phase = 'stopping';
+        run.lastActivity = Date.now();
+        const relayed = this.sendRemoteSceneMessage(targetId, {
+            type: 'remote_scene_stop',
+            targetClientId: targetId,
+            senderClientId: ownerId,
+            sceneInstanceId
+        });
+        if (!relayed) {
+            this.remoteScenesByTarget.delete(targetId);
+            const target = this.clients.get(targetId);
+            const targetTransportLost = !target || !target.ws
+                || target.ws.readyState !== WebSocket.OPEN;
+            if (targetTransportLost) {
+                this.rememberRemoteSceneStopped(run);
+                this.sendRemoteSceneStopped(
+                    ownerId, targetId, sceneInstanceId, true);
+            } else {
+                this.sendRemoteSceneStopped(
+                    ownerId, targetId, sceneInstanceId, false,
+                    'Remote scene stop could not be delivered');
+            }
+        }
+    }
+
+    handleRemoteSceneStopped(targetId, message) {
+        const run = this.remoteScenesByTarget.get(targetId);
+        if (!run || run.phase !== 'stopping'
+            || run.sceneInstanceId !== message.sceneInstanceId
+            || typeof message.success !== 'boolean') {
+            return;
+        }
+        const error = typeof message.error === 'string'
+            ? message.error.slice(0, 512) : '';
+        if (!message.success) {
+            const resumablePhases = new Set([
+                'preparing', 'prepared', 'activating', 'running'
+            ]);
+            run.phase = resumablePhases.has(run.previousPhase)
+                ? run.previousPhase : 'running';
+            run.previousPhase = null;
+            run.lastActivity = Date.now();
+            this.sendRemoteSceneStopped(
+                run.ownerId, targetId, run.sceneInstanceId, false,
+                error || 'Remote client failed to stop the scene');
+            return;
+        }
+
+        this.remoteScenesByTarget.delete(targetId);
+        this.rememberRemoteSceneStopped(run);
+        this.sendRemoteSceneStopped(
+            run.ownerId, targetId, run.sceneInstanceId, true);
+    }
+
+    cleanupRemoteScenes(now = Date.now()) {
+        this.pruneRemoteSceneStopTombstones(now);
+        for (const [targetId, run] of Array.from(this.remoteScenesByTarget.entries())) {
+            if (!run || run.phase === 'running') continue;
+            const timeoutMs = run.phase === 'stopping'
+                ? this.REMOTE_SCENE_STOP_TIMEOUT_MS
+                : run.phase === 'activating'
+                    ? this.REMOTE_SCENE_ACTIVATE_TIMEOUT_MS
+                    : this.REMOTE_SCENE_PREPARE_TIMEOUT_MS;
+            if (now - (run.lastActivity || run.createdAt || now) <= timeoutMs) continue;
+
+            const cleanupDelivered = this.sendRemoteSceneMessage(targetId, {
+                type: 'remote_scene_stop',
+                targetClientId: targetId,
+                senderClientId: run.ownerId,
+                sceneInstanceId: run.sceneInstanceId,
+                protocolTimeout: true
+            });
+            this.remoteScenesByTarget.delete(targetId);
+            if (run.phase === 'stopping') {
+                const target = this.clients.get(targetId);
+                const targetTransportLost = !target || !target.ws
+                    || target.ws.readyState !== WebSocket.OPEN;
+                if (!cleanupDelivered && targetTransportLost) {
+                    this.rememberRemoteSceneStopped(run, now);
+                    this.sendRemoteSceneStopped(
+                        run.ownerId, targetId, run.sceneInstanceId, true);
+                } else {
+                    this.sendRemoteSceneStopped(
+                        run.ownerId, targetId, run.sceneInstanceId, false,
+                        'Remote scene stop acknowledgement timed out');
+                }
+            } else {
+                this.sendRemoteSceneValidation(
+                    run.ownerId, targetId, run.sceneInstanceId, false,
+                    'Remote scene launch timed out');
+            }
+        }
     }
 
     handleRemoteSceneClientDeparture(clientId) {
         if (!clientId) return;
 
-        // Notify the owner before removing a departing/replaced target. In a
-        // logical-session replacement there is no client-list gap, so this
-        // correlated failure is what prevents the host retaining a ghost run.
         const targetRun = this.remoteScenesByTarget.get(clientId);
         if (targetRun) {
-            const owner = this.clients.get(targetRun.ownerId);
-            if (owner && owner.ws && owner.ws.readyState === WebSocket.OPEN) {
-                owner.ws.send(JSON.stringify({
-                    type: 'remote_scene_stopped',
-                    senderClientId: clientId,
-                    targetClientId: targetRun.ownerId,
-                    sceneInstanceId: targetRun.sceneInstanceId,
-                    success: false,
-                    error: 'Remote target connection was lost'
-                }));
+            if (targetRun.phase === 'preparing'
+                || targetRun.phase === 'prepared'
+                || targetRun.phase === 'activating') {
+                this.sendRemoteSceneValidation(
+                    targetRun.ownerId, clientId, targetRun.sceneInstanceId, false,
+                    'Remote target connection was lost');
+            } else {
+                const completedRun = { ...targetRun, targetId: clientId };
+                this.rememberRemoteSceneStopped(completedRun);
+                this.sendRemoteSceneStopped(
+                    targetRun.ownerId, clientId, targetRun.sceneInstanceId, true);
             }
+            this.remoteScenesByTarget.delete(clientId);
         }
-        this.remoteScenesByTarget.delete(clientId);
 
-        // If the authenticated owner disappears, issue the same correlated
-        // STOP the owner would have sent. This message is server-authored from
-        // the recorded run, so a client-provided senderClientId is never used.
-        for (const [targetId, run] of this.remoteScenesByTarget) {
+        // An owner's departure triggers exactly one server-authored cleanup.
+        for (const [targetId, run] of Array.from(this.remoteScenesByTarget.entries())) {
             if (!run || run.ownerId !== clientId) continue;
-
-            const target = this.clients.get(targetId);
-            if (target && target.ws && target.ws.readyState === WebSocket.OPEN) {
-                try {
-                    target.ws.send(JSON.stringify({
-                        type: 'remote_scene_stop',
-                        targetClientId: targetId,
-                        senderClientId: clientId,
-                        sceneInstanceId: run.sceneInstanceId,
-                        ownerDisconnected: true
-                    }));
-                    console.log(`🛑 Stopped orphaned remote scene ${run.sceneInstanceId} on ${targetId}`);
-                } catch (error) {
-                    console.error('❌ Failed to stop orphaned remote scene:', error);
-                }
-            }
+            this.sendRemoteSceneMessage(targetId, {
+                type: 'remote_scene_stop',
+                targetClientId: targetId,
+                senderClientId: clientId,
+                sceneInstanceId: run.sceneInstanceId,
+                ownerDisconnected: true
+            });
             this.remoteScenesByTarget.delete(targetId);
         }
+
+        for (const [key, tombstone] of this.remoteSceneStopTombstones) {
+            // Keep a departed target's terminal result: if it reconnects under
+            // the same logical session, the still-connected owner may retry
+            // STOP and must receive the cached convergence result. An owner
+            // departure has no consumer left, so its entries can go now.
+            if (tombstone && tombstone.ownerId === clientId) {
+                this.remoteSceneStopTombstones.delete(key);
+            }
+        }
+        this.remoteSceneAuxiliaryReplyRates.delete(clientId);
     }
     
-    handleMessage(clientId, message) {
+    handleMessage(clientId, message, uploadTransportSocket = null) {
         const client = this.clients.get(clientId);
         if (!client) return;
         
-        console.log(`📨 Message from ${clientId}:`, message.type);
+        if (message.type !== 'upload_chunk' && message.type !== 'upload_progress'
+            && message.type !== 'cursor_update'
+            && message.type !== 'remote_scene_video_sync') {
+            console.log(`📨 Message from ${clientId}:`, message.type);
+        }
         
         switch (message.type) {
             case 'register':
@@ -471,13 +995,13 @@ class MouffetteServer {
                 break;
             // Upload flow: track state and relay
             case 'upload_start':
-                this.handleUploadStart(clientId, message);
+                this.handleUploadStart(clientId, message, uploadTransportSocket);
                 break;
             case 'upload_chunk':
-                this.handleUploadChunk(clientId, message);
+                this.handleUploadChunk(clientId, message, uploadTransportSocket);
                 break;
             case 'upload_complete':
-                this.handleUploadComplete(clientId, message);
+                this.handleUploadComplete(clientId, message, uploadTransportSocket);
                 break;
             case 'upload_abort':
                 this.handleUploadAbort(clientId, message);
@@ -499,14 +1023,23 @@ class MouffetteServer {
             case 'upload_progress':
                 this.handleUploadProgress(clientId, message);
                 break;
+            case 'upload_ready':
+                this.handleUploadReady(clientId, message);
+                break;
             case 'upload_finished':
                 this.handleUploadFinished(clientId, message);
                 break;
             case 'upload_rejected':
                 this.handleUploadRejected(clientId, message);
                 break;
+            case 'upload_abort_ack':
+                this.handleUploadAbortAcknowledgement(clientId, message);
+                break;
             case 'all_files_removed':
                 this.handleAllFilesRemoved(clientId, message);
+                break;
+            case 'remove_all_files_failed':
+                this.handleAllFilesRemovalFailed(clientId, message);
                 break;
             case 'media_share':
                 this.handleMediaShare(clientId, message);
@@ -520,68 +1053,26 @@ class MouffetteServer {
             case 'cursor_update':
                 this.handleCursorUpdate(clientId, message);
                 break;
-            case 'remote_scene_start': {
-                // Relay to target client (like uploads). Expect: targetClientId, scene payload
-                console.log(`🎬 Received remote_scene_start from ${clientId} to ${message.targetClientId}`);
-                const targetId = this.resolveClientId(message.targetClientId);
-                const sceneInstanceId = message.scene && typeof message.scene === 'object'
-                    ? message.scene.sceneInstanceId : null;
-                if (targetId && typeof sceneInstanceId === 'string'
-                    && sceneInstanceId.length >= 1 && sceneInstanceId.length <= 128) {
-                    const activeRun = this.remoteScenesByTarget.get(targetId);
-                    if (!activeRun
-                        || (activeRun.ownerId === clientId
-                            && activeRun.sceneInstanceId === sceneInstanceId)) {
-                        this.remoteScenesByTarget.set(targetId, {
-                            ownerId: clientId,
-                            sceneInstanceId
-                        });
-                    }
-                }
-                this.relayToTarget(clientId, message.targetClientId, message);
+            case 'remote_scene_start':
+                this.handleRemoteSceneStart(clientId, message);
                 break;
-            }
             case 'remote_scene_activate':
-                this.relayToTarget(clientId, message.targetClientId, message);
+                this.handleRemoteSceneActivate(clientId, message);
                 break;
             case 'remote_scene_video_sync':
-                this.relayToTarget(clientId, message.targetClientId, message);
+                this.handleRemoteSceneVideoSync(clientId, message);
                 break;
-            case 'remote_scene_stop': {
-                const targetId = this.resolveClientId(message.targetClientId);
-                const activeRun = targetId ? this.remoteScenesByTarget.get(targetId) : null;
-                if (activeRun && activeRun.ownerId === clientId
-                    && (typeof message.sceneInstanceId !== 'string'
-                        || message.sceneInstanceId.length === 0)) {
-                    // Upgrade the legacy generic STOP to the recorded correlated
-                    // run whenever possible.
-                    message.sceneInstanceId = activeRun.sceneInstanceId;
-                }
-                this.relayToTarget(clientId, message.targetClientId, message);
+            case 'remote_scene_stop':
+                this.handleRemoteSceneStop(clientId, message);
                 break;
-            }
-            case 'remote_scene_stopped': {
-                const activeRun = this.remoteScenesByTarget.get(clientId);
-                if (message.success === true && activeRun
-                    && activeRun.sceneInstanceId === message.sceneInstanceId) {
-                    this.remoteScenesByTarget.delete(clientId);
-                }
-                this.relayToTarget(clientId, message.targetClientId, message);
+            case 'remote_scene_stopped':
+                this.handleRemoteSceneStopped(clientId, message);
                 break;
-            }
-            case 'remote_scene_validation': {
-                // Relay validation result back to sender
-                const activeRun = this.remoteScenesByTarget.get(clientId);
-                if (message.success === false && activeRun
-                    && activeRun.sceneInstanceId === message.sceneInstanceId) {
-                    this.remoteScenesByTarget.delete(clientId);
-                }
-                this.relayToTarget(clientId, message.targetClientId, message);
+            case 'remote_scene_validation':
+                this.handleRemoteSceneValidation(clientId, message);
                 break;
-            }
             case 'remote_scene_launched':
-                // Relay launched confirmation back to sender
-                this.relayToTarget(clientId, message.targetClientId, message);
+                this.handleRemoteSceneLaunched(clientId, message);
                 break;
             default:
                 console.log(`⚠️ Unknown message type: ${message.type}`);
@@ -609,7 +1100,8 @@ class MouffetteServer {
         const resolvedId = this.resolveClientId(targetClientId);
         const targetClient = resolvedId ? this.clients.get(resolvedId) : null;
         
-        if (!targetClient || !targetClient.ws) {
+        if (!targetClient || !targetClient.ws
+            || targetClient.ws.readyState !== WebSocket.OPEN) {
             const senderClient = this.clients.get(senderId);
             if (senderClient && senderClient.ws) {
                 senderClient.ws.send(JSON.stringify({
@@ -617,7 +1109,7 @@ class MouffetteServer {
                     message: 'Target client not found',
                 }));
             }
-            return;
+            return false;
         }
         // Scene-control ownership must come from the authenticated control
         // socket, never from a client-provided JSON field. Other protocols keep
@@ -642,20 +1134,25 @@ class MouffetteServer {
                 console.log(`🎯 Relaying ${message.type} from ${senderId} -> ${targetClientId}`);
             }
             targetClient.ws.send(JSON.stringify(message));
+            return true;
         } catch (e) {
             console.error('❌ Relay to target failed:', e);
+            return false;
         }
     }
 
     // Helper to relay a message from target -> sender
     relayToSender(targetId, senderClientId, message) {
         const senderClient = this.clients.get(senderClientId);
-        if (!senderClient || !senderClient.ws) return;
+        if (!senderClient || !senderClient.ws
+            || senderClient.ws.readyState !== WebSocket.OPEN) return false;
         if (!message.targetClientId) message.targetClientId = targetId;
         try {
             senderClient.ws.send(JSON.stringify(message));
+            return true;
         } catch (e) {
             console.error('❌ Relay to sender failed:', e);
+            return false;
         }
     }
 
@@ -920,6 +1417,29 @@ class MouffetteServer {
     }
     
     // PHASE 2: Upload state tracking methods
+    abortUploadsForUploadSocket(senderId, socket, reason) {
+        if (!senderId || !socket) return;
+        for (const [uploadId, upload] of Array.from(this.uploads.entries())) {
+            if (!upload || upload.senderSession !== senderId
+                || upload.transportSocket !== socket) continue;
+            const failure = String(reason || 'Dedicated upload transport was lost');
+            const target = this.clients.get(upload.targetSession);
+            if (target && target.ws && target.ws.readyState === WebSocket.OPEN) {
+                target.ws.send(JSON.stringify({
+                    type: 'upload_abort',
+                    uploadId,
+                    canvasSessionId: upload.canvasSessionId,
+                    senderClientId: upload.senderSession,
+                    senderPersistentClientId: upload.senderPersistent,
+                    protocolRejected: true,
+                    reason: failure
+                }));
+            }
+            this.sendUploadRejected(upload.senderSession, uploadId, failure);
+            this.uploads.delete(uploadId);
+        }
+    }
+
     abortUploadsForClient(clientId) {
         if (!clientId) return;
 
@@ -951,9 +1471,26 @@ class MouffetteServer {
         }
 
         for (const [removalId, removal] of Array.from(this.pendingRemovals.entries())) {
-            if (removal && (removal.senderSession === clientId
-                || removal.targetSession === clientId)) {
+            if (!removal) continue;
+            if (removal.senderSession === clientId) {
                 this.pendingRemovals.delete(removalId);
+            } else if (removal.targetSession === clientId) {
+                this.pendingRemovals.delete(removalId);
+                this.sendRemovalRejected(removal.senderSession, removalId,
+                    'Remote removal target disconnected');
+            }
+        }
+        for (const [uploadId, pending] of Array.from(this.pendingUploadAborts.entries())) {
+            if (!pending) continue;
+            if (pending.senderSession === clientId) {
+                this.pendingUploadAborts.delete(uploadId);
+            } else if (pending.targetSession === clientId) {
+                this.pendingUploadAborts.delete(uploadId);
+                this.relayToSender(clientId, pending.senderSession, {
+                    type: 'upload_aborted',
+                    uploadId,
+                    canvasSessionId: pending.canvasSessionId
+                });
             }
         }
     }
@@ -965,6 +1502,16 @@ class MouffetteServer {
             type: 'upload_rejected',
             uploadId: typeof uploadId === 'string' ? uploadId : '',
             reason: String(reason || 'Upload rejected').slice(0, 512)
+        }));
+    }
+
+    sendRemovalRejected(senderSession, removalId, reason) {
+        const sender = this.clients.get(senderSession);
+        if (!sender || !sender.ws || sender.ws.readyState !== WebSocket.OPEN) return;
+        sender.ws.send(JSON.stringify({
+            type: 'removal_rejected',
+            removalId: typeof removalId === 'string' ? removalId : '',
+            reason: String(reason || 'Remote removal was rejected').slice(0, 512)
         }));
     }
 
@@ -1017,7 +1564,7 @@ class MouffetteServer {
         this.uploads.delete(uploadId);
     }
 
-    handleUploadStart(senderId, message) {
+    handleUploadStart(senderId, message, transportSocket = null) {
         const targetClientId = message.targetPersistentClientId || message.targetClientId;
         const { uploadId, canvasSessionId, files } = message;
 
@@ -1038,14 +1585,46 @@ class MouffetteServer {
             rejectStart('Invalid upload identifiers, target, or file count');
             return;
         }
-        if (this.uploads.has(uploadId)) {
+        const targetPersistentId = this.getPersistentId(resolvedTarget);
+        const senderPersistentId = this.getPersistentId(senderId);
+        if (this.uploads.has(uploadId) || this.pendingUploadAborts.has(uploadId)) {
             rejectStart('Upload identifier is already active');
             return;
+        }
+        for (const pending of this.pendingUploadAborts.values()) {
+            if (pending && (pending.senderPersistent === senderPersistentId
+                || pending.targetSession === resolvedTarget)) {
+                rejectStart('Previous upload cancellation cleanup is still pending');
+                return;
+            }
+        }
+        for (const removal of this.pendingRemovals.values()) {
+            const sameNamespace = removal
+                && removal.senderPersistent === senderPersistentId
+                && removal.targetPersistent === targetPersistentId;
+            const overlappingCanvas = sameNamespace
+                && (removal.canvasSessionId === 'default'
+                    || removal.canvasSessionId === canvasSessionId);
+            if (overlappingCanvas) {
+                rejectStart('Remote removal for this canvas is still pending');
+                return;
+            }
+        }
+        for (const upload of this.uploads.values()) {
+            if (upload && upload.senderSession === senderId) {
+                rejectStart('Another upload from this sender is already active');
+                return;
+            }
+            if (upload && upload.targetSession === resolvedTarget) {
+                rejectStart('Remote client is already receiving another upload');
+                return;
+            }
         }
 
         const fileIds = [];
         const seenFileIds = new Set();
         const seenMediaIds = new Set();
+        const fileStates = new Map();
         let totalSize = 0;
         for (const file of files) {
             if (!file || typeof file !== 'object' || Array.isArray(file)
@@ -1084,10 +1663,13 @@ class MouffetteServer {
             totalSize += file.sizeBytes;
             seenFileIds.add(file.fileId);
             fileIds.push(file.fileId);
+            fileStates.set(file.fileId, {
+                sizeBytes: file.sizeBytes,
+                receivedBytes: 0,
+                nextChunkIndex: 0
+            });
         }
 
-        const targetPersistentId = this.getPersistentId(targetClientId);
-        const senderPersistentId = this.getPersistentId(senderId);
         console.log(`📤 Upload started: ${senderPersistentId}/${senderId} -> ${targetPersistentId}/${targetClientId} [${uploadId}] directional-idea:${canvasSessionId}`);
 
         const startedAt = Date.now();
@@ -1101,16 +1683,25 @@ class MouffetteServer {
             lastActivity: startedAt,
             files: fileIds,
             fileSet: seenFileIds,
+            fileStates,
             totalSize,
-            awaitingTargetValidation: false
+            relayedBytes: 0,
+            receivedBytes: 0,
+            lastTargetPercent: 0,
+            awaitingTargetReady: true,
+            awaitingTargetValidation: false,
+            transportSocket
         });
 
         console.log(`   Files: ${fileIds.length} file(s)`);
         const relayed = { ...message, senderClientId: senderId };
-        this.relayToTarget(senderId, resolvedTarget, relayed);
+        if (!this.relayToTarget(senderId, resolvedTarget, relayed)) {
+            this.sendUploadRejected(senderId, uploadId, 'Upload target is unavailable');
+            this.uploads.delete(uploadId);
+        }
     }
 
-    handleUploadChunk(senderId, message) {
+    handleUploadChunk(senderId, message, transportSocket = null) {
         const uploadId = message.uploadId;
         const upload = this.uploads.get(uploadId);
         if (!upload) {
@@ -1121,13 +1712,47 @@ class MouffetteServer {
             this.sendUploadRejected(senderId, uploadId, 'Upload sender does not own this session');
             return;
         }
-        if (upload.awaitingTargetValidation
+        if (upload.transportSocket !== transportSocket) {
+            this.rejectTrackedUpload(uploadId, 'Upload transport changed during transfer');
+            return;
+        }
+        if (upload.awaitingTargetReady || upload.awaitingTargetValidation
             || message.canvasSessionId !== upload.canvasSessionId
             || typeof message.fileId !== 'string' || !upload.fileSet.has(message.fileId)
             || !Number.isInteger(message.chunkIndex) || message.chunkIndex < 0
             || typeof message.data !== 'string' || message.data.length < 1
             || message.data.length > this.MAX_UPLOAD_CHUNK_BASE64_LENGTH) {
             this.rejectTrackedUpload(uploadId, 'Invalid upload chunk');
+            return;
+        }
+
+        const fileState = upload.fileStates.get(message.fileId);
+        const encodedData = message.data;
+        let decodedData;
+        try {
+            decodedData = Buffer.from(encodedData, 'base64');
+        } catch (_error) {
+            decodedData = null;
+        }
+        if (!fileState || message.chunkIndex !== fileState.nextChunkIndex
+            || encodedData.length % 4 !== 0
+            || !/^[A-Za-z0-9+/]*={0,2}$/.test(encodedData)
+            || !decodedData || decodedData.length < 1 || decodedData.length > 128 * 1024
+            || decodedData.toString('base64') !== encodedData
+            || decodedData.length > fileState.sizeBytes - fileState.receivedBytes) {
+            this.rejectTrackedUpload(uploadId,
+                'Upload chunks are out of order or exceed the declared file size');
+            return;
+        }
+
+        const target = this.clients.get(upload.targetSession);
+        if (!target || !target.ws || target.ws.readyState !== WebSocket.OPEN) {
+            this.rejectTrackedUpload(uploadId, 'Upload target disconnected', false);
+            return;
+        }
+        if (target.ws.bufferedAmount > this.MAX_TARGET_BUFFERED_UPLOAD_BYTES) {
+            this.rejectTrackedUpload(uploadId,
+                'Upload target is not consuming data fast enough');
             return;
         }
 
@@ -1138,10 +1763,16 @@ class MouffetteServer {
             targetPersistentClientId: upload.targetPersistent
         };
         upload.lastActivity = Date.now();
-        this.relayToTarget(upload.senderSession, upload.targetSession, relayed);
+        if (!this.relayToTarget(upload.senderSession, upload.targetSession, relayed)) {
+            this.rejectTrackedUpload(uploadId, 'Upload relay failed', false);
+            return;
+        }
+        fileState.receivedBytes += decodedData.length;
+        fileState.nextChunkIndex++;
+        upload.relayedBytes += decodedData.length;
     }
 
-    handleUploadComplete(senderId, message) {
+    handleUploadComplete(senderId, message, transportSocket = null) {
         const { uploadId, canvasSessionId } = message;
         const upload = this.uploads.get(uploadId);
 
@@ -1154,11 +1785,22 @@ class MouffetteServer {
             this.sendUploadRejected(senderId, uploadId, 'Upload sender does not own this session');
             return;
         }
-        if (canvasSessionId !== upload.canvasSessionId) {
+        if (upload.transportSocket !== transportSocket) {
+            this.rejectTrackedUpload(uploadId, 'Upload transport changed before completion');
+            return;
+        }
+        if (upload.awaitingTargetReady || canvasSessionId !== upload.canvasSessionId) {
             this.rejectTrackedUpload(uploadId, 'Upload session identifier mismatch');
             return;
         }
         if (upload.awaitingTargetValidation) {
+            return;
+        }
+        if (upload.relayedBytes !== upload.totalSize
+            || [...upload.fileStates.values()].some(file =>
+                file.receivedBytes !== file.sizeBytes)) {
+            this.rejectTrackedUpload(uploadId,
+                'Upload completed before every declared byte was relayed');
             return;
         }
         upload.awaitingTargetValidation = true;
@@ -1170,15 +1812,56 @@ class MouffetteServer {
             targetClientId: upload.targetPersistent,
             targetPersistentClientId: upload.targetPersistent
         };
-        this.relayToTarget(upload.senderSession, upload.targetSession, relayed);
+        if (!this.relayToTarget(upload.senderSession, upload.targetSession, relayed)) {
+            this.rejectTrackedUpload(uploadId,
+                'Upload target disconnected before validation', false);
+        }
+    }
+
+    handleUploadReady(targetId, message) {
+        const upload = this.uploads.get(message.uploadId);
+        if (!upload || !this.isExpectedUploadTarget(upload, targetId)
+            || message.canvasSessionId !== upload.canvasSessionId) return;
+        if (upload.awaitingTargetValidation || !upload.awaitingTargetReady) return;
+
+        upload.awaitingTargetReady = false;
+        upload.lastActivity = Date.now();
+        this.relayToSender(targetId, upload.senderSession, {
+            type: 'upload_ready',
+            uploadId: message.uploadId,
+            canvasSessionId: upload.canvasSessionId
+        });
     }
 
     handleUploadProgress(targetId, message) {
         const upload = this.uploads.get(message.uploadId);
         if (!upload || !this.isExpectedUploadTarget(upload, targetId)) return;
-        upload.lastActivity = Date.now();
+        let madeProgress = false;
+
+        // Compatibility with clients predating the explicit upload_ready event:
+        // their initial zero-progress acknowledgement also proves staging is ready.
+        if (upload.awaitingTargetReady && !upload.awaitingTargetValidation) {
+            upload.awaitingTargetReady = false;
+            madeProgress = true;
+            this.relayToSender(targetId, upload.senderSession, {
+                type: 'upload_ready',
+                uploadId: message.uploadId,
+                canvasSessionId: upload.canvasSessionId
+            });
+        }
 
         const percent = Number.isInteger(message.percent) ? Math.max(0, Math.min(99, message.percent)) : 0;
+        if (percent > upload.lastTargetPercent) {
+            upload.lastTargetPercent = percent;
+            madeProgress = true;
+        }
+        if (Number.isSafeInteger(message.receivedBytes)
+            && message.receivedBytes > upload.receivedBytes
+            && message.receivedBytes <= upload.relayedBytes) {
+            upload.receivedBytes = message.receivedBytes;
+            madeProgress = true;
+        }
+        if (madeProgress) upload.lastActivity = Date.now();
         const perFileProgress = [];
         if (Array.isArray(message.perFileProgress)) {
             for (const entry of message.perFileProgress) {
@@ -1196,6 +1879,7 @@ class MouffetteServer {
             percent,
             filesCompleted: 0,
             totalFiles: upload.files.length,
+            receivedBytes: upload.receivedBytes,
             perFileProgress
         });
     }
@@ -1294,10 +1978,50 @@ class MouffetteServer {
         }
         console.log(`❌ Upload aborted: ${uploadId}`);
         this.uploads.delete(uploadId);
-        this.relayToTarget(senderId, upload.targetSession, {
+        const abortMessage = {
             ...message,
+            type: 'upload_abort',
             senderClientId: upload.senderSession,
+            senderPersistentClientId: upload.senderPersistent,
             canvasSessionId: upload.canvasSessionId
+        };
+        this.pendingUploadAborts.set(uploadId, {
+            senderSession: upload.senderSession,
+            senderPersistent: upload.senderPersistent,
+            targetSession: upload.targetSession,
+            canvasSessionId: upload.canvasSessionId,
+            abortMessage,
+            createdAt: Date.now(),
+            lastSentAt: Date.now(),
+            attempts: 1
+        });
+        if (!this.relayToTarget(senderId, upload.targetSession, abortMessage)) {
+            // A disconnected target runs its own connection-loss cleanup, so no
+            // partial staging can remain usable. Complete the correlated cancel.
+            this.pendingUploadAborts.delete(uploadId);
+            this.relayToSender(upload.targetSession, upload.senderSession, {
+                type: 'upload_aborted',
+                uploadId,
+                canvasSessionId: upload.canvasSessionId
+            });
+        }
+    }
+
+    handleUploadAbortAcknowledgement(targetId, message) {
+        const pending = this.pendingUploadAborts.get(message.uploadId);
+        // A retried abort can produce a second acknowledgement after the first
+        // one committed. Treat that as an idempotent no-op.
+        if (!pending) return;
+        if (pending.targetSession !== targetId
+            || pending.senderPersistent !== message.senderClientId
+            || pending.canvasSessionId !== message.canvasSessionId) {
+            return this.sendError(targetId, 'Invalid upload abort acknowledgement');
+        }
+        this.pendingUploadAborts.delete(message.uploadId);
+        this.relayToSender(targetId, pending.senderSession, {
+            type: 'upload_aborted',
+            uploadId: message.uploadId,
+            canvasSessionId: pending.canvasSessionId
         });
     }
     
@@ -1343,30 +2067,56 @@ class MouffetteServer {
             console.log(`🧹 Cleaned up ${cleanedCount} stalled upload(s)`);
         }
 
+        for (const [uploadId, pending] of Array.from(this.pendingUploadAborts.entries())) {
+            if (!pending || now - pending.createdAt > this.UPLOAD_TIMEOUT_MS) {
+                this.pendingUploadAborts.delete(uploadId);
+                continue;
+            }
+            if (now - pending.lastSentAt >= 2000 && pending.attempts < 5) {
+                pending.lastSentAt = now;
+                pending.attempts++;
+                this.relayToTarget(pending.senderSession, pending.targetSession,
+                    { ...pending.abortMessage });
+            }
+        }
+
         for (const [removalId, removal] of this.pendingRemovals) {
             if (!removal || now - removal.createdAt > this.REMOVAL_ACK_TIMEOUT_MS) {
+                if (removal) {
+                    this.sendRemovalRejected(removal.senderSession, removalId,
+                        'Remote removal confirmation timed out');
+                }
                 this.pendingRemovals.delete(removalId);
             }
         }
+
+        this.cleanupRemoteScenes(now);
     }
     
     handleRemoveAllFiles(senderId, message) {
         // PHASE 2: Extract targetClientId with fallback
         const targetClientId = message.targetPersistentClientId || message.targetClientId;
         const { canvasSessionId, removalId } = message;
-        if (!targetClientId || !canvasSessionId
+        if (!targetClientId || typeof canvasSessionId !== 'string'
+            || !CANVAS_SESSION_ID_PATTERN.test(canvasSessionId)
             || typeof removalId !== 'string' || !CANONICAL_UUID_PATTERN.test(removalId)) {
             console.warn(`⚠️ remove_all_files missing or invalid required fields from ${senderId}`);
             return this.sendError(senderId,
                 'Missing or invalid targetClientId, canvasSessionId, or removalId');
         }
         if (this.pendingRemovals.has(removalId)) {
-            return this.sendError(senderId, 'Removal identifier is already active');
+            return this.sendRemovalRejected(senderId, removalId,
+                'Removal identifier is already active');
+        }
+        if (this.pendingRemovals.size >= this.MAX_PENDING_REMOVALS) {
+            return this.sendRemovalRejected(senderId, removalId,
+                'Server has too many pending removal transactions');
         }
 
         const resolvedTarget = this.resolveClientId(targetClientId);
         if (!resolvedTarget) {
-            return this.sendError(senderId, 'Target client not found');
+            return this.sendRemovalRejected(senderId, removalId,
+                'Target client not found');
         }
         const targetPersistentId = this.getPersistentId(resolvedTarget);
         const targetFiles = this.clientFiles.get(targetPersistentId);
@@ -1374,6 +2124,25 @@ class MouffetteServer {
         const targetGenerations = this.clientFileGenerations.get(targetPersistentId);
         const senderPersistentId = this.getPersistentId(senderId);
         const entries = [];
+
+        for (const removal of this.pendingRemovals.values()) {
+            if (removal && removal.senderPersistent === senderPersistentId) {
+                return this.sendRemovalRejected(senderId, removalId,
+                    'Another remote removal from this sender is still pending');
+            }
+        }
+        for (const upload of this.uploads.values()) {
+            const sameNamespace = upload
+                && upload.senderPersistent === senderPersistentId
+                && upload.targetPersistent === targetPersistentId;
+            const overlappingCanvas = sameNamespace
+                && (canvasSessionId === 'default'
+                    || upload.canvasSessionId === canvasSessionId);
+            if (overlappingCanvas) {
+                return this.sendRemovalRejected(senderId, removalId,
+                    'Cannot remove files while their upload is active');
+            }
+        }
 
         // DEFAULT means the target will remove the authenticated sender's whole
         // cache root, so mirror that operation across all of that sender's
@@ -1399,11 +2168,6 @@ class MouffetteServer {
             }
         }
 
-        if (entries.length === 0) {
-            console.warn(`⚠️ Unauthorized remove_all_files from ${senderId} for ${targetPersistentId}:${canvasSessionId}`);
-            return this.sendError(senderId, 'Not authorized to remove files from this canvas');
-        }
-
         this.pendingRemovals.set(removalId, {
             senderSession: senderId,
             senderPersistent: senderPersistentId,
@@ -1413,8 +2177,12 @@ class MouffetteServer {
             entries,
             createdAt: Date.now()
         });
-        console.log(`🗑️  Requested removal of ${entries.length} owned file(s) from ${targetPersistentId}:${canvasSessionId}`);
-        this.relayToTarget(senderId, resolvedTarget, message);
+        console.log(`🗑️  Requested idempotent removal of ${entries.length} tracked file(s) from ${targetPersistentId}:${canvasSessionId}`);
+        if (!this.relayToTarget(senderId, resolvedTarget, message)) {
+            this.pendingRemovals.delete(removalId);
+            this.sendRemovalRejected(senderId, removalId,
+                'Remote client is unavailable for removal');
+        }
     }
 
     handleAllFilesRemoved(targetId, message) {
@@ -1466,6 +2234,23 @@ class MouffetteServer {
             targetClientId: removal.targetPersistent,
             targetPersistentClientId: removal.targetPersistent
         });
+    }
+
+    handleAllFilesRemovalFailed(targetId, message) {
+        const removal = typeof message.removalId === 'string'
+            ? this.pendingRemovals.get(message.removalId) : null;
+        if (!removal || removal.targetSession !== targetId
+            || removal.senderPersistent !== message.senderClientId
+            || removal.canvasSessionId !== message.canvasSessionId) {
+            console.warn(`⚠️ Ignoring mismatched removal failure from ${targetId}`);
+            return this.sendError(targetId, 'Invalid removal failure acknowledgement');
+        }
+
+        this.pendingRemovals.delete(message.removalId);
+        const reason = typeof message.reason === 'string' && message.reason.trim()
+            ? message.reason.trim().slice(0, 512)
+            : 'Remote client could not remove every file';
+        this.sendRemovalRejected(removal.senderSession, message.removalId, reason);
     }
     
     handleRemoveFile(senderId, message) {

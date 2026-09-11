@@ -183,8 +183,7 @@ private:
 	void handleVideoSyncWatchdogTimeout();
 	void dispatchDeferredSceneStart();
 	void scheduleSceneRestartCooldown();
-	void drainDeferredDeletes(int passes = 1, bool processEvents = false);
-    void teardownMediaItem(const std::shared_ptr<RemoteMediaItem>& item);
+	void teardownMediaItem(const std::shared_ptr<RemoteMediaItem>& item);
     void markItemReady(const std::shared_ptr<RemoteMediaItem>& item);
     void evaluateItemReadiness(const std::shared_ptr<RemoteMediaItem>& item);
     void startSceneActivationIfReady();

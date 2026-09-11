@@ -4,6 +4,7 @@
 #include "backend/files/LocalFileRepository.h"
 #include "backend/network/RemoteFileTracker.h"
 #include "backend/network/UploadManager.h"
+#include "backend/network/WebSocketClient.h"
 
 #include <QDir>
 #include <QFile>
@@ -12,6 +13,9 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QStandardPaths>
+#include <QTemporaryDir>
+#include <QWebSocket>
+#include <QWebSocketServer>
 
 class UploadRemovalSecurityTest final : public QObject {
     Q_OBJECT
@@ -22,7 +26,11 @@ private slots:
     void removeFileIsBoundToSenderAndCanvas();
     void removeAllIsBoundToSenderRoot();
     void removeAllFailureKeepsMappings();
+    void scopedRemovalFailureRollsBackTheWholeBatch();
     void idempotentRecoveryIsBoundToPersistentSender();
+    void interruptedUploadRemovesOnlyPartialStagingAndCanRetry();
+    void startupSweepPurgesOrphansAndRecoversInterruptedRemoval();
+    void duplicateUploadClickIsIgnoredBeforeExplicitCancellation();
 
 private:
     QString uploadRoot() const;
@@ -177,6 +185,41 @@ void UploadRemovalSecurityTest::removeAllFailureKeepsMappings() {
     QVERIFY(QFileInfo(path).isDir());
 }
 
+void UploadRemovalSecurityTest::scopedRemovalFailureRollsBackTheWholeBatch() {
+    const QString senderId = QStringLiteral("sender_transaction");
+    const QString goodFileId(64, QLatin1Char('a'));
+    const QString badFileId(64, QLatin1Char('b'));
+    const QString canvasId = QStringLiteral("canvas_transaction");
+    const QString goodPath = createReceivedFile(senderId, goodFileId);
+    QString badPath = createReceivedFile(senderId, badFileId);
+    QVERIFY(!goodPath.isEmpty());
+    QVERIFY(!badPath.isEmpty());
+    QVERIFY(QFile::remove(badPath));
+    QVERIFY(QDir().mkpath(badPath));
+    badPath = QFileInfo(badPath).canonicalFilePath();
+
+    FileManager files;
+    files.registerReceivedFilePath(goodFileId, goodPath);
+    files.registerReceivedFilePath(badFileId, badPath);
+    files.associateFileWithIdea(goodFileId, canvasId);
+    files.associateFileWithIdea(badFileId, canvasId);
+    UploadManager uploads(&files);
+
+    QJsonObject message;
+    message["type"] = "remove_all_files";
+    message["senderClientId"] = senderId;
+    message["canvasSessionId"] = canvasId;
+    message["removalId"] = QStringLiteral("34343434-3434-4434-8434-343434343434");
+    uploads.handleIncomingMessage(message);
+
+    QVERIFY2(QFileInfo::exists(goodPath),
+             "a failed batch must not delete files validated earlier in the batch");
+    QCOMPARE(files.getFilePathForId(goodFileId), goodPath);
+    QCOMPARE(files.getFilePathForId(badFileId), badPath);
+    QVERIFY(files.getIdeaIdsForFile(goodFileId).contains(canvasId));
+    QVERIFY(files.getIdeaIdsForFile(badFileId).contains(canvasId));
+}
+
 void UploadRemovalSecurityTest::idempotentRecoveryIsBoundToPersistentSender() {
     const QString senderId = QStringLiteral("stable_sender");
     const QString foreignSenderId = QStringLiteral("foreign_sender");
@@ -257,6 +300,165 @@ void UploadRemovalSecurityTest::idempotentRecoveryIsBoundToPersistentSender() {
                   QStringLiteral("88888888-8888-4888-8888-888888888888"));
     QCOMPARE(files.getFilePathForId(fileId), canonicalExistingPath);
     QVERIFY(!files.getIdeaIdsForFile(fileId).contains(foreignCanvas));
+}
+
+void UploadRemovalSecurityTest::interruptedUploadRemovesOnlyPartialStagingAndCanRetry() {
+    const QString senderId = QStringLiteral("partial_sender");
+    const QString uploadId = QStringLiteral("99990000-1111-4222-8333-444455556666");
+    const QString canvasId = QStringLiteral("partial_canvas");
+    const QString fileId(64, QLatin1Char('f'));
+    const QByteArray bytes("\x89PNG\r\n\x1a\npartial-data", 20);
+
+    FileManager files;
+    UploadManager uploads(&files);
+
+    QJsonObject manifestFile;
+    manifestFile["fileId"] = fileId;
+    manifestFile["name"] = QStringLiteral("partial.png");
+    manifestFile["extension"] = QStringLiteral("png");
+    manifestFile["sizeBytes"] = static_cast<double>(bytes.size());
+    manifestFile["mediaIds"] = QJsonArray{
+        QStringLiteral("12345678-1234-4234-8234-123456789abc")
+    };
+
+    auto startUpload = [&] {
+        QJsonObject start;
+        start["type"] = "upload_start";
+        start["senderClientId"] = QStringLiteral("ephemeral_sender");
+        start["senderPersistentClientId"] = senderId;
+        start["uploadId"] = uploadId;
+        start["canvasSessionId"] = canvasId;
+        start["files"] = QJsonArray{manifestFile};
+        uploads.handleIncomingMessage(start);
+    };
+
+    startUpload();
+    const QString stagingDirectory = QDir(uploadRoot()).filePath(senderId + QLatin1Char('/') + uploadId);
+    const QString stagingFile = QDir(stagingDirectory).filePath(fileId + QStringLiteral(".png"));
+    QVERIFY(QDir(stagingDirectory).exists());
+    QVERIFY(QFileInfo::exists(stagingFile));
+
+    QJsonObject chunk;
+    chunk["type"] = "upload_chunk";
+    chunk["senderClientId"] = QStringLiteral("ephemeral_sender");
+    chunk["senderPersistentClientId"] = senderId;
+    chunk["uploadId"] = uploadId;
+    chunk["canvasSessionId"] = canvasId;
+    chunk["fileId"] = fileId;
+    chunk["chunkIndex"] = 0;
+    chunk["data"] = QString::fromLatin1(bytes.left(8).toBase64());
+    uploads.handleIncomingMessage(chunk);
+    QVERIFY(QFileInfo::exists(stagingFile));
+
+    QJsonObject abort;
+    abort["type"] = "upload_abort";
+    abort["senderClientId"] = QStringLiteral("ephemeral_sender");
+    abort["senderPersistentClientId"] = senderId;
+    abort["uploadId"] = uploadId;
+    abort["canvasSessionId"] = canvasId;
+    uploads.handleIncomingMessage(abort);
+
+    QVERIFY2(!QDir(stagingDirectory).exists(),
+             "an interrupted transfer must remove its partial staging directory");
+    QVERIFY(files.getFilePathForId(fileId).isEmpty());
+
+    startUpload();
+    QVERIFY2(QDir(stagingDirectory).exists(),
+             "cleanup must leave the receiver ready for an immediate retry");
+    uploads.handleIncomingMessage(abort);
+    QVERIFY(!QDir(stagingDirectory).exists());
+}
+
+void UploadRemovalSecurityTest::startupSweepPurgesOrphansAndRecoversInterruptedRemoval() {
+    const QString orphanDirectory = QDir(uploadRoot()).filePath(
+        QStringLiteral("orphan_sender/11111111-2222-4333-8444-555566667777"));
+    QVERIFY(QDir().mkpath(orphanDirectory));
+    QFile orphanFile(QDir(orphanDirectory).filePath(QStringLiteral("partial.png")));
+    QVERIFY(orphanFile.open(QIODevice::WriteOnly));
+    QCOMPARE(orphanFile.write("partial", 7), 7);
+    orphanFile.close();
+
+    const QString senderName = QStringLiteral("tracked_sender");
+    const QString trackedDirectory = QDir(uploadRoot()).filePath(
+        senderName + QStringLiteral("/22222222-3333-4444-8555-666677778888"));
+    QVERIFY(QDir().mkpath(trackedDirectory));
+    const QString trackedFileId(64, QLatin1Char('9'));
+    const QString trackedPath = QDir(trackedDirectory).filePath(trackedFileId
+                                                               + QStringLiteral(".png"));
+    QFile trackedFile(trackedPath);
+    QVERIFY(trackedFile.open(QIODevice::WriteOnly));
+    QCOMPARE(trackedFile.write("tracked", 7), 7);
+    trackedFile.close();
+
+    FileManager files;
+    files.registerReceivedFilePath(trackedFileId, QFileInfo(trackedPath).canonicalFilePath());
+    const QString quarantineName = QStringLiteral(
+        ".mouffette-removing-33333333-4444-4555-8666-777788889999-%1")
+        .arg(senderName);
+    QDir root(uploadRoot());
+    QVERIFY(root.rename(senderName, quarantineName));
+    QVERIFY(!QFileInfo::exists(trackedPath));
+
+    UploadManager uploads(&files);
+    Q_UNUSED(uploads);
+
+    QVERIFY2(!QDir(orphanDirectory).exists(),
+             "untracked staging left by a crash must be removed on startup");
+    QVERIFY2(QFileInfo::exists(trackedPath),
+             "a mapped cache directory quarantined before a crash must be restored");
+    QVERIFY(!root.exists(quarantineName));
+}
+
+void UploadRemovalSecurityTest::duplicateUploadClickIsIgnoredBeforeExplicitCancellation() {
+    QWebSocketServer server(QStringLiteral("upload-state-test"),
+                            QWebSocketServer::NonSecureMode);
+    QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+
+    WebSocketClient socket;
+    QSignalSpy connected(&socket, &WebSocketClient::connected);
+    socket.connectToServer(QStringLiteral("ws://127.0.0.1:%1").arg(server.serverPort()));
+    QTRY_COMPARE_WITH_TIMEOUT(connected.count(), 1, 3000);
+    QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingConnections(), 3000);
+    QScopedPointer<QWebSocket> peer(server.nextPendingConnection());
+    QVERIFY(peer);
+
+    QTemporaryDir sources;
+    QVERIFY(sources.isValid());
+    const QString sourcePath = QDir(sources.path()).filePath(QStringLiteral("pixel.png"));
+    QImage image(8, 8, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::magenta);
+    QVERIFY(image.save(sourcePath));
+
+    FileManager files;
+    const QString fileId = files.getOrCreateFileId(sourcePath);
+    const QString mediaId = QStringLiteral("44444444-5555-4666-8777-888899990000");
+    QVERIFY(!fileId.isEmpty());
+    files.associateMediaWithFile(mediaId, fileId);
+
+    UploadFileInfo info;
+    info.fileId = fileId;
+    info.mediaId = mediaId;
+    info.path = sourcePath;
+    info.name = QStringLiteral("pixel.png");
+    info.extension = QStringLiteral("png");
+    info.size = QFileInfo(sourcePath).size();
+
+    UploadManager uploads(&files);
+    uploads.setWebSocketClient(&socket);
+    uploads.setTargetClientId(QStringLiteral("target_client"));
+    uploads.setActiveIdeaId(QStringLiteral("canvas_click_guard"));
+
+    QVERIFY(uploads.toggleUpload(QVector<UploadFileInfo>{info}));
+    QCOMPARE(uploads.outgoingState(), UploadManager::OutgoingState::AwaitingTargetReady);
+    QVERIFY(!uploads.toggleUpload(QVector<UploadFileInfo>{info}));
+    QCOMPARE(uploads.outgoingState(), UploadManager::OutgoingState::AwaitingTargetReady);
+    uploads.requestCancel();
+    QCOMPARE(uploads.outgoingState(), UploadManager::OutgoingState::AwaitingTargetReady);
+
+    QTest::qWait(1050);
+    uploads.requestCancel();
+    QCOMPARE(uploads.outgoingState(), UploadManager::OutgoingState::Cancelling);
+    socket.disconnect();
 }
 
 QTEST_GUILESS_MAIN(UploadRemovalSecurityTest)

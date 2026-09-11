@@ -505,9 +505,34 @@ if(BUILD_TESTING)
     target_link_libraries(tst_UploadRemovalSecurity PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
     add_test(NAME UploadRemovalSecurity COMMAND tst_UploadRemovalSecurity)
+
+    add_executable(tst_RemoteSceneControllerLifecycle
+        tests/qt/tst_RemoteSceneControllerLifecycle.cpp
+        "$<FILTER:$<TARGET_OBJECTS:MouffetteClient>,EXCLUDE,/src/main[.]cpp[.](o|obj)$>"
+    )
+    target_include_directories(tst_RemoteSceneControllerLifecycle PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
+    target_compile_definitions(tst_RemoteSceneControllerLifecycle PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>"
+        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../video-1080p.mp4")
+    target_link_libraries(tst_RemoteSceneControllerLifecycle PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
+    add_test(NAME RemoteSceneControllerLifecycle COMMAND tst_RemoteSceneControllerLifecycle)
+
+    add_executable(tst_RemoteSceneLifecycle
+        tests/qt/tst_RemoteSceneLifecycle.cpp
+        "$<FILTER:$<TARGET_OBJECTS:MouffetteClient>,EXCLUDE,/src/main[.]cpp[.](o|obj)$>"
+    )
+    target_include_directories(tst_RemoteSceneLifecycle PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
+    target_compile_definitions(tst_RemoteSceneLifecycle PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>")
+    target_link_libraries(tst_RemoteSceneLifecycle PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
+    add_test(NAME RemoteSceneLifecycle COMMAND tst_RemoteSceneLifecycle)
     # Native window focus/grabs are part of these tests. Do not race other GUI
     # suites when CI invokes ctest with parallel jobs.
-    set_tests_properties(CanvasInteraction CanvasInteractionScaled CanvasSelectionBackend VideoPlaybackBackend UploadRemovalSecurity
+    set_tests_properties(CanvasInteraction CanvasInteractionScaled CanvasSelectionBackend VideoPlaybackBackend UploadRemovalSecurity RemoteSceneControllerLifecycle RemoteSceneLifecycle
         PROPERTIES RUN_SERIAL TRUE)
 
     # Reference implementation retained for before/after profiling only. The
