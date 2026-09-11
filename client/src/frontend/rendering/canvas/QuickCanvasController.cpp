@@ -925,6 +925,8 @@ void QuickCanvasController::handleDropPreviewContentReady(const QString& mediaId
     // texture is guaranteed to have reached the visible Quick scene. Keep the
     // old preview fully opaque across two completed render passes, covering a
     // pass that may already have been in flight when readiness was reported.
+    // Then keep the same frame mounted as a poster in the final item for two
+    // more passes before releasing its source.
     cancelDropHandoffRenderBarrier();
     QQuickWindow* renderWindow = m_quickWidget ? m_quickWidget->quickWindow() : nullptr;
     if (!renderWindow) {
@@ -933,7 +935,7 @@ void QuickCanvasController::handleDropPreviewContentReady(const QString& mediaId
 
     const quint64 generation = m_localDragGeneration;
     m_dropHandoffRenderGeneration = generation;
-    m_dropHandoffRenderedFramesRemaining = 2;
+    m_dropHandoffRenderedFramesRemaining = 4;
     m_dropHandoffRenderConnection = QObject::connect(
         renderWindow, &QQuickWindow::afterRendering, this,
         [this, mediaId, generation]() {
@@ -942,7 +944,14 @@ void QuickCanvasController::handleDropPreviewContentReady(const QString& mediaId
                 || mediaId != m_localDropHandoffMediaId) {
                 return;
             }
-            if (--m_dropHandoffRenderedFramesRemaining > 0) {
+            --m_dropHandoffRenderedFramesRemaining;
+            if (m_dropHandoffRenderedFramesRemaining == 2) {
+                // The final item's poster has now been presented underneath
+                // the floating preview. Swap them atomically; both contain the
+                // same QImage and geometry.
+                publishLocalDragPreview(false);
+            }
+            if (m_dropHandoffRenderedFramesRemaining > 0) {
                 if (m_quickWidget) {
                     m_quickWidget->update();
                     if (m_quickWidget->quickWindow()) {
@@ -953,16 +962,7 @@ void QuickCanvasController::handleDropPreviewContentReady(const QString& mediaId
             }
 
             cancelDropHandoffRenderBarrier();
-            // Publish the hidden state while the handoff id is still present.
-            // The QML Behavior is disabled in that state, so opacity jumps from
-            // one to zero without exposing the shared grey placeholder.
-            publishLocalDragPreview(false);
-            QTimer::singleShot(0, this, [this, generation, mediaId]() {
-                if (generation == m_localDragGeneration
-                    && mediaId == m_localDropHandoffMediaId) {
-                    clearLocalDragPreview(false);
-                }
-            });
+            clearLocalDragPreview(false);
         }, Qt::QueuedConnection);
 
     m_quickWidget->update();

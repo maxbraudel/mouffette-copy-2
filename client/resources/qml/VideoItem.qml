@@ -16,8 +16,10 @@ BaseMediaItem {
     property bool videoHasPosterFrame: false
     property bool videoFirstFramePrimed: false
     property bool handoffCovered: false
+    property var handoffFrameSource: null
     readonly property bool remoteFrameMode: remoteFrameSource !== null
-    readonly property bool showFallbackOverlay: !hasLiveFrame
+    readonly property bool hasHandoffPoster: handoffPoster.hasFrame
+    readonly property bool showFallbackOverlay: !hasLiveFrame && !hasHandoffPoster
     readonly property bool hasLiveFrame: remoteFrameMode
                                           ? remoteFrameSurface.hasFrame
                                           : (videoHasRenderedFrame || videoFirstFramePrimed || localFrameSeen)
@@ -92,13 +94,21 @@ BaseMediaItem {
     MediaSurface {
         id: mediaSurface
         anchors.fill: parent
-        contentReady: root.hasLiveFrame
+        contentReady: root.hasHandoffPoster || root.hasLiveFrame
         revealImmediately: root.handoffCovered
         fadeDuration: 80
+
+        RemoteVideoFrameItem {
+            id: handoffPoster
+            anchors.fill: parent
+            z: 0
+            frameSource: root.handoffFrameSource
+        }
 
         VideoOutput {
             id: videoOutput
             anchors.fill: parent
+            z: 1
             fillMode: VideoOutput.Stretch
             visible: !root.remoteFrameMode
 
@@ -111,6 +121,7 @@ BaseMediaItem {
         RemoteVideoFrameItem {
             id: remoteFrameSurface
             anchors.fill: parent
+            z: 1
             visible: root.remoteFrameMode
             frameSource: root.remoteFrameSource
         }

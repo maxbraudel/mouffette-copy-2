@@ -324,6 +324,7 @@ Item {
 
         delegate: Item {
             id: chrome
+            objectName: "selectionChromeVisual"
             property var entry: modelData
             readonly property var geometry: root.resolveEntryGeometry(entry)
             readonly property real sceneX: geometry.sceneX
@@ -352,7 +353,11 @@ Item {
 
             enabled: !!entry
             visible: !!entry
-            z: 90000
+            // Delegates are deliberately reparented to contentRoot, so this z
+            // is compared directly with mediaDropPreview.z (98000). Selection
+            // borders and handles must remain the topmost scene-space visual
+            // during the preview-to-media handoff.
+            z: 98500
 
             // Apply offset when dragging OR when the snap freeze is active.
             // The snap freeze outlives the drag by design (cleared by onMediaChanged),

@@ -778,6 +778,30 @@ private slots:
         QVERIFY(drop.isAccepted());
         QVERIFY(!insertedId.isEmpty());
 
+        auto* previewVisual = m_canvas->root->findChild<QQuickItem*>(
+            QStringLiteral("mediaDropPreview"));
+        QVERIFY(previewVisual);
+        QQuickItem* selectedChrome = nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT([&]() {
+            QList<QQuickItem*> pending {
+                qobject_cast<QQuickItem*>(m_canvas->root)
+            };
+            while (!pending.isEmpty()) {
+                QQuickItem* candidate = pending.takeLast();
+                if (candidate->objectName() == QStringLiteral("selectionChromeVisual")
+                    && mapProperty(candidate, "entry").value("mediaId").toString()
+                        == insertedId) {
+                    selectedChrome = candidate;
+                    return true;
+                }
+                pending.append(candidate->childItems());
+            }
+            return false;
+        }(), 1000);
+        QCOMPARE(selectedChrome->parentItem(), previewVisual->parentItem());
+        QVERIFY2(selectedChrome->z() > previewVisual->z(),
+                 "selection border/handles must render above the drop preview");
+
         int darkestRed = 255;
         int brightestOtherChannel = 0;
         for (int frameIndex = 0; frameIndex < 45; ++frameIndex) {

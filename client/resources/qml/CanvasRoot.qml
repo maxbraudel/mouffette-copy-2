@@ -701,6 +701,8 @@ Rectangle {
                             return !!preview && !!preview.handoffMediaId
                                     && preview.handoffMediaId === mediaDelegate.currentMediaId
                         }
+                        handoffFrameSource: handoffCovered
+                                            ? root.dropPreviewFrameSource : null
                         readonly property real liveWidth:  mediaDelegate.usesLiveAltResize
                                                           ? root.liveAltResizeWidth
                                                           : (media ? media.width : 0)

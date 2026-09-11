@@ -11,6 +11,7 @@ Item {
     property bool textEditable: false
     property QtObject editingSession: null
     property bool handoffCovered: false
+    property var handoffFrameSource: null
 
     readonly property var visualItem: visualLoader.item
     // Compatibility alias for the former Loader-based local delegate.
@@ -66,6 +67,7 @@ Item {
             mediaZ: 0
             selected: root.selected
             handoffCovered: root.handoffCovered
+            handoffFrameSource: root.handoffFrameSource
             imageSource: root.media
                          ? (root.media.sourceUrl || root.media.sourcePath || "")
                          : ""
@@ -84,6 +86,7 @@ Item {
             mediaZ: 0
             selected: root.selected
             handoffCovered: root.handoffCovered
+            handoffFrameSource: root.handoffFrameSource
             cppMediaPlayer: root.media ? (root.media.videoPlayerPtr || null) : null
             cppVideoSink: root.media ? (root.media.videoSinkPtr || null) : null
             remoteFrameSource: root.media ? (root.media.remoteFrameSource || null) : null
