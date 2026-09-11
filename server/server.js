@@ -1,7 +1,9 @@
 const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
+const crypto = require('node:crypto');
 
 const CURSOR_DEBUG = !!process.env.MOUFFETTE_CURSOR_DEBUG;
+const CANONICAL_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 🔐 MOUFFETTE SERVER - IDENTIFICATION SYSTEM & TERMINOLOGY FIX
@@ -47,13 +49,35 @@ class MouffetteServer {
         // PHASE 2: Server-side state tracking
         this.uploads = new Map();        // uploadId -> { sender, target, canvasSessionId, startTime, files: [fileIds] }
         this.clientFiles = new Map();    // persistentClientId -> Map(canvasSessionId -> Set(fileId))
+        // Mirrors clientFiles and records which authenticated sender session
+        // created each inventory entry. Removal requests must match this owner
+        // before either server state or the target filesystem is touched.
+        this.clientFileOwners = new Map(); // persistentClientId -> Map(canvasSessionId -> Map(fileId -> senderPersistentId))
+        this.clientFileGenerations = new Map(); // same shape, fileId -> validated uploadId
+        this.pendingRemovals = new Map(); // removalId -> authenticated sender/target/canvas correlation
         this.sessionsByPersistent = new Map(); // persistentClientId -> Set(sessionId)
+        // target session -> { ownerId, sceneInstanceId }. This is intentionally
+        // small protocol state used only to terminate orphaned remote scenes
+        // when their authenticated control owner disconnects.
+        this.remoteScenesByTarget = new Map();
         
         // PHASE 2: Active canvas tracking (CRITICAL for canvasSessionId validation)
         this.activeCanvases = new Map(); // persistentClientId -> Set(canvasSessionId)
         
         // PHASE 1: Upload timeout configuration
         this.UPLOAD_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+        this.UPLOAD_TARGET_ACK_TIMEOUT_MS = 30 * 1000;
+        this.REMOVAL_ACK_TIMEOUT_MS = 30 * 1000;
+        this.MAX_UPLOAD_FILES = 256;
+        this.MAX_UPLOAD_FILE_BYTES = 16 * 1024 * 1024 * 1024;
+        this.MAX_UPLOAD_TOTAL_BYTES = 64 * 1024 * 1024 * 1024;
+        this.MAX_UPLOAD_CHUNK_BASE64_LENGTH = Math.ceil((128 * 1024) / 3) * 4;
+        this.UPLOAD_CHANNEL_TOKEN_TTL_MS = 30 * 1000;
+        this.uploadChannelTokens = new Map();
+        this.uploadSocketsByClient = new Map();
+        this.uploadChannelMessageTypes = new Set([
+            'upload_start', 'upload_chunk', 'upload_complete', 'upload_abort'
+        ]);
         this.uploadCleanupInterval = null;
     }
 
@@ -76,41 +100,47 @@ class MouffetteServer {
             const isUploadChannel = (channel === 'upload');
             
             if (isUploadChannel) {
-                // Upload channel: send welcome but don't register as new client
-                // Client will identify itself via messages, we'll route through existing client entry
-                const tempId = uuidv4(); // Temporary ID for this socket connection tracking
-                console.log(`📤 Upload channel connected (temp ID: ${tempId})`);
-                
-                ws.send(JSON.stringify({
-                    type: 'welcome',
-                    clientId: tempId, // Client uses this to track which socket received the response
-                    message: 'Upload channel ready'
-                }));
-                
-                // Handle messages from upload channel - they should contain senderClientId
+                const boundClient = this.consumeUploadChannelToken(url.searchParams.get('token'));
+                if (!boundClient) {
+                    console.warn('⚠️ Rejected unauthenticated upload channel');
+                    ws.send(JSON.stringify({
+                        type: 'error',
+                        message: 'Invalid or expired upload channel token'
+                    }));
+                    ws.close(1008, 'Upload channel authentication failed');
+                    return;
+                }
+
+                this.registerUploadSocket(boundClient, ws);
+                console.log(`📤 Authenticated upload channel connected for ${boundClient.id}`);
+
                 ws.on('message', (data) => {
                     try {
                         const message = JSON.parse(data.toString());
-                        // Extract the real client ID from the message
-                        const realClientId = message.senderClientId;
-                        if (realClientId) {
-                            // Forward to handleMessage with the real client ID
-                            this.handleMessage(realClientId, message);
-                        }
+                        this.handleUploadChannelMessage(boundClient, ws, message);
                     } catch (error) {
                         console.error('❌ Error parsing upload channel message:', error);
+                        ws.send(JSON.stringify({
+                            type: 'error',
+                            message: 'Invalid JSON format'
+                        }));
                     }
                 });
                 
                 ws.on('close', () => {
-                    console.log(`📤 Upload channel disconnected (temp ID: ${tempId})`);
+                    this.unregisterUploadSocket(boundClient, ws);
+                    console.log(`📤 Upload channel disconnected for ${boundClient.id}`);
                 });
                 
                 ws.on('error', (error) => {
-                    console.error(`❌ Upload channel error (temp ID: ${tempId}):`, error);
+                    this.unregisterUploadSocket(boundClient, ws);
+                    console.error(`❌ Upload channel error for ${boundClient.id}:`, error);
                 });
-                
-                // Don't add to clients map or broadcast client list
+
+                ws.send(JSON.stringify({
+                    type: 'upload_channel_ready',
+                    clientId: boundClient.id
+                }));
                 return;
             }
             
@@ -161,6 +191,9 @@ class MouffetteServer {
                 }
                 const finalId = clientInfo.id;
                 console.log(`📱 Client disconnected: ${finalId}`);
+                this.revokeUploadChannelsForClient(clientInfo);
+                this.handleRemoteSceneClientDeparture(finalId);
+                this.abortUploadsForClient(finalId);
                 // Clean up watching relationships
                 const targetId = this.watchingByWatcher.get(finalId);
                 if (targetId) {
@@ -201,6 +234,9 @@ class MouffetteServer {
                 }
                 const finalId = clientInfo.id;
                 console.error(`❌ WebSocket error for client ${finalId}:`, error);
+                this.revokeUploadChannelsForClient(clientInfo);
+                this.handleRemoteSceneClientDeparture(finalId);
+                this.abortUploadsForClient(finalId);
                 // Similar cleanup on error
                 const targetId = this.watchingByWatcher.get(finalId);
                 if (targetId) {
@@ -238,6 +274,173 @@ class MouffetteServer {
             this.broadcastClientList();
         });
     }
+
+    removeExpiredUploadChannelTokens(now = Date.now()) {
+        for (const [token, binding] of this.uploadChannelTokens) {
+            if (!binding || binding.expiresAt <= now) {
+                this.uploadChannelTokens.delete(token);
+            }
+        }
+    }
+
+    revokeUploadTokensForClient(client) {
+        if (!client) return;
+        for (const [token, binding] of this.uploadChannelTokens) {
+            if (binding && binding.client === client) {
+                this.uploadChannelTokens.delete(token);
+            }
+        }
+    }
+
+    issueUploadChannelToken(clientId) {
+        const client = this.clients.get(clientId);
+        if (!client || !client.persistentId || !client.ws
+            || client.ws.readyState !== WebSocket.OPEN) {
+            return null;
+        }
+
+        this.removeExpiredUploadChannelTokens();
+        this.revokeUploadTokensForClient(client);
+
+        let token;
+        do {
+            token = crypto.randomBytes(32).toString('base64url');
+        } while (this.uploadChannelTokens.has(token));
+
+        const expiresAt = Date.now() + this.UPLOAD_CHANNEL_TOKEN_TTL_MS;
+        this.uploadChannelTokens.set(token, { client, expiresAt });
+        client.ws.send(JSON.stringify({
+            type: 'upload_channel_token',
+            token,
+            expiresAt
+        }));
+        return token;
+    }
+
+    consumeUploadChannelToken(token) {
+        if (typeof token !== 'string' || token.length < 32 || token.length > 128) {
+            return null;
+        }
+
+        const binding = this.uploadChannelTokens.get(token);
+        this.uploadChannelTokens.delete(token);
+        this.removeExpiredUploadChannelTokens();
+        if (!binding || binding.expiresAt <= Date.now()) return null;
+
+        const client = binding.client;
+        if (!client || this.clients.get(client.id) !== client || !client.ws
+            || client.ws.readyState !== WebSocket.OPEN) {
+            return null;
+        }
+        return client;
+    }
+
+    registerUploadSocket(client, ws) {
+        let sockets = this.uploadSocketsByClient.get(client);
+        if (!sockets) {
+            sockets = new Set();
+            this.uploadSocketsByClient.set(client, sockets);
+        }
+        sockets.add(ws);
+    }
+
+    unregisterUploadSocket(client, ws) {
+        const sockets = this.uploadSocketsByClient.get(client);
+        if (!sockets) return;
+        sockets.delete(ws);
+        if (sockets.size === 0) {
+            this.uploadSocketsByClient.delete(client);
+        }
+    }
+
+    revokeUploadChannelsForClient(client) {
+        if (!client) return;
+        this.revokeUploadTokensForClient(client);
+        const sockets = this.uploadSocketsByClient.get(client);
+        this.uploadSocketsByClient.delete(client);
+        if (!sockets) return;
+        for (const socket of sockets) {
+            if (socket && (socket.readyState === WebSocket.OPEN
+                || socket.readyState === WebSocket.CONNECTING)) {
+                socket.close(1008, 'Control channel disconnected');
+            }
+        }
+    }
+
+    handleUploadChannelMessage(boundClient, ws, message) {
+        if (!boundClient || this.clients.get(boundClient.id) !== boundClient
+            || !boundClient.ws || boundClient.ws.readyState !== WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                type: 'error',
+                message: 'Upload channel is no longer authenticated'
+            }));
+            ws.close(1008, 'Control channel unavailable');
+            return;
+        }
+
+        if (!message || typeof message !== 'object' || Array.isArray(message)
+            || !this.uploadChannelMessageTypes.has(message.type)) {
+            console.warn(`⚠️ Rejected ${message && message.type ? message.type : 'invalid message'} on upload channel`);
+            ws.send(JSON.stringify({
+                type: 'error',
+                message: 'Message type is not allowed on the upload channel'
+            }));
+            return;
+        }
+
+        this.handleMessage(boundClient.id, {
+            ...message,
+            senderClientId: boundClient.id,
+            senderPersistentClientId: boundClient.persistentId
+        });
+    }
+
+    handleRemoteSceneClientDeparture(clientId) {
+        if (!clientId) return;
+
+        // Notify the owner before removing a departing/replaced target. In a
+        // logical-session replacement there is no client-list gap, so this
+        // correlated failure is what prevents the host retaining a ghost run.
+        const targetRun = this.remoteScenesByTarget.get(clientId);
+        if (targetRun) {
+            const owner = this.clients.get(targetRun.ownerId);
+            if (owner && owner.ws && owner.ws.readyState === WebSocket.OPEN) {
+                owner.ws.send(JSON.stringify({
+                    type: 'remote_scene_stopped',
+                    senderClientId: clientId,
+                    targetClientId: targetRun.ownerId,
+                    sceneInstanceId: targetRun.sceneInstanceId,
+                    success: false,
+                    error: 'Remote target connection was lost'
+                }));
+            }
+        }
+        this.remoteScenesByTarget.delete(clientId);
+
+        // If the authenticated owner disappears, issue the same correlated
+        // STOP the owner would have sent. This message is server-authored from
+        // the recorded run, so a client-provided senderClientId is never used.
+        for (const [targetId, run] of this.remoteScenesByTarget) {
+            if (!run || run.ownerId !== clientId) continue;
+
+            const target = this.clients.get(targetId);
+            if (target && target.ws && target.ws.readyState === WebSocket.OPEN) {
+                try {
+                    target.ws.send(JSON.stringify({
+                        type: 'remote_scene_stop',
+                        targetClientId: targetId,
+                        senderClientId: clientId,
+                        sceneInstanceId: run.sceneInstanceId,
+                        ownerDisconnected: true
+                    }));
+                    console.log(`🛑 Stopped orphaned remote scene ${run.sceneInstanceId} on ${targetId}`);
+                } catch (error) {
+                    console.error('❌ Failed to stop orphaned remote scene:', error);
+                }
+            }
+            this.remoteScenesByTarget.delete(targetId);
+        }
+    }
     
     handleMessage(clientId, message) {
         const client = this.clients.get(clientId);
@@ -251,6 +454,11 @@ class MouffetteServer {
                 break;
             case 'request_client_list':
                 this.sendClientList(clientId);
+                break;
+            case 'request_upload_channel':
+                if (!this.issueUploadChannelToken(clientId)) {
+                    this.sendError(clientId, 'Upload channel requires a registered control connection');
+                }
                 break;
             case 'request_screens':
                 this.handleRequestScreens(clientId, message);
@@ -266,11 +474,7 @@ class MouffetteServer {
                 this.handleUploadStart(clientId, message);
                 break;
             case 'upload_chunk':
-                // PHASE 2: Extract targetClientId with fallback
-                {
-                    const targetClientId = message.targetPersistentClientId || message.targetClientId;
-                    this.relayToTarget(clientId, targetClientId, message);
-                }
+                this.handleUploadChunk(clientId, message);
                 break;
             case 'upload_complete':
                 this.handleUploadComplete(clientId, message);
@@ -293,13 +497,16 @@ class MouffetteServer {
                 break;
             // Progress/status notifications from target back to sender
             case 'upload_progress':
-                this.relayToSender(clientId, message.senderClientId, message);
+                this.handleUploadProgress(clientId, message);
                 break;
             case 'upload_finished':
-                this.relayToSender(clientId, message.senderClientId, message);
+                this.handleUploadFinished(clientId, message);
+                break;
+            case 'upload_rejected':
+                this.handleUploadRejected(clientId, message);
                 break;
             case 'all_files_removed':
-                this.relayToSender(clientId, message.senderClientId, message);
+                this.handleAllFilesRemoved(clientId, message);
                 break;
             case 'media_share':
                 this.handleMediaShare(clientId, message);
@@ -313,21 +520,65 @@ class MouffetteServer {
             case 'cursor_update':
                 this.handleCursorUpdate(clientId, message);
                 break;
-            case 'remote_scene_start':
+            case 'remote_scene_start': {
                 // Relay to target client (like uploads). Expect: targetClientId, scene payload
                 console.log(`🎬 Received remote_scene_start from ${clientId} to ${message.targetClientId}`);
+                const targetId = this.resolveClientId(message.targetClientId);
+                const sceneInstanceId = message.scene && typeof message.scene === 'object'
+                    ? message.scene.sceneInstanceId : null;
+                if (targetId && typeof sceneInstanceId === 'string'
+                    && sceneInstanceId.length >= 1 && sceneInstanceId.length <= 128) {
+                    const activeRun = this.remoteScenesByTarget.get(targetId);
+                    if (!activeRun
+                        || (activeRun.ownerId === clientId
+                            && activeRun.sceneInstanceId === sceneInstanceId)) {
+                        this.remoteScenesByTarget.set(targetId, {
+                            ownerId: clientId,
+                            sceneInstanceId
+                        });
+                    }
+                }
                 this.relayToTarget(clientId, message.targetClientId, message);
                 break;
-            case 'remote_scene_stop':
+            }
+            case 'remote_scene_activate':
                 this.relayToTarget(clientId, message.targetClientId, message);
                 break;
-            case 'remote_scene_stopped':
+            case 'remote_scene_video_sync':
                 this.relayToTarget(clientId, message.targetClientId, message);
                 break;
-            case 'remote_scene_validation':
+            case 'remote_scene_stop': {
+                const targetId = this.resolveClientId(message.targetClientId);
+                const activeRun = targetId ? this.remoteScenesByTarget.get(targetId) : null;
+                if (activeRun && activeRun.ownerId === clientId
+                    && (typeof message.sceneInstanceId !== 'string'
+                        || message.sceneInstanceId.length === 0)) {
+                    // Upgrade the legacy generic STOP to the recorded correlated
+                    // run whenever possible.
+                    message.sceneInstanceId = activeRun.sceneInstanceId;
+                }
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
+            }
+            case 'remote_scene_stopped': {
+                const activeRun = this.remoteScenesByTarget.get(clientId);
+                if (message.success === true && activeRun
+                    && activeRun.sceneInstanceId === message.sceneInstanceId) {
+                    this.remoteScenesByTarget.delete(clientId);
+                }
+                this.relayToTarget(clientId, message.targetClientId, message);
+                break;
+            }
+            case 'remote_scene_validation': {
                 // Relay validation result back to sender
+                const activeRun = this.remoteScenesByTarget.get(clientId);
+                if (message.success === false && activeRun
+                    && activeRun.sceneInstanceId === message.sceneInstanceId) {
+                    this.remoteScenesByTarget.delete(clientId);
+                }
                 this.relayToTarget(clientId, message.targetClientId, message);
                 break;
+            }
             case 'remote_scene_launched':
                 // Relay launched confirmation back to sender
                 this.relayToTarget(clientId, message.targetClientId, message);
@@ -368,10 +619,26 @@ class MouffetteServer {
             }
             return;
         }
-        // Include senderId for correlation if not present
-        if (!message.senderClientId) message.senderClientId = senderId;
+        // Scene-control ownership must come from the authenticated control
+        // socket, never from a client-provided JSON field. Other protocols keep
+        // their existing compatibility behavior.
+        const isRemoteSceneMessage = typeof message.type === 'string'
+            && message.type.startsWith('remote_scene_');
+        const isUploadMessage = typeof message.type === 'string'
+            && (message.type.startsWith('upload_') || message.type === 'remove_file'
+                || message.type === 'remove_all_files');
+        if (isRemoteSceneMessage || isUploadMessage) {
+            message.senderClientId = senderId;
+            if (isUploadMessage) {
+                message.senderPersistentClientId = this.getPersistentId(senderId);
+            }
+        } else if (!message.senderClientId) {
+            message.senderClientId = senderId;
+        }
         try {
-            if (message.type === 'remote_scene_start' || message.type === 'remote_scene_stop') {
+            if (message.type === 'remote_scene_start'
+                || message.type === 'remote_scene_activate'
+                || message.type === 'remote_scene_stop') {
                 console.log(`🎯 Relaying ${message.type} from ${senderId} -> ${targetClientId}`);
             }
             targetClient.ws.send(JSON.stringify(message));
@@ -525,6 +792,11 @@ class MouffetteServer {
             if (existingSession.persistentId) {
                 this.unregisterSessionForPersistent(existingSession.persistentId, sessionId);
             }
+            // The old socket's close/error callbacks intentionally return once
+            // marked as replaced, so terminate its protocol state explicitly.
+            this.abortUploadsForClient(existingSession.id);
+            this.handleRemoteSceneClientDeparture(existingSession.id);
+            this.revokeUploadChannelsForClient(existingSession);
             this.clients.delete(existingSession.id);
             existingSession.replaced = true;
             existingSession.id = `${sessionId}::replaced::${Date.now()}`;
@@ -648,94 +920,385 @@ class MouffetteServer {
     }
     
     // PHASE 2: Upload state tracking methods
+    abortUploadsForClient(clientId) {
+        if (!clientId) return;
+
+        for (const [uploadId, upload] of Array.from(this.uploads.entries())) {
+            if (!upload) continue;
+
+            if (upload.senderSession === clientId) {
+                const target = this.clients.get(upload.targetSession);
+                if (target && target.ws && target.ws.readyState === WebSocket.OPEN) {
+                    target.ws.send(JSON.stringify({
+                        type: 'upload_abort',
+                        uploadId,
+                        canvasSessionId: upload.canvasSessionId,
+                        senderClientId: upload.senderSession,
+                        senderPersistentClientId: upload.senderPersistent,
+                        protocolRejected: true,
+                        reason: 'Upload sender disconnected'
+                    }));
+                }
+                this.uploads.delete(uploadId);
+                continue;
+            }
+
+            if (upload.targetSession === clientId) {
+                this.sendUploadRejected(upload.senderSession, uploadId,
+                    'Upload target disconnected');
+                this.uploads.delete(uploadId);
+            }
+        }
+
+        for (const [removalId, removal] of Array.from(this.pendingRemovals.entries())) {
+            if (removal && (removal.senderSession === clientId
+                || removal.targetSession === clientId)) {
+                this.pendingRemovals.delete(removalId);
+            }
+        }
+    }
+
+    sendUploadRejected(senderSession, uploadId, reason) {
+        const sender = this.clients.get(senderSession);
+        if (!sender || !sender.ws || sender.ws.readyState !== WebSocket.OPEN) return;
+        sender.ws.send(JSON.stringify({
+            type: 'upload_rejected',
+            uploadId: typeof uploadId === 'string' ? uploadId : '',
+            reason: String(reason || 'Upload rejected').slice(0, 512)
+        }));
+    }
+
+    isExpectedUploadSender(upload, clientId) {
+        return !!upload && upload.senderSession === clientId;
+    }
+
+    isExpectedUploadTarget(upload, clientId) {
+        return !!upload && upload.targetSession === clientId;
+    }
+
+    rejectTrackedUpload(uploadId, reason, notifyTarget = true) {
+        const upload = this.uploads.get(uploadId);
+        if (!upload) return;
+
+        if (notifyTarget) {
+            const target = this.clients.get(upload.targetSession);
+            if (target && target.ws && target.ws.readyState === WebSocket.OPEN) {
+                target.ws.send(JSON.stringify({
+                    type: 'upload_abort',
+                    uploadId,
+                    canvasSessionId: upload.canvasSessionId,
+                    senderClientId: upload.senderSession,
+                    senderPersistentClientId: upload.senderPersistent,
+                    protocolRejected: true,
+                    reason: String(reason || 'Upload rejected').slice(0, 512)
+                }));
+            }
+        }
+
+        this.sendUploadRejected(upload.senderSession, uploadId, reason);
+        this.uploads.delete(uploadId);
+    }
+
+    rejectInvalidFinishedAcknowledgement(uploadId, reason) {
+        const upload = this.uploads.get(uploadId);
+        if (!upload) return;
+        const target = this.clients.get(upload.targetSession);
+        if (target && target.ws && target.ws.readyState === WebSocket.OPEN) {
+            for (const fileId of upload.files) {
+                target.ws.send(JSON.stringify({
+                    type: 'remove_file',
+                    fileId,
+                    canvasSessionId: upload.canvasSessionId,
+                    senderClientId: upload.senderSession
+                }));
+            }
+        }
+        this.sendUploadRejected(upload.senderSession, uploadId, reason);
+        this.uploads.delete(uploadId);
+    }
+
     handleUploadStart(senderId, message) {
-        // PHASE 2: Read targetPersistentClientId (new) with fallback to targetClientId (legacy)
         const targetClientId = message.targetPersistentClientId || message.targetClientId;
         const { uploadId, canvasSessionId, files } = message;
-        
-        // Validation
-        if (!targetClientId || !uploadId || !canvasSessionId) {
-            console.warn(`⚠️ upload_start missing required fields from ${senderId}`);
-            return this.sendError(senderId, 'Missing targetClientId, uploadId, or canvasSessionId');
+
+        const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+        const fileIdPattern = /^[0-9a-f]{64}$/;
+        const extensionPattern = /^[a-z0-9]{1,16}$/;
+        const canvasPattern = /^[A-Za-z0-9_-]{1,512}$/;
+        const resolvedTarget = typeof targetClientId === 'string' ? this.resolveClientId(targetClientId) : null;
+
+        const rejectStart = reason => {
+            console.warn(`⚠️ Rejecting upload_start ${uploadId || '<missing>'} from ${senderId}: ${reason}`);
+            this.sendUploadRejected(senderId, uploadId, reason);
+        };
+
+        if (!resolvedTarget || !uuidPattern.test(uploadId || '')
+            || !canvasPattern.test(canvasSessionId || '')
+            || !Array.isArray(files) || files.length < 1 || files.length > this.MAX_UPLOAD_FILES) {
+            rejectStart('Invalid upload identifiers, target, or file count');
+            return;
         }
-        
+        if (this.uploads.has(uploadId)) {
+            rejectStart('Upload identifier is already active');
+            return;
+        }
+
+        const fileIds = [];
+        const seenFileIds = new Set();
+        const seenMediaIds = new Set();
+        let totalSize = 0;
+        for (const file of files) {
+            if (!file || typeof file !== 'object' || Array.isArray(file)
+                || typeof file.fileId !== 'string' || !fileIdPattern.test(file.fileId)
+                || seenFileIds.has(file.fileId)
+                || typeof file.name !== 'string' || file.name.length < 1 || file.name.length > 255
+                || /[\\/\x00-\x1f\x7f]/.test(file.name)
+                || typeof file.extension !== 'string' || file.extension !== file.extension.trim()
+                || (file.extension.length > 0 && !extensionPattern.test(file.extension.toLowerCase()))
+                || !Number.isSafeInteger(file.sizeBytes) || file.sizeBytes < 1
+                || file.sizeBytes > this.MAX_UPLOAD_FILE_BYTES
+                || !Array.isArray(file.mediaIds) || file.mediaIds.length < 1 || file.mediaIds.length > 4096) {
+                rejectStart('Upload manifest contains invalid file metadata');
+                return;
+            }
+
+            const lastDot = file.name.lastIndexOf('.');
+            const filenameExtension = lastDot > 0 && lastDot < file.name.length - 1
+                ? file.name.slice(lastDot + 1).toLowerCase() : '';
+            if (filenameExtension !== file.extension.toLowerCase()) {
+                rejectStart('Upload filename and extension do not match');
+                return;
+            }
+            for (const mediaId of file.mediaIds) {
+                if (typeof mediaId !== 'string' || !uuidPattern.test(mediaId)
+                    || seenMediaIds.has(mediaId)) {
+                    rejectStart('Upload manifest contains an invalid or duplicate media identifier');
+                    return;
+                }
+                seenMediaIds.add(mediaId);
+            }
+            if (totalSize > this.MAX_UPLOAD_TOTAL_BYTES - file.sizeBytes) {
+                rejectStart('Upload manifest exceeds the total size limit');
+                return;
+            }
+            totalSize += file.sizeBytes;
+            seenFileIds.add(file.fileId);
+            fileIds.push(file.fileId);
+        }
+
         const targetPersistentId = this.getPersistentId(targetClientId);
         const senderPersistentId = this.getPersistentId(senderId);
-        
-        // DIRECTIONAL SESSION FIX: Client already sends directional canvasSessionId
-        // Format: "senderClient_TO_targetClient_canvas_uuid"
-        // Server just passes it through without modification
-        // This ensures A→B and B→A have completely different session IDs
-        
         console.log(`📤 Upload started: ${senderPersistentId}/${senderId} -> ${targetPersistentId}/${targetClientId} [${uploadId}] directional-idea:${canvasSessionId}`);
-        
-        // Track upload state with directional session ID from client
-        const fileIds = Array.isArray(files) ? files.map(f => f.fileId).filter(Boolean) : [];
+
+        const startedAt = Date.now();
         this.uploads.set(uploadId, {
             senderSession: senderId,
             senderPersistent: senderPersistentId,
-            targetSession: targetClientId,
+            targetSession: resolvedTarget,
             targetPersistent: targetPersistentId,
-            canvasSessionId: canvasSessionId, // ← Use client's directional ID
-            startTime: Date.now(),
-            files: fileIds.length > 0 ? fileIds : []
+            canvasSessionId,
+            startTime: startedAt,
+            lastActivity: startedAt,
+            files: fileIds,
+            fileSet: seenFileIds,
+            totalSize,
+            awaitingTargetValidation: false
         });
-        
-        console.log(`   Files: ${fileIds.length > 0 ? fileIds.length + ' file(s)' : 'none'}`);
-        
-        // Relay to target WITHOUT modifying canvasSessionId
-        this.relayToTarget(senderId, targetClientId, message);
+
+        console.log(`   Files: ${fileIds.length} file(s)`);
+        const relayed = { ...message, senderClientId: senderId };
+        this.relayToTarget(senderId, resolvedTarget, relayed);
     }
-    
+
+    handleUploadChunk(senderId, message) {
+        const uploadId = message.uploadId;
+        const upload = this.uploads.get(uploadId);
+        if (!upload) {
+            this.sendUploadRejected(senderId, uploadId, 'Unknown or closed upload session');
+            return;
+        }
+        if (!this.isExpectedUploadSender(upload, senderId)) {
+            this.sendUploadRejected(senderId, uploadId, 'Upload sender does not own this session');
+            return;
+        }
+        if (upload.awaitingTargetValidation
+            || message.canvasSessionId !== upload.canvasSessionId
+            || typeof message.fileId !== 'string' || !upload.fileSet.has(message.fileId)
+            || !Number.isInteger(message.chunkIndex) || message.chunkIndex < 0
+            || typeof message.data !== 'string' || message.data.length < 1
+            || message.data.length > this.MAX_UPLOAD_CHUNK_BASE64_LENGTH) {
+            this.rejectTrackedUpload(uploadId, 'Invalid upload chunk');
+            return;
+        }
+
+        const relayed = {
+            ...message,
+            senderClientId: upload.senderSession,
+            targetClientId: upload.targetPersistent,
+            targetPersistentClientId: upload.targetPersistent
+        };
+        upload.lastActivity = Date.now();
+        this.relayToTarget(upload.senderSession, upload.targetSession, relayed);
+    }
+
     handleUploadComplete(senderId, message) {
-        // PHASE 2: Read targetPersistentClientId (new) with fallback to targetClientId (legacy)
-        const targetClientId = message.targetPersistentClientId || message.targetClientId;
         const { uploadId, canvasSessionId } = message;
         const upload = this.uploads.get(uploadId);
-        
+
         if (!upload) {
             console.warn(`⚠️ upload_complete for unknown uploadId: ${uploadId}`);
-            // Still relay (backward compatibility)
-            return this.relayToTarget(senderId, targetClientId, message);
+            this.sendUploadRejected(senderId, uploadId, 'Unknown or closed upload session');
+            return;
         }
-        if (!canvasSessionId) {
-            console.warn(`⚠️ upload_complete missing canvasSessionId for ${uploadId}`);
-            return this.sendError(senderId, 'Missing canvasSessionId in upload_complete');
+        if (!this.isExpectedUploadSender(upload, senderId)) {
+            this.sendUploadRejected(senderId, uploadId, 'Upload sender does not own this session');
+            return;
         }
-        // Track files received by target
-        const effectiveTarget = upload.targetPersistent;
-        const effectiveIdea = upload.canvasSessionId;
-        
-        if (!this.clientFiles.has(effectiveTarget)) {
-            this.clientFiles.set(effectiveTarget, new Map());
+        if (canvasSessionId !== upload.canvasSessionId) {
+            this.rejectTrackedUpload(uploadId, 'Upload session identifier mismatch');
+            return;
         }
-        const targetIdeas = this.clientFiles.get(effectiveTarget);
-        if (!targetIdeas.has(effectiveIdea)) {
-            targetIdeas.set(effectiveIdea, new Set());
+        if (upload.awaitingTargetValidation) {
+            return;
         }
-        
-        const ideaFiles = targetIdeas.get(effectiveIdea);
-        upload.files.forEach(fileId => ideaFiles.add(fileId));
-        
-        const duration = ((Date.now() - upload.startTime) / 1000).toFixed(1);
-        console.log(`✅ Upload complete: ${uploadId} (${duration}s) - ${upload.files.length} files to ${effectiveTarget}:${effectiveIdea}`);
-        
-        // Cleanup upload tracking
-        this.uploads.delete(uploadId);
-        
-        // Relay to target
-        this.relayToTarget(senderId, targetClientId, message);
+        upload.awaitingTargetValidation = true;
+        upload.lastActivity = Date.now();
+        upload.awaitingTargetValidationSince = upload.lastActivity;
+        const relayed = {
+            ...message,
+            senderClientId: upload.senderSession,
+            targetClientId: upload.targetPersistent,
+            targetPersistentClientId: upload.targetPersistent
+        };
+        this.relayToTarget(upload.senderSession, upload.targetSession, relayed);
     }
-    
+
+    handleUploadProgress(targetId, message) {
+        const upload = this.uploads.get(message.uploadId);
+        if (!upload || !this.isExpectedUploadTarget(upload, targetId)) return;
+        upload.lastActivity = Date.now();
+
+        const percent = Number.isInteger(message.percent) ? Math.max(0, Math.min(99, message.percent)) : 0;
+        const perFileProgress = [];
+        if (Array.isArray(message.perFileProgress)) {
+            for (const entry of message.perFileProgress) {
+                if (!entry || typeof entry !== 'object' || !upload.fileSet.has(entry.fileId)
+                    || !Number.isInteger(entry.percent)) continue;
+                perFileProgress.push({
+                    fileId: entry.fileId,
+                    percent: Math.max(0, Math.min(99, entry.percent))
+                });
+            }
+        }
+        this.relayToSender(targetId, upload.senderSession, {
+            type: 'upload_progress',
+            uploadId: message.uploadId,
+            percent,
+            filesCompleted: 0,
+            totalFiles: upload.files.length,
+            perFileProgress
+        });
+    }
+
+    handleUploadFinished(targetId, message) {
+        const uploadId = message.uploadId;
+        const upload = this.uploads.get(uploadId);
+        if (!upload || !this.isExpectedUploadTarget(upload, targetId)) {
+            this.sendError(targetId, 'Invalid upload_finished acknowledgement');
+            return;
+        }
+        if (!upload.awaitingTargetValidation) {
+            this.rejectTrackedUpload(uploadId, 'Target acknowledged the upload before completion');
+            return;
+        }
+        if (message.canvasSessionId !== upload.canvasSessionId
+            || !Array.isArray(message.fileIds)) {
+            this.rejectInvalidFinishedAcknowledgement(uploadId,
+                'Target returned an invalid upload acknowledgement');
+            return;
+        }
+
+        const acknowledged = new Set(message.fileIds);
+        if (acknowledged.size !== message.fileIds.length
+            || acknowledged.size !== upload.fileSet.size
+            || [...upload.fileSet].some(fileId => !acknowledged.has(fileId))) {
+            this.rejectInvalidFinishedAcknowledgement(uploadId,
+                'Target acknowledgement does not match the upload manifest');
+            return;
+        }
+
+        if (!this.clientFiles.has(upload.targetPersistent)) {
+            this.clientFiles.set(upload.targetPersistent, new Map());
+        }
+        const targetIdeas = this.clientFiles.get(upload.targetPersistent);
+        if (!targetIdeas.has(upload.canvasSessionId)) {
+            targetIdeas.set(upload.canvasSessionId, new Set());
+        }
+        const ideaFiles = targetIdeas.get(upload.canvasSessionId);
+        upload.files.forEach(fileId => ideaFiles.add(fileId));
+
+        if (!this.clientFileOwners.has(upload.targetPersistent)) {
+            this.clientFileOwners.set(upload.targetPersistent, new Map());
+        }
+        const targetOwners = this.clientFileOwners.get(upload.targetPersistent);
+        if (!targetOwners.has(upload.canvasSessionId)) {
+            targetOwners.set(upload.canvasSessionId, new Map());
+        }
+        const ideaOwners = targetOwners.get(upload.canvasSessionId);
+        upload.files.forEach(fileId => ideaOwners.set(fileId, upload.senderPersistent));
+
+        if (!this.clientFileGenerations.has(upload.targetPersistent)) {
+            this.clientFileGenerations.set(upload.targetPersistent, new Map());
+        }
+        const targetGenerations = this.clientFileGenerations.get(upload.targetPersistent);
+        if (!targetGenerations.has(upload.canvasSessionId)) {
+            targetGenerations.set(upload.canvasSessionId, new Map());
+        }
+        const ideaGenerations = targetGenerations.get(upload.canvasSessionId);
+        upload.files.forEach(fileId => ideaGenerations.set(fileId, uploadId));
+
+        const duration = ((Date.now() - upload.startTime) / 1000).toFixed(1);
+        console.log(`✅ Upload validated: ${uploadId} (${duration}s) - ${upload.files.length} files to ${upload.targetPersistent}:${upload.canvasSessionId}`);
+        this.uploads.delete(uploadId);
+        this.relayToSender(targetId, upload.senderSession, {
+            type: 'upload_finished',
+            uploadId,
+            canvasSessionId: upload.canvasSessionId,
+            fileIds: upload.files
+        });
+    }
+
+    handleUploadRejected(targetId, message) {
+        const uploadId = message.uploadId;
+        const upload = this.uploads.get(uploadId);
+        if (!upload || !this.isExpectedUploadTarget(upload, targetId)
+            || (message.canvasSessionId !== undefined
+                && message.canvasSessionId !== upload.canvasSessionId)) return;
+
+        const reason = typeof message.reason === 'string' && message.reason.trim()
+            ? message.reason.trim().slice(0, 512) : 'Remote client rejected the upload';
+        this.uploads.delete(uploadId);
+        this.relayToSender(targetId, upload.senderSession, {
+            type: 'upload_rejected',
+            uploadId,
+            reason,
+            canvasSessionId: upload.canvasSessionId
+        });
+    }
+
     handleUploadAbort(senderId, message) {
         const { uploadId } = message;
-        if (uploadId && this.uploads.has(uploadId)) {
-            console.log(`❌ Upload aborted: ${uploadId}`);
-            this.uploads.delete(uploadId);
+        const upload = this.uploads.get(uploadId);
+        if (!upload || !this.isExpectedUploadSender(upload, senderId)) {
+            return;
         }
-        // PHASE 2: Extract targetClientId with fallback
-        const targetClientId = message.targetPersistentClientId || message.targetClientId;
-        this.relayToTarget(senderId, targetClientId, message);
+        console.log(`❌ Upload aborted: ${uploadId}`);
+        this.uploads.delete(uploadId);
+        this.relayToTarget(senderId, upload.targetSession, {
+            ...message,
+            senderClientId: upload.senderSession,
+            canvasSessionId: upload.canvasSessionId
+        });
     }
     
     // PHASE 1: Cleanup stalled uploads (called periodically)
@@ -744,25 +1307,33 @@ class MouffetteServer {
         let cleanedCount = 0;
         
         for (const [uploadId, upload] of this.uploads) {
-            const age = now - upload.startTime;
-            if (age > this.UPLOAD_TIMEOUT_MS) {
-                console.warn(`⏱️  Upload ${uploadId} timed out after ${(age / 1000).toFixed(1)}s`);
-                
-                // Notify sender if still connected
-                const senderPersistent = upload.senderPersistent;
-                const senderSessions = this.sessionsByPersistent.get(senderPersistent);
-                if (senderSessions && senderSessions.size > 0) {
-                    const senderSessionId = [...senderSessions][0]; // First active session
-                    const senderClient = this.clients.get(senderSessionId);
-                    if (senderClient && senderClient.ws.readyState === WebSocket.OPEN) {
-                        senderClient.ws.send(JSON.stringify({
-                            type: 'upload_timeout',
-                            uploadId: uploadId,
-                            message: `Upload timed out after ${this.UPLOAD_TIMEOUT_MS / 1000}s`
-                        }));
-                    }
+            const awaitingTarget = upload.awaitingTargetValidation === true;
+            const timeoutMs = awaitingTarget
+                ? this.UPLOAD_TARGET_ACK_TIMEOUT_MS : this.UPLOAD_TIMEOUT_MS;
+            const activityAt = awaitingTarget
+                ? (upload.awaitingTargetValidationSince || upload.lastActivity || upload.startTime)
+                : (upload.lastActivity || upload.startTime);
+            const age = now - activityAt;
+            if (age > timeoutMs) {
+                const reason = awaitingTarget
+                    ? 'Target validation acknowledgement timed out'
+                    : 'Upload timed out';
+                console.warn(`⏱️  ${reason}: ${uploadId} after ${(age / 1000).toFixed(1)}s`);
+
+                const target = this.clients.get(upload.targetSession);
+                if (target && target.ws && target.ws.readyState === WebSocket.OPEN) {
+                    target.ws.send(JSON.stringify({
+                        type: 'upload_abort',
+                        uploadId,
+                        canvasSessionId: upload.canvasSessionId,
+                        senderClientId: upload.senderSession,
+                        senderPersistentClientId: upload.senderPersistent,
+                        protocolRejected: true,
+                        reason
+                    }));
                 }
-                
+                this.sendUploadRejected(upload.senderSession, uploadId,
+                    `${reason} after ${timeoutMs / 1000}s`);
                 this.uploads.delete(uploadId);
                 cleanedCount++;
             }
@@ -771,26 +1342,130 @@ class MouffetteServer {
         if (cleanedCount > 0) {
             console.log(`🧹 Cleaned up ${cleanedCount} stalled upload(s)`);
         }
+
+        for (const [removalId, removal] of this.pendingRemovals) {
+            if (!removal || now - removal.createdAt > this.REMOVAL_ACK_TIMEOUT_MS) {
+                this.pendingRemovals.delete(removalId);
+            }
+        }
     }
     
     handleRemoveAllFiles(senderId, message) {
         // PHASE 2: Extract targetClientId with fallback
         const targetClientId = message.targetPersistentClientId || message.targetClientId;
-        const { canvasSessionId } = message;
-        const targetPersistentId = this.getPersistentId(targetClientId);
-        if (!targetClientId || !canvasSessionId) {
-            console.warn(`⚠️ remove_all_files missing required fields from ${senderId}`);
-            return this.sendError(senderId, 'Missing targetClientId or canvasSessionId');
+        const { canvasSessionId, removalId } = message;
+        if (!targetClientId || !canvasSessionId
+            || typeof removalId !== 'string' || !CANONICAL_UUID_PATTERN.test(removalId)) {
+            console.warn(`⚠️ remove_all_files missing or invalid required fields from ${senderId}`);
+            return this.sendError(senderId,
+                'Missing or invalid targetClientId, canvasSessionId, or removalId');
+        }
+        if (this.pendingRemovals.has(removalId)) {
+            return this.sendError(senderId, 'Removal identifier is already active');
         }
 
-        const targetFiles = this.clientFiles.get(targetPersistentId);
-        if (targetFiles && targetFiles.has(canvasSessionId)) {
-            const count = targetFiles.get(canvasSessionId).size;
-            targetFiles.delete(canvasSessionId);
-            console.log(`🗑️  Removed ${count} files from ${targetPersistentId}:${canvasSessionId}`);
+        const resolvedTarget = this.resolveClientId(targetClientId);
+        if (!resolvedTarget) {
+            return this.sendError(senderId, 'Target client not found');
         }
-        
-        this.relayToTarget(senderId, targetClientId, message);
+        const targetPersistentId = this.getPersistentId(resolvedTarget);
+        const targetFiles = this.clientFiles.get(targetPersistentId);
+        const targetOwners = this.clientFileOwners.get(targetPersistentId);
+        const targetGenerations = this.clientFileGenerations.get(targetPersistentId);
+        const senderPersistentId = this.getPersistentId(senderId);
+        const entries = [];
+
+        // DEFAULT means the target will remove the authenticated sender's whole
+        // cache root, so mirror that operation across all of that sender's
+        // inventory entries. A scoped request only affects its named canvas.
+        const canvasIds = canvasSessionId === 'default' && targetOwners
+            ? Array.from(targetOwners.keys()) : [canvasSessionId];
+        for (const candidateCanvasId of canvasIds) {
+            const ideaFiles = targetFiles && targetFiles.get(candidateCanvasId);
+            const ideaOwners = targetOwners && targetOwners.get(candidateCanvasId);
+            const ideaGenerations = targetGenerations && targetGenerations.get(candidateCanvasId);
+            if (!ideaFiles || !ideaOwners || !ideaGenerations) continue;
+
+            for (const [fileId, ownerId] of Array.from(ideaOwners.entries())) {
+                if (ownerId !== senderPersistentId) continue;
+                const generation = ideaGenerations.get(fileId);
+                if (!ideaFiles.has(fileId) || typeof generation !== 'string') continue;
+                entries.push({
+                    canvasSessionId: candidateCanvasId,
+                    fileId,
+                    ownerPersistent: ownerId,
+                    generation
+                });
+            }
+        }
+
+        if (entries.length === 0) {
+            console.warn(`⚠️ Unauthorized remove_all_files from ${senderId} for ${targetPersistentId}:${canvasSessionId}`);
+            return this.sendError(senderId, 'Not authorized to remove files from this canvas');
+        }
+
+        this.pendingRemovals.set(removalId, {
+            senderSession: senderId,
+            senderPersistent: senderPersistentId,
+            targetSession: resolvedTarget,
+            targetPersistent: targetPersistentId,
+            canvasSessionId,
+            entries,
+            createdAt: Date.now()
+        });
+        console.log(`🗑️  Requested removal of ${entries.length} owned file(s) from ${targetPersistentId}:${canvasSessionId}`);
+        this.relayToTarget(senderId, resolvedTarget, message);
+    }
+
+    handleAllFilesRemoved(targetId, message) {
+        const { removalId, canvasSessionId } = message;
+        const removal = typeof removalId === 'string'
+            ? this.pendingRemovals.get(removalId) : null;
+        if (!removal || removal.targetSession !== targetId
+            || removal.senderPersistent !== message.senderClientId
+            || removal.canvasSessionId !== canvasSessionId) {
+            console.warn(`⚠️ Ignoring mismatched all_files_removed acknowledgement from ${targetId}`);
+            return this.sendError(targetId, 'Invalid removal acknowledgement');
+        }
+
+        this.pendingRemovals.delete(removalId);
+        const targetFiles = this.clientFiles.get(removal.targetPersistent);
+        const targetOwners = this.clientFileOwners.get(removal.targetPersistent);
+        const targetGenerations = this.clientFileGenerations.get(removal.targetPersistent);
+        for (const entry of removal.entries) {
+            const ideaFiles = targetFiles && targetFiles.get(entry.canvasSessionId);
+            const ideaOwners = targetOwners && targetOwners.get(entry.canvasSessionId);
+            const ideaGenerations = targetGenerations
+                && targetGenerations.get(entry.canvasSessionId);
+            if (!ideaFiles || !ideaOwners || !ideaGenerations
+                || ideaOwners.get(entry.fileId) !== entry.ownerPersistent
+                || ideaGenerations.get(entry.fileId) !== entry.generation) {
+                continue;
+            }
+
+            ideaFiles.delete(entry.fileId);
+            ideaOwners.delete(entry.fileId);
+            ideaGenerations.delete(entry.fileId);
+            if (ideaFiles.size === 0) targetFiles.delete(entry.canvasSessionId);
+            if (ideaOwners.size === 0) targetOwners.delete(entry.canvasSessionId);
+            if (ideaGenerations.size === 0) targetGenerations.delete(entry.canvasSessionId);
+        }
+        if (targetFiles && targetFiles.size === 0) {
+            this.clientFiles.delete(removal.targetPersistent);
+        }
+        if (targetOwners && targetOwners.size === 0) {
+            this.clientFileOwners.delete(removal.targetPersistent);
+        }
+        if (targetGenerations && targetGenerations.size === 0) {
+            this.clientFileGenerations.delete(removal.targetPersistent);
+        }
+        this.relayToSender(targetId, removal.senderSession, {
+            type: 'all_files_removed',
+            removalId,
+            canvasSessionId: removal.canvasSessionId,
+            targetClientId: removal.targetPersistent,
+            targetPersistentClientId: removal.targetPersistent
+        });
     }
     
     handleRemoveFile(senderId, message) {
@@ -803,22 +1478,39 @@ class MouffetteServer {
             return this.sendError(senderId, 'Missing targetClientId, canvasSessionId, or fileId');
         }
         
-        const targetPersistentId = this.getPersistentId(targetClientId);
-        const targetFiles = this.clientFiles.get(targetPersistentId);
-        if (targetFiles) {
-            const ideaFiles = targetFiles.get(canvasSessionId);
-            if (ideaFiles && ideaFiles.has(fileId)) {
-                ideaFiles.delete(fileId);
-                console.log(`🗑️  Removed file ${fileId} from ${targetPersistentId}:${canvasSessionId}`);
-                
-                // Cleanup empty idea sets
-                if (ideaFiles.size === 0) {
-                    targetFiles.delete(canvasSessionId);
-                }
-            }
+        const resolvedTarget = this.resolveClientId(targetClientId);
+        if (!resolvedTarget) {
+            return this.sendError(senderId, 'Target client not found');
         }
-        
-        this.relayToTarget(senderId, targetClientId, message);
+        const targetPersistentId = this.getPersistentId(resolvedTarget);
+        const targetFiles = this.clientFiles.get(targetPersistentId);
+        const targetOwners = this.clientFileOwners.get(targetPersistentId);
+        const targetGenerations = this.clientFileGenerations.get(targetPersistentId);
+        const senderPersistentId = this.getPersistentId(senderId);
+        const ideaFiles = targetFiles && targetFiles.get(canvasSessionId);
+        const ideaOwners = targetOwners && targetOwners.get(canvasSessionId);
+        if (!ideaFiles || !ideaFiles.has(fileId)
+            || !ideaOwners || ideaOwners.get(fileId) !== senderPersistentId) {
+            console.warn(`⚠️ Unauthorized remove_file from ${senderId} for ${targetPersistentId}:${canvasSessionId}/${fileId}`);
+            return this.sendError(senderId, 'Not authorized to remove this file');
+        }
+
+        ideaFiles.delete(fileId);
+        ideaOwners.delete(fileId);
+        const ideaGenerations = targetGenerations && targetGenerations.get(canvasSessionId);
+        if (ideaGenerations) ideaGenerations.delete(fileId);
+        if (ideaFiles.size === 0) targetFiles.delete(canvasSessionId);
+        if (ideaOwners.size === 0) targetOwners.delete(canvasSessionId);
+        if (ideaGenerations && ideaGenerations.size === 0) {
+            targetGenerations.delete(canvasSessionId);
+        }
+        if (targetFiles.size === 0) this.clientFiles.delete(targetPersistentId);
+        if (targetOwners.size === 0) this.clientFileOwners.delete(targetPersistentId);
+        if (targetGenerations && targetGenerations.size === 0) {
+            this.clientFileGenerations.delete(targetPersistentId);
+        }
+        console.log(`🗑️  Removed owned file ${fileId} from ${targetPersistentId}:${canvasSessionId}`);
+        this.relayToTarget(senderId, resolvedTarget, message);
     }
     
     // PHASE 2: Canvas lifecycle tracking handlers
@@ -1061,32 +1753,31 @@ class MouffetteServer {
     }
 }
 
-// Start the server
-const server = new MouffetteServer(8080);
-server.start();
+module.exports = { MouffetteServer };
 
-// Display stats every 30 seconds
-setInterval(() => {
-    const stats = server.getStats();
-    console.log(`📊 Stats: ${stats.connectedClients} connected, ${stats.registeredClients} registered`);
-}, 30000);
+if (require.main === module) {
+    const server = new MouffetteServer(8080);
+    server.start();
 
-// Graceful shutdown
-process.on('SIGINT', () => {
-    console.log('\n🛑 Shutting down Mouffette Server...');
-    
-    // PHASE 1: Clear upload cleanup interval
-    if (server.uploadCleanupInterval) {
-        clearInterval(server.uploadCleanupInterval);
-        console.log('🧹 Upload cleanup interval stopped');
-    }
-    
-    if (server.wss) {
-        server.wss.close(() => {
-            console.log('✅ Server closed gracefully');
+    setInterval(() => {
+        const stats = server.getStats();
+        console.log(`📊 Stats: ${stats.connectedClients} connected, ${stats.registeredClients} registered`);
+    }, 30000);
+
+    process.on('SIGINT', () => {
+        console.log('\n🛑 Shutting down Mouffette Server...');
+        if (server.uploadCleanupInterval) {
+            clearInterval(server.uploadCleanupInterval);
+            console.log('🧹 Upload cleanup interval stopped');
+        }
+
+        if (server.wss) {
+            server.wss.close(() => {
+                console.log('✅ Server closed gracefully');
+                process.exit(0);
+            });
+        } else {
             process.exit(0);
-        });
-    } else {
-        process.exit(0);
-    }
-});
+        }
+    });
+}

@@ -1172,11 +1172,14 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
 {
     m_controlsFadeMs = std::max(0, controlsFadeMs);
     m_player = new QMediaPlayer();
-    m_audio = new QAudioOutput();
-    m_sink = new QVideoSink();
+    // QMediaPlayer is the QObject lifetime root for the complete playback
+    // pipeline.  ResizableVideoItem is a QGraphicsItem (not a QObject), so
+    // parenting these helpers prevents orphaned timers/sinks and guarantees
+    // queued callbacks are cancelled before this item goes away.
+    m_audio = new QAudioOutput(m_player);
+    m_sink = new QVideoSink(m_player);
     m_player->setAudioOutput(m_audio);
     m_player->setVideoSink(m_sink);
-    m_player->setSource(QUrl::fromLocalFile(filePath));
 
     const qreal initialVolume = m_audio ? std::clamp<qreal>(m_audio->volume(), 0.0, 1.0) : 1.0;
     m_effectiveMuted = m_audio ? m_audio->isMuted() : false;
@@ -1204,107 +1207,14 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
     });
 
 
-    QObject::connect(m_sink, &QVideoSink::videoFrameChanged, m_player, [this](const QVideoFrame& f){
-        bool allowVisualUpdate = true;
-        ++m_framesReceived;
-        if (m_appSuspended) {
-            ++m_framesSkipped;
-            return;
-        }
-
-        // Priming path: if playback was started only to wake the decoder,
-        // force it back to paused immediately on the first frame callback
-        // so imported videos never appear to auto-play.
-        if (m_firstFramePrimeRequested
-            && !m_expectedPlayingState
-            && m_player) {
-            m_player->pause();
-            m_player->setPosition(0);
-            m_expectedPlayingState = false;
-            updatePlayPauseIconState(false);
-        }
-
-        if (!m_holdLastFrameAtEnd && f.isValid()) {
-            const bool mustProcessFrame = !m_firstFramePrimed || m_seeking
-                || (m_player && m_player->playbackState() != QMediaPlayer::PlayingState);
-            if (!mustProcessFrame && !isVisibleInAnyView()) {
-                ++m_framesSkipped;
-                logFrameStats();
-                return;
-            }
-
-            QImage converted = convertFrameToImage(f);
-            if (converted.isNull()) {
-                ++m_framesDropped;
-                ++m_conversionFailures;
-                if (m_conversionFailures <= 5 || (m_conversionFailures % 25) == 0) {
-                    qWarning() << "ResizableVideoItem: frame conversion failed"
-                               << "handleType=" << f.handleType()
-                               << "pixelFormat=" << f.pixelFormat()
-                               << "surface=" << f.surfaceFormat().pixelFormat();
-                }
-                // Even when conversion fails we must still stop a priming-triggered play; otherwise
-                // the player runs indefinitely because m_firstFramePrimed is never set.
-                if (!m_firstFramePrimed && m_firstFramePrimeRequested) {
-                    m_firstFramePrimed = true;
-                    m_firstFramePrimeRequested = false;
-                    m_controlsLockedUntilReady = false;
-                    m_controlsDidInitialFade = false;
-                    if (!m_expectedPlayingState && m_player) {
-                        m_player->pause();
-                    }
-                    if (m_primingNeedsUnmute && m_audio) {
-                        m_audio->setMuted(false);
-                        m_primingNeedsUnmute = false;
-                    }
-                }
-            } else {
-                m_conversionFailures = 0;
-                maybeAdoptFrameSize(f);
-                converted = applyViewportCrop(converted, f);
-                m_lastFrameImage = std::move(converted);
-                if (m_posterImageSet) {
-                    m_posterImage = QImage();
-                    m_posterImageSet = false;
-                }
-                const qint64 ts = frameTimestampMs(f);
-                if (ts >= 0) {
-                    m_lastFrameTimestampMs = ts;
-                } else if (m_player) {
-                    m_lastFrameTimestampMs = m_player->position();
-                }
-                ++m_framesProcessed;
-                if (!m_firstFramePrimed) {
-                    m_firstFramePrimed = true;
-                    m_firstFramePrimeRequested = false;
-                    m_controlsLockedUntilReady = false;
-                    m_controlsDidInitialFade = false;
-
-                    // If we started playback only for priming (user never pressed play),
-                    // pause immediately now that we have the first decoded frame.
-                    if (!m_expectedPlayingState && m_player) {
-                        m_player->pause();
-                        m_player->setPosition(0);
-                    }
-                    // Restore audio if we muted it for the priming decode pass.
-                    if (m_primingNeedsUnmute && m_audio) {
-                        m_audio->setMuted(false);
-                        m_primingNeedsUnmute = false;
-                    }
-
-                    if (isSelected()) {
-                        setControlsVisible(true);
-                        updateControlsLayout();
-                    }
-                }
-            }
-            logFrameStats();
-        }
-        if (allowVisualUpdate && shouldRepaint()) {
-            m_lastRepaintMs = QDateTime::currentMSecsSinceEpoch();
-            update();
-        }
+    // A Qt Quick VideoOutput replaces QMediaPlayer's sink while its delegate is
+    // alive.  Observe the *active* sink instead of permanently observing the
+    // fallback sink created above; otherwise first-frame priming never completes
+    // and its temporary audio mute is left enabled forever.
+    QObject::connect(m_player, &QMediaPlayer::videoOutputChanged, m_player, [this]() {
+        bindFrameObserverToActiveSink();
     });
+    bindFrameObserverToActiveSink();
 
     ensureControlsPanel();
     m_controlsLockedUntilReady = true;
@@ -1319,10 +1229,24 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
         }
     }
 
-    m_progressTimer = new QTimer(); m_progressTimer->setInterval(33);
-    QObject::connect(m_progressTimer, &QTimer::timeout, [this]() {
+    m_progressTimer = new QTimer(m_player); m_progressTimer->setInterval(33);
+    QObject::connect(m_progressTimer, &QTimer::timeout, m_player, [this]() {
         if (m_player && m_player->playbackState() == QMediaPlayer::PlayingState && !m_draggingProgress && !m_holdLastFrameAtEnd && !m_seeking && m_durationMs > 0) {
-            qint64 currentPos = m_player->position(); qreal newRatio = static_cast<qreal>(currentPos) / m_durationMs; m_smoothProgressRatio = std::clamp<qreal>(newRatio, 0.0, 1.0); updateProgressBar(); update();
+            const qint64 currentPos = m_player->position();
+            const qreal newRatio = static_cast<qreal>(currentPos) / m_durationMs;
+            m_smoothProgressRatio = std::clamp<qreal>(newRatio, 0.0, 1.0);
+
+            // QuickCanvasController publishes the lightweight video state at
+            // 20 Hz. When QML's native VideoOutput owns the active sink, a
+            // QGraphicsItem repaint here would additionally emit
+            // QGraphicsScene::changed and rebuild the complete media model at
+            // roughly 30 Hz, even though no legacy pixels are being painted.
+            const QVideoSink* activeSink = m_player->videoSink();
+            const bool renderedByQtQuick = activeSink && m_sink && activeSink != m_sink;
+            if (!renderedByQtQuick) {
+                updateProgressBar();
+                update();
+            }
         }
     });
     QObject::connect(m_player, &QMediaPlayer::mediaStatusChanged, m_player, [this](QMediaPlayer::MediaStatus s){
@@ -1391,7 +1315,7 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
                     m_player->setPosition(0);
                     m_player->play();
                 }
-                QTimer::singleShot(10, [this]() {
+                QTimer::singleShot(10, m_player, [this]() {
                     if (m_progressTimer && m_player && m_player->playbackState() == QMediaPlayer::PlayingState) {
                         m_progressTimer->start();
                     }
@@ -1410,7 +1334,6 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
                 if (m_progressTimer) m_progressTimer->stop();
                 if (m_player) {
                     m_player->pause();
-                    m_player->setPosition(0);
                 }
                 cancelSettingsRepeatSession();
                 updateControlsLayout();
@@ -1481,6 +1404,23 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
     QObject::connect(m_player, &QMediaPlayer::errorOccurred, m_player, [this](QMediaPlayer::Error error, const QString& errorString) {
         m_lastPlaybackError = error;
         m_lastPlaybackErrorString = errorString;
+        if (error != QMediaPlayer::NoError) {
+            m_expectedPlayingState = false;
+            // An error is terminal for both the live intent and any suspended
+            // resume transaction. Otherwise resume could replay/re-prime a
+            // source after this handler had already declared it stopped.
+            m_wasPlayingBeforeSuspend = false;
+            m_needsReprimeAfterResume = false;
+            m_firstFramePrimeRequested = false;
+            ++m_primingGeneration;
+            if (m_primingNeedsUnmute && m_audio) {
+                m_audio->setMuted(m_effectiveMuted);
+                m_primingNeedsUnmute = false;
+            }
+            m_controlsLockedUntilReady = false;
+            if (m_progressTimer) m_progressTimer->stop();
+            updatePlayPauseIconState(false);
+        }
         qDebug() << "ResizableVideoItem: Media player error occurred for" << sourcePath() 
                  << "- Error:" << error << "Message:" << errorString;
         
@@ -1490,21 +1430,167 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, int visualSizePx
             notifyFileError();
         }
     });
+
+    // Connect every observer before assigning the source: short/local media can
+    // otherwise reach LoadedMedia before the priming and error hooks exist.
+    m_player->setSource(QUrl::fromLocalFile(filePath));
+}
+
+void ResizableVideoItem::bindFrameObserverToActiveSink() {
+    QVideoSink* activeSink = m_player ? m_player->videoSink() : nullptr;
+    if (activeSink == m_observedSink) {
+        return;
+    }
+
+    QObject::disconnect(m_videoFrameConnection);
+    m_videoFrameConnection = {};
+    m_observedSink = activeSink;
+
+    if (!activeSink || !m_player) {
+        return;
+    }
+
+    m_videoFrameConnection = QObject::connect(
+        activeSink, &QVideoSink::videoFrameChanged, m_player,
+        [this](const QVideoFrame& frame) { handleVideoFrame(frame); });
+}
+
+void ResizableVideoItem::handleVideoFrame(const QVideoFrame& frame) {
+    ++m_framesReceived;
+    if (m_appSuspended) {
+        ++m_framesSkipped;
+        return;
+    }
+
+    // Priming briefly starts the decoder. Whichever output currently owns the
+    // player (the fallback C++ sink or Qt Quick's VideoOutput) must be able to
+    // finish that transaction and restore audio.
+    if (!m_holdLastFrameAtEnd && frame.isValid()) {
+        const bool completingTechnicalPrime =
+            m_firstFramePrimeRequested && !m_expectedPlayingState;
+        if (completingTechnicalPrime && m_player) {
+            m_player->pause();
+            m_player->setPosition(0);
+            m_expectedPlayingState = false;
+            updatePlayPauseIconState(false);
+        }
+
+        // Keep the authoritative displayed PTS fresh even when Qt Quick owns
+        // rendering and the expensive CPU conversion below is skipped.
+        const qint64 frameTimestamp = frameTimestampMs(frame);
+        m_lastFrameTimestampMs = frameTimestamp >= 0
+            ? frameTimestamp
+            : (m_player ? m_player->position() : -1);
+
+        const bool mustProcessFrame = !m_firstFramePrimed || m_seeking
+            || (m_player && m_player->playbackState() != QMediaPlayer::PlayingState);
+        // Qt Quick's VideoOutput already renders the native QVideoFrame on the
+        // scene graph. Converting every 1080p frame back to a QImage here would
+        // force a costly CPU/GPU readback and duplicate the rendering work.
+        // The fallback sink still keeps the legacy QGraphicsView path alive.
+        const bool renderedByQtQuick = m_observedSink && m_sink && m_observedSink != m_sink;
+        if (!mustProcessFrame && (renderedByQtQuick || !isVisibleInAnyView())) {
+            ++m_framesSkipped;
+            logFrameStats();
+            return;
+        }
+
+        QImage converted = convertFrameToImage(frame);
+        if (converted.isNull()) {
+            ++m_framesDropped;
+            ++m_conversionFailures;
+            ++m_consecutiveConversionFailures;
+            if (m_consecutiveConversionFailures <= 5 || (m_consecutiveConversionFailures % 25) == 0) {
+                qWarning() << "ResizableVideoItem: frame conversion failed"
+                           << "handleType=" << frame.handleType()
+                           << "pixelFormat=" << frame.pixelFormat()
+                           << "surface=" << frame.surfaceFormat().pixelFormat();
+            }
+            // Do not let a backend-specific conversion limitation strand the
+            // decoder in its silent priming playback state.
+            if (!m_firstFramePrimed && m_firstFramePrimeRequested) {
+                m_firstFramePrimed = true;
+                m_firstFramePrimeRequested = false;
+                m_controlsLockedUntilReady = false;
+                m_controlsDidInitialFade = false;
+                if (completingTechnicalPrime && m_player) {
+                    m_player->pause();
+                }
+                if (m_primingNeedsUnmute && m_audio) {
+                    m_audio->setMuted(m_effectiveMuted);
+                    m_primingNeedsUnmute = false;
+                }
+            }
+        } else {
+            m_consecutiveConversionFailures = 0;
+            maybeAdoptFrameSize(frame);
+            converted = applyViewportCrop(converted, frame);
+            m_lastFrameImage = std::move(converted);
+            if (m_posterImageSet) {
+                m_posterImage = QImage();
+                m_posterImageSet = false;
+            }
+            ++m_framesProcessed;
+            if (!m_firstFramePrimed) {
+                m_firstFramePrimed = true;
+                m_firstFramePrimeRequested = false;
+                m_controlsLockedUntilReady = false;
+                m_controlsDidInitialFade = false;
+
+                if (completingTechnicalPrime && m_player) {
+                    m_player->pause();
+                    m_player->setPosition(0);
+                }
+                if (m_primingNeedsUnmute && m_audio) {
+                    m_audio->setMuted(m_effectiveMuted);
+                    m_primingNeedsUnmute = false;
+                }
+
+                if (isSelected()) {
+                    setControlsVisible(true);
+                    updateControlsLayout();
+                }
+            }
+        }
+        logFrameStats();
+    }
+
+    if (shouldRepaint()) {
+        m_lastRepaintMs = QDateTime::currentMSecsSinceEpoch();
+        update();
+    }
 }
 
 ResizableVideoItem::~ResizableVideoItem() {
     teardownPlayback();
     if (m_player) QObject::disconnect(m_player, nullptr, nullptr, nullptr);
-    if (m_sink) QObject::disconnect(m_sink, nullptr, nullptr, nullptr);
-    delete m_player; delete m_audio; delete m_sink; delete m_controlsFadeAnim;
+    delete m_controlsFadeAnim;
+    m_controlsFadeAnim = nullptr;
+    // m_audio, m_sink, m_progressTimer and m_audioFadeAnimation are children
+    // of m_player and are destroyed with it.
+    delete m_player;
+    m_player = nullptr;
+    m_audio = nullptr;
+    m_sink = nullptr;
+    m_progressTimer = nullptr;
+    m_audioFadeAnimation = nullptr;
 }
 
 void ResizableVideoItem::togglePlayPause() {
     if (!m_player) return;
+    if (m_firstFramePrimeRequested && !m_expectedPlayingState) {
+        // Promote the decoder's technical priming play to an intentional play
+        // instead of interpreting its raw PlayingState as a user pause.
+        m_firstFramePrimeRequested = false;
+        if (m_primingNeedsUnmute && m_audio) {
+            m_audio->setMuted(m_effectiveMuted);
+            m_primingNeedsUnmute = false;
+        }
+    }
     m_seamlessLoopJumpPending = false;
     m_lastSeamlessLoopTriggerMs = 0;
     bool nowPlaying = false;
-    if (m_player->playbackState() == QMediaPlayer::PlayingState) {
+    if (m_expectedPlayingState) {
         m_player->pause();
         if (m_progressTimer) m_progressTimer->stop();
         nowPlaying = false;
@@ -1574,6 +1660,36 @@ void ResizableVideoItem::setMuted(bool muted, bool skipFade) {
     stopAudioFadeAnimation(true);
 
     const bool targetMuted = muted;
+
+    // First-frame priming deliberately runs the decoder while keeping the
+    // physical audio output muted. A settings update or a click on the mute
+    // control can arrive during that short transaction; applying the regular
+    // fade path here would briefly unmute the decoder and leak audio. Preserve
+    // the requested logical state, but defer the hardware mute transition until
+    // handleVideoFrame() (or the priming watchdog) completes the transaction.
+    if (m_firstFramePrimeRequested && !m_expectedPlayingState) {
+        m_effectiveMuted = targetMuted;
+        m_savedMuted = targetMuted;
+        m_primingNeedsUnmute = true;
+
+        const bool previousGuard = m_volumeChangeFromAudioFade;
+        m_volumeChangeFromAudioFade = true;
+        m_audio->setMuted(true);
+        if (!targetMuted) {
+            const qreal desiredVolume = volumeFromSettingsState();
+            m_audio->setVolume(desiredVolume);
+            if (desiredVolume > 0.0) {
+                m_lastUserVolumeBeforeMute = desiredVolume;
+            }
+        }
+        m_volumeChangeFromAudioFade = previousGuard;
+
+        updateControlsVisualState();
+        updateControlsLayout();
+        update();
+        return;
+    }
+
     const bool alreadyMuted = (m_effectiveMuted == targetMuted) && !m_audioFadeAnimation;
     if (alreadyMuted) {
         // Ensure hardware mute state matches logical state
@@ -1636,6 +1752,11 @@ void ResizableVideoItem::setMuted(bool muted, bool skipFade) {
 
 void ResizableVideoItem::stopToBeginning() {
     if (!m_player) return;
+    m_firstFramePrimeRequested = false;
+    if (m_primingNeedsUnmute && m_audio) {
+        m_audio->setMuted(m_effectiveMuted);
+        m_primingNeedsUnmute = false;
+    }
     m_seamlessLoopJumpPending = false;
     m_lastSeamlessLoopTriggerMs = 0;
     m_holdLastFrameAtEnd = false;
@@ -1649,6 +1770,11 @@ void ResizableVideoItem::stopToBeginning() {
 
 void ResizableVideoItem::seekToRatio(qreal r) {
     if (!m_player || m_durationMs <= 0) return;
+    m_firstFramePrimeRequested = false;
+    if (m_primingNeedsUnmute && m_audio) {
+        m_audio->setMuted(m_effectiveMuted);
+        m_primingNeedsUnmute = false;
+    }
     m_seamlessLoopJumpPending = false;
     m_lastSeamlessLoopTriggerMs = 0;
     r = std::clamp<qreal>(r, 0.0, 1.0);
@@ -1664,7 +1790,7 @@ void ResizableVideoItem::seekToRatio(qreal r) {
     // restart the progress timer — but only when NOT still dragging. If the
     // user is mid-scrub, setDraggingProgress(false) will restart the timer
     // once the drag actually ends, preventing a start/stop oscillation.
-    QTimer::singleShot(30, [this]() {
+    QTimer::singleShot(30, m_player, [this]() {
         m_seeking = false;
         if (!m_draggingProgress && m_progressTimer && m_player
                 && m_player->playbackState() == QMediaPlayer::PlayingState) {
@@ -1693,6 +1819,11 @@ void ResizableVideoItem::pauseAndSetPosition(qint64 posMs) {
     m_seamlessLoopJumpPending = false;
     m_lastSeamlessLoopTriggerMs = 0;
     m_holdLastFrameAtEnd = false;
+    m_firstFramePrimeRequested = false;
+    if (m_primingNeedsUnmute && m_audio) {
+        m_audio->setMuted(m_effectiveMuted);
+        m_primingNeedsUnmute = false;
+    }
     m_player->pause();
     if (m_progressTimer) m_progressTimer->stop();
     m_player->setPosition(posMs);
@@ -1727,15 +1858,23 @@ void ResizableVideoItem::setApplicationSuspended(bool suspended) {
         cancelSettingsRepeatSession();
     }
     if (m_appSuspended) {
-        m_wasPlayingBeforeSuspend = m_player && m_player->playbackState() == QMediaPlayer::PlayingState;
+        m_wasPlayingBeforeSuspend = m_expectedPlayingState;
         m_resumePositionMs = m_player ? m_player->position() : m_positionMs;
         m_needsReprimeAfterResume = !m_firstFramePrimed;
         if (m_player) {
-            if (m_wasPlayingBeforeSuspend) {
+            if (m_player->playbackState() == QMediaPlayer::PlayingState) {
                 m_player->pause();
             }
             if (!m_sinkDetached) {
-                m_player->setVideoSink(nullptr);
+                // Preserve a live Qt Quick VideoOutput. Restoring m_sink
+                // unconditionally here used to sever the QML renderer after an
+                // application suspend/resume cycle.
+                m_suspendedVideoOutput = m_player->videoOutput();
+                if (m_suspendedVideoOutput) {
+                    m_player->setVideoOutput(nullptr);
+                } else {
+                    m_player->setVideoSink(nullptr);
+                }
                 m_sinkDetached = true;
             }
         }
@@ -1745,10 +1884,33 @@ void ResizableVideoItem::setApplicationSuspended(bool suspended) {
     } else {
         if (m_player) {
             if (m_sinkDetached) {
-                m_player->setVideoSink(m_sink);
+                // A QML delegate may have been recreated while the application
+                // was suspended and already rebound a fresh VideoOutput. Keep
+                // that newer owner instead of replacing it with a stale sink.
+                if (m_player->videoOutput()) {
+                    // Already rebound by the active renderer.
+                } else if (m_suspendedVideoOutput) {
+                    m_player->setVideoOutput(m_suspendedVideoOutput);
+                } else {
+                    m_player->setVideoSink(m_sink);
+                }
+                m_suspendedVideoOutput = nullptr;
                 m_sinkDetached = false;
             }
-            if (m_needsReprimeAfterResume) {
+            if (m_needsReprimeAfterResume && m_wasPlayingBeforeSuspend) {
+                // Suspension can happen before the very first decoded frame.
+                // Resume the intentional playback directly; a technical prime
+                // would be rejected while m_expectedPlayingState remains true
+                // and would otherwise leave the player paused indefinitely.
+                m_firstFramePrimeRequested = false;
+                ++m_primingGeneration;
+                if (m_primingNeedsUnmute && m_audio) {
+                    m_audio->setMuted(m_effectiveMuted);
+                    m_primingNeedsUnmute = false;
+                }
+                m_player->setPosition(std::max<qint64>(0, m_resumePositionMs));
+                m_player->play();
+            } else if (m_needsReprimeAfterResume) {
                 restartPrimingSequence();
             } else {
                 if (m_resumePositionMs > 0) {
@@ -1779,7 +1941,7 @@ void ResizableVideoItem::getFrameStatsExtended(int& received, int& processed, in
     processed = m_framesProcessed;
     skipped = m_framesSkipped;
     dropped = m_framesDropped;
-    conversionFailures = m_framesDropped;
+    conversionFailures = m_conversionFailures;
 }
 
 void ResizableVideoItem::resetFrameStats() {
@@ -1788,6 +1950,7 @@ void ResizableVideoItem::resetFrameStats() {
     m_framesSkipped = 0;
     m_framesDropped = 0;
     m_conversionFailures = 0;
+    m_consecutiveConversionFailures = 0;
 }
 
 void ResizableVideoItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* option, QWidget* widget) {
@@ -2277,7 +2440,7 @@ void ResizableVideoItem::ensureAudioFadeAnimation() {
         m_audioFadeAnimation->stop();
         m_audioFadeAnimation->deleteLater();
     }
-    m_audioFadeAnimation = new QVariantAnimation();
+    m_audioFadeAnimation = new QVariantAnimation(m_player);
 }
 
 void ResizableVideoItem::stopAudioFadeAnimation(bool resetVolumeGuard) {
@@ -2326,7 +2489,7 @@ void ResizableVideoItem::startAudioFade(qreal startVolume, qreal endVolume, doub
     m_audioFadeAnimation->setDuration(std::max(1, static_cast<int>(durationSeconds * 1000.0)));
     m_audioFadeAnimation->setEasingCurve(QEasingCurve::Linear);
 
-    QObject::connect(m_audioFadeAnimation, &QVariantAnimation::valueChanged, [this, targetMuted](const QVariant& value) {
+    QObject::connect(m_audioFadeAnimation, &QVariantAnimation::valueChanged, m_player, [this, targetMuted](const QVariant& value) {
         Q_UNUSED(targetMuted);
         if (!m_audio) {
             return;
@@ -2342,7 +2505,7 @@ void ResizableVideoItem::startAudioFade(qreal startVolume, qreal endVolume, doub
         update();
     });
 
-    QObject::connect(m_audioFadeAnimation, &QVariantAnimation::finished, [this]() {
+    QObject::connect(m_audioFadeAnimation, &QVariantAnimation::finished, m_player, [this]() {
         finalizeAudioFade(m_pendingMuteTarget);
     });
 
@@ -2377,7 +2540,17 @@ void ResizableVideoItem::finalizeAudioFade(bool targetMuted) {
     update();
 }
 
-bool ResizableVideoItem::isVisibleInAnyView() const { if (!scene() || scene()->views().isEmpty()) return false; auto *view = scene()->views().first(); if (!view || !view->viewport()) return false; QRectF viewportRect = view->viewport()->rect(); QRectF sceneRect = view->mapToScene(viewportRect.toRect()).boundingRect(); QRectF itemSceneRect = mapToScene(boundingRect()).boundingRect(); return sceneRect.intersects(itemSceneRect); }
+bool ResizableVideoItem::isVisibleInAnyView() const {
+    if (!scene()) return false;
+    const QRectF itemSceneRect = mapToScene(boundingRect()).boundingRect();
+    for (QGraphicsView* view : scene()->views()) {
+        if (!view || !view->isVisible() || !view->viewport() || !view->viewport()->isVisible()) continue;
+        const QRectF viewportRect = view->viewport()->rect();
+        const QRectF sceneRect = view->mapToScene(viewportRect.toRect()).boundingRect();
+        if (sceneRect.intersects(itemSceneRect)) return true;
+    }
+    return false;
+}
 bool ResizableVideoItem::shouldRepaint() const { const qint64 now = QDateTime::currentMSecsSinceEpoch(); return (now - m_lastRepaintMs) >= m_repaintBudgetMs; }
 void ResizableVideoItem::logFrameStats() const {
     if (m_framesReceived > 0 && m_framesReceived % 120 == 0) {
@@ -2389,7 +2562,7 @@ void ResizableVideoItem::logFrameStats() const {
                  << "processed=" << m_framesProcessed << "(" << (processRatio * 100.0f) << "% )"
                  << "skipped=" << m_framesSkipped << "(" << (skipRatio * 100.0f) << "% )"
                  << "dropped=" << m_framesDropped << "(" << (dropRatio * 100.0f) << "% )"
-                 << "conversionFailures=" << m_framesDropped << "(" << (failureRatio * 100.0f) << "% )";
+                 << "conversionFailures=" << m_conversionFailures << "(" << (failureRatio * 100.0f) << "% )";
     }
 }
 
@@ -2561,7 +2734,7 @@ void ResizableVideoItem::restartPrimingSequence() {
     m_positionMs = 0;
     m_firstFramePrimeRequested = false;
     if (m_primingNeedsUnmute && m_audio) {
-        m_audio->setMuted(false);
+        m_audio->setMuted(m_effectiveMuted);
         m_primingNeedsUnmute = false;
     }
     cancelSettingsRepeatSession();
@@ -2575,7 +2748,8 @@ void ResizableVideoItem::restartPrimingSequence() {
 }
 
 void ResizableVideoItem::requestFirstFramePrime() {
-    if (!m_player || m_firstFramePrimed || m_firstFramePrimeRequested) {
+    if (!m_player || m_appSuspended || m_expectedPlayingState
+        || m_firstFramePrimed || m_firstFramePrimeRequested) {
         return;
     }
 
@@ -2595,7 +2769,7 @@ void ResizableVideoItem::requestFirstFramePrime() {
     // enters PlayingState. We therefore briefly call play() here and auto-pause
     // in videoFrameChanged the moment the first frame arrives.
     // Mute audio first so the brief decode pass is completely silent.
-    if (m_audio && !m_effectiveMuted) {
+    if (m_audio) {
         m_audio->setMuted(true);
         m_primingNeedsUnmute = true;
     }
@@ -2604,14 +2778,23 @@ void ResizableVideoItem::requestFirstFramePrime() {
 
     // Fallback safety-net: if the backend delays or misses the first frame callback,
     // ensure priming playback cannot continue visibly.
-    QTimer::singleShot(120, m_player, [this]() {
+    const quint64 primingGeneration = ++m_primingGeneration;
+    QTimer::singleShot(1500, m_player, [this, primingGeneration]() {
         if (!m_player) {
             return;
         }
-        if (m_firstFramePrimeRequested && !m_expectedPlayingState) {
+        if (primingGeneration == m_primingGeneration
+            && m_firstFramePrimeRequested && !m_expectedPlayingState) {
             m_player->pause();
             m_player->setPosition(0);
+            m_firstFramePrimeRequested = false;
+            m_controlsLockedUntilReady = false;
+            if (m_primingNeedsUnmute && m_audio) {
+                m_audio->setMuted(m_effectiveMuted);
+                m_primingNeedsUnmute = false;
+            }
             updatePlayPauseIconState(false);
+            qWarning() << "ResizableVideoItem: first-frame priming timed out for" << sourcePath();
         }
     });
 }
@@ -2622,6 +2805,12 @@ void ResizableVideoItem::teardownPlayback() {
     }
     m_playbackTornDown = true;
     cancelSettingsRepeatSession();
+    stopAudioFadeAnimation(true);
+    ++m_primingGeneration;
+    QObject::disconnect(m_videoFrameConnection);
+    m_videoFrameConnection = {};
+    m_observedSink = nullptr;
+    m_suspendedVideoOutput = nullptr;
 
     if (m_progressTimer) {
         m_progressTimer->stop();
@@ -2635,10 +2824,9 @@ void ResizableVideoItem::teardownPlayback() {
         if (m_audio) {
             m_player->setAudioOutput(nullptr);
         }
-        if (!m_sinkDetached) {
-            m_player->setVideoSink(nullptr);
-            m_sinkDetached = true;
-        }
+        m_player->setVideoOutput(nullptr);
+        m_player->setVideoSink(nullptr);
+        m_sinkDetached = true;
     }
 
     if (m_sink) {

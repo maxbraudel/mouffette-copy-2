@@ -310,7 +310,9 @@ public:
     bool firstFramePrimed() const { return m_firstFramePrimed; }
     QMediaPlayer::Error lastPlaybackError() const { return m_lastPlaybackError; }
     QString lastPlaybackErrorString() const { return m_lastPlaybackErrorString; }
-    bool isPlaying() const { return m_player && m_player->playbackState() == QMediaPlayer::PlayingState; }
+    // Intentional user/automation playback; excludes the brief technical play
+    // used to prime the decoder's first frame.
+    bool isPlaying() const { return m_expectedPlayingState; }
     void pauseAndSetPosition(qint64 posMs);
     void setInitialScaleFactor(qreal f) { m_initialScaleFactor = f; }
     void setExternalPosterImage(const QImage& img);
@@ -370,6 +372,8 @@ protected:
 
 private:
     void requestFirstFramePrime();
+    void bindFrameObserverToActiveSink();
+    void handleVideoFrame(const QVideoFrame& frame);
     void maybeAdoptFrameSize(const QVideoFrame& f);
     QSizeF computeFrameDisplaySize(const QVideoFrame& frame) const;
     QImage applyViewportCrop(const QImage& image, const QVideoFrame& frame) const;
@@ -404,6 +408,9 @@ private:
     QMediaPlayer* m_player = nullptr;
     QAudioOutput* m_audio = nullptr;
     QVideoSink* m_sink = nullptr;
+    QPointer<QVideoSink> m_observedSink;
+    QPointer<QObject> m_suspendedVideoOutput;
+    QMetaObject::Connection m_videoFrameConnection;
     QImage m_lastFrameImage;
     QSizeF m_lastFrameDisplaySize;
     qint64 m_lastFrameTimestampMs = -1;
@@ -412,6 +419,7 @@ private:
     bool m_firstFramePrimed = false;
     bool m_firstFramePrimeRequested = false;
     bool m_primingNeedsUnmute = false;
+    quint64 m_primingGeneration = 0;
     bool m_savedMuted = false;
     bool m_effectiveMuted = false;
     bool m_pendingMuteTarget = false;
@@ -430,7 +438,9 @@ private:
     bool m_controlsLockedUntilReady = true; int m_controlsFadeMs = 140; QVariantAnimation* m_controlsFadeAnim = nullptr; bool m_controlsDidInitialFade = false;
     qint64 m_lastRepaintMs = 0; int m_repaintBudgetMs = 16;
     mutable int m_framesReceived = 0; mutable int m_framesProcessed = 0; mutable int m_framesSkipped = 0;
-    mutable int m_framesDropped = 0; mutable int m_conversionFailures = 0;
+    mutable int m_framesDropped = 0;
+    mutable int m_conversionFailures = 0;
+    mutable int m_consecutiveConversionFailures = 0;
     bool m_appSuspended = false; bool m_wasPlayingBeforeSuspend = false;
     bool m_sinkDetached = false; qint64 m_resumePositionMs = 0; bool m_needsReprimeAfterResume = false;
     bool m_playbackTornDown = false;

@@ -133,6 +133,7 @@ set(SOURCES
     
     # Domain - Media
     src/backend/domain/media/MediaItems.cpp
+    src/backend/domain/media/MediaFilePolicy.cpp
     src/backend/domain/media/MediaRuntimeHooks.cpp
     src/backend/domain/media/TextRenderState.cpp
     src/backend/domain/media/TextMediaItem.cpp
@@ -284,6 +285,7 @@ set(HEADERS
     
     # Domain - Media
     src/backend/domain/media/MediaItems.h
+    src/backend/domain/media/MediaFilePolicy.h
     src/backend/domain/media/MediaRuntimeHooks.h
     src/backend/domain/media/TextRenderState.h
     src/backend/domain/media/TextMediaItem.h
@@ -476,9 +478,34 @@ if(BUILD_TESTING)
     target_link_libraries(tst_CanvasSelectionBackend PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
     add_test(NAME CanvasSelectionBackend COMMAND tst_CanvasSelectionBackend)
+
+    add_executable(tst_VideoPlaybackBackend
+        tests/qt/tst_VideoPlaybackBackend.cpp
+        "$<FILTER:$<TARGET_OBJECTS:MouffetteClient>,EXCLUDE,/src/main[.]cpp[.](o|obj)$>"
+    )
+    target_include_directories(tst_VideoPlaybackBackend PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
+    target_compile_definitions(tst_VideoPlaybackBackend PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>"
+        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../video-1080p.mp4")
+    target_link_libraries(tst_VideoPlaybackBackend PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
+    add_test(NAME VideoPlaybackBackend COMMAND tst_VideoPlaybackBackend)
+
+    add_executable(tst_UploadRemovalSecurity
+        tests/qt/tst_UploadRemovalSecurity.cpp
+        "$<FILTER:$<TARGET_OBJECTS:MouffetteClient>,EXCLUDE,/src/main[.]cpp[.](o|obj)$>"
+    )
+    target_include_directories(tst_UploadRemovalSecurity PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
+    target_compile_definitions(tst_UploadRemovalSecurity PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>")
+    target_link_libraries(tst_UploadRemovalSecurity PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
+    add_test(NAME UploadRemovalSecurity COMMAND tst_UploadRemovalSecurity)
     # Native window focus/grabs are part of these tests. Do not race other GUI
     # suites when CI invokes ctest with parallel jobs.
-    set_tests_properties(CanvasInteraction CanvasInteractionScaled CanvasSelectionBackend
+    set_tests_properties(CanvasInteraction CanvasInteractionScaled CanvasSelectionBackend VideoPlaybackBackend UploadRemovalSecurity
         PROPERTIES RUN_SERIAL TRUE)
 
     # Reference implementation retained for before/after profiling only. The
@@ -504,4 +531,24 @@ if(BUILD_TESTING)
     target_include_directories(tst_MediaRuntimeContext PRIVATE src)
     target_link_libraries(tst_MediaRuntimeContext PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME MediaRuntimeContext COMMAND tst_MediaRuntimeContext)
+
+    add_executable(tst_MediaFilePolicy
+        tests/qt/tst_MediaFilePolicy.cpp
+        src/backend/domain/media/MediaFilePolicy.cpp
+        src/backend/domain/media/MediaFilePolicy.h
+    )
+    target_include_directories(tst_MediaFilePolicy PRIVATE src)
+    target_compile_definitions(tst_MediaFilePolicy PRIVATE
+        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../video-1080p.mp4")
+    target_link_libraries(tst_MediaFilePolicy PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
+    add_test(NAME MediaFilePolicy COMMAND tst_MediaFilePolicy)
+
+    add_executable(tst_LocalFileRepository
+        tests/qt/tst_LocalFileRepository.cpp
+        src/backend/files/LocalFileRepository.cpp
+        src/backend/files/LocalFileRepository.h
+    )
+    target_include_directories(tst_LocalFileRepository PRIVATE src)
+    target_link_libraries(tst_LocalFileRepository PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME LocalFileRepository COMMAND tst_LocalFileRepository)
 endif()

@@ -23,6 +23,7 @@
 #include <utility>
 #include "backend/domain/media/MediaItems.h" // for ResizableMediaBase
 #include "backend/domain/media/TextMediaItem.h"
+#include "frontend/rendering/canvas/ScreenCanvas.h"
 
 namespace {
 
@@ -2880,6 +2881,20 @@ void MediaSettingsPanel::refreshVolumeDisplay() {
 void MediaSettingsPanel::pushSettingsToMedia() {
     if (m_updatingFromMedia) return;
     if (!m_mediaItem) return;
+
+    if (m_mediaItem->scene()) {
+        for (QGraphicsView* view : m_mediaItem->scene()->views()) {
+            if (auto* canvas = qobject_cast<ScreenCanvas*>(view)) {
+                if (canvas->isRemoteSceneLaunching() || canvas->isRemoteSceneLaunched()) {
+                    // PREPARE serializes an immutable scene. Keep the panel's
+                    // visible controls in sync with that authoritative state,
+                    // but do not let a late focus/edit mutate the host only.
+                    pullSettingsFromMedia();
+                    return;
+                }
+            }
+        }
+    }
 
     auto trimmedText = [](QLabel* label, const QString& fallback) {
         if (!label) return fallback;

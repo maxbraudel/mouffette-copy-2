@@ -6,6 +6,7 @@
 #include "shared/rendering/ICanvasHost.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/domain/media/MediaItems.h"
+#include "backend/domain/media/MediaFilePolicy.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include "backend/domain/session/SessionManager.h"
 #include <QFileInfo>
@@ -76,6 +77,7 @@ void UploadEventHandler::onUploadButtonClicked()
     QList<ResizableMediaBase*> mediaItemsToRemove;
     QSet<QString> processedFileIds;
     QSet<QString> currentFileIds;
+    QStringList unsupportedMediaNames;
 
     FileManager* fileManager = m_mainWindow->getFileManager();
     const QList<ResizableMediaBase*> mediaItems = canvas->enumerateMediaItems();
@@ -93,10 +95,27 @@ void UploadEventHandler::onUploadButtonClicked()
             continue;
         }
 
-        const QString fileId = media->fileId();
+        const MediaFilePolicy::Kind mediaKind = MediaFilePolicy::classifyLocalFile(fi.absoluteFilePath());
+        const bool accepted = media->isVideoMedia()
+            ? mediaKind == MediaFilePolicy::Kind::Mp4Video
+            : mediaKind == MediaFilePolicy::Kind::Image;
+        if (!accepted) {
+            unsupportedMediaNames.append(fi.fileName());
+            continue;
+        }
+
+        // Refresh the identity at the upload boundary. A video can be
+        // re-encoded/replaced at the same path after it was placed on canvas;
+        // reusing the old path-derived ID would incorrectly skip the upload
+        // and leave stale bytes on the remote client.
+        const QString fileId = fileManager->getOrCreateFileId(fi.absoluteFilePath());
         if (fileId.isEmpty()) {
             qWarning() << "MainWindow: Media item has no fileId, skipping:" << media->mediaId();
             continue;
+        }
+        if (media->fileId() != fileId) {
+            media->setFileId(fileId);
+            fileManager->associateMediaWithFile(media->mediaId(), fileId);
         }
 
         currentFileIds.insert(fileId);
@@ -136,6 +155,12 @@ void UploadEventHandler::onUploadButtonClicked()
     if (!mediaItemsToRemove.isEmpty()) {
         canvas->refreshInfoOverlay();
         TOAST_WARNING(QString("%1 media item(s) removed - source files not found").arg(mediaItemsToRemove.size()));
+    }
+
+    if (!unsupportedMediaNames.isEmpty()) {
+        TOAST_ERROR(QString("Upload blocked: only MP4 video files are supported (%1)")
+                        .arg(unsupportedMediaNames.join(QStringLiteral(", "))), 5000);
+        return;
     }
 
     m_mainWindow->reconcileRemoteFilesForSession(*session, currentFileIds);
@@ -247,4 +272,3 @@ void UploadEventHandler::updateIndividualProgressFromServer(int globalPercent, i
         if (have >= desired) break;
     }
 }
-

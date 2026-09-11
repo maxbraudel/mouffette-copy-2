@@ -15,12 +15,11 @@ QuickCanvasHost::QuickCanvasHost(QuickCanvasController* controller, LegacySceneM
     connect(m_legacyMirror, &LegacySceneMirror::mediaItemRemoved, this, &QuickCanvasHost::mediaItemRemoved);
     connect(m_legacyMirror, &LegacySceneMirror::remoteSceneLaunchStateChanged,
             this, &QuickCanvasHost::remoteSceneLaunchStateChanged);
-    connect(m_legacyMirror, &LegacySceneMirror::remoteSceneLaunchStateChanged,
-            this, [this](bool active, const QString&, const QString&) {
-                if (!m_controller) return;
-                if (active) m_controller->startHostSceneState();
-                else        m_controller->stopHostSceneState();
-            });
+    // LegacySceneMirror owns the authoritative scene automation state. The
+    // Quick controller projects QGraphicsScene changes automatically; running
+    // its second automation engine here reset every video a second time after
+    // the remote launch acknowledgement and restored the wrong pre-scene state
+    // on stop.
     connect(m_legacyMirror, &LegacySceneMirror::textToolActiveChanged,
             m_controller, &QuickCanvasController::setTextToolActive);
     connect(m_controller, &QuickCanvasController::textMediaCreateRequested, this,

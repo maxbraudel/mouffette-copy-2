@@ -34,6 +34,8 @@ struct IncomingUploadSession {
     QHash<QString, QFile*> openFiles;          // fileId -> QFile*
     QHash<QString, qint64> expectedSizes;      // fileId -> total bytes
     QHash<QString, qint64> receivedByFile;     // fileId -> received bytes
+    QHash<QString, QString> filePaths;         // fileId -> upload-owned staging path
+    QHash<QString, QString> fileIdToName;      // fileId -> display name from manifest
     QHash<QString, QString> fileIdToMediaId;   // fileId -> mediaId for target-side naming
     QHash<QString, QString> fileIdToExtension; // fileId -> original file extension
     qint64 totalSize = 0;
@@ -89,6 +91,7 @@ signals:
     void uiStateChanged(); // generic signal to refresh button text/state
     void uploadProgress(int percent, int filesCompleted, int totalFiles); // forwarded from server
     void uploadFinished();
+    void uploadRejected(const QString& uploadId, const QString& reason);
     // New: subset of files confirmed complete by target so far
     void uploadCompletedFileIds(const QStringList& fileIds);
     void allFilesRemoved();
@@ -102,7 +105,10 @@ public slots:
     void onUploadProgress(const QString& uploadId, int percent, int filesCompleted, int totalFiles);
     void onUploadCompletedFileIds(const QString& uploadId, const QStringList& fileIds);
     void onUploadFinished(const QString& uploadId);
-    void onAllFilesRemovedRemote();
+    void onUploadRejected(const QString& uploadId, const QString& reason);
+    void onAllFilesRemovedRemote(const QString& removalId,
+                                 const QString& targetClientId,
+                                 const QString& canvasSessionId);
     // Handle network connection loss while uploading/finalizing
     void onConnectionLost();
 
@@ -110,14 +116,24 @@ private:
     void startUpload(const QVector<UploadFileInfo>& files);
     void resetToInitial();
     void cleanupIncomingCacheForConnectionLoss();
+    void discardActiveIncomingSession(bool rememberRejectedUpload);
+    void rejectIncomingUpload(const QString& senderId,
+                              const QString& uploadId,
+                              const QString& reason,
+                              bool discardMatchingSession);
+    void clearIncomingChunkTracking(const QString& uploadId);
     void finalizeLocalCancelState();
-    void cleanupIncomingSession(bool deleteDiskContents,
+    bool cleanupIncomingSession(bool deleteDiskContents,
                                 bool notifySender,
                                 const QString& senderOverride = QString(),
                                 const QString& cacheDirOverride = QString(),
                                 const QString& uploadIdOverride = QString(),
                                 const QString& ideaOverride = QString());
     void resetProgressTracking();
+    void scheduleOutgoingPump();
+    void pumpOutgoingUpload();
+    void stopOutgoingPump();
+    void failOutgoingUpload(const QString& reason);
     void updateLocalProgress(int percent, int filesCompleted);
     void updateRemoteProgress(int percent, int filesCompleted);
     void emitEffectiveProgressIfChanged();
@@ -138,6 +154,8 @@ private:
     bool m_uploadActive = false;      // true after remote finished (acts as toggle to unload)
     bool m_uploadInProgress = false;  // true while streaming chunks
     bool m_cancelRequested = false;   // user pressed cancel mid-stream
+    bool m_uploadRejectedDuringSend = false; // target rejected while the send loop was yielding
+    bool m_uploadWasActiveBeforeStart = false; // preserve earlier synchronized files on incremental failure
     bool m_finalizing = false;        // true after all bytes sent, awaiting server ack
     bool m_cancelFinalizePending = false; // true while local cancellation cleanup is outstanding
     QString m_currentUploadId;        // uuid
@@ -145,6 +163,7 @@ private:
     int m_filesCompleted = 0;
     int m_totalFiles = 0;
     QTimer* m_cancelFallbackTimer = nullptr; // fires if remote never responds to abort/unload
+    QTimer* m_removalAckTimer = nullptr;
     // Sender-side byte tracking for accurate weighted progress
     qint64 m_totalBytes = 0;
     qint64 m_sentBytes = 0;
@@ -159,11 +178,25 @@ private:
 
     // Sender-side per-file tracking
     QVector<UploadFileInfo> m_outgoingFiles;
+    QFile m_outgoingFileHandle;
+    int m_outgoingFileIndex = 0;
+    int m_outgoingChunkIndex = 0;
+    qint64 m_outgoingSentForFile = 0;
+    QTimer* m_outgoingPumpTimer = nullptr;
+    QTimer* m_outgoingStallTimer = nullptr;
+    QTimer* m_outgoingAckTimer = nullptr;
+    bool m_outgoingPumpRunning = false;
+    bool m_outgoingPayloadCompleteSent = false;
+    QMetaObject::Connection m_uploadBytesWrittenConnection;
+    QMetaObject::Connection m_uploadTransportLostConnection;
     QHash<QString, int> m_localFilePercents;
     QHash<QString, int> m_remoteFilePercents;
     QHash<QString, int> m_effectiveFilePercents;
 
     QString m_lastRemovalClientId;
+    QString m_pendingRemovalId;
+    QString m_pendingRemovalTargetId;
+    QString m_pendingRemovalCanvasSessionId;
 
     // Phase 4.3: FileManager injected (not singleton)
     FileManager* m_fileManager = nullptr;

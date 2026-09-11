@@ -7,6 +7,7 @@
 #include <QGraphicsPathItem>
 #include <QElapsedTimer>
 #include <QMap>
+#include <QHash>
 #include <QPixmap>
 #include <QVector>
 #include <QLineF>
@@ -431,10 +432,16 @@ private:
 
 private slots:
     // Remote scene feedback handlers
-    void onRemoteSceneValidationReceived(const QString& targetClientId, bool success, const QString& errorMessage);
-    void onRemoteSceneLaunchedReceived(const QString& targetClientId);
+    void onRemoteSceneValidationReceived(const QString& targetClientId,
+                                         const QString& sceneInstanceId,
+                                         bool success,
+                                         const QString& errorMessage);
+    void onRemoteSceneLaunchedReceived(const QString& targetClientId, const QString& sceneInstanceId);
     void onRemoteSceneLaunchTimeout();
-    void onRemoteSceneStoppedReceived(const QString& targetClientId, bool success, const QString& errorMessage);
+    void onRemoteSceneStoppedReceived(const QString& targetClientId,
+                                      const QString& sceneInstanceId,
+                                      bool success,
+                                      const QString& errorMessage);
     void onRemoteSceneStopTimeout();
 
 protected:
@@ -444,11 +451,14 @@ protected:
     bool m_sceneLaunched = false;
     bool m_sceneLaunching = false; // Loading state while waiting for remote validation
     bool m_sceneStopping = false; // Waiting for remote confirmation to stop
+    bool m_remoteSceneStopRetrySent = false;
     QTimer* m_sceneLaunchTimeoutTimer = nullptr;
     QTimer* m_sceneStopTimeoutTimer = nullptr;
     
     // Configurable timeout for remote scene launch (milliseconds)
-    static constexpr int REMOTE_SCENE_LAUNCH_TIMEOUT_MS = 10000; // 10 seconds
+    // Must exceed the target's 11 s media-preparation watchdog plus relay and
+    // teardown overhead, otherwise the host can abort before target validation.
+    static constexpr int REMOTE_SCENE_LAUNCH_TIMEOUT_MS = 15000;
     static constexpr int REMOTE_SCENE_STOP_TIMEOUT_MS = 10000; // 10 seconds
     
     // Launch Test Scene toggle state
@@ -457,6 +467,7 @@ protected:
     // Unified host scene state (either remote or test scene active)
     bool m_hostSceneActive = false;
     HostSceneMode m_hostSceneMode = HostSceneMode::None;
+    QObject* m_hostSceneRunContext = nullptr;
     struct SavedSelection {
         ResizableMediaBase* media = nullptr;
         std::weak_ptr<bool> guard;
@@ -511,6 +522,16 @@ protected:
     MediaRuntimeHooks::Context* m_mediaRuntimeContext = nullptr; // owned by this canvas
     QString m_remoteSceneTargetClientId; // target client to receive remote scene commands
     QString m_remoteSceneTargetMachineName; // machine name of target (stable across reconnections)
+    QString m_pendingRemoteSceneInstanceId;
+    QHash<QString, qint64> m_pendingRemoteStartPositionsMs;
+    QTimer* m_remoteSceneActivationTimer = nullptr;
+    QTimer* m_remoteVideoSyncTimer = nullptr;
+    qint64 m_remoteVideoSyncSequence = 0;
+    static constexpr int REMOTE_SCENE_ACTIVATION_LEAD_MS = 1000;
+    static constexpr int REMOTE_VIDEO_SYNC_INTERVAL_MS = 500;
+    void startRemoteVideoStateSync();
+    void stopRemoteVideoStateSync();
+    void sendRemoteVideoStateSync();
     void emitRemoteSceneLaunchStateChanged();
 };
 

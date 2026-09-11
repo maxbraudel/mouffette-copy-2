@@ -13,7 +13,7 @@
  * Extracted from FileManager to separate concerns.
  * 
  * Responsibilities:
- * - Generate stable fileIds from file paths (SHA-256 hash)
+ * - Generate stable fileIds from path, file metadata and bounded content hashing
  * - Maintain bidirectional fileId ↔ filePath mapping
  * - Check file existence and provide file info
  * - Register received remote files (target-side)
@@ -55,7 +55,7 @@ private:
     LocalFileRepository(const LocalFileRepository&) = delete;
     LocalFileRepository& operator=(const LocalFileRepository&) = delete;
     
-    // Generate stable fileId from file path
+    // Generate an identity that rotates when a local file is replaced in place.
     QString generateFileId(const QString& filePath) const;
     
     QHash<QString, QString> m_fileIdToPath;  // fileId → absolute file path

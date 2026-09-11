@@ -7,6 +7,7 @@
 #include <QThread>
 #include <QUuid>
 #include <QPoint>
+#include <cmath>
 
 namespace {
 bool cursorDebugEnabled() {
@@ -75,10 +76,28 @@ void WebSocketClient::onUploadTextMessageReceived(const QString& message) {
     }
     QJsonObject obj = doc.object();
     const QString type = obj.value("type").toString();
-    if (type == "welcome") {
-        // Keep a separate client id for the upload channel; do not override control id
+    if (type == "upload_channel_ready") {
         m_uploadClientId = obj.value("clientId").toString();
-        qDebug() << "Upload channel received client ID:" << m_uploadClientId;
+        m_uploadChannelAuthenticated = !m_uploadClientId.isEmpty()
+            && m_uploadClientId == m_clientId;
+        if (!m_uploadChannelAuthenticated) {
+            qWarning() << "Upload channel identity does not match the control connection";
+            closeUploadChannel();
+            return;
+        }
+        qDebug() << "Upload channel authenticated for client:" << m_uploadClientId;
+        return;
+    }
+    if (type == "welcome") {
+        // A legacy upload-channel welcome is not proof of identity. Keep the
+        // dedicated socket unauthenticated and let the upload fall back to the
+        // already authenticated control connection.
+        qWarning() << "Upload channel server did not provide authenticated readiness";
+        return;
+    }
+    if (type == "error" && !m_uploadChannelAuthenticated) {
+        qWarning() << "Upload channel authentication failed:"
+                   << obj.value("message").toString();
         return;
     }
     // Reuse the same message handler for upload progress/finished/all_files_removed
@@ -100,20 +119,45 @@ WebSocketClient::~WebSocketClient() {
 }
 
 void WebSocketClient::connectToServer(const QString& serverUrl) {
+    closeUploadChannel();
     if (m_webSocket) {
-        if (m_webSocket->state() == QAbstractSocket::ConnectedState || m_webSocket->state() == QAbstractSocket::ConnectingState) {
-            m_webSocket->close();
+        QWebSocket* const obsoleteSocket = m_webSocket;
+        m_webSocket = nullptr;
+        QObject::disconnect(obsoleteSocket, nullptr, this, nullptr);
+        if (obsoleteSocket->state() == QAbstractSocket::ConnectedState
+            || obsoleteSocket->state() == QAbstractSocket::ConnectingState) {
+            obsoleteSocket->close();
         }
-        m_webSocket->deleteLater();
+        obsoleteSocket->deleteLater();
     }
     
     m_serverUrl = serverUrl;
     m_webSocket = new QWebSocket();
-    
-    connect(m_webSocket, &QWebSocket::connected, this, &WebSocketClient::onConnected);
-    connect(m_webSocket, &QWebSocket::disconnected, this, &WebSocketClient::onDisconnected);
-    connect(m_webSocket, &QWebSocket::textMessageReceived, this, &WebSocketClient::onTextMessageReceived);
-    connect(m_webSocket, &QWebSocket::errorOccurred, this, &WebSocketClient::onError);
+    QWebSocket* const controlSocket = m_webSocket;
+
+    // Pin every callback to the socket that installed it. An already queued Qt
+    // signal from an obsolete socket must not mutate or close its replacement.
+    connect(controlSocket, &QWebSocket::connected, this, [this, controlSocket]() {
+        if (m_webSocket == controlSocket) onConnected();
+    });
+    connect(controlSocket, &QWebSocket::disconnected, this, [this, controlSocket]() {
+        if (m_webSocket == controlSocket) onDisconnected();
+    });
+    connect(controlSocket, &QWebSocket::textMessageReceived, this,
+            [this, controlSocket](const QString& message) {
+        if (m_webSocket == controlSocket) onTextMessageReceived(message);
+    });
+    connect(controlSocket, &QWebSocket::errorOccurred, this,
+            [this, controlSocket](QAbstractSocket::SocketError error) {
+        if (m_webSocket == controlSocket) onError(error);
+    });
+    connect(controlSocket, &QWebSocket::bytesWritten, this,
+            [this, controlSocket](qint64 bytes) {
+        if (m_webSocket == controlSocket && m_uploadSessionActive
+            && !m_useUploadSocketForSession) {
+            emit uploadTransportBytesWritten(bytes);
+        }
+    });
     
     setConnectionStatus("Connecting...");
     qDebug() << "Connecting to server:" << serverUrl;
@@ -138,14 +182,25 @@ void WebSocketClient::disconnect() {
 }
 
 void WebSocketClient::onUploadConnected() {
+    m_uploadChannelAuthenticated = false;
     qDebug() << "Upload channel connected";
 }
 
 void WebSocketClient::onUploadDisconnected() {
+    const bool selectedTransportWasLost = m_uploadSessionActive
+        && m_useUploadSocketForSession;
+    m_uploadChannelAuthenticated = false;
+    m_uploadChannelTokenRequested = false;
+    m_uploadChannelToken.clear();
+    m_uploadClientId.clear();
     qDebug() << "Upload channel disconnected";
+    if (selectedTransportWasLost) {
+        emit uploadTransportLost(QStringLiteral("Dedicated upload connection was lost"));
+    }
 }
 
 void WebSocketClient::onUploadError(QAbstractSocket::SocketError error) {
+    m_uploadChannelAuthenticated = false;
     QString errorString;
     switch (error) {
         case QAbstractSocket::ConnectionRefusedError: errorString = "Connection refused"; break;
@@ -162,7 +217,20 @@ bool WebSocketClient::isConnected() const {
 }
 
 bool WebSocketClient::isUploadChannelConnected() const {
-    return m_uploadSocket && m_uploadSocket->state() == QAbstractSocket::ConnectedState;
+    return m_uploadChannelAuthenticated && m_uploadSocket
+        && m_uploadSocket->state() == QAbstractSocket::ConnectedState;
+}
+
+bool WebSocketClient::isUploadSessionTransportAvailable() const {
+    if (!m_uploadSessionActive || m_uploadChannelPreparing) return false;
+    if (m_useUploadSocketForSession) return isUploadChannelConnected();
+    return isConnected();
+}
+
+qint64 WebSocketClient::uploadTransportBytesToWrite() const {
+    if (!isUploadSessionTransportAvailable()) return -1;
+    const QWebSocket* channel = m_useUploadSocketForSession ? m_uploadSocket : m_webSocket;
+    return channel ? channel->bytesToWrite() : -1;
 }
 
 bool WebSocketClient::prepareUploadChannel(int timeoutMs) {
@@ -177,10 +245,11 @@ bool WebSocketClient::prepareUploadChannel(int timeoutMs) {
     QElapsedTimer timer;
     timer.start();
     while (timer.elapsed() < timeoutMs) {
+        ensureUploadChannel();
+        QCoreApplication::processEvents();
         if (isUploadChannelConnected()) {
             return true;
         }
-        QCoreApplication::processEvents();
         QThread::msleep(20);
     }
 
@@ -190,11 +259,8 @@ bool WebSocketClient::prepareUploadChannel(int timeoutMs) {
 
 void WebSocketClient::beginUploadSession(bool preferUploadChannel) {
     if (m_uploadSessionActive) {
-        if (preferUploadChannel && !m_useUploadSocketForSession) {
-            if (prepareUploadChannel()) {
-                m_useUploadSocketForSession = true;
-            }
-        }
+        // A session's transport is immutable once preparation starts. Switching
+        // sockets after START could reorder chunks across two TCP connections.
         return;
     }
 
@@ -212,15 +278,21 @@ void WebSocketClient::beginUploadSession(bool preferUploadChannel) {
         timerInitialized = true;
     }
 
-    if (!isUploadChannelConnected()) {
-        if (!ensureUploadChannel()) {
-            qWarning() << "Failed to initiate dedicated upload channel";
-        }
+    m_uploadChannelPreparing = true;
+    const bool dedicatedChannelReady = prepareUploadChannel();
+    m_uploadChannelPreparing = false;
+    if (!m_uploadSessionActive) {
+        // A re-entrant cancellation/rejection may have ended the session while
+        // prepareUploadChannel() was pumping the event loop.
+        return;
     }
 
-    if (prepareUploadChannel()) {
+    if (dedicatedChannelReady) {
         m_useUploadSocketForSession = true;
     } else {
+        // Select the control channel before START and keep that choice for the
+        // whole session. The half-open dedicated channel is no longer useful.
+        closeUploadChannel();
         if (!timerInitialized || throttleTimer.elapsed() > 2000) {
             qWarning() << "Falling back to control channel for this upload session";
             throttleTimer.restart();
@@ -231,6 +303,7 @@ void WebSocketClient::beginUploadSession(bool preferUploadChannel) {
 void WebSocketClient::endUploadSession() {
     m_uploadSessionActive = false;
     m_useUploadSocketForSession = false;
+    m_uploadChannelPreparing = false;
     closeUploadChannel();
 }
 
@@ -246,37 +319,73 @@ bool WebSocketClient::ensureUploadChannel() {
 
     if (!m_uploadSocket) {
         m_uploadSocket = new QWebSocket();
-        connect(m_uploadSocket, &QWebSocket::connected, this, &WebSocketClient::onUploadConnected);
-        connect(m_uploadSocket, &QWebSocket::disconnected, this, &WebSocketClient::onUploadDisconnected);
-        connect(m_uploadSocket, &QWebSocket::errorOccurred, this, &WebSocketClient::onUploadError);
-        connect(m_uploadSocket, &QWebSocket::textMessageReceived, this, &WebSocketClient::onUploadTextMessageReceived);
+        QWebSocket* const uploadSocket = m_uploadSocket;
+        connect(uploadSocket, &QWebSocket::connected, this, [this, uploadSocket]() {
+            if (m_uploadSocket == uploadSocket) onUploadConnected();
+        });
+        connect(uploadSocket, &QWebSocket::disconnected, this, [this, uploadSocket]() {
+            if (m_uploadSocket == uploadSocket) onUploadDisconnected();
+        });
+        connect(uploadSocket, &QWebSocket::errorOccurred, this,
+                [this, uploadSocket](QAbstractSocket::SocketError error) {
+            if (m_uploadSocket == uploadSocket) onUploadError(error);
+        });
+        connect(uploadSocket, &QWebSocket::textMessageReceived, this,
+                [this, uploadSocket](const QString& message) {
+            if (m_uploadSocket == uploadSocket) onUploadTextMessageReceived(message);
+        });
+        connect(uploadSocket, &QWebSocket::bytesWritten, this,
+                [this, uploadSocket](qint64 bytes) {
+            if (m_uploadSocket == uploadSocket && m_uploadSessionActive
+                && m_useUploadSocketForSession) {
+                emit uploadTransportBytesWritten(bytes);
+            }
+        });
     }
 
-    if (m_uploadSocket->state() == QAbstractSocket::ConnectingState) {
+    if (m_uploadSocket->state() == QAbstractSocket::ConnectingState
+        || m_uploadSocket->state() == QAbstractSocket::ConnectedState) {
         return true;
     }
 
-    if (m_uploadSocket->state() == QAbstractSocket::ConnectedState) {
+    if (m_uploadChannelToken.isEmpty()) {
+        if (!m_uploadChannelTokenRequested) {
+            m_uploadChannelTokenRequested = true;
+            QJsonObject request;
+            request["type"] = "request_upload_channel";
+            sendMessage(request);
+        }
         return true;
     }
 
     QUrl url(m_serverUrl);
     QUrlQuery q(url);
+    q.removeAllQueryItems("channel");
+    q.removeAllQueryItems("token");
     q.addQueryItem("channel", "upload");
+    q.addQueryItem("token", m_uploadChannelToken);
     url.setQuery(q);
+    m_uploadChannelToken.clear(); // server tokens are deliberately one-shot
+    m_uploadChannelAuthenticated = false;
     m_uploadSocket->open(url);
     return true;
 }
 
 void WebSocketClient::closeUploadChannel() {
+    m_uploadChannelAuthenticated = false;
+    m_uploadChannelTokenRequested = false;
+    m_uploadChannelToken.clear();
+    m_uploadClientId.clear();
     if (!m_uploadSocket) {
         return;
     }
-    if (m_uploadSocket->state() != QAbstractSocket::UnconnectedState) {
-        m_uploadSocket->close();
-    }
-    m_uploadSocket->deleteLater();
+    QWebSocket* const obsoleteSocket = m_uploadSocket;
     m_uploadSocket = nullptr;
+    QObject::disconnect(obsoleteSocket, nullptr, this, nullptr);
+    if (obsoleteSocket->state() != QAbstractSocket::UnconnectedState) {
+        obsoleteSocket->close();
+    }
+    obsoleteSocket->deleteLater();
 }
 
 void WebSocketClient::registerClient(const QString& machineName, const QString& platform, const QList<ScreenInfo>& screens, int volumePercent) {
@@ -383,8 +492,8 @@ void WebSocketClient::sendCursorUpdate(int globalX, int globalY, int screenId, q
     sendMessage(msg);
 }
 
-void WebSocketClient::sendUploadStart(const QString& targetClientId, const QJsonArray& filesManifest, const QString& uploadId, const QString& canvasSessionId) {
-    if (!(isConnected() || isUploadChannelConnected())) return;
+bool WebSocketClient::sendUploadStart(const QString& targetClientId, const QJsonArray& filesManifest, const QString& uploadId, const QString& canvasSessionId) {
+    if (!m_uploadSessionActive) return false;
     
     QJsonObject msg;
     msg["type"] = "upload_start";
@@ -397,12 +506,11 @@ void WebSocketClient::sendUploadStart(const QString& targetClientId, const QJson
         msg["senderClientId"] = m_clientId;           // Legacy (backward compat)
         msg["senderPersistentClientId"] = m_clientId;  // PHASE 2: Explicit field
     }
-    sendMessageUpload(msg);
+    return sendMessageUpload(msg);
 }
 
-void WebSocketClient::sendUploadChunk(const QString& targetClientId, const QString& uploadId, const QString& fileId, int chunkIndex, const QByteArray& dataBase64, const QString& canvasSessionId) {
-    if (!(isConnected() || isUploadChannelConnected())) return;
-    if (m_canceledUploads.contains(uploadId)) return; // drop silently
+bool WebSocketClient::sendUploadChunk(const QString& targetClientId, const QString& uploadId, const QString& fileId, int chunkIndex, const QByteArray& dataBase64, const QString& canvasSessionId) {
+    if (!m_uploadSessionActive || m_canceledUploads.contains(uploadId)) return false;
     
     QJsonObject msg;
     msg["type"] = "upload_chunk";
@@ -423,12 +531,11 @@ void WebSocketClient::sendUploadChunk(const QString& targetClientId, const QStri
         msg["senderClientId"] = m_clientId;           // Legacy (backward compat)
         msg["senderPersistentClientId"] = m_clientId;  // PHASE 2: Explicit field
     }
-    sendMessageUpload(msg);
+    return sendMessageUpload(msg);
 }
 
-void WebSocketClient::sendUploadComplete(const QString& targetClientId, const QString& uploadId, const QString& canvasSessionId) {
-    if (!(isConnected() || isUploadChannelConnected())) return;
-    if (m_canceledUploads.contains(uploadId)) return; // already canceled
+bool WebSocketClient::sendUploadComplete(const QString& targetClientId, const QString& uploadId, const QString& canvasSessionId) {
+    if (!m_uploadSessionActive || m_canceledUploads.contains(uploadId)) return false;
     
     QJsonObject msg;
     msg["type"] = "upload_complete";
@@ -440,11 +547,11 @@ void WebSocketClient::sendUploadComplete(const QString& targetClientId, const QS
         msg["senderClientId"] = m_clientId;           // Legacy (backward compat)
         msg["senderPersistentClientId"] = m_clientId;  // PHASE 2: Explicit field
     }
-    sendMessageUpload(msg);
+    return sendMessageUpload(msg);
 }
 
-void WebSocketClient::sendUploadAbort(const QString& targetClientId, const QString& uploadId, const QString& reason, const QString& canvasSessionId) {
-    if (!(isConnected() || isUploadChannelConnected())) return;
+bool WebSocketClient::sendUploadAbort(const QString& targetClientId, const QString& uploadId, const QString& reason, const QString& canvasSessionId) {
+    if (!(isConnected() || isUploadChannelConnected())) return false;
     m_canceledUploads.insert(uploadId);
     
     QJsonObject msg;
@@ -458,10 +565,19 @@ void WebSocketClient::sendUploadAbort(const QString& targetClientId, const QStri
         msg["senderClientId"] = m_clientId;           // Legacy (backward compat)
         msg["senderPersistentClientId"] = m_clientId;  // PHASE 2: Explicit field
     }
-    sendMessageUpload(msg);
+    // Aborting is the only permitted cross-transport message: it terminates the
+    // server-side session, so chunks arriving later on the pinned data socket
+    // are rejected instead of being reordered into a continued transfer.
+    if (isConnected()) {
+        QJsonDocument doc(msg);
+        return m_webSocket->sendTextMessage(doc.toJson(QJsonDocument::Compact)) >= 0;
+    }
+    return m_uploadSessionActive && sendMessageUpload(msg);
 }
 
-void WebSocketClient::sendRemoveAllFiles(const QString& targetClientId, const QString& canvasSessionId) {
+void WebSocketClient::sendRemoveAllFiles(const QString& targetClientId,
+                                         const QString& canvasSessionId,
+                                         const QString& removalId) {
     if (!isConnected()) return;
     
     QJsonObject msg;
@@ -469,6 +585,7 @@ void WebSocketClient::sendRemoveAllFiles(const QString& targetClientId, const QS
     msg["targetClientId"] = targetClientId;           // Legacy (backward compat)
     msg["targetPersistentClientId"] = targetClientId;  // PHASE 2: Explicit field
     msg["canvasSessionId"] = canvasSessionId;
+    msg["removalId"] = removalId;
     sendMessage(msg);
 }
 
@@ -534,20 +651,49 @@ void WebSocketClient::notifyUploadProgressToSender(const QString& senderClientId
     sendMessage(msg);
 }
 
-void WebSocketClient::notifyUploadFinishedToSender(const QString& senderClientId, const QString& uploadId) {
+void WebSocketClient::notifyUploadFinishedToSender(const QString& senderClientId,
+                                                   const QString& uploadId,
+                                                   const QString& canvasSessionId,
+                                                   const QStringList& validatedFileIds) {
     if (!isConnected()) return;
     QJsonObject msg;
     msg["type"] = "upload_finished";
     msg["senderClientId"] = senderClientId;
     msg["uploadId"] = uploadId;
+    msg["canvasSessionId"] = canvasSessionId;
+    QJsonArray fileIds;
+    for (const QString& fileId : validatedFileIds) {
+        fileIds.append(fileId);
+    }
+    msg["fileIds"] = fileIds;
     sendMessage(msg);
 }
 
-void WebSocketClient::notifyAllFilesRemovedToSender(const QString& senderClientId) {
+void WebSocketClient::notifyUploadRejectedToSender(const QString& senderClientId,
+                                                   const QString& uploadId,
+                                                   const QString& reason,
+                                                   const QString& canvasSessionId) {
+    if (!isConnected() || senderClientId.isEmpty() || uploadId.isEmpty()) return;
+    QJsonObject msg;
+    msg["type"] = "upload_rejected";
+    msg["senderClientId"] = senderClientId;
+    msg["uploadId"] = uploadId;
+    msg["reason"] = reason.left(512);
+    if (!canvasSessionId.isEmpty()) {
+        msg["canvasSessionId"] = canvasSessionId;
+    }
+    sendMessage(msg);
+}
+
+void WebSocketClient::notifyAllFilesRemovedToSender(const QString& senderClientId,
+                                                    const QString& removalId,
+                                                    const QString& canvasSessionId) {
     if (!isConnected()) return;
     QJsonObject msg;
     msg["type"] = "all_files_removed";
     msg["senderClientId"] = senderClientId;
+    msg["removalId"] = removalId;
+    msg["canvasSessionId"] = canvasSessionId;
     sendMessage(msg);
 }
 
@@ -561,20 +707,61 @@ void WebSocketClient::sendRemoteSceneStart(const QString& targetClientId, const 
     sendMessage(msg);
 }
 
-void WebSocketClient::sendRemoteSceneStop(const QString& targetClientId) {
+void WebSocketClient::sendRemoteSceneActivate(const QString& targetClientId,
+                                              const QString& sceneInstanceId,
+                                              qint64 activationEpochMs,
+                                              int activationDelayMs) {
+    if (!isConnected() || targetClientId.isEmpty() || sceneInstanceId.isEmpty()) return;
+    QJsonObject msg;
+    msg["type"] = "remote_scene_activate";
+    msg["targetClientId"] = targetClientId;
+    msg["sceneInstanceId"] = sceneInstanceId;
+    msg["activationEpochMs"] = static_cast<double>(activationEpochMs);
+    msg["activationDelayMs"] = std::max(0, activationDelayMs);
+    if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
+    sendMessage(msg);
+}
+
+void WebSocketClient::sendRemoteSceneVideoSync(const QString& targetClientId,
+                                               const QString& sceneInstanceId,
+                                               qint64 sequence,
+                                               qint64 sampledEpochMs,
+                                               const QJsonArray& videos) {
+    if (!isConnected() || targetClientId.isEmpty() || sceneInstanceId.isEmpty()
+        || sequence <= 0 || sampledEpochMs <= 0) {
+        return;
+    }
+    QJsonObject msg;
+    msg["type"] = "remote_scene_video_sync";
+    msg["targetClientId"] = targetClientId;
+    msg["sceneInstanceId"] = sceneInstanceId;
+    msg["sequence"] = static_cast<double>(sequence);
+    msg["sampledEpochMs"] = static_cast<double>(sampledEpochMs);
+    msg["videos"] = videos;
+    if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
+    sendMessage(msg);
+}
+
+void WebSocketClient::sendRemoteSceneStop(const QString& targetClientId,
+                                          const QString& sceneInstanceId) {
     if (!isConnected()) return;
     QJsonObject msg;
     msg["type"] = "remote_scene_stop";
     msg["targetClientId"] = targetClientId;
+    if (!sceneInstanceId.isEmpty()) msg["sceneInstanceId"] = sceneInstanceId;
     if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
     sendMessage(msg);
 }
 
-void WebSocketClient::sendRemoteSceneStopResult(const QString& senderClientId, bool success, const QString& errorMessage) {
+void WebSocketClient::sendRemoteSceneStopResult(const QString& senderClientId,
+                                                const QString& sceneInstanceId,
+                                                bool success,
+                                                const QString& errorMessage) {
     if (!isConnected()) return;
     QJsonObject msg;
     msg["type"] = "remote_scene_stopped";
     msg["targetClientId"] = senderClientId;
+    msg["sceneInstanceId"] = sceneInstanceId;
     msg["success"] = success;
     if (!success && !errorMessage.isEmpty()) {
         msg["error"] = errorMessage;
@@ -583,11 +770,15 @@ void WebSocketClient::sendRemoteSceneStopResult(const QString& senderClientId, b
     sendMessage(msg);
 }
 
-void WebSocketClient::sendRemoteSceneValidationResult(const QString& senderClientId, bool success, const QString& errorMessage) {
+void WebSocketClient::sendRemoteSceneValidationResult(const QString& senderClientId,
+                                                      const QString& sceneInstanceId,
+                                                      bool success,
+                                                      const QString& errorMessage) {
     if (!isConnected()) return;
     QJsonObject msg;
     msg["type"] = "remote_scene_validation";
     msg["targetClientId"] = senderClientId; // Send back to the sender
+    msg["sceneInstanceId"] = sceneInstanceId;
     msg["success"] = success;
     if (!success && !errorMessage.isEmpty()) {
         msg["error"] = errorMessage;
@@ -596,11 +787,13 @@ void WebSocketClient::sendRemoteSceneValidationResult(const QString& senderClien
     sendMessage(msg);
 }
 
-void WebSocketClient::sendRemoteSceneLaunched(const QString& senderClientId) {
+void WebSocketClient::sendRemoteSceneLaunched(const QString& senderClientId,
+                                              const QString& sceneInstanceId) {
     if (!isConnected()) return;
     QJsonObject msg;
     msg["type"] = "remote_scene_launched";
     msg["targetClientId"] = senderClientId; // Send back to the sender
+    msg["sceneInstanceId"] = sceneInstanceId;
     if (!m_clientId.isEmpty()) msg["senderClientId"] = m_clientId;
     sendMessage(msg);
 }
@@ -617,6 +810,7 @@ void WebSocketClient::onConnected() {
 
 void WebSocketClient::onDisconnected() {
     qDebug() << "Disconnected from server";
+    closeUploadChannel();
     // If user initiated, keep status as Disconnected (no error, no reconnect)
     setConnectionStatus("Disconnected");
     emit disconnected();
@@ -753,6 +947,16 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         qDebug() << "Registration confirmed for session" << m_clientId << "persistent" << clientInfo.clientId();
         emit registrationConfirmed(clientInfo);
     }
+    else if (type == "upload_channel_token") {
+        const QString token = message.value("token").toString();
+        m_uploadChannelTokenRequested = false;
+        if (token.size() >= 32 && token.size() <= 128) {
+            m_uploadChannelToken = token;
+        } else {
+            m_uploadChannelToken.clear();
+            qWarning() << "Server returned an invalid upload channel token";
+        }
+    }
     else if (type == "client_list") {
         QJsonArray clientsArray = message["clients"].toArray();
         QList<ClientInfo> clients;
@@ -822,33 +1026,67 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         const QString uploadId = message.value("uploadId").toString();
         emit uploadFinishedReceived(uploadId);
     }
+    else if (type == "upload_rejected" || type == "upload_timeout") {
+        const QString uploadId = message.value("uploadId").toString();
+        QString reason = message.value("reason").toString();
+        if (reason.isEmpty()) reason = message.value("message").toString();
+        if (reason.isEmpty()) reason = QStringLiteral("Remote client rejected the upload");
+        emit uploadRejectedReceived(uploadId, reason);
+    }
     else if (type == "all_files_removed") {
-        emit allFilesRemovedReceived();
+        const QString removalId = message.value("removalId").toString();
+        const QString targetClientId = message.value("targetPersistentClientId").toString(
+            message.value("targetClientId").toString());
+        const QString canvasSessionId = message.value("canvasSessionId").toString();
+        emit allFilesRemovedReceived(removalId, targetClientId, canvasSessionId);
     }
     else if (type == "remote_scene_start") {
         const QString sender = message.value("senderClientId").toString();
         const QJsonObject scene = message.value("scene").toObject();
         emit remoteSceneStartReceived(sender, scene);
     }
+    else if (type == "remote_scene_activate") {
+        const QString sender = message.value("senderClientId").toString();
+        const QString sceneInstanceId = message.value("sceneInstanceId").toString();
+        const qint64 activationEpochMs = static_cast<qint64>(
+            std::llround(message.value("activationEpochMs").toDouble(0.0)));
+        const int activationDelayMs = message.value("activationDelayMs").toInt(1000);
+        emit remoteSceneActivateReceived(sender, sceneInstanceId, activationEpochMs, activationDelayMs);
+    }
+    else if (type == "remote_scene_video_sync") {
+        const QString sender = message.value("senderClientId").toString();
+        const QString sceneInstanceId = message.value("sceneInstanceId").toString();
+        const qint64 sequence = static_cast<qint64>(
+            std::llround(message.value("sequence").toDouble(0.0)));
+        const qint64 sampledEpochMs = static_cast<qint64>(
+            std::llround(message.value("sampledEpochMs").toDouble(0.0)));
+        const QJsonArray videos = message.value("videos").toArray();
+        emit remoteSceneVideoSyncReceived(
+            sender, sceneInstanceId, sequence, sampledEpochMs, videos);
+    }
     else if (type == "remote_scene_stop") {
         const QString sender = message.value("senderClientId").toString();
-        emit remoteSceneStopReceived(sender);
+        const QString sceneInstanceId = message.value("sceneInstanceId").toString();
+        emit remoteSceneStopReceived(sender, sceneInstanceId);
     }
     else if (type == "remote_scene_stopped") {
         const QString sender = message.value("senderClientId").toString();
+        const QString sceneInstanceId = message.value("sceneInstanceId").toString();
         const bool success = message.value("success").toBool(false);
         const QString error = message.value("error").toString();
-        emit remoteSceneStoppedReceived(sender, success, error);
+        emit remoteSceneStoppedReceived(sender, sceneInstanceId, success, error);
     }
     else if (type == "remote_scene_validation") {
         const QString sender = message.value("senderClientId").toString();
+        const QString sceneInstanceId = message.value("sceneInstanceId").toString();
         const bool success = message.value("success").toBool();
         const QString error = message.value("error").toString();
-        emit remoteSceneValidationReceived(sender, success, error);
+        emit remoteSceneValidationReceived(sender, sceneInstanceId, success, error);
     }
     else if (type == "remote_scene_launched") {
         const QString sender = message.value("senderClientId").toString();
-        emit remoteSceneLaunchedReceived(sender);
+        const QString sceneInstanceId = message.value("sceneInstanceId").toString();
+        emit remoteSceneLaunchedReceived(sender, sceneInstanceId);
     }
     else if (type == "state_sync") {
         // PHASE 2: Handle server state synchronization after reconnection
@@ -873,34 +1111,23 @@ void WebSocketClient::sendMessage(const QJsonObject& message) {
     m_webSocket->sendTextMessage(jsonString);
 }
 
-void WebSocketClient::sendMessageUpload(const QJsonObject& message) {
-    const QString type = message.value("type").toString();
-    QWebSocket* channel = nullptr;
-    bool attemptedUploadChannel = false;
-
-    if (m_useUploadSocketForSession) {
-        attemptedUploadChannel = true;
-        if (isUploadChannelConnected()) {
-            channel = m_uploadSocket;
-        }
+bool WebSocketClient::sendMessageUpload(const QJsonObject& message) {
+    if (!m_uploadSessionActive || m_uploadChannelPreparing) {
+        qWarning() << "Cannot send upload payload before the session transport is locked";
+        return false;
     }
 
-    if (!channel && isConnected()) {
-        channel = m_webSocket;
-        if (attemptedUploadChannel) {
-            qWarning() << "Falling back to control channel for upload session";
-            m_useUploadSocketForSession = false;
-            closeUploadChannel();
-        }
-    }
-
-    if (!channel || channel->state() != QAbstractSocket::ConnectedState) {
-        qWarning() << "Cannot send upload message: no connected websocket available";
-        return;
+    QWebSocket* channel = m_useUploadSocketForSession ? m_uploadSocket : m_webSocket;
+    const bool connected = m_useUploadSocketForSession
+        ? isUploadChannelConnected()
+        : (channel && channel->state() == QAbstractSocket::ConnectedState);
+    if (!channel || !connected) {
+        qWarning() << "Upload session transport was lost; refusing to switch sockets";
+        return false;
     }
 
     QJsonDocument doc(message);
-    channel->sendTextMessage(doc.toJson(QJsonDocument::Compact));
+    return channel->sendTextMessage(doc.toJson(QJsonDocument::Compact)) >= 0;
 }
 
 void WebSocketClient::setConnectionStatus(const QString& status) {

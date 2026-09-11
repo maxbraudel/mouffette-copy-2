@@ -808,10 +808,16 @@ void OverlayPanel::setParentItem(QGraphicsItem* parent) {
 }
 
 void OverlayPanel::setScene(QGraphicsScene* scene) {
-    m_scene = scene;
-    if (m_background && !m_parentItem && scene) {
-        scene->addItem(m_background);
+    if (m_background && !m_parentItem) {
+        QGraphicsScene* currentScene = m_background->scene();
+        if (currentScene && currentScene != scene) {
+            currentScene->removeItem(m_background);
+        }
+        if (scene && m_background->scene() != scene) {
+            scene->addItem(m_background);
+        }
     }
+    m_scene = scene;
     
     // Element graphics items should be children of panel background, not added directly to scene
     // They will be automatically added when background is added/parented
@@ -1166,4 +1172,3 @@ QPointF OverlayPanel::calculatePanelPositionFromAnchor(const QPointF& anchorScen
     // Map back to scene coordinates - this ensures pixel-perfect gap regardless of zoom
     return vt.inverted().map(panelTopLeftViewport);
 }
-

@@ -3,6 +3,7 @@
 #include "frontend/rendering/canvas/TextEditHelper.h"
 #include "frontend/rendering/canvas/CanvasQmlTypes.h"
 #include "backend/domain/media/MediaRuntimeHooks.h"
+#include "backend/domain/media/MediaFilePolicy.h"
 #include "backend/domain/media/TextRenderState.h"
 #include "frontend/rendering/canvas/GestureCommands.h"
 #include "frontend/rendering/canvas/ModelPublisher.h"
@@ -46,6 +47,16 @@
 namespace {
 constexpr int kRemoteCursorDiameterPx = 30;
 constexpr qreal kRemoteCursorBorderWidthPx = 2.0;
+
+bool containsAcceptedLocalMedia(const QMimeData* mimeData) {
+    if (!mimeData || !mimeData->hasUrls()) return false;
+    for (const QUrl& url : mimeData->urls()) {
+        if (url.isLocalFile() && MediaFilePolicy::isAcceptedLocalFile(url.toLocalFile())) {
+            return true;
+        }
+    }
+    return false;
+}
 
 QString uploadStateToString(ResizableMediaBase::UploadState state) {
     switch (state) {
@@ -383,7 +394,11 @@ bool QuickCanvasController::eventFilter(QObject* watched, QEvent* event) {
             break;
         case QEvent::DragEnter: {
             auto* dragEnter = static_cast<QDragEnterEvent*>(event);
-            if (dragEnter && dragEnter->mimeData() && dragEnter->mimeData()->hasUrls()) {
+            if (remoteSceneLocksEdits()) {
+                if (dragEnter) dragEnter->ignore();
+                return true;
+            }
+            if (dragEnter && containsAcceptedLocalMedia(dragEnter->mimeData())) {
                 dragEnter->acceptProposedAction();
                 return true;
             }
@@ -391,6 +406,12 @@ bool QuickCanvasController::eventFilter(QObject* watched, QEvent* event) {
         }
         case QEvent::DragMove: {
             auto* dragMove = static_cast<QDragMoveEvent*>(event);
+            if (remoteSceneLocksEdits()) {
+                if (dragMove) dragMove->ignore();
+                return true;
+            }
+            // DragEnter already performed content validation; avoid reopening
+            // large media files for every pointer move.
             if (dragMove && dragMove->mimeData() && dragMove->mimeData()->hasUrls()) {
                 dragMove->acceptProposedAction();
                 return true;
@@ -399,6 +420,10 @@ bool QuickCanvasController::eventFilter(QObject* watched, QEvent* event) {
         }
         case QEvent::Drop: {
             auto* dropEvent = static_cast<QDropEvent*>(event);
+            if (remoteSceneLocksEdits()) {
+                if (dropEvent) dropEvent->ignore();
+                return true;
+            }
             if (dropEvent && dropEvent->mimeData() && dropEvent->mimeData()->hasUrls()) {
                 QStringList localPaths;
                 const QList<QUrl> urls = dropEvent->mimeData()->urls();
@@ -554,6 +579,23 @@ ResizableMediaBase* QuickCanvasController::mediaItemById(const QString& mediaId)
     return m_mediaItemsById.value(mediaId).item;
 }
 
+bool QuickCanvasController::remoteSceneLocksEdits() const {
+    if (!m_mediaScene) {
+        return false;
+    }
+    for (QGraphicsView* view : m_mediaScene->views()) {
+        if (auto* canvas = qobject_cast<ScreenCanvas*>(view)) {
+            // The remote manifest is immutable from PREPARE until STOP. This
+            // also covers the stopping handshake because launched remains true
+            // until the matching acknowledgement is accepted.
+            if (canvas->isRemoteSceneLaunching() || canvas->isRemoteSceneLaunched()) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void QuickCanvasController::updateRemoteCursor(int globalX, int globalY) {
     bool ok = false;
     const QPointF mapped = mapRemoteCursorToQuickScene(globalX, globalY, &ok);
@@ -640,6 +682,9 @@ void QuickCanvasController::scheduleMediaModelSync() {
 }
 
 void QuickCanvasController::handleMediaSelectRequested(const QString& mediaId, bool additive) {
+    if (remoteSceneLocksEdits()) {
+        return;
+    }
     if (!m_mediaScene || mediaId.isEmpty()) {
         return;
     }
@@ -706,6 +751,17 @@ void QuickCanvasController::handleClearSelectionRequested() {
 // Move drag is now fully QML-native (DragHandler on each mediaDelegate inside contentRoot).
 // C++ is only notified once at drag-end to commit the final position.
 void QuickCanvasController::handleMediaMoveEnded(const QString& mediaId, qreal sceneX, qreal sceneY, bool snap) {
+    if (remoteSceneLocksEdits()) {
+        m_dragSnapSession->end();
+        clearLiveDragSnapPosition();
+        m_pointerSession->setDraggingMedia(false);
+        if (m_mediaSyncTimer) m_mediaSyncTimer->stop();
+        m_mediaSyncPending = false;
+        pushMediaModelOnly();
+        pushSelectionAndSnapModels();
+        return;
+    }
+
     // Commit exactly what was displayed: use the last snapped position that was
     // pushed to QML via pushLiveDragSnapPosition, stored in m_lastSnapSceneX/Y.
     // This avoids re-running the snap engine (which could yield a slightly different
@@ -764,6 +820,10 @@ void QuickCanvasController::handleMediaMoveStarted(const QString& mediaId, qreal
     clearLiveDragSnapPosition();
     m_modelPublisher->publishSnapGuidesOnly(m_viewAdapter, SnapGuidePublisher::emptyModel());
 
+    if (remoteSceneLocksEdits()) {
+        return;
+    }
+
     if (!m_mediaScene || mediaId.isEmpty()) {
         return;
     }
@@ -777,6 +837,9 @@ void QuickCanvasController::handleMediaMoveStarted(const QString& mediaId, qreal
 }
 
 void QuickCanvasController::handleMediaMoveUpdated(const QString& mediaId, qreal sceneX, qreal sceneY, bool snap) {
+    if (remoteSceneLocksEdits()) {
+        return;
+    }
     if (!m_mediaScene || mediaId.isEmpty()) {
         return;
     }
@@ -803,6 +866,12 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
                                                        qreal sceneY,
                                                        bool snap,
                                                        bool altPressed) {
+    if (remoteSceneLocksEdits()) {
+        m_hasQueuedResize = false;
+        if (m_resizeDispatchTimer) m_resizeDispatchTimer->stop();
+        return;
+    }
+
     if (!m_executingQueuedResize) {
         m_queuedResizeMediaId = mediaId;
         m_queuedResizeHandleId = handleId;
@@ -1486,6 +1555,21 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
 }
 
 void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId) {
+    if (remoteSceneLocksEdits()) {
+        m_hasQueuedResize = false;
+        if (m_resizeDispatchTimer) m_resizeDispatchTimer->stop();
+        m_pointerSession->setDraggingMedia(false);
+        m_pointerSession->clearResize();
+        m_resizeBaseSize = QSize();
+        m_resizeFixedItemPoint = QPointF();
+        m_resizeFixedScenePoint = QPointF();
+        m_snapStore->clear();
+        resetAltResizeState();
+        pushMediaModelOnly();
+        pushSelectionAndSnapModels();
+        return;
+    }
+
     // A late release must not cancel the newer owner's pending update, even
     // before its first timer tick has established an active PointerSession.
     const QString resizeOwner = m_pointerSession->resizeActive()
@@ -1562,6 +1646,9 @@ void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId) {
 }
 
 void QuickCanvasController::handleTextCommitRequested(const QString& mediaId, const QString& text) {
+    if (remoteSceneLocksEdits()) {
+        return;
+    }
     if (!m_mediaScene || mediaId.isEmpty()) {
         return;
     }
@@ -1583,6 +1670,9 @@ void QuickCanvasController::handleTextCommitRequested(const QString& mediaId, co
 }
 
 void QuickCanvasController::handleTextLiveUpdateRequested(const QString& mediaId, const QString& text) {
+    if (remoteSceneLocksEdits()) {
+        return;
+    }
     if (!m_mediaScene || mediaId.isEmpty()) {
         return;
     }
@@ -1605,6 +1695,9 @@ void QuickCanvasController::handleTextLiveUpdateRequested(const QString& mediaId
 }
 
 void QuickCanvasController::handleTextCreateRequested(qreal viewX, qreal viewY) {
+    if (remoteSceneLocksEdits()) {
+        return;
+    }
     const QPointF scenePos = mapViewPointToScene(QPointF(viewX, viewY));
     emit textMediaCreateRequested(scenePos);
 
@@ -2003,6 +2096,7 @@ void QuickCanvasController::pushVideoStateModel() {
 // ---- Overlay action slots ----
 
 void QuickCanvasController::handleOverlayVisibilityToggle(const QString& mediaId, bool visible) {
+    if (remoteSceneLocksEdits()) return;
     ResizableMediaBase* media = mediaItemById(mediaId);
     if (!media) return;
     if (visible) {
@@ -2015,6 +2109,7 @@ void QuickCanvasController::handleOverlayVisibilityToggle(const QString& mediaId
 }
 
 void QuickCanvasController::handleOverlayBringForward(const QString& mediaId) {
+    if (remoteSceneLocksEdits()) return;
     ResizableMediaBase* media = mediaItemById(mediaId);
     if (!media || !m_mediaScene || m_mediaScene->views().isEmpty()) return;
     if (auto* sc = qobject_cast<ScreenCanvas*>(m_mediaScene->views().first())) {
@@ -2025,6 +2120,7 @@ void QuickCanvasController::handleOverlayBringForward(const QString& mediaId) {
 }
 
 void QuickCanvasController::handleOverlayBringBackward(const QString& mediaId) {
+    if (remoteSceneLocksEdits()) return;
     ResizableMediaBase* media = mediaItemById(mediaId);
     if (!media || !m_mediaScene || m_mediaScene->views().isEmpty()) return;
     if (auto* sc = qobject_cast<ScreenCanvas*>(m_mediaScene->views().first())) {
@@ -2035,6 +2131,7 @@ void QuickCanvasController::handleOverlayBringBackward(const QString& mediaId) {
 }
 
 void QuickCanvasController::handleOverlayDelete(const QString& mediaId) {
+    if (remoteSceneLocksEdits()) return;
     ResizableMediaBase* media = mediaItemById(mediaId);
     if (!media) return;
     emit mediaDeleteRequested(mediaId);
@@ -2051,6 +2148,7 @@ void QuickCanvasController::handleOverlayDelete(const QString& mediaId) {
 }
 
 void QuickCanvasController::handleOverlayPlayPause(const QString& mediaId) {
+    if (remoteSceneLocksEdits()) return;
     if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
         v->togglePlayPause();
         emit mediaPlayPauseRequested(mediaId);
@@ -2058,6 +2156,7 @@ void QuickCanvasController::handleOverlayPlayPause(const QString& mediaId) {
 }
 
 void QuickCanvasController::handleOverlayStop(const QString& mediaId) {
+    if (remoteSceneLocksEdits()) return;
     if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
         v->stopToBeginning();
         emit mediaStopRequested(mediaId);
@@ -2065,6 +2164,7 @@ void QuickCanvasController::handleOverlayStop(const QString& mediaId) {
 }
 
 void QuickCanvasController::handleOverlayRepeatToggle(const QString& mediaId) {
+    if (remoteSceneLocksEdits()) return;
     if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
         v->toggleRepeat();
         emit mediaRepeatToggleRequested(mediaId);
@@ -2072,6 +2172,7 @@ void QuickCanvasController::handleOverlayRepeatToggle(const QString& mediaId) {
 }
 
 void QuickCanvasController::handleOverlayMuteToggle(const QString& mediaId) {
+    if (remoteSceneLocksEdits()) return;
     if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
         v->toggleMute();
         emit mediaMuteToggleRequested(mediaId);
@@ -2079,6 +2180,7 @@ void QuickCanvasController::handleOverlayMuteToggle(const QString& mediaId) {
 }
 
 void QuickCanvasController::handleOverlayVolumeChange(const QString& mediaId, qreal value) {
+    if (remoteSceneLocksEdits()) return;
     if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
         v->setVolume(value);
         emit mediaVolumeChangeRequested(mediaId, value);
@@ -2090,6 +2192,7 @@ void QuickCanvasController::handleOverlayVolumeChange(const QString& mediaId, qr
 // initial seek so that m_progressTimer and positionChanged handlers both see
 // m_draggingProgress=true and suppress conflicting pushes for the duration.
 void QuickCanvasController::handleOverlaySeekBegin(const QString& mediaId, qreal ratio) {
+    if (remoteSceneLocksEdits()) return;
     if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
         v->setDraggingProgress(true);
         v->seekToRatio(std::clamp(ratio, 0.0, 1.0));
@@ -2099,6 +2202,7 @@ void QuickCanvasController::handleOverlaySeekBegin(const QString& mediaId, qreal
 // Phase 2: pointer moved.  Seek to the live scrub position for visual preview.
 // m_draggingProgress remains true so C++ push-back is suppressed.
 void QuickCanvasController::handleOverlaySeekUpdate(const QString& mediaId, qreal ratio) {
+    if (remoteSceneLocksEdits()) return;
     if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
         v->seekToRatio(std::clamp(ratio, 0.0, 1.0));
     }
@@ -2107,6 +2211,12 @@ void QuickCanvasController::handleOverlaySeekUpdate(const QString& mediaId, qrea
 // Phase 3: pointer released.  Commit the final position then clear the drag lock.
 // setDraggingProgress(false) also restarts m_progressTimer if playing and !m_seeking.
 void QuickCanvasController::handleOverlaySeekEnd(const QString& mediaId, qreal ratio) {
+    if (remoteSceneLocksEdits()) {
+        if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
+            v->setDraggingProgress(false);
+        }
+        return;
+    }
     if (auto* v = dynamic_cast<ResizableVideoItem*>(mediaItemById(mediaId))) {
         v->seekToRatio(std::clamp(ratio, 0.0, 1.0));
         v->setDraggingProgress(false);
@@ -2115,6 +2225,7 @@ void QuickCanvasController::handleOverlaySeekEnd(const QString& mediaId, qreal r
 }
 
 void QuickCanvasController::handleOverlayFitToTextToggle(const QString& mediaId) {
+    if (remoteSceneLocksEdits()) return;
     if (auto* t = dynamic_cast<TextMediaItem*>(mediaItemById(mediaId))) {
         t->setFitToTextEnabled(!t->fitToTextEnabled());
         emit mediaFitToTextToggleRequested(mediaId);
@@ -2123,6 +2234,7 @@ void QuickCanvasController::handleOverlayFitToTextToggle(const QString& mediaId)
 }
 
 void QuickCanvasController::handleOverlayHorizontalAlign(const QString& mediaId, const QString& alignment) {
+    if (remoteSceneLocksEdits()) return;
     auto* t = dynamic_cast<TextMediaItem*>(mediaItemById(mediaId));
     if (!t) return;
     if      (alignment == QStringLiteral("left"))   t->setHorizontalAlignment(TextMediaItem::HorizontalAlignment::Left);
@@ -2133,6 +2245,7 @@ void QuickCanvasController::handleOverlayHorizontalAlign(const QString& mediaId,
 }
 
 void QuickCanvasController::handleOverlayVerticalAlign(const QString& mediaId, const QString& alignment) {
+    if (remoteSceneLocksEdits()) return;
     auto* t = dynamic_cast<TextMediaItem*>(mediaItemById(mediaId));
     if (!t) return;
     if      (alignment == QStringLiteral("top"))    t->setVerticalAlignment(TextMediaItem::VerticalAlignment::Top);
@@ -2150,224 +2263,6 @@ void QuickCanvasController::handleFadeAnimationTick() {
 }
 
 void QuickCanvasController::handleMediaSettingsChanged(ResizableMediaBase* /*media*/) {
-    scheduleMediaModelSync();
-}
-
-void QuickCanvasController::startHostSceneState() {
-    if (m_hostSceneActive) return;
-    m_hostSceneActive = true;
-
-    // Disconnect any leftover automation connections from a previous session
-    for (auto& conn : m_sceneAutomationConnections) QObject::disconnect(conn);
-    m_sceneAutomationConnections.clear();
-    m_prevVideoStates.clear();
-
-    if (!m_mediaScene) return;
-
-    const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
-    for (QGraphicsItem* gi : sceneItems) {
-        auto* media = dynamic_cast<ResizableMediaBase*>(gi);
-        if (!media) continue;
-
-        const bool shouldAutoDisplay   = media->autoDisplayEnabled();
-        const int  displayDelayMs      = media->autoDisplayDelayMs();
-        const bool shouldAutoHide      = media->autoHideEnabled();
-        const int  hideDelayMs         = media->autoHideDelayMs();
-        const bool hideOnEnd           = media->hideWhenVideoEnds();
-        const bool muteOnEnd           = media->muteWhenVideoEnds();
-        const bool scheduleHideFromDisplay = shouldAutoHide && !hideOnEnd;
-
-        if (auto* vid = dynamic_cast<ResizableVideoItem*>(media)) {
-            VideoPreState ps;
-            ps.video      = vid;
-            ps.guard      = vid->lifetimeGuard();
-            ps.posMs      = vid->currentPositionMs();
-            ps.wasPlaying = vid->isPlaying();
-            ps.wasMuted   = vid->isMuted();
-            m_prevVideoStates.append(ps);
-
-            const bool shouldAutoPlay   = media->autoPlayEnabled();
-            const int  playDelayMs      = media->autoPlayDelayMs();
-            const bool shouldAutoPause  = media->autoPauseEnabled();
-            const int  pauseDelayMs     = media->autoPauseDelayMs();
-            const bool shouldAutoMute   = media->autoMuteEnabled();
-            const int  muteDelayMs      = media->autoMuteDelayMs();
-            const bool shouldAutoUnmute = media->autoUnmuteEnabled();
-            const int  unmuteDelayMs    = media->autoUnmuteDelayMs();
-
-            vid->pauseAndSetPosition(0);
-            vid->setMuted(true, true);
-
-            QMediaPlayer* player = vid->mediaPlayer();
-
-            // --- hide/mute on video end ---
-            if ((hideOnEnd || muteOnEnd) && player) {
-                auto hideTriggered = std::make_shared<bool>(false);
-                auto triggerHide = [this, media, guard = ps.guard, hideTriggered]() {
-                    if (*hideTriggered) return;
-                    if (!m_hostSceneActive) return;
-                    if (guard.expired()) return;
-                    if (!media || media->isBeingDeleted()) return;
-                    if (!media->mediaSettingsState().hideWhenVideoEnds) return;
-                    if (auto* v = dynamic_cast<ResizableVideoItem*>(media)) {
-                        if (v->settingsRepeatAvailable()) return;
-                    }
-                    *hideTriggered = true;
-                    media->hideWithConfiguredFade();
-                    scheduleMediaModelSync();
-                };
-
-                auto muteTriggered = std::make_shared<bool>(false);
-                auto triggerMute = [this, vid, guard = ps.guard, muteTriggered]() {
-                    if (*muteTriggered) return;
-                    if (!m_hostSceneActive) return;
-                    if (guard.expired()) return;
-                    if (!vid || vid->isBeingDeleted()) return;
-                    if (!vid->mediaSettingsState().muteWhenVideoEnds) return;
-                    if (vid->settingsRepeatAvailable()) return;
-                    *muteTriggered = true;
-                    vid->setMuted(true);
-                };
-
-                if (hideOnEnd) {
-                    auto conn = QObject::connect(player, &QMediaPlayer::mediaStatusChanged, this,
-                        [this, triggerHide, hideDelayMs, shouldAutoHide](QMediaPlayer::MediaStatus status) {
-                            if (!m_hostSceneActive) return;
-                            if (status != QMediaPlayer::EndOfMedia) return;
-                            if (shouldAutoHide && hideDelayMs > 0) {
-                                QTimer::singleShot(hideDelayMs, this, [this, triggerHide]() { triggerHide(); });
-                            } else {
-                                triggerHide();
-                            }
-                        });
-                    m_sceneAutomationConnections.append(conn);
-                }
-
-                if (muteOnEnd) {
-                    auto conn = QObject::connect(player, &QMediaPlayer::mediaStatusChanged, this,
-                        [this, triggerMute, muteDelayMs, shouldAutoMute](QMediaPlayer::MediaStatus status) {
-                            if (!m_hostSceneActive) return;
-                            if (status != QMediaPlayer::EndOfMedia) return;
-                            if (shouldAutoMute && muteDelayMs > 0) {
-                                QTimer::singleShot(muteDelayMs, this, [this, triggerMute]() { triggerMute(); });
-                            } else {
-                                triggerMute();
-                            }
-                        });
-                    m_sceneAutomationConnections.append(conn);
-                }
-            }
-
-            // --- auto unmute ---
-            if (shouldAutoUnmute) {
-                const auto unmuteGuard = vid->lifetimeGuard();
-                ResizableVideoItem* videoPtr = vid;
-                auto unmuteNow = [this, videoPtr, unmuteGuard]() {
-                    if (!m_hostSceneActive) return;
-                    if (unmuteGuard.expired()) return;
-                    if (!videoPtr || videoPtr->isBeingDeleted()) return;
-                    if (!videoPtr->mediaSettingsState().unmuteAutomatically) return;
-                    videoPtr->setMuted(false);
-                };
-                QTimer::singleShot(std::max(0, unmuteDelayMs), this, unmuteNow);
-            }
-
-            // --- auto mute (non-end) ---
-            if (shouldAutoMute && !muteOnEnd) {
-                const auto muteGuard = vid->lifetimeGuard();
-                ResizableVideoItem* videoPtr = vid;
-                QTimer::singleShot(std::max(0, muteDelayMs), this, [this, videoPtr, muteGuard]() {
-                    if (!m_hostSceneActive) return;
-                    if (muteGuard.expired()) return;
-                    if (!videoPtr || videoPtr->isBeingDeleted()) return;
-                    if (!videoPtr->mediaSettingsState().muteDelayEnabled) return;
-                    videoPtr->setMuted(true);
-                });
-            }
-
-            // --- auto play ---
-            if (shouldAutoPlay) {
-                const auto playGuard = vid->lifetimeGuard();
-                ResizableVideoItem* videoPtr = vid;
-                auto startPlayback = [this, videoPtr, playGuard, shouldAutoPause, pauseDelayMs]() {
-                    if (!m_hostSceneActive) return;
-                    if (playGuard.expired()) return;
-                    if (!videoPtr || videoPtr->isBeingDeleted()) return;
-                    if (!videoPtr->isPlaying()) {
-                        videoPtr->initializeSettingsRepeatSessionForPlaybackStart();
-                        videoPtr->togglePlayPause();
-                        if (shouldAutoPause) {
-                            const auto pauseGuard = videoPtr->lifetimeGuard();
-                            QTimer::singleShot(std::max(0, pauseDelayMs), this, [this, videoPtr, pauseGuard]() {
-                                if (!m_hostSceneActive) return;
-                                if (pauseGuard.expired()) return;
-                                if (!videoPtr || videoPtr->isBeingDeleted()) return;
-                                if (videoPtr->isPlaying()) videoPtr->togglePlayPause();
-                            });
-                        }
-                    }
-                };
-                QTimer::singleShot(std::max(0, playDelayMs), this, startPlayback);
-            }
-        }
-
-        // --- hide immediately, then schedule auto display ---
-        media->hideImmediateNoFade();
-
-        if (shouldAutoDisplay) {
-            const auto displayGuard = media->lifetimeGuard();
-            auto showNow = [this, media, displayGuard, scheduleHideFromDisplay, hideDelayMs]() {
-                if (!m_hostSceneActive) return;
-                if (displayGuard.expired()) return;
-                if (media->isBeingDeleted()) return;
-                media->showWithConfiguredFade();
-                if (scheduleHideFromDisplay) {
-                    const auto hideGuard = media->lifetimeGuard();
-                    QTimer::singleShot(std::max(0, hideDelayMs), this, [this, media, hideGuard]() {
-                        if (!m_hostSceneActive) return;
-                        if (hideGuard.expired()) return;
-                        if (!media || media->isBeingDeleted()) return;
-                        media->hideWithConfiguredFade();
-                        scheduleMediaModelSync();
-                    });
-                }
-                scheduleMediaModelSync();
-            };
-            QTimer::singleShot(std::max(0, displayDelayMs), this, showNow);
-        }
-    }
-
-    scheduleMediaModelSync();
-}
-
-void QuickCanvasController::stopHostSceneState() {
-    if (!m_hostSceneActive) return;
-    m_hostSceneActive = false;
-
-    // Disconnect all automation connections
-    for (auto& conn : m_sceneAutomationConnections) QObject::disconnect(conn);
-    m_sceneAutomationConnections.clear();
-
-    // Restore video states
-    for (const VideoPreState& ps : m_prevVideoStates) {
-        if (ps.guard.expired()) continue;
-        if (!ps.video || ps.video->isBeingDeleted()) continue;
-        ps.video->pauseAndSetPosition(ps.posMs);
-        ps.video->setMuted(ps.wasMuted, true);
-        if (ps.wasPlaying) ps.video->togglePlayPause();
-    }
-    m_prevVideoStates.clear();
-
-    // Restore all media to visible
-    if (m_mediaScene) {
-        for (QGraphicsItem* gi : m_mediaScene->items()) {
-            if (auto* media = dynamic_cast<ResizableMediaBase*>(gi)) {
-                media->cancelFade();
-                media->showImmediateNoFade();
-            }
-        }
-    }
-
     scheduleMediaModelSync();
 }
 

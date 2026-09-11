@@ -5,9 +5,8 @@
 #include <QMap>
 #include <QList>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QTimer>
-#include <QSharedPointer>
-#include <QByteArray>
 #include <QVideoFrame>
 #include <QImage>
 #include <QPointer>
@@ -20,7 +19,6 @@ class QWidget;
 class QMediaPlayer;
 class QVideoSink;
 class QAudioOutput;
-class QBuffer;
 class QQuickWidget;
 class QVariantAnimation;
 class MediaListModel;
@@ -36,7 +34,17 @@ public:
 
 private slots:
 	void onRemoteSceneStart(const QString& senderClientId, const QJsonObject& scene);
-	void onRemoteSceneStop(const QString& senderClientId);
+	void onRemoteSceneActivate(const QString& senderClientId,
+	                          const QString& sceneInstanceId,
+	                          qint64 activationEpochMs,
+	                          int activationDelayMs);
+	void onRemoteSceneVideoSync(const QString& senderClientId,
+	                            const QString& sceneInstanceId,
+	                            qint64 sequence,
+	                            qint64 sampledEpochMs,
+	                            const QJsonArray& videos);
+	void onRemoteSceneStop(const QString& senderClientId,
+	                      const QString& sceneInstanceId);
 	void onConnectionLost();
 	void onConnectionError(const QString& errorMessage);
 	void onRemoteSpanReady(const QString& mediaId, const QString& spanId);
@@ -107,7 +115,10 @@ private:
 		double audioFadeInSeconds = 0.0; double audioFadeOutSeconds = 0.0;
 		QPointer<QVariantAnimation> audioFadeAnimation;
 		QPointer<QVariantAnimation> visualFadeAnimation;
+		bool continuousLoop = false;
 		bool repeatEnabled = false; int repeatCount = 0; int repeatRemaining = 0; bool repeatActive = false;
+		qint64 lastRepeatTriggerMs = 0;
+		qint64 authoritativeSeekGuardUntilMs = 0;
 		bool primedFirstFrame = false; bool playAuthorized = false;
 		bool displayReady = false; bool displayStarted = false;
 		bool hiding = false;
@@ -132,10 +143,6 @@ private:
 		QMetaObject::Connection primingConn; // one-shot first-frame priming when autoPlay=false
 		QMetaObject::Connection mirrorConn; // multi-span frame mirroring
 		quint64 sceneEpoch = 0; // generation token to guard delayed actions
-		// In-memory source support
-		QSharedPointer<QByteArray> memoryBytes;
-		QBuffer* memoryBuffer = nullptr;
-		bool usingMemoryBuffer = false;
 		int pendingDisplayDelayMs = -1;
 		int pendingPlayDelayMs = -1;
 		int pendingPauseDelayMs = -1;
@@ -172,6 +179,8 @@ private:
 	void cancelAudioFade(const std::shared_ptr<RemoteMediaItem>& item, bool applyFinalState);
 	void applyAudioMuteState(const std::shared_ptr<RemoteMediaItem>& item, bool muted, bool skipFade = false);
 	void clearScene();
+	void armVideoSyncWatchdog();
+	void handleVideoSyncWatchdogTimeout();
 	void dispatchDeferredSceneStart();
 	void scheduleSceneRestartCooldown();
 	void drainDeferredDeletes(int passes = 1, bool processEvents = false);
@@ -212,12 +221,24 @@ private:
 	QList<std::shared_ptr<RemoteMediaItem>> m_mediaItems;
 	quint64 m_sceneEpoch = 0; // incremented on each start/stop
 	QString m_pendingSenderClientId;
+	QString m_pendingSceneInstanceId;
+	// Kept separately while clearScene() drains deferred events, because that
+	// function resets the prepared/active identifiers before it processes them.
+	QString m_startingSenderClientId;
+	QString m_startingSceneInstanceId;
+	QString m_lastStoppedSenderClientId;
+	QString m_lastStoppedSceneInstanceId;
 	int m_totalMediaToPrime = 0;
 	int m_mediaReadyCount = 0;
 	bool m_sceneActivationRequested = false;
 	bool m_sceneActivated = false;
-	quint64 m_pendingActivationEpoch = 0;
+	qint64 m_activationEpochMs = 0;
+	bool m_activationClockPlausible = false;
+	qint64 m_lastVideoSyncSequence = 0;
+	QTimer* m_videoSyncWatchdog = nullptr;
+	bool m_videoSyncWatchdogTripped = false;
 	QTimer* m_sceneReadyTimeout = nullptr;
+	QTimer* m_activationTimer = nullptr;
 	QTimer* m_windowShowTimer = nullptr; // Timer for deferred window showing
 	bool m_teardownInProgress = false;
 	bool m_sceneStartInProgress = false;

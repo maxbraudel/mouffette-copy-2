@@ -7,6 +7,7 @@
 #include "frontend/ui/theme/AppColors.h"
 #include "backend/files/Theme.h"
 #include "backend/domain/media/MediaItems.h"
+#include "backend/domain/media/MediaFilePolicy.h"
 #include "backend/domain/media/MediaRuntimeHooks.h"
 #include "frontend/ui/overlays/canvas/CanvasMediaSettingsPanel.h" // for settings panel overlay
 #include "frontend/ui/overlays/canvas/CanvasGlobalOverlayHost.h"
@@ -61,6 +62,7 @@
 #include <QRegion>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QDateTime>
 #include <QDebug>
 #include <QStandardPaths>
 #include <QUuid>
@@ -664,6 +666,7 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                     m["muted"] = v->isMuted();
                     m["volume"] = v->volume();
                     const auto& settings = media->mediaSettingsState();
+                    m["continuousLoop"] = v->isRepeatEnabled();
                     m["repeatEnabled"] = settings.repeatEnabled;
                     int repeatCount = 0;
                     if (settings.repeatEnabled) {
@@ -1031,7 +1034,23 @@ void ScreenCanvas::initInfoOverlay() {
                 // Send scene data (validation will happen on remote side)
                 if (m_wsClient) {
                     QJsonObject sceneObj = serializeSceneState();
+                    m_pendingRemoteSceneInstanceId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+                    m_remoteVideoSyncSequence = 0;
+                    sceneObj["sceneInstanceId"] = m_pendingRemoteSceneInstanceId;
+                    m_pendingRemoteStartPositionsMs.clear();
+                    const QJsonArray serializedMedia = sceneObj.value("media").toArray();
+                    for (const QJsonValue& value : serializedMedia) {
+                        const QJsonObject mediaObject = value.toObject();
+                        if (mediaObject.value("type").toString() != QLatin1String("video")) continue;
+                        const QString mediaId = mediaObject.value("mediaId").toString();
+                        if (mediaId.isEmpty() || !mediaObject.contains("startPositionMs")) continue;
+                        m_pendingRemoteStartPositionsMs.insert(
+                            mediaId,
+                            std::max<qint64>(0, static_cast<qint64>(
+                                std::llround(mediaObject.value("startPositionMs").toDouble(0.0)))));
+                    }
                     qDebug() << "ScreenCanvas: sending remote_scene_start to" << m_remoteSceneTargetClientId
+                             << "sceneInstanceId=" << m_pendingRemoteSceneInstanceId
                              << "mediaCount=" << sceneObj.value("media").toArray().size()
                              << "screenCount=" << sceneObj.value("screens").toArray().size();
                     m_wsClient->sendRemoteSceneStart(m_remoteSceneTargetClientId, sceneObj);
@@ -1047,6 +1066,8 @@ void ScreenCanvas::initInfoOverlay() {
                 }
 
                 m_sceneStopping = true;
+                m_remoteSceneStopRetrySent = false;
+                stopRemoteVideoStateSync();
                 updateLaunchSceneButtonStyle();
                 updateLaunchTestSceneButtonStyle();
 
@@ -1060,7 +1081,8 @@ void ScreenCanvas::initInfoOverlay() {
                 TOAST_INFO("Requesting remote scene stop...", 2000);
                 if (m_wsClient) {
                     qDebug() << "ScreenCanvas: requesting remote_scene_stop from" << m_remoteSceneTargetClientId;
-                    m_wsClient->sendRemoteSceneStop(m_remoteSceneTargetClientId);
+                    m_wsClient->sendRemoteSceneStop(
+                        m_remoteSceneTargetClientId, m_pendingRemoteSceneInstanceId);
                 }
             }
         });
@@ -3171,6 +3193,14 @@ bool ScreenCanvas::gestureEvent(QGestureEvent* event) {
 }
 
 void ScreenCanvas::keyPressEvent(QKeyEvent* event) {
+    if (m_hostSceneActive || m_sceneLaunching || m_sceneLaunched || m_sceneStopping) {
+        // A prepared remote manifest is immutable until its run is stopped.
+        // Consume keyboard edits so local geometry/content cannot diverge from
+        // the already validated target scene.
+        event->accept();
+        return;
+    }
+
     bool editingText = false;
     if (m_scene) {
         if (QGraphicsItem* focus = m_scene->focusItem()) {
@@ -3376,6 +3406,13 @@ void ScreenCanvas::keyReleaseEvent(QKeyEvent* event) {
 }
 
 void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
+    if (m_hostSceneActive || m_sceneLaunching || m_sceneLaunched || m_sceneStopping) {
+        // Keep the host canvas read-only for the complete PREPARE/ACTIVATE/STOP
+        // transaction, including when the Text tool was selected beforehand.
+        event->ignore();
+        return;
+    }
+
     // Handle Text tool interactions
     if (m_currentTool == CanvasTool::Text && event->button() == Qt::LeftButton) {
         QPointF scenePos = mapToScene(event->pos());
@@ -3387,11 +3424,6 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
         return;
     }
     
-    if (m_hostSceneActive) {
-        // Block selection interactions during host scene state
-        event->ignore();
-        return;
-    }
     // Fresh user interaction cancels any momentum ignore state
     if (m_ignorePanMomentum) { m_ignorePanMomentum = false; m_momentumPrimed = false; }
     // Viewport overlay widgets consume their own input events.
@@ -3489,6 +3521,11 @@ void ScreenCanvas::mousePressEvent(QMouseEvent* event) {
 }
 
 void ScreenCanvas::mouseDoubleClickEvent(QMouseEvent* event) {
+    if (m_hostSceneActive || m_sceneLaunching || m_sceneLaunched || m_sceneStopping) {
+        event->ignore();
+        return;
+    }
+
     // Viewport overlay widgets consume their own input events.
     if (event->button() == Qt::LeftButton) {
         // Do not change selection when double-clicking on overlay elements
@@ -3735,9 +3772,22 @@ void ScreenCanvas::resizeEvent(QResizeEvent* event) {
 }
 
 void ScreenCanvas::dragEnterEvent(QDragEnterEvent* event) {
+    if (m_hostSceneActive || m_sceneLaunching || m_sceneLaunched || m_sceneStopping) {
+        event->ignore();
+        return;
+    }
     if (!event->mimeData()) { event->ignore(); return; }
     const QMimeData* mime = event->mimeData();
-    if (mime->hasUrls()) { event->acceptProposedAction(); ensureDragPreview(mime); }
+    bool hasAcceptedUrl = false;
+    if (mime->hasUrls()) {
+        for (const QUrl& url : mime->urls()) {
+            if (url.isLocalFile() && MediaFilePolicy::isAcceptedLocalFile(url.toLocalFile())) {
+                hasAcceptedUrl = true;
+                break;
+            }
+        }
+    }
+    if (hasAcceptedUrl) { event->acceptProposedAction(); ensureDragPreview(mime); }
     else if (mime->hasImage()) { event->acceptProposedAction(); ensureDragPreview(mime); }
     else event->ignore();
 }
@@ -3755,6 +3805,16 @@ void ScreenCanvas::dragLeaveEvent(QDragLeaveEvent* event) {
 }
 
 void ScreenCanvas::dropEvent(QDropEvent* event) {
+    if (m_hostSceneActive || m_sceneLaunching || m_sceneLaunched || m_sceneStopping) {
+        clearDragPreview();
+        if (m_dragCursorHidden) {
+            viewport()->unsetCursor();
+            m_dragCursorHidden = false;
+        }
+        event->ignore();
+        return;
+    }
+
     const QTransform originalTransform = transform();
     QPointF originalCenter;
     if (viewport()) {
@@ -3777,9 +3837,8 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                 QString localPath = url.toLocalFile();
                 if (localPath.isEmpty()) continue;
                 QFileInfo fi(localPath);
-                const QString suffix = fi.suffix().toLower();
-                bool isVideo = suffix == "mp4" || suffix == "mov" || suffix == "m4v" || suffix == "avi" || suffix == "mkv" || suffix == "webm";
-                if (isVideo) {
+                const MediaFilePolicy::Kind mediaKind = MediaFilePolicy::classifyLocalFile(localPath);
+                if (mediaKind == MediaFilePolicy::Kind::Mp4Video) {
                     // Use default handle sizes similar to previous inline defaults (visual 12, selection 30)
                     auto* v = new ResizableVideoItem(localPath, 12, 30, fi.fileName(), m_videoControlsFadeMs);
                     v->setRuntimeContext(m_mediaRuntimeContext);
@@ -3819,7 +3878,7 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                     m_scene->addItem(v);
                     v->setSelected(true);
                     emit mediaItemAdded(v);
-                } else {
+                } else if (mediaKind == MediaFilePolicy::Kind::Image) {
                     QPixmap pm(localPath);
                     if (!pm.isNull()) {
                         auto* p = new ResizablePixmapItem(pm, 12, 30, QFileInfo(localPath).fileName());
@@ -3832,6 +3891,8 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                         p->setSelected(true);
                         emit mediaItemAdded(p);
                     }
+                } else if (mediaKind == MediaFilePolicy::Kind::UnsupportedVideo) {
+                    TOAST_WARNING(QStringLiteral("Unsupported video format: only MP4 video files are accepted"));
                 }
             }
         }
@@ -3909,9 +3970,10 @@ void ScreenCanvas::ensureDragPreview(const QMimeData* mime) {
     if (!mime) return; if (m_dragPreviewItem) return; m_dragPreviewGotFrame = false; m_dragPreviewIsVideo = false;
     if (mime->hasUrls()) {
         QList<QUrl> urls = mime->urls(); if (!urls.isEmpty() && urls.first().isLocalFile()) {
-            QFileInfo fi(urls.first().toLocalFile()); QString suffix = fi.suffix().toLower();
-            bool isVideo = suffix == "mp4" || suffix == "mov" || suffix == "m4v" || suffix == "avi" || suffix == "mkv" || suffix == "webm";
-            if (isVideo) { m_dragPreviewIsVideo = true; startVideoPreviewProbe(fi.absoluteFilePath()); return; }
+            QFileInfo fi(urls.first().toLocalFile());
+            const MediaFilePolicy::Kind mediaKind = MediaFilePolicy::classifyLocalFile(fi.absoluteFilePath());
+            if (mediaKind == MediaFilePolicy::Kind::Mp4Video) { m_dragPreviewIsVideo = true; startVideoPreviewProbe(fi.absoluteFilePath()); return; }
+            if (mediaKind != MediaFilePolicy::Kind::Image) return;
             QPixmap pm(fi.absoluteFilePath()); if (!pm.isNull()) { m_dragPreviewPixmap = pm; m_dragPreviewBaseSize = pm.size(); }
         }
     } else if (mime->hasImage()) {
@@ -5025,6 +5087,7 @@ void ScreenCanvas::runOverlayHardeningChecks(const char* context) const {
 
 void ScreenCanvas::handleRemoteConnectionLost() {
     const bool remoteFlowActive = m_sceneLaunching || m_sceneLaunched || (m_hostSceneActive && m_hostSceneMode == HostSceneMode::Remote);
+    stopRemoteVideoStateSync();
     if (!remoteFlowActive) return;
 
     if (m_sceneLaunchTimeoutTimer && m_sceneLaunchTimeoutTimer->isActive()) {
@@ -5033,6 +5096,9 @@ void ScreenCanvas::handleRemoteConnectionLost() {
     if (m_sceneStopTimeoutTimer && m_sceneStopTimeoutTimer->isActive()) {
         m_sceneStopTimeoutTimer->stop();
     }
+    if (m_remoteSceneActivationTimer) {
+        m_remoteSceneActivationTimer->stop();
+    }
 
     const bool shouldStopHostScene = (m_hostSceneActive && m_hostSceneMode == HostSceneMode::Remote);
     const bool wasLaunched = m_sceneLaunched;
@@ -5040,6 +5106,7 @@ void ScreenCanvas::handleRemoteConnectionLost() {
     m_sceneLaunching = false;
     m_sceneLaunched = false;
     m_sceneStopping = false;
+    m_remoteSceneStopRetrySent = false;
 
     if (m_launchSceneButton) {
         QSignalBlocker blocker(m_launchSceneButton);
@@ -5050,6 +5117,8 @@ void ScreenCanvas::handleRemoteConnectionLost() {
         // Skip the remote notification so the client keeps its last frame during transient loss.
         stopHostSceneState(false);
     }
+    m_pendingRemoteStartPositionsMs.clear();
+    m_pendingRemoteSceneInstanceId.clear();
 
     updateLaunchSceneButtonStyle();
     updateLaunchTestSceneButtonStyle();
@@ -5063,11 +5132,78 @@ void ScreenCanvas::handleRemoteConnectionLost() {
 
 // (Removed legacy duplicate snap indicator drawing functions; SnapGuideItem now handles rendering.)
 
+void ScreenCanvas::startRemoteVideoStateSync() {
+    stopRemoteVideoStateSync();
+    if (!m_wsClient || !m_wsClient->isConnected()
+        || m_remoteSceneTargetClientId.isEmpty()
+        || m_pendingRemoteSceneInstanceId.isEmpty()) {
+        return;
+    }
+
+    if (!m_remoteVideoSyncTimer) {
+        m_remoteVideoSyncTimer = new QTimer(this);
+        m_remoteVideoSyncTimer->setInterval(REMOTE_VIDEO_SYNC_INTERVAL_MS);
+        m_remoteVideoSyncTimer->setTimerType(Qt::CoarseTimer);
+        connect(m_remoteVideoSyncTimer, &QTimer::timeout,
+                this, &ScreenCanvas::sendRemoteVideoStateSync);
+    }
+
+    sendRemoteVideoStateSync();
+    m_remoteVideoSyncTimer->start();
+}
+
+void ScreenCanvas::stopRemoteVideoStateSync() {
+    if (m_remoteVideoSyncTimer) {
+        m_remoteVideoSyncTimer->stop();
+    }
+}
+
+void ScreenCanvas::sendRemoteVideoStateSync() {
+    if (!m_hostSceneActive || m_hostSceneMode != HostSceneMode::Remote
+        || m_sceneStopping || !m_scene || !m_wsClient || !m_wsClient->isConnected()
+        || m_remoteSceneTargetClientId.isEmpty()
+        || m_pendingRemoteSceneInstanceId.isEmpty()) {
+        return;
+    }
+
+    const qint64 sampledEpochMs = QDateTime::currentMSecsSinceEpoch();
+    QJsonArray videos;
+    for (QGraphicsItem* graphicsItem : m_scene->items()) {
+        auto* video = dynamic_cast<ResizableVideoItem*>(graphicsItem);
+        if (!video || video->isBeingDeleted() || video->mediaId().isEmpty()) continue;
+
+        QMediaPlayer* player = video->mediaPlayer();
+        qint64 positionMs = player ? player->position() : video->currentPositionMs();
+        if (positionMs < 0) positionMs = std::max<qint64>(0, video->currentPositionMs());
+
+        QJsonObject state;
+        state["mediaId"] = video->mediaId();
+        state["positionMs"] = static_cast<double>(positionMs);
+        state["durationMs"] = static_cast<double>(player ? std::max<qint64>(0, player->duration()) : 0);
+        state["playing"] = video->isPlaying();
+        state["muted"] = video->isMuted();
+        state["visible"] = video->isContentVisible();
+        state["repeatAvailable"] = video->shouldAutoRepeat();
+        videos.append(state);
+    }
+
+    if (videos.isEmpty()) return;
+    m_wsClient->sendRemoteSceneVideoSync(
+        m_remoteSceneTargetClientId,
+        m_pendingRemoteSceneInstanceId,
+        ++m_remoteVideoSyncSequence,
+        sampledEpochMs,
+        videos);
+}
+
 void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
     if (m_hostSceneActive) return;
+    delete m_hostSceneRunContext;
+    m_hostSceneRunContext = new QObject(this);
     m_hostSceneActive = true;
     m_hostSceneMode = mode;
     m_sceneStopping = false;
+    m_remoteSceneStopRetrySent = false;
     // Capture current selection (only ResizableMediaBase items) before clearing so we can restore later.
     m_prevSelectionBeforeHostScene.clear();
     m_prevVideoStates.clear();
@@ -5126,7 +5262,7 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                             const auto currentState = media->mediaSettingsState();
                             if (!currentState.hideWhenVideoEnds) return;
                             // Don't hide if repeats are still pending
-                            if (videoPtr && videoPtr->settingsRepeatAvailable()) return;
+                            if (videoPtr && (videoPtr->isRepeatEnabled() || videoPtr->settingsRepeatAvailable())) return;
                             *hideTriggered = true;
                             media->hideWithConfiguredFade();
                         };
@@ -5181,7 +5317,7 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                             const auto currentState = videoPtr->mediaSettingsState();
                             if (!currentState.muteWhenVideoEnds) return;
                             // Don't mute if repeats are still pending
-                            if (videoPtr->settingsRepeatAvailable()) return;
+                            if (videoPtr->isRepeatEnabled() || videoPtr->settingsRepeatAvailable()) return;
                             *muteTriggered = true;
                             videoPtr->setMuted(true);
                         };
@@ -5228,7 +5364,11 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                         }
                     }
 
-                    vid->pauseAndSetPosition(videoState.posMs);
+                    const qint64 sceneStartPosition =
+                        mode == HostSceneMode::Remote
+                            ? m_pendingRemoteStartPositionsMs.value(vid->mediaId(), videoState.posMs)
+                            : videoState.posMs;
+                    vid->pauseAndSetPosition(sceneStartPosition);
 
                     vid->setMuted(true, true);
                     if (shouldAutoUnmute) {
@@ -5243,9 +5383,9 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                             videoPtr->setMuted(false);
                         };
                         if (unmuteDelayMs > 0) {
-                            QTimer::singleShot(unmuteDelayMs, this, unmuteNow);
+                            QTimer::singleShot(unmuteDelayMs, m_hostSceneRunContext, unmuteNow);
                         } else {
-                            QTimer::singleShot(0, this, unmuteNow);
+                            QTimer::singleShot(0, m_hostSceneRunContext, unmuteNow);
                         }
                     }
 
@@ -5253,7 +5393,7 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                         const auto muteGuard = vid->lifetimeGuard();
                         ResizableVideoItem* videoPtr = vid;
                         const int delay = std::max(0, muteDelayMs);
-                        QTimer::singleShot(delay, this, [this, videoPtr, muteGuard]() {
+                        QTimer::singleShot(delay, m_hostSceneRunContext, [this, videoPtr, muteGuard]() {
                             if (!m_hostSceneActive) return;
                             if (muteGuard.expired()) return;
                             if (!videoPtr || videoPtr->isBeingDeleted()) return;
@@ -5268,14 +5408,14 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                 if (shouldAutoDisplay) {
                     const auto displayGuard = media->lifetimeGuard();
                     if (displayDelayMs > 0) {
-                        QTimer::singleShot(displayDelayMs, this, [this, media, displayGuard, scheduleHideFromDisplay, hideDelayMs]() {
+                        QTimer::singleShot(displayDelayMs, m_hostSceneRunContext, [this, media, displayGuard, scheduleHideFromDisplay, hideDelayMs]() {
                             if (!m_hostSceneActive) return;
                             if (displayGuard.expired()) return;
                             if (media->isBeingDeleted()) return;
                             media->showWithConfiguredFade();
                             if (scheduleHideFromDisplay) {
                                 const auto hideGuard = media->lifetimeGuard();
-                                QTimer::singleShot(std::max(0, hideDelayMs), this, [this, media, hideGuard]() {
+                                QTimer::singleShot(std::max(0, hideDelayMs), m_hostSceneRunContext, [this, media, hideGuard]() {
                                     if (!m_hostSceneActive) return;
                                     if (hideGuard.expired()) return;
                                     if (!media || media->isBeingDeleted()) return;
@@ -5287,7 +5427,7 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                         media->showWithConfiguredFade();
                         if (scheduleHideFromDisplay) {
                             const auto hideGuard = media->lifetimeGuard();
-                            QTimer::singleShot(std::max(0, hideDelayMs), this, [this, media, hideGuard]() {
+                            QTimer::singleShot(std::max(0, hideDelayMs), m_hostSceneRunContext, [this, media, hideGuard]() {
                                 if (!m_hostSceneActive) return;
                                 if (hideGuard.expired()) return;
                                 if (!media || media->isBeingDeleted()) return;
@@ -5314,7 +5454,7 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                                 // Schedule pause if enabled
                                 if (shouldAutoPause) {
                                     const auto pauseGuard = media->lifetimeGuard();
-                                    QTimer::singleShot(std::max(0, pauseDelayMs), this, [this, media, pauseGuard]() {
+                                    QTimer::singleShot(std::max(0, pauseDelayMs), m_hostSceneRunContext, [this, media, pauseGuard]() {
                                         if (!m_hostSceneActive) return;
                                         if (pauseGuard.expired()) return;
                                         if (!media || media->isBeingDeleted()) return;
@@ -5329,7 +5469,7 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
                         }
                     };
                     if (playbackDelay > 0) {
-                        QTimer::singleShot(playbackDelay, this, startPlayback);
+                        QTimer::singleShot(playbackDelay, m_hostSceneRunContext, startPlayback);
                     } else {
                         startPlayback();
                     }
@@ -5337,16 +5477,25 @@ void ScreenCanvas::startHostSceneState(HostSceneMode mode) {
             }
         }
     }
+
+    if (mode == HostSceneMode::Remote) {
+        startRemoteVideoStateSync();
+    }
 }
 
 void ScreenCanvas::stopHostSceneState(bool notifyRemote) {
+    const QString remoteSceneInstanceId = m_pendingRemoteSceneInstanceId;
+    stopRemoteVideoStateSync();
     if (m_sceneStopTimeoutTimer) {
         m_sceneStopTimeoutTimer->stop();
     }
     m_sceneStopping = false;
+    m_remoteSceneStopRetrySent = false;
 
     if (!m_hostSceneActive) return;
     m_hostSceneActive = false;
+    delete m_hostSceneRunContext;
+    m_hostSceneRunContext = nullptr;
     HostSceneMode prevMode = m_hostSceneMode;
     m_hostSceneMode = HostSceneMode::None;
     // Restore visibility of media items (leave videos stopped).
@@ -5410,6 +5559,8 @@ void ScreenCanvas::stopHostSceneState(bool notifyRemote) {
         }
     }
     m_prevVideoStates.clear();
+    m_pendingRemoteStartPositionsMs.clear();
+    m_pendingRemoteSceneInstanceId.clear();
 
     // Notify remote client to stop scene only if Remote mode was active
     if (prevMode == HostSceneMode::Remote) {
@@ -5420,7 +5571,8 @@ void ScreenCanvas::stopHostSceneState(bool notifyRemote) {
         }
         if (notifyRemote && m_wsClient && !m_remoteSceneTargetClientId.isEmpty()) {
             qDebug() << "ScreenCanvas: sending remote_scene_stop to" << m_remoteSceneTargetClientId;
-            m_wsClient->sendRemoteSceneStop(m_remoteSceneTargetClientId);
+            m_wsClient->sendRemoteSceneStop(
+                m_remoteSceneTargetClientId, remoteSceneInstanceId);
         }
     }
 }
@@ -5526,6 +5678,9 @@ void ScreenCanvas::setCurrentTool(CanvasTool tool) {
 }
 
 void ScreenCanvas::requestTextMediaCreateAt(const QPointF& scenePos, bool beginInlineEditing) {
+    if (m_hostSceneActive || m_sceneLaunching || m_sceneLaunched || m_sceneStopping) {
+        return;
+    }
     if (TextMediaItem* newText = createTextMediaAtPosition(scenePos)) {
         if (beginInlineEditing) {
             newText->beginInlineEditing();
@@ -5534,7 +5689,8 @@ void ScreenCanvas::requestTextMediaCreateAt(const QPointF& scenePos, bool beginI
 }
 
 void ScreenCanvas::requestLocalFileDropAt(const QStringList& localPaths, const QPointF& scenePos) {
-    if (!m_scene || localPaths.isEmpty()) {
+    if (m_hostSceneActive || m_sceneLaunching || m_sceneLaunched || m_sceneStopping
+        || !m_scene || localPaths.isEmpty()) {
         return;
     }
 
@@ -5546,11 +5702,9 @@ void ScreenCanvas::requestLocalFileDropAt(const QStringList& localPaths, const Q
         }
 
         QFileInfo fi(localPath);
-        const QString suffix = fi.suffix().toLower();
-        const bool isVideo = suffix == "mp4" || suffix == "mov" || suffix == "m4v"
-            || suffix == "avi" || suffix == "mkv" || suffix == "webm";
+        const MediaFilePolicy::Kind mediaKind = MediaFilePolicy::classifyLocalFile(localPath);
 
-        if (isVideo) {
+        if (mediaKind == MediaFilePolicy::Kind::Mp4Video) {
             auto* v = new ResizableVideoItem(localPath, 12, 30, fi.fileName(), m_videoControlsFadeMs);
             v->setRuntimeContext(m_mediaRuntimeContext);
             if (m_applicationSuspended) {
@@ -5571,6 +5725,14 @@ void ScreenCanvas::requestLocalFileDropAt(const QStringList& localPaths, const Q
             m_scene->addItem(v);
             v->setSelected(true);
             emit mediaItemAdded(v);
+            continue;
+        }
+
+        if (mediaKind == MediaFilePolicy::Kind::UnsupportedVideo) {
+            TOAST_WARNING(QStringLiteral("Unsupported video format: only MP4 video files are accepted"));
+            continue;
+        }
+        if (mediaKind != MediaFilePolicy::Kind::Image) {
             continue;
         }
 
@@ -5769,17 +5931,43 @@ void ScreenCanvas::emitRemoteSceneLaunchStateChanged()
     }
 }
 
-void ScreenCanvas::onRemoteSceneValidationReceived(const QString& targetClientId, bool success, const QString& errorMessage) {
+void ScreenCanvas::onRemoteSceneValidationReceived(const QString& targetClientId,
+                                                   const QString& sceneInstanceId,
+                                                   bool success,
+                                                   const QString& errorMessage) {
     // Only handle if this is a response to our request
     if (targetClientId != m_remoteSceneTargetClientId) return;
+    if (sceneInstanceId != m_pendingRemoteSceneInstanceId) return;
     if (!m_sceneLaunching) return; // Ignore if not in launching state
     
     if (success) {
-        // Validation successful - scene is being prepared on remote
-        TOAST_SUCCESS("Remote client validated scene successfully", 2000);
-        if (!m_hostSceneActive) {
-            startHostSceneState(HostSceneMode::Remote);
+        // PREPARE completed remotely. Give both clients the same future UTC
+        // activation epoch so display/play/audio automation starts together.
+        TOAST_SUCCESS("Remote scene prepared successfully", 2000);
+        const qint64 activationEpochMs =
+            QDateTime::currentMSecsSinceEpoch() + REMOTE_SCENE_ACTIVATION_LEAD_MS;
+        if (m_wsClient) {
+            m_wsClient->sendRemoteSceneActivate(
+                m_remoteSceneTargetClientId,
+                sceneInstanceId,
+                activationEpochMs,
+                REMOTE_SCENE_ACTIVATION_LEAD_MS);
         }
+
+        if (!m_remoteSceneActivationTimer) {
+            m_remoteSceneActivationTimer = new QTimer(this);
+            m_remoteSceneActivationTimer->setSingleShot(true);
+            m_remoteSceneActivationTimer->setTimerType(Qt::PreciseTimer);
+            connect(m_remoteSceneActivationTimer, &QTimer::timeout, this, [this]() {
+                if (m_pendingRemoteSceneInstanceId.isEmpty() || m_hostSceneActive) return;
+                if (!m_sceneLaunching && !m_sceneLaunched) return;
+                startHostSceneState(HostSceneMode::Remote);
+            });
+        }
+        const qint64 remainingMs = std::max<qint64>(
+            0, activationEpochMs - QDateTime::currentMSecsSinceEpoch());
+        m_remoteSceneActivationTimer->start(static_cast<int>(remainingMs));
+
         // Keep loading state - wait for final "launched" confirmation
         // Restart timeout for the launch phase
         if (m_sceneLaunchTimeoutTimer && m_sceneLaunchTimeoutTimer->isActive()) {
@@ -5789,6 +5977,9 @@ void ScreenCanvas::onRemoteSceneValidationReceived(const QString& targetClientId
         // Stop timeout timer
         if (m_sceneLaunchTimeoutTimer) {
             m_sceneLaunchTimeoutTimer->stop();
+        }
+        if (m_remoteSceneActivationTimer) {
+            m_remoteSceneActivationTimer->stop();
         }
         
         // Validation failed - abort launch
@@ -5800,7 +5991,9 @@ void ScreenCanvas::onRemoteSceneValidationReceived(const QString& targetClientId
         updateLaunchTestSceneButtonStyle();
         
         // Stop local scene too
-        stopHostSceneState();
+        stopHostSceneState(false);
+        m_pendingRemoteStartPositionsMs.clear();
+        m_pendingRemoteSceneInstanceId.clear();
         if (wasLaunched) {
             emitRemoteSceneLaunchStateChanged();
         }
@@ -5810,9 +6003,11 @@ void ScreenCanvas::onRemoteSceneValidationReceived(const QString& targetClientId
     }
 }
 
-void ScreenCanvas::onRemoteSceneLaunchedReceived(const QString& targetClientId) {
+void ScreenCanvas::onRemoteSceneLaunchedReceived(const QString& targetClientId,
+                                                 const QString& sceneInstanceId) {
     // Only handle if this is a response to our request
     if (targetClientId != m_remoteSceneTargetClientId) return;
+    if (sceneInstanceId != m_pendingRemoteSceneInstanceId) return;
     if (!m_sceneLaunching) return; // Ignore if not in launching state
     
     // Stop timeout timer
@@ -5839,12 +6034,22 @@ void ScreenCanvas::onRemoteSceneLaunchTimeout() {
     m_sceneLaunching = false;
     const bool wasLaunched = m_sceneLaunched;
     m_sceneLaunched = false;
+    if (m_remoteSceneActivationTimer) {
+        m_remoteSceneActivationTimer->stop();
+    }
     if (m_launchTestSceneButton) m_launchTestSceneButton->setEnabled(true);
     updateLaunchSceneButtonStyle();
     updateLaunchTestSceneButtonStyle();
     
-    // Stop local scene too
-    stopHostSceneState();
+    // Cancel a prepared/partially activated target too; otherwise a late
+    // decoder completion could leave an orphaned remote overlay running.
+    if (m_wsClient && m_wsClient->isConnected() && !m_remoteSceneTargetClientId.isEmpty()) {
+        m_wsClient->sendRemoteSceneStop(
+            m_remoteSceneTargetClientId, m_pendingRemoteSceneInstanceId);
+    }
+    stopHostSceneState(false);
+    m_pendingRemoteStartPositionsMs.clear();
+    m_pendingRemoteSceneInstanceId.clear();
     if (wasLaunched) {
         emitRemoteSceneLaunchStateChanged();
     }
@@ -5852,8 +6057,16 @@ void ScreenCanvas::onRemoteSceneLaunchTimeout() {
     TOAST_ERROR("Scene launch timed out: Remote client did not respond", 5000);
 }
 
-void ScreenCanvas::onRemoteSceneStoppedReceived(const QString& targetClientId, bool success, const QString& errorMessage) {
+void ScreenCanvas::onRemoteSceneStoppedReceived(const QString& targetClientId,
+                                                const QString& sceneInstanceId,
+                                                bool success,
+                                                const QString& errorMessage) {
     if (targetClientId != m_remoteSceneTargetClientId) return;
+    // STOPPED is an acknowledgement, never an unsolicited state command. Both
+    // the current run and the local STOP phase must match before it may mutate
+    // host state; this makes delayed acknowledgements harmless.
+    if (!m_sceneStopping) return;
+    if (sceneInstanceId.isEmpty() || sceneInstanceId != m_pendingRemoteSceneInstanceId) return;
 
     if (m_sceneStopTimeoutTimer) {
         m_sceneStopTimeoutTimer->stop();
@@ -5861,10 +6074,14 @@ void ScreenCanvas::onRemoteSceneStoppedReceived(const QString& targetClientId, b
 
     const bool wasStopping = m_sceneStopping;
     m_sceneStopping = false;
+    m_remoteSceneStopRetrySent = false;
 
     if (!success) {
         const QString message = errorMessage.isEmpty() ? QStringLiteral("Remote client failed to stop the scene") : errorMessage;
         TOAST_ERROR(message, 4000);
+        if (m_hostSceneActive && m_hostSceneMode == HostSceneMode::Remote) {
+            startRemoteVideoStateSync();
+        }
         updateLaunchSceneButtonStyle();
         updateLaunchTestSceneButtonStyle();
         return;
@@ -5888,8 +6105,46 @@ void ScreenCanvas::onRemoteSceneStoppedReceived(const QString& targetClientId, b
 
 void ScreenCanvas::onRemoteSceneStopTimeout() {
     if (!m_sceneStopping) return;
+
+    // A lost STOP or STOPPED frame must not leave the host running after the
+    // user explicitly requested shutdown. Retry the same correlated command
+    // once (the target handles it idempotently), then grant that retry a real
+    // acknowledgement window before converging local state.
+    const QString sceneInstanceId = m_pendingRemoteSceneInstanceId;
+    const bool canRetry = m_wsClient
+        && m_wsClient->isConnected()
+        && !m_remoteSceneTargetClientId.isEmpty()
+        && !sceneInstanceId.isEmpty();
+    if (!m_remoteSceneStopRetrySent && canRetry) {
+        m_wsClient->sendRemoteSceneStop(m_remoteSceneTargetClientId, sceneInstanceId);
+        m_remoteSceneStopRetrySent = true;
+        if (m_sceneStopTimeoutTimer) {
+            m_sceneStopTimeoutTimer->start(REMOTE_SCENE_STOP_TIMEOUT_MS);
+        }
+        qWarning() << "Remote stop acknowledgement timed out; correlated STOP retried"
+                   << sceneInstanceId;
+        return;
+    }
+
     m_sceneStopping = false;
-    TOAST_ERROR("Scene stop timed out: Remote client did not respond", 5000);
+    m_remoteSceneStopRetrySent = false;
+    m_sceneLaunching = false;
+    if (m_remoteSceneActivationTimer) {
+        m_remoteSceneActivationTimer->stop();
+    }
+    if (m_sceneLaunchTimeoutTimer) {
+        m_sceneLaunchTimeoutTimer->stop();
+    }
+
+    stopHostSceneState(false);
+    if (m_sceneLaunched) {
+        m_sceneLaunched = false;
+        emitRemoteSceneLaunchStateChanged();
+    }
+    m_pendingRemoteStartPositionsMs.clear();
+    m_pendingRemoteSceneInstanceId.clear();
+
+    TOAST_WARNING("Remote stop acknowledgement timed out; scene stopped locally", 5000);
     updateLaunchSceneButtonStyle();
     updateLaunchTestSceneButtonStyle();
 }

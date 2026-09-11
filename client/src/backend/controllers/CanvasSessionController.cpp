@@ -370,6 +370,11 @@ void CanvasSessionController::unloadUploadsForSession(void* sessionPtr, bool att
     m_mainWindow->getUploadManager()->setActiveIdeaId(session->canvasSessionId);
 
     if (attemptRemote && m_mainWindow->getWebSocketClient() && m_mainWindow->getWebSocketClient()->isConnected()) {
+        // Both STOP and file-removal commands use the control WebSocket. Send
+        // STOP first so the target synchronously clears QMediaPlayer sources
+        // before it receives a command that may delete their backing files.
+        m_mainWindow->getWebSocketClient()->sendRemoteSceneStop(targetId);
+
         if (m_mainWindow->getUploadManager()->isUploading() || m_mainWindow->getUploadManager()->isFinalizing()) {
             m_mainWindow->getUploadManager()->requestCancel();
         } else if (m_mainWindow->getUploadManager()->hasActiveUpload()) {
@@ -381,8 +386,6 @@ void CanvasSessionController::unloadUploadsForSession(void* sessionPtr, bool att
         if (m_mainWindow->getUploadButton()) {
             m_mainWindow->getUploadButton()->setFont(m_mainWindow->getUploadButtonDefaultFont());
         }
-
-        m_mainWindow->getWebSocketClient()->sendRemoteSceneStop(targetId);
     }
 
     m_mainWindow->getFileManager()->unmarkAllForClient(targetId);

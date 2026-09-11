@@ -42,9 +42,6 @@ public:
     void setShellActive(bool active);
     void setScreens(const QList<ScreenInfo>& screens);
     void setMediaScene(QGraphicsScene* scene);
-    void startHostSceneState();
-    void stopHostSceneState();
-    bool isHostSceneActive() const { return m_hostSceneActive; }
     void updateRemoteCursor(int globalX, int globalY);
     void hideRemoteCursor();
     void resetView();
@@ -112,6 +109,7 @@ private slots:
 private:
     void rebuildMediaItemIndex();
     ResizableMediaBase* mediaItemById(const QString& mediaId);
+    bool remoteSceneLocksEdits() const;
     void pushStaticLayerModels();
     void scheduleMediaModelSync();
     void syncMediaModelFromScene();
@@ -219,16 +217,6 @@ private:
     int m_initialFitRetryCount = 0;
     QTimer* m_initialFitRetryTimer = nullptr;
     QTimer* m_fadeTickTimer = nullptr;
-    bool m_hostSceneActive = false;
-    struct VideoPreState {
-        ResizableVideoItem* video = nullptr;
-        std::weak_ptr<bool> guard;
-        qint64 posMs = 0;
-        bool wasPlaying = false;
-        bool wasMuted = false;
-    };
-    QList<VideoPreState> m_prevVideoStates;
-    QList<QMetaObject::Connection> m_sceneAutomationConnections;
 };
 
 #endif // QUICKCANVASCONTROLLER_H

@@ -462,6 +462,7 @@ MainWindow::MainWindow(QWidget* parent)
     // Upload progress forwards
     connect(m_webSocketClient, &WebSocketClient::uploadProgressReceived, m_uploadManager, &UploadManager::onUploadProgress);
     connect(m_webSocketClient, &WebSocketClient::uploadFinishedReceived, m_uploadManager, &UploadManager::onUploadFinished);
+    connect(m_webSocketClient, &WebSocketClient::uploadRejectedReceived, m_uploadManager, &UploadManager::onUploadRejected);
     // New: per-file completion ids
     connect(m_webSocketClient, &WebSocketClient::uploadCompletedFileIdsReceived, m_uploadManager, &UploadManager::onUploadCompletedFileIds);
     connect(m_webSocketClient, &WebSocketClient::allFilesRemovedReceived, m_uploadManager, &UploadManager::onAllFilesRemovedRemote);
@@ -1842,4 +1843,3 @@ bool MainWindow::hasUnuploadedFilesForTarget(const QString& targetClientId) cons
     }
     return false;
 }
-

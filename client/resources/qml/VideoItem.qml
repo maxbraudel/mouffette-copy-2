@@ -9,7 +9,7 @@ BaseMediaItem {
     property var cppVideoSink: null
     property var remoteFrameSource: null
     property var boundMediaPlayer: null
-    property bool boundViaSinkPath: false   // true when VideoOutput.videoSink was used
+    property var boundFallbackSink: null
     property int videoPlaybackErrorCode: 0
     property string videoPlaybackErrorString: ""
     property bool videoHasRenderedFrame: false
@@ -35,66 +35,50 @@ BaseMediaItem {
         return "Loading video..."
     }
 
+    function restoreBoundPlayer() {
+        var previousPlayer = boundMediaPlayer
+        var previousSink = boundFallbackSink
+        boundMediaPlayer = null
+        boundFallbackSink = null
+        if (!previousPlayer || !("videoOutput" in previousPlayer))
+            return
+        try {
+            // Restore only our own binding. A newer delegate/output must never
+            // be detached by destruction of an older delegate.
+            if (previousPlayer.videoOutput === videoOutput)
+                previousPlayer.videoOutput = previousSink
+        } catch (e) { }
+    }
+
     function bindPlayerToOutput() {
-        if (!videoOutput)
+        if (!videoOutput || !cppMediaPlayer || !("videoOutput" in cppMediaPlayer)) {
+            restoreBoundPlayer()
             return
+        }
 
-        if (boundViaSinkPath && cppVideoSink && videoOutput.videoSink === cppVideoSink)
-            return
-
-        if (!boundViaSinkPath && boundMediaPlayer === cppMediaPlayer && cppMediaPlayer && ("videoOutput" in cppMediaPlayer)) {
+        if (boundMediaPlayer === cppMediaPlayer) {
             try {
-                if (cppMediaPlayer.videoOutput === videoOutput)
+                if (cppMediaPlayer.videoOutput === videoOutput) {
+                    // The fallback role can settle one event-loop turn after
+                    // the player role. Keep the restore target current even
+                    // when no rebinding is otherwise necessary.
+                    boundFallbackSink = cppVideoSink
                     return
+                }
             } catch (e) { }
         }
 
-        // Clear any old binding
-        if (boundViaSinkPath) {
-            try { videoOutput.videoSink = null } catch (e) { }
-        } else if (boundMediaPlayer && ("videoOutput" in boundMediaPlayer)) {
-            try { boundMediaPlayer.videoOutput = null } catch (e) { }
-        }
-        boundMediaPlayer = null
-        boundViaSinkPath = false
-
-        // Primary path: assign C++ QVideoSink directly to the VideoOutput so it
-        // renders every frame the C++ QMediaPlayer delivers to m_sink.  Read-only
-        // in some Qt6 builds – fall through silently in that case.
-        if (cppVideoSink) {
-            try {
-                videoOutput.videoSink = cppVideoSink
-                boundMediaPlayer = cppMediaPlayer
-                boundViaSinkPath = true
-                return
-            } catch (e) {
-                // videoSink is read-only in this Qt build; use player.videoOutput below
-            }
-        }
-
-        // Fallback: QMediaPlayer.videoOutput = VideoOutput.  Qt internally calls
-        // setVideoSink(videoOutput.videoSink) internally.  The VideoOutput's internal
-        // QVideoSink is only initialised after the item is placed in a Window (the
-        // scenegraph creates it on first render).  If it is still null we defer
-        // and retry; once it is non-null the assignment wires up the video pipeline.
-        if (!cppMediaPlayer)
-            return
-        if (!("videoOutput" in cppMediaPlayer))
-            return
-
-        // Guard: if the VideoOutput sink is not yet ready, retry after current
-        // event loop iteration (window may not have rendered yet).
-        if (!videoOutput.videoSink) {
-            Qt.callLater(bindPlayerToOutput)
-            return
-        }
-
+        restoreBoundPlayer()
         try {
+            // VideoOutput.videoSink is intentionally read-only in Qt 6. The
+            // supported, accelerated path is to give the VideoOutput object to
+            // QMediaPlayer and let Qt wire its internal sink.
             cppMediaPlayer.videoOutput = videoOutput
             boundMediaPlayer = cppMediaPlayer
-            boundViaSinkPath = false
+            boundFallbackSink = cppVideoSink
         } catch (e) {
             boundMediaPlayer = null
+            boundFallbackSink = null
         }
     }
 
@@ -109,9 +93,7 @@ BaseMediaItem {
         fillMode: VideoOutput.Stretch
         visible: !root.remoteFrameMode
 
-        // Retrigger binding when the VideoOutput enters a Window and the
-        // scenegraph initialises its internal QVideoSink.
-        onWindowChanged: {
+        onWindowChanged: function(window) {
             if (window)
                 Qt.callLater(root.bindPlayerToOutput)
         }
@@ -125,11 +107,13 @@ BaseMediaItem {
     }
 
     onCppMediaPlayerChanged: {
-        bindPlayerToOutput()
+        // Delegate role updates are not atomic: consume the player/sink pair
+        // after both bindings have settled for this event-loop turn.
+        Qt.callLater(bindPlayerToOutput)
     }
 
     onCppVideoSinkChanged: {
-        bindPlayerToOutput()
+        Qt.callLater(bindPlayerToOutput)
     }
 
     onVisibleChanged: {
@@ -138,52 +122,25 @@ BaseMediaItem {
     }
 
     Component.onCompleted: {
-        // Defer one event-loop tick so the VideoOutput is placed in its
-        // parent Window and its internal QVideoSink is non-null.
         Qt.callLater(bindPlayerToOutput)
     }
 
     Component.onDestruction: {
-        // Undo only what we set; avoid touching the C++ player's sink
-        // when we went through the primary videoOutput.videoSink path.
-        if (boundViaSinkPath) {
-            try { videoOutput.videoSink = null } catch (e) { }
-        } else if (boundMediaPlayer && ("videoOutput" in boundMediaPlayer)) {
-            try { boundMediaPlayer.videoOutput = null } catch (e) { }
-        }
+        restoreBoundPlayer()
     }
 
-    // Primary path (videoOutput.videoSink = cppVideoSink worked): the C++ m_sink
-    // still receives every decoded frame, so watch it directly.
+    // Playback state is still observed for resetting the loading affordance.
     Connections {
-        target: root.boundViaSinkPath ? root.cppVideoSink : null
+        target: root.cppMediaPlayer
         ignoreUnknownSignals: true
-        function onVideoFrameChanged(frame) {
-            root.localFrameSeen = true
-        }
-    }
-
-    // Fallback path (cppMediaPlayer.videoOutput = videoOutput): the player was
-    // internally rewired to the VideoOutput's own sink so cppVideoSink no longer
-    // fires.  Use positionChanged (fires every ~100 ms during playback) to detect
-    // that frames are actually being delivered and rendered.
-    Connections {
-        target: !root.boundViaSinkPath ? root.cppMediaPlayer : null
-        ignoreUnknownSignals: true
-        function onPositionChanged(position) {
-            if (position >= 0)
-                root.localFrameSeen = true
-        }
-        // Reset when the user stops/rewinds so the overlay re-appears if needed
         function onPlaybackStateChanged(state) {
-            // 0 = StoppedState – re-arm so overlay shows on next play start
             if (state === 0)
                 root.localFrameSeen = false
         }
     }
 
     Connections {
-        target: (!root.boundViaSinkPath && videoOutput && videoOutput.videoSink) ? videoOutput.videoSink : null
+        target: videoOutput ? videoOutput.videoSink : null
         ignoreUnknownSignals: true
         function onVideoFrameChanged(frame) {
             root.localFrameSeen = true
