@@ -421,6 +421,18 @@ if(BUILD_TESTING)
     target_link_libraries(tst_TextOutlineItem PRIVATE Qt6::QuickPrivate Qt6::GuiPrivate Qt6::Qml Qt6::Test)
     add_test(NAME TextOutlineItem COMMAND tst_TextOutlineItem)
 
+    add_executable(tst_TextOutlineMotion
+        tests/qt/tst_TextOutlineMotion.cpp
+        src/frontend/rendering/canvas/TextOutlineItem.cpp
+        src/frontend/rendering/canvas/TextOutlineItem.h
+        src/frontend/rendering/canvas/TextEditHelper.cpp
+        src/frontend/rendering/canvas/TextEditHelper.h
+    )
+    target_include_directories(tst_TextOutlineMotion PRIVATE src)
+    target_compile_definitions(tst_TextOutlineMotion PRIVATE TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(tst_TextOutlineMotion PRIVATE Qt6::QuickPrivate Qt6::GuiPrivate Qt6::Qml Qt6::Test)
+    add_test(NAME TextOutlineMotion COMMAND tst_TextOutlineMotion)
+
     add_executable(tst_TextItemQml
         tests/qt/tst_TextItemQml.cpp
         src/frontend/rendering/canvas/TextOutlineItem.cpp

@@ -11,6 +11,7 @@
 #include <QQuickRenderControl>
 #include <QQuickRenderTarget>
 #include <QQuickWindow>
+#include <QRawFont>
 #include <QSGRendererInterface>
 #include <QTest>
 #include <QTextBlock>
@@ -553,6 +554,232 @@ private slots:
         const auto zoomedStats = scene.outline->statistics();
         QVERIFY(zoomedStats.glyphs > middleStats.glyphs);
         QVERIFY(zoomedStats.glyphs < 160);
+    }
+
+    void fractionalMotionRetainsRasterAndLayout_data()
+    {
+        QTest::addColumn<qreal>("physicalDensity");
+        QTest::addColumn<qreal>("worldOrigin");
+        QTest::newRow("density-1") << qreal(1) << qreal(0);
+        QTest::newRow("density-2") << qreal(2) << qreal(0);
+        QTest::newRow("density-1-large-coordinates") << qreal(1) << qreal(1000000);
+        QTest::newRow("density-2-large-coordinates") << qreal(2) << qreal(1000000);
+    }
+
+    void fractionalMotionRetainsRasterAndLayout()
+    {
+        QFETCH(qreal, physicalDensity);
+        QFETCH(qreal, worldOrigin);
+        Scene scene(QStringLiteral("Éi:j OBA\nÀÇ: Métal"),
+                    QQuickTextEdit::AlignLeft, 64, 40, {900, 520});
+        scene.edit->setWrapMode(QQuickTextEdit::NoWrap);
+        const qreal scale = physicalDensity / scene.window.effectiveDevicePixelRatio();
+
+        auto* camera = new QQuickItem(scene.window.contentItem());
+        camera->setTransformOrigin(QQuickItem::TopLeft);
+        camera->setSize({6000, 4000});
+        camera->setScale(scale);
+        camera->setPosition({-worldOrigin * scale - 240,
+                             -worldOrigin * scale - 140});
+        scene.outline->setParentItem(camera);
+        scene.edit->setParentItem(camera);
+        scene.outline->setPosition({worldOrigin, worldOrigin});
+        scene.outline->setSize({6000, 4000});
+        scene.edit->setPosition({worldOrigin + 330 / scale,
+                                worldOrigin + 240 / scale});
+        scene.edit->setSize({4000, 2000});
+        QVERIFY2(scene.expose(), "The Qt Quick window could not be exposed");
+
+        const OutlineCapture initial = captureOutline(scene);
+        QVERIFY(!initial.rendered.isNull());
+        QVERIFY2(initial.iou >= 0.90,
+                 qPrintable(QStringLiteral("initial motion fixture IoU: %1").arg(initial.iou)));
+        const QRectF cachedRect = scene.outline->renderedRect();
+        const QSize cachedPixelSize = scene.outline->renderedPixelSize();
+        QVERIFY(!cachedRect.isEmpty());
+
+        const QList<QPointF> deltas {{0.3, 0.7}, {7.3, -3.1}, {-11.75, 13.125},
+                                    {29.125, -17.375}, {0.125, 0.375}};
+        // The density is exactly a resolution boundary, including the cases
+        // where subtracting scene coordinates around 1e6 loses low bits.
+        // Tiny zoom oscillations must not repeatedly choose a new bucket.
+        for (int iteration = 0; iteration < 15; ++iteration) {
+            const QPointF delta = deltas.at(iteration % deltas.size());
+            const qreal zoomJitter = iteration < 5 ? 0
+                : (iteration % 2 ? qreal(2e-7) : qreal(-2e-7));
+            const qreal currentScale = scale * (1 + zoomJitter);
+            camera->setScale(currentScale);
+            camera->setPosition({-worldOrigin * currentScale - 240 + delta.x(),
+                                 -worldOrigin * currentScale - 140 + delta.y()});
+            scene.outline->rebuildNow();
+            const auto preparation = scene.outline->statistics();
+            QCOMPARE(preparation.layoutPasses, 0);
+            QCOMPARE(preparation.generatedGlyphs, 0);
+            QCOMPARE(preparation.uploadedGlyphs, 0);
+            QCOMPARE(scene.outline->renderedRect(), cachedRect);
+            QCOMPARE(scene.outline->renderedPixelSize(), cachedPixelSize);
+
+            const OutlineCapture moved = captureOutline(scene);
+            QVERIFY(!moved.rendered.isNull());
+            QVERIFY2(moved.iou >= 0.90,
+                     qPrintable(QStringLiteral("motion %1 IoU: %2")
+                         .arg(iteration).arg(moved.iou)));
+            QVERIFY(moved.renderedBounds.pixels > 0);
+            const QRect actual = moved.renderedBounds.rect;
+            const QRect expected = moved.referenceBounds.rect;
+            QVERIFY2(std::abs(actual.left() - expected.left()) <= 2
+                         && std::abs(actual.top() - expected.top()) <= 2
+                         && std::abs(actual.right() - expected.right()) <= 2
+                         && std::abs(actual.bottom() - expected.bottom()) <= 2,
+                     qPrintable(QStringLiteral("motion %1 changed outline registration")
+                         .arg(iteration)));
+            const auto rendered = scene.outline->statistics();
+            QCOMPARE(rendered.layoutPasses, 0);
+            QCOMPARE(rendered.generatedGlyphs, 0);
+            QCOMPARE(rendered.uploadedGlyphs, 0);
+            QCOMPARE(rendered.rebuiltChunks, 0);
+            QCOMPARE(rendered.movedChunks, 0);
+        }
+    }
+
+    void independentPositionAndReparentKeepSourceRegistration()
+    {
+        Scene scene(QStringLiteral("Éi:j OBA"), QQuickTextEdit::AlignLeft, 64, 32);
+        scene.edit->setWrapMode(QQuickTextEdit::NoWrap);
+        QVERIFY2(scene.expose(), "The Qt Quick window could not be exposed");
+        const auto verifyRegistration = [&](const char* phase) {
+            const OutlineCapture capture = captureOutline(scene);
+            QVERIFY2(!capture.rendered.isNull(), phase);
+            QVERIFY2(capture.iou >= 0.90,
+                     qPrintable(QStringLiteral("%1 registration IoU: %2")
+                         .arg(QString::fromLatin1(phase)).arg(capture.iou)));
+            const QRect actual = capture.renderedBounds.rect;
+            const QRect expected = capture.referenceBounds.rect;
+            QVERIFY2(std::abs(actual.left() - expected.left()) <= 2
+                         && std::abs(actual.top() - expected.top()) <= 2
+                         && std::abs(actual.right() - expected.right()) <= 2
+                         && std::abs(actual.bottom() - expected.bottom()) <= 2,
+                     phase);
+        };
+        verifyRegistration("initial");
+
+        // Unlike a shared camera transform, moving just the outline changes
+        // the source-to-outline origin and must refresh its glyph placements.
+        scene.outline->setPosition({17.25, -11.5});
+        verifyRegistration("independent outline position");
+        auto* outlineHost = new QQuickItem(scene.window.contentItem());
+        outlineHost->setPosition({23.5, 19.25});
+        scene.outline->setParentItem(outlineHost);
+        verifyRegistration("outline reparent");
+
+        // This changes only the source's parent. Its x/y, text and font stay
+        // identical, so watching xChanged/yChanged alone cannot detect it.
+        auto* sourceHost = new QQuickItem(scene.window.contentItem());
+        sourceHost->setPosition({55.75, 31.25});
+        scene.edit->setParentItem(sourceHost);
+        verifyRegistration("source reparent");
+
+        scene.outline->setSource(nullptr);
+        const QImage cleared = grabAfterSync(scene.window, scene.outline);
+        QVERIFY(!cleared.isNull());
+        QCOMPARE(nonBlackBounds(cleared).pixels, 0);
+        QCOMPARE(scene.outline->statistics().glyphs, 0);
+        scene.outline->setSource(scene.edit);
+        verifyRegistration("source restored");
+    }
+
+    void historicalGlyphMasksRespectMemoryBudget_data()
+    {
+        QTest::addColumn<qreal>("radius");
+        QTest::newRow("radius-128") << qreal(128);
+        QTest::newRow("radius-256") << qreal(256);
+    }
+
+    void historicalGlyphMasksRespectMemoryBudget()
+    {
+        QFETCH(qreal, radius);
+        Scene scene(QStringLiteral("A"), QQuickTextEdit::AlignLeft, 128, radius);
+        // Exercise the CPU cache directly, without allocating a GPU texture
+        // or taking a screenshot for every character in this churn test.
+        // Fix physical density at 2 so the same bounded fixture exceeds the
+        // cache budget on both normal and high-DPI test machines.
+        auto* canvas = new QQuickItem(scene.window.contentItem());
+        canvas->setTransformOrigin(QQuickItem::TopLeft);
+        canvas->setScale(2 / scene.window.effectiveDevicePixelRatio());
+        canvas->setSize({1400, 1400});
+        scene.outline->setParentItem(canvas);
+        scene.edit->setParentItem(canvas);
+        scene.outline->setFlag(QQuickItem::ItemObservesViewport, false);
+        scene.outline->setSize({1400, 1400});
+        scene.edit->setPosition({600, 600});
+        scene.edit->setSize({400, 400});
+        scene.edit->setWrapMode(QQuickTextEdit::NoWrap);
+        scene.outline->rebuildNow();
+        const auto first = scene.outline->statistics();
+        QCOMPARE(first.glyphs, 1);
+        QCOMPARE(first.generatedGlyphs, 1);
+        QVERIFY(first.cachedMaskBytes > 0);
+        QVERIFY(first.cachedMaskBytes < TextOutlineItem::maskCacheBudgetBytes);
+
+        scene.edit->setText(QStringLiteral("B"));
+        scene.outline->rebuildNow();
+        QCOMPARE(scene.outline->statistics().generatedGlyphs, 1);
+        scene.edit->setText(QStringLiteral("A"));
+        scene.outline->rebuildNow();
+        QCOMPARE(scene.outline->statistics().generatedGlyphs, 0);
+
+        const QRawFont font = QRawFont::fromFont(scene.edit->font());
+        QVERIFY(font.isValid());
+        QSet<quint32> seen;
+        for (const quint32 glyph : font.glyphIndexesForString(QStringLiteral("AB")))
+            seen.insert(glyph);
+        constexpr qreal rasterScale = 2;
+        qint64 visitedMaskBytes = 0;
+        int distinctGlyphs = 0;
+        for (ushort codepoint = 33; codepoint < 0x3000
+             && visitedMaskBytes <= TextOutlineItem::maskCacheBudgetBytes * 2; ++codepoint) {
+            const QChar characterValue(codepoint);
+            if (!characterValue.isPrint() || characterValue.isSpace() || characterValue.isMark()
+                || characterValue.category() == QChar::Other_Format)
+                continue;
+            const QString character {characterValue};
+            const auto indexes = font.glyphIndexesForString(character);
+            if (indexes.size() != 1 || indexes.first() == 0 || seen.contains(indexes.first()))
+                continue;
+            const QPainterPath path = font.pathForGlyph(indexes.first());
+            if (path.isEmpty())
+                continue;
+            seen.insert(indexes.first());
+            // Sum the immutable image sizes that would be retained without
+            // eviction; this proves the fixture actually exceeds the budget.
+            const QRectF ink = path.boundingRect().adjusted(-radius, -radius, radius, radius);
+            const qreal glyphScale = qMin(rasterScale,
+                2044.0 / qMax(qreal(1), qMax(ink.width(), ink.height())));
+            const QRect pixels = QRectF(ink.topLeft() * glyphScale,
+                ink.size() * glyphScale).toAlignedRect().adjusted(-2, -2, 2, 2);
+            visitedMaskBytes += qint64(pixels.width()) * pixels.height() * 4;
+
+            scene.edit->setText(character);
+            scene.outline->rebuildNow();
+            const auto stats = scene.outline->statistics();
+            QCOMPARE(stats.glyphs, 1);
+            QVERIFY2(stats.generatedGlyphs > 0, "distinct visible glyph did not populate the cache");
+            QVERIFY2(stats.cachedMaskBytes <= TextOutlineItem::maskCacheBudgetBytes,
+                     qPrintable(QStringLiteral("historical masks retain %1 bytes after %2 glyphs")
+                         .arg(stats.cachedMaskBytes).arg(distinctGlyphs)));
+            ++distinctGlyphs;
+        }
+        QVERIFY2(visitedMaskBytes > TextOutlineItem::maskCacheBudgetBytes * 2,
+                 "the fixture font did not exercise enough distinct raster masks");
+        QVERIFY(distinctGlyphs > 2);
+
+        // A was recently reusable before the churn, but must now be evicted.
+        scene.edit->setText(QStringLiteral("A"));
+        scene.outline->rebuildNow();
+        const auto restored = scene.outline->statistics();
+        QCOMPARE(restored.glyphs, 1);
+        QCOMPARE(restored.generatedGlyphs, 1);
+        QVERIFY(restored.cachedMaskBytes <= TextOutlineItem::maskCacheBudgetBytes);
     }
 
     void repeatedPrefixEditsDoNotFragmentChunks()

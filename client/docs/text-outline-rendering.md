@@ -36,19 +36,47 @@ wrapping, paragraph positions, padding and alignment therefore come from the
 same source as the visible fill. It reads the editor's actual document offsets.
 All glyph components are retained.
 
-Qt's own `QSGCurveProcessor` and `QSGCurveStrokeNode` render the outlines with
-the GPU curve renderer used by Qt Quick. Immutable geometry is cached by the
-actual `QRawFont`, glyph and current outline radius. Small groups of glyphs
-retain their scene-graph nodes. Common prefixes and suffixes preserve group
-boundaries when inserting into the start or middle of a long line; changing
-alignment uses transforms. Small adjacent fragments are coalesced, so repeated
-insertions do not accumulate one scene-graph node per keystroke. Color changes
-update materials. Qt's `ItemObservesViewport` and `clipRect()` exclude off-screen
-blocks and glyphs; ancestor pan/zoom and window resizing refresh the visible
-region. Radius changes rebuild the per-glyph cache at the exact
-requested width; no undocumented stroke-expansion environment flag is needed.
+The first correction used Qt's `QSGCurveStrokeNode` and cached curve meshes. It
+fixed editing costs, but **cached geometry is not cached rasterization**: the
+analytic stroke shader still solves curve distances for every covered pixel on
+every rendered frame. Thick overlapping outlines create considerable overdraw.
+On the motion benchmark below, an unchanged paragraph consumed about 30.5 ms
+per forced Retina frame; CPU outline polish/sync together were below 0.6 ms.
+Pan and drag did not change the text or call the backend model. Neither a faster
+layout nor another geometry cache could remove that GPU cost.
 
-Retaining nodes alone was not enough. Three further issues were measured:
+The renderer now paints each distinct glyph's exact stroke once into an
+immutable `QImage`, using `QRawFont::pathForGlyph()` and `QPainter::strokePath()`.
+This is a **per-glyph** operation, never a document-sized painter or texture.
+Occurrences are ordinary `QSGImageNode` quads created by
+`QQuickWindow::createImageNode()`. Textures are shared per glyph and created on
+the scene-graph thread with `TextureCanUseAtlas`: Qt owns atlas packing, upload,
+texture coordinates, the image shader and batching. If its atlas is full, Qt's
+regular texture fallback remains correct. No custom curve shader/material,
+private curve processor, atlas-packing implementation or new library is needed.
+
+Masks are keyed by the actual raw font and glyph; the cache is invalidated when
+outline radius or screen-density bucket changes. Half-octave density buckets
+include DPR. Upgrades preserve screen detail, while downgrades have hysteresis;
+a numerical tolerance prevents fractional translations at an exact zoom power
+from toggling the resolution. Glyph textures are limited to approximately
+2048 pixels per axis; extreme magnification can therefore soften their edges.
+Unused CPU masks are evicted least-recently-used above a 64 MiB history budget
+per outline item. The currently visible working set is retained even if it
+alone exceeds that budget. GPU textures only retain the current working set.
+Before replacing textures, obsolete image consumers and atlas slots are freed,
+so old generations cannot unnecessarily force new glyphs out of the atlas.
+Color changes recolor cached masks without reshaping or stroking them.
+
+Small groups retain their scene-graph nodes. Common prefixes and suffixes
+preserve group boundaries during edits; common alignment motion uses one
+transform. Adjacent small fragments are coalesced. Qt's `ItemObservesViewport`
+and `clipRect()` limit rendering to visible blocks/lines/glyphs plus a 96-DIP
+screen-space guard. Transform-only changes inside that guard do not access the
+document, rebuild groups, generate masks or upload textures. Crossing the guard
+refreshes the visible placements; existing glyph images remain cached.
+
+The earlier investigation also found three independent batching issues:
 
 - `QSGTransformNode::setMatrix()` marks its subtree dirty even for an identical
   matrix. The adapter now compares before setting it.
@@ -57,8 +85,9 @@ Retaining nodes alone was not enough. Three further issues were measured:
   occurrence order.
 - Qt merged all chunks into one approximately 137 MB vertex buffer for the
   12,000-character stress case. A one-glyph change invalidated that entire batch.
-  A small material subclass keeps chunks in separate batches while using Qt's
-  unchanged stroke shader. This bounds geometry uploads to changed chunks.
+  A material subclass initially isolated curve chunks. It is now removed:
+  image quads reduce the measured 592-glyph paragraph from 56,784 triangles to
+  1,184, and let Qt's ordinary image batching work efficiently.
 
 No SVG is constructed or parsed in the live path, and the pre-generated Impact
 atlas is no longer bundled or loaded. `TextGlyphPath` remains available only as
@@ -70,14 +99,16 @@ deferred to commit. Returning to the legacy editor also restores synchronization
 Translucent borders use a viewport-sized `ShaderEffectSource`, applying alpha
 once instead of accumulating it at overlapping strokes. Its destination matches
 the source crop exactly; simply changing `layer.sourceRect` would stretch the
-crop across the whole document. Texture resolution follows screen scale/DPR and
-is capped at 4096 pixels per axis, so a huge or zoomed-out document does not
+crop across the whole document. Texture resolution follows the stable
+screen-density/DPR bucket and is capped at 4096 pixels per axis, so a huge or zoomed-out document does not
 allocate a document-sized texture. Fully transparent borders skip geometry
 generation; opaque borders do not pay for this offscreen pass.
+The guard keeps the crop and texture size stable during small translations.
 Source and destination crops share integer-aligned local bounds, avoiding
 Qt 6.11's fractional `ShaderEffectSource` target rounding (QTBUG-149373).
 
-The private Qt interface is confined to one renderer translation unit. It needs
+The remaining private Qt interface (editor offsets and font-engine lifetime)
+is confined to one renderer translation unit. It needs
 Qt 6.11+ and matching private headers/libraries; rebuilding and rerunning pixel
 tests is required when upgrading Qt. The project already used Gui-private APIs
 for its trailing-space behavior. Font engine caches populated on the GUI thread
@@ -92,7 +123,8 @@ are reset before the editor's render-thread work, following Qt's own practice.
 | `QQuickPaintedItem` + `QTextCharFormat::TextOutline` | Simple CPU reference/fallback, but normally paints into an image and uploads it. The framebuffer optimization is OpenGL-specific, not Metal. |
 | MSDF/MTSDF atlas (`msdfgen`) | A sound alternative with public scene-graph APIs and compact glyph quads. A 100% outline needs a large true-distance range/padding; integrating generation, eviction, font fallback and shaders is a substantial new renderer. |
 | Image dilation / repeated shifted text | Work grows with the radius, glyph count or image area. The old brute-force shader is unsuitable for large text and thick borders. |
-| Qt GPU curve adapter | Reuses Qt's shaping and curve rasterization, keeps editable text native, supports the required widths and removes the measured SVG bottleneck. Selected and covered by the rendering tests below. |
+| Qt GPU curve adapter | Fixed the SVG/editing bottleneck, but analytic thick strokes still cost about 31 ms per unchanged Retina frame. Replaced. |
+| Per-glyph raster masks + Qt image nodes/atlas | Keeps native shaping/editing; reuses Qt's standard texture rendering; one inexpensive quad per occurrence. Selected and covered by pixel, edit and motion tests. |
 
 A cached `QPainterPathStroker` → `QSGCurveFillNode` alternative was also
 implemented and tested, then removed. Pixel tests passed, but a 100% stroke
@@ -108,6 +140,10 @@ on macOS. It compares border pixels against a QPainter reference made from the
 same document's glyphs, verifies left/center/right positioning, disconnected
 contours, wrap/resize, italic/fallback/RTL and outline-width transitions. The reference uses
 nonzero winding, so overlapping strokes form a union rather than cancelling.
+Additional cases cover fractional pan and zoom oscillations at exact density
+boundaries, coordinates around 1,000,000, independent source/adapter reparenting,
+and a history of more than 128 MiB of distinct masks evicted to the 64 MiB
+budget. Pixel thresholds were retained when replacing curve rendering.
 
 Performance measurements use `QQuickRenderControl` with a real Metal/QRhi
 offscreen render target, like the rendering mechanism behind `QQuickWidget`.
@@ -120,7 +156,7 @@ Both the normal viewport-culling path and an artificial all-glyphs path are
 measured separately. The latter deliberately disables viewport observation to
 exercise every placement and GPU node even when most of the line is off-screen.
 
-Release results on this machine, 12,000 characters, 48 px Impact text, 48 px
+Historical curve-renderer Release results, 12,000 characters, 48 px Impact text, 48 px
 outline radius (100%), native fill visible in the production cases:
 
 | Case | First edit | Steady p95 | Insert at start / middle |
@@ -129,18 +165,46 @@ outline radius (100%), native fill visible in the production cases:
 | Wrapped paragraph, viewport on editing tail | 21.79 ms | 19.79 ms | 20.80 / 20.89 ms |
 | Artificial all-glyphs stress, culling disabled | 104.16 ms | 62.02 ms | 56.73 / 50.88 ms |
 
-These are renderer-harness measurements, not a claim about complete application
-input latency. They include the native editor's fill in the production cases,
-but not the backend model update. The all-glyph case still has a substantial
-GPU cost; viewport culling does not make genuinely visible thousands of glyphs
-free. Normal production cases have a 50 ms regression ceiling, intentionally
-looser than the observed values to allow for test-machine variability.
-These are small samples on a shared desktop, not an isolated hardware
-certification: earlier Debug runs transiently exceeded the production ceiling
-(63 ms) and the artificial stress ceiling (314 ms). The final Debug CTest run
-passed all five suites; the final Release production benchmark remained below
-20 ms at p95. Structural assertions also verify bounded chunks, stable node
-transforms and no regeneration of cached glyph geometry, independently of timing.
+These historical numbers include the native editor's fill in production cases,
+but not the backend model update. They are not complete application latency.
+After replacing the curves with image quads, the final Debug editing run measured p95
+11.50 ms (no-wrap), 10.26 ms (wrapped), and 23.65 ms (all-glyph stress), retaining
+the existing incremental-edit and pixel assertions. This is not a like-for-like
+Debug/Release speed comparison; the dedicated same-build motion comparison
+below isolates the reported defect.
+
+`tst_TextOutlineMotion` renders a 12,000-character wrapped Impact paragraph,
+48 px font and 48 px outline radius, with native fill visible, to a 1280×800
+logical Metal target at DPR 1 and 2. Camera pan and element drag are separate
+cases, at zoom 1 and 0.35. A forced stationary pass isolates the GPU cost of
+unchanged content. A 60-DIP motion sequence verifies zero document processing,
+raster generation, chunk rebuilds and texture uploads. A further 480-DIP
+sequence crosses the cache guard repeatedly and measures refresh frames too.
+Translucent Retina cases use the same cropped `ShaderEffectSource` composition
+as production; a readback outside timing verifies the actual 50% alpha.
+
+Same-machine Release motion results, September 11, 2026; all values in ms.
+The baseline executable was preserved before rebuilding the renderer.
+
+| Retina case | Curve p50 / p95 | Cached-image p50 / p95 | Cached-image p95, 480-DIP traversal |
+| --- | ---: | ---: | ---: |
+| Camera pan, zoom 1 | 30.902 / 34.550 | 1.236 / 1.796 | 1.936 |
+| Element drag, zoom 1 | 30.878 / 36.916 | 1.229 / 1.384 | 1.525 |
+| Camera pan, zoom 0.35 | 14.501 / 24.300 | 0.931 / 1.638 | 2.757 |
+| Element drag, zoom 0.35 | 15.066 / 26.227 | 0.936 / 1.067 | 3.051 |
+| 50% alpha, pan, zoom 0.35 | Not measured | 0.568 / 0.698 | 3.400 |
+| 50% alpha, drag, zoom 0.35 | Not measured | 0.597 / 0.765 | 3.455 |
+
+The final run passed all 18 motion scenarios (864 timed moving frames). Large
+traversals refreshed placements five times per scenario, with zero new glyph
+rasterizations or texture uploads. The maximum measured translucent traversal
+frame was 4.112 ms. Small motions used only inherited scene-graph transforms.
+
+The motion regression ceiling is 50 ms at p95, intentionally looser than
+observed results for variable CI hardware; structural assertions independently
+require two triangles per glyph and no rasterization of cached glyphs. These
+are small samples on a shared desktop, not an isolated hardware certification
+or a guarantee of complete application frame rate on every scene/backend.
 
 `tst_TextItemQml` loads the real production QML component and checks all nine
 horizontal/vertical alignments, border safety insets and uniform translucent
@@ -156,14 +220,23 @@ The old `tst_TextGlyphPath reportLongTextRebuildCost` target records the SVG
 baseline independently. The architecture boundary checks and the shared local/
 remote delegate gate remain applicable.
 
+The final full Debug application build and all six CTest suites passed (25
+outline checks, 20 motion checks, both production-QML scaling suites, the legacy
+reference and runtime-context tests). Architecture, baseline, render schema,
+interaction parity/ownership, integration and randomized-input gates also passed.
+
 Validation was performed on macOS with Metal and Qt 6.11.2. Other RHI backends
-have not been exercised here. This adapter does not implement Qt Quick's
-software scene-graph backend, nor contours for bitmap-only color emoji fonts.
+and the software scene graph have not been exercised here. Bitmap-only color
+emoji fonts have no vector contours and therefore receive no path-based border.
 
 ## Primary sources
 
 - [Qt Shape processing and asynchronous behavior](https://doc.qt.io/qt-6/qml-qtquick-shapes-shape.html)
 - [Qt Quick text render types](https://doc.qt.io/qt-6/qml-qtquick-textedit.html#renderType-prop)
+- [Qt image-node factory and atlas texture creation](https://doc.qt.io/qt-6/qquickwindow.html#createTextureFromImage)
+- [Qt image nodes](https://doc.qt.io/qt-6/qsgimagenode.html)
+- [Qt scene-graph batching](https://doc.qt.io/qt-6/qtquick-visualcanvas-scenegraph-renderer.html)
+- [Qt render-thread atlas allocation and fallback](https://github.com/qt/qtdeclarative/blob/v6.11.2/src/quick/scenegraph/qsgdefaultrendercontext.cpp)
 - [Public QSGTextNode API](https://doc.qt.io/qt-6/qsgtextnode.html)
 - [Qt's fixed-width curve text outline implementation](https://github.com/qt/qtdeclarative/blob/v6.11.2/src/quick/scenegraph/qsgcurveglyphnode.cpp)
 - [Qt's curve glyph processing](https://github.com/qt/qtdeclarative/blob/v6.11.2/src/quick/scenegraph/qsgcurveglyphatlas.cpp)

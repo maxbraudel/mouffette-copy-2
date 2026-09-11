@@ -206,7 +206,7 @@ BaseMediaItem {
     }
 
     // The border reads the exact document, resolved fonts and positions of the
-    // editor. Qt's GPU curve nodes are retained in small reusable groups.
+    // editor. Cached glyph masks use Qt's ordinary image nodes and texture atlas.
     TextOutlineItem {
         id: outlineRenderer
         anchors.fill: parent

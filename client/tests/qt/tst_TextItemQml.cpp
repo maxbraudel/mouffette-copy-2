@@ -101,7 +101,9 @@ private slots:
             const QImage huge = window.grabWindow().convertToFormat(QImage::Format_ARGB32);
             QVERIFY(!huge.isNull());
             QVERIFY(outline->renderedRect().left() > 99000);
-            QVERIFY(outline->renderedRect().width() <= window.width() + 2);
+            // The stable viewport cache includes a 96-DIP guard on each side.
+            // It must remain viewport-sized, never the 100,000-pixel document.
+            QVERIFY(outline->renderedRect().width() <= window.width() + 2 * 96 + 2);
             QCOMPARE(outline->renderedRect(), QRectF(outline->renderedRect().toAlignedRect()));
             QVERIFY(outline->renderedPixelSize().width() <= 4096);
             QVERIFY(outline->renderedPixelSize().height() <= 4096);

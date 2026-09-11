@@ -1,43 +1,36 @@
-// Qt's private curve material headers use QStringBuilder concatenation, as
-// does Qt Quick itself. Keep that build convention local to this adapter.
-#define QT_USE_QSTRINGBUILDER
-#include <QStringBuilder>
 #include "frontend/rendering/canvas/TextOutlineItem.h"
 
 #include <QAbstractTextDocumentLayout>
 #include <QElapsedTimer>
 #include <QGlyphRun>
 #include <QHash>
+#include <QPainter>
 #include <QPointer>
 #include <QRawFont>
 #include <QQuickWindow>
 #include <QSGTransformNode>
+#include <QSGImageNode>
+#include <QSet>
 #include <QTextBlock>
 #include <QTextDocument>
 #include <QTextLayout>
 #include <QtGui/private/qtextengine_p.h>
 #include <QtQuick/private/qquicktextedit_p_p.h>
-#include <QtQuick/private/qsgcurveprocessor_p.h>
-#include <QtQuick/private/qsgcurvestrokenode_p.h>
-
-#include <array>
 #include <cmath>
+#include <algorithm>
 
 namespace {
 constexpr int glyphsPerChunk = 64;
 
-struct Triangle {
-    std::array<QVector2D, 3> vertices;
-    std::array<QVector2D, 3> controls;
-    std::array<QVector2D, 3> normals;
-    std::array<float, 3> extrusions;
-    bool line;
-};
 struct GlyphMesh {
-    QList<Triangle> triangles;
+    QImage mask;
     QRectF bounds;
 };
 using Mesh = std::shared_ptr<const GlyphMesh>;
+struct CachedGlyph {
+    Mesh glyph;
+    quint64 lastUse = 0;
+};
 
 struct PlacedGlyph {
     Mesh mesh;
@@ -51,44 +44,28 @@ struct Chunk {
     size_t key = 0;
 };
 
-class ChunkMaterial final : public QSGCurveStrokeMaterial {
-public:
-    explicit ChunkMaterial(QSGCurveStrokeNode* node)
-        : QSGCurveStrokeMaterial(node, QSGCurveStrokeNode::expandingStrokeEnabled()) {}
-
-    QSGMaterialType* type() const override
-    {
-        static QSGMaterialType type;
-        return &type;
-    }
-
-    int compare(const QSGMaterial* other) const override
-    {
-        // Keep GPU uploads bounded to a chunk. Otherwise Qt merges the entire
-        // document into one buffer and re-uploads it when ONE glyph changes.
-        const auto a = quintptr(this);
-        const auto b = quintptr(other);
-        return a < b ? -1 : a > b ? 1 : 0;
-    }
-};
-
-class ChunkStrokeNode final : public QSGCurveStrokeNode {
-public:
-    void cookGeometry() override
-    {
-        QSGCurveStrokeNode::cookGeometry();
-        m_material.reset(new ChunkMaterial(this));
-        setMaterial(m_material.data());
-    }
-};
-
 struct ChunkNode : QSGTransformNode {
     QList<PlacedGlyph> glyphs;
-    QSGCurveStrokeNode* stroke = nullptr;
+    QList<QSGImageNode*> images;
     size_t key = 0;
+};
+struct GlyphTexture {
+    Mesh glyph;
+    QSGTexture* texture = nullptr;
 };
 struct OutlineNode : QSGTransformNode {
     QList<ChunkNode*> chunks;
+    QHash<const GlyphMesh*, GlyphTexture> textures;
+    QColor color;
+    ~OutlineNode() override
+    {
+        // Image nodes borrow textures; release consumers first, all on the
+        // scene-graph thread. No GUI-thread font object lives in this cache.
+        while (firstChild())
+            delete firstChild();
+        for (const auto& entry : std::as_const(textures))
+            delete entry.texture;
+    }
 };
 }
 
@@ -101,32 +78,82 @@ struct TextOutlineItem::Private {
     QRectF renderedRect;
     QSize renderedPixelSize;
     bool layoutDirty = true;
-    // GUI-thread-only font objects. Only immutable, font-free meshes cross
+    bool viewportDirty = true;
+    qreal rasterScale = 1;
+    // GUI-thread-only font objects. Only immutable, font-free masks cross
     // into updatePaintNode while the GUI thread is blocked by Qt's sync phase.
-    QHash<QRawFont, QHash<quint32, Mesh>> cache;
+    QHash<QRawFont, QHash<quint32, CachedGlyph>> cache;
+    qint64 cacheBytes = 0;
+    quint64 cacheEpoch = 0;
     QList<Chunk> chunks;
     Statistics stats;
+
+    void clearCache()
+    {
+        cache.clear();
+        cacheBytes = 0;
+    }
+
+    void trimCache()
+    {
+        if (cacheBytes > maskCacheBudgetBytes) {
+            struct Candidate { QRawFont font; quint32 index; quint64 age; };
+            QList<Candidate> candidates;
+            for (auto font = cache.cbegin(); font != cache.cend(); ++font) {
+                for (auto glyph = font->cbegin(); glyph != font->cend(); ++glyph) {
+                    if (glyph->lastUse != cacheEpoch)
+                        candidates.append({font.key(), glyph.key(), glyph->lastUse});
+                }
+            }
+            std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
+                return a.age < b.age;
+            });
+            for (const auto& candidate : candidates) {
+                if (cacheBytes <= maskCacheBudgetBytes)
+                    break;
+                auto font = cache.find(candidate.font);
+                auto glyph = font->find(candidate.index);
+                cacheBytes -= glyph->glyph->mask.sizeInBytes();
+                font->erase(glyph);
+                if (font->isEmpty())
+                    cache.erase(font);
+            }
+        }
+        // The current visible working set is never evicted, even if it alone
+        // exceeds the history budget; otherwise every frame would regenerate it.
+        stats.cachedMaskBytes = cacheBytes;
+    }
 
     Mesh glyphMesh(const QRawFont& font, quint32 index)
     {
         auto& glyphs = cache[font];
-        auto it = glyphs.constFind(index);
-        if (it != glyphs.cend())
-            return it.value();
+        auto it = glyphs.find(index);
+        if (it != glyphs.end()) {
+            it->lastUse = cacheEpoch;
+            return it->glyph;
+        }
         auto mesh = std::make_shared<GlyphMesh>();
         const QPainterPath path = font.pathForGlyph(index);
-        mesh->bounds = path.boundingRect().adjusted(-width, -width, width, width);
-        // Process once per unique glyph/width, using Qt's own analytic stroke
-        // renderer. Unlike the stock Text.Outline style, width is unrestricted.
-        QSGCurveProcessor::processStroke(QQuadPath::fromPainterPath(path), 2,
-            float(width * 2), false, Qt::RoundJoin, Qt::RoundCap,
-            [&mesh](const auto& v, const auto& c, const auto& n, const auto& e,
-                    QSGCurveStrokeNode::TriangleFlags flags) {
-                mesh->triangles.append({v, c, n, e,
-                    flags.testFlag(QSGCurveStrokeNode::TriangleFlag::Line)});
-            });
+        if (!path.isEmpty()) {
+            const QRectF ink = path.boundingRect().adjusted(-width, -width, width, width);
+            // Guard extreme font sizes without allocating unbounded images.
+            const qreal scale = qMin(rasterScale,
+                2044.0 / qMax(qreal(1), qMax(ink.width(), ink.height())));
+            const QRect pixels = QRectF(ink.topLeft() * scale,
+                ink.size() * scale).toAlignedRect().adjusted(-2, -2, 2, 2);
+            mesh->bounds = QRectF(pixels.topLeft() / scale, QSizeF(pixels.size()) / scale);
+            mesh->mask = QImage(pixels.size(), QImage::Format_ARGB32_Premultiplied);
+            mesh->mask.fill(Qt::transparent);
+            QPainter painter(&mesh->mask);
+            painter.setRenderHint(QPainter::Antialiasing);
+            painter.scale(scale, scale);
+            painter.translate(-mesh->bounds.topLeft());
+            painter.strokePath(path, QPen(Qt::white, width * 2, Qt::SolidLine,
+                                         Qt::RoundCap, Qt::RoundJoin));
+        }
         ++stats.generatedGlyphs;
-        glyphs.insert(index, mesh);
+        cacheBytes += mesh->mask.sizeInBytes();
+        glyphs.insert(index, {mesh, cacheEpoch});
         return mesh;
     }
 };
@@ -155,6 +182,14 @@ void TextOutlineItem::scheduleLayout()
     update();
 }
 
+void TextOutlineItem::scheduleViewport()
+{
+    d->viewportDirty = true;
+    polish();
+    // The inherited scene-graph transform already moves the existing quads.
+    // Only updatePolish can decide whether new visible content is needed.
+}
+
 void TextOutlineItem::setSource(QQuickItem* item)
 {
     auto* edit = qobject_cast<QQuickTextEdit*>(item);
@@ -163,7 +198,7 @@ void TextOutlineItem::setSource(QQuickItem* item)
     for (const auto& connection : std::as_const(d->connections))
         disconnect(connection);
     d->connections.clear();
-    d->cache.clear();
+    d->clearCache();
     d->source = edit;
     if (edit) {
         const auto watch = [this, edit](auto signal) {
@@ -173,7 +208,7 @@ void TextOutlineItem::setSource(QQuickItem* item)
         watch(&QQuickTextEdit::preeditTextChanged);
         watch(&QQuickTextEdit::contentSizeChanged);
         d->connections.append(connect(edit, &QQuickTextEdit::fontChanged, this, [this] {
-            d->cache.clear();
+            d->clearCache();
             scheduleLayout();
         }));
         watch(&QQuickTextEdit::effectiveHorizontalAlignmentChanged);
@@ -187,8 +222,9 @@ void TextOutlineItem::setSource(QQuickItem* item)
         watch(&QQuickItem::heightChanged);
         watch(&QQuickItem::xChanged);
         watch(&QQuickItem::yChanged);
+        watch(&QQuickItem::parentChanged);
         d->connections.append(connect(edit, &QObject::destroyed, this, [this] {
-            d->cache.clear();
+            d->clearCache();
             scheduleLayout();
             emit sourceChanged();
         }));
@@ -206,7 +242,7 @@ void TextOutlineItem::setOutlinePixels(qreal width)
     if (d->width == width)
         return;
     d->width = width;
-    d->cache.clear();
+    d->clearCache();
     scheduleLayout();
     emit outlinePixelsChanged();
 }
@@ -223,6 +259,8 @@ void TextOutlineItem::setColor(const QColor& color)
 void TextOutlineItem::geometryChange(const QRectF& now, const QRectF& before)
 {
     QQuickItem::geometryChange(now, before);
+    // Moving this adapter relative to its source changes the document offset.
+    // Actual canvas drag/pan moves their common ancestor, handled separately.
     scheduleLayout();
 }
 
@@ -235,40 +273,36 @@ void TextOutlineItem::itemChange(ItemChange change, const ItemChangeData& data)
         d->windowConnections.clear();
         if (data.window) {
             d->windowConnections.append(connect(data.window, &QQuickWindow::widthChanged,
-                                               this, &TextOutlineItem::scheduleLayout));
+                                               this, &TextOutlineItem::scheduleViewport));
             d->windowConnections.append(connect(data.window, &QQuickWindow::heightChanged,
-                                               this, &TextOutlineItem::scheduleLayout));
+                                               this, &TextOutlineItem::scheduleViewport));
         }
         scheduleLayout();
-    } else if (change == ItemTransformHasChanged || change == ItemParentHasChanged
-               || change == ItemDevicePixelRatioHasChanged) {
-        // ItemObservesViewport propagates ancestor pan/zoom changes here.
+    } else if (change == ItemParentHasChanged) {
         scheduleLayout();
+    } else if (change == ItemTransformHasChanged || change == ItemDevicePixelRatioHasChanged) {
+        // ItemObservesViewport propagates ancestor pan/zoom changes here.
+        scheduleViewport();
     }
 }
 
 void TextOutlineItem::updatePolish()
 {
-    if (!d->layoutDirty)
+    if (!d->layoutDirty && !d->viewportDirty)
         return;
     QElapsedTimer timer;
     timer.start();
-    d->layoutDirty = false;
-    const auto previous = std::move(d->chunks);
-    d->chunks = {};
-    d->stats = {};
-    if (!d->source || d->width <= 0)
+    bool contentChanged = d->layoutDirty;
+    d->layoutDirty = d->viewportDirty = false;
+    d->stats.generatedGlyphs = d->stats.rebuiltChunks = d->stats.movedChunks = 0;
+    d->stats.layoutPasses = d->stats.uploadedGlyphs = 0;
+    d->stats.polishNanoseconds = d->stats.syncNanoseconds = 0;
+    if (!d->source || d->width <= 0) {
+        d->chunks.clear();
+        d->stats = {};
+        update();
         return;
-
-    auto* edit = d->source.data();
-    edit->ensurePolished();
-    auto* text = QQuickTextEditPrivate::get(edit);
-    auto* doc = text->document;
-    auto* layout = doc->documentLayout();
-    layout->documentSize(); // Finish any pending QTextDocument layout.
-    // Read Qt's actual offset, including padding and RTL alignment. Recreating
-    // its alignment formulas was the cause of fill/border drift in the SVG path.
-    const QPointF offset = edit->mapToItem(this, QPointF(text->xoff, text->yoff));
+    }
     QRectF visibleBounds = clipRect();
     if (flags().testFlag(ItemObservesViewport) && window()) {
         // An intermediate clipped item need not itself observe the viewport.
@@ -288,17 +322,60 @@ void TextOutlineItem::updatePolish()
     const QPointF sceneX = mapToScene(QPointF(1, 0)) - sceneOrigin;
     const QPointF sceneY = mapToScene(QPointF(0, 1)) - sceneOrigin;
     const qreal dpr = window() ? window()->effectiveDevicePixelRatio() : 1;
-    const auto textureExtent = [dpr](qreal extent, const QPointF& axis) {
-        const qreal pixels = extent * std::hypot(axis.x(), axis.y()) * dpr;
-        return int(qBound(qreal(1), std::ceil(pixels), qreal(4096)));
+    const qreal density = qMax(std::hypot(sceneX.x(), sceneX.y()),
+                              std::hypot(sceneY.x(), sceneY.y())) * dpr;
+    // Upgrade before magnification, but downgrade only below half resolution.
+    // Hysteresis also prevents tiny floating-point translation errors at exact
+    // zoom powers from repeatedly invalidating every glyph in the cache.
+    const qreal wantedScale = qMax(qreal(0.0625), density);
+    if (wantedScale > d->rasterScale * (1 + 1e-5)
+        || wantedScale < d->rasterScale * 0.5) {
+        d->rasterScale = std::exp2(std::ceil(std::log2(wantedScale) * 2 - 1e-5) / 2);
+        d->clearCache();
+        contentChanged = true;
+    }
+    // Keep a small screen-space guard around the visible area. Panning or
+    // dragging within it needs neither document access nor node rebuilding,
+    // and the optional translucent mask retains an identical source rectangle.
+    const QRectF itemBounds = boundingRect().toAlignedRect();
+    const QRectF previousBounds = d->renderedRect;
+    if (!visibleBounds.isEmpty()) {
+        if (previousBounds.contains(visibleBounds) && itemBounds.contains(previousBounds)) {
+            visibleBounds = previousBounds;
+        } else {
+            const qreal guard = 96 * dpr / qMax(qreal(0.0625), density);
+            visibleBounds = visibleBounds.adjusted(-guard, -guard, guard, guard)
+                .toAlignedRect().intersected(itemBounds.toRect());
+        }
+    }
+    const auto textureExtent = [this](qreal extent) {
+        return int(qBound(qreal(1), std::ceil(extent * d->rasterScale), qreal(4096)));
     };
-    const QSize pixelSize(textureExtent(visibleBounds.width(), sceneX),
-                          textureExtent(visibleBounds.height(), sceneY));
+    const QSize pixelSize(textureExtent(visibleBounds.width()), textureExtent(visibleBounds.height()));
     if (d->renderedRect != visibleBounds || d->renderedPixelSize != pixelSize) {
         d->renderedRect = visibleBounds;
         d->renderedPixelSize = pixelSize;
         emit viewportChanged();
     }
+    if (!contentChanged && previousBounds == visibleBounds) {
+        d->stats.polishNanoseconds = timer.nsecsElapsed();
+        return;
+    }
+    const auto previous = std::move(d->chunks);
+    d->chunks = {};
+    d->stats.glyphs = d->stats.chunks = 0;
+    d->stats.triangles = 0;
+    d->stats.layoutPasses = 1;
+    ++d->cacheEpoch;
+    auto* edit = d->source.data();
+    edit->ensurePolished();
+    auto* text = QQuickTextEditPrivate::get(edit);
+    auto* doc = text->document;
+    auto* layout = doc->documentLayout();
+    layout->documentSize(); // Finish any pending QTextDocument layout.
+    // Read Qt's actual offset, including padding and RTL alignment. Recreating
+    // its alignment formulas was the cause of fill/border drift in the SVG path.
+    const QPointF offset = edit->mapToItem(this, QPointF(text->xoff, text->yoff));
     QList<PlacedGlyph> placed;
 
     for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
@@ -327,15 +404,20 @@ void TextOutlineItem::updatePolish()
                 const auto indexes = run.glyphIndexes();
                 const auto positions = run.positions();
                 for (qsizetype i = 0; i < indexes.size(); ++i) {
-                    const Mesh mesh = d->glyphMesh(font, indexes[i]);
-                    if (mesh->triangles.isEmpty())
-                        continue;
                     const QPointF position = positions[i] + blockOffset;
+                    // Do not rasterize previously unseen offscreen glyphs.
+                    const QRectF bounds = font.boundingRect(indexes[i])
+                        .adjusted(-d->width - 2, -d->width - 2, d->width + 2, d->width + 2);
+                    if (!visibleBounds.intersects(bounds.translated(position)))
+                        continue;
+                    const Mesh mesh = d->glyphMesh(font, indexes[i]);
+                    if (mesh->mask.isNull())
+                        continue;
                     if (!visibleBounds.intersects(mesh->bounds.translated(position)))
                         continue;
                     placed.append({mesh, position});
                     ++d->stats.glyphs;
-                    d->stats.triangles += mesh->triangles.size();
+                    d->stats.triangles += 2; // One ordinary Qt image quad.
                 }
             }
         }
@@ -408,6 +490,7 @@ void TextOutlineItem::updatePolish()
         appendChunk(boundaries[i] + delta, boundaries[i + 1] + delta);
 
     d->stats.chunks = int(d->chunks.size());
+    d->trimCache();
     d->stats.polishNanoseconds = timer.nsecsElapsed();
     update();
 }
@@ -419,10 +502,36 @@ QSGNode* TextOutlineItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*
     auto* root = static_cast<OutlineNode*>(oldNode);
     if (d->chunks.isEmpty()) {
         delete root;
+        d->stats.atlasedGlyphs = 0;
+        d->stats.textureBytes = 0;
+        d->stats.uploadedGlyphs = 0;
+        d->stats.syncNanoseconds = timer.nsecsElapsed();
         return nullptr;
     }
     if (!root)
         root = new OutlineNode;
+    d->stats.uploadedGlyphs = 0;
+    const bool colorChanged = root->color != d->color;
+    root->color = d->color;
+    QSet<const GlyphMesh*> usedTextures;
+    const auto textureFor = [this, root](const Mesh& glyph) {
+        auto it = root->textures.constFind(glyph.get());
+        if (it != root->textures.cend())
+            return it->texture;
+        QImage colored = glyph->mask;
+        if (d->color != QColor(Qt::white)) {
+            QPainter painter(&colored);
+            painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+            painter.fillRect(colored.rect(), d->color);
+        }
+        // Qt packs these immutable glyphs in its shared atlas when possible.
+        // Creation here (on the render thread) is required for atlas support.
+        QSGTexture* texture = window()->createTextureFromImage(
+            colored, QQuickWindow::TextureCanUseAtlas);
+        root->textures.insert(glyph.get(), {glyph, texture});
+        ++d->stats.uploadedGlyphs;
+        return texture;
+    };
     // Common alignment/padding motion belongs on one parent transform. In
     // particular, centering a long line while typing must not move each chunk
     // independently and make Qt rebatch the complete line.
@@ -457,6 +566,31 @@ QSGNode* TextOutlineItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*
             root->appendChildNode(node);
         }
         root->chunks.append(node);
+        for (const auto& glyph : chunk.glyphs)
+            usedTextures.insert(glyph.mesh.get());
+    }
+    // Free old consumers and atlas slots BEFORE allocating replacements. If
+    // slots are released afterwards, Qt's failed atlas allocations stay as
+    // separate textures even though space has subsequently become available.
+    for (const auto& unused : std::as_const(available))
+        qDeleteAll(unused);
+    if (colorChanged) {
+        for (auto* node : std::as_const(root->chunks)) {
+            qDeleteAll(node->images);
+            node->images.clear();
+        }
+    }
+    for (auto it = root->textures.begin(); it != root->textures.end();) {
+        if (colorChanged || !usedTextures.contains(it.key())) {
+            delete it->texture;
+            it = root->textures.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (qsizetype i = 0; i < d->chunks.size(); ++i) {
+        const Chunk& chunk = d->chunks[i];
+        ChunkNode* node = root->chunks[i];
         QMatrix4x4 matrix;
         matrix.translate(chunk.origin.x() - origin.x(), chunk.origin.y() - origin.y());
         // Unlike QQuickItem setters, QSGTransformNode::setMatrix marks the
@@ -465,37 +599,31 @@ QSGNode* TextOutlineItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*
             node->setMatrix(matrix);
             ++d->stats.movedChunks;
         }
-        if (node->glyphs != chunk.glyphs) {
-            delete node->stroke;
-            node->stroke = new ChunkStrokeNode;
-            node->stroke->setStrokeWidth(float(d->width * 2));
+        // A reused chunk has exactly equal placements. Only a newly created
+        // chunk (or recoloring) needs new image nodes; motion changes nothing.
+        if (node->images.isEmpty()) {
             for (const auto& glyph : chunk.glyphs) {
-                const QVector2D p(glyph.position);
-                for (const auto& t : glyph.mesh->triangles) {
-                    const std::array<QVector2D, 3> vertices {
-                        t.vertices[0] + p, t.vertices[1] + p, t.vertices[2] + p};
-                    if (t.line) {
-                        node->stroke->appendTriangle(vertices,
-                            std::array<QVector2D, 2>{t.controls[0] + p, t.controls[2] + p},
-                            t.normals, t.extrusions);
-                    } else {
-                        node->stroke->appendTriangle(vertices,
-                            {t.controls[0] + p, t.controls[1] + p, t.controls[2] + p},
-                            t.normals, t.extrusions);
-                    }
-                }
+                auto* image = window()->createImageNode();
+                image->setOwnsTexture(false);
+                image->setTexture(textureFor(glyph.mesh));
+                image->setFiltering(QSGTexture::Linear);
+                image->setRect(glyph.mesh->bounds.translated(glyph.position));
+                node->appendChildNode(image);
+                node->images.append(image);
             }
-            node->stroke->cookGeometry();
-            node->appendChildNode(node->stroke);
+        }
+        if (node->glyphs != chunk.glyphs) {
             node->glyphs = chunk.glyphs;
             node->key = chunk.key;
             ++d->stats.rebuiltChunks;
         }
-        if (node->stroke->color() != d->color)
-            node->stroke->setColor(d->color);
     }
-    for (const auto& unused : std::as_const(available))
-        qDeleteAll(unused);
+    d->stats.atlasedGlyphs = 0;
+    d->stats.textureBytes = 0;
+    for (const auto& entry : std::as_const(root->textures)) {
+        d->stats.atlasedGlyphs += entry.texture->isAtlasTexture();
+        d->stats.textureBytes += entry.glyph->mask.sizeInBytes();
+    }
     d->stats.syncNanoseconds = timer.nsecsElapsed();
     return root;
 }

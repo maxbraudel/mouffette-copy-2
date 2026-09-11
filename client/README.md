@@ -108,8 +108,9 @@ cd .\client
 
 ## Architecture
 
-The text outline renderer uses the existing `TextEdit` document and Qt's GPU
-curve renderer. Its Qt-private integration is isolated in `TextOutlineItem.cpp`;
+The text outline renderer uses the existing `TextEdit` document, cached glyph
+masks and Qt's image-node/texture-atlas renderer. Its Qt-private document access
+is isolated in `TextOutlineItem.cpp`;
 build and package it with the same Qt version. See
 [the rendering investigation and validation notes](docs/text-outline-rendering.md).
 
