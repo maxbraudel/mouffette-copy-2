@@ -3,6 +3,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cmath>
+#include <utility>
 
 #include <QFont>
 #include <QFontMetricsF>
@@ -61,6 +63,7 @@ void TextGlyphPath::clearGlyphCaches()
     m_intrinsicContentWidth    = 0.0;
     m_strokeXOffset            = 0.0;
     m_svgBuiltAtWidth     = 0.0;
+    m_svgBuiltHorizontalAlignment.clear();
 }
 
 void TextGlyphPath::clearStrokeCache()
@@ -75,6 +78,7 @@ void TextGlyphPath::clearStrokeCache()
     m_cachedVertOffset    = -1.0;
     m_strokeXOffset       = 0.0;
     m_svgBuiltAtWidth     = 0.0;
+    m_svgBuiltHorizontalAlignment.clear();
     // NOTE: m_prevReflowHash is intentionally NOT reset here.  Since
     // strokeCacheWarm is always false after this call (m_cachedOutlinePixels=-1),
     // the reflowStable && strokeCacheWarm fast-exit is never taken anyway.
@@ -162,6 +166,7 @@ void TextGlyphPath::updatePolish()
 
             QTextOption textOption;
             textOption.setWrapMode(m_fitToText ? QTextOption::NoWrap : QTextOption::WordWrap);
+            textOption.setFlags(textOption.flags() | QTextOption::IncludeTrailingSpaces);
             Qt::Alignment hAlign = Qt::AlignHCenter;
             if (m_horizontalAlignment == QLatin1String("left"))       hAlign = Qt::AlignLeft;
             else if (m_horizontalAlignment == QLatin1String("right")) hAlign = Qt::AlignRight;
@@ -197,33 +202,55 @@ void TextGlyphPath::updatePolish()
                 layout.setTextOption(textOption);
                 layout.beginLayout();
                 qreal lineY = 0.0;
+                QVector<QTextLine> laidOutLines;
                 while (true) {
                     QTextLine line = layout.createLine();
                     if (!line.isValid()) break;
                     line.setLineWidth(availWidth);
                     line.setPosition(QPointF(0.0, lineY));
-                    // Track the widest line across all paragraphs.  naturalTextWidth()
-                    // returns the line's content width independent of alignment/container.
-                    m_intrinsicContentWidth = qMax(m_intrinsicContentWidth, line.naturalTextWidth());
+                    laidOutLines.append(line);
+                    // QML's TextEdit document is configured to include trailing
+                    // spaces in its effective line advance. Track the same width
+                    // here so the no-reflow fast path cannot accept a too-small box.
+                    const QString lineText = para.mid(line.textStart(), line.textLength());
+                    const qreal fullAdvance = qMax(line.naturalTextWidth(), fm.horizontalAdvance(lineText));
+                    m_intrinsicContentWidth = qMax(m_intrinsicContentWidth, fullAdvance);
                     // Mirror QTextDocumentLayout exactly: advance by qCeil(ascent+descent+leading)
                     // so that each line snaps to an integer pixel boundary, matching the
                     // integer-ceiled rawHeight used by getLineHeightParams() internally.
                     lineY += qCeil(line.ascent() + line.descent() + line.leading());
                 }
                 layout.endLayout();
-                for (const QGlyphRun& run : layout.glyphRuns()) {
-                    const QRawFont rf    = run.rawFont();
-                    const QString keyPfx = rf.familyName()
-                        + QLatin1Char('|') + rf.styleName()
-                        + QLatin1Char('|') + QString::number(rf.pixelSize(), 'f', 3)
-                        + QLatin1Char('|');
-                    CachedGlyphRun cgr;
-                    cgr.rawFont       = rf;
-                    cgr.ids           = run.glyphIndexes();
-                    cgr.positions     = run.positions();
-                    cgr.runPrefixHash = static_cast<quint32>(qHash(keyPfx) & 0xFFFFFFFFu);
-                    cgr.startY        = totalHeight;
-                    m_cachedGlyphRuns.append(std::move(cgr));
+                for (const QTextLine& line : std::as_const(laidOutLines)) {
+                    const QString lineText = para.mid(line.textStart(), line.textLength());
+                    const qreal fullAdvance = qMax(line.naturalTextWidth(), fm.horizontalAdvance(lineText));
+                    const qreal trailingAdvance = qMax<qreal>(0.0, fullAdvance - line.naturalTextWidth());
+                    qreal trailingAlignmentCorrection = 0.0;
+                    if (m_horizontalAlignment == QLatin1String("center")) {
+                        trailingAlignmentCorrection = -trailingAdvance * 0.5;
+                    } else if (m_horizontalAlignment == QLatin1String("right")) {
+                        trailingAlignmentCorrection = -trailingAdvance;
+                    }
+
+                    for (const QGlyphRun& run : line.glyphRuns()) {
+                        const QRawFont rf    = run.rawFont();
+                        const QString keyPfx = rf.familyName()
+                            + QLatin1Char('|') + rf.styleName()
+                            + QLatin1Char('|') + QString::number(rf.pixelSize(), 'f', 3)
+                            + QLatin1Char('|');
+                        CachedGlyphRun cgr;
+                        cgr.rawFont       = rf;
+                        cgr.ids           = run.glyphIndexes();
+                        cgr.positions     = run.positions();
+                        if (!qFuzzyIsNull(trailingAlignmentCorrection)) {
+                            for (QPointF& position : cgr.positions) {
+                                position.rx() += trailingAlignmentCorrection;
+                            }
+                        }
+                        cgr.runPrefixHash = static_cast<quint32>(qHash(keyPfx) & 0xFFFFFFFFu);
+                        cgr.startY        = totalHeight;
+                        m_cachedGlyphRuns.append(std::move(cgr));
+                    }
                 }
                 totalHeight += (lineY > 0.0 ? lineY : emptyLineHeight);
             }
@@ -373,7 +400,9 @@ void TextGlyphPath::updatePolish()
     // are identical to the last full SVG build.  The only valid change is a pure
     // x-shift from alignment, which strokeXOffset handles without retessellation.
     const bool reflowStable = (m_reflowHash == m_prevReflowHash);
-    if (reflowStable && strokeCacheWarm) {
+    const bool builtAlignmentUnchanged =
+        (m_svgBuiltHorizontalAlignment == m_horizontalAlignment);
+    if (reflowStable && strokeCacheWarm && builtAlignmentUnchanged) {
         // No reflow, stroke shapes unchanged.  For center/right alignment the
         // text shifted purely in x — update the cheap QML Translate offset so
         // the border follows without any Qt Shape retessellation at all.
@@ -398,6 +427,7 @@ void TextGlyphPath::updatePolish()
     m_cachedOutlinePixels = m_outlinePixels;
     m_cachedVertOffset    = m_vertOffset;   // mark vert offset as baked into this SVG
     m_svgBuiltAtWidth     = m_itemWidth;
+    m_svgBuiltHorizontalAlignment = m_horizontalAlignment;
     if (m_strokeXOffset != 0.0) {
         m_strokeXOffset = 0.0;
         emit strokeXOffsetChanged();
@@ -574,12 +604,13 @@ QByteArray TextGlyphPath::buildStrokeSvg()
         const QList<quint32>& ids   = cgr.ids;
         const QList<QPointF>& poses = cgr.positions;
         const int count = qMin(ids.size(), poses.size());
-        // Quantized outline key component: quarter-pixel precision.  Encodes the
+        // Quantized outline key component: 0.001-pixel precision, matching the
+        // SVG coordinate encoder. Encodes the
         // current outlinePixels into the cache key so different thicknesses get
         // independent cache slots.  This eliminates the need to clear the entire
         // m_strokeSvgCache on every outlinePixels change.
         const quint32 quantizedOutline =
-            static_cast<quint32>(qRound(m_outlinePixels * 4.0));
+            static_cast<quint32>(qRound(m_outlinePixels * 1000.0));
 
         for (int i = 0; i < count; ++i) {
             const quint32 id        = ids[i];
@@ -591,15 +622,29 @@ QByteArray TextGlyphPath::buildStrokeSvg()
                 // Cold path: try atlas first, fall back to QPainterPathStroker.
                 bool builtFromAtlas = false;
                 const GlyphBorderAtlas& atlas = GlyphBorderAtlas::instance();
-                if (atlas.isLoaded() && m_fontPixelSize > 0) {
+                const bool atlasFontMatches =
+                    cgr.rawFont.familyName().compare(QStringLiteral("Impact"), Qt::CaseInsensitive) == 0
+                    && !m_fontItalic
+                    && m_fontWeight == static_cast<int>(QFont::Normal);
+                if (atlas.isLoaded() && atlasFontMatches && m_fontPixelSize > 0) {
                     const double thicknessPct =
                         (static_cast<double>(m_outlinePixels) /
                          static_cast<double>(m_fontPixelSize)) * 100.0;
+                    const float snappedPct = atlas.nearestThicknessStep(
+                        static_cast<float>(thicknessPct));
+                    const double snappedPixels = snappedPct > 0.0f
+                        ? (static_cast<double>(snappedPct) / 100.0)
+                            * static_cast<double>(m_fontPixelSize)
+                        : -1.0;
                     const double scale =
                         static_cast<double>(m_fontPixelSize) / atlas.refPixelSize();
                     QVector<AtlasSubpathRaw> rawSubpaths;
-                    if (atlas.lookup(static_cast<uint32_t>(id),
-                                     static_cast<float>(thicknessPct),
+                    // The atlas stores discrete percentages. Never substitute a
+                    // visibly different thickness merely to get a cache hit.
+                    if (snappedPixels > 0.0
+                        && std::abs(snappedPixels - m_outlinePixels) <= 0.05
+                        && atlas.lookup(static_cast<uint32_t>(id),
+                                     snappedPct,
                                      rawSubpaths)) {
                         strokeIt = m_strokeSvgCache.insert(
                             cacheKey,

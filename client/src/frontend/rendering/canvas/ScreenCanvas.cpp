@@ -11,6 +11,7 @@
 #include "frontend/ui/overlays/canvas/CanvasMediaSettingsPanel.h" // for settings panel overlay
 #include "frontend/ui/overlays/canvas/CanvasGlobalOverlayHost.h"
 #include "backend/domain/media/TextMediaItem.h" // for text media creation
+#include "backend/domain/media/TextRenderState.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h" // for toast notifications
 #include "frontend/ui/widgets/ClippedContainer.h" // for ClippedContainer widget
 #include <QGraphicsScene>
@@ -516,6 +517,7 @@ void ScreenCanvas::setOverlayViewport(QWidget* overlayViewport) {
 
 QJsonObject ScreenCanvas::serializeSceneState() const {
     QJsonObject root;
+    root["renderSchemaVersion"] = 2;
     // Phase 3: canvasSessionId is MANDATORY - only include in manifest if it's not the default
     if (m_activeIdeaId != DEFAULT_IDEA_ID) {
         root["canvasSessionId"] = m_activeIdeaId;
@@ -547,52 +549,31 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
                 m["type"] = "text";
                 // Include text-specific properties
                 if (auto* textMedia = dynamic_cast<TextMediaItem*>(media)) {
-                    m["text"] = textMedia->text();
-                    m["fontFamily"] = textMedia->font().family();
+                    const TextRenderState textState = TextRenderMetrics::fromMediaItem(*textMedia);
+                    m["text"] = textState.text;
+                    m["fontFamily"] = textState.fontFamily;
                     m["fontSize"] = textMedia->font().pointSize();
                     m["fontBold"] = textMedia->font().bold();
-                    m["fontItalic"] = textMedia->font().italic();
-                    m["fontWeight"] = textMedia->textFontWeightValue();
-                    QColor textColor = textMedia->textColor();
-                    m["textColor"] = textColor.name(QColor::HexArgb);
-                    m["textBorderWidthPercent"] = textMedia->textBorderWidth();
-                    m["textBorderColor"] = textMedia->textBorderColor().name(QColor::HexArgb);
-                    m["textHighlightEnabled"] = textMedia->highlightEnabled();
-                    m["textHighlightColor"] = textMedia->highlightColor().name(QColor::HexArgb);
-                    m["textFitToTextEnabled"] = textMedia->fitToTextEnabled();
+                    m["fontItalic"] = textState.italic;
+                    m["fontWeight"] = textState.fontWeight;
+                    m["fontPixelSize"] = textState.fontPixelSize;
+                    m["fontUnderline"] = textState.underline;
+                    m["fontUppercase"] = textState.uppercase;
+                    m["textColor"] = textState.textColor.name(QColor::HexArgb);
+                    m["textBorderWidthPercent"] = textState.outlineWidthPercent;
+                    m["textOutlineWidthPx"] = textState.outlineWidthPixels;
+                    m["textBorderColor"] = textState.outlineColor.name(QColor::HexArgb);
+                    m["textHighlightEnabled"] = textState.highlightEnabled;
+                    m["textHighlightColor"] = textState.highlightColor.name(QColor::HexArgb);
+                    m["textFitToTextEnabled"] = textState.fitToTextEnabled;
                     qreal uniformScale = textMedia->uniformScaleFactor();
                     if (!std::isfinite(uniformScale) || std::abs(uniformScale) < 1e-6) {
                         uniformScale = 1.0;
                     }
                     m["uniformScale"] = uniformScale;
 
-                    QString horizontalAlignment = QStringLiteral("center");
-                    switch (textMedia->horizontalAlignment()) {
-                        case TextMediaItem::HorizontalAlignment::Left:
-                            horizontalAlignment = QStringLiteral("left");
-                            break;
-                        case TextMediaItem::HorizontalAlignment::Center:
-                            horizontalAlignment = QStringLiteral("center");
-                            break;
-                        case TextMediaItem::HorizontalAlignment::Right:
-                            horizontalAlignment = QStringLiteral("right");
-                            break;
-                    }
-                    m["horizontalAlignment"] = horizontalAlignment;
-
-                    QString verticalAlignment = QStringLiteral("center");
-                    switch (textMedia->verticalAlignment()) {
-                        case TextMediaItem::VerticalAlignment::Top:
-                            verticalAlignment = QStringLiteral("top");
-                            break;
-                        case TextMediaItem::VerticalAlignment::Center:
-                            verticalAlignment = QStringLiteral("center");
-                            break;
-                        case TextMediaItem::VerticalAlignment::Bottom:
-                            verticalAlignment = QStringLiteral("bottom");
-                            break;
-                    }
-                    m["verticalAlignment"] = verticalAlignment;
+                    m["horizontalAlignment"] = textState.horizontalAlignment;
+                    m["verticalAlignment"] = textState.verticalAlignment;
                 }
             } else {
                 m["type"] = media->isVideoMedia() ? "video" : "image";
@@ -613,6 +594,7 @@ QJsonObject ScreenCanvas::serializeSceneState() const {
             m["baseWidth"] = media->baseSizePx().width();
             m["baseHeight"] = media->baseSizePx().height();
             m["visible"] = media->isContentVisible();
+            m["z"] = media->zValue();
             // Compute per-screen spans: for every screen intersecting this media, include:
             // - legacy full-bounds normalized geometry (norm*) for backward compatibility
             // - clipped destination geometry on the target screen (spanDestNorm*)
@@ -1555,6 +1537,7 @@ std::pair<int, bool> ScreenCanvas::calculateDesiredWidthAndConstraint() {
 }
 
 ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
+    m_mediaRuntimeContext = new MediaRuntimeHooks::Context(this);
     setAcceptDrops(true);
     setDragMode(QGraphicsView::NoDrag); // manual panning / selection logic
     m_scene = new QGraphicsScene(this);
@@ -1600,20 +1583,20 @@ ScreenCanvas::ScreenCanvas(QWidget* parent) : QGraphicsView(parent) {
     });
     
     // Set up screen border snapping callbacks for media items
-    MediaRuntimeHooks::setScreenSnapCallback([this](const QPointF& pos, const QRectF& bounds, bool shift, ResizableMediaBase* item) {
+    m_mediaRuntimeContext->screenSnapCallback = [this](const QPointF& pos, const QRectF& bounds, bool shift, ResizableMediaBase* item) {
         return snapToMediaAndScreenTargets(pos, bounds, shift, item);
-    });
+    };
 
     // Unified resize snap: screens + other media (corner precedence)
-    MediaRuntimeHooks::setResizeSnapCallback([this](qreal scale,
-                                                    const QPointF& fixed,
-                                                    const QPointF& movingItemPoint,
-                                                    const QSize& base,
-                                                    bool shift,
-                                                    ResizableMediaBase* item) {
+    m_mediaRuntimeContext->resizeSnapCallback = [this](qreal scale,
+                                                       const QPointF& fixed,
+                                                       const QPointF& movingItemPoint,
+                                                       const QSize& base,
+                                                       bool shift,
+                                                       ResizableMediaBase* item) {
         auto r = snapResizeToScreenBorders(scale, fixed, movingItemPoint, base, shift, item);
         return ResizeSnapFeedback{ r.scale, r.cornerSnapped, r.snappedMovingCornerScene };
-    });
+    };
 
     // Initialize global info overlay (top-right)
     initInfoOverlay();
@@ -3799,6 +3782,7 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                 if (isVideo) {
                     // Use default handle sizes similar to previous inline defaults (visual 12, selection 30)
                     auto* v = new ResizableVideoItem(localPath, 12, 30, fi.fileName(), m_videoControlsFadeMs);
+                    v->setRuntimeContext(m_mediaRuntimeContext);
                     if (m_applicationSuspended) {
                         v->setApplicationSuspended(true);
                     }
@@ -3839,6 +3823,7 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
                     QPixmap pm(localPath);
                     if (!pm.isNull()) {
                         auto* p = new ResizablePixmapItem(pm, 12, 30, QFileInfo(localPath).fileName());
+                        p->setRuntimeContext(m_mediaRuntimeContext);
                         p->setSourcePath(localPath);
                         p->setScale(m_scaleFactor);
                         positionMediaCenteredAtScene(p, scenePos);
@@ -3856,6 +3841,7 @@ void ScreenCanvas::dropEvent(QDropEvent* event) {
             QPixmap pm = QPixmap::fromImage(img);
             if (!pm.isNull()) {
                 auto* p = new ResizablePixmapItem(pm, 12, 30, QString());
+                p->setRuntimeContext(m_mediaRuntimeContext);
                 QString cacheRoot = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
                 if (cacheRoot.isEmpty()) {
                     cacheRoot = QDir::tempPath();
@@ -5566,6 +5552,7 @@ void ScreenCanvas::requestLocalFileDropAt(const QStringList& localPaths, const Q
 
         if (isVideo) {
             auto* v = new ResizableVideoItem(localPath, 12, 30, fi.fileName(), m_videoControlsFadeMs);
+            v->setRuntimeContext(m_mediaRuntimeContext);
             if (m_applicationSuspended) {
                 v->setApplicationSuspended(true);
             }
@@ -5590,6 +5577,7 @@ void ScreenCanvas::requestLocalFileDropAt(const QStringList& localPaths, const Q
         QPixmap pm(localPath);
         if (!pm.isNull()) {
             auto* p = new ResizablePixmapItem(pm, 12, 30, fi.fileName());
+            p->setRuntimeContext(m_mediaRuntimeContext);
             p->setSourcePath(localPath);
             p->setScale(m_scaleFactor);
             positionMediaCenteredAtScene(p, scenePos);
@@ -5616,6 +5604,7 @@ TextMediaItem* ScreenCanvas::createTextMediaAtPosition(const QPointF& scenePos) 
         m_mediaHandleSelectionSizePx,
         TextMediaDefaults::DEFAULT_TEXT
     );
+    textItem->setRuntimeContext(m_mediaRuntimeContext);
     
     // Apply scale adjusted for current canvas zoom to maintain constant visual size
     // Get current canvas zoom level from view transform

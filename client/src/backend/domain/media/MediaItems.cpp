@@ -143,7 +143,9 @@ void ResizableMediaBase::fadeContentIn(double seconds) {
     m_fadeAnimation->setEasingCurve(QEasingCurve::Linear);
     QObject::connect(m_fadeAnimation, &QVariantAnimation::valueChanged, [this](const QVariant& v){
         m_contentDisplayOpacity = v.toDouble();
-        if (auto tick = MediaRuntimeHooks::mediaOpacityAnimationTickNotifier()) { tick(); }
+        if (m_runtimeContext && m_runtimeContext->mediaOpacityAnimationTickNotifier) {
+            m_runtimeContext->mediaOpacityAnimationTickNotifier();
+        }
         update();
     });
     QObject::connect(m_fadeAnimation, &QVariantAnimation::finished, [this](){
@@ -169,7 +171,9 @@ void ResizableMediaBase::fadeContentOut(double seconds) {
     m_fadeAnimation->setEasingCurve(QEasingCurve::Linear);
     QObject::connect(m_fadeAnimation, &QVariantAnimation::valueChanged, [this](const QVariant& v){
         m_contentDisplayOpacity = v.toDouble();
-        if (auto tick = MediaRuntimeHooks::mediaOpacityAnimationTickNotifier()) { tick(); }
+        if (m_runtimeContext && m_runtimeContext->mediaOpacityAnimationTickNotifier) {
+            m_runtimeContext->mediaOpacityAnimationTickNotifier();
+        }
         update();
     });
     QObject::connect(m_fadeAnimation, &QVariantAnimation::finished, [this](){
@@ -196,8 +200,8 @@ void ResizableMediaBase::setMediaSettingsState(const MediaSettingsState& state) 
 }
 
 void ResizableMediaBase::onMediaSettingsChanged() {
-    if (auto notifier = MediaRuntimeHooks::mediaSettingsChangedNotifier()) {
-        notifier(this);
+    if (m_runtimeContext && m_runtimeContext->mediaSettingsChangedNotifier) {
+        m_runtimeContext->mediaSettingsChangedNotifier(this);
     }
 }
 
@@ -458,7 +462,8 @@ QVariant ResizableMediaBase::itemChange(GraphicsItemChange change, const QVarian
         // Disable movement screen-border snapping (Shift) during ANY active resize (corner or midpoint)
         // to prevent the opposite/fixed corner from being repositioned while scaling.
         bool anyResizeActive = (m_activeHandle != None);
-        const auto screenSnap = MediaRuntimeHooks::screenSnapCallback();
+        const auto screenSnap = m_runtimeContext
+            ? m_runtimeContext->screenSnapCallback : MediaRuntimeHooks::ScreenSnapCallback{};
         if (screenSnap && !anyResizeActive) {
             const bool shiftPressed = QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier);
             if (shiftPressed) {
@@ -534,7 +539,8 @@ void ResizableMediaBase::mouseMoveEvent(QGraphicsSceneMouseEvent* event) {
                 qreal newScale = m_initialScale * (currDist / (m_initialGrabDist > 0 ? m_initialGrabDist : 1e-6));
                 newScale = std::clamp<qreal>(newScale, 0.05, 100.0);
                 qreal finalScale = newScale;
-                const auto resizeSnap = MediaRuntimeHooks::resizeSnapCallback();
+                const auto resizeSnap = m_runtimeContext
+                    ? m_runtimeContext->resizeSnapCallback : MediaRuntimeHooks::ResizeSnapCallback{};
                 if (resizeSnap && QGuiApplication::keyboardModifiers().testFlag(Qt::ShiftModifier)) {
                     auto feedback = resizeSnap(newScale, m_fixedScenePoint, m_fixedItemPoint, m_baseSize, true, this);
                     finalScale = feedback.scale;

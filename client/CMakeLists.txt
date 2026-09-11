@@ -4,6 +4,17 @@ project(MouffetteClient VERSION 1.0.0)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(MOUFFETTE_QT_ROOT "" CACHE PATH "Root of the Qt distribution used to build Mouffette")
+option(MOUFFETTE_REQUIRE_EXPLICIT_QT_ROOT "Fail unless MOUFFETTE_QT_ROOT is provided" OFF)
+if(MOUFFETTE_REQUIRE_EXPLICIT_QT_ROOT AND NOT MOUFFETTE_QT_ROOT)
+    message(FATAL_ERROR
+        "MOUFFETTE_QT_ROOT is required by this preset. Point it to a Qt distribution "
+        "compatible with the active compiler and platform SDK.")
+endif()
+if(MOUFFETTE_QT_ROOT)
+    list(PREPEND CMAKE_PREFIX_PATH "${MOUFFETTE_QT_ROOT}")
+endif()
+
 # On Windows, allow building as a console app to see logs in the terminal
 option(CONSOLE_OUTPUT "Build with console subsystem on Windows for visible qDebug logs" OFF)
 
@@ -14,6 +25,25 @@ endif()
 
 # Find Qt6
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia MultimediaWidgets Svg SvgWidgets Concurrent Quick QuickWidgets Qml ShaderTools GuiPrivate)
+
+# Recent macOS SDKs no longer ship AGL.  Some older/broken Qt packages still
+# export it transitively from QtGui; detect that toolchain mismatch at configure
+# time instead of hiding it with linker flags or failing after a full build.
+if(APPLE)
+    get_target_property(_mouffette_qt_gui_binary Qt6::Gui IMPORTED_LOCATION)
+    if(_mouffette_qt_gui_binary AND EXISTS "${_mouffette_qt_gui_binary}")
+        execute_process(
+            COMMAND otool -L "${_mouffette_qt_gui_binary}"
+            OUTPUT_VARIABLE _mouffette_qt_gui_dependencies
+            ERROR_QUIET)
+        if(_mouffette_qt_gui_dependencies MATCHES "AGL\\.framework")
+            message(FATAL_ERROR
+                "The selected QtGui (${_mouffette_qt_gui_binary}) depends on the removed "
+                "macOS AGL framework. Install/select a Qt build compatible with the current "
+                "SDK and configure with -DMOUFFETTE_QT_ROOT=<qt-prefix>.")
+        endif()
+    endif()
+endif()
 
 # Enable Qt MOC
 set(CMAKE_AUTOMOC ON)
@@ -75,9 +105,11 @@ set(SOURCES
     src/frontend/rendering/canvas/TextGlyphPath.cpp
     src/frontend/rendering/canvas/TextEditHelper.cpp
     src/frontend/rendering/canvas/GlyphBorderAtlas.cpp
+    src/frontend/rendering/canvas/CanvasQmlTypes.cpp
     
     # Rendering - Remote
     src/frontend/rendering/remote/RemoteSceneController.cpp
+    src/frontend/rendering/remote/RemoteVideoFrameItem.cpp
     
     # Rendering - Navigation
     src/frontend/rendering/navigation/ScreenNavigationManager.cpp
@@ -104,6 +136,7 @@ set(SOURCES
     # Domain - Media
     src/backend/domain/media/MediaItems.cpp
     src/backend/domain/media/MediaRuntimeHooks.cpp
+    src/backend/domain/media/TextRenderState.cpp
     src/backend/domain/media/TextMediaItem.cpp
 
     # UI - Overlays (Canvas)
@@ -218,6 +251,7 @@ set(HEADERS
     src/frontend/rendering/canvas/TextGlyphPath.h
     src/frontend/rendering/canvas/TextEditHelper.h
     src/frontend/rendering/canvas/GlyphBorderAtlas.h
+    src/frontend/rendering/canvas/CanvasQmlTypes.h
     src/frontend/rendering/canvas/RoundedRectItem.h
     src/frontend/rendering/canvas/SegmentedButtonItem.h
 
@@ -228,6 +262,7 @@ set(HEADERS
     
     # Rendering - Remote
     src/frontend/rendering/remote/RemoteSceneController.h
+    src/frontend/rendering/remote/RemoteVideoFrameItem.h
     
     # Rendering - Navigation
     src/frontend/rendering/navigation/ScreenNavigationManager.h
@@ -254,6 +289,7 @@ set(HEADERS
     # Domain - Media
     src/backend/domain/media/MediaItems.h
     src/backend/domain/media/MediaRuntimeHooks.h
+    src/backend/domain/media/TextRenderState.h
     src/backend/domain/media/TextMediaItem.h
     
     # Network
@@ -385,4 +421,31 @@ if(APPLE)
     # Set Objective-C++ properties for .mm files (updated paths for backend/platform)
     set_source_files_properties(src/backend/platform/macos/MacVideoThumbnailer.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
     set_source_files_properties(src/backend/platform/macos/MacWindowManager.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+
+    add_executable(tst_TextGlyphPath
+        tests/qt/tst_TextGlyphPath.cpp
+        src/frontend/rendering/canvas/TextGlyphPath.cpp
+        src/frontend/rendering/canvas/TextGlyphPath.h
+        src/frontend/rendering/canvas/GlyphBorderAtlas.cpp
+        src/frontend/rendering/canvas/GlyphBorderAtlas.h
+        ${ATLAS_QRC}
+    )
+    target_include_directories(tst_TextGlyphPath PRIVATE src)
+    target_link_libraries(tst_TextGlyphPath PRIVATE Qt6::Core Qt6::Gui Qt6::Quick Qt6::Test)
+    add_test(NAME TextGlyphPath COMMAND tst_TextGlyphPath)
+    set_tests_properties(TextGlyphPath PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    add_executable(tst_MediaRuntimeContext
+        tests/qt/tst_MediaRuntimeContext.cpp
+        src/backend/domain/media/MediaRuntimeHooks.cpp
+        src/backend/domain/media/MediaRuntimeHooks.h
+    )
+    target_include_directories(tst_MediaRuntimeContext PRIVATE src)
+    target_link_libraries(tst_MediaRuntimeContext PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME MediaRuntimeContext COMMAND tst_MediaRuntimeContext)
 endif()

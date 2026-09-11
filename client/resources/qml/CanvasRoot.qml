@@ -637,22 +637,18 @@ Rectangle {
                         }
                     }
 
-                    Loader {
+                    MediaVisual {
                         id: mediaContentLoader
-                        property var media: mediaDelegate.media
-                        property bool selected: mediaDelegate.isSelected
+                        media: mediaDelegate.media
+                        selected: mediaDelegate.isSelected
                         readonly property real liveWidth:  mediaDelegate.usesLiveAltResize
                                                           ? root.liveAltResizeWidth
                                                           : (media ? media.width : 0)
                         readonly property real liveHeight: mediaDelegate.usesLiveAltResize
                                                           ? root.liveAltResizeHeight
                                                           : (media ? media.height : 0)
-                        sourceComponent: {
-                            if (!mediaDelegate.media) return null
-                            if (mediaDelegate.media.mediaType === "video") return videoDelegate
-                            if (mediaDelegate.media.mediaType === "text") return textDelegate
-                            return imageDelegate
-                        }
+                        anchors.fill: parent
+                        textEditable: true
                     }
 
                     Binding {
@@ -699,75 +695,6 @@ Rectangle {
                     }
                 }
 
-                // Components receive mediaX:0/mediaY:0 and mediaScale:1 — the parent
-                // mediaDelegate Item handles all position/scale/z transforms.
-                Component {
-                    id: imageDelegate
-                    ImageItem {
-                        mediaId: parent.media ? (parent.media.mediaId || "") : ""
-                        mediaX: 0
-                        mediaY: 0
-                        mediaWidth: parent.media ? parent.media.width : 0
-                        mediaHeight: parent.media ? parent.media.height : 0
-                        mediaScale: 1.0
-                        mediaZ: parent.media.z
-                        selected: !!parent.selected
-                        imageSource: parent.media
-                                   ? (parent.media.sourceUrl || root.mediaSourceUrl(parent.media.sourcePath || ""))
-                                   : ""
-                    }
-                }
-
-                Component {
-                    id: videoDelegate
-                    VideoItem {
-                        mediaId: parent.media ? (parent.media.mediaId || "") : ""
-                        mediaX: 0
-                        mediaY: 0
-                        mediaWidth: parent.media ? parent.media.width : 0
-                        mediaHeight: parent.media ? parent.media.height : 0
-                        mediaScale: 1.0
-                        mediaZ: parent.media.z
-                        selected: !!parent.selected
-                        cppMediaPlayer: parent.media ? (parent.media.videoPlayerPtr || null) : null
-                        cppVideoSink: parent.media ? (parent.media.videoSinkPtr || null) : null
-                        videoPlaybackErrorCode: parent.media ? (parent.media.videoPlaybackErrorCode || 0) : 0
-                        videoPlaybackErrorString: parent.media ? (parent.media.videoPlaybackErrorString || "") : ""
-                        videoHasRenderedFrame: !!(parent.media && parent.media.videoHasRenderedFrame)
-                        videoHasPosterFrame: !!(parent.media && parent.media.videoHasPosterFrame)
-                        videoFirstFramePrimed: !!(parent.media && parent.media.videoFirstFramePrimed)
-                    }
-                }
-
-                Component {
-                    id: textDelegate
-                    TextItem {
-                        mediaId: parent.media ? (parent.media.mediaId || "") : ""
-                        mediaX: 0
-                        mediaY: 0
-                        mediaWidth: parent.media ? parent.media.width : 0
-                        mediaHeight: parent.media ? parent.media.height : 0
-                        mediaScale: 1.0
-                        mediaZ: parent.media.z
-                        selected: !!parent.selected
-                        textContent: parent.media ? (parent.media.textContent || "") : ""
-                        horizontalAlignment: parent.media ? (parent.media.textHorizontalAlignment || "center") : "center"
-                        verticalAlignment: parent.media ? (parent.media.textVerticalAlignment || "center") : "center"
-                        fitToTextEnabled: !!(parent.media && parent.media.fitToTextEnabled)
-                        fontFamily: "Impact"
-                        fontPixelSize: Math.max(1, parent.media ? (parent.media.textFontPixelSize || 22) : 22)
-                        fontWeight: parent.media ? (parent.media.textFontWeight || 400) : 400
-                        fontItalic: !!(parent.media && parent.media.textItalic)
-                        fontUnderline: !!(parent.media && parent.media.textUnderline)
-                        fontUppercase: !!(parent.media && parent.media.textUppercase)
-                        textColor: parent.media ? (parent.media.textColor || "#FFFFFFFF") : "#FFFFFFFF"
-                        outlineWidthPercent: parent.media ? (parent.media.textOutlineWidthPercent || 0.0) : 0.0
-                        outlineColor: parent.media ? (parent.media.textOutlineColor || "#FF000000") : "#FF000000"
-                        highlightEnabled: !!(parent.media && parent.media.textHighlightEnabled)
-                        highlightColor: parent.media ? (parent.media.textHighlightColor || "#00000000") : "#00000000"
-                        textEditable: !!(parent.media && parent.media.textEditable)
-                    }
-                }
             }
 
             RemoteCursor {

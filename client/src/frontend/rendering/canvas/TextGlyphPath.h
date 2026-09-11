@@ -145,6 +145,10 @@ private:
     // The itemWidth at which the current m_strokePath was built.  Used to compute
     // the correct strokeXOffset when the container resizes without a reflow.
     qreal      m_svgBuiltAtWidth  { 0.0 };
+    // Alignment whose absolute glyph x positions are baked into m_strokePath.
+    // A width-only resize may use strokeXOffset, but an alignment change must
+    // rebuild the path even when glyph ids and line breaks are unchanged.
+    QString    m_svgBuiltHorizontalAlignment;
 
     // ── Per-unique-glyph path caches ─────────────────────────────────────────
     // Keyed by "raw-font identity + glyph index". Glyph IDs are local to each
@@ -194,9 +198,11 @@ private:
     QHash<quint64, QPainterPath>   m_glyphPathCache;
     // Key: QPair<glyphKey, quantizedOutline>
     //   glyphKey        = (quint64(runPrefixHash) << 32) | quint64(glyphId)
-    //   quantizedOutline= quint32(qRound(outlinePixels * 4))  — quarter-pixel precision
+    //   quantizedOutline= quint32(qRound(outlinePixels * 1000)) — SVG precision
     // This encoding survives outlinePixels and fontPixelSize changes without a full
-    // cache clear: old entries go naturally cold, new keys are inserted.
+    // cache clear: old entries go naturally cold, new keys are inserted. Using
+    // the same 0.001 px precision as the SVG encoder avoids substituting a
+    // visibly different cached stroke for an intermediate thickness.
     // The cache is cleared only on font-shape changes (family / weight / italic)
     // via clearGlyphCaches().  clearStrokeCache() still resets the SVG build state
     // but no longer clears the hash itself.

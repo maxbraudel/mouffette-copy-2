@@ -11,6 +11,8 @@ Item {
     property real mediaZ: 0
     property bool selected: false
     property string mediaId: ""
+    // Passive renderers use this to report when the visual can be revealed.
+    property bool contentReady: true
 
     property bool pointerEnabled: true
     property bool doubleClickEnabled: false

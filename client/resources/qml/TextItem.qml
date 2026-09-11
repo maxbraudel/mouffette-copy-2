@@ -16,6 +16,9 @@ BaseMediaItem {
     property bool fontUppercase: false
     property color textColor: "#FFFFFFFF"
     property real outlineWidthPercent: 0.0
+    // Canonical value supplied by C++. A negative value keeps compatibility
+    // with older callers that only provide the percentage.
+    property real outlineWidthPx: -1.0
     property color outlineColor: "#FF000000"
     property bool highlightEnabled: false
     property color highlightColor: "#00000000"
@@ -31,7 +34,9 @@ BaseMediaItem {
     // Outline thickness in scene-space pixels derived from font size.
     // Fed into TextGlyphPath.outlinePixels which drives the QPainterPathStroker width.
     readonly property real outlinePixels: root.outlineWidthPercent > 0
-        ? Math.max(1, Math.round(root.outlineWidthPercent * Math.max(1, root.fontPixelSize) / 100.0))
+        ? (root.outlineWidthPx >= 0
+            ? root.outlineWidthPx
+            : Math.max(1, Math.round(root.outlineWidthPercent * Math.max(1, root.fontPixelSize) / 100.0)))
         : 0
 
     function commitAndStopEditing() {
@@ -205,7 +210,10 @@ BaseMediaItem {
     // moves it via transforms only.
     TextGlyphPath {
         id: glyphPath
-        textContent:        root.textContent || ""
+        // The editor is the immediate visual source of truth. The C++ model
+        // still receives live updates for fit-to-text geometry, but the border
+        // no longer waits for that round-trip before following a keystroke.
+        textContent:        textDisplayNode.text || ""
         fontFamily:         root.fontFamily
         fontPixelSize:      Math.max(1, root.fontPixelSize)
         fontWeight:         root.fontWeight
@@ -234,7 +242,7 @@ BaseMediaItem {
         // graph and Qt keeps tessellating the pre-warmed path in the background
         // (asynchronous:true).  When the user enables the border the geometry is
         // already resident in the GPU — no blank-frame delay.
-        visible: !root.editing
+        visible: true
         opacity: root.outlinePixels > 0 ? 1.0 : 0.0
         // Smooth fade masks any residual tessellation latency on first enable.
         Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
@@ -247,7 +255,7 @@ BaseMediaItem {
         // Tessellate asynchronously so path changes never block the render thread.
         // The previous tessellated geometry stays visible until the new one is ready,
         // giving a smooth experience when border width or text changes.
-        asynchronous: true
+        asynchronous: !root.editing
         ShapePath {
             fillColor:   root.outlineColor
             strokeColor: "transparent"

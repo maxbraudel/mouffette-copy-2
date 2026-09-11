@@ -2,8 +2,9 @@
 #include "frontend/rendering/canvas/CanvasSceneStore.h"
 #include "frontend/rendering/canvas/TextGlyphPath.h"
 #include "frontend/rendering/canvas/TextEditHelper.h"
-#include <QtQml/qqml.h>
+#include "frontend/rendering/canvas/CanvasQmlTypes.h"
 #include "backend/domain/media/MediaRuntimeHooks.h"
+#include "backend/domain/media/TextRenderState.h"
 #include "frontend/rendering/canvas/GestureCommands.h"
 #include "frontend/rendering/canvas/ModelPublisher.h"
 #include "frontend/rendering/canvas/PointerSession.h"
@@ -57,70 +58,6 @@ QString uploadStateToString(ResizableMediaBase::UploadState state) {
         return QStringLiteral("uploaded");
     }
     return QStringLiteral("not_uploaded");
-}
-
-QString textHorizontalAlignmentToString(TextMediaItem::HorizontalAlignment alignment) {
-    switch (alignment) {
-    case TextMediaItem::HorizontalAlignment::Left:
-        return QStringLiteral("left");
-    case TextMediaItem::HorizontalAlignment::Center:
-        return QStringLiteral("center");
-    case TextMediaItem::HorizontalAlignment::Right:
-        return QStringLiteral("right");
-    }
-    return QStringLiteral("center");
-}
-
-QString textVerticalAlignmentToString(TextMediaItem::VerticalAlignment alignment) {
-    switch (alignment) {
-    case TextMediaItem::VerticalAlignment::Top:
-        return QStringLiteral("top");
-    case TextMediaItem::VerticalAlignment::Center:
-        return QStringLiteral("center");
-    case TextMediaItem::VerticalAlignment::Bottom:
-        return QStringLiteral("bottom");
-    }
-    return QStringLiteral("center");
-}
-
-int textFontPixelSizeForQuickCanvas(const TextMediaItem* textMedia) {
-    if (!textMedia) {
-        return 1;
-    }
-
-    const QFont font = textMedia->font();
-
-    qreal pixelSize = 0.0;
-    if (font.pixelSize() > 0) {
-        pixelSize = static_cast<qreal>(font.pixelSize());
-    } else if (font.pointSizeF() > 0.0) {
-        qreal logicalDpiY = 96.0;
-        if (QScreen* screen = QGuiApplication::primaryScreen()) {
-            logicalDpiY = std::max<qreal>(screen->logicalDotsPerInchY(), 1.0);
-        }
-        pixelSize = font.pointSizeF() * logicalDpiY / 72.0;
-    } else {
-        QFontInfo info(font);
-        if (info.pixelSize() > 0) {
-            pixelSize = static_cast<qreal>(info.pixelSize());
-        } else if (info.pointSizeF() > 0.0) {
-            qreal logicalDpiY = 96.0;
-            if (QScreen* screen = QGuiApplication::primaryScreen()) {
-                logicalDpiY = std::max<qreal>(screen->logicalDotsPerInchY(), 1.0);
-            }
-            pixelSize = info.pointSizeF() * logicalDpiY / 72.0;
-        }
-    }
-
-    if (pixelSize <= 0.0) {
-        pixelSize = 12.0;
-    }
-
-    // Keep QML text rendering in sync with backend fit-to-text geometry math,
-    // which is based on TextMediaItem::uniformScaleFactor().
-    const qreal uniformScale = std::max<qreal>(std::abs(textMedia->uniformScaleFactor()), 1e-4);
-    const int effectivePixelSize = qMax(1, qRound(pixelSize * uniformScale));
-    return effectivePixelSize;
 }
 
 bool uiZonesEquivalent(const QList<ScreenInfo::UIZone>& lhs, const QList<ScreenInfo::UIZone>& rhs) {
@@ -308,21 +245,21 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
     m_quickWidget->setAcceptDrops(true);
     m_quickWidget->setResizeMode(QQuickWidget::SizeRootObjectToView);
 
-    // Register custom QML types before the QML source is loaded.
-    qmlRegisterType<TextGlyphPath>("Mouffette.Canvas", 1, 0, "TextGlyphPath");
-    qmlRegisterSingletonType<TextEditHelper>("Mouffette.Canvas", 1, 0, "TextEditHelper",
-        [](QQmlEngine*, QJSEngine*) -> QObject* { return new TextEditHelper(); });
+    // Register custom QML types once before any local or remote engine loads.
+    registerCanvasQmlTypes();
 
     m_quickWidget->setSource(QUrl(QStringLiteral("qrc:/qml/CanvasRoot.qml")));
 
-    if (m_quickWidget->status() == QQuickWidget::Error) {
+    if (m_quickWidget->status() != QQuickWidget::Ready || !m_quickWidget->rootObject()) {
         if (errorMessage) {
             QStringList messages;
             const auto qmlErrors = m_quickWidget->errors();
             for (const auto& err : qmlErrors) {
                 messages.append(err.toString());
             }
-            *errorMessage = messages.join(QStringLiteral(" | "));
+            *errorMessage = messages.isEmpty()
+                ? QStringLiteral("Qt Quick canvas root object was not created")
+                : messages.join(QStringLiteral(" | "));
         }
         delete m_quickWidget;
         m_quickWidget = nullptr;
@@ -419,15 +356,6 @@ bool QuickCanvasController::initialize(QWidget* parentWidget, QString* errorMess
         this, SLOT(handleOverlayVerticalAlign(QString,QString)));
 
     m_videoStateTimer->start();
-
-    // Phase 3: fade animation tick → republish animatedDisplayOpacity each frame
-    MediaRuntimeHooks::setMediaOpacityAnimationTickNotifier([this]() {
-        handleFadeAnimationTick();
-    });
-    // Phase 6: settings change → republish contentOpacity immediately
-    MediaRuntimeHooks::setMediaSettingsChangedNotifier([this](ResizableMediaBase* media) {
-        handleMediaSettingsChanged(media);
-    });
 
     m_pendingInitialSceneScaleRefresh = true;
     QTimer::singleShot(0, this, [this]() {
@@ -556,6 +484,23 @@ void QuickCanvasController::setMediaScene(QGraphicsScene* scene) {
     m_mediaItemsById.clear();
 
     if (m_mediaScene) {
+        ScreenCanvas* screenCanvas = m_mediaScene->views().isEmpty()
+            ? nullptr : qobject_cast<ScreenCanvas*>(m_mediaScene->views().first());
+        if (screenCanvas && screenCanvas->mediaRuntimeContext()) {
+            auto* context = screenCanvas->mediaRuntimeContext();
+            const QPointer<QuickCanvasController> self(this);
+            context->mediaOpacityAnimationTickNotifier = [self]() {
+                if (self) self->handleFadeAnimationTick();
+            };
+            context->mediaSettingsChangedNotifier = [self](ResizableMediaBase* media) {
+                if (self) self->handleMediaSettingsChanged(media);
+            };
+            for (QGraphicsItem* graphicsItem : m_mediaScene->items()) {
+                if (auto* media = dynamic_cast<ResizableMediaBase*>(graphicsItem)) {
+                    media->setRuntimeContext(context);
+                }
+            }
+        }
         connect(m_mediaScene, &QGraphicsScene::changed, this, [this](const QList<QRectF>&) {
             if (!m_pointerSession->draggingMedia() && !m_selectionMutationInProgress) {
                 scheduleMediaModelSync();
@@ -1821,22 +1766,23 @@ void QuickCanvasController::pushMediaModelOnly() {
             }
 
             if (auto* textMedia = dynamic_cast<TextMediaItem*>(media)) {
-                const QFont textFont = textMedia->font();
-                mediaEntry.insert(QStringLiteral("textContent"), textMedia->text());
-                mediaEntry.insert(QStringLiteral("textHorizontalAlignment"), textHorizontalAlignmentToString(textMedia->horizontalAlignment()));
-                mediaEntry.insert(QStringLiteral("textVerticalAlignment"), textVerticalAlignmentToString(textMedia->verticalAlignment()));
-                mediaEntry.insert(QStringLiteral("fitToTextEnabled"), textMedia->fitToTextEnabled());
-                mediaEntry.insert(QStringLiteral("textFontFamily"), textFont.family());
-                mediaEntry.insert(QStringLiteral("textFontPixelSize"), textFontPixelSizeForQuickCanvas(textMedia));
-                mediaEntry.insert(QStringLiteral("textFontWeight"), textMedia->textFontWeightValue());
-                mediaEntry.insert(QStringLiteral("textItalic"), textMedia->italicEnabled());
-                mediaEntry.insert(QStringLiteral("textUnderline"), textMedia->underlineEnabled());
-                mediaEntry.insert(QStringLiteral("textUppercase"), textMedia->uppercaseEnabled());
-                mediaEntry.insert(QStringLiteral("textColor"), textMedia->textColor().name(QColor::HexArgb));
-                mediaEntry.insert(QStringLiteral("textOutlineWidthPercent"), textMedia->textBorderWidth());
-                mediaEntry.insert(QStringLiteral("textOutlineColor"), textMedia->textBorderColor().name(QColor::HexArgb));
-                mediaEntry.insert(QStringLiteral("textHighlightEnabled"), textMedia->highlightEnabled());
-                mediaEntry.insert(QStringLiteral("textHighlightColor"), textMedia->highlightColor().name(QColor::HexArgb));
+                const TextRenderState textState = TextRenderMetrics::fromMediaItem(*textMedia);
+                mediaEntry.insert(QStringLiteral("textContent"), textState.text);
+                mediaEntry.insert(QStringLiteral("textHorizontalAlignment"), textState.horizontalAlignment);
+                mediaEntry.insert(QStringLiteral("textVerticalAlignment"), textState.verticalAlignment);
+                mediaEntry.insert(QStringLiteral("fitToTextEnabled"), textState.fitToTextEnabled);
+                mediaEntry.insert(QStringLiteral("textFontFamily"), textState.fontFamily);
+                mediaEntry.insert(QStringLiteral("textFontPixelSize"), textState.fontPixelSize);
+                mediaEntry.insert(QStringLiteral("textFontWeight"), textState.fontWeight);
+                mediaEntry.insert(QStringLiteral("textItalic"), textState.italic);
+                mediaEntry.insert(QStringLiteral("textUnderline"), textState.underline);
+                mediaEntry.insert(QStringLiteral("textUppercase"), textState.uppercase);
+                mediaEntry.insert(QStringLiteral("textColor"), textState.textColor.name(QColor::HexArgb));
+                mediaEntry.insert(QStringLiteral("textOutlineWidthPercent"), textState.outlineWidthPercent);
+                mediaEntry.insert(QStringLiteral("textOutlineWidthPx"), textState.outlineWidthPixels);
+                mediaEntry.insert(QStringLiteral("textOutlineColor"), textState.outlineColor.name(QColor::HexArgb));
+                mediaEntry.insert(QStringLiteral("textHighlightEnabled"), textState.highlightEnabled);
+                mediaEntry.insert(QStringLiteral("textHighlightColor"), textState.highlightColor.name(QColor::HexArgb));
                 // All text media items are editable in the Quick Canvas.
                 // isEditing() reflects the legacy widget-canvas inline editor state,
                 // which is always false in the Quick Canvas path. QML handles editing

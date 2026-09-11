@@ -2,7 +2,6 @@
 #include "MainWindow.h"
 #include "backend/domain/models/ClientInfo.h"
 #include "shared/rendering/ICanvasHost.h"
-#include "frontend/rendering/canvas/LegacyCanvasHost.h"
 #include "frontend/rendering/canvas/LegacySceneMirror.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 #include "frontend/rendering/canvas/ScreenCanvas.h"
@@ -16,6 +15,7 @@
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
 #include "frontend/ui/pages/ClientListPage.h"
 #include "frontend/ui/pages/CanvasViewPage.h"
+#include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include "backend/domain/media/MediaItems.h"
 #include <QStackedWidget>
 #include <QPushButton>
@@ -92,41 +92,35 @@ void* CanvasSessionController::ensureCanvasSession(const ClientInfo& client) {
             return &session;
         }
 
-        const bool quickRequested = m_mainWindow->useQuickCanvasRenderer();
-        QString appliedRenderer = QStringLiteral("legacy_screen_canvas");
-        QString reason = QStringLiteral("flag_off_legacy_default");
+        const bool quickRequested = true;
+        QString appliedRenderer = QStringLiteral("quick_canvas_shell");
+        QString reason;
 
-        if (quickRequested) {
-            if (m_prewarmedQuickCanvasHost) {
-                session.canvas = m_prewarmedQuickCanvasHost;
-                m_prewarmedQuickCanvasHost = nullptr;
-                appliedRenderer = QStringLiteral("quick_canvas_shell");
-                reason = QStringLiteral("flag_on_prewarmed_shell");
-            } else {
-                QString quickError;
-                LegacySceneMirror* legacyBridge = createExplicitLegacyMirror(canvasHostStack);
-                session.canvas = QuickCanvasHost::create(canvasHostStack, legacyBridge, &quickError);
-                if (!session.canvas && legacyBridge) {
-                    delete legacyBridge;
-                }
-                if (session.canvas) {
-                    appliedRenderer = QStringLiteral("quick_canvas_shell");
-                    reason = QStringLiteral("flag_on_explicit_legacy_bridge");
-                    m_lastQuickInitError.clear();
-                } else {
-                    session.canvas = LegacyCanvasHost::create(canvasHostStack);
-                    appliedRenderer = QStringLiteral("legacy_screen_canvas");
-                    reason = quickError.isEmpty()
-                        ? QStringLiteral("quick_shell_init_failed_fallback")
-                        : QStringLiteral("quick_shell_error_fallback");
-                    m_lastQuickInitError = quickError;
-                    qWarning() << "CanvasSessionController: Quick canvas unavailable, using legacy fallback."
-                               << "reason=" << reason
-                               << "error=" << (quickError.isEmpty() ? QStringLiteral("<none>") : quickError);
-                }
-            }
+        if (m_prewarmedQuickCanvasHost) {
+            session.canvas = m_prewarmedQuickCanvasHost;
+            m_prewarmedQuickCanvasHost = nullptr;
+            reason = QStringLiteral("mandatory_quick_prewarmed_shell");
         } else {
-            session.canvas = LegacyCanvasHost::create(canvasHostStack);
+            QString quickError;
+            LegacySceneMirror* legacyBridge = createExplicitLegacyMirror(canvasHostStack);
+            session.canvas = QuickCanvasHost::create(canvasHostStack, legacyBridge, &quickError);
+            if (!session.canvas && legacyBridge) {
+                delete legacyBridge;
+            }
+            if (session.canvas) {
+                reason = QStringLiteral("mandatory_quick_explicit_model_bridge");
+                m_lastQuickInitError.clear();
+            } else {
+                appliedRenderer = QStringLiteral("quick_canvas_initialization_error");
+                reason = QStringLiteral("mandatory_quick_init_failed");
+                m_lastQuickInitError = quickError.isEmpty()
+                    ? QStringLiteral("Qt Quick canvas failed to initialize") : quickError;
+                qCritical() << "CanvasSessionController: mandatory Qt Quick canvas unavailable."
+                            << "error=" << m_lastQuickInitError;
+                TOAST_ERROR(QStringLiteral("Canvas initialization failed: %1")
+                                .arg(m_lastQuickInitError),
+                            5000);
+            }
         }
 
         MigrationTelemetryManager::logRendererPathResolved(
@@ -134,6 +128,10 @@ void* CanvasSessionController::ensureCanvasSession(const ClientInfo& client) {
             quickRequested,
             appliedRenderer,
             reason);
+
+        if (!session.canvas) {
+            return &session;
+        }
 
         session.canvas->setActiveIdeaId(session.canvasSessionId); // Use canvasSessionId from SessionManager
         session.connectionsInitialized = false;
@@ -161,7 +159,7 @@ void* CanvasSessionController::ensureCanvasSession(const ClientInfo& client) {
 }
 
 void CanvasSessionController::prewarmQuickCanvasHost() {
-    if (!m_mainWindow || !m_mainWindow->useQuickCanvasRenderer() || m_prewarmedQuickCanvasHost) {
+    if (!m_mainWindow || m_prewarmedQuickCanvasHost) {
         return;
     }
 

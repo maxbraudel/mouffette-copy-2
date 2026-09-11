@@ -17,8 +17,25 @@ QSize MacVideoThumbnailer::videoDimensions(const QString& localFilePath) {
         AVURLAsset* asset = [AVURLAsset URLAssetWithURL:url options:nil];
         if (!asset) return QSize();
         
-        NSArray<AVAssetTrack*>* videoTracks = [asset tracksWithMediaType:AVMediaTypeVideo];
-        if (videoTracks.count == 0) return QSize();
+        __block NSArray<AVAssetTrack*>* videoTracks = nil;
+        dispatch_semaphore_t tracksReady = dispatch_semaphore_create(0);
+        if (@available(macOS 12.0, *)) {
+            [asset loadTracksWithMediaType:AVMediaTypeVideo completionHandler:^(NSArray<AVAssetTrack*>* tracks, NSError*) {
+                videoTracks = [tracks retain];
+                dispatch_semaphore_signal(tracksReady);
+            }];
+            const dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC);
+            if (dispatch_semaphore_wait(tracksReady, timeout) != 0) return QSize();
+        } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            videoTracks = [[asset tracksWithMediaType:AVMediaTypeVideo] retain];
+#pragma clang diagnostic pop
+        }
+        if (videoTracks.count == 0) {
+            [videoTracks release];
+            return QSize();
+        }
         
         AVAssetTrack* videoTrack = videoTracks[0];
         CGSize naturalSize = [videoTrack naturalSize];
@@ -27,7 +44,9 @@ QSize MacVideoThumbnailer::videoDimensions(const QString& localFilePath) {
         CGAffineTransform transform = [videoTrack preferredTransform];
         CGSize displaySize = CGSizeApplyAffineTransform(naturalSize, transform);
         
-        return QSize(std::abs(displaySize.width), std::abs(displaySize.height));
+        const QSize dimensions(std::abs(displaySize.width), std::abs(displaySize.height));
+        [videoTracks release];
+        return dimensions;
     }
 }
 
@@ -80,9 +99,22 @@ QImage MacVideoThumbnailer::firstFrame(const QString& localFilePath) {
         gen.requestedTimeToleranceAfter = kCMTimeZero;
         gen.requestedTimeToleranceBefore = kCMTimeZero;
         CMTime time = CMTimeMake(0, 600);
-        CMTime actual;
-        NSError* error = nil;
-        CGImageRef cgImg = [gen copyCGImageAtTime:time actualTime:&actual error:&error];
+        __block CGImageRef cgImg = nullptr;
+        dispatch_semaphore_t imageReady = dispatch_semaphore_create(0);
+        NSArray<NSValue*>* times = @[[NSValue valueWithCMTime:time]];
+        [gen generateCGImagesAsynchronouslyForTimes:times
+                                  completionHandler:^(CMTime, CGImageRef image, CMTime,
+                                                      AVAssetImageGeneratorResult result, NSError*) {
+            if (result == AVAssetImageGeneratorSucceeded && image) {
+                cgImg = CGImageRetain(image);
+            }
+            dispatch_semaphore_signal(imageReady);
+        }];
+        const dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC);
+        if (dispatch_semaphore_wait(imageReady, timeout) != 0) {
+            [gen cancelAllCGImageGeneration];
+            return QImage();
+        }
         if (!cgImg) {
             return QImage();
         }

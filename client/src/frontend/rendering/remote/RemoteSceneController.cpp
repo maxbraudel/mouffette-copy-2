@@ -1,11 +1,14 @@
 #include "frontend/rendering/remote/RemoteSceneController.h"
 #include "backend/network/WebSocketClient.h"
+#include "backend/domain/media/TextRenderState.h"
+#include "frontend/rendering/canvas/CanvasQmlTypes.h"
+#include "frontend/rendering/canvas/MediaListModel.h"
+#include "frontend/rendering/remote/RemoteVideoFrameItem.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include <QJsonArray>
 #include <QScreen>
 #include <QGuiApplication>
 #include <QHBoxLayout>
-#include <QPixmap>
 #include <QBuffer>
 #include <QFileInfo>
 #include <QFile>
@@ -21,22 +24,10 @@
 #include <QUrl>
 #include <QThread>
 #include <QIODevice>
-#include <QGraphicsView>
-#include <QGraphicsPixmapItem>
-#include <QGraphicsTextItem>
-#include <QGraphicsScene>
-#include <QStyleOptionGraphicsItem>
-#include <QStyle>
-#include <QTextOption>
-#include <QTextDocument>
-#include <QTextCursor>
-#include <QTextCharFormat>
-#include <QAbstractTextDocumentLayout>
-#include <QTextBlock>
-#include <QTextLayout>
-#include <QPaintDevice>
-#include <QFontMetricsF>
-#include <QPen>
+#include <QQuickWidget>
+#include <QQmlContext>
+#include <QQmlEngine>
+#include <QQuickItem>
 #include <QPointer>
 #include <QHash>
 #include <QVariant>
@@ -50,89 +41,12 @@
 #include <algorithm>
 #include <memory>
 #include <QVideoFrameFormat>
-#include <array>
-#include <limits>
 
 
 namespace {
 constexpr qint64 kStartPositionToleranceMs = 120;
 constexpr qint64 kDecoderSyncToleranceMs = 25;
 constexpr int kLivePlaybackWarmupFrames = 2;
-QRectF computeDocumentTextBounds(const QTextDocument& doc, QAbstractTextDocumentLayout* layout) {
-    if (!layout) {
-        return QRectF();
-    }
-
-    QRectF bounds;
-    bool hasBounds = false;
-
-    for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
-        QTextLayout* textLayout = block.layout();
-        if (!textLayout) {
-            continue;
-        }
-
-        const QRectF blockRect = layout->blockBoundingRect(block);
-        for (int lineIndex = 0; lineIndex < textLayout->lineCount(); ++lineIndex) {
-            QTextLine line = textLayout->lineAt(lineIndex);
-            if (!line.isValid()) {
-                continue;
-            }
-
-            const QRectF lineRect(blockRect.left() + line.x(),
-                                  blockRect.top() + line.y(),
-                                  std::max<qreal>(line.naturalTextWidth(), 1.0),
-                                  std::max<qreal>(line.height(), 1.0));
-            bounds = hasBounds ? bounds.united(lineRect) : lineRect;
-            hasBounds = true;
-        }
-    }
-
-    if (!hasBounds) {
-        const QSizeF fallbackSize = layout->documentSize();
-        return QRectF(0.0, 0.0,
-                      std::max<qreal>(fallbackSize.width(), 1.0),
-                      std::max<qreal>(fallbackSize.height(), 1.0));
-    }
-
-    return bounds;
-}
-
-QFont::Weight qFontWeightFromCss(int cssWeight) {
-    struct WeightMapping {
-        int css;
-        QFont::Weight qt;
-    };
-
-    static constexpr std::array<WeightMapping, 9> kMappings = {{
-        {100, QFont::Thin},
-        {200, QFont::ExtraLight},
-        {300, QFont::Light},
-        {400, QFont::Normal},
-        {500, QFont::Medium},
-        {600, QFont::DemiBold},
-        {700, QFont::Bold},
-        {800, QFont::ExtraBold},
-        {900, QFont::Black}
-    }};
-
-    int clamped = std::clamp(cssWeight, 1, 1000);
-    clamped = ((clamped + 50) / 100) * 100;
-    clamped = std::clamp(clamped, 100, 900);
-
-    const WeightMapping* best = &kMappings.front();
-    int bestDiff = std::numeric_limits<int>::max();
-    for (const auto& mapping : kMappings) {
-        const int diff = std::abs(clamped - mapping.css);
-        if (diff < bestDiff) {
-            bestDiff = diff;
-            best = &mapping;
-        }
-    }
-
-    return best->qt;
-}
-
 qint64 frameTimestampMs(const QVideoFrame& frame) {
     if (!frame.isValid()) {
         return -1;
@@ -336,6 +250,16 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
     m_sceneReadyTimeout->start(11000);
 
     buildWindows(screens);
+    for (auto it = m_screenWindows.cbegin(); it != m_screenWindows.cend(); ++it) {
+        const ScreenWindow& window = it.value();
+        if (!window.quickWidget || window.quickWidget->status() == QQuickWidget::Error
+            || !window.quickWidget->rootObject()) {
+            failWithMessage(QStringLiteral("Qt Quick remote renderer failed to initialize"));
+            ++m_sceneEpoch;
+            clearScene();
+            return;
+        }
+    }
     buildMedia(media);
 
     // Cancel any pending window show timer from previous scene
@@ -462,18 +386,16 @@ void RemoteSceneController::clearScene() {
             QAccessible::deleteAccessibleInterface(id);
         }
 
-        // Detach and destroy the graphics scene so it will be rebuilt cleanly.
-        if (sw.graphicsView) {
-            QObject::disconnect(sw.graphicsView, nullptr, nullptr, nullptr);
-            sw.graphicsView->setScene(nullptr);
-            sw.graphicsView->deleteLater();
-            sw.graphicsView = nullptr;
+        if (sw.mediaModel) {
+            sw.mediaModel->clearAll();
+            sw.mediaModel = nullptr;
         }
-        if (sw.scene) {
-            QObject::disconnect(sw.scene, nullptr, nullptr, nullptr);
-            sw.scene->clear();
-            sw.scene->deleteLater();
-            sw.scene = nullptr;
+        sw.mediaEntries.clear();
+        if (sw.quickWidget) {
+            QObject::disconnect(sw.quickWidget, nullptr, nullptr, nullptr);
+            sw.quickWidget->setSource(QUrl());
+            sw.quickWidget->deleteLater();
+            sw.quickWidget = nullptr;
         }
 
         window->close();
@@ -606,6 +528,13 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     stopAndDeleteTimer(item->muteEndDelayTimer);
 
     cancelAudioFade(item, false);
+    if (item->visualFadeAnimation) {
+        QVariantAnimation* animation = item->visualFadeAnimation.data();
+        QObject::disconnect(animation, nullptr, this, nullptr);
+        animation->stop();
+        animation->deleteLater();
+        item->visualFadeAnimation = nullptr;
+    }
 
     QObject::disconnect(item->deferredStartConn);
     QObject::disconnect(item->primingConn);
@@ -648,27 +577,6 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     }
     item->muted = true;
 
-    for (auto& span : item->spans) {
-        if (span.textItem) {
-            if (span.textItem->scene()) {
-                span.textItem->scene()->removeItem(span.textItem);
-            }
-            delete span.textItem;
-            span.textItem = nullptr;
-        }
-        if (span.imageItem) {
-            if (span.imageItem->scene()) {
-                span.imageItem->scene()->removeItem(span.imageItem);
-            }
-            delete span.imageItem;
-            span.imageItem = nullptr;
-        }
-        if (span.widget) {
-            span.widget->hide();
-            span.widget->deleteLater();
-            span.widget = nullptr;
-        }
-    }
     item->spans.clear();
 
     if (item->player) {
@@ -686,9 +594,12 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     item->primedFirstFrame = false;
     item->primedFrame = QVideoFrame();
     item->primedFrameSticky = false;
-    item->primedFrameDeferred = false;
     item->lastFrameImage = QImage();
-    item->lastFramePixmap = QPixmap();
+    if (item->frameSource) {
+        item->frameSource->clear();
+        item->frameSource->deleteLater();
+        item->frameSource = nullptr;
+    }
     item->playAuthorized = false;
     item->hiding = false;
     item->readyNotified = false;
@@ -724,11 +635,11 @@ void RemoteSceneController::evaluateItemReadiness(const std::shared_ptr<RemoteMe
     if (item->readyNotified) return;
     bool ready = false;
     if (item->type == "image") {
-        ready = item->loaded;
+        ready = item->loaded && allSpansReady(item);
     } else if (item->type == "video") {
-        ready = item->loaded && item->primedFirstFrame;
+        ready = item->loaded && item->primedFirstFrame && allSpansReady(item);
     } else {
-        ready = item->loaded;
+        ready = item->loaded && allSpansReady(item);
     }
     if (ready) {
         markItemReady(item);
@@ -885,29 +796,9 @@ void RemoteSceneController::triggerAutoPlayNow(const std::shared_ptr<RemoteMedia
     });
 }
 
-void RemoteSceneController::applyPixmapToSpans(const std::shared_ptr<RemoteMediaItem>& item, const QPixmap& pixmap) const {
-    if (!item) return;
-    if (pixmap.isNull()) return;
-
-    for (auto& span : item->spans) {
-        if (!span.imageItem) continue;
-        // Safety check: verify scene still contains the item before updating pixmap
-        if (span.imageItem->scene() == nullptr) continue;
-        const int targetW = span.widget ? std::max(1, span.widget->width()) : std::max(1, pixmap.width());
-        const int targetH = span.widget ? std::max(1, span.widget->height()) : std::max(1, pixmap.height());
-        const int sourceX = std::clamp(static_cast<int>(std::floor(span.srcNx * pixmap.width())), 0, std::max(0, pixmap.width() - 1));
-        const int sourceY = std::clamp(static_cast<int>(std::floor(span.srcNy * pixmap.height())), 0, std::max(0, pixmap.height() - 1));
-        const int sourceW = std::max(1, static_cast<int>(std::ceil(span.srcNw * pixmap.width())));
-        const int sourceH = std::max(1, static_cast<int>(std::ceil(span.srcNh * pixmap.height())));
-        const QRect sourceRect(sourceX, sourceY, sourceW, sourceH);
-        const QRect boundedSource = sourceRect.intersected(QRect(0, 0, pixmap.width(), pixmap.height()));
-        if (!boundedSource.isValid() || boundedSource.isEmpty()) {
-            span.imageItem->setPixmap(QPixmap());
-            continue;
-        }
-        QPixmap clipped = pixmap.copy(boundedSource);
-        span.imageItem->setPixmap(clipped.scaled(QSize(targetW, targetH), Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
-    }
+void RemoteSceneController::applyImageToSpans(const std::shared_ptr<RemoteMediaItem>& item, const QImage& image) const {
+    if (!item || image.isNull() || !item->frameSource) return;
+    item->frameSource->setFrame(image);
 }
 
 bool RemoteSceneController::autoDisplayDelayActive(const std::shared_ptr<RemoteMediaItem>& item) const {
@@ -936,18 +827,11 @@ void RemoteSceneController::applyPrimedFrameToSinks(const std::shared_ptr<Remote
     if (image.isNull()) return;
 
     item->lastFrameImage = image;
-    item->lastFramePixmap = QPixmap::fromImage(image);
 
-    const bool awaitingPlaybackGate = item->awaitingLivePlayback && !item->livePlaybackStarted && !item->autoDisplay;
-    const bool displayDelayActive = autoDisplayDelayActive(item);
-
-    if (awaitingPlaybackGate || displayDelayActive) {
-        item->primedFrameDeferred = true;
-        return;
-    }
-
-    item->primedFrameDeferred = false;
-    applyPixmapToSpans(item, item->lastFramePixmap);
+    // Feed the passive surfaces while opacity is still zero.  Readiness must
+    // never depend on a later display timer, otherwise delayed videos deadlock
+    // the scene activation barrier.
+    applyImageToSpans(item, item->lastFrameImage);
 }
 
 void RemoteSceneController::clearRenderedFrames(const std::shared_ptr<RemoteMediaItem>& item) {
@@ -955,14 +839,7 @@ void RemoteSceneController::clearRenderedFrames(const std::shared_ptr<RemoteMedi
     if (item->awaitingLivePlayback && !item->livePlaybackStarted) return;
 
     item->lastFrameImage = QImage();
-    item->lastFramePixmap = QPixmap();
-    item->primedFrameDeferred = false;
-
-    for (auto& span : item->spans) {
-        if (span.imageItem) {
-            span.imageItem->setPixmap(QPixmap());
-        }
-    }
+    if (item->frameSource) item->frameSource->clear();
 }
 
 void RemoteSceneController::ensureVideoOutputsAttached(const std::shared_ptr<RemoteMediaItem>& item) {
@@ -1000,7 +877,6 @@ void RemoteSceneController::ensureVideoOutputsAttached(const std::shared_ptr<Rem
             QImage converted = convertFrameToImage(frame);
             if (!converted.isNull()) {
                 item->lastFrameImage = converted;
-                item->lastFramePixmap = QPixmap::fromImage(converted);
             }
 
             const qint64 ts = frameTimestampMs(frame);
@@ -1020,8 +896,8 @@ void RemoteSceneController::ensureVideoOutputsAttached(const std::shared_ptr<Rem
                 }
             }
 
-            if (!item->lastFramePixmap.isNull()) {
-                applyPixmapToSpans(item, item->lastFramePixmap);
+            if (!item->lastFrameImage.isNull()) {
+                applyImageToSpans(item, item->lastFrameImage);
             }
         });
     }
@@ -1194,18 +1070,13 @@ void RemoteSceneController::freezeVideoOutput(const std::shared_ptr<RemoteMediaI
         qWarning() << "RemoteSceneController: unable to convert final video frame for" << item->mediaId;
     } else {
         item->lastFrameImage = image;
-        item->lastFramePixmap = QPixmap::fromImage(image);
     }
 
     item->holdLastFrameAtEnd = true;
 
-    if (!item->lastFramePixmap.isNull()) {
-        applyPixmapToSpans(item, item->lastFramePixmap);
-        for (auto& span : item->spans) {
-            if (!span.imageItem) continue;
-            span.imageItem->setOpacity(item->contentOpacity);
-            span.imageItem->setVisible(true);
-        }
+    if (!item->lastFrameImage.isNull()) {
+        applyImageToSpans(item, item->lastFrameImage);
+        setRemoteMediaVisualState(item, item->contentOpacity, item->contentVisible);
     }
     // Handle mute-on-end with optional delay
     if (item->muteWhenVideoEnds && item->audio && !item->muteEndTriggered) {
@@ -1285,7 +1156,7 @@ void RemoteSceneController::seekToConfiguredStart(const std::shared_ptr<RemoteMe
 }
 
 void RemoteSceneController::resetWindowForNewScene(ScreenWindow& sw, int screenId, int x, int y, int w, int h, bool primary) {
-    if (!sw.window || !sw.graphicsView) return;
+    if (!sw.window || !sw.quickWidget || !sw.mediaModel) return;
 
     sw.x = x;
     sw.y = y;
@@ -1296,20 +1167,9 @@ void RemoteSceneController::resetWindowForNewScene(ScreenWindow& sw, int screenI
     sw.window->hide();
     sw.window->setGeometry(x, y, w, h);
     sw.window->setWindowTitle(primary ? "Remote Scene (Primary)" : "Remote Scene");
-
-    // Replace graphics scene to ensure a clean slate for the new remote scene
-    QGraphicsScene* oldScene = sw.scene;
-    if (sw.graphicsView->scene()) {
-        sw.graphicsView->setScene(nullptr);
-    }
-    sw.scene = new QGraphicsScene(sw.graphicsView);
-    sw.scene->setSceneRect(0, 0, w, h);
-    sw.graphicsView->setScene(sw.scene);
-
-    if (oldScene) {
-        oldScene->clear();
-        oldScene->deleteLater();
-    }
+    sw.mediaEntries.clear();
+    sw.mediaModel->clearAll();
+    sw.quickWidget->resize(w, h);
 
 #ifdef Q_OS_MAC
     MacWindowManager::setWindowAsGlobalOverlay(sw.window, /*clickThrough*/ true);
@@ -1320,6 +1180,7 @@ QWidget* RemoteSceneController::ensureScreenWindow(int screenId, int x, int y, i
     ScreenWindow& sw = m_screenWindows[screenId];
 
     if (!sw.window) {
+        registerCanvasQmlTypes();
         sw.window = new QWidget();
         
         // Force native window on macOS to avoid accessibility crashes (QTBUG-95134)
@@ -1337,23 +1198,31 @@ QWidget* RemoteSceneController::ensureScreenWindow(int screenId, int x, int y, i
         sw.window->setAttribute(Qt::WA_OpaquePaintEvent, false);
         sw.window->setObjectName(QString("RemoteScreenWindow_%1").arg(screenId));
 
-        sw.graphicsView = new QGraphicsView(sw.window);
-        sw.graphicsView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        sw.graphicsView->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        sw.graphicsView->setFrameStyle(QFrame::NoFrame);
-        sw.graphicsView->setAttribute(Qt::WA_TranslucentBackground, true);
-        sw.graphicsView->setStyleSheet("background: transparent;");
-        sw.graphicsView->setRenderHint(QPainter::Antialiasing, true);
-        sw.graphicsView->setRenderHint(QPainter::SmoothPixmapTransform, true);
-        if (sw.graphicsView->viewport()) {
-            sw.graphicsView->viewport()->setAutoFillBackground(false);
-            sw.graphicsView->viewport()->setAttribute(Qt::WA_TranslucentBackground, true);
+        sw.quickWidget = new QQuickWidget(sw.window);
+        sw.quickWidget->setResizeMode(QQuickWidget::SizeRootObjectToView);
+        sw.quickWidget->setClearColor(Qt::transparent);
+        sw.quickWidget->setAttribute(Qt::WA_AlwaysStackOnTop, true);
+        sw.quickWidget->setAttribute(Qt::WA_TranslucentBackground, true);
+        sw.quickWidget->setAttribute(Qt::WA_NoSystemBackground, true);
+        sw.quickWidget->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        sw.mediaModel = new MediaListModel(sw.quickWidget);
+        sw.quickWidget->setSource(QUrl(QStringLiteral("qrc:/qml/RemoteSceneRoot.qml")));
+
+        if (sw.quickWidget->status() == QQuickWidget::Error || !sw.quickWidget->rootObject()) {
+            qCritical() << "RemoteSceneController: Qt Quick remote renderer failed to initialize for screen" << screenId;
+            for (const QQmlError& error : sw.quickWidget->errors()) {
+                qCritical().noquote() << error.toString();
+            }
+        } else {
+            sw.quickWidget->rootObject()->setProperty("mediaListModel", QVariant::fromValue(sw.mediaModel));
+            connect(sw.quickWidget->rootObject(), SIGNAL(spanReady(QString,QString)),
+                    this, SLOT(onRemoteSpanReady(QString,QString)));
         }
 
         auto* layout = new QHBoxLayout(sw.window);
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(0);
-        layout->addWidget(sw.graphicsView);
+        layout->addWidget(sw.quickWidget);
     }
 
     resetWindowForNewScene(sw, screenId, x, y, w, h, primary);
@@ -1378,10 +1247,131 @@ void RemoteSceneController::buildWindows(const QJsonArray& screensArray) {
     qDebug() << "RemoteSceneController: created" << m_screenWindows.size() << "remote screen windows (host screens:" << screensArray.size() << ", local screens:" << localScreens.size() << ")";
 }
 
+void RemoteSceneController::publishScreenModel(int screenId) {
+    auto it = m_screenWindows.find(screenId);
+    if (it == m_screenWindows.end() || !it->mediaModel) return;
+    it->mediaModel->updateFromList(it->mediaEntries);
+}
+
+void RemoteSceneController::publishMediaSpan(const std::shared_ptr<RemoteMediaItem>& item,
+                                             RemoteMediaItem::Span& span) {
+    if (!item) return;
+    auto windowIt = m_screenWindows.find(span.screenId);
+    if (windowIt == m_screenWindows.end() || !windowIt->quickWidget || !windowIt->mediaModel) {
+        qWarning() << "RemoteSceneController: no Qt Quick surface for span" << span.spanId;
+        return;
+    }
+
+    const qreal surfaceWidth = std::max<qreal>(1.0, windowIt->w);
+    const qreal surfaceHeight = std::max<qreal>(1.0, windowIt->h);
+    QVariantMap media;
+    // MediaListModel uses mediaId as its stable row key.  remoteMediaId keeps
+    // the protocol identifier used by readiness and automation.
+    media.insert(QStringLiteral("mediaId"), span.spanId);
+    media.insert(QStringLiteral("remoteMediaId"), item->mediaId);
+    media.insert(QStringLiteral("spanId"), span.spanId);
+    media.insert(QStringLiteral("mediaType"), item->type);
+    media.insert(QStringLiteral("destX"), span.destNx * surfaceWidth);
+    media.insert(QStringLiteral("destY"), span.destNy * surfaceHeight);
+    media.insert(QStringLiteral("destWidth"), span.destNw * surfaceWidth);
+    media.insert(QStringLiteral("destHeight"), span.destNh * surfaceHeight);
+    media.insert(QStringLiteral("sourceX"), span.srcNx);
+    media.insert(QStringLiteral("sourceY"), span.srcNy);
+    media.insert(QStringLiteral("sourceWidth"), span.srcNw);
+    media.insert(QStringLiteral("sourceHeight"), span.srcNh);
+    media.insert(QStringLiteral("width"), std::max(1, item->baseWidth));
+    media.insert(QStringLiteral("height"), std::max(1, item->baseHeight));
+    media.insert(QStringLiteral("z"), item->z);
+    media.insert(QStringLiteral("contentVisible"), item->contentVisible);
+    media.insert(QStringLiteral("renderVisible"), item->renderVisible);
+    media.insert(QStringLiteral("renderOpacity"), item->renderOpacity);
+
+    if (item->type == QLatin1String("image")) {
+        const QString path = m_fileManager ? m_fileManager->getFilePathForId(item->fileId) : QString();
+        media.insert(QStringLiteral("sourceUrl"), path.isEmpty() ? QString() : QUrl::fromLocalFile(path).toString());
+    } else if (item->type == QLatin1String("video")) {
+        media.insert(QStringLiteral("remoteFrameSource"),
+                     QVariant::fromValue(static_cast<QObject*>(item->frameSource.data())));
+    } else if (item->type == QLatin1String("text")) {
+        QString horizontal = QStringLiteral("center");
+        if (item->horizontalAlignment == RemoteMediaItem::HorizontalAlignment::Left) horizontal = QStringLiteral("left");
+        if (item->horizontalAlignment == RemoteMediaItem::HorizontalAlignment::Right) horizontal = QStringLiteral("right");
+        QString vertical = QStringLiteral("center");
+        if (item->verticalAlignment == RemoteMediaItem::VerticalAlignment::Top) vertical = QStringLiteral("top");
+        if (item->verticalAlignment == RemoteMediaItem::VerticalAlignment::Bottom) vertical = QStringLiteral("bottom");
+
+        media.insert(QStringLiteral("textContent"), item->text);
+        media.insert(QStringLiteral("textFontFamily"), item->fontFamily);
+        media.insert(QStringLiteral("textFontPixelSize"), std::max(1, item->fontPixelSize));
+        media.insert(QStringLiteral("textFontWeight"), item->fontWeight > 0
+                     ? item->fontWeight : (item->fontBold ? 700 : 400));
+        media.insert(QStringLiteral("textItalic"), item->fontItalic);
+        media.insert(QStringLiteral("textUnderline"), item->fontUnderline);
+        media.insert(QStringLiteral("textUppercase"), item->fontUppercase);
+        media.insert(QStringLiteral("textHorizontalAlignment"), horizontal);
+        media.insert(QStringLiteral("textVerticalAlignment"), vertical);
+        media.insert(QStringLiteral("fitToTextEnabled"), item->fitToTextEnabled);
+        media.insert(QStringLiteral("textColor"), item->textColor);
+        media.insert(QStringLiteral("textOutlineWidthPercent"), item->textBorderWidthPercent);
+        media.insert(QStringLiteral("textOutlineWidthPx"), item->textOutlineWidthPx);
+        media.insert(QStringLiteral("textOutlineColor"), item->textBorderColor);
+        media.insert(QStringLiteral("textHighlightEnabled"), item->highlightEnabled);
+        media.insert(QStringLiteral("textHighlightColor"), item->textHighlightColor);
+    }
+
+    windowIt->mediaEntries.append(media);
+    publishScreenModel(span.screenId);
+}
+
+void RemoteSceneController::setRemoteMediaVisualState(const std::shared_ptr<RemoteMediaItem>& item,
+                                                      qreal opacity,
+                                                      bool visible) {
+    if (!item) return;
+    item->renderOpacity = std::clamp<qreal>(opacity, 0.0, 1.0);
+    item->renderVisible = visible;
+    QSet<int> changedScreens;
+    for (const auto& span : item->spans) {
+        auto windowIt = m_screenWindows.find(span.screenId);
+        if (windowIt == m_screenWindows.end()) continue;
+        for (QVariant& entry : windowIt->mediaEntries) {
+            QVariantMap map = entry.toMap();
+            if (map.value(QStringLiteral("spanId")).toString() != span.spanId) continue;
+            map.insert(QStringLiteral("renderOpacity"), item->renderOpacity);
+            map.insert(QStringLiteral("renderVisible"), item->renderVisible);
+            entry = map;
+            changedScreens.insert(span.screenId);
+            break;
+        }
+    }
+    for (int screenId : std::as_const(changedScreens)) publishScreenModel(screenId);
+}
+
+bool RemoteSceneController::allSpansReady(const std::shared_ptr<RemoteMediaItem>& item) const {
+    if (!item || item->spans.isEmpty()) return false;
+    return std::all_of(item->spans.cbegin(), item->spans.cend(), [](const RemoteMediaItem::Span& span) {
+        return span.qmlReady;
+    });
+}
+
+void RemoteSceneController::onRemoteSpanReady(const QString& mediaId, const QString& spanId) {
+    for (const auto& item : m_mediaItems) {
+        if (!item || item->mediaId != mediaId || item->sceneEpoch != m_sceneEpoch) continue;
+        for (auto& span : item->spans) {
+            if (span.spanId == spanId) {
+                span.qmlReady = true;
+                break;
+            }
+        }
+        if (allSpansReady(item) && item->type != QLatin1String("video")) item->loaded = true;
+        evaluateItemReadiness(item);
+        return;
+    }
+}
+
 void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
-    // QGraphicsScene::items() (used on host serialization) returns items in descending Z (topmost first) by default.
-    // If we create children in that order, later widgets sit on top of earlier ones, reversing the stack.
-    // Therefore, build from the end to the beginning so the topmost item is created last and remains on top.
+    // Keep the historical array order for schema v1; schema v2 also carries an
+    // explicit z value, which the shared QML delegate applies authoritatively.
+    m_totalMediaToPrime = mediaArray.size();
     for (int idx = mediaArray.size() - 1; idx >= 0; --idx) {
         const auto& v = mediaArray.at(idx);
         QJsonObject m = v.toObject();
@@ -1391,6 +1381,14 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
     item->type = m.value("type").toString();
     item->fileName = m.value("fileName").toString();
     item->sceneEpoch = m_sceneEpoch;
+    // Schema v1 has no explicit z and is serialized topmost-first. Because we
+    // still iterate backwards, a descending implicit value preserves that
+    // historical stack. Schema v2 uses the authoritative value from the host.
+    const double implicitZ = static_cast<double>(mediaArray.size() - idx);
+    item->z = m.value("z").toDouble(implicitZ);
+    if (!std::isfinite(item->z)) item->z = implicitZ;
+    item->contentVisible = m.value("visible").toBool(true);
+    item->renderVisible = item->contentVisible;
     
     // Parse base dimensions for all media types (needed for scaling)
     item->baseWidth = m.value("baseWidth").toInt(0);
@@ -1399,22 +1397,39 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
     // Parse text-specific properties if this is a text item
     if (item->type == "text") {
         item->text = m.value("text").toString();
-        item->fontFamily = m.value("fontFamily").toString("Arial");
-        item->fontSize = m.value("fontSize").toInt(12);
+        item->fontFamily = m.value("fontFamily").toString("Impact");
+        item->fontSize = std::clamp(m.value("fontSize").toInt(12), 1, 1000);
         item->fontBold = m.value("fontBold").toBool(false);
         item->fontItalic = m.value("fontItalic").toBool(false);
-    item->fontWeight = m.value("fontWeight").toInt(0);
+        item->fontUnderline = m.value("fontUnderline").toBool(false);
+        item->fontUppercase = m.value("fontUppercase").toBool(false);
+        item->fontWeight = m.value("fontWeight").toInt(0);
+        if (item->fontWeight > 0) item->fontWeight = std::clamp(item->fontWeight, 100, 900);
+        item->fontPixelSize = std::clamp(m.value("fontPixelSize").toInt(0), 0, 4096);
         item->textColor = m.value("textColor").toString("#FFFFFF");
-    item->textBorderWidthPercent = m.value("textBorderWidthPercent").toDouble(0.0);
-    item->textBorderColor = m.value("textBorderColor").toString();
-    item->fitToTextEnabled = m.value("textFitToTextEnabled").toBool(false);
-    item->highlightEnabled = m.value("textHighlightEnabled").toBool(false);
+        item->textBorderWidthPercent = m.value("textBorderWidthPercent").toDouble(0.0);
+        item->textOutlineWidthPx = m.value("textOutlineWidthPx").toDouble(-1.0);
+        item->textBorderColor = m.value("textBorderColor").toString();
+        item->fitToTextEnabled = m.value("textFitToTextEnabled").toBool(false);
+        item->highlightEnabled = m.value("textHighlightEnabled").toBool(false);
         item->textHighlightColor = m.value("textHighlightColor").toString();
         double uniformScale = m.value("uniformScale").toDouble(1.0);
         if (!std::isfinite(uniformScale) || std::abs(uniformScale) < 1e-6) {
             uniformScale = 1.0;
         }
         item->uniformScale = uniformScale;
+
+        if (item->fontPixelSize <= 0) {
+            QFont legacyFont(item->fontFamily, std::max(1, item->fontSize));
+            legacyFont.setBold(item->fontBold);
+            legacyFont.setItalic(item->fontItalic);
+            legacyFont.setUnderline(item->fontUnderline);
+            item->fontPixelSize = TextRenderMetrics::effectiveFontPixelSize(legacyFont, item->uniformScale);
+        }
+        if (!std::isfinite(item->textOutlineWidthPx) || item->textOutlineWidthPx < 0.0) {
+            item->textOutlineWidthPx = TextRenderMetrics::outlinePixels(
+                item->textBorderWidthPercent, item->fontPixelSize);
+        }
 
         const QString hAlign = m.value("horizontalAlignment").toString("center").toLower();
         if (hAlign == QLatin1String("left")) {
@@ -1437,7 +1452,8 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
         // Parse spans if present
         if (m.contains("spans") && m.value("spans").isArray()) {
             const QJsonArray spans = m.value("spans").toArray();
-            for (const auto& sv : spans) {
+            for (int spanIndex = 0; spanIndex < spans.size(); ++spanIndex) {
+                const auto& sv = spans.at(spanIndex);
                 const QJsonObject so = sv.toObject();
                 RemoteMediaItem::Span s; s.screenId = so.value("screenId").toInt(-1);
                 s.nx = so.value("normX").toDouble(); s.ny = so.value("normY").toDouble(); s.nw = so.value("normW").toDouble(); s.nh = so.value("normH").toDouble();
@@ -1449,6 +1465,8 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
                 s.srcNy = so.contains("spanSourceNormY") ? so.value("spanSourceNormY").toDouble() : 0.0;
                 s.srcNw = so.contains("spanSourceNormW") ? so.value("spanSourceNormW").toDouble() : 1.0;
                 s.srcNh = so.contains("spanSourceNormH") ? so.value("spanSourceNormH").toDouble() : 1.0;
+                s.spanId = QStringLiteral("%1:%2:%3")
+                    .arg(item->mediaId).arg(s.screenId).arg(spanIndex);
                 item->spans.append(s);
             }
         }
@@ -1466,7 +1484,7 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
         item->hideWhenVideoEnds = m.value("hideWhenVideoEnds").toBool(false);
         item->fadeInSeconds = m.value("fadeInSeconds").toDouble(0.0);
         item->fadeOutSeconds = m.value("fadeOutSeconds").toDouble(0.0);
-        item->contentOpacity = m.value("contentOpacity").toDouble(1.0);
+        item->contentOpacity = std::clamp(m.value("contentOpacity").toDouble(1.0), 0.0, 1.0);
         item->repeatEnabled = m.value("repeatEnabled").toBool(false);
         item->repeatCount = std::max(0, m.value("repeatCount").toInt(0));
         item->repeatRemaining = 0;
@@ -1498,6 +1516,7 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
                     item->hasDisplayTimestamp = true;
                 }
             }
+            item->frameSource = new RemoteVideoFrameSource(this);
             m_fileManager->preloadFileIntoMemory(item->fileId);
         }
         m_mediaItems.append(item);
@@ -1523,274 +1542,25 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
     if (item->hideTimer) {
         item->hideTimer->stop();
     }
-    for (int i=0;i<item->spans.size();++i) {
-        auto& s = item->spans[i];
-        auto winIt = m_screenWindows.find(s.screenId);
-        if (winIt == m_screenWindows.end()) continue;
-        QWidget* container = winIt.value().window; if (!container) continue;
-        QWidget* w = new QWidget(container);
-        w->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-        w->setAutoFillBackground(false);
-        w->setAttribute(Qt::WA_NoSystemBackground, true);
-        w->setAttribute(Qt::WA_OpaquePaintEvent, false);
-        w->hide();
-        // Geometry
-        const qreal containerW = static_cast<qreal>(container->width());
-        const qreal containerH = static_cast<qreal>(container->height());
-        const qreal exactX = s.destNx * containerW;
-        const qreal exactY = s.destNy * containerH;
-        const int px = static_cast<int>(std::floor(exactX));
-        const int py = static_cast<int>(std::floor(exactY));
-        const int right = static_cast<int>(std::ceil((s.destNx + s.destNw) * containerW));
-        const int bottom = static_cast<int>(std::ceil((s.destNy + s.destNh) * containerH));
-        int pw = std::max(0, right - px);
-        int ph = std::max(0, bottom - py);
-        if (pw <=0 || ph <=0) { pw = 10; ph = 10; }
-        w->setGeometry(px, py, pw, ph);
-    s.widget = w;
-        
-        // Get the scene for this screen
-        QGraphicsScene* scene = winIt.value().scene;
-        if (!scene) continue;
-        
-        if (item->type == "text") {
-            QGraphicsTextItem* textItem = new QGraphicsTextItem();
-            textItem->setOpacity(0.0);
-            textItem->setVisible(true);
-            textItem->setTextInteractionFlags(Qt::NoTextInteraction);
-
-            QFont font(item->fontFamily, item->fontSize);
-            font.setItalic(item->fontItalic);
-            if (item->fontWeight > 0) {
-                font.setWeight(qFontWeightFromCss(item->fontWeight));
-            } else if (item->fontBold) {
-                font.setWeight(QFont::Bold);
-            }
-            textItem->setFont(font);
-
-            QColor color(item->textColor);
-            if (!color.isValid()) {
-                color = QColor(Qt::white);
-            }
-            textItem->setDefaultTextColor(color);
-            textItem->setPlainText(item->text);
-
-            auto computeOutlineWidth = [](double percent, const QFont& baseFont) -> qreal {
-                if (percent <= 0.0) {
-                    return 0.0;
-                }
-                QFontMetricsF metrics(baseFont);
-                qreal reference = metrics.height();
-                if (reference <= 0.0) {
-                    if (baseFont.pixelSize() > 0) {
-                        reference = static_cast<qreal>(baseFont.pixelSize());
-                    } else {
-                        reference = baseFont.pointSizeF();
-                    }
-                }
-                if (reference <= 0.0) {
-                    reference = 16.0;
-                }
-                constexpr qreal kMaxOutlineThicknessFactor = 0.35;
-                constexpr qreal kOutlineCurveExponent = 1.35;
-                constexpr qreal kMaxOutlineStrokePx = 14.0;
-                const qreal normalized = std::clamp(percent / 100.0, 0.0, 1.0);
-                const qreal eased = std::pow(normalized, kOutlineCurveExponent);
-                const qreal scaledStroke = eased * kMaxOutlineThicknessFactor * reference;
-                return std::clamp(scaledStroke, 0.0, kMaxOutlineStrokePx);
-            };
-
-            const qreal strokeWidth = computeOutlineWidth(item->textBorderWidthPercent, font);
-            auto outlineOverflowAllowance = [](qreal stroke) -> qreal {
-                if (stroke <= 0.0) {
-                    return 0.0;
-                }
-                constexpr qreal kOverflowScale = 0.45;
-                constexpr qreal kOverflowMinPx = 2.0;
-                return std::ceil(std::max<qreal>(stroke * kOverflowScale, kOverflowMinPx));
-            };
-
-            const qreal padding = std::max<qreal>(0.0, strokeWidth + outlineOverflowAllowance(strokeWidth));
-
-            QColor outlineColor(item->textBorderColor);
-            if (!outlineColor.isValid()) {
-                outlineColor = color;
-            }
-
-            QColor highlightColor(item->textHighlightColor);
-            if (!highlightColor.isValid()) {
-                highlightColor = QColor(255, 255, 0, 160);
-            }
-
-            if (QTextDocument* doc = textItem->document()) {
-                doc->setDocumentMargin(0.0);
-
-                QTextOption textOption = doc->defaultTextOption();
-                textOption.setWrapMode(item->fitToTextEnabled ? QTextOption::NoWrap : QTextOption::WordWrap);
-                Qt::Alignment hAlign = Qt::AlignHCenter;
-                switch (item->horizontalAlignment) {
-                    case RemoteMediaItem::HorizontalAlignment::Left:
-                        hAlign = Qt::AlignLeft;
-                        break;
-                    case RemoteMediaItem::HorizontalAlignment::Center:
-                        hAlign = Qt::AlignHCenter;
-                        break;
-                    case RemoteMediaItem::HorizontalAlignment::Right:
-                        hAlign = Qt::AlignRight;
-                        break;
-                }
-                textOption.setAlignment(hAlign);
-                doc->setDefaultTextOption(textOption);
-
-                QTextCursor cursor(doc);
-                cursor.select(QTextCursor::Document);
-                QTextCharFormat format;
-                format.setForeground(color);
-                if (strokeWidth > 0.0) {
-                    format.setTextOutline(QPen(outlineColor, strokeWidth * 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                } else {
-                    format.clearProperty(QTextFormat::TextOutline);
-                }
-                if (item->highlightEnabled && highlightColor.alpha() > 0) {
-                    format.setBackground(QBrush(highlightColor));
-                } else {
-                    format.clearBackground();
-                }
-                cursor.mergeCharFormat(format);
-            }
-
-            const qreal baseWidth = static_cast<qreal>(item->baseWidth > 0 ? item->baseWidth : 200);
-            const qreal baseHeight = static_cast<qreal>(item->baseHeight > 0 ? item->baseHeight : 100);
-            const qreal uniformScale = std::max<qreal>(static_cast<qreal>(std::abs(item->uniformScale)), 1e-4);
-            const qreal logicalWidth = std::max<qreal>(1.0, (baseWidth / uniformScale) - 2.0 * padding);
-
-            if (item->fitToTextEnabled) {
-                textItem->setTextWidth(-1.0);
-            } else {
-                textItem->setTextWidth(logicalWidth);
-            }
-
-            QRectF docBounds;
-            if (QTextDocument* doc = textItem->document()) {
-                if (QAbstractTextDocumentLayout* docLayout = doc->documentLayout()) {
-                    docBounds = computeDocumentTextBounds(*doc, docLayout);
-                }
-            }
-            if (!docBounds.isValid() || docBounds.isEmpty()) {
-                const qreal logicalHeight = std::max<qreal>(1.0, (baseHeight - 2.0 * padding) / uniformScale);
-                docBounds = QRectF(0.0, 0.0, std::max<qreal>(logicalWidth, 1.0), logicalHeight);
-            }
-
-            const qreal safeBaseWidth = std::max<qreal>(baseWidth, 1.0);
-            const qreal safeBaseHeight = std::max<qreal>(baseHeight, 1.0);
-            const qreal safeSrcNw = std::max<qreal>(1e-6, s.srcNw);
-            const qreal safeSrcNh = std::max<qreal>(1e-6, s.srcNh);
-            const qreal fullDisplayWidth = (s.destNw * containerW) / safeSrcNw;
-            const qreal fullDisplayHeight = (s.destNh * containerH) / safeSrcNh;
-            const qreal scaleX = fullDisplayWidth / safeBaseWidth;
-            const qreal scaleY = fullDisplayHeight / safeBaseHeight;
-            const qreal appliedScale = scaleX * uniformScale;
-
-            const qreal paddingX = padding * appliedScale;
-            const qreal paddingY = padding * appliedScale;
-            const qreal docVisualTop = docBounds.top();
-            const qreal docVisualHeight = std::max<qreal>(1.0, docBounds.height());
-            const qreal scaledDocTop = docVisualTop * appliedScale;
-            const qreal scaledDocHeight = docVisualHeight * appliedScale;
-            const qreal availableHeightScene = std::max<qreal>(0.0, fullDisplayHeight - 2.0 * paddingY);
-
-            qreal verticalOffset = paddingY;
-            switch (item->verticalAlignment) {
-                case RemoteMediaItem::VerticalAlignment::Top:
-                    verticalOffset = paddingY - scaledDocTop;
-                    break;
-                case RemoteMediaItem::VerticalAlignment::Center:
-                    verticalOffset = paddingY + std::max<qreal>(0.0, (availableHeightScene - scaledDocHeight) * 0.5) - scaledDocTop;
-                    break;
-                case RemoteMediaItem::VerticalAlignment::Bottom:
-                    verticalOffset = paddingY + std::max<qreal>(0.0, availableHeightScene - scaledDocHeight) - scaledDocTop;
-                    break;
-            }
-
-            const qreal horizontalOffset = paddingX;
-            const qreal sourcePixelOffsetX = s.srcNx * baseWidth * scaleX;
-            const qreal sourcePixelOffsetY = s.srcNy * baseHeight * scaleY;
-
-            textItem->setPos(exactX + horizontalOffset - sourcePixelOffsetX,
-                             exactY + verticalOffset - sourcePixelOffsetY);
-            textItem->setScale(appliedScale);
-
-            scene->addItem(textItem);
-            s.textItem = textItem;
-            s.imageItem = nullptr;
-        } else if (item->type == "image") {
-            // Create a pixmap item for host-provided still images
-            QGraphicsPixmapItem* pixmapItem = new QGraphicsPixmapItem();
-            pixmapItem->setPos(exactX, exactY);
-            pixmapItem->setOpacity(0.0);
-            pixmapItem->setTransformationMode(Qt::SmoothTransformation);
-            scene->addItem(pixmapItem);
-            s.imageItem = pixmapItem;
-        } else if (item->type == "video") {
-            // Create a pixmap item to display CPU-rendered video frames
-            QGraphicsPixmapItem* frameItem = new QGraphicsPixmapItem();
-            frameItem->setPos(exactX, exactY);
-            frameItem->setOpacity(0.0);
-            frameItem->setTransformationMode(Qt::SmoothTransformation);
-            scene->addItem(frameItem);
-            s.imageItem = frameItem;
-        }
-        w->hide(); // Hide widget container since items render in scene
-        w->raise();
+    for (auto& span : item->spans) {
+        publishMediaSpan(item, span);
     }
+
 
     // Content loading
     std::weak_ptr<RemoteMediaItem> weakItem = item;
 
     if (item->type == "text") {
-        bool renderedAllSpans = !item->spans.isEmpty();
-        for (const auto& span : item->spans) {
-            if (!span.textItem) {
-                renderedAllSpans = false;
-                break;
-            }
-        }
-        item->loaded = renderedAllSpans;
-        if (!renderedAllSpans) {
-            qWarning() << "RemoteSceneController: text span setup incomplete for" << item->mediaId;
-        }
-        evaluateItemReadiness(item);
+        // QML reports readiness once the shared text delegate has been created.
+        item->loaded = false;
     } else if (item->type == "image") {
-        auto attemptLoad = [this, epoch, weakItem]() {
-            auto item = weakItem.lock();
-            if (!item) return false;
-            if (epoch != m_sceneEpoch) return false;
-            QString path = m_fileManager->getFilePathForId(item->fileId);
-            if (!path.isEmpty() && QFileInfo::exists(path)) {
-                QPixmap pm; 
-                if (pm.load(path)) {
-                    applyPixmapToSpans(item, pm);
-                    item->loaded = true;
-                    evaluateItemReadiness(item);
-                    return true;
-                }
-            }
-            return false;
-        };
-        if (!attemptLoad()) {
-            // Bind retries to each span widget so callbacks are dropped if the widget is destroyed
-            for (auto& s : item->spans) {
-                QWidget* recv = s.widget;
-                for (int i=1;i<=5;++i) QTimer::singleShot(i*500, recv, [attemptLoad]() { attemptLoad(); });
-            }
-        }
+        // Image.Ready is reported by ImageItem through RemoteSceneRoot.
+        item->loaded = false;
     } else if (item->type == "video") {
-        // CPU-rendered video playback driven by a shared QVideoSink
-        QWidget* parentForAv = nullptr; 
-        if (!item->spans.isEmpty()) parentForAv = item->spans.first().widget;
-        
-        item->player = new QMediaPlayer(parentForAv);
-        item->audio = new QAudioOutput(parentForAv);
+        // The existing decoder remains authoritative; its QVideoSink feeds one
+        // shared frame source rendered by every passive QML span.
+        item->player = new QMediaPlayer(this);
+        item->audio = new QAudioOutput(this);
         item->audio->setMuted(item->muted); 
         item->audio->setVolume(std::clamp(item->volume, 0.0, 1.0));
         item->player->setAudioOutput(item->audio);
@@ -2067,8 +1837,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             return false;
         };
         if (!attemptLoadVid()) {
-            QWidget* recv = (!item->spans.isEmpty() ? item->spans.first().widget : nullptr);
-            for (int i=1;i<=5;++i) QTimer::singleShot(i*500, recv, [attemptLoadVid]() { attemptLoadVid(); });
+            for (int i=1;i<=5;++i) QTimer::singleShot(i*500, this, [attemptLoadVid]() { attemptLoadVid(); });
         }
     }
 
@@ -2174,60 +1943,50 @@ void RemoteSceneController::fadeIn(const std::shared_ptr<RemoteMediaItem>& item)
     }
     const int durMs = int(item->fadeInSeconds * 1000.0);
     std::weak_ptr<RemoteMediaItem> weakItem = item;
-    auto scheduleHideAfterFade = [this, weakItem, durMs]() {
+    auto finishFade = [this, weakItem]() {
         auto locked = weakItem.lock();
         if (!locked) return;
-        if (!locked->autoHide) return;
-        if (locked->hideWhenVideoEnds) return;
-        if (durMs <= 10) {
-            scheduleHideTimer(locked);
-        } else {
-            QTimer::singleShot(durMs, this, [this, weakItem]() {
-                auto lockedInner = weakItem.lock();
-                if (!lockedInner) return;
-                scheduleHideTimer(lockedInner);
-            });
-        }
+        scheduleHideTimer(locked);
     };
     if (item->spans.isEmpty()) {
         qWarning() << "RemoteSceneController: fadeIn requested with no spans" << item->mediaId;
-        scheduleHideAfterFade();
+        finishFade();
         return;
     }
+
+    if (item->visualFadeAnimation) {
+        QVariantAnimation* previous = item->visualFadeAnimation.data();
+        QObject::disconnect(previous, nullptr, this, nullptr);
+        previous->stop();
+        previous->deleteLater();
+        item->visualFadeAnimation = nullptr;
+    }
+
     if (durMs <= 10) {
-        for (auto& s : item->spans) {
-            if (s.textItem) {
-                s.textItem->setOpacity(item->contentOpacity);
-                s.textItem->setVisible(true);
-            } else if (s.imageItem) {
-                s.imageItem->setOpacity(item->contentOpacity);
-                s.imageItem->setVisible(true);
-            }
-        }
-        scheduleHideAfterFade();
+        setRemoteMediaVisualState(item, item->contentOpacity, item->contentVisible);
+        finishFade();
         return;
     }
-    for (auto& s : item->spans) {
-        QGraphicsItem* graphicsItem = nullptr;
-        if (s.textItem) {
-            graphicsItem = static_cast<QGraphicsItem*>(s.textItem);
-        } else if (s.imageItem) {
-            graphicsItem = static_cast<QGraphicsItem*>(s.imageItem);
-        }
-        if (!graphicsItem) continue;
-        graphicsItem->setVisible(true);
-        auto* anim = new QVariantAnimation(this);
-        anim->setStartValue(0.0);
-        anim->setEndValue(item->contentOpacity);
-        anim->setDuration(durMs);
-        anim->setEasingCurve(QEasingCurve::Linear);
-        connect(anim, &QVariantAnimation::valueChanged, this, [graphicsItem](const QVariant& v){
-            if (graphicsItem) graphicsItem->setOpacity(v.toDouble());
-        });
-        connect(anim, &QVariantAnimation::finished, anim, [anim]() { anim->deleteLater(); });
-        anim->start();
-    }
-    scheduleHideAfterFade();
+
+    setRemoteMediaVisualState(item, item->renderOpacity, item->contentVisible);
+    auto* animation = new QVariantAnimation(this);
+    animation->setStartValue(item->renderOpacity);
+    animation->setEndValue(item->contentOpacity);
+    animation->setDuration(durMs);
+    animation->setEasingCurve(QEasingCurve::Linear);
+    connect(animation, &QVariantAnimation::valueChanged, this, [this, weakItem](const QVariant& value) {
+        auto locked = weakItem.lock();
+        if (!locked) return;
+        setRemoteMediaVisualState(locked, value.toReal(), locked->contentVisible);
+    });
+    connect(animation, &QVariantAnimation::finished, this, [weakItem, finishFade, animation]() {
+        auto locked = weakItem.lock();
+        if (locked && locked->visualFadeAnimation == animation) locked->visualFadeAnimation = nullptr;
+        animation->deleteLater();
+        finishFade();
+    });
+    item->visualFadeAnimation = animation;
+    animation->start();
 }
 
 void RemoteSceneController::scheduleHideTimer(const std::shared_ptr<RemoteMediaItem>& item) {
@@ -2387,15 +2146,14 @@ void RemoteSceneController::fadeOutAndHide(const std::shared_ptr<RemoteMediaItem
         item->hideTimer->stop();
     }
     const int durMs = int(std::max(0.0, item->fadeOutSeconds) * 1000.0);
-    auto finalize = [item]() {
-        item->displayStarted = false;
-        item->displayReady = false;
-        item->hiding = false;
-        for (auto& span : item->spans) {
-            if (span.widget) span.widget->hide();
-            if (span.textItem) span.textItem->setOpacity(0.0);
-            if (span.imageItem) span.imageItem->setOpacity(0.0);
-        }
+    std::weak_ptr<RemoteMediaItem> weakItem = item;
+    auto finalize = [this, weakItem]() {
+        auto locked = weakItem.lock();
+        if (!locked) return;
+        setRemoteMediaVisualState(locked, 0.0, false);
+        locked->displayStarted = false;
+        locked->displayReady = false;
+        locked->hiding = false;
     };
 
     if (item->spans.isEmpty()) {
@@ -2407,34 +2165,31 @@ void RemoteSceneController::fadeOutAndHide(const std::shared_ptr<RemoteMediaItem
         finalize();
         return;
     }
-    auto remaining = std::make_shared<int>(0);
-    for (auto& span : item->spans) {
-        QGraphicsItem* graphicsItem = nullptr;
-        if (span.textItem) {
-            graphicsItem = static_cast<QGraphicsItem*>(span.textItem);
-        } else if (span.imageItem) {
-            graphicsItem = static_cast<QGraphicsItem*>(span.imageItem);
-        }
-        if (!graphicsItem) continue;
-        ++(*remaining);
-        auto* anim = new QVariantAnimation(this);
-        anim->setStartValue(graphicsItem->opacity());
-        anim->setEndValue(0.0);
-        anim->setDuration(durMs);
-        anim->setEasingCurve(QEasingCurve::Linear);
-        connect(anim, &QVariantAnimation::valueChanged, this, [graphicsItem](const QVariant& v) {
-            if (graphicsItem) graphicsItem->setOpacity(v.toDouble());
-        });
-        connect(anim, &QVariantAnimation::finished, anim, [anim]() { anim->deleteLater(); });
-        connect(anim, &QVariantAnimation::finished, this, [remaining, finalize]() mutable {
-            if (!remaining) return;
-            if (--(*remaining) == 0) {
-                finalize();
-            }
-        });
-        anim->start();
+
+    if (item->visualFadeAnimation) {
+        QVariantAnimation* previous = item->visualFadeAnimation.data();
+        QObject::disconnect(previous, nullptr, this, nullptr);
+        previous->stop();
+        previous->deleteLater();
+        item->visualFadeAnimation = nullptr;
     }
-    if (*remaining == 0) {
+
+    auto* animation = new QVariantAnimation(this);
+    animation->setStartValue(item->renderOpacity);
+    animation->setEndValue(0.0);
+    animation->setDuration(durMs);
+    animation->setEasingCurve(QEasingCurve::Linear);
+    connect(animation, &QVariantAnimation::valueChanged, this, [this, weakItem](const QVariant& value) {
+        auto locked = weakItem.lock();
+        if (!locked) return;
+        setRemoteMediaVisualState(locked, value.toReal(), true);
+    });
+    connect(animation, &QVariantAnimation::finished, this, [weakItem, finalize, animation]() {
+        auto locked = weakItem.lock();
+        if (locked && locked->visualFadeAnimation == animation) locked->visualFadeAnimation = nullptr;
+        animation->deleteLater();
         finalize();
-    }
+    });
+    item->visualFadeAnimation = animation;
+    animation->start();
 }

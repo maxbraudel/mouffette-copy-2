@@ -1,11 +1,13 @@
 import QtQuick 2.15
 import QtMultimedia
+import Mouffette.Canvas 1.0
 
 BaseMediaItem {
     id: root
 
     property var cppMediaPlayer: null
     property var cppVideoSink: null
+    property var remoteFrameSource: null
     property var boundMediaPlayer: null
     property bool boundViaSinkPath: false   // true when VideoOutput.videoSink was used
     property int videoPlaybackErrorCode: 0
@@ -13,9 +15,13 @@ BaseMediaItem {
     property bool videoHasRenderedFrame: false
     property bool videoHasPosterFrame: false
     property bool videoFirstFramePrimed: false
+    readonly property bool remoteFrameMode: remoteFrameSource !== null
     readonly property bool showFallbackOverlay: !hasLiveFrame
-    readonly property bool hasLiveFrame: videoHasRenderedFrame || videoFirstFramePrimed || localFrameSeen
+    readonly property bool hasLiveFrame: remoteFrameMode
+                                          ? remoteFrameSurface.hasFrame
+                                          : (videoHasRenderedFrame || videoFirstFramePrimed || localFrameSeen)
     property bool localFrameSeen: false
+    contentReady: hasLiveFrame
 
     function fallbackStatusText() {
         if (videoPlaybackErrorCode !== 0)
@@ -101,6 +107,7 @@ BaseMediaItem {
         id: videoOutput
         anchors.fill: parent
         fillMode: VideoOutput.Stretch
+        visible: !root.remoteFrameMode
 
         // Retrigger binding when the VideoOutput enters a Window and the
         // scenegraph initialises its internal QVideoSink.
@@ -108,6 +115,13 @@ BaseMediaItem {
             if (window)
                 Qt.callLater(root.bindPlayerToOutput)
         }
+    }
+
+    RemoteVideoFrameItem {
+        id: remoteFrameSurface
+        anchors.fill: parent
+        visible: root.remoteFrameMode
+        frameSource: root.remoteFrameSource
     }
 
     onCppMediaPlayerChanged: {
@@ -178,7 +192,7 @@ BaseMediaItem {
 
     Rectangle {
         anchors.fill: parent
-        visible: root.showFallbackOverlay
+        visible: root.showFallbackOverlay && !root.remoteFrameMode
         color: "#141a24"
         border.width: 1
         border.color: "#2a3240"

@@ -3,6 +3,7 @@
 #include <QPointF>
 #include <QRectF>
 #include <QSize>
+#include <QObject>
 
 #include <functional>
 
@@ -23,24 +24,25 @@ using ResizeSnapCallback = std::function<ResizeSnapFeedback(qreal, const QPointF
 using MediaSettingsChangedNotifier = std::function<void(ResizableMediaBase*)>;
 using MediaOpacityAnimationTickNotifier = std::function<void()>;
 
+// Session-owned callbacks.  Each canvas creates one context and injects it
+// into its media items; QObject lifetime makes every callback disappear with
+// that canvas instead of being overwritten by another open session.
+class Context final : public QObject {
+public:
+    explicit Context(QObject* parent = nullptr) : QObject(parent) {}
+
+    ScreenSnapCallback screenSnapCallback;
+    ResizeSnapCallback resizeSnapCallback;
+    MediaSettingsChangedNotifier mediaSettingsChangedNotifier;
+    MediaOpacityAnimationTickNotifier mediaOpacityAnimationTickNotifier;
+};
+
 void setUploadChangedNotifier(UploadChangedNotifier cb);
 UploadChangedNotifier uploadChangedNotifier();
 
 void setFileErrorNotifier(FileErrorNotifier cb);
 FileErrorNotifier fileErrorNotifier();
 
-void setScreenSnapCallback(ScreenSnapCallback cb);
-ScreenSnapCallback screenSnapCallback();
-
-void setResizeSnapCallback(ResizeSnapCallback cb);
-ResizeSnapCallback resizeSnapCallback();
-
 void setFileManager(FileManager* manager);
 FileManager* fileManager();
-
-void setMediaSettingsChangedNotifier(MediaSettingsChangedNotifier cb);
-MediaSettingsChangedNotifier mediaSettingsChangedNotifier();
-
-void setMediaOpacityAnimationTickNotifier(MediaOpacityAnimationTickNotifier cb);
-MediaOpacityAnimationTickNotifier mediaOpacityAnimationTickNotifier();
 } // namespace MediaRuntimeHooks

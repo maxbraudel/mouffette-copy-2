@@ -16,6 +16,7 @@
 #include <QAudioOutput>
 #include <QSet>
 #include <QTimer>
+#include <QPointer>
 #include <QVariantAnimation>
 #include <memory>
 #include <cmath>
@@ -72,6 +73,9 @@ public:
     enum Handle { None, TopLeft, TopRight, BottomLeft, BottomRight, LeftMid, RightMid, TopMid, BottomMid };
     ~ResizableMediaBase() override;
     explicit ResizableMediaBase(const QSize& baseSizePx, int visualSizePx, int selectionSizePx, const QString& filename = QString());
+
+    void setRuntimeContext(MediaRuntimeHooks::Context* context) { m_runtimeContext = context; }
+    MediaRuntimeHooks::Context* runtimeContext() const { return m_runtimeContext.data(); }
 
     // Lifetime guard for external schedulers storing raw pointers (e.g., delayed timers).
     std::weak_ptr<bool> lifetimeGuard() const;
@@ -274,6 +278,7 @@ protected:
     qreal m_axisSnapTargetScale = 1.0;
     MediaSettingsState m_mediaSettings;
     std::shared_ptr<bool> m_lifetimeToken;
+    QPointer<MediaRuntimeHooks::Context> m_runtimeContext;
 };
 
 // Simple pixmap media item
@@ -441,4 +446,3 @@ private:
     QMediaPlayer::Error m_lastPlaybackError = QMediaPlayer::NoError;
     QString m_lastPlaybackErrorString;
 };
-

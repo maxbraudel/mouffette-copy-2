@@ -1,5 +1,6 @@
 // TextMediaItem.cpp - Implementation of text media item
 #include "TextMediaItem.h"
+#include "backend/domain/media/TextRenderState.h"
 #include <QPainter>
 #include <QStyleOptionGraphicsItem>
 #include <QGraphicsSceneMouseEvent>
@@ -72,15 +73,8 @@ namespace TextMediaDefaults {
 
 namespace {
 
-constexpr qreal kContentPadding = 4.0;
-constexpr qreal kStrokeOverflowScale = 0.75;
-constexpr qreal kStrokeOverflowMinPx = 1.5;
 constexpr qreal kFitToTextMinWidth = 24.0;
 constexpr int kFitToTextSizeStabilizationPx = 1;
-constexpr qreal kMaxOutlineThicknessFactor = 0.35;
-constexpr qreal kOutlineCurveExponent = 1.35;
-constexpr qreal kMaxOutlineStrokePx = 14.0;
-constexpr qreal kMinOutlineStrokePx = 0.25;
 constexpr qreal kBorderWidthQuantizationStepPercent = 1.0;
 constexpr int kFallbackFontPixelSize = 12;
 
@@ -174,27 +168,7 @@ QString previewTextForLog(const QString& text, int maxLen = 120) {
 }
 
 qreal computeStrokeWidthFromFont(const QFont& font, qreal widthPercent) {
-    if (widthPercent <= 0.0) {
-        return 0.0;
-    }
-
-    QFontMetricsF metrics(font);
-    qreal reference = metrics.height();
-    if (reference <= 0.0) {
-        if (font.pixelSize() > 0) {
-            reference = static_cast<qreal>(font.pixelSize());
-        } else {
-            reference = font.pointSizeF();
-        }
-    }
-    if (reference <= 0.0) {
-        reference = 16.0;
-    }
-
-    const qreal normalized = std::clamp(widthPercent / 100.0, 0.0, 1.0);
-    const qreal eased = std::pow(normalized, kOutlineCurveExponent);
-    const qreal scaledStroke = eased * kMaxOutlineThicknessFactor * reference;
-    return std::clamp(scaledStroke, 0.0, kMaxOutlineStrokePx);
+    return TextRenderMetrics::outlinePixels(font, widthPercent);
 }
 
 QRectF computeDocumentTextBounds(const QTextDocument& doc, QAbstractTextDocumentLayout* layout) {
@@ -923,12 +897,9 @@ void TextMediaItem::paintVectorSnapshot(QPainter* painter, const VectorDrawSnaps
         highlightColor = TextMediaDefaults::TEXT_HIGHLIGHT_COLOR;
     }
 
-    const qreal baseStrokeWidth = computeStrokeWidthFromFont(snapshot.font, snapshot.outlineWidthPercent);
     const qreal uniformScale = std::max(std::abs(snapshot.uniformScaleFactor), epsilon);
-    const qreal strokeWidthRaw = baseStrokeWidth * uniformScale;
-    const qreal strokeWidth = (strokeWidthRaw >= kMinOutlineStrokePx)
-        ? std::min(strokeWidthRaw, kMaxOutlineStrokePx)
-        : 0.0;
+    const qreal strokeWidth = TextRenderMetrics::outlinePixels(
+        snapshot.font, snapshot.outlineWidthPercent, uniformScale);
     const QString preview = previewTextForLog(snapshot.text);
     auto logSnapshotPerf = [&](const char* context, qint64 outlineMs, int textLength, qint64 totalMs) {
         if (strokeWidth <= 0.0 && totalMs < 4) {
@@ -1395,7 +1366,7 @@ qreal TextMediaItem::borderStrokeWidthPx() const {
 }
 
 qreal TextMediaItem::contentPaddingPx() const {
-    return kContentPadding;
+    return TextRenderMetrics::ContentMarginPx;
 }
 
 void TextMediaItem::handleContentPaddingChanged(qreal oldPadding, qreal newPadding) {
@@ -2538,37 +2509,20 @@ void TextMediaItem::applyFitToTextNow() {
     // uniformScale is needed both for the measurement font pixel size and for
     // the container size calculation below — declare it once here.
     const qreal uniformScale = std::max(std::abs(m_uniformScaleFactor), 1e-4);
+    const TextRenderState renderState = TextRenderMetrics::fromMediaItem(*this);
 
     qreal logicalContentWidth  = 0.0;
     qreal logicalContentHeight = 0.0;
     {
-        // Build the measurement font to exactly match what TextItem.qml's textDisplayNode
-        // renders.  Two properties must be right:
-        //   1. Family = "Impact" (hardcoded in CanvasRoot.qml delegate, line 764).
-        //      m_font defaults to Arial, which is ~20-40% wider than Impact for typical
-        //      text — that was the direct cause of the oversized fit-to-text container.
-        //   2. Pixel size = QML's textFontPixelSize = round(rawPx * uniformScale).
-        //      Using m_font's point size (48pt) directly would produce wrong metrics
-        //      when uniformScale ≠ 1, because fit-to-text containers are sized in
-        //      scene pixels, not logical pixels.
-        qreal rawPixelSize = 0.0;
-        if (m_font.pixelSize() > 0) {
-            rawPixelSize = static_cast<qreal>(m_font.pixelSize());
-        } else if (m_font.pointSizeF() > 0.0) {
-            qreal dpi = 96.0;
-            if (QScreen* scr = QGuiApplication::primaryScreen())
-                dpi = std::max<qreal>(scr->logicalDotsPerInchY(), 1.0);
-            rawPixelSize = m_font.pointSizeF() * dpi / 72.0;
-        }
-        if (rawPixelSize <= 0.0) rawPixelSize = 12.0;
-        const int measurePixelSize = std::max(1, qRound(rawPixelSize * uniformScale));
-
+        // Build the exact font state published to Qt Quick. The resulting
+        // QTextLayout metrics are already expressed in scaled scene pixels.
         QFont measureFont;
-        measureFont.setFamily(QStringLiteral("Impact"));
-        measureFont.setPixelSize(measurePixelSize);
-        measureFont.setItalic(m_font.italic());
-        measureFont.setWeight(m_font.weight());
-        measureFont.setCapitalization(m_font.capitalization());
+        measureFont.setFamily(renderState.fontFamily);
+        measureFont.setPixelSize(renderState.fontPixelSize);
+        measureFont.setItalic(renderState.italic);
+        measureFont.setWeight(cssWeightToQtWeight(renderState.fontWeight));
+        measureFont.setCapitalization(renderState.uppercase
+            ? QFont::AllUppercase : QFont::MixedCase);
         measureFont.setKerning(true);
         measureFont.setHintingPreference(QFont::PreferNoHinting);
 
@@ -2611,22 +2565,17 @@ void TextMediaItem::applyFitToTextNow() {
         logicalContentHeight = std::max<qreal>(1.0, measuredHeight);
     }
 
-    const qreal marginLogical = contentPaddingPx();
-    const qreal marginScene = marginLogical * uniformScale;
-
-    const qreal strokeWidthLogical = borderStrokeWidthPx();
-    const qreal borderPaddingLogical = (strokeWidthLogical > 0.0)
-        ? (strokeWidthLogical + std::max<qreal>(kStrokeOverflowMinPx, strokeWidthLogical * kStrokeOverflowScale + 1.0))
-        : 0.0;
-    const qreal borderPaddingScene = borderPaddingLogical * uniformScale;
+    const qreal marginScene = TextRenderMetrics::ContentMarginPx;
+    const qreal borderPaddingScene =
+        TextRenderMetrics::outlineSafetyPadding(renderState.outlineWidthPixels);
 
     // Calculate dimensions with minimum width constraint in fit-to-text mode
-    const int calculatedWidth = static_cast<int>(std::ceil(logicalContentWidth * uniformScale + marginScene * 2.0 + borderPaddingScene * 2.0));
+    const int calculatedWidth = static_cast<int>(std::ceil(logicalContentWidth + marginScene * 2.0 + borderPaddingScene * 2.0));
     const int minWidth = static_cast<int>(std::ceil(kFitToTextMinWidth * uniformScale + marginScene * 2.0 + borderPaddingScene * 2.0));
     
     QSize newBase(
         std::max(minWidth, std::max(1, calculatedWidth)),
-        std::max(1, static_cast<int>(std::ceil(logicalContentHeight * uniformScale + marginScene * 2.0 + borderPaddingScene * 2.0))));
+        std::max(1, static_cast<int>(std::ceil(logicalContentHeight + marginScene * 2.0 + borderPaddingScene * 2.0))));
 
     const QSize oldBase = m_baseSize;
 

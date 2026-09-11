@@ -1,5 +1,14 @@
-client/build
-client/build_gen_atlas
-server/node_modules
-build
-.vscode
+# CMake / Qt build trees (including local and IDE-specific variants)
+**/build/
+**/build-*/
+**/build_*/
+**/cmake-build-*/
+**/out/build/
+**/*_autogen/
+
+# User-specific CMake configuration; shared CMakePresets.json stays versioned
+**/CMakeUserPresets.json
+
+# Dependencies and editor state
+server/node_modules/
+.vscode/

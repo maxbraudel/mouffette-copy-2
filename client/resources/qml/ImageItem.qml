@@ -3,6 +3,7 @@ import QtQuick 2.15
 BaseMediaItem {
     id: root
     property string imageSource: ""
+    contentReady: image.status === Image.Ready
 
     Rectangle {
         anchors.fill: parent

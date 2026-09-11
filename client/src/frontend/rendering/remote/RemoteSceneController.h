@@ -6,12 +6,12 @@
 #include <QList>
 #include <QJsonObject>
 #include <QTimer>
-#include <QPixmap>
 #include <QSharedPointer>
 #include <QByteArray>
 #include <QVideoFrame>
 #include <QImage>
 #include <QPointer>
+#include <QVariantList>
 #include <memory>
 
 class WebSocketClient;
@@ -21,11 +21,10 @@ class QMediaPlayer;
 class QVideoSink;
 class QAudioOutput;
 class QBuffer;
-class QGraphicsView;
-class QGraphicsScene;
-class QGraphicsPixmapItem;
-class QGraphicsTextItem;
+class QQuickWidget;
 class QVariantAnimation;
+class MediaListModel;
+class RemoteVideoFrameSource;
 
 class RemoteSceneController : public QObject {
 	Q_OBJECT
@@ -40,12 +39,14 @@ private slots:
 	void onRemoteSceneStop(const QString& senderClientId);
 	void onConnectionLost();
 	void onConnectionError(const QString& errorMessage);
+	void onRemoteSpanReady(const QString& mediaId, const QString& spanId);
 
 private:
 	struct ScreenWindow {
 		QWidget* window = nullptr;
-		QGraphicsView* graphicsView = nullptr;
-		QGraphicsScene* scene = nullptr;
+		QQuickWidget* quickWidget = nullptr;
+		MediaListModel* mediaModel = nullptr;
+		QVariantList mediaEntries;
 		int x=0,y=0,w=0,h=0;
 		quint64 sceneEpoch = 0;
 	};
@@ -60,9 +61,13 @@ private:
 		int fontSize = 12;
 		bool fontBold = false;
 		bool fontItalic = false;
+		bool fontUnderline = false;
+		bool fontUppercase = false;
 		int fontWeight = 0; // 0 falls back to bold flag
+		int fontPixelSize = 0;
 		QString textColor;
 		double textBorderWidthPercent = 0.0;
+		double textOutlineWidthPx = -1.0;
 		QString textBorderColor;
 		bool fitToTextEnabled = false;
 		bool highlightEnabled = false;
@@ -70,6 +75,10 @@ private:
 		int baseWidth = 0;
 		int baseHeight = 0;
 		double uniformScale = 1.0;
+		double z = 0.0;
+		bool contentVisible = true;
+		double renderOpacity = 0.0;
+		bool renderVisible = true;
 		enum class HorizontalAlignment { Left, Center, Right };
 		enum class VerticalAlignment { Top, Center, Bottom };
 		HorizontalAlignment horizontalAlignment = HorizontalAlignment::Center;
@@ -80,11 +89,8 @@ private:
 			double nx = 0, ny = 0, nw = 0, nh = 0;
 			double destNx = 0, destNy = 0, destNw = 0, destNh = 0;
 			double srcNx = 0, srcNy = 0, srcNw = 1, srcNh = 1;
-			QWidget* widget = nullptr;
-			QGraphicsPixmapItem* imageItem = nullptr;
-			QGraphicsTextItem* textItem = nullptr;
-			bool requiresRender = false;
-			bool renderReady = false;
+			QString spanId;
+			bool qmlReady = false;
 		};
 		QList<Span> spans;
 		bool autoDisplay=false; int autoDisplayDelayMs=0;
@@ -100,6 +106,7 @@ private:
 		bool autoUnmute = false; int autoUnmuteDelayMs = 0;
 		double audioFadeInSeconds = 0.0; double audioFadeOutSeconds = 0.0;
 		QPointer<QVariantAnimation> audioFadeAnimation;
+		QPointer<QVariantAnimation> visualFadeAnimation;
 		bool repeatEnabled = false; int repeatCount = 0; int repeatRemaining = 0; bool repeatActive = false;
 		bool primedFirstFrame = false; bool playAuthorized = false;
 		bool displayReady = false; bool displayStarted = false;
@@ -136,7 +143,6 @@ private:
 		QVideoSink* liveSink = nullptr;
 		bool videoOutputsAttached = false;
 		bool primedFrameSticky = false;
-		bool primedFrameDeferred = false;
 		QTimer* muteTimer = nullptr;
 		QTimer* hideEndDelayTimer = nullptr;
 		QTimer* muteEndDelayTimer = nullptr;
@@ -144,7 +150,7 @@ private:
 		bool muteEndTriggered = false;
 		bool holdLastFrameAtEnd = false;
 		QImage lastFrameImage;
-		QPixmap lastFramePixmap;
+		QPointer<RemoteVideoFrameSource> frameSource;
 	};
 
 	struct PendingSceneRequest {
@@ -189,8 +195,14 @@ private:
     qint64 targetDisplayTimestamp(const std::shared_ptr<RemoteMediaItem>& item) const;
 	void freezeVideoOutput(const std::shared_ptr<RemoteMediaItem>& item);
 	void restoreVideoOutput(const std::shared_ptr<RemoteMediaItem>& item);
-	void applyPixmapToSpans(const std::shared_ptr<RemoteMediaItem>& item, const QPixmap& pixmap) const;
+	void applyImageToSpans(const std::shared_ptr<RemoteMediaItem>& item, const QImage& image) const;
+	void publishScreenModel(int screenId);
+	void publishMediaSpan(const std::shared_ptr<RemoteMediaItem>& item, RemoteMediaItem::Span& span);
+	void setRemoteMediaVisualState(const std::shared_ptr<RemoteMediaItem>& item, qreal opacity, bool visible);
+	bool allSpansReady(const std::shared_ptr<RemoteMediaItem>& item) const;
 
+
+	private:
 	// Phase 4.3: FileManager injected (not singleton)
 	FileManager* m_fileManager = nullptr;
 	
@@ -213,4 +225,3 @@ private:
 	bool m_restartCooldownActive = false;
 	PendingSceneRequest m_deferredSceneStart;
 };
-

@@ -848,7 +848,10 @@ bool MainWindow::getAutoUploadImportedMedia() const {
 }
 
 bool MainWindow::useQuickCanvasRenderer() const {
-    return m_settingsManager ? m_settingsManager->getUseQuickCanvasRenderer() : false;
+    // Qt Quick is the single visible rendering contract. The old flag remains
+    // readable for migration telemetry/settings compatibility, but selecting a
+    // second renderer would reintroduce local/remote visual divergence.
+    return true;
 }
 
 void MainWindow::markCanvasLoadRequest(const QString& persistentClientId) {
@@ -1839,5 +1842,4 @@ bool MainWindow::hasUnuploadedFilesForTarget(const QString& targetClientId) cons
     }
     return false;
 }
-
 

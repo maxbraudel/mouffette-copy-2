@@ -1,0 +1,40 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "qt6-debug",
+      "displayName": "Mouffette Qt 6 Debug (out-of-source)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/qt6-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "MOUFFETTE_REQUIRE_EXPLICIT_QT_ROOT": "ON",
+        "MOUFFETTE_QT_ROOT": "$env{MOUFFETTE_QT_ROOT}"
+      }
+    },
+    {
+      "name": "qt6-release",
+      "inherits": "qt6-debug",
+      "displayName": "Mouffette Qt 6 Release (out-of-source)",
+      "binaryDir": "${sourceDir}/out/build/qt6-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "qt6-debug",
+      "configurePreset": "qt6-debug"
+    },
+    {
+      "name": "qt6-release",
+      "configurePreset": "qt6-release"
+    }
+  ]
+}

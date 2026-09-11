@@ -21,6 +21,8 @@ function checkFilesPresent() {
     'resources/qml/ImageItem.qml',
     'resources/qml/VideoItem.qml',
     'resources/qml/TextItem.qml',
+    'resources/qml/MediaVisual.qml',
+    'resources/qml/RemoteSceneRoot.qml',
     'resources/qml/CanvasRoot.qml'
   ];
 
@@ -33,7 +35,10 @@ function checkFilesPresent() {
 
 function checkResourceRegistration() {
   const qrc = readText('resources/resources.qrc');
-  const requiredAliases = ['BaseMediaItem.qml', 'ImageItem.qml', 'VideoItem.qml', 'TextItem.qml'];
+  const requiredAliases = [
+    'BaseMediaItem.qml', 'ImageItem.qml', 'VideoItem.qml', 'TextItem.qml',
+    'MediaVisual.qml', 'RemoteSceneRoot.qml'
+  ];
   for (const alias of requiredAliases) {
     assert(qrc.includes(`alias="${alias}"`), `resources.qrc missing alias ${alias}`);
   }
@@ -44,26 +49,25 @@ function checkCanvasBindings() {
   const qmlPath = path.join(projectRoot, 'resources/qml/CanvasRoot.qml');
   assert(fs.existsSync(qmlPath), 'CanvasRoot.qml must exist');
   const qml = fs.readFileSync(qmlPath, 'utf8');
+  const mediaInteractions = readText('resources/qml/MediaInteractionHandlers.qml');
   const stat = fs.statSync(qmlPath);
   assert(stat.size > 0, 'CanvasRoot.qml must not be empty');
-  assert(qml.includes('inputLayer.inputCoordinator.tryBeginMove('),
-    'CanvasRoot move ownership must route through InputCoordinator');
+  assert(mediaInteractions.includes('coord.tryBeginMove('),
+    'Media interactions must route move ownership through InputCoordinator');
   assert(qml.includes('inputLayer.inputCoordinator.tryBeginPanAt('),
     'CanvasRoot pan ownership must route through InputCoordinator');
   assert(qml.includes('inputLayer.inputCoordinator.tryBeginTextCreateAt('),
     'CanvasRoot text-create ownership must route through InputCoordinator');
-  assert(qml.includes('inputLayer.useInputCoordinator'),
-    'CanvasRoot must support rollout flag for input coordinator');
-  return { fileExists: true, bytes: stat.size, inputCoordinatorBindings: 3, rolloutFlagBindings: 1 };
+  return { fileExists: true, bytes: stat.size, inputCoordinatorBindings: 3 };
 }
 
 function checkCoordinatorFlag() {
   const inputLayer = readText('resources/qml/InputLayer.qml');
-  assert(inputLayer.includes('useInputCoordinator'),
-    'InputLayer must expose useInputCoordinator rollout flag');
-  assert(inputLayer.includes('--legacy-input-arbitration'),
-    'InputLayer rollout flag must support --legacy-input-arbitration runtime arg');
-  return { rolloutFlagChecks: 2 };
+  assert(inputLayer.includes('readonly property alias inputCoordinator: coordinator'),
+    'InputLayer must expose its per-canvas InputCoordinator');
+  assert(inputLayer.includes('function assertInvariants(stage)'),
+    'InputCoordinator must retain runtime ownership guards');
+  return { coordinatorChecks: 2 };
 }
 
 function checkMediaDelegates() {
@@ -71,6 +75,12 @@ function checkMediaDelegates() {
   const imageItem = readText('resources/qml/ImageItem.qml');
   const videoItem = readText('resources/qml/VideoItem.qml');
   const textItem = readText('resources/qml/TextItem.qml');
+  const mediaVisual = readText('resources/qml/MediaVisual.qml');
+  const canvasRoot = readText('resources/qml/CanvasRoot.qml');
+  const remoteRoot = readText('resources/qml/RemoteSceneRoot.qml');
+  const remoteController = readText('src/frontend/rendering/remote/RemoteSceneController.cpp');
+  const glyphPath = readText('src/frontend/rendering/canvas/TextGlyphPath.cpp');
+  const sessionController = readText('src/backend/controllers/CanvasSessionController.cpp');
 
   assert(baseItem.includes('signal selectRequested'), 'BaseMediaItem must provide selectRequested contract');
   assert(baseItem.includes('onPressed'), 'BaseMediaItem must own primary press handling');
@@ -83,12 +93,29 @@ function checkMediaDelegates() {
   assert(textItem.includes('BaseMediaItem {'), 'TextItem must derive from BaseMediaItem');
   assert(imageItem.includes('Image {'), 'ImageItem must contain Image element');
   assert(videoItem.includes('VideoOutput {'), 'VideoItem must contain VideoOutput element');
-  assert(textItem.includes('Text {'), 'TextItem must contain Text element');
-  assert(textItem.includes('TextEdit {'), 'TextItem must contain TextEdit for edit contract');
+  assert(textItem.includes('TextEdit {'), 'TextItem must use one TextEdit for display and edit');
+  assert(textItem.includes('TextGlyphPath {'), 'TextItem must derive its outline from glyph paths');
+  assert(textItem.includes('Shape {'), 'TextItem must render its outline through Qt Quick Shape');
+  assert(textItem.includes('textContent:        textDisplayNode.text'),
+    'Text outline must consume the live editor text directly');
+  assert(textItem.includes('asynchronous: !root.editing'),
+    'Text outline tessellation must be synchronous while editing');
+  assert(textItem.includes('visible: true'), 'Text outline must stay present while editing');
+  assert(glyphPath.includes('builtAlignmentUnchanged'),
+    'Alignment changes must invalidate the width-only translation shortcut');
   assert(textItem.includes('onPrimaryDoubleClicked'), 'TextItem must support double-click edit start via base signal');
   assert(textItem.includes('textCommitRequested'), 'TextItem must emit text commit signal');
+  assert(canvasRoot.includes('MediaVisual {'), 'Local canvas must instantiate the shared media visual');
+  assert(remoteRoot.includes('MediaVisual {'), 'Remote canvas must instantiate the shared media visual');
+  assert(mediaVisual.includes('ImageItem {') && mediaVisual.includes('VideoItem {') && mediaVisual.includes('TextItem {'),
+    'Shared media visual must own all three visual delegates');
+  assert(remoteController.includes('new QQuickWidget'), 'Remote renderer must use QQuickWidget');
+  assert(!remoteController.includes('QGraphicsTextItem') && !remoteController.includes('QGraphicsPixmapItem'),
+    'Remote renderer must not retain a QGraphics drawing path');
+  assert(!sessionController.includes('LegacyCanvasHost::create'),
+    'Qt Quick initialization must not silently fall back to a second visible renderer');
 
-  return { delegateChecks: 11 };
+  return { delegateChecks: 24 };
 }
 
 function checkDtoBridge() {
