@@ -93,6 +93,20 @@ void ResizableMediaBase::notifyInteractiveGeometryChanged() {
     onInteractiveGeometryChanged();
 }
 
+void ResizableMediaBase::beginExternalInteractiveResize() {
+    m_externalInteractiveResize = true;
+}
+
+void ResizableMediaBase::endExternalInteractiveResize() {
+    if (!m_externalInteractiveResize)
+        return;
+    m_externalInteractiveResize = false;
+    // Perform exactly one deferred derived layout after the final geometry is
+    // committed. TextMediaItem uses this to synchronize its hidden legacy
+    // editor without relaying out that unused document on every pointer tick.
+    onInteractiveGeometryChanged();
+}
+
 void ResizableMediaBase::suppressNextItemPositionSnap() {
     m_suppressNextItemPositionSnap = true;
 }
@@ -856,6 +870,7 @@ void ResizableMediaBase::prepareForDeletion() {
     m_beingDeleted = true;
     // Cancel any active resize interaction.
     if (m_activeHandle != None) { m_activeHandle = None; ungrabMouse(); }
+    m_externalInteractiveResize = false;
     cancelFade();
     setContentVisible(false);
     m_contentDisplayOpacity = 0.0;

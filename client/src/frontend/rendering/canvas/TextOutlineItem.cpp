@@ -38,6 +38,19 @@ struct PlacedGlyph {
     bool operator==(const PlacedGlyph& other) const
     { return mesh == other.mesh && position == other.position; }
 };
+
+bool sameGlyphSequence(const QList<PlacedGlyph>& left,
+                       const QList<PlacedGlyph>& right)
+{
+    if (left.size() != right.size())
+        return false;
+    for (qsizetype i = 0; i < left.size(); ++i) {
+        if (left[i].mesh != right[i].mesh)
+            return false;
+    }
+    return true;
+}
+
 struct Chunk {
     QList<PlacedGlyph> glyphs;
     QPointF origin;
@@ -161,7 +174,8 @@ struct TextOutlineItem::Private {
 TextOutlineItem::TextOutlineItem(QQuickItem* parent)
     : QQuickItem(parent), d(std::make_unique<Private>())
 {
-    setFlag(ItemHasContents);
+    setFlag(ItemHasContents, false);
+    setVisible(false);
     // A disabled outline must be completely dormant. ItemObservesViewport
     // propagates every ancestor camera transform to itemChange(); keeping it on
     // at zero width made every borderless TextItem polish and synchronize an
@@ -181,6 +195,11 @@ TextOutlineItem::Statistics TextOutlineItem::statistics() const { return d->stat
 
 void TextOutlineItem::scheduleLayout()
 {
+    // Text/source geometry may keep changing during Alt-resize even though no
+    // border exists. Once the old node is gone, none of those signals require
+    // polish or a render-thread update until a positive width is enabled.
+    if ((!d->source || d->width <= 0) && d->chunks.isEmpty())
+        return;
     d->layoutDirty = true;
     polish();
     update();
@@ -188,6 +207,8 @@ void TextOutlineItem::scheduleLayout()
 
 void TextOutlineItem::scheduleViewport()
 {
+    if (!d->source || d->width <= 0)
+        return;
     d->viewportDirty = true;
     polish();
     // The inherited scene-graph transform already moves the existing quads.
@@ -204,7 +225,10 @@ void TextOutlineItem::setSource(QQuickItem* item)
     d->connections.clear();
     d->clearCache();
     d->source = edit;
-    setFlag(ItemObservesViewport, d->source && d->width > 0);
+    const bool renderable = d->source && d->width > 0;
+    setFlag(ItemHasContents, renderable);
+    setFlag(ItemObservesViewport, renderable);
+    setVisible(renderable);
     if (edit) {
         const auto watch = [this, edit](auto signal) {
             d->connections.append(connect(edit, signal, this, &TextOutlineItem::scheduleLayout));
@@ -230,7 +254,9 @@ void TextOutlineItem::setSource(QQuickItem* item)
         watch(&QQuickItem::parentChanged);
         d->connections.append(connect(edit, &QObject::destroyed, this, [this] {
             d->clearCache();
+            setFlag(ItemHasContents, false);
             setFlag(ItemObservesViewport, false);
+            setVisible(false);
             scheduleLayout();
             emit sourceChanged();
         }));
@@ -248,7 +274,10 @@ void TextOutlineItem::setOutlinePixels(qreal width)
     if (d->width == width)
         return;
     d->width = width;
-    setFlag(ItemObservesViewport, d->source && d->width > 0);
+    const bool renderable = d->source && d->width > 0;
+    setFlag(ItemHasContents, renderable);
+    setFlag(ItemObservesViewport, renderable);
+    setVisible(renderable);
     d->clearCache();
     scheduleLayout();
     emit outlinePixelsChanged();
@@ -268,7 +297,8 @@ void TextOutlineItem::geometryChange(const QRectF& now, const QRectF& before)
     QQuickItem::geometryChange(now, before);
     // Moving this adapter relative to its source changes the document offset.
     // Actual canvas drag/pan moves their common ancestor, handled separately.
-    scheduleLayout();
+    if (d->source && d->width > 0)
+        scheduleLayout();
 }
 
 void TextOutlineItem::itemChange(ItemChange change, const ItemChangeData& data)
@@ -479,8 +509,10 @@ void TextOutlineItem::updatePolish()
             chunk.glyphs.reserve(chunk.glyphs.size() + count);
         for (qsizetype i = begin; i < end; ++i) {
             PlacedGlyph glyph {placed[i].mesh, placed[i].position - chunk.origin};
-            chunk.key = qHashMulti(chunk.key, quintptr(glyph.mesh.get()),
-                                   glyph.position.x(), glyph.position.y());
+            // Keep the node identity stable when wrapping only changes glyph
+            // positions. Alt-resize can then update retained image quads rather
+            // than destroy and recreate the whole scene-graph subtree.
+            chunk.key = qHashMulti(chunk.key, quintptr(glyph.mesh.get()));
             chunk.glyphs.append(std::move(glyph));
         }
     };
@@ -557,65 +589,72 @@ QSGNode* TextOutlineItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*
         root->setMatrix(rootMatrix);
     d->stats.rebuiltChunks = 0;
     d->stats.movedChunks = 0;
-    // Preserve occurrence order for repeated chunks. QMultiHash::find() picks
-    // the last inserted equal key: identical phrases would swap nodes every
-    // frame, moving their transforms and invalidating the entire GPU batch.
-    QHash<size_t, QList<ChunkNode*>> available;
-    for (auto* node : std::as_const(root->chunks))
-        available[node->key].append(node);
+    // Preserve occurrence order for repeated chunks. Prefer the same glyph
+    // sequence, then recycle a node with the same quad count. A wrapped resize
+    // can replace the visible sequence without requiring any QSG allocation.
+    QList<ChunkNode*> available = root->chunks;
     root->chunks.clear();
     for (qsizetype i = 0; i < d->chunks.size(); ++i) {
         const Chunk& chunk = d->chunks[i];
         ChunkNode* node = nullptr;
-        auto candidates = available.find(chunk.key);
-        if (candidates != available.end()) {
-            for (qsizetype j = 0; j < candidates->size(); ++j) {
-                if (candidates->at(j)->glyphs == chunk.glyphs) {
-                    node = candidates->takeAt(j);
+        bool nodeCreated = false;
+        qsizetype candidateIndex = -1;
+        for (qsizetype j = 0; j < available.size(); ++j) {
+            if (available[j]->key == chunk.key
+                && sameGlyphSequence(available[j]->glyphs, chunk.glyphs)) {
+                candidateIndex = j;
+                break;
+            }
+        }
+        if (candidateIndex < 0) {
+            for (qsizetype j = 0; j < available.size(); ++j) {
+                if (available[j]->glyphs.size() == chunk.glyphs.size()) {
+                    candidateIndex = j;
                     break;
                 }
             }
         }
+        if (candidateIndex >= 0)
+            node = available.takeAt(candidateIndex);
         if (!node) {
             node = new ChunkNode;
             root->appendChildNode(node);
+            nodeCreated = true;
         }
+        if (nodeCreated)
+            ++d->stats.rebuiltChunks;
         root->chunks.append(node);
         for (const auto& glyph : chunk.glyphs)
             usedTextures.insert(glyph.mesh.get());
     }
-    // Free old consumers and atlas slots BEFORE allocating replacements. If
-    // slots are released afterwards, Qt's failed atlas allocations stay as
-    // separate textures even though space has subsequently become available.
-    for (const auto& unused : std::as_const(available))
-        qDeleteAll(unused);
+    // Drop consumers that could not be recycled. Texture pruning happens once
+    // retained nodes have received their new references, so no image node ever
+    // observes a deleted borrowed texture.
+    qDeleteAll(available);
     if (colorChanged) {
         for (auto* node : std::as_const(root->chunks)) {
             qDeleteAll(node->images);
             node->images.clear();
         }
-    }
-    for (auto it = root->textures.begin(); it != root->textures.end();) {
-        if (colorChanged || !usedTextures.contains(it.key())) {
-            delete it->texture;
-            it = root->textures.erase(it);
-        } else {
-            ++it;
-        }
+        for (const auto& texture : std::as_const(root->textures))
+            delete texture.texture;
+        root->textures.clear();
     }
     for (qsizetype i = 0; i < d->chunks.size(); ++i) {
         const Chunk& chunk = d->chunks[i];
         ChunkNode* node = root->chunks[i];
+        bool chunkMoved = false;
         QMatrix4x4 matrix;
         matrix.translate(chunk.origin.x() - origin.x(), chunk.origin.y() - origin.y());
         // Unlike QQuickItem setters, QSGTransformNode::setMatrix marks the
         // subtree dirty even when the matrix has not changed.
         if (node->matrix() != matrix) {
             node->setMatrix(matrix);
-            ++d->stats.movedChunks;
+            chunkMoved = true;
         }
-        // A reused chunk has exactly equal placements. Only a newly created
-        // chunk (or recoloring) needs new image nodes; motion changes nothing.
+        // Reflow preserves the glyph sequence far more often than it preserves
+        // positions. Retain those image nodes and update only the quads whose
+        // relative positions changed.
         if (node->images.isEmpty()) {
             for (const auto& glyph : chunk.glyphs) {
                 auto* image = window()->createImageNode();
@@ -626,11 +665,37 @@ QSGNode* TextOutlineItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*
                 node->appendChildNode(image);
                 node->images.append(image);
             }
+        } else if (node->glyphs != chunk.glyphs) {
+            Q_ASSERT(node->images.size() == chunk.glyphs.size());
+            for (qsizetype glyphIndex = 0; glyphIndex < chunk.glyphs.size(); ++glyphIndex) {
+                const auto& glyph = chunk.glyphs[glyphIndex];
+                if (node->glyphs[glyphIndex].mesh != glyph.mesh) {
+                    node->images[glyphIndex]->setTexture(textureFor(glyph.mesh));
+                    chunkMoved = true;
+                }
+                const QRectF rect = glyph.mesh->bounds.translated(glyph.position);
+                if (node->images[glyphIndex]->rect() != rect) {
+                    node->images[glyphIndex]->setRect(rect);
+                    chunkMoved = true;
+                }
+            }
         }
         if (node->glyphs != chunk.glyphs) {
             node->glyphs = chunk.glyphs;
             node->key = chunk.key;
-            ++d->stats.rebuiltChunks;
+        }
+        if (chunkMoved)
+            ++d->stats.movedChunks;
+    }
+    // Active nodes no longer borrow unused textures. Release them after node
+    // recycling; most resize reflows reuse the same glyph set and allocate
+    // nothing, while genuinely new glyphs still use Qt's regular atlas path.
+    for (auto it = root->textures.begin(); it != root->textures.end();) {
+        if (!usedTextures.contains(it.key())) {
+            delete it->texture;
+            it = root->textures.erase(it);
+        } else {
+            ++it;
         }
     }
     d->stats.atlasedGlyphs = 0;

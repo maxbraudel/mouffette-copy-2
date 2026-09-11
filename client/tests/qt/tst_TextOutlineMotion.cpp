@@ -121,12 +121,13 @@ private slots:
         QTest::addColumn<qreal>("cameraScale");
         QTest::addColumn<qreal>("devicePixelRatio");
         QTest::addColumn<bool>("translucent");
+        QTest::addColumn<bool>("liveResize");
         for (const qreal dpr : {qreal(1), qreal(2)}) {
             const QByteArray suffix = dpr == 1 ? QByteArray() : QByteArray("-retina");
             const auto addRow = [&](const char* name, bool border, bool cameraPan,
-                                    qreal scale) {
+                                    qreal scale, bool liveResize = false) {
                 QTest::newRow((QByteArray(name) + suffix).constData())
-                    << border << cameraPan << scale << dpr << false;
+                    << border << cameraPan << scale << dpr << false << liveResize;
             };
             addRow("native-camera-pan", false, true, 1);
             addRow("border-camera-pan", true, true, 1);
@@ -136,11 +137,13 @@ private slots:
             addRow("zoomed-border-camera-pan", true, true, 0.35);
             addRow("zoomed-native-element-drag", false, false, 0.35);
             addRow("zoomed-border-element-drag", true, false, 0.35);
+            addRow("native-alt-resize", false, false, 1, true);
+            addRow("border-alt-resize", true, false, 1, true);
         }
         QTest::newRow("zoomed-translucent-camera-pan-retina")
-            << true << true << qreal(0.35) << qreal(2) << true;
+            << true << true << qreal(0.35) << qreal(2) << true << false;
         QTest::newRow("zoomed-translucent-element-drag-retina")
-            << true << false << qreal(0.35) << qreal(2) << true;
+            << true << false << qreal(0.35) << qreal(2) << true << false;
     }
 
     void unchangedParagraphMotion()
@@ -150,6 +153,7 @@ private slots:
         QFETCH(qreal, cameraScale);
         QFETCH(qreal, devicePixelRatio);
         QFETCH(bool, translucent);
+        QFETCH(bool, liveResize);
         QString text;
         const QString phrase = QStringLiteral("MOUFFETTE OUTLINE PERFORMANCE 0123456789 ");
         while (text.size() < 12000)
@@ -382,24 +386,44 @@ private slots:
 
         QQuickItem* movingItem = cameraPan ? camera : element;
         const QPointF initialPosition = movingItem->position();
+        const qreal initialElementWidth = element->width();
         const qreal motionScale = cameraPan ? 1 : cameraScale;
         QList<FrameTimings> movingFrames;
+        int totalRebuiltChunks = 0;
+        int totalMovedChunks = 0;
         for (int i = 0; i < 24; ++i) {
             QCoreApplication::processEvents();
             QElapsedTimer motionTimer;
             motionTimer.start();
-            // Fractional diagonal motion crosses both glyph and line culling
-            // boundaries, without changing text, font, size, or local layout.
-            movingItem->setPosition(initialPosition + QPointF((i + 1) * 1.25,
-                                                               -(i + 1) * 2.5) / motionScale);
+            if (liveResize) {
+                // Mirror horizontal Alt-resize: the container, editor wrap
+                // width and outline viewport all change before the next frame.
+                const qreal width = initialElementWidth - (i + 1) * 12;
+                element->setWidth(width);
+                edit->setWidth(width - 200);
+                outline->setWidth(width);
+            } else {
+                // Fractional diagonal motion crosses both glyph and line culling
+                // boundaries without changing text, size or local layout.
+                movingItem->setPosition(initialPosition + QPointF((i + 1) * 1.25,
+                                                                   -(i + 1) * 2.5) / motionScale);
+            }
             FrameTimings frame = renderFrame();
             frame.totalUs = motionTimer.nsecsElapsed() / 1000;
             movingFrames.append(frame);
+            totalRebuiltChunks += frame.rebuiltChunks;
+            totalMovedChunks += frame.movedChunks;
             QCOMPARE(edit->text(), text);
             QCOMPARE(frame.generatedGlyphs, 0);
-            QCOMPARE(frame.layoutPasses, 0);
-            QCOMPARE(frame.rebuiltChunks, 0);
-            QCOMPARE(frame.movedChunks, 0);
+            if (!liveResize) {
+                QCOMPARE(frame.layoutPasses, 0);
+                QCOMPARE(frame.rebuiltChunks, 0);
+                QCOMPARE(frame.movedChunks, 0);
+            } else if (border) {
+                // Prove this is exercising real live wrap/reflow rather than a
+                // transform-only shortcut.
+                QCOMPARE(frame.layoutPasses, 1);
+            }
             QCOMPARE(frame.uploadedGlyphs, 0);
             if (!border) {
                 // A disabled renderer must not observe inherited camera or
@@ -409,7 +433,8 @@ private slots:
                 QCOMPARE(frame.syncCalls, 0);
             }
         }
-        reportFrames(cameraPan ? "camera-pan" : "element-drag", movingFrames);
+        reportFrames(liveResize ? "alt-resize"
+                                : (cameraPan ? "camera-pan" : "element-drag"), movingFrames);
 
         // A generous machine-independent safety gate; exact sub-frame timing
         // belongs in the reported benchmark, not in a load-sensitive CI test.
@@ -417,7 +442,24 @@ private slots:
         for (const FrameTimings& frame : movingFrames)
             totalTimes.append(frame.totalUs);
         QVERIFY2(percentile(totalTimes, 0.95) < 50000,
-                 "Unchanged paragraph motion regressed beyond a 50 ms frame");
+                 "Paragraph interaction regressed beyond a 50 ms frame");
+
+        if (liveResize) {
+            if (border) {
+                // A resize legitimately moves many glyph quads as wrapping
+                // changes, but it must recycle the established QSG subtree.
+                // The former implementation rebuilt 17 chunks in this exact
+                // sequence; at most four edge/visibility additions are allowed.
+                QVERIFY2(totalMovedChunks > 0,
+                         "Alt-resize did not update retained outline geometry");
+                QVERIFY2(totalRebuiltChunks <= 4,
+                         qPrintable(QStringLiteral("Alt-resize rebuilt %1 chunks instead of recycling them")
+                             .arg(totalRebuiltChunks)));
+            }
+            window.setRenderTarget({});
+            control.invalidate();
+            return;
+        }
 
         // Also cross the 96-screen-pixel cache guard several times. Measuring
         // only a short cached drag could conceal expensive viewport refreshes.

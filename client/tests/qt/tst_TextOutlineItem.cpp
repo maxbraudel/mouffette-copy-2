@@ -504,8 +504,10 @@ private slots:
         // and enabling it again must restore rendering and viewport tracking.
         scene.outline->setOutlinePixels(0);
         QVERIFY(!scene.outline->flags().testFlag(QQuickItem::ItemObservesViewport));
-        const OutlineCapture disabled = captureOutline(scene);
-        QCOMPARE(disabled.renderedBounds.pixels, 0);
+        QVERIFY(!scene.outline->isVisible());
+        scene.edit->setColor(Qt::transparent);
+        const QImage disabled = grabAfterSync(scene.window, scene.outline);
+        QCOMPARE(nonBlackBounds(disabled).pixels, 0);
 
         scene.outline->setOutlinePixels(8);
         QVERIFY(scene.outline->flags().testFlag(QQuickItem::ItemObservesViewport));
@@ -556,8 +558,8 @@ private slots:
                      .arg(middle.iou)));
         const auto middleStats = scene.outline->statistics();
         QVERIFY(middleStats.glyphs > 0 && middleStats.glyphs < 80);
-        QVERIFY2(middleStats.rebuiltChunks > 0,
-                 "ancestor pan did not replace the visible glyph geometry");
+        QVERIFY2(middleStats.rebuiltChunks + middleStats.movedChunks > 0,
+                 "ancestor pan did not update the visible glyph geometry");
 
         canvas->setScale(0.5);
         canvas->setX(-(aAdvance + bAdvance) * canvas->scale() + 40);

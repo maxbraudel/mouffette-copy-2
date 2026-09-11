@@ -232,6 +232,15 @@ QuickCanvasController::QuickCanvasController(QObject* parent)
 }
 
 QuickCanvasController::~QuickCanvasController() {
+    // The controller can be torn down while a pointer is still held. Release
+    // the mirrored backend lifecycle before destroying its session state.
+    if (m_pointerSession && m_pointerSession->resizeActive()) {
+        const auto target = m_mediaItemsById.constFind(m_pointerSession->resizeMediaId());
+        if (target != m_mediaItemsById.constEnd() && !target->lifetime.expired()
+            && target->item && !target->item->isBeingDeleted()) {
+            target->item->endExternalInteractiveResize();
+        }
+    }
     delete m_modelPublisher;
     m_modelPublisher = nullptr;
     delete m_pointerSession;
@@ -495,6 +504,14 @@ void QuickCanvasController::setScreens(const QList<ScreenInfo>& screens) {
 void QuickCanvasController::setMediaScene(QGraphicsScene* scene) {
     if (m_mediaScene == scene) {
         return;
+    }
+
+    // Finish the backend-side resize lifecycle while the old scene/index are
+    // still available. A detached scene can otherwise leave a surviving text
+    // item permanently suppressing its one-time legacy layout synchronization.
+    if (m_mediaScene && m_pointerSession->resizeActive()) {
+        if (ResizableMediaBase* target = mediaItemById(m_pointerSession->resizeMediaId()))
+            target->endExternalInteractiveResize();
     }
 
     if (m_mediaScene) {
@@ -975,6 +992,7 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
     }
 
     if (m_resizeBaseSize.isEmpty()) {
+        target->beginExternalInteractiveResize();
         m_resizeBaseSize = baseSizeNow;
         m_resizeFixedItemPoint = fixedItemPoint;
         const qreal currentScaleAtStart = std::abs(target->scale()) > 1e-6 ? std::abs(target->scale()) : 1.0;
@@ -1556,6 +1574,10 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
 
 void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId) {
     if (remoteSceneLocksEdits()) {
+        if (m_pointerSession->resizeActive()) {
+            if (ResizableMediaBase* target = mediaItemById(m_pointerSession->resizeMediaId()))
+                target->endExternalInteractiveResize();
+        }
         m_hasQueuedResize = false;
         if (m_resizeDispatchTimer) m_resizeDispatchTimer->stop();
         m_pointerSession->setDraggingMedia(false);
@@ -1606,8 +1628,10 @@ void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId) {
     qreal finalY = m_resizeLastSceneY;
     qreal finalScale = m_resizeLastScale;
     bool haveFinal = !finalMediaId.isEmpty();
+    ResizableMediaBase* finalMedia = nullptr;
     if (m_mediaScene && !finalMediaId.isEmpty()) {
-        const ResizableMediaBase* media = mediaItemById(finalMediaId);
+        finalMedia = mediaItemById(finalMediaId);
+        const ResizableMediaBase* media = finalMedia;
         if (media) {
             finalX = media->scenePos().x();
             finalY = media->scenePos().y();
@@ -1623,6 +1647,8 @@ void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId) {
     m_resizeFixedScenePoint = QPointF();
     m_snapStore->clear();
     resetAltResizeState();
+    if (finalMedia)
+        finalMedia->endExternalInteractiveResize();
     // Clear SnapGuideItem on ScreenCanvas so currentSnapGuideLines() returns empty for
     // any subsequent pushSelectionAndSnapModels call — prevents stale lines leaking across sessions.
     if (m_mediaScene && !m_mediaScene->views().isEmpty()) {

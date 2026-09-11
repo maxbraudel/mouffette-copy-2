@@ -95,13 +95,16 @@ a reference test/benchmark target, not as a registered QML or application type.
 
 The QML editor uses matching border insets. The canonical backend text and fit
 geometry remain live, while synchronization of the hidden legacy editor is
-deferred to commit. Returning to the legacy editor also restores synchronization.
+deferred to commit. Quick Canvas resize gestures now mirror the native resize
+lifecycle into the backend, so this unused document is also laid out once at
+pointer release instead of once per queued pointer tick. Returning to the legacy
+editor restores synchronization.
 Translucent borders use a viewport-sized `ShaderEffectSource`, applying alpha
 once instead of accumulating it at overlapping strokes. Its destination matches
 the source crop exactly; simply changing `layer.sourceRect` would stretch the
 crop across the whole document. Texture resolution follows the stable
-screen-density/DPR bucket and is capped at 4096 pixels per axis, so a huge or zoomed-out document does not
-allocate a document-sized texture. Fully transparent borders skip geometry
+screen-density/DPR bucket and is capped at 4096 pixels per axis, so a huge or
+zoomed-out document does not allocate a document-sized texture. Fully transparent borders skip geometry
 generation; opaque borders do not pay for this offscreen pass. A zero-width or
 fully transparent border also disables viewport observation altogether. This is
 important for borderless text: an empty outline adapter no longer wakes up,
@@ -199,8 +202,19 @@ The baseline executable was preserved before rebuilding the renderer.
 | 50% alpha, pan, zoom 0.35 | Not measured | 0.568 / 0.698 | 3.400 |
 | 50% alpha, drag, zoom 0.35 | Not measured | 0.597 / 0.765 | 3.455 |
 
-The final run passed all 18 motion scenarios (864 timed moving frames). Large
-traversals refreshed placements five times per scenario, with zero new glyph
+Alt-resize has a separate live-reflow case. Changing width must still run Qt's
+text layout so line breaks follow the pointer immediately, but the border no
+longer destroys and recreates its scene-graph subtree. Chunks first retain the
+same glyph sequence and otherwise recycle a node with the same quad count;
+relative quad rectangles are updated in place. Across the 24-step regression
+sequence, this reduced newly allocated chunks from 17 to 2, with no glyph-mask
+generation or texture upload. The corresponding thick-border Debug benchmark
+measured 11.48 ms p95 at DPR 1 and 12.47 ms p95 at DPR 2 on the shared test
+machine; timings are reported as diagnostics, while the recycling limit is a
+deterministic assertion.
+
+The final run passed all 22 motion scenarios (960 timed moving/resize frames).
+Large traversals refreshed placements five times per scenario, with zero new glyph
 rasterizations or texture uploads. The maximum measured translucent traversal
 frame was 4.112 ms. Small motions used only inherited scene-graph transforms.
 
@@ -224,9 +238,9 @@ The old `tst_TextGlyphPath reportLongTextRebuildCost` target records the SVG
 baseline independently. The architecture boundary checks and the shared local/
 remote delegate gate remain applicable.
 
-The final full Debug application build and all six CTest suites passed (25
-outline checks, 20 motion checks, both production-QML scaling suites, the legacy
-reference and runtime-context tests). Architecture, baseline, render schema,
+The final full Debug application build and all 13 CTest suites passed (25
+outline checks, 22 motion scenarios, both production-QML scaling suites, the
+legacy reference and runtime-context tests). Architecture, baseline, render schema,
 interaction parity/ownership, integration and randomized-input gates also passed.
 
 Validation was performed on macOS with Metal and Qt 6.11.2. Other RHI backends

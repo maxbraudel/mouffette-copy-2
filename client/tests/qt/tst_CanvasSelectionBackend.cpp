@@ -253,6 +253,7 @@ private slots:
         const char* ownerProperty = alt ? "liveAltResizeMediaId" : "liveResizeMediaId";
         QTRY_VERIFY(m_canvas->root->property(activeFlag).toBool());
         QCOMPARE(m_canvas->root->property(ownerProperty).toString(), m_firstId);
+        QVERIFY(m_first->isActivelyResizing());
 
         // A final pointer update is still queued when the target/scene goes
         // away. Ending must safely drain/discard it and release both kinds of
@@ -277,6 +278,7 @@ private slots:
         QTRY_COMPARE(listProperty(m_canvas->root, "mediaModel").size(), detachScene ? 0 : 1);
 
         if (detachScene) {
+            QVERIFY(!m_first->isActivelyResizing());
             m_canvas->controller.setMediaScene(&m_canvas->scene);
             QTRY_COMPARE(listProperty(m_canvas->root, "mediaModel").size(), 2);
         }
@@ -289,6 +291,7 @@ private slots:
         QTRY_VERIFY(m_canvas->root->property("liveResizeActive").toBool());
         QCOMPARE(m_canvas->root->property("liveResizeMediaId").toString(), m_secondId);
         QVERIFY(m_canvas->endResize(m_secondId));
+        QVERIFY(!m_second->isActivelyResizing());
         QVERIFY(!m_canvas->root->property("liveResizeActive").toBool());
         QVERIFY(!m_canvas->root->property("liveAltResizeActive").toBool());
         QCOMPARE(m_canvas->selectedIds(), QSet<QString>{m_secondId});

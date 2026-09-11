@@ -99,6 +99,11 @@ public:
     bool beginAltResizeMode();
     // Public wrapper: notifies the item that interactive geometry has changed.
     void notifyInteractiveGeometryChanged();
+    // Quick Canvas owns pointer handling outside QGraphicsItem. Mirror that
+    // lifecycle here so derived items can defer hidden/legacy layout work until
+    // the resize has finished, just as they do for native QGraphics resizing.
+    void beginExternalInteractiveResize();
+    void endExternalInteractiveResize();
     // One-shot bypass for legacy ItemPositionChange snapping (grid + screen callback).
     // Used by QuickCanvasController, which already computes snapped positions.
     void suppressNextItemPositionSnap();
@@ -127,7 +132,9 @@ public:
     bool isOnHandleAtItemPos(const QPointF& itemPos) const; // used by view for cursor decision
     bool beginResizeAtScenePos(const QPointF& scenePos);    // start interactive resize
     Qt::CursorShape cursorForScenePos(const QPointF& scenePos) const;
-    bool isActivelyResizing() const { return m_activeHandle != None; }
+    bool isActivelyResizing() const {
+        return m_activeHandle != None || m_externalInteractiveResize;
+    }
     void setHandleVisualSize(int px);
     void setHandleSelectionSize(int px);
 
@@ -203,6 +210,7 @@ protected:
     virtual bool onAltResizeModeEngaged() { return false; }
     QSize m_baseSize;
     Handle m_activeHandle = None;
+    bool m_externalInteractiveResize = false;
     // Tracks if the current (or last) midpoint axis resize used Alt (option) for axis-only stretch
     bool m_lastAxisAltStretch = false;
     QSize m_axisStretchOriginalBaseSize; // captured at first Alt midpoint movement

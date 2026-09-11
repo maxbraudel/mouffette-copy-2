@@ -2043,7 +2043,7 @@ void TextMediaItem::onInteractiveGeometryChanged() {
         // Keep hidden editor in sync with base size so entering edit mode wraps correctly.
         // During active handle resize (especially Alt stretch), avoid synchronous document
         // relayout on every mouse-move to keep the UI thread responsive.
-        if (m_activeHandle == None) {
+        if (!isActivelyResizing()) {
             syncInlineEditorToBaseSize();
         }
     }
@@ -2270,7 +2270,7 @@ QVariant TextMediaItem::itemChange(GraphicsItemChange change, const QVariant& va
         change == ItemPositionHasChanged ||
         change == ItemSelectedChange ||
         change == ItemSelectedHasChanged) {
-        if (m_activeHandle == None || m_isEditing) {
+        if (!isActivelyResizing() || m_isEditing) {
             updateInlineEditorGeometry();
         }
     }
