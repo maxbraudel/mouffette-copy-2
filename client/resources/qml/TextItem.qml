@@ -174,7 +174,10 @@ BaseMediaItem {
 
     Rectangle {
         id: textBackground
-        visible: root.highlightEnabled && (root.textContent || "").length > 0 && !root.editing
+        // Follow the same live document as the fill and border. The committed
+        // model text may be stale while the user is typing or deleting.
+        visible: root.highlightEnabled
+                 && (textDisplayNode.length > 0 || textDisplayNode.preeditText.length > 0)
         color: root.highlightColor
         radius: 2
 

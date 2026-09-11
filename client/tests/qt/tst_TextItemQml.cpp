@@ -4,10 +4,13 @@
 #include <QFontDatabase>
 #include <QDir>
 #include <QGuiApplication>
+#include <QInputMethodEvent>
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickWindow>
+#include <QSignalSpy>
 #include <QTest>
+#include <QtQuick/private/qquicktextedit_p.h>
 
 class TextItemQmlTest : public QObject
 {
@@ -130,6 +133,115 @@ private slots:
                      qPrintable(QStringLiteral("Viewport alpha mask shifted/stretched: %1 / %2 pixels")
                          .arg(differingPixels).arg(baselinePixels)));
         }
+        item->setParentItem(nullptr);
+    }
+
+    void highlightFollowsLiveTextThroughoutEditing()
+    {
+        QQmlEngine engine;
+        QQmlComponent component(&engine, QUrl::fromLocalFile(TEST_SOURCE_DIR "/resources/qml/TextItem.qml"));
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        QQuickWindow window;
+        std::unique_ptr<QObject> object(component.createWithInitialProperties({
+            {"mediaWidth", 600}, {"mediaHeight", 320}, {"mediaId", "highlight-test"},
+            {"textContent", "A"}, {"fontPixelSize", 40}, {"textEditable", true},
+            {"horizontalAlignment", "left"}, {"verticalAlignment", "top"},
+            {"textColor", QColor(Qt::white)}, {"highlightEnabled", true},
+            {"highlightColor", QColor(Qt::green)}
+        }));
+        QVERIFY2(object, qPrintable(component.errorString()));
+        auto* item = qobject_cast<QQuickItem*>(object.get());
+        QVERIFY(item);
+        auto* outline = item->findChild<TextOutlineItem*>();
+        QVERIFY(outline);
+        auto* edit = qobject_cast<QQuickTextEdit*>(outline->source());
+        QVERIFY(edit);
+        QSignalSpy liveUpdates(item, SIGNAL(textLiveUpdateRequested(QString,QString)));
+        QSignalSpy commits(item, SIGNAL(textCommitRequested(QString,QString)));
+        QVERIFY(liveUpdates.isValid());
+        QVERIFY(commits.isValid());
+        window.setColor(Qt::black);
+        window.resize(600, 320);
+        item->setParentItem(window.contentItem());
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+        const auto highlightBounds = [&]() {
+            QCoreApplication::processEvents();
+            const QImage frame = window.grabWindow().convertToFormat(QImage::Format_ARGB32);
+            int left = frame.width(), top = frame.height(), right = -1, bottom = -1;
+            for (int y = 0; y < frame.height(); ++y) {
+                const auto* row = reinterpret_cast<const QRgb*>(frame.constScanLine(y));
+                for (int x = 0; x < frame.width(); ++x) {
+                    if (qGreen(row[x]) > 200 && qRed(row[x]) < 40 && qBlue(row[x]) < 40) {
+                        left = qMin(left, x);
+                        right = qMax(right, x);
+                        top = qMin(top, y);
+                        bottom = qMax(bottom, y);
+                    }
+                }
+            }
+            return right >= left ? QRect(QPoint(left, top), QPoint(right, bottom)) : QRect();
+        };
+        const QRect initial = highlightBounds();
+        QVERIFY(!initial.isEmpty());
+
+        // The parent canvas forwards actual double-clicks through this method.
+        QVERIFY(QMetaObject::invokeMethod(item, "fireDoubleClick", Q_ARG(QVariant, false)));
+        QVERIFY(item->property("editing").toBool());
+        QVERIFY(edit->isEnabled());
+        QVERIFY(!edit->isReadOnly());
+        QVERIFY(edit->hasActiveFocus());
+        QCOMPARE(highlightBounds(), initial);
+
+        QTest::keyClick(&window, Qt::Key_End);
+        QTest::keyClick(&window, Qt::Key_W);
+        QCOMPARE(edit->text(), QStringLiteral("Aw"));
+        edit->insert(edit->length(), QStringLiteral(" LONG TEXT\nSECOND LINE"));
+        QCOMPARE(item->property("textContent").toString(), QStringLiteral("A"));
+        const QRect expanded = highlightBounds();
+        QVERIFY(expanded.width() > initial.width() * 3);
+        QVERIFY(expanded.height() > initial.height() + 10);
+        QVERIFY(liveUpdates.count() >= 2);
+
+        // A stale/empty committed model must not govern the live background.
+        item->setProperty("textContent", QString());
+        QVERIFY(!edit->text().isEmpty());
+        edit->selectAll();
+        QTest::keyClick(&window, Qt::Key_Backspace);
+        QCOMPARE(edit->length(), 0);
+        QVERIFY(highlightBounds().isEmpty());
+
+        QInputMethodEvent preedit(QStringLiteral("ime"), {});
+        QCoreApplication::sendEvent(edit, &preedit);
+        QCOMPARE(edit->length(), 0);
+        QCOMPARE(edit->preeditText(), QStringLiteral("ime"));
+        QVERIFY(!highlightBounds().isEmpty());
+        QInputMethodEvent clearPreedit;
+        QCoreApplication::sendEvent(edit, &clearPreedit);
+        QVERIFY(highlightBounds().isEmpty());
+
+        QTest::keyClick(&window, Qt::Key_W);
+        QCOMPARE(edit->text(), QStringLiteral("w"));
+        QCOMPARE(item->property("textContent").toString(), QString());
+        QVERIFY(!highlightBounds().isEmpty());
+        item->setProperty("highlightEnabled", false);
+        QVERIFY(highlightBounds().isEmpty());
+        item->setProperty("highlightEnabled", true);
+        const QRect restored = highlightBounds();
+        QVERIFY(!restored.isEmpty());
+        edit->select(0, 1);
+        QCOMPARE(edit->selectedText(), QStringLiteral("w"));
+
+        // Supply the host's authoritative value only at commit, after all
+        // preceding edits were intentionally tested without model round-trips.
+        item->setProperty("textContent", edit->text());
+        QVERIFY(QMetaObject::invokeMethod(item, "commitAndStopEditing"));
+        QCOMPARE(commits.count(), 1);
+        QCOMPARE(commits.first().at(1).toString(), QStringLiteral("w"));
+        QVERIFY(!item->property("editing").toBool());
+        QVERIFY(edit->selectedText().isEmpty());
+        QCOMPARE(highlightBounds(), restored);
         item->setParentItem(nullptr);
     }
 };
