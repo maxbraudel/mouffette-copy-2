@@ -162,7 +162,11 @@ TextOutlineItem::TextOutlineItem(QQuickItem* parent)
     : QQuickItem(parent), d(std::make_unique<Private>())
 {
     setFlag(ItemHasContents);
-    setFlag(ItemObservesViewport);
+    // A disabled outline must be completely dormant. ItemObservesViewport
+    // propagates every ancestor camera transform to itemChange(); keeping it on
+    // at zero width made every borderless TextItem polish and synchronize an
+    // empty scene-graph node on every pan frame.
+    setFlag(ItemObservesViewport, false);
     if (window())
         itemChange(ItemSceneChange, ItemChangeData(window()));
 }
@@ -200,6 +204,7 @@ void TextOutlineItem::setSource(QQuickItem* item)
     d->connections.clear();
     d->clearCache();
     d->source = edit;
+    setFlag(ItemObservesViewport, d->source && d->width > 0);
     if (edit) {
         const auto watch = [this, edit](auto signal) {
             d->connections.append(connect(edit, signal, this, &TextOutlineItem::scheduleLayout));
@@ -225,6 +230,7 @@ void TextOutlineItem::setSource(QQuickItem* item)
         watch(&QQuickItem::parentChanged);
         d->connections.append(connect(edit, &QObject::destroyed, this, [this] {
             d->clearCache();
+            setFlag(ItemObservesViewport, false);
             scheduleLayout();
             emit sourceChanged();
         }));
@@ -242,6 +248,7 @@ void TextOutlineItem::setOutlinePixels(qreal width)
     if (d->width == width)
         return;
     d->width = width;
+    setFlag(ItemObservesViewport, d->source && d->width > 0);
     d->clearCache();
     scheduleLayout();
     emit outlinePixelsChanged();
@@ -281,8 +288,11 @@ void TextOutlineItem::itemChange(ItemChange change, const ItemChangeData& data)
     } else if (change == ItemParentHasChanged) {
         scheduleLayout();
     } else if (change == ItemTransformHasChanged || change == ItemDevicePixelRatioHasChanged) {
-        // ItemObservesViewport propagates ancestor pan/zoom changes here.
-        scheduleViewport();
+        // ItemObservesViewport propagates ancestor pan/zoom changes here. Qt
+        // can still deliver a queued transform notification just after the
+        // flag is disabled, so also gate the callback on live renderability.
+        if (d->source && d->width > 0)
+            scheduleViewport();
     }
 }
 
@@ -298,9 +308,14 @@ void TextOutlineItem::updatePolish()
     d->stats.layoutPasses = d->stats.uploadedGlyphs = 0;
     d->stats.polishNanoseconds = d->stats.syncNanoseconds = 0;
     if (!d->source || d->width <= 0) {
+        const bool hadSceneGraphContent = !d->chunks.isEmpty();
         d->chunks.clear();
         d->stats = {};
-        update();
+        // One update is required when disabling an existing border so Qt can
+        // release its old node. An already empty renderer stays render-thread
+        // dormant instead of synchronizing on every camera transform.
+        if (hadSceneGraphContent)
+            update();
         return;
     }
     QRectF visibleBounds = clipRect();

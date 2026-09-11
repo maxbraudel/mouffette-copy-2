@@ -499,6 +499,21 @@ private slots:
                      .arg(small.iou)));
         QVERIFY(scene.outline->statistics().generatedGlyphs > 0);
         QVERIFY(large.renderedBounds.rect.contains(small.renderedBounds.rect));
+
+        // Disabling an existing border must release its scene-graph content,
+        // and enabling it again must restore rendering and viewport tracking.
+        scene.outline->setOutlinePixels(0);
+        QVERIFY(!scene.outline->flags().testFlag(QQuickItem::ItemObservesViewport));
+        const OutlineCapture disabled = captureOutline(scene);
+        QCOMPARE(disabled.renderedBounds.pixels, 0);
+
+        scene.outline->setOutlinePixels(8);
+        QVERIFY(scene.outline->flags().testFlag(QQuickItem::ItemObservesViewport));
+        const OutlineCapture restored = captureOutline(scene);
+        QVERIFY2(restored.renderedBounds.pixels > 0, "re-enabled outline is empty");
+        QVERIFY2(restored.iou >= 0.84,
+                 qPrintable(QStringLiteral("re-enabled outline IoU too low: %1")
+                     .arg(restored.iou)));
     }
 
     void viewportCullingFollowsAncestorPanAndZoom()
@@ -863,7 +878,6 @@ private slots:
         window.contentItem()->setSize(targetSize);
 
         auto* outline = new TestableTextOutlineItem(window.contentItem());
-        outline->setFlag(QQuickItem::ItemObservesViewport, viewportCulling);
         outline->setPosition({0, 0});
         outline->setZ(0);
         outline->setColor(Qt::white);
@@ -893,6 +907,10 @@ private slots:
         TextEditHelper helper;
         helper.applyIncludeTrailingSpaces(edit);
         outline->setSource(edit);
+        // The production renderer observes the viewport whenever it is active.
+        // This benchmark-only row deliberately disables culling to exercise
+        // every glyph in the document.
+        outline->setFlag(QQuickItem::ItemObservesViewport, viewportCulling);
 
         if (wrapped) {
             // A realistic long paragraph: fixed editor width, tall document,

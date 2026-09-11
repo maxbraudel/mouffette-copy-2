@@ -401,6 +401,13 @@ private slots:
             QCOMPARE(frame.rebuiltChunks, 0);
             QCOMPARE(frame.movedChunks, 0);
             QCOMPARE(frame.uploadedGlyphs, 0);
+            if (!border) {
+                // A disabled renderer must not observe inherited camera or
+                // element transforms. One empty sync per TextItem is enough to
+                // make a text-heavy canvas stutter.
+                QCOMPARE(frame.polishCalls, 0);
+                QCOMPARE(frame.syncCalls, 0);
+            }
         }
         reportFrames(cameraPan ? "camera-pan" : "element-drag", movingFrames);
 
@@ -431,6 +438,10 @@ private slots:
             refreshes += frame.layoutPasses;
             QCOMPARE(edit->text(), text);
             QCOMPARE(frame.generatedGlyphs, 0);
+            if (!border) {
+                QCOMPARE(frame.polishCalls, 0);
+                QCOMPARE(frame.syncCalls, 0);
+            }
         }
         reportFrames(cameraPan ? "camera-pan-crossing-cache" : "element-drag-crossing-cache",
                      crossingFrames);

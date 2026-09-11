@@ -102,7 +102,11 @@ the source crop exactly; simply changing `layer.sourceRect` would stretch the
 crop across the whole document. Texture resolution follows the stable
 screen-density/DPR bucket and is capped at 4096 pixels per axis, so a huge or zoomed-out document does not
 allocate a document-sized texture. Fully transparent borders skip geometry
-generation; opaque borders do not pay for this offscreen pass.
+generation; opaque borders do not pay for this offscreen pass. A zero-width or
+fully transparent border also disables viewport observation altogether. This is
+important for borderless text: an empty outline adapter no longer wakes up,
+polishes and requests scene-graph synchronization on every inherited camera
+transform.
 The guard keeps the crop and texture size stable during small translations.
 Source and destination crops share integer-aligned local bounds, avoiding
 Qt 6.11's fractional `ShaderEffectSource` target rounding (QTBUG-149373).
