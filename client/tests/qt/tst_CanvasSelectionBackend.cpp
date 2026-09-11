@@ -11,6 +11,7 @@
 #include <QImageWriter>
 #include <QJSValue>
 #include <QMimeData>
+#include <QPixmap>
 #include <QQuickItem>
 #include <QQuickWidget>
 #include <QRegularExpression>
@@ -21,8 +22,11 @@
 #include <QVariantList>
 #include <QWidget>
 #include <QtTest>
+#include <cmath>
+#include <limits>
 #include <memory>
 
+#include "backend/domain/media/MediaItems.h"
 #include "backend/domain/media/TextMediaItem.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 
@@ -567,8 +571,20 @@ private slots:
                                           "handleDropPreviewContentReady",
                                           Qt::DirectConnection,
                                           Q_ARG(QString, QStringLiteral("prepared-image"))));
+        // Content readiness only arms the render barrier. The preview and its
+        // handoff identity must remain intact until Quick has presented the
+        // final texture in completed render passes.
+        QCOMPARE(mapProperty(m_canvas->root, "dropPreviewModel")
+                     .value("handoffMediaId").toString(),
+                 QStringLiteral("prepared-image"));
         QTRY_VERIFY_WITH_TIMEOUT(
             !mapProperty(m_canvas->root, "dropPreviewModel").value("visible").toBool(),
+            500);
+        // Cleanup is acknowledged by the real QML animation completion, not
+        // by an unrelated timer that could race the render thread.
+        QTRY_VERIFY_WITH_TIMEOUT(
+            mapProperty(m_canvas->root, "dropPreviewModel")
+                .value("handoffMediaId").toString().isEmpty(),
             500);
 
         // The identity-based cache makes a second enter ready synchronously.
@@ -670,6 +686,238 @@ private slots:
         QCOMPARE(handoff.value("phase").toString(), QStringLiteral("handoff"));
         QCOMPARE(handoff.value("width").toInt(), 1920);
         QCOMPARE(handoff.value("height").toInt(), 1080);
+    }
+
+    void imageDropHandoffNeverRendersAnEmptyFrame()
+    {
+        // Exercise the complete visible path. State-only assertions cannot
+        // detect a decoded image that has not reached the Quick render pass.
+        m_canvas->scene.clear();
+        m_first = nullptr;
+        m_second = nullptr;
+        QTRY_COMPARE(listProperty(m_canvas->root, "mediaModel").size(), 0);
+
+        auto* quick = qobject_cast<QQuickWidget*>(m_canvas->controller.widget());
+        QVERIFY(quick);
+        m_canvas->host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&m_canvas->host));
+        m_canvas->root->setProperty("viewScale", 1.0);
+        m_canvas->root->setProperty("panX", 0.0);
+        m_canvas->root->setProperty("panY", 0.0);
+
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString path = directory.filePath(QStringLiteral("handoff-red.png"));
+        QImage source(160, 100, QImage::Format_ARGB32_Premultiplied);
+        source.fill(QColor(245, 36, 64));
+        QVERIFY(source.save(path));
+
+        QString insertedId;
+        connect(&m_canvas->controller,
+                &QuickCanvasController::preparedLocalFileDropRequested,
+                &m_canvas->controller,
+                [this, &insertedId](const QString& localPath,
+                                    const QSize& nativeSize,
+                                    const QImage& previewFrame,
+                                    const QPointF& sceneCenter) {
+                    auto* image = new ResizablePixmapItem(
+                        QPixmap::fromImage(previewFrame), nativeSize,
+                        12, 30, QFileInfo(localPath).fileName());
+                    image->setSourcePath(localPath);
+                    image->setPos(sceneCenter - QPointF(nativeSize.width() * 0.5,
+                                                        nativeSize.height() * 0.5));
+                    image->setZValue(10.0);
+                    m_canvas->scene.addItem(image);
+                    image->setSelected(true);
+                    insertedId = image->mediaId();
+                    m_canvas->controller.beginDropPreviewHandoff(insertedId);
+                });
+
+        const QPoint dropPoint(420, 320);
+        QMimeData mime;
+        mime.setUrls({QUrl::fromLocalFile(path)});
+        QDragEnterEvent enter(dropPoint, Qt::CopyAction, &mime,
+                              Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(quick, &enter);
+        QVERIFY(enter.isAccepted());
+        QTRY_VERIFY_WITH_TIMEOUT(
+            mapProperty(m_canvas->root, "dropPreviewModel").value("frameReady").toBool(),
+            3000);
+
+        const auto centerPixel = [quick, dropPoint]() {
+            const QImage frame = quick->grab().toImage();
+            const qreal dpr = frame.devicePixelRatio();
+            const int x = std::clamp(qRound(dropPoint.x() * dpr), 0, frame.width() - 1);
+            const int y = std::clamp(qRound(dropPoint.y() * dpr), 0, frame.height() - 1);
+            return frame.pixelColor(x, y);
+        };
+        QColor initialPixel;
+        for (int attempt = 0; attempt < 100; ++attempt) {
+            initialPixel = centerPixel();
+            if (initialPixel.red() > 220)
+                break;
+            QTest::qWait(10);
+        }
+        const QVariantMap initialPreview = mapProperty(m_canvas->root, "dropPreviewModel");
+        QVERIFY2(initialPixel.red() > 220,
+                 qPrintable(QStringLiteral(
+                     "preview center was %1 at drop=(%2,%3), preview=(%4,%5 %6x%7), viewScale=%8 pan=(%9,%10)")
+                     .arg(initialPixel.name(QColor::HexArgb))
+                     .arg(dropPoint.x()).arg(dropPoint.y())
+                     .arg(initialPreview.value("x").toDouble())
+                     .arg(initialPreview.value("y").toDouble())
+                     .arg(initialPreview.value("width").toDouble())
+                     .arg(initialPreview.value("height").toDouble())
+                     .arg(m_canvas->root->property("viewScale").toDouble())
+                     .arg(m_canvas->root->property("panX").toDouble())
+                     .arg(m_canvas->root->property("panY").toDouble())));
+
+        QDropEvent drop(QPointF(dropPoint), Qt::CopyAction, &mime,
+                        Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(quick, &drop);
+        QVERIFY(drop.isAccepted());
+        QVERIFY(!insertedId.isEmpty());
+
+        int darkestRed = 255;
+        int brightestOtherChannel = 0;
+        for (int frameIndex = 0; frameIndex < 45; ++frameIndex) {
+            QTest::qWait(4);
+            const QColor pixel = centerPixel();
+            darkestRed = std::min(darkestRed, pixel.red());
+            brightestOtherChannel = std::max(
+                brightestOtherChannel, std::max(pixel.green(), pixel.blue()));
+        }
+        QVERIFY2(darkestRed > 220,
+                 qPrintable(QStringLiteral("drop rendered a non-media frame; minimum red=%1")
+                                .arg(darkestRed)));
+        QVERIFY2(brightestOtherChannel < 100,
+                 qPrintable(QStringLiteral("drop exposed placeholder/background; max other=%1")
+                                .arg(brightestOtherChannel)));
+        QTRY_VERIFY_WITH_TIMEOUT(
+            mapProperty(m_canvas->root, "dropPreviewModel")
+                .value("handoffMediaId").toString().isEmpty(),
+            1000);
+        QVERIFY(mediaDelegate(qobject_cast<QQuickItem*>(m_canvas->root), insertedId));
+    }
+
+    void videoDropHandoffWaitsForItsVisibleVideoOutput()
+    {
+        const QString path = QString::fromUtf8(TEST_VIDEO_FILE);
+        if (!QFileInfo::exists(path)) {
+            QSKIP(qPrintable(QStringLiteral("Optional real-video fixture is missing: %1")
+                                 .arg(path)));
+        }
+
+        m_canvas->scene.clear();
+        m_first = nullptr;
+        m_second = nullptr;
+        QTRY_COMPARE(listProperty(m_canvas->root, "mediaModel").size(), 0);
+
+        auto* quick = qobject_cast<QQuickWidget*>(m_canvas->controller.widget());
+        QVERIFY(quick);
+        m_canvas->host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&m_canvas->host));
+        m_canvas->root->setProperty("viewScale", 1.0);
+        m_canvas->root->setProperty("panX", 0.0);
+        m_canvas->root->setProperty("panY", 0.0);
+
+        QString insertedId;
+        connect(&m_canvas->controller,
+                &QuickCanvasController::preparedLocalFileDropRequested,
+                &m_canvas->controller,
+                [this, &insertedId](const QString& localPath,
+                                    const QSize& nativeSize,
+                                    const QImage& previewFrame,
+                                    const QPointF& sceneCenter) {
+                    auto* video = new ResizableVideoItem(
+                        localPath, nativeSize, 12, 30,
+                        QFileInfo(localPath).fileName());
+                    video->setSourcePath(localPath);
+                    video->setExternalPosterImage(previewFrame, nativeSize);
+                    video->setPos(sceneCenter - QPointF(nativeSize.width() * 0.5,
+                                                        nativeSize.height() * 0.5));
+                    video->setZValue(10.0);
+                    m_canvas->scene.addItem(video);
+                    video->setSelected(true);
+                    insertedId = video->mediaId();
+                    m_canvas->controller.beginDropPreviewHandoff(insertedId);
+                });
+
+        const QPoint dropPoint(500, 350);
+        QMimeData mime;
+        mime.setUrls({QUrl::fromLocalFile(path)});
+        QDragEnterEvent enter(dropPoint, Qt::CopyAction, &mime,
+                              Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(quick, &enter);
+        QVERIFY(enter.isAccepted());
+        QTRY_VERIFY_WITH_TIMEOUT(
+            mapProperty(m_canvas->root, "dropPreviewModel").value("frameReady").toBool(),
+            5000);
+
+        const auto widgetFrame = [quick]() { return quick->grab().toImage(); };
+        QImage previewImage;
+        const QColor canvasColor(QStringLiteral("#10131a"));
+        const QColor placeholderColor(QStringLiteral("#323232"));
+        const auto colorDistance = [](const QColor& lhs, const QColor& rhs) {
+            const int dr = lhs.red() - rhs.red();
+            const int dg = lhs.green() - rhs.green();
+            const int db = lhs.blue() - rhs.blue();
+            return std::sqrt(double(dr * dr + dg * dg + db * db));
+        };
+
+        QPoint probe = dropPoint;
+        double probeDistance = -1.0;
+        for (int attempt = 0; attempt < 200 && probeDistance <= 35.0; ++attempt) {
+            previewImage = widgetFrame();
+            QVERIFY(!previewImage.isNull());
+            const qreal dpr = previewImage.devicePixelRatio();
+            for (int y = 100; y <= 600; y += 50) {
+                for (int x = 100; x <= 900; x += 50) {
+                    const int px = std::clamp(qRound(x * dpr), 0, previewImage.width() - 1);
+                    const int py = std::clamp(qRound(y * dpr), 0, previewImage.height() - 1);
+                    const QColor candidate = previewImage.pixelColor(px, py);
+                    const double distance = std::min(colorDistance(candidate, canvasColor),
+                                                     colorDistance(candidate, placeholderColor));
+                    if (distance > probeDistance) {
+                        probeDistance = distance;
+                        probe = QPoint(x, y);
+                    }
+                }
+            }
+            if (probeDistance <= 35.0)
+                QTest::qWait(10);
+        }
+        QVERIFY2(probeDistance > 35.0,
+                 "The video fixture has no usable probe distinct from canvas/placeholder");
+
+        QDropEvent drop(QPointF(dropPoint), Qt::CopyAction, &mime,
+                        Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(quick, &drop);
+        QVERIFY(drop.isAccepted());
+        QVERIFY(!insertedId.isEmpty());
+
+        double closestToEmpty = std::numeric_limits<double>::max();
+        for (int frameIndex = 0; frameIndex < 80; ++frameIndex) {
+            QTest::qWait(5);
+            const QImage frame = widgetFrame();
+            const qreal frameDpr = frame.devicePixelRatio();
+            const int px = std::clamp(qRound(probe.x() * frameDpr), 0, frame.width() - 1);
+            const int py = std::clamp(qRound(probe.y() * frameDpr), 0, frame.height() - 1);
+            const QColor pixel = frame.pixelColor(px, py);
+            closestToEmpty = std::min(
+                closestToEmpty,
+                std::min(colorDistance(pixel, canvasColor),
+                         colorDistance(pixel, placeholderColor)));
+        }
+        QVERIFY2(closestToEmpty > 20.0,
+                 qPrintable(QStringLiteral(
+                     "video handoff exposed canvas/placeholder; closest color distance=%1")
+                     .arg(closestToEmpty)));
+        QTRY_VERIFY_WITH_TIMEOUT(
+            mapProperty(m_canvas->root, "dropPreviewModel")
+                .value("handoffMediaId").toString().isEmpty(),
+            8000);
+        QVERIFY(mediaDelegate(qobject_cast<QQuickItem*>(m_canvas->root), insertedId));
     }
 
     void localImageDragRespectsStoredOrientation()

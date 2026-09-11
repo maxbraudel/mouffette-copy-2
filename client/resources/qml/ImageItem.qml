@@ -3,11 +3,14 @@ import QtQuick 2.15
 BaseMediaItem {
     id: root
     property string imageSource: ""
+    property bool handoffCovered: false
+    readonly property bool handoffContentReady: image.status === Image.Ready
     contentReady: image.status === Image.Ready
 
     MediaSurface {
         anchors.fill: parent
         contentReady: image.status === Image.Ready
+        revealImmediately: root.handoffCovered
         fadeDuration: 80
 
         Image {

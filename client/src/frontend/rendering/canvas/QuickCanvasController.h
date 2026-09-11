@@ -162,6 +162,7 @@ private:
     void performPreparedLocalDrop();
     void failLocalDragPreview(const QString& message, quint64 generation);
     void clearLocalDragPreview(bool animate, bool restoreCursor = true);
+    void cancelDropHandoffRenderBarrier();
     QString localPreviewCacheKey(const QString& localPath) const;
     bool restoreLocalPreviewFromCache(const QString& cacheKey);
     void storeLocalPreviewInCache();
@@ -273,6 +274,9 @@ private:
     QPointF m_localDragSceneCenter;
     QPointF m_localDropSceneCenter;
     QString m_localDropHandoffMediaId;
+    QMetaObject::Connection m_dropHandoffRenderConnection;
+    quint64 m_dropHandoffRenderGeneration = 0;
+    int m_dropHandoffRenderedFramesRemaining = 0;
     RemoteVideoFrameSource* m_localDragFrameSource = nullptr;
     QMediaPlayer* m_localDragFallbackPlayer = nullptr;
     QVideoSink* m_localDragFallbackSink = nullptr;

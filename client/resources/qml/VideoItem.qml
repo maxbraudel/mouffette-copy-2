@@ -15,11 +15,18 @@ BaseMediaItem {
     property bool videoHasRenderedFrame: false
     property bool videoHasPosterFrame: false
     property bool videoFirstFramePrimed: false
+    property bool handoffCovered: false
     readonly property bool remoteFrameMode: remoteFrameSource !== null
     readonly property bool showFallbackOverlay: !hasLiveFrame
     readonly property bool hasLiveFrame: remoteFrameMode
                                           ? remoteFrameSurface.hasFrame
                                           : (videoHasRenderedFrame || videoFirstFramePrimed || localFrameSeen)
+    // Backend poster/priming flags are useful loading hints, but they do not
+    // prove that this particular Qt Quick VideoOutput owns a visible frame.
+    // Only its sink notification may release a drag/drop handoff.
+    readonly property bool handoffContentReady: remoteFrameMode
+                                                ? remoteFrameSurface.hasFrame
+                                                : localFrameSeen
     property bool localFrameSeen: false
     contentReady: hasLiveFrame
 
@@ -86,6 +93,7 @@ BaseMediaItem {
         id: mediaSurface
         anchors.fill: parent
         contentReady: root.hasLiveFrame
+        revealImmediately: root.handoffCovered
         fadeDuration: 80
 
         VideoOutput {

@@ -10,12 +10,15 @@ Item {
     property bool selected: false
     property bool textEditable: false
     property QtObject editingSession: null
+    property bool handoffCovered: false
 
     readonly property var visualItem: visualLoader.item
     // Compatibility alias for the former Loader-based local delegate.
     readonly property var item: visualItem
     readonly property bool editing: !!(visualItem && visualItem.editing === true)
     readonly property bool contentReady: !!(visualItem && visualItem.contentReady === true)
+    readonly property bool handoffContentReady: !!visualItem
+                                                && visualItem.handoffContentReady === true
 
     signal primaryPressed(string mediaId, bool additive)
     signal textCommitRequested(string mediaId, string text)
@@ -62,6 +65,7 @@ Item {
             mediaScale: 1.0
             mediaZ: 0
             selected: root.selected
+            handoffCovered: root.handoffCovered
             imageSource: root.media
                          ? (root.media.sourceUrl || root.media.sourcePath || "")
                          : ""
@@ -79,6 +83,7 @@ Item {
             mediaScale: 1.0
             mediaZ: 0
             selected: root.selected
+            handoffCovered: root.handoffCovered
             cppMediaPlayer: root.media ? (root.media.videoPlayerPtr || null) : null
             cppVideoSink: root.media ? (root.media.videoSinkPtr || null) : null
             remoteFrameSource: root.media ? (root.media.remoteFrameSource || null) : null

@@ -10,6 +10,8 @@ Item {
 
     readonly property bool shown: !!preview && preview.visible === true
     readonly property bool frameReady: preview && preview.frameReady === true
+    readonly property bool handoffActive: !!preview
+                                          && !!preview.handoffMediaId
 
     x: preview && preview.x !== undefined ? preview.x : 0
     y: preview && preview.y !== undefined ? preview.y : 0
@@ -21,6 +23,10 @@ Item {
     enabled: false
 
     Behavior on opacity {
+        // Enter/leave keeps the short affordance fade. A successful drop is a
+        // visual identity handoff, not a disappearance: once the final media
+        // has crossed the render barrier this item is removed atomically.
+        enabled: !root.handoffActive
         NumberAnimation {
             duration: 80
             easing.type: Easing.OutCubic

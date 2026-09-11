@@ -693,6 +693,14 @@ Rectangle {
                         id: mediaContentLoader
                         media: mediaDelegate.media
                         selected: mediaDelegate.isSelected
+                        // Keep the final surface's own content fade disabled
+                        // until the covering preview has completed its handoff.
+                        // The preview id deliberately survives its 80 ms fade.
+                        handoffCovered: {
+                            var preview = root.dropPreviewModel
+                            return !!preview && !!preview.handoffMediaId
+                                    && preview.handoffMediaId === mediaDelegate.currentMediaId
+                        }
                         readonly property real liveWidth:  mediaDelegate.usesLiveAltResize
                                                           ? root.liveAltResizeWidth
                                                           : (media ? media.width : 0)
@@ -705,7 +713,8 @@ Rectangle {
                     }
 
                     function reportDropHandoffReady() {
-                        if (dropHandoffReadyReported || !mediaContentLoader.contentReady)
+                        if (dropHandoffReadyReported
+                                || !mediaContentLoader.handoffContentReady)
                             return
                         var preview = root.dropPreviewModel
                         if (!preview || !preview.handoffMediaId
@@ -717,7 +726,7 @@ Rectangle {
 
                     Connections {
                         target: mediaContentLoader
-                        function onContentReadyChanged() {
+                        function onHandoffContentReadyChanged() {
                             mediaDelegate.reportDropHandoffReady()
                         }
                     }
@@ -1112,6 +1121,11 @@ Rectangle {
             enabled: false
 
             Behavior on opacity {
+                // Match the media preview: on a successful drop the final name
+                // pill is already present, so fading this duplicate would only
+                // create a visible blink.
+                enabled: !(dropPreviewTitle.preview
+                           && dropPreviewTitle.preview.handoffMediaId)
                 NumberAnimation { duration: 80; easing.type: Easing.OutCubic }
             }
 
