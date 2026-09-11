@@ -10,6 +10,7 @@
 #include <QHash>
 #include <QPointer>
 #include <QRawFont>
+#include <QQuickWindow>
 #include <QSGTransformNode>
 #include <QTextBlock>
 #include <QTextDocument>
@@ -49,6 +50,38 @@ struct Chunk {
     QPointF origin;
     size_t key = 0;
 };
+
+class ChunkMaterial final : public QSGCurveStrokeMaterial {
+public:
+    explicit ChunkMaterial(QSGCurveStrokeNode* node)
+        : QSGCurveStrokeMaterial(node, QSGCurveStrokeNode::expandingStrokeEnabled()) {}
+
+    QSGMaterialType* type() const override
+    {
+        static QSGMaterialType type;
+        return &type;
+    }
+
+    int compare(const QSGMaterial* other) const override
+    {
+        // Keep GPU uploads bounded to a chunk. Otherwise Qt merges the entire
+        // document into one buffer and re-uploads it when ONE glyph changes.
+        const auto a = quintptr(this);
+        const auto b = quintptr(other);
+        return a < b ? -1 : a > b ? 1 : 0;
+    }
+};
+
+class ChunkStrokeNode final : public QSGCurveStrokeNode {
+public:
+    void cookGeometry() override
+    {
+        QSGCurveStrokeNode::cookGeometry();
+        m_material.reset(new ChunkMaterial(this));
+        setMaterial(m_material.data());
+    }
+};
+
 struct ChunkNode : QSGTransformNode {
     QList<PlacedGlyph> glyphs;
     QSGCurveStrokeNode* stroke = nullptr;
@@ -62,8 +95,11 @@ struct OutlineNode : QSGTransformNode {
 struct TextOutlineItem::Private {
     QPointer<QQuickTextEdit> source;
     QList<QMetaObject::Connection> connections;
+    QList<QMetaObject::Connection> windowConnections;
     qreal width = 0;
     QColor color = Qt::black;
+    QRectF renderedRect;
+    QSize renderedPixelSize;
     bool layoutDirty = true;
     // GUI-thread-only font objects. Only immutable, font-free meshes cross
     // into updatePaintNode while the GUI thread is blocked by Qt's sync phase.
@@ -99,12 +135,17 @@ TextOutlineItem::TextOutlineItem(QQuickItem* parent)
     : QQuickItem(parent), d(std::make_unique<Private>())
 {
     setFlag(ItemHasContents);
+    setFlag(ItemObservesViewport);
+    if (window())
+        itemChange(ItemSceneChange, ItemChangeData(window()));
 }
 
 TextOutlineItem::~TextOutlineItem() = default;
 QQuickItem* TextOutlineItem::source() const { return d->source; }
 qreal TextOutlineItem::outlinePixels() const { return d->width; }
 QColor TextOutlineItem::color() const { return d->color; }
+QRectF TextOutlineItem::renderedRect() const { return d->renderedRect; }
+QSize TextOutlineItem::renderedPixelSize() const { return d->renderedPixelSize; }
 TextOutlineItem::Statistics TextOutlineItem::statistics() const { return d->stats; }
 
 void TextOutlineItem::scheduleLayout()
@@ -185,6 +226,27 @@ void TextOutlineItem::geometryChange(const QRectF& now, const QRectF& before)
     scheduleLayout();
 }
 
+void TextOutlineItem::itemChange(ItemChange change, const ItemChangeData& data)
+{
+    QQuickItem::itemChange(change, data);
+    if (change == ItemSceneChange) {
+        for (const auto& connection : std::as_const(d->windowConnections))
+            disconnect(connection);
+        d->windowConnections.clear();
+        if (data.window) {
+            d->windowConnections.append(connect(data.window, &QQuickWindow::widthChanged,
+                                               this, &TextOutlineItem::scheduleLayout));
+            d->windowConnections.append(connect(data.window, &QQuickWindow::heightChanged,
+                                               this, &TextOutlineItem::scheduleLayout));
+        }
+        scheduleLayout();
+    } else if (change == ItemTransformHasChanged || change == ItemParentHasChanged
+               || change == ItemDevicePixelRatioHasChanged) {
+        // ItemObservesViewport propagates ancestor pan/zoom changes here.
+        scheduleLayout();
+    }
+}
+
 void TextOutlineItem::updatePolish()
 {
     if (!d->layoutDirty)
@@ -207,7 +269,36 @@ void TextOutlineItem::updatePolish()
     // Read Qt's actual offset, including padding and RTL alignment. Recreating
     // its alignment formulas was the cause of fill/border drift in the SVG path.
     const QPointF offset = edit->mapToItem(this, QPointF(text->xoff, text->yoff));
-    const QRectF visibleBounds(0, 0, width(), height());
+    QRectF visibleBounds = clipRect();
+    if (flags().testFlag(ItemObservesViewport) && window()) {
+        // An intermediate clipped item need not itself observe the viewport.
+        // Intersect the window too, including offscreen QQuickWidget targets.
+        visibleBounds &= mapRectFromItem(window()->contentItem(),
+                                        window()->contentItem()->boundingRect());
+    }
+    // Qt 6.11 ShaderEffectSource rounds a fractional destination rectangle
+    // outward without matching its source crop (QTBUG-149373). Use one aligned
+    // rectangle for BOTH sides so fractional pan/zoom cannot stretch the mask.
+    if (!visibleBounds.isEmpty())
+        visibleBounds = visibleBounds.toAlignedRect();
+    // A translucent border needs a single alpha mask, but a document-sized
+    // Item layer can exceed the GPU texture limit. Expose a viewport crop and
+    // screen-resolution texture size for an explicitly positioned Qt source.
+    const QPointF sceneOrigin = mapToScene(QPointF());
+    const QPointF sceneX = mapToScene(QPointF(1, 0)) - sceneOrigin;
+    const QPointF sceneY = mapToScene(QPointF(0, 1)) - sceneOrigin;
+    const qreal dpr = window() ? window()->effectiveDevicePixelRatio() : 1;
+    const auto textureExtent = [dpr](qreal extent, const QPointF& axis) {
+        const qreal pixels = extent * std::hypot(axis.x(), axis.y()) * dpr;
+        return int(qBound(qreal(1), std::ceil(pixels), qreal(4096)));
+    };
+    const QSize pixelSize(textureExtent(visibleBounds.width(), sceneX),
+                          textureExtent(visibleBounds.height(), sceneY));
+    if (d->renderedRect != visibleBounds || d->renderedPixelSize != pixelSize) {
+        d->renderedRect = visibleBounds;
+        d->renderedPixelSize = pixelSize;
+        emit viewportChanged();
+    }
     QList<PlacedGlyph> placed;
 
     for (QTextBlock block = doc->begin(); block.isValid(); block = block.next()) {
@@ -222,24 +313,31 @@ void TextOutlineItem::updatePolish()
         // Qt releases its shaping cache. Read each existing line, whose range
         // remains valid, instead of glyphRuns()'s default text().size() range.
         for (int lineIndex = 0; lineIndex < block.layout()->lineCount(); ++lineIndex) {
-          const QTextLine line = block.layout()->lineAt(lineIndex);
-          const auto runs = line.glyphRuns();
-          for (const auto& run : runs) {
-            const QRawFont font = run.rawFont();
-            const auto indexes = run.glyphIndexes();
-            const auto positions = run.positions();
-            for (qsizetype i = 0; i < indexes.size(); ++i) {
-                const Mesh mesh = d->glyphMesh(font, indexes[i]);
-                if (mesh->triangles.isEmpty())
-                    continue;
-                const QPointF position = positions[i] + blockOffset;
-                if (!visibleBounds.intersects(mesh->bounds.translated(position)))
-                    continue;
-                placed.append({mesh, position});
-                ++d->stats.glyphs;
-                d->stats.triangles += mesh->triangles.size();
+            const QTextLine line = block.layout()->lineAt(lineIndex);
+            // A wrapped paragraph can contain thousands of offscreen lines.
+            // Reject those before retrieving/shaping their glyph runs. Keep a
+            // generous line-height guard for italic bearings and font fallback.
+            const qreal lineGuard = d->width + line.height();
+            if (!visibleBounds.intersects(line.rect().translated(blockOffset)
+                    .adjusted(-lineGuard, -lineGuard, lineGuard, lineGuard)))
+                continue;
+            const auto runs = line.glyphRuns();
+            for (const auto& run : runs) {
+                const QRawFont font = run.rawFont();
+                const auto indexes = run.glyphIndexes();
+                const auto positions = run.positions();
+                for (qsizetype i = 0; i < indexes.size(); ++i) {
+                    const Mesh mesh = d->glyphMesh(font, indexes[i]);
+                    if (mesh->triangles.isEmpty())
+                        continue;
+                    const QPointF position = positions[i] + blockOffset;
+                    if (!visibleBounds.intersects(mesh->bounds.translated(position)))
+                        continue;
+                    placed.append({mesh, position});
+                    ++d->stats.glyphs;
+                    d->stats.triangles += mesh->triangles.size();
+                }
             }
-          }
         }
         // QQuickTextEdit also does this before scene-graph synchronization:
         // font engines created by glyphRuns() on the GUI thread must not leak
@@ -270,16 +368,24 @@ void TextOutlineItem::updatePolish()
     const auto appendChunk = [this, &placed](qsizetype begin, qsizetype end) {
         if (begin == end)
             return;
-        Chunk chunk;
-        chunk.origin = placed[begin].position;
-        chunk.glyphs.reserve(end - begin);
+        const qsizetype count = end - begin;
+        const bool mergeWithPrevious = !d->chunks.isEmpty()
+            && d->chunks.constLast().glyphs.size() + count <= glyphsPerChunk;
+        if (!mergeWithPrevious) {
+            Chunk chunk;
+            chunk.origin = placed[begin].position;
+            chunk.glyphs.reserve(count);
+            d->chunks.append(std::move(chunk));
+        }
+        Chunk& chunk = d->chunks.last();
+        if (mergeWithPrevious)
+            chunk.glyphs.reserve(chunk.glyphs.size() + count);
         for (qsizetype i = begin; i < end; ++i) {
             PlacedGlyph glyph {placed[i].mesh, placed[i].position - chunk.origin};
             chunk.key = qHashMulti(chunk.key, quintptr(glyph.mesh.get()),
                                    glyph.position.x(), glyph.position.y());
             chunk.glyphs.append(std::move(glyph));
         }
-        d->chunks.append(std::move(chunk));
     };
     qsizetype begin = 0;
     qsizetype firstSuffixChunk = 0;
@@ -323,23 +429,28 @@ QSGNode* TextOutlineItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*
     const QPointF origin = d->chunks.first().origin;
     QMatrix4x4 rootMatrix;
     rootMatrix.translate(origin.x(), origin.y());
-    root->setMatrix(rootMatrix);
+    if (root->matrix() != rootMatrix)
+        root->setMatrix(rootMatrix);
     d->stats.rebuiltChunks = 0;
-    QMultiHash<size_t, ChunkNode*> available;
+    d->stats.movedChunks = 0;
+    // Preserve occurrence order for repeated chunks. QMultiHash::find() picks
+    // the last inserted equal key: identical phrases would swap nodes every
+    // frame, moving their transforms and invalidating the entire GPU batch.
+    QHash<size_t, QList<ChunkNode*>> available;
     for (auto* node : std::as_const(root->chunks))
-        available.insert(node->key, node);
+        available[node->key].append(node);
     root->chunks.clear();
     for (qsizetype i = 0; i < d->chunks.size(); ++i) {
         const Chunk& chunk = d->chunks[i];
         ChunkNode* node = nullptr;
-        auto candidate = available.find(chunk.key);
-        while (candidate != available.end() && candidate.key() == chunk.key) {
-            if (candidate.value()->glyphs == chunk.glyphs) {
-                node = candidate.value();
-                available.erase(candidate);
-                break;
+        auto candidates = available.find(chunk.key);
+        if (candidates != available.end()) {
+            for (qsizetype j = 0; j < candidates->size(); ++j) {
+                if (candidates->at(j)->glyphs == chunk.glyphs) {
+                    node = candidates->takeAt(j);
+                    break;
+                }
             }
-            ++candidate;
         }
         if (!node) {
             node = new ChunkNode;
@@ -348,10 +459,15 @@ QSGNode* TextOutlineItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*
         root->chunks.append(node);
         QMatrix4x4 matrix;
         matrix.translate(chunk.origin.x() - origin.x(), chunk.origin.y() - origin.y());
-        node->setMatrix(matrix);
+        // Unlike QQuickItem setters, QSGTransformNode::setMatrix marks the
+        // subtree dirty even when the matrix has not changed.
+        if (node->matrix() != matrix) {
+            node->setMatrix(matrix);
+            ++d->stats.movedChunks;
+        }
         if (node->glyphs != chunk.glyphs) {
             delete node->stroke;
-            node->stroke = new QSGCurveStrokeNode;
+            node->stroke = new ChunkStrokeNode;
             node->stroke->setStrokeWidth(float(d->width * 2));
             for (const auto& glyph : chunk.glyphs) {
                 const QVector2D p(glyph.position);
@@ -378,7 +494,8 @@ QSGNode* TextOutlineItem::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*
         if (node->stroke->color() != d->color)
             node->stroke->setColor(d->color);
     }
-    qDeleteAll(available);
+    for (const auto& unused : std::as_const(available))
+        qDeleteAll(unused);
     d->stats.syncNanoseconds = timer.nsecsElapsed();
     return root;
 }

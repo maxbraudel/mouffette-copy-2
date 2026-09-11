@@ -432,6 +432,8 @@ if(BUILD_TESTING)
     target_compile_definitions(tst_TextItemQml PRIVATE TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
     target_link_libraries(tst_TextItemQml PRIVATE Qt6::QuickPrivate Qt6::GuiPrivate Qt6::Qml Qt6::Test)
     add_test(NAME TextItemQml COMMAND tst_TextItemQml)
+    add_test(NAME TextItemQmlScaled COMMAND tst_TextItemQml)
+    set_tests_properties(TextItemQmlScaled PROPERTIES ENVIRONMENT "QT_SCALE_FACTOR=2")
 
     # Reference implementation retained for before/after profiling only. The
     # application no longer registers, compiles or bundles this SVG renderer.

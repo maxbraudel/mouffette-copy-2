@@ -13,6 +13,8 @@ class TextOutlineItem : public QQuickItem
     Q_PROPERTY(QQuickItem* source READ source WRITE setSource NOTIFY sourceChanged)
     Q_PROPERTY(qreal outlinePixels READ outlinePixels WRITE setOutlinePixels NOTIFY outlinePixelsChanged)
     Q_PROPERTY(QColor color READ color WRITE setColor NOTIFY colorChanged)
+    Q_PROPERTY(QRectF renderedRect READ renderedRect NOTIFY viewportChanged)
+    Q_PROPERTY(QSize renderedPixelSize READ renderedPixelSize NOTIFY viewportChanged)
 
 public:
     explicit TextOutlineItem(QQuickItem* parent = nullptr);
@@ -24,6 +26,8 @@ public:
     void setOutlinePixels(qreal width);
     QColor color() const;
     void setColor(const QColor& color);
+    QRectF renderedRect() const;
+    QSize renderedPixelSize() const;
 
     // C++ diagnostics used by the rendering regression/benchmark tests.
     struct Statistics {
@@ -31,6 +35,7 @@ public:
         int chunks = 0;
         int generatedGlyphs = 0;
         int rebuiltChunks = 0;
+        int movedChunks = 0;
         qint64 triangles = 0;
         qint64 polishNanoseconds = 0;
         qint64 syncNanoseconds = 0;
@@ -41,11 +46,13 @@ signals:
     void sourceChanged();
     void outlinePixelsChanged();
     void colorChanged();
+    void viewportChanged();
 
 protected:
     void updatePolish() override;
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) override;
     void geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry) override;
+    void itemChange(ItemChange change, const ItemChangeData& data) override;
 
 private:
     void scheduleLayout();

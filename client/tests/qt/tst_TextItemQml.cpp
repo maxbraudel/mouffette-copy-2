@@ -85,6 +85,49 @@ private slots:
         }
         QVERIFY2(maximumRed >= 125 && maximumRed <= 130,
                  qPrintable(QStringLiteral("Overlapping border alpha accumulated: %1").arg(maximumRed)));
+
+        // The same text at the right edge of a huge document must use only a
+        // viewport-sized alpha texture, without stretching or shifting it.
+        auto* outline = item->findChild<TextOutlineItem*>();
+        QVERIFY(outline);
+        for (qreal panFraction : {qreal(0), qreal(0.25)}) {
+            item->setProperty("mediaWidth", 600);
+            item->setX(panFraction);
+            QCoreApplication::processEvents();
+            const QImage baseline = window.grabWindow().convertToFormat(QImage::Format_ARGB32);
+            item->setProperty("mediaWidth", 100000);
+            item->setX(600 - 100000 + panFraction);
+            QCoreApplication::processEvents();
+            const QImage huge = window.grabWindow().convertToFormat(QImage::Format_ARGB32);
+            QVERIFY(!huge.isNull());
+            QVERIFY(outline->renderedRect().left() > 99000);
+            QVERIFY(outline->renderedRect().width() <= window.width() + 2);
+            QCOMPARE(outline->renderedRect(), QRectF(outline->renderedRect().toAlignedRect()));
+            QVERIFY(outline->renderedPixelSize().width() <= 4096);
+            QVERIFY(outline->renderedPixelSize().height() <= 4096);
+            qsizetype baselinePixels = 0;
+            qsizetype hugePixels = 0;
+            qsizetype differingPixels = 0;
+            maximumRed = 0;
+            QCOMPARE(huge.size(), baseline.size());
+            for (int y = 0; y < huge.height(); ++y) {
+                const auto* a = reinterpret_cast<const QRgb*>(baseline.constScanLine(y));
+                const auto* b = reinterpret_cast<const QRgb*>(huge.constScanLine(y));
+                for (int x = 0; x < huge.width(); ++x) {
+                    const bool wasRed = qRed(a[x]) > 60;
+                    const bool isRed = qRed(b[x]) > 60;
+                    baselinePixels += wasRed;
+                    hugePixels += isRed;
+                    differingPixels += wasRed != isRed;
+                    maximumRed = qMax(maximumRed, qRed(b[x]));
+                }
+            }
+            QVERIFY(hugePixels > 100);
+            QVERIFY(maximumRed >= 125 && maximumRed <= 130);
+            QVERIFY2(differingPixels < baselinePixels / 20,
+                     qPrintable(QStringLiteral("Viewport alpha mask shifted/stretched: %1 / %2 pixels")
+                         .arg(differingPixels).arg(baselinePixels)));
+        }
         item->setParentItem(nullptr);
     }
 };

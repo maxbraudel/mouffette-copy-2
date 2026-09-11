@@ -208,13 +208,32 @@ BaseMediaItem {
     // The border reads the exact document, resolved fonts and positions of the
     // editor. Qt's GPU curve nodes are retained in small reusable groups.
     TextOutlineItem {
+        id: outlineRenderer
         anchors.fill: parent
         source: textDisplayNode
-        outlinePixels: root.outlinePixels
-        // Curves overlap at joins and between glyphs. Isolate translucent
-        // borders so alpha is applied once to the complete outline mask.
+        outlinePixels: root.outlineColor.a > 0 ? root.outlinePixels : 0
         color: Qt.rgba(root.outlineColor.r, root.outlineColor.g, root.outlineColor.b, 1)
+        opacity: root.outlineColor.a > 0 ? 1 : 0
+    }
+
+    // Apply translucent alpha once, including overlapping glyphs. An explicit
+    // viewport-sized source avoids an enormous document-sized layer texture.
+    // Its destination matches its source crop; layer.sourceRect alone would
+    // stretch the cropped image back over the full document.
+    ShaderEffectSource {
+        visible: root.outlineColor.a > 0 && root.outlineColor.a < 1
+                 && root.outlinePixels > 0
+                 && outlineRenderer.renderedRect.width > 0
+                 && outlineRenderer.renderedRect.height > 0
+        sourceItem: visible ? outlineRenderer : null
+        hideSource: true
+        sourceRect: outlineRenderer.renderedRect
+        x: sourceRect.x
+        y: sourceRect.y
+        width: sourceRect.width
+        height: sourceRect.height
+        textureSize: outlineRenderer.renderedPixelSize
         opacity: root.outlineColor.a
-        layer.enabled: root.outlineColor.a > 0 && root.outlineColor.a < 1
+        smooth: true
     }
 }
