@@ -832,6 +832,20 @@ Rectangle {
                             handle ? handle.handleId : "",
                             handle ? handle.mediaId : ""
                         )
+                        // Dispatch selection from the same atomic hit-test that
+                        // assigned ownership. Delegated PointerHandlers may see
+                        // their active transition before or after this global
+                        // observer; relying on their ordering could lose a plain
+                        // click permanently. Local handlers may still call the
+                        // same method, whose per-gesture guard deduplicates it.
+                        // Keep clicks inside the active TextEdit untouched.
+                        if (ownerKind === "media" && !textEditSession.activeEditor) {
+                            var modifiers = Qt.application.keyboardModifiers
+                            if (point && point.modifiers !== undefined)
+                                modifiers = point.modifiers
+                            inputLayer.inputCoordinator.noteMediaPrimaryPress(
+                                mediaId, (modifiers & Qt.ShiftModifier) !== 0)
+                        }
                         // The same exact press decision drives deselection. A
                         // second TapHandler using hover state can disagree at
                         // handle edges and clear selection during resize.

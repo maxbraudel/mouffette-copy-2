@@ -23,6 +23,18 @@ QVariantList listProperty(QObject* object, const char* name)
     return value.toList();
 }
 
+QQuickItem* mediaDelegate(QQuickItem* root, const QString& mediaId)
+{
+    QList<QQuickItem*> pending {root};
+    while (!pending.isEmpty()) {
+        QQuickItem* item = pending.takeLast();
+        if (item->property("currentMediaId").toString() == mediaId)
+            return item;
+        pending.append(item->childItems());
+    }
+    return nullptr;
+}
+
 // Real controller/QML, without MainWindow, network or upload-cache initialization.
 struct CanvasFixture {
     QGraphicsScene scene;
@@ -131,6 +143,40 @@ private slots:
         QCOMPARE(m_canvas->selectedIds(), QSet<QString>{m_secondId});
         QVERIFY(!m_first->isSelected());
         QVERIFY(m_second->isSelected());
+    }
+
+    void nativeLeftPressSelectsTextThroughController_data()
+    {
+        QTest::addColumn<qreal>("borderWidth");
+        QTest::newRow("borderless") << qreal(0);
+        QTest::newRow("thick-border") << qreal(100);
+    }
+
+    void nativeLeftPressSelectsTextThroughController()
+    {
+        QFETCH(qreal, borderWidth);
+        m_first->setTextBorderWidthOverrideEnabled(true);
+        m_first->setTextBorderWidth(borderWidth);
+        QTRY_COMPARE(m_canvas->publishedMedia(m_firstId)
+                         .value("textOutlineWidthPercent").toReal(), borderWidth);
+
+        auto* quick = qobject_cast<QQuickWidget*>(m_canvas->controller.widget());
+        QVERIFY(quick);
+        m_canvas->host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&m_canvas->host));
+        auto* rootItem = qobject_cast<QQuickItem*>(m_canvas->root);
+        QVERIFY(rootItem);
+        QQuickItem* delegate = nullptr;
+        QTRY_VERIFY((delegate = mediaDelegate(rootItem, m_firstId)) != nullptr);
+        const QPoint pressPoint = delegate->mapToScene(delegate->boundingRect().center()).toPoint();
+
+        QTest::mousePress(quick, Qt::LeftButton, Qt::NoModifier, pressPoint);
+        QCoreApplication::processEvents();
+        QVERIFY2(m_first->isSelected(), "Native text press did not reach backend selection");
+        QCOMPARE(m_canvas->selectedIds(), QSet<QString>{m_firstId});
+
+        QTest::mouseRelease(quick, Qt::LeftButton, Qt::NoModifier, pressPoint);
+        QCoreApplication::processEvents();
     }
 
     void lateTextCommitPreservesCurrentSelection()

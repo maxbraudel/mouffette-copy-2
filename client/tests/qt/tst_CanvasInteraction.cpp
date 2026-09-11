@@ -256,6 +256,38 @@ private slots:
         }
     }
 
+    void primaryPressSelectsTextBeforeRelease_data()
+    {
+        QTest::addColumn<qreal>("outlinePercent");
+        QTest::newRow("borderless") << qreal(0);
+        QTest::newRow("thick-border") << qreal(100);
+    }
+
+    void primaryPressSelectsTextBeforeRelease()
+    {
+        QFETCH(qreal, outlinePercent);
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("text", "text", 100, 150);
+        scene.change("text", {{"textOutlineWidthPercent", outlinePercent},
+                               {"textOutlineWidthPx", qreal(40)}});
+
+        QSignalSpy selected(scene.root, SIGNAL(mediaSelectRequested(QString,bool)));
+        QTest::mousePress(&scene.window, Qt::LeftButton, Qt::NoModifier, {240, 230});
+        QCoreApplication::processEvents();
+
+        // Selection is a press decision. It must not depend on whether the
+        // delegate's child PointerHandler happens to activate before or after
+        // the global gesture router on a particular renderer/frame.
+        QCOMPARE(scene.selected, QStringList {"text"});
+        QCOMPARE(selected.size(), 1);
+
+        QTest::mouseRelease(&scene.window, Qt::LeftButton, Qt::NoModifier, {240, 230});
+        QCoreApplication::processEvents();
+        QCOMPARE(selected.size(), 1);
+        QCOMPARE(scene.root->property("interactionMode").toString(), QString("idle"));
+    }
+
     void externalDeselectionEndsEditing()
     {
         CanvasFixture scene;
