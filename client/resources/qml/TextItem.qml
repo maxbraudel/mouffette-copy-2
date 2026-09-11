@@ -1,5 +1,4 @@
 import QtQuick 2.15
-import QtQuick.Shapes 1.0
 import Mouffette.Canvas 1.0
 
 BaseMediaItem {
@@ -32,12 +31,15 @@ BaseMediaItem {
     doubleClickEnabled: true
 
     // Outline thickness in scene-space pixels derived from font size.
-    // Fed into TextGlyphPath.outlinePixels which drives the QPainterPathStroker width.
+    // Radius of the border around the glyph, in scene-space pixels.
     readonly property real outlinePixels: root.outlineWidthPercent > 0
         ? (root.outlineWidthPx >= 0
             ? root.outlineWidthPx
             : Math.max(1, Math.round(root.outlineWidthPercent * Math.max(1, root.fontPixelSize) / 100.0)))
         : 0
+    // The model reserves this same safety margin in fit-to-text mode. It must
+    // also surround the content, otherwise left/right/top/bottom borders clip.
+    readonly property real textInset: 4 + (outlinePixels > 0 ? Math.ceil(outlinePixels) + 1 : 0)
 
     function commitAndStopEditing() {
         if (!root.editing) return
@@ -75,7 +77,7 @@ BaseMediaItem {
         id: textDisplayNode
         z: 1
         anchors.fill: parent
-        anchors.margins: 4
+        anchors.margins: root.textInset
         readOnly:           !root.editing
         enabled:            root.editing   // false in display mode → no event capture
         activeFocusOnTab:   false          // focus managed imperatively
@@ -176,7 +178,7 @@ BaseMediaItem {
         color: root.highlightColor
         radius: 2
 
-        readonly property real contentMargin: 4
+        readonly property real contentMargin: root.textInset
         readonly property real highlightPadding: 2
         readonly property real contentWidth: Math.max(0, root.width - contentMargin * 2)
         readonly property real contentHeight: Math.max(0, root.height - contentMargin * 2)
@@ -203,65 +205,16 @@ BaseMediaItem {
         }
     }
 
-    // Glyph path engine — computes the stroke SVG path once per content/style
-    // change using QTextLayout + QRawFont + QPainterPathStroker (C++ retained).
-    // Fill text is rendered natively by textDisplayNode (shared TextEdit).
-    // Camera pan/zoom never triggers recompute: Shape caches GPU geometry and
-    // moves it via transforms only.
-    TextGlyphPath {
-        id: glyphPath
-        // The editor is the immediate visual source of truth. The C++ model
-        // still receives live updates for fit-to-text geometry, but the border
-        // no longer waits for that round-trip before following a keystroke.
-        textContent:        textDisplayNode.text || ""
-        fontFamily:         root.fontFamily
-        fontPixelSize:      Math.max(1, root.fontPixelSize)
-        fontWeight:         root.fontWeight
-        fontItalic:         root.fontItalic
-        fontUppercase:      root.fontUppercase
-        outlinePixels:     root.outlinePixels
-        itemWidth:         Math.max(1, textDisplayNode.width)
-        itemHeight:        Math.max(1, textDisplayNode.height)
-        horizontalAlignment: root.horizontalAlignment
-        verticalAlignment: root.verticalAlignment
-        fitToText:         root.fitToTextEnabled
-    }
-
-    // Border display path — bottom layer rendered with outlineColor.
-    // Uses QtQuick.Shapes which tessellates the SVG path once into GPU geometry;
-    // subsequent pan/zoom uses scene graph matrix transforms — no re-rasterization.
-    //
-    // TextGlyphPath bakes BOTH horizontal and vertical alignment offsets directly
-    // into the SVG glyph coordinates (m_vertOffset in C++), so no external QML
-    // Translate is needed for vertical correction.  This eliminates the former
-    // topPadding binding timing race that caused border drift on any alignment
-    // other than top-left.
-    Shape {
-        id: textStrokeShape
-        // Hidden via opacity instead of visible so the Shape stays in the scene
-        // graph and Qt keeps tessellating the pre-warmed path in the background
-        // (asynchronous:true).  When the user enables the border the geometry is
-        // already resident in the GPU — no blank-frame delay.
-        visible: true
-        opacity: root.outlinePixels > 0 ? 1.0 : 0.0
-        // Smooth fade masks any residual tessellation latency on first enable.
-        Behavior on opacity { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
-        anchors.fill: textDisplayNode
-        // strokeXOffset handles the center/right-alignment container-resize fast path
-        // (no retessellation on pure width change).  Vertical offset is already baked
-        // into the SVG coordinates by TextGlyphPath, so no y translate is needed.
-        transform: Translate { x: glyphPath.strokeXOffset }
-        layer.enabled: false
-        // Tessellate asynchronously so path changes never block the render thread.
-        // The previous tessellated geometry stays visible until the new one is ready,
-        // giving a smooth experience when border width or text changes.
-        asynchronous: !root.editing
-        ShapePath {
-            fillColor:   root.outlineColor
-            strokeColor: "transparent"
-            strokeWidth: 0
-            fillRule:    ShapePath.WindingFill
-            PathSvg { path: glyphPath.strokePath }
-        }
+    // The border reads the exact document, resolved fonts and positions of the
+    // editor. Qt's GPU curve nodes are retained in small reusable groups.
+    TextOutlineItem {
+        anchors.fill: parent
+        source: textDisplayNode
+        outlinePixels: root.outlinePixels
+        // Curves overlap at joins and between glyphs. Isolate translucent
+        // borders so alpha is applied once to the complete outline mask.
+        color: Qt.rgba(root.outlineColor.r, root.outlineColor.g, root.outlineColor.b, 1)
+        opacity: root.outlineColor.a
+        layer.enabled: root.outlineColor.a > 0 && root.outlineColor.a < 1
     }
 }

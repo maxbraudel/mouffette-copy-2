@@ -1,6 +1,7 @@
 #include "frontend/rendering/canvas/TextGlyphPath.h"
 
 #include <QGuiApplication>
+#include <QElapsedTimer>
 #include <QTest>
 
 class TestableTextGlyphPath final : public TextGlyphPath {
@@ -103,6 +104,35 @@ private slots:
                 }
             }
         }
+    }
+
+    void reportLongTextRebuildCost() {
+        TestableTextGlyphPath path;
+        configure(path);
+        path.setOutlinePixels(48.0);
+        path.setItemWidth(1600.0);
+
+        QString text;
+        text.reserve(6000);
+        for (int i = 0; i < 300; ++i)
+            text += QStringLiteral("LONG BORDER PERFORMANCE TEST 0123456789 ");
+
+        path.setTextContent(text);
+        QElapsedTimer timer;
+        timer.start();
+        path.rebuildNow();
+        const qint64 initialNs = timer.nsecsElapsed();
+
+        path.setTextContent(text + QLatin1Char('X'));
+        timer.restart();
+        path.rebuildNow();
+        const qint64 editNs = timer.nsecsElapsed();
+
+        qInfo().noquote() << QStringLiteral("[TextGlyphPath baseline] chars=%1 svgBytes=%2 initialMs=%3 editMs=%4")
+                                .arg(text.size())
+                                .arg(path.strokePath().toLatin1().size())
+                                .arg(initialNs / 1.0e6, 0, 'f', 3)
+                                .arg(editNs / 1.0e6, 0, 'f', 3);
     }
 };
 

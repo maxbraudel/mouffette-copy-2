@@ -6,6 +6,7 @@
 #include <QPointer>
 #include <QHash>
 #include <QFile>
+#include <QElapsedTimer>
 #include <QSet>
 #include <QVector>
 #include <QTimer>

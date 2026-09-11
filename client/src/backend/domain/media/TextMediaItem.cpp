@@ -1181,29 +1181,86 @@ TextMediaItem::TextMediaItem(
     applyFitToTextNow();
 }
 
-void TextMediaItem::setText(const QString& text) {
-    if (m_text != text) {
-        m_text = text;
-        m_editorRenderingText = text;
-        m_documentMetricsDirty = true;
-        m_cachedEditorPosValid = false;
-        invalidateRenderPipeline(InvalidationReason::Content, true);
+bool TextMediaItem::updateStoredText(const QString& text) {
+    if (m_text == text) {
+        return false;
+    }
 
-        if (m_inlineEditor && !m_isEditing) {
-            QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
-            m_inlineEditor->setPlainText(m_text);
-            m_documentMetricsDirty = true;
-            m_cachedEditorPosValid = false;
-            if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
-                inlineEditor->invalidateCache();
-            }
-        }
-        updateInlineEditorGeometry();
-        update(); // Trigger repaint
+    m_text = text;
+    m_editorRenderingText = text;
+    m_documentMetricsDirty = true;
+    m_cachedEditorPosValid = false;
+    invalidateRenderPipeline(InvalidationReason::Content, true);
+    return true;
+}
+
+void TextMediaItem::syncInlineEditorTextFromModel(bool editorKnownStale) {
+    if (!m_inlineEditor || m_isEditing) {
+        return;
+    }
+    if (!editorKnownStale && m_inlineEditor->toPlainText() == m_text) {
+        return;
+    }
+
+    QScopedValueRollback<bool> guard(m_ignoreDocumentChange, true);
+    m_inlineEditor->setPlainText(m_text);
+    m_documentMetricsDirty = true;
+    m_cachedEditorPosValid = false;
+    if (auto* inlineEditor = toInlineEditor(m_inlineEditor)) {
+        inlineEditor->invalidateCache();
+    }
+}
+
+void TextMediaItem::setText(const QString& text) {
+    // A non-Quick update resumes the ordinary legacy synchronization contract.
+    const bool wasQuickEditorLiveUpdateActive = m_quickEditorLiveUpdateActive;
+    m_quickEditorLiveUpdateActive = false;
+    const bool changed = updateStoredText(text);
+    if (!changed && !wasQuickEditorLiveUpdateActive) {
+        return;
+    }
+
+    syncInlineEditorTextFromModel(/*editorKnownStale*/true);
+    updateInlineEditorGeometry();
+    update(); // Trigger repaint
+    updateOverlayLayout();
+    if (m_fitToTextEnabled) {
+        scheduleFitToTextUpdate();
+    }
+}
+
+void TextMediaItem::setTextFromQuickEditorLive(const QString& text) {
+    // The visible QML TextEdit already laid out and painted this text. Mirroring
+    // it into the hidden QGraphicsTextItem here would synchronously lay out the
+    // complete document a second time for every character.
+    m_quickEditorLiveUpdateActive = true;
+    if (!updateStoredText(text)) {
+        return;
+    }
+
+    update();
+    updateOverlayLayout();
+    if (m_fitToTextEnabled) {
+        scheduleFitToTextUpdate();
+    }
+}
+
+void TextMediaItem::commitTextFromQuickEditor(const QString& text) {
+    const bool hadDeferredLiveUpdate = m_quickEditorLiveUpdateActive;
+    m_quickEditorLiveUpdateActive = false;
+    const bool changed = updateStoredText(text);
+
+    // The live path deliberately left the legacy document stale. Synchronize it
+    // exactly once when QML exits edit mode, even when the canonical text already
+    // equals the final value from the last live update.
+    syncInlineEditorTextFromModel(hadDeferredLiveUpdate || changed);
+    updateInlineEditorGeometry();
+    if (changed) {
+        update();
         updateOverlayLayout();
-        if (m_fitToTextEnabled) {
-            scheduleFitToTextUpdate();
-        }
+    }
+    if (m_fitToTextEnabled) {
+        scheduleFitToTextUpdate();
     }
 }
 
@@ -1602,6 +1659,11 @@ void TextMediaItem::normalizeEditorFormatting() {
 }
 
 bool TextMediaItem::beginInlineEditing() {
+    // If a Quick editor disappeared without its normal commit signal (for
+    // example while switching canvas hosts), the legacy editor below becomes
+    // authoritative again and must resume its ordinary synchronization path.
+    m_quickEditorLiveUpdateActive = false;
+
     if (m_isEditing) {
         if (m_inlineEditor) {
             m_inlineEditor->setFocus(Qt::OtherFocusReason);
@@ -1977,7 +2039,7 @@ void TextMediaItem::onInteractiveGeometryChanged() {
     if (m_isEditing) {
         updateInlineEditorGeometry();
     }
-    else {
+    else if (!m_quickEditorLiveUpdateActive) {
         // Keep hidden editor in sync with base size so entering edit mode wraps correctly.
         // During active handle resize (especially Alt stretch), avoid synchronous document
         // relayout on every mouse-move to keep the UI thread responsive.
@@ -2483,20 +2545,18 @@ void TextMediaItem::applyFitToTextNow() {
         return;
     }
 
-    ensureInlineEditor();
-    if (!m_inlineEditor) {
-        return;
-    }
-
     QScopedValueRollback<bool> guard(m_applyingFitToText, true);
 
-    if (!m_isEditing && m_inlineEditor->toPlainText() != m_text) {
-        QScopedValueRollback<bool> docGuard(m_ignoreDocumentChange, true);
-        m_inlineEditor->setPlainText(m_text);
-    }
-
-    if (!m_inlineEditor->document()) {
-        return;
+    const bool syncLegacyEditor = !m_quickEditorLiveUpdateActive;
+    if (syncLegacyEditor) {
+        ensureInlineEditor();
+        if (!m_inlineEditor) {
+            return;
+        }
+        syncInlineEditorTextFromModel();
+        if (!m_inlineEditor->document()) {
+            return;
+        }
     }
 
     // Measure width and height using QTextLayout with the exact same rendering
@@ -2597,8 +2657,10 @@ void TextMediaItem::applyFitToTextNow() {
     m_documentMetricsDirty = true;
     m_cachedEditorPosValid = false;
 
-    syncInlineEditorToBaseSize();
-    updateInlineEditorGeometry();
+    if (syncLegacyEditor) {
+        syncInlineEditorToBaseSize();
+        updateInlineEditorGeometry();
+    }
     updateAlignmentControlsLayout();
     updateOverlayLayout();
     update();

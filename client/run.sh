@@ -1,10 +1,16 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLIENT_EXECUTABLE="$SCRIPT_DIR/out/build/qt6-debug/MouffetteClient.app/Contents/MacOS/MouffetteClient"
 
 echo "🚀 Launching Mouffette Client..."
 
-# Check if we're in the client directory
-if [ ! -f "build/MouffetteClient.app/Contents/MacOS/MouffetteClient" ]; then
-    echo "❌ Client not found. Please run this from the client directory after building."
+# Only the current CMake preset output is supported.
+if [ ! -x "$CLIENT_EXECUTABLE" ]; then
+    echo "❌ Client not found at:"
+    echo "   $CLIENT_EXECUTABLE"
     echo "💡 Build with: ./build.sh"
     exit 1
 fi
@@ -15,6 +21,4 @@ echo "👆 Click the icon to show the main window"
 echo "🎯 The client will auto-connect to localhost:8080"
 echo ""
 
-# Launch the clienta
-cd build
-./MouffetteClient.app/Contents/MacOS/MouffetteClient
+exec "$CLIENT_EXECUTABLE" "$@"

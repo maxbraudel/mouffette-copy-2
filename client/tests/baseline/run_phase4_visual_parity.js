@@ -79,7 +79,7 @@ function checkMediaDelegates() {
   const canvasRoot = readText('resources/qml/CanvasRoot.qml');
   const remoteRoot = readText('resources/qml/RemoteSceneRoot.qml');
   const remoteController = readText('src/frontend/rendering/remote/RemoteSceneController.cpp');
-  const glyphPath = readText('src/frontend/rendering/canvas/TextGlyphPath.cpp');
+  const outline = readText('src/frontend/rendering/canvas/TextOutlineItem.cpp');
   const sessionController = readText('src/backend/controllers/CanvasSessionController.cpp');
 
   assert(baseItem.includes('signal selectRequested'), 'BaseMediaItem must provide selectRequested contract');
@@ -94,15 +94,16 @@ function checkMediaDelegates() {
   assert(imageItem.includes('Image {'), 'ImageItem must contain Image element');
   assert(videoItem.includes('VideoOutput {'), 'VideoItem must contain VideoOutput element');
   assert(textItem.includes('TextEdit {'), 'TextItem must use one TextEdit for display and edit');
-  assert(textItem.includes('TextGlyphPath {'), 'TextItem must derive its outline from glyph paths');
-  assert(textItem.includes('Shape {'), 'TextItem must render its outline through Qt Quick Shape');
-  assert(textItem.includes('textContent:        textDisplayNode.text'),
-    'Text outline must consume the live editor text directly');
-  assert(textItem.includes('asynchronous: !root.editing'),
-    'Text outline tessellation must be synchronous while editing');
-  assert(textItem.includes('visible: true'), 'Text outline must stay present while editing');
-  assert(glyphPath.includes('builtAlignmentUnchanged'),
-    'Alignment changes must invalidate the width-only translation shortcut');
+  assert(textItem.includes('TextOutlineItem {'), 'TextItem must use the retained text outline renderer');
+  assert(!textItem.includes('PathSvg') && !textItem.includes('Shape {'),
+    'Live text outlines must not rebuild and parse a document-sized SVG');
+  assert(textItem.includes('source: textDisplayNode'),
+    'Text outline must consume the live editor document directly');
+  assert(outline.includes('line.glyphRuns()'),
+    'Text outline must use the existing document layout');
+  assert(!textItem.includes('visible: !root.editing'), 'Text outline must stay present while editing');
+  assert(textItem.includes('anchors.margins: root.textInset'),
+    'The border safety margin must surround the text on all sides');
   assert(textItem.includes('onPrimaryDoubleClicked'), 'TextItem must support double-click edit start via base signal');
   assert(textItem.includes('textCommitRequested'), 'TextItem must emit text commit signal');
   assert(canvasRoot.includes('MediaVisual {'), 'Local canvas must instantiate the shared media visual');

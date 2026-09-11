@@ -5,7 +5,7 @@ C++ Qt application for the Mouffette media sharing system.
 ## Prerequisites
 
 ### macOS
-- Qt6 (install via Homebrew)
+- Qt 6.11 or newer, including the matching Qt Quick/Gui private development headers (install via Homebrew)
 - CMake
 - Xcode Command Line Tools
 
@@ -18,7 +18,7 @@ export PATH="/opt/homebrew/opt/qt@6/bin:$PATH"
 ```
 
 ### Windows
-- Qt6 (download from Qt website)
+- Qt 6.11 or newer, including the matching Qt Quick/Gui private development headers (download from Qt website)
 - CMake
 - Visual Studio or MinGW
 
@@ -107,6 +107,11 @@ cd .\client
 - **Context menu**: Right-click tray icon for menu options
 
 ## Architecture
+
+The text outline renderer uses the existing `TextEdit` document and Qt's GPU
+curve renderer. Its Qt-private integration is isolated in `TextOutlineItem.cpp`;
+build and package it with the same Qt version. See
+[the rendering investigation and validation notes](docs/text-outline-rendering.md).
 
 The client is built with:
 - **Qt6**: Cross-platform UI framework

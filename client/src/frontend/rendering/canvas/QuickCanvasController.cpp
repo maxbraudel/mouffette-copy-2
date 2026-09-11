@@ -1,6 +1,5 @@
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/CanvasSceneStore.h"
-#include "frontend/rendering/canvas/TextGlyphPath.h"
 #include "frontend/rendering/canvas/TextEditHelper.h"
 #include "frontend/rendering/canvas/CanvasQmlTypes.h"
 #include "backend/domain/media/MediaRuntimeHooks.h"
@@ -1608,7 +1607,7 @@ void QuickCanvasController::handleTextCommitRequested(const QString& mediaId, co
         return;
     }
 
-    textMedia->setText(text);
+    textMedia->commitTextFromQuickEditor(text);
     textMedia->setSelected(true);
     scheduleMediaModelSync();
 }
@@ -1631,7 +1630,7 @@ void QuickCanvasController::handleTextLiveUpdateRequested(const QString& mediaId
     // Live edit path: push content changes into C++ immediately so fit-to-text
     // can recompute geometry while typing. Repaint/model publication remains
     // debounced by the existing 16 ms media sync timer.
-    textMedia->setText(text);
+    textMedia->setTextFromQuickEditorLive(text);
     scheduleMediaModelSync();
 }
 

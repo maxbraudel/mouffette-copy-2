@@ -24,7 +24,7 @@ if(APPLE)
 endif()
 
 # Find Qt6
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia MultimediaWidgets Svg SvgWidgets Concurrent Quick QuickWidgets Qml ShaderTools GuiPrivate)
+find_package(Qt6 6.11 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia MultimediaWidgets Svg SvgWidgets Concurrent Quick QuickWidgets Qml ShaderTools GuiPrivate QuickPrivate)
 
 # Recent macOS SDKs no longer ship AGL.  Some older/broken Qt packages still
 # export it transitively from QtGui; detect that toolchain mismatch at configure
@@ -102,9 +102,8 @@ set(SOURCES
     src/frontend/rendering/canvas/QuickCanvasViewAdapter.cpp
     src/frontend/rendering/canvas/MediaListModel.cpp
     src/frontend/rendering/canvas/OverlayPanels.cpp
-    src/frontend/rendering/canvas/TextGlyphPath.cpp
+    src/frontend/rendering/canvas/TextOutlineItem.cpp
     src/frontend/rendering/canvas/TextEditHelper.cpp
-    src/frontend/rendering/canvas/GlyphBorderAtlas.cpp
     src/frontend/rendering/canvas/CanvasQmlTypes.cpp
     
     # Rendering - Remote
@@ -248,9 +247,8 @@ set(HEADERS
     src/frontend/rendering/canvas/QuickCanvasViewAdapter.h
     src/frontend/rendering/canvas/MediaListModel.h
     src/frontend/rendering/canvas/OverlayPanels.h
-    src/frontend/rendering/canvas/TextGlyphPath.h
+    src/frontend/rendering/canvas/TextOutlineItem.h
     src/frontend/rendering/canvas/TextEditHelper.h
-    src/frontend/rendering/canvas/GlyphBorderAtlas.h
     src/frontend/rendering/canvas/CanvasQmlTypes.h
     src/frontend/rendering/canvas/RoundedRectItem.h
     src/frontend/rendering/canvas/SegmentedButtonItem.h
@@ -351,23 +349,6 @@ set(RESOURCE_FILES
     resources/resources.qrc
 )
 
-# Conditionally bundle the pre-baked glyph border atlas (.gba).
-# Generate it first by running: ./scripts/gen_impact_atlas.sh
-# Once the file exists, it will be bundled automatically on every build.
-set(ATLAS_GBA "${CMAKE_SOURCE_DIR}/resources/fonts/impact_border_atlas.gba")
-if(EXISTS "${ATLAS_GBA}")
-    message(STATUS "[GlyphBorderAtlas] Bundling atlas: ${ATLAS_GBA}")
-    set(ATLAS_QRC "${CMAKE_BINARY_DIR}/atlas.qrc")
-    file(WRITE "${ATLAS_QRC}"
-        "<RCC><qresource prefix=\"/fonts\">"
-        "<file alias=\"impact_border_atlas.gba\">${ATLAS_GBA}</file>"
-        "</qresource></RCC>"
-    )
-    list(APPEND RESOURCE_FILES "${ATLAS_QRC}")
-else()
-    message(STATUS "[GlyphBorderAtlas] Atlas not found — run ./scripts/gen_impact_atlas.sh to generate it")
-endif()
-
 # Create executable
 add_executable(MouffetteClient ${SOURCES} ${HEADERS} ${UI_FILES} ${RESOURCE_FILES})
 
@@ -386,6 +367,7 @@ target_link_libraries(MouffetteClient
     Qt6::QuickWidgets
     Qt6::Qml
     Qt6::GuiPrivate
+    Qt6::QuickPrivate
 )
 
 # Include directories
@@ -427,6 +409,32 @@ include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
 
+    add_executable(tst_TextOutlineItem
+        tests/qt/tst_TextOutlineItem.cpp
+        src/frontend/rendering/canvas/TextOutlineItem.cpp
+        src/frontend/rendering/canvas/TextOutlineItem.h
+        src/frontend/rendering/canvas/TextEditHelper.cpp
+        src/frontend/rendering/canvas/TextEditHelper.h
+    )
+    target_include_directories(tst_TextOutlineItem PRIVATE src)
+    target_compile_definitions(tst_TextOutlineItem PRIVATE TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(tst_TextOutlineItem PRIVATE Qt6::QuickPrivate Qt6::GuiPrivate Qt6::Qml Qt6::Test)
+    add_test(NAME TextOutlineItem COMMAND tst_TextOutlineItem)
+
+    add_executable(tst_TextItemQml
+        tests/qt/tst_TextItemQml.cpp
+        src/frontend/rendering/canvas/TextOutlineItem.cpp
+        src/frontend/rendering/canvas/TextOutlineItem.h
+        src/frontend/rendering/canvas/TextEditHelper.cpp
+        src/frontend/rendering/canvas/TextEditHelper.h
+    )
+    target_include_directories(tst_TextItemQml PRIVATE src)
+    target_compile_definitions(tst_TextItemQml PRIVATE TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(tst_TextItemQml PRIVATE Qt6::QuickPrivate Qt6::GuiPrivate Qt6::Qml Qt6::Test)
+    add_test(NAME TextItemQml COMMAND tst_TextItemQml)
+
+    # Reference implementation retained for before/after profiling only. The
+    # application no longer registers, compiles or bundles this SVG renderer.
     add_executable(tst_TextGlyphPath
         tests/qt/tst_TextGlyphPath.cpp
         src/frontend/rendering/canvas/TextGlyphPath.cpp

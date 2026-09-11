@@ -70,6 +70,12 @@ public:
     // Text content accessors
     QString text() const { return m_isEditing ? m_editorRenderingText : m_text; }
     void setText(const QString& text);
+    // Qt Quick owns the visible QTextDocument while its TextEdit is active.
+    // Keep the canonical model/fit geometry live without rebuilding the hidden
+    // legacy QGraphicsTextItem document on every keystroke; the commit call
+    // performs one final legacy-document synchronization.
+    void setTextFromQuickEditorLive(const QString& text);
+    void commitTextFromQuickEditor(const QString& text);
     
     // Font/styling accessors (for future editing features)
     QFont font() const { return m_font; }
@@ -214,6 +220,7 @@ private:
     bool m_fitToTextEnabled = true;
     bool m_fitToTextUpdatePending = false;
     bool m_applyingFitToText = false;
+    bool m_quickEditorLiveUpdateActive = false;
     std::optional<QSize> m_pendingGeometryCommitSize;
     qreal m_appliedContentPaddingPx = 0.0;
     
@@ -229,6 +236,8 @@ private:
     QString m_alignmentPanelStyleSignature;
     
     void ensureInlineEditor();
+    bool updateStoredText(const QString& text);
+    void syncInlineEditorTextFromModel(bool editorKnownStale = false);
     void updateInlineEditorGeometry();
     void finishInlineEditing(bool commitChanges);
     struct VectorDrawSnapshot {
@@ -264,4 +273,3 @@ private:
     qreal contentPaddingPx() const;
     void handleContentPaddingChanged(qreal oldPadding, qreal newPadding);
 };
-
