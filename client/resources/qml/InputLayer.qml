@@ -5,10 +5,7 @@ Item {
 
     property var interactionController: null
     property bool textToolActive: false
-    property var mediaModel: []
-    property Item contentItem: null
     property bool selectionHandlePriorityActive: false
-    property string selectionHandleHoveredMediaId: ""
     property string liveDragMediaId: ""
     readonly property alias inputCoordinator: coordinator
     default property alias layerChildren: layerRoot.data
@@ -20,21 +17,18 @@ Item {
 
         property string mode: "idle"
         property string ownerId: ""
-        property string pressTargetKind: "unknown" // unknown | handle | media | canvas
-        property string pressTargetMediaId: ""
         property bool primaryGestureActive: false
         property string primaryOwnerKind: "none" // none | handle | media | canvas
         property string primaryOwnerMediaId: ""
+        property bool primarySelectionDispatched: false
+        readonly property string pressTargetKind: primaryGestureActive ? primaryOwnerKind : "unknown"
+        readonly property string pressTargetMediaId: primaryOwnerMediaId
 
         function resetPrimaryOwner() {
             primaryGestureActive = false
             primaryOwnerKind = "none"
             primaryOwnerMediaId = ""
-        }
-
-        function resetPressTarget() {
-            pressTargetKind = "unknown"
-            pressTargetMediaId = ""
+            primarySelectionDispatched = false
         }
 
         function assertInvariants(stage) {
@@ -53,86 +47,24 @@ Item {
         }
 
         function mediaIdAtPoint(viewX, viewY) {
-            if (!inputLayer.contentItem)
+            if (!inputLayer.interactionController
+                    || typeof inputLayer.interactionController.mediaIdAtPoint !== "function")
                 return ""
-
-            function resolveMediaIdFromItemHierarchy(item) {
-                var node = item
-                while (node) {
-                    if (node.currentMediaId !== undefined && node.currentMediaId)
-                        return node.currentMediaId
-                    if (node.mediaId !== undefined && node.mediaId)
-                        return node.mediaId
-                    node = node.parent
-                }
-                return ""
-            }
-
-            function mediaIdFromModelBounds(sceneX, sceneY) {
-                if (!inputLayer.mediaModel || inputLayer.mediaModel.length === 0)
-                    return ""
-
-                var bestMediaId = ""
-                var bestZ = -Infinity
-                var bestIndex = -1
-
-                for (var i = 0; i < inputLayer.mediaModel.length; ++i) {
-                    var entry = inputLayer.mediaModel[i]
-                    if (!entry || !entry.mediaId)
-                        continue
-
-                    var ex = entry.x || 0
-                    var ey = entry.y || 0
-                    var ew = Math.max(1, (entry.width || 1) * (entry.scale || 1.0))
-                    var eh = Math.max(1, (entry.height || 1) * (entry.scale || 1.0))
-                    if (sceneX < ex || sceneX > (ex + ew) || sceneY < ey || sceneY > (ey + eh))
-                        continue
-
-                    var z = entry.z !== undefined ? entry.z : 0
-                    if (z > bestZ || (z === bestZ && i > bestIndex)) {
-                        bestZ = z
-                        bestIndex = i
-                        bestMediaId = entry.mediaId
-                    }
-                }
-
-                return bestMediaId
-            }
-
-            var currentItem = inputLayer.contentItem
-            var scenePoint = currentItem.mapFromItem(inputLayer, viewX, viewY)
-            var localPoint = Qt.point(scenePoint.x, scenePoint.y)
-            var mediaId = ""
-
-            while (currentItem) {
-                var child = currentItem.childAt(localPoint.x, localPoint.y)
-                if (!child)
-                    break
-
-                mediaId = resolveMediaIdFromItemHierarchy(child)
-                if (mediaId !== "")
-                    break
-
-                localPoint = child.mapFromItem(currentItem, localPoint.x, localPoint.y)
-                currentItem = child
-            }
-
-            if (mediaId === "") {
-                mediaId = mediaIdFromModelBounds(scenePoint.x, scenePoint.y)
-            }
-
-            return mediaId || ""
+            // CanvasRoot resolves the actual, topmost visual delegate. Do not
+            // guess from decorative children or a stale geometry snapshot.
+            return inputLayer.interactionController.mediaIdAtPoint(viewX, viewY) || ""
         }
 
-        function beginPrimaryGesture(viewX, viewY, hoveredHandleId, hoveredHandleMediaId) {
+        function beginPrimaryGesture(viewX, viewY, pressedHandleId, pressedHandleMediaId) {
+            resetPrimaryOwner()
             primaryGestureActive = true
 
-            var handleId = hoveredHandleId || ""
-            if (inputLayer.selectionHandlePriorityActive || handleId !== "") {
+            // The caller performs an exact handle hit test for this press;
+            // hover feedback must never determine gesture ownership.
+            var handleId = pressedHandleId || ""
+            if (handleId !== "") {
                 primaryOwnerKind = "handle"
-                primaryOwnerMediaId = hoveredHandleMediaId || ""
-                pressTargetKind = "handle"
-                pressTargetMediaId = primaryOwnerMediaId
+                primaryOwnerMediaId = pressedHandleMediaId || ""
                 return primaryOwnerKind
             }
 
@@ -140,22 +72,17 @@ Item {
             if (hitMediaId !== "") {
                 primaryOwnerKind = "media"
                 primaryOwnerMediaId = hitMediaId
-                pressTargetKind = "media"
-                pressTargetMediaId = hitMediaId
                 return primaryOwnerKind
             }
 
             primaryOwnerKind = "canvas"
             primaryOwnerMediaId = ""
-            pressTargetKind = "canvas"
-            pressTargetMediaId = ""
             assertInvariants("beginPrimaryGesture")
             return primaryOwnerKind
         }
 
         function endPrimaryGesture() {
             resetPrimaryOwner()
-            resetPressTarget()
             assertInvariants("endPrimaryGesture")
         }
 
@@ -167,6 +94,40 @@ Item {
             if (primaryOwnerKind !== "media")
                 return false
             return primaryOwnerMediaId === "" || primaryOwnerMediaId === (mediaId || "")
+        }
+
+        function claimMediaPress(mediaId) {
+            // Delegates consume the press decision; they cannot replace it.
+            // This also prevents an underlying delegate or handle/body overlap
+            // from selecting a second item during the same pointer event.
+            return !!mediaId
+                && primaryGestureActive
+                && primaryOwnerKind === "media"
+                && primaryOwnerMediaId === mediaId
+        }
+
+        function canObserveMediaAtScenePoint(mediaId, sceneX, sceneY) {
+            if (!mediaId || !ownerAllowsMedia(mediaId, false))
+                return false
+            var viewPoint = inputLayer.mapFromItem(null, sceneX, sceneY)
+            return mediaIdAtPoint(viewPoint.x, viewPoint.y) === mediaId
+        }
+
+        function canActivateMediaAtScenePoint(mediaId, sceneX, sceneY) {
+            return isIdle() && canObserveMediaAtScenePoint(mediaId, sceneX, sceneY)
+        }
+
+        function releaseMediaOwnership(mediaId) {
+            // Removing an old delegate must not reset another item's newer
+            // interaction (for example after a model change in a callback).
+            if (!mediaId)
+                return
+            if (ownerId === mediaId) {
+                mode = "idle"
+                ownerId = ""
+            }
+            if (primaryOwnerMediaId === mediaId)
+                resetPrimaryOwner()
         }
 
         function ownerAllowsCanvasPan(active) {
@@ -234,7 +195,7 @@ Item {
             }
             mode = "idle"
             ownerId = ""
-            resetPressTarget()
+            resetPrimaryOwner()
             assertInvariants("forceReset")
         }
 
@@ -243,11 +204,11 @@ Item {
         }
 
         function noteMediaPrimaryPress(mediaId, additive) {
-            if (!mediaId)
+            if (!claimMediaPress(mediaId))
                 return false
-
-            pressTargetKind = "media"
-            pressTargetMediaId = mediaId
+            if (primarySelectionDispatched)
+                return true
+            primarySelectionDispatched = true
 
             if (inputLayer.interactionController) {
                 inputLayer.interactionController.requestMediaSelection(mediaId, !!additive)
@@ -256,7 +217,7 @@ Item {
         }
 
         function tryBeginMove(mediaId) {
-            if (!mediaId)
+            if (!claimMediaPress(mediaId))
                 return false
             return beginMode("move", mediaId)
         }
@@ -290,21 +251,19 @@ Item {
                 return true
             if (!isIdle())
                 return false
-            if (pressTargetKind === "handle") {
-                return pressTargetMediaId === "" || pressTargetMediaId === mediaId
-            }
-            return true
+            return !primaryGestureActive
+                || (primaryOwnerKind === "handle" && primaryOwnerMediaId === mediaId)
         }
 
         function tryBeginResize(mediaId) {
-            pressTargetKind = "handle"
-            pressTargetMediaId = mediaId || ""
+            if (!mediaId || !primaryGestureActive
+                    || primaryOwnerKind !== "handle" || primaryOwnerMediaId !== mediaId)
+                return false
             return beginMode("resize", mediaId)
         }
 
         function endResize(mediaId) {
             endMode("resize", mediaId)
-            resetPressTarget()
         }
 
         function canStartTextToolTap() {
@@ -322,8 +281,11 @@ Item {
                 return false
             if (!beginMode("text", "canvas"))
                 return false
-            inputLayer.textCreateRequested(viewX, viewY)
-            endMode("text", "canvas")
+            try {
+                inputLayer.textCreateRequested(viewX, viewY)
+            } finally {
+                endMode("text", "canvas")
+            }
             return true
         }
     }

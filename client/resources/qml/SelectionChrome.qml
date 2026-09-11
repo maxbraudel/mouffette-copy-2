@@ -26,8 +26,16 @@ Item {
         { ux: 0.5, uy: 1.0, handleId: "bottom-mid" },
         { ux: 1.0, uy: 1.0, handleId: "bottom-right" }
     ]
-    property string hoveredMediaId: ""
-    property string hoveredHandleId: ""
+    // Hover is derived feedback, not a second owner store. Re-evaluate when
+    // selection, live geometry or the camera changes under a stationary cursor.
+    readonly property var hoveredHandleHit: !interacting && globalHover.hovered
+        && inputCoordinator && inputCoordinator.isIdle()
+        ? hitTestHandle(globalHover.point.position.x, globalHover.point.position.y)
+        : null
+    readonly property string hoveredMediaId: interacting ? activeResizeMediaId
+        : (hoveredHandleHit ? hoveredHandleHit.mediaId : "")
+    readonly property string hoveredHandleId: interacting ? activeResizeHandleId
+        : (hoveredHandleHit ? hoveredHandleHit.handleId : "")
     property string activeResizeMediaId: ""
     property string activeResizeHandleId: ""
     property real pressEntryX: 0.0
@@ -44,6 +52,24 @@ Item {
 
     signal resizeRequested(string mediaId, string handleId, real sceneX, real sceneY, bool snap, bool altPressed)
     signal resizeEnded(string mediaId)
+
+    function finishResizeSession(abandonPointer) {
+        var mediaId = activeResizeMediaId
+        // Release our state before synchronous backend/model callbacks. Both
+        // native cancellation and release can arrive; only the first commits.
+        activeResizeMediaId = ""
+        activeResizeHandleId = ""
+        interacting = false
+        if (!mediaId)
+            return
+        if (inputCoordinator) {
+            if (abandonPointer)
+                inputCoordinator.releaseMediaOwnership(mediaId)
+            else if (inputCoordinator.mode === "resize" && inputCoordinator.ownerId === mediaId)
+                inputCoordinator.endResize(mediaId)
+        }
+        resizeEnded(mediaId)
+    }
 
     onMediaModelChanged: {
         var index = ({})
@@ -164,31 +190,6 @@ Item {
         return null
     }
 
-    function updateHoveredHandle(viewX, viewY) {
-        if (interacting)
-            return
-        if (!inputCoordinator || inputCoordinator.mode !== "idle") {
-            hoveredMediaId = ""
-            hoveredHandleId = ""
-            return
-        }
-        var hit = hitTestHandle(viewX, viewY)
-        if (hit) {
-            hoveredMediaId = hit.mediaId
-            hoveredHandleId = hit.handleId
-        } else {
-            hoveredMediaId = ""
-            hoveredHandleId = ""
-        }
-    }
-
-    function clearHoveredHandle() {
-        if (interacting)
-            return
-        hoveredMediaId = ""
-        hoveredHandleId = ""
-    }
-
     function resizeCursorForHandle(handleId) {
         switch (handleId) {
         case "top-left":
@@ -217,36 +218,37 @@ Item {
         id: globalHover
         acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
         cursorShape: root.effectiveResizeCursorShape
+    }
 
-        onHoveredChanged: {
-            if (!hovered)
-                root.clearHoveredHandle()
-        }
-
-        onPointChanged: {
-            if (!point)
-                return
-            root.updateHoveredHandle(point.position.x, point.position.y)
+    Item {
+        id: resizeInputSurface
+        anchors.fill: parent
+        // Qt evaluates contains() before granting a native grab. A remembered
+        // hover must not enable a full-canvas drag handler after deselection.
+        containmentMask: QtObject {
+            function contains(p: point): bool {
+                return root.hitTestHandle(p.x, p.y) !== null
+            }
         }
     }
 
     DragHandler {
         id: globalResizeDrag
+        parent: resizeInputSurface
         target: null
         acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
         acceptedButtons: Qt.LeftButton
         cursorShape: root.effectiveResizeCursorShape
         grabPermissions: PointerHandler.CanTakeOverFromAnything
         enabled: globalResizeDrag.active
-                 || (root.hoveredHandleId !== ""
-                     && (!!root.inputCoordinator
-                         && root.inputCoordinator.canStartResize(false, root.hoveredMediaId)))
+                 || (!!root.inputCoordinator && root.inputCoordinator.isIdle())
         dragThreshold: 0
 
         onActiveChanged: {
             if (active) {
                 var pressPoint = globalResizeDrag.centroid.scenePressPosition
-                var pressHit = root.hitTestHandle(pressPoint.x, pressPoint.y)
+                var localPressPoint = root.mapFromItem(null, pressPoint.x, pressPoint.y)
+                var pressHit = root.hitTestHandle(localPressPoint.x, localPressPoint.y)
                 if (!pressHit) {
                     root.interacting = false
                     root.activeResizeMediaId = ""
@@ -272,28 +274,13 @@ Item {
                 }
 
                 root.interacting = true
-                root.hoveredMediaId = root.activeResizeMediaId
-                root.hoveredHandleId = root.activeResizeHandleId
             } else {
-                var finalMediaId = root.activeResizeMediaId
-                root.interacting = false
-                if (root.inputCoordinator)
-                    root.inputCoordinator.endResize(finalMediaId)
-                root.resizeEnded(finalMediaId)
-                root.activeResizeMediaId = ""
-                root.activeResizeHandleId = ""
+                root.finishResizeSession(false)
             }
         }
 
         onCanceled: {
-            var canceledMediaId = root.activeResizeMediaId
-            root.interacting = false
-            if (root.inputCoordinator) {
-                root.inputCoordinator.endResize(canceledMediaId)
-            }
-            root.resizeEnded(canceledMediaId)
-            root.activeResizeMediaId = ""
-            root.activeResizeHandleId = ""
+            root.finishResizeSession(false)
         }
 
         onTranslationChanged: {
@@ -331,11 +318,12 @@ Item {
     }
 
     Repeater {
+        // Repeater owns sibling stacking: reparent it, not its delegates.
+        parent: root.contentItem ? root.contentItem : root
         model: root.selectionModel
 
         delegate: Item {
             id: chrome
-            parent: root.contentItem ? root.contentItem : root
             property var entry: modelData
             readonly property var geometry: root.resolveEntryGeometry(entry)
             readonly property real sceneX: geometry.sceneX

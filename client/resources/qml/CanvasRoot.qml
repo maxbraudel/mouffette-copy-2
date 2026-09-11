@@ -47,9 +47,9 @@ Rectangle {
     property var uiZonesModel: []
     property var mediaModel: []
     // Stable C++ QAbstractListModel — the Repeater binds here so delegates are
-    // NEVER destroyed on move/resize commits.  Only dataChanged fires per row.
-    // The legacy mediaModel JS-array above is kept for all utility consumers
-    // (hit-testing, selection chrome, input layer, etc.).
+    // Not recreated on move/resize commits: only dataChanged fires per row.
+    // The mediaModel JS-array above supplies metadata to chrome and overlays;
+    // pointer picking uses the actual live delegates, not that snapshot.
     property var mediaListModel: null
     property var selectionChromeModel: []
     property var snapGuidesModel: []
@@ -102,10 +102,14 @@ Rectangle {
     property int activeMediaDragCount: 0
     // True while any text media item is in text-edit mode. Used to disable canvas
     // pan so parent DragHandlers don't interfere with TextEdit cursor placement.
-    property bool anyMediaEditing: false
+    readonly property bool anyMediaEditing: textEditSession.activeEditor !== null
     // Reference to the TextItem currently in edit mode, or null. Used to commit
     // and exit editing when the user presses outside the item.
-    property var currentEditingMediaItem: null
+    readonly property Item currentEditingMediaItem: textEditSession.activeEditor
+    TextEditSession {
+        id: textEditSession
+        selectionModel: root.selectionChromeModel
+    }
     // Video state dictionary: keys are mediaId strings, values are state maps.
     // Published every 50 ms by QuickCanvasController for ALL video items
     // (not just the selected one), so overlays remain live after deselection.
@@ -132,6 +136,28 @@ Rectangle {
         if (!mediaId || mediaId.length === 0)
             return
         root.mediaSelectRequested(mediaId, !!additive)
+    }
+
+    // One picker for every input consumer. The actual delegates include live
+    // drag/resize transforms and visibility; a previously published DTO does not.
+    function mediaIdAtPoint(viewX, viewY) {
+        if (!viewport.contains(Qt.point(viewX, viewY)))
+            return ""
+        var hitId = ""
+        var hitZ = -Infinity
+        for (var i = 0; i < mediaRepeater.count; ++i) {
+            var candidate = mediaRepeater.itemAt(i)
+            if (!candidate || !candidate.visible || !candidate.enabled || candidate.opacity <= 0)
+                continue
+            var point = candidate.mapFromItem(viewport, viewX, viewY)
+            if (point.x < 0 || point.y < 0 || point.x >= candidate.width || point.y >= candidate.height)
+                continue
+            if (candidate.z >= hitZ) {
+                hitId = candidate.currentMediaId
+                hitZ = candidate.z
+            }
+        }
+        return hitId
     }
 
     function canStartCanvasPan(panActive) {
@@ -331,21 +357,27 @@ Rectangle {
 
         if (mode === "resize") {
             if (!selectionChrome || !selectionChrome.interacting || owner === "" || !mediaModelContainsId(owner)) {
-                coordinator.forceReset(reason + ":stale-resize")
+                // The global handle survives deletion of its media delegate.
+                // Close its session (and backend resize) before releasing the
+                // pointer, instead of leaving hidden chrome state behind.
+                if (selectionChrome && owner !== "" && selectionChrome.activeResizeMediaId === owner)
+                    selectionChrome.finishResizeSession(true)
+                else
+                    coordinator.forceReset(reason + ":stale-resize")
             }
             return
         }
 
         if (mode === "pan") {
-            if (!panDrag || !panDrag.active) {
+            if ((!panDrag || !panDrag.active) && (!middlePanDrag || !middlePanDrag.active)) {
                 coordinator.forceReset(reason + ":stale-pan")
             }
             return
         }
 
-        if (mode === "text") {
-            coordinator.forceReset(reason + ":stale-text")
-        }
+        // Text creation is a synchronous transaction with a finally block.
+        // Its callback legitimately publishes media/selection before returning;
+        // observing that publication must not reset the transaction mid-call.
     }
 
     onMediaModelChanged: {
@@ -620,6 +652,10 @@ Rectangle {
                     opacity: media ? ((media.contentOpacity !== undefined ? media.contentOpacity : 1.0)
                                     * (media.animatedDisplayOpacity !== undefined ? media.animatedDisplayOpacity : 1.0))
                                    : 1.0
+                    // Opacity alone does not disable Qt input. Match the picker
+                    // for the whole subtree, including TextEdit and MouseArea,
+                    // so invisible content cannot swallow another item's press.
+                    enabled: opacity > 0
 
                     MediaInteractionHandlers {
                         id: mediaInteraction
@@ -649,6 +685,7 @@ Rectangle {
                                                           : (media ? media.height : 0)
                         anchors.fill: parent
                         textEditable: true
+                        editingSession: textEditSession
                     }
 
                     Binding {
@@ -682,13 +719,8 @@ Rectangle {
                         function onTextLiveUpdateRequested(mediaId, text) {
                             root.textLiveUpdateRequested(mediaId, text)
                         }
-                        // Track whether any text item is currently in edit mode so
-                        // canvas pan handlers can be disabled while editing.
-                        function onEditingChanged() {
-                            var isEditing = !!(mediaContentLoader.item
-                                              && mediaContentLoader.item.editing === true)
-                            root.anyMediaEditing = isEditing
-                            root.currentEditingMediaItem = isEditing ? mediaContentLoader.item : null
+                        function onSelectRequested(mediaId, additive) {
+                            root.requestMediaSelection(mediaId, additive)
                         }
                     }
 
@@ -766,12 +798,7 @@ Rectangle {
             anchors.fill: parent
             interactionController: root
             textToolActive: root.textToolActive
-            mediaModel: root.mediaModel
-            contentItem: viewport.contentRootItem
             selectionHandlePriorityActive: selectionChrome.interacting
-            selectionHandleHoveredMediaId: selectionChrome.activeResizeMediaId !== ""
-                                            ? selectionChrome.activeResizeMediaId
-                                            : selectionChrome.hoveredMediaId
             liveDragMediaId: root.liveDragMediaId
             onTextCreateRequested: function(viewX, viewY) {
                 root.textCreateRequested(viewX, viewY)
@@ -783,7 +810,9 @@ Rectangle {
                 acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
                 acceptedButtons: Qt.LeftButton
                 grabPermissions: PointerHandler.ApprovesTakeOverByAnything
-                enabled: !root.anyMediaEditing
+                // Always observe the entire native press/release lifecycle,
+                // including the press which enters or leaves text editing.
+                enabled: true
 
                 onActiveChanged: {
                     if (!inputLayer || !inputLayer.inputCoordinator)
@@ -791,12 +820,24 @@ Rectangle {
 
                     if (active) {
                         var viewPoint = point ? point.position : centroid.position
-                        inputLayer.inputCoordinator.beginPrimaryGesture(
+                        var handle = selectionChrome.hitTestHandle(viewPoint.x, viewPoint.y)
+                        var mediaId = root.mediaIdAtPoint(viewPoint.x, viewPoint.y)
+                        var editor = textEditSession.activeEditor
+                        if (editor && (editor.mediaId !== mediaId || handle)) {
+                            textEditSession.finish(editor)
+                        }
+                        var ownerKind = inputLayer.inputCoordinator.beginPrimaryGesture(
                             viewPoint.x,
                             viewPoint.y,
-                            selectionChrome.hoveredHandleId,
-                            selectionChrome.hoveredMediaId
+                            handle ? handle.handleId : "",
+                            handle ? handle.mediaId : ""
                         )
+                        // The same exact press decision drives deselection. A
+                        // second TapHandler using hover state can disagree at
+                        // handle edges and clear selection during resize.
+                        if (ownerKind === "canvas" && !root.textToolActive
+                                && root.selectionChromeModel.length > 0)
+                            root.clearSelectionRequested()
                     } else {
                         inputLayer.inputCoordinator.endPrimaryGesture()
                     }
@@ -839,8 +880,9 @@ Rectangle {
                         startPanX = root.panX
                         startPanY = root.panY
                     } else {
+                        if (panSessionActive)
+                            inputLayer.inputCoordinator.endPan()
                         panSessionActive = false
-                        inputLayer.inputCoordinator.endPan()
                     }
                 }
 
@@ -852,8 +894,9 @@ Rectangle {
                 }
 
                 onCanceled: {
+                    if (panSessionActive)
+                        inputLayer.inputCoordinator.endPan()
                     panSessionActive = false
-                    inputLayer.inputCoordinator.endPan()
                 }
             }
 
@@ -882,8 +925,9 @@ Rectangle {
                         startPanX = root.panX
                         startPanY = root.panY
                     } else {
+                        if (panSessionActive)
+                            inputLayer.inputCoordinator.endPan()
                         panSessionActive = false
-                        inputLayer.inputCoordinator.endPan()
                     }
                 }
 
@@ -895,8 +939,9 @@ Rectangle {
                 }
 
                 onCanceled: {
+                    if (panSessionActive)
+                        inputLayer.inputCoordinator.endPan()
                     panSessionActive = false
-                    inputLayer.inputCoordinator.endPan()
                 }
             }
 
@@ -919,56 +964,6 @@ Rectangle {
                     if (isFiniteNumber(factor) && factor > 0.0)
                         root.applyZoomAt(centroid.position.x, centroid.position.y, factor)
                     lastScale = scale
-                }
-            }
-
-            TapHandler {
-                id: emptyCanvasTap
-                target: null
-                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-                acceptedButtons: Qt.LeftButton
-                // This handler must never block media drag on first press.
-                // Allow DragHandler/PointHandler to take over immediately when
-                // the pointer moves past drag threshold.
-                grabPermissions: PointerHandler.ApprovesTakeOverByAnything
-                // Only active when not editing text and not in text tool mode.
-                enabled: !root.textToolActive
-                         && !root.anyMediaEditing
-                         && !selectionChrome.interacting
-                         && selectionChrome.hoveredHandleId === ""
-
-                onPressedChanged: {
-                    if (!pressed) return
-                    if (!root.selectionChromeModel || root.selectionChromeModel.length === 0)
-                        return
-                    if (inputLayer.inputCoordinator.isPointInsideMedia(point.position.x,
-                                                                       point.position.y))
-                        return
-                    root.clearSelectionRequested()
-                }
-            }
-
-            // Passive press observer active only during text-edit mode.
-            // PointHandler takes a passive grab by design (never steals events from
-            // child items), so TextEdit's MouseArea continues to work normally for
-            // cursor placement and text selection. When the press lands outside the
-            // editing item, we commit the edit and clear selection.
-            PointHandler {
-                id: editExitPress
-                target: null
-                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-                acceptedButtons: Qt.LeftButton
-                enabled: root.anyMediaEditing
-
-                onActiveChanged: {
-                    if (!active) return
-                    if (inputLayer.inputCoordinator.isPointInsideMedia(point.position.x,
-                                                                       point.position.y))
-                        return
-                    if (root.currentEditingMediaItem)
-                        root.currentEditingMediaItem.commitAndStopEditing()
-                    if (root.selectionChromeModel && root.selectionChromeModel.length > 0)
-                        root.clearSelectionRequested()
                 }
             }
 

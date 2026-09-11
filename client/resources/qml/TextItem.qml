@@ -22,7 +22,12 @@ BaseMediaItem {
     property bool highlightEnabled: false
     property color highlightColor: "#00000000"
     property bool textEditable: false
-    property bool editing: false
+    property QtObject editingSession: null
+    // A hosted editor derives its state solely from the canvas session. The
+    // local flag supports standalone previews/tests without a canvas host.
+    property bool standaloneEditing: false
+    readonly property bool editing: editingSession
+        ? editingSession.activeEditor === root : standaloneEditing
     signal textCommitRequested(string mediaId, string text)
     signal textLiveUpdateRequested(string mediaId, string text)
 
@@ -43,23 +48,39 @@ BaseMediaItem {
 
     function commitAndStopEditing() {
         if (!root.editing) return
-        root.textCommitRequested(root.mediaId, textDisplayNode.text)
-        root.editing = false
-        // Clear any selection left over from edit mode so it doesn't bleed
-        // into display mode under the stroke shape.
-        textDisplayNode.select(0, 0)
+        if (root.editingSession) {
+            root.editingSession.finish(root)
+        } else {
+            var text = textDisplayNode.text
+            root.standaloneEditing = false
+            root.textCommitRequested(root.mediaId, text)
+        }
     }
+
+    function currentText() { return textDisplayNode.text }
 
     onPrimaryDoubleClicked: function(mediaId, additive) {
         if (!root.textEditable)
             return
         root.selectRequested(mediaId, additive)
-        root.editing = true
-        // The Binding on textDisplayNode.text is inactive while root.editing
-        // is true, so this imperative assignment is the source-of-truth for
-        // the initial edit content.
-        textDisplayNode.text = root.textContent || ""
-        textDisplayNode.forceActiveFocus()
+        if (root.editingSession)
+            root.editingSession.begin(root)
+        else
+            root.standaloneEditing = true
+    }
+
+    onEditingChanged: {
+        if (root.editing) {
+            textDisplayNode.forceActiveFocus()
+        } else {
+            textDisplayNode.select(0, 0)
+            textDisplayNode.focus = false
+        }
+    }
+
+    Component.onDestruction: {
+        if (root.editingSession)
+            root.editingSession.abandon(root)
     }
 
     // ── Single TextEdit for both display and edit mode ──────────────────────
@@ -71,8 +92,8 @@ BaseMediaItem {
     //               cursorVisible:false. Text is kept in sync with
     //               root.textContent via the Binding below.
     // Edit mode:    readOnly:false, enabled:true, cursorVisible:true.
-    //               Text is set imperatively in onPrimaryDoubleClicked and
-    //               the Binding is inactive (when:!root.editing is false).
+    //               The same document remains intact while its model binding
+    //               is suspended; entering edit mode is not a text mutation.
     TextEdit {
         id: textDisplayNode
         z: 1
@@ -118,9 +139,7 @@ BaseMediaItem {
             var isEnter = (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
             var hasCommitModifier = (event.modifiers & Qt.ControlModifier) || (event.modifiers & Qt.MetaModifier)
             if (isEnter && hasCommitModifier) {
-                root.textCommitRequested(root.mediaId, textDisplayNode.text)
-                root.editing = false
-                textDisplayNode.select(0, 0)
+                root.commitAndStopEditing()
                 event.accepted = true
             }
         }
@@ -140,6 +159,9 @@ BaseMediaItem {
         property: "text"
         value:    root.textContent || ""
         when:     !root.editing
+        // The default restore mode would restore the pre-binding empty value
+        // on entry and could publish that empty document as a live user edit.
+        restoreMode: Binding.RestoreNone
     }
 
     // Cursor placement and drag-select.

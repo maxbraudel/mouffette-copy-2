@@ -8,7 +8,7 @@ Item {
     property string iconSource: ""
     property bool   isToggle:    false
     property bool   toggled:     false
-    property bool   enabled:     true
+    // Use Item.enabled; shadowing it leaves native input eligibility divergent.
     // "solo" | "leading" | "middle" | "trailing"
     // Controls which corners are rounded, matching legacy SegmentRole behavior.
     property string segmentRole: "solo"

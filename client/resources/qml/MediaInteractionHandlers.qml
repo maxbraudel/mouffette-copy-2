@@ -15,16 +15,30 @@ Item {
 
     readonly property var activeCoordinator: coordinatorRef
 
+    containmentMask: QtObject {
+        function contains(p: point): bool {
+            // A custom mask replaces Qt's default rectangle check. Reject
+            // distant delegates before mapping/scanning the canvas picker.
+            if (p.x < 0 || p.y < 0 || p.x >= interaction.width || p.y >= interaction.height)
+                return false
+            if (!interaction.activeCoordinator || !interaction.delegateItem)
+                return false
+            var scenePoint = interaction.mapToItem(null, p.x, p.y)
+            return interaction.activeCoordinator.canObserveMediaAtScenePoint(
+                interaction.delegateItem.currentMediaId, scenePoint.x, scenePoint.y)
+        }
+    }
+
     signal requestSnapFreezeCleanup()
 
     readonly property bool active: mediaDrag.active
     readonly property string activeMoveMediaId: mediaDrag.activeMoveMediaId
     readonly property bool countedAsActive: mediaDrag.countedAsActive
-    readonly property bool mediaPressSelectEnabledState: !!delegateItem.media
+    readonly property bool mediaPressSelectEnabledState: !!rootController && !!delegateItem && !!delegateItem.media
                                                      && !delegateItem.overlayHovered
                                                      && !(mediaContentItem && mediaContentItem.editing === true)
                                                      && !!activeCoordinator
-    readonly property bool mediaDragEnabledState: !!delegateItem.media
+    readonly property bool mediaDragEnabledState: !!rootController && !!delegateItem && !!delegateItem.media
                                             && !delegateItem.overlayHovered
                                             && !(mediaContentItem && mediaContentItem.editing === true)
                                             && !textToolActive
@@ -38,7 +52,7 @@ Item {
     }
 
     function releaseOrphanedDrag() {
-        if (!mediaDrag)
+        if (!mediaDrag || !delegateItem || !rootController)
             return
         if (!mediaDrag.active && mediaDrag.activeMoveMediaId === "" && !delegateItem.localDragging)
             return
@@ -53,12 +67,14 @@ Item {
         }
 
         delegateItem.localDragging = false
-        rootController.liveDragMediaId = ""
-        rootController.liveDragViewOffsetX = 0.0
-        rootController.liveDragViewOffsetY = 0.0
+        if (rootController.liveDragMediaId === orphanMediaId) {
+            rootController.liveDragMediaId = ""
+            rootController.liveDragViewOffsetX = 0.0
+            rootController.liveDragViewOffsetY = 0.0
+        }
 
         if (activeCoordinator) {
-            activeCoordinator.forceReset("media-delegate-destroyed")
+            activeCoordinator.releaseMediaOwnership(orphanMediaId)
         }
     }
 
@@ -68,14 +84,14 @@ Item {
         acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
         acceptedButtons: Qt.LeftButton
         grabPermissions: PointerHandler.ApprovesTakeOverByAnything
-        enabled: !!delegateItem.media
-                 && !delegateItem.overlayHovered
-                 && !(mediaContentItem && mediaContentItem.editing === true)
-                 && !!activeCoordinator
-                 && activeCoordinator.ownerAllowsMedia(delegateItem.currentMediaId, false)
+        enabled: interaction.mediaPressSelectEnabledState
 
         onTapped: function(eventPoint) {
-            if (tapCount !== 2)
+            if (tapCount !== 2 || !activeCoordinator || !delegateItem)
+                return
+            if (!activeCoordinator.canActivateMediaAtScenePoint(delegateItem.currentMediaId,
+                                                                 eventPoint.scenePosition.x,
+                                                                 eventPoint.scenePosition.y))
                 return
             var item = mediaContentItem
             if (!item || typeof item.fireDoubleClick !== "function")
@@ -91,15 +107,13 @@ Item {
         acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
         acceptedButtons: Qt.LeftButton
         grabPermissions: PointerHandler.ApprovesTakeOverByAnything
-        // NOTE: ownerAllowsMedia is intentionally NOT checked here.
-        // mediaPressSelect is parented to the media delegate — if it fires, the
-        // press is by definition on media. Gating on the coordinator here would
-        // create a race with primaryGestureRouter (which fires first on higher-z
-        // InputLayer) and can falsely block selection when mediaIdAtPoint fails.
-        // Instead, onActiveChanged corrects the coordinator state itself.
+        // Keep native event observation stable. Ownership is decided once by
+        // the canvas's press observer, then checked when handling the event.
         enabled: interaction.mediaPressSelectEnabledState
 
         function selectNow(modifiers) {
+            if (!delegateItem || !activeCoordinator)
+                return
             var mediaId = delegateItem.currentMediaId
             if (!mediaId || mediaId.length === 0)
                 return
@@ -111,27 +125,11 @@ Item {
             if (!active)
                 return
 
-            if (!activeCoordinator)
+            if (!activeCoordinator || !delegateItem || !rootController)
                 return
 
-            // Ensure the coordinator correctly identifies this press as on-media.
-            // primaryGestureRouter (on higher-z InputLayer) fires first; if its
-            // mediaIdAtPoint traversal missed this item, primaryOwnerKind may be
-            // "canvas".  Correct it here — mediaPressSelect firing IS proof the
-            // press landed on this media delegate.
-            var coord = activeCoordinator
-            var myMediaId = delegateItem.currentMediaId
-            if (myMediaId && myMediaId.length > 0) {
-                if (!coord.primaryGestureActive)
-                    coord.primaryGestureActive = true
-                if (coord.primaryOwnerKind !== "media"
-                        || (coord.primaryOwnerMediaId !== "" && coord.primaryOwnerMediaId !== myMediaId)) {
-                    coord.primaryOwnerKind = "media"
-                    coord.primaryOwnerMediaId = myMediaId
-                    coord.pressTargetKind = "media"
-                    coord.pressTargetMediaId = myMediaId
-                }
-            }
+            if (!activeCoordinator.claimMediaPress(delegateItem.currentMediaId))
+                return
 
             var modifiers = Qt.application.keyboardModifiers
             if (mediaPressSelect.point && mediaPressSelect.point.modifiers !== undefined)
@@ -159,19 +157,8 @@ Item {
         acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
         acceptedButtons: Qt.LeftButton
         grabPermissions: PointerHandler.CanTakeOverFromAnything
-        // NOTE: ownerAllowsMedia is intentionally NOT checked here.
-        // DragHandlers get their passive grab at press-time, BEFORE beginPrimaryGesture
-        // has run and set coordinator ownership. Gating on ownership here creates a
-        // race that prevents mediaDrag from ever getting a passive grab, making drag
-        // impossible whenever the coordinator starts from a "canvas" classification.
-        // Instead, ownership correctness is enforced inside onActiveChanged (below),
-        // which runs only after the drag threshold is crossed — by then, mediaPressSelect
-        // has already corrected the coordinator. Block only conditions that are truly
-        // incompatible with drag at press time:
-        //   • overlayHovered  — pointer is on the media overlay UI, not the item body
-        //   • editing         — text item in edit mode
-        //   • textToolActive  — text-create tool active on canvas
-        //   • selectionChrome.interacting — a resize gesture is already in progress
+        // Observe native presses without toggling enabled on a previous press's
+        // owner. The coordinator grants the move only to this gesture's target.
         enabled: interaction.mediaDragEnabledState
 
         dragThreshold: 4
@@ -187,68 +174,27 @@ Item {
         property bool countedAsActive: false
 
         onActiveChanged: {
+            if (!delegateItem || !rootController)
+                return
             if (active) {
-                if (!activeCoordinator) {
+                // The containment mask normally excludes these presses before
+                // Qt takes a grab. If state changed since the press, a denied
+                // move must still leave another session's shared state intact.
+                if (!activeCoordinator || selectionInteracting || selectionHandlePriorityActive) {
                     activeMoveMediaId = ""
                     delegateItem.localDragging = false
-                    rootController.liveDragMediaId = ""
-                    rootController.liveDragViewOffsetX = 0.0
-                    rootController.liveDragViewOffsetY = 0.0
-                    countedAsActive = false
-                    return
-                }
-                activeMoveMediaId = delegateItem.currentMediaId
-
-                // Guard: if a resize gesture is already in progress (handle actively being dragged),
-                // abort — the drag threshold was reached before the enabled binding could fire.
-                if (selectionInteracting) {
-                    activeMoveMediaId = ""
-                    delegateItem.localDragging = false
-                    rootController.liveDragMediaId = ""
-                    rootController.liveDragViewOffsetX = 0.0
-                    rootController.liveDragViewOffsetY = 0.0
                     countedAsActive = false
                     return
                 }
 
-                // Guard: if the press landed on a resize handle, let the resize handler
-                // take it — do not start a body drag.
-                if (selectionHandlePriorityActive) {
+                var requestedMediaId = delegateItem.currentMediaId
+                if (!activeCoordinator.tryBeginMove(requestedMediaId)) {
                     activeMoveMediaId = ""
                     delegateItem.localDragging = false
-                    rootController.liveDragMediaId = ""
-                    rootController.liveDragViewOffsetX = 0.0
-                    rootController.liveDragViewOffsetY = 0.0
                     countedAsActive = false
                     return
                 }
-
-                // Correct ownership if primaryGestureRouter misclassified the press as
-                // "canvas" (same pattern as mediaPressSelect.onActiveChanged).
-                // By the time the drag threshold is crossed mediaPressSelect will have
-                // already run, but just in case it hasn't (e.g. extremely fast flicks),
-                // we self-correct here as well. We only correct when the press target
-                // is definitively this media item.
-                var coord = activeCoordinator
-                if (coord.primaryOwnerKind !== "media"
-                        || (coord.primaryOwnerMediaId !== "" && coord.primaryOwnerMediaId !== activeMoveMediaId)) {
-                    coord.primaryOwnerKind    = "media"
-                    coord.primaryOwnerMediaId = activeMoveMediaId
-                    coord.pressTargetKind     = "media"
-                    coord.pressTargetMediaId  = activeMoveMediaId
-                    coord.primaryGestureActive = true
-                }
-
-                var moveGranted = coord.tryBeginMove(activeMoveMediaId)
-                if (!moveGranted) {
-                    activeMoveMediaId = ""
-                    delegateItem.localDragging = false
-                    rootController.liveDragMediaId = ""
-                    rootController.liveDragViewOffsetX = 0.0
-                    rootController.liveDragViewOffsetY = 0.0
-                    countedAsActive = false
-                    return
-                }
+                activeMoveMediaId = requestedMediaId
                 if (!countedAsActive) {
                     rootController.activeMediaDragCount += 1
                     countedAsActive = true
@@ -283,6 +229,12 @@ Item {
                                                 snapAtStart)
             } else {
                 var finalMediaId = activeMoveMediaId
+                // A handler that did not acquire a move session owns no shared
+                // drag state. Native cancellation may notify us more than once.
+                if (finalMediaId === "") {
+                    pressAnchorValid = false
+                    return
+                }
                 if (countedAsActive) {
                     rootController.activeMediaDragCount = Math.max(0, rootController.activeMediaDragCount - 1)
                     countedAsActive = false
@@ -316,7 +268,7 @@ Item {
         }
 
         onTranslationChanged: {
-            if (!active || !delegateItem.localDragging)
+            if (!active || !delegateItem || !rootController || !delegateItem.localDragging)
                 return
 
             var currentViewPoint = mediaDrag.centroid.scenePosition
@@ -344,6 +296,8 @@ Item {
         }
 
         onCanceled: {
+            if (activeMoveMediaId === "" || !delegateItem || !rootController)
+                return
             if (countedAsActive) {
                 rootController.activeMediaDragCount = Math.max(0, rootController.activeMediaDragCount - 1)
                 countedAsActive = false

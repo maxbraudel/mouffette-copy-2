@@ -92,7 +92,6 @@ set(SOURCES
     src/frontend/rendering/canvas/GestureCommands.cpp
     src/frontend/rendering/canvas/PointerSession.cpp
     src/frontend/rendering/canvas/ModelPublisher.cpp
-    src/frontend/rendering/canvas/SelectionStore.cpp
     src/frontend/rendering/canvas/SnapStore.cpp
     src/frontend/rendering/canvas/SnapEngine.cpp
     src/frontend/rendering/canvas/SnapGuidePublisher.cpp
@@ -237,7 +236,6 @@ set(HEADERS
     src/frontend/rendering/canvas/GestureCommands.h
     src/frontend/rendering/canvas/PointerSession.h
     src/frontend/rendering/canvas/ModelPublisher.h
-    src/frontend/rendering/canvas/SelectionStore.h
     src/frontend/rendering/canvas/SnapStore.h
     src/frontend/rendering/canvas/SnapEngine.h
     src/frontend/rendering/canvas/SnapGuidePublisher.h
@@ -446,6 +444,42 @@ if(BUILD_TESTING)
     add_test(NAME TextItemQml COMMAND tst_TextItemQml)
     add_test(NAME TextItemQmlScaled COMMAND tst_TextItemQml)
     set_tests_properties(TextItemQmlScaled PROPERTIES ENVIRONMENT "QT_SCALE_FACTOR=2")
+
+    add_executable(tst_CanvasInteraction
+        tests/qt/tst_CanvasInteraction.cpp
+        src/frontend/rendering/canvas/CanvasQmlTypes.cpp
+        src/frontend/rendering/canvas/MediaListModel.cpp
+        src/frontend/rendering/canvas/TextOutlineItem.cpp
+        src/frontend/rendering/canvas/TextEditHelper.cpp
+        src/frontend/rendering/remote/RemoteVideoFrameItem.cpp
+        resources/resources.qrc
+    )
+    target_include_directories(tst_CanvasInteraction PRIVATE src)
+    target_compile_definitions(tst_CanvasInteraction PRIVATE TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(tst_CanvasInteraction PRIVATE Qt6::QuickPrivate Qt6::GuiPrivate Qt6::Qml Qt6::Multimedia Qt6::Test)
+    add_test(NAME CanvasInteraction COMMAND tst_CanvasInteraction)
+    add_test(NAME CanvasInteractionScaled COMMAND tst_CanvasInteraction)
+    set_tests_properties(CanvasInteractionScaled PROPERTIES ENVIRONMENT "QT_SCALE_FACTOR=2")
+
+    # Exercise the real controller, scene and packaged QML without production
+    # main() (which initializes services and clears upload caches). Reuse the
+    # app's compiled objects and dependencies rather than duplicating its source
+    # list. Only the exact application entry-point object is excluded.
+    add_executable(tst_CanvasSelectionBackend
+        tests/qt/tst_CanvasSelectionBackend.cpp
+        "$<FILTER:$<TARGET_OBJECTS:MouffetteClient>,EXCLUDE,/src/main[.]cpp[.](o|obj)$>"
+    )
+    target_include_directories(tst_CanvasSelectionBackend PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
+    target_compile_definitions(tst_CanvasSelectionBackend PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>")
+    target_link_libraries(tst_CanvasSelectionBackend PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
+    add_test(NAME CanvasSelectionBackend COMMAND tst_CanvasSelectionBackend)
+    # Native window focus/grabs are part of these tests. Do not race other GUI
+    # suites when CI invokes ctest with parallel jobs.
+    set_tests_properties(CanvasInteraction CanvasInteractionScaled CanvasSelectionBackend
+        PROPERTIES RUN_SERIAL TRUE)
 
     # Reference implementation retained for before/after profiling only. The
     # application no longer registers, compiles or bundles this SVG renderer.

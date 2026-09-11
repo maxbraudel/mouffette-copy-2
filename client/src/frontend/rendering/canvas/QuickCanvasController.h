@@ -8,6 +8,7 @@
 #include <QSize>
 #include <QVector>
 #include <QMetaObject>
+#include <memory>
 
 #include "backend/domain/models/ClientInfo.h"
 #include "frontend/rendering/canvas/QuickDragSnapSession.h"
@@ -23,7 +24,6 @@ class ResizableVideoItem;
 class CanvasSceneStore;
 class QuickCanvasViewAdapter;
 class PointerSession;
-class SelectionStore;
 class ModelPublisher;
 class SnapStore;
 class MediaListModel;
@@ -158,16 +158,23 @@ private:
     QuickCanvasViewAdapter* m_viewAdapter = nullptr;
     MediaListModel*         m_mediaListModel = nullptr;
     PointerSession* m_pointerSession = nullptr;
-    SelectionStore* m_selectionStore = nullptr;
     ModelPublisher* m_modelPublisher = nullptr;
     SnapStore* m_snapStore = nullptr;
     QuickDragSnapSession* m_dragSnapSession = nullptr;
     QGraphicsScene* m_mediaScene = nullptr;
-    QHash<QString, ResizableMediaBase*> m_mediaItemsById;
+    struct MediaItemReference {
+        ResizableMediaBase* item = nullptr;
+        std::weak_ptr<bool> lifetime;
+    };
+    // QGraphicsItem is not a QObject. Its lifetime token provides the guarded
+    // lookup needed when a queued input arrives after deletion, before model sync.
+    QHash<QString, MediaItemReference> m_mediaItemsById;
     QTimer* m_mediaSyncTimer = nullptr;
     QTimer* m_resizeDispatchTimer = nullptr;
     QTimer* m_videoStateTimer = nullptr;
     bool m_mediaSyncPending = false;
+    // QGraphicsScene owns selection; QML receives only its read-only projection.
+    // Batch clear + select into one projection update without touching media sync.
     bool m_selectionMutationInProgress = false;
     bool m_executingQueuedResize = false;
     bool m_hasQueuedResize = false;

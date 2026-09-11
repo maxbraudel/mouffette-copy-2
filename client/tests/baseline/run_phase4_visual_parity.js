@@ -23,7 +23,8 @@ function checkFilesPresent() {
     'resources/qml/TextItem.qml',
     'resources/qml/MediaVisual.qml',
     'resources/qml/RemoteSceneRoot.qml',
-    'resources/qml/CanvasRoot.qml'
+    'resources/qml/CanvasRoot.qml',
+    'resources/qml/TextEditSession.qml'
   ];
 
   for (const file of required) {
@@ -37,7 +38,7 @@ function checkResourceRegistration() {
   const qrc = readText('resources/resources.qrc');
   const requiredAliases = [
     'BaseMediaItem.qml', 'ImageItem.qml', 'VideoItem.qml', 'TextItem.qml',
-    'MediaVisual.qml', 'RemoteSceneRoot.qml'
+    'MediaVisual.qml', 'RemoteSceneRoot.qml', 'TextEditSession.qml'
   ];
   for (const alias of requiredAliases) {
     assert(qrc.includes(`alias="${alias}"`), `resources.qrc missing alias ${alias}`);
@@ -52,7 +53,7 @@ function checkCanvasBindings() {
   const mediaInteractions = readText('resources/qml/MediaInteractionHandlers.qml');
   const stat = fs.statSync(qmlPath);
   assert(stat.size > 0, 'CanvasRoot.qml must not be empty');
-  assert(mediaInteractions.includes('coord.tryBeginMove('),
+  assert(mediaInteractions.includes('activeCoordinator.tryBeginMove('),
     'Media interactions must route move ownership through InputCoordinator');
   assert(qml.includes('inputLayer.inputCoordinator.tryBeginPanAt('),
     'CanvasRoot pan ownership must route through InputCoordinator');
@@ -67,7 +68,16 @@ function checkCoordinatorFlag() {
     'InputLayer must expose its per-canvas InputCoordinator');
   assert(inputLayer.includes('function assertInvariants(stage)'),
     'InputCoordinator must retain runtime ownership guards');
-  return { coordinatorChecks: 2 };
+  assert(inputLayer.includes('readonly property string pressTargetKind:'),
+    'Press target must be derived from the primary owner, never a second writable state');
+  const canvas = readText('resources/qml/CanvasRoot.qml');
+  assert(canvas.includes('readonly property bool anyMediaEditing:')
+    && canvas.includes('readonly property Item currentEditingMediaItem:'),
+    'Canvas editing flags must be projections of the single edit session');
+  const controller = readText('src/frontend/rendering/canvas/QuickCanvasController.h');
+  assert(!controller.includes('SelectionStore'),
+    'The scene selection must not acquire a second mutable selection store');
+  return { coordinatorChecks: 5 };
 }
 
 function checkMediaDelegates() {

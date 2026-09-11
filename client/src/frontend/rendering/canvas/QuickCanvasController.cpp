@@ -9,7 +9,6 @@
 #include "frontend/rendering/canvas/PointerSession.h"
 #include "frontend/rendering/canvas/QuickCanvasViewAdapter.h"
 #include "frontend/rendering/canvas/MediaListModel.h"
-#include "frontend/rendering/canvas/SelectionStore.h"
 #include "frontend/rendering/canvas/SnapEngine.h"
 #include "frontend/rendering/canvas/SnapStore.h"
 #include "frontend/rendering/canvas/SnapGuidePublisher.h"
@@ -28,6 +27,7 @@
 #include <QQuickItem>
 #include <QQuickWidget>
 #include <QScreen>
+#include <QScopedValueRollback>
 #include <QLineF>
 #include <QGuiApplication>
 #include <QTimer>
@@ -143,7 +143,6 @@ QuickCanvasController::QuickCanvasController(QObject* parent)
 {
     m_sceneStore = new CanvasSceneStore(this);
     m_pointerSession = new PointerSession();
-    m_selectionStore = new SelectionStore();
     m_modelPublisher = new ModelPublisher();
     m_snapStore = new SnapStore();
     m_dragSnapSession = new QuickDragSnapSession();
@@ -226,8 +225,6 @@ QuickCanvasController::~QuickCanvasController() {
     m_modelPublisher = nullptr;
     delete m_pointerSession;
     m_pointerSession = nullptr;
-    delete m_selectionStore;
-    m_selectionStore = nullptr;
     delete m_snapStore;
     m_snapStore = nullptr;
     delete m_dragSnapSession;
@@ -525,14 +522,14 @@ void QuickCanvasController::rebuildMediaItemIndex() {
     const QList<QGraphicsItem*> sceneItems = m_mediaScene->items();
     for (QGraphicsItem* graphicsItem : sceneItems) {
         auto* media = dynamic_cast<ResizableMediaBase*>(graphicsItem);
-        if (!media) {
+        if (!media || media->isBeingDeleted()) {
             continue;
         }
         const QString mediaId = media->mediaId();
         if (mediaId.isEmpty()) {
             continue;
         }
-        m_mediaItemsById.insert(mediaId, media);
+        m_mediaItemsById.insert(mediaId, {media, media->lifetimeGuard()});
     }
 }
 
@@ -543,14 +540,18 @@ ResizableMediaBase* QuickCanvasController::mediaItemById(const QString& mediaId)
 
     auto it = m_mediaItemsById.constFind(mediaId);
     if (it != m_mediaItemsById.constEnd()) {
-        ResizableMediaBase* candidate = it.value();
-        if (candidate && candidate->scene() == m_mediaScene) {
+        const MediaItemReference& reference = it.value();
+        ResizableMediaBase* candidate = reference.item;
+        // All scene/input access is on the GUI thread. Test the token before
+        // touching the raw QGraphicsItem, which may have died since publication.
+        if (!reference.lifetime.expired() && candidate
+            && !candidate->isBeingDeleted() && candidate->scene() == m_mediaScene) {
             return candidate;
         }
     }
 
     rebuildMediaItemIndex();
-    return m_mediaItemsById.value(mediaId, nullptr);
+    return m_mediaItemsById.value(mediaId).item;
 }
 
 void QuickCanvasController::updateRemoteCursor(int globalX, int globalY) {
@@ -639,103 +640,66 @@ void QuickCanvasController::scheduleMediaModelSync() {
 }
 
 void QuickCanvasController::handleMediaSelectRequested(const QString& mediaId, bool additive) {
-    qWarning().noquote()
-        << "[QuickCanvas][InputDebug][Controller] handleMediaSelectRequested"
-        << "mediaId=" << mediaId
-        << "additive=" << additive
-        << "hasScene=" << (m_mediaScene != nullptr);
-
     if (!m_mediaScene || mediaId.isEmpty()) {
-        qWarning().noquote()
-            << "[QuickCanvas][InputDebug][Controller] select request rejected"
-            << "reason=" << (!m_mediaScene ? "missing-scene" : "empty-media-id");
         return;
     }
 
     ResizableMediaBase* target = mediaItemById(mediaId);
 
     if (!target) {
-        qWarning().noquote()
-            << "[QuickCanvas][InputDebug][Controller] select request rejected"
-            << "reason=media-not-found"
-            << "mediaId=" << mediaId;
         return;
     }
-
-    qWarning().noquote()
-        << "[QuickCanvas][InputDebug][Controller] target state"
-        << "alreadySelected=" << target->isSelected()
-        << "currentSelectedCount=" << m_mediaScene->selectedItems().size();
 
     const bool alreadyOnlySelected = target->isSelected()
         && m_mediaScene->selectedItems().size() == 1;
     if (!additive && alreadyOnlySelected) {
-        qWarning().noquote()
-            << "[QuickCanvas][InputDebug][Controller] select request no-op"
-            << "reason=already-only-selected"
-            << "mediaId=" << mediaId;
         pushSelectionAndSnapModels();
         return;
     }
 
     if (additive && target->isSelected()) {
-        qWarning().noquote()
-            << "[QuickCanvas][InputDebug][Controller] select request no-op"
-            << "reason=already-selected-additive"
-            << "mediaId=" << mediaId;
         pushSelectionAndSnapModels();
         return;
     }
 
-    // Suppress both scene::changed and scene::selectionChanged during the mutation
-    // so neither triggers a full media-model republish that would destroy QML delegates.
-    m_selectionMutationInProgress = true;
-    if (!additive) {
-        m_mediaScene->clearSelection();
+    // The scene is the sole selection authority, including multi-selection and
+    // selection changes initiated outside Quick. Publish the resulting projection
+    // once, rather than exposing the intermediate clear during replacement.
+    const auto targetLifetime = target->lifetimeGuard();
+    {
+        QScopedValueRollback<bool> mutationGuard(m_selectionMutationInProgress, true);
+        if (!additive) {
+            m_mediaScene->clearSelection();
+        }
+        // Other scene listeners can react synchronously to clearSelection().
+        if (!targetLifetime.expired() && !target->isBeingDeleted()
+            && target->scene() == m_mediaScene) {
+            target->setSelected(true);
+        }
     }
-    target->setSelected(true);
-    m_selectionMutationInProgress = false;
 
-    // Cancel any pending media sync that was scheduled before this call
-    // (e.g. from a scene::changed fired by a prior selection repaint).
-    if (m_mediaSyncTimer) {
-        m_mediaSyncTimer->stop();
-    }
-    m_mediaSyncPending = false;
-
-    m_selectionStore->setSelectedMediaId(mediaId);
+    // Never cancel a pending media publication here: it may contain a text edit,
+    // fit-to-text resize, style change or newly added item. MediaListModel updates
+    // stable delegates in place, so selection needs no destructive-sync workaround.
     pushSelectionAndSnapModels();
-
-    qWarning().noquote()
-        << "[QuickCanvas][InputDebug][Controller] selection applied"
-        << "mediaId=" << mediaId
-        << "selectedCountAfter=" << m_mediaScene->selectedItems().size();
 }
 
 void QuickCanvasController::handleClearSelectionRequested() {
-    qWarning().noquote()
-        << "[QuickCanvas][InputDebug][Controller] handleClearSelectionRequested"
-        << "hasScene=" << (m_mediaScene != nullptr)
-        << "selectedCountBefore=" << (m_mediaScene ? m_mediaScene->selectedItems().size() : 0);
-
     if (!m_mediaScene) {
         return;
     }
 
     if (m_mediaScene->selectedItems().isEmpty()) {
+        pushSelectionAndSnapModels();
         return;
     }
 
-    m_selectionMutationInProgress = true;
-    m_mediaScene->clearSelection();
-    m_selectionMutationInProgress = false;
-
-    if (m_mediaSyncTimer) {
-        m_mediaSyncTimer->stop();
+    {
+        QScopedValueRollback<bool> mutationGuard(m_selectionMutationInProgress, true);
+        m_mediaScene->clearSelection();
     }
-    m_mediaSyncPending = false;
 
-    m_selectionStore->setSelectedMediaId(QString());
+    // Keep pending content/geometry updates alive, just as on selection.
     pushSelectionAndSnapModels();
 }
 
@@ -1522,13 +1486,18 @@ void QuickCanvasController::handleMediaResizeRequested(const QString& mediaId,
 }
 
 void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId) {
+    // A late release must not cancel the newer owner's pending update, even
+    // before its first timer tick has established an active PointerSession.
+    const QString resizeOwner = m_pointerSession->resizeActive()
+        ? m_pointerSession->resizeMediaId()
+        : (m_hasQueuedResize ? m_queuedResizeMediaId : QString());
+    if (!mediaId.isEmpty() && !resizeOwner.isEmpty() && mediaId != resizeOwner) {
+        return;
+    }
+
     m_hasQueuedResize = false;
     if (m_resizeDispatchTimer) {
         m_resizeDispatchTimer->stop();
-    }
-
-    if (m_pointerSession->resizeActive() && !mediaId.isEmpty() && mediaId != m_pointerSession->resizeMediaId()) {
-        return;
     }
 
     const QString finalMediaId = !mediaId.isEmpty() ? mediaId : m_pointerSession->resizeMediaId();
@@ -1572,7 +1541,7 @@ void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId) {
     resetAltResizeState();
     // Clear SnapGuideItem on ScreenCanvas so currentSnapGuideLines() returns empty for
     // any subsequent pushSelectionAndSnapModels call — prevents stale lines leaking across sessions.
-    if (!m_mediaScene->views().isEmpty()) {
+    if (m_mediaScene && !m_mediaScene->views().isEmpty()) {
         if (auto* sc = qobject_cast<ScreenCanvas*>(m_mediaScene->views().first())) {
             sc->clearSnapGuides();
         }
@@ -1608,7 +1577,8 @@ void QuickCanvasController::handleTextCommitRequested(const QString& mediaId, co
     }
 
     textMedia->commitTextFromQuickEditor(text);
-    textMedia->setSelected(true);
+    // Committing content must not change selection: this can be the final step
+    // of switching to another item, deselecting, or leaving the editor entirely.
     scheduleMediaModelSync();
 }
 
@@ -1712,7 +1682,7 @@ void QuickCanvasController::pushMediaModelOnly() {
 
             const QString mediaId = media->mediaId();
             if (!mediaId.isEmpty()) {
-                m_mediaItemsById.insert(mediaId, media);
+                m_mediaItemsById.insert(mediaId, {media, media->lifetimeGuard()});
             }
 
             const QSize baseSize = media->baseSizePx();
@@ -1740,10 +1710,8 @@ void QuickCanvasController::pushMediaModelOnly() {
             mediaEntry.insert(QStringLiteral("height"), std::max<qreal>(1.0, baseHeight * sceneUnitScale));
             mediaEntry.insert(QStringLiteral("scale"), mediaScale);
             mediaEntry.insert(QStringLiteral("z"), media->zValue());
-            // NOTE: 'selected' is intentionally NOT included here.
-            // Selection state is published separately via selectionChromeModel.
-            // Including it here would cause the entire mediaModel to be replaced
-            // on every selection change, destroying all QML delegates mid-gesture.
+            // Selection has its own scene-derived projection. A selection-only
+            // change therefore needs no content-model or media-delegate update.
             mediaEntry.insert(QStringLiteral("sourcePath"), media->sourcePath());
             mediaEntry.insert(QStringLiteral("sourceUrl"), toCanonicalMediaSourceUrl(media->sourcePath()));
             mediaEntry.insert(QStringLiteral("uploadState"), uploadStateToString(media->uploadState()));
@@ -1943,6 +1911,8 @@ void QuickCanvasController::pushSelectionAndSnapModels() {
         return;
     }
 
+    // A read-only projection of the scene's selection, never an independent
+    // selection store. Rebuilding it also covers widget/backend-initiated changes.
     QVariantList selectionChromeModel;
     QVariantList snapGuidesModel;
 

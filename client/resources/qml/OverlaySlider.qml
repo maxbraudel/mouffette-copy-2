@@ -28,8 +28,7 @@ Item {
     // Set this via a declarative binding from the parent. Never write to it here.
     property real progress: 0.0
 
-    // Whether this slider accepts pointer input.
-    property bool enabled: true
+    // Item.enabled is the single native input-enabled state for this control.
 
     // --- Signals ---
     signal dragStarted(real ratio)

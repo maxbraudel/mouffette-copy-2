@@ -108,6 +108,10 @@ cd .\client
 
 ## Architecture
 
+Canvas selection has one authority in the C++ scene. QML consumes its selection
+projection; one per-canvas edit session and one pointer coordinator own their
+respective lifecycles. See [the input ownership contract and Qt regression tests](docs/QUICK_CANVAS_INPUT_COORDINATOR.md).
+
 The text outline renderer uses the existing `TextEdit` document, cached glyph
 masks and Qt's image-node/texture-atlas renderer. Its Qt-private document access
 is isolated in `TextOutlineItem.cpp`;

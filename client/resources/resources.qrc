@@ -32,6 +32,7 @@
     <file alias="ImageItem.qml">qml/ImageItem.qml</file>
     <file alias="VideoItem.qml">qml/VideoItem.qml</file>
     <file alias="TextItem.qml">qml/TextItem.qml</file>
+    <file alias="TextEditSession.qml">qml/TextEditSession.qml</file>
     <file alias="MediaVisual.qml">qml/MediaVisual.qml</file>
     <file alias="RemoteSceneRoot.qml">qml/RemoteSceneRoot.qml</file>
     <file alias="SelectionChrome.qml">qml/SelectionChrome.qml</file>

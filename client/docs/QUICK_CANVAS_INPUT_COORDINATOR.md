@@ -1,84 +1,107 @@
-# Quick Canvas Input Coordinator
+# Quick Canvas: selection and input ownership
 
-## Scope
+## Authorities
 
-This document defines the authoritative input ownership model for Quick Canvas.
+These are different states, each with one writer, not competing copies of selection:
 
-- Single input owner: `InputLayer.qml` (`inputCoordinator`)
-- Render-only layers: `MediaLayer.qml`, `SelectionLayer.qml`, `SelectionChrome.qml`
-- C++ commit authority: `QuickCanvasController` for selection sync and final move/resize commit
+| State | Authority | Consumers |
+| --- | --- | --- |
+| Selected media | `QGraphicsScene::selectedItems()` | Controller publishes `selectionChromeModel`; visuals, chrome, overlays and edit session consume it |
+| Active text editor | Per-canvas `TextEditSession.activeEditor` | Hosted `TextItem.editing`, `anyMediaEditing` and `currentEditingMediaItem` are read-only projections |
+| Pointer gesture | Per-canvas `InputLayer.inputCoordinator` | Native media/resize/pan handlers request ownership and release their own session |
+| Committed content and geometry | C++ media items | Stable `MediaListModel` updates existing QML delegates |
 
-## Rollout Flag
+The unused single-ID `SelectionStore` has been removed. Do not introduce a second
+mutable selected-ID collection in QML alongside the scene. Widget/backend
+selection follows the same projection path as pointer selection.
 
-Temporary rollout switch:
+Live drag/resize geometry is temporary presentation state, not a second committed
+model. Selection-only updates must not cancel pending content publication: it can
+contain a text edit, style change, fit-to-text resize or newly created item.
 
-- Default mode: coordinator enabled.
-- Legacy mode: pass `--legacy-input-arbitration` to disable coordinator ownership paths.
+## Native pointer lifecycle
 
-Example launch:
+The always-enabled canvas `PointHandler` observes left presses and their
+release/cancellation, including presses which enter or leave text editing.
 
-- `./MouffetteClient.app/Contents/MacOS/MouffetteClient --legacy-input-arbitration`
+1. Resolve the exact resize handle and topmost media at the press coordinates.
+2. Finish an editor when the press targets another item, a handle or the background.
+3. `beginPrimaryGesture()` chooses **handle > media > canvas** once.
+4. The same decision controls background deselection and media ownership.
+5. A media press selects once; exceeding the drag threshold starts a move using
+   the original press anchor. A double tap may open the selected text's editor.
+6. Release/cancellation clears the primary owner. Native drag handlers close
+   their own granted mode; cleanup of an old item must not reset a newer owner.
 
-## State Model
+`pressTargetKind` and `pressTargetMediaId` are derived from the primary owner.
+Delegates must not assign owner fields. Recovery-only `forceReset()` clears both
+the active mode and primary owner. Synchronous text creation uses `try/finally`,
+not watchdog cleanup. The pan watchdog recognizes left and middle-button handlers.
 
-Coordinator states:
+`CanvasRoot.mediaIdAtPoint()` examines live delegates, their actual transforms,
+visibility, enabled state, opacity and stacking order. Decorative children and
+delayed DTO geometry are not alternate pickers. Fully transparent media disable
+their whole input subtree so children cannot swallow another item's press.
 
-- `idle`
-- `move`
-- `resize`
-- `pan`
-- `text`
+Native `containmentMask` checks make media and resize surfaces eligible before
+Qt grants a grab. Rejecting a move only after `DragHandler.active` becomes true
+is too late to protect another target. Hover is cursor feedback, never ownership.
+Resize masks use exact handle hit tests even without an earlier mouse move.
 
-Coordinator tracked context:
+Qt documents the typed [containment mask](https://doc.qt.io/qt-6/qml-qtquick-item.html#containmentMask-prop)
+and distinguishes [opacity from input eligibility](https://doc.qt.io/qt-6/qml-qtquick-item.html#opacity-prop).
+Selection chrome reparents its `Repeater`, not individual delegates, respecting
+[Qt's sibling ownership](https://doc.qt.io/qt-6/qml-qtquick-repeater.html#details).
 
-- `ownerId` (media id or `canvas`)
-- `pressTargetKind` (`unknown | background | media | handle`)
-- `pressTargetMediaId`
+## Text edit lifecycle
 
-## Pointer-Down Priority Rules
+Only a selected, editable text can enter the canvas edit session. Opening B
+finishes A first. External deselection finishes the current editor too. Finishing
+snapshots the live document and releases ownership before emitting the commit:
+synchronous listeners may publish selection or open a newer editor. `begin()`
+rechecks selection and ownership after those callbacks. Destroying a visual
+abandons only that visual's session.
 
-Pointer-down arbitration order is deterministic:
+A text commit changes content, never selection. A late commit cannot resurrect
+an old selection. Inspector style/focus changes do not themselves force an exit:
+live text styling must remain usable while editing.
 
-1. Resize handle
-2. Media body (select first, move after threshold)
-3. Text-create (text tool active + background only)
-4. Pan (background only)
+One `TextEdit` document is retained across display/edit transitions. Suspending
+the existing model `Binding` must not restore its initial empty value. Its explicit
+restore policy preserves text and highlight without a synthetic text change on
+entry. See [Qt Binding restore semantics](https://doc.qt.io/qt-6/qml-qtqml-binding.html#restoreMode-prop).
+Standalone text previews may use a local edit flag; hosted canvas text always
+derives editing from its injected session. The remote renderer is passive.
 
-## Ownership Rules
+## Coordinates and lifetime
 
-- Media delegates emit intent only (`primaryPressed` / `selectRequested`).
-- Selection resize start/end is granted only by coordinator.
-- Pan is denied if pointer-down begins on media or handle.
-- Gesture ownership transitions to active mode only through coordinator begin/end methods.
+- Handler `scenePosition` means QQuickWindow coordinates, not backend scene units.
+- Map from the window to viewport coordinates for picking.
+- Map to content-root coordinates for drag anchors and deltas. Qt's mapping
+  already accounts for pan and zoom; do not apply them a second time.
+- C++ converts QML content coordinates at its backend boundary.
+- Media IDs resolve through lifetime-guarded references. A queued request for
+  a deleted item is ignored; never dereference a cached `QGraphicsItem*` first.
 
-## C++ Boundary
+## Regression verification
 
-C++ remains authoritative for:
+From `client`, configure with `BUILD_TESTING=ON`, then:
 
-- selection synchronization (`handleMediaSelectRequested`)
-- final move commit (`handleMediaMoveEnded`)
-- resize commit (`handleMediaResizeEnded`)
+```sh
+cmake --build --preset qt6-debug --parallel 4
+ctest --test-dir out/build/qt6-debug --output-on-failure
+node tests/baseline/run_phase4_visual_parity.js
+bash tools/check_architecture_boundaries.sh
+```
 
-QML owns live interaction and temporary visual geometry during active gesture.
+`CanvasInteraction` drives production QML with real window mouse/keyboard events
+and deterministic storage. It also runs at `QT_SCALE_FACTOR=2`.
+`CanvasSelectionBackend` exercises the real controller, scene and publication
+without application startup, networking or cache cleanup. See the
+[test matrix](QUICK_CANVAS_INPUT_TEST_MATRIX.md).
 
-## Verification Checklist
-
-Run:
-
-- `node tests/baseline/run_phase2_interaction_runtime_matrix.js`
-- `node tests/baseline/run_phase4_visual_parity.js`
-- `./build.sh`
-
-Run both interaction modes:
-
-- Coordinator mode (default): normal launch.
-- Legacy mode: launch with `--legacy-input-arbitration` and compare behavior.
-
-Manual smoke checklist:
-
-1. Add media A, then media B.
-2. First left-click on B selects B immediately.
-3. Press-drag on selected B moves B; pan does not start.
-4. Press-drag canvas background pans; media does not move.
-5. Resize handle drag starts resize, blocks pan/move.
-6. Text tool tap on background creates text; tap on media does not create text.
+The original failure was reproduced before the edit-session fix: an externally
+deselected text, or A after clicking B, remained in editing mode and kept its media
+handlers disabled. Per-delegate writes to global editing flags could then hide
+that forgotten editor. The regressions are asserted directly; JS simulation and
+static checks alone cannot test Qt's native grabs or QML binding lifecycles.

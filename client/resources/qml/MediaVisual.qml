@@ -9,6 +9,7 @@ Item {
     property var media: null
     property bool selected: false
     property bool textEditable: false
+    property QtObject editingSession: null
 
     readonly property var visualItem: visualLoader.item
     // Compatibility alias for the former Loader-based local delegate.
@@ -100,6 +101,7 @@ Item {
             mediaScale: 1.0
             mediaZ: 0
             selected: root.selected
+            editingSession: root.editingSession
             textContent: root.media ? (root.media.textContent || "") : ""
             horizontalAlignment: root.media ? (root.media.textHorizontalAlignment || "center") : "center"
             verticalAlignment: root.media ? (root.media.textVerticalAlignment || "center") : "center"
