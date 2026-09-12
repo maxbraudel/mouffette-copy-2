@@ -89,8 +89,11 @@ C'est le chargement, le timer qui s'affiche, delete, ça. Le numéro des timers,
 
 upload failed : upload file identfier collided with a different or foreign target file
 
-totalement reitrr e le système in use; On doit pouvori se connecter
-à un client surl equel est djàé connecté un autre. Pas du tout de sysrme in sue. Par contre, on pourra pas lancer une scene en même tems que l'uatre.
+j'aimerai totalement reitrr e le système in use; On doit pouvori se connecter
+à un client surl equel est djàé connecté un autre. Pas du tout de sysrme in use. Par contre, on pourra pas lancer une scene en même tems que l'uatre.
 Du coup quando n clique sur launch remote scene. Si le client distant
 a déjà une scene lancée sur lui, ça renovie une erreur disant qu'il y a
 déjà une scene en corus et qu'il faut réessayer dans pas longtemps. Mais retrie totalement le système in use
+
+ya un énorme socuis. ça fait plusieurs fois que je t'en parle mais t'arrives pas à la résodure déifntivmeent donc ya manifestement un prboeme d'approche, de sturcutre, de roebustesse autour de la séleciton et manipulation de medias dans le canvas.
+en gros j'ai créé un media texte dans le canvas. J'ai fais uqelques trucs; Muis je l'ai sélecitonné et j'ai essayé de le déplacer en le dragant avec clique gauche maintenu... mais c'était plus possible. Je pouvais plus le déplacer avec drag. Ya donc manifestement un soucis d'état, du syst!me dans le dpélacement... Invesitgue en profondeur. Trouve le probleme strcuturel, l'origne du bug et fixe le définitvmeent en profondeur poru que ça n'arrive plus jamais

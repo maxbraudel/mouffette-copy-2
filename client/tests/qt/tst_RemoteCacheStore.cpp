@@ -197,14 +197,25 @@ void RemoteCacheStoreTest::strictIdentifiersAndGenerationBinding()
     QVERIFY2(!firstStagingPath.isEmpty(), qPrintable(error));
     QVERIFY2(!retryStagingPath.isEmpty(), qPrintable(error));
     QVERIFY(firstStagingPath != retryStagingPath);
-    QCOMPARE(QFileInfo(firstStagingPath).absolutePath(),
-             QDir(store.rootPath()).filePath(
-                 kSender + QLatin1Char('/') + kSession
-                 + QStringLiteral("/staging/upload_first")));
+    const QString stagingRoot = QDir(store.rootPath()).filePath(
+        kSender + QLatin1Char('/') + kSession + QStringLiteral("/staging"));
+    QCOMPARE(QFileInfo(QFileInfo(firstStagingPath).absolutePath()).absolutePath(),
+             stagingRoot);
+    QVERIFY(QFileInfo(firstStagingPath).dir().dirName().size() <= 24);
+    QVERIFY(QFileInfo(firstStagingPath).completeBaseName().size() <= 24);
+    QVERIFY(!firstStagingPath.contains(QStringLiteral("upload_first")));
+    QVERIFY(!firstStagingPath.contains(kAsset));
     QVERIFY(store.stagingAssetPath(
         scope(), QStringLiteral("../upload"), kAsset,
         QStringLiteral("mp4"), &error).isEmpty());
     QCOMPARE(error, QStringLiteral("invalid_upload_id"));
+
+    const QString validatedPath = store.assetPath(
+        scope(), kAsset, RemoteCacheStore::AssetArea::Validated,
+        QStringLiteral("mp4"), &error);
+    QVERIFY2(!validatedPath.isEmpty(), qPrintable(error));
+    QVERIFY(QFileInfo(validatedPath).completeBaseName().size() <= 24);
+    QVERIFY(!validatedPath.contains(kAsset));
 
     QVERIFY(store.assetPath(scope(), QStringLiteral("../asset"),
                             RemoteCacheStore::AssetArea::Validated).isEmpty());

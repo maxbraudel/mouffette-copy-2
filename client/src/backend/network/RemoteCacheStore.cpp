@@ -40,9 +40,18 @@ constexpr auto kCleanupErrorDirectory = "cleanup-errors";
 constexpr auto kQuarantineDirectory = ".quarantine";
 constexpr char kHashSeparator[] = {'\0'};
 constexpr qint64 kMaximumAssetRemovalBytes = 16LL * 1024 * 1024 * 1024;
+constexpr qsizetype kCompactPathTokenHexLength = 24;
 
 const QFileDevice::Permissions kOwnerDirectoryPermissions =
     QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner;
+
+QString compactPathToken(const QString& identity)
+{
+    return QString::fromLatin1(
+        QCryptographicHash::hash(identity.toUtf8(), QCryptographicHash::Sha256)
+            .toHex()
+            .left(kCompactPathTokenHexLength));
+}
 
 QString utcNow()
 {
@@ -878,7 +887,10 @@ QString RemoteCacheStore::assetPath(const Scope& scope,
         || !ensurePrivateDirectory(areaDirectory, errorCode)) {
         return {};
     }
-    QString fileName = assetId;
+    // The protocol keeps the full asset identity in metadata and FileManager;
+    // the physical cache name is deliberately compact for Windows path limits.
+    QString fileName = area == AssetArea::Validated
+        ? compactPathToken(assetId) : assetId;
     if (!normalizedExtension.isEmpty()) {
         fileName += QLatin1Char('.') + normalizedExtension;
     }
@@ -925,7 +937,13 @@ QString RemoteCacheStore::stagingAssetPath(const Scope& scope,
 
     const QString stagingDirectory =
         QDir(scopeDirectory(scope)).filePath(QStringLiteral("staging"));
-    const QString uploadDirectory = QDir(stagingDirectory).filePath(uploadId);
+    // Keep transient names compact. The regular Windows file APIs used by Qt
+    // still encounter MAX_PATH on systems where long paths are not enabled;
+    // spelling two full protocol identities into the staging path can make an
+    // otherwise writable AppData cache fail at QFile::open(). 96-bit
+    // deterministic tokens retain transfer isolation within the path budget.
+    const QString uploadDirectory = QDir(stagingDirectory).filePath(
+        compactPathToken(uploadId));
     if (!isDirectChild(scopeDirectory(scope), stagingDirectory)
         || !isDirectChild(stagingDirectory, uploadDirectory)
         || !ensurePrivateDirectory(stagingDirectory, errorCode)
@@ -933,7 +951,7 @@ QString RemoteCacheStore::stagingAssetPath(const Scope& scope,
         return {};
     }
 
-    QString fileName = assetId;
+    QString fileName = compactPathToken(assetId);
     if (!normalizedExtension.isEmpty()) {
         fileName += QLatin1Char('.') + normalizedExtension;
     }
@@ -1065,7 +1083,8 @@ RemoteCacheStore::removeValidatedAsset(const Scope& scope,
     const QString validatedDirectory =
         QDir(scopeDirectory(scope)).filePath(QStringLiteral("validated"));
     const QString assetFile = QDir(validatedDirectory).filePath(
-        command.assetId + QLatin1Char('.') + command.extension);
+        compactPathToken(command.assetId)
+        + QLatin1Char('.') + command.extension);
     const QString intentFile = assetRemovalIntentPath(command.removalId);
     QString quarantineEntry;
     QString phase;

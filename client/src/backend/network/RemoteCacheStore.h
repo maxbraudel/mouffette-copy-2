@@ -148,8 +148,8 @@ public:
                                  QString* errorCode = nullptr);
 
     // Returns a safe path for an upload-owned file, creating only the fixed
-    // staging/validated subdirectory.  An empty result means the request was
-    // rejected.  extension is lower-cased and accepts ASCII alphanumerics only.
+    // staging/validated subdirectory. Validated files use compact physical
+    // names. extension is lower-cased and accepts ASCII alphanumerics only.
     QString assetPath(const Scope& scope,
                       const QString& assetId,
                       AssetArea area,
@@ -157,8 +157,8 @@ public:
                       QString* errorCode = nullptr);
 
     // Staging is transfer-scoped, whereas validated assets are content-scoped.
-    // Keeping uploadId in the directory identity prevents an abandoned or
-    // retried transfer from colliding with a later upload of the same asset.
+    // Compact deterministic path tokens prevent both stale-transfer collisions
+    // and Windows MAX_PATH failures; protocol identities remain full-length.
     QString stagingAssetPath(const Scope& scope,
                              const QString& uploadId,
                              const QString& assetId,
