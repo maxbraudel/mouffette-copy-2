@@ -40,16 +40,9 @@ public slots:
      */
     void syncRegistration();
 
-    /**
-     * @brief Handle screen information received from remote client
-     * @param clientInfo Client information including screen details
-     */
+    // Internal compatibility entry points. Protocol v2 does not expose
+    // request/watch messages; both are intentionally disconnected.
     void onScreensInfoReceived(const ClientInfo& clientInfo);
-
-    /**
-     * @brief Handle data request from server
-     * Send current screen and volume information
-     */
     void onDataRequestReceived();
 
 private:

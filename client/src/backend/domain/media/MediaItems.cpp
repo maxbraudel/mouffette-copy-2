@@ -1306,7 +1306,8 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, const QSize& nat
                 // If we have a cover image, use its dimensions as the display size (respects PAR/DAR)
                 // and lock the display size to prevent frame storage dimensions from overriding it
                 if (!coverImage.isNull()) {
-                    qDebug() << "ResizableVideoItem: metadata cover image size =" << coverImage.size() << "for" << m_sourcePath;
+                    qDebug() << "ResizableVideoItem: metadata cover image size ="
+                             << coverImage.size() << "mediaId=" << mediaId();
                     m_posterImage = coverImage;
                     m_posterImageSet = true;
                     m_lastFrameDisplaySize = QSizeF(coverImage.size());
@@ -1318,7 +1319,8 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, const QSize& nat
                     const QVariant v = md.value(QMediaMetaData::Resolution);
                     const QSize sz = v.toSize();
                     if (!sz.isEmpty()) {
-                        qDebug() << "ResizableVideoItem: metadata resolution (storage) =" << sz << "for" << m_sourcePath;
+                        qDebug() << "ResizableVideoItem: metadata resolution (storage) ="
+                                 << sz << "mediaId=" << mediaId();
                         m_lastFrameDisplaySize = QSizeF(sz);
                         adoptBaseSize(sz);
                     }
@@ -1460,8 +1462,8 @@ ResizableVideoItem::ResizableVideoItem(const QString& filePath, const QSize& nat
             if (m_progressTimer) m_progressTimer->stop();
             updatePlayPauseIconState(false);
         }
-        qDebug() << "ResizableVideoItem: Media player error occurred for" << sourcePath() 
-                 << "- Error:" << error << "Message:" << errorString;
+        qDebug() << "ResizableVideoItem: media player error; mediaId=" << mediaId()
+                 << "error=" << error << "message=" << errorString;
         
         // Check if the error indicates the file is missing or corrupted
         if (error == QMediaPlayer::ResourceError || error == QMediaPlayer::FormatError) {
@@ -1507,9 +1509,12 @@ void ResizableVideoItem::handleVideoFrame(const QVideoFrame& frame) {
     if (!m_holdLastFrameAtEnd && frame.isValid()) {
         const bool completingTechnicalPrime =
             m_firstFramePrimeRequested && !m_expectedPlayingState;
+        const qint64 technicalPrimeStopPosition = m_pendingRestoredPositionMs >= 0
+            ? m_pendingRestoredPositionMs : 0;
         if (completingTechnicalPrime && m_player) {
             m_player->pause();
-            m_player->setPosition(0);
+            m_player->setPosition(technicalPrimeStopPosition);
+            m_positionMs = technicalPrimeStopPosition;
             m_expectedPlayingState = false;
             updatePlayPauseIconState(false);
         }
@@ -1559,6 +1564,7 @@ void ResizableVideoItem::handleVideoFrame(const QVideoFrame& frame) {
             if (!m_firstFramePrimed && m_firstFramePrimeRequested) {
                 m_firstFramePrimed = true;
                 m_firstFramePrimeRequested = false;
+                m_pendingRestoredPositionMs = -1;
                 m_controlsLockedUntilReady = false;
                 m_controlsDidInitialFade = false;
                 if (completingTechnicalPrime && m_player) {
@@ -1582,12 +1588,14 @@ void ResizableVideoItem::handleVideoFrame(const QVideoFrame& frame) {
             if (!m_firstFramePrimed) {
                 m_firstFramePrimed = true;
                 m_firstFramePrimeRequested = false;
+                m_pendingRestoredPositionMs = -1;
                 m_controlsLockedUntilReady = false;
                 m_controlsDidInitialFade = false;
 
                 if (completingTechnicalPrime && m_player) {
                     m_player->pause();
-                    m_player->setPosition(0);
+                    m_player->setPosition(technicalPrimeStopPosition);
+                    m_positionMs = technicalPrimeStopPosition;
                 }
                 if (m_primingNeedsUnmute && m_audio) {
                     m_audio->setMuted(m_effectiveMuted);
@@ -1702,6 +1710,10 @@ void ResizableVideoItem::toggleMute() {
 
 void ResizableVideoItem::setVolume(qreal ratio) {
     setVolumeFromControl(std::clamp(ratio, 0.0, 1.0), false);
+}
+
+void ResizableVideoItem::restoreEffectiveVolume(qreal ratio) {
+    applyVolumeRatio(std::clamp<qreal>(ratio, 0.0, 1.0));
 }
 
 void ResizableVideoItem::setMuted(bool muted, bool skipFade) {
@@ -2073,6 +2085,20 @@ void ResizableVideoItem::pauseAndSetPosition(qint64 posMs) {
     cancelSettingsRepeatSession();
     m_expectedPlayingState = false; updatePlayPauseIconState(false);
     updateControlsLayout(); update();
+}
+
+void ResizableVideoItem::restorePausedPosition(qint64 posMs) {
+    if (posMs < 0) posMs = 0;
+    if (m_durationMs > 0 && posMs > m_durationMs) posMs = m_durationMs;
+    m_pendingRestoredPositionMs = posMs;
+    pauseAndSetPosition(posMs);
+
+    // The source may already have reached LoadedMedia before ScreenCanvas has
+    // finished rebuilding the item. Restart the technical prime immediately in
+    // that case; otherwise mediaStatusChanged will do it when loading settles.
+    if (!m_firstFramePrimed) {
+        requestFirstFramePrime();
+    }
 }
 
 void ResizableVideoItem::setExternalPosterImage(const QImage& img, const QSize& nativeDisplaySize) {
@@ -3015,7 +3041,9 @@ void ResizableVideoItem::requestFirstFramePrime() {
         m_audio->setMuted(true);
         m_primingNeedsUnmute = true;
     }
-    m_player->setPosition(0);
+    const qint64 primePosition = m_pendingRestoredPositionMs >= 0
+        ? m_pendingRestoredPositionMs : 0;
+    m_player->setPosition(primePosition);
     m_player->play();
 
     // Fallback safety-net: if the backend delays or misses the first frame callback,
@@ -3028,7 +3056,11 @@ void ResizableVideoItem::requestFirstFramePrime() {
         if (primingGeneration == m_primingGeneration
             && m_firstFramePrimeRequested && !m_expectedPlayingState) {
             m_player->pause();
-            m_player->setPosition(0);
+            const qint64 pausedPosition = m_pendingRestoredPositionMs >= 0
+                ? m_pendingRestoredPositionMs : 0;
+            m_player->setPosition(pausedPosition);
+            m_positionMs = pausedPosition;
+            m_pendingRestoredPositionMs = -1;
             m_firstFramePrimeRequested = false;
             m_controlsLockedUntilReady = false;
             if (m_primingNeedsUnmute && m_audio) {
@@ -3036,7 +3068,8 @@ void ResizableVideoItem::requestFirstFramePrime() {
                 m_primingNeedsUnmute = false;
             }
             updatePlayPauseIconState(false);
-            qWarning() << "ResizableVideoItem: first-frame priming timed out for" << sourcePath();
+            qWarning() << "ResizableVideoItem: first-frame priming timed out; mediaId="
+                       << mediaId();
         }
     });
 }

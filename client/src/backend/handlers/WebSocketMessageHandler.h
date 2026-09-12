@@ -2,7 +2,6 @@
 #define WEBSOCKETMESSAGEHANDLER_H
 
 #include <QObject>
-#include <QJsonObject>
 
 class MainWindow;
 class WebSocketClient;
@@ -42,12 +41,6 @@ public slots:
      * @brief Handle disconnection from server
      */
     void onDisconnected();
-
-    /**
-     * @brief Handle state synchronization message from server
-     * @param message JSON message containing state sync data
-     */
-    void handleStateSyncMessage(const QJsonObject& message);
 
 signals:
     /**

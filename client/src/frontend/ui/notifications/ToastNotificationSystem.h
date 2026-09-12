@@ -12,6 +12,7 @@
 #include <QQueue>
 #include <QEasingCurve>
 #include "frontend/ui/theme/AppColors.h"
+#include "backend/notifications/NotificationCenter.h"
 
 class ToastNotification : public QWidget
 {
@@ -157,6 +158,11 @@ public:
     
     // Generic show method
     void showNotification(const QString& message, ToastNotification::Type type, int duration = -1);
+    QString publishNotification(const NotificationRequest& request);
+
+    // History UI can bind directly to this model. It is owned by the toast
+    // system and remains valid for the lifetime of the main window.
+    NotificationCenter* notificationCenter() const { return m_notificationCenter; }
     
     // Clear all notifications
     void clearAll();
@@ -173,6 +179,10 @@ private slots:
     bool eventFilter(QObject* obj, QEvent* event) override;
     
 private:
+    void displayNotification(const QString& message,
+                             NotificationSeverity severity,
+                             int duration);
+    bool canDisplayToast() const;
     void showNotificationInternal(ToastNotification* notification);
     void repositionNotifications();
     QPoint calculateNotificationPosition(int index) const;
@@ -181,6 +191,7 @@ private:
 
     QWidget* m_parentWindow;
     Config m_config;
+    NotificationCenter* m_notificationCenter = nullptr;
     QList<ToastNotification*> m_activeNotifications;
     QQueue<ToastNotification*> m_pendingNotifications;
     

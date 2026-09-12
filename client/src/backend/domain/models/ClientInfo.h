@@ -4,6 +4,7 @@
 #include <QString>
 #include <QList>
 #include <QJsonObject>
+#include <QtGlobal>
 
 struct ScreenInfo {
     int id;
@@ -47,8 +48,20 @@ public:
     void setFromMemory(bool fromMemory) { m_fromMemory = fromMemory; }
     bool isOnline() const { return m_isOnline; }
     void setOnline(bool online) { m_isOnline = online; }
-    QString clientId() const { return m_clientId; }
-    void setClientId(const QString& id) { m_clientId = id; }
+    QString deviceId() const { return m_deviceId; }
+    QString runtimeId() const { return m_runtimeId; }
+    // Transitional C++ name used by the existing canvas model. It now always
+    // returns the protocol-v2 deviceId and is never serialized as clientId.
+    QString clientId() const { return m_deviceId; }
+    void setClientId(const QString& id) {
+        m_deviceId = id;
+        if (m_id.isEmpty()) m_id = id;
+    }
+    QString availabilityStatus() const { return m_availabilityStatus; }
+    QString projectId() const { return m_projectId; }
+    bool hasProject() const { return m_hasProject; }
+    qint64 remoteSessionCloseAtMs() const { return m_remoteSessionCloseAtMs; }
+    qint64 projectDeleteAtMs() const { return m_projectDeleteAtMs; }
     
     // Setters
     void setId(const QString& id) { m_id = id; }
@@ -57,13 +70,24 @@ public:
     void setStatus(const QString& status) { m_status = status; }
     void setScreens(const QList<ScreenInfo>& screens) { m_screens = screens; }
     void setVolumePercent(int v) { m_volumePercent = v; }
+    void setDeviceId(const QString& id) { m_deviceId = id; m_id = id; }
+    void setRuntimeId(const QString& id) { m_runtimeId = id; }
+    void setAvailabilityStatus(const QString& status) { m_availabilityStatus = status; }
+    void setProjectId(const QString& id) { m_projectId = id; }
+    void setHasProject(bool value) { m_hasProject = value; }
+    void setRemoteSessionCloseAtMs(qint64 value) { m_remoteSessionCloseAtMs = value; }
+    void setProjectDeleteAtMs(qint64 value) { m_projectDeleteAtMs = value; }
     
     // JSON serialization
     QJsonObject toJson() const;
     static ClientInfo fromJson(const QJsonObject& json);
     
     // Helper methods
+    QString getIdentityDisplayText() const;
+    QString availabilityBadgeText() const;
+    QString getProjectSummaryText(qint64 nowMs = -1) const;
     QString getDisplayText() const;
+    static QString formatRemainingTime(qint64 remainingMs);
     int getScreenCount() const { return m_screens.size(); }
     
 private:
@@ -75,7 +99,13 @@ private:
     int m_volumePercent = -1; // 0-100, -1 when unknown
     bool m_fromMemory = false;
     bool m_isOnline = true;
-    QString m_clientId;
+    QString m_deviceId;
+    QString m_runtimeId;
+    QString m_availabilityStatus = QStringLiteral("Unavailable");
+    QString m_projectId;
+    bool m_hasProject = false;
+    qint64 m_remoteSessionCloseAtMs = 0;
+    qint64 m_projectDeleteAtMs = 0;
 };
 
 #endif // CLIENTINFO_H

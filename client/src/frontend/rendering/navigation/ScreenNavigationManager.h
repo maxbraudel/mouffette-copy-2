@@ -35,7 +35,7 @@ public:
     void setDurations(int loaderDelayMs, int loaderFadeMs, int canvasFadeMs);
     void setActiveCanvas(ICanvasHost* canvas);
 
-    void showScreenView(const ClientInfo& client, bool hasCachedContent = false); // triggers requestScreens + watch
+    void showScreenView(const ClientInfo& client, bool hasCachedContent = false);
     void refreshActiveClientPreservingCanvas(const ClientInfo& client); // update client id without UI reset
     void showClientList();
     // Called when screens data has arrived and we can display the canvas
@@ -49,8 +49,6 @@ public:
     QString currentClientId() const { return m_currentClientId; }
 
 signals:
-    void requestScreens(const QString& clientId);
-    void watchTargetRequested(const QString& clientId);
     void screenViewEntered(const QString& clientId);
     void clientListEntered();
 

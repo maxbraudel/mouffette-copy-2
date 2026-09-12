@@ -163,10 +163,12 @@ void ResponsiveLayoutManager::updateButtonVisibility(bool visible)
 {
     QWidget* localClientInfoContainer = getLocalClientInfoContainer();
     QPushButton* connectToggleButton = getConnectToggleButton();
+    QWidget* historyControl = m_mainWindow->getHistoryControl();
     QPushButton* settingsButton = getSettingsButton();
     
     if (localClientInfoContainer) localClientInfoContainer->setVisible(visible);
     if (connectToggleButton) connectToggleButton->setVisible(visible);
+    if (historyControl) historyControl->setVisible(visible);
     if (settingsButton) settingsButton->setVisible(visible);
 }
 

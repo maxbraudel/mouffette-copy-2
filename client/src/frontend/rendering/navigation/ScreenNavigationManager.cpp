@@ -79,10 +79,6 @@ void ScreenNavigationManager::showScreenView(const ClientInfo& client, bool hasC
         }
     }
 
-    if (isOnline && !id.isEmpty()) {
-        emit requestScreens(id);
-        emit watchTargetRequested(id);
-    }
     emit screenViewEntered(id);
 }
 
@@ -104,10 +100,6 @@ void ScreenNavigationManager::refreshActiveClientPreservingCanvas(const ClientIn
     if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(1);
     if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(1.0);
 
-    if (isOnline && !id.isEmpty()) {
-        emit requestScreens(id);
-        emit watchTargetRequested(id);
-    }
     emit screenViewEntered(id);
 }
 

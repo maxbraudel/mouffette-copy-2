@@ -84,6 +84,11 @@ public:
     QString sourcePath() const { return m_sourcePath; }
     // Stable unique identifier for this media item (persists across uploads)
     QString mediaId() const { return m_mediaId; }
+    // Project restoration is the only caller allowed to replace the generated
+    // id. Keeping it stable makes canvas references survive process restarts.
+    void restorePersistentMediaId(const QString& mediaId) {
+        if (!mediaId.trimmed().isEmpty()) m_mediaId = mediaId.trimmed();
+    }
     // Shared file identifier (multiple media items can have same fileId)
     QString fileId() const { return m_fileId; }
     void setFileId(const QString& fileId) { m_fileId = fileId; }
@@ -330,6 +335,9 @@ public:
     // used to prime the decoder's first frame.
     bool isPlaying() const { return m_expectedPlayingState; }
     void pauseAndSetPosition(qint64 posMs);
+    // Like pauseAndSetPosition(), but keeps the requested Project timecode
+    // authoritative across the decoder's asynchronous first-frame priming.
+    void restorePausedPosition(qint64 posMs);
     void setInitialScaleFactor(qreal f) { m_initialScaleFactor = f; }
     void setExternalPosterImage(const QImage& img, const QSize& nativeDisplaySize = {});
     bool isDraggingProgress() const { return m_draggingProgress; }
@@ -352,6 +360,9 @@ public:
     bool isMuted() const { return m_effectiveMuted; }
     qreal volume() const { return m_userVolumeRatio; }
     void setVolume(qreal ratio);
+    // Project restoration must reapply the last effective output level without
+    // rewriting the separately persisted, possibly in-progress settings text.
+    void restoreEffectiveVolume(qreal ratio);
     
     // Repeat session management (public for host scene automation)
     void initializeSettingsRepeatSessionForPlaybackStart();
@@ -433,6 +444,7 @@ private:
     qint64 m_lastFrameTimestampMs = -1;
     qint64 m_durationMs = 0;
     qint64 m_positionMs = 0;
+    qint64 m_pendingRestoredPositionMs = -1;
     bool m_firstFramePrimed = false;
     bool m_firstFramePrimeRequested = false;
     bool m_primingNeedsUnmute = false;

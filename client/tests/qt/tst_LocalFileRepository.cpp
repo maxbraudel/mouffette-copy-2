@@ -1,4 +1,5 @@
 #include <QFile>
+#include <QCryptographicHash>
 #include <QTemporaryDir>
 #include <QtTest>
 
@@ -29,6 +30,9 @@ private slots:
         LocalFileRepository& repository = LocalFileRepository::instance();
         const QString firstId = repository.getOrCreateFileId(path);
         QVERIFY(!firstId.isEmpty());
+        QCOMPARE(firstId,
+                 QString::fromLatin1(QCryptographicHash::hash(
+                     QByteArrayLiteral("AAAA"), QCryptographicHash::Sha256).toHex()));
         QCOMPARE(repository.getOrCreateFileId(path), firstId);
 
         QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));

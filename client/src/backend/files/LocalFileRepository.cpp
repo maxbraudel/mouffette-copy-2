@@ -1,8 +1,6 @@
 #include "backend/files/LocalFileRepository.h"
 #include <QFile>
 #include <QDebug>
-#include <algorithm>
-#include <array>
 
 LocalFileRepository& LocalFileRepository::instance() {
     static LocalFileRepository instance;
@@ -16,43 +14,21 @@ QString LocalFileRepository::generateFileId(const QString& filePath) const {
         canonicalPath = fileInfo.absoluteFilePath();
     }
 
-    QCryptographicHash hash(QCryptographicHash::Sha256);
-    QByteArray metadata = canonicalPath.toUtf8();
-    metadata.append('\0');
-    metadata.append(QByteArray::number(fileInfo.size()));
-    metadata.append('\0');
-    metadata.append(QByteArray::number(fileInfo.lastModified().toMSecsSinceEpoch()));
-    metadata.append('\0');
-    metadata.append(QByteArray::number(fileInfo.metadataChangeTime().toMSecsSinceEpoch()));
-    hash.addData(metadata);
-
     QFile file(canonicalPath);
-    if (file.open(QIODevice::ReadOnly)) {
-        constexpr qint64 fullHashLimit = 64LL * 1024 * 1024;
-        constexpr qint64 sampleSize = 64LL * 1024;
-        const qint64 size = file.size();
-        if (size <= fullHashLimit) {
-            while (!file.atEnd()) {
-                const QByteArray block = file.read(1024 * 1024);
-                if (block.isEmpty() && file.error() != QFileDevice::NoError) break;
-                hash.addData(block);
-            }
-        } else {
-            // Avoid synchronously reading multi-gigabyte media on the UI
-            // thread. Metadata plus evenly distributed content samples still
-            // invalidates normal replacements while keeping import bounded.
-            const std::array<qint64, 5> offsets = {
-                0,
-                size / 4,
-                size / 2,
-                (size * 3) / 4,
-                std::max<qint64>(0, size - sampleSize)
-            };
-            for (const qint64 offset : offsets) {
-                if (!file.seek(std::clamp<qint64>(offset, 0, std::max<qint64>(0, size - 1)))) break;
-                hash.addData(file.read(sampleSize));
-            }
+    if (!file.open(QIODevice::ReadOnly)) {
+        return QString();
+    }
+
+    // Protocol v2 uses one content-addressed identity all the way from the
+    // local canvas through upload validation and the immutable scene manifest.
+    // Metadata and paths must never participate in this value.
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    while (!file.atEnd()) {
+        const QByteArray block = file.read(1024 * 1024);
+        if (block.isEmpty() && file.error() != QFileDevice::NoError) {
+            return QString();
         }
+        hash.addData(block);
     }
     return QString::fromLatin1(hash.result().toHex());
 }
@@ -72,6 +48,10 @@ QString LocalFileRepository::getOrCreateFileId(const QString& filePath) {
     // Re-evaluate identity on every boundary call. The canonical path alone is
     // not a file identity: editors commonly replace/re-encode a movie in place.
     const QString fileId = generateFileId(canonicalPath);
+    if (fileId.isEmpty()) {
+        qWarning() << "LocalFileRepository: source could not be hashed";
+        return QString();
+    }
     auto it = m_pathToFileId.constFind(canonicalPath);
     if (it != m_pathToFileId.constEnd()) {
         if (it.value() == fileId) return fileId;
@@ -80,14 +60,13 @@ QString LocalFileRepository::getOrCreateFileId(const QString& filePath) {
         if (m_fileIdToPath.value(staleFileId) == canonicalPath) {
             m_fileIdToPath.remove(staleFileId);
         }
-        qDebug() << "LocalFileRepository: File content changed; rotating fileId for"
-                 << canonicalPath;
+        qDebug() << "LocalFileRepository: source content changed; rotating fileId";
     }
 
     m_fileIdToPath.insert(fileId, canonicalPath);
     m_pathToFileId.insert(canonicalPath, fileId);
     
-    qDebug() << "LocalFileRepository: Created fileId" << fileId << "for path" << canonicalPath;
+    qDebug() << "LocalFileRepository: Created fileId" << fileId;
     return fileId;
 }
 
@@ -122,7 +101,7 @@ void LocalFileRepository::registerReceivedFilePath(const QString& fileId, const 
     m_fileIdToPath.insert(fileId, canonicalPath);
     m_pathToFileId.insert(canonicalPath, fileId);
     
-    qDebug() << "LocalFileRepository: Registered received file" << fileId << "at" << canonicalPath;
+    qDebug() << "LocalFileRepository: Registered received file" << fileId;
 }
 
 void LocalFileRepository::removeReceivedFileMapping(const QString& fileId) {

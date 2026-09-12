@@ -1,7 +1,5 @@
 #include "WindowEventHandler.h"
 #include "MainWindow.h"
-#include "backend/network/WatchManager.h"
-#include "backend/network/WebSocketClient.h"
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
 #include "frontend/ui/layout/ResponsiveLayoutManager.h"
 #include "backend/domain/models/ClientInfo.h"
@@ -18,10 +16,8 @@ WindowEventHandler::WindowEventHandler(MainWindow* mainWindow, QObject* parent)
 
 void WindowEventHandler::handleCloseEvent(QCloseEvent* event)
 {
-    // Interpret window close as: stop watching (to stop remote stream) but keep app running in background.
-    if (m_mainWindow->getWatchManager()) {
-        m_mainWindow->getWatchManager()->unwatchIfAny();
-    }
+    // Closing the window hides the active local Project. Incoming receiver
+    // availability is intentionally unaffected.
     m_mainWindow->hide();
     event->ignore(); // do not quit app
 }
@@ -29,28 +25,17 @@ void WindowEventHandler::handleCloseEvent(QCloseEvent* event)
 void WindowEventHandler::handleShowEvent(QShowEvent* event)
 {
     Q_UNUSED(event);
-    
-    // If user reopens the window and we are on the canvas view with a selected client but not watching anymore, restart watch.
-    ScreenNavigationManager* navManager = m_mainWindow->getNavigationManager();
-    WatchManager* watchManager = m_mainWindow->getWatchManager();
-    WebSocketClient* wsClient = m_mainWindow->getWebSocketClient();
-    
-    if (navManager && navManager->isOnScreenView() && watchManager) {
-        const QString selId = m_mainWindow->getSelectedClient().getId();
-        if (!selId.isEmpty() && !watchManager->isWatching() && wsClient && wsClient->isConnected()) {
-            qDebug() << "Reopening window: auto-resuming watch on" << selId;
-            watchManager->toggleWatch(selId); // since not watching, this starts watch
-            // Also request screens to ensure fresh snapshot if server paused sending after unwatch
-            wsClient->requestScreens(selId);
-        }
-    }
-    updateApplicationSuspendedState(m_mainWindow->windowState() & Qt::WindowMinimized);
+
+    m_windowSuspended = (m_mainWindow->windowState() & Qt::WindowMinimized)
+        || !m_mainWindow->isVisible();
+    applyCombinedSuspendedState();
 }
 
 void WindowEventHandler::handleHideEvent(QHideEvent* event)
 {
     Q_UNUSED(event);
-    updateApplicationSuspendedState(true);
+    m_windowSuspended = true;
+    applyCombinedSuspendedState();
 }
 
 void WindowEventHandler::handleResizeEvent(QResizeEvent* event)
@@ -80,18 +65,34 @@ void WindowEventHandler::handleChangeEvent(QEvent* event)
 {
     if (event->type() == QEvent::WindowStateChange) {
         const bool minimized = (m_mainWindow->windowState() & Qt::WindowMinimized);
-        updateApplicationSuspendedState(minimized || m_mainWindow->isHidden());
+        m_windowSuspended = minimized || m_mainWindow->isHidden();
+        applyCombinedSuspendedState();
     }
 }
 
 void WindowEventHandler::handleApplicationStateChanged(Qt::ApplicationState state)
 {
-    const bool suspended = (state == Qt::ApplicationHidden || state == Qt::ApplicationSuspended);
-    updateApplicationSuspendedState(suspended);
+    m_qtApplicationSuspended =
+        state == Qt::ApplicationHidden || state == Qt::ApplicationSuspended;
+    applyCombinedSuspendedState();
 }
 
 void WindowEventHandler::updateApplicationSuspendedState(bool suspended)
 {
+    m_windowSuspended = suspended;
+    applyCombinedSuspendedState();
+}
+
+void WindowEventHandler::updateNativeSystemSuspendedState(bool suspended)
+{
+    m_nativeSystemSuspended = suspended;
+    applyCombinedSuspendedState();
+}
+
+void WindowEventHandler::applyCombinedSuspendedState()
+{
+    const bool suspended = m_windowSuspended || m_qtApplicationSuspended
+        || m_nativeSystemSuspended;
     if (m_mainWindow->isApplicationSuspended() == suspended) {
         return;
     }

@@ -1,12 +1,12 @@
 #include "backend/managers/app/MigrationTelemetryManager.h"
+#include "backend/config/AppConfig.h"
 #include <QJsonObject>
 #include <QJsonDocument>
 #include <QDebug>
 
 namespace {
 bool migrationTelemetryEnabled() {
-    static const bool enabled = qEnvironmentVariableIntValue("MOUFFETTE_MIGRATION_TELEMETRY") == 1;
-    return enabled;
+    return AppConfig::instance().migrationTelemetry();
 }
 
 void logTelemetry(const QJsonObject& payload) {
@@ -39,19 +39,19 @@ void MigrationTelemetryManager::logRendererPathResolved(const QString& location,
     logTelemetry(payload);
 }
 
-void MigrationTelemetryManager::logCanvasLoadRequest(const QString& persistentClientId) {
+void MigrationTelemetryManager::logCanvasLoadRequest(const QString& deviceId) {
     QJsonObject payload;
     payload["event"] = "canvas_load_request";
-    payload["persistentClientId"] = persistentClientId;
+    payload["deviceId"] = deviceId;
     logTelemetry(payload);
 }
 
-void MigrationTelemetryManager::logCanvasLoadReady(const QString& persistentClientId,
+void MigrationTelemetryManager::logCanvasLoadReady(const QString& deviceId,
                                                    int screenCount,
                                                    qint64 latencyMs) {
     QJsonObject payload;
     payload["event"] = "canvas_load_ready";
-    payload["persistentClientId"] = persistentClientId;
+    payload["deviceId"] = deviceId;
     payload["screenCount"] = screenCount;
     payload["latencyMs"] = static_cast<qint64>(latencyMs);
     logTelemetry(payload);

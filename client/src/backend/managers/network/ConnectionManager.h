@@ -14,7 +14,7 @@ class ClientInfo;
  * ConnectionManager encapsulates all connection-related logic including:
  * - Initial connection to server
  * - Disconnection handling
- * - Smart reconnection with exponential backoff
+ * - Lease-aware fast reconnection followed by indefinite capped backoff
  * - Connection status tracking
  * 
  * This removes ~200 lines of connection logic from MainWindow.
@@ -66,6 +66,9 @@ public:
      */
     QString getConnectionStatus() const;
 
+    /** Pure retry policy helper, exposed to make timing boundaries testable. */
+    static int retryDelayForAttempt(int attempt, bool withinLease);
+
 signals:
     /**
      * @brief Emitted when successfully connected to the server
@@ -88,6 +91,7 @@ signals:
      * @param status New status string
      */
     void statusChanged(const QString& status);
+    void leaseExpired(const QString& serverBootId, quint64 connectionGeneration);
     
     /**
      * @brief Emitted when client registration is confirmed by server
@@ -99,18 +103,28 @@ private slots:
     void onConnected();
     void onDisconnected();
     void onConnectionError(const QString& error);
+    void onFatalError(const QString& error);
+    void onLeaseExpired(const QString& serverBootId, quint64 connectionGeneration);
+    void onTransportHealthChanged(bool degraded);
     void attemptReconnect();
+    void onAttemptTimedOut();
 
 private:
     void scheduleReconnect();
-    int calculateReconnectDelay() const;
+    void beginAttempt();
+    void setStatus(const QString& status);
     
     WebSocketClient* m_wsClient;
     QTimer* m_reconnectTimer;
+    QTimer* m_attemptTimeoutTimer;
     QString m_serverUrl;
-    int m_reconnectAttempts;
-    int m_maxReconnectDelay;
-    bool m_isManualDisconnect;
+    QString m_status = QStringLiteral("Disconnected");
+    int m_fastRetryAttempt = 0;
+    int m_backgroundRetryAttempt = 0;
+    bool m_wasWithinLease = false;
+    bool m_isManualDisconnect = false;
+    bool m_attemptInProgress = false;
+    bool m_fatalFailure = false;
 };
 
 #endif // CONNECTIONMANAGER_H

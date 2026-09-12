@@ -1,6 +1,9 @@
 #ifndef UPLOADMANAGER_H
 #define UPLOADMANAGER_H
 
+#include "backend/network/RemoteCacheStore.h"
+#include "backend/network/UploadScheduler.h"
+
 #include <QObject>
 #include <QJsonArray>
 #include <QPointer>
@@ -8,6 +11,7 @@
 #include <QFile>
 #include <QElapsedTimer>
 #include <QSet>
+#include <QStringList>
 #include <QVector>
 #include <QTimer>
 #include <QUuid>
@@ -28,20 +32,26 @@ struct UploadFileInfo {
 
 struct IncomingUploadSession {
     QString senderId;
+    QString remoteSessionId;
+    quint64 generation = 0;                 // RemoteSession generation
+    quint64 sourceConnectionGeneration = 0; // authenticated sender transport
     QString uploadId;
     QString canvasSessionId;
     QString cacheDirPath;
-    QHash<QString, QFile*> openFiles;          // fileId -> QFile*
-    QHash<QString, qint64> expectedSizes;      // fileId -> total bytes
-    QHash<QString, qint64> receivedByFile;     // fileId -> received bytes
-    QHash<QString, QString> filePaths;         // fileId -> upload-owned staging path
-    QHash<QString, QString> fileIdToName;      // fileId -> display name from manifest
-    QHash<QString, QString> fileIdToMediaId;   // fileId -> mediaId for target-side naming
-    QHash<QString, QString> fileIdToExtension; // fileId -> original file extension
+    QHash<QString, QFile*> openFiles;          // assetId -> QFile*
+    QHash<QString, qint64> expectedSizes;      // assetId -> total bytes
+    QHash<QString, qint64> receivedByFile;     // assetId -> durable contiguous bytes
+    QHash<QString, QString> filePaths;         // assetId -> upload-owned staging path
+    QHash<QString, QString> assetIdToFileId;   // assetId -> SHA-256/fileId
+    QHash<QString, QString> assetIdToSha256;   // assetId -> immutable digest
+    QHash<QString, QString> assetIdToName;     // assetId -> display name from manifest
+    QHash<QString, QStringList> assetIdToMediaIds;
+    QHash<QString, QString> assetIdToExtension;
     qint64 totalSize = 0;
     qint64 received = 0;
     qint64 lastProgressBytesReported = 0;
     int totalFiles = 0;
+    bool suspendedForResume = false;
 };
 
 // Dedicated component that encapsulates upload/unload logic previously in MainWindow.
@@ -56,85 +66,279 @@ class UploadManager : public QObject {
 public:
     enum class OutgoingState {
         Idle,
+        Queued,
         AwaitingTargetReady,
         Streaming,
         AwaitingValidation,
+        Suspended,
         Cancelling
     };
     Q_ENUM(OutgoingState)
 
-    explicit UploadManager(FileManager* fileManager, QObject* parent = nullptr);
+    struct BulkTeardownResult {
+        int discoveredScopes = 0;
+        int committedScopes = 0;
+        int cleanupErrorScopes = 0;
+        int removedFileMappings = 0;
+        qint64 quarantinedBytes = 0;
+        QString errorCode;
+
+        bool allLogicallyCommitted() const
+        {
+            return cleanupErrorScopes == 0 && errorCode.isEmpty();
+        }
+    };
+
+    explicit UploadManager(
+        FileManager* fileManager,
+        QObject* parent = nullptr,
+        const QString& remoteCacheRoot = RemoteCacheStore::defaultRootPath());
+    ~UploadManager() override;
     void setWebSocketClient(WebSocketClient* client);
     void setTargetClientId(const QString& id);
     QString targetClientId() const { return m_targetClientId; }
-    QString activeUploadTargetClientId() const { return m_uploadTargetClientId; }
-    QString lastRemovalClientId() const { return m_lastRemovalClientId; }
+    QString activeUploadTargetClientId() const;
     void setActiveIdeaId(const QString& canvasSessionId) { m_activeIdeaId = canvasSessionId; }
     void setActiveSessionIdentity(const QString& identity) { m_activeSessionIdentity = identity; }
     QString activeSessionIdentity() const { return m_activeSessionIdentity; }
-    void clearLastRemovalClientId() { m_lastRemovalClientId.clear(); }
     void forceResetForClient(const QString& clientId = QString());
     
     // Set local client ID for generating directional session IDs
     void setMyClientId(const QString& myClientId) { m_myClientId = myClientId; }
 
     // Outbound (sender side)
-    bool hasActiveUpload() const { return m_uploadActive; }
-    bool isUploading() const {
-        return m_outgoingState == OutgoingState::AwaitingTargetReady
-            || m_outgoingState == OutgoingState::Streaming;
+    bool hasActiveUpload() const;
+    bool isUploading() const;
+    bool isCancelling() const;
+    bool isFinalizing() const;
+    bool isRemoving() const {
+        return !m_pendingAssetRemovals.isEmpty();
     }
-    bool isCancelling() const { return m_outgoingState == OutgoingState::Cancelling; }
-    bool isFinalizing() const { return m_outgoingState == OutgoingState::AwaitingValidation; }
-    bool isRemoving() const { return !m_pendingRemovalId.isEmpty(); }
-    bool isBusy() const { return m_outgoingState != OutgoingState::Idle || isRemoving(); }
+    bool isBusy() const;
     bool canRequestCancel() const;
-    OutgoingState outgoingState() const { return m_outgoingState; }
-    QString currentUploadId() const { return m_currentUploadId; }
+    OutgoingState outgoingState() const;
+    QString currentUploadId() const;
+    QString currentRemoteSessionId() const;
+    quint64 currentRemoteSessionGeneration() const;
+    int activeOutgoingTransferCount() const;
+    UploadScheduler* uploadScheduler() const { return m_uploadScheduler; }
 
-    // Starts a new/incremental upload, or unloads when already synchronized and
-    // no new files are supplied. Cancellation is an explicit guarded action.
+    // Starts a new/incremental upload. Cancellation is an explicit guarded action.
     bool toggleUpload(const QVector<UploadFileInfo>& files);
-    bool requestUnload();
     void requestCancel();
-    bool requestRemoval(const QString& clientId);
+    // Removes one immutable validated asset while keeping the RemoteSession
+    // and every other uploaded asset alive. This is the canonical path used
+    // when the last local reference to a source disappears.
+    bool requestAssetRemoval(const QString& targetDeviceId,
+                             const QString& localFileId,
+                             const QString& reason = QStringLiteral("source_removed"));
 
     // Incoming (target side) handling entry point
     void handleIncomingMessage(const QJsonObject& message);
 
+    // Called after the render/audio side has reached teardownSettled.  The
+    // first call blocks all subsequent upload commands for this scope, closes
+    // an in-flight receiver, drops FileManager handles/mappings, then commits
+    // the atomic quarantine.  Replays return AlreadyCommitted.
+    RemoteCacheStore::CommitResult teardownRemoteSession(
+        const QString& senderDeviceId,
+        const QString& remoteSessionId,
+        quint64 generation,
+        const QString& teardownId);
+    // Terminal transport events must stop writers immediately but may not
+    // rename/delete their cache while a renderer still owns those files.
+    // MainWindow calls completeTerminalIncomingCleanup() only after every
+    // correlated RemoteSceneController::teardownSettled barrier has fired.
+    void beginTerminalIncomingCleanup(const QString& reasonCode);
+    BulkTeardownResult completeTerminalIncomingCleanup(
+        const QString& reasonCode);
+    // Terminal local events (lease expiry/server restart) have no server
+    // teardownId. Every live on-disk receiver scope is therefore committed
+    // under a provisional tombstone which can later adopt the authenticated
+    // server teardown identity without reopening the cache.
+    BulkTeardownResult teardownAllIncomingRemoteSessions(
+        const QString& reasonCode);
+    bool receiverReadyForAdvertisement() const
+    {
+        return m_remoteCacheReady && m_receiverAdvertisementReady;
+    }
+    QString receiverCleanupError() const { return m_receiverCleanupError; }
+    // Retry only after a previous startup/server-boot cleanup failure. A
+    // healthy reconnect never sweeps live RemoteSessions.
+    bool retryReceiverAdvertisementCleanup();
+    RemoteCacheStore* remoteCacheStore() const { return m_remoteCacheStore; }
+    int lastTeardownRemovedFileCount() const { return m_lastTeardownRemovedFileCount; }
+
 signals:
     void uiStateChanged(); // generic signal to refresh button text/state
     void uploadProgress(int percent, int filesCompleted, int totalFiles); // forwarded from server
-    void uploadFinished();
+    // Carries the immutable transfer identity so terminal UI/history events
+    // remain correlated even after the runtime transfer state is cleared.
+    void uploadFinished(const QString& uploadId);
     void uploadCancelled(const QString& uploadId);
     void uploadRejected(const QString& uploadId, const QString& reason);
-    void removalFailed(const QString& reason);
+    void assetRemovalCommitted(const QString& targetDeviceId,
+                               const QStringList& localFileIds);
+    void assetRemovalFailed(const QString& targetDeviceId,
+                            const QString& remoteSessionId,
+                            const QStringList& localFileIds,
+                            const QString& reason);
     // New: subset of files confirmed complete by target so far
     void uploadCompletedFileIds(const QStringList& fileIds);
-    void allFilesRemoved();
     // New: fine-grained per-file upload lifecycle (sender-side only)
     void fileUploadStarted(const QString& fileId);
     void fileUploadProgress(const QString& fileId, int percent);
     void fileUploadFinished(const QString& fileId);
+    // Complete v2 target replies. The transport layer must add its standard
+    // protocolVersion/serverBootId/messageId/connectionGeneration envelope.
+    void protocolV2UploadResponseReady(const QJsonObject& response);
+    void remoteSessionCacheCommitted(const QString& senderDeviceId,
+                                     const QString& remoteSessionId,
+                                     quint64 generation,
+                                     const QString& teardownId,
+                                     int removedFileMappings,
+                                     qint64 quarantinedBytes);
+    void remoteSessionCacheCleanupError(const QString& senderDeviceId,
+                                        const QString& remoteSessionId,
+                                        quint64 generation,
+                                        const QString& teardownId,
+                                        const QString& errorCode);
+    void receiverAdvertisementReadinessChanged(bool ready,
+                                               const QString& errorCode);
+    // Requests the application-level renderer barrier. This is emitted
+    // synchronously from leaseExpired/serverRestarted while RemoteSession
+    // bindings can still be enumerated, before WebSocketClient clears them.
+    void terminalIncomingCleanupRequired(const QString& reasonCode);
 
 public slots:
-    // Forwarded from WebSocket layer
-    void onUploadProgress(const QString& uploadId, int percent, int filesCompleted, int totalFiles);
-    void onUploadReady(const QString& uploadId, const QString& canvasSessionId);
-    void onUploadBytesAcknowledged(const QString& uploadId, qint64 receivedBytes);
-    void onUploadCompletedFileIds(const QString& uploadId, const QStringList& fileIds);
-    void onUploadFinished(const QString& uploadId);
-    void onUploadRejected(const QString& uploadId, const QString& reason);
-    void onUploadAborted(const QString& uploadId, const QString& canvasSessionId);
-    void onAllFilesRemovedRemote(const QString& removalId,
-                                 const QString& targetClientId,
-                                 const QString& canvasSessionId);
-    void onRemovalRejected(const QString& removalId, const QString& reason);
+    // Canonical protocol-v2 entry point. Both owner responses and target
+    // requests arrive here with their immutable RemoteSession correlation.
+    void handleUploadProtocolMessage(const QJsonObject& message);
     // Handle network connection loss while uploading/finalizing
     void onConnectionLost();
 
 private:
+    struct OutgoingAsset {
+        QString assetId;       // content SHA-256 used by protocol v2
+        QString sha256;
+        QString path;
+        QString name;
+        QString extension;
+        QStringList mediaIds;
+        QStringList localFileIds;
+        qint64 size = 0;
+    };
+
+    struct CommittedRemoteAsset {
+        QString targetDeviceId;
+        QString remoteSessionId;
+        quint64 generation = 0;
+        QString uploadId;
+        QString assetId;
+        QString sha256;
+        QString extension;
+        QStringList localFileIds;
+        qint64 size = 0;
+    };
+
+    struct PendingAssetRemoval {
+        QString removalId;
+        CommittedRemoteAsset asset;
+        QString reason;
+        quint64 lastSentGeneration = 0;
+    };
+
+    struct IncomingUploadCompletionTombstone {
+        QString senderDeviceId;
+        QString remoteSessionId;
+        quint64 generation = 0;
+        quint64 sourceConnectionGeneration = 0;
+        QString uploadId;
+        QJsonArray assets;
+        qint64 expiresAtEpochMs = 0;
+    };
+
+    // The original UI exposes one selected project at a time, while protocol
+    // v2 permits two uploads to different RemoteSessions concurrently.  The
+    // first transfer keeps the historical fields below for source
+    // compatibility; every additional queued/active transfer owns this fully
+    // independent context.  All protocol routing is by uploadId + session.
+    struct ParallelOutgoingTransfer {
+        QString targetDeviceId;
+        QString remoteSessionId;
+        QString uploadId;
+        quint64 generation = 0;
+        quint64 schedulerGeneration = 0;
+        OutgoingState state = OutgoingState::Queued;
+        OutgoingState stateBeforeSuspend = OutgoingState::Idle;
+        bool remoteInventoryBeforeStart = false;
+        bool waitingForResume = false;
+        bool payloadCompleteSent = false;
+        bool transportRegistered = false;
+        bool pumpRunning = false;
+        QVector<OutgoingAsset> assets;
+        QJsonArray manifest;
+        QHash<QString, qint64> durableOffsets;
+        QFile fileHandle;
+        int fileIndex = 0;
+        qint64 sentForFile = 0;
+        qint64 totalBytes = 0;
+        qint64 sentBytes = 0;
+        qint64 remoteAcknowledgedBytes = 0;
+        QTimer* pumpTimer = nullptr;
+        QTimer* stallTimer = nullptr;
+        QTimer* startAckTimer = nullptr;
+        QTimer* ackTimer = nullptr;
+        QTimer* cancelTimer = nullptr;
+        QElapsedTimer stateAge;
+        int totalFiles = 0;
+        int localPercent = 0;
+        int remotePercent = 0;
+        int remoteFilesCompleted = 0;
+        QHash<QString, int> localFilePercents;
+        QHash<QString, int> remoteFilePercents;
+    };
+
     void startUpload(const QVector<UploadFileInfo>& files);
+    ParallelOutgoingTransfer* parallelForUpload(const QString& uploadId) const;
+    ParallelOutgoingTransfer* parallelForSession(const QString& remoteSessionId) const;
+    ParallelOutgoingTransfer* parallelForTarget(const QString& targetDeviceId) const;
+    void initializeParallelTimers(ParallelOutgoingTransfer* transfer);
+    void setParallelState(ParallelOutgoingTransfer* transfer, OutgoingState state);
+    void startParallelScheduled(ParallelOutgoingTransfer* transfer);
+    bool resumeParallel(ParallelOutgoingTransfer* transfer);
+    void suspendParallel(ParallelOutgoingTransfer* transfer);
+    void scheduleParallelPump(ParallelOutgoingTransfer* transfer);
+    void stopParallel(ParallelOutgoingTransfer* transfer);
+    void pumpParallel(ParallelOutgoingTransfer* transfer);
+    QJsonArray parallelAssetStates(const ParallelOutgoingTransfer* transfer,
+                                   bool complete) const;
+    bool applyParallelOffsets(ParallelOutgoingTransfer* transfer,
+                              const QJsonArray& assets,
+                              bool resetSendCursor,
+                              QString* errorMessage = nullptr);
+    void failParallel(ParallelOutgoingTransfer* transfer, const QString& reason);
+    void finishParallel(ParallelOutgoingTransfer* transfer);
+    void cancelParallel(ParallelOutgoingTransfer* transfer);
+    void removeParallel(ParallelOutgoingTransfer* transfer,
+                        bool preserveRemoteInventory,
+                        bool releaseScheduler,
+                        bool schedulerSuccess = false);
+    void handleParallelMessage(ParallelOutgoingTransfer* transfer,
+                               const QJsonObject& message);
+    void emitParallelProgress(const ParallelOutgoingTransfer* transfer);
+    void startScheduledUpload(const UploadScheduler::UploadRequest& request);
+    bool resumeOutgoingUpload();
+    void suspendOutgoingForResume(const QString& reason = QString());
+    void terminateRemoteSessionUpload(const QString& remoteSessionId,
+                                      const QString& reason);
+    bool applyAuthoritativeOffsets(const QJsonArray& assets,
+                                   bool resetSendCursor,
+                                   QString* errorMessage = nullptr);
+    QJsonArray outgoingAssetStates(bool complete) const;
+    void releaseSchedulerSlot(bool success);
+    void clearOutgoingTransfer(bool preserveRemoteInventory);
+    void applyRemoteSessionEnvelope(const QJsonObject& envelope);
     void setOutgoingState(OutgoingState state);
     void resetToInitial();
     void cleanupOrphanedIncomingCache();
@@ -145,7 +349,9 @@ private:
     void rejectIncomingUpload(const QString& senderId,
                               const QString& uploadId,
                               const QString& reason,
-                              bool discardMatchingSession);
+                              bool discardMatchingSession,
+                              const QString& remoteSessionId = QString(),
+                              quint64 generation = 0);
     void clearIncomingChunkTracking(const QString& uploadId);
     bool cleanupIncomingSession(bool deleteDiskContents,
                                 bool notifySender,
@@ -159,6 +365,8 @@ private:
     void stopOutgoingPump();
     void failOutgoingUpload(const QString& reason);
     void finishLocalCancellation();
+    void onUploadFinished(const QString& uploadId);
+    void onUploadRejected(const QString& uploadId, const QString& reason);
     void updateLocalProgress(int percent, int filesCompleted);
     void updateRemoteProgress(int percent, int filesCompleted);
     void emitEffectiveProgressIfChanged();
@@ -168,6 +376,48 @@ private:
     bool canAcceptNewAction() const;
     void recordAcceptedAction();
     void restartIncomingStallTimer();
+    void closeIncomingFiles(bool flush);
+    void suspendIncomingForResume();
+    QJsonArray incomingAssetOffsets() const;
+    void rememberIncomingUploadCompletion(
+        const QString& senderDeviceId,
+        const QString& remoteSessionId,
+        quint64 generation,
+        quint64 sourceConnectionGeneration,
+        const QString& uploadId,
+        const QJsonArray& assets);
+    bool replayIncomingUploadCompletion(
+        const QJsonObject& message,
+        const QString& senderDeviceId,
+        const QString& remoteSessionId,
+        quint64 generation,
+        quint64 sourceConnectionGeneration);
+    void pruneIncomingUploadCompletions(qint64 nowEpochMs);
+    void forgetIncomingUploadCompletions(const QString& remoteSessionId);
+    void emitIncomingV2Response(const QString& type,
+                                const QString& senderDeviceId,
+                                const QString& remoteSessionId,
+                                quint64 generation,
+                                const QString& uploadId,
+                                const QJsonObject& extra = QJsonObject());
+    int detachReceivedMappingsForScope(const RemoteCacheStore::Scope& scope);
+    void rememberCommittedAssets(const QString& targetDeviceId,
+                                 const QString& remoteSessionId,
+                                 quint64 generation,
+                                 const QString& uploadId,
+                                 const QVector<OutgoingAsset>& assets);
+    bool findCommittedAsset(const QString& targetDeviceId,
+                            const QString& localFileId,
+                            CommittedRemoteAsset* asset) const;
+    void forgetCommittedAsset(const CommittedRemoteAsset& asset);
+    void forgetRemoteSessionInventory(const QString& remoteSessionId);
+    void failAssetRemoval(const QString& removalId, const QString& reason);
+    bool sendPendingAssetRemoval(PendingAssetRemoval& pending);
+    bool assetRemovalMessageMatches(const PendingAssetRemoval& pending,
+                                    const QJsonObject& message,
+                                    bool requireDerivedFields = true) const;
+    void handleIncomingAssetRemoval(const QJsonObject& message);
+    void handleAssetRemovalResult(const QJsonObject& message);
 
     QPointer<WebSocketClient> m_ws;
     QString m_targetClientId;
@@ -177,15 +427,15 @@ private:
     QString m_activeIdeaId;
 
     // Sender side state
-    bool m_uploadActive = false;      // true after remote finished (acts as toggle to unload)
+    bool m_uploadActive = false;      // true while this target has validated remote inventory
     OutgoingState m_outgoingState = OutgoingState::Idle;
+    OutgoingState m_stateBeforeSuspend = OutgoingState::Idle;
     bool m_uploadWasActiveBeforeStart = false; // preserve earlier synchronized files on incremental failure
     QString m_currentUploadId;        // uuid
     int m_lastPercent = 0;
     int m_filesCompleted = 0;
     int m_totalFiles = 0;
-    QTimer* m_cancelFallbackTimer = nullptr; // fires if remote never responds to abort/unload
-    QTimer* m_removalAckTimer = nullptr;
+    QTimer* m_cancelFallbackTimer = nullptr; // fires if remote never responds to abort
     // Sender-side byte tracking for accurate weighted progress
     qint64 m_totalBytes = 0;
     qint64 m_sentBytes = 0;
@@ -200,6 +450,14 @@ private:
 
     // Sender-side per-file tracking
     QVector<UploadFileInfo> m_outgoingFiles;
+    QVector<OutgoingAsset> m_outgoingAssets;
+    QJsonArray m_outgoingManifest;
+    QHash<QString, qint64> m_outgoingDurableOffsets;
+    QString m_outgoingRemoteSessionId;
+    quint64 m_outgoingGeneration = 0;
+    quint64 m_schedulerGeneration = 0;
+    bool m_waitingForResume = false;
+    bool m_outgoingTransportRegistered = false;
     QFile m_outgoingFileHandle;
     int m_outgoingFileIndex = 0;
     int m_outgoingChunkIndex = 0;
@@ -213,24 +471,36 @@ private:
     qint64 m_remoteAcknowledgedBytes = 0;
     QMetaObject::Connection m_uploadBytesWrittenConnection;
     QMetaObject::Connection m_uploadTransportLostConnection;
+    QVector<QMetaObject::Connection> m_webSocketConnections;
     QHash<QString, int> m_localFilePercents;
     QHash<QString, int> m_remoteFilePercents;
     QHash<QString, int> m_effectiveFilePercents;
-
-    QString m_lastRemovalClientId;
-    QString m_pendingRemovalId;
-    QString m_pendingRemovalTargetId;
-    QString m_pendingRemovalCanvasSessionId;
+    QHash<QString, ParallelOutgoingTransfer*> m_parallelOutgoingByUpload;
+    QHash<QString, QString> m_parallelUploadBySession;
+    QSet<QString> m_remoteInventoryTargets;
+    QHash<QString, QHash<QString, CommittedRemoteAsset>>
+        m_committedAssetsByTarget; // targetDeviceId -> assetId -> metadata
+    QHash<QString, PendingAssetRemoval> m_pendingAssetRemovals; // removalId -> request
 
     // Phase 4.3: FileManager injected (not singleton)
     FileManager* m_fileManager = nullptr;
+    RemoteCacheStore* m_remoteCacheStore = nullptr;
+    UploadScheduler* m_uploadScheduler = nullptr;
+    bool m_remoteCacheReady = false;
+    bool m_receiverAdvertisementReady = false;
+    QString m_receiverCleanupError;
+    QString m_receiverCleanupReason = QStringLiteral("startup_recovery");
+    bool m_terminalIncomingCleanupAwaitingRenderer = false;
+    int m_lastTeardownRemovedFileCount = 0;
 
     // Incoming session (target side)
     IncomingUploadSession m_incoming;
     QTimer* m_incomingStallTimer = nullptr;
     QSet<QString> m_canceledIncoming; // uploadIds canceled by sender
-    // Track next expected chunk index per (uploadId:fileId) on the target side
-    QHash<QString, int> m_expectedChunkIndex;
+    QHash<QString, IncomingUploadCompletionTombstone>
+        m_incomingUploadCompletionTombstones;
+    // Track the next durable byte offset per (uploadId:assetId).
+    QHash<QString, qint64> m_expectedChunkIndex;
     
     // Local client ID for directional session generation
     QString m_myClientId; 

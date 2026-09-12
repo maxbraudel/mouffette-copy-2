@@ -7,35 +7,39 @@
 #include <QCoreApplication>
 #include <QQuickWindow>
 #include <QMediaFormat>
+#include <QSettings>
+#include <cstdio>
+#include "backend/config/AppConfig.h"
+#include "backend/managers/system/SystemLifecycleMonitor.h"
 #include "MainWindow.h"
 
 // ── Dev flags ────────────────────────────────────────────────────────────────
-// Set these to true to enable features without passing environment variables.
-// Equivalent to: MOUFFETTE_USE_QUICK_CANVAS_RENDERER=1 MOUFFETTE_CURSOR_DEBUG=1
-static constexpr bool DEV_USE_QUICK_CANVAS_RENDERER = true;
-static constexpr bool DEV_CURSOR_DEBUG               = false;
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace {
-// Remove the entire upload cache folder used by UploadManager:
-//   base = QStandardPaths::CacheLocation (fallback ~/.cache)
-//   path = base + "/Mouffette/Uploads"
-void cleanUploadsFolder() {
+// Protocol-v2 migration only. Live v2 caches are owned by RemoteSession
+// teardown and must never be swept merely because the UI process exits.
+void cleanLegacyUploadsOnce() {
+    QSettings settings(QStringLiteral("Mouffette"), QStringLiteral("Client"));
+    if (settings.value(QStringLiteral("protocolV2LegacyUploadsCleaned"), false).toBool()) {
+        return;
+    }
     QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
     if (base.isEmpty()) base = QDir::homePath() + "/.cache";
-    const QString uploadsPath = base + "/Mouffette/Uploads";
+    const QString uploadsPath =
+        QDir(base).absoluteFilePath(QStringLiteral("Mouffette/Uploads"));
     QDir dir(uploadsPath);
-    if (dir.exists()) {
-        if (!dir.removeRecursively()) {
-            qWarning() << "Failed to remove uploads cache folder:" << uploadsPath;
-        } else {
-            qDebug() << "Cleared uploads cache folder:" << uploadsPath;
-        }
+    if (dir.exists() && !dir.removeRecursively()) {
+        qWarning() << "Protocol-v2 migration could not remove the legacy upload cache";
+        return;
     }
+    settings.setValue(QStringLiteral("protocolV2LegacyUploadsCleaned"), true);
+    settings.sync();
+    qInfo() << "Protocol-v2 legacy upload cache migration complete";
 }
 
 void logRuntimeDiagnostics() {
-    if (qEnvironmentVariableIntValue("MOUFFETTE_RUNTIME_DIAGNOSTICS") != 1) {
+    if (!AppConfig::instance().runtimeDiagnostics()) {
         return;
     }
     const auto apiToString = [](QSGRendererInterface::GraphicsApi api) {
@@ -65,11 +69,19 @@ void logRuntimeDiagnostics() {
 }
 
 int main(int argc, char *argv[]) {
-    if (DEV_USE_QUICK_CANVAS_RENDERER) qputenv("MOUFFETTE_USE_QUICK_CANVAS_RENDERER", "1");
-    if (DEV_CURSOR_DEBUG)               qputenv("MOUFFETTE_CURSOR_DEBUG", "1");
-    if (!qEnvironmentVariableIsSet("QT_MEDIA_BACKEND")) {
-        qputenv("QT_MEDIA_BACKEND", "ffmpeg");
+    QStringList arguments;
+    arguments.reserve(argc);
+    for (int i = 0; i < argc; ++i) {
+        arguments.append(QString::fromLocal8Bit(argv[i]));
     }
+
+    QString configError;
+    if (!AppConfig::instance().initialize(arguments, &configError)) {
+        std::fprintf(stderr, "Mouffette configuration error: %s\n",
+                     configError.toLocal8Bit().constData());
+        return 2;
+    }
+    AppConfig::instance().applyPreApplicationEnvironment();
 
     QApplication app(argc, argv);
 
@@ -87,18 +99,23 @@ int main(int argc, char *argv[]) {
     // Disable focus rectangle on all widgets (especially visible on Windows)
     app.setStyleSheet("* { outline: none; }");
     
-    // Ensure uploads cache is empty on startup
-    cleanUploadsFolder();
+    cleanLegacyUploadsOnce();
     logRuntimeDiagnostics();
-
-    // Also clear on clean shutdown
-    QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, [](){ cleanUploadsFolder(); });
 
     // Keep application alive when window is closed (so user can reopen via other means later)
     app.setQuitOnLastWindowClosed(false);
 
     MainWindow window;
+    SystemLifecycleMonitor systemLifecycleMonitor;
     QObject::connect(&app, &QGuiApplication::applicationStateChanged, &window, &MainWindow::handleApplicationStateChanged);
+    QObject::connect(&systemLifecycleMonitor,
+                     &SystemLifecycleMonitor::systemSuspendedChanged,
+                     &window,
+                     &MainWindow::handleNativeSystemSuspendedChanged);
+    systemLifecycleMonitor.startNativeMonitoring();
+    QObject::connect(&app, &QCoreApplication::aboutToQuit,
+                     &window, &MainWindow::handleApplicationAboutToQuit,
+                     Qt::DirectConnection);
     window.show(); // Explicitly show main window since tray UX removed
     return app.exec();
 }

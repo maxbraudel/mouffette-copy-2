@@ -18,7 +18,8 @@
 #include <QVBoxLayout>
 
 class ClientInfo;
-class SessionManager;
+class SceneActivityModel;
+class QTimer;
 
 /**
  * @class ClientListPage
@@ -36,10 +37,11 @@ class ClientListPage : public QWidget {
 public:
     /**
      * @brief Constructor
-     * @param sessionManager Pointer to the session manager for ongoing scenes
+     * @param sceneActivityModel Canonical model containing Live scenes only
      * @param parent Parent widget
      */
-    explicit ClientListPage(SessionManager* sessionManager, QWidget* parent = nullptr);
+    explicit ClientListPage(SceneActivityModel* sceneActivityModel,
+                            QWidget* parent = nullptr);
     
     /**
      * @brief Destructor
@@ -73,6 +75,9 @@ public:
      */
     void setEnabled(bool enabled);
 
+    int authenticatedDeviceCount() const noexcept { return m_authenticatedDeviceCount; }
+    int liveSceneCount() const noexcept { return m_liveSceneCount; }
+
 signals:
     /**
      * @brief Emitted when a client is clicked
@@ -83,9 +88,11 @@ signals:
 
     /**
      * @brief Emitted when an ongoing scene is clicked
-     * @param persistentClientId The persistent client ID of the session
+     * @param sceneRunId The immutable SceneRun identity
      */
-    void ongoingSceneClicked(const QString& persistentClientId);
+    void ongoingSceneClicked(const QString& sceneRunId);
+
+    void summaryCountsChanged(int authenticatedDeviceCount, int liveSceneCount);
 
 private slots:
     /**
@@ -100,6 +107,8 @@ private slots:
      */
     void onOngoingSceneItemClicked(QListWidgetItem* item);
 
+    void refreshClientCountdowns();
+
 private:
     /**
      * @brief Setup the UI layout and widgets
@@ -112,17 +121,27 @@ private:
      */
     void applyListWidgetStyle(QListWidget* listWidget);
 
-    // Session manager (not owned)
-    SessionManager* m_sessionManager;
+    void updateClientItem(QListWidgetItem* item,
+                          const ClientInfo& client,
+                          qint64 nowMs);
+    void updateSectionTitles();
+    QString peerDisplayName(const QString& deviceId) const;
+
+    // Canonical Live-scene model (not owned)
+    SceneActivityModel* m_sceneActivityModel;
 
     // UI Components
     QVBoxLayout* m_layout;
+    QLabel* m_clientsLabel;
     QListWidget* m_clientListWidget;
     QLabel* m_ongoingScenesLabel;
     QListWidget* m_ongoingScenesList;
+    QTimer* m_countdownTimer;
 
     // Data
     QList<ClientInfo> m_availableClients;
+    int m_authenticatedDeviceCount = 0;
+    int m_liveSceneCount = 0;
 };
 
 #endif // CLIENTLISTPAGE_H

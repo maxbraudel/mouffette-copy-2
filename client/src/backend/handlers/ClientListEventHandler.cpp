@@ -6,10 +6,8 @@
 #include "shared/rendering/ICanvasHost.h"
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
 #include "backend/network/UploadManager.h"
-#include "backend/network/WatchManager.h"
 #include "frontend/ui/pages/ClientListPage.h"
 #include <QDebug>
-#include <optional>
 
 ClientListEventHandler::ClientListEventHandler(MainWindow* mainWindow, WebSocketClient* webSocketClient, QObject* parent)
     : QObject(parent)
@@ -68,138 +66,70 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
         }
     }
 
-    // Update remote status and canvas behavior if we're on screen view:
-    // Handle remote reconnect where the server assigns a NEW clientId.
-    // Strategy:
-    // 1) If selected client's id is present -> mark CONNECTED. If we're on loader, request screens + watch.
-    // 2) Else, try to match by machineName (and platform). If found -> treat as same device, switch selection to new id,
-    //    reset reveal flag, show screen view for it, request screens + watch.
-    // 3) Else -> mark DISCONNECTED and keep loader.
+    // Reconcile exclusively by the authenticated installation identity. A
+    // machine name is presentation data and must never reconnect one physical
+    // device's project to another device which happens to share that name.
     ScreenNavigationManager* navigationManager = m_mainWindow->getNavigationManager();
     if (navigationManager && navigationManager->isOnScreenView() && !activeSessionIdentity.isEmpty()) {
         MainWindow::CanvasSession* activeSession = m_mainWindow->findCanvasSession(activeSessionIdentity);
         if (activeSession) {
-            const QString selId = activeSession->serverAssignedId;
-            const QString selName = activeSession->lastClientInfo.getMachineName();
-            const QString selPlatform = activeSession->lastClientInfo.getPlatform();
-
-            const auto findById = [&clients](const QString& id) -> std::optional<ClientInfo> {
-                for (const auto& c : clients) { if (c.getId() == id) return c; }
-                return std::nullopt;
-            };
-            const auto findByNamePlatform = [&clients](const QString& name, const QString& platform) -> std::optional<ClientInfo> {
-                for (const auto& c : clients) {
-                    if (c.getMachineName().compare(name, Qt::CaseInsensitive) == 0 && c.getPlatform() == platform) return c;
+            const ClientInfo* matchingDevice = nullptr;
+            for (const ClientInfo& candidate : clients) {
+                if (candidate.clientId() == activeSessionIdentity) {
+                    matchingDevice = &candidate;
+                    break;
                 }
-                return std::nullopt;
-            };
-
-            std::optional<ClientInfo> byId;
-            if (!selId.isEmpty()) {
-                byId = findById(selId);
             }
 
-            if (byId.has_value()) {
-                activeSession->serverAssignedId = byId->getId();
-                activeSession->lastClientInfo = byId.value();
+            if (matchingDevice) {
+                m_mainWindow->getSessionManager()->updateSessionServerId(
+                    activeSessionIdentity, matchingDevice->getId());
+                activeSession = m_mainWindow->findCanvasSession(activeSessionIdentity);
+                if (!activeSession) {
+                    return;
+                }
+                activeSession->lastClientInfo = *matchingDevice;
                 activeSession->lastClientInfo.setClientId(activeSessionIdentity);
+                activeSession->lastClientInfo.setOnline(true);
                 activeSession->remoteContentClearedOnDisconnect = false;
                 m_mainWindow->setSelectedClient(activeSession->lastClientInfo);
                 if (activeSession->canvas && !activeSession->serverAssignedId.isEmpty()) {
-                    activeSession->canvas->setRemoteSceneTarget(activeSession->serverAssignedId, selName);
+                    activeSession->canvas->setRemoteSceneTarget(
+                        activeSessionIdentity,
+                        activeSession->lastClientInfo.getMachineName());
+                    // Replace only the remote topology. ScreenCanvas rebuilds
+                    // its screen backdrops without remapping media, whose
+                    // project coordinates remain absolute.
+                    activeSession->canvas->setScreens(
+                        activeSession->lastClientInfo.getScreens());
                 }
-                UploadManager* uploadManager = m_mainWindow->getUploadManager();
-                if (uploadManager) uploadManager->setTargetClientId(activeSession->serverAssignedId);
-                
+                navigationManager->refreshActiveClientPreservingCanvas(activeSession->lastClientInfo);
+                m_mainWindow->updateClientNameDisplay(activeSession->lastClientInfo);
                 const bool isActiveSelection = (activeSession->persistentClientId == activeSessionIdentity);
                 if (isActiveSelection) {
                     QString activeRemoteClientId = m_mainWindow->getActiveRemoteClientId();
-                    if (activeRemoteClientId != activeSession->serverAssignedId) {
-                        m_mainWindow->setActiveRemoteClientId(activeSession->serverAssignedId);
+                    if (activeRemoteClientId != activeSessionIdentity) {
+                        m_mainWindow->setActiveRemoteClientId(activeSessionIdentity);
                         m_mainWindow->setRemoteClientConnected(false);
-                    }
-                    if (!m_mainWindow->isRemoteClientConnected()) {
-                        m_mainWindow->addRemoteStatusToLayout();
-                        m_mainWindow->setRemoteConnectionStatus("CONNECTING...", /*propagateLoss*/ false);
-                        if (m_webSocketClient && m_webSocketClient->isConnected()) {
-                            m_webSocketClient->requestScreens(activeSession->serverAssignedId);
-                            WatchManager* watchManager = m_mainWindow->getWatchManager();
-                            if (watchManager) {
-                                if (watchManager->watchedClientId() != activeSession->serverAssignedId) {
-                                    watchManager->unwatchIfAny();
-                                    watchManager->toggleWatch(activeSession->serverAssignedId);
-                                }
-                            }
-                        }
                     }
                 }
             } else {
-                auto byName = findByNamePlatform(selName, selPlatform);
-                if (byName.has_value()) {
-                    activeSession->serverAssignedId = byName->getId();
-                    activeSession->lastClientInfo = byName.value();
-                    activeSession->lastClientInfo.setClientId(activeSessionIdentity);
-                    activeSession->remoteContentClearedOnDisconnect = false;
-                    m_mainWindow->setSelectedClient(activeSession->lastClientInfo);
-                    if (activeSession->canvas && !activeSession->serverAssignedId.isEmpty()) {
-                        activeSession->canvas->setRemoteSceneTarget(activeSession->serverAssignedId, selName);
-                    }
-                    UploadManager* uploadManager = m_mainWindow->getUploadManager();
-                    if (uploadManager) uploadManager->setTargetClientId(activeSession->serverAssignedId);
-                    
-                    if (navigationManager) {
-                        navigationManager->refreshActiveClientPreservingCanvas(activeSession->lastClientInfo);
-                    }
-                    m_mainWindow->updateClientNameDisplay(activeSession->lastClientInfo);
-                    const bool isActiveSelection = (activeSession->persistentClientId == activeSessionIdentity);
-                    if (isActiveSelection) {
-                        QString activeRemoteClientId = m_mainWindow->getActiveRemoteClientId();
-                        if (activeRemoteClientId != activeSession->serverAssignedId) {
-                            m_mainWindow->setActiveRemoteClientId(activeSession->serverAssignedId);
-                            m_mainWindow->setRemoteClientConnected(false);
-                        }
-                        if (!m_mainWindow->isRemoteClientConnected()) {
-                            m_mainWindow->setRemoteConnectionStatus("CONNECTING...");
-                            m_mainWindow->addRemoteStatusToLayout();
-                            if (m_webSocketClient && m_webSocketClient->isConnected()) {
-                                m_webSocketClient->requestScreens(activeSession->serverAssignedId);
-                                WatchManager* watchManager = m_mainWindow->getWatchManager();
-                                if (watchManager) {
-                                    if (watchManager->watchedClientId() != activeSession->serverAssignedId) {
-                                        watchManager->unwatchIfAny();
-                                        watchManager->toggleWatch(activeSession->serverAssignedId);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    if (!activeSession->remoteContentClearedOnDisconnect) {
-                        m_mainWindow->unloadUploadsForSession(*activeSession, true);
-                    }
-                    
-                    m_mainWindow->setPreserveViewportOnReconnect(true);
-                    UploadManager* uploadManager = m_mainWindow->getUploadManager();
-                    if (uploadManager) {
-                        uploadManager->setTargetClientId(QString());
-                    }
-                    WatchManager* watchManager = m_mainWindow->getWatchManager();
-                    if (watchManager) {
-                        watchManager->unwatchIfAny();
-                    }
-                    
-                    // Apply DISCONNECTED state
-                    RemoteClientState state = RemoteClientState::disconnected();
-                    const int volumePercent = activeSession->lastClientInfo.getVolumePercent();
-                    if (volumePercent >= 0) {
-                        m_mainWindow->setSelectedClient(activeSession->lastClientInfo);
-                        state.clientInfo = activeSession->lastClientInfo;
-                        state.volumeVisible = true;
-                        state.volumePercent = volumePercent;
-                    }
-                    
-                    m_mainWindow->setRemoteClientState(state);
+                // Discovery loss does not delete the local project/canvas and
+                // does not itself purge uploads. The RemoteSession lease owns
+                // that terminal decision after its exact three-second limit.
+                activeSession->lastClientInfo.setOnline(false);
+                activeSession->lastClientInfo.setFromMemory(true);
+                m_mainWindow->setSelectedClient(activeSession->lastClientInfo);
+                m_mainWindow->setPreserveViewportOnReconnect(true);
+                m_mainWindow->refreshOverlayActionsState(false, /*propagateLoss*/ false);
+                if (m_mainWindow->getUploadManager()) {
+                    m_mainWindow->getUploadManager()->setTargetClientId(QString());
                 }
+                RemoteClientState state = RemoteClientState::disconnected();
+                state.clientInfo = activeSession->lastClientInfo;
+                state.volumeVisible = activeSession->lastClientInfo.getVolumePercent() >= 0;
+                state.volumePercent = activeSession->lastClientInfo.getVolumePercent();
+                m_mainWindow->setRemoteClientState(state, /*propagateLoss*/ false);
             }
         }
     }

@@ -68,7 +68,6 @@ void UploadEventHandler::onUploadButtonClicked()
     qDebug() << "managerHasActive:" << managerHasActive;
     qDebug() << "  - hasActiveUpload:" << uploadManager->hasActiveUpload();
     qDebug() << "  - activeTargetClientId:" << uploadManager->activeUploadTargetClientId();
-    qDebug() << "  - lastRemovalClientId:" << uploadManager->lastRemovalClientId();
     qDebug() << "hasRemoteFiles:" << hasRemoteFiles;
 
     upload.itemsByFileId.clear();
@@ -190,20 +189,10 @@ void UploadEventHandler::onUploadButtonClicked()
                 return;
             }
 
-            if (sessionHasRemote) {
-                qDebug() << "Requesting remote removal for" << targetClientId << "(session" << session->persistentClientId << ")";
-                uploadManager->setActiveSessionIdentity(session->persistentClientId);
-                if (uploadManager->requestRemoval(targetClientId)) {
-                    TOAST_INFO(QString("Requesting remote removal from %1…").arg(clientLabel));
-                }
-                return;
-            }
-
-            if (managerHasActive) {
-                uploadManager->requestUnload();
-            } else {
-                TOAST_INFO("Remote media already cleared");
-            }
+            // Validated files belong to the RemoteSession. Reusing the Upload
+            // button is a no-op: source invalidation and session teardown own
+            // their separate, transactionally correlated removal paths.
+            TOAST_INFO("All media already synchronized with remote client");
         } else {
             TOAST_INFO("No new media to upload");
             qDebug() << "Upload skipped: aucun média local nouveau (popup supprimée).";
@@ -216,8 +205,6 @@ void UploadEventHandler::onUploadButtonClicked()
     for (const auto& f : files) {
         fileIdsBeingUploaded.insert(f.fileId);
     }
-
-    uploadManager->clearLastRemovalClientId();
 
     if (!m_mainWindow->areUploadSignalsConnected()) {
         m_mainWindow->connectUploadSignals();

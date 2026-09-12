@@ -3,6 +3,8 @@
 
 #include "shared/rendering/ICanvasHost.h"
 
+#include <QMetaObject>
+
 class QuickCanvasController;
 class LegacySceneMirror;
 
@@ -41,6 +43,12 @@ public:
 
     void setOverlayActionsEnabled(bool enabled) override;
     void handleRemoteConnectionLost() override;
+    void stopScenesForSourceInvalidation() override;
+    QJsonObject serializeProjectState() const override;
+    bool restoreProjectState(const QJsonObject& state,
+                             const QHash<QString, QString>& sourcePathByMediaId,
+                             QStringList* skippedMediaIds = nullptr) override;
+    void deleteMediaItemCanonical(ResizableMediaBase* mediaItem) override;
 
     void setSizePolicy(QSizePolicy::Policy horizontal, QSizePolicy::Policy vertical) override;
     void setViewportUpdateMode(QGraphicsView::ViewportUpdateMode mode) override;
@@ -53,9 +61,15 @@ public:
     void refreshInfoOverlay() override;
 
 private:
+    void beginLocalScenePresentationBarrier(quint64 presentationGeneration);
+    void cancelLocalScenePresentationBarrier();
+
     QuickCanvasController* m_controller;
     LegacySceneMirror* m_legacyMirror;
     bool m_hasActiveScreens = false;
+    QMetaObject::Connection m_localScenePresentationConnection;
+    quint64 m_localScenePresentationGeneration = 0;
+    int m_localScenePresentationFramesRemaining = 0;
 };
 
 #endif // QUICKCANVASHOST_H

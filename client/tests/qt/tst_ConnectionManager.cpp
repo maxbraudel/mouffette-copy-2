@@ -1,0 +1,793 @@
+#include <QtTest>
+
+#include "backend/domain/models/ClientInfo.h"
+#include "backend/managers/network/ConnectionManager.h"
+#include "backend/network/WebSocketClient.h"
+#include "backend/network/RemoteSessionCoordinator.h"
+#include "backend/security/DeviceIdentityStore.h"
+
+#include <QJsonDocument>
+#include <QPointer>
+#include <QSignalSpy>
+#include <QTemporaryDir>
+#include <QUuid>
+#include <QWebSocket>
+#include <QWebSocketServer>
+
+#include <openssl/evp.h>
+#include <openssl/x509.h>
+
+class ConnectionManagerTest : public QObject {
+    Q_OBJECT
+
+private slots:
+    void fastRetrySchedule();
+    void backgroundRetrySchedule();
+    void clientInfoUsesProtocolV2Identity();
+    void signedHandshakeAndHeartbeat();
+    void handshakeRejectsMalformedEnvelope_data();
+    void handshakeRejectsMalformedEnvelope();
+    void uploadChannelReadyRequiresExactEnvelope_data();
+    void uploadChannelReadyRequiresExactEnvelope();
+    void protocolV2UploadWireSchemaAndActiveGate();
+    void suspendInclusiveLeaseBoundaryRejectsLateContact();
+};
+
+void ConnectionManagerTest::fastRetrySchedule() {
+    QCOMPARE(ConnectionManager::retryDelayForAttempt(0, true), 0);
+    QCOMPARE(ConnectionManager::retryDelayForAttempt(1, true), 250);
+    QCOMPARE(ConnectionManager::retryDelayForAttempt(2, true), 500);
+    QCOMPARE(ConnectionManager::retryDelayForAttempt(3, true), 750);
+    QCOMPARE(ConnectionManager::retryDelayForAttempt(20, true), 750);
+}
+
+void ConnectionManagerTest::backgroundRetrySchedule() {
+    QCOMPARE(ConnectionManager::retryDelayForAttempt(0, false), 1000);
+    QCOMPARE(ConnectionManager::retryDelayForAttempt(1, false), 2000);
+    QCOMPARE(ConnectionManager::retryDelayForAttempt(4, false), 16000);
+    QCOMPARE(ConnectionManager::retryDelayForAttempt(5, false), 30000);
+    QCOMPARE(ConnectionManager::retryDelayForAttempt(50, false), 30000);
+}
+
+void ConnectionManagerTest::clientInfoUsesProtocolV2Identity() {
+    const QString deviceId(43, QLatin1Char('a'));
+    const QString runtimeId = QStringLiteral("123e4567-e89b-42d3-a456-426614174000");
+    QJsonObject wire{
+        {"deviceId", deviceId},
+        {"runtimeId", runtimeId},
+        {"machineName", "target"},
+        {"platform", "Linux"},
+        {"status", "connected"},
+        {"remoteSessionState", "In use"},
+    };
+    ClientInfo client = ClientInfo::fromJson(wire);
+    QCOMPARE(client.getId(), deviceId);
+    QCOMPARE(client.deviceId(), deviceId);
+    QCOMPARE(client.runtimeId(), runtimeId);
+    QCOMPARE(client.availabilityStatus(), QStringLiteral("In use"));
+
+    client.setProjectId(QStringLiteral("project-1"));
+    client.setHasProject(true);
+    client.setRemoteSessionCloseAtMs(60'000);
+    client.setProjectDeleteAtMs(300'000);
+    const QJsonObject serialized = client.toJson();
+    QCOMPARE(serialized.value("deviceId").toString(), deviceId);
+    QCOMPARE(serialized.value("runtimeId").toString(), runtimeId);
+    QVERIFY(!serialized.contains("id"));
+    QVERIFY(!serialized.contains("clientId"));
+    QVERIFY(!serialized.contains("persistentClientId"));
+    QVERIFY(!serialized.contains("projectId"));
+}
+
+void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
+    QTemporaryDir identityDirectory;
+    QVERIFY(identityDirectory.isValid());
+    QWebSocketServer server(QStringLiteral("protocol-v2-test"),
+                            QWebSocketServer::NonSecureMode);
+    QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+
+    const QString bootId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString nonce = QString::fromLatin1(QByteArray(32, 'n').toBase64(
+        QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+    bool signatureVerified = false;
+    bool heartbeatReceived = false;
+    QWebSocket* peer = nullptr;
+
+    connect(&server, &QWebSocketServer::newConnection, this, [&]() {
+        peer = server.nextPendingConnection();
+        QVERIFY(peer != nullptr);
+        QJsonObject challenge{
+            {"type", "auth_challenge"},
+            {"protocolVersion", 2},
+            {"serverBootId", bootId},
+            {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+            {"nonce", nonce},
+            {"issuedAt", 1},
+        };
+        peer->sendTextMessage(QString::fromUtf8(
+            QJsonDocument(challenge).toJson(QJsonDocument::Compact)));
+
+        connect(peer, &QWebSocket::textMessageReceived, this,
+                [&](const QString& encoded) {
+            const QJsonObject message = QJsonDocument::fromJson(encoded.toUtf8()).object();
+            const QString type = message.value("type").toString();
+            if (type == QStringLiteral("auth_response")) {
+                QCOMPARE(message.value("protocolVersion").toInt(), 2);
+                QCOMPARE(message.value("serverBootId").toString(), bootId);
+                const QByteArray publicDer = QByteArray::fromBase64(
+                    message.value("publicKey").toString().toLatin1(),
+                    QByteArray::Base64UrlEncoding | QByteArray::AbortOnBase64DecodingErrors);
+                const QByteArray signature = QByteArray::fromBase64(
+                    message.value("signature").toString().toLatin1(),
+                    QByteArray::Base64UrlEncoding | QByteArray::AbortOnBase64DecodingErrors);
+                QCOMPARE(message.value("deviceId").toString(),
+                         DeviceIdentityStore::deviceIdForPublicKey(publicDer));
+                const QByteArray signedPayload = QStringLiteral("mouffette-v2\n%1\n%2\n%3")
+                    .arg(bootId, nonce, message.value("runtimeId").toString()).toUtf8();
+                const unsigned char* cursor = reinterpret_cast<const unsigned char*>(
+                    publicDer.constData());
+                EVP_PKEY* publicKey = d2i_PUBKEY(nullptr, &cursor, publicDer.size());
+                QVERIFY(publicKey != nullptr);
+                EVP_MD_CTX* context = EVP_MD_CTX_new();
+                QVERIFY(context != nullptr);
+                QVERIFY(EVP_DigestVerifyInit(context, nullptr, nullptr, nullptr, publicKey) == 1);
+                signatureVerified = EVP_DigestVerify(
+                    context,
+                    reinterpret_cast<const unsigned char*>(signature.constData()), signature.size(),
+                    reinterpret_cast<const unsigned char*>(signedPayload.constData()), signedPayload.size()) == 1;
+                EVP_MD_CTX_free(context);
+                EVP_PKEY_free(publicKey);
+
+                const QJsonObject policy{
+                    {"policyVersion", 1},
+                    {"heartbeatIntervalMs", 250},
+                    {"leaseTimeoutMs", 1000},
+                    {"scenePrepareTimeoutMs", 15000},
+                    {"sceneActivationLeadMs", 4000},
+                    {"sceneMaxClockSkewMs", 50},
+                    {"uploadIdleTimeoutMs", 45000},
+                    {"uploadTargetAckTimeoutMs", 30000},
+                    {"removalAckTimeoutMs", 30000},
+                };
+                QJsonObject welcome{
+                    {"type", "welcome"},
+                    {"protocolVersion", 2},
+                    {"serverBootId", bootId},
+                    {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                    {"connectionId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                    {"deviceId", message.value("deviceId")},
+                    {"runtimeId", message.value("runtimeId")},
+                    {"connectionGeneration", 1},
+                    {"policy", policy},
+                    {"serverMonotonicMs", 10},
+                };
+                peer->sendTextMessage(QString::fromUtf8(
+                    QJsonDocument(welcome).toJson(QJsonDocument::Compact)));
+            } else if (type == QStringLiteral("heartbeat")) {
+                QCOMPARE(message.value("protocolVersion").toInt(), 2);
+                QCOMPARE(message.value("serverBootId").toString(), bootId);
+                QCOMPARE(message.value("connectionGeneration").toInt(), 1);
+                heartbeatReceived = true;
+                QJsonObject ack{
+                    {"type", "heartbeat_ack"},
+                    {"protocolVersion", 2},
+                    {"serverBootId", bootId},
+                    {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                    {"connectionGeneration", 1},
+                    {"sequence", message.value("sequence")},
+                    {"clientMonotonicMs", message.value("clientMonotonicMs")},
+                    {"serverMonotonicMs", message.value("clientMonotonicMs").toDouble() + 5},
+                    {"serverEpochMs", 1},
+                };
+                peer->sendTextMessage(QString::fromUtf8(
+                    QJsonDocument(ack).toJson(QJsonDocument::Compact)));
+            }
+        });
+    });
+
+    WebSocketClient client(identityDirectory.path(), false);
+    QSignalSpy connectedSpy(&client, &WebSocketClient::connected);
+    QSignalSpy heartbeatSpy(&client, &WebSocketClient::heartbeatSampleReceived);
+    client.connectToServer(QStringLiteral("ws://127.0.0.1:%1").arg(server.serverPort()));
+    QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2000);
+    QTRY_VERIFY_WITH_TIMEOUT(signatureVerified, 2000);
+    QTRY_VERIFY_WITH_TIMEOUT(heartbeatReceived, 2000);
+    QTRY_VERIFY_WITH_TIMEOUT(heartbeatSpy.count() >= 1, 2000);
+    QCOMPARE(client.serverBootId(), bootId);
+    QCOMPARE(client.connectionGeneration(), quint64(1));
+    QVERIFY(client.hasUnexpiredLease());
+    client.disconnect();
+}
+
+void ConnectionManagerTest::suspendInclusiveLeaseBoundaryRejectsLateContact()
+{
+    QTemporaryDir identityDirectory;
+    QVERIFY(identityDirectory.isValid());
+    QWebSocketServer server(QStringLiteral("continuous-lease-clock-test"),
+                            QWebSocketServer::NonSecureMode);
+    QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+    const QString bootId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString nonce = QString::fromLatin1(QByteArray(32, 'c').toBase64(
+        QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+    QPointer<QWebSocket> peer;
+
+    connect(&server, &QWebSocketServer::newConnection, this, [&]() {
+        peer = server.nextPendingConnection();
+        QVERIFY(peer);
+        peer->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+            {"type", "auth_challenge"}, {"protocolVersion", 2},
+            {"serverBootId", bootId},
+            {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+            {"nonce", nonce}, {"issuedAt", 1},
+        }).toJson(QJsonDocument::Compact)));
+        connect(peer, &QWebSocket::textMessageReceived, this,
+                [&, peer](const QString& encoded) {
+            const QJsonObject request =
+                QJsonDocument::fromJson(encoded.toUtf8()).object();
+            if (request.value("type").toString()
+                != QLatin1String("auth_response")) {
+                return;
+            }
+            const QJsonObject policy{
+                {"policyVersion", 1}, {"heartbeatIntervalMs", 750},
+                {"leaseTimeoutMs", 3000}, {"scenePrepareTimeoutMs", 15000},
+                {"sceneActivationLeadMs", 4000}, {"sceneMaxClockSkewMs", 50},
+                {"uploadIdleTimeoutMs", 45000},
+                {"uploadTargetAckTimeoutMs", 30000},
+                {"removalAckTimeoutMs", 30000},
+            };
+            peer->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+                {"type", "welcome"}, {"protocolVersion", 2},
+                {"serverBootId", bootId},
+                {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                {"connectionId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                {"deviceId", request.value("deviceId")},
+                {"runtimeId", request.value("runtimeId")},
+                {"connectionGeneration", 1}, {"policy", policy},
+                {"serverMonotonicMs", 1},
+            }).toJson(QJsonDocument::Compact)));
+        });
+    });
+
+    qint64 continuousNowMs = 10'000;
+    WebSocketClient client(identityDirectory.path(), false, nullptr,
+                           [&continuousNowMs]() { return continuousNowMs; });
+    QSignalSpy connectedSpy(&client, &WebSocketClient::connected);
+    QSignalSpy leaseExpiredSpy(&client, &WebSocketClient::leaseExpired);
+    QSignalSpy listSpy(&client, &WebSocketClient::clientListReceived);
+    client.connectToServer(QStringLiteral("ws://127.0.0.1:%1")
+                               .arg(server.serverPort()));
+    QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2000);
+    QVERIFY(client.hasUnexpiredLease());
+    QCOMPARE(client.leaseRemainingMs(), qint64(3000));
+
+    continuousNowMs += 2999;
+    QVERIFY(client.hasUnexpiredLease());
+    QCOMPARE(client.leaseRemainingMs(), qint64(1));
+
+    continuousNowMs += 1;
+    QVERIFY(!client.hasUnexpiredLease());
+    // A valid packet at exactly 3000 ms cannot refresh lastContact. It first
+    // drives the irreversible terminal edge and is never dispatched.
+    peer->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+        {"type", "client_list"}, {"protocolVersion", 2},
+        {"serverBootId", bootId},
+        {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+        {"connectionGeneration", 1}, {"clients", QJsonArray{}},
+    }).toJson(QJsonDocument::Compact)));
+    QTRY_COMPARE_WITH_TIMEOUT(leaseExpiredSpy.count(), 1, 1000);
+    QCOMPARE(listSpy.count(), 0);
+    QVERIFY(!client.hasUnexpiredLease());
+    client.disconnect();
+}
+
+void ConnectionManagerTest::handshakeRejectsMalformedEnvelope_data() {
+    QTest::addColumn<QString>("scenario");
+    QTest::newRow("challenge-missing-message-id")
+        << QStringLiteral("challenge_missing_message_id");
+    QTest::newRow("challenge-fractional-protocol")
+        << QStringLiteral("challenge_fractional_protocol");
+    QTest::newRow("challenge-fractional-issued-at")
+        << QStringLiteral("challenge_fractional_issued_at");
+    QTest::newRow("welcome-missing-message-id")
+        << QStringLiteral("welcome_missing_message_id");
+    QTest::newRow("welcome-fractional-generation")
+        << QStringLiteral("welcome_fractional_generation");
+    QTest::newRow("welcome-fractional-monotonic")
+        << QStringLiteral("welcome_fractional_monotonic");
+    QTest::newRow("welcome-fractional-clock-policy")
+        << QStringLiteral("welcome_fractional_clock_policy");
+}
+
+void ConnectionManagerTest::handshakeRejectsMalformedEnvelope() {
+    QFETCH(QString, scenario);
+    QTemporaryDir identityDirectory;
+    QVERIFY(identityDirectory.isValid());
+    QWebSocketServer server(QStringLiteral("malformed-handshake-test"),
+                            QWebSocketServer::NonSecureMode);
+    QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+    const QString bootId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QPointer<QWebSocket> peer;
+
+    connect(&server, &QWebSocketServer::newConnection, this, [&]() {
+        peer = server.nextPendingConnection();
+        QVERIFY(peer);
+        QJsonObject challenge{
+            {QStringLiteral("type"), QStringLiteral("auth_challenge")},
+            {QStringLiteral("protocolVersion"), 2},
+            {QStringLiteral("serverBootId"), bootId},
+            {QStringLiteral("messageId"),
+             QUuid::createUuid().toString(QUuid::WithoutBraces)},
+            {QStringLiteral("nonce"), QString::fromLatin1(
+                 QByteArray(32, 'm').toBase64(
+                     QByteArray::Base64UrlEncoding
+                     | QByteArray::OmitTrailingEquals))},
+            {QStringLiteral("issuedAt"), 1}
+        };
+        if (scenario == QLatin1String("challenge_missing_message_id")) {
+            challenge.remove(QStringLiteral("messageId"));
+        } else if (scenario == QLatin1String("challenge_fractional_protocol")) {
+            challenge.insert(QStringLiteral("protocolVersion"), 2.5);
+        } else if (scenario == QLatin1String("challenge_fractional_issued_at")) {
+            challenge.insert(QStringLiteral("issuedAt"), 1.5);
+        }
+        peer->sendTextMessage(QString::fromUtf8(
+            QJsonDocument(challenge).toJson(QJsonDocument::Compact)));
+
+        connect(peer, &QWebSocket::textMessageReceived, this,
+                [&, peer](const QString& encoded) {
+            const QJsonObject request =
+                QJsonDocument::fromJson(encoded.toUtf8()).object();
+            if (request.value(QStringLiteral("type")).toString()
+                != QLatin1String("auth_response")) {
+                return;
+            }
+            QJsonObject policy{
+                {QStringLiteral("policyVersion"), 1},
+                {QStringLiteral("heartbeatIntervalMs"), 750},
+                {QStringLiteral("leaseTimeoutMs"), 3000},
+                {QStringLiteral("scenePrepareTimeoutMs"), 15000},
+                {QStringLiteral("sceneActivationLeadMs"), 4000},
+                {QStringLiteral("sceneMaxClockSkewMs"), 50},
+                {QStringLiteral("uploadIdleTimeoutMs"), 45000},
+                {QStringLiteral("uploadTargetAckTimeoutMs"), 30000},
+                {QStringLiteral("removalAckTimeoutMs"), 30000}
+            };
+            if (scenario == QLatin1String("welcome_fractional_clock_policy")) {
+                policy.insert(QStringLiteral("sceneMaxClockSkewMs"), 50.5);
+            }
+            QJsonObject welcome{
+                {QStringLiteral("type"), QStringLiteral("welcome")},
+                {QStringLiteral("protocolVersion"), 2},
+                {QStringLiteral("serverBootId"), bootId},
+                {QStringLiteral("messageId"),
+                 QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                {QStringLiteral("connectionId"),
+                 QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                {QStringLiteral("deviceId"),
+                 request.value(QStringLiteral("deviceId"))},
+                {QStringLiteral("runtimeId"),
+                 request.value(QStringLiteral("runtimeId"))},
+                {QStringLiteral("connectionGeneration"), 1},
+                {QStringLiteral("policy"), policy},
+                {QStringLiteral("serverMonotonicMs"), 1}
+            };
+            if (scenario == QLatin1String("welcome_missing_message_id")) {
+                welcome.remove(QStringLiteral("messageId"));
+            } else if (scenario == QLatin1String("welcome_fractional_generation")) {
+                welcome.insert(QStringLiteral("connectionGeneration"), 1.5);
+            } else if (scenario == QLatin1String("welcome_fractional_monotonic")) {
+                welcome.insert(QStringLiteral("serverMonotonicMs"), 1.5);
+            }
+            peer->sendTextMessage(QString::fromUtf8(
+                QJsonDocument(welcome).toJson(QJsonDocument::Compact)));
+        });
+    });
+
+    WebSocketClient client(identityDirectory.path(), false);
+    QSignalSpy fatalSpy(&client, &WebSocketClient::fatalError);
+    QSignalSpy connectedSpy(&client, &WebSocketClient::connected);
+    client.connectToServer(
+        QStringLiteral("ws://127.0.0.1:%1").arg(server.serverPort()));
+    QTRY_COMPARE_WITH_TIMEOUT(fatalSpy.count(), 1, 2000);
+    QCOMPARE(connectedSpy.count(), 0);
+    QVERIFY(!client.isConnected());
+}
+
+void ConnectionManagerTest::uploadChannelReadyRequiresExactEnvelope_data() {
+    QTest::addColumn<QString>("scenario");
+    QTest::newRow("missing-message-id")
+        << QStringLiteral("missing_message_id");
+    QTest::newRow("fractional-generation")
+        << QStringLiteral("fractional_generation");
+    QTest::newRow("wrong-server-boot")
+        << QStringLiteral("wrong_server_boot");
+}
+
+void ConnectionManagerTest::uploadChannelReadyRequiresExactEnvelope() {
+    QFETCH(QString, scenario);
+    QTemporaryDir identityDirectory;
+    QVERIFY(identityDirectory.isValid());
+    QWebSocketServer server(QStringLiteral("upload-ready-envelope-test"),
+                            QWebSocketServer::NonSecureMode);
+    QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+
+    const QString bootId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString token(43, QLatin1Char('t'));
+    QPointer<QWebSocket> controlPeer;
+    QPointer<QWebSocket> uploadPeer;
+    bool uploadPeerSeen = false;
+
+    connect(&server, &QWebSocketServer::newConnection, this, [&]() {
+        QWebSocket* candidate = server.nextPendingConnection();
+        QVERIFY(candidate);
+        if (candidate->requestUrl().query().contains(
+                QStringLiteral("channel=upload"))) {
+            uploadPeer = candidate;
+            uploadPeerSeen = true;
+            QJsonObject ready{
+                {QStringLiteral("type"), QStringLiteral("upload_channel_ready")},
+                {QStringLiteral("protocolVersion"), 2},
+                {QStringLiteral("serverBootId"), bootId},
+                {QStringLiteral("messageId"),
+                 QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                {QStringLiteral("deviceId"),
+                 controlPeer ? controlPeer->property("deviceId").toString()
+                             : QString()},
+                {QStringLiteral("connectionGeneration"), 1}
+            };
+            if (scenario == QLatin1String("missing_message_id")) {
+                ready.remove(QStringLiteral("messageId"));
+            } else if (scenario == QLatin1String("fractional_generation")) {
+                ready.insert(QStringLiteral("connectionGeneration"), 1.5);
+            } else if (scenario == QLatin1String("wrong_server_boot")) {
+                ready.insert(QStringLiteral("serverBootId"),
+                             QUuid::createUuid().toString(QUuid::WithoutBraces));
+            }
+            candidate->sendTextMessage(QString::fromUtf8(
+                QJsonDocument(ready).toJson(QJsonDocument::Compact)));
+            return;
+        }
+
+        controlPeer = candidate;
+        const QJsonObject challenge{
+            {QStringLiteral("type"), QStringLiteral("auth_challenge")},
+            {QStringLiteral("protocolVersion"), 2},
+            {QStringLiteral("serverBootId"), bootId},
+            {QStringLiteral("messageId"),
+             QUuid::createUuid().toString(QUuid::WithoutBraces)},
+            {QStringLiteral("nonce"), QString::fromLatin1(
+                 QByteArray(32, 'c').toBase64(
+                     QByteArray::Base64UrlEncoding
+                     | QByteArray::OmitTrailingEquals))},
+            {QStringLiteral("issuedAt"), 1}
+        };
+        candidate->sendTextMessage(QString::fromUtf8(
+            QJsonDocument(challenge).toJson(QJsonDocument::Compact)));
+        connect(candidate, &QWebSocket::textMessageReceived, this,
+                [&, candidate](const QString& encoded) {
+            const QJsonObject request =
+                QJsonDocument::fromJson(encoded.toUtf8()).object();
+            const QString type = request.value(QStringLiteral("type")).toString();
+            if (type == QLatin1String("auth_response")) {
+                candidate->setProperty(
+                    "deviceId", request.value(QStringLiteral("deviceId")).toString());
+                const QJsonObject policy{
+                    {QStringLiteral("policyVersion"), 1},
+                    {QStringLiteral("heartbeatIntervalMs"), 750},
+                    {QStringLiteral("leaseTimeoutMs"), 3000},
+                    {QStringLiteral("scenePrepareTimeoutMs"), 15000},
+                    {QStringLiteral("sceneActivationLeadMs"), 4000},
+                    {QStringLiteral("sceneMaxClockSkewMs"), 50},
+                    {QStringLiteral("uploadIdleTimeoutMs"), 45000},
+                    {QStringLiteral("uploadTargetAckTimeoutMs"), 30000},
+                    {QStringLiteral("removalAckTimeoutMs"), 30000}
+                };
+                candidate->sendTextMessage(QString::fromUtf8(QJsonDocument(
+                    QJsonObject{
+                        {QStringLiteral("type"), QStringLiteral("welcome")},
+                        {QStringLiteral("protocolVersion"), 2},
+                        {QStringLiteral("serverBootId"), bootId},
+                        {QStringLiteral("messageId"),
+                         QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                        {QStringLiteral("connectionId"),
+                         QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                        {QStringLiteral("deviceId"),
+                         request.value(QStringLiteral("deviceId"))},
+                        {QStringLiteral("runtimeId"),
+                         request.value(QStringLiteral("runtimeId"))},
+                        {QStringLiteral("connectionGeneration"), 1},
+                        {QStringLiteral("policy"), policy},
+                        {QStringLiteral("serverMonotonicMs"), 1}
+                    }).toJson(QJsonDocument::Compact)));
+            } else if (type == QLatin1String("request_upload_channel")) {
+                candidate->sendTextMessage(QString::fromUtf8(QJsonDocument(
+                    QJsonObject{
+                        {QStringLiteral("type"),
+                         QStringLiteral("upload_channel_token")},
+                        {QStringLiteral("protocolVersion"), 2},
+                        {QStringLiteral("serverBootId"), bootId},
+                        {QStringLiteral("messageId"),
+                         QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                        {QStringLiteral("connectionGeneration"), 1},
+                        {QStringLiteral("token"), token},
+                        {QStringLiteral("expiresAt"), 1000}
+                    }).toJson(QJsonDocument::Compact)));
+            }
+        });
+    });
+
+    WebSocketClient client(identityDirectory.path(), false);
+    QSignalSpy connectedSpy(&client, &WebSocketClient::connected);
+    client.connectToServer(
+        QStringLiteral("ws://127.0.0.1:%1").arg(server.serverPort()));
+    QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2000);
+    QVERIFY(client.ensureUploadChannel());
+    QTRY_VERIFY_WITH_TIMEOUT(uploadPeerSeen, 2000);
+    QTest::qWait(100);
+    QVERIFY(!client.isUploadChannelConnected());
+    QVERIFY(client.beginUploadSession(true));
+    QVERIFY(!client.isUploadSessionUsingDedicatedChannel());
+    client.endUploadSession();
+    client.disconnect();
+}
+
+void ConnectionManagerTest::protocolV2UploadWireSchemaAndActiveGate() {
+    QTemporaryDir identityDirectory;
+    QVERIFY(identityDirectory.isValid());
+    QWebSocketServer server(QStringLiteral("upload-v2-test"),
+                            QWebSocketServer::NonSecureMode);
+    QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+
+    const QString bootId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString targetDeviceId(43, QLatin1Char('B'));
+    const QString remoteSessionId = QStringLiteral("remote_session_upload_test");
+    const QString uploadId = QStringLiteral("upload_test_1");
+    const QString digest(64, QLatin1Char('a'));
+    QVector<QJsonObject> uploadCommands;
+    QVector<QJsonObject> deviceSnapshots;
+    QVector<QJsonObject> teardownAcknowledgements;
+    QWebSocket* peer = nullptr;
+
+    WebSocketClient client(identityDirectory.path(), false);
+    const auto sendServerMessage = [&](QJsonObject message) {
+        QVERIFY(peer != nullptr);
+        message.insert(QStringLiteral("protocolVersion"), 2);
+        message.insert(QStringLiteral("serverBootId"), bootId);
+        message.insert(QStringLiteral("messageId"),
+                       QUuid::createUuid().toString(QUuid::WithoutBraces));
+        peer->sendTextMessage(QString::fromUtf8(
+            QJsonDocument(message).toJson(QJsonDocument::Compact)));
+    };
+
+    connect(&server, &QWebSocketServer::newConnection, this, [&]() {
+        peer = server.nextPendingConnection();
+        QVERIFY(peer != nullptr);
+        peer->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+            {QStringLiteral("type"), QStringLiteral("auth_challenge")},
+            {QStringLiteral("protocolVersion"), 2},
+            {QStringLiteral("serverBootId"), bootId},
+            {QStringLiteral("messageId"),
+             QUuid::createUuid().toString(QUuid::WithoutBraces)},
+            {QStringLiteral("nonce"), QString::fromLatin1(QByteArray(32, 'u').toBase64(
+                 QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals))},
+            {QStringLiteral("issuedAt"), 1}
+        }).toJson(QJsonDocument::Compact)));
+
+        connect(peer, &QWebSocket::textMessageReceived, this,
+                [&](const QString& encoded) {
+            const QJsonObject message =
+                QJsonDocument::fromJson(encoded.toUtf8()).object();
+            const QString type = message.value(QStringLiteral("type")).toString();
+            if (type == QLatin1String("auth_response")) {
+                const QJsonObject policy{
+                    {QStringLiteral("policyVersion"), 1},
+                    {QStringLiteral("heartbeatIntervalMs"), 750},
+                    {QStringLiteral("leaseTimeoutMs"), 3000},
+                    {QStringLiteral("scenePrepareTimeoutMs"), 15000},
+                    {QStringLiteral("sceneActivationLeadMs"), 4000},
+                    {QStringLiteral("sceneMaxClockSkewMs"), 50},
+                    {QStringLiteral("uploadIdleTimeoutMs"), 45000},
+                    {QStringLiteral("uploadTargetAckTimeoutMs"), 30000},
+                    {QStringLiteral("removalAckTimeoutMs"), 30000}
+                };
+                peer->sendTextMessage(QString::fromUtf8(QJsonDocument(QJsonObject{
+                    {QStringLiteral("type"), QStringLiteral("welcome")},
+                    {QStringLiteral("protocolVersion"), 2},
+                    {QStringLiteral("serverBootId"), bootId},
+                    {QStringLiteral("messageId"),
+                     QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                    {QStringLiteral("connectionId"),
+                     QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                    {QStringLiteral("deviceId"), message.value(QStringLiteral("deviceId"))},
+                    {QStringLiteral("runtimeId"), message.value(QStringLiteral("runtimeId"))},
+                    {QStringLiteral("connectionGeneration"), 1},
+                    {QStringLiteral("policy"), policy},
+                    {QStringLiteral("serverMonotonicMs"), 1}
+                }).toJson(QJsonDocument::Compact)));
+            } else if (type == QLatin1String("heartbeat")) {
+                sendServerMessage(QJsonObject{
+                    {QStringLiteral("type"), QStringLiteral("heartbeat_ack")},
+                    {QStringLiteral("connectionGeneration"), 1},
+                    {QStringLiteral("sequence"), message.value(QStringLiteral("sequence"))},
+                    {QStringLiteral("clientMonotonicMs"),
+                     message.value(QStringLiteral("clientMonotonicMs"))},
+                    {QStringLiteral("serverMonotonicMs"),
+                     message.value(QStringLiteral("clientMonotonicMs"))},
+                    {QStringLiteral("serverEpochMs"), 1}
+                });
+            } else if (type == QLatin1String("device_snapshot")) {
+                deviceSnapshots.append(message);
+            } else if (type.startsWith(QLatin1String("upload_"))) {
+                uploadCommands.append(message);
+            } else if (type == QLatin1String("remote_session_teardown_ack")) {
+                teardownAcknowledgements.append(message);
+            }
+        });
+    });
+
+    QSignalSpy connectedSpy(&client, &WebSocketClient::connected);
+    QSignalSpy sessionSpy(&client, &WebSocketClient::remoteSessionOpened);
+    QSignalSpy uploadEnvelopeSpy(&client, &WebSocketClient::uploadMessageReceived);
+    client.connectToServer(QStringLiteral("ws://127.0.0.1:%1").arg(server.serverPort()));
+    QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 1, 2000);
+    client.registerClient(QStringLiteral("test-device"), QStringLiteral("test-platform"),
+                          {}, -1);
+    QTRY_COMPARE_WITH_TIMEOUT(deviceSnapshots.size(), 1, 1000);
+    QCOMPARE(deviceSnapshots.first().value(QStringLiteral("screens")).toArray().size(), 0);
+    QVERIFY(deviceSnapshots.first().contains(QStringLiteral("volumePercent")));
+    QVERIFY(deviceSnapshots.first().value(QStringLiteral("volumePercent")).isNull());
+
+    sendServerMessage(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("remote_session_opened")},
+        {QStringLiteral("remoteSessionId"), remoteSessionId},
+        {QStringLiteral("generation"), 1},
+        {QStringLiteral("ownerConnectionGeneration"), 1},
+        {QStringLiteral("targetConnectionGeneration"), 1},
+        {QStringLiteral("phase"), QStringLiteral("Active")},
+        {QStringLiteral("ownerDeviceId"), client.deviceId()},
+        {QStringLiteral("targetDeviceId"), targetDeviceId},
+        {QStringLiteral("resumeToken"), QStringLiteral("memory_only_resume_token")}
+    });
+    QTRY_COMPARE_WITH_TIMEOUT(sessionSpy.count(), 1, 1000);
+    QVERIFY(client.remoteSessionCoordinator()->forPeer(targetDeviceId).active);
+    QVERIFY(client.beginUploadSession(false));
+    QVERIFY(client.beginUploadSession(false));
+    client.endUploadSession();
+    QVERIFY(client.isUploadSessionTransportAvailable());
+
+    const QJsonArray manifest{QJsonObject{
+        {QStringLiteral("assetId"), digest},
+        {QStringLiteral("fileId"), digest},
+        {QStringLiteral("sha256"), digest},
+        {QStringLiteral("name"), QStringLiteral("asset.png")},
+        {QStringLiteral("extension"), QStringLiteral("png")},
+        {QStringLiteral("size"), 3},
+        {QStringLiteral("mediaIds"), QJsonArray{QStringLiteral("media_1")}}
+    }};
+    QVERIFY(client.sendUploadStart(remoteSessionId, 1, uploadId, manifest));
+    QVERIFY(client.sendUploadChunk(remoteSessionId, 1, uploadId, digest,
+                                   0, digest, QByteArray("abc")));
+    const QJsonArray completed{QJsonObject{
+        {QStringLiteral("assetId"), digest},
+        {QStringLiteral("offset"), 3},
+        {QStringLiteral("size"), 3},
+        {QStringLiteral("sha256"), digest}
+    }};
+    QVERIFY(client.sendUploadComplete(remoteSessionId, 1, uploadId, completed));
+    QTRY_COMPARE_WITH_TIMEOUT(uploadCommands.size(), 3, 1000);
+
+    static const QStringList forbiddenFields{
+        QStringLiteral("targetClientId"), QStringLiteral("targetPersistentClientId"),
+        QStringLiteral("senderClientId"), QStringLiteral("senderPersistentClientId"),
+        QStringLiteral("persistentClientId"), QStringLiteral("canvasSessionId"),
+        QStringLiteral("sessionId")
+    };
+    for (const QJsonObject& command : std::as_const(uploadCommands)) {
+        QCOMPARE(command.value(QStringLiteral("protocolVersion")).toInt(), 2);
+        QCOMPARE(command.value(QStringLiteral("remoteSessionId")).toString(),
+                 remoteSessionId);
+        QCOMPARE(command.value(QStringLiteral("generation")).toInt(), 1);
+        QCOMPARE(command.value(QStringLiteral("uploadId")).toString(), uploadId);
+        for (const QString& forbidden : forbiddenFields) {
+            QVERIFY2(!command.contains(forbidden), qPrintable(forbidden));
+        }
+    }
+    QCOMPARE(uploadCommands.at(0).value(QStringLiteral("files")).toArray(), manifest);
+    const QJsonObject chunk = uploadCommands.at(1);
+    QCOMPARE(chunk.value(QStringLiteral("assetId")).toString(), digest);
+    QCOMPARE(chunk.value(QStringLiteral("offset")).toInt(), 0);
+    QCOMPARE(chunk.value(QStringLiteral("size")).toInt(), 3);
+    QCOMPARE(chunk.value(QStringLiteral("sha256")).toString(), digest);
+    const QByteArray encoded = chunk.value(QStringLiteral("data")).toString().toLatin1();
+    QCOMPARE(QByteArray::fromBase64(encoded), QByteArray("abc"));
+    QCOMPARE(QByteArray::fromBase64(encoded).toBase64(), encoded);
+    QCOMPARE(uploadCommands.at(2).value(QStringLiteral("assets")).toArray(), completed);
+
+    QJsonObject uploadReady{
+        {QStringLiteral("type"), QStringLiteral("upload_ready")},
+        {QStringLiteral("remoteSessionId"), remoteSessionId},
+        {QStringLiteral("generation"), 1},
+        {QStringLiteral("ownerConnectionGeneration"), 1},
+        {QStringLiteral("targetConnectionGeneration"), 1},
+        {QStringLiteral("uploadId"), uploadId},
+        {QStringLiteral("ownerDeviceId"), client.deviceId()},
+        {QStringLiteral("targetDeviceId"), targetDeviceId},
+        {QStringLiteral("assets"), completed}
+    };
+    QJsonObject fractionalUploadReady = uploadReady;
+    fractionalUploadReady.insert(QStringLiteral("generation"), 1.5);
+    sendServerMessage(fractionalUploadReady);
+    QTest::qWait(50);
+    QCOMPARE(uploadEnvelopeSpy.count(), 0);
+    sendServerMessage(uploadReady);
+    QTRY_COMPARE_WITH_TIMEOUT(uploadEnvelopeSpy.count(), 1, 1000);
+
+    sendServerMessage(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("remote_session_lease_state")},
+        {QStringLiteral("remoteSessionId"), remoteSessionId},
+        {QStringLiteral("generation"), 1},
+        {QStringLiteral("ownerConnectionGeneration"), 1},
+        {QStringLiteral("targetConnectionGeneration"), 1},
+        {QStringLiteral("phase"), QStringLiteral("Grace")},
+        {QStringLiteral("state"), QStringLiteral("Grace")},
+        {QStringLiteral("ownerDeviceId"), client.deviceId()},
+        {QStringLiteral("targetDeviceId"), targetDeviceId}
+    });
+    QTRY_VERIFY_WITH_TIMEOUT(
+        !client.remoteSessionCoordinator()->forPeer(targetDeviceId).active, 1000);
+    QVERIFY(!client.sendUploadStart(remoteSessionId, 1,
+                                    QStringLiteral("upload_blocked_in_grace"), manifest));
+
+    // The reverse direction is a distinct binding even though the peer is the
+    // same device. B may control A while A's outgoing session to B is in Grace.
+    const QString incomingSessionId = QStringLiteral("remote_session_reverse_test");
+    sendServerMessage(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("remote_session_opened")},
+        {QStringLiteral("remoteSessionId"), incomingSessionId},
+        {QStringLiteral("generation"), 1},
+        {QStringLiteral("ownerConnectionGeneration"), 1},
+        {QStringLiteral("targetConnectionGeneration"), 1},
+        {QStringLiteral("phase"), QStringLiteral("Active")},
+        {QStringLiteral("ownerDeviceId"), targetDeviceId},
+        {QStringLiteral("targetDeviceId"), client.deviceId()},
+        {QStringLiteral("resumeToken"), QStringLiteral("reverse_memory_token")}
+    });
+    QTRY_COMPARE_WITH_TIMEOUT(sessionSpy.count(), 2, 1000);
+    QVERIFY(!client.remoteSessionCoordinator()
+                 ->outgoingForPeer(targetDeviceId).active);
+    QVERIFY(client.remoteSessionCoordinator()
+                ->incomingForPeer(targetDeviceId).active);
+    QVERIFY(!client.acknowledgeRemoteSessionTeardown(
+        incomingSessionId, QStringLiteral("teardown_reverse"), true, true, true, 0));
+
+    sendServerMessage(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("remote_session_terminating")},
+        {QStringLiteral("remoteSessionId"), incomingSessionId},
+        {QStringLiteral("generation"), 1},
+        {QStringLiteral("ownerConnectionGeneration"), 1},
+        {QStringLiteral("targetConnectionGeneration"), 1},
+        {QStringLiteral("phase"), QStringLiteral("CleanupPending")},
+        {QStringLiteral("ownerDeviceId"), targetDeviceId},
+        {QStringLiteral("targetDeviceId"), client.deviceId()},
+        {QStringLiteral("teardownId"), QStringLiteral("teardown_reverse")}
+    });
+    QTRY_COMPARE_WITH_TIMEOUT(
+        client.remoteSessionCoordinator()->incomingForPeer(targetDeviceId).phase,
+        QStringLiteral("CleanupPending"), 1000);
+    QVERIFY(!client.acknowledgeRemoteSessionTeardown(
+        incomingSessionId, QStringLiteral("teardown_wrong"), true, true, true, 0));
+    QVERIFY(client.acknowledgeRemoteSessionTeardown(
+        incomingSessionId, QStringLiteral("teardown_reverse"), true, true, true, 0));
+    QTRY_COMPARE_WITH_TIMEOUT(teardownAcknowledgements.size(), 1, 1000);
+    QCOMPARE(teardownAcknowledgements.first()
+                 .value(QStringLiteral("teardownId")).toString(),
+             QStringLiteral("teardown_reverse"));
+    QCOMPARE(teardownAcknowledgements.first()
+                 .value(QStringLiteral("generation")).toInt(), 1);
+    client.endUploadSession();
+    client.disconnect();
+}
+
+QTEST_GUILESS_MAIN(ConnectionManagerTest)
+#include "tst_ConnectionManager.moc"

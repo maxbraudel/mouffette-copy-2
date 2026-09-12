@@ -1,4 +1,5 @@
 #include "frontend/rendering/remote/RemoteSceneController.h"
+#include "backend/network/SceneRunCoordinator.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/domain/media/TextRenderState.h"
 #include "backend/domain/media/MediaFilePolicy.h"
@@ -24,6 +25,7 @@
 #include <QUrl>
 #include <QThread>
 #include <QQuickWidget>
+#include <QQuickWindow>
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQuickItem>
@@ -36,6 +38,7 @@
 #include "backend/files/FileManager.h"
 #include "backend/platform/macos/MacWindowManager.h"
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <QVideoFrameFormat>
@@ -46,15 +49,8 @@ constexpr qint64 kSeekPositionToleranceMs = 120;
 constexpr qint64 kStartFrameTimestampToleranceMs = 25;
 constexpr qint64 kDecoderSyncToleranceMs = 25;
 constexpr int kLivePlaybackWarmupFrames = 2;
-// Clock differences larger than a short LAN scheduling/network allowance make
-// an absolute wall-clock deadline less accurate than the bounded relative
-// delay carried alongside it.
-constexpr qint64 kActivationClockToleranceMs = 250;
-constexpr qint64 kMaxActivationDelayMs = 5000;
-constexpr int kActivationWatchdogGraceMs = 2000;
 constexpr qint64 kVideoSyncPositionToleranceMs = 400;
 constexpr qint64 kMaxVideoSyncTransitMs = 2000;
-constexpr int kVideoSyncWatchdogMs = 3000;
 constexpr qint64 kMaxVideoPositionMs = 7LL * 24LL * 60LL * 60LL * 1000LL;
 constexpr int kMaxVideoSyncItems = 512;
 constexpr int kMaxRemoteScreens = 64;
@@ -62,6 +58,7 @@ constexpr int kMaxRemoteMediaItems = 512;
 constexpr int kMaxRemoteSpansPerMedia = 64;
 constexpr int kMaxRemoteTotalSpans = 4096;
 constexpr int kMaxRemoteIdentifierLength = 128;
+constexpr qint64 kMaxSafeJsonInteger = 9007199254740991LL;
 constexpr double kMaxRemoteCoordinate = 100000000.0;
 constexpr double kMaxRemoteDimension = 10000000.0;
 constexpr double kMaxLegacyNormalizedMagnitude = 10000.0;
@@ -90,6 +87,22 @@ bool readBoundedInteger(const QJsonObject& object,
     return true;
 }
 
+bool readBoundedInt64(const QJsonObject& object,
+					  const char* key,
+					  qint64 minimum,
+					  qint64 maximum,
+					  qint64& value) {
+	double numeric = 0.0;
+	if (!readFiniteNumber(object, key, numeric)
+		|| std::floor(numeric) != numeric
+		|| numeric < static_cast<double>(minimum)
+		|| numeric > static_cast<double>(maximum)) {
+		return false;
+	}
+	value = static_cast<qint64>(numeric);
+	return true;
+}
+
 bool readFiniteRect(const QJsonObject& object,
                     const char* xKey,
                     const char* yKey,
@@ -113,6 +126,12 @@ bool isValidUnitRect(double x, double y, double width, double height) {
         && height <= 1.0 + kNormalizedRectEpsilon
         && x + width <= 1.0 + kNormalizedRectEpsilon
         && y + height <= 1.0 + kNormalizedRectEpsilon;
+}
+
+qint64 localSteadyMilliseconds()
+{
+	using namespace std::chrono;
+	return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
 qint64 repeatLeadMarginMs(qint64 durationMs) {
@@ -201,15 +220,24 @@ RemoteSceneController::RemoteSceneController(FileManager* fileManager, WebSocket
     , m_fileManager(fileManager)
     , m_ws(ws) {
     if (m_ws) {
-        connect(m_ws, &WebSocketClient::remoteSceneStartReceived, this, &RemoteSceneController::onRemoteSceneStart);
-        connect(m_ws, &WebSocketClient::remoteSceneActivateReceived, this, &RemoteSceneController::onRemoteSceneActivate);
-        connect(m_ws, &WebSocketClient::remoteSceneVideoSyncReceived, this, &RemoteSceneController::onRemoteSceneVideoSync);
-        connect(m_ws, &WebSocketClient::remoteSceneStopReceived, this, &RemoteSceneController::onRemoteSceneStop);
-        connect(m_ws, &WebSocketClient::disconnected,
+        connect(m_ws, &WebSocketClient::scenePrepareReceived,
+                this, &RemoteSceneController::onScenePrepareEnvelope);
+        connect(m_ws, &WebSocketClient::scenePreparedReceived,
+                this, &RemoteSceneController::onScenePreparedEnvelope);
+        connect(m_ws, &WebSocketClient::sceneCommitReceived,
+                this, &RemoteSceneController::onSceneCommitEnvelope);
+        connect(m_ws, &WebSocketClient::sceneStateSnapshotReceived,
+                this, &RemoteSceneController::onSceneStateSnapshotEnvelope);
+        connect(m_ws, &WebSocketClient::sceneStopReceived,
+                this, &RemoteSceneController::onSceneStopEnvelope);
+        connect(m_ws, &WebSocketClient::sceneStoppedReceived,
+                this, &RemoteSceneController::onSceneStoppedEnvelope);
+        connect(m_ws, &WebSocketClient::sceneErrorReceived,
+                this, &RemoteSceneController::onSceneErrorEnvelope);
+        connect(m_ws, &WebSocketClient::remoteSessionResumed,
+                this, &RemoteSceneController::onRemoteSessionResumedEnvelope);
+        connect(m_ws, &WebSocketClient::leaseExpired,
                 this, &RemoteSceneController::onConnectionLost,
-                Qt::UniqueConnection);
-        connect(m_ws, &WebSocketClient::connectionError,
-                this, &RemoteSceneController::onConnectionError,
                 Qt::UniqueConnection);
     }
 }
@@ -226,24 +254,74 @@ RemoteSceneController::~RemoteSceneController() {
     m_screenWindows.clear();
 }
 
+bool RemoteSceneController::teardownRemoteSession(const QString& remoteSessionId)
+{
+    if (remoteSessionId.isEmpty() || QThread::currentThread() != thread()) return false;
+
+    const bool ownsRequestedSession = m_pendingRemoteSessionId == remoteSessionId;
+    const bool hasRendererState = !m_pendingRemoteSessionId.isEmpty()
+        || !m_pendingSceneInstanceId.isEmpty()
+        || !m_startingSceneInstanceId.isEmpty()
+        || m_deferredSceneStart.valid
+        || !m_mediaItems.isEmpty()
+        || !m_screenWindows.isEmpty();
+
+    if (m_teardownInProgress) {
+        if (m_teardownGraphRemoteSessionId != remoteSessionId) return false;
+        m_teardownSessionWaiters.insert(remoteSessionId);
+        scheduleTeardownBarrierCompletion();
+        return true;
+    }
+
+    if (!ownsRequestedSession) {
+		if (m_lastTornDownRemoteSessionId == remoteSessionId) {
+			// Replay settlement asynchronously for an idempotent caller whose
+			// previous ACK may have been lost. Callers uniformly wait for the
+			// signal, even when this renderer graph was already retired.
+			QMetaObject::invokeMethod(this, [this, remoteSessionId]() {
+				if (m_lastTornDownRemoteSessionId == remoteSessionId) {
+					emit teardownSettled(remoteSessionId, true);
+				}
+			}, Qt::QueuedConnection);
+			return true;
+		}
+        // No graph means this session has nothing to settle. Never allow a
+        // teardown for session X to clear an active graph belonging to Y.
+        if (hasRendererState) return false;
+        m_teardownSessionWaiters.insert(remoteSessionId);
+        m_teardownGraphRemoteSessionId = remoteSessionId;
+        m_teardownInProgress = true;
+        ++m_teardownBarrierEpoch;
+        scheduleTeardownBarrierCompletion();
+        return true;
+    }
+
+    m_teardownSessionWaiters.insert(remoteSessionId);
+    m_teardownGraphRemoteSessionId = remoteSessionId;
+    m_deferredSceneStart.valid = false;
+    m_startingSenderClientId.clear();
+    m_startingSceneInstanceId.clear();
+    ++m_sceneEpoch;
+    clearScene();
+    return true;
+}
+
 void RemoteSceneController::resetSceneSynchronization() {
+	disconnectFirstFrameObservers();
+    m_screensAwaitingFirstFrame.clear();
     if (m_sceneReadyTimeout) {
         m_sceneReadyTimeout->stop();
         QObject::disconnect(m_sceneReadyTimeout, nullptr, this, nullptr);
+        if (m_teardownInProgress) trackTeardownObjectTree(m_sceneReadyTimeout);
         m_sceneReadyTimeout->deleteLater();
         m_sceneReadyTimeout = nullptr;
     }
     if (m_activationTimer) {
         m_activationTimer->stop();
         QObject::disconnect(m_activationTimer, nullptr, this, nullptr);
+        if (m_teardownInProgress) trackTeardownObjectTree(m_activationTimer);
         m_activationTimer->deleteLater();
         m_activationTimer = nullptr;
-    }
-    if (m_videoSyncWatchdog) {
-        m_videoSyncWatchdog->stop();
-        QObject::disconnect(m_videoSyncWatchdog, nullptr, this, nullptr);
-        m_videoSyncWatchdog->deleteLater();
-        m_videoSyncWatchdog = nullptr;
     }
     m_pendingSenderClientId.clear();
     m_pendingSceneInstanceId.clear();
@@ -251,61 +329,832 @@ void RemoteSceneController::resetSceneSynchronization() {
     m_mediaReadyCount = 0;
     m_sceneActivationRequested = false;
     m_sceneActivated = false;
+	m_firstFrameReported = false;
+	m_firstFramePresentedServerMonotonicMs = -1;
+	m_firstFramePresentedLocalSteadyMs = -1;
     m_activationEpochMs = 0;
     m_activationClockPlausible = false;
     m_lastVideoSyncSequence = 0;
-    m_videoSyncWatchdogTripped = false;
+    if (!m_sceneStartInProgress) {
+        m_pendingSceneDigest.clear();
+        m_pendingRemoteSessionId.clear();
+        m_pendingSessionGeneration = 0;
+        m_pendingSceneRevision = 0;
+        m_prepareChecklist = {};
+        m_scenePreparedReported = false;
+        m_sceneArmedReported = false;
+    }
 }
 
-void RemoteSceneController::armVideoSyncWatchdog() {
-    if (!m_sceneActivated || m_pendingSceneInstanceId.isEmpty()) return;
-
-    const bool hasVideo = std::any_of(
-        m_mediaItems.cbegin(), m_mediaItems.cend(), [](const auto& item) {
-            return item && item->type == QLatin1String("video") && item->player;
-        });
-    if (!hasVideo) return;
-
-    if (!m_videoSyncWatchdog) {
-        m_videoSyncWatchdog = new QTimer(this);
-        m_videoSyncWatchdog->setSingleShot(true);
-        m_videoSyncWatchdog->setTimerType(Qt::CoarseTimer);
-        connect(m_videoSyncWatchdog, &QTimer::timeout,
-                this, &RemoteSceneController::handleVideoSyncWatchdogTimeout);
-    }
-    m_videoSyncWatchdog->start(kVideoSyncWatchdogMs);
+bool RemoteSceneController::matchesSceneEnvelope(const QJsonObject& envelope) const
+{
+	qint64 generation = -1;
+    return !m_pendingSceneInstanceId.isEmpty()
+		&& readBoundedInt64(envelope, "generation", 1,
+							kMaxSafeJsonInteger, generation)
+        && envelope.value(QStringLiteral("sceneRunId")).toString() == m_pendingSceneInstanceId
+        && envelope.value(QStringLiteral("digest")).toString() == m_pendingSceneDigest
+        && envelope.value(QStringLiteral("remoteSessionId")).toString() == m_pendingRemoteSessionId
+		&& static_cast<quint64>(generation) == m_pendingSessionGeneration;
 }
 
-void RemoteSceneController::handleVideoSyncWatchdogTimeout() {
-    if (!m_sceneActivated || m_pendingSceneInstanceId.isEmpty()) return;
-
-    m_videoSyncWatchdogTripped = true;
-    qWarning() << "RemoteSceneController: authoritative video sync timed out;"
-                  " freezing and muting remote playback"
-               << m_pendingSceneInstanceId;
-
-    for (const auto& item : m_mediaItems) {
-        if (!item || item->type != QLatin1String("video")) continue;
-
-        item->playAuthorized = false;
-        item->awaitingDecoderSync = false;
-        item->awaitingLivePlayback = false;
-        item->repeatActive = false;
-        item->lastRepeatTriggerMs = 0;
-        if (item->playTimer) item->playTimer->stop();
-        if (item->pauseTimer) item->pauseTimer->stop();
-        if (item->muteTimer) item->muteTimer->stop();
-        if (item->player
-            && item->player->playbackState() == QMediaPlayer::PlayingState) {
-            item->player->pause();
-        }
-        if (item->audio) {
-            applyAudioMuteState(item, true, true);
-        }
-        // Do not clear frameSource or alter visibility. The last successfully
-        // rendered frame remains on every span until a valid owner/run sync
-        // resumes playback or a correlated STOP tears the scene down.
+void RemoteSceneController::onScenePrepareEnvelope(const QJsonObject& envelope)
+{
+    if (!m_enabled || !m_ws
+        || envelope.value(QStringLiteral("targetDeviceId")).toString() != m_ws->deviceId()) return;
+    const QString runId = envelope.value(QStringLiteral("sceneRunId")).toString();
+	qint64 generation = -1;
+	qint64 revision = -1;
+	if (runId.isEmpty()
+		|| !readBoundedInt64(envelope, "generation", 1,
+							kMaxSafeJsonInteger, generation)
+		|| !readBoundedInt64(envelope, "revision", 1,
+							kMaxSafeJsonInteger, revision)) {
+		if (!runId.isEmpty()) {
+			m_ws->sendScenePrepared(
+				runId, false, {}, QStringLiteral("scene_prepare_failed"),
+				QStringLiteral("Scene correlation contains an invalid integer"));
+		}
+		return;
+	}
+    if ((!m_pendingSceneInstanceId.isEmpty() && m_pendingSceneInstanceId != runId)
+        || (!m_startingSceneInstanceId.isEmpty() && m_startingSceneInstanceId != runId)) {
+        m_ws->sendScenePrepared(runId, false, {}, QStringLiteral("scene_target_busy"),
+                                QStringLiteral("Target is already preparing or presenting another scene"));
+        return;
     }
+
+    const QJsonObject incomingScene = envelope.value(QStringLiteral("scene")).toObject();
+    QHash<QString, QString> declaredFileByMedia;
+    QHash<QString, QString> declaredAssetByMedia;
+    for (const QJsonValue& value : envelope.value(QStringLiteral("manifest")).toArray()) {
+        const QJsonObject asset = value.toObject();
+        const QString assetId = asset.value(QStringLiteral("assetId")).toString();
+        const QString fileId = asset.value(QStringLiteral("fileId")).toString();
+        for (const QJsonValue& mediaId : asset.value(QStringLiteral("mediaIds")).toArray()) {
+            const QString id = mediaId.toString();
+            if (declaredFileByMedia.contains(id)) {
+                m_ws->sendScenePrepared(runId, false, {},
+                                        QStringLiteral("scene_manifest_mismatch"),
+                                        QStringLiteral("A media id occurs in multiple assets"));
+                return;
+            }
+            declaredFileByMedia.insert(id, fileId);
+            declaredAssetByMedia.insert(id, assetId);
+        }
+    }
+    QSet<QString> referencedMedia;
+    for (const QJsonValue& value : incomingScene.value(QStringLiteral("media")).toArray()) {
+        const QJsonObject media = value.toObject();
+        if (media.value(QStringLiteral("type")).toString() == QLatin1String("text")) continue;
+        const QString mediaId = media.value(QStringLiteral("mediaId")).toString();
+        if (declaredFileByMedia.value(mediaId)
+                != media.value(QStringLiteral("fileId")).toString()
+            || declaredAssetByMedia.value(mediaId)
+                != media.value(QStringLiteral("assetId")).toString()) {
+            m_ws->sendScenePrepared(runId, false, {},
+                                    QStringLiteral("scene_manifest_mismatch"),
+                                    QStringLiteral("Scene media does not match its validated asset"));
+            return;
+        }
+        referencedMedia.insert(mediaId);
+    }
+    for (auto iterator = declaredFileByMedia.cbegin();
+         iterator != declaredFileByMedia.cend(); ++iterator) {
+        if (!referencedMedia.contains(iterator.key())) {
+            m_ws->sendScenePrepared(runId, false, {},
+                                    QStringLiteral("scene_manifest_mismatch"),
+                                    QStringLiteral("Manifest contains an unreferenced media id"));
+            return;
+        }
+    }
+
+    m_pendingRemoteSessionId = envelope.value(QStringLiteral("remoteSessionId")).toString();
+    m_lastTornDownRemoteSessionId.clear();
+	m_pendingSessionGeneration = static_cast<quint64>(generation);
+	m_pendingSceneRevision = static_cast<quint64>(revision);
+    m_pendingSceneDigest = envelope.value(QStringLiteral("digest")).toString();
+    m_scenePreparedReported = false;
+    m_sceneArmedReported = false;
+    m_firstFrameReported = false;
+	m_firstFramePresentedServerMonotonicMs = -1;
+	m_firstFramePresentedLocalSteadyMs = -1;
+
+    QJsonObject scene = incomingScene;
+    scene.insert(QStringLiteral("sceneInstanceId"), runId);
+    m_prepareChecklist = SceneRunCoordinator::createLocalChecklist(scene);
+    for (qsizetype index = 0; index < m_prepareChecklist.size(); ++index) {
+        QJsonObject item = m_prepareChecklist.at(index).toObject();
+        item.insert(QStringLiteral("ready"), false);
+        m_prepareChecklist.replace(index, item);
+    }
+    onRemoteSceneStart(envelope.value(QStringLiteral("ownerDeviceId")).toString(), scene);
+
+    if (m_pendingSceneInstanceId != runId) {
+        if (m_deferredSceneStart.valid) return;
+        m_pendingSceneDigest.clear();
+        m_pendingRemoteSessionId.clear();
+        m_pendingSessionGeneration = 0;
+        m_pendingSceneRevision = 0;
+        m_prepareChecklist = {};
+        return;
+    }
+
+    if (!remoteRenderGraphsReady()) {
+        sendPrepareResult(false, QStringLiteral(
+            "Qt Quick remote renderer did not produce a ready root object"));
+        ++m_sceneEpoch;
+        clearScene();
+        return;
+    }
+
+    // Native/QML screen windows are now constructed but remain hidden.
+    for (qsizetype index = 0; index < m_prepareChecklist.size(); ++index) {
+        QJsonObject item = m_prepareChecklist.at(index).toObject();
+        if (item.value(QStringLiteral("stage")).toString()
+            == QLatin1String("screen_render_graph_ready")) {
+            item.insert(QStringLiteral("ready"), true);
+            m_prepareChecklist.replace(index, item);
+        }
+    }
+    updatePrepareProgress();
+    if (m_sceneActivationRequested
+        && (m_totalMediaToPrime == 0 || m_mediaReadyCount >= m_totalMediaToPrime)) {
+        sendPrepareResult(true);
+    }
+}
+
+bool RemoteSceneController::remoteRenderGraphsReady() const
+{
+    if (m_screenWindows.isEmpty()) return false;
+    for (auto it = m_screenWindows.cbegin(); it != m_screenWindows.cend(); ++it) {
+        const ScreenWindow& window = it.value();
+        if (!window.window || !window.quickWidget || !window.mediaModel
+            || window.quickWidget->status() != QQuickWidget::Ready
+            || !window.quickWidget->rootObject()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void RemoteSceneController::onScenePreparedEnvelope(const QJsonObject& envelope)
+{
+    if (!matchesSceneEnvelope(envelope) || !m_scenePreparedReported
+        || !envelope.value(QStringLiteral("allPrepared")).toBool(false)
+        || m_sceneArmedReported || !m_ws) return;
+    const qint64 uncertainty = m_ws->sceneClockUncertaintyMs();
+	qint64 maximum = -1;
+	if (!readBoundedInt64(m_ws->serverPolicy(), "sceneMaxClockSkewMs",
+						0, kMaxSafeJsonInteger, maximum)
+		|| uncertainty < 0 || uncertainty > maximum) {
+        sendPrepareResult(false, QStringLiteral("Clock synchronization uncertainty exceeds policy"));
+        return;
+    }
+    m_sceneArmedReported = m_ws->sendSceneArmed(m_pendingSceneInstanceId, uncertainty);
+}
+
+void RemoteSceneController::onSceneCommitEnvelope(const QJsonObject& envelope)
+{
+    if (!matchesSceneEnvelope(envelope) || !m_sceneArmedReported || !m_ws) return;
+	qint64 startServerMonotonicMs = -1;
+	qint64 maximum = -1;
+	qint64 startEpochMs = -1;
+	qint64 policyMaximum = -1;
+	qint64 activationLeadMs = -1;
+	if (!readBoundedInt64(envelope, "startServerMonotonicMs",
+						0, kMaxSafeJsonInteger, startServerMonotonicMs)
+		|| !readBoundedInt64(envelope, "maximumClockUncertaintyMs",
+						0, kMaxSafeJsonInteger, maximum)
+		|| !readBoundedInt64(envelope, "startEpochMs",
+						1, kMaxSafeJsonInteger, startEpochMs)
+		|| !readBoundedInt64(m_ws->serverPolicy(), "sceneMaxClockSkewMs",
+						0, kMaxSafeJsonInteger, policyMaximum)
+		|| !readBoundedInt64(m_ws->serverPolicy(), "sceneActivationLeadMs",
+						1, std::numeric_limits<int>::max(), activationLeadMs)
+		|| maximum != policyMaximum) {
+		sendPrepareResult(false, QStringLiteral("Invalid synchronized scene commitment"));
+		return;
+	}
+    const qint64 serverNow = m_ws->estimatedServerMonotonicMs();
+	const qint64 localUncertainty = m_ws->sceneClockUncertaintyMs();
+    if (serverNow < 0 || localUncertainty < 0 || localUncertainty > maximum) {
+        sendPrepareResult(false, QStringLiteral("Invalid synchronized scene commitment"));
+        return;
+    }
+	const qint64 remaining = startServerMonotonicMs - serverNow;
+	if (remaining < -maximum
+		|| remaining > activationLeadMs + maximum
+		|| remaining > std::numeric_limits<int>::max()) {
+        sendPrepareResult(false, QStringLiteral("Scene commitment missed its activation window"));
+        return;
+    }
+    onRemoteSceneActivate(
+        m_pendingSenderClientId,
+        m_pendingSceneInstanceId,
+		startEpochMs,
+        static_cast<int>(std::max<qint64>(0, remaining)));
+}
+
+void RemoteSceneController::onSceneStateSnapshotEnvelope(const QJsonObject& envelope)
+{
+    if (!matchesSceneEnvelope(envelope) || !m_ws || !m_sceneActivated) return;
+    const QJsonValue snapshotValue = envelope.value(QStringLiteral("snapshot"));
+    const QJsonValue sequenceValue = envelope.value(QStringLiteral("sequence"));
+    const QJsonValue sampledValue =
+        envelope.value(QStringLiteral("sampledServerMonotonicMs"));
+    const double rawSequence = sequenceValue.toDouble(-1.0);
+    const double rawSampled = sampledValue.toDouble(-1.0);
+    if (!snapshotValue.isObject() || !sequenceValue.isDouble()
+        || !sampledValue.isDouble() || !std::isfinite(rawSequence)
+        || std::floor(rawSequence) != rawSequence || rawSequence < 1.0
+        || rawSequence > 9007199254740991.0 || !std::isfinite(rawSampled)
+        || std::floor(rawSampled) != rawSampled || rawSampled < 0.0
+        || rawSampled > 9007199254740991.0) {
+        qWarning() << "RemoteSceneController: rejecting malformed state_snapshot envelope";
+        return;
+    }
+    const qint64 sampledServer = static_cast<qint64>(rawSampled);
+    const qint64 nowServer = m_ws->estimatedServerMonotonicMs();
+	qint64 policyClockSkewMs = -1;
+	qint64 policyLeaseMs = -1;
+	const qint64 clockUncertaintyMs = m_ws->sceneClockUncertaintyMs();
+	if (nowServer < 0
+		|| !readBoundedInt64(m_ws->serverPolicy(), "sceneMaxClockSkewMs",
+							0, kMaxSafeJsonInteger, policyClockSkewMs)
+		|| !readBoundedInt64(m_ws->serverPolicy(), "leaseTimeoutMs",
+							1, kMaxSafeJsonInteger, policyLeaseMs)
+		|| clockUncertaintyMs < 0 || clockUncertaintyMs > policyClockSkewMs) {
+        qWarning() << "RemoteSceneController: rejecting state_snapshot without a synchronized clock";
+        return;
+    }
+	if (sampledServer > nowServer + clockUncertaintyMs) {
+		qWarning() << "RemoteSceneController: rejecting state_snapshot sampled in the future";
+		return;
+	}
+	const qint64 sampleAge = std::max<qint64>(0, nowServer - sampledServer);
+	if (sampleAge > policyLeaseMs + clockUncertaintyMs) {
+		qWarning() << "RemoteSceneController: rejecting state_snapshot older than the session lease";
+		return;
+	}
+    applyAuthoritativeStateSnapshot(
+        snapshotValue.toObject(), static_cast<quint64>(rawSequence), sampleAge);
+}
+
+bool RemoteSceneController::applyAuthoritativeStateSnapshot(
+    const QJsonObject& snapshot,
+    quint64 sequence,
+    qint64 sampleAgeMs)
+{
+    auto reject = [this, sequence](const QString& reason) {
+        qWarning() << "RemoteSceneController: rejecting authoritative state snapshot:"
+                   << reason;
+        emit authoritativeSnapshotRejected(sequence, reason);
+        return false;
+    };
+
+    if (!m_enabled || m_pendingSceneInstanceId.isEmpty() || m_teardownInProgress) {
+        return reject(QStringLiteral("No active renderer graph"));
+    }
+    if (sequence < 1 || sequence > 9007199254740991ULL
+        || sequence <= static_cast<quint64>(m_lastVideoSyncSequence)) {
+        return reject(QStringLiteral("Snapshot sequence is stale"));
+    }
+    if (sampleAgeMs < 0 || sampleAgeMs > kMaxSafeJsonInteger) {
+        return reject(QStringLiteral("Snapshot sample age is invalid"));
+    }
+
+    const QJsonValue sceneValue = snapshot.value(QStringLiteral("scene"));
+    const QJsonValue videosValue = snapshot.value(QStringLiteral("videos"));
+    double capturedEpochMs = 0.0;
+    if (!sceneValue.isObject() || !videosValue.isArray()
+        || !readFiniteNumber(snapshot, "capturedEpochMs", capturedEpochMs)
+		|| capturedEpochMs < 0.0
+		|| capturedEpochMs > static_cast<double>(kMaxSafeJsonInteger)
+		|| std::floor(capturedEpochMs) != capturedEpochMs) {
+        return reject(QStringLiteral("Snapshot is incomplete"));
+    }
+
+    const QJsonObject scene = sceneValue.toObject();
+    int schemaVersion = 0;
+    if (!readBoundedInteger(scene, "renderSchemaVersion", 2, 2, schemaVersion)
+        || !scene.value(QStringLiteral("screens")).isArray()
+        || !scene.value(QStringLiteral("media")).isArray()) {
+        return reject(QStringLiteral("Scene snapshot schema is invalid"));
+    }
+
+    const QJsonArray screens = scene.value(QStringLiteral("screens")).toArray();
+    if (screens.size() != m_screenWindows.size()) {
+        return reject(QStringLiteral("Scene snapshot screen set is incomplete"));
+    }
+    QSet<int> snapshotScreenIds;
+    for (qsizetype index = 0; index < screens.size(); ++index) {
+        if (!screens.at(index).isObject()) {
+            return reject(QStringLiteral("Scene snapshot contains a malformed screen"));
+        }
+        const QJsonObject screen = screens.at(index).toObject();
+        int screenId = -1;
+        int x = 0;
+        int y = 0;
+        int width = 0;
+        int height = 0;
+        if (!readBoundedInteger(screen, "id", 0, 1000000, screenId)
+            || !readBoundedInteger(screen, "x", -100000000, 100000000, x)
+            || !readBoundedInteger(screen, "y", -100000000, 100000000, y)
+            || !readBoundedInteger(screen, "width", 1, 100000, width)
+            || !readBoundedInteger(screen, "height", 1, 100000, height)
+            || !screen.value(QStringLiteral("primary")).isBool()
+            || snapshotScreenIds.contains(screenId)
+			|| !m_screenWindows.contains(screenId)
+			|| screen != m_screenWindows.value(screenId).sourceScreenDefinition) {
+            return reject(QStringLiteral("Scene snapshot screen identity is invalid"));
+        }
+        snapshotScreenIds.insert(screenId);
+    }
+
+    QHash<QString, std::shared_ptr<RemoteMediaItem>> currentByMediaId;
+    int expectedVideoCount = 0;
+    for (const auto& item : std::as_const(m_mediaItems)) {
+        if (!item || item->mediaId.isEmpty() || currentByMediaId.contains(item->mediaId)) {
+            return reject(QStringLiteral("Current renderer graph has invalid media identity"));
+        }
+        currentByMediaId.insert(item->mediaId, item);
+        if (item->type == QLatin1String("video")) ++expectedVideoCount;
+    }
+
+    const QJsonArray mediaArray = scene.value(QStringLiteral("media")).toArray();
+    if (mediaArray.size() != currentByMediaId.size()) {
+        return reject(QStringLiteral("Scene snapshot media set is incomplete"));
+    }
+
+    struct StagedMediaState {
+        std::shared_ptr<RemoteMediaItem> item;
+        QJsonObject state;
+        QHash<int, QJsonObject> spansByScreen;
+        QJsonObject video;
+    };
+    QList<StagedMediaState> staged;
+    staged.reserve(mediaArray.size());
+    QHash<QString, qsizetype> stagedIndexByMediaId;
+
+    auto requiredBool = [](const QJsonObject& object, const char* key) {
+        return object.value(QLatin1String(key)).isBool();
+    };
+    auto requiredString = [](const QJsonObject& object, const char* key,
+                             int maximumLength = 4096) {
+        const QJsonValue value = object.value(QLatin1String(key));
+        return value.isString() && value.toString().size() <= maximumLength;
+    };
+    auto requiredFinite = [](const QJsonObject& object, const char* key,
+                             double minimum, double maximum) {
+        double value = 0.0;
+        return readFiniteNumber(object, key, value)
+            && value >= minimum && value <= maximum;
+    };
+
+    for (qsizetype index = 0; index < mediaArray.size(); ++index) {
+        if (!mediaArray.at(index).isObject()) {
+            return reject(QStringLiteral("Scene snapshot contains malformed media"));
+        }
+        const QJsonObject state = mediaArray.at(index).toObject();
+        const QString mediaId = state.value(QStringLiteral("mediaId")).toString();
+        const auto currentIt = currentByMediaId.constFind(mediaId);
+        if (!state.value(QStringLiteral("mediaId")).isString()
+            || mediaId.isEmpty() || mediaId.size() > kMaxRemoteIdentifierLength
+            || currentIt == currentByMediaId.cend()
+            || stagedIndexByMediaId.contains(mediaId)) {
+            return reject(QStringLiteral("Scene snapshot media identity is invalid"));
+        }
+        const std::shared_ptr<RemoteMediaItem> item = currentIt.value();
+        if (!requiredString(state, "type", 16)
+            || state.value(QStringLiteral("type")).toString() != item->type
+            || !requiredString(state, "fileId", kMaxRemoteIdentifierLength)
+            || state.value(QStringLiteral("fileId")).toString() != item->fileId) {
+            return reject(QStringLiteral("Scene snapshot attempts to replace media identity"));
+        }
+
+        double x = 0.0;
+        double y = 0.0;
+        double width = 0.0;
+        double height = 0.0;
+        int baseWidth = 0;
+        int baseHeight = 0;
+        int repeatCount = 0;
+        int automationDelay = 0;
+        if (!readFiniteRect(state, "x", "y", "width", "height",
+                            x, y, width, height)
+            || std::abs(x) > kMaxRemoteCoordinate
+            || std::abs(y) > kMaxRemoteCoordinate
+            || width <= 0.0 || width > kMaxRemoteDimension
+            || height <= 0.0 || height > kMaxRemoteDimension
+            || !readBoundedInteger(state, "baseWidth", 0,
+                                   static_cast<int>(kMaxRemoteDimension), baseWidth)
+            || !readBoundedInteger(state, "baseHeight", 0,
+                                   static_cast<int>(kMaxRemoteDimension), baseHeight)
+            || !requiredFinite(state, "z", -kMaxRemoteCoordinate, kMaxRemoteCoordinate)
+            || !requiredFinite(state, "contentOpacity", 0.0, 1.0)
+            || !requiredBool(state, "visible")
+            || !requiredBool(state, "autoDisplay")
+            || !requiredBool(state, "autoHide")
+            || !requiredBool(state, "hideWhenVideoEnds")
+            || !readBoundedInteger(state, "autoDisplayDelayMs",
+                                   -static_cast<int>(kMaxVideoPositionMs),
+                                   static_cast<int>(kMaxVideoPositionMs), automationDelay)
+            || !readBoundedInteger(state, "autoHideDelayMs",
+                                   -static_cast<int>(kMaxVideoPositionMs),
+                                   static_cast<int>(kMaxVideoPositionMs), automationDelay)
+            || !requiredFinite(state, "fadeInSeconds", 0.0, 3600.0)
+            || !requiredFinite(state, "fadeOutSeconds", 0.0, 3600.0)) {
+            return reject(QStringLiteral("Scene snapshot media state is malformed"));
+        }
+
+        const QJsonValue spansValue = state.value(QStringLiteral("spans"));
+        if (!spansValue.isArray()) {
+            return reject(QStringLiteral("Scene snapshot media spans are missing"));
+        }
+        const QJsonArray spans = spansValue.toArray();
+        if (spans.size() != item->spans.size()) {
+            return reject(QStringLiteral("Scene snapshot would reconstruct media spans"));
+        }
+        QSet<int> currentSpanScreens;
+        for (const RemoteMediaItem::Span& span : item->spans) {
+            currentSpanScreens.insert(span.screenId);
+        }
+        QHash<int, QJsonObject> spansByScreen;
+        for (const QJsonValue& spanValue : spans) {
+            if (!spanValue.isObject()) {
+                return reject(QStringLiteral("Scene snapshot contains a malformed span"));
+            }
+            const QJsonObject span = spanValue.toObject();
+            int screenId = -1;
+            double normX = 0.0;
+            double normY = 0.0;
+            double normWidth = 0.0;
+            double normHeight = 0.0;
+            double destX = 0.0;
+            double destY = 0.0;
+            double destWidth = 0.0;
+            double destHeight = 0.0;
+            double sourceX = 0.0;
+            double sourceY = 0.0;
+            double sourceWidth = 0.0;
+            double sourceHeight = 0.0;
+            if (!readBoundedInteger(span, "screenId", 0, 1000000, screenId)
+                || !currentSpanScreens.contains(screenId)
+                || spansByScreen.contains(screenId)
+                || !readFiniteRect(span, "normX", "normY", "normW", "normH",
+                                   normX, normY, normWidth, normHeight)
+                || std::abs(normX) > kMaxLegacyNormalizedMagnitude
+                || std::abs(normY) > kMaxLegacyNormalizedMagnitude
+                || normWidth <= 0.0 || normWidth > kMaxLegacyNormalizedMagnitude
+                || normHeight <= 0.0 || normHeight > kMaxLegacyNormalizedMagnitude
+                || !readFiniteRect(span,
+                                   "spanDestNormX", "spanDestNormY",
+                                   "spanDestNormW", "spanDestNormH",
+                                   destX, destY, destWidth, destHeight)
+                || !isValidUnitRect(destX, destY, destWidth, destHeight)
+                || !readFiniteRect(span,
+                                   "spanSourceNormX", "spanSourceNormY",
+                                   "spanSourceNormW", "spanSourceNormH",
+                                   sourceX, sourceY, sourceWidth, sourceHeight)
+                || !isValidUnitRect(sourceX, sourceY, sourceWidth, sourceHeight)) {
+                return reject(QStringLiteral("Scene snapshot span topology is invalid"));
+            }
+            spansByScreen.insert(screenId, span);
+        }
+
+        if (item->type == QLatin1String("text")) {
+            int fontSize = 0;
+            int fontWeight = 0;
+            int fontPixelSize = 0;
+            const QString horizontal =
+                state.value(QStringLiteral("horizontalAlignment")).toString().toLower();
+            const QString vertical =
+                state.value(QStringLiteral("verticalAlignment")).toString().toLower();
+            if (!requiredString(state, "text", 1000000)
+                || !requiredString(state, "fontFamily", 1024)
+                || !readBoundedInteger(state, "fontSize", 1, 1000, fontSize)
+                || !requiredBool(state, "fontBold")
+                || !requiredBool(state, "fontItalic")
+                || !requiredBool(state, "fontUnderline")
+                || !requiredBool(state, "fontUppercase")
+                || !readBoundedInteger(state, "fontWeight", 0, 900, fontWeight)
+                || !readBoundedInteger(state, "fontPixelSize", 0, 4096, fontPixelSize)
+                || !requiredString(state, "textColor", 64)
+                || !requiredFinite(state, "textBorderWidthPercent", 0.0, 1000.0)
+                || !requiredFinite(state, "textOutlineWidthPx", 0.0, 100000.0)
+                || !requiredString(state, "textBorderColor", 64)
+                || !requiredBool(state, "textFitToTextEnabled")
+                || !requiredBool(state, "textHighlightEnabled")
+                || !requiredString(state, "textHighlightColor", 64)
+                || !requiredFinite(state, "uniformScale", -100000.0, 100000.0)
+                || std::abs(state.value(QStringLiteral("uniformScale")).toDouble()) < 1e-6
+                || (horizontal != QLatin1String("left")
+                    && horizontal != QLatin1String("center")
+                    && horizontal != QLatin1String("right"))
+                || (vertical != QLatin1String("top")
+                    && vertical != QLatin1String("center")
+                    && vertical != QLatin1String("bottom"))) {
+                return reject(QStringLiteral("Scene snapshot text state is malformed"));
+            }
+        } else if (item->type == QLatin1String("video")) {
+            int delay = 0;
+			// The commit path delegates runtime seek/play state to the existing
+			// video synchronizer. Guarantee its complete graph precondition here,
+			// before any text/image/QML mutation begins.
+			if (!item->player || !item->audio
+				|| !requiredBool(state, "autoPlay")
+                || !requiredBool(state, "autoPause")
+                || !requiredBool(state, "muted")
+                || !requiredBool(state, "continuousLoop")
+                || !requiredBool(state, "repeatEnabled")
+                || !requiredBool(state, "autoUnmute")
+                || !requiredBool(state, "autoMute")
+                || !requiredBool(state, "muteWhenVideoEnds")
+                || !readBoundedInteger(state, "repeatCount", 0, 1000000, repeatCount)
+                || !readBoundedInteger(state, "autoPlayDelayMs",
+                                       -static_cast<int>(kMaxVideoPositionMs),
+                                       static_cast<int>(kMaxVideoPositionMs), delay)
+                || !readBoundedInteger(state, "autoPauseDelayMs",
+                                       -static_cast<int>(kMaxVideoPositionMs),
+                                       static_cast<int>(kMaxVideoPositionMs), delay)
+                || !readBoundedInteger(state, "autoUnmuteDelayMs",
+                                       -static_cast<int>(kMaxVideoPositionMs),
+                                       static_cast<int>(kMaxVideoPositionMs), delay)
+                || !readBoundedInteger(state, "autoMuteDelayMs",
+                                       -static_cast<int>(kMaxVideoPositionMs),
+                                       static_cast<int>(kMaxVideoPositionMs), delay)
+                || !requiredFinite(state, "volume", 0.0, 1.0)
+                || !requiredFinite(state, "audioFadeInSeconds", 0.0, 3600.0)
+                || !requiredFinite(state, "audioFadeOutSeconds", 0.0, 3600.0)) {
+                return reject(QStringLiteral("Scene snapshot video configuration is malformed"));
+            }
+        }
+
+        stagedIndexByMediaId.insert(mediaId, staged.size());
+        staged.append({item, state, spansByScreen, {}});
+    }
+
+    const QJsonArray videos = videosValue.toArray();
+    if (videos.size() != expectedVideoCount) {
+        return reject(QStringLiteral("Video state set is incomplete"));
+    }
+    QSet<QString> seenVideoIds;
+    for (const QJsonValue& videoValue : videos) {
+        if (!videoValue.isObject()) {
+            return reject(QStringLiteral("Video state contains a malformed entry"));
+        }
+        const QJsonObject video = videoValue.toObject();
+        const QString mediaId = video.value(QStringLiteral("mediaId")).toString();
+        const auto stagedIt = stagedIndexByMediaId.constFind(mediaId);
+        double position = 0.0;
+        double duration = 0.0;
+        if (!video.value(QStringLiteral("mediaId")).isString()
+            || stagedIt == stagedIndexByMediaId.cend()
+            || staged.at(stagedIt.value()).item->type != QLatin1String("video")
+            || seenVideoIds.contains(mediaId)
+            || !readFiniteNumber(video, "positionMs", position)
+            || position < 0.0 || position > static_cast<double>(kMaxVideoPositionMs)
+            || !readFiniteNumber(video, "durationMs", duration)
+            || duration < 0.0 || duration > static_cast<double>(kMaxVideoPositionMs)
+            || !requiredBool(video, "playing")
+            || !requiredBool(video, "muted")
+            || !requiredBool(video, "visible")
+            || !requiredBool(video, "repeatAvailable")
+            || video.value(QStringLiteral("visible")).toBool()
+                != staged.at(stagedIt.value()).state
+                       .value(QStringLiteral("visible")).toBool()
+            || video.value(QStringLiteral("muted")).toBool()
+                != staged.at(stagedIt.value()).state
+                       .value(QStringLiteral("muted")).toBool()) {
+            return reject(QStringLiteral("Video state is incomplete or ambiguous"));
+        }
+        seenVideoIds.insert(mediaId);
+        staged[stagedIt.value()].video = video;
+    }
+
+    // Commit begins only after the entire scene and every video state have
+    // validated. No object, QML row or player is touched above this point.
+    for (StagedMediaState& stagedState : staged) {
+        const QJsonObject& state = stagedState.state;
+        const std::shared_ptr<RemoteMediaItem>& item = stagedState.item;
+        item->baseWidth = state.value(QStringLiteral("baseWidth")).toInt();
+        item->baseHeight = state.value(QStringLiteral("baseHeight")).toInt();
+        item->z = state.value(QStringLiteral("z")).toDouble();
+        item->contentOpacity = state.value(QStringLiteral("contentOpacity")).toDouble();
+        item->autoDisplay = state.value(QStringLiteral("autoDisplay")).toBool();
+        item->autoDisplayDelayMs = state.value(QStringLiteral("autoDisplayDelayMs")).toInt();
+        item->autoHide = state.value(QStringLiteral("autoHide")).toBool();
+        item->autoHideDelayMs = state.value(QStringLiteral("autoHideDelayMs")).toInt();
+        item->hideWhenVideoEnds = state.value(QStringLiteral("hideWhenVideoEnds")).toBool();
+        item->fadeInSeconds = state.value(QStringLiteral("fadeInSeconds")).toDouble();
+        item->fadeOutSeconds = state.value(QStringLiteral("fadeOutSeconds")).toDouble();
+
+        for (RemoteMediaItem::Span& span : item->spans) {
+            const QJsonObject source = stagedState.spansByScreen.value(span.screenId);
+            span.nx = source.value(QStringLiteral("normX")).toDouble();
+            span.ny = source.value(QStringLiteral("normY")).toDouble();
+            span.nw = source.value(QStringLiteral("normW")).toDouble();
+            span.nh = source.value(QStringLiteral("normH")).toDouble();
+            span.destNx = source.value(QStringLiteral("spanDestNormX")).toDouble();
+            span.destNy = source.value(QStringLiteral("spanDestNormY")).toDouble();
+            span.destNw = source.value(QStringLiteral("spanDestNormW")).toDouble();
+            span.destNh = source.value(QStringLiteral("spanDestNormH")).toDouble();
+            span.srcNx = source.value(QStringLiteral("spanSourceNormX")).toDouble();
+            span.srcNy = source.value(QStringLiteral("spanSourceNormY")).toDouble();
+            span.srcNw = source.value(QStringLiteral("spanSourceNormW")).toDouble();
+            span.srcNh = source.value(QStringLiteral("spanSourceNormH")).toDouble();
+        }
+
+        if (item->type == QLatin1String("text")) {
+            item->text = state.value(QStringLiteral("text")).toString();
+            item->fontFamily = state.value(QStringLiteral("fontFamily")).toString();
+            item->fontSize = state.value(QStringLiteral("fontSize")).toInt();
+            item->fontBold = state.value(QStringLiteral("fontBold")).toBool();
+            item->fontItalic = state.value(QStringLiteral("fontItalic")).toBool();
+            item->fontUnderline = state.value(QStringLiteral("fontUnderline")).toBool();
+            item->fontUppercase = state.value(QStringLiteral("fontUppercase")).toBool();
+            item->fontWeight = state.value(QStringLiteral("fontWeight")).toInt();
+            item->fontPixelSize = state.value(QStringLiteral("fontPixelSize")).toInt();
+            item->textColor = state.value(QStringLiteral("textColor")).toString();
+            item->textBorderWidthPercent =
+                state.value(QStringLiteral("textBorderWidthPercent")).toDouble();
+            item->textOutlineWidthPx =
+                state.value(QStringLiteral("textOutlineWidthPx")).toDouble();
+            item->textBorderColor = state.value(QStringLiteral("textBorderColor")).toString();
+            item->fitToTextEnabled =
+                state.value(QStringLiteral("textFitToTextEnabled")).toBool();
+            item->highlightEnabled =
+                state.value(QStringLiteral("textHighlightEnabled")).toBool();
+            item->textHighlightColor =
+                state.value(QStringLiteral("textHighlightColor")).toString();
+            item->uniformScale = state.value(QStringLiteral("uniformScale")).toDouble();
+            const QString horizontal =
+                state.value(QStringLiteral("horizontalAlignment")).toString().toLower();
+            item->horizontalAlignment = horizontal == QLatin1String("left")
+                ? RemoteMediaItem::HorizontalAlignment::Left
+                : (horizontal == QLatin1String("right")
+                       ? RemoteMediaItem::HorizontalAlignment::Right
+                       : RemoteMediaItem::HorizontalAlignment::Center);
+            const QString vertical =
+                state.value(QStringLiteral("verticalAlignment")).toString().toLower();
+            item->verticalAlignment = vertical == QLatin1String("top")
+                ? RemoteMediaItem::VerticalAlignment::Top
+                : (vertical == QLatin1String("bottom")
+                       ? RemoteMediaItem::VerticalAlignment::Bottom
+                       : RemoteMediaItem::VerticalAlignment::Center);
+        } else if (item->type == QLatin1String("video")) {
+            item->autoPlay = state.value(QStringLiteral("autoPlay")).toBool();
+            item->autoPlayDelayMs = state.value(QStringLiteral("autoPlayDelayMs")).toInt();
+            item->autoPause = state.value(QStringLiteral("autoPause")).toBool();
+            item->autoPauseDelayMs = state.value(QStringLiteral("autoPauseDelayMs")).toInt();
+            item->continuousLoop = state.value(QStringLiteral("continuousLoop")).toBool();
+            item->repeatEnabled = state.value(QStringLiteral("repeatEnabled")).toBool();
+            item->repeatCount = state.value(QStringLiteral("repeatCount")).toInt();
+            item->volume = state.value(QStringLiteral("volume")).toDouble();
+            item->autoUnmute = state.value(QStringLiteral("autoUnmute")).toBool();
+            item->autoUnmuteDelayMs = state.value(QStringLiteral("autoUnmuteDelayMs")).toInt();
+            item->autoMute = state.value(QStringLiteral("autoMute")).toBool();
+            item->autoMuteDelayMs = state.value(QStringLiteral("autoMuteDelayMs")).toInt();
+            item->muteWhenVideoEnds =
+                state.value(QStringLiteral("muteWhenVideoEnds")).toBool();
+            item->audioFadeInSeconds =
+                state.value(QStringLiteral("audioFadeInSeconds")).toDouble();
+            item->audioFadeOutSeconds =
+                state.value(QStringLiteral("audioFadeOutSeconds")).toDouble();
+        }
+
+        const bool visible = item->type == QLatin1String("video")
+            ? stagedState.video.value(QStringLiteral("visible")).toBool()
+            : state.value(QStringLiteral("visible")).toBool();
+        item->contentVisible = visible;
+        item->displayReady = visible;
+        item->displayStarted = visible;
+        item->hiding = false;
+        updatePublishedMediaItem(item);
+        setRemoteMediaVisualState(item, visible ? item->contentOpacity : 0.0, visible);
+    }
+
+    if (expectedVideoCount > 0) {
+        const qint64 approximateSampleEpoch =
+            QDateTime::currentMSecsSinceEpoch() - sampleAgeMs;
+        onRemoteSceneVideoSync(m_pendingSenderClientId, m_pendingSceneInstanceId,
+                               static_cast<qint64>(sequence), approximateSampleEpoch,
+                               videos);
+    } else {
+        m_lastVideoSyncSequence = static_cast<qint64>(sequence);
+    }
+    emit authoritativeSnapshotApplied(sequence);
+    return true;
+}
+
+void RemoteSceneController::onSceneStopEnvelope(const QJsonObject& envelope)
+{
+    if (!matchesSceneEnvelope(envelope)) return;
+    onRemoteSceneStop(m_pendingSenderClientId, m_pendingSceneInstanceId);
+}
+
+void RemoteSceneController::onSceneStoppedEnvelope(const QJsonObject& envelope)
+{
+    const QString runId = envelope.value(QStringLiteral("sceneRunId")).toString();
+    if (runId.isEmpty() || (runId != m_pendingSceneInstanceId
+                            && runId != m_lastStoppedSceneInstanceId)) return;
+    if (runId == m_pendingSceneInstanceId) clearScene();
+}
+
+void RemoteSceneController::onSceneErrorEnvelope(const QJsonObject& envelope)
+{
+    if (!matchesSceneEnvelope(envelope)) return;
+    qWarning() << "Remote scene protocol error:"
+               << envelope.value(QStringLiteral("code")).toString();
+    ++m_sceneEpoch;
+    clearScene();
+}
+
+void RemoteSceneController::onRemoteSessionResumedEnvelope(const QJsonObject& envelope)
+{
+    if (envelope.value(QStringLiteral("remoteSessionId")).toString()
+        != m_pendingRemoteSessionId) return;
+	qint64 generation = -1;
+	if (!readBoundedInt64(envelope, "generation", 1,
+						kMaxSafeJsonInteger, generation)) {
+		return;
+	}
+	m_pendingSessionGeneration = static_cast<quint64>(generation);
+	// A frame can genuinely reach the compositor while the transport is in its
+	// lease grace period. Re-send that exact observation after resumption; never
+	// manufacture a new presentation time merely because the socket returned.
+	if (m_sceneActivated && m_screensAwaitingFirstFrame.isEmpty()
+		&& m_firstFramePresentedLocalSteadyMs >= 0) {
+		sendFirstFramePresented(true);
+	}
+}
+
+void RemoteSceneController::sendPrepareResult(bool success, const QString& detail)
+{
+    if (!m_ws || m_pendingSceneInstanceId.isEmpty()) return;
+    if (success) {
+        if (m_scenePreparedReported) return;
+        for (const QJsonValue& value : std::as_const(m_prepareChecklist)) {
+            if (!value.toObject().value(QStringLiteral("ready")).toBool(false)) return;
+        }
+        m_scenePreparedReported = m_ws->sendScenePrepared(
+            m_pendingSceneInstanceId, true, m_prepareChecklist);
+    } else {
+        m_ws->sendScenePrepared(
+            m_pendingSceneInstanceId, false, m_prepareChecklist,
+            QStringLiteral("scene_prepare_failed"), detail);
+    }
+}
+
+void RemoteSceneController::updatePrepareProgress()
+{
+    if (!m_ws || m_pendingSceneInstanceId.isEmpty() || m_prepareChecklist.isEmpty()) return;
+    int ready = 0;
+    for (const QJsonValue& value : std::as_const(m_prepareChecklist)) {
+        if (value.toObject().value(QStringLiteral("ready")).toBool(false)) ++ready;
+    }
+    const int percent = (ready * 100) / m_prepareChecklist.size();
+    m_ws->sendScenePrepareProgress(m_pendingSceneInstanceId, percent, m_prepareChecklist);
+}
+
+void RemoteSceneController::sendFirstFramePresented(bool forceReplay)
+{
+	if ((!forceReplay && m_firstFrameReported)
+		|| !m_screensAwaitingFirstFrame.isEmpty()
+        || !m_ws || m_pendingSceneInstanceId.isEmpty()) return;
+	if (m_firstFramePresentedServerMonotonicMs < 0) {
+		qint64 maximumClockSkewMs = -1;
+		const qint64 uncertaintyMs = m_ws->sceneClockUncertaintyMs();
+		const qint64 serverNow = m_ws->estimatedServerMonotonicMs();
+		const qint64 localNow = localSteadyMilliseconds();
+		if (!readBoundedInt64(m_ws->serverPolicy(), "sceneMaxClockSkewMs",
+							0, kMaxSafeJsonInteger, maximumClockSkewMs)
+			|| uncertaintyMs < 0 || uncertaintyMs > maximumClockSkewMs
+			|| serverNow < 0 || m_firstFramePresentedLocalSteadyMs < 0
+			|| localNow < m_firstFramePresentedLocalSteadyMs) {
+			return;
+		}
+		const qint64 elapsedSincePresentation =
+			localNow - m_firstFramePresentedLocalSteadyMs;
+		if (serverNow < elapsedSincePresentation) return;
+		m_firstFramePresentedServerMonotonicMs =
+			serverNow - elapsedSincePresentation;
+	}
+	const qint64 timestamp = m_firstFramePresentedServerMonotonicMs;
+	if (timestamp < 0) return;
+	m_firstFrameReported = m_ws->sendSceneStarted(
+		m_pendingSceneInstanceId, true, timestamp) || m_firstFrameReported;
+	if (m_firstFrameReported) disconnectFirstFrameObservers();
+}
+
+void RemoteSceneController::disconnectFirstFrameObservers()
+{
+	for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
+		QObject::disconnect(it->firstFrameConnection);
+		it->firstFrameConnection = {};
+		it->firstFrameSwapsRemaining = 0;
+	}
 }
 
 void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, const QJsonObject& scene) {
@@ -318,7 +1167,8 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
     auto rejectStart = [&](const QString& errorMsg) {
         qWarning() << "RemoteSceneController: validation failed -" << errorMsg;
         if (m_ws) {
-            m_ws->sendRemoteSceneValidationResult(senderClientId, sceneInstanceId, false, errorMsg);
+            m_ws->sendScenePrepared(sceneInstanceId, false, {},
+                                    QStringLiteral("scene_prepare_failed"), errorMsg);
         }
     };
 
@@ -343,9 +1193,13 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
         qDebug() << "RemoteSceneController: duplicate start for current scene" << sceneInstanceId;
         if (m_sceneActivationRequested || m_sceneActivated) {
             if (m_ws) {
-                m_ws->sendRemoteSceneValidationResult(senderClientId, sceneInstanceId, true);
-                if (m_sceneActivated) {
-                    m_ws->sendRemoteSceneLaunched(senderClientId, sceneInstanceId);
+                m_ws->sendScenePrepared(sceneInstanceId, true, m_prepareChecklist);
+				// A duplicate START is a protocol retry, not evidence that a frame
+				// reached the compositor. Replay STARTED only after the real barrier
+				// completed, preserving the original presentation timestamp.
+				if (m_sceneActivated && m_screensAwaitingFirstFrame.isEmpty()
+					&& m_firstFramePresentedLocalSteadyMs >= 0) {
+					sendFirstFramePresented(true);
                 }
             }
         }
@@ -685,8 +1539,10 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
     }
 
     QStringList missingFileNames;
-    QStringList unsupportedVideoNames;
     QStringList invalidMediaEntries;
+    QList<MediaFilePolicy::PreparationAsset> preparationAssets;
+    QHash<QString, QString> preparationFileNames;
+    QHash<QString, QString> preparationTypes;
     for (const QJsonValue& val : media) {
         const QJsonObject mediaObj = val.toObject();
         const QString type = mediaObj.value("type").toString();
@@ -708,22 +1564,20 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
             invalidMediaEntries.append(mediaObj.value("mediaId").toString(QStringLiteral("unnamed media")));
             continue;
         }
-        const QString path = m_fileManager->getFilePathForId(fileId);
+        const QString path = m_fileManager
+            ? m_fileManager->getFilePathForId(fileId) : QString();
+        QString fileName = mediaObj.value("fileName").toString();
+        if (fileName.isEmpty()) fileName = fileId;
         if (path.isEmpty() || !QFile::exists(path)) {
-            QString fileName = mediaObj.value("fileName").toString();
-            if (fileName.isEmpty()) {
-                fileName = fileId;
-            }
             missingFileNames.append(fileName);
         } else {
-            const MediaFilePolicy::Kind actualKind = MediaFilePolicy::classifyLocalFile(path);
-            QString fileName = mediaObj.value("fileName").toString();
-            if (fileName.isEmpty()) fileName = fileId;
-            if (type == QLatin1String("video") && actualKind != MediaFilePolicy::Kind::Mp4Video) {
-                unsupportedVideoNames.append(fileName);
-            } else if (type == QLatin1String("image") && actualKind != MediaFilePolicy::Kind::Image) {
-                invalidMediaEntries.append(fileName);
-            }
+            const QString mediaId = mediaObj.value("mediaId").toString();
+            const MediaFilePolicy::Kind expectedKind = type == QLatin1String("video")
+                ? MediaFilePolicy::Kind::Mp4Video
+                : MediaFilePolicy::Kind::Image;
+            preparationAssets.append({mediaId, path, expectedKind});
+            preparationFileNames.insert(mediaId, fileName);
+            preparationTypes.insert(mediaId, type);
         }
     }
 
@@ -747,9 +1601,28 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
         return;
     }
 
-    if (!unsupportedVideoNames.isEmpty()) {
-        failWithMessage(QStringLiteral("Unsupported video format (MP4 required): %1")
-                            .arg(unsupportedVideoNames.join(QStringLiteral(", "))));
+    const MediaFilePolicy::PreparationValidationResult preparation =
+        MediaFilePolicy::validatePreparationAssets(preparationAssets);
+    if (!preparation.accepted) {
+        if (preparation.errorCode == QLatin1String("decoded_rgba_budget_exceeded")) {
+            failWithMessage(QStringLiteral(
+                "Scene preparation exceeds the 1 GiB decoded RGBA image budget"));
+            return;
+        }
+
+        const QString fileName = preparationFileNames
+            .value(preparation.failedAssetId, preparation.failedAssetId);
+        if (preparationTypes.value(preparation.failedAssetId)
+            == QLatin1String("video")) {
+            failWithMessage(QStringLiteral(
+                "Unsupported video format or codec (MP4 required): %1").arg(fileName));
+        } else {
+            failWithMessage(QStringLiteral("Invalid image asset %1 (%2)")
+                                .arg(fileName,
+                                     preparation.errorCode.isEmpty()
+                                         ? QStringLiteral("media_validation_failed")
+                                         : preparation.errorCode));
+        }
         return;
     }
 
@@ -785,7 +1658,18 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
         m_sceneReadyTimeout->setSingleShot(true);
         connect(m_sceneReadyTimeout, &QTimer::timeout, this, &RemoteSceneController::handleSceneReadyTimeout);
     }
-    m_sceneReadyTimeout->start(11000);
+    if (m_ws) {
+        const int prepareTimeoutMs = m_ws->serverPolicy()
+            .value(QStringLiteral("scenePrepareTimeoutMs")).toInt();
+        if (prepareTimeoutMs <= 0) {
+            failWithMessage(QStringLiteral(
+                "The server did not provide a valid scene preparation policy"));
+            ++m_sceneEpoch;
+            clearScene();
+            return;
+        }
+        m_sceneReadyTimeout->start(prepareTimeoutMs);
+    }
 
     buildWindows(screens);
     if (!m_enabled || epoch != m_sceneEpoch) {
@@ -801,8 +1685,8 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
     }
     for (auto it = m_screenWindows.cbegin(); it != m_screenWindows.cend(); ++it) {
         const ScreenWindow& window = it.value();
-        if (!window.quickWidget || window.quickWidget->status() == QQuickWidget::Error
-            || !window.quickWidget->rootObject()) {
+        if (!window.quickWidget || window.quickWidget->status() != QQuickWidget::Ready
+            || !window.quickWidget->rootObject() || !window.mediaModel) {
             failWithMessage(QStringLiteral("Qt Quick remote renderer failed to initialize"));
             ++m_sceneEpoch;
             clearScene();
@@ -815,6 +1699,25 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
         clearScene();
         return;
     }
+
+    // This also covers a PREPARE that was deferred behind destruction of the
+    // preceding graph: its original envelope callback has already returned,
+    // so readiness must be published from the eventual build itself.
+    if (!remoteRenderGraphsReady()) {
+        failWithMessage(QStringLiteral("Qt Quick remote renderer failed after media construction"));
+        ++m_sceneEpoch;
+        clearScene();
+        return;
+    }
+    for (qsizetype index = 0; index < m_prepareChecklist.size(); ++index) {
+        QJsonObject checklistItem = m_prepareChecklist.at(index).toObject();
+        if (checklistItem.value(QStringLiteral("stage")).toString()
+            == QLatin1String("screen_render_graph_ready")) {
+            checklistItem.insert(QStringLiteral("ready"), true);
+            m_prepareChecklist.replace(index, checklistItem);
+        }
+    }
+    updatePrepareProgress();
 
     // Cancel any pending window show timer from previous scene
     if (m_windowShowTimer) {
@@ -872,12 +1775,26 @@ void RemoteSceneController::onRemoteSceneActivate(const QString& senderClientId,
 
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     const qint64 absoluteRemainingMs = activationEpochMs - nowMs;
+    const QJsonObject policy = m_ws ? m_ws->serverPolicy() : QJsonObject();
+    const qint64 activationLeadMs = policy
+        .value(QStringLiteral("sceneActivationLeadMs")).toInt();
+    const qint64 maximumClockSkewMs = policy
+        .value(QStringLiteral("sceneMaxClockSkewMs")).toInt(-1);
+    const qint64 leaseTimeoutMs = policy
+        .value(QStringLiteral("leaseTimeoutMs")).toInt();
+    if (activationLeadMs <= 0 || maximumClockSkewMs < 0 || leaseTimeoutMs <= 0) {
+        sendPrepareResult(false, QStringLiteral("Invalid scene activation policy"));
+        ++m_sceneEpoch;
+        clearScene();
+        return;
+    }
+    const qint64 maximumDelayMs = activationLeadMs + maximumClockSkewMs;
     const qint64 fallbackDelayMs = std::clamp<qint64>(
-        activationDelayMs, 0, kMaxActivationDelayMs);
+        activationDelayMs, 0, maximumDelayMs);
     const bool absoluteDeadlinePlausible =
-        absoluteRemainingMs >= -kActivationClockToleranceMs
-        && absoluteRemainingMs <= kMaxActivationDelayMs
-        && qAbs(absoluteRemainingMs - fallbackDelayMs) <= kActivationClockToleranceMs;
+        absoluteRemainingMs >= -maximumClockSkewMs
+        && absoluteRemainingMs <= maximumDelayMs
+        && qAbs(absoluteRemainingMs - fallbackDelayMs) <= maximumClockSkewMs;
     const qint64 remainingMs = absoluteDeadlinePlausible
         ? std::max<qint64>(0, absoluteRemainingMs)
         : fallbackDelayMs;
@@ -890,10 +1807,10 @@ void RemoteSceneController::onRemoteSceneActivate(const QString& senderClientId,
     }
 
     m_activationEpochMs = nowMs + remainingMs;
-    // ACTIVATE is a commit, but retain a bounded watchdog until its timer fires.
-    // This prevents malformed/future timestamps from pinning a prepared scene.
+	// ACTIVATE is a commit. Keep only the server-policy-derived lease bound
+	// until its timer fires; no independent client deadline may pre-empt it.
     if (m_sceneReadyTimeout) {
-        m_sceneReadyTimeout->start(static_cast<int>(remainingMs) + kActivationWatchdogGraceMs);
+        m_sceneReadyTimeout->start(static_cast<int>(remainingMs + leaseTimeoutMs));
     }
     if (remainingMs <= 0) {
         QMetaObject::invokeMethod(this, &RemoteSceneController::activateScene, Qt::QueuedConnection);
@@ -917,7 +1834,7 @@ void RemoteSceneController::onRemoteSceneVideoSync(const QString& senderClientId
         return;
     }
 
-    if (!m_enabled || !m_sceneActivated) return;
+    if (!m_enabled) return;
     if (senderClientId != m_pendingSenderClientId
         || sceneInstanceId.isEmpty()
         || sceneInstanceId != m_pendingSceneInstanceId) {
@@ -930,7 +1847,8 @@ void RemoteSceneController::onRemoteSceneVideoSync(const QString& senderClientId
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     const qint64 sampleAgeMs = sampledEpochMs > 0 ? nowMs - sampledEpochMs : -1;
     const bool canProjectTransit = m_activationClockPlausible
-        && sampleAgeMs >= -kActivationClockToleranceMs
+        && sampleAgeMs >= -m_ws->serverPolicy()
+                              .value(QStringLiteral("sceneMaxClockSkewMs")).toInt()
         && sampleAgeMs <= kMaxVideoSyncTransitMs;
     const qint64 projectedTransitMs = canProjectTransit
         ? std::clamp<qint64>(sampleAgeMs, 0, kMaxVideoSyncTransitMs)
@@ -982,8 +1900,6 @@ void RemoteSceneController::onRemoteSceneVideoSync(const QString& senderClientId
     // Commit ordering only after the full snapshot validates. A malformed high
     // sequence must not poison the stream and block a later valid correction.
     m_lastVideoSyncSequence = sequence;
-    m_videoSyncWatchdogTripped = false;
-
     for (const auto& item : m_mediaItems) {
         if (!item || item->type != QLatin1String("video") || !item->player) continue;
         const auto stateIt = stateByMediaId.constFind(item->mediaId);
@@ -995,9 +1911,7 @@ void RemoteSceneController::onRemoteSceneVideoSync(const QString& senderClientId
         const bool visible = state.value("visible").toBool(false);
         const bool repeatAvailable = state.value("repeatAvailable").toBool(false);
 
-        if (!m_videoSyncWatchdogTripped && item->muted != muted) {
-            applyAudioMuteState(item, muted, true);
-        }
+        applyAudioMuteState(item, muted, true);
 
         if (item->contentVisible != visible) {
             if (item->visualFadeAnimation) {
@@ -1068,7 +1982,7 @@ void RemoteSceneController::onRemoteSceneVideoSync(const QString& senderClientId
             }
         }
 
-        if (playing && !decoderTransitionInProgress && !m_videoSyncWatchdogTripped) {
+        if (playing && !decoderTransitionInProgress) {
             item->playAuthorized = true;
             item->pausedAtEnd = false;
             restoreVideoOutput(item);
@@ -1079,7 +1993,6 @@ void RemoteSceneController::onRemoteSceneVideoSync(const QString& senderClientId
         }
     }
 
-    armVideoSyncWatchdog();
 }
 
 void RemoteSceneController::onRemoteSceneStop(const QString& senderClientId,
@@ -1116,8 +2029,7 @@ void RemoteSceneController::onRemoteSceneStop(const QString& senderClientId,
                               bool success,
                               const QString& error = QString()) {
         if (m_ws) {
-            m_ws->sendRemoteSceneStopResult(
-                senderClientId, resultSceneInstanceId, success, error);
+            m_ws->sendSceneStopped(resultSceneInstanceId, success, error);
         }
     };
 
@@ -1208,18 +2120,19 @@ void RemoteSceneController::clearScene() {
         return;
     }
 
-    const bool requiresDeferredCleanup =
-        m_windowShowTimer
-        || m_sceneReadyTimeout
-        || m_activationTimer
-        || m_videoSyncWatchdog
-        || !m_mediaItems.isEmpty()
-        || !m_screenWindows.isEmpty();
     m_teardownInProgress = true;
+    m_teardownCompletionScheduled = false;
+    m_pendingTeardownObjects.clear();
+    ++m_teardownBarrierEpoch;
+    if (m_teardownGraphRemoteSessionId.isEmpty()) {
+        m_teardownGraphRemoteSessionId = m_pendingRemoteSessionId;
+    }
 
     // CRITICAL: Cancel pending window show timer to prevent showing windows after scene cleared
     if (m_windowShowTimer) {
         m_windowShowTimer->stop();
+        QObject::disconnect(m_windowShowTimer, nullptr, this, nullptr);
+        trackTeardownObjectTree(m_windowShowTimer);
         m_windowShowTimer->deleteLater();
         m_windowShowTimer = nullptr;
     }
@@ -1259,10 +2172,20 @@ void RemoteSceneController::clearScene() {
         // safely at the normal event-loop boundary.
         sw.mediaModel = nullptr;
         sw.mediaEntries.clear();
+		QWindow* nativeWindow = window->windowHandle();
+        QQuickWindow* quickWindow = nullptr;
         if (sw.quickWidget) {
+            quickWindow = sw.quickWidget->quickWindow();
             QObject::disconnect(sw.quickWidget, nullptr, nullptr, nullptr);
             sw.quickWidget = nullptr;
         }
+
+        // Register the destruction observers after all wildcard disconnects;
+        // otherwise QObject::disconnect(sender, nullptr, nullptr, nullptr)
+        // would silently remove the barrier itself.
+        trackTeardownObjectTree(window);
+		trackTeardownObjectTree(nativeWindow);
+        trackTeardownObjectTree(quickWindow);
 
         window->close();
         window->lower();
@@ -1273,27 +2196,79 @@ void RemoteSceneController::clearScene() {
 
     m_screenWindows.clear();
 
-    if (!requiresDeferredCleanup) {
+    // An initial START calls clearScene() before it owns any QObject graph. It
+    // can keep the historical synchronous fast path because there is nothing
+    // to settle and no RemoteSession teardown is waiting. Every real teardown,
+    // including an empty graph, completes on a later event-loop boundary.
+    if (m_pendingTeardownObjects.isEmpty()
+        && m_sceneStartInProgress
+        && m_teardownSessionWaiters.isEmpty()) {
         m_teardownInProgress = false;
-        if (!m_sceneStartInProgress) {
-            dispatchDeferredSceneStart();
-        }
+        m_teardownGraphRemoteSessionId.clear();
         return;
     }
 
-    // Never force DeferredDelete delivery or process arbitrary application
-    // events here. Keep START gated briefly while Qt destroys the object trees
-    // naturally after this WebSocket callback returns.
-    m_restartCooldownActive = true;
-    scheduleSceneRestartCooldown();
+    scheduleTeardownBarrierCompletion();
+}
+
+void RemoteSceneController::trackTeardownObject(QObject* object)
+{
+    if (!object || m_pendingTeardownObjects.contains(object)) return;
+    const quint64 barrierEpoch = m_teardownBarrierEpoch;
+    m_pendingTeardownObjects.insert(object);
+    connect(object, &QObject::destroyed, this,
+            [this, object, barrierEpoch]() {
+        if (barrierEpoch != m_teardownBarrierEpoch) return;
+        m_pendingTeardownObjects.remove(object);
+        scheduleTeardownBarrierCompletion();
+    });
+}
+
+void RemoteSceneController::trackTeardownObjectTree(QObject* root)
+{
+    if (!root) return;
+    const QList<QObject*> descendants = root->findChildren<QObject*>();
+    for (QObject* child : descendants) trackTeardownObject(child);
+    trackTeardownObject(root);
+}
+
+void RemoteSceneController::scheduleTeardownBarrierCompletion()
+{
+    if (!m_teardownInProgress || !m_pendingTeardownObjects.isEmpty()
+        || m_teardownCompletionScheduled) {
+        return;
+    }
+    m_teardownCompletionScheduled = true;
+    const quint64 barrierEpoch = m_teardownBarrierEpoch;
+    QMetaObject::invokeMethod(this, [this, barrierEpoch]() {
+        completeTeardownBarrier(barrierEpoch);
+    }, Qt::QueuedConnection);
+}
+
+void RemoteSceneController::completeTeardownBarrier(quint64 barrierEpoch)
+{
+    if (barrierEpoch != m_teardownBarrierEpoch || !m_teardownInProgress) return;
+    m_teardownCompletionScheduled = false;
+    if (!m_pendingTeardownObjects.isEmpty()) return;
+
+    const QSet<QString> sessionWaiters = m_teardownSessionWaiters;
+    m_teardownSessionWaiters.clear();
+    m_teardownGraphRemoteSessionId.clear();
+    m_teardownInProgress = false;
+
+    if (sessionWaiters.isEmpty()) {
+        emit teardownSettled(QString(), true);
+    } else {
+        for (const QString& remoteSessionId : sessionWaiters) {
+            m_lastTornDownRemoteSessionId = remoteSessionId;
+            emit teardownSettled(remoteSessionId, true);
+        }
+    }
+    dispatchDeferredSceneStart();
 }
 
 void RemoteSceneController::dispatchDeferredSceneStart() {
     if (!m_deferredSceneStart.valid) {
-        return;
-    }
-
-    if (m_restartCooldownActive) {
         return;
     }
 
@@ -1317,41 +2292,14 @@ void RemoteSceneController::dispatchDeferredSceneStart() {
     }, Qt::QueuedConnection);
 }
 
-void RemoteSceneController::scheduleSceneRestartCooldown() {
-    // Increase cooldown on macOS to give accessibility bridge more time to clear (QTBUG-95134)
-#ifdef Q_OS_MAC
-    constexpr int kRestartCooldownMs = 150;
-#else
-    constexpr int kRestartCooldownMs = 60;
-#endif
-
-    if (!m_sceneRestartDelayTimer) {
-        m_sceneRestartDelayTimer = new QTimer(this);
-        m_sceneRestartDelayTimer->setSingleShot(true);
-        connect(m_sceneRestartDelayTimer, &QTimer::timeout, this, [this]() {
-            m_teardownInProgress = false;
-            m_restartCooldownActive = false;
-            if (m_sceneRestartDelayTimer) {
-                m_sceneRestartDelayTimer->deleteLater();
-                m_sceneRestartDelayTimer = nullptr;
-            }
-            dispatchDeferredSceneStart();
-        });
-    }
-
-    if (m_sceneRestartDelayTimer->isActive()) {
-        m_sceneRestartDelayTimer->stop();
-    }
-    m_sceneRestartDelayTimer->start(kRestartCooldownMs);
-}
-
 void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaItem>& item) {
     if (!item) return;
 
-    auto stopAndDeleteTimer = [](QTimer*& timer) {
+    auto stopAndDeleteTimer = [this](QTimer*& timer) {
         if (!timer) return;
         timer->stop();
         QObject::disconnect(timer, nullptr, nullptr, nullptr);
+        trackTeardownObjectTree(timer);
         timer->deleteLater();
         timer = nullptr;
     };
@@ -1363,12 +2311,24 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     stopAndDeleteTimer(item->muteTimer);
     stopAndDeleteTimer(item->hideEndDelayTimer);
     stopAndDeleteTimer(item->muteEndDelayTimer);
+	for (const QPointer<QTimer>& timerPointer : std::as_const(item->auxiliaryTimers)) {
+		QTimer* timer = timerPointer.data();
+		if (!timer) continue;
+		timer->stop();
+		QObject::disconnect(timer, nullptr, nullptr, nullptr);
+		trackTeardownObjectTree(timer);
+		timer->deleteLater();
+	}
+	item->auxiliaryTimers.clear();
 
+    QVariantAnimation* audioFade = item->audioFadeAnimation.data();
     cancelAudioFade(item, false);
+    trackTeardownObjectTree(audioFade);
     if (item->visualFadeAnimation) {
         QVariantAnimation* animation = item->visualFadeAnimation.data();
         QObject::disconnect(animation, nullptr, this, nullptr);
         animation->stop();
+        trackTeardownObjectTree(animation);
         animation->deleteLater();
         item->visualFadeAnimation = nullptr;
     }
@@ -1415,10 +2375,12 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     item->spans.clear();
 
     if (item->player) {
+        trackTeardownObjectTree(item->player);
         item->player->deleteLater();
         item->player = nullptr;
     }
     if (item->audio) {
+        trackTeardownObjectTree(item->audio);
         item->audio->deleteLater();
         item->audio = nullptr;
     }
@@ -1430,6 +2392,7 @@ void RemoteSceneController::teardownMediaItem(const std::shared_ptr<RemoteMediaI
     item->lastFrameImage = QImage();
     if (item->frameSource) {
         item->frameSource->clear();
+        trackTeardownObjectTree(item->frameSource.data());
         item->frameSource->deleteLater();
         item->frameSource = nullptr;
     }
@@ -1459,6 +2422,15 @@ void RemoteSceneController::markItemReady(const std::shared_ptr<RemoteMediaItem>
     if (item->readyNotified) return;
     item->readyNotified = true;
     ++m_mediaReadyCount;
+    for (qsizetype index = 0; index < m_prepareChecklist.size(); ++index) {
+        QJsonObject entry = m_prepareChecklist.at(index).toObject();
+        if (entry.value(QStringLiteral("itemId")).toString()
+                .startsWith(item->mediaId + QLatin1Char('_'))) {
+            entry.insert(QStringLiteral("ready"), true);
+            m_prepareChecklist.replace(index, entry);
+        }
+    }
+    updatePrepareProgress();
     qDebug() << "RemoteSceneController: media primed" << item->mediaId << "(" << m_mediaReadyCount << "/" << m_totalMediaToPrime << ")";
     startSceneActivationIfReady();
 }
@@ -1487,12 +2459,22 @@ void RemoteSceneController::startSceneActivationIfReady() {
     // PREPARE is complete. Keep all windows hidden and every automation timer
     // stopped until the host sends ACTIVATE with a shared wall-clock epoch.
     m_sceneActivationRequested = true;
-    if (m_sceneReadyTimeout) {
-        m_sceneReadyTimeout->start(10000);
+    if (m_sceneReadyTimeout && m_ws) {
+        const QJsonObject policy = m_ws ? m_ws->serverPolicy() : QJsonObject();
+        const int activationLeadMs = policy
+            .value(QStringLiteral("sceneActivationLeadMs")).toInt();
+        const int leaseTimeoutMs = policy
+            .value(QStringLiteral("leaseTimeoutMs")).toInt();
+        if (activationLeadMs <= 0 || leaseTimeoutMs <= 0) {
+            sendPrepareResult(false, QStringLiteral("Invalid scene activation policy"));
+            ++m_sceneEpoch;
+            clearScene();
+            return;
+        }
+        m_sceneReadyTimeout->start(activationLeadMs + leaseTimeoutMs);
     }
     if (m_ws && !m_pendingSenderClientId.isEmpty() && !m_pendingSceneInstanceId.isEmpty()) {
-        m_ws->sendRemoteSceneValidationResult(
-            m_pendingSenderClientId, m_pendingSceneInstanceId, true);
+        sendPrepareResult(true);
     }
 }
 
@@ -1534,8 +2516,6 @@ void RemoteSceneController::triggerAutoPlayNow(const std::shared_ptr<RemoteMedia
     if (!item) return;
     if (epoch != m_sceneEpoch) return;
     if (!item->player) return;
-    if (m_videoSyncWatchdogTripped) return;
-
     item->playAuthorized = true;
     item->repeatActive = false;
     item->lastRepeatTriggerMs = 0;
@@ -1763,6 +2743,24 @@ void RemoteSceneController::finalizeLivePlaybackStart(const std::shared_ptr<Remo
 
 void RemoteSceneController::activateScene() {
     if (m_sceneActivated || !m_sceneActivationRequested) return;
+	const quint64 activationEpoch = m_sceneEpoch;
+	bool activationGraphReady = remoteRenderGraphsReady();
+	for (auto it = m_screenWindows.cbegin();
+		 activationGraphReady && it != m_screenWindows.cend(); ++it) {
+		activationGraphReady = it->sceneEpoch == activationEpoch
+			&& it->quickWidget && it->quickWidget->quickWindow();
+	}
+	if (!activationGraphReady) {
+		const qint64 timestamp = m_ws ? m_ws->estimatedServerMonotonicMs() : -1;
+		if (m_ws && timestamp >= 0) {
+			m_ws->sendSceneStarted(m_pendingSceneInstanceId, false, timestamp);
+		}
+		qWarning() << "RemoteSceneController: activation failed before first-frame presentation";
+		++m_sceneEpoch;
+		clearScene();
+		return;
+	}
+
     m_sceneActivated = true;
     m_sceneActivationRequested = false;
     if (m_activationTimer) m_activationTimer->stop();
@@ -1771,16 +2769,71 @@ void RemoteSceneController::activateScene() {
         m_sceneReadyTimeout->stop();
     }
 
-    const quint64 activationEpoch = m_sceneEpoch;
+    m_screensAwaitingFirstFrame.clear();
     for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
         ScreenWindow& sw = it.value();
-        if (!sw.window || sw.sceneEpoch != activationEpoch) {
-            continue;
-        }
+		QQuickWindow* renderWindow = sw.quickWidget->quickWindow();
 
-        sw.window->show();
-#ifdef Q_OS_MAC
+		// Install the swap observer only after show(). Any preparation frame
+		// emitted while the window was hidden is therefore outside this
+		// activation generation and cannot satisfy the barrier.
+		sw.window->show();
+
         const int screenId = it.key();
+        m_screensAwaitingFirstFrame.insert(screenId);
+		sw.firstFrameSwapsRemaining = 2;
+        QObject::disconnect(sw.firstFrameConnection);
+        sw.firstFrameConnection = connect(
+            renderWindow, &QQuickWindow::frameSwapped, this,
+            [this, activationEpoch, screenId]() {
+				if (activationEpoch != m_sceneEpoch || !m_sceneActivated) {
+                    return;
+                }
+                auto windowIt = m_screenWindows.find(screenId);
+				if (windowIt == m_screenWindows.end()
+					|| windowIt->sceneEpoch != activationEpoch
+					|| !windowIt->window || !windowIt->quickWidget) {
+					return;
+				}
+
+				ScreenWindow& presentedWindow = windowIt.value();
+				QWindow* nativeWindow = presentedWindow.window->windowHandle();
+				if (!presentedWindow.window->isVisible()
+					|| !presentedWindow.quickWidget->isVisible()
+					|| !nativeWindow || !nativeWindow->isExposed()) {
+					// A hidden/off-screen render pass is not a presented frame. Keep
+					// the barrier armed and request another compositor cycle.
+					presentedWindow.quickWidget->update();
+					if (QQuickWindow* quickWindow = presentedWindow.quickWidget->quickWindow()) {
+						quickWindow->update();
+					}
+					return;
+                }
+
+				if (presentedWindow.firstFrameSwapsRemaining > 0) {
+					--presentedWindow.firstFrameSwapsRemaining;
+					if (presentedWindow.firstFrameSwapsRemaining > 0) {
+						presentedWindow.quickWidget->update();
+						if (QQuickWindow* quickWindow = presentedWindow.quickWidget->quickWindow()) {
+							quickWindow->update();
+						}
+						return;
+					}
+					m_screensAwaitingFirstFrame.remove(screenId);
+				}
+
+				if (m_screensAwaitingFirstFrame.isEmpty()) {
+					if (m_firstFramePresentedLocalSteadyMs < 0) {
+						m_firstFramePresentedLocalSteadyMs =
+							localSteadyMilliseconds();
+					}
+                    sendFirstFramePresented();
+                }
+			}, Qt::QueuedConnection);
+
+        sw.quickWidget->update();
+		renderWindow->update();
+#ifdef Q_OS_MAC
         QTimer::singleShot(0, this, [this, activationEpoch, screenId]() {
             if (activationEpoch != m_sceneEpoch) {
                 return;
@@ -1818,15 +2871,14 @@ void RemoteSceneController::activateScene() {
                 if (epoch != m_sceneEpoch) return; // Scene changed
                 if (!item || !item->audio) return; // Item deleted
                 if (!m_sceneActivated) return; // Scene stopped
-                if (m_videoSyncWatchdogTripped) return;
                 applyAudioMuteState(item, false);
             };
             
-            if (unmuteDelayMs > 0) {
-                QTimer::singleShot(unmuteDelayMs, this, unmuteCallback);
-            } else {
-                QTimer::singleShot(0, this, unmuteCallback);
-            }
+			QTimer* unmuteTimer = new QTimer(this);
+			unmuteTimer->setSingleShot(true);
+			item->auxiliaryTimers.append(unmuteTimer);
+			connect(unmuteTimer, &QTimer::timeout, this, unmuteCallback);
+			unmuteTimer->start(unmuteDelayMs);
         }
 
         item->hideEndTriggered = false;
@@ -1840,27 +2892,19 @@ void RemoteSceneController::activateScene() {
     }
 
     startDeferredTimers();
-    armVideoSyncWatchdog();
-
-    const QString sender = m_pendingSenderClientId;
-    const QString sceneInstanceId = m_pendingSceneInstanceId;
-    if (m_ws && !sender.isEmpty() && !sceneInstanceId.isEmpty()) {
-        m_ws->sendRemoteSceneLaunched(sender, sceneInstanceId);
-    }
+    // No local show()/repaint acknowledgement is emitted. Each target screen
+    // must reach QQuickWindow::frameSwapped above; if one never does, no
+    // `started` acknowledgement is sent and the server's authoritative
+    // SceneRun started deadline fails both parties closed.
 }
 
 void RemoteSceneController::handleSceneReadyTimeout() {
-    const QString sender = m_pendingSenderClientId;
-    qWarning() << "RemoteSceneController: timed out waiting for remote media to load" << sender;
-    if (m_ws && !sender.isEmpty()) {
-        m_ws->sendRemoteSceneValidationResult(
-            sender,
-            m_pendingSceneInstanceId,
-            false,
-            m_sceneActivationRequested
-                ? QStringLiteral("Timed out waiting for scene activation")
-                : QStringLiteral("Timed out waiting for remote media to load"));
-    }
+    qWarning() << "RemoteSceneController: timed out waiting for remote media to load";
+    sendPrepareResult(
+        false,
+        m_sceneActivationRequested
+            ? QStringLiteral("Timed out waiting for scene activation")
+            : QStringLiteral("Timed out waiting for remote media to load"));
     ++m_sceneEpoch;
     clearScene();
 }
@@ -1996,6 +3040,10 @@ void RemoteSceneController::seekToConfiguredStart(const std::shared_ptr<RemoteMe
 void RemoteSceneController::resetWindowForNewScene(ScreenWindow& sw, int screenId, int x, int y, int w, int h, bool primary) {
     if (!sw.window || !sw.quickWidget || !sw.mediaModel) return;
 
+    QObject::disconnect(sw.firstFrameConnection);
+    sw.firstFrameConnection = {};
+	sw.firstFrameSwapsRemaining = 0;
+
     sw.x = x;
     sw.y = y;
     sw.w = w;
@@ -2087,6 +3135,10 @@ void RemoteSceneController::buildWindows(const QJsonArray& screensArray) {
         const QRect geom = target->geometry();
         const bool primary = target == QGuiApplication::primaryScreen();
         ensureScreenWindow(hostScreenId, geom.x(), geom.y(), geom.width(), geom.height(), primary);
+		auto windowIt = m_screenWindows.find(hostScreenId);
+		if (windowIt != m_screenWindows.end()) {
+			windowIt->sourceScreenDefinition = o;
+		}
         ++hostIndex;
     }
     qDebug() << "RemoteSceneController: created" << m_screenWindows.size() << "remote screen windows (host screens:" << screensArray.size() << ", local screens:" << localScreens.size() << ")";
@@ -2166,6 +3218,80 @@ void RemoteSceneController::publishMediaSpan(const std::shared_ptr<RemoteMediaIt
 
     windowIt->mediaEntries.append(media);
     publishScreenModel(span.screenId);
+}
+
+void RemoteSceneController::updatePublishedMediaItem(
+    const std::shared_ptr<RemoteMediaItem>& item)
+{
+    if (!item) return;
+    QSet<int> changedScreens;
+    for (const RemoteMediaItem::Span& span : item->spans) {
+        auto windowIt = m_screenWindows.find(span.screenId);
+        if (windowIt == m_screenWindows.end()) continue;
+        const qreal surfaceWidth = std::max<qreal>(1.0, windowIt->w);
+        const qreal surfaceHeight = std::max<qreal>(1.0, windowIt->h);
+        for (QVariant& entry : windowIt->mediaEntries) {
+            QVariantMap media = entry.toMap();
+            if (media.value(QStringLiteral("spanId")).toString() != span.spanId
+                || media.value(QStringLiteral("remoteMediaId")).toString()
+                    != item->mediaId) {
+                continue;
+            }
+            media.insert(QStringLiteral("destX"), span.destNx * surfaceWidth);
+            media.insert(QStringLiteral("destY"), span.destNy * surfaceHeight);
+            media.insert(QStringLiteral("destWidth"), span.destNw * surfaceWidth);
+            media.insert(QStringLiteral("destHeight"), span.destNh * surfaceHeight);
+            media.insert(QStringLiteral("sourceX"), span.srcNx);
+            media.insert(QStringLiteral("sourceY"), span.srcNy);
+            media.insert(QStringLiteral("sourceWidth"), span.srcNw);
+            media.insert(QStringLiteral("sourceHeight"), span.srcNh);
+            media.insert(QStringLiteral("width"), std::max(1, item->baseWidth));
+            media.insert(QStringLiteral("height"), std::max(1, item->baseHeight));
+            media.insert(QStringLiteral("z"), item->z);
+            media.insert(QStringLiteral("contentVisible"), item->contentVisible);
+            if (item->type == QLatin1String("text")) {
+                QString horizontal = QStringLiteral("center");
+                if (item->horizontalAlignment
+                    == RemoteMediaItem::HorizontalAlignment::Left) {
+                    horizontal = QStringLiteral("left");
+                } else if (item->horizontalAlignment
+                           == RemoteMediaItem::HorizontalAlignment::Right) {
+                    horizontal = QStringLiteral("right");
+                }
+                QString vertical = QStringLiteral("center");
+                if (item->verticalAlignment
+                    == RemoteMediaItem::VerticalAlignment::Top) {
+                    vertical = QStringLiteral("top");
+                } else if (item->verticalAlignment
+                           == RemoteMediaItem::VerticalAlignment::Bottom) {
+                    vertical = QStringLiteral("bottom");
+                }
+                media.insert(QStringLiteral("textContent"), item->text);
+                media.insert(QStringLiteral("textFontFamily"), item->fontFamily);
+                media.insert(QStringLiteral("textFontPixelSize"),
+                             std::max(1, item->fontPixelSize));
+                media.insert(QStringLiteral("textFontWeight"), item->fontWeight > 0
+                             ? item->fontWeight : (item->fontBold ? 700 : 400));
+                media.insert(QStringLiteral("textItalic"), item->fontItalic);
+                media.insert(QStringLiteral("textUnderline"), item->fontUnderline);
+                media.insert(QStringLiteral("textUppercase"), item->fontUppercase);
+                media.insert(QStringLiteral("textHorizontalAlignment"), horizontal);
+                media.insert(QStringLiteral("textVerticalAlignment"), vertical);
+                media.insert(QStringLiteral("fitToTextEnabled"), item->fitToTextEnabled);
+                media.insert(QStringLiteral("textColor"), item->textColor);
+                media.insert(QStringLiteral("textOutlineWidthPercent"),
+                             item->textBorderWidthPercent);
+                media.insert(QStringLiteral("textOutlineWidthPx"), item->textOutlineWidthPx);
+                media.insert(QStringLiteral("textOutlineColor"), item->textBorderColor);
+                media.insert(QStringLiteral("textHighlightEnabled"), item->highlightEnabled);
+                media.insert(QStringLiteral("textHighlightColor"), item->textHighlightColor);
+            }
+            entry = media;
+            changedScreens.insert(span.screenId);
+            break;
+        }
+    }
+    for (int screenId : std::as_const(changedScreens)) publishScreenModel(screenId);
 }
 
 void RemoteSceneController::setRemoteMediaVisualState(const std::shared_ptr<RemoteMediaItem>& item,
@@ -2602,10 +3728,11 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
                                     const QString owner = m_pendingSenderClientId;
                                     const QString failedSceneInstanceId = m_pendingSceneInstanceId;
                                     if (m_ws && !owner.isEmpty() && !failedSceneInstanceId.isEmpty()) {
-                                        m_ws->sendRemoteSceneValidationResult(
-                                            owner,
+                                        m_ws->sendScenePrepared(
                                             failedSceneInstanceId,
                                             false,
+                                            m_prepareChecklist,
+                                            QStringLiteral("video_frame_unrenderable"),
                                             QStringLiteral("Video decoder produced a frame that cannot be rendered"));
                                     }
                                     const quint64 failureEpoch = ++m_sceneEpoch;
@@ -2705,7 +3832,11 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             return false;
         };
         if (!attemptLoadVid()) {
-            for (int i=1;i<=5;++i) QTimer::singleShot(i*500, this, [attemptLoadVid]() { attemptLoadVid(); });
+			// Upload inventory is already committed before PREPARE. Do not run a
+			// client-side retry schedule that can outlive or second-guess the
+			// server's preparation deadline; the policy timeout fails this graph.
+			qWarning() << "RemoteSceneController: video source unavailable during preparation"
+					   << item->mediaId;
         }
     }
 

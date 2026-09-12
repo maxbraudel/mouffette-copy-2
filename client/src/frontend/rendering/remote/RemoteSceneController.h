@@ -31,8 +31,30 @@ public:
 	~RemoteSceneController() override;
 	void setEnabled(bool en) { m_enabled = en; if (!en) clearScene(); }
 	bool isEnabled() const { return m_enabled; }
+	// Begins renderer teardown for exactly one RemoteSession.  Returning true
+	// means that the request was accepted (or had already settled), not that
+	// QObject destruction has completed.  Cache quarantine must wait for the
+	// correlated teardownSettled() signal. Idempotent.
+	bool teardownRemoteSession(const QString& remoteSessionId);
+
+signals:
+	// Emitted only after every tracked player, sink, audio output, frame source,
+	// timer, animation, QQuickWidget/model and native top-level window from the
+	// retired graph has actually been destroyed. An empty id denotes a normal
+	// SceneRun stop rather than a RemoteSession teardown.
+	void teardownSettled(const QString& remoteSessionId, bool success);
+	void authoritativeSnapshotApplied(quint64 sequence);
+	void authoritativeSnapshotRejected(quint64 sequence, const QString& reason);
 
 private slots:
+	void onScenePrepareEnvelope(const QJsonObject& envelope);
+	void onScenePreparedEnvelope(const QJsonObject& envelope);
+	void onSceneCommitEnvelope(const QJsonObject& envelope);
+	void onSceneStateSnapshotEnvelope(const QJsonObject& envelope);
+	void onSceneStopEnvelope(const QJsonObject& envelope);
+	void onSceneStoppedEnvelope(const QJsonObject& envelope);
+	void onSceneErrorEnvelope(const QJsonObject& envelope);
+	void onRemoteSessionResumedEnvelope(const QJsonObject& envelope);
 	void onRemoteSceneStart(const QString& senderClientId, const QJsonObject& scene);
 	void onRemoteSceneActivate(const QString& senderClientId,
 	                          const QString& sceneInstanceId,
@@ -48,6 +70,12 @@ private slots:
 	void onConnectionLost();
 	void onConnectionError(const QString& errorMessage);
 	void onRemoteSpanReady(const QString& mediaId, const QString& spanId);
+	// Kept as a slot so focused Qt tests can exercise the transaction without a
+	// transport. Production calls it only after envelope correlation succeeds.
+	bool applyAuthoritativeStateSnapshot(const QJsonObject& snapshot,
+	                                     quint64 sequence,
+	                                     qint64 sampleAgeMs);
+	bool remoteRenderGraphsReady() const;
 
 private:
 	struct ScreenWindow {
@@ -55,6 +83,15 @@ private:
 		QQuickWidget* quickWidget = nullptr;
 		MediaListModel* mediaModel = nullptr;
 		QVariantList mediaEntries;
+		QMetaObject::Connection firstFrameConnection;
+		// A QQuickWidget may already have a render pass in flight when the
+		// activation barrier is installed. Requiring two post-installation swaps
+		// prevents that stale pass from being acknowledged as the live scene.
+		int firstFrameSwapsRemaining = 0;
+		// Immutable source topology for the SceneRun. The QWidget geometry below
+		// is the local physical mapping and must never be replaced by a resumed
+		// owner's coordinates.
+		QJsonObject sourceScreenDefinition;
 		int x=0,y=0,w=0,h=0;
 		quint64 sceneEpoch = 0;
 	};
@@ -153,6 +190,9 @@ private:
 		QTimer* muteTimer = nullptr;
 		QTimer* hideEndDelayTimer = nullptr;
 		QTimer* muteEndDelayTimer = nullptr;
+		// Explicitly-owned retry/automation timers. Avoid untrackable
+		// QTimer::singleShot functors surviving a RemoteSession teardown.
+		QList<QPointer<QTimer>> auxiliaryTimers;
 		bool hideEndTriggered = false;
 		bool muteEndTriggered = false;
 		bool holdLastFrameAtEnd = false;
@@ -179,11 +219,13 @@ private:
 	void cancelAudioFade(const std::shared_ptr<RemoteMediaItem>& item, bool applyFinalState);
 	void applyAudioMuteState(const std::shared_ptr<RemoteMediaItem>& item, bool muted, bool skipFade = false);
 	void clearScene();
-	void armVideoSyncWatchdog();
-	void handleVideoSyncWatchdogTimeout();
 	void dispatchDeferredSceneStart();
-	void scheduleSceneRestartCooldown();
 	void teardownMediaItem(const std::shared_ptr<RemoteMediaItem>& item);
+	void trackTeardownObject(QObject* object);
+	void trackTeardownObjectTree(QObject* root);
+	void scheduleTeardownBarrierCompletion();
+	void completeTeardownBarrier(quint64 barrierEpoch);
+	void updatePublishedMediaItem(const std::shared_ptr<RemoteMediaItem>& item);
     void markItemReady(const std::shared_ptr<RemoteMediaItem>& item);
     void evaluateItemReadiness(const std::shared_ptr<RemoteMediaItem>& item);
     void startSceneActivationIfReady();
@@ -208,6 +250,11 @@ private:
 	void publishMediaSpan(const std::shared_ptr<RemoteMediaItem>& item, RemoteMediaItem::Span& span);
 	void setRemoteMediaVisualState(const std::shared_ptr<RemoteMediaItem>& item, qreal opacity, bool visible);
 	bool allSpansReady(const std::shared_ptr<RemoteMediaItem>& item) const;
+	bool matchesSceneEnvelope(const QJsonObject& envelope) const;
+	void sendPrepareResult(bool success, const QString& message = QString());
+	void sendFirstFramePresented(bool forceReplay = false);
+	void disconnectFirstFrameObservers();
+	void updatePrepareProgress();
 
 
 	private:
@@ -221,6 +268,18 @@ private:
 	quint64 m_sceneEpoch = 0; // incremented on each start/stop
 	QString m_pendingSenderClientId;
 	QString m_pendingSceneInstanceId;
+	QString m_pendingSceneDigest;
+	QString m_pendingRemoteSessionId;
+	QString m_lastTornDownRemoteSessionId;
+	quint64 m_pendingSessionGeneration = 0;
+	quint64 m_pendingSceneRevision = 0;
+	QJsonArray m_prepareChecklist;
+	bool m_scenePreparedReported = false;
+	bool m_sceneArmedReported = false;
+	bool m_firstFrameReported = false;
+	qint64 m_firstFramePresentedServerMonotonicMs = -1;
+	qint64 m_firstFramePresentedLocalSteadyMs = -1;
+	QSet<int> m_screensAwaitingFirstFrame;
 	// Kept separately while clearScene() drains deferred events, because that
 	// function resets the prepared/active identifiers before it processes them.
 	QString m_startingSenderClientId;
@@ -234,14 +293,15 @@ private:
 	qint64 m_activationEpochMs = 0;
 	bool m_activationClockPlausible = false;
 	qint64 m_lastVideoSyncSequence = 0;
-	QTimer* m_videoSyncWatchdog = nullptr;
-	bool m_videoSyncWatchdogTripped = false;
 	QTimer* m_sceneReadyTimeout = nullptr;
 	QTimer* m_activationTimer = nullptr;
 	QTimer* m_windowShowTimer = nullptr; // Timer for deferred window showing
 	bool m_teardownInProgress = false;
+	quint64 m_teardownBarrierEpoch = 0;
+	bool m_teardownCompletionScheduled = false;
+	QSet<QObject*> m_pendingTeardownObjects;
+	QSet<QString> m_teardownSessionWaiters;
+	QString m_teardownGraphRemoteSessionId;
 	bool m_sceneStartInProgress = false;
-	QTimer* m_sceneRestartDelayTimer = nullptr;
-	bool m_restartCooldownActive = false;
 	PendingSceneRequest m_deferredSceneStart;
 };

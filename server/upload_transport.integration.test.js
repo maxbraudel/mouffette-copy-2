@@ -1,11 +1,13 @@
+'use strict';
+
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const WebSocket = require('ws');
 const { MouffetteServer } = require('./server');
-
-const senderId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-const targetId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
-const canvasSessionId = `${senderId}_TO_${targetId}_canvas_cccccccc-cccc-4ccc-8ccc-cccccccccccc`;
-const fileId = 'd'.repeat(64);
+const {
+    challengePayload, deviceIdForPublicKey,
+} = require('./device_auth');
+const { computeSceneDigest, SceneRunRegistry } = require('./scene_run_registry');
 
 function trackedSocket(url) {
     const ws = new WebSocket(url);
@@ -13,14 +15,12 @@ function trackedSocket(url) {
     const waiters = [];
     ws.on('message', payload => {
         const message = JSON.parse(payload.toString());
-        const waiterIndex = waiters.findIndex(waiter => waiter.predicate(message));
-        if (waiterIndex >= 0) {
-            const [waiter] = waiters.splice(waiterIndex, 1);
+        const index = waiters.findIndex(waiter => waiter.predicate(message));
+        if (index >= 0) {
+            const [waiter] = waiters.splice(index, 1);
             clearTimeout(waiter.timer);
             waiter.resolve(message);
-        } else {
-            queued.push(message);
-        }
+        } else queued.push(message);
     });
     return {
         ws,
@@ -32,324 +32,313 @@ function trackedSocket(url) {
             });
         },
         next(predicate, timeoutMs = 3000) {
-            const queuedIndex = queued.findIndex(predicate);
-            if (queuedIndex >= 0) {
-                return Promise.resolve(queued.splice(queuedIndex, 1)[0]);
-            }
+            const index = queued.findIndex(predicate);
+            if (index >= 0) return Promise.resolve(queued.splice(index, 1)[0]);
             return new Promise((resolve, reject) => {
                 const waiter = { predicate, resolve, timer: null };
                 waiter.timer = setTimeout(() => {
-                    const index = waiters.indexOf(waiter);
-                    if (index >= 0) waiters.splice(index, 1);
+                    const current = waiters.indexOf(waiter);
+                    if (current >= 0) waiters.splice(current, 1);
                     reject(new Error('Timed out waiting for WebSocket protocol message'));
                 }, timeoutMs);
                 waiters.push(waiter);
             });
-        }
+        },
     };
 }
 
-async function register(peer, id, machineName) {
-    peer.ws.send(JSON.stringify({
-        type: 'register',
-        persistentClientId: id,
-        sessionId: id,
-        machineName,
-        platform: 'test',
-        screens: []
-    }));
-    await peer.next(message => message.type === 'registration_confirmed');
+function assertV2Envelope(message, context) {
+    assert.equal(message.protocolVersion, 2);
+    assert.equal(message.serverBootId, context.serverBootId);
+    assert.equal(message.connectionGeneration, context.connectionGeneration);
+    assert.match(message.messageId,
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 }
 
 async function closeSocket(ws) {
     if (!ws || ws.readyState === WebSocket.CLOSED) return;
     await new Promise(resolve => {
-        const timer = setTimeout(() => {
-            if (ws.readyState !== WebSocket.CLOSED) ws.terminate();
-        }, 1000);
-        ws.once('close', () => {
-            clearTimeout(timer);
-            resolve();
-        });
+        const timer = setTimeout(() => ws.terminate(), 1000);
+        ws.once('close', () => { clearTimeout(timer); resolve(); });
         ws.close();
     });
 }
 
+async function connectDevice(url, machineName) {
+    const peer = trackedSocket(url);
+    await peer.opened();
+    const challenge = await peer.next(message => message.type === 'auth_challenge');
+    const keyPair = crypto.generateKeyPairSync('ed25519');
+    const publicKey = keyPair.publicKey.export({ type: 'spki', format: 'der' });
+    const runtimeId = crypto.randomUUID();
+    const deviceId = deviceIdForPublicKey(publicKey);
+    peer.ws.send(JSON.stringify({
+        type: 'auth_response',
+        protocolVersion: 2,
+        serverBootId: challenge.serverBootId,
+        messageId: crypto.randomUUID(),
+        runtimeId,
+        deviceId,
+        publicKey: publicKey.toString('base64url'),
+        signature: crypto.sign(null,
+            challengePayload({ ...challenge, runtimeId }), keyPair.privateKey).toString('base64url'),
+    }));
+    const welcome = await peer.next(message => message.type === 'welcome');
+    peer.context = {
+        deviceId,
+        runtimeId,
+        serverBootId: welcome.serverBootId,
+        connectionGeneration: welcome.connectionGeneration,
+    };
+    peer.send = (type, body = {}) => peer.ws.send(JSON.stringify({
+        type,
+        protocolVersion: 2,
+        serverBootId: peer.context.serverBootId,
+        connectionGeneration: peer.context.connectionGeneration,
+        messageId: crypto.randomUUID(),
+        ...body,
+    }));
+    peer.send('device_snapshot', {
+        machineName, platform: 'test', screens: [], volumePercent: null,
+    });
+    await peer.next(message => message.type === 'device_snapshot_applied');
+    return peer;
+}
+
 (async () => {
     const server = new MouffetteServer(0);
+    let sceneEpoch = Date.now();
+    let sceneMonotonic = 10_000;
+    server.sceneRuns = new SceneRunRegistry({
+        epochNow: () => sceneEpoch,
+        monotonicNow: () => sceneMonotonic,
+        prepareTimeoutMs: 15_000,
+        activationLeadMs: 4_000,
+        maximumClockUncertaintyMs: 50,
+    });
     server.start();
     await new Promise(resolve => server.wss.once('listening', resolve));
-    const port = server.wss.address().port;
-    const url = `ws://127.0.0.1:${port}`;
-    const sender = trackedSocket(url);
-    const target = trackedSocket(url);
-    let uploadChannel;
+    const url = `ws://127.0.0.1:${server.wss.address().port}`;
+    const owner = await connectDevice(url, 'owner');
+    const target = await connectDevice(url, 'target');
+    let uploadChannel = null;
 
     try {
-        await Promise.all([sender.opened(), target.opened()]);
-        await Promise.all([
-            register(sender, senderId, 'integration-sender'),
-            register(target, targetId, 'integration-target')
-        ]);
+        owner.send('remote_session_open', {
+            targetDeviceId: target.context.deviceId,
+            requestId: 'open-1',
+        });
+        const opened = await owner.next(message => message.type === 'remote_session_opened');
+        await target.next(message => message.type === 'remote_session_opened'
+            && message.remoteSessionId === opened.remoteSessionId);
+        const session = {
+            remoteSessionId: opened.remoteSessionId,
+            generation: opened.generation,
+        };
 
-        sender.ws.send(JSON.stringify({ type: 'request_upload_channel' }));
-        const tokenMessage = await sender.next(message =>
-            message.type === 'upload_channel_token');
-        uploadChannel = trackedSocket(`${url}?channel=upload&token=${encodeURIComponent(tokenMessage.token)}`);
+        owner.send('request_upload_channel');
+        const token = await owner.next(message => message.type === 'upload_channel_token');
+        assertV2Envelope(token, owner.context);
+        uploadChannel = trackedSocket(`${url}?channel=upload&token=${encodeURIComponent(token.token)}`);
         await uploadChannel.opened();
-        await uploadChannel.next(message => message.type === 'upload_channel_ready');
+        const ready = await uploadChannel.next(message => message.type === 'upload_channel_ready');
+        assertV2Envelope(ready, owner.context);
 
-        const uploadId = '11111111-2222-4333-8444-555555555555';
-        uploadChannel.ws.send(JSON.stringify({
-            type: 'upload_start',
-            targetPersistentClientId: targetId,
-            uploadId,
-            canvasSessionId,
-            files: [{
-                fileId,
-                name: 'integration.png',
-                extension: 'png',
-                sizeBytes: 128,
-                mediaIds: ['66666666-7777-4888-8999-aaaaaaaaaaaa']
-            }]
-        }));
-        const start = await target.next(message =>
-            message.type === 'upload_start' && message.uploadId === uploadId);
-        assert.equal(start.senderPersistentClientId, senderId);
-
-        target.ws.send(JSON.stringify({
-            type: 'upload_ready', uploadId, canvasSessionId
-        }));
-        await sender.next(message => message.type === 'upload_ready'
+        const bytes = Buffer.alloc(128, 0x4d);
+        const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+        const uploadId = 'upload-integration-1';
+        const asset = {
+            assetId: 'asset-integration-1', fileId: sha256, sha256,
+            name: 'integration.png', extension: 'png', size: bytes.length,
+            mediaIds: ['media-integration-1'],
+        };
+        const uploadEnvelope = body => ({
+            protocolVersion: 2,
+            serverBootId: owner.context.serverBootId,
+            messageId: crypto.randomUUID(),
+            connectionGeneration: owner.context.connectionGeneration,
+            remoteSessionId: session.remoteSessionId,
+            generation: session.generation,
+            ...body,
+        });
+        uploadChannel.ws.send(JSON.stringify(uploadEnvelope({
+            type: 'upload_start', uploadId, files: [asset],
+        })));
+        await target.next(message => message.type === 'upload_start'
+            && message.uploadId === uploadId);
+        target.send('upload_ready', {
+            ...session, uploadId,
+            assets: [{ assetId: asset.assetId, offset: 0, size: 128, sha256 }],
+        });
+        await owner.next(message => message.type === 'upload_ready'
             && message.uploadId === uploadId);
 
-        uploadChannel.ws.send(JSON.stringify({
-            type: 'upload_chunk',
-            uploadId,
-            canvasSessionId,
-            fileId,
-            chunkIndex: 0,
-            data: Buffer.alloc(128, 0x3c).toString('base64')
-        }));
+        uploadChannel.ws.send(JSON.stringify(uploadEnvelope({
+            type: 'upload_chunk', uploadId, assetId: asset.assetId,
+            offset: 0, size: 64, sha256, data: bytes.subarray(0, 64).toString('base64'),
+        })));
         await target.next(message => message.type === 'upload_chunk'
             && message.uploadId === uploadId);
-        target.ws.send(JSON.stringify({
-            type: 'upload_progress',
-            uploadId,
-            percent: 99,
-            receivedBytes: 128,
-            perFileProgress: [{ fileId, percent: 99 }]
-        }));
-        const progress = await sender.next(message =>
-            message.type === 'upload_progress' && message.uploadId === uploadId);
-        assert.equal(progress.receivedBytes, 128);
+        target.send('upload_progress', {
+            ...session, uploadId,
+            assets: [{ assetId: asset.assetId, offset: 64, size: 128, sha256 }],
+        });
+        await owner.next(message => message.type === 'upload_progress'
+            && message.durableBytes === 64);
 
-        uploadChannel.ws.send(JSON.stringify({
-            type: 'upload_complete', uploadId, canvasSessionId
-        }));
-        await target.next(message => message.type === 'upload_complete'
-            && message.uploadId === uploadId);
-        target.ws.send(JSON.stringify({
-            type: 'upload_finished', uploadId, canvasSessionId, fileIds: [fileId]
-        }));
-        await sender.next(message => message.type === 'upload_finished'
-            && message.uploadId === uploadId);
-
-        const removalId = '22222222-3333-4444-8555-666666666666';
-        sender.ws.send(JSON.stringify({
-            type: 'remove_all_files',
-            targetPersistentClientId: targetId,
-            removalId,
-            canvasSessionId
-        }));
-        const removal = await target.next(message =>
-            message.type === 'remove_all_files' && message.removalId === removalId);
-        target.ws.send(JSON.stringify({
-            type: 'all_files_removed',
-            removalId,
-            canvasSessionId,
-            senderClientId: removal.senderPersistentClientId
-        }));
-        await sender.next(message => message.type === 'all_files_removed'
-            && message.removalId === removalId);
-
-        const cancelledUploadId = '33333333-4444-4555-8666-777777777777';
-        uploadChannel.ws.send(JSON.stringify({
-            type: 'upload_start',
-            targetPersistentClientId: targetId,
-            uploadId: cancelledUploadId,
-            canvasSessionId,
-            files: [{
-                fileId,
-                name: 'integration.png',
-                extension: 'png',
-                sizeBytes: 128,
-                mediaIds: ['88888888-9999-4aaa-8bbb-cccccccccccc']
-            }]
-        }));
-        await target.next(message => message.type === 'upload_start'
-            && message.uploadId === cancelledUploadId);
-        target.ws.send(JSON.stringify({
-            type: 'upload_ready', uploadId: cancelledUploadId, canvasSessionId
-        }));
-        await sender.next(message => message.type === 'upload_ready'
-            && message.uploadId === cancelledUploadId);
-        uploadChannel.ws.send(JSON.stringify({
-            type: 'upload_abort', uploadId: cancelledUploadId, canvasSessionId
-        }));
-        const abortRequest = await target.next(message =>
-            message.type === 'upload_abort' && message.uploadId === cancelledUploadId);
-        target.ws.send(JSON.stringify({
-            type: 'upload_abort_ack',
-            uploadId: cancelledUploadId,
-            canvasSessionId,
-            senderClientId: abortRequest.senderPersistentClientId
-        }));
-        await sender.next(message => message.type === 'upload_aborted'
-            && message.uploadId === cancelledUploadId);
-        assert.equal(server.pendingUploadAborts.size, 0);
-
-        const interruptedUploadId = '44444444-5555-4666-8777-888888888888';
-        uploadChannel.ws.send(JSON.stringify({
-            type: 'upload_start',
-            targetPersistentClientId: targetId,
-            uploadId: interruptedUploadId,
-            canvasSessionId,
-            files: [{
-                fileId,
-                name: 'integration.png',
-                extension: 'png',
-                sizeBytes: 128,
-                mediaIds: ['99999999-aaaa-4bbb-8ccc-dddddddddddd']
-            }]
-        }));
-        await target.next(message => message.type === 'upload_start'
-            && message.uploadId === interruptedUploadId);
-        target.ws.send(JSON.stringify({
-            type: 'upload_ready', uploadId: interruptedUploadId, canvasSessionId
-        }));
-        await sender.next(message => message.type === 'upload_ready'
-            && message.uploadId === interruptedUploadId);
-        uploadChannel.ws.send(JSON.stringify({
-            type: 'upload_chunk',
-            uploadId: interruptedUploadId,
-            canvasSessionId,
-            fileId,
-            chunkIndex: 0,
-            data: Buffer.alloc(64, 0x7e).toString('base64')
-        }));
-        await target.next(message => message.type === 'upload_chunk'
-            && message.uploadId === interruptedUploadId);
         await closeSocket(uploadChannel.ws);
         uploadChannel = null;
+        assert.equal(server.uploads.has(uploadId), true,
+            'closing only the upload transport must preserve resumable state');
+        owner.send('request_upload_channel');
+        const replacementToken = await owner.next(message => message.type === 'upload_channel_token');
+        assertV2Envelope(replacementToken, owner.context);
+        uploadChannel = trackedSocket(
+            `${url}?channel=upload&token=${encodeURIComponent(replacementToken.token)}`);
+        await uploadChannel.opened();
+        const replacementReady = await uploadChannel.next(
+            message => message.type === 'upload_channel_ready');
+        assertV2Envelope(replacementReady, owner.context);
+        uploadChannel.ws.send(JSON.stringify(uploadEnvelope({
+            type: 'upload_resume', uploadId,
+        })));
+        const resumed = await owner.next(message => message.type === 'upload_resume_ready');
+        assert.equal(resumed.assets[0].offset, 64);
+        await target.next(message => message.type === 'upload_resume'
+            && message.uploadId === uploadId);
+        target.send('upload_ready', {
+            ...session, uploadId,
+            assets: [{ assetId: asset.assetId, offset: 64, size: 128, sha256 }],
+        });
+        await owner.next(message => message.type === 'upload_ready'
+            && message.uploadId === uploadId);
 
-        const [rejected, abort] = await Promise.all([
-            sender.next(message => message.type === 'upload_rejected'
-                && message.uploadId === interruptedUploadId),
-            target.next(message => message.type === 'upload_abort'
-                && message.uploadId === interruptedUploadId)
-        ]);
-        assert.match(rejected.reason, /upload connection closed/i);
-        assert.equal(abort.protocolRejected, true);
-        assert.equal(server.uploads.size, 0);
-        assert.equal(server.pendingRemovals.size, 0);
+        uploadChannel.ws.send(JSON.stringify(uploadEnvelope({
+            type: 'upload_chunk', uploadId, assetId: asset.assetId,
+            offset: 64, size: 64, sha256, data: bytes.subarray(64).toString('base64'),
+        })));
+        await target.next(message => message.type === 'upload_chunk'
+            && message.offset === 64);
+        uploadChannel.ws.send(JSON.stringify(uploadEnvelope({
+            type: 'upload_complete', uploadId,
+            assets: [{ assetId: asset.assetId, offset: 128, size: 128, sha256 }],
+        })));
+        const firstCompletion = await target.next(message => message.type === 'upload_complete'
+            && message.uploadId === uploadId);
+        assert.deepEqual(firstCompletion.assets,
+            [{ assetId: asset.assetId, offset: 128, size: 128, sha256 }]);
 
-        // Exercise the remote-scene lifecycle over real control WebSockets too.
-        // Deliberately bogus response destinations verify that the server routes
-        // acknowledgements from its correlated run instead of trusting JSON.
-        const sceneInstanceId = '55555555-6666-4777-8888-999999999999';
-        sender.ws.send(JSON.stringify({
-            type: 'remote_scene_start',
-            targetClientId: targetId,
-            scene: {
-                sceneInstanceId,
-                renderSchemaVersion: 2,
-                screens: [{ id: 1 }],
-                media: [{ mediaId: 'integration-video', type: 'video' }]
-            }
-        }));
-        const remoteStart = await target.next(message =>
-            message.type === 'remote_scene_start'
-            && message.scene.sceneInstanceId === sceneInstanceId);
-        assert.equal(remoteStart.senderClientId, senderId);
+        // Simulate B promoting the asset while its upload_finished ACK is lost.
+        // Reopening only A's upload channel and replaying the exact upload_start
+        // must ask B for the terminal ACK, never restart byte transport.
+        await closeSocket(uploadChannel.ws);
+        uploadChannel = null;
+        owner.send('request_upload_channel');
+        const finalAckRetryToken = await owner.next(
+            message => message.type === 'upload_channel_token');
+        uploadChannel = trackedSocket(
+            `${url}?channel=upload&token=${encodeURIComponent(finalAckRetryToken.token)}`);
+        await uploadChannel.opened();
+        await uploadChannel.next(message => message.type === 'upload_channel_ready');
+        uploadChannel.ws.send(JSON.stringify(uploadEnvelope({
+            type: 'upload_start', uploadId, files: [asset],
+        })));
+        const completionReplay = await target.next(message =>
+            message.type === 'upload_complete' && message.uploadId === uploadId
+            && message.replay === true);
+        assert.deepEqual(completionReplay.assets, firstCompletion.assets);
+        const resumeReadyAfterPromotion = await owner.next(message =>
+            message.type === 'upload_resume_ready' && message.uploadId === uploadId);
+        assert.equal(resumeReadyAfterPromotion.replay, true);
+        assert.deepEqual(resumeReadyAfterPromotion.assets,
+            [{ assetId: asset.assetId, offset: 64, size: 128, sha256 }]);
+        target.send('upload_finished', {
+            ...session, uploadId,
+            assets: [{ assetId: asset.assetId, offset: 128, size: 128, sha256 }],
+        });
+        await owner.next(message => message.type === 'upload_finished'
+            && message.uploadId === uploadId);
 
-        target.ws.send(JSON.stringify({
-            type: 'remote_scene_validation',
-            targetClientId: 'bogus-destination',
-            sceneInstanceId,
-            success: true
-        }));
-        const validation = await sender.next(message =>
-            message.type === 'remote_scene_validation'
-            && message.sceneInstanceId === sceneInstanceId);
-        assert.equal(validation.senderClientId, targetId);
-
-        sender.ws.send(JSON.stringify({
-            type: 'remote_scene_activate',
-            targetClientId: targetId,
-            sceneInstanceId,
-            activationEpochMs: Date.now() + 250,
-            activationDelayMs: 250
-        }));
-        await target.next(message => message.type === 'remote_scene_activate'
-            && message.sceneInstanceId === sceneInstanceId);
-        target.ws.send(JSON.stringify({
-            type: 'remote_scene_launched',
-            targetClientId: 'bogus-destination',
-            sceneInstanceId
-        }));
-        await sender.next(message => message.type === 'remote_scene_launched'
-            && message.sceneInstanceId === sceneInstanceId);
-
-        sender.ws.send(JSON.stringify({
-            type: 'remote_scene_video_sync',
-            targetClientId: targetId,
-            sceneInstanceId,
-            sequence: 1,
-            sampledEpochMs: Date.now(),
-            videos: [{
-                mediaId: 'integration-video',
-                positionMs: 10,
-                durationMs: 1000,
-                playing: true,
-                muted: false,
-                visible: true,
-                repeatAvailable: false
-            }]
-        }));
-        await target.next(message => message.type === 'remote_scene_video_sync'
-            && message.sequence === 1);
-
-        const remoteStop = {
-            type: 'remote_scene_stop',
-            targetClientId: targetId,
-            sceneInstanceId
+        const manifest = [{
+            assetId: asset.assetId, extension: asset.extension, fileId: sha256,
+            mediaIds: asset.mediaIds, sha256, size: asset.size,
+        }];
+        const scene = {
+            screens: [{ id: 'screen-integration-1' }],
+            media: [{ mediaId: asset.mediaIds[0], assetId: asset.assetId, type: 'image' }],
         };
-        sender.ws.send(JSON.stringify(remoteStop));
-        sender.ws.send(JSON.stringify(remoteStop));
-        await target.next(message => message.type === 'remote_scene_stop'
-            && message.sceneInstanceId === sceneInstanceId);
-        target.ws.send(JSON.stringify({
-            type: 'remote_scene_stopped',
-            targetClientId: 'bogus-destination',
-            sceneInstanceId,
-            success: true
-        }));
-        const stopped = await sender.next(message =>
-            message.type === 'remote_scene_stopped'
-            && message.sceneInstanceId === sceneInstanceId);
-        assert.equal(stopped.success, true);
-        assert.equal(stopped.senderClientId, targetId);
-        assert.equal(server.remoteScenesByTarget.size, 0);
+        const digest = computeSceneDigest(1, manifest, scene);
+        const sceneRunId = 'scene-run-integration-1';
+        owner.send('scene_prepare', {
+            ...session, sceneRunId, revision: 1, digest, manifest, scene,
+        });
+        await target.next(message => message.type === 'scene_prepare'
+            && message.sceneRunId === sceneRunId);
+        const checklist = [
+            { itemId: 'screen_screen-integration-1', stage: 'screen_render_graph_ready', ready: true },
+            { itemId: 'media-integration-1_file', stage: 'file_validated', ready: true },
+            { itemId: 'media-integration-1_decode', stage: 'image_decoded', ready: true },
+            { itemId: 'media-integration-1_texture', stage: 'image_texture_ready', ready: true },
+        ];
+        owner.send('prepared', { ...session, sceneRunId, digest, success: true, checklist });
+        target.send('prepared', { ...session, sceneRunId, digest, success: true, checklist });
+        await owner.next(message => message.type === 'prepared' && message.allPrepared === true);
+        owner.send('armed', { ...session, sceneRunId, digest, clockUncertaintyMs: 10 });
+        target.send('armed', { ...session, sceneRunId, digest, clockUncertaintyMs: 10 });
+        const commit = await owner.next(message => message.type === 'commit');
+        assert.ok(commit.startEpochMs - Date.now() > 3000);
+        await target.next(message => message.type === 'commit');
+        sceneEpoch += 4_000;
+        sceneMonotonic += 4_000;
+        owner.send('started', {
+            ...session, sceneRunId, digest, firstFramePresented: true,
+            presentedServerMonotonicMs: sceneMonotonic,
+        });
+        target.send('started', {
+            ...session, sceneRunId, digest, firstFramePresented: true,
+            presentedServerMonotonicMs: sceneMonotonic,
+        });
+        await owner.next(message => message.type === 'started' && message.allStarted === true);
+        owner.send('stop', { ...session, sceneRunId, digest, reason: 'test_complete' });
+        await target.next(message => message.type === 'stop');
+        owner.send('stopped', { ...session, sceneRunId, digest, success: true });
+        target.send('stopped', { ...session, sceneRunId, digest, success: true });
+        await owner.next(message => message.type === 'stopped' && message.success === true);
 
-        console.log('upload transport integration tests passed');
+        owner.send('remote_session_close', { ...session, requestId: 'close-1' });
+        const terminating = await target.next(message => message.type === 'remote_session_terminating');
+        target.send('remote_session_teardown_ack', {
+            ...session,
+            teardownId: terminating.teardownId,
+            result: 'committed',
+            sceneStopped: true,
+            uploadsAborted: true,
+            cacheQuarantined: true,
+            removedFileCount: 1,
+        });
+        await owner.next(message => message.type === 'remote_session_closed');
+        assert.equal(server.sessionAssets.has(session.remoteSessionId), false);
+
+        for (const peer of [owner, target]) {
+            const output = peer.ws === owner.ws ? owner : target;
+            // A representative post-auth message proves centralized envelopes.
+            const clientList = await output.next(message => message.type === 'client_list');
+            assert.equal(clientList.protocolVersion, 2);
+            assert.equal(clientList.serverBootId, server.serverBootId);
+            assert.equal(clientList.connectionGeneration,
+                output.context.connectionGeneration);
+            assert.equal(typeof clientList.messageId, 'string');
+        }
     } finally {
-        if (server.uploadCleanupInterval) clearInterval(server.uploadCleanupInterval);
-        if (uploadChannel) await closeSocket(uploadChannel.ws);
-        await Promise.all([closeSocket(sender.ws), closeSocket(target.ws)]);
+        await closeSocket(uploadChannel && uploadChannel.ws);
+        await Promise.all([closeSocket(owner.ws), closeSocket(target.ws)]);
+        clearInterval(server.uploadCleanupInterval);
+        clearInterval(server.leaseSweepInterval);
         await new Promise(resolve => server.wss.close(resolve));
     }
-})().catch(error => {
+})().then(() => {
+    console.log('upload transport v2 integration tests passed');
+}).catch(error => {
     console.error(error);
     process.exitCode = 1;
 });

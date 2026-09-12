@@ -4,7 +4,8 @@
 #include "backend/domain/models/ClientInfo.h"
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
 #include "backend/network/UploadManager.h"
-#include "backend/network/WatchManager.h"
+#include "backend/network/RemoteSessionCoordinator.h"
+#include "backend/network/RemoteCacheStore.h"
 #include "backend/files/FileWatcher.h"
 #include "frontend/ui/widgets/SpinnerWidget.h"
 #include "frontend/rendering/canvas/ScreenCanvas.h"
@@ -17,11 +18,16 @@
 #include "backend/files/FileManager.h"
 #include "frontend/rendering/remote/RemoteSceneController.h"
 #include "backend/domain/session/SessionManager.h"
+#include "backend/domain/project/ProjectManager.h"
+#include "backend/domain/project/ProjectModel.h"
+#include "backend/domain/scene/SceneActivityModel.h"
+#include "backend/network/SceneRunCoordinator.h"
 #include "frontend/ui/widgets/RoundedContainer.h"
 #include "frontend/ui/widgets/ClippedContainer.h"
 #include "frontend/ui/widgets/ClientListDelegate.h"
 #include "frontend/ui/pages/ClientListPage.h"
 #include "frontend/ui/pages/CanvasViewPage.h"
+#include "frontend/ui/pages/HistoryPage.h"
 #include "frontend/ui/theme/ThemeManager.h"
 #include "frontend/managers/ui/RemoteClientInfoManager.h"
 #include "backend/managers/system/SystemMonitor.h"
@@ -35,10 +41,12 @@
 #include "backend/controllers/CanvasSessionController.h"
 #include "frontend/handlers/WindowEventHandler.h"
 #include "backend/controllers/TimerController.h"
+#include "backend/config/AppConfig.h"
 #include "frontend/managers/ui/UploadButtonStyleManager.h"
 #include "backend/managers/app/SettingsManager.h"
 #include "backend/managers/app/MigrationTelemetryManager.h"
 #include "backend/managers/network/ClientListBuilder.h"
+#include "backend/managers/network/ConnectionManager.h"
 #include "frontend/handlers/UploadSignalConnector.h"
 #include <QMenuBar>
 #include <QHostInfo>
@@ -109,13 +117,66 @@ static BOOL CALLBACK MouffetteEnumMonProc(HMONITOR hMon, HDC, LPRECT, LPARAM lPa
 #include <QJsonArray>
 #include <QByteArray>
 #include <QFileDialog>
+#include <QMessageBox>
 #include <climits>
 #include <memory>
 
 namespace {
-bool cursorDebugEnabled() {
-    static const bool enabled = qEnvironmentVariableIsSet("MOUFFETTE_CURSOR_DEBUG");
-    return enabled;
+constexpr double kMaxSafeJsonInteger = 9007199254740991.0;
+
+bool readSafePositiveJsonInteger(const QJsonValue& value, quint64* output)
+{
+    if (!output || !value.isDouble()) return false;
+    const double number = value.toDouble();
+    if (!std::isfinite(number) || number < 1.0
+        || number > kMaxSafeJsonInteger || std::floor(number) != number) {
+        return false;
+    }
+    *output = static_cast<quint64>(number);
+    return true;
+}
+
+ProjectManager::TimingPolicy projectTimingPolicyFromConfig() {
+    ProjectManager::TimingPolicy timing;
+    timing.remoteSessionHiddenTimeoutMs =
+        AppConfig::instance().remoteSessionHiddenTimeoutMs();
+    timing.projectHiddenRetentionMs =
+        AppConfig::instance().projectHiddenRetentionMs();
+    return timing;
+}
+
+QString canonicalExistingPath(const QString& sourcePath) {
+    const QFileInfo info(sourcePath);
+    if (!info.exists() || !info.isFile() || !info.isReadable()) {
+        return {};
+    }
+    return info.canonicalFilePath();
+}
+
+QString sourceIdentityForPath(const QString& canonicalPath) {
+    const QFileInfo info(canonicalPath);
+    if (!info.exists() || !info.isFile()) {
+        return {};
+    }
+    return QStringLiteral("%1:%2")
+        .arg(info.size())
+        .arg(info.lastModified().toMSecsSinceEpoch());
+}
+
+QString sha256ForPath(const QString& canonicalPath) {
+    QFile file(canonicalPath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return {};
+    }
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    while (!file.atEnd()) {
+        const QByteArray chunk = file.read(4 * 1024 * 1024);
+        if (chunk.isEmpty() && file.error() != QFileDevice::NoError) {
+            return {};
+        }
+        hash.addData(chunk);
+    }
+    return QString::fromLatin1(hash.result().toHex());
 }
 }
 
@@ -159,8 +220,6 @@ bool cursorDebugEnabled() {
 #endif
 
 static RemoteSceneController* g_remoteSceneController = nullptr; // Remote scene controller global instance
-
-const QString MainWindow::DEFAULT_SERVER_URL = "ws://192.168.0.188:8080";
 
 // [Phase 17] Global style configuration - migrated to ThemeManager
 // These macros provide backward compatibility while using ThemeManager
@@ -320,6 +379,8 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent),
       m_fileManager(new FileManager()),  // Phase 4.3: Inject FileManager
       m_sessionManager(new SessionManager(this)),  // Phase 4.1
+      m_projectManager(new ProjectManager(projectTimingPolicyFromConfig(), this)),
+      m_sceneActivityModel(new SceneActivityModel(this)),
       m_centralWidget(nullptr),
       m_mainLayout(nullptr),
       m_stackedWidget(nullptr),
@@ -339,10 +400,10 @@ MainWindow::MainWindow(QWidget* parent)
       m_uploadButtonInOverlay(false),
       m_remoteOverlayActionsEnabled(false),
       m_responsiveLayoutManager(new ResponsiveLayoutManager(this)),
-      m_cursorTimer(nullptr),
       m_menuBarManager(new MenuBarManager(this, this)), // Phase 6.3
       m_systemTrayManager(new SystemTrayManager(this)), // Phase 6.2
       m_webSocketClient(new WebSocketClient(this)),
+      m_connectionManager(new ConnectionManager(m_webSocketClient, this)),
       m_settingsManager(new SettingsManager(this, m_webSocketClient, this)), // Phase 12
       m_webSocketMessageHandler(new WebSocketMessageHandler(this, this)), // Phase 7.1
       m_screenEventHandler(new ScreenEventHandler(this, this)), // Phase 7.2
@@ -355,11 +416,7 @@ MainWindow::MainWindow(QWidget* parent)
       m_uploadSignalConnector(new UploadSignalConnector(this)), // Phase 15
       m_statusUpdateTimer(new QTimer(this)),
       m_displaySyncTimer(new QTimer(this)),
-      m_reconnectTimer(new QTimer(this)),
-      m_reconnectAttempts(0),
-      m_maxReconnectDelay(15000),
       m_uploadManager(new UploadManager(m_fileManager, this)),
-      m_watchManager(new WatchManager(this)),
       m_fileWatcher(new FileWatcher(this)),
       m_navigationManager(nullptr)
 {
@@ -387,6 +444,53 @@ MainWindow::MainWindow(QWidget* parent)
     setWindowState(Qt::WindowMaximized);
     
     setupUI();
+    if (m_canvasViewPage) {
+        connect(m_canvasViewPage, &CanvasViewPage::disconnectRequested,
+                this, &MainWindow::onDisconnectProjectRequested);
+        connect(m_canvasViewPage, &CanvasViewPage::deleteProjectRequested,
+                this, &MainWindow::onDeleteProjectRequested);
+    }
+    if (m_projectManager) {
+        connect(m_projectManager, &ProjectManager::remoteSessionCloseDue,
+                this, [this](const QString&, const QString& targetDeviceId) {
+            terminateProjectRemoteSession(targetDeviceId, true);
+        });
+        connect(m_projectManager,
+                &ProjectManager::projectRestoredAfterSessionDeadline,
+                this, [this](const QString&, const QString& targetDeviceId) {
+            // Every path which makes a hidden canvas visible (window restore,
+            // tray, wake, Settings return, or explicit navigation) receives
+            // the same single post-60-second reconnect allowance.
+            m_reopenAfterSessionCloseTargets.insert(targetDeviceId);
+            m_remoteSessionOpenSuppressedTargets.remove(targetDeviceId);
+            QTimer::singleShot(0, this, [this, targetDeviceId]() {
+                if (!m_navigationManager
+                    || !m_navigationManager->isOnScreenView()
+                    || m_activeSessionIdentity != targetDeviceId) {
+                    return;
+                }
+                CanvasSession* session = findCanvasSession(targetDeviceId);
+                if (!session) return;
+                ensureRemoteSessionForClient(session->lastClientInfo);
+            });
+        });
+        connect(m_projectManager, &ProjectManager::projectAboutToDelete,
+                this, [this](const ProjectRecord& project) {
+            terminateProjectRemoteSession(project.targetDeviceId, true);
+        });
+        connect(m_projectManager, &ProjectManager::projectCheckpointDue,
+                this, &MainWindow::persistProjectCanvas);
+        connect(m_projectManager, &ProjectManager::projectDeleted,
+                this, [this](const QString&, const QString& targetDeviceId) {
+            removeRuntimeCanvasSession(targetDeviceId);
+        });
+        connect(m_projectManager, &ProjectManager::projectsChanged,
+                this, &MainWindow::refreshProjectClientList);
+        connect(m_projectManager, &ProjectManager::persistenceError,
+                this, [](const QString& message) {
+            qWarning().noquote() << "Project persistence error:" << message;
+        });
+    }
     if (m_canvasSessionController && useQuickCanvasRenderer()) {
         QTimer::singleShot(0, this, [this]() {
             if (m_canvasSessionController) {
@@ -398,6 +502,9 @@ MainWindow::MainWindow(QWidget* parent)
     if (!g_remoteSceneController) {
         g_remoteSceneController = new RemoteSceneController(m_fileManager, m_webSocketClient, this);
     }
+    connect(g_remoteSceneController, &RemoteSceneController::teardownSettled,
+            this, &MainWindow::handleRemoteRendererTeardownSettled,
+            Qt::UniqueConnection);
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN) || defined(Q_OS_LINUX)
     // Ensure no status bar is shown at the bottom
     if (QStatusBar* sb = findChild<QStatusBar*>()) {
@@ -422,9 +529,16 @@ MainWindow::MainWindow(QWidget* parent)
     // [PHASE 3] Start system monitoring
     if (m_systemMonitor) {
         m_systemMonitor->startVolumeMonitoring();
-        // Connect volume changes to sync with server when watched
+        // Volume is part of every protocol-v2 device snapshot; it is not tied
+        // to any remote controller's Project or session.
         connect(m_systemMonitor, &SystemMonitor::volumeChanged, this, [this](int) {
-            if (m_webSocketClient && m_webSocketClient->isConnected() && m_isWatched) {
+            if (m_webSocketClient && m_webSocketClient->isConnected()) {
+                syncRegistration();
+            }
+        });
+        connect(m_systemMonitor, &SystemMonitor::screenConfigurationChanged,
+                this, [this](const QList<ScreenInfo>&) {
+            if (m_webSocketClient && m_webSocketClient->isConnected()) {
                 syncRegistration();
             }
         });
@@ -444,107 +558,231 @@ MainWindow::MainWindow(QWidget* parent)
     if (m_clientListEventHandler) {
         m_clientListEventHandler->setupConnections(m_webSocketClient);
     }
-    
-    // Connect remaining WebSocketClient signals (non-lifecycle)
-    connect(m_webSocketClient, &WebSocketClient::connectionError, this, &MainWindow::onConnectionError);
-    // Immediate status reflection without polling
-    connect(m_webSocketClient, &WebSocketClient::connectionStatusChanged, this, [this](const QString& s){ setLocalNetworkStatus(s); });
-    connect(m_webSocketClient, &WebSocketClient::registrationConfirmed, this, &MainWindow::onRegistrationConfirmed);
-    connect(m_webSocketClient, &WebSocketClient::watchStatusChanged, this, &MainWindow::onWatchStatusChanged);
-    // Unused generic message hook removed; specific handlers are wired explicitly
-    // Forward all generic messages to UploadManager so it can handle incoming upload_* and remove_all_files when we are the target
-    connect(m_webSocketClient, &WebSocketClient::messageReceived, m_uploadManager, &UploadManager::handleIncomingMessage);
-    // Upload progress forwards
-    connect(m_webSocketClient, &WebSocketClient::uploadReadyReceived, m_uploadManager, &UploadManager::onUploadReady);
-    connect(m_webSocketClient, &WebSocketClient::uploadProgressReceived, m_uploadManager, &UploadManager::onUploadProgress);
-    connect(m_webSocketClient, &WebSocketClient::uploadBytesAcknowledgedReceived, m_uploadManager, &UploadManager::onUploadBytesAcknowledged);
-    connect(m_webSocketClient, &WebSocketClient::uploadFinishedReceived, m_uploadManager, &UploadManager::onUploadFinished);
-    connect(m_webSocketClient, &WebSocketClient::uploadRejectedReceived, m_uploadManager, &UploadManager::onUploadRejected);
-    connect(m_webSocketClient, &WebSocketClient::uploadAbortedReceived, m_uploadManager, &UploadManager::onUploadAborted);
-    // New: per-file completion ids
-    connect(m_webSocketClient, &WebSocketClient::uploadCompletedFileIdsReceived, m_uploadManager, &UploadManager::onUploadCompletedFileIds);
-    connect(m_webSocketClient, &WebSocketClient::allFilesRemovedReceived, m_uploadManager, &UploadManager::onAllFilesRemovedRemote);
-    connect(m_webSocketClient, &WebSocketClient::removalRejectedReceived, m_uploadManager, &UploadManager::onRemovalRejected);
+    // The handler above applies discovery/snapshot updates first. This second
+    // observer only reconciles the active Project with its v2 RemoteSession;
+    // it never owns retry policy or rebuilds the list a second time.
+    connect(m_webSocketClient, &WebSocketClient::clientListReceived,
+            this, &MainWindow::onClientListReceived);
 
-    // Managers wiring
-    m_uploadManager->setWebSocketClient(m_webSocketClient);
-    m_watchManager->setWebSocketClient(m_webSocketClient);
+    // SceneActivityModel is the sole source for the Ongoing Scenes UI. A run
+    // is inserted only after the protocol-v2 coordinator reaches Live and is
+    // removed as soon as it leaves Live.
+    if (m_sceneActivityModel && m_webSocketClient) {
+        m_sceneActivityModel->setLocalDeviceId(m_webSocketClient->deviceId());
+        if (SceneRunCoordinator* sceneRuns = m_webSocketClient->sceneRunCoordinator()) {
+            connect(sceneRuns, &SceneRunCoordinator::runChanged, this,
+                    [this, sceneRuns](const QString& sceneRunId,
+                                      SceneRunCoordinator::Phase phase) {
+                if (!m_sceneActivityModel) return;
+                if (phase != SceneRunCoordinator::Phase::Live) {
+                    m_sceneActivityModel->remove(sceneRunId);
+                    return;
+                }
+                const SceneRunCoordinator::Run run = sceneRuns->run(sceneRunId);
+                if (run.sceneRunId.isEmpty()) return;
+                qint64 startedAt = run.startEpochMs;
+                if (startedAt <= 0) {
+                    const SceneActivityModel::Activity existing =
+                        m_sceneActivityModel->activity(sceneRunId);
+                    startedAt = existing.startedAtEpochMs > 0
+                        ? existing.startedAtEpochMs
+                        : QDateTime::currentMSecsSinceEpoch();
+                }
+                m_sceneActivityModel->upsertLive(
+                    run.sceneRunId, run.remoteSessionId, run.ownerDeviceId,
+                    run.targetDeviceId, startedAt);
+            });
+        }
+        connect(m_webSocketClient, &WebSocketClient::transportHealthChanged,
+                m_sceneActivityModel, &SceneActivityModel::setAllDegraded);
+        connect(m_webSocketClient, &WebSocketClient::remoteSessionLeaseStateChanged,
+                this, [this](const QJsonObject& envelope) {
+            handleRemoteSessionLeaseState(envelope);
+            if (!m_sceneActivityModel) return;
+            const QString sessionId = envelope.value(QStringLiteral("remoteSessionId")).toString();
+            const QString phase = envelope.value(QStringLiteral("phase"))
+                                      .toString(envelope.value(QStringLiteral("state")).toString());
+            if (phase.compare(QStringLiteral("Grace"), Qt::CaseInsensitive) == 0) {
+                m_sceneActivityModel->setSessionDegraded(sessionId, true);
+            } else if (phase.compare(QStringLiteral("Active"), Qt::CaseInsensitive) == 0) {
+                m_sceneActivityModel->setSessionDegraded(sessionId, false);
+            } else if (phase.compare(QStringLiteral("Terminating"), Qt::CaseInsensitive) == 0
+                       || phase.compare(QStringLiteral("CleanupPending"), Qt::CaseInsensitive) == 0
+                       || phase.compare(QStringLiteral("Closed"), Qt::CaseInsensitive) == 0) {
+                m_sceneActivityModel->removeForSession(sessionId);
+            }
+        });
+        connect(m_webSocketClient, &WebSocketClient::remoteSessionTerminating,
+                this, [this](const QJsonObject& envelope) {
+            handleRemoteSessionTerminating(envelope);
+            if (m_sceneActivityModel) {
+                m_sceneActivityModel->removeForSession(
+                    envelope.value(QStringLiteral("remoteSessionId")).toString());
+            }
+        });
+        connect(m_webSocketClient, &WebSocketClient::remoteSessionClosed,
+                this, [this](const QJsonObject& envelope) {
+            handleRemoteSessionClosed(envelope);
+            if (m_sceneActivityModel) {
+                m_sceneActivityModel->removeForSession(
+                    envelope.value(QStringLiteral("remoteSessionId")).toString());
+            }
+        });
+        connect(m_webSocketClient, &WebSocketClient::serverRestarted,
+                m_sceneActivityModel, [this](const QString&, const QString&) {
+            if (m_sceneActivityModel) m_sceneActivityModel->clear();
+        });
+        connect(m_webSocketClient, &WebSocketClient::remoteSessionOpened,
+                this, [this](const QJsonObject& envelope) {
+            handleRemoteSessionReady(envelope, false);
+        });
+        connect(m_webSocketClient, &WebSocketClient::remoteSessionResumed,
+                this, [this](const QJsonObject& envelope) {
+            handleRemoteSessionReady(envelope, true);
+        });
+        connect(m_webSocketClient, &WebSocketClient::remoteSessionError,
+                this, &MainWindow::handleRemoteSessionError);
+    }
     
-    // PHASE 2: SessionManager signal connections (canvas lifecycle tracking)
-    connect(m_sessionManager, &SessionManager::sessionDeleted, this, [this](const QString& persistentClientId) {
-        // Notify server when canvas is deleted
-        CanvasSession* session = m_sessionManager->findSession(persistentClientId);
-        if (session && m_webSocketClient) {
-            m_webSocketClient->sendCanvasDeleted(persistentClientId, session->canvasSessionId);
+    // ConnectionManager is the sole owner of retries and transport status.
+    connect(m_connectionManager, &ConnectionManager::connectionError,
+            this, &MainWindow::onConnectionError);
+    connect(m_webSocketClient, &WebSocketClient::connected,
+            this, &MainWindow::retryPendingTeardownAcks);
+    connect(m_webSocketClient, &WebSocketClient::disconnected,
+            this, [this]() {
+        if (m_cleanShutdownPrepared && !m_cleanShutdownFinished) {
+            finishCleanShutdown();
+        }
+    });
+    connect(m_connectionManager, &ConnectionManager::statusChanged,
+            this, [this](const QString& status) {
+        setLocalNetworkStatus(status);
+        if (status == QLatin1String("Reconnecting")) {
+            for (ClientInfo& client : m_discoveredClients) {
+                client.setStatus(QStringLiteral("Reconnecting"));
+                client.setAvailabilityStatus(QStringLiteral("Reconnecting"));
+            }
+            refreshProjectClientList();
+            if (m_screenCanvas) {
+                // Grace disables new remote commands but does not tear down the
+                // running graph or discard resumable upload state.
+                m_screenCanvas->setOverlayActionsEnabled(false);
+            }
+        }
+    });
+    connect(m_connectionManager, &ConnectionManager::leaseExpired,
+            this, [this](const QString& serverBootId, quint64 generation) {
+        if (m_cleanShutdownPrepared) {
+            // WebSocketClient::disconnect() deliberately expires its in-memory
+            // lease. During a requested quit this is cleanup, not an outage,
+            // and must not create a misleading history entry/toast.
+            if (m_sceneActivityModel) m_sceneActivityModel->clear();
+            return;
+        }
+        // This signal is delivered synchronously from WebSocketClient before
+        // SceneRunCoordinator::clearSessions(). Capture every incoming binding
+        // now; a queued cleanup would lose the immutable cache correlation.
+        beginTerminalIncomingCacheCleanup(QStringLiteral("lease_expired"));
+        if (m_toastSystem) {
+            NotificationRequest notification;
+            notification.severity = NotificationSeverity::Warning;
+            notification.category = QStringLiteral("Remote session");
+            notification.message = QStringLiteral(
+                "Connection lost for more than 3 seconds. Remote scenes were stopped and session uploads were invalidated.");
+            notification.correlationId = QStringLiteral("lease-expired:%1:%2")
+                                             .arg(serverBootId)
+                                             .arg(generation);
+            notification.terminal = true;
+            m_toastSystem->publishNotification(notification);
+        }
+        if (m_sceneActivityModel) m_sceneActivityModel->clear();
+        if (m_sessionManager) {
+            const QList<QString> targets =
+                m_sessionManager->getAllPersistentClientIds();
+            for (const QString& target : targets) {
+                m_remoteSessionOpenSuppressedTargets.insert(target);
+                if (CanvasSession* session =
+                        m_sessionManager->findSession(target)) {
+                    terminateProjectRemoteSession(target, false);
+                }
+            }
+            markAllSessionsOffline();
+        }
+        m_remoteSessionOpenPendingTargets.clear();
+        m_remoteSessionOpenTargetByRequestId.clear();
+        m_locallyTerminatingRemoteSessions.clear();
+        m_pendingTeardownAcks.clear();
+        m_discoveredClients.clear();
+        refreshProjectClientList();
+    });
+    connect(m_webSocketClient, &WebSocketClient::registrationConfirmed, this, &MainWindow::onRegistrationConfirmed);
+    // UploadManager subscribes to the canonical protocol-v2 upload envelope.
+    m_uploadManager->setWebSocketClient(m_webSocketClient);
+    connect(m_uploadManager, &UploadManager::terminalIncomingCleanupRequired,
+            this, &MainWindow::beginTerminalIncomingCacheCleanup);
+    connect(m_uploadManager,
+            &UploadManager::receiverAdvertisementReadinessChanged,
+            this, [this](bool ready, const QString&) {
+        // A welcome may have completed while renderer destruction was still
+        // pending. Publish the device only after logical quarantine commits.
+        if (ready && m_webSocketClient && m_webSocketClient->isConnected()) {
+            syncRegistration();
+        }
+    });
+
+    connect(m_uploadManager, &UploadManager::assetRemovalCommitted,
+            this, [this](const QString& targetDeviceId,
+                         const QStringList& localFileIds) {
+        CanvasSession* session = m_sessionManager
+            ? m_sessionManager->findSession(targetDeviceId) : nullptr;
+        if (!session) return;
+        for (const QString& fileId : localFileIds) {
+            session->knownRemoteFileIds.remove(fileId);
+            session->expectedIdeaFileIds.remove(fileId);
+        }
+        session->upload.remoteFilesPresent =
+            !session->knownRemoteFileIds.isEmpty();
+    });
+    connect(m_uploadManager, &UploadManager::assetRemovalFailed,
+            this, [this](const QString& targetDeviceId,
+                         const QString& remoteSessionId,
+                         const QStringList& localFileIds,
+                         const QString& reason) {
+        Q_UNUSED(localFileIds);
+        TOAST_ERROR(QStringLiteral(
+            "Remote asset cleanup failed; the session is being closed: %1")
+                        .arg(reason), 5000);
+        RemoteSessionCoordinator* coordinator = m_webSocketClient
+            ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
+        const RemoteSessionCoordinator::Binding binding = coordinator
+            ? coordinator->byId(remoteSessionId)
+            : RemoteSessionCoordinator::Binding();
+        if (!binding.remoteSessionId.isEmpty()
+            && binding.ownerDeviceId == m_webSocketClient->deviceId()) {
+            terminateProjectRemoteSession(targetDeviceId, true);
+        } else {
+            clearRemoteSessionRuntimeState(targetDeviceId, false);
         }
     });
     
-    // FileManager: configure callback to send file removal commands to remote clients
-    // Phase 3: canvasSessionId is MANDATORY - always present from SessionManager
+    // A file is invalidated only after its last local media reference is gone.
+    // Remote copies are addressed through the exact authenticated session
+    // inventory; no target name or historical canvas identifier is accepted.
     FileManager::setFileRemovalNotifier([this](const QString& fileId, const QList<QString>& clientIds, const QList<QString>& canvasSessionIds) {
-        qDebug() << "MainWindow: FileManager requested removal of file" << fileId
-                 << "from clients:" << clientIds << "ideas:" << canvasSessionIds;
-        if (!m_webSocketClient) {
-            qWarning() << "MainWindow: No WebSocket client available for file removal";
-            return;
-        }
-        
-        for (const QString& canvasSessionId : canvasSessionIds) {
-            for (const QString& clientId : clientIds) {
-                qDebug() << "MainWindow: Sending remove_file command for" << fileId
-                         << "to" << clientId << "canvasSessionId" << canvasSessionId;
-                m_webSocketClient->sendRemoveFile(clientId, canvasSessionId, fileId);
-            }
-            
-            if (CanvasSession* session = findCanvasSessionByIdeaId(canvasSessionId)) {
-                session->knownRemoteFileIds.remove(fileId);
-                session->expectedIdeaFileIds.remove(fileId);
-            }
+        Q_UNUSED(canvasSessionIds);
+        if (!m_uploadManager) return;
+        QSet<QString> uniqueTargets(clientIds.cbegin(), clientIds.cend());
+        for (const QString& targetDeviceId : uniqueTargets) {
+            m_uploadManager->requestAssetRemoval(
+                targetDeviceId, fileId, QStringLiteral("source_removed"));
         }
     });
     
     // FileWatcher: remove media items when their source files are deleted
-    connect(m_fileWatcher, &FileWatcher::filesDeleted, this, [this](const QList<ResizableMediaBase*>& mediaItems) {
-        if (!m_screenCanvas || !m_screenCanvas->scene()) return;
-        
-        qDebug() << "MainWindow: Removing" << mediaItems.size() << "media items due to deleted source files";
-        
-        for (ResizableMediaBase* mediaItem : mediaItems) {
-            // Safety check: ensure the mediaItem pointer is valid
-            if (!mediaItem) {
-                qDebug() << "MainWindow: Skipping null mediaItem in filesDeleted callback";
-                continue;
-            }
-            
-            // Additional safety: check if mediaId is valid
-            QString mediaId = mediaItem->mediaId();
-            if (mediaId.isEmpty() || mediaId.contains('\0')) {
-                qDebug() << "MainWindow: Skipping mediaItem with invalid mediaId:" << mediaId;
-                continue;
-            }
-            
-            // Stop watching this item
-            m_fileWatcher->unwatchMediaItem(mediaItem);
-            
-            // Use the same safe deletion pattern as the delete button
-            // Defer deletion to the event loop to avoid re-entrancy issues
-            QTimer::singleShot(0, [itemPtr=mediaItem]() {
-                if (itemPtr) { // Extra safety check in lambda
-                    itemPtr->prepareForDeletion();
-                    if (itemPtr->scene()) itemPtr->scene()->removeItem(itemPtr);
-                    delete itemPtr;
-                }
-            });
-        }
-        
-        // Refresh the media list overlay if it's visible (also deferred)
-        if (m_screenCanvas) {
-            QTimer::singleShot(0, [this]() {
-                if (m_screenCanvas) {
-                    m_screenCanvas->refreshInfoOverlay();
-                }
-            });
-        }
+    connect(m_fileWatcher, &FileWatcher::filesDeleted, this,
+            [this](const QList<ResizableMediaBase*>& mediaItems) {
+        removeInvalidMediaItems(mediaItems);
     });
     
     // Phase 4.3: Inject FileManager into media runtime hooks
@@ -552,34 +790,7 @@ MainWindow::MainWindow(QWidget* parent)
     
     // File error callback: remove media items when playback detects missing/corrupted files
     MediaRuntimeHooks::setFileErrorNotifier([this](ResizableMediaBase* mediaItem) {
-        if (!m_screenCanvas || !m_screenCanvas->scene() || !mediaItem) return;
-        
-        // Additional safety: check if mediaId is valid
-        QString mediaId = mediaItem->mediaId();
-        if (mediaId.isEmpty() || mediaId.contains('\0')) {
-            qDebug() << "MainWindow: Skipping mediaItem with invalid mediaId in file error callback:" << mediaId;
-            return;
-        }
-        
-        qDebug() << "MainWindow: Removing media item due to file error:" << mediaItem->sourcePath();
-        
-        // Stop watching this item
-        m_fileWatcher->unwatchMediaItem(mediaItem);
-        
-        // Use the same safe deletion pattern as the delete button
-        // Defer deletion to the event loop to avoid re-entrancy issues
-        QTimer::singleShot(0, [itemPtr=mediaItem]() {
-            itemPtr->prepareForDeletion();
-            if (itemPtr->scene()) itemPtr->scene()->removeItem(itemPtr);
-            delete itemPtr;
-        });
-        
-        // Refresh the media list overlay (also deferred)
-        QTimer::singleShot(0, [this]() {
-            if (m_screenCanvas) {
-                m_screenCanvas->refreshInfoOverlay();
-            }
-        });
+        removeInvalidMediaItems({mediaItem});
     });
 
     // [PHASE 11] UI refresh when upload state changes - delegate to UploadButtonStyleManager
@@ -597,23 +808,34 @@ MainWindow::MainWindow(QWidget* parent)
         // Update individual media progress based on server-acknowledged data
         updateIndividualProgressFromServer(percent, filesCompleted, totalFiles);
     });
-    connect(m_uploadManager, &UploadManager::uploadFinished, this, [this]() {
+    connect(m_uploadManager, &UploadManager::uploadFinished, this,
+            [this](const QString&) {
         if (m_uploadButtonStyleManager && m_uploadButton) {
             m_uploadButtonStyleManager->applyUploadButtonStyle(m_uploadButton);
         }
     });
-    connect(m_uploadManager, &UploadManager::allFilesRemoved, this, [this]() {
-        if (m_uploadButtonStyleManager && m_uploadButton) {
-            m_uploadButtonStyleManager->applyUploadButtonStyle(m_uploadButton);
-        }
-    });
-
     // [Phase 10] Setup timers via TimerController
     m_timerController->setupTimers();
 
     // Initialize toast notification system
     m_toastSystem = new ToastNotificationSystem(this, this);
     ToastNotificationSystem::setInstance(m_toastSystem);
+    if (m_historyPage && m_toastSystem->notificationCenter()) {
+        NotificationCenter* center = m_toastSystem->notificationCenter();
+        m_historyPage->setNotificationCenter(center);
+        connect(center, &NotificationCenter::unreadCountChanged,
+                this, &MainWindow::updateHistoryUnreadBadge);
+        updateHistoryVisibilityState();
+        updateHistoryUnreadBadge(center->unreadCount());
+    }
+
+    if (m_projectManager && !m_projectManager->load()) {
+        TOAST_ERROR(QStringLiteral("Projects could not be loaded: %1")
+                        .arg(m_projectManager->lastError()), 5000);
+    } else {
+        validateAllProjectSources();
+        refreshProjectClientList();
+    }
 
     connectToServer();
 }
@@ -835,13 +1057,6 @@ void MainWindow::updateUploadButtonForSession(CanvasSession& session) {
     }
 }
 
-// [PHASE 8] Unload uploads - delegate to CanvasSessionController
-void MainWindow::unloadUploadsForSession(CanvasSession& session, bool attemptRemote) {
-    if (m_canvasSessionController) {
-        m_canvasSessionController->unloadUploadsForSession(&session, attemptRemote);
-    }
-}
-
 // [Phase 12] Delegate to SettingsManager
 bool MainWindow::getAutoUploadImportedMedia() const {
     return m_settingsManager ? m_settingsManager->getAutoUploadImportedMedia() : false;
@@ -889,16 +1104,15 @@ void MainWindow::reconcileRemoteFilesForSession(CanvasSession& session, const QS
     session.expectedIdeaFileIds = currentFileIds;
     m_fileManager->replaceIdeaFileSet(session.canvasSessionId, currentFileIds);
 
-    // Phase 3: Use persistentClientId for server communication
     if (!session.persistentClientId.isEmpty()) {
-        if (m_webSocketClient && m_webSocketClient->isConnected()) {
-            const QSet<QString> toRemove = session.knownRemoteFileIds - currentFileIds;
-            for (const QString& fileId : toRemove) {
-                m_webSocketClient->sendRemoveFile(session.persistentClientId, session.canvasSessionId, fileId);
-                session.knownRemoteFileIds.remove(fileId);
+        const QSet<QString> toRemove = session.knownRemoteFileIds - currentFileIds;
+        for (const QString& fileId : toRemove) {
+            if (m_uploadManager) {
+                m_uploadManager->requestAssetRemoval(
+                    session.persistentClientId, fileId,
+                    QStringLiteral("no_longer_referenced"));
             }
         }
-        session.knownRemoteFileIds.intersect(currentFileIds);
     }
 }
 
@@ -913,13 +1127,6 @@ void MainWindow::setUploadSessionByUploadId(const QString& uploadId, const QStri
     m_uploadSessionByUploadId.insert(uploadId, sessionIdentity);
 }
 
-// [PHASE 7.1] Simplified - delegates to WebSocketMessageHandler
-void MainWindow::handleStateSyncFromServer(const QJsonObject& message) {
-    if (m_webSocketMessageHandler) {
-        m_webSocketMessageHandler->handleStateSyncMessage(message);
-    }
-}
-
 void MainWindow::markAllSessionsOffline() {
     for (CanvasSession* session : m_sessionManager->getAllSessions()) {
         session->lastClientInfo.setClientId(session->persistentClientId);
@@ -928,9 +1135,405 @@ void MainWindow::markAllSessionsOffline() {
     }
 }
 
-// [Phase 16] Delegate to ClientListBuilder
 QList<ClientInfo> MainWindow::buildDisplayClientList(const QList<ClientInfo>& connectedClients) {
-    return ClientListBuilder::buildDisplayClientList(this, connectedClients);
+    m_discoveredClients = connectedClients;
+    if (!m_projectManager) {
+        return ClientListBuilder::buildDisplayClientList(this, connectedClients);
+    }
+
+    const QList<ProjectClientEntry> entries =
+        m_projectManager->mergeDiscoveredClients(connectedClients);
+    QList<ClientInfo> result;
+    result.reserve(entries.size());
+    for (const ProjectClientEntry& entry : entries) {
+        ClientInfo client = entry.client;
+        client.setClientId(entry.deviceId);
+        client.setOnline(entry.online);
+        client.setFromMemory(entry.hasProject);
+        client.setProjectId(entry.projectId);
+        client.setHasProject(entry.hasProject);
+        client.setRemoteSessionCloseAtMs(entry.remoteSessionCloseAtMs);
+        client.setProjectDeleteAtMs(entry.projectDeleteAtMs);
+        if (!entry.online) {
+            client.setStatus(QStringLiteral("Offline"));
+            client.setAvailabilityStatus(QStringLiteral("Offline"));
+        } else {
+            static const QSet<QString> allowedStatuses = {
+                QStringLiteral("Available"),
+                QStringLiteral("Connecting"),
+                QStringLiteral("Connected"),
+                QStringLiteral("Reconnecting"),
+                QStringLiteral("Disconnecting"),
+                QStringLiteral("In use"),
+                QStringLiteral("Unavailable")
+            };
+            QString status = client.availabilityStatus().trimmed();
+            if (status.compare(QStringLiteral("active"), Qt::CaseInsensitive) == 0) {
+                status = QStringLiteral("Connected");
+            } else if (status.compare(QStringLiteral("in_use"), Qt::CaseInsensitive) == 0
+                       || status.compare(QStringLiteral("busy"), Qt::CaseInsensitive) == 0) {
+                status = QStringLiteral("In use");
+            } else if (status.compare(QStringLiteral("opening"), Qt::CaseInsensitive) == 0) {
+                status = QStringLiteral("Connecting");
+            } else if (status.compare(QStringLiteral("grace"), Qt::CaseInsensitive) == 0) {
+                status = QStringLiteral("Reconnecting");
+            } else if (status.compare(QStringLiteral("terminating"), Qt::CaseInsensitive) == 0
+                       || status.compare(QStringLiteral("cleanup_pending"), Qt::CaseInsensitive) == 0) {
+                status = QStringLiteral("Disconnecting");
+            } else if (status.compare(QStringLiteral("cleanup_error"), Qt::CaseInsensitive) == 0) {
+                status = QStringLiteral("Unavailable");
+            }
+            if (!allowedStatuses.contains(status)) {
+                status = QStringLiteral("Available");
+            }
+            client.setStatus(status);
+            client.setAvailabilityStatus(status);
+        }
+
+        if (CanvasSession* session = m_sessionManager->findSession(entry.deviceId)) {
+            if (entry.online) {
+                m_sessionManager->updateSessionServerId(entry.deviceId, client.getId());
+                session = m_sessionManager->findSession(entry.deviceId);
+            }
+            if (session) {
+                session->lastClientInfo = client;
+                session->remoteContentClearedOnDisconnect = !entry.online
+                    ? session->remoteContentClearedOnDisconnect : false;
+                if (session->canvas) {
+                    session->canvas->setRemoteSceneTarget(
+                        entry.deviceId, client.getMachineName());
+                }
+            }
+        }
+        result.append(client);
+    }
+    return result;
+}
+
+void MainWindow::refreshProjectClientList() {
+    if (!m_clientListPage) {
+        return;
+    }
+    m_clientListPage->updateClientList(buildDisplayClientList(m_discoveredClients));
+}
+
+QList<ProjectMediaReference> MainWindow::collectProjectMediaReferences(
+    const QString& targetDeviceId, ICanvasHost* canvas) const {
+    QList<ProjectMediaReference> references;
+    if (!canvas) {
+        return references;
+    }
+
+    QHash<QString, ProjectMediaReference> previousByMediaId;
+    if (m_projectManager) {
+        if (const ProjectRecord* project =
+                m_projectManager->projectForTarget(targetDeviceId)) {
+            for (const ProjectMediaReference& previous : project->mediaReferences) {
+                previousByMediaId.insert(previous.mediaId, previous);
+            }
+        }
+    }
+
+    for (ResizableMediaBase* media : canvas->enumerateMediaItems()) {
+        if (!media || media->isTextMedia() || media->sourcePath().isEmpty()) {
+            continue;
+        }
+        const QString canonicalPath = canonicalExistingPath(media->sourcePath());
+        if (canonicalPath.isEmpty()) {
+            continue;
+        }
+        const QString identity = sourceIdentityForPath(canonicalPath);
+        ProjectMediaReference reference = previousByMediaId.value(media->mediaId());
+        reference.mediaId = media->mediaId();
+        if (reference.canonicalSourcePath != canonicalPath
+            || reference.sourceIdentity != identity
+            || reference.sha256.isEmpty()) {
+            reference.canonicalSourcePath = canonicalPath;
+            reference.sourceIdentity = identity;
+            reference.sha256 = sha256ForPath(canonicalPath);
+            reference.assetId = reference.sha256;
+        }
+        reference.mediaType = media->isVideoMedia()
+            ? QStringLiteral("video") : QStringLiteral("image");
+        if (!reference.sha256.isEmpty()) {
+            references.append(reference);
+        }
+    }
+    return references;
+}
+
+void MainWindow::persistProjectCanvas(const QString& targetDeviceId) {
+    if (!m_projectManager || targetDeviceId.isEmpty()) {
+        return;
+    }
+    CanvasSession* session = m_sessionManager->findSession(targetDeviceId);
+    if (!session || !session->canvas
+        || !m_projectManager->hasProjectForTarget(targetDeviceId)) {
+        return;
+    }
+    m_projectManager->updateCanvasState(
+        targetDeviceId,
+        session->canvas->serializeProjectState(),
+        collectProjectMediaReferences(targetDeviceId, session->canvas));
+}
+
+void MainWindow::restoreProjectCanvas(CanvasSession& session) {
+    if (!m_projectManager || !session.canvas
+        || m_restoredProjectIds.contains(session.persistentClientId)) {
+        return;
+    }
+    const ProjectRecord* stored =
+        m_projectManager->projectForTarget(session.persistentClientId);
+    if (!stored) {
+        return;
+    }
+
+    QHash<QString, QString> validSources;
+    QList<ProjectMediaReference> validReferences;
+    QSet<QString> invalidMediaIds;
+    for (const ProjectMediaReference& reference : stored->mediaReferences) {
+        const QString canonicalPath = canonicalExistingPath(reference.canonicalSourcePath);
+        const QString identity = sourceIdentityForPath(canonicalPath);
+        if (canonicalPath.isEmpty()
+            || canonicalPath != reference.canonicalSourcePath
+            || identity.isEmpty()
+            || identity != reference.sourceIdentity
+            || sha256ForPath(canonicalPath) != reference.sha256) {
+            invalidMediaIds.insert(reference.mediaId);
+            continue;
+        }
+        validSources.insert(reference.mediaId, canonicalPath);
+        validReferences.append(reference);
+    }
+
+    QJsonObject durableState = stored->canvasStateForRestore();
+    QJsonArray filteredMedia;
+    for (const QJsonValue& value : durableState.value(QStringLiteral("media")).toArray()) {
+        const QJsonObject media = value.toObject();
+        const QString type = media.value(QStringLiteral("type")).toString().toLower();
+        const QString mediaId = media.value(QStringLiteral("mediaId")).toString();
+        if (type == QLatin1String("text") || validSources.contains(mediaId)) {
+            filteredMedia.append(media);
+        } else {
+            invalidMediaIds.insert(mediaId);
+        }
+    }
+    durableState.insert(QStringLiteral("media"), filteredMedia);
+
+    QStringList skipped;
+    if (!session.canvas->restoreProjectState(durableState, validSources, &skipped)) {
+        qWarning() << "Project canvas restoration failed for device"
+                   << session.persistentClientId.left(12);
+        return;
+    }
+    for (const QString& mediaId : skipped) {
+        invalidMediaIds.insert(mediaId);
+    }
+    m_restoredProjectIds.insert(session.persistentClientId);
+
+    if (!invalidMediaIds.isEmpty() || !skipped.isEmpty()) {
+        QJsonArray finalMedia;
+        for (const QJsonValue& value : filteredMedia) {
+            const QString mediaId = value.toObject()
+                                        .value(QStringLiteral("mediaId")).toString();
+            if (!invalidMediaIds.contains(mediaId)) {
+                finalMedia.append(value);
+            }
+        }
+        durableState.insert(QStringLiteral("media"), finalMedia);
+        m_projectManager->updateCanvasState(
+            session.persistentClientId, durableState, validReferences);
+        TOAST_WARNING(QStringLiteral("%1 missing or modified media item%2 removed from the project")
+                          .arg(invalidMediaIds.size())
+                          .arg(invalidMediaIds.size() == 1 ? QString() : QStringLiteral("s")),
+                      5000);
+    }
+}
+
+void MainWindow::removeInvalidMediaItems(
+    const QList<ResizableMediaBase*>& mediaItems) {
+    if (!m_sessionManager || mediaItems.isEmpty()) {
+        return;
+    }
+
+    QSet<ResizableMediaBase*> requested;
+    QSet<QString> affectedCanonicalPaths;
+    QSet<QString> affectedMediaIds;
+    for (ResizableMediaBase* media : mediaItems) {
+        if (!media || media->mediaId().isEmpty()
+            || media->mediaId().contains(QChar::Null)) {
+            continue;
+        }
+        requested.insert(media);
+        affectedMediaIds.insert(media->mediaId());
+        QString sourcePath = m_fileWatcher
+            ? m_fileWatcher->watchedFilePath(media) : QString();
+        if (sourcePath.isEmpty()) {
+            const QFileInfo info(media->sourcePath());
+            sourcePath = info.canonicalFilePath();
+            if (sourcePath.isEmpty()) {
+                sourcePath = QDir::cleanPath(info.absoluteFilePath());
+            }
+        }
+        if (!sourcePath.isEmpty()) {
+            affectedCanonicalPaths.insert(sourcePath);
+        }
+    }
+    if (requested.isEmpty()) {
+        return;
+    }
+
+    QHash<QString, QList<ResizableMediaBase*>> itemsByProject;
+    for (CanvasSession* session : m_sessionManager->getAllSessions()) {
+        if (!session || !session->canvas) {
+            continue;
+        }
+        for (ResizableMediaBase* candidate : session->canvas->enumerateMediaItems()) {
+            if (!candidate || candidate->isTextMedia()) {
+                continue;
+            }
+            QString candidatePath = m_fileWatcher
+                ? m_fileWatcher->watchedFilePath(candidate) : QString();
+            if (candidatePath.isEmpty()) {
+                const QFileInfo candidateInfo(candidate->sourcePath());
+                candidatePath = candidateInfo.canonicalFilePath();
+                if (candidatePath.isEmpty()) {
+                    candidatePath = QDir::cleanPath(candidateInfo.absoluteFilePath());
+                }
+            }
+            if (requested.contains(candidate)
+                || affectedCanonicalPaths.contains(candidatePath)) {
+                itemsByProject[session->persistentClientId].append(candidate);
+            }
+        }
+    }
+
+    // Stop every affected graph before deleting the first item. The canvas
+    // method also sends the remote stop when a remote run is active.
+    for (auto it = itemsByProject.cbegin(); it != itemsByProject.cend(); ++it) {
+        if (CanvasSession* session = m_sessionManager->findSession(it.key());
+            session && session->canvas) {
+            session->canvas->stopScenesForSourceInvalidation();
+        }
+    }
+
+    int removedCount = 0;
+    for (auto it = itemsByProject.cbegin(); it != itemsByProject.cend(); ++it) {
+        CanvasSession* session = m_sessionManager->findSession(it.key());
+        if (!session || !session->canvas) {
+            continue;
+        }
+        for (ResizableMediaBase* media : it.value()) {
+            if (m_fileWatcher) {
+                m_fileWatcher->unwatchMediaItem(media);
+            }
+            session->canvas->deleteMediaItemCanonical(media);
+            ++removedCount;
+        }
+        persistProjectCanvas(it.key());
+    }
+
+    // A source can occur in projects whose canvas has not been instantiated
+    // in this process. Remove those durable occurrences as part of the same
+    // canonical operation; no placeholder survives.
+    if (m_projectManager) {
+        const QList<ProjectRecord> projects = m_projectManager->projects();
+        for (const ProjectRecord& project : projects) {
+            QSet<QString> removeIds;
+            QList<ProjectMediaReference> retainedReferences;
+            for (const ProjectMediaReference& reference : project.mediaReferences) {
+                if (affectedMediaIds.contains(reference.mediaId)
+                    || affectedCanonicalPaths.contains(reference.canonicalSourcePath)) {
+                    removeIds.insert(reference.mediaId);
+                } else {
+                    retainedReferences.append(reference);
+                }
+            }
+            if (removeIds.isEmpty()) {
+                continue;
+            }
+            QJsonObject state = project.canvasState;
+            QJsonArray retainedMedia;
+            for (const QJsonValue& value : state.value(QStringLiteral("media")).toArray()) {
+                if (!removeIds.contains(
+                        value.toObject().value(QStringLiteral("mediaId")).toString())) {
+                    retainedMedia.append(value);
+                }
+            }
+            state.insert(QStringLiteral("media"), retainedMedia);
+            m_projectManager->updateCanvasState(
+                project.targetDeviceId, state, retainedReferences);
+        }
+        m_projectManager->flush();
+    }
+
+    if (removedCount > 0) {
+        TOAST_WARNING(
+            QStringLiteral("%1 unavailable media item%2 removed from all projects")
+                .arg(removedCount)
+                .arg(removedCount == 1 ? QString() : QStringLiteral("s")),
+            5000);
+    }
+}
+
+void MainWindow::validateAllProjectSources() {
+    if (!m_projectManager) {
+        return;
+    }
+
+    int removedCount = 0;
+    bool changed = false;
+    const QList<ProjectRecord> projects = m_projectManager->projects();
+    for (const ProjectRecord& project : projects) {
+        QSet<QString> validMediaIds;
+        QSet<QString> invalidMediaIds;
+        QList<ProjectMediaReference> retainedReferences;
+        for (const ProjectMediaReference& reference : project.mediaReferences) {
+            const QString canonicalPath =
+                canonicalExistingPath(reference.canonicalSourcePath);
+            const bool valid = !canonicalPath.isEmpty()
+                && canonicalPath == reference.canonicalSourcePath
+                && sourceIdentityForPath(canonicalPath) == reference.sourceIdentity
+                && sha256ForPath(canonicalPath) == reference.sha256;
+            if (valid) {
+                validMediaIds.insert(reference.mediaId);
+                retainedReferences.append(reference);
+            } else {
+                invalidMediaIds.insert(reference.mediaId);
+            }
+        }
+
+        QJsonObject state = project.canvasState;
+        QJsonArray retainedMedia;
+        for (const QJsonValue& value : state.value(QStringLiteral("media")).toArray()) {
+            const QJsonObject media = value.toObject();
+            const QString type = media.value(QStringLiteral("type")).toString().toLower();
+            const QString mediaId = media.value(QStringLiteral("mediaId")).toString();
+            if (type == QLatin1String("text") || validMediaIds.contains(mediaId)) {
+                retainedMedia.append(media);
+            } else {
+                invalidMediaIds.insert(mediaId);
+            }
+        }
+
+        if (invalidMediaIds.isEmpty()) {
+            continue;
+        }
+        removedCount += invalidMediaIds.size();
+        state.insert(QStringLiteral("media"), retainedMedia);
+        m_projectManager->updateCanvasState(
+            project.targetDeviceId, state, retainedReferences);
+        changed = true;
+    }
+
+    if (changed) {
+        m_projectManager->flush();
+        TOAST_WARNING(
+            QStringLiteral("%1 missing or modified media item%2 removed while restoring projects")
+                .arg(removedCount)
+                .arg(removedCount == 1 ? QString() : QStringLiteral("s")),
+            5000);
+    }
 }
 
 ICanvasHost* MainWindow::canvasForClientId(const QString& clientId) const {
@@ -977,6 +1580,7 @@ void MainWindow::changeEvent(QEvent* event) {
     if (m_windowEventHandler) {
         m_windowEventHandler->handleChangeEvent(event);
     }
+    updateHistoryVisibilityState();
 }
 
 void MainWindow::handleApplicationStateChanged(Qt::ApplicationState state) {
@@ -985,16 +1589,80 @@ void MainWindow::handleApplicationStateChanged(Qt::ApplicationState state) {
     }
 }
 
+void MainWindow::handleNativeSystemSuspendedChanged(bool suspended) {
+    if (m_windowEventHandler) {
+        m_windowEventHandler->updateNativeSystemSuspendedState(suspended);
+    }
+}
+
 void MainWindow::showScreenView(const ClientInfo& client) {
     if (!m_navigationManager) return;
+    const QString targetDeviceId = client.clientId().trimmed();
+    if (targetDeviceId.isEmpty()) {
+        TOAST_ERROR(QStringLiteral("This client has no authenticated device identity"), 4000);
+        return;
+    }
+    const bool explicitProjectEntry = !m_navigationManager->isOnScreenView()
+        || m_activeSessionIdentity != targetDeviceId;
+    if (explicitProjectEntry) {
+        // A fresh user navigation is the only event that clears a prior
+        // command-level rejection. Discovery changes never auto-queue access.
+        m_remoteSessionOpenSuppressedTargets.remove(targetDeviceId);
+    }
+    const bool hadRuntimeCanvas =
+        m_sessionManager && m_sessionManager->hasSession(targetDeviceId);
+    bool hasDurableViewport = false;
+    if (m_projectManager) {
+        if (const ProjectRecord* existing =
+                m_projectManager->projectForTarget(targetDeviceId)) {
+            hasDurableViewport =
+                existing->canvasState.value(QStringLiteral("viewport")).isObject();
+        }
+    }
+    const bool preserveProjectViewport = hadRuntimeCanvas || hasDurableViewport;
+    if (!m_activeSessionIdentity.isEmpty()
+        && m_activeSessionIdentity != targetDeviceId
+        && m_projectManager) {
+        persistProjectCanvas(m_activeSessionIdentity);
+        m_projectManager->setHidden(m_activeSessionIdentity);
+    }
+
+    if (m_projectManager) {
+        if (!m_projectManager->hasProjectForTarget(targetDeviceId)) {
+            if (m_projectManager->ensureProject(
+                    ClientSnapshot::fromClientInfo(client, QDateTime::currentMSecsSinceEpoch()),
+                    ProjectLifecycleState::Visible).isEmpty()) {
+                TOAST_ERROR(QStringLiteral("The project could not be created"), 4000);
+                return;
+            }
+        } else {
+            if (client.isOnline()) {
+                m_projectManager->updateClientSnapshot(
+                    ClientSnapshot::fromClientInfo(client, QDateTime::currentMSecsSinceEpoch()));
+            }
+            if (!m_projectManager->setVisible(targetDeviceId)) {
+                TOAST_WARNING(QStringLiteral("This project has expired"), 3500);
+                refreshProjectClientList();
+                return;
+            }
+        }
+    }
+
     CanvasSession& session = ensureCanvasSession(client);
+    restoreProjectCanvas(session);
+    if (session.canvas) {
+        // The authenticated device snapshot is authoritative for topology.
+        // setScreens updates only screen backdrops; persisted media keep their
+        // absolute scene coordinates even when monitors changed.
+        session.canvas->setScreens(session.lastClientInfo.getScreens());
+    }
     markCanvasLoadRequest(session.persistentClientId);
     const bool sessionHasActiveScreens = session.canvas && session.canvas->hasActiveScreens();
     const bool sessionHasStoredScreens = !session.lastClientInfo.getScreens().isEmpty();
     const bool hasRenderableCachedContent = sessionHasActiveScreens;
     const bool hasCachedContent = hasRenderableCachedContent || sessionHasStoredScreens;
     switchToCanvasSession(session.persistentClientId);
-    m_activeRemoteClientId = session.serverAssignedId;
+    m_activeRemoteClientId = session.persistentClientId;
     m_remoteClientConnected = false;
     m_selectedClient = session.lastClientInfo;
     ClientInfo effectiveClient = session.lastClientInfo;
@@ -1009,8 +1677,9 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     if (!alreadyOnThisClient) {
         // New client selection: reset reveal flag so first incoming screens will fade in once
         m_canvasRevealedForCurrentClient = false;
+        m_preserveViewportOnReconnect = preserveProjectViewport;
         m_navigationManager->showScreenView(effectiveClient, hasCachedContent);
-        if (session.canvas) {
+        if (session.canvas && !preserveProjectViewport) {
             session.canvas->resetTransform();
             session.canvas->requestDeferredInitialRecenter(53);
             session.canvas->recenterWithMargin(53);
@@ -1028,7 +1697,8 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     if (m_backButton) m_backButton->show();
 
     // Update upload target
-    m_uploadManager->setTargetClientId(session.serverAssignedId);
+    m_uploadManager->setTargetClientId(
+        effectiveClient.isOnline() ? session.persistentClientId : QString());
 
     // Show remote client info wrapper when viewing a client
     if (m_remoteClientInfoWrapper) {
@@ -1057,9 +1727,11 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     if (hasRenderableCachedContent) {
         if (session.canvas) {
             session.canvas->showContentAfterReconnect();
-            session.canvas->resetTransform();
-            session.canvas->recenterWithMargin(53);
-            session.canvas->requestDeferredInitialRecenter(53);
+            if (!preserveProjectViewport) {
+                session.canvas->resetTransform();
+                session.canvas->recenterWithMargin(53);
+                session.canvas->requestDeferredInitialRecenter(53);
+            }
         }
         m_canvasRevealedForCurrentClient = true;
         m_canvasContentEverLoaded = true;
@@ -1075,6 +1747,12 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     if (m_responsiveLayoutManager) {
         m_responsiveLayoutManager->updateResponsiveButtonVisibility();
     }
+    if (m_canvasViewPage) {
+        m_canvasViewPage->setDisconnecting(false);
+        m_canvasViewPage->setProjectActionsEnabled(effectiveClient.isOnline(), true);
+    }
+    setActiveProjectVisibleIfAppropriate();
+    ensureRemoteSessionForClient(effectiveClient);
 }
 
 // [PHASE 5] Delegate to RemoteClientInfoManager
@@ -1088,6 +1766,12 @@ void MainWindow::showClientListView() {
     // Do NOT unload when navigating back to client list - uploads persist per session
     // Each client maintains its own upload state that should survive navigation
     
+    const QString leavingTarget = m_activeSessionIdentity;
+    if (!leavingTarget.isEmpty() && m_projectManager
+        && m_navigationManager && m_navigationManager->isOnScreenView()) {
+        persistProjectCanvas(leavingTarget);
+        m_projectManager->setHidden(leavingTarget);
+    }
     if (m_navigationManager) m_navigationManager->showClientList();
     if (m_uploadButton) m_uploadButton->setText("Upload to Client");
     m_uploadManager->setTargetClientId(QString());
@@ -1112,13 +1796,770 @@ void MainWindow::showClientListView() {
     // Ensure volume indicator is removed when leaving screen view
     removeVolumeIndicatorFromLayout();
     // Show top-bar page title and hide back button on client list
-    if (m_pageTitleLabel) m_pageTitleLabel->show();
+    if (m_pageTitleLabel) {
+        const int authenticatedCount = m_clientListPage
+            ? m_clientListPage->authenticatedDeviceCount() : 0;
+        const int liveCount = m_clientListPage
+            ? m_clientListPage->liveSceneCount() : 0;
+        m_pageTitleLabel->setText(
+            QStringLiteral("Clients · %1 authenticated · %2 live")
+                .arg(authenticatedCount)
+                .arg(liveCount));
+        m_pageTitleLabel->show();
+    }
     if (m_backButton) m_backButton->hide();
     
     // Update button visibility for client list page
     if (m_responsiveLayoutManager) {
         m_responsiveLayoutManager->updateResponsiveButtonVisibility();
     }
+}
+
+void MainWindow::updateRemoteClientAvailability(const QString& targetDeviceId,
+                                                const QString& status) {
+    if (targetDeviceId.isEmpty() || status.isEmpty()) {
+        return;
+    }
+    for (ClientInfo& client : m_discoveredClients) {
+        if (client.clientId() != targetDeviceId) {
+            continue;
+        }
+        client.setStatus(status);
+        client.setAvailabilityStatus(status);
+        if (status == QLatin1String("Offline")) {
+            client.setOnline(false);
+        }
+    }
+    if (m_sessionManager) {
+        if (CanvasSession* session = m_sessionManager->findSession(targetDeviceId)) {
+            session->lastClientInfo.setStatus(status);
+            session->lastClientInfo.setAvailabilityStatus(status);
+            if (status == QLatin1String("Offline")) {
+                session->lastClientInfo.setOnline(false);
+            }
+        }
+    }
+    refreshProjectClientList();
+}
+
+void MainWindow::ensureRemoteSessionForClient(const ClientInfo& client) {
+    if (m_cleanShutdownPrepared || !m_webSocketClient || !m_canvasViewPage) {
+        return;
+    }
+    const QString targetDeviceId = client.clientId().trimmed();
+    if (targetDeviceId.isEmpty() || targetDeviceId == m_webSocketClient->deviceId()) {
+        return;
+    }
+
+    RemoteSessionCoordinator* coordinator =
+        m_webSocketClient->remoteSessionCoordinator();
+    const RemoteSessionCoordinator::Binding binding = coordinator
+        ? coordinator->outgoingForPeer(targetDeviceId)
+        : RemoteSessionCoordinator::Binding();
+    if (!binding.remoteSessionId.isEmpty()) {
+        QString status = QStringLiteral("Disconnecting");
+        if (binding.phase == QLatin1String("Active")) {
+            status = QStringLiteral("Connected");
+        } else if (binding.phase == QLatin1String("Opening")) {
+            status = QStringLiteral("Connecting");
+        } else if (binding.phase == QLatin1String("Grace")) {
+            status = QStringLiteral("Reconnecting");
+        } else if (binding.phase == QLatin1String("Closed")) {
+            status = client.isOnline() ? QStringLiteral("Available")
+                                       : QStringLiteral("Offline");
+        }
+        updateRemoteClientAvailability(targetDeviceId, status);
+        const bool commandReady = binding.phase == QLatin1String("Active")
+            && !m_locallyTerminatingRemoteSessions.contains(binding.remoteSessionId);
+        if (m_activeSessionIdentity == targetDeviceId) {
+            m_remoteClientConnected = binding.phase == QLatin1String("Active")
+                || binding.phase == QLatin1String("Grace");
+            setRemoteConnectionStatus(commandReady ? QStringLiteral("CONNECTED")
+                                                   : status.toUpper(), false);
+            m_canvasViewPage->setProjectActionsEnabled(commandReady, true);
+            if (m_screenCanvas) m_screenCanvas->setOverlayActionsEnabled(commandReady);
+            if (m_uploadManager) {
+                m_uploadManager->setTargetClientId(
+                    commandReady ? targetDeviceId : QString());
+            }
+        }
+        return;
+    }
+
+    // If setVisible() just expired an old hidden session, this is the one
+    // permitted replacement attempt. Once consumed it is never auto-retried.
+    m_reopenAfterSessionCloseTargets.remove(targetDeviceId);
+    if (m_remoteSessionOpenPendingTargets.contains(targetDeviceId)) {
+        updateRemoteClientAvailability(targetDeviceId, QStringLiteral("Connecting"));
+        if (m_activeSessionIdentity == targetDeviceId && m_uploadManager) {
+            m_uploadManager->setTargetClientId(QString());
+        }
+        return;
+    }
+    if (m_remoteSessionOpenSuppressedTargets.contains(targetDeviceId)) {
+        const QString status = client.isOnline()
+            ? client.availabilityBadgeText() : QStringLiteral("Offline");
+        updateRemoteClientAvailability(targetDeviceId, status);
+        if (m_activeSessionIdentity == targetDeviceId) {
+            setRemoteConnectionStatus(status.toUpper(), false);
+            m_canvasViewPage->setProjectActionsEnabled(false, true);
+            if (m_screenCanvas) m_screenCanvas->setOverlayActionsEnabled(false);
+            if (m_uploadManager) m_uploadManager->setTargetClientId(QString());
+        }
+        return;
+    }
+
+    const QString badge = client.availabilityBadgeText();
+    const bool canOpen = client.isOnline()
+        && badge != QLatin1String("In use")
+        && badge != QLatin1String("Unavailable")
+        && badge != QLatin1String("Disconnecting")
+        && m_webSocketClient->isConnected();
+    if (!canOpen) {
+        const QString status = client.isOnline() ? badge : QStringLiteral("Offline");
+        updateRemoteClientAvailability(targetDeviceId, status);
+        m_remoteSessionOpenSuppressedTargets.insert(targetDeviceId);
+        if (m_activeSessionIdentity == targetDeviceId) {
+            setRemoteConnectionStatus(status.toUpper(), false);
+            m_canvasViewPage->setProjectActionsEnabled(false, true);
+            if (m_screenCanvas) m_screenCanvas->setOverlayActionsEnabled(false);
+            if (m_uploadManager) m_uploadManager->setTargetClientId(QString());
+        }
+        return;
+    }
+
+    QString requestId;
+    if (!m_webSocketClient->openRemoteSession(targetDeviceId, &requestId)) {
+        updateRemoteClientAvailability(targetDeviceId, QStringLiteral("Unavailable"));
+        m_canvasViewPage->setProjectActionsEnabled(false, true);
+        if (m_activeSessionIdentity == targetDeviceId && m_uploadManager) {
+            m_uploadManager->setTargetClientId(QString());
+        }
+        return;
+    }
+    m_remoteSessionOpenPendingTargets.insert(targetDeviceId);
+    m_remoteSessionOpenTargetByRequestId.insert(requestId, targetDeviceId);
+    updateRemoteClientAvailability(targetDeviceId, QStringLiteral("Connecting"));
+    if (m_activeSessionIdentity == targetDeviceId) {
+        m_remoteClientConnected = false;
+        setRemoteConnectionStatus(QStringLiteral("CONNECTING..."), false);
+        m_canvasViewPage->setProjectActionsEnabled(false, true);
+        if (m_screenCanvas) m_screenCanvas->setOverlayActionsEnabled(false);
+        if (m_uploadManager) m_uploadManager->setTargetClientId(QString());
+    }
+}
+
+void MainWindow::handleRemoteSessionReady(const QJsonObject& envelope,
+                                          bool resumed) {
+    Q_UNUSED(resumed);
+    if (!m_webSocketClient) return;
+    const QString ownerDeviceId = envelope.value(QStringLiteral("ownerDeviceId")).toString();
+    const QString targetDeviceId = envelope.value(QStringLiteral("targetDeviceId")).toString();
+    const QString localDeviceId = m_webSocketClient->deviceId();
+    const QString peerDeviceId = ownerDeviceId == localDeviceId
+        ? targetDeviceId
+        : (targetDeviceId == localDeviceId ? ownerDeviceId : QString());
+    if (peerDeviceId.isEmpty()) return;
+
+    // A response to an in-flight open (or a new incoming session) may cross
+    // the quit request. Never let it resurrect command-capable state while the
+    // transport is being drained: include it in the same idempotent close set.
+    if (m_cleanShutdownPrepared) {
+        const QString remoteSessionId =
+            envelope.value(QStringLiteral("remoteSessionId")).toString();
+        if (!remoteSessionId.isEmpty()) {
+            m_cleanShutdownPendingSessionIds.insert(remoteSessionId);
+            m_locallyTerminatingRemoteSessions.insert(remoteSessionId);
+            m_webSocketClient->closeRemoteSession(
+                remoteSessionId, nullptr, QStringLiteral("clean_shutdown"));
+            if (targetDeviceId == localDeviceId && g_remoteSceneController) {
+                g_remoteSceneController->teardownRemoteSession(remoteSessionId);
+            }
+        }
+        return;
+    }
+
+    const QString requestId = envelope.value(QStringLiteral("requestId")).toString();
+    if (!requestId.isEmpty()) m_remoteSessionOpenTargetByRequestId.remove(requestId);
+    m_remoteSessionOpenPendingTargets.remove(peerDeviceId);
+    m_remoteSessionOpenSuppressedTargets.remove(peerDeviceId);
+    m_locallyTerminatingRemoteSessions.remove(
+        envelope.value(QStringLiteral("remoteSessionId")).toString());
+    if (ownerDeviceId != localDeviceId) {
+        return; // Incoming sessions do not create a local Project.
+    }
+
+    updateRemoteClientAvailability(peerDeviceId, QStringLiteral("Connected"));
+    if (m_activeSessionIdentity == peerDeviceId) {
+        m_remoteClientConnected = true;
+        setRemoteConnectionStatus(QStringLiteral("CONNECTED"), false);
+        if (m_canvasViewPage) m_canvasViewPage->setProjectActionsEnabled(true, true);
+        if (m_screenCanvas) m_screenCanvas->setOverlayActionsEnabled(true);
+        if (m_uploadManager) m_uploadManager->setTargetClientId(peerDeviceId);
+    }
+}
+
+void MainWindow::handleRemoteSessionLeaseState(const QJsonObject& envelope) {
+    if (!m_webSocketClient) return;
+    const QString ownerDeviceId = envelope.value(QStringLiteral("ownerDeviceId")).toString();
+    if (ownerDeviceId != m_webSocketClient->deviceId()) return;
+    const QString targetDeviceId = envelope.value(QStringLiteral("targetDeviceId")).toString();
+    const QString remoteSessionId =
+        envelope.value(QStringLiteral("remoteSessionId")).toString();
+    const QString phase = envelope.value(QStringLiteral("phase")).toString();
+    const QString state = envelope.value(QStringLiteral("state")).toString(phase);
+    QString status;
+    if (phase == QLatin1String("Grace") || state == QLatin1String("Grace")
+        || state == QLatin1String("Degraded")
+        || envelope.value(QStringLiteral("degraded")).toBool()) {
+        status = QStringLiteral("Reconnecting");
+    } else if (phase == QLatin1String("Active") && state == QLatin1String("Active")) {
+        status = QStringLiteral("Connected");
+    } else if (phase == QLatin1String("Terminating")
+               || phase == QLatin1String("CleanupPending")) {
+        status = QStringLiteral("Disconnecting");
+    }
+    if (status.isEmpty()) return;
+    updateRemoteClientAvailability(targetDeviceId, status);
+    const bool commandReady = status == QLatin1String("Connected")
+        && !m_locallyTerminatingRemoteSessions.contains(remoteSessionId);
+    if (m_activeSessionIdentity == targetDeviceId) {
+        m_remoteClientConnected = phase == QLatin1String("Active")
+            || phase == QLatin1String("Grace");
+        setRemoteConnectionStatus(status.toUpper(), false);
+        if (m_canvasViewPage) m_canvasViewPage->setProjectActionsEnabled(commandReady, true);
+        if (m_screenCanvas) m_screenCanvas->setOverlayActionsEnabled(commandReady);
+    }
+}
+
+void MainWindow::handleRemoteSessionTerminating(const QJsonObject& envelope) {
+    if (!m_webSocketClient) return;
+    const QString remoteSessionId =
+        envelope.value(QStringLiteral("remoteSessionId")).toString();
+    const QString teardownId = envelope.value(QStringLiteral("teardownId")).toString();
+    const QString ownerDeviceId = envelope.value(QStringLiteral("ownerDeviceId")).toString();
+    const QString targetDeviceId = envelope.value(QStringLiteral("targetDeviceId")).toString();
+    quint64 generation = 0;
+    if (remoteSessionId.isEmpty() || teardownId.isEmpty()
+        || !readSafePositiveJsonInteger(
+            envelope.value(QStringLiteral("generation")), &generation)) {
+        return;
+    }
+    m_locallyTerminatingRemoteSessions.insert(remoteSessionId);
+
+    if (ownerDeviceId == m_webSocketClient->deviceId()) {
+        if (m_activeSessionIdentity == targetDeviceId) m_remoteClientConnected = false;
+        updateRemoteClientAvailability(targetDeviceId, QStringLiteral("Disconnecting"));
+        clearRemoteSessionRuntimeState(targetDeviceId, false);
+        return;
+    }
+    if (targetDeviceId != m_webSocketClient->deviceId()) return;
+
+    // Duplicate terminal envelopes replay the result already being built or
+    // acknowledged. They must never enter renderer destruction or quarantine
+    // a second time.
+    const auto acknowledged = m_pendingTeardownAcks.constFind(remoteSessionId);
+    if (acknowledged != m_pendingTeardownAcks.cend()) {
+        if (acknowledged->teardownId == teardownId) retryPendingTeardownAcks();
+        return;
+    }
+    const auto pending = m_pendingRendererTeardowns.constFind(remoteSessionId);
+    if (pending != m_pendingRendererTeardowns.cend()) return;
+
+    // Target-side commit order is enforced asynchronously: renderer objects
+    // are stopped/detached now, but cache quarantine is forbidden until their
+    // actual QObject/native-window destruction completes.
+    PendingRendererTeardown rendererTeardown;
+    rendererTeardown.ownerDeviceId = ownerDeviceId;
+    rendererTeardown.teardownId = teardownId;
+    rendererTeardown.generation = generation;
+    m_pendingRendererTeardowns.insert(remoteSessionId, rendererTeardown);
+    const bool accepted = g_remoteSceneController
+        && g_remoteSceneController->teardownRemoteSession(remoteSessionId);
+    if (!accepted) {
+        handleRemoteRendererTeardownSettled(remoteSessionId, false);
+    }
+}
+
+void MainWindow::beginTerminalIncomingCacheCleanup(const QString& reasonCode)
+{
+    if (m_cleanShutdownPrepared || !m_uploadManager || !m_webSocketClient) {
+        return;
+    }
+
+    // Stop the receiver writer/timer and fail-close advertisement before any
+    // asynchronous renderer destruction starts. This call does not touch the
+    // cache namespace or FileManager mappings.
+    m_uploadManager->beginTerminalIncomingCleanup(reasonCode);
+
+    if (!m_terminalIncomingCleanupActive) {
+        m_terminalIncomingCleanupActive = true;
+        m_terminalIncomingCacheTeardownStarted = false;
+    }
+    if (!reasonCode.trimmed().isEmpty()) {
+        m_terminalIncomingCleanupReason = reasonCode.trimmed();
+    }
+
+    const QString localDeviceId = m_webSocketClient->deviceId();
+    RemoteSessionCoordinator* coordinator =
+        m_webSocketClient->remoteSessionCoordinator();
+    const QList<RemoteSessionCoordinator::Binding> bindings = coordinator
+        ? coordinator->all() : QList<RemoteSessionCoordinator::Binding>();
+
+    // This slot is reached synchronously from leaseExpired/serverRestarted.
+    // WebSocketClient deliberately clears the coordinator only after signal
+    // delivery, so capture every incoming id now; a queued scan would be too
+    // late and could quarantine media still held by the renderer.
+    for (const RemoteSessionCoordinator::Binding& binding : bindings) {
+        if (binding.targetDeviceId != localDeviceId
+            || binding.remoteSessionId.isEmpty()
+            || m_terminalRendererPendingSessionIds.contains(
+                binding.remoteSessionId)) {
+            continue;
+        }
+        m_terminalRendererPendingSessionIds.insert(binding.remoteSessionId);
+        if (!g_remoteSceneController
+            || !g_remoteSceneController->teardownRemoteSession(
+                binding.remoteSessionId)) {
+            // Keep the id pending and the receiver unadvertised. Clearing it
+            // here would permit cache quarantine without renderer settlement.
+            qCritical() << "Terminal renderer teardown could not start for"
+                        << binding.remoteSessionId;
+        }
+    }
+    finishTerminalIncomingCacheCleanupIfReady();
+}
+
+void MainWindow::finishTerminalIncomingCacheCleanupIfReady()
+{
+    if (!m_terminalIncomingCleanupActive
+        || m_terminalIncomingCacheTeardownStarted
+        || !m_terminalRendererPendingSessionIds.isEmpty()
+        || !m_uploadManager) {
+        return;
+    }
+
+    m_terminalIncomingCacheTeardownStarted = true;
+    const UploadManager::BulkTeardownResult cleanup =
+        m_uploadManager->completeTerminalIncomingCleanup(
+            m_terminalIncomingCleanupReason);
+    if (!cleanup.allLogicallyCommitted()) {
+        qCritical() << "Terminal incoming cache cleanup remains pending:"
+                    << cleanup.errorCode
+                    << "failed scopes" << cleanup.cleanupErrorScopes;
+    }
+    m_terminalIncomingCleanupActive = false;
+}
+
+void MainWindow::handleRemoteRendererTeardownSettled(
+    const QString& remoteSessionId,
+    bool sceneStopped)
+{
+    if (remoteSessionId.isEmpty()) return;
+    const bool terminalTransportBarrier =
+        m_terminalRendererPendingSessionIds.remove(remoteSessionId) > 0;
+    const bool cleanShutdownBarrier =
+        m_cleanShutdownRendererPendingSessionIds.remove(remoteSessionId) > 0;
+    const auto pending = m_pendingRendererTeardowns.find(remoteSessionId);
+    if (pending == m_pendingRendererTeardowns.end()) {
+        if (terminalTransportBarrier) {
+            finishTerminalIncomingCacheCleanupIfReady();
+        }
+        if (cleanShutdownBarrier) {
+            finishCleanShutdownIncomingCacheTeardownIfReady();
+        }
+        return;
+    }
+    const PendingRendererTeardown teardown = pending.value();
+    m_pendingRendererTeardowns.erase(pending);
+
+    RemoteCacheStore::CommitResult cacheResult;
+    bool uploadsAborted = false;
+    int removedFileCount = 0;
+    if (sceneStopped && m_uploadManager) {
+        cacheResult = m_uploadManager->teardownRemoteSession(
+            teardown.ownerDeviceId, remoteSessionId, teardown.generation,
+            teardown.teardownId);
+        uploadsAborted = true;
+        removedFileCount = m_uploadManager->lastTeardownRemovedFileCount();
+    } else {
+        cacheResult.outcome = RemoteCacheStore::CommitOutcome::CleanupError;
+        cacheResult.teardownId = teardown.teardownId;
+        cacheResult.errorCode = sceneStopped
+            ? QStringLiteral("upload_manager_unavailable")
+            : QStringLiteral("renderer_teardown_failed");
+    }
+
+    PendingTeardownAck ack;
+    ack.teardownId = teardown.teardownId;
+    ack.sceneStopped = sceneStopped;
+    ack.uploadsAborted = uploadsAborted;
+    ack.cacheQuarantined = cacheResult.acknowledgementSafe();
+    ack.removedFileCount = removedFileCount;
+    ack.errorCode = cacheResult.errorCode;
+    ack.quarantinedBytes = cacheResult.quarantinedBytes;
+    m_pendingTeardownAcks.insert(remoteSessionId, ack);
+    retryPendingTeardownAcks();
+
+    if (!ack.sceneStopped || !ack.uploadsAborted || !ack.cacheQuarantined) {
+        if (m_toastSystem) {
+            NotificationRequest notification;
+            notification.severity = NotificationSeverity::Error;
+            notification.category = QStringLiteral("Remote session cleanup");
+            notification.message = QStringLiteral(
+                "Remote session cleanup could not be committed; this device remains unavailable until cleanup succeeds.");
+            notification.remoteSessionId = remoteSessionId;
+            notification.correlationId =
+                NotificationCorrelation::teardown(teardown.teardownId);
+            notification.terminal = true;
+            m_toastSystem->publishNotification(notification);
+        }
+    }
+    if (cleanShutdownBarrier) {
+        finishCleanShutdownIncomingCacheTeardownIfReady();
+    }
+    if (terminalTransportBarrier) {
+        finishTerminalIncomingCacheCleanupIfReady();
+    }
+}
+
+void MainWindow::retryPendingTeardownAcks() {
+    if (!m_webSocketClient || !m_webSocketClient->isConnected()) return;
+    for (auto it = m_pendingTeardownAcks.cbegin();
+         it != m_pendingTeardownAcks.cend(); ++it) {
+        const PendingTeardownAck& ack = it.value();
+        m_webSocketClient->acknowledgeRemoteSessionTeardown(
+            it.key(), ack.teardownId, ack.sceneStopped, ack.uploadsAborted,
+            ack.cacheQuarantined, ack.removedFileCount, ack.errorCode,
+            ack.quarantinedBytes);
+    }
+}
+
+void MainWindow::clearRemoteSessionRuntimeState(const QString& targetDeviceId,
+                                                bool connectionLost) {
+    CanvasSession* session = m_sessionManager
+        ? m_sessionManager->findSession(targetDeviceId) : nullptr;
+    if (!session) return;
+    if (session->canvas) {
+        if (connectionLost) session->canvas->handleRemoteConnectionLost();
+        else session->canvas->stopScenesForSourceInvalidation();
+    }
+    session->knownRemoteFileIds.clear();
+    session->expectedIdeaFileIds.clear();
+    session->remoteContentClearedOnDisconnect = true;
+    if (session->canvas) {
+        for (ResizableMediaBase* media : session->canvas->enumerateMediaItems()) {
+            if (media) media->setUploadNotUploaded();
+        }
+    }
+    clearUploadTracking(*session);
+    if (m_activeSessionIdentity == targetDeviceId && m_uploadManager) {
+        // RemoteSession terminal envelopes invalidate only their own upload.
+        // onConnectionLost() is transport-wide and would suspend unrelated
+        // concurrent uploads to other devices indefinitely.
+        m_uploadManager->setTargetClientId(QString());
+    }
+}
+
+void MainWindow::handleRemoteSessionClosed(const QJsonObject& envelope) {
+    if (!m_webSocketClient) return;
+    const QString remoteSessionId =
+        envelope.value(QStringLiteral("remoteSessionId")).toString();
+    if (m_cleanShutdownPrepared) {
+        m_cleanShutdownPendingSessionIds.remove(remoteSessionId);
+        // Defer final disconnect until every slot handling this envelope has
+        // returned, in particular the target-side teardown/ACK handlers.
+        QTimer::singleShot(0, this, &MainWindow::maybeFinishCleanShutdown);
+    }
+    const QString ownerDeviceId = envelope.value(QStringLiteral("ownerDeviceId")).toString();
+    const QString targetDeviceId = envelope.value(QStringLiteral("targetDeviceId")).toString();
+    m_pendingRendererTeardowns.remove(remoteSessionId);
+    m_cleanShutdownRendererPendingSessionIds.remove(remoteSessionId);
+    m_pendingTeardownAcks.remove(remoteSessionId);
+    m_locallyTerminatingRemoteSessions.remove(remoteSessionId);
+    if (ownerDeviceId != m_webSocketClient->deviceId()) return;
+
+    const bool explicitlyReopening =
+        m_reopenAfterSessionCloseTargets.contains(targetDeviceId);
+    if (!explicitlyReopening) {
+        // A terminal lease/peer close is never converted into an implicit new
+        // session when discovery later reports the device again.
+        m_remoteSessionOpenSuppressedTargets.insert(targetDeviceId);
+    }
+    clearRemoteSessionRuntimeState(targetDeviceId, false);
+    if (m_activeSessionIdentity == targetDeviceId) m_remoteClientConnected = false;
+    bool online = false;
+    ClientInfo current;
+    for (const ClientInfo& client : m_discoveredClients) {
+        if (client.clientId() == targetDeviceId) {
+            current = client;
+            online = client.isOnline();
+            break;
+        }
+    }
+    if (online) {
+        current.setStatus(QStringLiteral("Available"));
+        current.setAvailabilityStatus(QStringLiteral("Available"));
+    }
+    updateRemoteClientAvailability(
+        targetDeviceId, online ? QStringLiteral("Available")
+                               : QStringLiteral("Offline"));
+
+    if (m_disconnectPendingTargets.remove(targetDeviceId)) {
+        if (m_activeSessionIdentity == targetDeviceId
+            && m_navigationManager && m_navigationManager->isOnScreenView()) {
+            showClientListView();
+        }
+        if (m_canvasViewPage) m_canvasViewPage->setDisconnecting(false);
+    }
+    if (m_deleteAfterSessionCloseTargets.contains(targetDeviceId)) {
+        finishDeferredProjectDeletion(targetDeviceId);
+        return;
+    }
+    if (explicitlyReopening
+        && online && m_activeSessionIdentity == targetDeviceId
+        && m_navigationManager && m_navigationManager->isOnScreenView()) {
+        ensureRemoteSessionForClient(current);
+    }
+}
+
+void MainWindow::handleRemoteSessionError(const QJsonObject& envelope) {
+    if (m_cleanShutdownPrepared) {
+        // A duplicate/late close rejection cannot change a terminal local
+        // shutdown. Keep draining any other correlated sessions until timeout.
+        return;
+    }
+    const QString code = envelope.value(QStringLiteral("code")).toString();
+    const QString requestId = envelope.value(QStringLiteral("requestId")).toString();
+    QString targetDeviceId =
+        envelope.value(QStringLiteral("targetDeviceId")).toString();
+    if (targetDeviceId.isEmpty() && !requestId.isEmpty()) {
+        targetDeviceId = m_remoteSessionOpenTargetByRequestId.value(requestId);
+    }
+    if (targetDeviceId.isEmpty()
+        && m_remoteSessionOpenPendingTargets.size() == 1) {
+        targetDeviceId = *m_remoteSessionOpenPendingTargets.cbegin();
+    }
+    if (!requestId.isEmpty()) m_remoteSessionOpenTargetByRequestId.remove(requestId);
+    if (!targetDeviceId.isEmpty()) {
+        m_remoteSessionOpenPendingTargets.remove(targetDeviceId);
+        m_remoteSessionOpenSuppressedTargets.insert(targetDeviceId);
+        m_reopenAfterSessionCloseTargets.remove(targetDeviceId);
+    }
+
+    QString status = QStringLiteral("Unavailable");
+    if (code == QLatin1String("target_in_use")) status = QStringLiteral("In use");
+    else if (code == QLatin1String("target_offline")) status = QStringLiteral("Offline");
+    else if (code == QLatin1String("cleanup_not_committed")) status = QStringLiteral("Unavailable");
+    else if (!targetDeviceId.isEmpty()) status = QStringLiteral("Available");
+    if (!targetDeviceId.isEmpty()) {
+        updateRemoteClientAvailability(targetDeviceId, status);
+        if (m_activeSessionIdentity == targetDeviceId && m_canvasViewPage) {
+            setRemoteConnectionStatus(status.toUpper(), false);
+            m_canvasViewPage->setProjectActionsEnabled(false, true);
+            if (m_screenCanvas) m_screenCanvas->setOverlayActionsEnabled(false);
+        }
+    }
+    if (m_toastSystem) {
+        NotificationRequest notification;
+        notification.severity = NotificationSeverity::Warning;
+        notification.category = QStringLiteral("Remote session");
+        notification.message = code == QLatin1String("target_in_use")
+            ? QStringLiteral("This client is already controlled by another device.")
+            : envelope.value(QStringLiteral("message"))
+                  .toString(QStringLiteral("The remote session command was rejected."));
+        notification.correlationId =
+            envelope.value(QStringLiteral("messageId")).toString();
+        m_toastSystem->publishNotification(notification);
+    }
+}
+
+void MainWindow::terminateProjectRemoteSession(const QString& targetDeviceId,
+                                               bool attemptRemote) {
+    CanvasSession* session = m_sessionManager
+        ? m_sessionManager->findSession(targetDeviceId) : nullptr;
+    if (session && session->canvas) {
+        if (attemptRemote) session->canvas->stopScenesForSourceInvalidation();
+        else session->canvas->handleRemoteConnectionLost();
+    }
+
+    RemoteSessionCoordinator* coordinator = m_webSocketClient
+        ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
+    const RemoteSessionCoordinator::Binding binding = coordinator
+        ? coordinator->outgoingForPeer(targetDeviceId)
+        : RemoteSessionCoordinator::Binding();
+    if (attemptRemote && m_webSocketClient
+        && !binding.remoteSessionId.isEmpty()
+        && binding.ownerDeviceId == m_webSocketClient->deviceId()
+        && binding.phase != QLatin1String("Terminating")
+        && binding.phase != QLatin1String("CleanupPending")) {
+        m_locallyTerminatingRemoteSessions.insert(binding.remoteSessionId);
+        updateRemoteClientAvailability(targetDeviceId, QStringLiteral("Disconnecting"));
+        if (m_uploadManager && m_uploadManager->canRequestCancel()) {
+            m_uploadManager->requestCancel();
+        }
+        if (m_webSocketClient->closeRemoteSession(binding.remoteSessionId)) {
+            return;
+        }
+    }
+
+    // There is no remote transaction to wait for (or the lease is terminal).
+    // Only transient remote state is discarded; Project and canvas content stay.
+    clearRemoteSessionRuntimeState(targetDeviceId, !attemptRemote);
+}
+
+void MainWindow::removeRuntimeCanvasSession(const QString& targetDeviceId) {
+    if (!m_sessionManager) {
+        return;
+    }
+    CanvasSession* session = m_sessionManager->findSession(targetDeviceId);
+    if (!session) {
+        m_restoredProjectIds.remove(targetDeviceId);
+        return;
+    }
+
+    ICanvasHost* canvas = session->canvas;
+    QWidget* canvasWidget = canvas ? canvas->asWidget() : nullptr;
+    const QString ideaId = session->canvasSessionId;
+    if (canvas) {
+        for (ResizableMediaBase* media : canvas->enumerateMediaItems()) {
+            if (m_fileWatcher && media) {
+                m_fileWatcher->unwatchMediaItem(media);
+            }
+        }
+    }
+    clearUploadTracking(*session);
+    if (m_fileManager && !ideaId.isEmpty()) {
+        m_fileManager->removeIdeaAssociations(ideaId);
+    }
+    if (m_canvasViewPage && m_canvasViewPage->getCanvasHostStack() && canvasWidget) {
+        m_canvasViewPage->getCanvasHostStack()->removeWidget(canvasWidget);
+    }
+    if (m_activeSessionIdentity == targetDeviceId) {
+        m_activeSessionIdentity.clear();
+        m_activeRemoteClientId.clear();
+        m_screenCanvas = nullptr;
+        m_uploadButton = nullptr;
+    }
+    m_sessionManager->deleteSession(targetDeviceId);
+    if (canvasWidget) {
+        canvasWidget->deleteLater();
+    }
+    m_restoredProjectIds.remove(targetDeviceId);
+}
+
+void MainWindow::onDisconnectProjectRequested() {
+    const QString targetDeviceId = m_activeSessionIdentity;
+    if (targetDeviceId.isEmpty()) {
+        return;
+    }
+    persistProjectCanvas(targetDeviceId);
+    if (m_canvasViewPage) {
+        m_canvasViewPage->setDisconnecting(true);
+        m_canvasViewPage->setProjectActionsEnabled(false, false);
+    }
+    m_disconnectPendingTargets.insert(targetDeviceId);
+    terminateProjectRemoteSession(targetDeviceId, true);
+
+    RemoteSessionCoordinator* coordinator = m_webSocketClient
+        ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
+    if (!coordinator
+        || coordinator->outgoingForPeer(targetDeviceId).remoteSessionId.isEmpty()) {
+        m_disconnectPendingTargets.remove(targetDeviceId);
+        showClientListView();
+        if (m_canvasViewPage) m_canvasViewPage->setDisconnecting(false);
+        return;
+    }
+
+    // The v2 close transaction can finish earlier through its ACK. Its UI
+    // deadline comes from the server policy announced at authentication, so
+    // the client never carries a second protocol timeout constant.
+    const int disconnectDeadlineMs = m_webSocketClient->serverPolicy()
+        .value(QStringLiteral("leaseTimeoutMs")).toInt();
+    QTimer::singleShot(std::max(0, disconnectDeadlineMs), this,
+                       [this, targetDeviceId]() {
+        if (!m_disconnectPendingTargets.remove(targetDeviceId)) return;
+        clearRemoteSessionRuntimeState(targetDeviceId, false);
+        if (m_activeSessionIdentity == targetDeviceId
+            && m_navigationManager && m_navigationManager->isOnScreenView()) {
+            showClientListView();
+        }
+        if (m_canvasViewPage) {
+            m_canvasViewPage->setDisconnecting(false);
+        }
+    });
+}
+
+void MainWindow::onDeleteProjectRequested() {
+    const QString targetDeviceId = m_activeSessionIdentity;
+    if (!m_projectManager || targetDeviceId.isEmpty()) {
+        return;
+    }
+    const QMessageBox::StandardButton choice = QMessageBox::question(
+        this,
+        QStringLiteral("Delete project?"),
+        QStringLiteral("Delete this local project and its canvas?\n\n"
+                       "Source files will never be deleted."),
+        QMessageBox::Cancel | QMessageBox::Yes,
+        QMessageBox::Cancel);
+    if (choice != QMessageBox::Yes) {
+        return;
+    }
+    persistProjectCanvas(targetDeviceId);
+    showClientListView();
+    m_deleteAfterSessionCloseTargets.insert(targetDeviceId);
+    terminateProjectRemoteSession(targetDeviceId, true);
+
+    RemoteSessionCoordinator* coordinator = m_webSocketClient
+        ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
+    if (!coordinator
+        || coordinator->outgoingForPeer(targetDeviceId).remoteSessionId.isEmpty()) {
+        finishDeferredProjectDeletion(targetDeviceId);
+        return;
+    }
+    const int deleteDeadlineMs = m_webSocketClient->serverPolicy()
+        .value(QStringLiteral("leaseTimeoutMs")).toInt();
+    QTimer::singleShot(std::max(0, deleteDeadlineMs), this,
+                       [this, targetDeviceId]() {
+        finishDeferredProjectDeletion(targetDeviceId);
+    });
+}
+
+void MainWindow::finishDeferredProjectDeletion(const QString& targetDeviceId) {
+    if (!m_deleteAfterSessionCloseTargets.remove(targetDeviceId)
+        || !m_projectManager
+        || !m_projectManager->hasProjectForTarget(targetDeviceId)) {
+        return;
+    }
+    if (!m_projectManager->deleteProject(targetDeviceId)) {
+        TOAST_ERROR(QStringLiteral("The project could not be deleted"), 4000);
+    }
+}
+
+void MainWindow::setActiveProjectVisibleIfAppropriate() {
+    if (!m_projectManager || m_activeSessionIdentity.isEmpty()) {
+        return;
+    }
+    const bool canvasShown = m_navigationManager
+        && m_navigationManager->isOnScreenView();
+    const bool visible = canvasShown && isVisible() && !isMinimized()
+        && !m_applicationSuspended;
+    if (visible) {
+        m_projectManager->setVisible(m_activeSessionIdentity);
+    } else {
+        persistProjectCanvas(m_activeSessionIdentity);
+        m_projectManager->setHidden(m_activeSessionIdentity);
+    }
+}
+
+void MainWindow::setApplicationSuspended(bool suspended) {
+    if (m_applicationSuspended == suspended) {
+        updateHistoryVisibilityState();
+        return;
+    }
+    m_applicationSuspended = suspended;
+    setActiveProjectVisibleIfAppropriate();
+    updateHistoryVisibilityState();
 }
 
 // Removed legacy createScreenWidget(): ScreenCanvas draws screens directly now
@@ -1188,6 +2629,65 @@ void MainWindow::onUploadButtonClicked() {
 
 void MainWindow::onBackToClientListClicked() { showClientListView(); }
 
+void MainWindow::showHistoryPage() {
+    if (!m_stackedWidget || !m_historyPage) return;
+
+    // Leaving a canvas uses the normal navigation path so watches and transient
+    // canvas UI are released consistently before the global page is shown.
+    if (m_navigationManager && m_navigationManager->isOnScreenView()) {
+        showClientListView();
+    }
+
+    m_stackedWidget->setCurrentWidget(m_historyPage);
+    if (m_pageTitleLabel) {
+        m_pageTitleLabel->setText(QStringLiteral("Notification History"));
+        m_pageTitleLabel->show();
+    }
+    if (m_backButton) m_backButton->show();
+    if (m_remoteClientInfoWrapper) m_remoteClientInfoWrapper->hide();
+    if (QWidget* container = m_remoteClientInfoManager
+            ? m_remoteClientInfoManager->getContainer() : nullptr) {
+        container->hide();
+    }
+    removeVolumeIndicatorFromLayout();
+    if (m_responsiveLayoutManager) {
+        m_responsiveLayoutManager->updateResponsiveButtonVisibility();
+    }
+}
+
+void MainWindow::updateHistoryUnreadBadge(int unreadCount) {
+    if (!m_historyUnreadBadge || !m_historyButton) return;
+
+    const int normalizedCount = qMax(0, unreadCount);
+    m_historyUnreadBadge->setText(normalizedCount > 99
+                                      ? QStringLiteral("99+")
+                                      : QString::number(normalizedCount));
+    m_historyUnreadBadge->setVisible(normalizedCount > 0);
+    m_historyButton->setAccessibleDescription(
+        normalizedCount == 0
+            ? QStringLiteral("No unread notifications")
+            : QStringLiteral("%1 unread notification%2")
+                  .arg(normalizedCount)
+                  .arg(normalizedCount == 1 ? QString() : QStringLiteral("s")));
+    m_historyButton->setToolTip(
+        normalizedCount == 0
+            ? QStringLiteral("Open notification history")
+            : QStringLiteral("Open notification history (%1 unread)").arg(normalizedCount));
+}
+
+void MainWindow::updateHistoryVisibilityState() {
+    if (!m_toastSystem || !m_toastSystem->notificationCenter()) return;
+
+    // Selecting History is insufficient while the window is not actually
+    // observable. New events stay unread during minimize, tray hide, lock and
+    // sleep even if History remains the current stacked page.
+    const bool historyActuallyVisible = m_stackedWidget && m_historyPage
+        && m_stackedWidget->currentWidget() == m_historyPage
+        && isVisible() && !isMinimized() && !m_applicationSuspended;
+    m_toastSystem->notificationCenter()->setHistoryVisible(
+        historyActuallyVisible);
+}
+
 
 // Phase 1.1: New slot connected to ClientListPage::clientClicked signal
 void MainWindow::onClientSelected(const ClientInfo& client, int clientIndex) {
@@ -1197,25 +2697,227 @@ void MainWindow::onClientSelected(const ClientInfo& client, int clientIndex) {
 }
 
 // Phase 1.1: New slot connected to ClientListPage::ongoingSceneClicked signal
-void MainWindow::onOngoingSceneSelected(const QString& persistentClientId) {
-    CanvasSession* session = findCanvasSession(persistentClientId);
-    if (!session) return;
+void MainWindow::onOngoingSceneSelected(const QString& sceneRunId) {
+    if (!m_sceneActivityModel) return;
+    const SceneActivityModel::Activity activity =
+        m_sceneActivityModel->activity(sceneRunId);
+    if (activity.sceneRunId.isEmpty()) return;
 
-    showScreenView(session->lastClientInfo);
+    if (activity.direction == SceneActivityModel::Direction::Outgoing) {
+        if (CanvasSession* session = findCanvasSession(activity.peerDeviceId)) {
+            showScreenView(session->lastClientInfo);
+            return;
+        }
+
+        // A live outgoing run normally has an instantiated canvas. Preserve a
+        // safe recovery route if UI state was rebuilt while the protocol run
+        // remained live.
+        for (const ClientInfo& client : m_discoveredClients) {
+            if (client.clientId() == activity.peerDeviceId) {
+                showScreenView(client);
+                return;
+            }
+        }
+        if (m_projectManager) {
+            if (const ProjectRecord* project =
+                    m_projectManager->projectForTarget(activity.peerDeviceId)) {
+                showScreenView(project->clientSnapshot.toClientInfo(false));
+            }
+        }
+        return;
+    }
+
+    QString peerName;
+    for (const ClientInfo& client : m_discoveredClients) {
+        if (client.clientId() == activity.peerDeviceId) {
+            peerName = client.getMachineName().trimmed();
+            break;
+        }
+    }
+    if (peerName.isEmpty()) {
+        peerName = activity.peerDeviceId.isEmpty()
+            ? QStringLiteral("Unknown device")
+            : QStringLiteral("Device %1").arg(activity.peerDeviceId.left(8));
+    }
+    const qint64 elapsedSeconds = qMax<qint64>(
+        0, QDateTime::currentMSecsSinceEpoch() - activity.startedAtEpochMs) / 1000;
+    const QString duration = elapsedSeconds >= 3600
+        ? QStringLiteral("%1:%2:%3")
+              .arg(elapsedSeconds / 3600)
+              .arg((elapsedSeconds / 60) % 60, 2, 10, QLatin1Char('0'))
+              .arg(elapsedSeconds % 60, 2, 10, QLatin1Char('0'))
+        : QStringLiteral("%1:%2")
+              .arg(elapsedSeconds / 60)
+              .arg(elapsedSeconds % 60, 2, 10, QLatin1Char('0'));
+    const QString started = QDateTime::fromMSecsSinceEpoch(activity.startedAtEpochMs)
+                                .toString(QStringLiteral("HH:mm:ss"));
+    QMessageBox::information(
+        this, QStringLiteral("Ongoing Scene"),
+        QStringLiteral("Received from %1\n\nStarted: %2\nDuration: %3\nNetwork: %4\n\n"
+                       "This incoming scene is read-only.")
+            .arg(peerName, started, duration,
+                 activity.degraded ? QStringLiteral("Degraded")
+                                   : QStringLiteral("Healthy")));
 }
 
 // Note: generic message hook removed; we handle specific message types via dedicated slots
 
 
 MainWindow::~MainWindow() {
-    // Cleanly disconnect
-    if (m_webSocketClient->isConnected()) {
+    prepareCleanShutdown();
+    finishCleanShutdown();
+}
+
+void MainWindow::prepareCleanShutdown() {
+    if (m_cleanShutdownPrepared) {
+        return;
+    }
+    m_cleanShutdownPrepared = true;
+
+    // Suppress the normal reconnect UI/toast path while retaining the
+    // protocol-specific RemoteSession handlers needed for the ACK drain.
+    if (m_webSocketClient && m_webSocketMessageHandler) {
+        QObject::disconnect(m_webSocketClient, nullptr,
+                            m_webSocketMessageHandler, nullptr);
+    }
+
+    // Persist every instantiated canvas before changing lifecycle state. This
+    // keeps local Projects and source references intact while guaranteeing that
+    // no transient RemoteSession/upload/run state reaches disk.
+    if (m_sessionManager && m_projectManager) {
+        for (CanvasSession* session : m_sessionManager->getAllSessions()) {
+            if (session && m_projectManager->hasProjectForTarget(
+                               session->persistentClientId)) {
+                persistProjectCanvas(session->persistentClientId);
+            }
+        }
+    }
+    if (m_projectManager) {
+        const qint64 hiddenAt = QDateTime::currentMSecsSinceEpoch();
+        m_projectManager->markAllHidden(hiddenAt);
+        m_projectManager->flush();
+    }
+
+    m_remoteSessionOpenPendingTargets.clear();
+    m_remoteSessionOpenTargetByRequestId.clear();
+    m_reopenAfterSessionCloseTargets.clear();
+
+    const QString localDeviceId = m_webSocketClient
+        ? m_webSocketClient->deviceId() : QString();
+    RemoteSessionCoordinator* coordinator = m_webSocketClient
+        ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
+    const QList<RemoteSessionCoordinator::Binding> bindings = coordinator
+        ? coordinator->all() : QList<RemoteSessionCoordinator::Binding>();
+
+    // The close command is the authoritative terminal barrier. Both owners and
+    // targets may issue it in protocol v2, so no incoming binding is omitted.
+    for (const RemoteSessionCoordinator::Binding& binding : bindings) {
+        if (binding.remoteSessionId.isEmpty()) continue;
+        m_cleanShutdownPendingSessionIds.insert(binding.remoteSessionId);
+        m_locallyTerminatingRemoteSessions.insert(binding.remoteSessionId);
+        if (m_webSocketClient && m_webSocketClient->isConnected()) {
+            m_webSocketClient->closeRemoteSession(
+                binding.remoteSessionId, nullptr,
+                QStringLiteral("clean_shutdown"));
+        }
+    }
+
+    // Quiesce every outgoing canvas graph synchronously. This does not remove
+    // canvas items or source files; it only destroys active render playback.
+    if (m_sessionManager) {
+        for (CanvasSession* session : m_sessionManager->getAllSessions()) {
+            if (session && session->canvas) {
+                session->canvas->stopScenesForSourceInvalidation();
+            }
+        }
+    }
+
+    // Retire every incoming renderer graph first. The bulk cache transaction
+    // is deliberately deferred until all correlated teardownSettled barriers
+    // have observed actual QObject/native-window destruction.
+    for (const RemoteSessionCoordinator::Binding& binding : bindings) {
+        if (binding.targetDeviceId == localDeviceId
+            && !binding.remoteSessionId.isEmpty()) {
+            m_cleanShutdownRendererPendingSessionIds.insert(
+                binding.remoteSessionId);
+            if (!g_remoteSceneController
+                || !g_remoteSceneController->teardownRemoteSession(
+                    binding.remoteSessionId)) {
+                qCritical() << "Clean shutdown could not start renderer teardown for"
+                            << binding.remoteSessionId;
+            }
+        }
+    }
+    finishCleanShutdownIncomingCacheTeardownIfReady();
+    retryPendingTeardownAcks();
+    if (m_sceneActivityModel) m_sceneActivityModel->clear();
+
+    const bool canDrain = m_webSocketClient && m_webSocketClient->isConnected()
+        && !m_cleanShutdownPendingSessionIds.isEmpty();
+    if (!canDrain) {
+        QTimer::singleShot(0, this, &MainWindow::finishCleanShutdown);
+        return;
+    }
+
+    // Do not spin a nested event loop: normal Qt delivery remains available for
+    // remote_session_terminating, renderer settlement, teardown ACK and close.
+    const int drainDeadlineMs = m_webSocketClient->serverPolicy()
+                                    .value(QStringLiteral("leaseTimeoutMs"))
+                                    .toInt();
+    QTimer::singleShot(std::max(0, drainDeadlineMs), this,
+                       &MainWindow::finishCleanShutdown);
+}
+
+void MainWindow::finishCleanShutdownIncomingCacheTeardownIfReady()
+{
+    if (!m_cleanShutdownPrepared
+        || m_cleanShutdownIncomingCacheTeardownStarted
+        || !m_cleanShutdownRendererPendingSessionIds.isEmpty()) {
+        return;
+    }
+    m_cleanShutdownIncomingCacheTeardownStarted = true;
+    if (m_uploadManager) {
+        const UploadManager::BulkTeardownResult cleanup =
+            m_uploadManager->teardownAllIncomingRemoteSessions(
+                QStringLiteral("clean_shutdown"));
+        if (!cleanup.allLogicallyCommitted()) {
+            qCritical() << "Clean shutdown left incoming cache cleanup pending:"
+                        << cleanup.errorCode
+                        << "failed scopes" << cleanup.cleanupErrorScopes;
+        }
+    }
+}
+
+void MainWindow::maybeFinishCleanShutdown() {
+    if (!m_cleanShutdownPrepared || m_cleanShutdownFinished
+        || !m_cleanShutdownPendingSessionIds.isEmpty()) {
+        return;
+    }
+    finishCleanShutdown();
+}
+
+void MainWindow::finishCleanShutdown() {
+    if (m_cleanShutdownFinished) return;
+    m_cleanShutdownFinished = true;
+    m_cleanShutdownPendingSessionIds.clear();
+
+    if (m_connectionManager) {
+        m_connectionManager->disconnect();
+    } else if (m_webSocketClient && m_webSocketClient->isConnected()) {
         m_webSocketClient->disconnect();
     }
-    // [Phase 12] Persist current settings on shutdown (safety in case dialog not used)
-    if (m_settingsManager) {
-        m_settingsManager->saveSettings();
+
+    if (m_cleanShutdownQuitRequested && qApp) {
+        QTimer::singleShot(0, qApp, &QCoreApplication::quit);
     }
+}
+
+void MainWindow::handleApplicationAboutToQuit() {
+    // aboutToQuit cannot be postponed. It is therefore only the safety net for
+    // OS/external exits which bypass onMenuQuitRequested; local teardown still
+    // completes synchronously even though a network ACK window is unavailable.
+    prepareCleanShutdown();
+    finishCleanShutdown();
 }
 
 void MainWindow::updateStylesheetsForTheme() {
@@ -1273,7 +2975,8 @@ void MainWindow::setupUI() {
     m_connectionLayout->setSpacing(8);
     
     // Contextual page title
-    m_pageTitleLabel = new QLabel("Connected Clients");
+    m_pageTitleLabel = new QLabel(
+        QStringLiteral("Clients · 0 authenticated · 0 live"));
     ThemeManager::instance()->applyTitleText(m_pageTitleLabel);
     // Match hostname styling: same font size, weight, and color
     m_pageTitleLabel->setStyleSheet(QString(
@@ -1323,16 +3026,50 @@ void MainWindow::setupUI() {
     m_settingsButton->setFixedWidth(settingsButtonWidth); // Use fixed width to prevent any changes
     connect(m_settingsButton, &QPushButton::clicked, this, &MainWindow::showSettingsDialog);
 
+    // History button and unread badge. The separate compact badge keeps the
+    // button label stable as the count changes.
+    m_historyControl = new QWidget(m_connectionBar);
+    m_historyControl->setObjectName(QStringLiteral("historyControl"));
+    m_historyControl->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    auto* historyControlLayout = new QHBoxLayout(m_historyControl);
+    historyControlLayout->setContentsMargins(0, 0, 0, 0);
+    historyControlLayout->setSpacing(4);
+
+    m_historyButton = ThemeManager::createPillButton(
+        QStringLiteral("History"), m_historyControl);
+    m_historyButton->setObjectName(QStringLiteral("historyButton"));
+    m_historyButton->setAccessibleName(QStringLiteral("Notification history"));
+    const int historyTextWidth =
+        m_historyButton->fontMetrics().horizontalAdvance(m_historyButton->text()) + 24;
+    m_historyButton->setFixedWidth(qMax(80, historyTextWidth));
+    connect(m_historyButton, &QPushButton::clicked,
+            this, &MainWindow::showHistoryPage);
+    historyControlLayout->addWidget(m_historyButton);
+
+    m_historyUnreadBadge = new QLabel(QStringLiteral("0"), m_historyControl);
+    m_historyUnreadBadge->setObjectName(QStringLiteral("historyUnreadBadge"));
+    m_historyUnreadBadge->setAlignment(Qt::AlignCenter);
+    m_historyUnreadBadge->setAttribute(Qt::WA_TransparentForMouseEvents);
+    m_historyUnreadBadge->setMinimumWidth(18);
+    m_historyUnreadBadge->setFixedHeight(18);
+    m_historyUnreadBadge->setStyleSheet(QString(
+        "QLabel { color: white; background-color: %1; border: none; "
+        "border-radius: 9px; padding: 0px 4px; font-size: 10px; font-weight: bold; }")
+        .arg(AppColors::colorToCss(AppColors::gStatusErrorText)));
+    m_historyUnreadBadge->hide();
+    historyControlLayout->addWidget(m_historyUnreadBadge);
+
     // [PHASE 6.1] Get local client info container from TopBarManager
     QWidget* localClientContainer = m_topBarManager ? m_topBarManager->getLocalClientInfoContainer() : nullptr;
     
-    // Layout: [title][back][stretch][local-client-info][connect][settings]
+    // Layout: [title][back][stretch][local-client-info][connect][history][settings]
     m_connectionLayout->addWidget(m_backButton);
     m_connectionLayout->addStretch();
     if (localClientContainer) {
         m_connectionLayout->addWidget(localClientContainer);
     }
     m_connectionLayout->addWidget(m_connectToggleButton);
+    m_connectionLayout->addWidget(m_historyControl);
     m_connectionLayout->addWidget(m_settingsButton);
 
     topLayout->addWidget(m_connectionBar);
@@ -1357,9 +3094,18 @@ void MainWindow::setupUI() {
     m_mainLayout->addWidget(bottomSection);
     
     // Phase 1.1: Create ClientListPage
-    m_clientListPage = new ClientListPage(m_sessionManager, this);
+    m_clientListPage = new ClientListPage(m_sceneActivityModel, this);
     connect(m_clientListPage, &ClientListPage::clientClicked, this, &MainWindow::onClientSelected);
     connect(m_clientListPage, &ClientListPage::ongoingSceneClicked, this, &MainWindow::onOngoingSceneSelected);
+    connect(m_clientListPage, &ClientListPage::summaryCountsChanged,
+            this, [this](int authenticatedCount, int liveCount) {
+        if (!m_pageTitleLabel || !m_stackedWidget
+            || m_stackedWidget->currentWidget() != m_clientListPage) return;
+        m_pageTitleLabel->setText(
+            QStringLiteral("Clients · %1 authenticated · %2 live")
+                .arg(authenticatedCount)
+                .arg(liveCount));
+    });
     m_stackedWidget->addWidget(m_clientListPage);
     
     // Show placeholder immediately (before any connection) so page isn't empty during CONNECTING state
@@ -1369,6 +3115,14 @@ void MainWindow::setupUI() {
     // Phase 1.2: Create CanvasViewPage
     m_canvasViewPage = new CanvasViewPage(this);
     m_stackedWidget->addWidget(m_canvasViewPage);
+
+    // Notification history binds to the NotificationCenter after the toast
+    // system is constructed later in MainWindow's initialization.
+    m_historyPage = new HistoryPage(nullptr, this);
+    m_stackedWidget->addWidget(m_historyPage);
+    connect(m_stackedWidget, &QStackedWidget::currentChanged, this, [this](int) {
+        updateHistoryVisibilityState();
+    });
     
     // Initialize remote client info in top bar (must be done after CanvasViewPage exists)
     initializeRemoteClientInfoInTopBar();
@@ -1402,119 +3156,12 @@ void MainWindow::setupUI() {
         w.screenCanvas = nullptr;
         m_navigationManager->setWidgets(w);
         m_navigationManager->setDurations(m_loaderDelayMs, m_loaderFadeDurationMs, m_fadeDurationMs);
-        connect(m_navigationManager, &ScreenNavigationManager::requestScreens, this, [this](const QString& id){
-            if (m_webSocketClient && m_webSocketClient->isConnected()) m_webSocketClient->requestScreens(id);
-        });
-        connect(m_navigationManager, &ScreenNavigationManager::watchTargetRequested, this, [this](const QString& id){
-            if (m_watchManager && m_webSocketClient && m_webSocketClient->isConnected()) m_watchManager->toggleWatch(id);
-        });
-    connect(m_navigationManager, &ScreenNavigationManager::clientListEntered, this, [this](){
+        connect(m_navigationManager, &ScreenNavigationManager::clientListEntered, this, [this](){
             // Do NOT unload uploads when navigating back to client list
             // Uploads should persist per session and only be cleared on disconnect or explicit unload
-            if (m_watchManager) m_watchManager->unwatchIfAny();
             if (m_screenCanvas) m_screenCanvas->hideRemoteCursor();
         });
     }
-
-    // Receive remote cursor updates when watching
-    connect(m_webSocketClient, &WebSocketClient::cursorPositionReceived, this,
-            [this](const QString& targetId, int x, int y, int screenId, qreal normalizedX, qreal normalizedY) {
-                if (!m_screenCanvas) return;
-                if (m_stackedWidget->currentWidget() != m_canvasViewPage) return;  // Phase 1.2
-                bool matchWatch = (m_watchManager && targetId == m_watchManager->watchedClientId());
-                bool matchSelected = (!m_selectedClient.getId().isEmpty() && targetId == m_selectedClient.getId());
-                if (matchWatch || matchSelected) {
-                    const QPoint rawPoint(x, y);
-                    bool mapped = false;
-                    CanvasSession* resolvedSession = nullptr;
-                    if (screenId >= 0 && normalizedX >= 0.0 && normalizedY >= 0.0) {
-                        resolvedSession = findCanvasSessionByServerClientId(targetId);
-                        QString resolutionPath = QStringLiteral("by_server_id");
-                        if (!resolvedSession) {
-                            resolvedSession = findCanvasSession(targetId);
-                            resolutionPath = QStringLiteral("by_persistent_id");
-                        }
-                        if (!resolvedSession && m_watchManager && !m_watchManager->watchedClientId().isEmpty()) {
-                            resolvedSession = findCanvasSessionByServerClientId(m_watchManager->watchedClientId());
-                            resolutionPath = QStringLiteral("by_watch_server_id");
-                            if (!resolvedSession) {
-                                resolvedSession = findCanvasSession(m_watchManager->watchedClientId());
-                                resolutionPath = QStringLiteral("by_watch_persistent_id");
-                            }
-                        }
-                        if (!resolvedSession && !m_selectedClient.clientId().isEmpty()) {
-                            resolvedSession = findCanvasSession(m_selectedClient.clientId());
-                            resolutionPath = QStringLiteral("by_selected_client_id");
-                        }
-                        if (!resolvedSession && !m_activeSessionIdentity.isEmpty()) {
-                            resolvedSession = findCanvasSession(m_activeSessionIdentity);
-                            resolutionPath = QStringLiteral("by_active_session");
-                        }
-
-                        if (cursorDebugEnabled()) {
-                            qDebug() << "[CursorDebug][Viewer][Lookup]"
-                                     << "targetId=" << targetId
-                                     << "watchId=" << (m_watchManager ? m_watchManager->watchedClientId() : QString())
-                                     << "selectedId=" << m_selectedClient.getId()
-                                     << "sessionResolved=" << (resolvedSession != nullptr)
-                                     << "path=" << resolutionPath
-                                     << "rawGlobal=" << rawPoint
-                                     << "screenId=" << screenId
-                                     << "norm=" << normalizedX << normalizedY;
-                        }
-
-                        if (resolvedSession) {
-                            const QList<ScreenInfo> screens = resolvedSession->lastClientInfo.getScreens();
-                            for (const ScreenInfo& screen : screens) {
-                                if (screen.id != screenId || screen.width <= 0 || screen.height <= 0) {
-                                    continue;
-                                }
-
-                                const qreal clampedX = std::clamp(normalizedX, 0.0, 1.0);
-                                const qreal clampedY = std::clamp(normalizedY, 0.0, 1.0);
-                                const int maxDx = std::max(0, screen.width - 1);
-                                const int maxDy = std::max(0, screen.height - 1);
-                                x = screen.x + static_cast<int>(std::lround(clampedX * static_cast<qreal>(maxDx)));
-                                y = screen.y + static_cast<int>(std::lround(clampedY * static_cast<qreal>(maxDy)));
-                                mapped = true;
-                                if (cursorDebugEnabled()) {
-                                    qDebug() << "[CursorDebug][Viewer][Mapped]"
-                                             << "screenRect=" << QRect(screen.x, screen.y, screen.width, screen.height)
-                                             << "rawGlobal=" << rawPoint
-                                             << "mappedGlobal=" << QPoint(x, y)
-                                             << "screenId=" << screenId
-                                             << "norm=" << normalizedX << normalizedY;
-                                }
-                                break;
-                            }
-                        }
-                    }
-
-                    if (cursorDebugEnabled() && !mapped) {
-                        qDebug() << "[CursorDebug][Viewer][FallbackRaw]"
-                                 << "rawGlobal=" << rawPoint
-                                 << "screenId=" << screenId
-                                 << "norm=" << normalizedX << normalizedY;
-                    }
-
-                    if (!mapped && screenId >= 0 && normalizedX >= 0.0 && normalizedY >= 0.0) {
-                        static QString s_lastCursorMapMissKey;
-                        const QString sessionKey = resolvedSession ? resolvedSession->persistentClientId : QStringLiteral("<none>");
-                        const QString missKey = targetId + QStringLiteral("|") + QString::number(screenId)
-                                              + QStringLiteral("|") + sessionKey;
-                        if (missKey != s_lastCursorMapMissKey) {
-                            s_lastCursorMapMissKey = missKey;
-                            qWarning() << "[CursorMapWarning] screenId not found in viewer session screens"
-                                       << "targetId=" << targetId
-                                       << "session=" << sessionKey
-                                       << "screenId=" << screenId
-                                       << "norm=" << normalizedX << normalizedY;
-                        }
-                    }
-
-                    m_screenCanvas->updateRemoteCursor(x, y);
-                }
-            });
 
     // Initialize responsive layout
     QTimer::singleShot(0, this, [this]() {
@@ -1535,10 +3182,10 @@ void MainWindow::setupUI() {
 
 // [PHASE 6.3] Handle quit request from menu
 void MainWindow::onMenuQuitRequested() {
-    if (m_webSocketClient && m_webSocketClient->isConnected()) {
-        m_webSocketClient->disconnect();
-    }
-    QApplication::quit();
+    if (m_cleanShutdownQuitRequested) return;
+    m_cleanShutdownQuitRequested = true;
+    setEnabled(false);
+    prepareCleanShutdown();
 }
 
 // [PHASE 6.3] Handle about request from menu
@@ -1559,6 +3206,7 @@ void MainWindow::showEvent(QShowEvent* event) {
     if (m_windowEventHandler) {
         m_windowEventHandler->handleShowEvent(event);
     }
+    updateHistoryVisibilityState();
 }
 
 void MainWindow::hideEvent(QHideEvent* event) {
@@ -1566,6 +3214,7 @@ void MainWindow::hideEvent(QHideEvent* event) {
     if (m_windowEventHandler) {
         m_windowEventHandler->handleHideEvent(event);
     }
+    updateHistoryVisibilityState();
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
@@ -1582,20 +3231,16 @@ void MainWindow::onTrayIconActivated(QSystemTrayIcon::ActivationReason reason) {
 }
 
 void MainWindow::onEnableDisableClicked() {
-    if (!m_webSocketClient) return;
+    if (!m_connectionManager) return;
     
     if (m_connectToggleButton->text() == "Disable") {
         // Disable client: disconnect and prevent auto-reconnect
         m_userDisconnected = true;
-        m_reconnectTimer->stop(); // Stop any pending reconnection
-        if (m_webSocketClient->isConnected()) {
-            m_webSocketClient->disconnect();
-        }
+        m_connectionManager->disconnect();
         m_connectToggleButton->setText("Enable");
     } else {
         // Enable client: allow connections and start connecting
         m_userDisconnected = false;
-        m_reconnectAttempts = 0; // Reset reconnection attempts
         connectToServer();
         m_connectToggleButton->setText("Disable");
     }
@@ -1603,32 +3248,22 @@ void MainWindow::onEnableDisableClicked() {
 
 // Settings dialog: server URL with Save/Cancel
 void MainWindow::showSettingsDialog() {
-    // [Phase 12] Delegate to SettingsManager
+    const QString targetDeviceId = m_activeSessionIdentity;
+    const bool wasCanvasVisible = m_navigationManager
+        && m_navigationManager->isOnScreenView();
+    if (wasCanvasVisible && m_projectManager && !targetDeviceId.isEmpty()) {
+        persistProjectCanvas(targetDeviceId);
+        m_projectManager->setHidden(targetDeviceId);
+    }
     if (m_settingsManager) {
         m_settingsManager->showSettingsDialog();
+    }
+    if (wasCanvasVisible && targetDeviceId == m_activeSessionIdentity) {
+        setActiveProjectVisibleIfAppropriate();
     }
 }
 
 // (Removed stray duplicated code block previously injected)
-
-void MainWindow::scheduleReconnect() {
-    if (m_timerController) {
-        m_timerController->scheduleReconnect();
-    }
-}
-
-void MainWindow::attemptReconnect() {
-    if (m_timerController) {
-        m_timerController->attemptReconnect();
-    }
-}
-
-// [PHASE 7.1] Helper methods for WebSocketMessageHandler
-void MainWindow::resetReconnectState() {
-    if (m_timerController) {
-        m_timerController->resetReconnectState();
-    }
-}
 
 void MainWindow::resetAllSessionUploadStates() {
     for (CanvasSession* session : m_sessionManager->getAllSessions()) {
@@ -1649,29 +3284,6 @@ void MainWindow::resetAllSessionUploadStates() {
     m_activeUploadSessionIdentity.clear();
 }
 
-void MainWindow::syncCanvasSessionFromServer(const QString& canvasSessionId, const QSet<QString>& fileIds) {
-    // Find session with this canvasSessionId and mark files as uploaded
-    CanvasSession* session = findCanvasSessionByIdeaId(canvasSessionId);
-    if (session && !session->persistentClientId.isEmpty()) {
-        session->knownRemoteFileIds = fileIds;
-        
-        // Mark files as uploaded in FileManager
-        for (const QString& fileId : fileIds) {
-            m_fileManager->markFileUploadedToClient(fileId, session->persistentClientId);
-        }
-        
-        qDebug() << "MainWindow: Restored upload state for session" << session->persistentClientId
-                 << "idea" << canvasSessionId;
-        
-        // Refresh UI if this is the active session
-        if (m_activeSessionIdentity == session->persistentClientId && m_uploadManager) {
-            emit m_uploadManager->uiStateChanged();
-        }
-    } else {
-        qDebug() << "MainWindow: No matching session found for idea" << canvasSessionId;
-    }
-}
-
 // [PHASE 7.1] Simplified - delegates to WebSocketMessageHandler
 void MainWindow::onConnected() {
     if (m_webSocketMessageHandler) {
@@ -1684,54 +3296,57 @@ void MainWindow::onDisconnected() {
     if (m_webSocketMessageHandler) {
         m_webSocketMessageHandler->onDisconnected();
     }
+    if (m_cleanShutdownPrepared && !m_cleanShutdownFinished) {
+        finishCleanShutdown();
+    }
 }
 
-// start Watching/stopWatchingCurrentClient removed (handled by WatchManager)
+// Legacy screen watching/cursor streaming was removed by protocol v2.
 
 void MainWindow::onConnectionError(const QString& error) {
+    if (m_cleanShutdownPrepared) return;
     qWarning() << "Failed to connect to server:" << error << "(silent mode, aucune popup)";
-    setUIEnabled(false);
-    setLocalNetworkStatus("Error");
     TOAST_ERROR(QString("Connection failed: %1").arg(error), 4000);
 }
 
 void MainWindow::onClientListReceived(const QList<ClientInfo>& clients) {
-    // [PHASE 7.3] Delegate to ClientListEventHandler
-    if (m_clientListEventHandler) {
-        m_clientListEventHandler->onClientListReceived(clients);
+    if (!m_activeSessionIdentity.isEmpty()
+        && m_navigationManager && m_navigationManager->isOnScreenView()) {
+        for (const ClientInfo& client : clients) {
+            if (client.clientId() == m_activeSessionIdentity) {
+                ensureRemoteSessionForClient(client);
+                break;
+            }
+        }
     }
 }
 
 void MainWindow::onRegistrationConfirmed(const ClientInfo& clientInfo) {
     m_thisClient = clientInfo;
+    if (m_sceneActivityModel) {
+        const QString deviceId = clientInfo.clientId().isEmpty()
+            ? (m_webSocketClient ? m_webSocketClient->deviceId() : QString())
+            : clientInfo.clientId();
+        m_sceneActivityModel->setLocalDeviceId(deviceId);
+    }
     qDebug() << "Registration confirmed for:" << clientInfo.getMachineName();
 }
 
 void MainWindow::syncRegistration() {
+    // Every device_snapshot path (initial connection, periodic refresh and
+    // topology/volume changes) converges here.  Keep the receiver absent from
+    // discovery while a previous process/server-boot cache has not reached a
+    // durable logical quarantine commit.  The connection handler owns retries;
+    // periodic refreshes must never bypass that fail-closed decision.
+    if (m_uploadManager
+        && !m_uploadManager->receiverReadyForAdvertisement()) {
+        qWarning() << "Device snapshot suppressed until remote cache cleanup commits:"
+                   << m_uploadManager->receiverCleanupError();
+        return;
+    }
     // [PHASE 7.2] Delegate to ScreenEventHandler
     if (m_screenEventHandler) {
         m_screenEventHandler->syncRegistration();
-    }
-}
-
-void MainWindow::onScreensInfoReceived(const ClientInfo& clientInfo) {
-    // [PHASE 7.2] Delegate to ScreenEventHandler
-    if (m_screenEventHandler) {
-        m_screenEventHandler->onScreensInfoReceived(clientInfo);
-    }
-}
-
-void MainWindow::onWatchStatusChanged(bool watched) {
-    // [PHASE 10] Delegate to TimerController
-    if (m_timerController) {
-        m_timerController->setWatchedState(watched);
-    }
-}
-
-void MainWindow::onDataRequestReceived() {
-    // [PHASE 7.2] Delegate to ScreenEventHandler
-    if (m_screenEventHandler) {
-        m_screenEventHandler->onDataRequestReceived();
     }
 }
 
@@ -1752,11 +3367,12 @@ QList<ScreenInfo> MainWindow::getLocalScreenInfo() {
 
 
 void MainWindow::connectToServer() {
-    if (!m_webSocketClient) return;
+    if (!m_connectionManager) return;
     // [Phase 12] Get server URL from SettingsManager
-    const QString url = m_settingsManager ? m_settingsManager->getServerUrl() : DEFAULT_SERVER_URL;
-    qDebug() << "Connecting to server:" << url;
-    m_webSocketClient->connectToServer(url);
+    const QString url = m_settingsManager
+        ? m_settingsManager->getServerUrl()
+        : AppConfig::instance().serverUrl();
+    m_connectionManager->connectToServer(url);
 }
 
 // [PHASE 3] Delegate to SystemMonitor

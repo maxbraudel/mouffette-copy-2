@@ -15,14 +15,15 @@ QSharedPointer<QByteArray> FileMemoryCache::loadFileFromDisk(const QString& file
     
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly)) {
-        qWarning() << "FileMemoryCache::loadFileFromDisk: Failed to open file" << filePath << file.errorString();
+        qWarning() << "FileMemoryCache::loadFileFromDisk: failed to open source:"
+                   << file.errorString();
         return QSharedPointer<QByteArray>::create();
     }
     
     QByteArray data = file.readAll();
     file.close();
     
-    qDebug() << "FileMemoryCache: Loaded" << data.size() << "bytes from" << filePath;
+    qDebug() << "FileMemoryCache: Loaded" << data.size() << "bytes";
     return QSharedPointer<QByteArray>::create(data);
 }
 

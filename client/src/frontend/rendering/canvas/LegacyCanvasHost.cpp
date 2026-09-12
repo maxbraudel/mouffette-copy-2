@@ -115,6 +115,30 @@ void LegacyCanvasHost::handleRemoteConnectionLost() {
     m_canvas->handleRemoteConnectionLost();
 }
 
+void LegacyCanvasHost::stopScenesForSourceInvalidation() {
+    if (m_canvas) {
+        m_canvas->stopScenesForSourceInvalidation();
+    }
+}
+
+QJsonObject LegacyCanvasHost::serializeProjectState() const {
+    return m_canvas ? m_canvas->serializeProjectState() : QJsonObject();
+}
+
+bool LegacyCanvasHost::restoreProjectState(
+    const QJsonObject& state,
+    const QHash<QString, QString>& sourcePathByMediaId,
+    QStringList* skippedMediaIds) {
+    return m_canvas && m_canvas->restoreProjectState(
+        state, sourcePathByMediaId, skippedMediaIds);
+}
+
+void LegacyCanvasHost::deleteMediaItemCanonical(ResizableMediaBase* mediaItem) {
+    if (m_canvas) {
+        m_canvas->deleteMediaItem(mediaItem);
+    }
+}
+
 void LegacyCanvasHost::setSizePolicy(QSizePolicy::Policy horizontal, QSizePolicy::Policy vertical) {
     m_canvas->setSizePolicy(horizontal, vertical);
 }

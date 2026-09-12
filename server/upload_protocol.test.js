@@ -1,834 +1,517 @@
+'use strict';
+
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const WebSocket = require('ws');
 const { MouffetteServer } = require('./server');
+const { RemoteSessionRegistry } = require('./remote_session_registry');
 
-function fakeSocket() {
+function socket() {
     return {
         readyState: WebSocket.OPEN,
         bufferedAmount: 0,
         messages: [],
-        send(payload) {
-            this.messages.push(JSON.parse(payload));
-        },
-        close(code, reason) {
-            this.readyState = WebSocket.CLOSED;
-            this.closeCode = code;
-            this.closeReason = reason;
-        }
+        send(encoded) { this.messages.push(JSON.parse(encoded)); },
+        close() { this.readyState = WebSocket.CLOSED; },
     };
 }
 
-function addClient(server, id, persistentId = id) {
-    const ws = fakeSocket();
-    server.clients.set(id, { id, sessionId: id, persistentId, machineName: id, ws });
-    return ws;
+function addClient(server, connectionId, deviceId) {
+    const ws = socket();
+    const client = {
+        id: connectionId,
+        sessionId: connectionId,
+        persistentId: deviceId,
+        deviceId,
+        runtimeId: `runtime-${deviceId}`,
+        connectionGeneration: 1,
+        authenticated: true,
+        machineName: deviceId,
+        ws,
+    };
+    server.clients.set(connectionId, client);
+    return { client, ws };
 }
 
-function manifest(fileId = 'a'.repeat(64), mediaId = '11111111-1111-4111-8111-111111111111') {
-    return [{
-        fileId,
-        name: 'pixel.png',
-        extension: 'png',
-        sizeBytes: 128,
-        mediaIds: [mediaId]
-    }];
+function setup() {
+    const server = new MouffetteServer(0);
+    const owner = addClient(server, 'owner-connection', 'A');
+    const target = addClient(server, 'target-connection', 'B');
+    const attacker = addClient(server, 'attacker-connection', 'C');
+    const session = server.remoteSessions.open({
+        ownerDeviceId: 'A', targetDeviceId: 'B',
+        ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
+        ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
+    }).session;
+    session.serverBootId = server.serverBootId;
+    return { server, owner, target, attacker, session };
 }
 
-function markTargetReady(server, targetId, uploadId) {
-    server.handleUploadReady(targetId, { uploadId, canvasSessionId });
+function envelope(session, extra = {}) {
+    return {
+        protocolVersion: 2,
+        serverBootId: session.serverBootId,
+        messageId: crypto.randomUUID(),
+        remoteSessionId: session.remoteSessionId,
+        generation: session.generation,
+        connectionGeneration: 1,
+        ...extra,
+    };
 }
 
-function relayDefaultManifestPayload(server, senderId, targetId, uploadId,
-    fileId = 'a'.repeat(64)) {
-    markTargetReady(server, targetId, uploadId);
-    server.handleUploadChunk(senderId, {
-        uploadId,
-        canvasSessionId,
-        fileId,
-        chunkIndex: 0,
-        data: Buffer.alloc(128, 0x5a).toString('base64')
+function file(assetId = 'asset-1', hash = 'a'.repeat(64), mediaId = 'media-1') {
+    return {
+        assetId, fileId: hash, sha256: hash, name: `${assetId}.png`,
+        extension: 'png', size: 128, mediaIds: [mediaId],
+    };
+}
+
+function assetState(asset = file(), offset = 0) {
+    return {
+        assetId: asset.assetId,
+        offset,
+        size: asset.size,
+        sha256: asset.sha256,
+    };
+}
+
+function messages(ws, type) {
+    return ws.messages.filter(message => message.type === type);
+}
+
+function startUpload(context, uploadId, asset = file(), transport = socket()) {
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_start', uploadId, files: [asset],
+    }), transport);
+    return transport;
+}
+
+const uploadId = 'upload-1';
+
+// Validated upload is scoped to the exact session generation and creates the
+// only inventory that scene_prepare may consume.
+{
+    const context = setup();
+    const transport = startUpload(context, uploadId);
+    assert.equal(context.server.uploads.get(uploadId).remoteSessionId,
+        context.session.remoteSessionId);
+    assert.equal(messages(context.target.ws, 'upload_start').length, 1);
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_ready', uploadId, assets: [assetState()],
+    }));
+    const data = Buffer.alloc(128, 0x5a).toString('base64');
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_chunk', uploadId, assetId: 'asset-1',
+        offset: 0, size: 128, sha256: 'a'.repeat(64), data,
+    }), transport);
+    assert.equal(messages(context.target.ws, 'upload_chunk').at(-1).offset, 0);
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_progress', uploadId,
+        assets: [{ assetId: 'asset-1', offset: 128, size: 128, sha256: 'a'.repeat(64) }],
+    }));
+    assert.equal(messages(context.owner.ws, 'upload_progress').at(-1).durableBytes, 128);
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_complete', uploadId, assets: [assetState(file(), 128)],
+    }), transport);
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_finished', uploadId,
+        assets: [{ assetId: 'asset-1', offset: 128, size: 128, sha256: 'a'.repeat(64) }],
+    }));
+    assert.equal(context.server.uploads.has(uploadId), false);
+    const stored = context.server.sessionAssets.get(context.session.remoteSessionId)
+        .get('asset-1');
+    assert.equal(stored.generation, context.session.generation);
+    assert.equal(stored.ownerDeviceId, 'A');
+    assert.equal(messages(context.owner.ws, 'upload_finished').length, 1);
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_start', uploadId, files: [file()],
+    }), transport);
+    assert.equal(messages(context.owner.ws, 'upload_finished').at(-1).replay, true);
+    assert.equal(messages(context.target.ws, 'upload_start').length, 1,
+        'a terminal upload retry must not recreate target staging');
+}
+
+// If B promoted the upload but upload_finished was lost, an exact upload_start
+// replay asks B to repeat only the terminal validation.  No staging is reopened,
+// and both the active transfer and its terminal tombstone advance to the
+// authenticated owner connection generation on resume.
+{
+    const context = setup();
+    const initialTransport = startUpload(context, uploadId);
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_ready', uploadId, assets: [assetState()],
+    }));
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_chunk', uploadId, assetId: 'asset-1',
+        offset: 0, size: 128, sha256: 'a'.repeat(64),
+        data: Buffer.alloc(128, 0x41).toString('base64'),
+    }), initialTransport);
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_progress', uploadId, assets: [assetState(file(), 128)],
+    }));
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_complete', uploadId, assets: [assetState(file(), 128)],
+    }), initialTransport);
+    assert.equal(context.server.uploads.get(uploadId).awaitingTargetValidation, true);
+    assert.equal(messages(context.target.ws, 'upload_complete').length, 1);
+
+    context.session.generation = 2;
+    context.owner.client.connectionGeneration = 2;
+    context.session.ownerConnectionGeneration = 2;
+    context.server.rebindSessionGeneration(context.session);
+    const resumedTransport = socket();
+    context.server.handleMessage('owner-connection', {
+        ...envelope(context.session, {
+            type: 'upload_start', uploadId, files: [file()],
+        }),
+        connectionGeneration: 2,
+    }, resumedTransport);
+    const completionReplay = messages(context.target.ws, 'upload_complete').at(-1);
+    assert.equal(completionReplay.replay, true);
+    assert.equal(completionReplay.generation, 2);
+    assert.equal(completionReplay.connectionGeneration, 2);
+    assert.deepEqual(completionReplay.assets, [assetState(file(), 128)]);
+    assert.equal(messages(context.target.ws, 'upload_start').length, 1,
+        'lost final ACK recovery must not recreate target staging');
+    assert.equal(messages(context.owner.ws, 'upload_resume_ready').at(-1).replay, true);
+
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_finished', uploadId, assets: [assetState(file(), 128)],
+    }));
+    assert.equal(context.server.uploads.has(uploadId), false);
+    const recovered = messages(context.owner.ws, 'upload_finished').at(-1);
+    assert.equal(recovered.generation, 2);
+    assert.equal(recovered.connectionGeneration, 2);
+    assert.equal(context.server.sessionAssets.get(context.session.remoteSessionId)
+        .get('asset-1').generation, 2);
+
+    context.session.generation = 3;
+    context.owner.client.connectionGeneration = 3;
+    context.session.ownerConnectionGeneration = 3;
+    context.server.rebindSessionGeneration(context.session);
+    context.server.handleMessage('owner-connection', {
+        ...envelope(context.session, {
+            type: 'upload_start', uploadId, files: [file()],
+        }),
+        connectionGeneration: 3,
+    }, socket());
+    const terminalReplay = messages(context.owner.ws, 'upload_finished').at(-1);
+    assert.equal(terminalReplay.replay, true);
+    assert.equal(terminalReplay.generation, 3);
+    assert.equal(terminalReplay.connectionGeneration, 3,
+        'terminal replay must use the resumed owner transport generation');
+    assert.equal(messages(context.target.ws, 'upload_complete').length, 2,
+        'a committed terminal replay must not contact B again');
+}
+
+// An active uploadId is an immutable idempotency key. Only an exact replay of
+// the same authenticated session/runtime/generation and normalized manifest is
+// accepted; changed asset metadata cannot inherit its offsets.
+{
+    const context = setup();
+    const original = file();
+    const transport = startUpload(context, uploadId, original);
+    const originalDigest = context.server.uploads.get(uploadId).manifestDigest;
+
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_start', uploadId, files: [structuredClone(original)],
+    }), transport);
+    assert.equal(messages(context.owner.ws, 'upload_resume_ready').at(-1).replay, true);
+
+    const changed = file('asset-1', 'b'.repeat(64), 'media-1');
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_start', uploadId, files: [changed],
+    }), transport);
+    assert.equal(messages(context.owner.ws, 'upload_rejected').at(-1).code,
+        'upload_id_reused');
+    assert.equal(context.server.uploads.get(uploadId).manifestDigest, originalDigest);
+    assert.equal(messages(context.target.ws, 'upload_start').length, 1,
+        'a conflicting active upload replay must never reach the target');
+
+    const otherSession = context.server.remoteSessions.open({
+        ownerDeviceId: 'A', targetDeviceId: 'C',
+        ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-C',
+        ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
+    }).session;
+    otherSession.serverBootId = context.server.serverBootId;
+    context.server.handleMessage('owner-connection', envelope(otherSession, {
+        type: 'upload_start', uploadId, files: [structuredClone(original)],
+    }), socket());
+    assert.equal(messages(context.owner.ws, 'upload_rejected').at(-1).code,
+        'upload_id_reused',
+        'an identical manifest cannot reuse an active uploadId in another session tuple');
+}
+
+// READY proves the target's complete durable inventory, not merely possession
+// of the uploadId. Missing, duplicate, unknown or altered tuple fields abort
+// the transfer before the owner may stream bytes.
+{
+    const first = file('asset-ready-1', '1'.repeat(64), 'media-ready-1');
+    const second = file('asset-ready-2', '2'.repeat(64), 'media-ready-2');
+    const valid = [assetState(first), assetState(second)];
+    const invalidInventories = [
+        [valid[0]],
+        [valid[0], valid[0]],
+        [valid[0], { ...valid[1], assetId: 'asset-unknown' }],
+        [valid[0], { ...valid[1], size: valid[1].size + 1 }],
+        [valid[0], { ...valid[1], sha256: '3'.repeat(64) }],
+        [valid[0], { ...valid[1], offset: 1 }],
+    ];
+    invalidInventories.forEach((assets, index) => {
+        const context = setup();
+        const currentUploadId = `invalid-ready-${index}`;
+        context.server.handleMessage('owner-connection', envelope(context.session, {
+            type: 'upload_start', uploadId: currentUploadId, files: [first, second],
+        }), socket());
+        context.server.handleMessage('target-connection', envelope(context.session, {
+            type: 'upload_ready', uploadId: currentUploadId, assets,
+        }));
+        assert.equal(messages(context.owner.ws, 'upload_rejected').at(-1).code,
+            'invalid_upload_ready_inventory');
+        assert.equal(context.server.uploads.has(currentUploadId), false);
     });
 }
 
-const senderId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-const targetId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
-const attackerId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
-const canvasSessionId = `${senderId}_TO_${targetId}_canvas_dddddddd-dddd-4ddd-8ddd-dddddddddddd`;
+// Durable progress uses the same complete, unique inventory contract, so a
+// partial acknowledgement cannot silently advance only selected assets.
+{
+    const context = setup();
+    const first = file('asset-progress-1', '4'.repeat(64), 'media-progress-1');
+    const second = file('asset-progress-2', '5'.repeat(64), 'media-progress-2');
+    const currentUploadId = 'invalid-progress-inventory';
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_start', uploadId: currentUploadId, files: [first, second],
+    }), socket());
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_ready', uploadId: currentUploadId,
+        assets: [assetState(first), assetState(second)],
+    }));
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_progress', uploadId: currentUploadId,
+        assets: [assetState(first)],
+    }));
+    assert.equal(messages(context.owner.ws, 'upload_rejected').at(-1).code,
+        'invalid_upload_progress_inventory');
+    assert.equal(context.server.uploads.has(currentUploadId), false);
+}
 
+// Completion repeats the immutable asset tuple and proves that every byte is
+// present.  Omitting or altering that inventory aborts before B may validate
+// or promote anything.
+{
+    const invalidInventories = [
+        undefined,
+        [],
+        [{ ...assetState(file(), 128), size: 129 }],
+        [{ ...assetState(file(), 128), sha256: 'b'.repeat(64) }],
+        [{ ...assetState(file(), 128), offset: 127 }],
+    ];
+    invalidInventories.forEach((assets, index) => {
+        const context = setup();
+        const currentUploadId = `invalid-complete-${index}`;
+        const transport = startUpload(context, currentUploadId);
+        context.server.handleMessage('target-connection', envelope(context.session, {
+            type: 'upload_ready', uploadId: currentUploadId, assets: [assetState()],
+        }));
+        context.server.handleMessage('owner-connection', envelope(context.session, {
+            type: 'upload_chunk', uploadId: currentUploadId, assetId: 'asset-1',
+            offset: 0, size: 128, sha256: 'a'.repeat(64),
+            data: Buffer.alloc(128, 0x42).toString('base64'),
+        }), transport);
+        const completion = { type: 'upload_complete', uploadId: currentUploadId };
+        if (assets !== undefined) completion.assets = assets;
+        context.server.handleMessage('owner-connection',
+            envelope(context.session, completion), transport);
+        assert.equal(messages(context.owner.ws, 'upload_rejected').at(-1).code,
+            'invalid_upload_completion_inventory');
+        assert.equal(context.server.uploads.has(currentUploadId), false);
+        assert.equal(messages(context.target.ws, 'upload_complete').length, 0);
+    });
+}
+
+// Even after the first valid completion entered target validation, a duplicate
+// completion may only replay the same immutable inventory.
+{
+    const context = setup();
+    const transport = startUpload(context, 'conflicting-complete-replay');
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_ready', uploadId: 'conflicting-complete-replay',
+        assets: [assetState()],
+    }));
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_chunk', uploadId: 'conflicting-complete-replay',
+        assetId: 'asset-1', offset: 0, size: 128, sha256: 'a'.repeat(64),
+        data: Buffer.alloc(128, 0x43).toString('base64'),
+    }), transport);
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_complete', uploadId: 'conflicting-complete-replay',
+        assets: [assetState(file(), 128)],
+    }), transport);
+    assert.equal(context.server.uploads.get('conflicting-complete-replay')
+        .awaitingTargetValidation, true);
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_complete', uploadId: 'conflicting-complete-replay',
+        assets: [{ ...assetState(file(), 128), offset: 127 }],
+    }), transport);
+    assert.equal(messages(context.owner.ws, 'upload_rejected').at(-1).code,
+        'invalid_upload_completion_inventory');
+    assert.equal(context.server.uploads.has('conflicting-complete-replay'), false);
+    assert.equal(messages(context.target.ws, 'upload_complete').length, 1);
+}
+
+// Sender spoofing, stale generations and disallowed formats never reach B.
+{
+    const context = setup();
+    context.server.handleMessage('attacker-connection', envelope(context.session, {
+        type: 'upload_start', uploadId, files: [file()],
+    }), socket());
+    assert.equal(messages(context.attacker.ws, 'upload_rejected').at(-1).code,
+        'not_a_session_party');
+    context.server.handleMessage('owner-connection', {
+        ...envelope(context.session, { type: 'upload_start', uploadId, files: [file()] }),
+        generation: context.session.generation + 1,
+    }, socket());
+    assert.equal(messages(context.owner.ws, 'upload_rejected').at(-1).code,
+        'stale_remote_session_generation');
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_start', uploadId,
+        files: [{ ...file(), name: 'payload.exe', extension: 'exe' }],
+    }), socket());
+    assert.equal(messages(context.owner.ws, 'upload_rejected').at(-1).code,
+        'invalid_upload_asset_metadata');
+    assert.equal(messages(context.target.ws, 'upload_start').length, 0);
+}
+
+// Two global transfers are permitted for an owner, but only one per session;
+// a third independent session is rejected by the server-side guard.
 {
     const server = new MouffetteServer(0);
-    addClient(server, senderId);
-    addClient(server, targetId);
-    addClient(server, attackerId);
-    const uploadSocket = fakeSocket();
-    const token = server.issueUploadChannelToken(senderId);
-    const boundClient = server.consumeUploadChannelToken(token);
-    const uploadId = '99999999-9999-4999-8999-999999999999';
+    const owner = addClient(server, 'owner-connection', 'A');
+    const targets = ['B', 'C', 'D'].map(deviceId =>
+        addClient(server, `target-${deviceId}`, deviceId));
+    const sessions = targets.map(({ client }) => server.remoteSessions.open({
+        ownerDeviceId: 'A', targetDeviceId: client.deviceId,
+        ownerRuntimeId: 'runtime-A', targetRuntimeId: client.runtimeId,
+        ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
+    }).session);
+    sessions.forEach(session => { session.serverBootId = server.serverBootId; });
+    for (let index = 0; index < 3; ++index) {
+        server.handleMessage('owner-connection', envelope(sessions[index], {
+            type: 'upload_start', uploadId: `upload-${index + 1}`,
+            files: [file(`asset-${index + 1}`, String(index + 1).repeat(64), `media-${index + 1}`)],
+        }), socket());
+    }
+    assert.equal(server.uploads.size, 2);
+    assert.equal(messages(owner.ws, 'upload_rejected').at(-1).code,
+        'upload_concurrency_exceeded');
 
-    assert.equal(boundClient.id, senderId);
-    assert.equal(server.consumeUploadChannelToken(token), null,
-        'an upload channel token must be one-shot');
-
-    server.handleUploadChannelMessage(boundClient, uploadSocket, {
-        type: 'upload_start',
-        senderClientId: attackerId,
-        senderPersistentClientId: attackerId,
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest()
-    });
-
-    assert.equal(server.uploads.get(uploadId).senderSession, senderId,
-        'the authenticated channel binding must override a spoofed sender ID');
-    server.handleUploadChannelMessage(boundClient, uploadSocket, {
-        type: 'remote_scene_stop',
-        senderClientId: attackerId,
-        targetClientId: targetId
-    });
-    assert.equal(uploadSocket.messages.at(-1).type, 'error',
-        'non-upload protocols must be rejected on the dedicated upload channel');
-
-    const replacementToken = server.issueUploadChannelToken(senderId);
-    server.registerUploadSocket(boundClient, uploadSocket);
-    server.revokeUploadChannelsForClient(boundClient);
-    assert.equal(server.consumeUploadChannelToken(replacementToken), null,
-        'disconnecting or replacing the control client must revoke pending tokens');
-    assert.equal(uploadSocket.readyState, WebSocket.CLOSED,
-        'disconnecting or replacing the control client must close bound upload sockets');
+    server.handleMessage('owner-connection', envelope(sessions[0], {
+        type: 'upload_start', uploadId: 'upload-same-session',
+        files: [file('asset-extra', 'e'.repeat(64), 'media-extra')],
+    }), socket());
+    assert.equal(messages(owner.ws, 'upload_rejected').at(-1).code,
+        'upload_session_busy');
 }
 
+// Resume rewinds relayed-but-unacknowledged data to the last contiguous durable
+// offset and rebinds transport/generation without changing immutable metadata.
 {
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    addClient(server, targetId);
-    addClient(server, attackerId);
-    const uploadId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
-
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest()
-    });
-    relayDefaultManifestPayload(server, senderId, targetId, uploadId);
-    server.handleUploadComplete(senderId, { uploadId, canvasSessionId });
-
-    assert.equal(server.uploads.has(uploadId), true, 'upload_complete must remain pending');
-    assert.equal(server.clientFiles.has(targetId), false, 'unvalidated files must not enter server inventory');
-
-    server.handleUploadFinished(attackerId, {
-        uploadId,
-        canvasSessionId,
-        fileIds: ['a'.repeat(64)]
-    });
-    assert.equal(server.uploads.has(uploadId), true, 'a third party cannot acknowledge an upload');
-
-    server.handleUploadFinished(targetId, {
-        uploadId,
-        canvasSessionId,
-        fileIds: ['a'.repeat(64)]
-    });
-    assert.equal(server.uploads.has(uploadId), false, 'validated upload must close');
-    assert.equal(server.clientFiles.get(targetId).get(canvasSessionId).has('a'.repeat(64)), true);
-    assert.equal(server.clientFileOwners.get(targetId).get(canvasSessionId).get('a'.repeat(64)), senderId,
-        'validated inventory must retain its authenticated sender owner');
-    assert.equal(sender.messages.at(-1).type, 'upload_finished');
+    const context = setup();
+    const firstTransport = startUpload(context, uploadId);
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_ready', uploadId, assets: [assetState()],
+    }));
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_chunk', uploadId, assetId: 'asset-1', offset: 0, size: 64,
+        sha256: 'a'.repeat(64), data: Buffer.alloc(64, 0x31).toString('base64'),
+    }), firstTransport);
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_progress', uploadId,
+        assets: [{ assetId: 'asset-1', offset: 32, size: 128, sha256: 'a'.repeat(64) }],
+    }));
+    context.session.generation = 2;
+    context.owner.client.connectionGeneration = 2;
+    context.session.ownerConnectionGeneration = 2;
+    context.server.rebindSessionGeneration(context.session);
+    assert.equal(context.server.uploads.get(uploadId).ownerConnectionGeneration, 2,
+        'the immutable upload binding advances only through authenticated session resume');
+    const secondTransport = socket();
+    context.server.handleMessage('owner-connection', {
+        ...envelope(context.session, { type: 'upload_resume', uploadId }),
+        connectionGeneration: 2,
+    }, secondTransport);
+    const resumed = messages(context.owner.ws, 'upload_resume_ready').at(-1);
+    assert.equal(resumed.assets[0].offset, 32);
+    assert.equal(context.server.uploads.get(uploadId).assetStates.get('asset-1').nextOffset, 32);
+    assert.equal(context.server.uploads.get(uploadId).transportSocket, secondTransport);
 }
 
+// The fixed RemoteSession lease is checked synchronously by every upload
+// command. A command at 2,999 ms is accepted; one at exactly 3,000 ms first
+// terminalizes the session and cannot relay or mutate upload data.
 {
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    const target = addClient(server, targetId);
-    const attacker = addClient(server, attackerId);
-    const uploadId = '13572468-2468-4246-8135-135724681357';
-    const fileId = 'd'.repeat(64);
+    let now = 70_000;
+    let sequence = 0;
+    const server = new MouffetteServer({ port: 0, metricLogger: () => {} });
+    server.remoteSessions = new RemoteSessionRegistry({
+        leaseTimeoutMs: 3_000,
+        now: () => now,
+        idFactory: () => `upload-lease-${++sequence}`,
+    });
+    const owner = addClient(server, 'owner-connection', 'A');
+    const target = addClient(server, 'target-connection', 'B');
+    const session = server.remoteSessions.open({
+        ownerDeviceId: 'A', targetDeviceId: 'B',
+        ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
+        ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
+    }).session;
+    session.serverBootId = server.serverBootId;
+    const transport = socket();
 
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest(fileId)
-    });
-    relayDefaultManifestPayload(server, senderId, targetId, uploadId, fileId);
-    server.handleUploadComplete(senderId, { uploadId, canvasSessionId });
-    server.handleUploadFinished(targetId, { uploadId, canvasSessionId, fileIds: [fileId] });
+    now = 72_999;
+    server.handleMessage('owner-connection', envelope(session, {
+        type: 'upload_start', uploadId: 'lease-upload', files: [file()],
+    }), transport);
+    assert.equal(server.uploads.has('lease-upload'), true);
+    assert.equal(messages(target.ws, 'upload_start').length, 1);
 
-    const targetMessageCount = target.messages.length;
-    server.handleRemoveFile(attackerId, {
-        type: 'remove_file',
-        targetPersistentClientId: targetId,
-        canvasSessionId,
-        fileId
-    });
-    assert.equal(server.clientFiles.get(targetId).get(canvasSessionId).has(fileId), true,
-        'an attacker remove_file must not mutate server inventory');
-    assert.equal(server.clientFileOwners.get(targetId).get(canvasSessionId).get(fileId), senderId,
-        'an attacker remove_file must not mutate ownership metadata');
-    assert.equal(target.messages.length, targetMessageCount,
-        'an attacker remove_file must not be relayed to the target');
-    assert.equal(attacker.messages.at(-1).type, 'error');
-
-    server.handleRemoveAllFiles(attackerId, {
-        type: 'remove_all_files',
-        targetPersistentClientId: targetId,
-        canvasSessionId,
-        removalId: '24681357-1357-4246-8246-246813572468'
-    });
-    assert.equal(server.clientFiles.get(targetId).get(canvasSessionId).has(fileId), true,
-        'an attacker remove_all_files must not mutate server inventory');
-    assert.equal(server.clientFileOwners.get(targetId).get(canvasSessionId).get(fileId), senderId,
-        'an attacker remove_all_files must not mutate ownership metadata');
-    assert.equal(target.messages.length, targetMessageCount + 1,
-        'an empty authenticated cleanup must be relayed for idempotent recovery');
-    assert.equal(target.messages.at(-1).type, 'remove_all_files');
-    assert.equal(target.messages.at(-1).senderPersistentClientId, attackerId,
-        'an empty cleanup must remain confined to the authenticated attacker namespace');
-    server.handleAllFilesRemoved(targetId, {
-        removalId: '24681357-1357-4246-8246-246813572468',
-        canvasSessionId,
-        senderClientId: attackerId
-    });
-    assert.equal(server.clientFiles.get(targetId).get(canvasSessionId).has(fileId), true,
-        'acknowledging an empty foreign cleanup must not remove the owner file');
-
-    server.handleRemoveFile(senderId, {
-        type: 'remove_file',
-        targetPersistentClientId: targetId,
-        canvasSessionId,
-        fileId
-    });
-    assert.equal(server.clientFiles.has(targetId), false,
-        'the authenticated owner must still be able to remove its file');
-    assert.equal(server.clientFileOwners.has(targetId), false,
-        'empty ownership metadata must be cleaned');
-    assert.equal(target.messages.at(-1).type, 'remove_file');
-    assert.equal(sender.messages.some(message => message.type === 'error'), false);
+    now = 73_000;
+    server.handleMessage('owner-connection', envelope(session, {
+        type: 'upload_chunk', uploadId: 'lease-upload', assetId: 'asset-1',
+        offset: 0, size: 1, sha256: 'a'.repeat(64),
+        data: Buffer.from([1]).toString('base64'),
+    }), transport);
+    assert.equal(session.phase, 'CleanupPending');
+    assert.equal(server.uploads.has('lease-upload'), false);
+    assert.equal(messages(target.ws, 'upload_chunk').length, 0);
+    const rejection = messages(owner.ws, 'upload_rejected').at(-1);
+    assert.equal(rejection.code, 'lease_expired');
+    assert.equal(rejection.remoteSessionId, session.remoteSessionId);
+    assert.equal(rejection.generation, session.generation);
+    assert.equal(rejection.ownerDeviceId, owner.client.deviceId);
+    assert.equal(rejection.targetDeviceId, target.client.deviceId);
+    const terminalAbort = messages(target.ws, 'upload_abort').at(-1);
+    assert.equal(terminalAbort.connectionGeneration, 1,
+        'server-generated upload aborts remain bound to the upload owner/source');
+    assert.equal(terminalAbort.remoteSessionId, session.remoteSessionId);
+    assert.equal(terminalAbort.generation, session.generation);
+    assert.equal(terminalAbort.ownerDeviceId, owner.client.deviceId);
+    assert.equal(terminalAbort.targetDeviceId, target.client.deviceId);
 }
 
+// A server-generated abort relayed owner -> target retains the owner's source
+// generation even when B is on a different transport generation.
 {
-    const server = new MouffetteServer(0);
-    const oldSenderSession = senderId;
-    const newSenderSession = 'eeeeeeee-1111-4111-8111-eeeeeeeeeeee';
-    const senderPersistentId = '12121212-3434-4567-8901-121212121212';
-    addClient(server, oldSenderSession, senderPersistentId);
-    const target = addClient(server, targetId);
-    const attacker = addClient(server, attackerId);
-    const uploadId = '31415926-5358-4979-8323-846264338327';
-    const fileId = 'e'.repeat(64);
-
-    server.handleUploadStart(oldSenderSession, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest(fileId)
-    });
-    relayDefaultManifestPayload(server, oldSenderSession, targetId, uploadId, fileId);
-    server.handleUploadComplete(oldSenderSession, { uploadId, canvasSessionId });
-    server.handleUploadFinished(targetId, { uploadId, canvasSessionId, fileIds: [fileId] });
-    assert.equal(server.clientFileOwners.get(targetId).get(canvasSessionId).get(fileId),
-        senderPersistentId, 'file ownership must survive a new sender session');
-
-    server.clients.delete(oldSenderSession);
-    const reconnectedSender = addClient(server, newSenderSession, senderPersistentId);
-    const removalId = '27182818-2845-4904-8235-360287471352';
-    server.handleRemoveAllFiles(newSenderSession, {
-        type: 'remove_all_files',
-        targetPersistentClientId: targetId,
-        canvasSessionId,
-        removalId
-    });
-
-    assert.equal(server.clientFiles.get(targetId).get(canvasSessionId).has(fileId), true,
-        'inventory must remain committed until the correlated target acknowledgement');
-    assert.equal(server.pendingRemovals.has(removalId), true);
-    assert.equal(target.messages.at(-1).senderPersistentClientId, senderPersistentId,
-        'the target cache namespace must use stable sender identity');
-
-    const senderMessageCount = reconnectedSender.messages.length;
-    server.handleAllFilesRemoved(attackerId, {
-        removalId,
-        canvasSessionId,
-        senderClientId: senderPersistentId
-    });
-    assert.equal(server.pendingRemovals.has(removalId), true,
-        'an acknowledgement from the wrong target must not consume the pending removal');
-    assert.equal(server.clientFiles.get(targetId).get(canvasSessionId).has(fileId), true,
-        'a spoofed acknowledgement must not commit the inventory removal');
-    assert.equal(reconnectedSender.messages.length, senderMessageCount);
-    assert.equal(attacker.messages.at(-1).type, 'error');
-
-    server.handleAllFilesRemoved(targetId, {
-        removalId,
-        canvasSessionId,
-        senderClientId: senderPersistentId
-    });
-    assert.equal(server.pendingRemovals.has(removalId), false);
-    assert.equal(server.clientFiles.has(targetId), false,
-        'a reconnected session with the same persistent identity may unload its files');
-    assert.equal(reconnectedSender.messages.at(-1).type, 'all_files_removed');
-    assert.equal(reconnectedSender.messages.at(-1).removalId, removalId);
-    assert.equal(reconnectedSender.messages.at(-1).targetPersistentClientId, targetId);
-
-    const retryUploadId = '16180339-8874-4989-8482-045868343656';
-    server.handleUploadStart(newSenderSession, {
-        targetPersistentClientId: targetId,
-        uploadId: retryUploadId,
-        canvasSessionId,
-        files: manifest(fileId)
-    });
-    relayDefaultManifestPayload(server, newSenderSession, targetId, retryUploadId, fileId);
-    server.handleUploadComplete(newSenderSession, {
-        uploadId: retryUploadId,
-        canvasSessionId
-    });
-    server.handleUploadFinished(targetId, {
-        uploadId: retryUploadId,
-        canvasSessionId,
-        fileIds: [fileId]
-    });
-    assert.equal(server.clientFileOwners.get(targetId).get(canvasSessionId).get(fileId),
-        senderPersistentId, 're-upload after reconnection must keep stable ownership');
+    const context = setup();
+    context.target.client.connectionGeneration = 7;
+    context.session.targetConnectionGeneration = 7;
+    startUpload(context, 'source-bound-abort');
+    const start = messages(context.target.ws, 'upload_start').at(-1);
+    assert.equal(start.connectionGeneration, 1);
+    context.server.abortUploadsForRemoteSession(context.session, 'test_abort');
+    const abort = messages(context.target.ws, 'upload_abort').at(-1);
+    assert.equal(abort.connectionGeneration, 1,
+        'the recipient generation must not overwrite the upload owner/source generation');
 }
 
-{
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    addClient(server, targetId);
-    const uploadId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
-
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest()
-    });
-    server.handleUploadRejected(targetId, {
-        uploadId,
-        canvasSessionId,
-        reason: 'invalid media'
-    });
-
-    assert.equal(server.uploads.has(uploadId), false);
-    assert.equal(server.clientFiles.has(targetId), false);
-    assert.deepEqual(sender.messages.at(-1), {
-        type: 'upload_rejected',
-        uploadId,
-        reason: 'invalid media',
-        canvasSessionId,
-        targetClientId: targetId
-    });
-}
-
-{
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    const target = addClient(server, targetId);
-    const uploadId = '87654321-4321-4321-8321-cba987654321';
-
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest()
-    });
-    relayDefaultManifestPayload(server, senderId, targetId, uploadId);
-    server.handleUploadComplete(senderId, { uploadId, canvasSessionId });
-    server.handleUploadFinished(targetId, {
-        uploadId,
-        canvasSessionId,
-        fileIds: ['b'.repeat(64)]
-    });
-
-    assert.equal(server.uploads.has(uploadId), false,
-        'an invalid target acknowledgement must close the pending upload');
-    assert.equal(server.clientFiles.has(targetId), false,
-        'an invalid target acknowledgement must not enter server inventory');
-    assert.equal(sender.messages.at(-1).type, 'upload_rejected');
-    assert.equal(target.messages.some(message => message.type === 'remove_file'
-        && message.fileId === 'a'.repeat(64)), true,
-    'the target must receive targeted cleanup for files it already validated');
-}
-
-{
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    addClient(server, targetId);
-    const uploadId = '12345678-1234-4234-8234-123456789abc';
-    const duplicate = manifest()[0];
-
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: [duplicate, {
-            ...duplicate,
-            mediaIds: ['22222222-2222-4222-8222-222222222222']
-        }]
-    });
-
-    assert.equal(server.uploads.has(uploadId), false);
-    assert.equal(sender.messages.at(-1).type, 'upload_rejected');
-}
-
-{
-    const server = new MouffetteServer(0);
-    addClient(server, senderId);
-    addClient(server, targetId);
-    const uploadId = 'abcdefab-cdef-4abc-8def-abcdefabcdef';
-
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest()
-    });
-    const upload = server.uploads.get(uploadId);
-    server.UPLOAD_TIMEOUT_MS = 1000;
-    upload.startTime = Date.now() - 5000;
-    upload.lastActivity = Date.now();
-    server.cleanupStalledUploads();
-    assert.equal(server.uploads.has(uploadId), true,
-        'an active long upload must use lastActivity rather than its original start time');
-
-    upload.lastActivity = Date.now() - 5000;
-    server.cleanupStalledUploads();
-    assert.equal(server.uploads.has(uploadId), false,
-        'an upload with no recent activity must still be timed out');
-}
-
-{
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    const target = addClient(server, targetId);
-    const uploadId = 'abcdef12-3456-4789-8abc-def123456789';
-
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest()
-    });
-    relayDefaultManifestPayload(server, senderId, targetId, uploadId);
-    server.handleUploadComplete(senderId, { uploadId, canvasSessionId });
-    const upload = server.uploads.get(uploadId);
-    upload.awaitingTargetValidationSince = Date.now() - 5000;
-    server.UPLOAD_TARGET_ACK_TIMEOUT_MS = 1000;
-    server.cleanupStalledUploads();
-
-    assert.equal(server.uploads.has(uploadId), false,
-        'a completed upload must not wait indefinitely for its target acknowledgement');
-    assert.equal(server.clientFiles.has(targetId), false,
-        'a timed-out acknowledgement must not enter server inventory');
-    assert.equal(sender.messages.at(-1).type, 'upload_rejected');
-    assert.equal(target.messages.at(-1).type, 'upload_abort');
-}
-
-{
-    const server = new MouffetteServer(0);
-    addClient(server, senderId);
-    const target = addClient(server, targetId);
-    const uploadId = '11112222-3333-4444-8555-666677778888';
-
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest()
-    });
-    server.abortUploadsForClient(senderId);
-
-    assert.equal(server.uploads.has(uploadId), false,
-        'disconnecting an upload sender must close its server session');
-    assert.equal(target.messages.at(-1).type, 'upload_abort');
-    assert.equal(target.messages.at(-1).senderClientId, senderId);
-}
-
-{
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    addClient(server, targetId);
-    const uploadId = '99998888-7777-4666-8555-444433332222';
-
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest()
-    });
-    server.abortUploadsForClient(targetId);
-
-    assert.equal(server.uploads.has(uploadId), false,
-        'disconnecting an upload target must close its server session');
-    assert.equal(sender.messages.at(-1).type, 'upload_rejected');
-    assert.match(sender.messages.at(-1).reason, /target disconnected/i);
-}
-
-{
-    const server = new MouffetteServer(0);
-    const stableOwner = '42424242-4242-4242-8242-424242424242';
-    const replacementSocketId = '56565656-5656-4565-8565-565656565656';
-    const oldSocket = addClient(server, senderId, stableOwner);
-    const target = addClient(server, targetId);
-    addClient(server, replacementSocketId, stableOwner);
-    const uploadId = '78787878-7878-4787-8787-787878787878';
-    const sceneInstanceId = 'replacement-scene';
-
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest()
-    });
-    server.remoteScenesByTarget.set(targetId, {
-        ownerId: senderId,
-        sceneInstanceId
-    });
-    server.handleRegister(replacementSocketId, {
-        persistentClientId: stableOwner,
-        sessionId: senderId,
-        machineName: 'replacement',
-        screens: []
-    });
-
-    assert.equal(server.uploads.has(uploadId), false,
-        'logical session replacement must explicitly purge the old upload');
-    assert.equal(server.remoteScenesByTarget.has(targetId), false,
-        'logical session replacement must explicitly purge the old remote scene');
-    assert.equal(target.messages.some(message => message.type === 'upload_abort'
-        && message.uploadId === uploadId), true);
-    assert.equal(target.messages.some(message => message.type === 'remote_scene_stop'
-        && message.sceneInstanceId === sceneInstanceId), true);
-    assert.equal(server.clients.get(senderId).ws === oldSocket, false,
-        'the replacement socket must own the logical session ID');
-}
-
-{
-    const server = new MouffetteServer(0);
-    const owner = addClient(server, senderId);
-    const targetPersistentId = '90909090-9090-4090-8090-909090909090';
-    const replacementSocketId = '67676767-6767-4676-8676-676767676767';
-    addClient(server, targetId, targetPersistentId);
-    addClient(server, replacementSocketId, targetPersistentId);
-    const sceneInstanceId = 'target-replacement-scene';
-    server.remoteScenesByTarget.set(targetId, {
-        ownerId: senderId,
-        sceneInstanceId
-    });
-
-    server.handleRegister(replacementSocketId, {
-        persistentClientId: targetPersistentId,
-        sessionId: targetId,
-        machineName: 'replacement-target',
-        screens: []
-    });
-
-    assert.equal(server.remoteScenesByTarget.has(targetId), false);
-    assert.equal(owner.messages.some(message => message.type === 'remote_scene_stopped'
-        && message.senderClientId === targetId
-        && message.sceneInstanceId === sceneInstanceId
-        && message.success === true), true,
-    'atomic target replacement must converge the owner after target cleanup');
-}
-
-{
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    const target = addClient(server, targetId);
-    const uploadId = '10101010-1010-4010-8010-101010101010';
-
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest()
-    });
-    server.handleUploadChunk(senderId, {
-        uploadId,
-        canvasSessionId,
-        fileId: 'a'.repeat(64),
-        chunkIndex: 0,
-        data: Buffer.from('premature').toString('base64')
-    });
-
-    assert.equal(server.uploads.has(uploadId), false,
-        'payload sent before target readiness must close the protocol session');
-    assert.equal(sender.messages.at(-1).type, 'upload_rejected');
-    assert.equal(target.messages.at(-1).type, 'upload_abort',
-        'a premature payload must explicitly clean target staging');
-}
-
-{
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    const target = addClient(server, targetId);
-    const uploadId = '11110000-2222-4333-8444-555566667777';
-
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest()
-    });
-    markTargetReady(server, targetId, uploadId);
-    server.handleUploadChunk(senderId, {
-        uploadId,
-        canvasSessionId,
-        fileId: 'a'.repeat(64),
-        chunkIndex: 0,
-        data: Buffer.alloc(64, 0x2a).toString('base64')
-    });
-    server.handleUploadComplete(senderId, { uploadId, canvasSessionId });
-
-    assert.equal(server.uploads.has(uploadId), false,
-        'completion before the manifest byte count must be rejected');
-    assert.equal(sender.messages.at(-1).type, 'upload_rejected');
-    assert.match(sender.messages.at(-1).reason, /every declared byte/i);
-    assert.equal(target.messages.at(-1).type, 'upload_abort');
-}
-
-{
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    const target = addClient(server, targetId);
-    const uploadSocket = fakeSocket();
-    const uploadId = '20202020-2020-4020-8020-202020202020';
-
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest()
-    }, uploadSocket);
-    markTargetReady(server, targetId, uploadId);
-    server.abortUploadsForUploadSocket(senderId, uploadSocket,
-        'Dedicated upload transport disconnected');
-
-    assert.equal(server.uploads.has(uploadId), false,
-        'losing the pinned payload socket must immediately close its upload');
-    assert.equal(target.messages.at(-1).type, 'upload_abort');
-    assert.equal(target.messages.at(-1).protocolRejected, true);
-    assert.equal(sender.messages.at(-1).type, 'upload_rejected');
-    assert.match(sender.messages.at(-1).reason, /transport disconnected/i);
-}
-
-{
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    const target = addClient(server, targetId);
-    const uploadId = '30303030-3030-4030-8030-303030303030';
-
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest()
-    });
-    markTargetReady(server, targetId, uploadId);
-    server.handleUploadAbort(senderId, { uploadId, canvasSessionId });
-
-    assert.equal(server.uploads.has(uploadId), false);
-    assert.equal(server.pendingUploadAborts.has(uploadId), true,
-        'sender cancellation must wait for correlated target cleanup');
-    assert.equal(target.messages.at(-1).type, 'upload_abort');
-
-    server.handleUploadAbortAcknowledgement(targetId, {
-        uploadId,
-        canvasSessionId,
-        senderClientId: senderId
-    });
-    assert.equal(server.pendingUploadAborts.has(uploadId), false);
-    assert.equal(sender.messages.at(-1).type, 'upload_aborted');
-    assert.equal(sender.messages.at(-1).uploadId, uploadId);
-    const targetMessageCount = target.messages.length;
-    server.handleUploadAbortAcknowledgement(targetId, {
-        uploadId,
-        canvasSessionId,
-        senderClientId: senderId
-    });
-    assert.equal(target.messages.length, targetMessageCount,
-        'a duplicate cleanup acknowledgement must be an idempotent no-op');
-}
-
-{
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    const target = addClient(server, targetId);
-    const removalId = '40404040-4040-4040-8040-404040404040';
-
-    server.handleRemoveAllFiles(senderId, {
-        type: 'remove_all_files',
-        targetPersistentClientId: targetId,
-        canvasSessionId,
-        removalId
-    });
-
-    assert.equal(server.pendingRemovals.has(removalId), true,
-        'empty removal must still reach the target after a server restart');
-    assert.equal(target.messages.at(-1).type, 'remove_all_files');
-    assert.equal(target.messages.at(-1).senderPersistentClientId, senderId);
-    server.handleAllFilesRemoved(targetId, {
-        removalId,
-        canvasSessionId,
-        senderClientId: senderId
-    });
-    assert.equal(server.pendingRemovals.has(removalId), false);
-    assert.equal(sender.messages.at(-1).type, 'all_files_removed');
-}
-
-{
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    const target = addClient(server, targetId);
-    const uploadId = '50505050-5050-4050-8050-505050505050';
-
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest()
-    });
-    markTargetReady(server, targetId, uploadId);
-    target.bufferedAmount = server.MAX_TARGET_BUFFERED_UPLOAD_BYTES + 1;
-    server.handleUploadChunk(senderId, {
-        uploadId,
-        canvasSessionId,
-        fileId: 'a'.repeat(64),
-        chunkIndex: 0,
-        data: Buffer.from('bounded').toString('base64')
-    });
-
-    assert.equal(server.uploads.has(uploadId), false,
-        'a non-consuming target must be rejected instead of growing relay memory');
-    assert.equal(sender.messages.at(-1).type, 'upload_rejected');
-    assert.match(sender.messages.at(-1).reason, /not consuming/i);
-}
-
-{
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    addClient(server, targetId);
-    const firstUploadId = '60606060-6060-4060-8060-606060606060';
-    const spamUploadId = '70707070-7070-4070-8070-707070707070';
-
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId: firstUploadId,
-        canvasSessionId,
-        files: manifest()
-    });
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId: spamUploadId,
-        canvasSessionId,
-        files: manifest('b'.repeat(64), '22222222-2222-4222-8222-222222222222')
-    });
-
-    assert.equal(server.uploads.has(firstUploadId), true,
-        'a duplicate start must not disturb the accepted transfer');
-    assert.equal(server.uploads.has(spamUploadId), false,
-        'one sender cannot create concurrent upload sessions by spamming');
-    assert.equal(sender.messages.at(-1).type, 'upload_rejected');
-    assert.match(sender.messages.at(-1).reason, /already active/i);
-}
-
-{
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    addClient(server, targetId);
-    const removalId = '80808080-8080-4080-8080-808080808080';
-
-    server.handleRemoveAllFiles(senderId, {
-        type: 'remove_all_files',
-        targetPersistentClientId: targetId,
-        canvasSessionId,
-        removalId
-    });
-    server.handleAllFilesRemovalFailed(targetId, {
-        removalId,
-        canvasSessionId,
-        senderClientId: senderId,
-        reason: 'disk is read-only'
-    });
-
-    assert.equal(server.pendingRemovals.has(removalId), false,
-        'a correlated target failure must close the removal immediately');
-    assert.equal(sender.messages.at(-1).type, 'removal_rejected');
-    assert.equal(sender.messages.at(-1).reason, 'disk is read-only');
-}
-
-{
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    addClient(server, targetId);
-    const removalId = '81818181-8181-4181-8181-818181818181';
-
-    server.handleRemoveAllFiles(senderId, {
-        type: 'remove_all_files',
-        targetPersistentClientId: targetId,
-        canvasSessionId,
-        removalId
-    });
-    server.abortUploadsForClient(targetId);
-
-    assert.equal(server.pendingRemovals.has(removalId), false);
-    assert.equal(sender.messages.at(-1).type, 'removal_rejected',
-        'target loss must reject unload without waiting for the client timer');
-    assert.match(sender.messages.at(-1).reason, /target disconnected/i);
-}
-
-{
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    addClient(server, targetId);
-    const removalId = '82828282-8282-4282-8282-828282828282';
-    const uploadId = '83838383-8383-4383-8383-838383838383';
-
-    server.handleRemoveAllFiles(senderId, {
-        type: 'remove_all_files',
-        targetPersistentClientId: targetId,
-        canvasSessionId,
-        removalId
-    });
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest()
-    });
-
-    assert.equal(server.pendingRemovals.has(removalId), true);
-    assert.equal(server.uploads.has(uploadId), false,
-        'upload and unload may not overlap in the same remote namespace');
-    assert.equal(sender.messages.at(-1).type, 'upload_rejected');
-    assert.match(sender.messages.at(-1).reason, /removal.*pending/i);
-}
-
-{
-    const server = new MouffetteServer(0);
-    const sender = addClient(server, senderId);
-    addClient(server, targetId);
-    const uploadId = '84848484-8484-4484-8484-848484848484';
-    const removalId = '85858585-8585-4585-8585-858585858585';
-
-    server.handleUploadStart(senderId, {
-        targetPersistentClientId: targetId,
-        uploadId,
-        canvasSessionId,
-        files: manifest()
-    });
-    server.handleRemoveAllFiles(senderId, {
-        type: 'remove_all_files',
-        targetPersistentClientId: targetId,
-        canvasSessionId,
-        removalId
-    });
-
-    assert.equal(server.uploads.has(uploadId), true,
-        'a spurious unload must not disturb the active upload');
-    assert.equal(server.pendingRemovals.has(removalId), false);
-    assert.equal(sender.messages.at(-1).type, 'removal_rejected');
-    assert.match(sender.messages.at(-1).reason, /upload is active/i);
-}
-
-console.log('upload protocol tests passed');
+console.log('upload protocol v2 tests passed');

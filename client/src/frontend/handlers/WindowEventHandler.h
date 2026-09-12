@@ -39,12 +39,18 @@ public:
     // Application state management
     void handleApplicationStateChanged(Qt::ApplicationState state);
     void updateApplicationSuspendedState(bool suspended);
+    void updateNativeSystemSuspendedState(bool suspended);
     
     // System tray
     void onTrayIconActivated(QSystemTrayIcon::ActivationReason reason);
 
 private:
+    void applyCombinedSuspendedState();
+
     MainWindow* m_mainWindow;
+    bool m_windowSuspended = false;
+    bool m_qtApplicationSuspended = false;
+    bool m_nativeSystemSuspended = false;
 };
 
 #endif // WINDOWEVENTHANDLER_H

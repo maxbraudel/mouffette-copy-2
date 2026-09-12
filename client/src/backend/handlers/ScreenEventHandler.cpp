@@ -11,12 +11,14 @@
 #include "backend/network/UploadManager.h"
 #include "backend/files/FileManager.h"
 #include "backend/domain/session/SessionManager.h"
+#include "backend/domain/project/ProjectManager.h"
 #include "frontend/managers/ui/RemoteClientInfoManager.h"
 #include "backend/managers/app/MigrationTelemetryManager.h"
 #include <QDebug>
 #include <QStackedWidget>
 #include <QGuiApplication>
 #include <QScreen>
+#include <QDateTime>
 #include <cmath>
 
 #ifdef Q_OS_WIN
@@ -86,10 +88,6 @@ void ScreenEventHandler::setupConnections(WebSocketClient* client)
 
     m_webSocketClient = client;
 
-    // Connect to screen-related signals
-    connect(client, &WebSocketClient::screensInfoReceived, this, &ScreenEventHandler::onScreensInfoReceived);
-    connect(client, &WebSocketClient::dataRequestReceived, this, &ScreenEventHandler::onDataRequestReceived);
-
     qDebug() << "ScreenEventHandler: Connections established";
 }
 
@@ -99,14 +97,11 @@ void ScreenEventHandler::syncRegistration()
 
     QString machineName = m_mainWindow->getMachineName();
     QString platform = m_mainWindow->getPlatformName();
-    QList<ScreenInfo> screens;
-    int volumePercent = -1;
-
-    // Only include screens/volume when actively watched; otherwise identity-only
-    if (m_mainWindow->isWatched()) {
-        screens = m_mainWindow->getLocalScreenInfo();
-        volumePercent = m_mainWindow->getSystemVolumePercent();
-    }
+    // Protocol v2 publishes one complete authoritative device snapshot. Screen
+    // and volume discovery is independent from projects and remote sessions;
+    // there is deliberately no request/watch subscription protocol anymore.
+    QList<ScreenInfo> screens = m_mainWindow->getLocalScreenInfo();
+    const int volumePercent = m_mainWindow->getSystemVolumePercent();
 
     // Build per-screen uiZones (taskbar/menu/dock)
     if (!screens.isEmpty()) {
@@ -212,7 +207,7 @@ void ScreenEventHandler::onScreensInfoReceived(const ClientInfo& clientInfo)
 
     QString persistentId = clientInfo.clientId();
     if (persistentId.isEmpty()) {
-        qWarning() << "ScreenEventHandler::onScreensInfoReceived: client has no persistentClientId";
+        qWarning() << "ScreenEventHandler::onScreensInfoReceived: client has no authenticated deviceId";
         return;
     }
 
@@ -248,9 +243,11 @@ void ScreenEventHandler::onScreensInfoReceived(const ClientInfo& clientInfo)
     m_mainWindow->recordCanvasLoadReady(session->persistentClientId, screens.size());
 
     if (session->canvas) {
-        if (!session->serverAssignedId.isEmpty()) {
-            session->canvas->setRemoteSceneTarget(session->serverAssignedId, session->lastClientInfo.getMachineName());
-        }
+        // A project is keyed exclusively by the authenticated installation
+        // identity. Socket ids are transport details and must never become
+        // durable canvas targets.
+        session->canvas->setRemoteSceneTarget(
+            persistentId, session->lastClientInfo.getMachineName());
         session->canvas->setScreens(screens);
     }
 
@@ -261,6 +258,17 @@ void ScreenEventHandler::onScreensInfoReceived(const ClientInfo& clientInfo)
     }
 
     session->lastClientInfo.setScreens(screens);
+
+    // Replace the cached device snapshot wholesale whenever that exact
+    // deviceId advertises fresh state. This preserves screens, UI zones and
+    // volume when the transport later disappears without ever reconciling by
+    // display name.
+    if (ProjectManager* projects = m_mainWindow->getProjectManager();
+        projects && projects->hasProjectForTarget(persistentId)) {
+        projects->updateClientSnapshot(
+            ClientSnapshot::fromClientInfo(
+                session->lastClientInfo, QDateTime::currentMSecsSinceEpoch()));
+    }
 
     if (isActiveSession && session->canvas) {
         if (!m_mainWindow->isCanvasRevealedForCurrentClient() && hasScreens) {
@@ -398,5 +406,8 @@ void ScreenEventHandler::onDataRequestReceived()
     }
 #endif
 
-    m_webSocketClient->sendStateSnapshot(screens, volumePercent);
+    // This entry point is no longer connected in protocol v2. If invoked by
+    // in-process compatibility code, publish the same complete authoritative
+    // snapshot as the regular timer instead of a partial legacy state message.
+    syncRegistration();
 }

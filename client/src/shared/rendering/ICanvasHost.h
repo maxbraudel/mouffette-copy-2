@@ -3,8 +3,11 @@
 
 #include <QObject>
 #include <QGraphicsView>
+#include <QHash>
+#include <QJsonObject>
 #include <QSizePolicy>
 #include <QString>
+#include <QStringList>
 #include "backend/domain/models/ClientInfo.h"
 #include "shared/rendering/IMediaSceneAdapter.h"
 #include "shared/rendering/IOverlayProjection.h"
@@ -44,6 +47,17 @@ public:
 
     virtual void setOverlayActionsEnabled(bool enabled) = 0;
     virtual void handleRemoteConnectionLost() = 0;
+    virtual void stopScenesForSourceInvalidation() = 0;
+
+    // Durable project state. Implementations must omit transport/session
+    // identifiers and restore file-backed media as NotUploaded. The source map
+    // is keyed by stable mediaId and has already been integrity-checked by the
+    // project layer.
+    virtual QJsonObject serializeProjectState() const = 0;
+    virtual bool restoreProjectState(const QJsonObject& state,
+                                     const QHash<QString, QString>& sourcePathByMediaId,
+                                     QStringList* skippedMediaIds = nullptr) = 0;
+    virtual void deleteMediaItemCanonical(ResizableMediaBase* mediaItem) = 0;
 
     virtual void setSizePolicy(QSizePolicy::Policy horizontal, QSizePolicy::Policy vertical) = 0;
     virtual void setViewportUpdateMode(QGraphicsView::ViewportUpdateMode mode) = 0;

@@ -9,7 +9,7 @@ class MainWindow;
 /**
  * [PHASE 10] TimerController
  * Manages all timer setup, configuration, and callbacks for MainWindow.
- * Handles: status update timer, display sync timer, reconnect timer, cursor update timer.
+ * Handles the periodic authoritative device-snapshot publication.
  */
 class TimerController : public QObject {
     Q_OBJECT
@@ -21,23 +21,11 @@ public:
     // Timer setup and initialization
     void setupTimers();
     
-    // Reconnection timer management
-    void scheduleReconnect();
-    void attemptReconnect();
-    void resetReconnectState();
-    
-    // Watch state management (controls display sync and cursor timers)
-    void setWatchedState(bool watched);
-    
-    // Cursor update interval configuration
-    void setCursorUpdateInterval(int intervalMs);
-
 private:
     MainWindow* m_mainWindow;
     
     // Timer callbacks
     void onDisplaySyncTimeout();
-    void onCursorTimeout();
 };
 
 #endif // TIMERCONTROLLER_H

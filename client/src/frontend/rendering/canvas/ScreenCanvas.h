@@ -6,6 +6,8 @@
 #include <QGraphicsEllipseItem>
 #include <QGraphicsPathItem>
 #include <QElapsedTimer>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QMap>
 #include <QHash>
 #include <QVector>
@@ -73,8 +75,17 @@ public:
     void startHostSceneState(HostSceneMode mode);
     void stopHostSceneState(bool notifyRemote = true);
     bool isHostSceneActive() const { return m_hostSceneActive; }
+    // Called by the visible canvas renderer after a frame for the correlated
+    // activation generation has completed rendering. The hidden legacy mirror
+    // never treats its own state transition as a presented frame when the
+    // Quick renderer is active.
+    void acknowledgeLocalSceneFramePresented(quint64 presentationGeneration);
     // Serialize current canvas state (screens + media) for remote scene start
     QJsonObject serializeSceneState() const;
+    QJsonObject serializeProjectState() const;
+    bool restoreProjectState(const QJsonObject& state,
+                             const QHash<QString, QString>& sourcePathByMediaId,
+                             QStringList* skippedMediaIds = nullptr);
     void setActiveIdeaId(const QString& canvasSessionId);
     QString activeIdeaId() const { return m_activeIdeaId; }
     // Remote scene integration setters
@@ -93,6 +104,7 @@ public:
     QString remoteSceneTargetClientId() const { return m_remoteSceneTargetClientId; }
     QString remoteSceneTargetMachineName() const { return m_remoteSceneTargetMachineName; }
     void handleRemoteConnectionLost();
+    void stopScenesForSourceInvalidation();
     // Remote cursor style setters
     void setRemoteCursorDiameterPx(int d) { m_remoteCursorDiameterPx = qMax(2, d); if (m_remoteCursorDot) { recreateRemoteCursorItem(); } }
     void setRemoteCursorFillColor(const QColor& c) { m_remoteCursorFill = c; if (m_remoteCursorDot) { m_remoteCursorDot->setBrush(m_remoteCursorFill); } }
@@ -177,6 +189,7 @@ signals:
     void mediaItemRemoved(ResizableMediaBase* mediaItem);
     void remoteSceneLaunchStateChanged(bool active, const QString& targetClientId, const QString& targetMachineName);
     void textToolActiveChanged(bool active);
+    void localScenePresentationRequested(quint64 presentationGeneration);
 
 protected:
     bool event(QEvent* event) override;
@@ -387,17 +400,17 @@ private:
     ResizableMediaBase* m_hoveredMediaItem = nullptr;
 
 private slots:
-    // Remote scene feedback handlers
-    void onRemoteSceneValidationReceived(const QString& targetClientId,
-                                         const QString& sceneInstanceId,
-                                         bool success,
-                                         const QString& errorMessage);
-    void onRemoteSceneLaunchedReceived(const QString& targetClientId, const QString& sceneInstanceId);
+    // Correlated protocol-v2 SceneRun feedback handlers.
+    void onScenePrepareProgressReceived(const QJsonObject& envelope);
+    void onScenePreparedReceived(const QJsonObject& envelope);
+    void onSceneArmedReceived(const QJsonObject& envelope);
+    void onSceneCommitReceived(const QJsonObject& envelope);
+    void onSceneStartedReceived(const QJsonObject& envelope);
+    void onSceneStopReceived(const QJsonObject& envelope);
+    void onSceneStoppedReceived(const QJsonObject& envelope);
+    void onSceneErrorReceived(const QJsonObject& envelope);
+    void onRemoteSessionResumed(const QJsonObject& envelope);
     void onRemoteSceneLaunchTimeout();
-    void onRemoteSceneStoppedReceived(const QString& targetClientId,
-                                      const QString& sceneInstanceId,
-                                      bool success,
-                                      const QString& errorMessage);
     void onRemoteSceneStopTimeout();
 
 protected:
@@ -411,10 +424,6 @@ protected:
     QTimer* m_sceneLaunchTimeoutTimer = nullptr;
     QTimer* m_sceneStopTimeoutTimer = nullptr;
     
-    // Configurable timeout for remote scene launch (milliseconds)
-    // Must exceed the target's 11 s media-preparation watchdog plus relay and
-    // teardown overhead, otherwise the host can abort before target validation.
-    static constexpr int REMOTE_SCENE_LAUNCH_TIMEOUT_MS = 15000;
     static constexpr int REMOTE_SCENE_STOP_TIMEOUT_MS = 10000; // 10 seconds
     
     // Launch Test Scene toggle state
@@ -427,6 +436,14 @@ protected:
     struct SavedSelection {
         ResizableMediaBase* media = nullptr;
         std::weak_ptr<bool> guard;
+    };
+    struct ProjectDraftMediaState {
+        ResizableMediaBase* media = nullptr;
+        std::weak_ptr<bool> guard;
+        bool contentVisible = true;
+        bool isVideo = false;
+        qint64 videoPositionMs = 0;
+        bool videoMuted = false;
     };
     struct VideoPreState {
         ResizableVideoItem* video = nullptr;
@@ -446,6 +463,15 @@ protected:
     // Remember selection present just before entering host scene so it can be restored afterward (multi-select supported)
     QList<SavedSelection> m_prevSelectionBeforeHostScene;
     QList<VideoPreState> m_prevVideoStates;
+    // SceneRun execution mutates the editor-backed graph (visibility, mute and
+    // playback position). Keep the immutable draft in a distinct snapshot so
+    // checkpoints/autosaves can never persist those transient mutations.
+    bool m_projectDraftSnapshotCaptured = false;
+    QJsonObject m_projectDraftStateBeforeSceneRun;
+    QList<ProjectDraftMediaState> m_projectDraftMediaStates;
+    QJsonObject serializeCurrentProjectState() const;
+    void captureProjectDraftBeforeSceneRun();
+    void restoreProjectDraftAfterSceneRun();
     void updateLaunchSceneButtonStyle();
     void updateLaunchTestSceneButtonStyle();
     void runOverlayHardeningChecks(const char* context) const;
@@ -479,12 +505,31 @@ protected:
     QString m_remoteSceneTargetClientId; // target client to receive remote scene commands
     QString m_remoteSceneTargetMachineName; // machine name of target (stable across reconnections)
     QString m_pendingRemoteSceneInstanceId;
+    QString m_stoppingRemoteSceneInstanceId;
+    QString m_pendingRemoteSceneDigest;
+    quint64 m_remoteSceneRevision = 0;
+    QJsonArray m_localSceneChecklist;
+    QJsonObject m_pendingLocalSceneRevision;
+    QTimer* m_localScenePrepareTimer = nullptr;
+    bool m_localVideoSeekRequested = false;
+    bool m_localSceneArmed = false;
+    bool m_localFirstFrameReported = false;
+    bool m_waitingForLocalScenePresentation = false;
+    quint64 m_localScenePresentationGeneration = 0;
     QHash<QString, qint64> m_pendingRemoteStartPositionsMs;
     QTimer* m_remoteSceneActivationTimer = nullptr;
     QTimer* m_remoteVideoSyncTimer = nullptr;
     qint64 m_remoteVideoSyncSequence = 0;
-    static constexpr int REMOTE_SCENE_ACTIVATION_LEAD_MS = 1000;
     static constexpr int REMOTE_VIDEO_SYNC_INTERVAL_MS = 500;
+    QJsonArray buildSceneManifest(const QJsonObject& scene, QString* errorMessage) const;
+    QJsonArray buildVerifiedLocalChecklist(const QJsonObject& scene,
+                                           bool* allReady,
+                                           QString* fatalError) const;
+    void beginLocalScenePreparation(const QJsonObject& scene);
+    void pollLocalScenePreparation();
+    bool matchesPendingSceneEnvelope(const QJsonObject& envelope) const;
+    void failPendingSceneRun(const QString& message, bool notifyServer);
+    void reportLocalFirstFrame();
     void startRemoteVideoStateSync();
     void stopRemoteVideoStateSync();
     void sendRemoteVideoStateSync();

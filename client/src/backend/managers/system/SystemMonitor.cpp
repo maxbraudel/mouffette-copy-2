@@ -62,6 +62,44 @@ static BOOL CALLBACK MouffetteEnumMonProc(HMONITOR hMon, HDC, LPRECT, LPARAM lPa
 SystemMonitor::SystemMonitor(QObject* parent)
     : QObject(parent)
 {
+    m_screenChangeTimer = new QTimer(this);
+    m_screenChangeTimer->setSingleShot(true);
+    m_screenChangeTimer->setInterval(150);
+    connect(m_screenChangeTimer, &QTimer::timeout, this, [this]() {
+        emit screenConfigurationChanged(getLocalScreenInfo());
+    });
+
+    if (QGuiApplication* app = qobject_cast<QGuiApplication*>(QCoreApplication::instance())) {
+        for (QScreen* screen : app->screens()) {
+            watchScreen(screen);
+        }
+        connect(app, &QGuiApplication::screenAdded, this, [this](QScreen* screen) {
+            watchScreen(screen);
+            scheduleScreenConfigurationChanged();
+        });
+        connect(app, &QGuiApplication::screenRemoved, this, [this](QScreen*) {
+            scheduleScreenConfigurationChanged();
+        });
+        connect(app, &QGuiApplication::primaryScreenChanged, this, [this](QScreen*) {
+            scheduleScreenConfigurationChanged();
+        });
+    }
+}
+
+void SystemMonitor::watchScreen(QScreen* screen) {
+    if (!screen) return;
+    const auto schedule = [this]() { scheduleScreenConfigurationChanged(); };
+    connect(screen, &QScreen::geometryChanged, this, schedule);
+    connect(screen, &QScreen::availableGeometryChanged, this, schedule);
+    connect(screen, &QScreen::logicalDotsPerInchChanged, this, schedule);
+    connect(screen, &QScreen::physicalDotsPerInchChanged, this, schedule);
+    connect(screen, &QScreen::virtualGeometryChanged, this, schedule);
+}
+
+void SystemMonitor::scheduleScreenConfigurationChanged() {
+    if (m_screenChangeTimer) {
+        m_screenChangeTimer->start();
+    }
 }
 
 SystemMonitor::~SystemMonitor() {

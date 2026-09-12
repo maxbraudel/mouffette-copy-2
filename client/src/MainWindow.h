@@ -46,14 +46,17 @@ class QGraphicsOpacityEffect;
 class QPropertyAnimation;
 class QProcess; // fwd decl to avoid including in header
 class UploadManager; // new component for upload/unload feature
-class WatchManager;  // new component for watch/unwatch feature
 class ScreenNavigationManager; // manages page switching & loader UX
 class ResponsiveLayoutManager; // manages responsive layout behavior
 class FileWatcher; // monitors source files and removes media when files are deleted
 class SessionManager; // Phase 4.1: manages canvas session lifecycle
+class ProjectManager;
+class SceneActivityModel;
+struct ProjectMediaReference;
 class FileManager; // Phase 4.3: forward declaration for dependency injection
 class ClientListPage; // Phase 1.1: extracted client list page
 class CanvasViewPage; // Phase 1.2: extracted canvas view page
+class HistoryPage;
 class RemoteClientInfoManager; // Phase 5: manages remote client info container
 class SystemMonitor; // Phase 3: system monitoring (volume, screens, platform)
 class TopBarManager; // Phase 6.1: manages top bar UI (local client info)
@@ -66,6 +69,7 @@ class UploadEventHandler; // Phase 7.4: manages upload events and file transfers
 class CanvasSessionController; // Phase 8: manages canvas session lifecycle
 class WindowEventHandler; // Phase 9: manages window lifecycle events
 class TimerController; // Phase 10: manages timer setup and callbacks
+class ConnectionManager;
 class UploadButtonStyleManager; // Phase 11: manages upload button styling
 class SettingsManager; // Phase 12: manages application settings and persistence
 class UploadSignalConnector; // Phase 15: manages upload signal connections
@@ -85,6 +89,10 @@ class MainWindow : public QMainWindow {
 public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
+    // Fallback used by QCoreApplication::aboutToQuit. Normal UI quits use the
+    // asynchronous drain below; an externally initiated exit still performs
+    // the same synchronous local teardown before Qt stops its event loop.
+    void handleApplicationAboutToQuit();
     
     // Accessor methods for ResponsiveLayoutManager
     QWidget* getRemoteClientInfoContainer() const;
@@ -94,26 +102,25 @@ public:
     QStackedWidget* getStackedWidget() const { return m_stackedWidget; }
     CanvasViewPage* getCanvasViewPage() const { return m_canvasViewPage; }
     ClientListPage* getClientListPage() const { return m_clientListPage; }
+    HistoryPage* getHistoryPage() const { return m_historyPage; }
     QPushButton* getBackButton() const;
     QLabel* getConnectionStatusLabel() const { return m_connectionStatusLabel; }
     QPushButton* getConnectToggleButton() const { return m_connectToggleButton; }
     QPushButton* getSettingsButton() const { return m_settingsButton; }
+    QWidget* getHistoryControl() const { return m_historyControl; }
     int getInnerContentGap() const;
     
     // [Phase 7.1] Accessor methods for WebSocketMessageHandler
     ScreenNavigationManager* getNavigationManager() const { return m_navigationManager; }
     WebSocketClient* getWebSocketClient() const { return m_webSocketClient; }
-    WatchManager* getWatchManager() const { return m_watchManager; }
     UploadManager* getUploadManager() const { return m_uploadManager; }
     const ClientInfo& getSelectedClient() const { return m_selectedClient; }
     bool isUserDisconnected() const { return m_userDisconnected; }
     
     // [Phase 7.1] State management for WebSocketMessageHandler
-    void resetReconnectState();
     void setCanvasRevealedForCurrentClient(bool revealed) { m_canvasRevealedForCurrentClient = revealed; }
     void setPreserveViewportOnReconnect(bool preserve) { m_preserveViewportOnReconnect = preserve; }
     void resetAllSessionUploadStates();
-    void syncCanvasSessionFromServer(const QString& canvasSessionId, const QSet<QString>& fileIds);
     
     // [Phase 7.1] UI methods for WebSocketMessageHandler (made public)
     void setUIEnabled(bool enabled);
@@ -122,14 +129,12 @@ public:
     void removeVolumeIndicatorFromLayout();
     void addRemoteStatusToLayout();
     void setRemoteConnectionStatus(const QString& status, bool propagateLoss = true);
-    void scheduleReconnect();
     void connectToServer(); // [Phase 12] Made public for SettingsManager
     
     // [Phase 7.2] Accessor methods for ScreenEventHandler
     FileManager* getFileManager() const { return m_fileManager; }
     RemoteClientInfoManager* getRemoteClientInfoManager() const { return m_remoteClientInfoManager; }
     QString getActiveSessionIdentity() const { return m_activeSessionIdentity; }
-    bool isWatched() const { return m_isWatched; }
     bool isCanvasRevealedForCurrentClient() const { return m_canvasRevealedForCurrentClient; }
     bool shouldPreserveViewportOnReconnect() const { return m_preserveViewportOnReconnect; }
     QList<ScreenInfo> getLocalScreenInfo();
@@ -179,7 +184,7 @@ public:
     bool isInlineSpinnerSpinning() const;
     void showInlineSpinner();
     void startInlineSpinner();
-    void unloadUploadsForSession(CanvasSession& session, bool clearFlag);
+    void ensureRemoteSessionForClient(const ClientInfo& client);
     
     // [Phase 7.4] Accessor methods for UploadEventHandler
     QString getActiveUploadSessionIdentity() const { return m_activeUploadSessionIdentity; }
@@ -194,6 +199,7 @@ public:
     
     // [Phase 8] Additional accessor methods for CanvasSessionController
     SessionManager* getSessionManager() const { return m_sessionManager; }
+    ProjectManager* getProjectManager() const { return m_projectManager; }
     void setActiveSessionIdentity(const QString& identity) { m_activeSessionIdentity = identity; }
     QPushButton* getUploadButton() const { return m_uploadButton; }
     void setUploadButton(QPushButton* button) { m_uploadButton = button; }
@@ -225,24 +231,15 @@ public:
     // [Phase 9] Accessor methods for WindowEventHandler
     ResponsiveLayoutManager* getResponsiveLayoutManager() const { return m_responsiveLayoutManager; }
     bool isApplicationSuspended() const { return m_applicationSuspended; }
-    void setApplicationSuspended(bool suspended) { m_applicationSuspended = suspended; }
+    void setApplicationSuspended(bool suspended);
     
     // [Phase 10] Accessor methods for TimerController
     QTimer* getStatusUpdateTimer() const { return m_statusUpdateTimer; }
     QTimer* getDisplaySyncTimer() const { return m_displaySyncTimer; }
-    QTimer* getReconnectTimer() const { return m_reconnectTimer; }
-    QTimer* getCursorTimer() const { return m_cursorTimer; }
-    void setCursorTimer(QTimer* timer) { m_cursorTimer = timer; }
-    int getReconnectAttempts() const { return m_reconnectAttempts; }
-    void resetReconnectAttempts() { m_reconnectAttempts = 0; }
-    void incrementReconnectAttempts() { m_reconnectAttempts++; }
-    int getMaxReconnectDelay() const { return m_maxReconnectDelay; }
-    void setIsWatched(bool watched) { m_isWatched = watched; }
-    int getCursorUpdateIntervalMs() const { return m_cursorUpdateIntervalMs; }
-    void setCursorUpdateIntervalMs(int intervalMs) { m_cursorUpdateIntervalMs = intervalMs; }
 
 public slots:
     void handleApplicationStateChanged(Qt::ApplicationState state);
+    void handleNativeSystemSuspendedChanged(bool suspended);
     void onUploadButtonClicked();  // Made public for CanvasSessionController
 
 private slots:
@@ -254,18 +251,17 @@ private slots:
     
     // Phase 1.1: ClientListPage signals
     void onClientSelected(const ClientInfo& clientInfo, int clientIndex);
-    void onOngoingSceneSelected(const QString& persistentClientId);
+    void onOngoingSceneSelected(const QString& sceneRunId);
     
     void updateConnectionStatus();
     void onEnableDisableClicked();
-    void attemptReconnect();
     
     // Screen view slots
     void onBackToClientListClicked();
-    void onScreensInfoReceived(const ClientInfo& clientInfo);
-    void onWatchStatusChanged(bool watched);
-    void onDataRequestReceived();
     void onRemoteSceneLaunchStateChanged(bool active, const QString& targetClientId, const QString& targetMachineName);
+    void showHistoryPage();
+    void onDisconnectProjectRequested();
+    void onDeleteProjectRequested();
     
     // System tray slots
     void onTrayIconActivated(QSystemTrayIcon::ActivationReason reason);
@@ -311,7 +307,7 @@ private:
     // Legacy helper removed; ScreenCanvas renders screens directly
     // [Phase 7.1] setRemoteConnectionStatus, removeVolumeIndicatorFromLayout, addRemoteStatusToLayout moved to public
     // [Phase 8] refreshOverlayActionsState moved to public
-    // watch management handled by WatchManager component now
+    // Legacy screen-watch/cursor protocol was removed in protocol v2.
     // Manage presence of the remote status (and its leading separator) in the top bar layout
     void removeRemoteStatusFromLayout();
     // [Phase 7.2] Session management methods moved to public for ScreenEventHandler
@@ -322,7 +318,6 @@ private:
     void updateUploadButtonForSession(CanvasSession& session);
     
     // PHASE 2: State synchronization after reconnection
-    void handleStateSyncFromServer(const QJsonObject& message);
 
     void rotateSessionIdea(CanvasSession& session);
     // markAllSessionsOffline() moved to public (Phase 16)
@@ -333,6 +328,37 @@ private:
     void refreshOngoingScenesList();
     void applyListWidgetStyle(QListWidget* listWidget) const;
     void updateApplicationSuspendedState(bool suspended);
+    void updateHistoryVisibilityState();
+    void updateHistoryUnreadBadge(int unreadCount);
+    void persistProjectCanvas(const QString& targetDeviceId);
+    void restoreProjectCanvas(CanvasSession& session);
+    void terminateProjectRemoteSession(const QString& targetDeviceId, bool attemptRemote);
+    void handleRemoteSessionReady(const QJsonObject& envelope, bool resumed);
+    void handleRemoteSessionLeaseState(const QJsonObject& envelope);
+    void handleRemoteSessionTerminating(const QJsonObject& envelope);
+    void handleRemoteRendererTeardownSettled(const QString& remoteSessionId,
+                                             bool success);
+    void beginTerminalIncomingCacheCleanup(const QString& reasonCode);
+    void finishTerminalIncomingCacheCleanupIfReady();
+    void handleRemoteSessionClosed(const QJsonObject& envelope);
+    void handleRemoteSessionError(const QJsonObject& envelope);
+    void updateRemoteClientAvailability(const QString& targetDeviceId,
+                                        const QString& status);
+    void clearRemoteSessionRuntimeState(const QString& targetDeviceId,
+                                        bool connectionLost);
+    void finishDeferredProjectDeletion(const QString& targetDeviceId);
+    void retryPendingTeardownAcks();
+    void removeRuntimeCanvasSession(const QString& targetDeviceId);
+    void refreshProjectClientList();
+    void setActiveProjectVisibleIfAppropriate();
+    void prepareCleanShutdown();
+    void finishCleanShutdownIncomingCacheTeardownIfReady();
+    void maybeFinishCleanShutdown();
+    void finishCleanShutdown();
+    QList<ProjectMediaReference> collectProjectMediaReferences(
+        const QString& targetDeviceId, ICanvasHost* canvas) const;
+    void removeInvalidMediaItems(const QList<ResizableMediaBase*>& mediaItems);
+    void validateAllProjectSources();
 
     // UI Components
     QWidget* m_centralWidget;
@@ -345,10 +371,16 @@ private:
     
     // Phase 1.2: Canvas view page (extracted)
     CanvasViewPage* m_canvasViewPage;
+
+    // Durable notification history page.
+    HistoryPage* m_historyPage = nullptr;
     
     // Connection section
     QHBoxLayout* m_connectionLayout;
     QPushButton* m_settingsButton;
+    QWidget* m_historyControl = nullptr;
+    QPushButton* m_historyButton = nullptr;
+    QLabel* m_historyUnreadBadge = nullptr;
     QPushButton* m_connectToggleButton;
     QLabel* m_connectionStatusLabel;
     
@@ -371,15 +403,13 @@ private:
     // Responsive layout manager
     ResponsiveLayoutManager* m_responsiveLayoutManager = nullptr;
     
-    // Cursor monitoring (only when this client is watched by someone else)
-    QTimer* m_cursorTimer = nullptr;
-    int m_cursorUpdateIntervalMs = 33; // ~30 Hz by default
-    
     // Phase 4.3: FileManager injected (not singleton)
     FileManager* m_fileManager = nullptr;
     
     // Phase 4.1: Session manager (COMPLETED - replaced m_canvasSessions)
     SessionManager* m_sessionManager = nullptr;
+    ProjectManager* m_projectManager = nullptr;
+    SceneActivityModel* m_sceneActivityModel = nullptr;
     
     // Active canvas pointer (dynamically points to current session's canvas)
     ICanvasHost* m_screenCanvas = nullptr;
@@ -405,6 +435,7 @@ private:
 
     // Backend - network client must be available before handlers
     WebSocketClient* m_webSocketClient = nullptr;
+    ConnectionManager* m_connectionManager = nullptr;
     
     // Phase 7.1: WebSocket message handler
     WebSocketMessageHandler* m_webSocketMessageHandler = nullptr;
@@ -442,21 +473,12 @@ private:
     ClientInfo m_selectedClient;
     QTimer* m_statusUpdateTimer;
     QTimer* m_displaySyncTimer;
-    // Smart reconnection system
-    QTimer* m_reconnectTimer;
-    int m_reconnectAttempts;
-    int m_maxReconnectDelay;
-    bool m_isWatched = false; // true when at least one remote client is watching us
     bool m_userDisconnected = false; // suppress auto-reconnect UI flows when true
     // m_serverUrlConfig moved to SettingsManager (Phase 12)
     // m_autoUploadImportedMedia moved to SettingsManager (Phase 12)
     
     // Navigation state
     bool m_ignoreSelectionChange;
-    // watched client id moved to WatchManager
-    
-    // Constants
-    static const QString DEFAULT_SERVER_URL;
     
     // [PHASE 3] Volume monitoring moved to SystemMonitor
     
@@ -465,7 +487,6 @@ private:
     bool m_uploadSignalsConnected = false;
     QString m_activeUploadSessionIdentity;
     QHash<QString, QString> m_uploadSessionByUploadId; // uploadId -> session identity
-    WatchManager* m_watchManager = nullptr;   // extracted watch logic
     ScreenNavigationManager* m_navigationManager = nullptr; // new navigation component
     FileWatcher* m_fileWatcher = nullptr; // monitors source files for deletion
     // Canvas reveal state: ensure fade-in/recenter happen only once per selected client
@@ -480,6 +501,44 @@ private:
     bool m_remoteClientConnected = false;
     bool m_applicationSuspended = false;
     QHash<QString, qint64> m_canvasLoadRequestMsBySession;
+    QList<ClientInfo> m_discoveredClients;
+    QSet<QString> m_restoredProjectIds;
+    QHash<QString, QString> m_remoteSessionOpenTargetByRequestId;
+    QSet<QString> m_remoteSessionOpenPendingTargets;
+    QSet<QString> m_remoteSessionOpenSuppressedTargets;
+    QSet<QString> m_reopenAfterSessionCloseTargets;
+    QSet<QString> m_disconnectPendingTargets;
+    QSet<QString> m_deleteAfterSessionCloseTargets;
+    QSet<QString> m_locallyTerminatingRemoteSessions;
+    struct PendingTeardownAck {
+        QString teardownId;
+        bool sceneStopped = false;
+        bool uploadsAborted = false;
+        bool cacheQuarantined = false;
+        int removedFileCount = 0;
+        QString errorCode;
+        qint64 quarantinedBytes = 0;
+    };
+    struct PendingRendererTeardown {
+        QString ownerDeviceId;
+        QString teardownId;
+        quint64 generation = 0;
+    };
+    QHash<QString, PendingRendererTeardown> m_pendingRendererTeardowns;
+    QHash<QString, PendingTeardownAck> m_pendingTeardownAcks;
+    // Lease expiry/server restart has no authenticated teardownId. Keep every
+    // incoming binding captured synchronously at that edge until its renderer
+    // graph settles, then perform one provisional bulk cache transaction.
+    QSet<QString> m_terminalRendererPendingSessionIds;
+    QString m_terminalIncomingCleanupReason;
+    bool m_terminalIncomingCleanupActive = false;
+    bool m_terminalIncomingCacheTeardownStarted = false;
+    QSet<QString> m_cleanShutdownPendingSessionIds;
+    QSet<QString> m_cleanShutdownRendererPendingSessionIds;
+    bool m_cleanShutdownIncomingCacheTeardownStarted = false;
+    bool m_cleanShutdownPrepared = false;
+    bool m_cleanShutdownFinished = false;
+    bool m_cleanShutdownQuitRequested = false;
     
     // Toast notification system
     ToastNotificationSystem* m_toastSystem = nullptr;

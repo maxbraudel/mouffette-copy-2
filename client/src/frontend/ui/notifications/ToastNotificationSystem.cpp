@@ -29,6 +29,9 @@ ToastNotification::ToastNotification(const QString& text, Type type, QWidget* pa
     
     // Create the text label
     m_textLabel = new QLabel(text, this);
+    // Toast contents can originate in correlated remote errors. Render them
+    // literally so HTML-like text cannot load resources or alter the widget.
+    m_textLabel->setTextFormat(Qt::PlainText);
     m_textLabel->setWordWrap(true);
     m_textLabel->setStyleSheet(QString(
         "QLabel { color: %1; background: transparent; padding: 10px 14px; font-size: 13px; font-weight: bold; }"
@@ -223,15 +226,21 @@ ToastNotification::Style ToastNotification::getDefaultStyleForType(Type type) co
 ToastNotificationSystem::ToastNotificationSystem(QWidget* parentWindow, QObject* parent)
     : QObject(parent)
     , m_parentWindow(parentWindow)
+    , m_notificationCenter(new NotificationCenter(this))
 {
     if (m_parentWindow) {
         m_parentWindow->installEventFilter(this);
     }
+    connect(m_notificationCenter, &NotificationCenter::toastRequested,
+            this, &ToastNotificationSystem::displayNotification);
 }
 
 ToastNotificationSystem::~ToastNotificationSystem()
 {
     clearAll();
+    if (s_instance == this) {
+        s_instance = nullptr;
+    }
 }
 
 void ToastNotificationSystem::setConfig(const Config& config)
@@ -267,8 +276,50 @@ void ToastNotificationSystem::showLoading(const QString& message, int duration)
 
 void ToastNotificationSystem::showNotification(const QString& message, ToastNotification::Type type, int duration)
 {
-    if (!m_parentWindow) return;
-    
+    NotificationRequest request;
+    request.message = message;
+    request.toastDurationMs = duration;
+    switch (type) {
+    case ToastNotification::Type::Success: request.severity = NotificationSeverity::Success; break;
+    case ToastNotification::Type::Error: request.severity = NotificationSeverity::Error; break;
+    case ToastNotification::Type::Warning: request.severity = NotificationSeverity::Warning; break;
+    case ToastNotification::Type::Info: request.severity = NotificationSeverity::Info; break;
+    case ToastNotification::Type::Loading: request.severity = NotificationSeverity::Loading; break;
+    }
+    publishNotification(request);
+}
+
+QString ToastNotificationSystem::publishNotification(const NotificationRequest& request)
+{
+    return m_notificationCenter ? m_notificationCenter->publish(request) : QString();
+}
+
+bool ToastNotificationSystem::canDisplayToast() const
+{
+    if (!m_parentWindow || !m_parentWindow->isVisible() || m_parentWindow->isMinimized()) {
+        return false;
+    }
+    const Qt::ApplicationState state = QApplication::applicationState();
+    return state != Qt::ApplicationHidden && state != Qt::ApplicationSuspended;
+}
+
+void ToastNotificationSystem::displayNotification(const QString& message,
+                                                  NotificationSeverity severity,
+                                                  int duration)
+{
+    if (!canDisplayToast()) {
+        return; // Already durable in NotificationCenter; do not replay later.
+    }
+
+    ToastNotification::Type type = ToastNotification::Type::Info;
+    switch (severity) {
+    case NotificationSeverity::Success: type = ToastNotification::Type::Success; break;
+    case NotificationSeverity::Error: type = ToastNotification::Type::Error; break;
+    case NotificationSeverity::Warning: type = ToastNotification::Type::Warning; break;
+    case NotificationSeverity::Info: type = ToastNotification::Type::Info; break;
+    case NotificationSeverity::Loading: type = ToastNotification::Type::Loading; break;
+    }
+
     auto* notification = new ToastNotification(message, type, m_parentWindow);
     
     if (duration > 0) {

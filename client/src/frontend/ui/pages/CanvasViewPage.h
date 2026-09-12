@@ -149,7 +149,12 @@ public:
      */
     ScreenCanvas* getCanvas() const { return m_screenCanvas; }
 
+    void setProjectActionsEnabled(bool canDisconnect, bool canDelete = true);
+    void setDisconnecting(bool disconnecting);
+
 signals:
+    void disconnectRequested();
+    void deleteProjectRequested();
 private:
     /**
      * @brief Setup the UI layout and widgets
@@ -179,6 +184,8 @@ private:
     QLabel* m_clientNameLabel;
     QLabel* m_remoteConnectionStatusLabel;
     QLabel* m_volumeIndicator;
+    QPushButton* m_disconnectButton = nullptr;
+    QPushButton* m_deleteProjectButton = nullptr;
     QFrame* m_remoteInfoSep1; // Separator before status
     QFrame* m_remoteInfoSep2; // Separator before volume
 

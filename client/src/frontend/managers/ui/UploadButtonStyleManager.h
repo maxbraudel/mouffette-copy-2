@@ -36,12 +36,10 @@ private:
     // Style generation helpers
     QString generateOverlayIdleStyle() const;
     QString generateOverlayUploadingStyle() const;
-    QString generateOverlayUnloadStyle() const;
     QString generateOverlayDisabledStyle() const;
     
     QString generateRegularGreyStyle() const;
     QString generateRegularBlueStyle() const;
-    QString generateRegularGreenStyle() const;
     
     // State detection helpers
     bool isRemoteSceneLaunchedForButton(QPushButton* button) const;

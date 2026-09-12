@@ -1,5 +1,7 @@
 #include "backend/domain/models/ClientInfo.h"
+#include <QDateTime>
 #include <QJsonArray>
+#include <QStringList>
 
 // ScreenInfo implementation
 QJsonObject ScreenInfo::toJson() const {
@@ -36,12 +38,15 @@ ClientInfo::ClientInfo() : m_status("unknown"), m_fromMemory(false), m_isOnline(
 }
 
 ClientInfo::ClientInfo(const QString& id, const QString& machineName, const QString& platform)
-    : m_id(id), m_machineName(machineName), m_platform(platform), m_status("connected"), m_fromMemory(false), m_isOnline(true) {
+    : m_id(id), m_machineName(machineName), m_platform(platform), m_status("connected"),
+      m_fromMemory(false), m_isOnline(true), m_deviceId(id),
+      m_availabilityStatus(QStringLiteral("Available")) {
 }
 
 QJsonObject ClientInfo::toJson() const {
     QJsonObject obj;
-    obj["id"] = m_id;
+    obj["deviceId"] = m_deviceId;
+    if (!m_runtimeId.isEmpty()) obj["runtimeId"] = m_runtimeId;
     obj["machineName"] = m_machineName;
     obj["platform"] = m_platform;
     obj["status"] = m_status;
@@ -78,16 +83,17 @@ ScreenInfo::UIZone ScreenInfo::UIZone::fromJson(const QJsonObject &json) {
 
 ClientInfo ClientInfo::fromJson(const QJsonObject& json) {
     ClientInfo client;
-    client.m_id = json["id"].toString();
+    client.m_deviceId = json.value("deviceId").toString();
+    client.m_runtimeId = json.value("runtimeId").toString();
+    client.m_id = client.m_deviceId;
     client.m_machineName = json["machineName"].toString();
     client.m_platform = json["platform"].toString();
     client.m_status = json["status"].toString();
     client.m_volumePercent = json.contains("volumePercent") ? json["volumePercent"].toInt(-1) : -1;
     client.m_fromMemory = false;
     client.m_isOnline = true;
-    if (json.contains("persistentClientId")) {
-        client.m_clientId = json.value("persistentClientId").toString();
-    }
+    client.m_availabilityStatus = json.value("remoteSessionState")
+        .toString(QStringLiteral("Available"));
     
     QJsonArray screensArray = json["screens"].toArray();
     for (const auto& screenValue : screensArray) {
@@ -97,7 +103,7 @@ ClientInfo ClientInfo::fromJson(const QJsonObject& json) {
     return client;
 }
 
-QString ClientInfo::getDisplayText() const {
+QString ClientInfo::getIdentityDisplayText() const {
     QString platformIcon;
     if (m_platform == "macOS") {
         platformIcon = "(apple)";
@@ -109,14 +115,96 @@ QString ClientInfo::getDisplayText() const {
         platformIcon = "💻";
     }
 
-    // Show only platform icon and machine name; omit screens/volume to avoid stale info
-    QString text = QString("%1 %2").arg(platformIcon, m_machineName);
+    const QString machineName = m_machineName.trimmed().isEmpty()
+        ? QStringLiteral("Unnamed client")
+        : m_machineName.trimmed();
+    return QStringLiteral("%1 %2").arg(platformIcon, machineName);
+}
+
+QString ClientInfo::availabilityBadgeText() const
+{
+    // Network presence always wins over stale session state. In particular,
+    // a durable project remains selectable while its target is Offline.
     if (!m_isOnline) {
-        if (m_fromMemory) {
-            text += QStringLiteral(" (from memory – active instance)");
-        } else {
-            text += QStringLiteral(" (offline)");
-        }
+        return QStringLiteral("Offline");
     }
-    return text;
+
+    const auto normalize = [](const QString& raw) -> QString {
+        const QString value = raw.trimmed();
+        if (value.compare(QStringLiteral("available"), Qt::CaseInsensitive) == 0) {
+            return QStringLiteral("Available");
+        }
+        if (value.compare(QStringLiteral("connecting"), Qt::CaseInsensitive) == 0
+            || value.compare(QStringLiteral("opening"), Qt::CaseInsensitive) == 0) {
+            return QStringLiteral("Connecting");
+        }
+        if (value.compare(QStringLiteral("connected"), Qt::CaseInsensitive) == 0
+            || value.compare(QStringLiteral("active"), Qt::CaseInsensitive) == 0) {
+            return QStringLiteral("Connected");
+        }
+        if (value.compare(QStringLiteral("reconnecting"), Qt::CaseInsensitive) == 0
+            || value.compare(QStringLiteral("grace"), Qt::CaseInsensitive) == 0) {
+            return QStringLiteral("Reconnecting");
+        }
+        if (value.compare(QStringLiteral("disconnecting"), Qt::CaseInsensitive) == 0
+            || value.compare(QStringLiteral("terminating"), Qt::CaseInsensitive) == 0
+            || value.compare(QStringLiteral("cleanup_pending"), Qt::CaseInsensitive) == 0) {
+            return QStringLiteral("Disconnecting");
+        }
+        if (value.compare(QStringLiteral("in use"), Qt::CaseInsensitive) == 0
+            || value.compare(QStringLiteral("in_use"), Qt::CaseInsensitive) == 0
+            || value.compare(QStringLiteral("busy"), Qt::CaseInsensitive) == 0) {
+            return QStringLiteral("In use");
+        }
+        if (value.compare(QStringLiteral("offline"), Qt::CaseInsensitive) == 0) {
+            return QStringLiteral("Offline");
+        }
+        if (value.compare(QStringLiteral("unavailable"), Qt::CaseInsensitive) == 0
+            || value.compare(QStringLiteral("cleanup_error"), Qt::CaseInsensitive) == 0) {
+            return QStringLiteral("Unavailable");
+        }
+        return {};
+    };
+
+    QString normalized = normalize(m_availabilityStatus);
+    if (normalized.isEmpty()) {
+        normalized = normalize(m_status);
+    }
+    return normalized.isEmpty() ? QStringLiteral("Unavailable") : normalized;
+}
+
+QString ClientInfo::formatRemainingTime(qint64 remainingMs)
+{
+    const qint64 clampedMs = qMax<qint64>(0, remainingMs);
+    const qint64 totalSeconds = (clampedMs + 999) / 1000;
+    const qint64 minutes = totalSeconds / 60;
+    const qint64 seconds = totalSeconds % 60;
+    return QStringLiteral("%1:%2")
+        .arg(minutes)
+        .arg(seconds, 2, 10, QLatin1Char('0'));
+}
+
+QString ClientInfo::getProjectSummaryText(qint64 nowMs) const
+{
+    if (!m_hasProject) {
+        return {};
+    }
+
+    const qint64 current = nowMs >= 0 ? nowMs : QDateTime::currentMSecsSinceEpoch();
+    QStringList parts{QStringLiteral("Project")};
+    if (m_remoteSessionCloseAtMs >= current && m_remoteSessionCloseAtMs > 0) {
+        parts.append(QStringLiteral("Disconnect in %1")
+                         .arg(formatRemainingTime(m_remoteSessionCloseAtMs - current)));
+    }
+    if (m_projectDeleteAtMs >= current && m_projectDeleteAtMs > 0) {
+        parts.append(QStringLiteral("Delete project in %1")
+                         .arg(formatRemainingTime(m_projectDeleteAtMs - current)));
+    }
+    return parts.join(QStringLiteral(" · "));
+}
+
+QString ClientInfo::getDisplayText() const
+{
+    return QStringLiteral("%1 — %2")
+        .arg(getIdentityDisplayText(), availabilityBadgeText());
 }

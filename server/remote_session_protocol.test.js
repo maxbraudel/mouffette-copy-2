@@ -1,0 +1,1247 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const WebSocket = require('ws');
+const {
+    challengePayload, createChallenge, deviceIdForPublicKey, verifyAuthResponse,
+} = require('./device_auth');
+const { RemoteSessionRegistry } = require('./remote_session_registry');
+const { MouffetteServer } = require('./server');
+
+{
+    const serverBootId = crypto.randomUUID();
+    const runtimeId = crypto.randomUUID();
+    const challenge = createChallenge(serverBootId, 1000);
+    const keys = crypto.generateKeyPairSync('ed25519');
+    const publicKeyDer = keys.publicKey.export({ type: 'spki', format: 'der' });
+    const signature = crypto.sign(null,
+        challengePayload({ ...challenge, runtimeId }), keys.privateKey);
+    const response = {
+        protocolVersion: 2,
+        serverBootId,
+        runtimeId,
+        publicKey: publicKeyDer.toString('base64url'),
+        deviceId: deviceIdForPublicKey(publicKeyDer),
+        signature: signature.toString('base64url'),
+    };
+    const verified = verifyAuthResponse(challenge, response, 1500);
+    assert.equal(verified.ok, true);
+    assert.equal(verified.deviceId, response.deviceId);
+    assert.equal(verifyAuthResponse(challenge, { ...response, runtimeId: crypto.randomUUID() }, 1500).ok, false);
+    assert.equal(verifyAuthResponse(challenge, {
+        ...response,
+        deviceId: deviceIdForPublicKey(Buffer.from('another-key')),
+    }, 1500).error, 'device_id_mismatch');
+    const forgedSignature = Buffer.from(signature);
+    forgedSignature[0] ^= 0xff;
+    assert.equal(verifyAuthResponse(challenge, {
+        ...response,
+        signature: forgedSignature.toString('base64url'),
+    }, 1500).error, 'invalid_identity_signature');
+    assert.equal(verifyAuthResponse(challenge, {
+        ...response,
+        publicKey: `${response.publicKey}=`,
+    }, 1500).error, 'invalid_identity_material');
+    assert.equal(verifyAuthResponse(challenge, response, 11_001).ok, false);
+
+    const differentChallenge = createChallenge(serverBootId, 1000);
+    assert.equal(verifyAuthResponse(differentChallenge, response, 1500).error,
+        'invalid_identity_signature',
+    'a response signed for one nonce cannot authenticate a different socket');
+}
+
+const committedCleanup = (extra = {}) => ({
+    result: 'committed',
+    sceneStopped: true,
+    uploadsAborted: true,
+    cacheQuarantined: true,
+    removedFileCount: 0,
+    ...extra,
+});
+
+const binding = (owner = 'A', target = 'B') => ({
+    ownerDeviceId: owner,
+    targetDeviceId: target,
+    ownerRuntimeId: `runtime-${owner}`,
+    targetRuntimeId: `runtime-${target}`,
+    ownerConnectionGeneration: 1,
+    targetConnectionGeneration: 1,
+});
+
+function testSocket() {
+    return {
+        readyState: WebSocket.OPEN,
+        bufferedAmount: 0,
+        messages: [],
+        send(encoded) { this.messages.push(JSON.parse(encoded)); },
+        close() { this.readyState = WebSocket.CLOSED; },
+    };
+}
+
+function addAuthenticatedClient(server, connectionId, deviceId,
+                                connectionGeneration = 1) {
+    const ws = testSocket();
+    server.clients.set(connectionId, {
+        id: connectionId,
+        sessionId: connectionId,
+        persistentId: deviceId,
+        deviceId,
+        runtimeId: `runtime-${deviceId}`,
+        connectionGeneration,
+        authenticated: true,
+        machineName: deviceId,
+        platform: 'test',
+        screens: [],
+        ws,
+    });
+    return ws;
+}
+
+function addAuthenticationCandidate(server, connectionId, keyPair, runtimeId,
+                                    issuedAt) {
+    const ws = testSocket();
+    const publicKeyDer = keyPair.publicKey.export({ type: 'spki', format: 'der' });
+    const challenge = createChallenge(server.serverBootId, issuedAt);
+    const client = {
+        id: connectionId,
+        sessionId: null,
+        persistentId: null,
+        deviceId: null,
+        runtimeId: null,
+        connectionGeneration: 1,
+        authenticated: false,
+        machineName: null,
+        screens: [],
+        ws,
+        authChallenge: challenge,
+        authTimer: null,
+    };
+    server.clients.set(connectionId, client);
+    const response = {
+        protocolVersion: 2,
+        serverBootId: server.serverBootId,
+        runtimeId,
+        deviceId: deviceIdForPublicKey(publicKeyDer),
+        publicKey: publicKeyDer.toString('base64url'),
+        signature: crypto.sign(null,
+            challengePayload({ ...challenge, runtimeId }), keyPair.privateKey)
+            .toString('base64url'),
+    };
+    return { client, ws, response, deviceId: response.deviceId };
+}
+
+function serverSessionContext(prefix) {
+    let sequence = 0;
+    const server = new MouffetteServer({ port: 0, metricLogger: () => {} });
+    server.remoteSessions = new RemoteSessionRegistry({
+        leaseTimeoutMs: 3000,
+        idFactory: () => `${prefix}-${++sequence}`,
+    });
+    const ownerSocket = addAuthenticatedClient(server, 'owner-connection', 'A');
+    const targetSocket = addAuthenticatedClient(server, 'target-connection', 'B');
+    const session = server.remoteSessions.open(binding()).session;
+    let beginAttempts = 0;
+    let beginCommits = 0;
+    const originalBegin = server.beginRemoteSessionTeardown.bind(server);
+    server.beginRemoteSessionTeardown = (...arguments_) => {
+        ++beginAttempts;
+        const began = originalBegin(...arguments_);
+        if (began) ++beginCommits;
+        return began;
+    };
+    return {
+        server, session, ownerSocket, targetSocket,
+        beginAttempts: () => beginAttempts,
+        beginCommits: () => beginCommits,
+    };
+}
+
+function messages(socket, type) {
+    return socket.messages.filter(message => message.type === type);
+}
+
+// The server consumes an authentication challenge before verification. A
+// duplicated response on the same socket and a response replayed onto a new
+// socket are both terminal failures, even though the signature was once valid.
+{
+    const server = new MouffetteServer({ port: 0, metricLogger: () => {} });
+    const keys = crypto.generateKeyPairSync('ed25519');
+    const runtimeId = crypto.randomUUID();
+    const now = Date.now();
+    const first = addAuthenticationCandidate(
+        server, 'auth-first', keys, runtimeId, now);
+    server.handleAuthResponse('auth-first', first.response, now + 1);
+    assert.equal(first.client.authenticated, true);
+    assert.equal(first.client.authChallenge, null);
+
+    server.handleAuthResponse('auth-first', first.response, now + 2);
+    assert.equal(messages(first.ws, 'error').at(-1).code,
+        'auth_challenge_already_consumed');
+    assert.equal(first.ws.readyState, WebSocket.CLOSED);
+
+    const replay = addAuthenticationCandidate(
+        server, 'auth-replay', keys, crypto.randomUUID(), now + 2);
+    server.handleAuthResponse('auth-replay', first.response, now + 3);
+    assert.equal(replay.client.authenticated, false);
+    assert.equal(replay.client.authChallenge, null);
+    assert.equal(messages(replay.ws, 'error').at(-1).code,
+        'invalid_identity_signature');
+    assert.equal(replay.ws.readyState, WebSocket.CLOSED);
+}
+
+// A new process using the same installation key cannot displace a healthy
+// runtime at 2,999 ms. At the exact 3,000 ms boundary the old runtime and all
+// its sessions are terminal, the ghost transport is evicted, and the new
+// runtime is admitted without treating the transition as a resume.
+{
+    const keyPair = crypto.generateKeyPairSync('ed25519');
+    const oldRuntimeId = crypto.randomUUID();
+    const newRuntimeId = crypto.randomUUID();
+    const base = Date.now();
+
+    const earlyServer = new MouffetteServer({ port: 0, metricLogger: () => {} });
+    const earlyCandidate = addAuthenticationCandidate(
+        earlyServer, 'candidate-early', keyPair, newRuntimeId, base);
+    const earlyOldSocket = addAuthenticatedClient(
+        earlyServer, 'old-early', earlyCandidate.deviceId);
+    const earlyOld = earlyServer.clients.get('old-early');
+    earlyOld.runtimeId = oldRuntimeId;
+    earlyOld.lastHeartbeatAt = base;
+    earlyServer.handleAuthResponse(
+        'candidate-early', earlyCandidate.response, base + 2_999);
+    assert.equal(earlyCandidate.client.authenticated, false);
+    assert.equal(messages(earlyCandidate.ws, 'error').at(-1).code,
+        'device_already_connected');
+    assert.equal(earlyServer.clients.get('old-early'), earlyOld);
+    assert.equal(earlyOldSocket.readyState, WebSocket.OPEN);
+
+    let registryNow = base;
+    let sequence = 0;
+    const boundaryServer = new MouffetteServer({ port: 0, metricLogger: () => {} });
+    boundaryServer.remoteSessions = new RemoteSessionRegistry({
+        leaseTimeoutMs: 3_000,
+        now: () => registryNow,
+        idFactory: () => `runtime-boundary-${++sequence}`,
+    });
+    const boundaryCandidate = addAuthenticationCandidate(
+        boundaryServer, 'candidate-boundary', keyPair, newRuntimeId, base);
+    addAuthenticatedClient(boundaryServer, 'owner-boundary', 'owner-device');
+    const oldSocket = addAuthenticatedClient(
+        boundaryServer, 'old-boundary', boundaryCandidate.deviceId);
+    const oldClient = boundaryServer.clients.get('old-boundary');
+    oldClient.runtimeId = oldRuntimeId;
+    oldClient.lastHeartbeatAt = base;
+    boundaryServer.connectionGenerationByDevice.set(boundaryCandidate.deviceId, 1);
+    const session = boundaryServer.remoteSessions.open({
+        ownerDeviceId: 'owner-device',
+        targetDeviceId: boundaryCandidate.deviceId,
+        ownerRuntimeId: 'runtime-owner',
+        targetRuntimeId: oldRuntimeId,
+        ownerConnectionGeneration: 1,
+        targetConnectionGeneration: 1,
+    }).session;
+
+    registryNow = base + 3_000;
+    boundaryServer.handleAuthResponse(
+        'candidate-boundary', boundaryCandidate.response, registryNow);
+    assert.equal(boundaryCandidate.client.authenticated, true);
+    assert.equal(boundaryCandidate.client.connectionGeneration, 2);
+    assert.equal(boundaryServer.clients.has('old-boundary'), false);
+    assert.equal(oldSocket.readyState, WebSocket.CLOSED);
+    assert.equal(session.phase, 'CleanupPending');
+    assert.equal(session.generation, 1,
+        'a process restart after lease expiry is terminal, never a resume');
+
+    boundaryServer.handleDeviceSnapshot('candidate-boundary', {
+        connectionGeneration: 2,
+        machineName: 'Restarted target', platform: 'test', screens: [],
+        volumePercent: 50,
+    });
+    assert.equal(session.targetConnectionGeneration, 1,
+        'terminal catch-up must not mutate the command-capable session tuple');
+    assert.equal(session.targetRuntimeId, oldRuntimeId);
+    assert.equal(session.targetTerminalConnectionGeneration, 2);
+    assert.equal(session.targetTerminalRuntimeId, newRuntimeId);
+    const catchUp = messages(
+        boundaryCandidate.ws, 'remote_session_terminating').at(-1);
+    assert.equal(catchUp.remoteSessionId, session.remoteSessionId);
+    assert.equal(catchUp.generation, 1);
+    assert.equal(catchUp.targetConnectionGeneration, 2);
+    assert.equal(catchUp.connectionGeneration, 2);
+
+    boundaryServer.handleRemoteSessionTeardownAck('candidate-boundary', {
+        remoteSessionId: session.remoteSessionId,
+        generation: session.generation,
+        connectionGeneration: 2,
+        teardownId: session.teardownId,
+        ...committedCleanup(),
+    });
+    assert.equal(boundaryServer.remoteSessions.get(session.remoteSessionId), null);
+
+    boundaryCandidate.client.connectionGeneration = 3;
+    const closedBeforeReplay = messages(
+        boundaryCandidate.ws, 'remote_session_closed').length;
+    boundaryServer.handleDeviceSnapshot('candidate-boundary', {
+        connectionGeneration: 3,
+        machineName: 'Restarted target again', platform: 'test', screens: [],
+        volumePercent: 50,
+    });
+    assert.equal(messages(boundaryCandidate.ws, 'remote_session_closed').length,
+        closedBeforeReplay + 1,
+        'the cleanup process can recover a lost CLOSED tombstone');
+    const replayedClosed = messages(
+        boundaryCandidate.ws, 'remote_session_closed').at(-1);
+    assert.equal(replayedClosed.replay, true);
+    assert.equal(replayedClosed.targetConnectionGeneration, 3);
+    assert.equal(replayedClosed.connectionGeneration, 3);
+}
+
+// Heartbeat leases also evict authenticated discovery ghosts that do not own
+// any RemoteSession; otherwise a half-open TCP socket can remain listed forever.
+{
+    const server = new MouffetteServer({ port: 0, metricLogger: () => {} });
+    const ghostSocket = addAuthenticatedClient(server, 'ghost-connection', 'ghost-device');
+    const ghost = server.clients.get('ghost-connection');
+    ghost.lastHeartbeatAt = 50_000;
+    assert.equal(server.sweepExpiredClientTransports(52_999), 0);
+    assert.equal(server.clients.get('ghost-connection'), ghost);
+    assert.equal(server.sweepExpiredClientTransports(53_000), 1);
+    assert.equal(server.clients.has('ghost-connection'), false);
+    assert.equal(ghostSocket.readyState, WebSocket.CLOSED);
+}
+
+// Wall-clock corrections affect only the display timestamp. The terminal
+// decision is based on the injected monotonic clock and remains fixed.
+{
+    let monotonic = 10_000;
+    let epoch = 1_000_000;
+    const server = new MouffetteServer({
+        port: 0,
+        metricLogger: () => {},
+        monotonicNow: () => monotonic,
+        epochNow: () => epoch,
+    });
+    addAuthenticatedClient(server, 'clock-owner', 'A');
+    addAuthenticatedClient(server, 'clock-target', 'B');
+    const session = server.remoteSessions.open(binding()).session;
+    server.handleRemoteSessionDeparture(server.clients.get('clock-owner'));
+    assert.equal(session.graceDeadlineAt, 13_000);
+    assert.equal(session.graceDeadlineEpochMs, 1_003_000);
+
+    epoch += 24 * 60 * 60 * 1_000;
+    monotonic = 12_999;
+    server.sweepRemoteSessionLeases();
+    assert.equal(session.phase, 'Grace',
+        'a forward wall-clock jump must not expire the lease early');
+    assert.equal(session.graceDeadlineEpochMs, 1_003_000,
+        'the originally advertised wall deadline is not pushed');
+
+    epoch -= 48 * 60 * 60 * 1_000;
+    monotonic = 13_000;
+    server.sweepRemoteSessionLeases();
+    assert.equal(session.phase, 'CleanupPending',
+        'the exact monotonic boundary stays terminal after a wall-clock rollback');
+}
+
+// Opening against B obeys B's own strict discovery lease. At 2,999 ms the
+// request may bind B; at exactly 3,000 ms B is retired before a session exists.
+{
+    const createOpenServer = () => {
+        let monotonic = 10_000;
+        const server = new MouffetteServer({
+            port: 0,
+            metricLogger: () => {},
+            monotonicNow: () => monotonic,
+            epochNow: () => 1_000_000,
+        });
+        const ownerSocket = addAuthenticatedClient(
+            server, 'open-owner', 'open-A');
+        addAuthenticatedClient(server, 'open-target', 'open-B');
+        const owner = server.clients.get('open-owner');
+        const target = server.clients.get('open-target');
+        owner.lastHeartbeatMonotonicAt = monotonic;
+        target.lastHeartbeatMonotonicAt = monotonic;
+        return {
+            server, ownerSocket, target,
+            setMonotonic(value) { monotonic = value; },
+        };
+    };
+
+    const early = createOpenServer();
+    early.setMonotonic(12_999);
+    early.server.handleRemoteSessionOpen('open-owner', {
+        targetDeviceId: 'open-B', connectionGeneration: 1,
+        requestId: 'open-before-boundary',
+    });
+    assert.equal(early.server.remoteSessions.sessions.size, 1);
+    assert.equal(messages(early.ownerSocket, 'remote_session_opened').length, 1);
+
+    const boundary = createOpenServer();
+    boundary.setMonotonic(13_000);
+    boundary.server.handleRemoteSessionOpen('open-owner', {
+        targetDeviceId: 'open-B', connectionGeneration: 1,
+        requestId: 'open-at-boundary',
+    });
+    assert.equal(boundary.server.remoteSessions.sessions.size, 0);
+    assert.equal(boundary.server.clients.has('open-target'), false);
+    assert.equal(boundary.target.ws.readyState, WebSocket.CLOSED);
+    assert.equal(messages(boundary.ownerSocket, 'error').at(-1).code,
+        'target_offline');
+}
+
+// A healthy B cannot be rebound merely because its previous controller's
+// session reached the lease boundary. The old incoming session becomes
+// CleanupPending synchronously and continues to reserve B until its ACK.
+{
+    let monotonic = 20_000;
+    const server = new MouffetteServer({
+        port: 0,
+        metricLogger: () => {},
+        monotonicNow: () => monotonic,
+        epochNow: () => 2_000_000,
+    });
+    addAuthenticatedClient(server, 'old-owner', 'old-A');
+    const targetSocket = addAuthenticatedClient(server, 'busy-target', 'busy-B');
+    const nextOwnerSocket = addAuthenticatedClient(server, 'next-owner', 'next-C');
+    for (const client of server.clients.values()) {
+        client.lastHeartbeatMonotonicAt = monotonic;
+    }
+    const oldSession = server.remoteSessions.open({
+        ownerDeviceId: 'old-A', targetDeviceId: 'busy-B',
+        ownerRuntimeId: 'runtime-old-A', targetRuntimeId: 'runtime-busy-B',
+        ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
+    }).session;
+
+    monotonic = 23_000;
+    server.clients.get('busy-target').lastHeartbeatMonotonicAt = monotonic;
+    server.clients.get('next-owner').lastHeartbeatMonotonicAt = monotonic;
+    oldSession.lastContact.set('busy-B', monotonic);
+    server.handleRemoteSessionOpen('next-owner', {
+        targetDeviceId: 'busy-B', connectionGeneration: 1,
+        requestId: 'open-after-old-controller-expired',
+    });
+    assert.equal(oldSession.phase, 'CleanupPending');
+    assert.equal(server.remoteSessions.activeIncomingFor('busy-B'), oldSession);
+    assert.equal(server.remoteSessions.outgoingByOwner.has('next-C'), false);
+    assert.equal(messages(nextOwnerSocket, 'error').at(-1).code, 'target_in_use');
+    assert.equal(messages(targetSocket, 'remote_session_terminating').length, 1);
+}
+
+// RemoteSession errors include only safe correlation fields. This lets the
+// client settle a pending Connecting row without treating it as transport loss.
+{
+    const context = serverSessionContext('correlated-error');
+    const controllerSocket = addAuthenticatedClient(
+        context.server, 'controller-connection', 'C');
+
+    context.server.handleRemoteSessionOpen('controller-connection', {
+        targetDeviceId: 'B',
+        connectionGeneration: 1,
+        requestId: 'open-in-use',
+        resumeToken: 'must-not-be-reflected',
+    });
+    const inUse = messages(controllerSocket, 'error').at(-1);
+    assert.equal(inUse.scope, 'remote_session');
+    assert.equal(inUse.code, 'target_in_use');
+    assert.equal(inUse.requestId, 'open-in-use');
+    assert.equal(inUse.targetDeviceId, 'B');
+    assert.equal(typeof inUse.messageId, 'string');
+    assert.equal(Object.hasOwn(inUse, 'resumeToken'), false);
+    assert.equal(Object.hasOwn(inUse, 'teardownId'), false);
+    assert.equal(controllerSocket.readyState, WebSocket.OPEN,
+        'a RemoteSession refusal must not reconnect the healthy transport');
+
+    context.server.handleRemoteSessionOpen('owner-connection', {
+        targetDeviceId: 'offline-device',
+        connectionGeneration: 1,
+        requestId: 'open-offline',
+    });
+    const offline = messages(context.ownerSocket, 'error').at(-1);
+    assert.equal(offline.scope, 'remote_session');
+    assert.equal(offline.code, 'target_offline');
+    assert.equal(offline.requestId, 'open-offline');
+    assert.equal(offline.targetDeviceId, 'offline-device');
+    assert.equal(context.ownerSocket.readyState, WebSocket.OPEN,
+        'an offline target is a scoped request failure, not transport loss');
+
+    context.server.handleRemoteSessionClose('controller-connection', {
+        remoteSessionId: context.session.remoteSessionId,
+        generation: context.session.generation,
+        connectionGeneration: 1,
+        requestId: 'foreign-close',
+    });
+    const forbidden = messages(controllerSocket, 'error').at(-1);
+    assert.equal(forbidden.scope, 'remote_session');
+    assert.equal(forbidden.code, 'not_a_session_party');
+    assert.equal(forbidden.requestId, 'foreign-close');
+    assert.equal(forbidden.remoteSessionId, context.session.remoteSessionId);
+}
+
+// Correlation identifiers are bounded protocol data, not arbitrary reflected
+// strings. Invalid values never cross from one authenticated peer to another.
+{
+    const server = new MouffetteServer({ port: 0, metricLogger: () => {} });
+    const ownerSocket = addAuthenticatedClient(server, 'bounded-owner', 'bounded-A');
+    const targetSocket = addAuthenticatedClient(server, 'bounded-target', 'bounded-B');
+    server.handleRemoteSessionOpen('bounded-owner', {
+        targetDeviceId: 'bounded-B', connectionGeneration: 1,
+        requestId: `secret\n${'x'.repeat(1024)}`,
+    });
+    const opened = messages(ownerSocket, 'remote_session_opened').at(-1);
+    assert.ok(opened);
+    assert.equal(Object.hasOwn(opened, 'requestId'), false);
+    assert.equal(Object.hasOwn(
+        messages(targetSocket, 'remote_session_opened').at(-1), 'requestId'), false);
+
+    const session = server.remoteSessions.get(opened.remoteSessionId);
+    server.handleRemoteSessionClose('bounded-owner', {
+        remoteSessionId: session.remoteSessionId,
+        generation: session.generation,
+        connectionGeneration: 1,
+        requestId: `secret\n${'y'.repeat(1024)}`,
+    });
+    assert.equal(Object.hasOwn(
+        messages(targetSocket, 'remote_session_terminating').at(-1), 'requestId'), false);
+}
+
+// A target has exactly one incoming controller. Refusal never queues or
+// preempts, and cleanup_error keeps the target unavailable until a committed
+// acknowledgement arrives.
+{
+    let clock = 10_000;
+    let sequence = 0;
+    const registry = new RemoteSessionRegistry({
+        leaseTimeoutMs: 3000,
+        now: () => clock,
+        idFactory: () => `exclusive-${++sequence}`,
+    });
+    const first = registry.open(binding('A', 'B'));
+    assert.equal(first.ok, true);
+
+    const refused = registry.open(binding('C', 'B'));
+    assert.equal(refused.error, 'target_in_use');
+    assert.equal(refused.remoteSessionId, first.session.remoteSessionId);
+    assert.equal(registry.outgoingByOwner.has('C'), false,
+        'a refused controller must not enter a hidden queue');
+    assert.equal(registry.activeIncomingFor('B'), first.session,
+        'refusal must not preempt the current controller');
+
+    assert.equal(registry.open(binding('B', 'C')).ok, true,
+        'a target may simultaneously own outgoing sessions');
+
+    const terminating = registry.terminate(first.session.remoteSessionId, 'disconnect', clock);
+    assert.equal(terminating.replay, false);
+    assert.equal(registry.markCleanupPending(first.session.remoteSessionId,
+        terminating.session.teardownId, clock).ok, true);
+    const cleanupError = registry.acknowledgeCleanup(
+        first.session.remoteSessionId, terminating.session.teardownId, 'B', {
+            result: 'cleanup_error',
+            sceneStopped: true,
+            uploadsAborted: true,
+            cacheQuarantined: false,
+            errorCode: 'quarantine_failed',
+        }, clock);
+    assert.equal(cleanupError.ok, false);
+    assert.equal(cleanupError.error, 'cleanup_not_committed');
+    assert.equal(cleanupError.session.phase, 'CleanupPending');
+    assert.equal(cleanupError.session.cleanupError, 'quarantine_failed');
+    assert.equal(registry.activeIncomingFor('B'), first.session,
+        'cleanup_error must retain exclusive occupancy');
+    assert.equal(registry.open(binding('C', 'B')).error, 'target_in_use');
+    assert.equal(registry.outgoingByOwner.has('C'), false,
+        'cleanup failure must not silently queue the refused controller');
+
+    const closed = registry.acknowledgeCleanup(
+        first.session.remoteSessionId, terminating.session.teardownId, 'B',
+        committedCleanup({ removedFileCount: 4 }), clock);
+    assert.equal(closed.ok, true);
+    assert.equal(registry.activeIncomingFor('B'), null);
+    assert.equal(registry.outgoingByOwner.has('C'), false,
+        'freeing B must not auto-start a previously refused request');
+    assert.equal(registry.open(binding('C', 'B')).ok, true,
+        'the second controller must issue a fresh explicit open');
+}
+
+// The client-list projection must not resurrect a terminal session as
+// Connected while the target is still logically occupied by cleanup.
+{
+    const context = serverSessionContext('list-cleanup-state');
+    const observerSocket = addAuthenticatedClient(
+        context.server, 'observer-connection', 'C');
+    const terminating = context.server.remoteSessions.terminate(
+        context.session.remoteSessionId, 'explicit_disconnect');
+    assert.equal(terminating.ok, true);
+    assert.equal(context.server.remoteSessions.markCleanupPending(
+        context.session.remoteSessionId,
+        terminating.session.teardownId).ok, true);
+
+    context.server.sendClientList('owner-connection');
+    const ownerTarget = messages(context.ownerSocket, 'client_list')
+        .at(-1).clients.find(client => client.deviceId === 'B');
+    assert.equal(ownerTarget.remoteSessionState, 'Disconnecting');
+
+    context.server.sendClientList('observer-connection');
+    const observerTarget = messages(observerSocket, 'client_list')
+        .at(-1).clients.find(client => client.deviceId === 'B');
+    assert.equal(observerTarget.remoteSessionState, 'Unavailable');
+}
+
+// Both peers may enter Grace independently. Each must resume from the exact
+// same runtime on a strictly newer transport, and neither resume hides the
+// other peer's fixed deadline.
+{
+    let clock = 20_000;
+    let sequence = 0;
+    const registry = new RemoteSessionRegistry({
+        leaseTimeoutMs: 3000,
+        now: () => clock,
+        idFactory: () => `dual-${++sequence}`,
+    });
+    const opened = registry.open(binding());
+    clock = 21_000;
+    assert.equal(registry.touch(opened.session.remoteSessionId, 'A', 1, clock).ok, true);
+    assert.equal(registry.touch(opened.session.remoteSessionId, 'B', 1, clock).ok, true);
+    clock = 21_001;
+    registry.markDisconnected('A', clock);
+    clock = 21_002;
+    registry.markDisconnected('B', clock);
+    assert.equal(opened.session.phase, 'Grace');
+    assert.deepEqual([...opened.session.graceDevices].sort(), ['A', 'B']);
+    assert.equal(opened.session.graceDeadlineAt, 24_000);
+
+    clock = 23_999;
+    const ownerResume = registry.resume({
+        remoteSessionId: opened.session.remoteSessionId,
+        deviceId: 'A', runtimeId: 'runtime-A',
+        resumeToken: opened.session.resumeToken, generation: 1,
+        connectionGeneration: 2,
+    }, clock);
+    assert.equal(ownerResume.ok, true, '2999ms remains resumable');
+    assert.equal(opened.session.phase, 'Grace');
+    assert.deepEqual([...opened.session.graceDevices], ['B']);
+    assert.equal(registry.resume({
+        remoteSessionId: opened.session.remoteSessionId,
+        deviceId: 'A', runtimeId: 'runtime-A',
+        resumeToken: opened.session.resumeToken, generation: 2,
+        connectionGeneration: 3,
+    }, clock).error, 'party_not_in_grace', 'one party cannot replay resume');
+
+    const targetResume = registry.resume({
+        remoteSessionId: opened.session.remoteSessionId,
+        deviceId: 'B', runtimeId: 'runtime-B',
+        resumeToken: opened.session.resumeToken, generation: 1,
+        connectionGeneration: 2,
+    }, clock);
+    assert.equal(targetResume.ok, true);
+    assert.equal(opened.session.phase, 'Active');
+    assert.equal(opened.session.graceDeadlineAt, null);
+    assert.equal(opened.session.generation, 3);
+    assert.equal(registry.touch(opened.session.remoteSessionId, 'A', 1, clock).error,
+        'stale_connection_generation');
+    assert.equal(registry.markGenerationDelivered(
+        opened.session.remoteSessionId, 'A', 3), true);
+    registry.markDisconnected('A', clock);
+    assert.equal(registry.resume({
+        remoteSessionId: opened.session.remoteSessionId,
+        deviceId: 'A', runtimeId: 'runtime-A',
+        resumeToken: opened.session.resumeToken, generation: 2,
+        connectionGeneration: 3,
+    }, clock).error, 'stale_remote_session_generation',
+    'a synchronized role cannot roll its RemoteSession generation back');
+    assert.equal(registry.resume({
+        remoteSessionId: opened.session.remoteSessionId,
+        deviceId: 'A', runtimeId: 'runtime-A',
+        resumeToken: opened.session.resumeToken, generation: 3,
+        connectionGeneration: 3,
+    }, clock).ok, true);
+}
+
+// Resume proof is bound to both the installation role and runtime. At the
+// exact lease boundary it is terminal and returns a transition for the server
+// to dispatch teardown exactly once.
+{
+    let clock = 30_000;
+    let sequence = 0;
+    const registry = new RemoteSessionRegistry({
+        leaseTimeoutMs: 3000,
+        now: () => clock,
+        idFactory: () => `resume-${++sequence}`,
+    });
+    const opened = registry.open(binding());
+    clock = 32_999;
+    registry.markDisconnected('A', clock);
+    const fixedDeadline = opened.session.graceDeadlineAt;
+    assert.equal(registry.touch(opened.session.remoteSessionId, 'A', 1, clock).error,
+        'resume_required', 'buffered heartbeats cannot substitute for signed resume');
+    assert.equal(opened.session.graceDeadlineAt, fixedDeadline,
+        'late activity must never push the Grace deadline');
+    assert.equal(registry.resume({
+        remoteSessionId: opened.session.remoteSessionId,
+        deviceId: 'A', runtimeId: 'new-process',
+        resumeToken: opened.session.resumeToken, generation: 1,
+        connectionGeneration: 2,
+    }, clock).error, 'invalid_resume_proof');
+    assert.equal(registry.resume({
+        remoteSessionId: opened.session.remoteSessionId,
+        deviceId: 'A', runtimeId: 'runtime-A',
+        resumeToken: 'wrong-token', generation: 1, connectionGeneration: 2,
+    }, clock).error, 'invalid_resume_proof');
+    assert.equal(registry.resume({
+        remoteSessionId: opened.session.remoteSessionId,
+        deviceId: 'A', runtimeId: 'runtime-A',
+        resumeToken: opened.session.resumeToken, generation: 1,
+        connectionGeneration: 1,
+    }, clock).error, 'stale_connection_generation');
+
+    clock = 33_000;
+    const expiredResume = registry.resume({
+        remoteSessionId: opened.session.remoteSessionId,
+        deviceId: 'A', runtimeId: 'runtime-A',
+        resumeToken: opened.session.resumeToken, generation: 1,
+        connectionGeneration: 2,
+    }, clock);
+    assert.equal(expiredResume.error, 'lease_expired');
+    assert.equal(expiredResume.terminalTransition, true);
+    assert.equal(opened.session.phase, 'Terminating');
+    const teardownId = opened.session.teardownId;
+    const repeated = registry.terminate(opened.session.remoteSessionId,
+        'another_reason', clock);
+    assert.equal(repeated.replay, true);
+    assert.equal(repeated.session.teardownId, teardownId,
+        'a terminal retry must reuse the same teardown transaction');
+    assert.equal(sequence, 3,
+        'session id, resume token and exactly one teardown id are generated');
+    assert.equal(registry.tick(clock).length, 0,
+        'a terminal transition must never be emitted twice by tick');
+}
+
+// A socket can remain open while its event loop/heartbeat is frozen. A late
+// heartbeat at 2999ms is still accepted; at >=3000ms it cannot restore Active.
+{
+    let clock = 50_000;
+    let sequence = 0;
+    const registry = new RemoteSessionRegistry({
+        leaseTimeoutMs: 3000,
+        now: () => clock,
+        idFactory: () => `freeze-${++sequence}`,
+    });
+    const opened = registry.open(binding());
+    clock = 51_499;
+    assert.equal(registry.markDegraded(clock, 1500).length, 0);
+    clock = 51_500;
+    assert.equal(registry.markDegraded(clock, 1500).length, 2,
+        'both silent peers become degraded at 1500ms');
+    assert.equal(registry.touch(opened.session.remoteSessionId, 'B', 1, clock).ok, true);
+    clock = 52_999;
+    assert.equal(registry.tick(clock).length, 0,
+        'an open but frozen socket remains recoverable at 2999ms');
+    clock = 53_000;
+    const lateHeartbeat = registry.touch(
+        opened.session.remoteSessionId, 'A', 1, clock);
+    assert.equal(lateHeartbeat.error, 'lease_expired');
+    assert.equal(lateHeartbeat.terminalTransition, true);
+    assert.equal(opened.session.phase, 'Terminating');
+    assert.equal(opened.session.lastContact.get('A'), 50_000,
+        'the terminal heartbeat must not advance lastContact');
+    assert.equal(registry.touch(opened.session.remoteSessionId, 'A', 1, clock).error,
+        'session_terminal');
+    assert.equal(registry.tick(clock).length, 0);
+}
+
+// When both peers vanish and do not resume, the earliest strict contact lease
+// closes the shared session exactly once.
+{
+    let clock = 60_000;
+    let sequence = 0;
+    const registry = new RemoteSessionRegistry({
+        leaseTimeoutMs: 3000,
+        now: () => clock,
+        idFactory: () => `offline-${++sequence}`,
+    });
+    const opened = registry.open(binding());
+    registry.markDisconnected('A', clock);
+    registry.markDisconnected('B', clock);
+    clock = 62_999;
+    assert.equal(registry.tick(clock).length, 0);
+    clock = 63_000;
+    const expired = registry.tick(clock);
+    assert.equal(expired.length, 1);
+    assert.equal(expired[0].remoteSessionId, opened.session.remoteSessionId);
+    const teardownId = expired[0].teardownId;
+    assert.equal(registry.tick(clock).length, 0);
+    assert.equal(registry.markDisconnected('A', clock).length, 0);
+    assert.equal(opened.session.teardownId, teardownId);
+}
+
+// Lost acknowledgements, duplicates, and late messages replay the committed
+// tombstone without reopening the session or freeing a different target.
+{
+    let clock = 70_000;
+    let sequence = 0;
+    const registry = new RemoteSessionRegistry({
+        leaseTimeoutMs: 3000,
+        now: () => clock,
+        idFactory: () => `ack-${++sequence}`,
+    });
+    const opened = registry.open(binding());
+    assert.equal(registry.markCleanupPending(
+        opened.session.remoteSessionId, null, clock).error, 'invalid_teardown');
+    assert.equal(registry.acknowledgeCleanup(
+        opened.session.remoteSessionId, undefined, 'B', committedCleanup(), clock).error,
+    'invalid_teardown_ack', 'an ACK cannot close an Active session');
+    const firstTermination = registry.terminate(
+        opened.session.remoteSessionId, 'explicit_disconnect', clock);
+    const duplicateTermination = registry.terminate(
+        opened.session.remoteSessionId, 'late_duplicate', clock);
+    assert.equal(firstTermination.replay, false);
+    assert.equal(duplicateTermination.replay, true);
+    assert.equal(duplicateTermination.session.teardownId,
+        firstTermination.session.teardownId);
+    assert.equal(registry.markCleanupPending(
+        opened.session.remoteSessionId, firstTermination.session.teardownId, clock).ok, true);
+
+    const result = committedCleanup({ removedFileCount: 9, quarantinedBytes: 1234 });
+    const committed = registry.acknowledgeCleanup(
+        opened.session.remoteSessionId, firstTermination.session.teardownId,
+        'B', result, clock);
+    assert.equal(committed.ok, true);
+    assert.equal(committed.replay, false);
+    assert.equal(registry.activeIncomingFor('B'), null);
+
+    // Simulate the server->client CLOSED response being lost: the target sends
+    // the same commit ACK again and receives the same tombstone result.
+    const retry = registry.acknowledgeCleanup(
+        opened.session.remoteSessionId, firstTermination.session.teardownId,
+        'B', result, clock);
+    assert.equal(retry.ok, true);
+    assert.equal(retry.replay, true);
+    assert.equal(retry.session.teardownId, firstTermination.session.teardownId);
+    assert.equal(registry.acknowledgeCleanup(
+        opened.session.remoteSessionId, firstTermination.session.teardownId,
+        'A', result, clock).ok, false, 'the owner cannot forge a target ACK');
+    assert.equal(registry.acknowledgeCleanup(
+        opened.session.remoteSessionId, firstTermination.session.teardownId,
+        'B', { ...result, cacheQuarantined: false }, clock).ok, false,
+    'a malformed duplicate cannot replay success');
+    assert.equal(registry.acknowledgeCleanup(
+        opened.session.remoteSessionId, 'obsolete-teardown', 'B', result, clock).ok, false);
+    assert.equal(registry.touch(opened.session.remoteSessionId, 'A', 1, clock).error,
+        'session_terminal');
+    assert.equal(registry.resume({
+        remoteSessionId: opened.session.remoteSessionId,
+        deviceId: 'A', runtimeId: 'runtime-A',
+        resumeToken: opened.session.resumeToken, generation: 1,
+        connectionGeneration: 2,
+    }, clock).error, 'session_not_resumable');
+    assert.equal(registry.terminate(opened.session.remoteSessionId,
+        'late_close', clock).replay, true);
+}
+
+// Grace does not mask a second peer whose still-open socket stopped sending
+// heartbeats earlier. The earliest per-party lastContact deadline wins.
+{
+    let clock = 90_000;
+    let sequence = 0;
+    const registry = new RemoteSessionRegistry({
+        leaseTimeoutMs: 3000,
+        now: () => clock,
+        idFactory: () => `mixed-freeze-${++sequence}`,
+    });
+    const opened = registry.open(binding());
+    clock = 92_000;
+    assert.equal(registry.touch(opened.session.remoteSessionId, 'A', 1, clock).ok, true);
+    registry.markDisconnected('A', clock);
+    assert.equal(opened.session.graceDeadlineAt, 95_000);
+    clock = 93_000;
+    const expired = registry.tick(clock);
+    assert.equal(expired.length, 1,
+        'B last contacted at 90000 and expires before A Grace deadline');
+    assert.equal(expired[0].teardownReason, 'lease_expired');
+}
+
+// Server integration: a heartbeat received at/after its strict deadline
+// dispatches teardown once. Subsequent late heartbeats see CleanupPending and
+// cannot execute the teardown side effects again.
+{
+    const context = serverSessionContext('server-heartbeat');
+    const now = Date.now();
+    context.session.lastContact.set('A', now - 3000);
+    context.session.lastContact.set('B', now);
+
+    context.server.handleHeartbeat('owner-connection', {
+        connectionGeneration: 1,
+        sequence: 1,
+        clientMonotonicMs: 10,
+    });
+    assert.equal(context.session.phase, 'CleanupPending');
+    assert.equal(context.beginAttempts(), 1);
+    assert.equal(context.beginCommits(), 1);
+    assert.equal(context.session.teardownDispatchStarted, true);
+
+    context.server.handleHeartbeat('owner-connection', {
+        connectionGeneration: 1,
+        sequence: 2,
+        clientMonotonicMs: 11,
+    });
+    assert.equal(context.beginAttempts(), 1,
+        'late heartbeat retries must not call beginRemoteSessionTeardown again');
+    assert.equal(context.beginCommits(), 1);
+    assert.equal(messages(context.ownerSocket, 'heartbeat_ack').length, 2,
+        'the authenticated transport itself remains usable after session expiry');
+}
+
+// Server integration: an exact-boundary resume failure follows the same
+// one-shot teardown path. A repeated same-process resume catches up the
+// terminal state on the replacement transport without re-running teardown.
+{
+    const context = serverSessionContext('server-resume');
+    const now = Date.now();
+    context.session.phase = 'Grace';
+    context.session.graceDevices.add('A');
+    context.session.graceDeadlineAt = now;
+    context.session.lastContact.set('A', now - 3000);
+    context.session.lastContact.set('B', now);
+    context.server.clients.get('owner-connection').connectionGeneration = 2;
+
+    const resumeMessage = {
+        remoteSessionId: context.session.remoteSessionId,
+        generation: context.session.generation,
+        resumeToken: context.session.resumeToken,
+    };
+    context.server.handleRemoteSessionResume('owner-connection', resumeMessage);
+    assert.equal(context.session.phase, 'CleanupPending');
+    assert.equal(context.beginAttempts(), 1);
+    assert.equal(context.beginCommits(), 1);
+    assert.equal(messages(context.ownerSocket, 'error').at(-1).code, 'lease_expired');
+
+    context.server.handleRemoteSessionResume('owner-connection', resumeMessage);
+    assert.equal(context.beginAttempts(), 1);
+    const catchUp = messages(
+        context.ownerSocket, 'remote_session_terminating').at(-1);
+    assert.equal(catchUp.replay, true);
+    assert.equal(catchUp.ownerConnectionGeneration, 2);
+    assert.equal(catchUp.targetConnectionGeneration, 1);
+    assert.equal(catchUp.connectionGeneration, 2);
+    assert.equal(messages(context.ownerSocket, 'error').length, 1,
+        'terminal catch-up replaces a misleading session_not_resumable error');
+}
+
+// A live server resume accepts exactly the generation last delivered to that
+// role, then advances both roles that receive the resumed state. A later
+// transport cannot roll that synchronized generation back.
+{
+    const context = serverSessionContext('server-generation-resume');
+    context.server.remoteSessions.markDisconnected('A');
+    const ownerClient = context.server.clients.get('owner-connection');
+    ownerClient.connectionGeneration = 2;
+    const baseResume = {
+        remoteSessionId: context.session.remoteSessionId,
+        resumeToken: context.session.resumeToken,
+    };
+    context.server.handleRemoteSessionResume('owner-connection', {
+        ...baseResume,
+        generation: 2,
+    });
+    assert.equal(messages(context.ownerSocket, 'error').at(-1).code,
+        'stale_remote_session_generation');
+    assert.equal(context.session.phase, 'Grace');
+
+    context.server.handleRemoteSessionResume('owner-connection', {
+        ...baseResume,
+        generation: 1,
+    });
+    assert.equal(context.session.phase, 'Active');
+    assert.equal(context.session.generation, 2);
+    assert.equal(context.session.ownerKnownGeneration, 2);
+    assert.equal(context.session.targetKnownGeneration, 2,
+        'the connected peer advances only after resumed state delivery');
+    assert.equal(messages(context.targetSocket, 'remote_session_resumed').length, 1);
+
+    context.server.remoteSessions.markDisconnected('A');
+    ownerClient.connectionGeneration = 3;
+    context.server.handleRemoteSessionResume('owner-connection', {
+        ...baseResume,
+        generation: 1,
+    });
+    assert.equal(messages(context.ownerSocket, 'error').at(-1).code,
+        'stale_remote_session_generation');
+    assert.equal(context.session.phase, 'Grace');
+}
+
+// Explicit close, lost CLOSED delivery, duplicate close, and duplicate cleanup
+// ACK all replay protocol results while the destructive teardown body runs once.
+{
+    const context = serverSessionContext('server-close');
+    const closeMessage = {
+        remoteSessionId: context.session.remoteSessionId,
+        generation: context.session.generation,
+        connectionGeneration: 1,
+        requestId: 'close-request',
+    };
+    context.server.handleRemoteSessionClose('owner-connection', closeMessage);
+    assert.equal(context.beginAttempts(), 1);
+    assert.equal(context.beginCommits(), 1);
+    const teardownId = context.session.teardownId;
+
+    context.server.handleRemoteSessionClose('owner-connection', closeMessage);
+    assert.equal(context.beginAttempts(), 1);
+    assert.equal(context.beginCommits(), 1);
+    assert.equal(messages(context.ownerSocket, 'remote_session_terminating').at(-1).replay,
+        true);
+
+    const ackMessage = {
+        remoteSessionId: context.session.remoteSessionId,
+        generation: context.session.generation,
+        connectionGeneration: 1,
+        teardownId,
+        ...committedCleanup({ quarantinedBytes: 42 }),
+    };
+    context.server.handleRemoteSessionTeardownAck('target-connection', ackMessage);
+    assert.equal(context.server.remoteSessions.get(context.session.remoteSessionId), null);
+    assert.equal(messages(context.ownerSocket, 'remote_session_closed').length, 1);
+
+    // Treat the first CLOSED response as lost and retry both possible source
+    // messages. Neither path re-enters teardown or mutates a new session.
+    context.server.handleRemoteSessionTeardownAck('target-connection', ackMessage);
+    assert.equal(messages(context.ownerSocket, 'remote_session_closed').length, 2);
+    assert.equal(messages(context.ownerSocket, 'remote_session_closed').at(-1).cleanupState,
+        'confirmed');
+    context.server.handleRemoteSessionClose('owner-connection', closeMessage);
+    assert.equal(messages(context.ownerSocket, 'remote_session_closed').length, 3);
+    assert.equal(messages(context.ownerSocket, 'remote_session_closed').at(-1).replay, true);
+    assert.equal(context.beginAttempts(), 1);
+
+    context.server.handleRemoteSessionTeardownAck('target-connection', {
+        ...ackMessage,
+        generation: ackMessage.generation + 1,
+        requestId: 'stale-cleanup-ack',
+    });
+    const staleAck = messages(context.targetSocket, 'error').at(-1);
+    assert.equal(staleAck.scope, 'remote_session');
+    assert.equal(staleAck.code, 'stale_remote_session_generation');
+    assert.equal(staleAck.requestId, 'stale-cleanup-ack');
+    assert.equal(staleAck.remoteSessionId, context.session.remoteSessionId);
+    assert.equal(Object.hasOwn(staleAck, 'resumeToken'), false);
+}
+
+// Both roles can recover terminal delivery after a same-process transport
+// replacement. Each recipient gets its current top-level/local-role transport
+// generation, while the immutable command tuple and peer generation remain
+// unchanged. CLOSED tombstones replay the same way without resurrection.
+{
+    const context = serverSessionContext('terminal-catch-up');
+    context.server.handleRemoteSessionClose('owner-connection', {
+        remoteSessionId: context.session.remoteSessionId,
+        generation: 1,
+        connectionGeneration: 1,
+        requestId: 'terminal-catch-up-close',
+    });
+    const teardownId = context.session.teardownId;
+
+    const ownerClient = context.server.clients.get('owner-connection');
+    ownerClient.connectionGeneration = 2;
+    context.server.handleDeviceSnapshot('owner-connection', {
+        connectionGeneration: 2,
+        machineName: 'Owner rebound', platform: 'test', screens: [],
+        volumePercent: 50,
+    });
+    const ownerTerminal = messages(
+        context.ownerSocket, 'remote_session_terminating').at(-1);
+    assert.equal(ownerTerminal.replay, true);
+    assert.equal(ownerTerminal.connectionGeneration, 2);
+    assert.equal(ownerTerminal.ownerConnectionGeneration, 2);
+    assert.equal(ownerTerminal.targetConnectionGeneration, 1);
+    assert.equal(context.session.ownerConnectionGeneration, 1);
+
+    const targetClient = context.server.clients.get('target-connection');
+    targetClient.connectionGeneration = 2;
+    context.server.handleDeviceSnapshot('target-connection', {
+        connectionGeneration: 2,
+        machineName: 'Target rebound', platform: 'test', screens: [],
+        volumePercent: 50,
+    });
+    const targetTerminal = messages(
+        context.targetSocket, 'remote_session_terminating').at(-1);
+    assert.equal(targetTerminal.replay, true);
+    assert.equal(targetTerminal.connectionGeneration, 2);
+    assert.equal(targetTerminal.ownerConnectionGeneration, 1);
+    assert.equal(targetTerminal.targetConnectionGeneration, 2);
+    assert.equal(context.session.targetConnectionGeneration, 1);
+
+    context.server.handleRemoteSessionTeardownAck('target-connection', {
+        remoteSessionId: context.session.remoteSessionId,
+        generation: 1,
+        connectionGeneration: 2,
+        teardownId,
+        ...committedCleanup(),
+    });
+    const ownerClosed = messages(
+        context.ownerSocket, 'remote_session_closed').at(-1);
+    const targetClosed = messages(
+        context.targetSocket, 'remote_session_closed').at(-1);
+    assert.equal(ownerClosed.connectionGeneration, 2);
+    assert.equal(ownerClosed.ownerConnectionGeneration, 2);
+    assert.equal(ownerClosed.targetConnectionGeneration, 1);
+    assert.equal(targetClosed.connectionGeneration, 2);
+    assert.equal(targetClosed.ownerConnectionGeneration, 1);
+    assert.equal(targetClosed.targetConnectionGeneration, 2);
+
+    ownerClient.connectionGeneration = 3;
+    const closedCount = messages(context.ownerSocket, 'remote_session_closed').length;
+    context.server.handleDeviceSnapshot('owner-connection', {
+        connectionGeneration: 3,
+        machineName: 'Owner rebound again', platform: 'test', screens: [],
+        volumePercent: 50,
+    });
+    assert.equal(messages(context.ownerSocket, 'remote_session_closed').length,
+        closedCount + 1);
+    const replayedClosed = messages(
+        context.ownerSocket, 'remote_session_closed').at(-1);
+    assert.equal(replayedClosed.replay, true);
+    assert.equal(replayedClosed.connectionGeneration, 3);
+    assert.equal(replayedClosed.ownerConnectionGeneration, 3);
+    assert.equal(replayedClosed.targetConnectionGeneration, 1);
+
+    ownerClient.runtimeId = 'different-owner-process';
+    ownerClient.connectionGeneration = 4;
+    const terminalCountBeforeForeignRuntime = messages(
+        context.ownerSocket, 'remote_session_terminating').length;
+    const closedCountBeforeForeignRuntime = messages(
+        context.ownerSocket, 'remote_session_closed').length;
+    context.server.handleDeviceSnapshot('owner-connection', {
+        connectionGeneration: 4,
+        machineName: 'Different owner process', platform: 'test', screens: [],
+        volumePercent: 50,
+    });
+    assert.equal(messages(context.ownerSocket, 'remote_session_terminating').length,
+        terminalCountBeforeForeignRuntime);
+    assert.equal(messages(context.ownerSocket, 'remote_session_closed').length,
+        closedCountBeforeForeignRuntime);
+}
+
+// Terminal frames are runtime-scoped even outside the explicit replay path,
+// and a RESUME may only catch up the exact requested session rather than hide
+// an error behind an unrelated terminal session owned by the same device.
+{
+    const context = serverSessionContext('terminal-runtime-scope');
+    const owner = context.server.clients.get('owner-connection');
+    owner.runtimeId = 'different-owner-process';
+    owner.connectionGeneration = 2;
+    const terminal = context.server.remoteSessions.terminate(
+        context.session.remoteSessionId, 'lease_expired');
+    context.server.beginRemoteSessionTeardown(terminal.session);
+    assert.equal(messages(context.ownerSocket, 'remote_session_terminating').length, 0,
+        'a replacement owner process must not receive the prior runtime terminal state');
+    assert.equal(messages(context.targetSocket, 'remote_session_terminating').length, 1);
+
+    context.server.handleRemoteSessionResume('owner-connection', {
+        remoteSessionId: 'some-other-session',
+        generation: 1,
+        resumeToken: context.session.resumeToken,
+    });
+    assert.equal(messages(context.ownerSocket, 'remote_session_terminating').length, 0,
+        'an unrelated terminal session must not satisfy catch-up');
+    assert.equal(messages(context.ownerSocket, 'error').at(-1).code,
+        'session_not_resumable');
+}
+
+// Either authenticated party may initiate a clean shutdown. The target can
+// therefore close its incoming session, while a third device remains unable
+// to terminate it and caller-provided reasons cannot escape the safe set.
+{
+    const context = serverSessionContext('target-clean-close');
+    const attackerSocket = addAuthenticatedClient(
+        context.server, 'attacker-connection', 'C');
+    const close = {
+        remoteSessionId: context.session.remoteSessionId,
+        generation: context.session.generation,
+        connectionGeneration: 1,
+        requestId: 'target-clean-quit',
+        reason: 'clean_shutdown',
+    };
+    context.server.handleRemoteSessionClose('target-connection', {
+        ...close,
+        generation: close.generation + 1,
+        requestId: 'target-stale-close',
+    });
+    assert.equal(messages(context.targetSocket, 'error').at(-1).code,
+        'stale_remote_session_generation');
+    assert.equal(context.session.phase, 'Active');
+    assert.equal(context.beginAttempts(), 0);
+
+    context.server.handleRemoteSessionClose('target-connection', close);
+    assert.equal(context.session.phase, 'CleanupPending');
+    assert.equal(context.session.teardownReason, 'clean_shutdown');
+    assert.equal(context.beginAttempts(), 1);
+    assert.equal(context.beginCommits(), 1);
+
+    context.server.handleRemoteSessionClose('target-connection', {
+        ...close,
+        requestId: 'target-clean-quit-retry',
+        reason: 'untrusted-reason',
+    });
+    assert.equal(context.session.teardownReason, 'clean_shutdown',
+        'a retry cannot replace the first terminal reason');
+    assert.equal(context.beginAttempts(), 1);
+
+    context.server.handleRemoteSessionClose('attacker-connection', close);
+    assert.equal(messages(attackerSocket, 'error').at(-1).code,
+        'not_a_session_party');
+    assert.equal(context.beginAttempts(), 1);
+
+    context.server.handleRemoteSessionTeardownAck('target-connection', {
+        remoteSessionId: context.session.remoteSessionId,
+        generation: context.session.generation,
+        connectionGeneration: 1,
+        teardownId: context.session.teardownId,
+        ...committedCleanup(),
+    });
+    assert.equal(context.server.remoteSessions.get(context.session.remoteSessionId), null);
+    context.server.handleRemoteSessionClose('target-connection', close);
+    assert.equal(messages(context.targetSocket, 'remote_session_closed').at(-1).replay,
+        true, 'the target party can replay its clean close tombstone');
+    assert.equal(context.beginAttempts(), 1);
+}
+
+{
+    const context = serverSessionContext('target-peer-close');
+    context.server.handleRemoteSessionClose('target-connection', {
+        remoteSessionId: context.session.remoteSessionId,
+        generation: context.session.generation,
+        connectionGeneration: 1,
+        reason: 'arbitrary-client-text',
+    });
+    assert.equal(context.session.teardownReason, 'peer_close');
+}
+
+// A server restart creates a fresh registry. Even if device/runtime/token
+// values are replayed verbatim, no session from the previous boot exists.
+{
+    let clock = 80_000;
+    let sequence = 0;
+    const firstBoot = new RemoteSessionRegistry({
+        leaseTimeoutMs: 3000,
+        now: () => clock,
+        idFactory: () => `boot-one-${++sequence}`,
+    });
+    const opened = firstBoot.open(binding());
+    firstBoot.markDisconnected('A', clock);
+
+    const secondBoot = new RemoteSessionRegistry({
+        leaseTimeoutMs: 3000,
+        now: () => clock,
+        idFactory: () => `boot-two-${++sequence}`,
+    });
+    const replay = secondBoot.resume({
+        remoteSessionId: opened.session.remoteSessionId,
+        deviceId: 'A', runtimeId: 'runtime-A',
+        resumeToken: opened.session.resumeToken, generation: 1,
+        connectionGeneration: 2,
+    }, clock);
+    assert.equal(replay.error, 'session_not_resumable');
+    assert.equal(secondBoot.sessions.size, 0);
+    assert.equal(secondBoot.incomingByTarget.size, 0);
+}
+
+console.log('remote session protocol tests passed');

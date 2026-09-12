@@ -24,6 +24,11 @@ public:
     
     // Remove a media item from watching (called when item is deleted)
     void unwatchMediaItem(ResizableMediaBase* mediaItem);
+
+    // Returns the canonical path captured while the source still existed.
+    // This remains usable in the deletion callback, where QFileInfo can no
+    // longer resolve a symlink target.
+    QString watchedFilePath(ResizableMediaBase* mediaItem) const;
     
     // Clear all watched items
     void clearAll();
@@ -59,6 +64,12 @@ private:
     
     // Set of files that need to be checked
     QSet<QString> m_filesToCheck;
+
+    // A direct QFileSystemWatcher::fileChanged signal means the source's
+    // identity may have changed even when the path is still readable (for
+    // example an in-place overwrite). Such a source must be invalidated, not
+    // treated as a harmless directory notification.
+    QSet<QString> m_directlyChangedFiles;
 };
 
 #endif // FILEWATCHER_H

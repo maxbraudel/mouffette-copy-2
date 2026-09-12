@@ -48,7 +48,6 @@ public:
 
     // Upload management
     void updateUploadButtonForSession(void* session);
-    void unloadUploadsForSession(void* session, bool attemptRemote);
     void clearUploadTracking(void* session);
     void* sessionForActiveUpload();
     void* sessionForUploadId(const QString& uploadId);

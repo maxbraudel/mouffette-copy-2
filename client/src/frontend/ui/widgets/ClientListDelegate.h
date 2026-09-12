@@ -3,6 +3,16 @@
 
 #include <QStyledItemDelegate>
 
+namespace ClientListRoles {
+enum Role {
+    ClientId = Qt::UserRole,
+    IsClientRow = Qt::UserRole + 20,
+    PrimaryText,
+    AvailabilityStatus,
+    SecondaryText
+};
+}
+
 /**
  * @brief Custom delegate for client list that draws separators between items
  * 
@@ -18,6 +28,8 @@ public:
     
     void paint(QPainter* painter, const QStyleOptionViewItem& option, 
                const QModelIndex& index) const override;
+    QSize sizeHint(const QStyleOptionViewItem& option,
+                   const QModelIndex& index) const override;
 };
 
 #endif // CLIENTLISTDELEGATE_H

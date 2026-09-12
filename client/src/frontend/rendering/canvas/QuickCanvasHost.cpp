@@ -2,7 +2,13 @@
 
 #include "frontend/rendering/canvas/LegacySceneMirror.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
+#include "frontend/rendering/canvas/ScreenCanvas.h"
 #include "backend/domain/media/MediaItems.h"
+
+#include <QQuickWidget>
+#include <QQuickWindow>
+#include <QPointer>
+#include <QWindow>
 
 QuickCanvasHost::QuickCanvasHost(QuickCanvasController* controller, LegacySceneMirror* legacyMirror, QObject* parent)
     : ICanvasHost(parent)
@@ -47,14 +53,94 @@ QuickCanvasHost::QuickCanvasHost(QuickCanvasController* controller, LegacySceneM
                 }
             });
 
+    if (ScreenCanvas* canvas = m_legacyMirror->mediaCanvas()) {
+        connect(canvas, &ScreenCanvas::localScenePresentationRequested,
+                this, &QuickCanvasHost::beginLocalScenePresentationBarrier);
+    }
+
     m_controller->setTextToolActive(m_legacyMirror->isTextToolActive());
 }
 
 QuickCanvasHost::~QuickCanvasHost() {
+    cancelLocalScenePresentationBarrier();
     if (m_controller) {
         delete m_controller;
         m_controller = nullptr;
     }
+}
+
+void QuickCanvasHost::beginLocalScenePresentationBarrier(
+    quint64 presentationGeneration)
+{
+    cancelLocalScenePresentationBarrier();
+    if (!m_controller || !m_legacyMirror || !m_legacyMirror->mediaCanvas()) {
+        return;
+    }
+
+    auto* quickWidget = qobject_cast<QQuickWidget*>(m_controller->widget());
+    QQuickWindow* renderWindow = quickWidget ? quickWidget->quickWindow() : nullptr;
+    QWidget* topLevelWindow = quickWidget ? quickWidget->window() : nullptr;
+    QWindow* nativeWindow = topLevelWindow ? topLevelWindow->windowHandle() : nullptr;
+    if (!quickWidget || !renderWindow || quickWidget->status() != QQuickWidget::Ready
+        || !quickWidget->rootObject() || !quickWidget->isVisible()
+        || !topLevelWindow || !topLevelWindow->isVisible()
+        || topLevelWindow->isMinimized() || !nativeWindow
+        || !nativeWindow->isExposed()) {
+        // No optimistic fallback: the server's one-second STARTED deadline
+        // will fail the run closed if the visible renderer cannot present.
+        return;
+    }
+
+    m_localScenePresentationGeneration = presentationGeneration;
+    // The scene-store projection may itself be queued. Requiring two complete
+    // Quick render passes prevents an already-in-flight pre-activation frame
+    // from satisfying the protocol acknowledgement.
+    m_localScenePresentationFramesRemaining = 2;
+    const QPointer<QQuickWidget> guardedQuickWidget(quickWidget);
+    const QPointer<QQuickWindow> guardedRenderWindow(renderWindow);
+    const QPointer<QWidget> guardedTopLevelWindow(topLevelWindow);
+    const QPointer<QWindow> guardedNativeWindow(nativeWindow);
+    m_localScenePresentationConnection = QObject::connect(
+        renderWindow, &QQuickWindow::frameSwapped, this,
+        [this, guardedQuickWidget, guardedRenderWindow,
+         guardedTopLevelWindow, guardedNativeWindow,
+         presentationGeneration]() {
+            if (presentationGeneration != m_localScenePresentationGeneration
+                || m_localScenePresentationFramesRemaining <= 0
+                || !guardedQuickWidget || !guardedRenderWindow
+                || !guardedTopLevelWindow || !guardedNativeWindow
+                || !guardedQuickWidget->isVisible()
+                || !guardedTopLevelWindow->isVisible()
+                || guardedTopLevelWindow->isMinimized()
+                || !guardedNativeWindow->isExposed()) {
+                return;
+            }
+            --m_localScenePresentationFramesRemaining;
+            if (m_localScenePresentationFramesRemaining > 0) {
+                if (guardedQuickWidget) guardedQuickWidget->update();
+                if (guardedRenderWindow) guardedRenderWindow->update();
+                return;
+            }
+
+            ScreenCanvas* canvas = m_legacyMirror
+                ? m_legacyMirror->mediaCanvas() : nullptr;
+            cancelLocalScenePresentationBarrier();
+            if (canvas) {
+                canvas->acknowledgeLocalSceneFramePresented(
+                    presentationGeneration);
+            }
+        }, Qt::QueuedConnection);
+
+    quickWidget->update();
+    renderWindow->update();
+}
+
+void QuickCanvasHost::cancelLocalScenePresentationBarrier()
+{
+    QObject::disconnect(m_localScenePresentationConnection);
+    m_localScenePresentationConnection = {};
+    m_localScenePresentationGeneration = 0;
+    m_localScenePresentationFramesRemaining = 0;
 }
 
 QuickCanvasHost* QuickCanvasHost::create(QWidget* parentWidget, LegacySceneMirror* legacyMirror, QString* errorMessage) {
@@ -212,6 +298,33 @@ void QuickCanvasHost::handleRemoteConnectionLost() {
     }
     if (m_controller) {
         m_controller->setShellActive(false);
+    }
+}
+
+void QuickCanvasHost::stopScenesForSourceInvalidation() {
+    if (m_legacyMirror && m_legacyMirror->mediaCanvas()) {
+        m_legacyMirror->mediaCanvas()->stopScenesForSourceInvalidation();
+    }
+}
+
+QJsonObject QuickCanvasHost::serializeProjectState() const {
+    return m_legacyMirror && m_legacyMirror->mediaCanvas()
+        ? m_legacyMirror->mediaCanvas()->serializeProjectState()
+        : QJsonObject();
+}
+
+bool QuickCanvasHost::restoreProjectState(
+    const QJsonObject& state,
+    const QHash<QString, QString>& sourcePathByMediaId,
+    QStringList* skippedMediaIds) {
+    return m_legacyMirror && m_legacyMirror->mediaCanvas()
+        && m_legacyMirror->mediaCanvas()->restoreProjectState(
+            state, sourcePathByMediaId, skippedMediaIds);
+}
+
+void QuickCanvasHost::deleteMediaItemCanonical(ResizableMediaBase* mediaItem) {
+    if (m_legacyMirror && m_legacyMirror->mediaCanvas()) {
+        m_legacyMirror->mediaCanvas()->deleteMediaItem(mediaItem);
     }
 }
 

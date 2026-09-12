@@ -7,6 +7,7 @@
 
 class QTimer;
 class QProcess;
+class QScreen;
 class ScreenInfo;
 
 /**
@@ -82,8 +83,12 @@ signals:
     void screenConfigurationChanged(const QList<ScreenInfo>& screens);
     
 private:
+    void watchScreen(QScreen* screen);
+    void scheduleScreenConfigurationChanged();
+
     // Volume monitoring state
     int m_cachedSystemVolume = -1;  // Last known value (0-100), -1 = unknown
+    QTimer* m_screenChangeTimer = nullptr;
     
 #ifdef Q_OS_MACOS
     QProcess* m_volProc = nullptr;  // For async osascript calls

@@ -1,24 +1,35 @@
 #include "backend/network/UploadManager.h"
 #include "backend/network/WebSocketClient.h"
+#include "backend/network/RemoteSessionCoordinator.h"
+#include "backend/config/AppConfig.h"
 #include "backend/files/FileManager.h"
 #include "backend/domain/media/MediaFilePolicy.h"
 #include "backend/domain/session/SessionManager.h"  // Phase 3: For DEFAULT_IDEA_ID constant
 #include <QGraphicsScene>
 #include <QGraphicsItem>
 #include <QFileInfo>
+#include <QCryptographicHash>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QMap>
 #include <QStandardPaths>
 #include <QDir>
 #include <QTimer>
 #include <QElapsedTimer>
 #include <QDebug>
+#include <QDateTime>
 #include <QRegularExpression>
 #include <QScopedValueRollback>
 #include <QSet>
 #include <algorithm>
 #include <cmath>
 #include <limits>
+
+#ifndef Q_OS_WIN
+#include <unistd.h>
+#else
+#include <io.h>
+#endif
 
 // Removed dependency on ResizableMediaBase / scene scanning.
 
@@ -33,15 +44,14 @@ constexpr qint64 kMaxQueuedUploadBytes = 2LL * 1024 * 1024;
 constexpr qint64 kMaxUnacknowledgedRemoteBytes = 2LL * 1024 * 1024;
 constexpr qint64 kIncomingProgressAckIntervalBytes = 512LL * 1024;
 constexpr int kMaxChunksPerPump = 8;
-constexpr int kUploadTransportStallTimeoutMs = 30 * 1000;
-constexpr int kUploadStartAckTimeoutMs = 15 * 1000;
-constexpr int kUploadFinalAckTimeoutMs = 45 * 1000;
-constexpr int kIncomingUploadStallTimeoutMs = 45 * 1000;
-constexpr int kRemovalAckTimeoutMs = 45 * 1000;
+constexpr int kMaxIncomingCompletionTombstones = 256;
+constexpr qint64 kIncomingCompletionTombstoneTtlMs = 60'000;
 const QString kRemovalQuarantinePrefix = QStringLiteral(".mouffette-removing-");
 
 struct ValidatedManifestFile {
+    QString assetId;
     QString fileId;
+    QString sha256;
     QString name;
     QString extension;
     QStringList mediaIds;
@@ -61,12 +71,29 @@ bool isValidFileId(const QString& value) {
 
 bool isValidPeerId(const QString& value) {
     static const QRegularExpression pattern(QStringLiteral("^[A-Za-z0-9_-]{1,128}$"));
-    return pattern.match(value).hasMatch();
+    static const QRegularExpression windowsReserved(
+        QStringLiteral("^(con|prn|aux|nul|com[1-9]|lpt[1-9])$"),
+        QRegularExpression::CaseInsensitiveOption);
+    return pattern.match(value).hasMatch()
+        && !windowsReserved.match(value).hasMatch();
 }
 
 QString senderCacheNamespace(const QJsonObject& message) {
-    const QString persistentId = message.value("senderPersistentClientId").toString();
-    return persistentId.isEmpty() ? message.value("senderClientId").toString() : persistentId;
+    // Protocol v2 supplies the authenticated owner as server-authored routing
+    // metadata. Never revive the removed sender aliases from client payloads.
+    return message.value("ownerDeviceId").toString();
+}
+
+bool isValidOpaqueId(const QString& value) {
+    return isValidPeerId(value);
+}
+
+bool isAllowedMediaExtension(const QString& extension) {
+    static const QSet<QString> allowed = {
+        QStringLiteral("png"), QStringLiteral("jpg"), QStringLiteral("jpeg"),
+        QStringLiteral("webp"), QStringLiteral("avif"), QStringLiteral("mp4")
+    };
+    return allowed.contains(extension.toLower());
 }
 
 bool isValidCanvasSessionId(const QString& value) {
@@ -103,6 +130,52 @@ bool parseManifestSize(const QJsonValue& value, qint64& size) {
     }
     size = static_cast<qint64>(raw);
     return true;
+}
+
+bool parsePositiveGeneration(const QJsonValue& value, quint64& generation) {
+    if (!value.isDouble()) return false;
+    const double raw = value.toDouble(-1.0);
+    if (!std::isfinite(raw) || raw < 1.0
+        || raw > 9007199254740991.0 || std::floor(raw) != raw) {
+        return false;
+    }
+    generation = static_cast<quint64>(raw);
+    return true;
+}
+
+bool parseNonNegativeOffset(const QJsonValue& value, qint64& offset) {
+    if (!value.isDouble()) return false;
+    const double raw = value.toDouble(-1.0);
+    if (!std::isfinite(raw) || raw < 0.0
+        || raw > static_cast<double>(std::numeric_limits<qint64>::max())
+        || std::floor(raw) != raw) {
+        return false;
+    }
+    offset = static_cast<qint64>(raw);
+    return true;
+}
+
+bool syncFile(QFile* file) {
+    if (!file || !file->isOpen() || !file->flush()) return false;
+    const qintptr handle = file->handle();
+    if (handle < 0) return false;
+#ifdef Q_OS_WIN
+    return ::_commit(static_cast<int>(handle)) == 0;
+#else
+    return ::fsync(static_cast<int>(handle)) == 0;
+#endif
+}
+
+QString sha256ForFile(const QString& path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    while (!file.atEnd()) {
+        const QByteArray block = file.read(1024 * 1024);
+        if (block.isEmpty() && file.error() != QFileDevice::NoError) return {};
+        hash.addData(QByteArrayView(block));
+    }
+    return QString::fromLatin1(hash.result().toHex());
 }
 
 bool parseChunkIndex(const QJsonValue& value, int& chunkIndex) {
@@ -193,7 +266,9 @@ void removeEmptyUploadParentsForFile(const QString& filePath) {
 
 } // namespace
 
-UploadManager::UploadManager(FileManager* fileManager, QObject* parent)
+UploadManager::UploadManager(FileManager* fileManager,
+                             QObject* parent,
+                             const QString& remoteCacheRoot)
     : QObject(parent), m_fileManager(fileManager) {
     m_lastAcceptedAction.invalidate();
     m_outgoingStateAge.start();
@@ -206,7 +281,7 @@ UploadManager::UploadManager(FileManager* fileManager, QObject* parent)
 
     m_outgoingStallTimer = new QTimer(this);
     m_outgoingStallTimer->setSingleShot(true);
-    m_outgoingStallTimer->setInterval(kUploadTransportStallTimeoutMs);
+    m_outgoingStallTimer->setInterval(0);
     connect(m_outgoingStallTimer, &QTimer::timeout, this, [this]() {
         if (m_outgoingState == OutgoingState::Streaming
             && !m_currentUploadId.isEmpty()) {
@@ -216,7 +291,7 @@ UploadManager::UploadManager(FileManager* fileManager, QObject* parent)
 
     m_outgoingStartAckTimer = new QTimer(this);
     m_outgoingStartAckTimer->setSingleShot(true);
-    m_outgoingStartAckTimer->setInterval(kUploadStartAckTimeoutMs);
+    m_outgoingStartAckTimer->setInterval(0);
     connect(m_outgoingStartAckTimer, &QTimer::timeout, this, [this]() {
         if (m_outgoingState == OutgoingState::AwaitingTargetReady
             && !m_currentUploadId.isEmpty()) {
@@ -227,7 +302,7 @@ UploadManager::UploadManager(FileManager* fileManager, QObject* parent)
 
     m_outgoingAckTimer = new QTimer(this);
     m_outgoingAckTimer->setSingleShot(true);
-    m_outgoingAckTimer->setInterval(kUploadFinalAckTimeoutMs);
+    m_outgoingAckTimer->setInterval(0);
     connect(m_outgoingAckTimer, &QTimer::timeout, this, [this]() {
         if (m_outgoingState == OutgoingState::AwaitingValidation
             && !m_currentUploadId.isEmpty()) {
@@ -236,29 +311,151 @@ UploadManager::UploadManager(FileManager* fileManager, QObject* parent)
         }
     });
 
-    m_removalAckTimer = new QTimer(this);
-    m_removalAckTimer->setSingleShot(true);
-    m_removalAckTimer->setInterval(kRemovalAckTimeoutMs);
-    connect(m_removalAckTimer, &QTimer::timeout, this, [this]() {
-        if (m_pendingRemovalId.isEmpty()) return;
-        m_pendingRemovalId.clear();
-        m_pendingRemovalTargetId.clear();
-        m_pendingRemovalCanvasSessionId.clear();
-        emit removalFailed(QStringLiteral(
-            "Remote removal confirmation timed out; you can retry safely"));
-        emit uiStateChanged();
-    });
-
     m_incomingStallTimer = new QTimer(this);
     m_incomingStallTimer->setSingleShot(true);
-    m_incomingStallTimer->setInterval(kIncomingUploadStallTimeoutMs);
+    m_incomingStallTimer->setInterval(0);
     connect(m_incomingStallTimer, &QTimer::timeout, this, [this]() {
         if (m_incoming.uploadId.isEmpty()) return;
         rejectIncomingUpload(m_incoming.senderId, m_incoming.uploadId,
                              QStringLiteral("Incoming upload stalled"), true);
     });
 
+    m_remoteCacheStore = new RemoteCacheStore(remoteCacheRoot, this);
+    QString cacheError;
+    m_remoteCacheReady = m_remoteCacheStore->initialize(&cacheError);
+    QString logicalCleanupError;
+    m_receiverAdvertisementReady = m_remoteCacheReady
+        && m_remoteCacheStore->receiverAdvertisementSafe(&logicalCleanupError);
+    m_receiverCleanupError = m_remoteCacheReady
+        ? (m_receiverAdvertisementReady ? QString() : logicalCleanupError)
+        : (cacheError.isEmpty()
+               ? QStringLiteral("cache_store_not_initialized") : cacheError);
+    if (!m_remoteCacheReady) {
+        qCritical() << "UploadManager: remote cache initialization failed:" << cacheError;
+    }
+    connect(m_remoteCacheStore, &RemoteCacheStore::physicalCleanupFailed,
+            this, [this](const QString& senderDeviceId,
+                         const QString& remoteSessionId,
+                         quint64 generation,
+                         const QString& teardownId,
+                         const QString& errorCode) {
+        emit remoteSessionCacheCleanupError(senderDeviceId, remoteSessionId,
+                                            generation, teardownId, errorCode);
+    });
     cleanupOrphanedIncomingCache();
+
+    m_uploadScheduler = new UploadScheduler(
+        AppConfig::instance().uploadConcurrency(), this);
+    connect(m_uploadScheduler, &UploadScheduler::uploadStartRequested,
+            this, &UploadManager::startScheduledUpload);
+}
+
+UploadManager::~UploadManager() {
+    if (m_ws && m_outgoingTransportRegistered) {
+        m_ws->endUploadSession();
+        m_outgoingTransportRegistered = false;
+    }
+    const auto transfers = m_parallelOutgoingByUpload.values();
+    m_parallelOutgoingByUpload.clear();
+    m_parallelUploadBySession.clear();
+    for (ParallelOutgoingTransfer* transfer : transfers) {
+        if (!transfer) continue;
+        if (m_ws && transfer->transportRegistered) m_ws->endUploadSession();
+        if (transfer->fileHandle.isOpen()) transfer->fileHandle.close();
+        delete transfer;
+    }
+}
+
+UploadManager::ParallelOutgoingTransfer*
+UploadManager::parallelForUpload(const QString& uploadId) const {
+    return m_parallelOutgoingByUpload.value(uploadId, nullptr);
+}
+
+UploadManager::ParallelOutgoingTransfer*
+UploadManager::parallelForSession(const QString& remoteSessionId) const {
+    return parallelForUpload(m_parallelUploadBySession.value(remoteSessionId));
+}
+
+UploadManager::ParallelOutgoingTransfer*
+UploadManager::parallelForTarget(const QString& targetDeviceId) const {
+    if (targetDeviceId.isEmpty()) return nullptr;
+    for (ParallelOutgoingTransfer* transfer : m_parallelOutgoingByUpload) {
+        if (transfer && transfer->targetDeviceId == targetDeviceId) return transfer;
+    }
+    return nullptr;
+}
+
+QString UploadManager::activeUploadTargetClientId() const {
+    if (ParallelOutgoingTransfer* transfer = parallelForTarget(m_targetClientId)) {
+        return transfer->targetDeviceId;
+    }
+    if (!m_uploadTargetClientId.isEmpty()) return m_uploadTargetClientId;
+    return m_targetClientId;
+}
+
+bool UploadManager::hasActiveUpload() const {
+    return !m_targetClientId.isEmpty()
+        ? m_remoteInventoryTargets.contains(m_targetClientId)
+        : (m_uploadActive || !m_remoteInventoryTargets.isEmpty());
+}
+
+UploadManager::OutgoingState UploadManager::outgoingState() const {
+    if (ParallelOutgoingTransfer* transfer = parallelForTarget(m_targetClientId)) {
+        return transfer->state;
+    }
+    if (m_targetClientId.isEmpty() || m_uploadTargetClientId == m_targetClientId) {
+        return m_outgoingState;
+    }
+    return OutgoingState::Idle;
+}
+
+bool UploadManager::isUploading() const {
+    const OutgoingState state = outgoingState();
+    return state == OutgoingState::Queued
+        || state == OutgoingState::AwaitingTargetReady
+        || state == OutgoingState::Streaming
+        || state == OutgoingState::Suspended;
+}
+
+bool UploadManager::isCancelling() const {
+    return outgoingState() == OutgoingState::Cancelling;
+}
+
+bool UploadManager::isFinalizing() const {
+    return outgoingState() == OutgoingState::AwaitingValidation;
+}
+
+bool UploadManager::isBusy() const {
+    return outgoingState() != OutgoingState::Idle || isRemoving();
+}
+
+QString UploadManager::currentUploadId() const {
+    if (ParallelOutgoingTransfer* transfer = parallelForTarget(m_targetClientId)) {
+        return transfer->uploadId;
+    }
+    return (m_targetClientId.isEmpty() || m_uploadTargetClientId == m_targetClientId)
+        ? m_currentUploadId : QString();
+}
+
+QString UploadManager::currentRemoteSessionId() const {
+    if (ParallelOutgoingTransfer* transfer = parallelForTarget(m_targetClientId)) {
+        return transfer->remoteSessionId;
+    }
+    return (m_targetClientId.isEmpty() || m_uploadTargetClientId == m_targetClientId)
+        ? m_outgoingRemoteSessionId : QString();
+}
+
+quint64 UploadManager::currentRemoteSessionGeneration() const {
+    if (ParallelOutgoingTransfer* transfer = parallelForTarget(m_targetClientId)) {
+        return transfer->generation;
+    }
+    return (m_targetClientId.isEmpty() || m_uploadTargetClientId == m_targetClientId)
+        ? m_outgoingGeneration : 0;
+}
+
+int UploadManager::activeOutgoingTransferCount() const {
+    return (m_currentUploadId.isEmpty() ? 0 : 1)
+        + m_parallelOutgoingByUpload.size();
 }
 
 void UploadManager::setOutgoingState(OutgoingState state) {
@@ -269,11 +466,12 @@ void UploadManager::setOutgoingState(OutgoingState state) {
 
 void UploadManager::cleanupOrphanedIncomingCache() {
     if (!m_fileManager) return;
-    const QString rootPath = incomingUploadsRoot();
+    const QString rootPath = m_remoteCacheStore
+        ? m_remoteCacheStore->rootPath() : incomingUploadsRoot();
     const QFileInfo rootInfo(rootPath);
     if (!rootInfo.exists()) return;
     if (!rootInfo.isDir() || rootInfo.isSymLink()) {
-        qWarning() << "UploadManager: Refusing unsafe orphan-cache sweep" << rootPath;
+        qWarning() << "UploadManager: refusing unsafe orphan-cache root";
         return;
     }
 
@@ -306,8 +504,12 @@ void UploadManager::cleanupOrphanedIncomingCache() {
     const QFileInfoList senderEntries = root.entryInfoList(
         QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System);
     for (const QFileInfo& senderEntry : senderEntries) {
+        if (senderEntry.fileName() == QLatin1String(".remote-cache-state")
+            || senderEntry.fileName() == QLatin1String(".quarantine")) {
+            continue;
+        }
         if (senderEntry.isSymLink()) {
-            QFile::remove(senderEntry.absoluteFilePath());
+            qWarning() << "UploadManager: refusing legacy cache symlink";
             continue;
         }
         if (!senderEntry.isDir()) continue;
@@ -318,12 +520,10 @@ void UploadManager::cleanupOrphanedIncomingCache() {
             if (hasTrackedPathUnder(originalSenderPath)
                 && !QFileInfo::exists(originalSenderPath)) {
                 if (!root.rename(senderEntry.fileName(), restoredSenderName)) {
-                    qCritical() << "UploadManager: Could not restore interrupted cache removal"
-                                << originalSenderPath;
+                    qCritical() << "UploadManager: could not restore interrupted legacy cache removal";
                 }
             } else if (!QDir(senderEntry.absoluteFilePath()).removeRecursively()) {
-                qWarning() << "UploadManager: Could not purge stale cache quarantine"
-                           << senderEntry.absoluteFilePath();
+                qWarning() << "UploadManager: could not purge stale legacy cache quarantine";
             }
             continue;
         }
@@ -333,14 +533,22 @@ void UploadManager::cleanupOrphanedIncomingCache() {
             QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System);
         for (const QFileInfo& uploadEntry : uploadEntries) {
             if (uploadEntry.isSymLink()) {
-                QFile::remove(uploadEntry.absoluteFilePath());
+                qWarning() << "UploadManager: refusing legacy upload symlink";
                 continue;
             }
             if (!uploadEntry.isDir()) continue;
+            // Protocol-v2 scopes are owned exclusively by RemoteCacheStore's
+            // intent/tombstone transaction. In particular, never let this
+            // legacy orphan sweep recursively delete a live scope whose atomic
+            // quarantine is blocked: doing so would erase the evidence while
+            // incorrectly making receiver advertisement appear safe.
+            if (QFileInfo::exists(QDir(uploadEntry.absoluteFilePath())
+                                      .filePath(QStringLiteral(".scope.json")))) {
+                continue;
+            }
             if (!hasTrackedPathUnder(uploadEntry.absoluteFilePath())) {
                 if (!QDir(uploadEntry.absoluteFilePath()).removeRecursively()) {
-                    qWarning() << "UploadManager: Could not purge orphaned upload staging"
-                               << uploadEntry.absoluteFilePath();
+                    qWarning() << "UploadManager: could not purge orphaned legacy upload staging";
                 }
                 continue;
             }
@@ -357,12 +565,10 @@ void UploadManager::cleanupOrphanedIncomingCache() {
                 if (trackedPaths.contains(cleanOriginalPath)
                     && !QFileInfo::exists(originalPath)) {
                     if (!uploadDirectory.rename(cachedFile.fileName(), originalFileName)) {
-                        qCritical() << "UploadManager: Could not restore interrupted file removal"
-                                    << originalPath;
+                        qCritical() << "UploadManager: could not restore interrupted legacy file removal";
                     }
                 } else if (!QFile::remove(cachedFile.absoluteFilePath())) {
-                    qWarning() << "UploadManager: Could not purge stale file quarantine"
-                               << cachedFile.absoluteFilePath();
+                    qWarning() << "UploadManager: could not purge stale legacy file quarantine";
                 }
             }
         }
@@ -376,34 +582,216 @@ void UploadManager::cleanupOrphanedIncomingCache() {
 void UploadManager::setWebSocketClient(WebSocketClient* client) {
     QObject::disconnect(m_uploadBytesWrittenConnection);
     QObject::disconnect(m_uploadTransportLostConnection);
+    for (const QMetaObject::Connection& connection : std::as_const(m_webSocketConnections)) {
+        QObject::disconnect(connection);
+    }
+    m_webSocketConnections.clear();
+    if (m_ws) {
+        QObject::disconnect(this, &UploadManager::protocolV2UploadResponseReady,
+                            m_ws, &WebSocketClient::sendUploadProtocolResponse);
+    }
     m_ws = client;
     if (!client) return;
 
     m_uploadBytesWrittenConnection = connect(
         client, &WebSocketClient::uploadTransportBytesWritten,
         this, [this](qint64) {
-            if (m_outgoingState != OutgoingState::Streaming) return;
-            if (m_outgoingStallTimer) m_outgoingStallTimer->start();
-            scheduleOutgoingPump();
+            if (m_outgoingState == OutgoingState::Streaming
+                && m_outgoingStallTimer && m_outgoingStallTimer->interval() > 0) {
+                m_outgoingStallTimer->start();
+            }
+            if (m_outgoingState == OutgoingState::Streaming) scheduleOutgoingPump();
+            for (ParallelOutgoingTransfer* transfer : m_parallelOutgoingByUpload) {
+                if (!transfer || transfer->state != OutgoingState::Streaming) continue;
+                if (transfer->stallTimer && transfer->stallTimer->interval() > 0) {
+                    transfer->stallTimer->start();
+                }
+                scheduleParallelPump(transfer);
+            }
         });
     m_uploadTransportLostConnection = connect(
         client, &WebSocketClient::uploadTransportLost,
         this, [this](const QString& reason) {
-            if (m_outgoingState == OutgoingState::Idle
-                || m_outgoingState == OutgoingState::Cancelling
-                || m_currentUploadId.isEmpty()) return;
-            failOutgoingUpload(reason);
+            if (m_outgoingState != OutgoingState::Idle
+                && m_outgoingState != OutgoingState::Cancelling
+                && !m_currentUploadId.isEmpty()) {
+                suspendOutgoingForResume(reason);
+            }
+            const auto transfers = m_parallelOutgoingByUpload.values();
+            for (ParallelOutgoingTransfer* transfer : transfers) {
+                if (transfer && transfer->state != OutgoingState::Cancelling) {
+                    suspendParallel(transfer);
+                }
+            }
+            // Losing only the optional payload socket is not a RemoteSession
+            // failure. Rebind this upload to the authenticated control socket
+            // immediately, using the durable target offsets as the authority.
+            QTimer::singleShot(0, this, [this]() {
+                if (m_outgoingState == OutgoingState::Suspended && m_ws
+                    && m_ws->isConnected()) {
+                    resumeOutgoingUpload();
+                }
+                const auto transfers = m_parallelOutgoingByUpload.values();
+                for (ParallelOutgoingTransfer* transfer : transfers) {
+                    if (transfer && transfer->state == OutgoingState::Suspended
+                        && m_ws && m_ws->isConnected()) {
+                        resumeParallel(transfer);
+                    }
+                }
+            });
         });
+
+    m_webSocketConnections.append(connect(
+        client, &WebSocketClient::uploadMessageReceived,
+        this, &UploadManager::handleUploadProtocolMessage));
+    m_webSocketConnections.append(connect(
+        client, &WebSocketClient::disconnected,
+        this, &UploadManager::onConnectionLost));
+    m_webSocketConnections.append(connect(
+        client, &WebSocketClient::remoteSessionOpened,
+        this, &UploadManager::applyRemoteSessionEnvelope));
+    m_webSocketConnections.append(connect(
+        client, &WebSocketClient::remoteSessionResumed,
+        this, &UploadManager::applyRemoteSessionEnvelope));
+    m_webSocketConnections.append(connect(
+        client, &WebSocketClient::remoteSessionLeaseStateChanged,
+        this, &UploadManager::applyRemoteSessionEnvelope));
+    m_webSocketConnections.append(connect(
+        client, &WebSocketClient::remoteSessionTerminating,
+        this, &UploadManager::applyRemoteSessionEnvelope));
+    m_webSocketConnections.append(connect(
+        client, &WebSocketClient::remoteSessionClosed,
+        this, &UploadManager::applyRemoteSessionEnvelope));
+    m_webSocketConnections.append(connect(
+        client, &WebSocketClient::leaseExpired,
+        this, [this](const QString&, quint64) {
+            QSet<QString> outgoingSessions;
+            if (!m_outgoingRemoteSessionId.isEmpty()) {
+                outgoingSessions.insert(m_outgoingRemoteSessionId);
+            }
+            for (ParallelOutgoingTransfer* transfer : m_parallelOutgoingByUpload) {
+                if (transfer) outgoingSessions.insert(transfer->remoteSessionId);
+            }
+            for (const QString& sessionId : outgoingSessions) {
+                terminateRemoteSessionUpload(
+                    sessionId, QStringLiteral("Remote session lease expired"));
+            }
+            beginTerminalIncomingCleanup(QStringLiteral("lease_expired"));
+            emit terminalIncomingCleanupRequired(
+                QStringLiteral("lease_expired"));
+        }));
+    m_webSocketConnections.append(connect(
+        client, &WebSocketClient::serverRestarted,
+        this, [this](const QString&, const QString&) {
+            beginTerminalIncomingCleanup(QStringLiteral("server_restart"));
+            emit terminalIncomingCleanupRequired(
+                QStringLiteral("server_restart"));
+        }));
+    m_webSocketConnections.append(connect(
+        client, &WebSocketClient::serverPolicyReceived,
+        this, [this](const QJsonObject& policy) {
+            const int idleTimeout = policy.value(QStringLiteral("uploadIdleTimeoutMs")).toInt();
+            const int targetAckTimeout =
+                policy.value(QStringLiteral("uploadTargetAckTimeoutMs")).toInt();
+            if (idleTimeout > 0) {
+                m_outgoingStallTimer->setInterval(idleTimeout);
+                m_incomingStallTimer->setInterval(idleTimeout);
+                for (ParallelOutgoingTransfer* transfer : m_parallelOutgoingByUpload) {
+                    if (transfer && transfer->stallTimer) {
+                        transfer->stallTimer->setInterval(idleTimeout);
+                    }
+                }
+            }
+            if (targetAckTimeout > 0) {
+                m_outgoingStartAckTimer->setInterval(targetAckTimeout);
+                m_outgoingAckTimer->setInterval(targetAckTimeout);
+                for (ParallelOutgoingTransfer* transfer : m_parallelOutgoingByUpload) {
+                    if (!transfer) continue;
+                    if (transfer->startAckTimer) {
+                        transfer->startAckTimer->setInterval(targetAckTimeout);
+                    }
+                    if (transfer->ackTimer) {
+                        transfer->ackTimer->setInterval(targetAckTimeout);
+                    }
+                }
+            }
+        }));
+    connect(this, &UploadManager::protocolV2UploadResponseReady,
+            client, &WebSocketClient::sendUploadProtocolResponse,
+            Qt::UniqueConnection);
+
+    const QJsonObject policy = client->serverPolicy();
+    if (!policy.isEmpty()) {
+        const int idleTimeout = policy.value(QStringLiteral("uploadIdleTimeoutMs")).toInt();
+        const int targetAckTimeout =
+            policy.value(QStringLiteral("uploadTargetAckTimeoutMs")).toInt();
+        if (idleTimeout > 0) {
+            m_outgoingStallTimer->setInterval(idleTimeout);
+            m_incomingStallTimer->setInterval(idleTimeout);
+            for (ParallelOutgoingTransfer* transfer : m_parallelOutgoingByUpload) {
+                if (transfer && transfer->stallTimer) {
+                    transfer->stallTimer->setInterval(idleTimeout);
+                }
+            }
+        }
+        if (targetAckTimeout > 0) {
+            m_outgoingStartAckTimer->setInterval(targetAckTimeout);
+            m_outgoingAckTimer->setInterval(targetAckTimeout);
+            for (ParallelOutgoingTransfer* transfer : m_parallelOutgoingByUpload) {
+                if (!transfer) continue;
+                if (transfer->startAckTimer) {
+                    transfer->startAckTimer->setInterval(targetAckTimeout);
+                }
+                if (transfer->ackTimer) {
+                    transfer->ackTimer->setInterval(targetAckTimeout);
+                }
+            }
+        }
+    }
 }
-void UploadManager::setTargetClientId(const QString& id) { m_targetClientId = id; }
+void UploadManager::setTargetClientId(const QString& id) {
+    if (m_targetClientId == id) return;
+    m_targetClientId = id;
+    m_uploadActive = hasActiveUpload();
+    emit uiStateChanged();
+}
 
 void UploadManager::forceResetForClient(const QString& clientId) {
+    const auto parallelTransfers = m_parallelOutgoingByUpload.values();
+    for (ParallelOutgoingTransfer* transfer : parallelTransfers) {
+        if (!transfer || (!clientId.isEmpty()
+                          && transfer->targetDeviceId != clientId)) continue;
+        if (m_uploadScheduler) {
+            m_uploadScheduler->cancelUpload(transfer->remoteSessionId,
+                                            transfer->schedulerGeneration,
+                                            transfer->uploadId);
+        }
+        removeParallel(transfer, false, false);
+    }
+    if (clientId.isEmpty()) {
+        m_remoteInventoryTargets.clear();
+        m_committedAssetsByTarget.clear();
+        m_pendingAssetRemovals.clear();
+    } else {
+        m_remoteInventoryTargets.remove(clientId);
+        m_committedAssetsByTarget.remove(clientId);
+        const QStringList pendingIds = m_pendingAssetRemovals.keys();
+        for (const QString& removalId : pendingIds) {
+            if (m_pendingAssetRemovals.value(removalId).asset.targetDeviceId
+                == clientId) {
+                m_pendingAssetRemovals.remove(removalId);
+            }
+        }
+    }
     if (!clientId.isEmpty()) {
-        const bool matchesUploadTarget = (!m_uploadTargetClientId.isEmpty() && m_uploadTargetClientId == clientId);
-        const bool matchesCurrentTarget = (!m_targetClientId.isEmpty() && m_targetClientId == clientId);
-        if (!matchesUploadTarget && !matchesCurrentTarget
-            && !m_uploadActive && m_outgoingState == OutgoingState::Idle
-            && m_pendingRemovalId.isEmpty()) {
+        const bool matchesPrimary = !m_uploadTargetClientId.isEmpty()
+            && m_uploadTargetClientId == clientId;
+        const bool matchesLegacyIdleProjection = m_uploadTargetClientId.isEmpty()
+            && m_targetClientId == clientId
+            && m_outgoingState == OutgoingState::Idle;
+        if (!matchesPrimary && !matchesLegacyIdleProjection) {
+            m_uploadActive = hasActiveUpload();
+            emit uiStateChanged();
             return;
         }
     }
@@ -423,98 +811,408 @@ bool UploadManager::toggleUpload(const QVector<UploadFileInfo>& files) {
         qInfo() << "UploadManager: Action ignored due to rate limiting";
         return false;
     }
-    if (!m_pendingRemovalId.isEmpty()) {
+    const bool selectedAssetRemovalPending = std::any_of(
+        m_pendingAssetRemovals.cbegin(), m_pendingAssetRemovals.cend(),
+        [this](const PendingAssetRemoval& removal) {
+            return removal.asset.targetDeviceId == m_targetClientId;
+        });
+    if (selectedAssetRemovalPending) {
         qInfo() << "UploadManager: Remote removal acknowledgement pending; toggle ignored";
         return false;
     }
-    if (m_outgoingState != OutgoingState::Idle) {
+    if ((m_uploadTargetClientId == m_targetClientId
+         && m_outgoingState != OutgoingState::Idle)
+        || parallelForTarget(m_targetClientId)) {
         qInfo() << "UploadManager: Transfer already active; duplicate action ignored";
         return false;
     }
     
-    if (m_uploadActive) {
+    if (hasActiveUpload()) {
         // If active state but we are provided with additional files, start a new upload for them
         if (!files.isEmpty()) {
             startUpload(files);
-            return m_outgoingState != OutgoingState::Idle;
+            return currentUploadId().isEmpty() == false;
         }
-        // No new files: behave as unload toggle
-        return requestUnload();
+        return false;
     }
     if (files.isEmpty()) {
         qInfo() << "UploadManager: No files provided";
         return false;
     }
     startUpload(files);
-    return m_outgoingState != OutgoingState::Idle;
+    return currentUploadId().isEmpty() == false;
 }
 
-bool UploadManager::requestRemoval(const QString& clientId) {
-    if (!m_ws || !m_ws->isConnected() || clientId.isEmpty()) return false;
-    if (m_outgoingState != OutgoingState::Idle) {
-        qInfo() << "UploadManager: Cannot unload while a transfer is active";
+bool UploadManager::requestAssetRemoval(const QString& targetDeviceId,
+                                        const QString& localFileId,
+                                        const QString& reason) {
+    if (!m_ws || !m_fileManager || targetDeviceId.isEmpty()
+        || localFileId.isEmpty()) {
         return false;
     }
-    if (!m_pendingRemovalId.isEmpty()) {
-        qInfo() << "UploadManager: A remote removal is already pending";
+
+    RemoteSessionCoordinator* sessions = m_ws->remoteSessionCoordinator();
+    const RemoteSessionCoordinator::Binding binding = sessions
+        ? sessions->outgoingForPeer(targetDeviceId)
+        : RemoteSessionCoordinator::Binding();
+
+    // Once a RemoteSession is gone, its target-side teardown owns the purge.
+    // Clear stale local bookkeeping without attempting a target-addressed
+    // command that could accidentally affect a later session.
+    if (binding.remoteSessionId.isEmpty()) {
+        m_fileManager->unmarkFileUploadedToClient(localFileId, targetDeviceId);
+        m_committedAssetsByTarget.remove(targetDeviceId);
+        m_remoteInventoryTargets.remove(targetDeviceId);
+        emit assetRemovalCommitted(targetDeviceId, {localFileId});
+        emit uiStateChanged();
+        return true;
+    }
+    const bool resumableGrace = binding.phase == QLatin1String("Grace");
+    if ((!binding.active && !resumableGrace)
+        || binding.ownerDeviceId != m_ws->deviceId()) {
+        emit assetRemovalFailed(targetDeviceId, binding.remoteSessionId,
+                                {localFileId},
+                                QStringLiteral("The remote session is not active"));
         return false;
     }
-    // Phase 3: canvasSessionId is MANDATORY - always set to DEFAULT_IDEA_ID at minimum
-    if (m_activeIdeaId.isEmpty()) {
-        qWarning() << "UploadManager: requestRemoval has empty canvasSessionId (should never happen), using DEFAULT_IDEA_ID";
-        m_activeIdeaId = DEFAULT_IDEA_ID;
+
+    // An external source deletion wins over an in-flight transfer. Abort it
+    // first and close the whole session through the caller: until a complete
+    // target ACK arrives there is no durable inventory tuple safe to remove.
+    if (ParallelOutgoingTransfer* transfer = parallelForTarget(targetDeviceId)) {
+        const bool containsFile = std::any_of(
+            transfer->assets.cbegin(), transfer->assets.cend(),
+            [&localFileId](const OutgoingAsset& asset) {
+                return asset.localFileIds.contains(localFileId);
+            });
+        if (containsFile) {
+            failParallel(transfer, QStringLiteral("Source asset was removed"));
+            emit assetRemovalFailed(targetDeviceId, binding.remoteSessionId,
+                                    {localFileId},
+                                    QStringLiteral("Source changed during upload"));
+            return false;
+        }
     }
-    // Ensure subsequent all_files_removed callbacks attribute to the correct target
-    const QString removalId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    m_uploadTargetClientId = clientId;
-    m_pendingRemovalId = removalId;
-    m_pendingRemovalTargetId = clientId;
-    m_pendingRemovalCanvasSessionId = m_activeIdeaId;
-    if (!m_ws->sendRemoveAllFiles(clientId, m_activeIdeaId, removalId)) {
-        m_pendingRemovalId.clear();
-        m_pendingRemovalTargetId.clear();
-        m_pendingRemovalCanvasSessionId.clear();
-        emit removalFailed(QStringLiteral("Could not send the removal request"));
+    if (m_uploadTargetClientId == targetDeviceId
+        && !m_currentUploadId.isEmpty()) {
+        const bool containsFile = std::any_of(
+            m_outgoingAssets.cbegin(), m_outgoingAssets.cend(),
+            [&localFileId](const OutgoingAsset& asset) {
+                return asset.localFileIds.contains(localFileId);
+            });
+        if (containsFile) {
+            failOutgoingUpload(QStringLiteral("Source asset was removed"));
+            emit assetRemovalFailed(targetDeviceId, binding.remoteSessionId,
+                                    {localFileId},
+                                    QStringLiteral("Source changed during upload"));
+            return false;
+        }
+    }
+
+    CommittedRemoteAsset asset;
+    if (!findCommittedAsset(targetDeviceId, localFileId, &asset)) {
+        if (!m_fileManager->isFileUploadedToClient(localFileId,
+                                                   targetDeviceId)) {
+            return true;
+        }
+        emit assetRemovalFailed(targetDeviceId, binding.remoteSessionId,
+                                {localFileId},
+                                QStringLiteral("Validated remote inventory is unavailable"));
         return false;
     }
-    m_lastRemovalClientId = clientId;
-    recordAcceptedAction();
-    if (m_removalAckTimer) m_removalAckTimer->start();
+    QStringList survivingAliases;
+    for (const QString& aliasFileId : asset.localFileIds) {
+        if (aliasFileId == localFileId) continue;
+        if (!m_fileManager->getMediaIdsForFile(aliasFileId).isEmpty()
+            || !m_fileManager->getIdeaIdsForFile(aliasFileId).isEmpty()) {
+            survivingAliases.append(aliasFileId);
+        }
+    }
+    if (!survivingAliases.isEmpty()) {
+        auto target = m_committedAssetsByTarget.find(targetDeviceId);
+        if (target != m_committedAssetsByTarget.end()) {
+            auto stored = target->find(asset.assetId);
+            if (stored != target->end()) {
+                stored->localFileIds.removeAll(localFileId);
+            }
+        }
+        m_fileManager->unmarkFileUploadedToClient(localFileId, targetDeviceId);
+        emit assetRemovalCommitted(targetDeviceId, {localFileId});
+        return true;
+    }
+    asset.generation = binding.generation;
+    if (asset.remoteSessionId != binding.remoteSessionId) {
+        emit assetRemovalFailed(targetDeviceId, binding.remoteSessionId,
+                                asset.localFileIds,
+                                QStringLiteral("Validated remote inventory belongs to an expired session"));
+        return false;
+    }
+    for (auto it = m_pendingAssetRemovals.cbegin();
+         it != m_pendingAssetRemovals.cend(); ++it) {
+        if (it->asset.targetDeviceId == targetDeviceId
+            && it->asset.assetId == asset.assetId) {
+            return true;
+        }
+    }
+
+    const int timeoutMs = m_ws->serverPolicy()
+        .value(QStringLiteral("removalAckTimeoutMs")).toInt();
+    if (timeoutMs <= 0) {
+        emit assetRemovalFailed(targetDeviceId, binding.remoteSessionId,
+                                asset.localFileIds,
+                                QStringLiteral("Server removal policy is unavailable"));
+        return false;
+    }
+    const QString removalId =
+        QUuid::createUuid().toString(QUuid::WithoutBraces).toLower();
+    PendingAssetRemoval pending;
+    pending.removalId = removalId;
+    pending.asset = asset;
+    pending.reason = reason.trimmed().isEmpty()
+        ? QStringLiteral("source_removed") : reason.trimmed().left(128);
+    m_pendingAssetRemovals.insert(removalId, pending);
+    if (binding.active) {
+        // A transport can disappear between reading the binding and sending.
+        // Keep the immutable intent alive until its original timeout; a
+        // signed session resume will replay the same removalId and tuple.
+        auto stored = m_pendingAssetRemovals.find(removalId);
+        if (stored != m_pendingAssetRemovals.end()) {
+            sendPendingAssetRemoval(stored.value());
+        }
+    }
+    QTimer::singleShot(timeoutMs, this, [this, removalId]() {
+        if (m_pendingAssetRemovals.contains(removalId)) {
+            failAssetRemoval(removalId,
+                             QStringLiteral("Remote asset removal confirmation timed out"));
+        }
+    });
     emit uiStateChanged();
     return true;
 }
 
-bool UploadManager::requestUnload() {
-    const QString clientId = m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId;
-    if (!m_uploadActive || clientId.isEmpty()) return false;
-    // Phase 3: canvasSessionId is MANDATORY - always set to DEFAULT_IDEA_ID at minimum
-    if (m_activeIdeaId.isEmpty()) {
-        qWarning() << "UploadManager: requestUnload has empty canvasSessionId (should never happen), using DEFAULT_IDEA_ID";
-        m_activeIdeaId = DEFAULT_IDEA_ID;
+bool UploadManager::sendPendingAssetRemoval(PendingAssetRemoval& pending) {
+    if (!m_ws || pending.removalId.isEmpty()) return false;
+    RemoteSessionCoordinator* sessions = m_ws->remoteSessionCoordinator();
+    const RemoteSessionCoordinator::Binding binding = sessions
+        ? sessions->byId(pending.asset.remoteSessionId)
+        : RemoteSessionCoordinator::Binding();
+    if (!binding.active || binding.ownerDeviceId != m_ws->deviceId()
+        || binding.remoteSessionId != pending.asset.remoteSessionId
+        || binding.generation < 1) {
+        return false;
     }
-    
-    return requestRemoval(clientId);
+    pending.asset.generation = binding.generation;
+    if (pending.lastSentGeneration == binding.generation) return true;
+    const bool sent = m_ws->sendUploadRemove(
+        pending.asset.remoteSessionId, pending.asset.generation,
+        pending.removalId, pending.asset.uploadId, pending.asset.assetId,
+        pending.asset.size, pending.asset.sha256, pending.reason);
+    if (sent) pending.lastSentGeneration = binding.generation;
+    return sent;
+}
+
+bool UploadManager::assetRemovalMessageMatches(
+    const PendingAssetRemoval& pending,
+    const QJsonObject& message,
+    bool requireDerivedFields) const {
+    quint64 generation = 0;
+    quint64 connectionGeneration = 0;
+    qint64 offset = -1;
+    qint64 size = -1;
+    if (!m_ws
+        || !parsePositiveGeneration(message.value(QStringLiteral("generation")),
+                                    generation)
+        || !parsePositiveGeneration(
+            message.value(QStringLiteral("connectionGeneration")),
+            connectionGeneration)
+        || !parseNonNegativeOffset(message.value(QStringLiteral("offset")), offset)
+        || !parseManifestSize(message.value(QStringLiteral("size")), size)) {
+        return false;
+    }
+    const QString ownerDeviceId =
+        message.value(QStringLiteral("ownerDeviceId")).toString();
+    const QString targetDeviceId =
+        message.value(QStringLiteral("targetDeviceId")).toString();
+    return connectionGeneration == m_ws->connectionGeneration()
+        && generation == pending.asset.generation
+        && message.value(QStringLiteral("remoteSessionId")).toString()
+            == pending.asset.remoteSessionId
+        && message.value(QStringLiteral("removalId")).toString()
+            == pending.removalId
+        && message.value(QStringLiteral("uploadId")).toString()
+            == pending.asset.uploadId
+        && message.value(QStringLiteral("assetId")).toString()
+            == pending.asset.assetId
+        && offset == pending.asset.size && size == pending.asset.size
+        && message.value(QStringLiteral("sha256")).toString()
+            == pending.asset.sha256
+        && (!requireDerivedFields
+            || (message.value(QStringLiteral("fileId")).toString()
+                    == pending.asset.sha256
+                && message.value(QStringLiteral("extension")).toString()
+                    == pending.asset.extension))
+        && (ownerDeviceId.isEmpty() || ownerDeviceId == m_ws->deviceId())
+        && (targetDeviceId.isEmpty()
+            || targetDeviceId == pending.asset.targetDeviceId);
+}
+
+void UploadManager::rememberCommittedAssets(
+    const QString& targetDeviceId,
+    const QString& remoteSessionId,
+    quint64 generation,
+    const QString& uploadId,
+    const QVector<OutgoingAsset>& assets) {
+    if (targetDeviceId.isEmpty() || remoteSessionId.isEmpty()
+        || generation == 0 || uploadId.isEmpty()) {
+        return;
+    }
+    QHash<QString, CommittedRemoteAsset>& inventory =
+        m_committedAssetsByTarget[targetDeviceId];
+    for (const OutgoingAsset& outgoing : assets) {
+        if (outgoing.assetId.isEmpty() || outgoing.sha256.isEmpty()
+            || outgoing.size < 1) {
+            continue;
+        }
+        // A local repository ID may point at new bytes after a source change.
+        // Remove its former association before recording the server's exact
+        // last-writer-wins asset inventory entry.
+        for (auto existing = inventory.begin(); existing != inventory.end();) {
+            bool overlaps = false;
+            for (const QString& localFileId : outgoing.localFileIds) {
+                if (existing->localFileIds.contains(localFileId)) {
+                    overlaps = true;
+                    break;
+                }
+            }
+            if (overlaps && existing.key() != outgoing.assetId) {
+                existing = inventory.erase(existing);
+            } else {
+                ++existing;
+            }
+        }
+        CommittedRemoteAsset committed;
+        committed.targetDeviceId = targetDeviceId;
+        committed.remoteSessionId = remoteSessionId;
+        committed.generation = generation;
+        committed.uploadId = uploadId;
+        committed.assetId = outgoing.assetId;
+        committed.sha256 = outgoing.sha256;
+        committed.extension = outgoing.extension;
+        committed.localFileIds = outgoing.localFileIds;
+        committed.size = outgoing.size;
+        inventory.insert(committed.assetId, committed);
+    }
+    if (!inventory.isEmpty()) {
+        m_remoteInventoryTargets.insert(targetDeviceId);
+    }
+}
+
+bool UploadManager::findCommittedAsset(const QString& targetDeviceId,
+                                       const QString& localFileId,
+                                       CommittedRemoteAsset* asset) const {
+    const auto target = m_committedAssetsByTarget.constFind(targetDeviceId);
+    if (target == m_committedAssetsByTarget.cend()) {
+        return false;
+    }
+    for (auto it = target->cbegin(); it != target->cend(); ++it) {
+        if (it->localFileIds.contains(localFileId)) {
+            if (asset) *asset = it.value();
+            return true;
+        }
+    }
+    return false;
+}
+
+void UploadManager::forgetCommittedAsset(const CommittedRemoteAsset& asset) {
+    auto target = m_committedAssetsByTarget.find(asset.targetDeviceId);
+    if (target == m_committedAssetsByTarget.end()) {
+        return;
+    }
+    const auto current = target->constFind(asset.assetId);
+    if (current != target->cend()
+        && current->remoteSessionId == asset.remoteSessionId
+        && current->uploadId == asset.uploadId
+        && current->sha256 == asset.sha256) {
+        target->remove(asset.assetId);
+    }
+    if (target->isEmpty()) {
+        m_committedAssetsByTarget.erase(target);
+        m_remoteInventoryTargets.remove(asset.targetDeviceId);
+    }
+}
+
+void UploadManager::forgetRemoteSessionInventory(const QString& remoteSessionId) {
+    if (remoteSessionId.isEmpty()) return;
+    forgetIncomingUploadCompletions(remoteSessionId);
+    const QStringList targets = m_committedAssetsByTarget.keys();
+    for (const QString& targetId : targets) {
+        auto target = m_committedAssetsByTarget.find(targetId);
+        if (target == m_committedAssetsByTarget.end()) continue;
+        for (auto asset = target->begin(); asset != target->end();) {
+            if (asset->remoteSessionId == remoteSessionId) {
+                asset = target->erase(asset);
+            } else {
+                ++asset;
+            }
+        }
+        if (target->isEmpty()) {
+            m_committedAssetsByTarget.erase(target);
+            m_remoteInventoryTargets.remove(targetId);
+        }
+    }
+    const QStringList removalIds = m_pendingAssetRemovals.keys();
+    for (const QString& removalId : removalIds) {
+        if (m_pendingAssetRemovals.value(removalId).asset.remoteSessionId
+            == remoteSessionId) {
+            m_pendingAssetRemovals.remove(removalId);
+        }
+    }
+}
+
+void UploadManager::failAssetRemoval(const QString& removalId,
+                                     const QString& reason) {
+    const auto it = m_pendingAssetRemovals.find(removalId);
+    if (it == m_pendingAssetRemovals.end()) return;
+    const PendingAssetRemoval pending = it.value();
+    m_pendingAssetRemovals.erase(it);
+    emit assetRemovalFailed(pending.asset.targetDeviceId,
+                            pending.asset.remoteSessionId,
+                            pending.asset.localFileIds,
+                            reason.left(512));
+    emit uiStateChanged();
 }
 
 void UploadManager::requestCancel() {
-    const QString clientId = m_uploadTargetClientId.isEmpty() ? m_targetClientId : m_uploadTargetClientId;
-    if (!m_ws || clientId.isEmpty() || m_currentUploadId.isEmpty()) return;
-    if (!canRequestCancel()) return;
-    // Phase 3: canvasSessionId is MANDATORY - always set to DEFAULT_IDEA_ID at minimum
-    if (m_activeIdeaId.isEmpty()) {
-        qWarning() << "UploadManager: requestCancel has empty canvasSessionId (should never happen), using DEFAULT_IDEA_ID";
-        m_activeIdeaId = DEFAULT_IDEA_ID;
+    if (ParallelOutgoingTransfer* transfer = parallelForTarget(m_targetClientId)) {
+        if (!m_ws || transfer->stateAge.elapsed() < CANCEL_GUARD_MS
+            || transfer->state == OutgoingState::Cancelling
+            || transfer->state == OutgoingState::Idle) return;
+        setParallelState(transfer, OutgoingState::Cancelling);
+        stopParallel(transfer);
+        m_ws->sendUploadAbort(transfer->remoteSessionId, transfer->generation,
+                              transfer->uploadId, QStringLiteral("User cancelled"));
+        if (transfer->cancelTimer) {
+            const int timeout = m_ws->serverPolicy()
+                .value(QStringLiteral("uploadTargetAckTimeoutMs")).toInt();
+            if (timeout > 0) transfer->cancelTimer->start(timeout);
+        }
+        emit uiStateChanged();
+        return;
     }
-    
+    if (!m_ws || m_outgoingRemoteSessionId.isEmpty()
+        || m_currentUploadId.isEmpty()) return;
+    if (!canRequestCancel()) return;
+
     recordAcceptedAction();
     setOutgoingState(OutgoingState::Cancelling);
     stopOutgoingPump();
-    m_ws->sendUploadAbort(clientId, m_currentUploadId,
-                          QStringLiteral("User cancelled"), m_activeIdeaId);
+    m_ws->sendUploadAbort(m_outgoingRemoteSessionId, m_outgoingGeneration,
+                          m_currentUploadId, QStringLiteral("User cancelled"));
     // Cancellation only discards this upload's staging directory. It must never
     // remove files validated by an earlier incremental transfer.
     emit uiStateChanged();
-    // Compatibility fallback for an older server without upload_abort_ack.
+    // A lost abort acknowledgement cannot keep the UI stuck. The upload ID is
+    // terminal on the server, so this local completion is idempotent.
     if (!m_cancelFallbackTimer) {
         m_cancelFallbackTimer = new QTimer(this);
         m_cancelFallbackTimer->setSingleShot(true);
@@ -524,100 +1222,1200 @@ void UploadManager::requestCancel() {
             }
         });
     }
-    m_cancelFallbackTimer->start(5000);
+    const int cancelTimeout = m_ws->serverPolicy()
+        .value(QStringLiteral("uploadTargetAckTimeoutMs")).toInt();
+    if (cancelTimeout > 0) m_cancelFallbackTimer->start(cancelTimeout);
 }
 
 void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
-    // Prevent concurrent uploads
-    if (m_outgoingState != OutgoingState::Idle || !m_pendingRemovalId.isEmpty()) {
-        qWarning() << "UploadManager: Upload already in progress, ignoring new start request";
+    const bool selectedAssetRemovalPending = std::any_of(
+        m_pendingAssetRemovals.cbegin(), m_pendingAssetRemovals.cend(),
+        [this](const PendingAssetRemoval& removal) {
+            return removal.asset.targetDeviceId == m_targetClientId;
+        });
+    if (selectedAssetRemovalPending) {
+        qWarning() << "UploadManager: remote removal is still pending";
         return;
     }
-    if (files.isEmpty() || files.size() > kMaxIncomingFiles) {
+    if (!m_ws || !m_fileManager || files.isEmpty()
+        || files.size() > kMaxIncomingFiles) {
         qWarning() << "UploadManager: refusing upload with invalid file count";
         return;
     }
-    qint64 declaredTotalBytes = 0;
+
+    RemoteSessionCoordinator* sessions = m_ws->remoteSessionCoordinator();
+    const RemoteSessionCoordinator::Binding binding = sessions
+        ? sessions->outgoingForPeer(m_targetClientId)
+        : RemoteSessionCoordinator::Binding();
+    if (!binding.active || binding.ownerDeviceId != m_ws->deviceId()) {
+        qWarning() << "UploadManager: an Active owner RemoteSession is required";
+        return;
+    }
+    if ((!m_currentUploadId.isEmpty()
+         && m_outgoingRemoteSessionId == binding.remoteSessionId)
+        || parallelForSession(binding.remoteSessionId)) {
+        qWarning() << "UploadManager: one upload per RemoteSession is already queued or active";
+        return;
+    }
+
+    QMap<QString, OutgoingAsset> assetsByDigest;
+    QSet<QString> allMediaIds;
     for (const UploadFileInfo& file : files) {
+        const QFileInfo info(file.path);
+        const QString extension = file.extension.toLower();
+        const QString name = file.name;
         if (file.size < 1 || file.size > kMaxIncomingFileBytes
-            || declaredTotalBytes > kMaxIncomingUploadBytes - file.size
             || !isValidFileId(file.fileId)
-            || !isCanonicalUuid(file.mediaId)
+            || !isValidOpaqueId(file.mediaId)
+            || !info.exists() || !info.isFile() || info.isSymLink()
+            || info.size() != file.size || !isSafeDisplayName(name)
+            || !isAllowedMediaExtension(extension)
+            || QFileInfo(name).suffix().compare(extension, Qt::CaseInsensitive) != 0
             || !MediaFilePolicy::isAcceptedLocalFile(file.path)) {
-            qWarning() << "UploadManager: refusing unsupported media file" << file.path
+            qWarning() << "UploadManager: refusing unsupported media file"
                        << "or excessive upload size (video uploads must be valid MP4 files)";
             return;
         }
-        declaredTotalBytes += file.size;
+
+        // The legacy repository ID is not a content digest yet. Protocol v2
+        // identity is always the full-file SHA-256; keep local IDs only for UI
+        // and RemoteFileTracker bookkeeping.
+        const QString digest = sha256ForFile(file.path);
+        if (!isValidFileId(digest)) {
+            qWarning() << "UploadManager: could not establish immutable asset identity";
+            return;
+        }
+
+        QStringList mediaIds;
+        const QList<QString> associated = m_fileManager->getMediaIdsForFile(file.fileId);
+        mediaIds.reserve(associated.size() + 1);
+        for (const QString& mediaId : associated) {
+            if (isValidOpaqueId(mediaId) && !mediaIds.contains(mediaId)) {
+                mediaIds.append(mediaId);
+            }
+        }
+        if (!mediaIds.contains(file.mediaId)) mediaIds.append(file.mediaId);
+        std::sort(mediaIds.begin(), mediaIds.end());
+
+        OutgoingAsset asset = assetsByDigest.value(digest);
+        if (!asset.assetId.isEmpty()
+            && (asset.size != file.size || asset.extension != extension)) {
+            qWarning() << "UploadManager: identical asset identity has conflicting metadata";
+            return;
+        }
+        if (asset.assetId.isEmpty()) {
+            asset.assetId = digest;
+            asset.sha256 = digest;
+            asset.path = file.path;
+            asset.name = name;
+            asset.extension = extension;
+            asset.size = file.size;
+        }
+        if (!asset.localFileIds.contains(file.fileId)) {
+            asset.localFileIds.append(file.fileId);
+        }
+        for (const QString& mediaId : std::as_const(mediaIds)) {
+            if (allMediaIds.contains(mediaId)
+                && !asset.mediaIds.contains(mediaId)) {
+                qWarning() << "UploadManager: a media ID maps to multiple upload assets";
+                return;
+            }
+            allMediaIds.insert(mediaId);
+            if (!asset.mediaIds.contains(mediaId)) asset.mediaIds.append(mediaId);
+        }
+        std::sort(asset.mediaIds.begin(), asset.mediaIds.end());
+        std::sort(asset.localFileIds.begin(), asset.localFileIds.end());
+        assetsByDigest.insert(digest, asset);
     }
-    // Phase 3: canvasSessionId is MANDATORY - always set to DEFAULT_IDEA_ID at minimum
-    if (m_activeIdeaId.isEmpty()) {
-        qWarning() << "UploadManager: startUpload has empty canvasSessionId (should never happen), using DEFAULT_IDEA_ID";
-        m_activeIdeaId = DEFAULT_IDEA_ID;
+
+    if (assetsByDigest.isEmpty() || assetsByDigest.size() > kMaxIncomingFiles) return;
+    qint64 declaredTotalBytes = 0;
+    QJsonArray manifest;
+    QVector<OutgoingAsset> normalizedAssets;
+    normalizedAssets.reserve(assetsByDigest.size());
+    for (auto iterator = assetsByDigest.cbegin(); iterator != assetsByDigest.cend(); ++iterator) {
+        const OutgoingAsset& asset = iterator.value();
+        if (declaredTotalBytes > kMaxIncomingUploadBytes - asset.size) {
+            qWarning() << "UploadManager: refusing upload above the session byte limit";
+            return;
+        }
+        declaredTotalBytes += asset.size;
+        QJsonArray mediaIds;
+        for (const QString& mediaId : asset.mediaIds) mediaIds.append(mediaId);
+        manifest.append(QJsonObject{
+            {QStringLiteral("assetId"), asset.assetId},
+            {QStringLiteral("fileId"), asset.sha256},
+            {QStringLiteral("sha256"), asset.sha256},
+            {QStringLiteral("name"), asset.name},
+            {QStringLiteral("extension"), asset.extension},
+            {QStringLiteral("size"), static_cast<double>(asset.size)},
+            {QStringLiteral("mediaIds"), mediaIds}
+        });
+        normalizedAssets.append(asset);
     }
-    
-    m_uploadWasActiveBeforeStart = m_uploadActive;
-    // Capture stable target id for the entire upload session
+
+    const bool usePrimarySlot = m_currentUploadId.isEmpty()
+        && m_outgoingState == OutgoingState::Idle;
+    if (!usePrimarySlot) {
+        auto* transfer = new ParallelOutgoingTransfer;
+        transfer->targetDeviceId = m_targetClientId;
+        transfer->remoteSessionId = binding.remoteSessionId;
+        transfer->uploadId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        transfer->generation = binding.generation;
+        transfer->schedulerGeneration = binding.generation;
+        transfer->remoteInventoryBeforeStart =
+            m_remoteInventoryTargets.contains(m_targetClientId);
+        transfer->assets = normalizedAssets;
+        transfer->manifest = manifest;
+        transfer->totalBytes = declaredTotalBytes;
+        transfer->totalFiles = normalizedAssets.size();
+        for (const OutgoingAsset& asset : std::as_const(transfer->assets)) {
+            transfer->durableOffsets.insert(asset.assetId, 0);
+        }
+        initializeParallelTimers(transfer);
+        m_parallelOutgoingByUpload.insert(transfer->uploadId, transfer);
+        m_parallelUploadBySession.insert(transfer->remoteSessionId,
+                                         transfer->uploadId);
+        recordAcceptedAction();
+        emit uiStateChanged();
+        m_uploadScheduler->setSessionState(binding.remoteSessionId,
+                                           UploadScheduler::SessionState::Active);
+        const UploadScheduler::UploadRequest request{
+            binding.remoteSessionId, binding.generation, transfer->uploadId,
+            transfer->assets.first().assetId
+        };
+        if (m_uploadScheduler->enqueue(request)
+            != UploadScheduler::EnqueueResult::Enqueued) {
+            failParallel(transfer,
+                         QStringLiteral("Upload scheduler rejected the request"));
+        }
+        return;
+    }
+
+    m_uploadWasActiveBeforeStart =
+        m_remoteInventoryTargets.contains(m_targetClientId);
     m_uploadTargetClientId = m_targetClientId;
+    m_outgoingRemoteSessionId = binding.remoteSessionId;
+    m_outgoingGeneration = binding.generation;
+    m_schedulerGeneration = binding.generation;
     m_currentUploadId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    setOutgoingState(OutgoingState::AwaitingTargetReady);
+    setOutgoingState(OutgoingState::Queued);
     m_lastPercent = 0;
     m_filesCompleted = 0;
-    m_totalFiles = files.size();
+    m_totalFiles = normalizedAssets.size();
     m_totalBytes = declaredTotalBytes;
     m_sentBytes = 0;
     m_remoteAcknowledgedBytes = 0;
     m_remoteProgressReceived = false;
     stopOutgoingPump();
     m_outgoingFiles = files;
+    m_outgoingAssets = normalizedAssets;
+    m_outgoingManifest = manifest;
+    m_outgoingDurableOffsets.clear();
+    for (const OutgoingAsset& asset : std::as_const(m_outgoingAssets)) {
+        m_outgoingDurableOffsets.insert(asset.assetId, 0);
+    }
     m_outgoingFileIndex = 0;
     m_outgoingChunkIndex = 0;
     m_outgoingSentForFile = 0;
     m_outgoingPayloadCompleteSent = false;
+    m_waitingForResume = false;
     resetProgressTracking();
-
-    // Build manifest with file deduplication info
-    QJsonArray manifest;
-    
-    for (const auto& f : files) {
-        QJsonObject obj;
-        obj["fileId"] = f.fileId;
-        obj["name"] = f.name;
-        obj["extension"] = f.extension;
-        obj["sizeBytes"] = static_cast<double>(f.size);
-        
-        // Include all mediaIds that use this fileId
-        QList<QString> mediaIds = m_fileManager->getMediaIdsForFile(f.fileId);
-        QJsonArray mediaIdArray;
-        for (const QString& mediaId : mediaIds) {
-            mediaIdArray.append(mediaId);
-        }
-        obj["mediaIds"] = mediaIdArray;
-        
-        
-        
-        manifest.append(obj);
-    }
-
-    // State is locked before transport selection, so duplicate clicks cannot
-    // start or cancel another transaction during setup.
     recordAcceptedAction();
     emit uiStateChanged();
-    if (!m_ws || !m_ws->beginUploadSession(true)) {
+    m_uploadScheduler->setSessionState(binding.remoteSessionId,
+                                       UploadScheduler::SessionState::Active);
+    const UploadScheduler::UploadRequest request{
+        binding.remoteSessionId, binding.generation, m_currentUploadId,
+        m_outgoingAssets.first().assetId
+    };
+    if (m_uploadScheduler->enqueue(request)
+        != UploadScheduler::EnqueueResult::Enqueued) {
+        onUploadRejected(m_currentUploadId,
+                         QStringLiteral("Upload scheduler rejected the request"));
+    }
+}
+
+void UploadManager::initializeParallelTimers(ParallelOutgoingTransfer* transfer) {
+    if (!transfer) return;
+    const QString uploadId = transfer->uploadId;
+    transfer->pumpTimer = new QTimer(this);
+    transfer->pumpTimer->setSingleShot(true);
+    transfer->pumpTimer->setInterval(0);
+    connect(transfer->pumpTimer, &QTimer::timeout, this, [this, uploadId]() {
+        if (ParallelOutgoingTransfer* current = parallelForUpload(uploadId)) {
+            pumpParallel(current);
+        }
+    });
+
+    auto makeWatchdog = [this, uploadId](const QString& error,
+                                         OutgoingState expected) {
+        QTimer* timer = new QTimer(this);
+        timer->setSingleShot(true);
+        timer->setInterval(0);
+        connect(timer, &QTimer::timeout, this, [this, uploadId, error, expected]() {
+            ParallelOutgoingTransfer* current = parallelForUpload(uploadId);
+            if (current && current->state == expected) failParallel(current, error);
+        });
+        return timer;
+    };
+    transfer->stallTimer = makeWatchdog(
+        QStringLiteral("Upload transport stalled"), OutgoingState::Streaming);
+    transfer->startAckTimer = makeWatchdog(
+        QStringLiteral("Remote client did not accept the upload in time"),
+        OutgoingState::AwaitingTargetReady);
+    transfer->ackTimer = makeWatchdog(
+        QStringLiteral("Remote client did not validate the upload in time"),
+        OutgoingState::AwaitingValidation);
+    transfer->cancelTimer = new QTimer(this);
+    transfer->cancelTimer->setSingleShot(true);
+    transfer->cancelTimer->setInterval(0);
+    connect(transfer->cancelTimer, &QTimer::timeout, this, [this, uploadId]() {
+        ParallelOutgoingTransfer* current = parallelForUpload(uploadId);
+        if (current && current->state == OutgoingState::Cancelling) {
+            cancelParallel(current);
+        }
+    });
+
+    const QJsonObject policy = m_ws ? m_ws->serverPolicy() : QJsonObject();
+    const int idleTimeout = policy.value(QStringLiteral("uploadIdleTimeoutMs")).toInt();
+    const int targetAckTimeout =
+        policy.value(QStringLiteral("uploadTargetAckTimeoutMs")).toInt();
+    if (idleTimeout > 0) transfer->stallTimer->setInterval(idleTimeout);
+    if (targetAckTimeout > 0) {
+        transfer->startAckTimer->setInterval(targetAckTimeout);
+        transfer->ackTimer->setInterval(targetAckTimeout);
+        transfer->cancelTimer->setInterval(targetAckTimeout);
+    }
+    transfer->stateAge.start();
+}
+
+void UploadManager::setParallelState(ParallelOutgoingTransfer* transfer,
+                                     OutgoingState state) {
+    if (!transfer || transfer->state == state) return;
+    transfer->state = state;
+    transfer->stateAge.restart();
+}
+
+void UploadManager::startParallelScheduled(ParallelOutgoingTransfer* transfer) {
+    if (!transfer || !m_ws || transfer->state != OutgoingState::Queued) return;
+    RemoteSessionCoordinator* sessions = m_ws->remoteSessionCoordinator();
+    const RemoteSessionCoordinator::Binding binding = sessions
+        ? sessions->byId(transfer->remoteSessionId)
+        : RemoteSessionCoordinator::Binding();
+    if (!binding.active || binding.ownerDeviceId != m_ws->deviceId()
+        || binding.generation != transfer->generation) {
+        failParallel(transfer, QStringLiteral("Remote session is not active"));
+        return;
+    }
+    if (!m_ws->beginUploadSession(true)) {
+        failParallel(transfer,
+                     QStringLiteral("Upload transport is unavailable before transfer start"));
+        return;
+    }
+    transfer->transportRegistered = true;
+    setParallelState(transfer, OutgoingState::AwaitingTargetReady);
+    if (!m_ws->sendUploadStart(transfer->remoteSessionId, transfer->generation,
+                               transfer->uploadId, transfer->manifest)) {
+        failParallel(transfer,
+                     QStringLiteral("Upload transport failed before transfer started"));
+        return;
+    }
+    if (transfer->startAckTimer && transfer->startAckTimer->interval() > 0) {
+        transfer->startAckTimer->start();
+    }
+    if (transfer->targetDeviceId == m_targetClientId) emit uiStateChanged();
+}
+
+bool UploadManager::resumeParallel(ParallelOutgoingTransfer* transfer) {
+    if (!transfer || !m_ws || transfer->state != OutgoingState::Suspended) return false;
+    RemoteSessionCoordinator* sessions = m_ws->remoteSessionCoordinator();
+    const RemoteSessionCoordinator::Binding binding = sessions
+        ? sessions->byId(transfer->remoteSessionId)
+        : RemoteSessionCoordinator::Binding();
+    if (!binding.active || binding.ownerDeviceId != m_ws->deviceId()) return false;
+
+    transfer->generation = binding.generation;
+    m_uploadScheduler->setSessionState(binding.remoteSessionId,
+                                       UploadScheduler::SessionState::Active);
+    if (!m_ws->beginUploadSession(true)) return false;
+    transfer->transportRegistered = true;
+    const bool wasAwaitingValidation =
+        transfer->stateBeforeSuspend == OutgoingState::AwaitingValidation;
+    setParallelState(transfer, wasAwaitingValidation
+        ? OutgoingState::AwaitingValidation
+        : OutgoingState::AwaitingTargetReady);
+    transfer->waitingForResume = !wasAwaitingValidation;
+    const bool sent = wasAwaitingValidation
+        ? m_ws->sendUploadStart(transfer->remoteSessionId, transfer->generation,
+                                transfer->uploadId, transfer->manifest)
+        : m_ws->sendUploadResume(transfer->remoteSessionId, transfer->generation,
+                                 transfer->uploadId);
+    if (!sent) {
+        m_ws->endUploadSession();
+        transfer->transportRegistered = false;
+        setParallelState(transfer, OutgoingState::Suspended);
+        return false;
+    }
+    QTimer* watchdog = wasAwaitingValidation
+        ? transfer->ackTimer : transfer->startAckTimer;
+    if (watchdog && watchdog->interval() > 0) watchdog->start();
+    if (transfer->targetDeviceId == m_targetClientId) emit uiStateChanged();
+    return true;
+}
+
+void UploadManager::suspendParallel(ParallelOutgoingTransfer* transfer) {
+    if (!transfer || transfer->state == OutgoingState::Idle
+        || transfer->state == OutgoingState::Queued
+        || transfer->state == OutgoingState::Cancelling
+        || transfer->state == OutgoingState::Suspended) return;
+    transfer->stateBeforeSuspend = transfer->state;
+    stopParallel(transfer);
+    if (transfer->transportRegistered && m_ws) m_ws->endUploadSession();
+    transfer->transportRegistered = false;
+    transfer->waitingForResume = true;
+    setParallelState(transfer, OutgoingState::Suspended);
+    m_uploadScheduler->setSessionState(transfer->remoteSessionId,
+                                       UploadScheduler::SessionState::Grace);
+    if (transfer->targetDeviceId == m_targetClientId) emit uiStateChanged();
+}
+
+void UploadManager::scheduleParallelPump(ParallelOutgoingTransfer* transfer) {
+    if (!transfer || !transfer->pumpTimer || transfer->pumpTimer->isActive()
+        || transfer->state != OutgoingState::Streaming
+        || transfer->payloadCompleteSent) return;
+    transfer->pumpTimer->start();
+}
+
+void UploadManager::stopParallel(ParallelOutgoingTransfer* transfer) {
+    if (!transfer) return;
+    if (transfer->pumpTimer) transfer->pumpTimer->stop();
+    if (transfer->stallTimer) transfer->stallTimer->stop();
+    if (transfer->startAckTimer) transfer->startAckTimer->stop();
+    if (transfer->ackTimer) transfer->ackTimer->stop();
+    if (transfer->fileHandle.isOpen()) transfer->fileHandle.close();
+}
+
+QJsonArray UploadManager::parallelAssetStates(
+    const ParallelOutgoingTransfer* transfer, bool complete) const {
+    QJsonArray states;
+    if (!transfer) return states;
+    for (const OutgoingAsset& asset : transfer->assets) {
+        states.append(QJsonObject{
+            {QStringLiteral("assetId"), asset.assetId},
+            {QStringLiteral("offset"), static_cast<double>(
+                 complete ? asset.size
+                          : transfer->durableOffsets.value(asset.assetId, 0))},
+            {QStringLiteral("size"), static_cast<double>(asset.size)},
+            {QStringLiteral("sha256"), asset.sha256}
+        });
+    }
+    return states;
+}
+
+void UploadManager::emitParallelProgress(
+    const ParallelOutgoingTransfer* transfer) {
+    if (!transfer || transfer->targetDeviceId != m_targetClientId
+        || transfer->totalFiles <= 0) return;
+    const int percent = std::clamp(
+        std::max(transfer->localPercent, transfer->remotePercent), 0,
+        transfer->remotePercent > 0 ? 100 : 99);
+    emit uploadProgress(percent, transfer->remoteFilesCompleted,
+                        transfer->totalFiles);
+}
+
+bool UploadManager::applyParallelOffsets(ParallelOutgoingTransfer* transfer,
+                                         const QJsonArray& assets,
+                                         bool resetSendCursor,
+                                         QString* errorMessage) {
+    if (!transfer || assets.size() != transfer->assets.size()) {
+        if (errorMessage) *errorMessage = QStringLiteral("Incomplete upload inventory");
+        return false;
+    }
+    QHash<QString, qint64> offsets;
+    for (const QJsonValue& value : assets) {
+        if (!value.isObject()) {
+            if (errorMessage) *errorMessage = QStringLiteral("Malformed upload inventory");
+            return false;
+        }
+        const QJsonObject state = value.toObject();
+        const QString assetId = state.value(QStringLiteral("assetId")).toString();
+        const auto assetIt = std::find_if(
+            transfer->assets.cbegin(), transfer->assets.cend(),
+            [&assetId](const OutgoingAsset& candidate) {
+                return candidate.assetId == assetId;
+            });
+        qint64 offset = -1;
+        qint64 size = -1;
+        if (assetIt == transfer->assets.cend() || offsets.contains(assetId)
+            || !parseNonNegativeOffset(state.value(QStringLiteral("offset")), offset)
+            || !parseManifestSize(state.value(QStringLiteral("size")), size)
+            || size != assetIt->size || offset > size
+            || state.value(QStringLiteral("sha256")).toString() != assetIt->sha256
+            || offset < transfer->durableOffsets.value(assetId, 0)) {
+            if (errorMessage) *errorMessage = QStringLiteral("Mismatched upload inventory");
+            return false;
+        }
+        offsets.insert(assetId, offset);
+    }
+
+    qint64 durableBytes = 0;
+    int completed = 0;
+    for (const OutgoingAsset& asset : transfer->assets) {
+        if (!offsets.contains(asset.assetId)) {
+            if (errorMessage) *errorMessage = QStringLiteral("Incomplete upload inventory");
+            return false;
+        }
+        const qint64 offset = offsets.value(asset.assetId);
+        durableBytes += offset;
+        if (offset == asset.size) ++completed;
+        const int percent = static_cast<int>(std::round(
+            offset * 100.0 / static_cast<double>(asset.size)));
+        for (const QString& localFileId : asset.localFileIds) {
+            transfer->remoteFilePercents[localFileId] = percent;
+            if (transfer->targetDeviceId == m_targetClientId) {
+                emit fileUploadProgress(localFileId, percent);
+            }
+        }
+    }
+    transfer->durableOffsets = offsets;
+    transfer->remoteAcknowledgedBytes = durableBytes;
+    transfer->remotePercent = transfer->totalBytes > 0
+        ? std::clamp(static_cast<int>(std::round(
+              durableBytes * 100.0 / static_cast<double>(transfer->totalBytes))), 0, 100)
+        : 0;
+    transfer->remoteFilesCompleted = completed;
+    emitParallelProgress(transfer);
+
+    if (resetSendCursor) {
+        if (transfer->fileHandle.isOpen()) transfer->fileHandle.close();
+        transfer->sentBytes = durableBytes;
+        transfer->fileIndex = 0;
+        while (transfer->fileIndex < transfer->assets.size()
+               && offsets.value(transfer->assets.at(transfer->fileIndex).assetId)
+                    == transfer->assets.at(transfer->fileIndex).size) {
+            ++transfer->fileIndex;
+        }
+        transfer->sentForFile = transfer->fileIndex < transfer->assets.size()
+            ? offsets.value(transfer->assets.at(transfer->fileIndex).assetId) : 0;
+        transfer->payloadCompleteSent = false;
+    }
+    return true;
+}
+
+void UploadManager::pumpParallel(ParallelOutgoingTransfer* transfer) {
+    if (!transfer || transfer->pumpRunning
+        || transfer->state != OutgoingState::Streaming
+        || transfer->payloadCompleteSent) return;
+    QScopedValueRollback<bool> guard(transfer->pumpRunning, true);
+    if (!m_ws || !m_ws->isUploadSessionTransportAvailable()) {
+        failParallel(transfer, QStringLiteral("Upload transport was interrupted"));
+        return;
+    }
+
+    constexpr qint64 chunkBytes = 128 * 1024;
+    constexpr qint64 maximumChunkWireBytes = ((chunkBytes + 2) / 3) * 4 + 4096;
+    int chunksQueued = 0;
+    while (chunksQueued < kMaxChunksPerPump
+           && transfer->state == OutgoingState::Streaming
+           && !transfer->payloadCompleteSent) {
+        const qint64 queuedBytes = m_ws->uploadTransportBytesToWrite();
+        if (queuedBytes < 0) {
+            failParallel(transfer, QStringLiteral("Upload transport was interrupted"));
+            return;
+        }
+        if (queuedBytes > kMaxQueuedUploadBytes - maximumChunkWireBytes
+            || transfer->sentBytes - transfer->remoteAcknowledgedBytes
+                >= kMaxUnacknowledgedRemoteBytes) return;
+
+        if (transfer->fileIndex >= transfer->assets.size()) {
+            if (transfer->sentBytes != transfer->totalBytes
+                || !m_ws->sendUploadComplete(
+                    transfer->remoteSessionId, transfer->generation,
+                    transfer->uploadId, parallelAssetStates(transfer, true))) {
+                failParallel(transfer, QStringLiteral(
+                    "Upload transport was interrupted before completion"));
+                return;
+            }
+            transfer->payloadCompleteSent = true;
+            setParallelState(transfer, OutgoingState::AwaitingValidation);
+            if (transfer->stallTimer) transfer->stallTimer->stop();
+            if (transfer->ackTimer && transfer->ackTimer->interval() > 0) {
+                transfer->ackTimer->start();
+            }
+            if (transfer->targetDeviceId == m_targetClientId) emit uiStateChanged();
+            return;
+        }
+
+        const OutgoingAsset asset = transfer->assets.at(transfer->fileIndex);
+        if (!transfer->fileHandle.isOpen()) {
+            transfer->fileHandle.setFileName(asset.path);
+            if (!transfer->fileHandle.open(QIODevice::ReadOnly)
+                || transfer->fileHandle.size() != asset.size
+                || !transfer->fileHandle.seek(transfer->sentForFile)) {
+                failParallel(transfer,
+                    QStringLiteral("Source asset is unavailable or changed: %1")
+                        .arg(asset.name));
+                return;
+            }
+            if (transfer->targetDeviceId == m_targetClientId) {
+                for (const QString& localFileId : asset.localFileIds) {
+                    emit fileUploadStarted(localFileId);
+                }
+            }
+        }
+
+        const qint64 remaining = asset.size - transfer->sentForFile;
+        const qint64 requested = std::min(chunkBytes, remaining);
+        if (requested <= 0) {
+            failParallel(transfer, QStringLiteral("Invalid source asset state"));
+            return;
+        }
+        const QByteArray chunk = transfer->fileHandle.read(requested);
+        if (chunk.size() != requested
+            || transfer->fileHandle.error() != QFileDevice::NoError
+            || !m_ws->sendUploadChunk(
+                transfer->remoteSessionId, transfer->generation,
+                transfer->uploadId, asset.assetId, transfer->sentForFile,
+                asset.sha256, chunk)) {
+            failParallel(transfer, QStringLiteral("Upload transport was interrupted"));
+            return;
+        }
+        ++chunksQueued;
+        transfer->sentForFile += chunk.size();
+        transfer->sentBytes += chunk.size();
+        if (transfer->stallTimer && transfer->stallTimer->interval() > 0) {
+            transfer->stallTimer->start();
+        }
+        const int filePercent = std::clamp(static_cast<int>(std::round(
+            transfer->sentForFile * 100.0 / static_cast<double>(asset.size))), 0, 99);
+        for (const QString& localFileId : asset.localFileIds) {
+            transfer->localFilePercents[localFileId] = filePercent;
+            if (transfer->targetDeviceId == m_targetClientId) {
+                emit fileUploadProgress(localFileId, filePercent);
+            }
+        }
+        transfer->localPercent = transfer->totalBytes > 0
+            ? std::clamp(static_cast<int>(std::round(
+                  transfer->sentBytes * 100.0
+                  / static_cast<double>(transfer->totalBytes))), 0, 99)
+            : 0;
+        emitParallelProgress(transfer);
+
+        if (transfer->sentForFile == asset.size) {
+            const bool exact = transfer->fileHandle.size() == asset.size
+                && transfer->fileHandle.pos() == asset.size
+                && transfer->fileHandle.error() == QFileDevice::NoError;
+            transfer->fileHandle.close();
+            if (!exact) {
+                failParallel(transfer,
+                    QStringLiteral("Source file changed during upload: %1")
+                        .arg(asset.name));
+                return;
+            }
+            ++transfer->fileIndex;
+            transfer->sentForFile = 0;
+            if (transfer->targetDeviceId == m_targetClientId) {
+                for (const QString& localFileId : asset.localFileIds) {
+                    emit fileUploadFinished(localFileId);
+                }
+            }
+        }
+    }
+    if (transfer->state == OutgoingState::Streaming
+        && !transfer->payloadCompleteSent) scheduleParallelPump(transfer);
+}
+
+void UploadManager::removeParallel(ParallelOutgoingTransfer* transfer,
+                                   bool preserveRemoteInventory,
+                                   bool releaseScheduler,
+                                   bool schedulerSuccess) {
+    if (!transfer) return;
+    const QString uploadId = transfer->uploadId;
+    const QString sessionId = transfer->remoteSessionId;
+    const QString targetId = transfer->targetDeviceId;
+    const quint64 schedulerGeneration = transfer->schedulerGeneration;
+    const bool wasActive = m_uploadScheduler && m_uploadScheduler->isUploadActive(
+        sessionId, schedulerGeneration, uploadId);
+
+    m_parallelOutgoingByUpload.remove(uploadId);
+    if (m_parallelUploadBySession.value(sessionId) == uploadId) {
+        m_parallelUploadBySession.remove(sessionId);
+    }
+    stopParallel(transfer);
+    if (transfer->cancelTimer) transfer->cancelTimer->stop();
+    if (transfer->transportRegistered && m_ws) m_ws->endUploadSession();
+    transfer->transportRegistered = false;
+    if (preserveRemoteInventory) m_remoteInventoryTargets.insert(targetId);
+    else if (!transfer->remoteInventoryBeforeStart) m_remoteInventoryTargets.remove(targetId);
+
+    if (m_uploadScheduler && releaseScheduler) {
+        if (wasActive) {
+            if (schedulerSuccess) {
+                m_uploadScheduler->completeUpload(sessionId, schedulerGeneration, uploadId);
+            } else {
+                m_uploadScheduler->failUpload(sessionId, schedulerGeneration, uploadId);
+            }
+        } else {
+            m_uploadScheduler->cancelUpload(sessionId, schedulerGeneration, uploadId);
+        }
+    }
+    for (QTimer* timer : {transfer->pumpTimer, transfer->stallTimer,
+                          transfer->startAckTimer, transfer->ackTimer,
+                          transfer->cancelTimer}) {
+        if (timer) timer->deleteLater();
+    }
+    delete transfer;
+    m_uploadActive = hasActiveUpload();
+    emit uiStateChanged();
+}
+
+void UploadManager::failParallel(ParallelOutgoingTransfer* transfer,
+                                 const QString& reason) {
+    if (!transfer || !m_parallelOutgoingByUpload.contains(transfer->uploadId)) return;
+    if (transfer->pumpRunning) {
+        const QString uploadId = transfer->uploadId;
+        transfer->pumpRunning = false;
+        QTimer::singleShot(0, this, [this, uploadId, reason]() {
+            if (ParallelOutgoingTransfer* current = parallelForUpload(uploadId)) {
+                failParallel(current, reason);
+            }
+        });
+        return;
+    }
+    const QString uploadId = transfer->uploadId;
+    const bool preserve = transfer->remoteInventoryBeforeStart;
+    stopParallel(transfer);
+    if (m_ws && transfer->state != OutgoingState::Queued) {
+        m_ws->sendUploadAbort(transfer->remoteSessionId, transfer->generation,
+                              uploadId, reason);
+        m_ws->cancelUploadId(uploadId);
+    }
+    emit uploadRejected(uploadId, reason.left(512));
+    removeParallel(transfer, preserve, true, false);
+}
+
+void UploadManager::finishParallel(ParallelOutgoingTransfer* transfer) {
+    if (!transfer || transfer->state != OutgoingState::AwaitingValidation) return;
+    const bool selected = transfer->targetDeviceId == m_targetClientId;
+    const QString uploadId = transfer->uploadId;
+    for (const OutgoingAsset& asset : std::as_const(transfer->assets)) {
+        for (const QString& localFileId : asset.localFileIds) {
+            m_fileManager->markFileUploadedToClient(localFileId,
+                                                    transfer->targetDeviceId);
+        }
+    }
+    rememberCommittedAssets(transfer->targetDeviceId,
+                            transfer->remoteSessionId,
+                            transfer->generation,
+                            transfer->uploadId,
+                            transfer->assets);
+    if (selected) emit uploadProgress(100, transfer->totalFiles, transfer->totalFiles);
+    removeParallel(transfer, true, true, true);
+    // Every concurrent transfer has its own terminal history event, including
+    // one which completed after the user selected another target.
+    emit uploadFinished(uploadId);
+}
+
+void UploadManager::cancelParallel(ParallelOutgoingTransfer* transfer) {
+    if (!transfer) return;
+    const QString uploadId = transfer->uploadId;
+    const bool preserve = transfer->remoteInventoryBeforeStart;
+    if (m_ws) m_ws->cancelUploadId(uploadId);
+    removeParallel(transfer, preserve, true, false);
+    emit uploadCancelled(uploadId);
+}
+
+void UploadManager::handleParallelMessage(ParallelOutgoingTransfer* transfer,
+                                          const QJsonObject& message) {
+    if (!transfer) return;
+    const QString type = message.value(QStringLiteral("type")).toString();
+    if (type == QLatin1String("upload_resume_ready")
+        || type == QLatin1String("upload_ready")) {
+        if (transfer->state != OutgoingState::AwaitingTargetReady
+            || !message.value(QStringLiteral("assets")).isArray()) return;
+        QString error;
+        if (!applyParallelOffsets(transfer,
+                message.value(QStringLiteral("assets")).toArray(), true, &error)) {
+            failParallel(transfer, error);
+            return;
+        }
+        if (type == QLatin1String("upload_resume_ready")) {
+            transfer->waitingForResume = true;
+            if (transfer->startAckTimer && transfer->startAckTimer->interval() > 0) {
+                transfer->startAckTimer->start();
+            }
+            return;
+        }
+        transfer->waitingForResume = false;
+        if (transfer->startAckTimer) transfer->startAckTimer->stop();
+        setParallelState(transfer, OutgoingState::Streaming);
+        if (transfer->stallTimer && transfer->stallTimer->interval() > 0) {
+            transfer->stallTimer->start();
+        }
+        if (transfer->targetDeviceId == m_targetClientId) emit uiStateChanged();
+        scheduleParallelPump(transfer);
+        return;
+    }
+    if (type == QLatin1String("upload_progress")) {
+        qint64 durableBytes = -1;
+        qint64 totalSize = -1;
+        if (!message.value(QStringLiteral("assets")).isArray()
+            || !parseNonNegativeOffset(message.value(QStringLiteral("durableBytes")),
+                                       durableBytes)
+            || !parseNonNegativeOffset(message.value(QStringLiteral("totalSize")),
+                                       totalSize)
+            || totalSize != transfer->totalBytes || durableBytes > totalSize) {
+            failParallel(transfer, QStringLiteral("Malformed upload progress inventory"));
+            return;
+        }
+        QString error;
+        if (!applyParallelOffsets(transfer,
+                message.value(QStringLiteral("assets")).toArray(), false, &error)
+            || durableBytes != transfer->remoteAcknowledgedBytes) {
+            failParallel(transfer, error.isEmpty()
+                ? QStringLiteral("Mismatched durable upload byte count") : error);
+            return;
+        }
+        if (transfer->state == OutgoingState::Streaming) {
+            if (transfer->stallTimer && transfer->stallTimer->interval() > 0) {
+                transfer->stallTimer->start();
+            }
+            scheduleParallelPump(transfer);
+        }
+        return;
+    }
+    if (type == QLatin1String("upload_finished")) {
+        if (!message.value(QStringLiteral("assets")).isArray()) return;
+        QString error;
+        if (!applyParallelOffsets(transfer,
+                message.value(QStringLiteral("assets")).toArray(), false, &error)) {
+            failParallel(transfer, error);
+            return;
+        }
+        for (const OutgoingAsset& asset : std::as_const(transfer->assets)) {
+            if (transfer->durableOffsets.value(asset.assetId) != asset.size) {
+                failParallel(transfer, QStringLiteral("Incomplete final upload inventory"));
+                return;
+            }
+        }
+        finishParallel(transfer);
+        return;
+    }
+    if (type == QLatin1String("upload_rejected")) {
+        failParallel(transfer,
+            message.value(QStringLiteral("reason")).toString(
+                message.value(QStringLiteral("code")).toString(
+                    QStringLiteral("Upload rejected"))));
+        return;
+    }
+    if (type == QLatin1String("upload_aborted")
+        || type == QLatin1String("upload_abort_ack")) {
+        if (transfer->state == OutgoingState::Cancelling) cancelParallel(transfer);
+        else failParallel(transfer, QStringLiteral("Upload aborted"));
+        return;
+    }
+    if (type == QLatin1String("upload_abort")) {
+        failParallel(transfer,
+            message.value(QStringLiteral("reason")).toString(
+                QStringLiteral("Upload aborted by remote session")));
+    }
+}
+
+void UploadManager::startScheduledUpload(
+    const UploadScheduler::UploadRequest& request) {
+    if (ParallelOutgoingTransfer* transfer = parallelForUpload(request.uploadId)) {
+        if (transfer->remoteSessionId == request.remoteSessionId
+            && transfer->schedulerGeneration == request.connectionGeneration
+            && transfer->state == OutgoingState::Queued) {
+            startParallelScheduled(transfer);
+        }
+        return;
+    }
+    if (m_outgoingState != OutgoingState::Queued
+        || request.uploadId != m_currentUploadId
+        || request.remoteSessionId != m_outgoingRemoteSessionId
+        || request.connectionGeneration != m_schedulerGeneration) return;
+
+    RemoteSessionCoordinator* sessions = m_ws ? m_ws->remoteSessionCoordinator() : nullptr;
+    const RemoteSessionCoordinator::Binding binding = sessions
+        ? sessions->byId(m_outgoingRemoteSessionId)
+        : RemoteSessionCoordinator::Binding();
+    if (!binding.active || binding.ownerDeviceId != m_ws->deviceId()
+        || binding.generation != m_outgoingGeneration) {
+        failOutgoingUpload(QStringLiteral("Remote session is not active"));
+        return;
+    }
+    if (!m_ws->beginUploadSession(true)) {
         failOutgoingUpload(QStringLiteral(
             "Upload transport is unavailable before transfer start"));
         return;
     }
+    m_outgoingTransportRegistered = true;
+    setOutgoingState(OutgoingState::AwaitingTargetReady);
+    if (!m_ws->sendUploadStart(m_outgoingRemoteSessionId, m_outgoingGeneration,
+                               m_currentUploadId, m_outgoingManifest)) {
+        failOutgoingUpload(QStringLiteral(
+            "Upload transport failed before transfer started"));
+        return;
+    }
+    if (m_outgoingStartAckTimer && m_outgoingStartAckTimer->interval() > 0) {
+        m_outgoingStartAckTimer->start();
+    }
+}
 
-    if (!m_ws->sendUploadStart(m_uploadTargetClientId, manifest,
-                               m_currentUploadId, m_activeIdeaId)) {
-        failOutgoingUpload(QStringLiteral("Upload transport failed before transfer started"));
+bool UploadManager::resumeOutgoingUpload() {
+    if (!m_ws || m_currentUploadId.isEmpty()
+        || m_outgoingRemoteSessionId.isEmpty()
+        || m_outgoingState != OutgoingState::Suspended) return false;
+    RemoteSessionCoordinator* sessions = m_ws->remoteSessionCoordinator();
+    const RemoteSessionCoordinator::Binding binding = sessions
+        ? sessions->byId(m_outgoingRemoteSessionId)
+        : RemoteSessionCoordinator::Binding();
+    if (!binding.active || binding.ownerDeviceId != m_ws->deviceId()) return false;
+
+    m_outgoingGeneration = binding.generation;
+    m_uploadScheduler->setSessionState(binding.remoteSessionId,
+                                       UploadScheduler::SessionState::Active);
+    if (!m_ws->beginUploadSession(true)) return false;
+    m_outgoingTransportRegistered = true;
+    const bool wasAwaitingValidation =
+        m_stateBeforeSuspend == OutgoingState::AwaitingValidation;
+    setOutgoingState(wasAwaitingValidation
+                         ? OutgoingState::AwaitingValidation
+                         : OutgoingState::AwaitingTargetReady);
+    m_waitingForResume = !wasAwaitingValidation;
+    const bool sent = wasAwaitingValidation
+        ? m_ws->sendUploadStart(m_outgoingRemoteSessionId,
+                                m_outgoingGeneration,
+                                m_currentUploadId,
+                                m_outgoingManifest)
+        : m_ws->sendUploadResume(m_outgoingRemoteSessionId,
+                                 m_outgoingGeneration,
+                                 m_currentUploadId);
+    if (!sent) {
+        m_ws->endUploadSession();
+        m_outgoingTransportRegistered = false;
+        setOutgoingState(OutgoingState::Suspended);
+        return false;
+    }
+    if (wasAwaitingValidation) {
+        if (m_outgoingAckTimer && m_outgoingAckTimer->interval() > 0) {
+            m_outgoingAckTimer->start();
+        }
+    } else if (m_outgoingStartAckTimer
+               && m_outgoingStartAckTimer->interval() > 0) {
+        m_outgoingStartAckTimer->start();
+    }
+    emit uiStateChanged();
+    return true;
+}
+
+void UploadManager::suspendOutgoingForResume(const QString& reason) {
+    Q_UNUSED(reason);
+    if (m_currentUploadId.isEmpty()
+        || m_outgoingState == OutgoingState::Idle
+        || m_outgoingState == OutgoingState::Cancelling
+        || m_outgoingState == OutgoingState::Suspended) return;
+    m_stateBeforeSuspend = m_outgoingState;
+    stopOutgoingPump();
+    if (m_ws && m_outgoingTransportRegistered) m_ws->endUploadSession();
+    m_outgoingTransportRegistered = false;
+    m_waitingForResume = true;
+    setOutgoingState(OutgoingState::Suspended);
+    if (m_uploadScheduler && !m_outgoingRemoteSessionId.isEmpty()) {
+        m_uploadScheduler->setSessionState(
+            m_outgoingRemoteSessionId, UploadScheduler::SessionState::Grace);
+    }
+    emit uiStateChanged();
+}
+
+void UploadManager::applyRemoteSessionEnvelope(const QJsonObject& envelope) {
+    const QString remoteSessionId =
+        envelope.value(QStringLiteral("remoteSessionId")).toString();
+    if (remoteSessionId.isEmpty()) return;
+    const QString type = envelope.value(QStringLiteral("type")).toString();
+    const QString phase = envelope.value(QStringLiteral("phase")).toString();
+    quint64 generation = 0;
+    if (!parsePositiveGeneration(
+            envelope.value(QStringLiteral("generation")), generation)) {
         return;
     }
 
-    // Do not queue file bytes until the target has validated the manifest and
-    // created every staging file. This is explicit protocol backpressure.
-    if (m_outgoingStartAckTimer) m_outgoingStartAckTimer->start();
+    if (type == QLatin1String("remote_session_closed")
+        || phase == QLatin1String("Terminating")
+        || phase == QLatin1String("CleanupPending")
+        || phase == QLatin1String("Closed")) {
+        forgetRemoteSessionInventory(remoteSessionId);
+        terminateRemoteSessionUpload(
+            remoteSessionId,
+            envelope.value(QStringLiteral("reason")).toString(
+                QStringLiteral("Remote session closed")));
+        return;
+    }
+
+    const bool active = phase == QLatin1String("Active");
+    if (active && generation > 0) {
+        for (auto target = m_committedAssetsByTarget.begin();
+             target != m_committedAssetsByTarget.end(); ++target) {
+            for (auto asset = target->begin(); asset != target->end(); ++asset) {
+                if (asset->remoteSessionId == remoteSessionId) {
+                    asset->generation = generation;
+                }
+            }
+        }
+        for (auto removal = m_pendingAssetRemovals.begin();
+             removal != m_pendingAssetRemovals.end(); ++removal) {
+            if (removal->asset.remoteSessionId == remoteSessionId) {
+                removal->asset.generation = generation;
+            }
+        }
+
+        // Completed incoming uploads have no in-memory transfer to perform the
+        // cache descriptor rebind. Advance every matching live scope before a
+        // replayed removal or teardown can be accepted in the new generation.
+        if (m_remoteCacheStore && m_remoteCacheReady) {
+            QString enumerationError;
+            const QList<RemoteCacheStore::Scope> scopes =
+                m_remoteCacheStore->liveScopes(&enumerationError);
+            if (enumerationError.isEmpty()) {
+                for (const RemoteCacheStore::Scope& scope : scopes) {
+                    if (scope.remoteSessionId == remoteSessionId
+                        && scope.generation < generation) {
+                        QString ignored;
+                        m_remoteCacheStore->rebindSessionGeneration(
+                            scope, generation, &ignored);
+                    }
+                }
+            }
+        }
+
+        // Re-send only when the authenticated RemoteSession generation has
+        // advanced. This recovers both an intent created during Grace and an
+        // ACK lost after the target already committed. The removalId and
+        // immutable asset tuple stay unchanged, and the original timeout is
+        // never restarted.
+        for (auto removal = m_pendingAssetRemovals.begin();
+             removal != m_pendingAssetRemovals.end(); ++removal) {
+            if (removal->asset.remoteSessionId == remoteSessionId
+                && removal->lastSentGeneration != generation) {
+                sendPendingAssetRemoval(removal.value());
+            }
+        }
+    }
+    if (m_uploadScheduler) {
+        m_uploadScheduler->setSessionState(
+            remoteSessionId,
+            active ? UploadScheduler::SessionState::Active
+                   : UploadScheduler::SessionState::Grace);
+    }
+    if (ParallelOutgoingTransfer* parallel = parallelForSession(remoteSessionId)) {
+        if (!active) {
+            suspendParallel(parallel);
+            return;
+        }
+        if (generation > 0) parallel->generation = generation;
+        if (parallel->state == OutgoingState::Suspended) {
+            const QString uploadId = parallel->uploadId;
+            QTimer::singleShot(0, this, [this, uploadId]() {
+                if (ParallelOutgoingTransfer* current = parallelForUpload(uploadId)) {
+                    resumeParallel(current);
+                }
+            });
+        }
+        return;
+    }
+    if (remoteSessionId != m_outgoingRemoteSessionId
+        || m_currentUploadId.isEmpty()) return;
+    if (!active) {
+        suspendOutgoingForResume();
+        return;
+    }
+    if (generation > 0) m_outgoingGeneration = generation;
+    if (m_outgoingState == OutgoingState::Suspended) {
+        QTimer::singleShot(0, this, [this]() { resumeOutgoingUpload(); });
+    }
+}
+
+void UploadManager::terminateRemoteSessionUpload(
+    const QString& remoteSessionId, const QString& reason) {
+    if (remoteSessionId.isEmpty()) return;
+    forgetRemoteSessionInventory(remoteSessionId);
+    if (m_uploadScheduler) m_uploadScheduler->cancelSession(remoteSessionId);
+    if (ParallelOutgoingTransfer* parallel = parallelForSession(remoteSessionId)) {
+        const QString uploadId = parallel->uploadId;
+        const QString targetId = parallel->targetDeviceId;
+        if (m_ws) m_ws->cancelUploadId(uploadId);
+        if (m_fileManager && !targetId.isEmpty()) {
+            m_fileManager->unmarkAllForClient(targetId);
+        }
+        m_remoteInventoryTargets.remove(targetId);
+        removeParallel(parallel, false, false);
+        emit uploadRejected(uploadId, reason.left(512));
+    }
+    if (remoteSessionId != m_outgoingRemoteSessionId) return;
+
+    const QString uploadId = m_currentUploadId;
+    stopOutgoingPump();
+    if (m_ws) {
+        if (!uploadId.isEmpty()) m_ws->cancelUploadId(uploadId);
+        if (m_outgoingTransportRegistered) m_ws->endUploadSession();
+        m_outgoingTransportRegistered = false;
+    }
+    if (m_fileManager && !m_uploadTargetClientId.isEmpty()) {
+        // Session teardown purges its entire remote inventory, not merely the
+        // current incremental batch. This is the only network-loss path which
+        // returns project media to Not uploaded.
+        m_fileManager->unmarkAllForClient(m_uploadTargetClientId);
+    }
+    m_remoteInventoryTargets.remove(m_uploadTargetClientId);
+    m_uploadActive = false;
+    clearOutgoingTransfer(false);
+    m_outgoingRemoteSessionId.clear();
+    m_outgoingGeneration = 0;
+    m_schedulerGeneration = 0;
+    if (!uploadId.isEmpty()) {
+        emit uploadRejected(uploadId, reason.left(512));
+    }
+    emit uiStateChanged();
+}
+
+QJsonArray UploadManager::outgoingAssetStates(bool complete) const {
+    QJsonArray states;
+    for (const OutgoingAsset& asset : m_outgoingAssets) {
+        states.append(QJsonObject{
+            {QStringLiteral("assetId"), asset.assetId},
+            {QStringLiteral("offset"), static_cast<double>(
+                 complete ? asset.size
+                          : m_outgoingDurableOffsets.value(asset.assetId, 0))},
+            {QStringLiteral("size"), static_cast<double>(asset.size)},
+            {QStringLiteral("sha256"), asset.sha256}
+        });
+    }
+    return states;
+}
+
+bool UploadManager::applyAuthoritativeOffsets(const QJsonArray& assets,
+                                              bool resetSendCursor,
+                                              QString* errorMessage) {
+    if (assets.size() != m_outgoingAssets.size()) {
+        if (errorMessage) *errorMessage = QStringLiteral("Incomplete upload inventory");
+        return false;
+    }
+    QHash<QString, qint64> offsets;
+    for (const QJsonValue& value : assets) {
+        if (!value.isObject()) {
+            if (errorMessage) *errorMessage = QStringLiteral("Malformed upload inventory");
+            return false;
+        }
+        const QJsonObject state = value.toObject();
+        const QString assetId = state.value(QStringLiteral("assetId")).toString();
+        auto assetIt = std::find_if(
+            m_outgoingAssets.cbegin(), m_outgoingAssets.cend(),
+            [&assetId](const OutgoingAsset& candidate) {
+                return candidate.assetId == assetId;
+            });
+        qint64 offset = -1;
+        qint64 size = -1;
+        if (assetIt == m_outgoingAssets.cend() || offsets.contains(assetId)
+            || !parseNonNegativeOffset(state.value(QStringLiteral("offset")), offset)
+            || !parseManifestSize(state.value(QStringLiteral("size")), size)
+            || size != assetIt->size || offset > size
+            || state.value(QStringLiteral("sha256")).toString() != assetIt->sha256
+            || offset < m_outgoingDurableOffsets.value(assetId, 0)) {
+            if (errorMessage) *errorMessage = QStringLiteral("Mismatched upload inventory");
+            return false;
+        }
+        offsets.insert(assetId, offset);
+    }
+
+    qint64 durableBytes = 0;
+    int completedAssets = 0;
+    for (const OutgoingAsset& asset : m_outgoingAssets) {
+        if (!offsets.contains(asset.assetId)) {
+            if (errorMessage) *errorMessage = QStringLiteral("Incomplete upload inventory");
+            return false;
+        }
+        const qint64 offset = offsets.value(asset.assetId);
+        durableBytes += offset;
+        if (offset == asset.size) ++completedAssets;
+        const int percent = static_cast<int>(std::round(
+            offset * 100.0 / static_cast<double>(asset.size)));
+        for (const QString& localFileId : asset.localFileIds) {
+            updatePerFileRemoteProgress(localFileId, percent);
+        }
+    }
+    m_outgoingDurableOffsets = offsets;
+    m_remoteAcknowledgedBytes = durableBytes;
+    const int percent = m_totalBytes > 0
+        ? std::clamp(static_cast<int>(std::round(
+              durableBytes * 100.0 / static_cast<double>(m_totalBytes))), 0, 100)
+        : 0;
+    updateRemoteProgress(percent, completedAssets);
+
+    if (resetSendCursor) {
+        if (m_outgoingFileHandle.isOpen()) m_outgoingFileHandle.close();
+        m_sentBytes = durableBytes;
+        m_outgoingFileIndex = 0;
+        while (m_outgoingFileIndex < m_outgoingAssets.size()
+               && offsets.value(m_outgoingAssets.at(m_outgoingFileIndex).assetId)
+                    == m_outgoingAssets.at(m_outgoingFileIndex).size) {
+            ++m_outgoingFileIndex;
+        }
+        m_outgoingSentForFile = m_outgoingFileIndex < m_outgoingAssets.size()
+            ? offsets.value(m_outgoingAssets.at(m_outgoingFileIndex).assetId)
+            : 0;
+        m_outgoingChunkIndex = static_cast<int>(
+            m_outgoingSentForFile / (128 * 1024));
+        m_outgoingPayloadCompleteSent = false;
+    }
+    return true;
+}
+
+void UploadManager::releaseSchedulerSlot(bool success) {
+    if (!m_uploadScheduler || m_outgoingRemoteSessionId.isEmpty()
+        || m_currentUploadId.isEmpty() || m_schedulerGeneration == 0) return;
+    if (m_uploadScheduler->isUploadActive(
+            m_outgoingRemoteSessionId, m_schedulerGeneration, m_currentUploadId)) {
+        if (success) {
+            m_uploadScheduler->completeUpload(
+                m_outgoingRemoteSessionId, m_schedulerGeneration, m_currentUploadId);
+        } else {
+            m_uploadScheduler->failUpload(
+                m_outgoingRemoteSessionId, m_schedulerGeneration, m_currentUploadId);
+        }
+    } else {
+        m_uploadScheduler->cancelUpload(
+            m_outgoingRemoteSessionId, m_schedulerGeneration, m_currentUploadId);
+    }
+}
+
+void UploadManager::clearOutgoingTransfer(bool preserveRemoteInventory) {
+    stopOutgoingPump();
+    if (m_ws && m_outgoingTransportRegistered) m_ws->endUploadSession();
+    m_outgoingTransportRegistered = false;
+    m_uploadActive = preserveRemoteInventory;
+    m_uploadWasActiveBeforeStart = false;
+    m_currentUploadId.clear();
+    m_outgoingFiles.clear();
+    m_outgoingAssets.clear();
+    m_outgoingManifest = QJsonArray();
+    m_outgoingDurableOffsets.clear();
+    m_outgoingFileIndex = 0;
+    m_outgoingChunkIndex = 0;
+    m_outgoingSentForFile = 0;
+    m_outgoingPayloadCompleteSent = false;
+    m_waitingForResume = false;
+    m_stateBeforeSuspend = OutgoingState::Idle;
+    m_lastPercent = 0;
+    m_filesCompleted = 0;
+    m_totalFiles = 0;
+    m_sentBytes = 0;
+    m_totalBytes = 0;
+    m_remoteAcknowledgedBytes = 0;
+    m_remoteProgressReceived = false;
+    resetProgressTracking();
+    setOutgoingState(OutgoingState::Idle);
 }
 
 void UploadManager::scheduleOutgoingPump() {
@@ -643,11 +2441,12 @@ void UploadManager::failOutgoingUpload(const QString& reason) {
     if (uploadId.isEmpty()) return;
 
     stopOutgoingPump();
-    if (m_ws) {
+    if (m_ws && m_outgoingState != OutgoingState::Queued
+        && !m_outgoingRemoteSessionId.isEmpty() && m_outgoingGeneration > 0) {
         // WebSocketClient keeps termination ordered on the pinned transport,
         // falling back to the authenticated control channel after transport loss.
-        m_ws->sendUploadAbort(m_uploadTargetClientId, uploadId,
-                              reason, m_activeIdeaId);
+        m_ws->sendUploadAbort(m_outgoingRemoteSessionId, m_outgoingGeneration,
+                              uploadId, reason);
     }
     onUploadRejected(uploadId, reason);
 }
@@ -690,13 +2489,15 @@ void UploadManager::pumpOutgoingUpload() {
             return;
         }
 
-        if (m_outgoingFileIndex >= m_outgoingFiles.size()) {
+        if (m_outgoingFileIndex >= m_outgoingAssets.size()) {
             if (m_sentBytes != m_totalBytes) {
                 failOutgoingUpload(QStringLiteral("Source files were not read completely"));
                 return;
             }
-            if (!m_ws->sendUploadComplete(m_uploadTargetClientId, m_currentUploadId,
-                                          m_activeIdeaId)) {
+            if (!m_ws->sendUploadComplete(m_outgoingRemoteSessionId,
+                                          m_outgoingGeneration,
+                                          m_currentUploadId,
+                                          outgoingAssetStates(true))) {
                 failOutgoingUpload(QStringLiteral(
                     "Upload transport was interrupted before completion"));
                 return;
@@ -706,12 +2507,14 @@ void UploadManager::pumpOutgoingUpload() {
             setOutgoingState(OutgoingState::AwaitingValidation);
             if (m_outgoingPumpTimer) m_outgoingPumpTimer->stop();
             if (m_outgoingStallTimer) m_outgoingStallTimer->stop();
-            if (m_outgoingAckTimer) m_outgoingAckTimer->start();
+            if (m_outgoingAckTimer && m_outgoingAckTimer->interval() > 0) {
+                m_outgoingAckTimer->start();
+            }
             emit uiStateChanged();
             return;
         }
 
-        const UploadFileInfo fileInfo = m_outgoingFiles.at(m_outgoingFileIndex);
+        const OutgoingAsset fileInfo = m_outgoingAssets.at(m_outgoingFileIndex);
         if (!m_outgoingFileHandle.isOpen()) {
             m_outgoingFileHandle.setFileName(fileInfo.path);
             if (!m_outgoingFileHandle.open(QIODevice::ReadOnly)) {
@@ -724,9 +2527,16 @@ void UploadManager::pumpOutgoingUpload() {
                                        .arg(fileInfo.name));
                 return;
             }
-            m_outgoingChunkIndex = 0;
-            m_outgoingSentForFile = 0;
-            emit fileUploadStarted(fileInfo.fileId);
+            if (!m_outgoingFileHandle.seek(m_outgoingSentForFile)) {
+                failOutgoingUpload(QStringLiteral("Could not seek source asset: %1")
+                                       .arg(fileInfo.name));
+                return;
+            }
+            m_outgoingChunkIndex = static_cast<int>(
+                m_outgoingSentForFile / (128 * 1024));
+            for (const QString& localFileId : fileInfo.localFileIds) {
+                emit fileUploadStarted(localFileId);
+            }
             if (m_outgoingState != OutgoingState::Streaming) {
                 return;
             }
@@ -747,10 +2557,10 @@ void UploadManager::pumpOutgoingUpload() {
             return;
         }
 
-        const int chunkIndex = m_outgoingChunkIndex;
-        if (!m_ws->sendUploadChunk(m_uploadTargetClientId, m_currentUploadId,
-                                   fileInfo.fileId, chunkIndex, chunk.toBase64(),
-                                   m_activeIdeaId)) {
+        const qint64 offset = m_outgoingSentForFile;
+        if (!m_ws->sendUploadChunk(m_outgoingRemoteSessionId, m_outgoingGeneration,
+                                   m_currentUploadId, fileInfo.assetId, offset,
+                                   fileInfo.sha256, chunk)) {
             failOutgoingUpload(QStringLiteral("Upload transport was interrupted"));
             return;
         }
@@ -758,11 +2568,15 @@ void UploadManager::pumpOutgoingUpload() {
         ++chunksQueuedThisPass;
         m_outgoingSentForFile += chunk.size();
         m_sentBytes += chunk.size();
-        if (m_outgoingStallTimer) m_outgoingStallTimer->start();
+        if (m_outgoingStallTimer && m_outgoingStallTimer->interval() > 0) {
+            m_outgoingStallTimer->start();
+        }
 
         const int filePercent = static_cast<int>(std::round(
             m_outgoingSentForFile * 100.0 / static_cast<double>(fileInfo.size)));
-        updatePerFileLocalProgress(fileInfo.fileId, filePercent);
+        for (const QString& localFileId : fileInfo.localFileIds) {
+            updatePerFileLocalProgress(localFileId, filePercent);
+        }
         if (m_outgoingState != OutgoingState::Streaming) {
             return;
         }
@@ -790,9 +2604,13 @@ void UploadManager::pumpOutgoingUpload() {
             ++m_outgoingFileIndex;
             m_outgoingChunkIndex = 0;
             m_outgoingSentForFile = 0;
-            updatePerFileLocalProgress(fileInfo.fileId, 99);
+            for (const QString& localFileId : fileInfo.localFileIds) {
+                updatePerFileLocalProgress(localFileId, 99);
+            }
             updateLocalProgress(globalPercent, m_outgoingFileIndex);
-            emit fileUploadFinished(fileInfo.fileId);
+            for (const QString& localFileId : fileInfo.localFileIds) {
+                emit fileUploadFinished(localFileId);
+            }
             if (m_outgoingState != OutgoingState::Streaming) {
                 return;
             }
@@ -808,33 +2626,15 @@ void UploadManager::pumpOutgoingUpload() {
 // collectSceneFiles removed; files now gathered by caller (MainWindow)
 
 void UploadManager::resetToInitial() {
-    stopOutgoingPump();
-    m_uploadActive = false;
-    setOutgoingState(OutgoingState::Idle);
-    m_uploadWasActiveBeforeStart = false;
-    m_currentUploadId.clear();
-    m_lastPercent = 0;
-    m_filesCompleted = 0;
-    m_totalFiles = 0;
-    m_sentBytes = 0;
-    m_totalBytes = 0;
-    m_remoteAcknowledgedBytes = 0;
-    m_remoteProgressReceived = false;
-    m_outgoingFiles.clear();
-    m_outgoingFileIndex = 0;
-    m_outgoingChunkIndex = 0;
-    m_outgoingSentForFile = 0;
-    m_outgoingPayloadCompleteSent = false;
-    resetProgressTracking();
+    if (!m_currentUploadId.isEmpty()) releaseSchedulerSlot(false);
+    clearOutgoingTransfer(false);
     if (m_cancelFallbackTimer) m_cancelFallbackTimer->stop();
-    if (m_removalAckTimer) m_removalAckTimer->stop();
     m_uploadTargetClientId.clear();
-    m_pendingRemovalId.clear();
-    m_pendingRemovalTargetId.clear();
-    m_pendingRemovalCanvasSessionId.clear();
+    m_outgoingRemoteSessionId.clear();
+    m_outgoingGeneration = 0;
+    m_schedulerGeneration = 0;
     m_activeSessionIdentity.clear();
     m_activeIdeaId.clear();
-    if (m_ws) m_ws->endUploadSession();
 }
 
 void UploadManager::finishLocalCancellation() {
@@ -842,30 +2642,16 @@ void UploadManager::finishLocalCancellation() {
     const QString cancelledUploadId = m_currentUploadId;
     const bool preserveExistingRemoteFiles = m_uploadWasActiveBeforeStart;
 
-    stopOutgoingPump();
     if (m_cancelFallbackTimer) m_cancelFallbackTimer->stop();
     if (m_ws) {
         m_ws->cancelUploadId(cancelledUploadId);
-        m_ws->endUploadSession();
     }
-
-    m_uploadActive = preserveExistingRemoteFiles;
-    m_uploadWasActiveBeforeStart = false;
-    m_currentUploadId.clear();
-    m_outgoingFiles.clear();
-    m_outgoingFileIndex = 0;
-    m_outgoingChunkIndex = 0;
-    m_outgoingSentForFile = 0;
-    m_outgoingPayloadCompleteSent = false;
-    m_lastPercent = 0;
-    m_filesCompleted = 0;
-    m_totalFiles = 0;
-    m_sentBytes = 0;
-    m_totalBytes = 0;
-    m_remoteAcknowledgedBytes = 0;
-    m_remoteProgressReceived = false;
-    resetProgressTracking();
-    setOutgoingState(OutgoingState::Idle);
+    if (m_uploadScheduler && !m_outgoingRemoteSessionId.isEmpty()) {
+        m_uploadScheduler->cancelUpload(m_outgoingRemoteSessionId,
+                                        m_schedulerGeneration,
+                                        cancelledUploadId);
+    }
+    clearOutgoingTransfer(preserveExistingRemoteFiles);
 
     emit uploadCancelled(cancelledUploadId);
     emit uiStateChanged();
@@ -911,7 +2697,7 @@ void UploadManager::updateRemoteProgress(int percent, int filesCompleted) {
 }
 
 void UploadManager::emitEffectiveProgressIfChanged() {
-    if (m_totalFiles <= 0) return;
+    if (m_totalFiles <= 0 || m_uploadTargetClientId != m_targetClientId) return;
     const int effectivePercent = std::clamp(std::max(m_lastLocalPercent, m_lastRemotePercent), 0, m_remoteProgressReceived ? 100 : 99);
     // A locally-sent file is not complete until the target has validated it.
     const int effectiveFilesCompleted = std::clamp(m_remoteProgressReceived ? m_lastRemoteFilesCompleted : 0,
@@ -944,6 +2730,7 @@ void UploadManager::updatePerFileRemoteProgress(const QString& fileId, int perce
 }
 
 void UploadManager::emitEffectivePerFileProgress(const QString& fileId) {
+    if (m_uploadTargetClientId != m_targetClientId) return;
     const int local = m_localFilePercents.value(fileId, 0);
     const int remote = m_remoteFilePercents.value(fileId, 0);
     int effective = std::max(local, remote);
@@ -968,9 +2755,418 @@ void UploadManager::clearIncomingChunkTracking(const QString& uploadId) {
     }
 }
 
+void UploadManager::closeIncomingFiles(bool flush)
+{
+    for (auto it = m_incoming.openFiles.begin(); it != m_incoming.openFiles.end(); ++it) {
+        QFile* file = it.value();
+        if (!file) continue;
+        if (flush && file->isOpen()) {
+            syncFile(file);
+        }
+        file->close();
+        delete file;
+    }
+    m_incoming.openFiles.clear();
+}
+
+void UploadManager::suspendIncomingForResume()
+{
+    if (m_incoming.uploadId.isEmpty()) return;
+    closeIncomingFiles(true);
+    m_incoming.suspendedForResume = true;
+    if (m_incomingStallTimer) m_incomingStallTimer->stop();
+}
+
+QJsonArray UploadManager::incomingAssetOffsets() const
+{
+    QJsonArray assets;
+    QStringList assetIds = m_incoming.expectedSizes.keys();
+    std::sort(assetIds.begin(), assetIds.end());
+    for (const QString& assetId : assetIds) {
+        QJsonObject asset;
+        asset.insert(QStringLiteral("assetId"), assetId);
+        asset.insert(QStringLiteral("offset"),
+                     static_cast<double>(m_incoming.receivedByFile.value(assetId, 0)));
+        asset.insert(QStringLiteral("size"),
+                     static_cast<double>(m_incoming.expectedSizes.value(assetId, 0)));
+        asset.insert(QStringLiteral("sha256"),
+                     m_incoming.assetIdToSha256.value(assetId));
+        assets.append(asset);
+    }
+    return assets;
+}
+
+void UploadManager::pruneIncomingUploadCompletions(qint64 nowEpochMs)
+{
+    for (auto it = m_incomingUploadCompletionTombstones.begin();
+         it != m_incomingUploadCompletionTombstones.end();) {
+        if (it->expiresAtEpochMs <= nowEpochMs) {
+            it = m_incomingUploadCompletionTombstones.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    while (m_incomingUploadCompletionTombstones.size()
+           > kMaxIncomingCompletionTombstones) {
+        auto oldest = m_incomingUploadCompletionTombstones.begin();
+        for (auto it = oldest; it != m_incomingUploadCompletionTombstones.end(); ++it) {
+            if (it->expiresAtEpochMs < oldest->expiresAtEpochMs) oldest = it;
+        }
+        m_incomingUploadCompletionTombstones.erase(oldest);
+    }
+}
+
+void UploadManager::rememberIncomingUploadCompletion(
+    const QString& senderDeviceId,
+    const QString& remoteSessionId,
+    quint64 generation,
+    quint64 sourceConnectionGeneration,
+    const QString& uploadId,
+    const QJsonArray& assets)
+{
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    pruneIncomingUploadCompletions(now);
+    IncomingUploadCompletionTombstone tombstone;
+    tombstone.senderDeviceId = senderDeviceId;
+    tombstone.remoteSessionId = remoteSessionId;
+    tombstone.generation = generation;
+    tombstone.sourceConnectionGeneration = sourceConnectionGeneration;
+    tombstone.uploadId = uploadId;
+    tombstone.assets = assets;
+    tombstone.expiresAtEpochMs = now + kIncomingCompletionTombstoneTtlMs;
+    m_incomingUploadCompletionTombstones.insert(uploadId, tombstone);
+    pruneIncomingUploadCompletions(now);
+}
+
+bool UploadManager::replayIncomingUploadCompletion(
+    const QJsonObject& message,
+    const QString& senderDeviceId,
+    const QString& remoteSessionId,
+    quint64 generation,
+    quint64 sourceConnectionGeneration)
+{
+    pruneIncomingUploadCompletions(QDateTime::currentMSecsSinceEpoch());
+    const QString uploadId = message.value(QStringLiteral("uploadId")).toString();
+    auto completed = m_incomingUploadCompletionTombstones.find(uploadId);
+    if (completed == m_incomingUploadCompletionTombstones.end()
+        || completed->senderDeviceId != senderDeviceId
+        || completed->remoteSessionId != remoteSessionId
+        || generation < completed->generation
+        || (generation == completed->generation
+            && sourceConnectionGeneration != completed->sourceConnectionGeneration)
+        || !message.value(QStringLiteral("assets")).isArray()
+        || message.value(QStringLiteral("assets")).toArray() != completed->assets) {
+        return false;
+    }
+
+    if (m_ws && m_ws->remoteSessionCoordinator()) {
+        const RemoteSessionCoordinator::Binding binding =
+            m_ws->remoteSessionCoordinator()->byId(remoteSessionId);
+        if (!binding.active || binding.generation != generation
+            || binding.ownerDeviceId != senderDeviceId
+            || binding.targetDeviceId != m_ws->deviceId()
+            || binding.ownerConnectionGeneration != sourceConnectionGeneration) {
+            return false;
+        }
+    }
+
+    completed->generation = generation;
+    completed->sourceConnectionGeneration = sourceConnectionGeneration;
+    emitIncomingV2Response(QStringLiteral("upload_finished"), senderDeviceId,
+                           remoteSessionId, generation, uploadId,
+                           {{QStringLiteral("assets"), completed->assets},
+                            {QStringLiteral("replay"), true}});
+    return true;
+}
+
+void UploadManager::forgetIncomingUploadCompletions(
+    const QString& remoteSessionId)
+{
+    for (auto it = m_incomingUploadCompletionTombstones.begin();
+         it != m_incomingUploadCompletionTombstones.end();) {
+        if (it->remoteSessionId == remoteSessionId) {
+            it = m_incomingUploadCompletionTombstones.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void UploadManager::emitIncomingV2Response(const QString& type,
+                                           const QString& senderDeviceId,
+                                           const QString& remoteSessionId,
+                                           quint64 generation,
+                                           const QString& uploadId,
+                                           const QJsonObject& extra)
+{
+    QJsonObject response = extra;
+    response.insert(QStringLiteral("type"), type);
+    Q_UNUSED(senderDeviceId);
+    response.insert(QStringLiteral("remoteSessionId"), remoteSessionId);
+    response.insert(QStringLiteral("generation"), static_cast<double>(generation));
+    response.insert(QStringLiteral("uploadId"), uploadId);
+    emit protocolV2UploadResponseReady(response);
+}
+
+RemoteCacheStore::CommitResult UploadManager::teardownRemoteSession(
+    const QString& senderDeviceId,
+    const QString& remoteSessionId,
+    quint64 generation,
+    const QString& teardownId)
+{
+    m_lastTeardownRemovedFileCount = 0;
+    forgetIncomingUploadCompletions(remoteSessionId);
+    const RemoteCacheStore::Scope scope {
+        senderDeviceId, remoteSessionId, generation
+    };
+    if (!m_remoteCacheStore || !m_remoteCacheReady) {
+        RemoteCacheStore::CommitResult unavailable;
+        unavailable.outcome = RemoteCacheStore::CommitOutcome::CleanupError;
+        unavailable.teardownId = teardownId;
+        unavailable.errorCode = QStringLiteral("cache_store_not_initialized");
+        emit remoteSessionCacheCleanupError(senderDeviceId, remoteSessionId,
+                                            generation, teardownId,
+                                            unavailable.errorCode);
+        return unavailable;
+    }
+
+    QString beginError;
+    if (!m_remoteCacheStore->beginTeardown(scope, teardownId, &beginError)) {
+        const RemoteCacheStore::CommitResult replay =
+            m_remoteCacheStore->commitTeardown(scope, teardownId);
+        if (!replay.acknowledgementSafe()) {
+            emit remoteSessionCacheCleanupError(senderDeviceId, remoteSessionId,
+                                                generation, teardownId,
+                                                replay.errorCode);
+        }
+        return replay;
+    }
+
+    if (m_incoming.senderId == senderDeviceId
+        && m_incoming.remoteSessionId == remoteSessionId) {
+        const QString uploadId = m_incoming.uploadId;
+        closeIncomingFiles(false);
+        clearIncomingChunkTracking(uploadId);
+        m_canceledIncoming.remove(uploadId);
+        m_incoming = IncomingUploadSession();
+        if (m_incomingStallTimer) m_incomingStallTimer->stop();
+    }
+
+    m_lastTeardownRemovedFileCount = detachReceivedMappingsForScope(scope);
+
+    const RemoteCacheStore::CommitResult committed =
+        m_remoteCacheStore->commitTeardown(scope, teardownId);
+    if (committed.acknowledgementSafe()) {
+        emit remoteSessionCacheCommitted(senderDeviceId, remoteSessionId,
+                                         generation, committed.teardownId,
+                                         m_lastTeardownRemovedFileCount,
+                                         committed.quarantinedBytes);
+    } else {
+        emit remoteSessionCacheCleanupError(senderDeviceId, remoteSessionId,
+                                            generation, committed.teardownId,
+                                            committed.errorCode);
+    }
+    return committed;
+}
+
+int UploadManager::detachReceivedMappingsForScope(
+    const RemoteCacheStore::Scope& scope)
+{
+    if (!m_fileManager || !m_remoteCacheStore) {
+        return 0;
+    }
+    int removed = 0;
+    const QList<QString> fileIds = m_fileManager->getAllFileIds();
+    for (const QString& fileId : fileIds) {
+        const QString mappedPath = m_fileManager->getFilePathForId(fileId);
+        if (!mappedPath.isEmpty()
+            && m_remoteCacheStore->ownsPath(scope, mappedPath)) {
+            m_fileManager->removeReceivedFileMapping(fileId);
+            ++removed;
+        }
+    }
+    return removed;
+}
+
+void UploadManager::beginTerminalIncomingCleanup(const QString& reasonCode)
+{
+    // This is only the command/writer barrier. Render-facing mappings and the
+    // live cache namespace deliberately remain intact until MainWindow has
+    // observed RemoteSceneController::teardownSettled for every incoming
+    // RemoteSession that existed at the terminal edge.
+    m_terminalIncomingCleanupAwaitingRenderer = true;
+    m_receiverAdvertisementReady = false;
+    m_receiverCleanupReason = reasonCode.trimmed().isEmpty()
+        ? QStringLiteral("terminal_session") : reasonCode.trimmed();
+    m_receiverCleanupError = QStringLiteral("renderer_teardown_pending");
+    m_incomingUploadCompletionTombstones.clear();
+    suspendIncomingForResume();
+    emit receiverAdvertisementReadinessChanged(false, m_receiverCleanupError);
+}
+
+UploadManager::BulkTeardownResult
+UploadManager::completeTerminalIncomingCleanup(const QString& reasonCode)
+{
+    // Contract: the application calls this only from the renderer settlement
+    // barrier. Clearing the guard first makes a failed logical commit eligible
+    // for the explicit recovery path, while advertisement remains fail-closed.
+    m_terminalIncomingCleanupAwaitingRenderer = false;
+    if (!reasonCode.trimmed().isEmpty()) {
+        m_receiverCleanupReason = reasonCode.trimmed();
+    }
+
+    const BulkTeardownResult result =
+        teardownAllIncomingRemoteSessions(m_receiverCleanupReason);
+    QString logicalCleanupError;
+    const bool logicallySafe = m_remoteCacheStore && m_remoteCacheReady
+        && m_remoteCacheStore->receiverAdvertisementSafe(&logicalCleanupError);
+    m_receiverAdvertisementReady = result.allLogicallyCommitted()
+        && logicallySafe;
+    m_receiverCleanupError = m_receiverAdvertisementReady
+        ? QString()
+        : (!result.errorCode.isEmpty() ? result.errorCode
+           : (!logicalCleanupError.isEmpty() ? logicalCleanupError
+              : QStringLiteral("cleanup_error")));
+    emit receiverAdvertisementReadinessChanged(
+        receiverReadyForAdvertisement(), m_receiverCleanupError);
+    return result;
+}
+
+UploadManager::BulkTeardownResult
+UploadManager::teardownAllIncomingRemoteSessions(const QString& reasonCode)
+{
+    BulkTeardownResult summary;
+    m_lastTeardownRemovedFileCount = 0;
+    if (!m_remoteCacheStore || !m_remoteCacheReady) {
+        summary.errorCode = QStringLiteral("cache_store_not_initialized");
+        summary.cleanupErrorScopes = 1;
+        return summary;
+    }
+
+    QString enumerationError;
+    const QList<RemoteCacheStore::Scope> scopes =
+        m_remoteCacheStore->liveScopes(&enumerationError);
+    if (!enumerationError.isEmpty()) {
+        summary.errorCode = enumerationError;
+        summary.cleanupErrorScopes = 1;
+    }
+    summary.discoveredScopes = scopes.size();
+
+    for (const RemoteCacheStore::Scope& scope : scopes) {
+        const QString teardownId =
+            QUuid::createUuid().toString(QUuid::WithoutBraces).toLower();
+        QString beginError;
+        if (!m_remoteCacheStore->beginProvisionalTeardown(
+                scope, teardownId, reasonCode, &beginError)) {
+            ++summary.cleanupErrorScopes;
+            if (summary.errorCode.isEmpty()) {
+                summary.errorCode = beginError;
+            }
+            emit remoteSessionCacheCleanupError(
+                scope.senderDeviceId, scope.remoteSessionId, scope.generation,
+                teardownId, beginError);
+            continue;
+        }
+
+        // Persisting the intent is the command barrier. Only then is it safe
+        // to detach the active writer and render-facing FileManager mappings.
+        if (m_incoming.senderId == scope.senderDeviceId
+            && m_incoming.remoteSessionId == scope.remoteSessionId) {
+            const QString uploadId = m_incoming.uploadId;
+            closeIncomingFiles(false);
+            clearIncomingChunkTracking(uploadId);
+            m_canceledIncoming.remove(uploadId);
+            m_incoming = IncomingUploadSession();
+            if (m_incomingStallTimer) {
+                m_incomingStallTimer->stop();
+            }
+        }
+
+        const int removedMappings = detachReceivedMappingsForScope(scope);
+        summary.removedFileMappings += removedMappings;
+        const RemoteCacheStore::CommitResult committed =
+            m_remoteCacheStore->commitTeardown(scope, teardownId);
+        summary.quarantinedBytes += committed.quarantinedBytes;
+        if (committed.acknowledgementSafe()) {
+            ++summary.committedScopes;
+            emit remoteSessionCacheCommitted(
+                scope.senderDeviceId, scope.remoteSessionId, scope.generation,
+                committed.teardownId, removedMappings,
+                committed.quarantinedBytes);
+        } else {
+            ++summary.cleanupErrorScopes;
+            if (summary.errorCode.isEmpty()) {
+                summary.errorCode = committed.errorCode;
+            }
+            emit remoteSessionCacheCleanupError(
+                scope.senderDeviceId, scope.remoteSessionId, scope.generation,
+                committed.teardownId, committed.errorCode);
+        }
+    }
+    m_lastTeardownRemovedFileCount = summary.removedFileMappings;
+    return summary;
+}
+
+bool UploadManager::retryReceiverAdvertisementCleanup()
+{
+    if (receiverReadyForAdvertisement()) return true;
+    if (m_terminalIncomingCleanupAwaitingRenderer) {
+        m_receiverCleanupError = QStringLiteral("renderer_teardown_pending");
+        emit receiverAdvertisementReadinessChanged(false,
+                                                   m_receiverCleanupError);
+        return false;
+    }
+
+    // initialize() is intentionally replayable: it retries durable teardown
+    // intents as well as a previously failed directory initialization. Merely
+    // enumerating liveScopes() is insufficient because a failed intent already
+    // removes that scope from the live inventory.
+    QString initializationError;
+    m_remoteCacheReady = m_remoteCacheStore
+        && m_remoteCacheStore->initialize(&initializationError);
+    if (!m_remoteCacheReady) {
+        m_receiverAdvertisementReady = false;
+        m_receiverCleanupError = initializationError.isEmpty()
+            ? QStringLiteral("cache_store_not_initialized")
+            : initializationError;
+        emit receiverAdvertisementReadinessChanged(
+            false, m_receiverCleanupError);
+        return false;
+    }
+
+    QString logicalCleanupError;
+    if (!m_remoteCacheStore->receiverAdvertisementSafe(&logicalCleanupError)) {
+        m_receiverAdvertisementReady = false;
+        m_receiverCleanupError = logicalCleanupError.isEmpty()
+            ? QStringLiteral("logical_cleanup_not_committed")
+            : logicalCleanupError;
+        emit receiverAdvertisementReadinessChanged(
+            false, m_receiverCleanupError);
+        return false;
+    }
+
+    const BulkTeardownResult result =
+        teardownAllIncomingRemoteSessions(m_receiverCleanupReason);
+    logicalCleanupError.clear();
+    const bool logicallySafe = m_remoteCacheStore->receiverAdvertisementSafe(
+        &logicalCleanupError);
+    m_receiverAdvertisementReady = result.allLogicallyCommitted()
+        && logicallySafe;
+    m_receiverCleanupError = m_receiverAdvertisementReady
+        ? QString()
+        : (!result.errorCode.isEmpty() ? result.errorCode
+           : (!logicalCleanupError.isEmpty() ? logicalCleanupError
+              : QStringLiteral("cleanup_error")));
+    emit receiverAdvertisementReadinessChanged(
+        receiverReadyForAdvertisement(), m_receiverCleanupError);
+    return receiverReadyForAdvertisement();
+}
+
 bool UploadManager::discardActiveIncomingSession(bool rememberRejectedUpload) {
     const QString senderId = m_incoming.senderId;
     const QString uploadId = m_incoming.uploadId;
+    const QString remoteSessionId = m_incoming.remoteSessionId;
+    const quint64 generation = m_incoming.generation;
     const QString cacheDirPath = m_incoming.cacheDirPath;
     const QHash<QString, QString> ownedPaths = m_incoming.filePaths;
     bool cleanupSucceeded = true;
@@ -984,27 +3180,34 @@ bool UploadManager::discardActiveIncomingSession(bool rememberRejectedUpload) {
 
     for (auto it = ownedPaths.constBegin(); it != ownedPaths.constEnd(); ++it) {
         const QString path = it.value();
+        const RemoteCacheStore::Scope scope{senderId, remoteSessionId, generation};
+        const bool v2Owned = !remoteSessionId.isEmpty() && m_remoteCacheStore
+            && m_remoteCacheStore->ownsPath(scope, path);
         if (path.isEmpty() || cacheDirPath.isEmpty()
-            || !pathIsInsideDirectory(path, cacheDirPath)) {
+            || !pathIsInsideDirectory(path, cacheDirPath)
+            || (!remoteSessionId.isEmpty() && !v2Owned)) {
             cleanupSucceeded = false;
             continue;
         }
 
-        const QString mappedPath = m_fileManager->getFilePathForId(it.key());
+        const QString fileId = m_incoming.assetIdToFileId.value(it.key());
+        const QString mappedPath = m_fileManager->getFilePathForId(fileId);
         const bool removed = !QFileInfo::exists(path) || QFile::remove(path);
         if (!removed) {
-            qWarning() << "UploadManager: Could not remove partial upload file" << path;
+            qWarning() << "UploadManager: could not remove partial upload file";
             cleanupSucceeded = false;
             continue;
         }
         if (!mappedPath.isEmpty()
             && QDir::cleanPath(QFileInfo(mappedPath).absoluteFilePath())
                 == QDir::cleanPath(QFileInfo(path).absoluteFilePath())) {
-            m_fileManager->removeReceivedFileMapping(it.key());
+            m_fileManager->removeReceivedFileMapping(fileId);
         }
     }
 
-    if (!cacheDirPath.isEmpty() && pathIsInsideDirectory(cacheDirPath, incomingUploadsRoot())) {
+    const QString activeRoot = m_remoteCacheStore
+        ? m_remoteCacheStore->rootPath() : incomingUploadsRoot();
+    if (!cacheDirPath.isEmpty() && pathIsInsideDirectory(cacheDirPath, activeRoot)) {
         QDir directory(cacheDirPath);
         if (directory.exists()) {
             if (!directory.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot
@@ -1014,7 +3217,7 @@ bool UploadManager::discardActiveIncomingSession(bool rememberRejectedUpload) {
                 const QString senderDirectoryPath = QFileInfo(cacheDirPath).absolutePath();
                 if (!QDir().rmdir(cacheDirPath)) {
                     cleanupSucceeded = false;
-                } else if (pathIsInsideDirectory(senderDirectoryPath, incomingUploadsRoot())) {
+                } else if (pathIsInsideDirectory(senderDirectoryPath, activeRoot)) {
                     QDir senderDirectory(senderDirectoryPath);
                     if (senderDirectory.entryInfoList(
                             QDir::AllEntries | QDir::NoDotAndDotDot).isEmpty()) {
@@ -1035,11 +3238,12 @@ bool UploadManager::discardActiveIncomingSession(bool rememberRejectedUpload) {
         if (m_canceledIncoming.size() >= 256) m_canceledIncoming.clear();
         m_canceledIncoming.insert(uploadId);
     }
-    if (!cleanupSucceeded && !senderId.isEmpty() && !uploadId.isEmpty()) {
+    if (!cleanupSucceeded && remoteSessionId.isEmpty()
+        && !senderId.isEmpty() && !uploadId.isEmpty()) {
         QTimer::singleShot(1000, this, [this, senderId, uploadId]() {
             if (!removeResidualIncomingStaging(senderId, uploadId)) {
-                qWarning() << "UploadManager: Deferred partial-upload cleanup still failed"
-                           << uploadId;
+                qWarning() << "UploadManager: deferred partial-upload cleanup still failed"
+                           << "uploadId" << uploadId.left(16);
             }
         });
     }
@@ -1069,8 +3273,7 @@ bool UploadManager::removeResidualIncomingStaging(const QString& senderId,
         const QString mappedPath = m_fileManager->getFilePathForId(fileId);
         if (!mappedPath.isEmpty()
             && pathIsInsideDirectory(mappedPath, stagingCanonical)) {
-            qWarning() << "UploadManager: Refusing to remove mapped residual staging"
-                       << stagingCanonical;
+            qWarning() << "UploadManager: refusing to remove mapped residual staging";
             return false;
         }
     }
@@ -1087,19 +3290,29 @@ bool UploadManager::removeResidualIncomingStaging(const QString& senderId,
 void UploadManager::rejectIncomingUpload(const QString& senderId,
                                          const QString& uploadId,
                                          const QString& reason,
-                                         bool discardMatchingSession) {
+                                         bool discardMatchingSession,
+                                         const QString& remoteSessionId,
+                                         quint64 generation) {
     const bool matchesActive = !m_incoming.uploadId.isEmpty()
         && m_incoming.uploadId == uploadId
         && (senderId.isEmpty() || m_incoming.senderId == senderId);
     const QString effectiveSender = senderId.isEmpty() && matchesActive ? m_incoming.senderId : senderId;
-    const QString canvasSessionId = matchesActive ? m_incoming.canvasSessionId : QString();
+    const QString effectiveRemoteSessionId = remoteSessionId.isEmpty() && matchesActive
+        ? m_incoming.remoteSessionId : remoteSessionId;
+    const quint64 effectiveGeneration = generation == 0 && matchesActive
+        ? m_incoming.generation : generation;
 
-    qWarning() << "UploadManager: Rejecting incoming upload" << uploadId << reason;
+    qWarning() << "UploadManager: rejecting incoming upload:" << reason;
     if (discardMatchingSession && matchesActive) {
         discardActiveIncomingSession(true);
     }
-    if (m_ws && !effectiveSender.isEmpty() && !uploadId.isEmpty()) {
-        m_ws->notifyUploadRejectedToSender(effectiveSender, uploadId, reason, canvasSessionId);
+    if (!effectiveSender.isEmpty() && !effectiveRemoteSessionId.isEmpty()
+        && effectiveGeneration > 0 && !uploadId.isEmpty()) {
+        emitIncomingV2Response(QStringLiteral("upload_rejected"), effectiveSender,
+                               effectiveRemoteSessionId, effectiveGeneration,
+                               uploadId,
+                               {{QStringLiteral("code"), QStringLiteral("target_rejected")},
+                                {QStringLiteral("reason"), reason.left(512)}});
     }
 }
 
@@ -1144,7 +3357,10 @@ bool UploadManager::cleanupIncomingSession(bool deleteDiskContents,
             }
         }
         m_incoming.openFiles.clear();
-        fileIds = m_incoming.expectedSizes.keys();
+        for (const QString& assetId : m_incoming.expectedSizes.keys()) {
+            const QString fileId = m_incoming.assetIdToFileId.value(assetId);
+            if (!fileId.isEmpty()) fileIds.append(fileId);
+        }
         ownedPaths = m_incoming.filePaths;
 
         clearIncomingChunkTracking(uploadId);
@@ -1173,8 +3389,7 @@ bool UploadManager::cleanupIncomingSession(bool deleteDiskContents,
             if (!cacheDirPath.isEmpty() && pathIsInsideDirectory(it.value(), cacheDirPath)) {
                 const QFileInfo info(it.value());
                 if (info.exists() && !QFile::remove(it.value())) {
-                    qWarning() << "UploadManager: Failed to remove partial cached file"
-                               << it.value();
+                    qWarning() << "UploadManager: failed to remove partial cached file";
                     return false;
                 }
             }
@@ -1207,12 +3422,10 @@ bool UploadManager::cleanupIncomingSession(bool deleteDiskContents,
                 if (rootInfo.isSymLink() || !rootInfo.isDir()
                     || QFileInfo::exists(quarantinedRootPath)
                     || !parent.rename(rootInfo.fileName(), quarantineName)) {
-                    qWarning() << "UploadManager: Failed to quarantine cache directory during cleanup:"
-                               << cacheDirPath;
+                    qWarning() << "UploadManager: failed to quarantine cache directory during cleanup";
                     return false;
                 }
-                qDebug() << "UploadManager: Quarantined cache directory during cleanup:"
-                         << cacheDirPath;
+                qDebug() << "UploadManager: quarantined cache directory during cleanup";
             }
         }
 
@@ -1230,8 +3443,7 @@ bool UploadManager::cleanupIncomingSession(bool deleteDiskContents,
             // The authoritative mappings are already gone and the original
             // namespace is empty. A later startup sweep safely removes this
             // inaccessible quarantine without making the unload fail.
-            qWarning() << "UploadManager: Could not purge quarantined cache directory:"
-                       << quarantinedRootPath;
+            qWarning() << "UploadManager: could not purge quarantined cache directory";
         }
     } else {
         struct IdeaCleanupOperation {
@@ -1257,8 +3469,7 @@ bool UploadManager::cleanupIncomingSession(bool deleteDiskContents,
             }
             if (path.isEmpty() || cacheDirPath.isEmpty()
                 || !pathIsInsideDirectory(path, cacheDirPath)) {
-                qWarning() << "UploadManager: Refusing idea cleanup outside sender root"
-                           << path;
+                qWarning() << "UploadManager: refusing idea cleanup outside sender root";
                 return false;
             }
 
@@ -1271,8 +3482,7 @@ bool UploadManager::cleanupIncomingSession(bool deleteDiskContents,
                 const QFileInfo info(path);
                 if (info.exists()) {
                     if (!info.isFile() || info.isSymLink()) {
-                        qWarning() << "UploadManager: Refusing to remove a non-regular cached file"
-                                   << path;
+                        qWarning() << "UploadManager: refusing to remove a non-regular cached file";
                         return false;
                     }
                     quarantinePath = QDir(info.absolutePath()).filePath(
@@ -1280,8 +3490,7 @@ bool UploadManager::cleanupIncomingSession(bool deleteDiskContents,
                             .arg(kRemovalQuarantinePrefix,
                                  quarantineTransaction, info.fileName()));
                     if (QFileInfo::exists(quarantinePath)) {
-                        qWarning() << "UploadManager: Cleanup quarantine already exists"
-                                   << quarantinePath;
+                        qWarning() << "UploadManager: cleanup quarantine already exists";
                         return false;
                     }
                 }
@@ -1295,14 +3504,13 @@ bool UploadManager::cleanupIncomingSession(bool deleteDiskContents,
             IdeaCleanupOperation& operation = operations[index];
             if (operation.quarantinePath.isEmpty()) continue;
             if (!QFile::rename(operation.path, operation.quarantinePath)) {
-                qWarning() << "UploadManager: Failed to quarantine cached file"
-                           << operation.path << "for idea" << canvasSessionId;
+                qWarning() << "UploadManager: failed to quarantine cached file"
+                           << "canvas" << canvasSessionId.left(16);
                 for (qsizetype rollback = index; rollback-- > 0;) {
                     IdeaCleanupOperation& prior = operations[rollback];
                     if (!prior.quarantined) continue;
                     if (!QFile::rename(prior.quarantinePath, prior.path)) {
-                        qCritical() << "UploadManager: Failed to roll back quarantined file"
-                                    << prior.path;
+                        qCritical() << "UploadManager: failed to roll back quarantined file";
                     }
                     prior.quarantined = false;
                 }
@@ -1322,8 +3530,7 @@ bool UploadManager::cleanupIncomingSession(bool deleteDiskContents,
 
         for (const IdeaCleanupOperation& operation : std::as_const(operations)) {
             if (operation.quarantined && !QFile::remove(operation.quarantinePath)) {
-                qWarning() << "UploadManager: Could not purge quarantined cached file"
-                           << operation.quarantinePath;
+                qWarning() << "UploadManager: could not purge quarantined cached file";
             }
             if (operation.removeMapping) removeEmptyUploadParentsForFile(operation.path);
         }
@@ -1332,7 +3539,7 @@ bool UploadManager::cleanupIncomingSession(bool deleteDiskContents,
             QDir dir(cacheDirPath);
             if (dir.exists() && dir.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot).isEmpty()) {
                 if (!dir.rmdir(cacheDirPath)) {
-                    qWarning() << "UploadManager: Failed to remove empty cache directory" << cacheDirPath;
+                    qWarning() << "UploadManager: failed to remove empty cache directory";
                 }
             }
         }
@@ -1345,64 +3552,344 @@ bool UploadManager::cleanupIncomingSession(bool deleteDiskContents,
     return true;
 }
 
-// Slots forwarded from WebSocketClient (sender side)
-void UploadManager::onUploadReady(const QString& uploadId,
-                                  const QString& canvasSessionId) {
-    if (uploadId != m_currentUploadId
-        || m_outgoingState != OutgoingState::AwaitingTargetReady) return;
-    if (canvasSessionId != m_activeIdeaId) {
-        failOutgoingUpload(QStringLiteral(
-            "Remote client accepted a different upload session"));
+void UploadManager::handleIncomingAssetRemoval(const QJsonObject& message) {
+    const QString senderDeviceId = senderCacheNamespace(message);
+    const QString remoteSessionId =
+        message.value(QStringLiteral("remoteSessionId")).toString();
+    const QString removalId =
+        message.value(QStringLiteral("removalId")).toString();
+    const QString uploadId =
+        message.value(QStringLiteral("uploadId")).toString();
+    const QString assetId =
+        message.value(QStringLiteral("assetId")).toString();
+    const QString sha256 =
+        message.value(QStringLiteral("sha256")).toString();
+    const QString fileId =
+        message.value(QStringLiteral("fileId")).toString();
+    const QString extension =
+        message.value(QStringLiteral("extension")).toString();
+    quint64 generation = 0;
+    qint64 offset = -1;
+    qint64 size = -1;
+
+    QJsonObject response{
+        {QStringLiteral("type"), QStringLiteral("upload_removed")},
+        {QStringLiteral("remoteSessionId"), remoteSessionId},
+        {QStringLiteral("generation"), message.value(QStringLiteral("generation"))},
+        {QStringLiteral("removalId"), removalId},
+        {QStringLiteral("uploadId"), uploadId},
+        {QStringLiteral("assetId"), assetId},
+        {QStringLiteral("offset"), message.value(QStringLiteral("offset"))},
+        {QStringLiteral("size"), message.value(QStringLiteral("size"))},
+        {QStringLiteral("sha256"), sha256},
+        {QStringLiteral("fileId"), fileId},
+        {QStringLiteral("extension"), extension}
+    };
+    const auto reject = [this, &response](const QString& errorCode) {
+        response.insert(QStringLiteral("success"), false);
+        response.insert(QStringLiteral("result"), QStringLiteral("cleanup_error"));
+        response.insert(QStringLiteral("cacheQuarantined"), false);
+        response.insert(QStringLiteral("errorCode"), errorCode.left(128));
+        response.insert(QStringLiteral("reason"), errorCode.left(512));
+        emit protocolV2UploadResponseReady(response);
+    };
+
+    if (!m_remoteCacheStore || !m_remoteCacheReady || !m_fileManager
+        || !RemoteCacheStore::isValidDeviceId(senderDeviceId)
+        || !RemoteCacheStore::isValidSessionId(remoteSessionId)
+        || !isCanonicalUuid(removalId) || !isValidOpaqueId(uploadId)
+        || !RemoteCacheStore::isValidAssetId(assetId)
+        || !parsePositiveGeneration(message.value(QStringLiteral("generation")),
+                                    generation)
+        || !parseNonNegativeOffset(message.value(QStringLiteral("offset")), offset)
+        || !parseManifestSize(message.value(QStringLiteral("size")), size)
+        || offset != size || !isValidFileId(sha256) || fileId != sha256
+        || extension != extension.toLower()
+        || !isAllowedMediaExtension(extension)) {
+        reject(QStringLiteral("invalid_asset_removal"));
         return;
     }
 
-    if (m_outgoingStartAckTimer) m_outgoingStartAckTimer->stop();
-    setOutgoingState(OutgoingState::Streaming);
-    if (m_outgoingStallTimer) m_outgoingStallTimer->start();
+    const RemoteCacheStore::Scope scope{
+        senderDeviceId, remoteSessionId, generation
+    };
+    QString pathError;
+    const QString expectedPath = m_remoteCacheStore->assetPath(
+        scope, assetId, RemoteCacheStore::AssetArea::Validated,
+        extension, &pathError);
+    const QString mappedPath = m_fileManager->getFilePathForId(fileId);
+    if (expectedPath.isEmpty()) {
+        reject(pathError.isEmpty() ? QStringLiteral("remote_asset_path_unavailable")
+                                   : pathError);
+        return;
+    }
+    const QFileInfo mappedInfo(mappedPath);
+    const QFileInfo expectedInfo(expectedPath);
+    const QString canonicalMappedPath = mappedPath.isEmpty()
+        ? QString() : mappedInfo.canonicalFilePath();
+    const QString canonicalExpectedPath = expectedInfo.canonicalFilePath();
+    if (!mappedPath.isEmpty()
+        && (canonicalMappedPath.isEmpty() || canonicalExpectedPath.isEmpty()
+            || QDir::cleanPath(canonicalMappedPath)
+                != QDir::cleanPath(canonicalExpectedPath))) {
+        reject(QStringLiteral("remote_asset_mapping_mismatch"));
+        return;
+    }
+
+    // SceneRun teardown has already settled on the server before this command
+    // is relayed. Drop the remaining memory cache handle before the atomic
+    // rename so Windows cannot keep the validated file accessible.
+    m_fileManager->releaseFileMemory(fileId);
+    const RemoteCacheStore::AssetRemovalDescriptor removal{
+        removalId,
+        uploadId,
+        assetId,
+        fileId,
+        sha256,
+        offset,
+        size,
+        extension
+    };
+    const RemoteCacheStore::AssetRemovalResult removed =
+        m_remoteCacheStore->removeValidatedAsset(scope, removal);
+    if (!removed.acknowledgementSafe()) {
+        reject(removed.errorCode.isEmpty()
+                   ? QStringLiteral("asset_quarantine_failed")
+                   : removed.errorCode);
+        return;
+    }
+    if (!mappedPath.isEmpty()) {
+        m_fileManager->removeReceivedFileMapping(fileId);
+    }
+    // A successful unload invalidates the completed-upload replay result: a
+    // late duplicate upload_complete must never claim that the removed asset
+    // is still present in the target inventory.
+    m_incomingUploadCompletionTombstones.remove(uploadId);
+    response.insert(QStringLiteral("success"), true);
+    response.insert(QStringLiteral("result"), QStringLiteral("committed"));
+    response.insert(QStringLiteral("cacheQuarantined"), true);
+    response.insert(QStringLiteral("removedFileCount"),
+                    mappedPath.isEmpty() ? 0 : 1);
+    response.insert(QStringLiteral("quarantinedBytes"),
+                    static_cast<double>(removed.quarantinedBytes));
+    emit protocolV2UploadResponseReady(response);
+}
+
+void UploadManager::handleAssetRemovalResult(const QJsonObject& message) {
+    const QString removalId =
+        message.value(QStringLiteral("removalId")).toString();
+    const auto pendingIt = m_pendingAssetRemovals.find(removalId);
+    if (pendingIt == m_pendingAssetRemovals.end()) {
+        return;
+    }
+    const PendingAssetRemoval pending = pendingIt.value();
+    if (!assetRemovalMessageMatches(pending, message)) {
+        qWarning() << "UploadManager: ignored stale or mismatched asset removal result";
+        return;
+    }
+    if (!message.value(QStringLiteral("success")).toBool(false)
+        || message.value(QStringLiteral("result")).toString()
+            != QLatin1String("committed")
+        || !message.value(QStringLiteral("cacheQuarantined")).toBool(false)) {
+        failAssetRemoval(
+            removalId,
+            message.value(QStringLiteral("reason")).toString(
+                message.value(QStringLiteral("errorCode")).toString(
+                    message.value(QStringLiteral("code")).toString(
+                        QStringLiteral("Remote asset cleanup failed")))));
+        return;
+    }
+
+    m_pendingAssetRemovals.erase(pendingIt);
+    forgetCommittedAsset(pending.asset);
+    for (const QString& localFileId : pending.asset.localFileIds) {
+        m_fileManager->unmarkFileUploadedToClient(localFileId,
+                                                  pending.asset.targetDeviceId);
+    }
+    emit assetRemovalCommitted(pending.asset.targetDeviceId,
+                               pending.asset.localFileIds);
     emit uiStateChanged();
-    scheduleOutgoingPump();
 }
 
-void UploadManager::onUploadBytesAcknowledged(const QString& uploadId,
-                                              qint64 receivedBytes) {
-    if (uploadId != m_currentUploadId
-        || m_outgoingState == OutgoingState::Idle
-        || m_outgoingState == OutgoingState::Cancelling) return;
-    receivedBytes = std::clamp<qint64>(receivedBytes, 0, m_totalBytes);
-    if (receivedBytes <= m_remoteAcknowledgedBytes) return;
-    m_remoteAcknowledgedBytes = receivedBytes;
-    if (m_outgoingState == OutgoingState::Streaming) {
-        if (m_outgoingStallTimer) m_outgoingStallTimer->start();
+void UploadManager::handleUploadProtocolMessage(const QJsonObject& message) {
+    if (message.value(QStringLiteral("protocolVersion")).toInt(-1) != 2 || !m_ws) return;
+    const QString type = message.value(QStringLiteral("type")).toString();
+    if (type == QLatin1String("error")
+        && message.value(QStringLiteral("scope")).toString()
+            == QLatin1String("upload_remove")) {
+        const QString removalId =
+            message.value(QStringLiteral("removalId")).toString();
+        const auto pending = m_pendingAssetRemovals.constFind(removalId);
+        if (pending == m_pendingAssetRemovals.cend()
+            || !assetRemovalMessageMatches(pending.value(), message, false)) {
+            qWarning() << "UploadManager: ignored uncorrelated asset removal error";
+            return;
+        }
+        failAssetRemoval(removalId,
+            message.value(QStringLiteral("message")).toString(
+                message.value(QStringLiteral("code")).toString(
+                    QStringLiteral("Remote asset removal was rejected"))));
+        return;
+    }
+    const QString uploadId = message.value(QStringLiteral("uploadId")).toString();
+    const QString remoteSessionId =
+        message.value(QStringLiteral("remoteSessionId")).toString();
+    quint64 generation = 0;
+    const bool validGeneration = parsePositiveGeneration(
+        message.value(QStringLiteral("generation")), generation);
+    const bool unboundRejection = type == QLatin1String("upload_rejected")
+        && remoteSessionId.isEmpty()
+        && !message.contains(QStringLiteral("generation"));
+    if (!validGeneration && !unboundRejection) return;
+    const RemoteSessionCoordinator::Binding binding =
+        m_ws->remoteSessionCoordinator()
+            ? m_ws->remoteSessionCoordinator()->byId(remoteSessionId)
+            : RemoteSessionCoordinator::Binding();
+    const bool localIsTarget = !binding.remoteSessionId.isEmpty()
+        && binding.targetDeviceId == m_ws->deviceId();
+    const bool localIsOwner = !binding.remoteSessionId.isEmpty()
+        && binding.ownerDeviceId == m_ws->deviceId();
+
+    if (type == QLatin1String("upload_remove")) {
+        quint64 sourceConnectionGeneration = 0;
+        if (localIsTarget
+            && parsePositiveGeneration(
+                message.value(QStringLiteral("connectionGeneration")),
+                sourceConnectionGeneration)
+            && sourceConnectionGeneration == binding.ownerConnectionGeneration) {
+            handleIncomingAssetRemoval(message);
+        }
+        return;
+    }
+    if (type == QLatin1String("upload_removed")) {
+        if (localIsOwner) handleAssetRemovalResult(message);
+        return;
+    }
+
+    if (type == QLatin1String("upload_start")
+        || type == QLatin1String("upload_resume")
+        || type == QLatin1String("upload_chunk")
+        || type == QLatin1String("upload_complete")) {
+        if (localIsTarget) handleIncomingMessage(message);
+        return;
+    }
+    if (type == QLatin1String("upload_abort") && localIsTarget) {
+        handleIncomingMessage(message);
+        return;
+    }
+
+    if (ParallelOutgoingTransfer* parallel = parallelForUpload(uploadId)) {
+        if (unboundRejection
+            || (localIsOwner && remoteSessionId == parallel->remoteSessionId
+                && generation == parallel->generation)) {
+            handleParallelMessage(parallel, message);
+        }
+        return;
+    }
+
+    if (uploadId.isEmpty() || uploadId != m_currentUploadId
+        || m_outgoingState == OutgoingState::Idle) return;
+    if (!unboundRejection
+        && (!localIsOwner || remoteSessionId != m_outgoingRemoteSessionId
+            || generation != m_outgoingGeneration)) return;
+
+    if (type == QLatin1String("upload_resume_ready")) {
+        if (m_outgoingState != OutgoingState::AwaitingTargetReady
+            || !message.value(QStringLiteral("assets")).isArray()) return;
+        QString error;
+        if (!applyAuthoritativeOffsets(
+                message.value(QStringLiteral("assets")).toArray(), true, &error)) {
+            failOutgoingUpload(error);
+            return;
+        }
+        m_waitingForResume = true;
+        if (m_outgoingStartAckTimer && m_outgoingStartAckTimer->interval() > 0) {
+            m_outgoingStartAckTimer->start();
+        }
+        return;
+    }
+    if (type == QLatin1String("upload_ready")) {
+        if (m_outgoingState != OutgoingState::AwaitingTargetReady
+            || !message.value(QStringLiteral("assets")).isArray()) return;
+        QString error;
+        if (!applyAuthoritativeOffsets(
+                message.value(QStringLiteral("assets")).toArray(), true, &error)) {
+            failOutgoingUpload(error);
+            return;
+        }
+        m_waitingForResume = false;
+        if (m_outgoingStartAckTimer) m_outgoingStartAckTimer->stop();
+        setOutgoingState(OutgoingState::Streaming);
+        if (m_outgoingStallTimer && m_outgoingStallTimer->interval() > 0) {
+            m_outgoingStallTimer->start();
+        }
+        emit uiStateChanged();
         scheduleOutgoingPump();
+        return;
     }
-}
-
-void UploadManager::onUploadProgress(const QString& uploadId, int percent, int filesCompleted, int totalFiles) {
-    if (uploadId != m_currentUploadId) return;
-    if (m_outgoingState == OutgoingState::Idle
-        || m_outgoingState == OutgoingState::Cancelling) return;
-    if (m_outgoingState == OutgoingState::AwaitingTargetReady) {
-        // Older relays use the initial zero-progress event as their readiness
-        // acknowledgement. Preserve compatibility without sending data early.
-        onUploadReady(uploadId, m_activeIdeaId);
+    if (type == QLatin1String("upload_progress")) {
+        if (!message.value(QStringLiteral("assets")).isArray()) return;
+        qint64 durableBytes = -1;
+        qint64 totalSize = -1;
+        if (!parseNonNegativeOffset(message.value(QStringLiteral("durableBytes")),
+                                    durableBytes)
+            || !parseNonNegativeOffset(message.value(QStringLiteral("totalSize")),
+                                       totalSize)
+            || totalSize != m_totalBytes || durableBytes > totalSize) {
+            failOutgoingUpload(QStringLiteral("Malformed upload progress inventory"));
+            return;
+        }
+        QString error;
+        if (!applyAuthoritativeOffsets(
+                message.value(QStringLiteral("assets")).toArray(), false, &error)
+            || durableBytes != m_remoteAcknowledgedBytes) {
+            failOutgoingUpload(error.isEmpty()
+                                   ? QStringLiteral("Mismatched durable upload byte count")
+                                   : error);
+            return;
+        }
+        if (m_outgoingState == OutgoingState::Streaming) {
+            if (m_outgoingStallTimer && m_outgoingStallTimer->interval() > 0) {
+                m_outgoingStallTimer->start();
+            }
+            scheduleOutgoingPump();
+        }
+        return;
     }
-    // Always accept target-side progress; it's authoritative
-    m_lastPercent = percent;
-    m_filesCompleted = filesCompleted;
-    if (totalFiles > 0) {
-        m_totalFiles = totalFiles;
+    if (type == QLatin1String("upload_finished")) {
+        if (!message.value(QStringLiteral("assets")).isArray()) return;
+        QString error;
+        if (!applyAuthoritativeOffsets(
+                message.value(QStringLiteral("assets")).toArray(), false, &error)) {
+            failOutgoingUpload(error);
+            return;
+        }
+        for (const OutgoingAsset& asset : std::as_const(m_outgoingAssets)) {
+            if (m_outgoingDurableOffsets.value(asset.assetId) != asset.size) {
+                failOutgoingUpload(QStringLiteral("Incomplete final upload inventory"));
+                return;
+            }
+        }
+        onUploadFinished(uploadId);
+        return;
     }
-    updateRemoteProgress(percent, filesCompleted);
-}
-
-void UploadManager::onUploadCompletedFileIds(const QString& uploadId, const QStringList& fileIds) {
-    if (uploadId != m_currentUploadId) return;
-    if (m_outgoingState == OutgoingState::Idle
-        || m_outgoingState == OutgoingState::Cancelling) return;
-    if (fileIds.isEmpty()) return;
-    emit uploadCompletedFileIds(fileIds);
-    for (const QString& fid : fileIds) {
-        updatePerFileRemoteProgress(fid, 100);
+    if (type == QLatin1String("upload_rejected")) {
+        onUploadRejected(uploadId,
+            message.value(QStringLiteral("reason")).toString(
+                message.value(QStringLiteral("code")).toString(
+                    QStringLiteral("Upload rejected"))));
+        return;
+    }
+    if (type == QLatin1String("upload_aborted")
+        || type == QLatin1String("upload_abort_ack")) {
+        if (m_outgoingState == OutgoingState::Cancelling) finishLocalCancellation();
+        else onUploadRejected(uploadId, QStringLiteral("Upload aborted"));
+        return;
+    }
+    if (type == QLatin1String("upload_abort") && localIsOwner) {
+        onUploadRejected(uploadId,
+            message.value(QStringLiteral("reason")).toString(
+                QStringLiteral("Upload aborted by remote session")));
     }
 }
 
@@ -1412,25 +3899,22 @@ void UploadManager::onUploadFinished(const QString& uploadId) {
     stopOutgoingPump();
     updateRemoteProgress(100, m_totalFiles > 0 ? m_totalFiles : m_filesCompleted);
     
-    // Mark all uploaded files and media as available on the target client
-    for (const auto& f : m_outgoingFiles) {
-        m_fileManager->markFileUploadedToClient(f.fileId, m_uploadTargetClientId);
+    // Only the target's exact, complete asset inventory commits local markers.
+    for (const OutgoingAsset& asset : std::as_const(m_outgoingAssets)) {
+        for (const QString& localFileId : asset.localFileIds) {
+            m_fileManager->markFileUploadedToClient(localFileId,
+                                                    m_uploadTargetClientId);
+        }
     }
-    
-    m_uploadActive = true; // switch to active state
-    m_uploadWasActiveBeforeStart = false;
-    m_currentUploadId.clear();
-    m_outgoingFiles.clear();
-    m_outgoingFileIndex = 0;
-    m_outgoingChunkIndex = 0;
-    m_outgoingSentForFile = 0;
-    m_outgoingPayloadCompleteSent = false;
-    m_sentBytes = 0;
-    m_totalBytes = 0;
-    m_remoteAcknowledgedBytes = 0;
-    setOutgoingState(OutgoingState::Idle);
-    if (m_ws) m_ws->endUploadSession();
-    emit uploadFinished();
+    rememberCommittedAssets(m_uploadTargetClientId,
+                            m_outgoingRemoteSessionId,
+                            m_outgoingGeneration,
+                            uploadId,
+                            m_outgoingAssets);
+    m_remoteInventoryTargets.insert(m_uploadTargetClientId);
+    releaseSchedulerSlot(true);
+    clearOutgoingTransfer(true);
+    emit uploadFinished(uploadId);
     emit uiStateChanged();
 }
 
@@ -1443,150 +3927,32 @@ void UploadManager::onUploadRejected(const QString& uploadId, const QString& rea
     }
 
     const bool preserveExistingRemoteFiles = m_uploadWasActiveBeforeStart;
-    stopOutgoingPump();
-    m_uploadActive = preserveExistingRemoteFiles;
-    setOutgoingState(OutgoingState::Idle);
-
-    if (!m_uploadTargetClientId.isEmpty()) {
-        for (const UploadFileInfo& file : std::as_const(m_outgoingFiles)) {
-            m_fileManager->unmarkFileUploadedToClient(file.fileId, m_uploadTargetClientId);
-        }
-    }
-
     if (m_ws) {
         m_ws->cancelUploadId(uploadId);
-        m_ws->endUploadSession();
     }
-
+    releaseSchedulerSlot(false);
     emit uploadRejected(uploadId, reason.left(512));
-    emit uiStateChanged();
-
-    m_currentUploadId.clear();
-    m_outgoingFiles.clear();
-    m_outgoingFileIndex = 0;
-    m_outgoingChunkIndex = 0;
-    m_outgoingSentForFile = 0;
-    m_outgoingPayloadCompleteSent = false;
-    m_lastPercent = 0;
-    m_filesCompleted = 0;
-    m_totalFiles = 0;
-    m_sentBytes = 0;
-    m_totalBytes = 0;
-    m_remoteAcknowledgedBytes = 0;
-    m_remoteProgressReceived = false;
-    m_uploadWasActiveBeforeStart = false;
-    resetProgressTracking();
-}
-
-void UploadManager::onUploadAborted(const QString& uploadId,
-                                    const QString& canvasSessionId) {
-    if (uploadId != m_currentUploadId
-        || m_outgoingState != OutgoingState::Cancelling) return;
-    if (!canvasSessionId.isEmpty() && canvasSessionId != m_activeIdeaId) return;
-    finishLocalCancellation();
-}
-
-void UploadManager::onAllFilesRemovedRemote(const QString& removalId,
-                                            const QString& targetClientId,
-                                            const QString& canvasSessionId) {
-    if (removalId.isEmpty() || removalId != m_pendingRemovalId
-        || targetClientId != m_pendingRemovalTargetId
-        || canvasSessionId != m_pendingRemovalCanvasSessionId) {
-        qWarning() << "UploadManager: Ignoring stale or mismatched removal acknowledgement"
-                   << removalId << targetClientId << canvasSessionId;
-        return;
-    }
-
-    m_pendingRemovalId.clear();
-    m_pendingRemovalTargetId.clear();
-    m_pendingRemovalCanvasSessionId.clear();
-    if (m_removalAckTimer) m_removalAckTimer->stop();
-    // Remote side confirmed unload; reset state
-    // Clear all uploaded markers for this client so that all items are considered Not uploaded
-    const QString removedClientId = !m_lastRemovalClientId.isEmpty()
-                                        ? m_lastRemovalClientId
-                                        : (!m_uploadTargetClientId.isEmpty() ? m_uploadTargetClientId : m_targetClientId);
-    if (!removedClientId.isEmpty()) {
-        m_fileManager->unmarkAllForClient(removedClientId);
-    }
-
-    // Now reset state
-    resetToInitial();
-
-    m_lastRemovalClientId = removedClientId;
-
-    emit allFilesRemoved();
-    emit uiStateChanged();
-}
-
-void UploadManager::onRemovalRejected(const QString& removalId,
-                                      const QString& reason) {
-    if (removalId.isEmpty() || removalId != m_pendingRemovalId) return;
-    m_pendingRemovalId.clear();
-    m_pendingRemovalTargetId.clear();
-    m_pendingRemovalCanvasSessionId.clear();
-    if (m_removalAckTimer) m_removalAckTimer->stop();
-    emit removalFailed(reason.left(512));
+    clearOutgoingTransfer(preserveExistingRemoteFiles);
     emit uiStateChanged();
 }
 
 void UploadManager::onConnectionLost() {
-    // If we were uploading or finalizing, treat it as an aborted session.
-    const bool hadOngoing = m_outgoingState != OutgoingState::Idle;
-
-    if (hadOngoing) {
-        stopOutgoingPump();
-        setOutgoingState(OutgoingState::Idle);
-
-        // Do not mark anything as uploaded; roll back any optimistic UI
-        // Unmark any files that were part of the outgoing batch but not yet confirmed by onUploadFinished
-        if (!m_uploadTargetClientId.isEmpty()) {
-            for (const auto& f : m_outgoingFiles) {
-                m_fileManager->unmarkFileUploadedToClient(f.fileId, m_uploadTargetClientId);
-                // File-based unmark covers all media instances
-            }
-        }
-
-        // Notify UI to recompute button state and progress text
-        emit uiStateChanged();
-
-        // Leave m_uploadActive = false so next click starts a fresh upload.
-        m_uploadActive = false;
-        m_currentUploadId.clear();
-        m_lastPercent = 0;
-        m_filesCompleted = 0;
-        m_totalFiles = 0;
-        m_sentBytes = 0;
-        m_totalBytes = 0;
-        m_remoteAcknowledgedBytes = 0;
-        m_remoteProgressReceived = false;
-        m_outgoingFiles.clear();
-        m_outgoingPayloadCompleteSent = false;
-        m_uploadWasActiveBeforeStart = false;
+    // Transport loss is non-terminal until the strict RemoteSession lease
+    // expires. Preserve the immutable manifest, source mapping and last durable
+    // offsets so a signed resume can continue without a new upload ID.
+    suspendOutgoingForResume();
+    const auto transfers = m_parallelOutgoingByUpload.values();
+    for (ParallelOutgoingTransfer* transfer : transfers) {
+        suspendParallel(transfer);
     }
-
-    if (m_ws) {
-        m_ws->endUploadSession();
-    }
-
-    // Any acknowledgement from the old transport is stale after reconnect.
-    m_pendingRemovalId.clear();
-    m_pendingRemovalTargetId.clear();
-    m_pendingRemovalCanvasSessionId.clear();
-    if (m_removalAckTimer) m_removalAckTimer->stop();
 
     cleanupIncomingCacheForConnectionLoss();
 }
 
 void UploadManager::cleanupIncomingCacheForConnectionLoss() {
-    // Only discard the active partial transfer. Previously this removed the
-    // entire uploads root, including already-validated files from other peers.
-    if (!m_incoming.senderId.isEmpty()) {
-        qDebug() << "UploadManager: Clearing incoming upload cache for sender" << m_incoming.senderId << "after connection loss";
-    }
-    discardActiveIncomingSession(false);
-    m_expectedChunkIndex.clear();
-    m_canceledIncoming.clear();
+    // The RemoteSession lease, not the transport callback, is terminal. Keep
+    // durable contiguous bytes for a possible signed resume before 3000 ms.
+    suspendIncomingForResume();
 }
 
 // Incoming side (target) - replicate subset of MainWindow logic for assembling files
@@ -1594,34 +3960,44 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
     const QString type = message.value("type").toString();
     if (type == "upload_start") {
         const QString senderId = senderCacheNamespace(message);
+        const QString remoteSessionId = message.value("remoteSessionId").toString();
         const QString uploadId = message.value("uploadId").toString();
-        const QString canvasSessionId = message.value("canvasSessionId").toString();
-
-        if (!m_incoming.uploadId.isEmpty()) {
-            rejectIncomingUpload(senderId, uploadId,
-                                 QStringLiteral("Remote client is already receiving another upload"), false);
+        quint64 generation = 0;
+        quint64 sourceConnectionGeneration = 0;
+        if (!m_remoteCacheReady || message.value("protocolVersion").toInt(-1) != 2
+            || !RemoteCacheStore::isValidDeviceId(senderId)
+            || !RemoteCacheStore::isValidSessionId(remoteSessionId)
+            || !isValidOpaqueId(uploadId)
+            || !parsePositiveGeneration(message.value("generation"), generation)
+            || !parsePositiveGeneration(message.value("connectionGeneration"),
+                                        sourceConnectionGeneration)) {
+            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Invalid upload identifiers"),
+                                 false, remoteSessionId, generation);
             return;
         }
-        if (!isValidPeerId(senderId) || !isCanonicalUuid(uploadId)
-            || !isValidCanvasSessionId(canvasSessionId)) {
-            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Invalid upload identifiers"), false);
+        if (!m_incoming.uploadId.isEmpty()) {
+            rejectIncomingUpload(senderId, uploadId,
+                                 QStringLiteral("Remote client is already receiving another upload"),
+                                 false, remoteSessionId, generation);
             return;
         }
         if (!message.value("files").isArray()) {
-            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Invalid upload manifest"), false);
+            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Invalid upload manifest"),
+                                 false, remoteSessionId, generation);
             return;
         }
 
         const QJsonArray files = message.value("files").toArray();
         if (files.isEmpty() || files.size() > kMaxIncomingFiles) {
             rejectIncomingUpload(senderId, uploadId,
-                                 QStringLiteral("Upload manifest has an invalid file count"), false);
+                                 QStringLiteral("Upload manifest has an invalid file count"),
+                                 false, remoteSessionId, generation);
             return;
         }
 
         QVector<ValidatedManifestFile> validatedFiles;
         validatedFiles.reserve(files.size());
-        QSet<QString> seenFileIds;
+        QSet<QString> seenAssetIds;
         QSet<QString> seenMediaIds;
         qint64 totalSize = 0;
         QString manifestError;
@@ -1632,7 +4008,9 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
                 break;
             }
             const QJsonObject fileObject = value.toObject();
-            if (!fileObject.value("fileId").isString()
+            if (!fileObject.value("assetId").isString()
+                || !fileObject.value("fileId").isString()
+                || !fileObject.value("sha256").isString()
                 || !fileObject.value("name").isString()
                 || !fileObject.value("extension").isString()
                 || !fileObject.value("mediaIds").isArray()) {
@@ -1641,19 +4019,24 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             }
 
             ValidatedManifestFile file;
+            file.assetId = fileObject.value("assetId").toString();
             file.fileId = fileObject.value("fileId").toString();
+            file.sha256 = fileObject.value("sha256").toString();
             file.name = fileObject.value("name").toString();
-            if (!isValidFileId(file.fileId) || seenFileIds.contains(file.fileId)) {
-                manifestError = QStringLiteral("Upload manifest contains an invalid or duplicate file identifier");
+            if (!RemoteCacheStore::isValidAssetId(file.assetId)
+                || seenAssetIds.contains(file.assetId)
+                || !isValidFileId(file.fileId) || file.sha256 != file.fileId) {
+                manifestError = QStringLiteral("Upload manifest contains invalid asset identity");
                 break;
             }
             if (!isSafeDisplayName(file.name)
                 || !normalizeAndValidateExtension(fileObject.value("extension").toString(), file.extension)
+                || !isAllowedMediaExtension(file.extension)
                 || QFileInfo(file.name).suffix().compare(file.extension, Qt::CaseInsensitive) != 0) {
                 manifestError = QStringLiteral("Upload manifest contains an invalid filename or extension");
                 break;
             }
-            if (!parseManifestSize(fileObject.value("sizeBytes"), file.size)
+            if (!parseManifestSize(fileObject.value("size"), file.size)
                 || totalSize > kMaxIncomingUploadBytes - file.size) {
                 manifestError = QStringLiteral("Upload manifest contains an invalid or excessive file size");
                 break;
@@ -1664,12 +4047,9 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
                 break;
             }
             for (const QJsonValue& mediaIdValue : mediaIds) {
-                if (!mediaIdValue.isString()) {
-                    manifestError = QStringLiteral("Upload manifest contains an invalid media identifier");
-                    break;
-                }
                 const QString mediaId = mediaIdValue.toString();
-                if (!isCanonicalUuid(mediaId) || seenMediaIds.contains(mediaId)) {
+                if (!mediaIdValue.isString() || !isValidOpaqueId(mediaId)
+                    || seenMediaIds.contains(mediaId)) {
                     manifestError = QStringLiteral("Upload manifest contains an invalid or duplicate media identifier");
                     break;
                 }
@@ -1678,197 +4058,367 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             }
             if (!manifestError.isEmpty()) break;
 
-            seenFileIds.insert(file.fileId);
+            seenAssetIds.insert(file.assetId);
             totalSize += file.size;
             validatedFiles.append(file);
         }
 
         if (!manifestError.isEmpty()) {
-            rejectIncomingUpload(senderId, uploadId, manifestError, false);
+            rejectIncomingUpload(senderId, uploadId, manifestError, false,
+                                 remoteSessionId, generation);
             return;
         }
 
-        const QString uploadsRoot = incomingUploadsRoot();
-        if (!QDir().mkpath(uploadsRoot)) {
+        const RemoteCacheStore::Scope scope {senderId, remoteSessionId, generation};
+        QString cacheError;
+        if (!m_remoteCacheStore->ensureSession(scope, &cacheError)) {
             rejectIncomingUpload(senderId, uploadId,
-                                 QStringLiteral("Remote client could not create its upload cache"), false);
-            return;
-        }
-        QDir rootDirectory(uploadsRoot);
-        if (!rootDirectory.exists(senderId) && !rootDirectory.mkdir(senderId)) {
-            rejectIncomingUpload(senderId, uploadId,
-                                 QStringLiteral("Remote client could not create a sender cache"), false);
-            return;
-        }
-
-        const QString rootCanonicalPath = QFileInfo(uploadsRoot).canonicalFilePath();
-        const QString senderPath = rootDirectory.absoluteFilePath(senderId);
-        const QFileInfo senderInfo(senderPath);
-        const QString senderCanonicalPath = senderInfo.canonicalFilePath();
-        if (rootCanonicalPath.isEmpty() || senderCanonicalPath.isEmpty()
-            || !senderInfo.isDir() || senderInfo.isSymLink()
-            || !pathIsInsideDirectory(senderCanonicalPath, rootCanonicalPath)) {
-            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Unsafe sender cache directory"), false);
-            return;
-        }
-
-        QDir senderDirectory(senderCanonicalPath);
-        if (senderDirectory.exists(uploadId) || !senderDirectory.mkdir(uploadId)) {
-            rejectIncomingUpload(senderId, uploadId,
-                                 QStringLiteral("Upload staging directory already exists"), false);
-            return;
-        }
-
-        const QString stagingPath = senderDirectory.absoluteFilePath(uploadId);
-        const QFileInfo stagingInfo(stagingPath);
-        const QString stagingCanonicalPath = stagingInfo.canonicalFilePath();
-        if (rootCanonicalPath.isEmpty() || stagingCanonicalPath.isEmpty()
-            || !stagingInfo.isDir() || stagingInfo.isSymLink()
-            || !pathIsInsideDirectory(stagingCanonicalPath, senderCanonicalPath)) {
-            QDir().rmdir(stagingPath);
-            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Unsafe upload staging directory"), false);
+                                 QStringLiteral("Remote cache rejected the session: %1").arg(cacheError),
+                                 false, remoteSessionId, generation);
             return;
         }
 
         m_incoming.senderId = senderId;
+        m_incoming.remoteSessionId = remoteSessionId;
+        m_incoming.generation = generation;
+        m_incoming.sourceConnectionGeneration = sourceConnectionGeneration;
         m_incoming.uploadId = uploadId;
-        m_incoming.canvasSessionId = canvasSessionId;
-        m_incoming.cacheDirPath = stagingCanonicalPath;
+        m_incoming.canvasSessionId = remoteSessionId;
         m_incoming.totalFiles = validatedFiles.size();
         m_incoming.totalSize = totalSize;
         m_canceledIncoming.remove(uploadId);
 
         for (const ValidatedManifestFile& file : std::as_const(validatedFiles)) {
-            QString filename = file.fileId;
-            if (!file.extension.isEmpty()) filename += QLatin1Char('.') + file.extension;
-            const QString fullPath = QDir(m_incoming.cacheDirPath).absoluteFilePath(filename);
-            if (!pathIsInsideDirectory(fullPath, m_incoming.cacheDirPath)) {
-                rejectIncomingUpload(senderId, uploadId, QStringLiteral("Unsafe upload path"), true);
+            const QString fullPath = m_remoteCacheStore->assetPath(
+                scope, file.assetId, RemoteCacheStore::AssetArea::Staging,
+                file.extension, &cacheError);
+            if (fullPath.isEmpty()) {
+                rejectIncomingUpload(senderId, uploadId,
+                                     QStringLiteral("Remote cache rejected the asset: %1").arg(cacheError),
+                                     true, remoteSessionId, generation);
                 return;
+            }
+            if (m_incoming.cacheDirPath.isEmpty()) {
+                m_incoming.cacheDirPath = QFileInfo(fullPath).absolutePath();
             }
 
             auto* output = new QFile(fullPath);
             if (!output->open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
                 delete output;
                 rejectIncomingUpload(senderId, uploadId,
-                                     QStringLiteral("Remote client could not create an upload file"), true);
+                                     QStringLiteral("Remote client could not create an upload file"),
+                                     true, remoteSessionId, generation);
                 return;
             }
 
-            m_incoming.openFiles.insert(file.fileId, output);
-            m_incoming.expectedSizes.insert(file.fileId, file.size);
-            m_incoming.receivedByFile.insert(file.fileId, 0);
-            m_incoming.filePaths.insert(file.fileId, fullPath);
-            m_incoming.fileIdToName.insert(file.fileId, file.name);
-            m_incoming.fileIdToExtension.insert(file.fileId, file.extension);
-            for (const QString& mediaId : file.mediaIds) {
-                m_incoming.fileIdToMediaId.insert(file.fileId, mediaId);
-            }
-            m_expectedChunkIndex.insert(uploadId + QLatin1Char(':') + file.fileId, 0);
+            m_incoming.openFiles.insert(file.assetId, output);
+            m_incoming.expectedSizes.insert(file.assetId, file.size);
+            m_incoming.receivedByFile.insert(file.assetId, 0);
+            m_incoming.filePaths.insert(file.assetId, fullPath);
+            m_incoming.assetIdToFileId.insert(file.assetId, file.fileId);
+            m_incoming.assetIdToSha256.insert(file.assetId, file.sha256);
+            m_incoming.assetIdToName.insert(file.assetId, file.name);
+            m_incoming.assetIdToExtension.insert(file.assetId, file.extension);
+            m_incoming.assetIdToMediaIds.insert(file.assetId, file.mediaIds);
+            m_expectedChunkIndex.insert(uploadId + QLatin1Char(':') + file.assetId, 0);
         }
 
         restartIncomingStallTimer();
-        if (m_ws) {
-            m_ws->notifyUploadReadyToSender(senderId, uploadId, canvasSessionId);
-            m_ws->notifyUploadProgressToSender(senderId, uploadId, 0, 0,
-                                               m_incoming.totalFiles, 0, QStringList());
+        emitIncomingV2Response(QStringLiteral("upload_ready"), senderId,
+                               remoteSessionId, generation, uploadId,
+                               {{QStringLiteral("assets"), incomingAssetOffsets()}});
+        emitIncomingV2Response(QStringLiteral("upload_progress"), senderId,
+                               remoteSessionId, generation, uploadId,
+                               {{QStringLiteral("durableBytes"), 0.0},
+                                {QStringLiteral("totalSize"), static_cast<double>(totalSize)},
+                                {QStringLiteral("assets"), incomingAssetOffsets()}});
+    } else if (type == "upload_resume") {
+        const QString senderId = senderCacheNamespace(message);
+        const QString remoteSessionId = message.value("remoteSessionId").toString();
+        const QString uploadId = message.value("uploadId").toString();
+        quint64 generation = 0;
+        quint64 sourceConnectionGeneration = 0;
+        if (message.value("protocolVersion").toInt(-1) != 2
+            || !parsePositiveGeneration(message.value("generation"), generation)
+            || !parsePositiveGeneration(message.value("connectionGeneration"),
+                                        sourceConnectionGeneration)
+            || senderId != m_incoming.senderId
+            || remoteSessionId != m_incoming.remoteSessionId
+            || uploadId != m_incoming.uploadId
+            || generation < m_incoming.generation
+            || sourceConnectionGeneration < m_incoming.sourceConnectionGeneration
+            || !message.value("assets").isArray()) {
+            rejectIncomingUpload(senderId, uploadId,
+                                 QStringLiteral("Invalid upload resume binding"), true,
+                                 remoteSessionId, generation);
+            return;
         }
+
+        const RemoteCacheStore::Scope oldScope {
+            senderId, remoteSessionId, m_incoming.generation
+        };
+        if (generation > m_incoming.generation) {
+            QString cacheError;
+            if (!m_remoteCacheStore->rebindSessionGeneration(oldScope, generation,
+                                                              &cacheError)) {
+                rejectIncomingUpload(senderId, uploadId,
+                                     QStringLiteral("Remote cache rejected resume: %1").arg(cacheError),
+                                     true, remoteSessionId, generation);
+                return;
+            }
+            m_incoming.generation = generation;
+        }
+        const RemoteCacheStore::Scope resumedScope {
+            senderId, remoteSessionId, generation
+        };
+
+        QHash<QString, qint64> durableOffsets;
+        for (const QJsonValue& value : message.value("assets").toArray()) {
+            if (!value.isObject()) {
+                rejectIncomingUpload(senderId, uploadId,
+                                     QStringLiteral("Invalid upload resume inventory"), true,
+                                     remoteSessionId, generation);
+                return;
+            }
+            const QJsonObject asset = value.toObject();
+            const QString assetId = asset.value("assetId").toString();
+            qint64 offset = -1;
+            qint64 size = -1;
+            if (!RemoteCacheStore::isValidAssetId(assetId)
+                || durableOffsets.contains(assetId)
+                || !parseNonNegativeOffset(asset.value("offset"), offset)
+                || !parseManifestSize(asset.value("size"), size)
+                || !m_incoming.expectedSizes.contains(assetId)
+                || size != m_incoming.expectedSizes.value(assetId)
+                || asset.value("sha256").toString()
+                    != m_incoming.assetIdToSha256.value(assetId)
+                || offset > size) {
+                rejectIncomingUpload(senderId, uploadId,
+                                     QStringLiteral("Invalid upload resume inventory"), true,
+                                     remoteSessionId, generation);
+                return;
+            }
+            durableOffsets.insert(assetId, offset);
+        }
+        if (durableOffsets.size() != m_incoming.expectedSizes.size()) {
+            rejectIncomingUpload(senderId, uploadId,
+                                 QStringLiteral("Incomplete upload resume inventory"), true,
+                                 remoteSessionId, generation);
+            return;
+        }
+
+        closeIncomingFiles(true);
+        m_incoming.received = 0;
+        for (auto it = durableOffsets.constBegin(); it != durableOffsets.constEnd(); ++it) {
+            const QString assetId = it.key();
+            const qint64 offset = it.value();
+            const QString path = m_incoming.filePaths.value(assetId);
+            const QFileInfo info(path);
+            if (!m_remoteCacheStore->ownsPath(resumedScope, path)
+                || !info.isFile() || info.isSymLink() || info.size() < offset) {
+                rejectIncomingUpload(senderId, uploadId,
+                                     QStringLiteral("Upload resume staging is unavailable"), true,
+                                     remoteSessionId, generation);
+                return;
+            }
+            auto* output = new QFile(path);
+            if (!output->open(QIODevice::ReadWrite) || !output->resize(offset)
+                || !output->seek(offset)) {
+                delete output;
+                rejectIncomingUpload(senderId, uploadId,
+                                     QStringLiteral("Upload resume staging could not be reopened"),
+                                     true, remoteSessionId, generation);
+                return;
+            }
+            m_incoming.openFiles.insert(assetId, output);
+            m_incoming.receivedByFile.insert(assetId, offset);
+            m_expectedChunkIndex.insert(uploadId + QLatin1Char(':') + assetId,
+                                        offset);
+            m_incoming.received += offset;
+        }
+        m_incoming.suspendedForResume = false;
+        m_incoming.sourceConnectionGeneration = sourceConnectionGeneration;
+        m_incoming.lastProgressBytesReported = m_incoming.received;
+        restartIncomingStallTimer();
+        emitIncomingV2Response(QStringLiteral("upload_ready"), senderId,
+                               remoteSessionId, generation, uploadId,
+                               {{QStringLiteral("assets"), incomingAssetOffsets()}});
     } else if (type == "upload_chunk") {
         const QString senderId = senderCacheNamespace(message);
+        const QString remoteSessionId = message.value("remoteSessionId").toString();
         const QString uploadId = message.value("uploadId").toString();
+        quint64 generation = 0;
+        quint64 sourceConnectionGeneration = 0;
+        if (message.value("protocolVersion").toInt(-1) != 2
+            || !parsePositiveGeneration(message.value("generation"), generation)
+            || !parsePositiveGeneration(message.value("connectionGeneration"),
+                                        sourceConnectionGeneration)) {
+            rejectIncomingUpload(senderId, uploadId,
+                                 QStringLiteral("Invalid upload generation"), false,
+                                 remoteSessionId, generation);
+            return;
+        }
         if (m_canceledIncoming.contains(uploadId)) return;
-        if (uploadId != m_incoming.uploadId || senderId != m_incoming.senderId) {
-            rejectIncomingUpload(senderId, uploadId, QStringLiteral("No matching upload session"), false);
+        if (uploadId != m_incoming.uploadId || senderId != m_incoming.senderId
+            || remoteSessionId != m_incoming.remoteSessionId
+            || generation != m_incoming.generation
+            || sourceConnectionGeneration != m_incoming.sourceConnectionGeneration
+            || m_incoming.suspendedForResume) {
+            rejectIncomingUpload(senderId, uploadId, QStringLiteral("No matching upload session"),
+                                 false, remoteSessionId, generation);
             return;
         }
-        const QString canvasSessionId = message.value("canvasSessionId").toString();
-        if (canvasSessionId != m_incoming.canvasSessionId) {
-            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Upload session identifier mismatch"), true);
+        const RemoteCacheStore::Scope scope {senderId, remoteSessionId, generation};
+        if (!m_remoteCacheStore->acceptsCommands(scope)) {
+            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Remote session is terminating"),
+                                 false, remoteSessionId, generation);
             return;
         }
-        if (!message.value("fileId").isString()) {
-            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Upload chunk has no file identifier"), true);
-            return;
-        }
-        const QString fid = message.value("fileId").toString();
-        QFile* qf = m_incoming.openFiles.value(fid, nullptr);
-        if (!isValidFileId(fid) || !qf || !qf->isOpen()) {
-            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Upload chunk references an unknown file"), true);
+        const QString assetId = message.value("assetId").toString();
+        QFile* qf = m_incoming.openFiles.value(assetId, nullptr);
+        if (!RemoteCacheStore::isValidAssetId(assetId) || !qf || !qf->isOpen()) {
+            rejectIncomingUpload(senderId, uploadId,
+                                 QStringLiteral("Upload chunk references an unknown asset"), true,
+                                 remoteSessionId, generation);
             return;
         }
 
-        int chunkIndex = -1;
+        qint64 offset = -1;
+        qint64 declaredChunkSize = -1;
         QByteArray data;
-        if (!parseChunkIndex(message.value("chunkIndex"), chunkIndex)
-            || !decodeCanonicalChunk(message.value("data"), data)) {
-            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Upload chunk is malformed or too large"), true);
+        if (!parseNonNegativeOffset(message.value("offset"), offset)
+            || !parseManifestSize(message.value("size"), declaredChunkSize)
+            || !decodeCanonicalChunk(message.value("data"), data)
+            || declaredChunkSize != data.size()
+            || message.value("sha256").toString()
+                != m_incoming.assetIdToSha256.value(assetId)) {
+            rejectIncomingUpload(senderId, uploadId,
+                                 QStringLiteral("Upload chunk is malformed or too large"), true,
+                                 remoteSessionId, generation);
             return;
         }
 
-        const QString key = uploadId + QLatin1Char(':') + fid;
+        const QString key = uploadId + QLatin1Char(':') + assetId;
         if (!m_expectedChunkIndex.contains(key)) {
-            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Upload chunk state is missing"), true);
+            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Upload chunk state is missing"),
+                                 true, remoteSessionId, generation);
             return;
         }
-        const int expected = m_expectedChunkIndex.value(key);
-        if (chunkIndex != expected) {
-            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Upload chunks arrived out of order"), true);
+        const qint64 expected = m_expectedChunkIndex.value(key);
+        if (offset != expected) {
+            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Upload chunks arrived out of order"),
+                                 true, remoteSessionId, generation);
             return;
         }
 
-        const qint64 receivedForFile = m_incoming.receivedByFile.value(fid, -1);
-        const qint64 expectedForFile = m_incoming.expectedSizes.value(fid, -1);
+        const qint64 receivedForFile = m_incoming.receivedByFile.value(assetId, -1);
+        const qint64 expectedForFile = m_incoming.expectedSizes.value(assetId, -1);
         if (receivedForFile < 0 || expectedForFile < 1
             || data.size() > expectedForFile - receivedForFile
             || qf->size() != receivedForFile
             || !qf->seek(receivedForFile)) {
-            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Upload chunk exceeds the declared file size"), true);
+            rejectIncomingUpload(senderId, uploadId,
+                                 QStringLiteral("Upload chunk exceeds the declared asset size"), true,
+                                 remoteSessionId, generation);
             return;
         }
 
         const qint64 written = qf->write(data);
-        if (written != data.size()) {
-            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Remote client could not write the upload"), true);
+        if (written != data.size() || !syncFile(qf)) {
+            rejectIncomingUpload(senderId, uploadId,
+                                 QStringLiteral("Remote client could not durably write the upload"),
+                                 true, remoteSessionId, generation);
             return;
         }
-        m_expectedChunkIndex[key] = expected + 1;
-        m_incoming.receivedByFile[fid] = receivedForFile + written;
+        m_expectedChunkIndex[key] = expected + written;
+        m_incoming.receivedByFile[assetId] = receivedForFile + written;
         m_incoming.received += written;
         restartIncomingStallTimer();
 
-        const bool shouldReportProgress =
-            m_incoming.received - m_incoming.lastProgressBytesReported
-                >= kIncomingProgressAckIntervalBytes
-            || m_incoming.received == m_incoming.totalSize
-            || m_incoming.receivedByFile.value(fid) == expectedForFile;
-        if (m_ws && m_incoming.totalSize > 0 && shouldReportProgress) {
-            const int percent = std::clamp(static_cast<int>(std::round(
-                                               m_incoming.received * 100.0 / m_incoming.totalSize)),
-                                           0, 99);
-            QJsonArray perFileArr;
-            const int filePercent = std::clamp(static_cast<int>(std::round(
-                                                   (receivedForFile + written) * 100.0 / expectedForFile)),
-                                               0, 99);
-            QJsonObject progressObject;
-            progressObject["fileId"] = fid;
-            progressObject["percent"] = filePercent;
-            perFileArr.append(progressObject);
-            m_ws->notifyUploadProgressToSender(senderId, uploadId, percent, 0,
-                                               m_incoming.totalFiles, m_incoming.received,
-                                               QStringList(), perFileArr);
-            m_incoming.lastProgressBytesReported = m_incoming.received;
-        }
+        emitIncomingV2Response(QStringLiteral("upload_progress"), senderId,
+                               remoteSessionId, generation, uploadId,
+                               {{QStringLiteral("durableBytes"),
+                                 static_cast<double>(m_incoming.received)},
+                                {QStringLiteral("totalSize"),
+                                 static_cast<double>(m_incoming.totalSize)},
+                                {QStringLiteral("assets"), incomingAssetOffsets()}});
+        m_incoming.lastProgressBytesReported = m_incoming.received;
     } else if (type == "upload_complete") {
         const QString senderId = senderCacheNamespace(message);
+        const QString remoteSessionId = message.value("remoteSessionId").toString();
         const QString uploadId = message.value("uploadId").toString();
-        if (m_canceledIncoming.contains(uploadId)) return;
-        if (uploadId != m_incoming.uploadId || senderId != m_incoming.senderId) {
-            rejectIncomingUpload(senderId, uploadId, QStringLiteral("No matching upload session"), false);
+        quint64 generation = 0;
+        quint64 sourceConnectionGeneration = 0;
+        if (message.value("protocolVersion").toInt(-1) != 2
+            || !parsePositiveGeneration(message.value("generation"), generation)
+            || !parsePositiveGeneration(message.value("connectionGeneration"),
+                                        sourceConnectionGeneration)) {
+            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Invalid upload generation"),
+                                 false, remoteSessionId, generation);
             return;
         }
-        const QString canvasSessionId = message.value("canvasSessionId").toString();
-        if (canvasSessionId != m_incoming.canvasSessionId) {
-            rejectIncomingUpload(senderId, uploadId, QStringLiteral("Upload session identifier mismatch"), true);
+        if (m_incoming.uploadId.isEmpty()
+            && m_incomingUploadCompletionTombstones.contains(uploadId)) {
+            if (!replayIncomingUploadCompletion(
+                    message, senderId, remoteSessionId, generation,
+                    sourceConnectionGeneration)) {
+                rejectIncomingUpload(
+                    senderId, uploadId,
+                    QStringLiteral("Upload completion replay inventory does not match"),
+                    false, remoteSessionId, generation);
+            }
+            return;
+        }
+        if (m_canceledIncoming.contains(uploadId)) return;
+        if (uploadId != m_incoming.uploadId || senderId != m_incoming.senderId
+            || remoteSessionId != m_incoming.remoteSessionId
+            || generation != m_incoming.generation
+            || sourceConnectionGeneration != m_incoming.sourceConnectionGeneration
+            || m_incoming.suspendedForResume) {
+            rejectIncomingUpload(senderId, uploadId, QStringLiteral("No matching upload session"),
+                                 false, remoteSessionId, generation);
+            return;
+        }
+        const RemoteCacheStore::Scope scope {senderId, remoteSessionId, generation};
+        if (!m_remoteCacheStore->acceptsCommands(scope)
+            || !message.value("assets").isArray()) {
+            rejectIncomingUpload(senderId, uploadId,
+                                 QStringLiteral("Upload completion is not valid for this session"),
+                                 true, remoteSessionId, generation);
+            return;
+        }
+
+        QSet<QString> completionAssets;
+        for (const QJsonValue& value : message.value("assets").toArray()) {
+            if (!value.isObject()) {
+                rejectIncomingUpload(senderId, uploadId,
+                                     QStringLiteral("Invalid upload completion inventory"), true,
+                                     remoteSessionId, generation);
+                return;
+            }
+            const QJsonObject asset = value.toObject();
+            const QString assetId = asset.value("assetId").toString();
+            qint64 offset = -1;
+            qint64 size = -1;
+            if (!RemoteCacheStore::isValidAssetId(assetId)
+                || completionAssets.contains(assetId)
+                || !parseNonNegativeOffset(asset.value("offset"), offset)
+                || !parseManifestSize(asset.value("size"), size)
+                || size != m_incoming.expectedSizes.value(assetId, -1)
+                || offset != size
+                || asset.value("sha256").toString()
+                    != m_incoming.assetIdToSha256.value(assetId)) {
+                rejectIncomingUpload(senderId, uploadId,
+                                     QStringLiteral("Invalid upload completion inventory"), true,
+                                     remoteSessionId, generation);
+                return;
+            }
+            completionAssets.insert(assetId);
+        }
+        if (completionAssets.size() != m_incoming.expectedSizes.size()) {
+            rejectIncomingUpload(senderId, uploadId,
+                                 QStringLiteral("Incomplete upload completion inventory"), true,
+                                 remoteSessionId, generation);
             return;
         }
 
@@ -1878,7 +4428,7 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
                 closeSucceeded = false;
                 continue;
             }
-            closeSucceeded = it.value()->flush() && closeSucceeded;
+            closeSucceeded = syncFile(it.value()) && closeSucceeded;
             it.value()->close();
             closeSucceeded = (it.value()->error() == QFileDevice::NoError) && closeSucceeded;
             delete it.value();
@@ -1886,245 +4436,171 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         m_incoming.openFiles.clear();
 
         QString completionError;
-        QHash<QString, QString> reusableExistingPaths;
-        QStringList validatedFileIds = m_incoming.expectedSizes.keys();
-        std::sort(validatedFileIds.begin(), validatedFileIds.end());
-        if (!closeSucceeded || validatedFileIds.size() != m_incoming.totalFiles) {
+        QStringList assetIds = m_incoming.expectedSizes.keys();
+        std::sort(assetIds.begin(), assetIds.end());
+        if (!closeSucceeded || assetIds.size() != m_incoming.totalFiles) {
             completionError = QStringLiteral("Remote client could not finalize every upload file");
         }
 
-        for (const QString& fileId : std::as_const(validatedFileIds)) {
+        QHash<QString, QString> selectedPathByAsset;
+        QHash<QString, QString> selectedPathByFileId;
+        for (const QString& assetId : std::as_const(assetIds)) {
             if (!completionError.isEmpty()) break;
-            const qint64 expectedSize = m_incoming.expectedSizes.value(fileId, -1);
-            const qint64 receivedSize = m_incoming.receivedByFile.value(fileId, -1);
-            const QString path = m_incoming.filePaths.value(fileId);
+            const QString fileId = m_incoming.assetIdToFileId.value(assetId);
+            const QString expectedDigest = m_incoming.assetIdToSha256.value(assetId);
+            const qint64 expectedSize = m_incoming.expectedSizes.value(assetId, -1);
+            const qint64 receivedSize = m_incoming.receivedByFile.value(assetId, -1);
+            const QString path = m_incoming.filePaths.value(assetId);
             const QFileInfo info(path);
             if (expectedSize < 1 || receivedSize != expectedSize
-                || !info.exists() || !info.isFile() || info.size() != expectedSize) {
+                || !info.exists() || !info.isFile() || info.isSymLink()
+                || info.size() != expectedSize || !m_remoteCacheStore->ownsPath(scope, path)
+                || sha256ForFile(path) != expectedDigest) {
                 completionError = QStringLiteral("Upload is incomplete or its size does not match the manifest");
                 break;
             }
             if (!MediaFilePolicy::isAcceptedLocalFile(path)) {
                 completionError = QStringLiteral("Unsupported or invalid media file: %1")
-                                      .arg(m_incoming.fileIdToName.value(fileId, fileId));
+                                      .arg(m_incoming.assetIdToName.value(assetId, assetId));
+                break;
+            }
+
+            QString selectedPath = selectedPathByFileId.value(fileId);
+            const QString expectedExtension = m_incoming.assetIdToExtension.value(assetId);
+            if (!selectedPath.isEmpty()
+                && QFileInfo(selectedPath).suffix().compare(expectedExtension,
+                                                            Qt::CaseInsensitive) != 0) {
+                completionError = QStringLiteral(
+                    "Upload file identifier was reused with a different extension");
                 break;
             }
             const QString existingPath = m_fileManager->getFilePathForId(fileId);
-            if (!existingPath.isEmpty()) {
+            if (selectedPath.isEmpty() && !existingPath.isEmpty()) {
                 const QFileInfo existingInfo(existingPath);
                 const QString existingCanonicalPath = existingInfo.canonicalFilePath();
-                const QString senderRoot = QFileInfo(m_incoming.cacheDirPath).absolutePath();
-                const QString expectedExtension = m_incoming.fileIdToExtension.value(fileId);
                 if (existingCanonicalPath.isEmpty() || !existingInfo.isFile()
                     || existingInfo.isSymLink()
-                    || !pathIsInsideDirectory(existingCanonicalPath, senderRoot)
+                    || !m_remoteCacheStore->ownsPath(scope, existingCanonicalPath)
                     || existingInfo.size() != expectedSize
                     || existingInfo.suffix().compare(expectedExtension, Qt::CaseInsensitive) != 0
                     || !MediaFilePolicy::isAcceptedLocalFile(existingCanonicalPath)
-                    || !filesHaveIdenticalContents(existingCanonicalPath, path)) {
+                    || sha256ForFile(existingCanonicalPath) != expectedDigest) {
                     completionError = QStringLiteral(
                         "Upload file identifier collided with a different or foreign target file");
                     break;
                 }
-                reusableExistingPaths.insert(fileId, existingCanonicalPath);
+                selectedPath = existingCanonicalPath;
             }
+            if (selectedPath.isEmpty()) {
+                QString cacheError;
+                selectedPath = m_remoteCacheStore->assetPath(
+                    scope, assetId, RemoteCacheStore::AssetArea::Validated,
+                    m_incoming.assetIdToExtension.value(assetId), &cacheError);
+                if (selectedPath.isEmpty()) {
+                    completionError = QStringLiteral("Remote cache rejected validation: %1")
+                                          .arg(cacheError);
+                    break;
+                }
+                const QFileInfo selectedInfo(selectedPath);
+                if (selectedInfo.exists()
+                    && (selectedInfo.isSymLink() || !selectedInfo.isFile()
+                        || selectedInfo.size() != expectedSize
+                        || sha256ForFile(selectedPath) != expectedDigest)) {
+                    completionError = QStringLiteral("Validated asset identity collided");
+                    break;
+                }
+            }
+            selectedPathByAsset.insert(assetId, selectedPath);
+            selectedPathByFileId.insert(fileId, selectedPath);
         }
-
         if (!completionError.isEmpty()) {
-            rejectIncomingUpload(senderId, uploadId, completionError, true);
+            rejectIncomingUpload(senderId, uploadId, completionError, true,
+                                 remoteSessionId, generation);
             return;
         }
 
-        // Remove byte-identical staging duplicates before changing mappings. A
-        // failed delete rejects the request and leaves the existing mapping as
-        // the authoritative retry point.
-        for (auto it = reusableExistingPaths.constBegin();
-             it != reusableExistingPaths.constEnd(); ++it) {
-            const QString duplicatePath = m_incoming.filePaths.value(it.key());
-            if (duplicatePath.isEmpty() || !QFile::remove(duplicatePath)) {
-                completionError = QStringLiteral(
-                    "Remote client could not remove an idempotent upload duplicate");
+        for (const QString& assetId : std::as_const(assetIds)) {
+            const QString stagingPath = m_incoming.filePaths.value(assetId);
+            const QString selectedPath = selectedPathByAsset.value(assetId);
+            if (QDir::cleanPath(stagingPath) == QDir::cleanPath(selectedPath)) continue;
+            if (!QFileInfo::exists(selectedPath)) {
+                QFile staging(stagingPath);
+                if (!staging.rename(selectedPath)) {
+                    completionError = QStringLiteral("Remote client could not promote a validated asset");
+                    break;
+                }
+            } else if (!QFile::remove(stagingPath)) {
+                completionError = QStringLiteral("Remote client could not remove a duplicate staging asset");
                 break;
             }
         }
         if (!completionError.isEmpty()) {
-            rejectIncomingUpload(senderId, uploadId, completionError, true);
+            rejectIncomingUpload(senderId, uploadId, completionError, true,
+                                 remoteSessionId, generation);
             return;
         }
 
-        for (const QString& fileId : std::as_const(validatedFileIds)) {
-            if (reusableExistingPaths.contains(fileId)) continue;
-            const QString path = m_incoming.filePaths.value(fileId);
-            m_fileManager->registerReceivedFilePath(fileId, path);
-            if (QDir::cleanPath(QFileInfo(m_fileManager->getFilePathForId(fileId)).absoluteFilePath())
-                != QDir::cleanPath(QFileInfo(path).absoluteFilePath())) {
-                completionError = QStringLiteral("Remote client could not register an upload file");
+        for (auto it = selectedPathByFileId.constBegin();
+             it != selectedPathByFileId.constEnd(); ++it) {
+            const QString existingPath = m_fileManager->getFilePathForId(it.key());
+            if (existingPath.isEmpty()) {
+                m_fileManager->registerReceivedFilePath(it.key(), it.value());
+            }
+            if (QDir::cleanPath(QFileInfo(m_fileManager->getFilePathForId(it.key())).absoluteFilePath())
+                != QDir::cleanPath(QFileInfo(it.value()).absoluteFilePath())) {
+                completionError = QStringLiteral("Remote client could not register a validated asset");
                 break;
             }
+            m_fileManager->associateFileWithIdea(it.key(), remoteSessionId);
         }
-
         if (!completionError.isEmpty()) {
-            rejectIncomingUpload(senderId, uploadId, completionError, true);
+            rejectIncomingUpload(senderId, uploadId, completionError, true,
+                                 remoteSessionId, generation);
             return;
         }
 
-        for (const QString& fileId : std::as_const(validatedFileIds)) {
-            m_fileManager->associateFileWithIdea(fileId, canvasSessionId);
-        }
-
+        const QJsonArray completedAssets = incomingAssetOffsets();
         const QString completedStagingPath = m_incoming.cacheDirPath;
+        rememberIncomingUploadCompletion(
+            senderId, remoteSessionId, generation,
+            sourceConnectionGeneration, uploadId, completedAssets);
         if (m_incomingStallTimer) m_incomingStallTimer->stop();
         clearIncomingChunkTracking(uploadId);
         m_canceledIncoming.remove(uploadId);
         m_incoming = IncomingUploadSession();
-        QDir().rmdir(completedStagingPath); // succeeds only for all-reused uploads
-        if (m_ws) {
-            m_ws->notifyUploadFinishedToSender(senderId, uploadId, canvasSessionId,
-                                               validatedFileIds);
-        }
+        QDir().rmdir(completedStagingPath);
+        emitIncomingV2Response(QStringLiteral("upload_finished"), senderId,
+                               remoteSessionId, generation, uploadId,
+                               {{QStringLiteral("assets"), completedAssets}});
     } else if (type == "upload_abort") {
         const QString abortedId = message.value("uploadId").toString();
         const QString senderClientId = senderCacheNamespace(message);
-        const QString abortedCanvasSessionId = message.value("canvasSessionId").toString();
+        const QString remoteSessionId = message.value("remoteSessionId").toString();
+        quint64 generation = 0;
+        quint64 sourceConnectionGeneration = 0;
+        if (message.value("protocolVersion").toInt(-1) != 2
+            || !parsePositiveGeneration(message.value("generation"), generation)
+            || !parsePositiveGeneration(message.value("connectionGeneration"),
+                                        sourceConnectionGeneration)
+            || !RemoteCacheStore::isValidDeviceId(senderClientId)
+            || !RemoteCacheStore::isValidSessionId(remoteSessionId)
+            || !isValidOpaqueId(abortedId)) {
+            return;
+        }
         bool cleanupConfirmed = false;
         if (!abortedId.isEmpty() && abortedId == m_incoming.uploadId
-            && (senderClientId.isEmpty() || senderClientId == m_incoming.senderId)) {
+            && senderClientId == m_incoming.senderId
+            && remoteSessionId == m_incoming.remoteSessionId
+            && generation == m_incoming.generation
+            && sourceConnectionGeneration == m_incoming.sourceConnectionGeneration) {
             cleanupConfirmed = discardActiveIncomingSession(true);
-        } else if (!abortedId.isEmpty() && !senderClientId.isEmpty()) {
-            if (m_canceledIncoming.size() >= 256) m_canceledIncoming.clear();
-            m_canceledIncoming.insert(abortedId);
-            clearIncomingChunkTracking(abortedId);
-            // Repeated aborts also retry cleanup after a transient filesystem
-            // failure. An absent staging directory is already clean.
-            cleanupConfirmed = removeResidualIncomingStaging(
-                senderClientId, abortedId);
+        } else if (m_canceledIncoming.contains(abortedId)) {
+            cleanupConfirmed = true;
         }
-        if (cleanupConfirmed && m_ws && !senderClientId.isEmpty()
-            && !message.value("protocolRejected").toBool(false)) {
-            m_ws->notifyUploadAbortAcknowledgedToSender(
-                senderClientId, abortedId, abortedCanvasSessionId);
-        }
-    } else if (type == "remove_all_files") {
-        const QString senderClientId = senderCacheNamespace(message);
-        const QString canvasSessionId = message.value("canvasSessionId").toString();
-        const QString removalId = message.value("removalId").toString();
-        if (!isValidPeerId(senderClientId) || !isValidCanvasSessionId(canvasSessionId)
-            || !isCanonicalUuid(removalId)) {
-            qWarning() << "UploadManager: Ignoring malformed remove_all_files command";
-            return;
-        }
-        const auto notifyRemovalFailure = [this, &senderClientId, &removalId,
-                                           &canvasSessionId](const QString& reason) {
-            if (m_ws) {
-                m_ws->notifyAllFilesRemovalFailedToSender(
-                    senderClientId, removalId, canvasSessionId, reason);
-            }
-        };
-
-        const QString uploadRoot = incomingUploadsRoot();
-        QString cacheOverride = QDir(uploadRoot).filePath(senderClientId);
-        if (!pathIsInsideDirectory(cacheOverride, uploadRoot)) {
-            qWarning() << "UploadManager: Refusing unsafe remove_all_files path";
-            notifyRemovalFailure(QStringLiteral("Remote cache path is unsafe"));
-            return;
-        }
-        const QFileInfo senderInfo(cacheOverride);
-        if (senderInfo.exists()) {
-            const QString canonicalSenderRoot = senderInfo.canonicalFilePath();
-            if (canonicalSenderRoot.isEmpty() || !senderInfo.isDir() || senderInfo.isSymLink()
-                || !pathIsInsideDirectory(canonicalSenderRoot, uploadRoot)) {
-                qWarning() << "UploadManager: Refusing unsafe remove_all_files sender root";
-                notifyRemovalFailure(QStringLiteral("Remote sender cache root is unsafe"));
-                return;
-            }
-            cacheOverride = canonicalSenderRoot;
-        }
-
-        // Always use the sender root here, not the active upload's UUID staging
-        // directory. DEFAULT_IDEA_ID means every validated upload for that sender.
-        if (!cleanupIncomingSession(true, false, senderClientId, cacheOverride,
-                                    QString(), canvasSessionId)) {
-            qWarning() << "UploadManager: Remote removal failed; acknowledgement withheld"
-                       << removalId;
-            notifyRemovalFailure(QStringLiteral(
-                "Remote client could not remove every cached file"));
-            return;
-        }
-        // Clear all expected indices; treat as a hard reset
-        m_expectedChunkIndex.clear();
-        if (m_ws) {
-            m_ws->notifyAllFilesRemovedToSender(senderClientId, removalId, canvasSessionId);
-        }
-    } else if (type == "connection_lost_cleanup") {
-        // A disconnect may only remove the partial transfer owned by this
-        // session, never validated files belonging to other uploads.
-        const QString senderClientId = senderCacheNamespace(message);
-        if (!m_incoming.uploadId.isEmpty()
-            && (senderClientId.isEmpty() || senderClientId == m_incoming.senderId)) {
-            discardActiveIncomingSession(false);
-        }
-    } else if (type == "remove_file") {
-        const QString senderClientId = senderCacheNamespace(message);
-        const QString fileId = message.value("fileId").toString();
-        const QString canvasSessionId = message.value("canvasSessionId").toString();
-
-        if (isValidPeerId(senderClientId) && isValidFileId(fileId)
-            && isValidCanvasSessionId(canvasSessionId)) {
-            const QString uploadRoot = incomingUploadsRoot();
-            const QString senderPath = QDir(uploadRoot).absoluteFilePath(senderClientId);
-            const QFileInfo senderInfo(senderPath);
-            const QString senderRoot = senderInfo.canonicalFilePath();
-            if (senderRoot.isEmpty() || !senderInfo.isDir() || senderInfo.isSymLink()
-                || !pathIsInsideDirectory(senderRoot, uploadRoot)) {
-                qWarning() << "UploadManager: Refusing remove_file for unsafe sender root";
-                return;
-            }
-
-            const QString mappedPath = m_fileManager->getFilePathForId(fileId);
-            if (mappedPath.isEmpty()) {
-                qDebug() << "UploadManager: No received mapping found for" << fileId;
-                return;
-            }
-
-            const QFileInfo mappedInfo(mappedPath);
-            QString ownedPath = mappedInfo.canonicalFilePath();
-            if (ownedPath.isEmpty()) ownedPath = mappedInfo.absoluteFilePath();
-            if (mappedInfo.isSymLink() || !pathIsInsideDirectory(ownedPath, senderRoot)) {
-                qWarning() << "UploadManager: Refusing cross-sender or non-upload deletion"
-                           << mappedPath;
-                return;
-            }
-
-            bool shouldRemoveFromDisk = true;
-            if (canvasSessionId != DEFAULT_IDEA_ID) {
-                const QSet<QString> currentIdeas = m_fileManager->getIdeaIdsForFile(fileId);
-                if (!currentIdeas.contains(canvasSessionId)) {
-                    qWarning() << "UploadManager: Refusing remove_file for unrelated canvas"
-                               << canvasSessionId;
-                    return;
-                }
-                m_fileManager->dissociateFileFromIdea(fileId, canvasSessionId);
-                const QSet<QString> remainingIdeas = m_fileManager->getIdeaIdsForFile(fileId);
-                shouldRemoveFromDisk = remainingIdeas.isEmpty();
-            }
-
-            if (!shouldRemoveFromDisk) {
-                qDebug() << "UploadManager: Retaining file" << fileId << "because other ideas still reference it";
-                return;
-            }
-
-            if (mappedInfo.exists()) {
-                QFile file(ownedPath);
-                if (file.remove()) {
-                    qDebug() << "UploadManager: Removed sender-owned cached file" << ownedPath;
-                } else {
-                    qWarning() << "UploadManager: Failed to remove mapped cached file" << ownedPath;
-                    return;
-                }
-            }
-
-            m_fileManager->removeReceivedFileMapping(fileId);
-            removeEmptyUploadParentsForFile(ownedPath);
+        if (cleanupConfirmed) {
+            emitIncomingV2Response(QStringLiteral("upload_abort_ack"), senderClientId,
+                                   remoteSessionId, generation, abortedId,
+                                   {{QStringLiteral("success"), true}});
         }
     }
 }
@@ -2134,7 +4610,13 @@ bool UploadManager::canAcceptNewAction() const {
         && m_lastAcceptedAction.elapsed() < MIN_ACTION_INTERVAL_MS) {
         return false;
     }
-    return m_outgoingState == OutgoingState::Idle && m_pendingRemovalId.isEmpty();
+    for (auto it = m_pendingAssetRemovals.cbegin();
+         it != m_pendingAssetRemovals.cend(); ++it) {
+        if (it->asset.targetDeviceId == m_targetClientId) return false;
+    }
+    if (parallelForTarget(m_targetClientId)) return false;
+    return m_currentUploadId.isEmpty()
+        || m_uploadTargetClientId != m_targetClientId;
 }
 
 void UploadManager::recordAcceptedAction() {
@@ -2142,14 +4624,28 @@ void UploadManager::recordAcceptedAction() {
 }
 
 bool UploadManager::canRequestCancel() const {
-    return (m_outgoingState == OutgoingState::AwaitingTargetReady
-            || m_outgoingState == OutgoingState::Streaming)
+    if (ParallelOutgoingTransfer* transfer = parallelForTarget(m_targetClientId)) {
+        return (transfer->state == OutgoingState::Queued
+                || transfer->state == OutgoingState::AwaitingTargetReady
+                || transfer->state == OutgoingState::Streaming
+                || transfer->state == OutgoingState::AwaitingValidation
+                || transfer->state == OutgoingState::Suspended)
+            && transfer->stateAge.isValid()
+            && transfer->stateAge.elapsed() >= CANCEL_GUARD_MS;
+    }
+    return m_uploadTargetClientId == m_targetClientId
+        && (m_outgoingState == OutgoingState::Queued
+            || m_outgoingState == OutgoingState::AwaitingTargetReady
+            || m_outgoingState == OutgoingState::Streaming
+            || m_outgoingState == OutgoingState::AwaitingValidation
+            || m_outgoingState == OutgoingState::Suspended)
         && m_outgoingStateAge.isValid()
         && m_outgoingStateAge.elapsed() >= CANCEL_GUARD_MS;
 }
 
 void UploadManager::restartIncomingStallTimer() {
-    if (m_incomingStallTimer && !m_incoming.uploadId.isEmpty()) {
+    if (m_incomingStallTimer && m_incomingStallTimer->interval() > 0
+        && !m_incoming.uploadId.isEmpty()) {
         m_incomingStallTimer->start();
     }
 }

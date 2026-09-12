@@ -25,13 +25,15 @@ FileWatcher::~FileWatcher() {
 
 void FileWatcher::watchMediaItem(ResizableMediaBase* mediaItem) {
     if (!mediaItem) return;
-    
-    const QString filePath = mediaItem->sourcePath();
+
+    const QFileInfo sourceInfo(mediaItem->sourcePath());
+    const QString filePath = sourceInfo.canonicalFilePath();
     if (filePath.isEmpty()) return;
     
     // Check if file is accessible before adding to watch
     if (!isFileAccessible(filePath)) {
-        qDebug() << "FileWatcher: File is not accessible, will not watch:" << filePath;
+        qWarning() << "FileWatcher: source is not accessible; mediaId="
+                   << mediaItem->mediaId();
         return;
     }
     
@@ -46,7 +48,11 @@ void FileWatcher::watchMediaItem(ResizableMediaBase* mediaItem) {
     addFileToWatch(filePath, mediaItem);
     m_mediaToFile[mediaItem] = filePath;
     
-    qDebug() << "FileWatcher: Now watching file" << filePath << "for media item" << mediaItem->mediaId();
+    qDebug() << "FileWatcher: watching source for mediaId=" << mediaItem->mediaId();
+}
+
+QString FileWatcher::watchedFilePath(ResizableMediaBase* mediaItem) const {
+    return m_mediaToFile.value(mediaItem);
 }
 
 void FileWatcher::unwatchMediaItem(ResizableMediaBase* mediaItem) {
@@ -84,6 +90,7 @@ void FileWatcher::clearAll() {
     m_fileToMedia.clear();
     m_mediaToFile.clear();
     m_filesToCheck.clear();
+    m_directlyChangedFiles.clear();
     m_delayedCheckTimer->stop();
 }
 
@@ -96,7 +103,7 @@ void FileWatcher::checkAllFiles() {
         
         if (!isFileAccessible(filePath)) {
             itemsToRemove.append(mediaItem);
-            qDebug() << "FileWatcher: File no longer accessible:" << filePath;
+            qDebug() << "FileWatcher: watched source is no longer accessible";
         }
     }
     
@@ -106,17 +113,18 @@ void FileWatcher::checkAllFiles() {
 }
 
 void FileWatcher::onFileDeleted(const QString& filePath) {
-    qDebug() << "FileWatcher: File changed/deleted signal received for:" << filePath;
+    qDebug() << "FileWatcher: watched source changed";
     
     // Add to files to check (will be processed with delay)
     m_filesToCheck.insert(filePath);
+    m_directlyChangedFiles.insert(filePath);
     
     // Start or restart the delayed check timer
     m_delayedCheckTimer->start();
 }
 
 void FileWatcher::onDirectoryChanged(const QString& dirPath) {
-    qDebug() << "FileWatcher: Directory changed:" << dirPath;
+    qDebug() << "FileWatcher: watched directory changed";
     
     // When a directory changes, check all files in that directory that we're watching
     for (auto it = m_fileToMedia.begin(); it != m_fileToMedia.end(); ++it) {
@@ -141,7 +149,8 @@ void FileWatcher::performDelayedCheck() {
     
     // Check each file that was flagged for checking
     for (const QString& filePath : m_filesToCheck) {
-        if (!isFileAccessible(filePath)) {
+        if (m_directlyChangedFiles.contains(filePath)
+            || !isFileAccessible(filePath)) {
             // File is no longer accessible, mark all associated media items for removal
             if (m_fileToMedia.contains(filePath)) {
                 const auto& mediaItems = m_fileToMedia.value(filePath);
@@ -163,6 +172,7 @@ void FileWatcher::performDelayedCheck() {
     
     // Clear the check list
     m_filesToCheck.clear();
+    m_directlyChangedFiles.clear();
     
     // Emit signal if we found items to remove
     if (!itemsToRemove.isEmpty()) {
@@ -178,9 +188,9 @@ void FileWatcher::addFileToWatch(const QString& filePath, ResizableMediaBase* me
     // Add file to watcher if not already watched
     if (!m_watcher->files().contains(filePath)) {
         if (m_watcher->addPath(filePath)) {
-            qDebug() << "FileWatcher: Added file to watcher:" << filePath;
+            qDebug() << "FileWatcher: source watch installed";
         } else {
-            qDebug() << "FileWatcher: Failed to add file to watcher:" << filePath;
+            qWarning() << "FileWatcher: failed to install source watch";
         }
     }
     
@@ -189,9 +199,9 @@ void FileWatcher::addFileToWatch(const QString& filePath, ResizableMediaBase* me
     const QString dirPath = fileInfo.absolutePath();
     if (!m_watcher->directories().contains(dirPath)) {
         if (m_watcher->addPath(dirPath)) {
-            qDebug() << "FileWatcher: Added directory to watcher:" << dirPath;
+            qDebug() << "FileWatcher: directory watch installed";
         } else {
-            qDebug() << "FileWatcher: Failed to add directory to watcher:" << dirPath;
+            qWarning() << "FileWatcher: failed to install directory watch";
         }
     }
 }
@@ -206,7 +216,7 @@ void FileWatcher::removeFileFromWatch(const QString& filePath, ResizableMediaBas
     if (m_fileToMedia[filePath].isEmpty()) {
         m_fileToMedia.remove(filePath);
         m_watcher->removePath(filePath);
-        qDebug() << "FileWatcher: Removed file from watcher:" << filePath;
+        qDebug() << "FileWatcher: source watch removed";
         
         // Check if we can remove the directory too (if no other files in it are watched)
         QFileInfo fileInfo(filePath);
@@ -223,7 +233,7 @@ void FileWatcher::removeFileFromWatch(const QString& filePath, ResizableMediaBas
         
         if (!stillWatchingDir) {
             m_watcher->removePath(dirPath);
-            qDebug() << "FileWatcher: Removed directory from watcher:" << dirPath;
+            qDebug() << "FileWatcher: directory watch removed";
         }
     }
 }

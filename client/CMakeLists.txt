@@ -25,6 +25,13 @@ endif()
 
 # Find Qt6
 find_package(Qt6 6.11 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia MultimediaWidgets Svg SvgWidgets Concurrent Quick QuickWidgets Qml ShaderTools GuiPrivate QuickPrivate)
+find_package(OpenSSL 1.1.1 REQUIRED COMPONENTS Crypto)
+if(UNIX AND NOT APPLE)
+    # systemd-logind is the native source for sleep and session-lock events.
+    # Keep it optional so non-systemd Linux targets still build with a no-op
+    # backend while exposing the same application-level lifecycle signal.
+    find_package(Qt6 6.11 QUIET COMPONENTS DBus)
+endif()
 
 # Recent macOS SDKs no longer ship AGL.  Some older/broken Qt packages still
 # export it transitively from QtGui; detect that toolchain mismatch at configure
@@ -65,6 +72,7 @@ set(SOURCES
     # UI - Pages
     src/frontend/ui/pages/ClientListPage.cpp
     src/frontend/ui/pages/CanvasViewPage.cpp
+    src/frontend/ui/pages/HistoryPage.cpp
     
     # UI - Widgets
     src/frontend/ui/widgets/RoundedContainer.cpp
@@ -108,6 +116,10 @@ set(SOURCES
     # Rendering - Remote
     src/frontend/rendering/remote/RemoteSceneController.cpp
     src/frontend/rendering/remote/RemoteVideoFrameItem.cpp
+
+    # Protocol v2 scene lifecycle
+    src/backend/network/RemoteSessionCoordinator.cpp
+    src/backend/network/SceneRunCoordinator.cpp
     
     # Rendering - Navigation
     src/frontend/rendering/navigation/ScreenNavigationManager.cpp
@@ -125,11 +137,29 @@ set(SOURCES
     # BACKEND - Business Logic & Data
     # ═══════════════════════════════════════════════════════
     
+    # Configuration
+    src/backend/config/AppConfig.cpp
+
+    # Security
+    src/backend/security/DeviceIdentityStore.cpp
+
     # Domain - Models
     src/backend/domain/models/ClientInfo.cpp
+
+    # Domain - Projects
+    src/backend/domain/project/ProjectModel.cpp
+    src/backend/domain/project/ProjectStore.cpp
+    src/backend/domain/project/ProjectManager.cpp
+
+    # Domain - Live scene activity
+    src/backend/domain/scene/SceneActivityModel.cpp
     
     # Domain - Session
     src/backend/domain/session/SessionManager.cpp
+
+    # Notifications
+    src/backend/notifications/HistoryStore.cpp
+    src/backend/notifications/NotificationCenter.cpp
     
     # Domain - Media
     src/backend/domain/media/MediaItems.cpp
@@ -145,7 +175,8 @@ set(SOURCES
     # Network
     src/backend/network/WebSocketClient.cpp
     src/backend/network/UploadManager.cpp
-    src/backend/network/WatchManager.cpp
+    src/backend/network/RemoteCacheStore.cpp
+    src/backend/network/UploadScheduler.cpp
     src/backend/network/RemoteFileTracker.cpp
     
     # Files
@@ -173,6 +204,7 @@ set(SOURCES
     
     # Backend Managers - System
     src/backend/managers/system/SystemMonitor.cpp
+    src/backend/managers/system/SystemLifecycleMonitor.cpp
     
     # Controllers
     src/backend/controllers/CanvasSessionController.cpp
@@ -184,11 +216,19 @@ if(APPLE)
     list(APPEND SOURCES 
         src/backend/platform/macos/MacVideoThumbnailer.mm 
         src/backend/platform/macos/MacWindowManager.mm
+        src/backend/managers/system/SystemLifecycleMonitor_mac.mm
     )
 endif()
 
 if(WIN32)
-    list(APPEND SOURCES src/backend/platform/windows/WindowsVideoThumbnailer.cpp)
+    list(APPEND SOURCES
+        src/backend/platform/windows/WindowsVideoThumbnailer.cpp
+        src/backend/managers/system/SystemLifecycleMonitor_windows.cpp
+    )
+elseif(UNIX AND NOT APPLE AND TARGET Qt6::DBus)
+    list(APPEND SOURCES src/backend/managers/system/SystemLifecycleMonitor_linux.cpp)
+elseif(NOT APPLE)
+    list(APPEND SOURCES src/backend/managers/system/SystemLifecycleMonitorStub.cpp)
 endif()
 
 # Header files - Frontend/Backend Architecture
@@ -205,6 +245,7 @@ set(HEADERS
     # UI - Pages
     src/frontend/ui/pages/ClientListPage.h
     src/frontend/ui/pages/CanvasViewPage.h
+    src/frontend/ui/pages/HistoryPage.h
     
     # UI - Widgets
     src/frontend/ui/widgets/RoundedContainer.h
@@ -260,6 +301,10 @@ set(HEADERS
     # Rendering - Remote
     src/frontend/rendering/remote/RemoteSceneController.h
     src/frontend/rendering/remote/RemoteVideoFrameItem.h
+
+    # Protocol v2 scene lifecycle
+    src/backend/network/RemoteSessionCoordinator.h
+    src/backend/network/SceneRunCoordinator.h
     
     # Rendering - Navigation
     src/frontend/rendering/navigation/ScreenNavigationManager.h
@@ -277,11 +322,29 @@ set(HEADERS
     # BACKEND - Business Logic & Data
     # ═══════════════════════════════════════════════════════
     
+    # Configuration
+    src/backend/config/AppConfig.h
+
+    # Security
+    src/backend/security/DeviceIdentityStore.h
+
     # Domain - Models
     src/backend/domain/models/ClientInfo.h
+
+    # Domain - Projects
+    src/backend/domain/project/ProjectModel.h
+    src/backend/domain/project/ProjectStore.h
+    src/backend/domain/project/ProjectManager.h
+
+    # Domain - Live scene activity
+    src/backend/domain/scene/SceneActivityModel.h
     
     # Domain - Session
     src/backend/domain/session/SessionManager.h
+
+    # Notifications
+    src/backend/notifications/HistoryStore.h
+    src/backend/notifications/NotificationCenter.h
     
     # Domain - Media
     src/backend/domain/media/MediaItems.h
@@ -293,7 +356,8 @@ set(HEADERS
     # Network
     src/backend/network/WebSocketClient.h
     src/backend/network/UploadManager.h
-    src/backend/network/WatchManager.h
+    src/backend/network/RemoteCacheStore.h
+    src/backend/network/UploadScheduler.h
     src/backend/network/RemoteFileTracker.h
     
     # Files
@@ -321,6 +385,8 @@ set(HEADERS
     
     # Backend Managers - System
     src/backend/managers/system/SystemMonitor.h
+    src/backend/managers/system/SystemLifecycleMonitor.h
+    src/backend/managers/system/SystemLifecycleMonitorBackend.h
     
     # Controllers
     src/backend/controllers/CanvasSessionController.h
@@ -368,6 +434,7 @@ target_link_libraries(MouffetteClient
     Qt6::Qml
     Qt6::GuiPrivate
     Qt6::QuickPrivate
+    OpenSSL::Crypto
 )
 
 # Include directories
@@ -390,7 +457,13 @@ if(WIN32)
         mfplat
         mfreadwrite
         mfuuid
+        Advapi32
+        Wtsapi32
     )
+endif()
+
+if(UNIX AND NOT APPLE AND TARGET Qt6::DBus)
+    target_link_libraries(MouffetteClient Qt6::DBus)
 endif()
 
 if(APPLE)
@@ -399,16 +472,89 @@ if(APPLE)
         MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/Info.plist
     )
     # Link with macOS frameworks used by native integrations
-    target_link_libraries(MouffetteClient "-framework AppKit" "-framework AVFoundation" "-framework CoreMedia" "-framework CoreGraphics")
+    target_link_libraries(MouffetteClient "-framework AppKit" "-framework AVFoundation" "-framework CoreMedia" "-framework CoreGraphics" "-framework Security")
     
     # Set Objective-C++ properties for .mm files (updated paths for backend/platform)
     set_source_files_properties(src/backend/platform/macos/MacVideoThumbnailer.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
     set_source_files_properties(src/backend/platform/macos/MacWindowManager.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
+    set_source_files_properties(src/backend/managers/system/SystemLifecycleMonitor_mac.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
 endif()
 
 include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
+
+    add_executable(tst_DeviceIdentityStore
+        tests/qt/tst_DeviceIdentityStore.cpp
+        src/backend/security/DeviceIdentityStore.cpp
+        src/backend/security/DeviceIdentityStore.h
+    )
+    target_include_directories(tst_DeviceIdentityStore PRIVATE src)
+    target_link_libraries(tst_DeviceIdentityStore PRIVATE Qt6::Core Qt6::Test OpenSSL::Crypto)
+    if(APPLE)
+        target_link_libraries(tst_DeviceIdentityStore PRIVATE "-framework Security")
+    elseif(WIN32)
+        target_link_libraries(tst_DeviceIdentityStore PRIVATE Advapi32)
+    endif()
+    add_test(NAME DeviceIdentityStore COMMAND tst_DeviceIdentityStore)
+
+    add_executable(tst_ConnectionManager
+        tests/qt/tst_ConnectionManager.cpp
+        src/backend/managers/network/ConnectionManager.cpp
+        src/backend/managers/network/ConnectionManager.h
+        src/backend/network/WebSocketClient.cpp
+        src/backend/network/WebSocketClient.h
+        src/backend/network/SceneRunCoordinator.cpp
+        src/backend/network/SceneRunCoordinator.h
+        src/backend/network/RemoteSessionCoordinator.cpp
+        src/backend/network/RemoteSessionCoordinator.h
+        src/backend/security/DeviceIdentityStore.cpp
+        src/backend/security/DeviceIdentityStore.h
+        src/backend/domain/models/ClientInfo.cpp
+        src/backend/domain/models/ClientInfo.h
+        src/backend/config/AppConfig.cpp
+        src/backend/config/AppConfig.h
+        resources/resources.qrc
+    )
+    target_include_directories(tst_ConnectionManager PRIVATE src)
+    target_link_libraries(tst_ConnectionManager PRIVATE
+        Qt6::Core Qt6::Network Qt6::WebSockets Qt6::Test OpenSSL::Crypto)
+    if(APPLE)
+        target_link_libraries(tst_ConnectionManager PRIVATE "-framework Security")
+    elseif(WIN32)
+        target_link_libraries(tst_ConnectionManager PRIVATE Advapi32)
+    endif()
+    add_test(NAME ConnectionManager COMMAND tst_ConnectionManager)
+
+    add_executable(tst_AppConfig
+        tests/qt/tst_AppConfig.cpp
+        src/backend/config/AppConfig.cpp
+        src/backend/config/AppConfig.h
+        resources/resources.qrc
+    )
+    target_include_directories(tst_AppConfig PRIVATE src)
+    target_link_libraries(tst_AppConfig PRIVATE Qt6::Core Qt6::Network Qt6::Test)
+    add_test(NAME AppConfig COMMAND tst_AppConfig)
+
+    add_executable(tst_ClientInfoDisplay
+        tests/qt/tst_ClientInfoDisplay.cpp
+        src/backend/domain/models/ClientInfo.cpp
+        src/backend/domain/models/ClientInfo.h
+    )
+    target_include_directories(tst_ClientInfoDisplay PRIVATE src)
+    target_link_libraries(tst_ClientInfoDisplay PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME ClientInfoDisplay COMMAND tst_ClientInfoDisplay)
+
+    add_executable(tst_SystemLifecycleMonitor
+        tests/qt/tst_SystemLifecycleMonitor.cpp
+        src/backend/managers/system/SystemLifecycleMonitor.cpp
+        src/backend/managers/system/SystemLifecycleMonitor.h
+        src/backend/managers/system/SystemLifecycleMonitorBackend.h
+        src/backend/managers/system/SystemLifecycleMonitorStub.cpp
+    )
+    target_include_directories(tst_SystemLifecycleMonitor PRIVATE src)
+    target_link_libraries(tst_SystemLifecycleMonitor PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME SystemLifecycleMonitor COMMAND tst_SystemLifecycleMonitor)
 
     add_executable(tst_TextOutlineItem
         tests/qt/tst_TextOutlineItem.cpp
@@ -526,13 +672,25 @@ if(BUILD_TESTING)
     target_include_directories(tst_RemoteSceneLifecycle PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
     target_compile_definitions(tst_RemoteSceneLifecycle PRIVATE
-        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>")
+        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>"
+        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../video-1080p.mp4")
     target_link_libraries(tst_RemoteSceneLifecycle PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
     add_test(NAME RemoteSceneLifecycle COMMAND tst_RemoteSceneLifecycle)
+
+    add_executable(tst_SceneRunCoordinator
+        tests/qt/tst_SceneRunCoordinator.cpp
+        src/backend/network/SceneRunCoordinator.cpp
+        src/backend/network/SceneRunCoordinator.h
+        src/backend/network/RemoteSessionCoordinator.cpp
+        src/backend/network/RemoteSessionCoordinator.h
+    )
+    target_include_directories(tst_SceneRunCoordinator PRIVATE src)
+    target_link_libraries(tst_SceneRunCoordinator PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME SceneRunCoordinator COMMAND tst_SceneRunCoordinator)
     # Native window focus/grabs are part of these tests. Do not race other GUI
     # suites when CI invokes ctest with parallel jobs.
-    set_tests_properties(CanvasInteraction CanvasInteractionScaled CanvasSelectionBackend VideoPlaybackBackend UploadRemovalSecurity RemoteSceneControllerLifecycle RemoteSceneLifecycle
+    set_tests_properties(TextOutlineMotion CanvasInteraction CanvasInteractionScaled CanvasSelectionBackend VideoPlaybackBackend UploadRemovalSecurity RemoteSceneControllerLifecycle RemoteSceneLifecycle
         PROPERTIES RUN_SERIAL TRUE)
 
     # Reference implementation retained for before/after profiling only. The
@@ -567,8 +725,18 @@ if(BUILD_TESTING)
     target_include_directories(tst_MediaFilePolicy PRIVATE src)
     target_compile_definitions(tst_MediaFilePolicy PRIVATE
         TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../video-1080p.mp4")
-    target_link_libraries(tst_MediaFilePolicy PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
+    target_link_libraries(tst_MediaFilePolicy PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test)
     add_test(NAME MediaFilePolicy COMMAND tst_MediaFilePolicy)
+    set(MOUFFETTE_MEDIA_POLICY_TEST_ENV "QT_MEDIA_BACKEND=ffmpeg")
+    if(NOT APPLE)
+        # Headless Unix CI needs a platform plugin. AVFoundation on macOS,
+        # however, cannot deliver QVideoSink frames through the offscreen
+        # plugin, so macOS uses its native GUI context without showing a window.
+        list(APPEND MOUFFETTE_MEDIA_POLICY_TEST_ENV "QT_QPA_PLATFORM=offscreen")
+    endif()
+    set_tests_properties(MediaFilePolicy UploadRemovalSecurity
+        PROPERTIES ENVIRONMENT "${MOUFFETTE_MEDIA_POLICY_TEST_ENV}")
 
     add_executable(tst_LocalFileRepository
         tests/qt/tst_LocalFileRepository.cpp
@@ -578,4 +746,58 @@ if(BUILD_TESTING)
     target_include_directories(tst_LocalFileRepository PRIVATE src)
     target_link_libraries(tst_LocalFileRepository PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME LocalFileRepository COMMAND tst_LocalFileRepository)
+
+    add_executable(tst_ProjectManager
+        tests/qt/tst_ProjectManager.cpp
+        src/backend/domain/models/ClientInfo.cpp
+        src/backend/domain/models/ClientInfo.h
+        src/backend/domain/project/ProjectModel.cpp
+        src/backend/domain/project/ProjectModel.h
+        src/backend/domain/project/ProjectStore.cpp
+        src/backend/domain/project/ProjectStore.h
+        src/backend/domain/project/ProjectManager.cpp
+        src/backend/domain/project/ProjectManager.h
+    )
+    target_include_directories(tst_ProjectManager PRIVATE src)
+    target_link_libraries(tst_ProjectManager PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME ProjectManager COMMAND tst_ProjectManager)
+
+    add_executable(tst_NotificationCenter
+        tests/qt/tst_NotificationCenter.cpp
+        src/backend/notifications/HistoryStore.cpp
+        src/backend/notifications/HistoryStore.h
+        src/backend/notifications/NotificationCenter.cpp
+        src/backend/notifications/NotificationCenter.h
+    )
+    target_include_directories(tst_NotificationCenter PRIVATE src)
+    target_link_libraries(tst_NotificationCenter PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME NotificationCenter COMMAND tst_NotificationCenter)
+
+    add_executable(tst_SceneActivityModel
+        tests/qt/tst_SceneActivityModel.cpp
+        src/backend/domain/scene/SceneActivityModel.cpp
+        src/backend/domain/scene/SceneActivityModel.h
+    )
+    target_include_directories(tst_SceneActivityModel PRIVATE src)
+    target_link_libraries(tst_SceneActivityModel PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME SceneActivityModel COMMAND tst_SceneActivityModel)
+
+    add_executable(tst_UploadScheduler
+        tests/qt/tst_UploadScheduler.cpp
+        src/backend/network/UploadScheduler.cpp
+        src/backend/network/UploadScheduler.h
+    )
+    target_include_directories(tst_UploadScheduler PRIVATE src)
+    target_link_libraries(tst_UploadScheduler PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME UploadScheduler COMMAND tst_UploadScheduler)
+
+    add_executable(tst_RemoteCacheStore
+        tests/qt/tst_RemoteCacheStore.cpp
+        src/backend/network/RemoteCacheStore.cpp
+        src/backend/network/RemoteCacheStore.h
+    )
+    target_include_directories(tst_RemoteCacheStore PRIVATE src)
+    target_link_libraries(tst_RemoteCacheStore PRIVATE
+        Qt6::Core Qt6::Concurrent Qt6::Test)
+    add_test(NAME RemoteCacheStore COMMAND tst_RemoteCacheStore)
 endif()
