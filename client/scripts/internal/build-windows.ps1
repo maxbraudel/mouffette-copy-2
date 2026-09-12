@@ -33,7 +33,14 @@ $env:Path = "$ucrtBin;$env:Path"
 # Run the same architecture guardrail on Windows through MSYS2's bash.
 $bash = Join-Path $msysRoot 'usr\bin\bash.exe'
 if (Test-Path $bash) {
-    & $bash -lc 'cd "$(cygpath -u "$1")" && ./tools/check_architecture_boundaries.sh' -- $clientRoot
+    # Avoid passing a nested `$()` expression through PowerShell's native
+    # argument quoting. Convert the script path first, then execute it directly.
+    $cygpath = Join-Path $msysRoot 'usr\bin\cygpath.exe'
+    $guardScript = Join-Path $clientRoot 'tools\check_architecture_boundaries.sh'
+    $guardScriptMsys = (& $cygpath -u $guardScript).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'Could not convert the architecture guardrail path for MSYS2.' }
+
+    & $bash -l $guardScriptMsys
     if ($LASTEXITCODE -ne 0) { throw 'Architecture boundary checks failed.' }
 } else {
     Write-Warning "MSYS2 bash not found at $bash; architecture guardrail was not run."
