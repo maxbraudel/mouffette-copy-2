@@ -49,6 +49,7 @@ private slots:
     void removeAllFailureKeepsMappings();
     void scopedRemovalFailureRollsBackTheWholeBatch();
     void idempotentRecoveryIsBoundToPersistentSender();
+    void freshUploadResetsStaleTransferScopedStaging();
     void scopeAwareRegistrySupportsConcurrentSameDigest();
     void interruptedUploadRemovesOnlyPartialStagingAndCanRetry();
     void v3UploadTeardownQuarantinesAndDropsMappings();
@@ -425,7 +426,8 @@ void UploadRemovalSecurityTest::idempotentRecoveryIsBoundToPersistentSender() {
     QCOMPARE(files.getReceivedFilePath(firstScope, fileId), canonicalExistingPath);
     const QString retryStaging = QDir(uploadRoot()).filePath(
         senderId + QLatin1Char('/') + remoteSessionId
-        + QStringLiteral("/staging/asset_retry.png"));
+        + QStringLiteral("/staging/") + retryUploadId
+        + QStringLiteral("/asset_retry.png"));
     QVERIFY2(!QFileInfo::exists(retryStaging),
              "byte-identical same-session retry staging must be removed");
 
@@ -454,6 +456,64 @@ void UploadRemovalSecurityTest::idempotentRecoveryIsBoundToPersistentSender() {
     QCOMPARE(files.getReceivedFilePath(foreignScope, fileId), foreignPath);
     QVERIFY(QFileInfo::exists(foreignPath));
     QVERIFY(QFileInfo::exists(localSourcePath));
+}
+
+void UploadRemovalSecurityTest::freshUploadResetsStaleTransferScopedStaging()
+{
+    const QString senderId = QStringLiteral("stale_sender");
+    const QString remoteSessionId = QStringLiteral("stale_session");
+    const QString uploadId =
+        QStringLiteral("14141414-2525-4363-8474-585858585858");
+    const QString assetId = QStringLiteral("stale_asset");
+    const QByteArray bytes("fresh-upload-bytes");
+    const QString digest = QString::fromLatin1(
+        QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+
+    FileManager files;
+    UploadManager uploads(&files);
+    QSignalSpy replies(&uploads, &UploadManager::protocolV3UploadResponseReady);
+    const RemoteCacheStore::Scope scope{senderId, remoteSessionId, 1};
+    QString error;
+    const QString stagingPath = uploads.remoteCacheStore()->stagingAssetPath(
+        scope, uploadId, assetId, QStringLiteral("png"), &error);
+    QVERIFY2(!stagingPath.isEmpty(), qPrintable(error));
+    QFile stale(stagingPath);
+    QVERIFY(stale.open(QIODevice::WriteOnly | QIODevice::NewOnly));
+    QCOMPARE(stale.write("abandoned", 9), qint64(9));
+    stale.close();
+
+    uploads.handleIncomingMessage(QJsonObject{
+        {"type", "upload_start"}, {"protocolVersion", 3},
+        {"connectionGeneration", 5}, {"generation", 1},
+        {"ownerEndpointId", senderId}, {"remoteSessionId", remoteSessionId},
+        {"uploadId", uploadId},
+        {"files", QJsonArray{QJsonObject{
+            {"assetId", assetId}, {"fileId", digest}, {"sha256", digest},
+            {"name", "fresh.png"}, {"extension", "png"},
+            {"size", static_cast<double>(bytes.size())},
+            {"mediaIds", QJsonArray{QStringLiteral("fresh_media")}},
+        }}},
+    });
+
+    QVERIFY(!replies.isEmpty());
+    bool uploadReady = false;
+    for (const QList<QVariant>& reply : replies) {
+        if (reply.at(0).toJsonObject().value("type").toString()
+            == QLatin1String("upload_ready")) {
+            uploadReady = true;
+            break;
+        }
+    }
+    QVERIFY(uploadReady);
+    QCOMPARE(QFileInfo(stagingPath).size(), qint64(0));
+
+    uploads.handleIncomingMessage(QJsonObject{
+        {"type", "upload_abort"}, {"protocolVersion", 3},
+        {"connectionGeneration", 5}, {"generation", 1},
+        {"ownerEndpointId", senderId}, {"remoteSessionId", remoteSessionId},
+        {"uploadId", uploadId},
+    });
+    QVERIFY(!QFileInfo::exists(stagingPath));
 }
 
 void UploadRemovalSecurityTest::scopeAwareRegistrySupportsConcurrentSameDigest()
@@ -536,7 +596,8 @@ void UploadRemovalSecurityTest::interruptedUploadRemovesOnlyPartialStagingAndCan
 
     startUpload();
     const QString stagingDirectory = QDir(uploadRoot()).filePath(
-        senderId + QLatin1Char('/') + remoteSessionId + QStringLiteral("/staging"));
+        senderId + QLatin1Char('/') + remoteSessionId
+        + QStringLiteral("/staging/") + uploadId);
     const QString stagingFile = QDir(stagingDirectory).filePath(assetId + QStringLiteral(".png"));
     QVERIFY(QDir(stagingDirectory).exists());
     QVERIFY(QFileInfo::exists(stagingFile));
@@ -758,7 +819,8 @@ void UploadRemovalSecurityTest::completedUploadAckIsReplayableAndInventoryBound(
     QVERIFY(QFileInfo::exists(validatedPath));
     QVERIFY(!QFileInfo::exists(QDir(uploadRoot()).filePath(
         senderId + QLatin1Char('/') + remoteSessionId
-        + QStringLiteral("/staging/") + assetId + QStringLiteral(".png"))));
+        + QStringLiteral("/staging/") + uploadId + QLatin1Char('/')
+        + assetId + QStringLiteral(".png"))));
 
     // The idempotency result is bound to the complete immutable inventory.
     // A changed tuple is rejected and cannot inherit the previous success.
@@ -855,7 +917,8 @@ void UploadRemovalSecurityTest::receiverRejectsMp4WhoseMediaSamplesCannotDecode(
     // upload remains possible on the same session.
     QVERIFY(QDir(sessionRoot).exists());
     QVERIFY(!QFileInfo::exists(QDir(sessionRoot).filePath(
-        QStringLiteral("staging/") + assetId + QStringLiteral(".mp4"))));
+        QStringLiteral("staging/") + uploadId + QLatin1Char('/')
+        + assetId + QStringLiteral(".mp4"))));
     QVERIFY(!QFileInfo::exists(QDir(sessionRoot).filePath(
         QStringLiteral("validated/") + assetId + QStringLiteral(".mp4"))));
     QVERIFY(uploads.remoteCacheStore()->acceptsCommands(

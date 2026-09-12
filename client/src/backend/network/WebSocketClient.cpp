@@ -416,6 +416,9 @@ void WebSocketClient::connectToServer(const QString& serverUrl) {
     m_heartbeatTimer->stop();
     m_pendingServerBootId.clear();
     m_heartbeatSentAt.clear();
+    m_clockSamples.clear();
+    m_clockUncertaintyMs = std::numeric_limits<qint64>::max();
+    m_serverMonotonicOffsetMs = 0;
     if (m_webSocket) {
         QWebSocket* const obsoleteSocket = m_webSocket;
         m_webSocket = nullptr;
@@ -1155,6 +1158,7 @@ void WebSocketClient::onConnected() {
     m_authenticated = false;
     m_clockUncertaintyMs = std::numeric_limits<qint64>::max();
     m_serverMonotonicOffsetMs = 0;
+    m_clockSamples.clear();
     setConnectionStatus("Authenticating...");
     emit transportConnected();
 }
@@ -1567,10 +1571,37 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         if (sentAt >= 0 && echoedAt == sentAt && serverAt >= 0 && receivedAt >= sentAt) {
             const qint64 rtt = receivedAt - sentAt;
             const qint64 midpoint = sentAt + rtt / 2;
-            m_serverMonotonicOffsetMs = serverAt - midpoint;
-            m_clockUncertaintyMs = (rtt + 1) / 2;
-            emit heartbeatSampleReceived(sequence, rtt, serverAt - midpoint,
-                                         (rtt + 1) / 2);
+            const qint64 offset = serverAt - midpoint;
+            const qint64 uncertainty = (rtt + 1) / 2;
+
+            // NTP-style clock filtering: queueing and scheduling spikes make
+            // a single RTT sample worse, never more authoritative. Retain a
+            // short rolling window and use its lowest-delay sample instead of
+            // replacing a precise estimate with the latest outlier. The
+            // window is bounded by both time and count, and is reset for every
+            // transport/authentication generation.
+            const qint64 sampleWindowMs = std::max<qint64>(
+                m_leaseTimeoutMs, static_cast<qint64>(m_heartbeatIntervalMs) * 8);
+            m_clockSamples.append({receivedAt, offset, uncertainty});
+            while (!m_clockSamples.isEmpty()
+                   && (m_clockSamples.size() > 8
+                       || receivedAt - m_clockSamples.constFirst().receivedAtMs
+                              > sampleWindowMs)) {
+                m_clockSamples.removeFirst();
+            }
+            const auto best = std::min_element(
+                m_clockSamples.cbegin(), m_clockSamples.cend(),
+                [](const ClockSample& left, const ClockSample& right) {
+                    if (left.uncertaintyMs != right.uncertaintyMs) {
+                        return left.uncertaintyMs < right.uncertaintyMs;
+                    }
+                    return left.receivedAtMs > right.receivedAtMs;
+                });
+            if (best != m_clockSamples.cend()) {
+                m_serverMonotonicOffsetMs = best->offsetMs;
+                m_clockUncertaintyMs = best->uncertaintyMs;
+            }
+            emit heartbeatSampleReceived(sequence, rtt, offset, uncertainty);
         }
     }
     else if (type == "error") {

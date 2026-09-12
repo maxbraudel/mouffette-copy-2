@@ -100,8 +100,11 @@ void QuickCanvasHost::beginLocalScenePresentationBarrier(
     const QPointer<QQuickWindow> guardedRenderWindow(renderWindow);
     const QPointer<QWidget> guardedTopLevelWindow(topLevelWindow);
     const QPointer<QWindow> guardedNativeWindow(nativeWindow);
+    // QQuickWidget uses redirected/offscreen Qt Quick rendering. Qt guarantees
+    // afterFrameEnd() for that path; frameSwapped() can be absent because the
+    // internal QQuickWindow owns no presentation swapchain.
     m_localScenePresentationConnection = QObject::connect(
-        renderWindow, &QQuickWindow::frameSwapped, this,
+        renderWindow, &QQuickWindow::afterFrameEnd, this,
         [this, guardedQuickWidget, guardedRenderWindow,
          guardedTopLevelWindow, guardedNativeWindow,
          presentationGeneration]() {

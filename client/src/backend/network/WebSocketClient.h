@@ -10,6 +10,7 @@
 #include <QTimer>
 #include <QJsonArray>
 #include <QElapsedTimer>
+#include <QVector>
 #include <functional>
 #include <memory>
 #include <limits>
@@ -229,6 +230,12 @@ private slots:
     void onUploadError(QAbstractSocket::SocketError error);
 
 private:
+    struct ClockSample {
+        qint64 receivedAtMs = 0;
+        qint64 offsetMs = 0;
+        qint64 uncertaintyMs = 0;
+    };
+
     void handleMessage(const QJsonObject& message);
     bool handleAuthChallenge(const QJsonObject& message);
     bool handleWelcome(const QJsonObject& message);
@@ -273,6 +280,7 @@ private:
     SuspendInclusiveClock m_suspendInclusiveClock;
     qint64 m_lastServerContactContinuousMs = -1;
     QHash<quint64, qint64> m_heartbeatSentAt;
+    QVector<ClockSample> m_clockSamples;
     quint64 m_heartbeatSequence = 0;
     qint64 m_serverMonotonicOffsetMs = 0;
     qint64 m_clockUncertaintyMs = std::numeric_limits<qint64>::max();

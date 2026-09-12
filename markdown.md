@@ -88,3 +88,9 @@ Ok, excellent. Maintenant, il faut qu'on règle pas mal de soucis avec un menu. 
 C'est le chargement, le timer qui s'affiche, delete, ça. Le numéro des timers, j'aimerais qu'il s'affiche les nombres, on monospace, pour que ça soit mieux. Et également avec, tu sais, ce système des zéros avant, en gros, il faut toujours qu'il y ait deux digits, deux chiffres. Donc si jamais on met par exemple une seconde ou une minute, par défaut un zéro devant. Bref, il faut qu'on laisse ces deux choses, c'est important pour éviter qu'il y ait des décalages. Et ya un osucis ausis si je suis connecté avec A à B. Je clique sur disconnect. ça me renvoie à la lsite de lcient. Mais là dnasl a lsite de clients en descirption du client je vois le timout de déconnexio nqui tourne.. ça n'a pas de sens pusique je me suis déconnecté manuellement déjà... Invesitgue, j'esère uqe c'stp as backend. Résouds le problmee
 
 upload failed : upload file identfier collided with a different or foreign target file
+
+totalement reitrr e le système in use; On doit pouvori se connecter
+à un client surl equel est djàé connecté un autre. Pas du tout de sysrme in sue. Par contre, on pourra pas lancer une scene en même tems que l'uatre.
+Du coup quando n clique sur launch remote scene. Si le client distant
+a déjà une scene lancée sur lui, ça renovie une erreur disant qu'il y a
+déjà une scene en corus et qu'il faut réessayer dans pas longtemps. Mais retrie totalement le système in use

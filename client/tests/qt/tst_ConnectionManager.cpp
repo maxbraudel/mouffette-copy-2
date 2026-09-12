@@ -10,6 +10,7 @@
 #include <QPointer>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QUuid>
 #include <QWebSocket>
 #include <QWebSocketServer>
@@ -99,6 +100,7 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
         QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
     bool signatureVerified = false;
     bool heartbeatReceived = false;
+    bool delayNextHeartbeat = false;
     QWebSocket* peer = nullptr;
 
     connect(&server, &QWebSocketServer::newConnection, this, [&]() {
@@ -196,8 +198,17 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
                     {"serverMonotonicMs", message.value("clientMonotonicMs").toDouble() + 5},
                     {"serverEpochMs", 1},
                 };
-                peer->sendTextMessage(QString::fromUtf8(
-                    QJsonDocument(ack).toJson(QJsonDocument::Compact)));
+                const QString encodedAck = QString::fromUtf8(
+                    QJsonDocument(ack).toJson(QJsonDocument::Compact));
+                if (delayNextHeartbeat) {
+                    delayNextHeartbeat = false;
+                    QPointer<QWebSocket> guardedPeer(peer);
+                    QTimer::singleShot(160, this, [guardedPeer, encodedAck]() {
+                        if (guardedPeer) guardedPeer->sendTextMessage(encodedAck);
+                    });
+                } else {
+                    peer->sendTextMessage(encodedAck);
+                }
             }
         });
     });
@@ -210,6 +221,20 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
     QTRY_VERIFY_WITH_TIMEOUT(signatureVerified, 2000);
     QTRY_VERIFY_WITH_TIMEOUT(heartbeatReceived, 2000);
     QTRY_VERIFY_WITH_TIMEOUT(heartbeatSpy.count() >= 1, 2000);
+    const qint64 preciseUncertainty = client.sceneClockUncertaintyMs();
+    QVERIFY(preciseUncertainty >= 0);
+
+    // A delayed heartbeat is a queueing outlier, not evidence that the
+    // previously established clock mapping became less precise. Scene launch
+    // must keep using the best recent NTP-style sample.
+    delayNextHeartbeat = true;
+    QTRY_VERIFY_WITH_TIMEOUT([&heartbeatSpy]() {
+        for (const QList<QVariant>& sample : heartbeatSpy) {
+            if (sample.at(1).toLongLong() >= 120) return true;
+        }
+        return false;
+    }(), 2000);
+    QVERIFY(client.sceneClockUncertaintyMs() <= preciseUncertainty);
     QCOMPARE(client.serverBootId(), bootId);
     QCOMPARE(client.connectionGeneration(), quint64(1));
     QVERIFY(client.hasUnexpiredLease());

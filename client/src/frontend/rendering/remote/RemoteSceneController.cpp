@@ -236,6 +236,19 @@ RemoteSceneController::RemoteSceneController(FileManager* fileManager, WebSocket
                 this, &RemoteSceneController::onSceneErrorEnvelope);
         connect(m_ws, &WebSocketClient::remoteSessionResumed,
                 this, &RemoteSceneController::onRemoteSessionResumedEnvelope);
+        connect(m_ws, &WebSocketClient::heartbeatSampleReceived,
+                this, [this](quint64, qint64, qint64, qint64) {
+                    // A compositor frame may land while the latest network
+                    // sample is temporarily outside policy. Keep the observed
+                    // presentation time and retry as soon as clock quality
+                    // recovers instead of silently timing out the live scene.
+                    if (m_sceneActivated
+                        && m_screensAwaitingFirstFrame.isEmpty()
+                        && m_firstFramePresentedLocalSteadyMs >= 0
+                        && !m_firstFrameReported) {
+                        sendFirstFramePresented();
+                    }
+                });
         connect(m_ws, &WebSocketClient::leaseExpired,
                 this, &RemoteSceneController::onConnectionLost,
                 Qt::UniqueConnection);
@@ -1177,7 +1190,7 @@ void RemoteSceneController::disconnectFirstFrameObservers()
 	for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
 		QObject::disconnect(it->firstFrameConnection);
 		it->firstFrameConnection = {};
-		it->firstFrameSwapsRemaining = 0;
+		it->firstFramePassesRemaining = 0;
 	}
 }
 
@@ -2800,21 +2813,22 @@ void RemoteSceneController::activateScene() {
         ScreenWindow& sw = it.value();
 		QQuickWindow* renderWindow = sw.quickWidget->quickWindow();
 
-		// Install the swap observer only after show(). Any preparation frame
+		// Install the render observer only after show(). Any preparation frame
 		// emitted while the window was hidden is therefore outside this
 		// activation generation and cannot satisfy the barrier.
 		sw.window->show();
 
         const int screenId = it.key();
         m_screensAwaitingFirstFrame.insert(screenId);
-		// The observer is installed only after the prepared window is shown, so
-		// the first swap is already a genuine post-activation presentation. A
-		// second mandatory swap made macOS miss the server barrier under normal
-		// compositor load even though the scene was visibly running.
-		sw.firstFrameSwapsRemaining = 1;
+		// QQuickWidget redirects Qt Quick through QQuickRenderControl into an
+		// offscreen texture. frameSwapped() is not guaranteed for redirected
+		// output (notably with Direct3D on Windows), while afterFrameEnd() is.
+		// The surrounding native-window exposure check prevents a hidden
+		// preparation pass from satisfying the barrier.
+		sw.firstFramePassesRemaining = 1;
         QObject::disconnect(sw.firstFrameConnection);
         sw.firstFrameConnection = connect(
-            renderWindow, &QQuickWindow::frameSwapped, this,
+            renderWindow, &QQuickWindow::afterFrameEnd, this,
             [this, activationEpoch, screenId]() {
 				if (activationEpoch != m_sceneEpoch || !m_sceneActivated) {
                     return;
@@ -2840,9 +2854,9 @@ void RemoteSceneController::activateScene() {
 					return;
                 }
 
-				if (presentedWindow.firstFrameSwapsRemaining > 0) {
-					--presentedWindow.firstFrameSwapsRemaining;
-					if (presentedWindow.firstFrameSwapsRemaining > 0) {
+				if (presentedWindow.firstFramePassesRemaining > 0) {
+					--presentedWindow.firstFramePassesRemaining;
+					if (presentedWindow.firstFramePassesRemaining > 0) {
 						presentedWindow.quickWidget->update();
 						if (QQuickWindow* quickWindow = presentedWindow.quickWidget->quickWindow()) {
 							quickWindow->update();
@@ -2923,7 +2937,7 @@ void RemoteSceneController::activateScene() {
 
     startDeferredTimers();
     // No local show()/repaint acknowledgement is emitted. Each target screen
-    // must reach QQuickWindow::frameSwapped above; if one never does, no
+    // must complete a post-exposure Qt Quick frame above; if one never does, no
     // `started` acknowledgement is sent and the server's authoritative
     // SceneRun started deadline fails both parties closed.
 }
@@ -3072,7 +3086,7 @@ void RemoteSceneController::resetWindowForNewScene(ScreenWindow& sw, int screenI
 
     QObject::disconnect(sw.firstFrameConnection);
     sw.firstFrameConnection = {};
-	sw.firstFrameSwapsRemaining = 0;
+	sw.firstFramePassesRemaining = 0;
 
     sw.x = x;
     sw.y = y;

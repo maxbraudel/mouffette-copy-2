@@ -4088,9 +4088,8 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
         m_canceledIncoming.remove(uploadId);
 
         for (const ValidatedManifestFile& file : std::as_const(validatedFiles)) {
-            const QString fullPath = m_remoteCacheStore->assetPath(
-                scope, file.assetId, RemoteCacheStore::AssetArea::Staging,
-                file.extension, &cacheError);
+            const QString fullPath = m_remoteCacheStore->stagingAssetPath(
+                scope, uploadId, file.assetId, file.extension, &cacheError);
             if (fullPath.isEmpty()) {
                 rejectIncomingUpload(senderId, uploadId,
                                      QStringLiteral("Remote cache rejected the asset: %1").arg(cacheError),
@@ -4101,11 +4100,35 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
                 m_incoming.cacheDirPath = QFileInfo(fullPath).absolutePath();
             }
 
+            // A START is a fresh transaction. RESUME is the only command that
+            // may reuse durable staging bytes. If a prior process/transport
+            // attempt left this transfer-scoped path behind, restart it from
+            // zero instead of failing every later upload with NewOnly.
+            const QFileInfo staleInfo(fullPath);
+            if (staleInfo.exists()
+                && (staleInfo.isSymLink() || !staleInfo.isFile()
+                    || !m_remoteCacheStore->ownsPath(scope, fullPath)
+                    || !QFile::remove(fullPath))) {
+                rejectIncomingUpload(
+                    senderId, uploadId,
+                    QStringLiteral("Remote client could not reset stale upload staging"),
+                    true, remoteSessionId, generation);
+                return;
+            }
+
             auto* output = new QFile(fullPath);
             if (!output->open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+                const QString fileError = output->errorString();
+                qWarning().noquote()
+                    << "UploadManager: staging create failed:"
+                    << fileError
+                    << "path=" << QDir::toNativeSeparators(fullPath);
                 delete output;
                 rejectIncomingUpload(senderId, uploadId,
-                                     QStringLiteral("Remote client could not create an upload file"),
+                                     fileError.isEmpty()
+                                         ? QStringLiteral("Remote client could not create an upload file")
+                                         : QStringLiteral("Remote client could not create an upload file: %1")
+                                               .arg(fileError),
                                      true, remoteSessionId, generation);
                 return;
             }

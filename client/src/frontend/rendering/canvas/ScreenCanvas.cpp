@@ -88,6 +88,38 @@ void publishSceneRunNotification(const QString& sceneRunId,
     }
     system->publishNotification(notification);
 }
+
+QString sceneRunFailureMessage(const QString& reason)
+{
+    if (reason == QLatin1String("scene_started_timeout")) {
+        return QStringLiteral(
+            "Remote scene stopped: a client did not confirm its first rendered frame in time");
+    }
+    if (reason == QLatin1String("scene_start_skew_too_high")) {
+        return QStringLiteral(
+            "Remote scene stopped: the first frames were presented too far apart");
+    }
+    if (reason == QLatin1String("clock_uncertainty_too_high")) {
+        return QStringLiteral(
+            "Remote scene stopped: clock synchronization became too imprecise");
+    }
+    if (reason == QLatin1String("scene_prepare_timeout")) {
+        return QStringLiteral(
+            "Remote scene stopped: preparation did not finish in time");
+    }
+    if (reason == QLatin1String("scene_commit_delivery_failed")) {
+        return QStringLiteral(
+            "Remote scene stopped: the synchronized start command was not delivered");
+    }
+    if (reason == QLatin1String("scene_target_unavailable")) {
+        return QStringLiteral("Remote scene stopped: the target client is unavailable");
+    }
+    if (reason.isEmpty()) {
+        return QStringLiteral("Remote scene stopped after a synchronization failure");
+    }
+    return QStringLiteral("Remote scene stopped after a synchronization failure (%1)")
+        .arg(reason.left(128));
+}
 }
 
 // Forward declare SnapGuideItem (full definition just below)
@@ -6666,9 +6698,11 @@ void ScreenCanvas::onSceneStopReceived(const QJsonObject& envelope)
     m_stoppingRemoteSceneInstanceId = runId;
     m_wsClient->sendSceneStopped(runId, true);
     if (failed) {
+        const QString reason = envelope.value(QStringLiteral("reason")).toString();
+        qWarning() << "Remote scene stopped by the coordinator:" << reason;
         publishSceneRunNotification(
             runId, NotificationSeverity::Warning,
-            QStringLiteral("Remote scene stopped after a synchronization failure"),
+            sceneRunFailureMessage(reason),
             4000);
     }
 }

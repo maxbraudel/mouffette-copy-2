@@ -86,10 +86,7 @@ private:
 		MediaListModel* mediaModel = nullptr;
 		QVariantList mediaEntries;
 		QMetaObject::Connection firstFrameConnection;
-		// A QQuickWidget may already have a render pass in flight when the
-		// activation barrier is installed. Requiring two post-installation swaps
-		// prevents that stale pass from being acknowledged as the live scene.
-		int firstFrameSwapsRemaining = 0;
+		int firstFramePassesRemaining = 0;
 		// Immutable source topology for the SceneRun. The QWidget geometry below
 		// is the local physical mapping and must never be replaced by a resumed
 		// owner's coordinates.

@@ -895,6 +895,61 @@ QString RemoteCacheStore::assetPath(const Scope& scope,
     return result;
 }
 
+QString RemoteCacheStore::stagingAssetPath(const Scope& scope,
+                                           const QString& uploadId,
+                                           const QString& assetId,
+                                           const QString& extension,
+                                           QString* errorCode)
+{
+    m_lastErrorCode.clear();
+    if (!isSafeOpaqueIdentifier(uploadId)) {
+        setError(QStringLiteral("invalid_upload_id"), errorCode);
+        return {};
+    }
+    if (!isValidAssetId(assetId)) {
+        setError(QStringLiteral("invalid_asset_id"), errorCode);
+        return {};
+    }
+    static const QRegularExpression extensionPattern(
+        QStringLiteral("^[a-z0-9]{1,16}$"));
+    const QString normalizedExtension = extension.toLower();
+    if (extension != extension.trimmed()
+        || (!normalizedExtension.isEmpty()
+            && !extensionPattern.match(normalizedExtension).hasMatch())) {
+        setError(QStringLiteral("invalid_asset_extension"), errorCode);
+        return {};
+    }
+    if (!ensureSession(scope, errorCode)) {
+        return {};
+    }
+
+    const QString stagingDirectory =
+        QDir(scopeDirectory(scope)).filePath(QStringLiteral("staging"));
+    const QString uploadDirectory = QDir(stagingDirectory).filePath(uploadId);
+    if (!isDirectChild(scopeDirectory(scope), stagingDirectory)
+        || !isDirectChild(stagingDirectory, uploadDirectory)
+        || !ensurePrivateDirectory(stagingDirectory, errorCode)
+        || !ensurePrivateDirectory(uploadDirectory, errorCode)) {
+        return {};
+    }
+
+    QString fileName = assetId;
+    if (!normalizedExtension.isEmpty()) {
+        fileName += QLatin1Char('.') + normalizedExtension;
+    }
+    const QString result = QDir(uploadDirectory).filePath(fileName);
+    if (!isDirectChild(uploadDirectory, result)) {
+        setError(QStringLiteral("unsafe_asset_path"), errorCode);
+        return {};
+    }
+    const QFileInfo info(result);
+    if (info.isSymLink() || (info.exists() && !info.isFile())) {
+        setError(QStringLiteral("unsafe_asset_entry"), errorCode);
+        return {};
+    }
+    return result;
+}
+
 RemoteCacheStore::AssetRemovalResult
 RemoteCacheStore::removeValidatedAsset(const Scope& scope,
                                        const AssetRemovalDescriptor& descriptor)

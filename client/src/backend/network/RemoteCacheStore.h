@@ -156,6 +156,15 @@ public:
                       const QString& extension = QString(),
                       QString* errorCode = nullptr);
 
+    // Staging is transfer-scoped, whereas validated assets are content-scoped.
+    // Keeping uploadId in the directory identity prevents an abandoned or
+    // retried transfer from colliding with a later upload of the same asset.
+    QString stagingAssetPath(const Scope& scope,
+                             const QString& uploadId,
+                             const QString& assetId,
+                             const QString& extension = QString(),
+                             QString* errorCode = nullptr);
+
     // Atomically removes one validated asset from the live namespace. The
     // complete immutable command tuple is tombstoned before an ACK may be
     // emitted, so only an exact duplicated server command can replay the same

@@ -188,6 +188,24 @@ void RemoteCacheStoreTest::strictIdentifiersAndGenerationBinding()
     QVERIFY(assetPath.endsWith(QStringLiteral(".mp4")));
     QVERIFY(store.acceptsCommands(scope()));
 
+    const QString firstStagingPath = store.stagingAssetPath(
+        scope(), QStringLiteral("upload_first"), kAsset,
+        QStringLiteral("mp4"), &error);
+    const QString retryStagingPath = store.stagingAssetPath(
+        scope(), QStringLiteral("upload_retry"), kAsset,
+        QStringLiteral("mp4"), &error);
+    QVERIFY2(!firstStagingPath.isEmpty(), qPrintable(error));
+    QVERIFY2(!retryStagingPath.isEmpty(), qPrintable(error));
+    QVERIFY(firstStagingPath != retryStagingPath);
+    QCOMPARE(QFileInfo(firstStagingPath).absolutePath(),
+             QDir(store.rootPath()).filePath(
+                 kSender + QLatin1Char('/') + kSession
+                 + QStringLiteral("/staging/upload_first")));
+    QVERIFY(store.stagingAssetPath(
+        scope(), QStringLiteral("../upload"), kAsset,
+        QStringLiteral("mp4"), &error).isEmpty());
+    QCOMPARE(error, QStringLiteral("invalid_upload_id"));
+
     QVERIFY(store.assetPath(scope(), QStringLiteral("../asset"),
                             RemoteCacheStore::AssetArea::Validated).isEmpty());
     QVERIFY(store.assetPath(scope(), kAsset,
