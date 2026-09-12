@@ -14,6 +14,26 @@ bool snapshotContentEquals(const ClientSnapshot& left, const ClientSnapshot& rig
     // zone fields. lastSeenAtMs is intentionally included and checkpointed.
     return left.toJson() == right.toJson();
 }
+
+ClientSnapshot mergeSnapshotPresentation(const ClientSnapshot& previous,
+                                         const ClientSnapshot& incoming)
+{
+    ClientSnapshot merged = incoming;
+    // Endpoint identity and liveness are authoritative in the incoming
+    // snapshot, but absent descriptive fields are not deletion commands.
+    if (merged.installationId.isEmpty()) merged.installationId = previous.installationId;
+    if (merged.instanceId.isEmpty()) {
+        merged.instanceId = previous.instanceId;
+        merged.instanceOrdinal = previous.instanceOrdinal;
+    }
+    if (merged.serverConnectionId.isEmpty()) {
+        merged.serverConnectionId = previous.serverConnectionId;
+    }
+    if (merged.machineName.trimmed().isEmpty()) merged.machineName = previous.machineName;
+    if (merged.platform.trimmed().isEmpty()) merged.platform = previous.platform;
+    if (merged.status.trimmed().isEmpty()) merged.status = previous.status;
+    return merged;
+}
 }
 
 ProjectManager::ProjectManager(QObject* parent)
@@ -259,7 +279,8 @@ QString ProjectManager::ensureProject(const ClientSnapshot& snapshot,
                 existing->lastCheckpointAtMs = current;
                 m_sessionDeadlineNotified.remove(snapshot.endpointId);
             }
-            existing->clientSnapshot = snapshot;
+            existing->clientSnapshot =
+                mergeSnapshotPresentation(existing->clientSnapshot, snapshot);
             existing->updatedAtMs = current;
             scheduleSave();
             if (becomingVisible) {
@@ -430,10 +451,12 @@ bool ProjectManager::updateClientSnapshot(const ClientSnapshot& snapshot, qint64
     if (!project || !snapshot.isValid()) {
         return false;
     }
-    if (snapshotContentEquals(project->clientSnapshot, snapshot)) {
+    const ClientSnapshot merged =
+        mergeSnapshotPresentation(project->clientSnapshot, snapshot);
+    if (snapshotContentEquals(project->clientSnapshot, merged)) {
         return true;
     }
-    project->clientSnapshot = snapshot;
+    project->clientSnapshot = merged;
     project->updatedAtMs = atMs >= 0 ? atMs : nowMs();
     scheduleSave();
     emit projectUpdated(project->projectId, project->targetEndpointId);
@@ -525,16 +548,30 @@ QList<ProjectClientEntry> ProjectManager::mergeDiscoveredClients(const QList<Cli
         client.setOnline(true);
 
         ProjectClientEntry entry;
-        entry.client = client;
         entry.endpointId = endpointId;
         entry.online = true;
         if (ProjectRecord* project = mutableProjectForTarget(endpointId)) {
-            const ClientSnapshot fresh = ClientSnapshot::fromClientInfo(client, current);
+            const ClientSnapshot fresh = mergeSnapshotPresentation(
+                project->clientSnapshot,
+                ClientSnapshot::fromClientInfo(client, current));
             if (!snapshotContentEquals(project->clientSnapshot, fresh)) {
                 project->clientSnapshot = fresh;
                 project->updatedAtMs = current;
                 snapshotChanged = true;
                 emit projectUpdated(project->projectId, endpointId);
+            }
+            if (client.getMachineName().trimmed().isEmpty()) {
+                client.setMachineName(fresh.machineName);
+            }
+            if (client.getPlatform().trimmed().isEmpty()) {
+                client.setPlatform(fresh.platform);
+            }
+            if (client.installationId().trimmed().isEmpty()) {
+                client.setInstallationId(fresh.installationId);
+            }
+            if (client.instanceId().trimmed().isEmpty()) {
+                client.setInstanceId(fresh.instanceId);
+                client.setInstanceOrdinal(fresh.instanceOrdinal);
             }
             entry.hasProject = true;
             entry.projectId = project->projectId;
@@ -542,6 +579,7 @@ QList<ProjectClientEntry> ProjectManager::mergeDiscoveredClients(const QList<Cli
             entry.remoteSessionCloseAtMs = remoteSessionCloseAtMs(endpointId);
             entry.projectDeleteAtMs = projectDeleteAtMs(endpointId);
         }
+        entry.client = client;
         result.append(entry);
     }
 

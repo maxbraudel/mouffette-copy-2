@@ -158,6 +158,8 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
                     {"scenePrepareTimeoutMs", 15000},
                     {"sceneActivationLeadMs", 4000},
                     {"sceneMaxClockSkewMs", 50},
+                    {"sceneStartedAckTimeoutMs", 5000},
+                    {"sceneMaxStartSkewMs", 750},
                     {"uploadIdleTimeoutMs", 45000},
                     {"uploadTargetAckTimeoutMs", 30000},
                     {"removalAckTimeoutMs", 30000},
@@ -247,6 +249,7 @@ void ConnectionManagerTest::suspendInclusiveLeaseBoundaryRejectsLateContact()
                 {"policyVersion", 1}, {"heartbeatIntervalMs", 750},
                 {"leaseTimeoutMs", 3000}, {"scenePrepareTimeoutMs", 15000},
                 {"sceneActivationLeadMs", 4000}, {"sceneMaxClockSkewMs", 50},
+                {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
                 {"uploadIdleTimeoutMs", 45000},
                 {"uploadTargetAckTimeoutMs", 30000},
                 {"removalAckTimeoutMs", 30000},
@@ -368,6 +371,8 @@ void ConnectionManagerTest::handshakeRejectsMalformedEnvelope() {
                 {QStringLiteral("scenePrepareTimeoutMs"), 15000},
                 {QStringLiteral("sceneActivationLeadMs"), 4000},
                 {QStringLiteral("sceneMaxClockSkewMs"), 50},
+                {QStringLiteral("sceneStartedAckTimeoutMs"), 5000},
+                {QStringLiteral("sceneMaxStartSkewMs"), 750},
                 {QStringLiteral("uploadIdleTimeoutMs"), 45000},
                 {QStringLiteral("uploadTargetAckTimeoutMs"), 30000},
                 {QStringLiteral("removalAckTimeoutMs"), 30000}
@@ -506,6 +511,8 @@ void ConnectionManagerTest::uploadChannelReadyRequiresExactEnvelope() {
                     {QStringLiteral("scenePrepareTimeoutMs"), 15000},
                     {QStringLiteral("sceneActivationLeadMs"), 4000},
                     {QStringLiteral("sceneMaxClockSkewMs"), 50},
+                    {QStringLiteral("sceneStartedAckTimeoutMs"), 5000},
+                    {QStringLiteral("sceneMaxStartSkewMs"), 750},
                     {QStringLiteral("uploadIdleTimeoutMs"), 45000},
                     {QStringLiteral("uploadTargetAckTimeoutMs"), 30000},
                     {QStringLiteral("removalAckTimeoutMs"), 30000}
@@ -617,6 +624,8 @@ void ConnectionManagerTest::protocolV3UploadWireSchemaAndActiveGate() {
                     {QStringLiteral("scenePrepareTimeoutMs"), 15000},
                     {QStringLiteral("sceneActivationLeadMs"), 4000},
                     {QStringLiteral("sceneMaxClockSkewMs"), 50},
+                    {QStringLiteral("sceneStartedAckTimeoutMs"), 5000},
+                    {QStringLiteral("sceneMaxStartSkewMs"), 750},
                     {QStringLiteral("uploadIdleTimeoutMs"), 45000},
                     {QStringLiteral("uploadTargetAckTimeoutMs"), 30000},
                     {QStringLiteral("removalAckTimeoutMs"), 30000}

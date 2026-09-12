@@ -227,7 +227,7 @@ bool filesHaveIdenticalContents(const QString& firstPath, const QString& secondP
 
 QString incomingUploadsRoot() {
     const QString base = RuntimeProfile::cacheLocation();
-    const QString path = QFileInfo(QDir(base).filePath(QStringLiteral("Mouffette/Uploads"))).absoluteFilePath();
+    const QString path = QFileInfo(QDir(base).filePath(QStringLiteral("Uploads"))).absoluteFilePath();
     const QString canonicalPath = QFileInfo(path).canonicalFilePath();
     return canonicalPath.isEmpty() ? path : canonicalPath;
 }
@@ -2182,8 +2182,12 @@ void UploadManager::applyRemoteSessionEnvelope(const QJsonObject& envelope) {
                     if (scope.remoteSessionId == remoteSessionId
                         && scope.generation < generation) {
                         QString ignored;
-                        m_remoteCacheStore->rebindSessionGeneration(
-                            scope, generation, &ignored);
+                        if (m_remoteCacheStore->rebindSessionGeneration(
+                                scope, generation, &ignored)) {
+                            m_fileManager->rebindReceivedFileScope(
+                                scope, {scope.senderEndpointId,
+                                        scope.remoteSessionId, generation});
+                        }
                     }
                 }
             }
@@ -2974,17 +2978,7 @@ int UploadManager::detachReceivedMappingsForScope(
     if (!m_fileManager || !m_remoteCacheStore) {
         return 0;
     }
-    int removed = 0;
-    const QList<QString> fileIds = m_fileManager->getAllFileIds();
-    for (const QString& fileId : fileIds) {
-        const QString mappedPath = m_fileManager->getFilePathForId(fileId);
-        if (!mappedPath.isEmpty()
-            && m_remoteCacheStore->ownsPath(scope, mappedPath)) {
-            m_fileManager->removeReceivedFileMapping(fileId);
-            ++removed;
-        }
-    }
-    return removed;
+    return m_fileManager->removeReceivedFileMappingsForScope(scope);
 }
 
 void UploadManager::beginTerminalIncomingCleanup(const QString& reasonCode)
@@ -3190,7 +3184,9 @@ bool UploadManager::discardActiveIncomingSession(bool rememberRejectedUpload) {
         }
 
         const QString fileId = m_incoming.assetIdToFileId.value(it.key());
-        const QString mappedPath = m_fileManager->getFilePathForId(fileId);
+        const QString mappedPath = remoteSessionId.isEmpty()
+            ? m_fileManager->getFilePathForId(fileId)
+            : m_fileManager->getReceivedFilePath(scope, fileId);
         const bool removed = !QFileInfo::exists(path) || QFile::remove(path);
         if (!removed) {
             qWarning() << "UploadManager: could not remove partial upload file";
@@ -3200,7 +3196,11 @@ bool UploadManager::discardActiveIncomingSession(bool rememberRejectedUpload) {
         if (!mappedPath.isEmpty()
             && QDir::cleanPath(QFileInfo(mappedPath).absoluteFilePath())
                 == QDir::cleanPath(QFileInfo(path).absoluteFilePath())) {
-            m_fileManager->removeReceivedFileMapping(fileId);
+            if (remoteSessionId.isEmpty()) {
+                m_fileManager->removeReceivedFileMapping(fileId);
+            } else {
+                m_fileManager->removeReceivedFileMapping(scope, fileId);
+            }
         }
     }
 
@@ -3370,7 +3370,7 @@ bool UploadManager::cleanupIncomingSession(bool deleteDiskContents,
     } else {
         if (cacheDirPath.isEmpty() && !senderId.isEmpty()) {
             const QString base = RuntimeProfile::cacheLocation();
-            cacheDirPath = base + "/Mouffette/Uploads/" + senderId;
+            cacheDirPath = QDir(base).filePath(QStringLiteral("Uploads/%1").arg(senderId));
         }
         if (uploadId.isEmpty()) uploadId = uploadIdOverride;
     }
@@ -3615,7 +3615,7 @@ void UploadManager::handleIncomingAssetRemoval(const QJsonObject& message) {
     const QString expectedPath = m_remoteCacheStore->assetPath(
         scope, assetId, RemoteCacheStore::AssetArea::Validated,
         extension, &pathError);
-    const QString mappedPath = m_fileManager->getFilePathForId(fileId);
+    const QString mappedPath = m_fileManager->getReceivedFilePath(scope, fileId);
     if (expectedPath.isEmpty()) {
         reject(pathError.isEmpty() ? QStringLiteral("remote_asset_path_unavailable")
                                    : pathError);
@@ -3637,7 +3637,7 @@ void UploadManager::handleIncomingAssetRemoval(const QJsonObject& message) {
     // SceneRun teardown has already settled on the server before this command
     // is relayed. Drop the remaining memory cache handle before the atomic
     // rename so Windows cannot keep the validated file accessible.
-    m_fileManager->releaseFileMemory(fileId);
+    m_fileManager->releaseReceivedFileMemory(scope, fileId);
     const RemoteCacheStore::AssetRemovalDescriptor removal{
         removalId,
         uploadId,
@@ -3657,7 +3657,8 @@ void UploadManager::handleIncomingAssetRemoval(const QJsonObject& message) {
         return;
     }
     if (!mappedPath.isEmpty()) {
-        m_fileManager->removeReceivedFileMapping(fileId);
+        m_fileManager->removeReceivedFileMapping(scope, fileId);
+        m_fileManager->dissociateFileFromIdea(fileId, remoteSessionId);
     }
     // A successful unload invalidates the completed-upload replay result: a
     // late duplicate upload_complete must never claim that the removed asset
@@ -4164,6 +4165,13 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
                                      true, remoteSessionId, generation);
                 return;
             }
+            if (!m_fileManager->rebindReceivedFileScope(
+                    oldScope, {senderId, remoteSessionId, generation})) {
+                rejectIncomingUpload(senderId, uploadId,
+                                     QStringLiteral("Received-file scope rejected resume"),
+                                     true, remoteSessionId, generation);
+                return;
+            }
             m_incoming.generation = generation;
         }
         const RemoteCacheStore::Scope resumedScope {
@@ -4472,7 +4480,8 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
                     "Upload file identifier was reused with a different extension");
                 break;
             }
-            const QString existingPath = m_fileManager->getFilePathForId(fileId);
+            const QString existingPath =
+                m_fileManager->getReceivedFilePath(scope, fileId);
             if (selectedPath.isEmpty() && !existingPath.isEmpty()) {
                 const QFileInfo existingInfo(existingPath);
                 const QString existingCanonicalPath = existingInfo.canonicalFilePath();
@@ -4540,11 +4549,17 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
 
         for (auto it = selectedPathByFileId.constBegin();
              it != selectedPathByFileId.constEnd(); ++it) {
-            const QString existingPath = m_fileManager->getFilePathForId(it.key());
-            if (existingPath.isEmpty()) {
-                m_fileManager->registerReceivedFilePath(it.key(), it.value());
+            const QString existingPath =
+                m_fileManager->getReceivedFilePath(scope, it.key());
+            if (existingPath.isEmpty()
+                && !m_fileManager->registerReceivedFilePath(
+                    scope, it.key(), it.value())) {
+                completionError = QStringLiteral(
+                    "Remote client could not register a validated asset");
+                break;
             }
-            if (QDir::cleanPath(QFileInfo(m_fileManager->getFilePathForId(it.key())).absoluteFilePath())
+            if (QDir::cleanPath(QFileInfo(
+                    m_fileManager->getReceivedFilePath(scope, it.key())).absoluteFilePath())
                 != QDir::cleanPath(QFileInfo(it.value()).absoluteFilePath())) {
                 completionError = QStringLiteral("Remote client could not register a validated asset");
                 break;

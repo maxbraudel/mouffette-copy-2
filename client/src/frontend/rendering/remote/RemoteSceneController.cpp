@@ -242,6 +242,27 @@ RemoteSceneController::RemoteSceneController(FileManager* fileManager, WebSocket
     }
 }
 
+RemoteCacheStore::Scope RemoteSceneController::receivedFileScope() const
+{
+    return {m_pendingSenderClientId, m_pendingRemoteSessionId,
+            m_pendingSessionGeneration};
+}
+
+QString RemoteSceneController::receivedFilePath(const QString& fileId) const
+{
+    if (!m_fileManager) return {};
+    const RemoteCacheStore::Scope scope = receivedFileScope();
+    if (scope.senderEndpointId.isEmpty() || scope.remoteSessionId.isEmpty()
+        || scope.generation == 0) {
+        // Production starts always arrive through a protocol-v3 envelope and
+        // must fail closed when its scope is incomplete. Only direct legacy
+        // and test invocations (which have no WebSocket) may use the local
+        // registry compatibility path.
+        return m_ws ? QString() : m_fileManager->getFilePathForId(fileId);
+    }
+    return m_fileManager->getReceivedFilePath(scope, fileId);
+}
+
 RemoteSceneController::~RemoteSceneController() {
     clearScene();
     for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
@@ -429,6 +450,8 @@ void RemoteSceneController::onScenePrepareEnvelope(const QJsonObject& envelope)
         }
     }
 
+    m_pendingSenderClientId =
+        envelope.value(QStringLiteral("ownerEndpointId")).toString();
     m_pendingRemoteSessionId = envelope.value(QStringLiteral("remoteSessionId")).toString();
     m_lastTornDownRemoteSessionId.clear();
 	m_pendingSessionGeneration = static_cast<quint64>(generation);
@@ -452,6 +475,7 @@ void RemoteSceneController::onScenePrepareEnvelope(const QJsonObject& envelope)
 
     if (m_pendingSceneInstanceId != runId) {
         if (m_deferredSceneStart.valid) return;
+        m_pendingSenderClientId.clear();
         m_pendingSceneDigest.clear();
         m_pendingRemoteSessionId.clear();
         m_pendingSessionGeneration = 0;
@@ -1564,8 +1588,7 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
             invalidMediaEntries.append(mediaObj.value("mediaId").toString(QStringLiteral("unnamed media")));
             continue;
         }
-        const QString path = m_fileManager
-            ? m_fileManager->getFilePathForId(fileId) : QString();
+        const QString path = receivedFilePath(fileId);
         QString fileName = mediaObj.value("fileName").toString();
         if (fileName.isEmpty()) fileName = fileId;
         if (path.isEmpty() || !QFile::exists(path)) {
@@ -1780,9 +1803,10 @@ void RemoteSceneController::onRemoteSceneActivate(const QString& senderClientId,
         .value(QStringLiteral("sceneActivationLeadMs")).toInt();
     const qint64 maximumClockSkewMs = policy
         .value(QStringLiteral("sceneMaxClockSkewMs")).toInt(-1);
-    const qint64 leaseTimeoutMs = policy
-        .value(QStringLiteral("leaseTimeoutMs")).toInt();
-    if (activationLeadMs <= 0 || maximumClockSkewMs < 0 || leaseTimeoutMs <= 0) {
+    const qint64 startedAckTimeoutMs = policy
+        .value(QStringLiteral("sceneStartedAckTimeoutMs")).toInt();
+    if (activationLeadMs <= 0 || maximumClockSkewMs < 0
+        || startedAckTimeoutMs <= 0) {
         sendPrepareResult(false, QStringLiteral("Invalid scene activation policy"));
         ++m_sceneEpoch;
         clearScene();
@@ -1807,10 +1831,11 @@ void RemoteSceneController::onRemoteSceneActivate(const QString& senderClientId,
     }
 
     m_activationEpochMs = nowMs + remainingMs;
-	// ACTIVATE is a commit. Keep only the server-policy-derived lease bound
+	// ACTIVATE is a commit. Keep only the server-policy-derived STARTED bound
 	// until its timer fires; no independent client deadline may pre-empt it.
     if (m_sceneReadyTimeout) {
-        m_sceneReadyTimeout->start(static_cast<int>(remainingMs + leaseTimeoutMs));
+        m_sceneReadyTimeout->start(
+            static_cast<int>(remainingMs + startedAckTimeoutMs));
     }
     if (remainingMs <= 0) {
         QMetaObject::invokeMethod(this, &RemoteSceneController::activateScene, Qt::QueuedConnection);
@@ -2463,15 +2488,16 @@ void RemoteSceneController::startSceneActivationIfReady() {
         const QJsonObject policy = m_ws ? m_ws->serverPolicy() : QJsonObject();
         const int activationLeadMs = policy
             .value(QStringLiteral("sceneActivationLeadMs")).toInt();
-        const int leaseTimeoutMs = policy
-            .value(QStringLiteral("leaseTimeoutMs")).toInt();
-        if (activationLeadMs <= 0 || leaseTimeoutMs <= 0) {
+        const int startedAckTimeoutMs = policy
+            .value(QStringLiteral("sceneStartedAckTimeoutMs")).toInt();
+        if (activationLeadMs <= 0 || startedAckTimeoutMs <= 0) {
             sendPrepareResult(false, QStringLiteral("Invalid scene activation policy"));
             ++m_sceneEpoch;
             clearScene();
             return;
         }
-        m_sceneReadyTimeout->start(activationLeadMs + leaseTimeoutMs);
+        m_sceneReadyTimeout->start(
+            activationLeadMs + startedAckTimeoutMs);
     }
     if (m_ws && !m_pendingSenderClientId.isEmpty() && !m_pendingSceneInstanceId.isEmpty()) {
         sendPrepareResult(true);
@@ -2781,7 +2807,11 @@ void RemoteSceneController::activateScene() {
 
         const int screenId = it.key();
         m_screensAwaitingFirstFrame.insert(screenId);
-		sw.firstFrameSwapsRemaining = 2;
+		// The observer is installed only after the prepared window is shown, so
+		// the first swap is already a genuine post-activation presentation. A
+		// second mandatory swap made macOS miss the server barrier under normal
+		// compositor load even though the scene was visibly running.
+		sw.firstFrameSwapsRemaining = 1;
         QObject::disconnect(sw.firstFrameConnection);
         sw.firstFrameConnection = connect(
             renderWindow, &QQuickWindow::frameSwapped, this,
@@ -3184,7 +3214,7 @@ void RemoteSceneController::publishMediaSpan(const std::shared_ptr<RemoteMediaIt
     media.insert(QStringLiteral("renderOpacity"), item->renderOpacity);
 
     if (item->type == QLatin1String("image")) {
-        const QString path = m_fileManager ? m_fileManager->getFilePathForId(item->fileId) : QString();
+        const QString path = receivedFilePath(item->fileId);
         media.insert(QStringLiteral("sourceUrl"), path.isEmpty() ? QString() : QUrl::fromLocalFile(path).toString());
     } else if (item->type == QLatin1String("video")) {
         media.insert(QStringLiteral("remoteFrameSource"),
@@ -3493,7 +3523,13 @@ void RemoteSceneController::buildMedia(const QJsonArray& mediaArray) {
             item->frameSource = new RemoteVideoFrameSource(this);
             // QMediaPlayer streams MP4 from the validated local path. Ensure a
             // previous cache user cannot leave a whole video resident in RAM.
-            m_fileManager->releaseFileMemory(item->fileId);
+            const RemoteCacheStore::Scope scope = receivedFileScope();
+            if (scope.senderEndpointId.isEmpty() || scope.remoteSessionId.isEmpty()
+                || scope.generation == 0) {
+                if (!m_ws) m_fileManager->releaseFileMemory(item->fileId);
+            } else {
+                m_fileManager->releaseReceivedFileMemory(scope, item->fileId);
+            }
         }
         m_mediaItems.append(item);
         scheduleMedia(item);
@@ -3632,7 +3668,7 @@ void RemoteSceneController::scheduleMediaMulti(const std::shared_ptr<RemoteMedia
             auto item = weakItem.lock();
             if (!item) return false;
             if (epoch != m_sceneEpoch) return false;
-            QString path = m_fileManager->getFilePathForId(item->fileId);
+            QString path = receivedFilePath(item->fileId);
             if (!path.isEmpty() && QFileInfo::exists(path)) {
                 item->pausedAtEnd = false;
                 item->player->setSource(QUrl::fromLocalFile(path));

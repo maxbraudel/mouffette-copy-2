@@ -1337,6 +1337,8 @@ bool WebSocketClient::validateServerPolicy(const QJsonObject& policy,
         {"scenePrepareTimeoutMs", 1000, 120000},
         {"sceneActivationLeadMs", 500, 10000},
         {"sceneMaxClockSkewMs", 0, 250},
+        {"sceneStartedAckTimeoutMs", 1000, 15000},
+        {"sceneMaxStartSkewMs", 50, 5000},
         {"uploadIdleTimeoutMs", 5000, 600000},
         {"uploadTargetAckTimeoutMs", 1000, 120000},
         {"removalAckTimeoutMs", 1000, 120000},
@@ -1356,7 +1358,9 @@ bool WebSocketClient::validateServerPolicy(const QJsonObject& policy,
     }
     if (values.value("leaseTimeoutMs") < values.value("heartbeatIntervalMs") * 4
         || values.value("sceneActivationLeadMs") <= values.value("leaseTimeoutMs")
-        || values.value("sceneMaxClockSkewMs") >= values.value("sceneActivationLeadMs")) {
+        || values.value("sceneMaxClockSkewMs") >= values.value("sceneActivationLeadMs")
+        || values.value("sceneMaxStartSkewMs")
+            >= values.value("sceneStartedAckTimeoutMs")) {
         if (errorMessage) *errorMessage = QStringLiteral("Server policy invariants are invalid");
         return false;
     }

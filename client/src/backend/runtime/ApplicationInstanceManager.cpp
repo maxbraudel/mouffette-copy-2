@@ -3,6 +3,7 @@
 #include <QCryptographicHash>
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QLocalServer>
 #include <QLocalSocket>
@@ -66,7 +67,7 @@ ApplicationInstanceManager::~ApplicationInstanceManager()
         m_slotLock->unlock();
     }
     if (m_profile.isTemporary()) {
-        QDir(m_profile.temporaryRoot).removeRecursively();
+        QDir(m_profile.rootPath).removeRecursively();
     }
 }
 
@@ -102,6 +103,12 @@ void ApplicationInstanceManager::cleanupAbandonedProfiles()
     const QFileInfoList entries = profiles.entryInfoList(
         {QStringLiteral("instance-*")}, QDir::Dirs | QDir::NoDotAndDotDot);
     for (const QFileInfo& entry : entries) {
+        if (entry.isSymLink()) {
+            // Never follow an untrusted abandoned-profile link outside the
+            // coordination root.
+            QFile::remove(entry.absoluteFilePath());
+            continue;
+        }
         QLockFile ownership(QDir(entry.absoluteFilePath()).filePath(QStringLiteral("active.lock")));
         if (!acquireRecoveringStaleLock(ownership)) {
             continue;
@@ -126,19 +133,22 @@ bool ApplicationInstanceManager::acquireSlot(int ordinal)
 bool ApplicationInstanceManager::createTemporaryProfile(QString* errorMessage)
 {
     m_profile.instanceId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_profile.profileId = QStringLiteral("instance-%1-%2")
+                              .arg(m_profile.ordinal).arg(m_profile.instanceId);
+    m_profile.persistent = false;
     const QString profilesRoot = QDir(m_coordinationRoot).filePath(QStringLiteral("profiles"));
     if (!QDir().mkpath(profilesRoot)) {
         if (errorMessage) *errorMessage = QStringLiteral("Cannot create temporary profile root");
         return false;
     }
-    m_profile.temporaryRoot = QDir(profilesRoot).filePath(
-        QStringLiteral("instance-%1-%2").arg(m_profile.ordinal).arg(m_profile.instanceId));
-    if (!QDir().mkpath(m_profile.temporaryRoot)) {
+    m_profile.rootPath = QDir(profilesRoot).filePath(m_profile.profileId);
+    m_profile.temporaryRoot = m_profile.rootPath;
+    if (!QDir().mkpath(m_profile.rootPath)) {
         if (errorMessage) *errorMessage = QStringLiteral("Cannot create temporary instance profile");
         return false;
     }
     m_profileLock = std::make_unique<QLockFile>(
-        QDir(m_profile.temporaryRoot).filePath(QStringLiteral("active.lock")));
+        QDir(m_profile.rootPath).filePath(QStringLiteral("active.lock")));
     if (!m_profileLock->tryLock(0)) {
         if (errorMessage) *errorMessage = QStringLiteral("Cannot lock temporary instance profile");
         return false;
@@ -230,6 +240,22 @@ ApplicationInstanceManager::start(QString* errorMessage)
 
     if (m_profile.ordinal == 1) {
         m_profile.instanceId = QStringLiteral("primary");
+        m_profile.profileId = QStringLiteral("instance-1");
+        m_profile.persistent = true;
+        if (!m_requestedCoordinationRoot.isEmpty()) {
+            // Test/embedded callers that explicitly isolate coordination also
+            // isolate the persistent runtime from the real user profile.
+            m_profile.rootPath = QDir(m_coordinationRoot).filePath(
+                QStringLiteral("persistent/instance-1"));
+        } else {
+            const QString base = QStandardPaths::writableLocation(
+                QStandardPaths::AppDataLocation);
+            const QString persistentBase = base.isEmpty()
+                ? QDir(QDir::homePath()).filePath(QStringLiteral(".mouffette/data"))
+                : base;
+            m_profile.rootPath = QDir(persistentBase).filePath(
+                QStringLiteral("runtimes/instance-1"));
+        }
         if (!startActivationServer(errorMessage)) {
             return StartResult::Failed;
         }

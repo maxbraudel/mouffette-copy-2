@@ -239,13 +239,15 @@ void CanvasViewPage::createRemoteClientInfoContainer() {
     // Spacer to push volume indicator to the right
     containerLayout->addStretch();
 
-    m_disconnectButton = ThemeManager::createPillButton(QStringLiteral("Disconnect"));
-    m_disconnectButton->setToolTip(QStringLiteral("Stop the scene, purge the remote session, and keep this project"));
+    m_disconnectButton = ThemeManager::createPillButton(QStringLiteral("Close session"));
+    m_disconnectButton->setObjectName(QStringLiteral("closeSessionButton"));
+    m_disconnectButton->setToolTip(QStringLiteral("Close the remote session and keep this project"));
     connect(m_disconnectButton, &QPushButton::clicked,
             this, &CanvasViewPage::disconnectRequested);
     containerLayout->addWidget(m_disconnectButton);
 
     m_deleteProjectButton = ThemeManager::createPillButton(QStringLiteral("Delete project…"));
+    m_deleteProjectButton->setObjectName(QStringLiteral("deleteProjectButton"));
     m_deleteProjectButton->setToolTip(QStringLiteral("Delete this local project without deleting source files"));
     connect(m_deleteProjectButton, &QPushButton::clicked,
             this, &CanvasViewPage::deleteProjectRequested);
@@ -287,8 +289,8 @@ void CanvasViewPage::setDisconnecting(bool disconnecting) {
         return;
     }
     m_disconnectButton->setText(disconnecting
-        ? QStringLiteral("Disconnecting…")
-        : QStringLiteral("Disconnect"));
+        ? QStringLiteral("Closing…")
+        : QStringLiteral("Close session"));
     m_disconnectButton->setEnabled(!disconnecting);
 }
 

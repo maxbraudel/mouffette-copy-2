@@ -154,11 +154,17 @@ void ApplicationInstanceManagerTest::redirectsSecondaryWritableState()
     RuntimeProfileContext context;
     context.ordinal = 2;
     context.instanceId = QStringLiteral("11111111-2222-4333-8444-555555555555");
+    context.profileId = QStringLiteral("instance-2-test");
+    context.rootPath = root.path();
+    context.persistent = false;
     context.temporaryRoot = root.path();
     RuntimeProfile::configure(context);
 
     QVERIFY(RuntimeProfile::appDataLocation().startsWith(root.path()));
     QVERIFY(RuntimeProfile::cacheLocation().startsWith(root.path()));
+    QCOMPARE(RuntimeProfile::profileRoot(), QDir::cleanPath(root.path()));
+    QVERIFY(RuntimeProfile::settingsFilePath().contains(QStringLiteral("settings/settings.ini")));
+    QVERIFY(RuntimeProfile::projectsFilePath().contains(QStringLiteral("projects/projects-v2.json")));
     const std::unique_ptr<QSettings> settings = RuntimeProfile::createSettings();
     settings->setValue(QStringLiteral("serverUrl"), QStringLiteral("ws://localhost:8080"));
     settings->sync();

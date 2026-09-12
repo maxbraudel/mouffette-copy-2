@@ -1,43 +1,24 @@
 #include <QApplication>
 #include <QFontDatabase>
 #include <QSystemTrayIcon>
-#include <QDir>
 #include <QDebug>
 #include <QCoreApplication>
 #include <QQuickWindow>
 #include <QMediaFormat>
-#include <QSettings>
 #include <cstdio>
 #include "AppBuildConfig.h"
 #include "backend/config/AppConfig.h"
 #include "backend/managers/system/SystemLifecycleMonitor.h"
 #include "backend/runtime/ApplicationInstanceManager.h"
 #include "backend/runtime/RuntimeProfile.h"
+#include "backend/runtime/RuntimeStorageBootstrap.h"
+#include "frontend/ui/widgets/BootstrapWindow.h"
 #include "MainWindow.h"
 
 // ── Dev flags ────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace {
-// Protocol-v3 cutover only. Live v3 caches are owned by RemoteSession teardown;
-// this one-time cleanup removes only pre-v3 cache state.
-void cleanLegacyUploadsOnce() {
-    const std::unique_ptr<QSettings> settings = RuntimeProfile::createSettings();
-    if (settings->value(QStringLiteral("protocolV3LegacyUploadsCleaned"), false).toBool()) {
-        return;
-    }
-    const QString uploadsPath =
-        QDir(RuntimeProfile::cacheLocation()).absoluteFilePath(QStringLiteral("Mouffette/Uploads"));
-    QDir dir(uploadsPath);
-    if (dir.exists() && !dir.removeRecursively()) {
-        qWarning() << "Protocol-v3 migration could not remove the legacy upload cache";
-        return;
-    }
-    settings->setValue(QStringLiteral("protocolV3LegacyUploadsCleaned"), true);
-    settings->sync();
-    qInfo() << "Protocol-v3 legacy upload cache cleanup complete";
-}
-
 void logRuntimeDiagnostics() {
     if (!AppConfig::instance().runtimeDiagnostics()) {
         return;
@@ -76,7 +57,7 @@ int main(int argc, char *argv[]) {
     }
 
     QString configError;
-    if (!AppConfig::instance().initialize(arguments, &configError)) {
+    if (!AppConfig::instance().initializePreApplication(arguments, &configError)) {
         std::fprintf(stderr, "Mouffette configuration error: %s\n",
                      configError.toLocal8Bit().constData());
         return 2;
@@ -112,18 +93,39 @@ int main(int argc, char *argv[]) {
     }
     const RuntimeProfileContext runtimeProfile = instanceManager.profile();
     RuntimeProfile::configure(runtimeProfile);
-    if (runtimeProfile.isSecondary()
-        && !AppConfig::instance().initializeWithSettings(
-            arguments, RuntimeProfile::readSettings(), &configError)) {
-        std::fprintf(stderr, "Mouffette profile configuration error: %s\n",
-                     configError.toLocal8Bit().constData());
-        return 2;
+
+    BootstrapWindow bootstrapWindow;
+    RuntimeStorageBootstrap storageBootstrap(runtimeProfile);
+    while (true) {
+        RuntimeStorageBootstrap::Result bootstrapResult = storageBootstrap.run(
+            [&bootstrapWindow](RuntimeStorageBootstrap::Stage stage) {
+                bootstrapWindow.setStage(stage);
+            });
+        if (!bootstrapResult.succeeded()) {
+            if (bootstrapWindow.waitForRetry(bootstrapResult)) continue;
+            return 4;
+        }
+        if (!AppConfig::instance().initializeWithSettings(
+                arguments, RuntimeProfile::readSettings(), &configError)) {
+            RuntimeStorageBootstrap::Result configFailure;
+            configFailure.status = RuntimeStorageBootstrap::Status::RecoverableFailure;
+            configFailure.code = QStringLiteral("runtime_configuration_invalid");
+            configFailure.cause = QStringLiteral("Runtime configuration is invalid: %1")
+                                      .arg(configError);
+            if (bootstrapWindow.waitForRetry(configFailure)) continue;
+            return 2;
+        }
+        if (bootstrapResult.hadReset()
+            && !bootstrapWindow.acknowledgeReset(bootstrapResult)) {
+            return 0;
+        }
+        bootstrapWindow.accept();
+        break;
     }
     
     // Disable focus rectangle on all widgets (especially visible on Windows)
     app.setStyleSheet("* { outline: none; }");
     
-    cleanLegacyUploadsOnce();
     logRuntimeDiagnostics();
 
     // Keep application alive when window is closed (so user can reopen via other means later)

@@ -21,6 +21,8 @@ fs.writeFileSync(envFile, [
     'MOUFFETTE_SCENE_PREPARE_TIMEOUT_MS=15000',
     'MOUFFETTE_SCENE_ACTIVATION_LEAD_MS=4000',
     'MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS=50',
+    'MOUFFETTE_SCENE_STARTED_ACK_TIMEOUT_MS=5000',
+    'MOUFFETTE_SCENE_MAX_START_SKEW_MS=750',
     'MOUFFETTE_UPLOAD_IDLE_TIMEOUT_MS=45000',
     'MOUFFETTE_UPLOAD_TARGET_ACK_TIMEOUT_MS=30000',
     'MOUFFETTE_REMOVAL_ACK_TIMEOUT_MS=30000',
@@ -30,6 +32,8 @@ fs.writeFileSync(envFile, [
 const config = loadServerConfig({ envFile });
 assert.equal(config.port, 9090);
 assert.equal(config.cursorDebug, false);
+assert.equal(config.sceneStartedAckTimeoutMs, 5000);
+assert.equal(config.sceneMaxStartSkewMs, 750);
 assert.ok(config.warnings.some((warning) => warning.includes('UNKNOWN_KEY')));
 
 process.env.MOUFFETTE_MISSPELLED_OPTION = 'true';

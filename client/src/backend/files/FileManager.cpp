@@ -6,6 +6,19 @@
 #include <QDebug>
 #include <QDir>
 
+QString FileManager::receivedScopeKey(const RemoteCacheStore::Scope& scope)
+{
+    return scope.senderEndpointId + QChar(0x1f) + scope.remoteSessionId;
+}
+
+QString FileManager::receivedMemoryKey(const RemoteCacheStore::Scope& scope,
+                                       const QString& fileId)
+{
+    return QStringLiteral("received:") + receivedScopeKey(scope)
+        + QChar(0x1f) + QString::number(scope.generation)
+        + QChar(0x1f) + fileId;
+}
+
 // Phase 4.3: Constructor with dependency injection
 FileManager::FileManager()
 {
@@ -126,6 +139,112 @@ void FileManager::removeReceivedFileMapping(const QString& fileId) {
     
     // Clean up tracker data
     m_tracker->removeAllTrackingForFile(fileId);
+}
+
+QString FileManager::getReceivedFilePath(const RemoteCacheStore::Scope& scope,
+                                         const QString& fileId) const
+{
+    const auto scopeIt = m_receivedFilesByScope.constFind(receivedScopeKey(scope));
+    if (scopeIt == m_receivedFilesByScope.constEnd()
+        || !(scopeIt->scope == scope)) {
+        return {};
+    }
+    return scopeIt->pathsByFileId.value(fileId);
+}
+
+bool FileManager::registerReceivedFilePath(const RemoteCacheStore::Scope& scope,
+                                           const QString& fileId,
+                                           const QString& absolutePath)
+{
+    if (fileId.isEmpty() || absolutePath.isEmpty()
+        || !RemoteCacheStore::isValidEndpointId(scope.senderEndpointId)
+        || !RemoteCacheStore::isValidSessionId(scope.remoteSessionId)
+        || scope.generation == 0) {
+        return false;
+    }
+    const QFileInfo info(absolutePath);
+    const QString canonicalPath = info.canonicalFilePath();
+    if (canonicalPath.isEmpty() || !info.isFile() || info.isSymLink()) return false;
+
+    const QString key = receivedScopeKey(scope);
+    auto scopeIt = m_receivedFilesByScope.find(key);
+    if (scopeIt == m_receivedFilesByScope.end()) {
+        ReceivedScopeFiles files;
+        files.scope = scope;
+        scopeIt = m_receivedFilesByScope.insert(key, files);
+    } else if (!(scopeIt->scope == scope)) {
+        return false;
+    }
+    const QString existing = scopeIt->pathsByFileId.value(fileId);
+    if (!existing.isEmpty()) {
+        return QDir::cleanPath(existing) == QDir::cleanPath(canonicalPath);
+    }
+    scopeIt->pathsByFileId.insert(fileId, canonicalPath);
+    return true;
+}
+
+bool FileManager::removeReceivedFileMapping(const RemoteCacheStore::Scope& scope,
+                                            const QString& fileId)
+{
+    const QString key = receivedScopeKey(scope);
+    auto scopeIt = m_receivedFilesByScope.find(key);
+    if (scopeIt == m_receivedFilesByScope.end() || !(scopeIt->scope == scope)) {
+        return false;
+    }
+    releaseReceivedFileMemory(scope, fileId);
+    const bool removed = scopeIt->pathsByFileId.remove(fileId) > 0;
+    if (scopeIt->pathsByFileId.isEmpty()) m_receivedFilesByScope.erase(scopeIt);
+    return removed;
+}
+
+int FileManager::removeReceivedFileMappingsForScope(
+    const RemoteCacheStore::Scope& scope)
+{
+    const QString key = receivedScopeKey(scope);
+    auto scopeIt = m_receivedFilesByScope.find(key);
+    if (scopeIt == m_receivedFilesByScope.end() || !(scopeIt->scope == scope)) return 0;
+    const QList<QString> ids = scopeIt->pathsByFileId.keys();
+    for (const QString& fileId : ids) {
+        releaseReceivedFileMemory(scope, fileId);
+        m_tracker->dissociateFileFromIdea(fileId, scope.remoteSessionId);
+    }
+    const int count = ids.size();
+    m_receivedFilesByScope.erase(scopeIt);
+    return count;
+}
+
+bool FileManager::rebindReceivedFileScope(const RemoteCacheStore::Scope& oldScope,
+                                          const RemoteCacheStore::Scope& newScope)
+{
+    if (oldScope.senderEndpointId != newScope.senderEndpointId
+        || oldScope.remoteSessionId != newScope.remoteSessionId
+        || newScope.generation <= oldScope.generation) {
+        return false;
+    }
+    auto scopeIt = m_receivedFilesByScope.find(receivedScopeKey(oldScope));
+    if (scopeIt == m_receivedFilesByScope.end()) return true;
+    if (!(scopeIt->scope == oldScope)) return false;
+    for (const QString& fileId : scopeIt->pathsByFileId.keys()) {
+        releaseReceivedFileMemory(oldScope, fileId);
+    }
+    scopeIt->scope = newScope;
+    return true;
+}
+
+QList<QString> FileManager::getReceivedFileIds(
+    const RemoteCacheStore::Scope& scope) const
+{
+    const auto scopeIt = m_receivedFilesByScope.constFind(receivedScopeKey(scope));
+    if (scopeIt == m_receivedFilesByScope.constEnd() || !(scopeIt->scope == scope)) {
+        return {};
+    }
+    return scopeIt->pathsByFileId.keys();
+}
+
+void FileManager::releaseReceivedFileMemory(const RemoteCacheStore::Scope& scope,
+                                            const QString& fileId)
+{
+    m_cache->releaseFileMemory(receivedMemoryKey(scope, fileId));
 }
 
 void FileManager::preloadFileIntoMemory(const QString& fileId) {

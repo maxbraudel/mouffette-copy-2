@@ -7,6 +7,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
+#include <QStandardPaths>
 
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -40,14 +41,14 @@ QString opensslError(const QString& operation) {
 }
 
 #ifdef Q_OS_MACOS
-bool loadNativeSecret(QByteArray* value, QString* diagnostic) {
+bool loadNativeSecret(const QByteArray& account, QByteArray* value, QString* diagnostic) {
     UInt32 length = 0;
     void* bytes = nullptr;
     SecKeychainItemRef item = nullptr;
     const OSStatus status = SecKeychainFindGenericPassword(
         nullptr,
         static_cast<UInt32>(qstrlen(kVaultService)), kVaultService,
-        static_cast<UInt32>(qstrlen(kVaultAccount)), kVaultAccount,
+        static_cast<UInt32>(account.size()), account.constData(),
         &length, &bytes, &item);
     if (status == errSecItemNotFound) {
         return false;
@@ -66,14 +67,14 @@ bool loadNativeSecret(QByteArray* value, QString* diagnostic) {
     return true;
 }
 
-bool saveNativeSecret(const QByteArray& value, QString* diagnostic) {
+bool saveNativeSecret(const QByteArray& account, const QByteArray& value, QString* diagnostic) {
     SecKeychainItemRef item = nullptr;
     UInt32 existingLength = 0;
     void* existingBytes = nullptr;
     OSStatus status = SecKeychainFindGenericPassword(
         nullptr,
         static_cast<UInt32>(qstrlen(kVaultService)), kVaultService,
-        static_cast<UInt32>(qstrlen(kVaultAccount)), kVaultAccount,
+        static_cast<UInt32>(account.size()), account.constData(),
         &existingLength, &existingBytes, &item);
     if (status == errSecSuccess) {
         SecKeychainItemFreeContent(nullptr, existingBytes);
@@ -84,7 +85,7 @@ bool saveNativeSecret(const QByteArray& value, QString* diagnostic) {
         status = SecKeychainAddGenericPassword(
             nullptr,
             static_cast<UInt32>(qstrlen(kVaultService)), kVaultService,
-            static_cast<UInt32>(qstrlen(kVaultAccount)), kVaultAccount,
+            static_cast<UInt32>(account.size()), account.constData(),
             static_cast<UInt32>(value.size()), value.constData(), nullptr);
     }
     if (status != errSecSuccess) {
@@ -95,14 +96,48 @@ bool saveNativeSecret(const QByteArray& value, QString* diagnostic) {
     }
     return true;
 }
-#elif defined(Q_OS_WIN)
-std::wstring vaultTargetName() {
-    return QString::fromLatin1(kVaultService).toStdWString();
+
+bool removeNativeSecret(const QByteArray& account, QString* diagnostic) {
+    SecKeychainItemRef item = nullptr;
+    UInt32 existingLength = 0;
+    void* existingBytes = nullptr;
+    const OSStatus found = SecKeychainFindGenericPassword(
+        nullptr,
+        static_cast<UInt32>(qstrlen(kVaultService)), kVaultService,
+        static_cast<UInt32>(account.size()), account.constData(),
+        &existingLength, &existingBytes, &item);
+    if (found == errSecItemNotFound) return true;
+    if (found != errSecSuccess) {
+        if (diagnostic) {
+            *diagnostic = QStringLiteral("macOS Keychain lookup failed (%1)").arg(found);
+        }
+        return false;
+    }
+    SecKeychainItemFreeContent(nullptr, existingBytes);
+    const OSStatus removed = SecKeychainItemDelete(item);
+    if (item) CFRelease(item);
+    if (removed != errSecSuccess) {
+        if (diagnostic) {
+            *diagnostic = QStringLiteral("macOS Keychain delete failed (%1)").arg(removed);
+        }
+        return false;
+    }
+    return true;
 }
 
-bool loadNativeSecret(QByteArray* value, QString* diagnostic) {
+bool removeLegacyNativeSecret(QString* diagnostic) {
+    return removeNativeSecret(QByteArray(kVaultAccount), diagnostic);
+}
+#elif defined(Q_OS_WIN)
+std::wstring vaultTargetName(const QByteArray& account) {
+    return QStringLiteral("%1:%2")
+        .arg(QString::fromLatin1(kVaultService), QString::fromUtf8(account))
+        .toStdWString();
+}
+
+bool loadNativeSecret(const QByteArray& account, QByteArray* value, QString* diagnostic) {
     PCREDENTIALW credential = nullptr;
-    const std::wstring target = vaultTargetName();
+    const std::wstring target = vaultTargetName(account);
     if (!CredReadW(target.c_str(), CRED_TYPE_GENERIC, 0, &credential)) {
         const DWORD code = GetLastError();
         if (code != ERROR_NOT_FOUND && diagnostic) {
@@ -119,8 +154,8 @@ bool loadNativeSecret(QByteArray* value, QString* diagnostic) {
     return true;
 }
 
-bool saveNativeSecret(const QByteArray& value, QString* diagnostic) {
-    const std::wstring target = vaultTargetName();
+bool saveNativeSecret(const QByteArray& account, const QByteArray& value, QString* diagnostic) {
+    const std::wstring target = vaultTargetName(account);
     const std::wstring username = L"Mouffette";
     CREDENTIALW credential{};
     credential.Type = CRED_TYPE_GENERIC;
@@ -139,22 +174,61 @@ bool saveNativeSecret(const QByteArray& value, QString* diagnostic) {
     }
     return true;
 }
+
+bool removeNativeSecret(const QByteArray& account, QString* diagnostic) {
+    const std::wstring target = vaultTargetName(account);
+    if (CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0)) return true;
+    const DWORD code = GetLastError();
+    if (code == ERROR_NOT_FOUND) return true;
+    if (diagnostic) {
+        *diagnostic = QStringLiteral("Windows Credential Manager delete failed (%1)")
+                          .arg(code);
+    }
+    return false;
+}
+
+bool removeLegacyNativeSecret(QString* diagnostic) {
+    const std::wstring target = QString::fromLatin1(kVaultService).toStdWString();
+    if (CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0)) return true;
+    const DWORD code = GetLastError();
+    if (code == ERROR_NOT_FOUND) return true;
+    if (diagnostic) {
+        *diagnostic = QStringLiteral("Windows Credential Manager delete failed (%1)")
+                          .arg(code);
+    }
+    return false;
+}
 #else
-bool loadNativeSecret(QByteArray*, QString*) { return false; }
-bool saveNativeSecret(const QByteArray&, QString*) { return false; }
+bool loadNativeSecret(const QByteArray&, QByteArray*, QString*) { return false; }
+bool saveNativeSecret(const QByteArray&, const QByteArray&, QString*) { return false; }
+bool removeNativeSecret(const QByteArray&, QString*) { return true; }
+bool removeLegacyNativeSecret(QString*) { return true; }
 #endif
+
+QByteArray accountForNamespace(const QString& runtimeNamespace) {
+    const QString normalized = runtimeNamespace.trimmed().isEmpty()
+        ? QStringLiteral("instance-1") : runtimeNamespace.trimmed();
+    const QByteArray digest = QCryptographicHash::hash(
+        normalized.toUtf8(), QCryptographicHash::Sha256).toHex().left(24);
+    return QByteArrayLiteral("runtime-") + digest;
+}
 
 } // namespace
 
 class DeviceIdentityStore::Impl {
 public:
-    explicit Impl(QString directory, bool preferVault)
-        : fallbackDirectory(std::move(directory)), preferNativeVault(preferVault) {}
+    explicit Impl(QString directory, bool preferVault, QString nameSpace)
+        : fallbackDirectory(std::move(directory))
+        , preferNativeVault(preferVault)
+        , runtimeNamespace(std::move(nameSpace))
+        , vaultAccount(accountForNamespace(runtimeNamespace)) {}
 
     using KeyPtr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
 
     QString fallbackDirectory;
     bool preferNativeVault = true;
+    QString runtimeNamespace;
+    QByteArray vaultAccount;
     StorageBackend backend = StorageBackend::Uninitialized;
     KeyPtr key{nullptr, EVP_PKEY_free};
     QByteArray publicDer;
@@ -313,8 +387,13 @@ public:
     }
 };
 
-DeviceIdentityStore::DeviceIdentityStore(QString fallbackDirectory, bool preferNativeVault)
-    : d(std::make_unique<Impl>(std::move(fallbackDirectory), preferNativeVault)) {}
+DeviceIdentityStore::DeviceIdentityStore(QString fallbackDirectory,
+                                         bool preferNativeVault,
+                                         QString runtimeNamespace)
+    : d(std::make_unique<Impl>(std::move(fallbackDirectory), preferNativeVault,
+                              runtimeNamespace.trimmed().isEmpty()
+                                  ? RuntimeProfile::context().profileId
+                                  : std::move(runtimeNamespace))) {}
 
 DeviceIdentityStore::~DeviceIdentityStore() = default;
 
@@ -325,7 +404,7 @@ bool DeviceIdentityStore::initialize(QString* errorMessage) {
     QString vaultDiagnostic;
     bool loadedFromVault = false;
     if (d->preferNativeVault) {
-        loadedFromVault = loadNativeSecret(&encoded, &vaultDiagnostic);
+        loadedFromVault = loadNativeSecret(d->vaultAccount, &encoded, &vaultDiagnostic);
     }
 
     QString fallbackDiagnostic;
@@ -370,7 +449,7 @@ bool DeviceIdentityStore::initialize(QString* errorMessage) {
 
         bool saved = false;
         if (d->preferNativeVault) {
-            saved = saveNativeSecret(encoded, &vaultDiagnostic);
+            saved = saveNativeSecret(d->vaultAccount, encoded, &vaultDiagnostic);
             if (saved) d->backend = StorageBackend::NativeVault;
         }
         if (!saved) {
@@ -403,6 +482,49 @@ bool DeviceIdentityStore::initialize(QString* errorMessage) {
             << QStringLiteral("Device identity uses owner-only file fallback (%1): %2")
                    .arg(why, d->resolvedFallbackPath());
     }
+    return true;
+}
+
+bool DeviceIdentityStore::reset(QString* errorMessage) {
+    d->key.reset();
+    d->publicDer.clear();
+    d->installationId.clear();
+    d->backend = StorageBackend::Uninitialized;
+
+    QString nativeError;
+    if (d->preferNativeVault
+        && !removeNativeSecret(d->vaultAccount, &nativeError)) {
+        if (errorMessage) *errorMessage = nativeError;
+        return false;
+    }
+    const QString path = d->resolvedFallbackPath();
+    const QFileInfo info(path);
+    if ((info.exists() || info.isSymLink()) && !QFile::remove(path)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Cannot remove invalid device identity file");
+        }
+        return false;
+    }
+    if (errorMessage) errorMessage->clear();
+    return true;
+}
+
+bool DeviceIdentityStore::validateOrReset(bool* wasReset, QString* errorMessage) {
+    if (wasReset) *wasReset = false;
+    QString validationError;
+    if (initialize(&validationError)) {
+        if (errorMessage) errorMessage->clear();
+        return true;
+    }
+    QString resetError;
+    if (!reset(&resetError) || !initialize(errorMessage)) {
+        if (errorMessage && errorMessage->isEmpty()) {
+            *errorMessage = resetError.isEmpty() ? validationError : resetError;
+        }
+        return false;
+    }
+    if (wasReset) *wasReset = true;
+    if (errorMessage) errorMessage->clear();
     return true;
 }
 
@@ -472,4 +594,29 @@ QString DeviceIdentityStore::endpointIdForInstallation(const QString& installati
         + installationId.toUtf8() + QByteArrayLiteral("\n") + instanceId.toUtf8();
     return QString::fromLatin1(toBase64Url(
         QCryptographicHash::hash(material, QCryptographicHash::Sha256)));
+}
+
+bool DeviceIdentityStore::removeLegacyInstallationIdentity(QString* errorMessage) {
+    QString nativeError;
+    if (!removeLegacyNativeSecret(&nativeError)) {
+        if (errorMessage) *errorMessage = nativeError;
+        return false;
+    }
+    QString directory = QStandardPaths::writableLocation(
+        QStandardPaths::AppLocalDataLocation);
+    if (directory.isEmpty()) {
+        directory = QDir(QDir::homePath()).filePath(
+            QStringLiteral(".mouffette/installation"));
+    }
+    const QString path = QDir(directory).filePath(
+        QString::fromLatin1(kFallbackFileName));
+    const QFileInfo info(path);
+    if ((info.exists() || info.isSymLink()) && !QFile::remove(path)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("Cannot remove legacy device identity file");
+        }
+        return false;
+    }
+    if (errorMessage) errorMessage->clear();
+    return true;
 }

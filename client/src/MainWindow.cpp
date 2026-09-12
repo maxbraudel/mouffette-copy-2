@@ -408,7 +408,8 @@ MainWindow::MainWindow(const RuntimeProfileContext& runtimeProfile, QWidget* par
       m_menuBarManager(new MenuBarManager(this, this)), // Phase 6.3
       m_systemTrayManager(new SystemTrayManager(this)), // Phase 6.2
       m_webSocketClient(new WebSocketClient(
-          QString(), true, this, {}, runtimeProfile.instanceId, runtimeProfile.ordinal)),
+          RuntimeProfile::identityLocation(), runtimeProfile.isPersistent(), this, {},
+          runtimeProfile.instanceId, runtimeProfile.ordinal)),
       m_connectionManager(new ConnectionManager(m_webSocketClient, this)),
       m_settingsManager(new SettingsManager(this, m_webSocketClient, this)), // Phase 12
       m_webSocketMessageHandler(new WebSocketMessageHandler(this, this)), // Phase 7.1
@@ -1669,9 +1670,33 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     const bool hasCachedContent = hasRenderableCachedContent || sessionHasStoredScreens;
     switchToCanvasSession(session.persistentClientId);
     m_activeRemoteClientId = session.persistentClientId;
-    m_remoteClientConnected = false;
     m_selectedClient = session.lastClientInfo;
     ClientInfo effectiveClient = session.lastClientInfo;
+    RemoteSessionCoordinator* remoteSessionCoordinator = m_webSocketClient
+        ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
+    const RemoteSessionCoordinator::Binding retainedBinding = remoteSessionCoordinator
+        ? remoteSessionCoordinator->outgoingForPeer(targetEndpointId)
+        : RemoteSessionCoordinator::Binding();
+    const bool retainedSessionActive = !retainedBinding.remoteSessionId.isEmpty()
+        && retainedBinding.phase == QLatin1String("Active")
+        && !m_locallyTerminatingRemoteSessions.contains(
+            retainedBinding.remoteSessionId);
+    const bool retainedSessionInGrace = !retainedBinding.remoteSessionId.isEmpty()
+        && retainedBinding.phase == QLatin1String("Grace")
+        && !m_locallyTerminatingRemoteSessions.contains(
+            retainedBinding.remoteSessionId);
+    const bool retainedSessionClosable = retainedSessionActive
+        || retainedSessionInGrace;
+    m_remoteClientConnected = retainedSessionActive || retainedSessionInGrace;
+    if (m_remoteClientConnected) {
+        effectiveClient.setOnline(true);
+        effectiveClient.setStatus(retainedSessionActive
+                                      ? QStringLiteral("Connected")
+                                      : QStringLiteral("Reconnecting"));
+        effectiveClient.setAvailabilityStatus(effectiveClient.getStatus());
+        session.lastClientInfo = effectiveClient;
+        m_selectedClient = effectiveClient;
+    }
     const bool alreadyOnScreenView = m_navigationManager->isOnScreenView();
     const QString currentId = alreadyOnScreenView ? m_navigationManager->currentClientId() : QString();
     const bool alreadyOnThisClient = alreadyOnScreenView && currentId == effectiveClient.getId() && !effectiveClient.getId().isEmpty();
@@ -1704,7 +1729,7 @@ void MainWindow::showScreenView(const ClientInfo& client) {
 
     // Update upload target
     m_uploadManager->setTargetClientId(
-        effectiveClient.isOnline() ? session.persistentClientId : QString());
+        retainedSessionActive ? session.persistentClientId : QString());
 
     // Show remote client info wrapper when viewing a client
     if (m_remoteClientInfoWrapper) {
@@ -1724,7 +1749,11 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     removeRemoteStatusFromLayout();
 
     addRemoteStatusToLayout();
-    if (effectiveClient.isOnline()) {
+    if (retainedSessionActive) {
+        setRemoteConnectionStatus("CONNECTED", /*propagateLoss*/ false);
+    } else if (retainedSessionInGrace) {
+        setRemoteConnectionStatus("RECONNECTING...", /*propagateLoss*/ false);
+    } else if (effectiveClient.isOnline()) {
         setRemoteConnectionStatus("CONNECTING...", /*propagateLoss*/ false);
     } else {
         setRemoteConnectionStatus("DISCONNECTED");
@@ -1755,7 +1784,7 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     }
     if (m_canvasViewPage) {
         m_canvasViewPage->setDisconnecting(false);
-        m_canvasViewPage->setProjectActionsEnabled(effectiveClient.isOnline(), true);
+        m_canvasViewPage->setProjectActionsEnabled(retainedSessionClosable, true);
     }
     setActiveProjectVisibleIfAppropriate();
     ensureRemoteSessionForClient(effectiveClient);
@@ -1781,10 +1810,9 @@ void MainWindow::showClientListView() {
     if (m_navigationManager) m_navigationManager->showClientList();
     if (m_uploadButton) m_uploadButton->setText("Upload to Client");
     m_uploadManager->setTargetClientId(QString());
-    // Clear remote connection status when leaving screen view
-    setRemoteConnectionStatus("DISCONNECTED", /*propagateLoss*/ false);
-    m_activeRemoteClientId.clear();
-    m_remoteClientConnected = false;
+    // Navigation hides the canvas but does not terminate its RemoteSession.
+    // Preserve the authenticated binding and its presentation state until the
+    // hidden-project deadline or an explicit user action closes it.
     
     // Hide remote client info wrapper when on client list
     if (m_remoteClientInfoWrapper) {
@@ -1870,12 +1898,15 @@ void MainWindow::ensureRemoteSessionForClient(const ClientInfo& client) {
         updateRemoteClientAvailability(targetEndpointId, status);
         const bool commandReady = binding.phase == QLatin1String("Active")
             && !m_locallyTerminatingRemoteSessions.contains(binding.remoteSessionId);
+        const bool sessionClosable = (binding.phase == QLatin1String("Active")
+                                      || binding.phase == QLatin1String("Grace"))
+            && !m_locallyTerminatingRemoteSessions.contains(binding.remoteSessionId);
         if (m_activeSessionIdentity == targetEndpointId) {
             m_remoteClientConnected = binding.phase == QLatin1String("Active")
                 || binding.phase == QLatin1String("Grace");
             setRemoteConnectionStatus(commandReady ? QStringLiteral("CONNECTED")
                                                    : status.toUpper(), false);
-            m_canvasViewPage->setProjectActionsEnabled(commandReady, true);
+            m_canvasViewPage->setProjectActionsEnabled(sessionClosable, true);
             if (m_screenCanvas) m_screenCanvas->setOverlayActionsEnabled(commandReady);
             if (m_uploadManager) {
                 m_uploadManager->setTargetClientId(
@@ -2022,11 +2053,16 @@ void MainWindow::handleRemoteSessionLeaseState(const QJsonObject& envelope) {
     updateRemoteClientAvailability(targetEndpointId, status);
     const bool commandReady = status == QLatin1String("Connected")
         && !m_locallyTerminatingRemoteSessions.contains(remoteSessionId);
+    const bool sessionClosable = (phase == QLatin1String("Active")
+                                  || phase == QLatin1String("Grace"))
+        && !m_locallyTerminatingRemoteSessions.contains(remoteSessionId);
     if (m_activeSessionIdentity == targetEndpointId) {
         m_remoteClientConnected = phase == QLatin1String("Active")
             || phase == QLatin1String("Grace");
         setRemoteConnectionStatus(status.toUpper(), false);
-        if (m_canvasViewPage) m_canvasViewPage->setProjectActionsEnabled(commandReady, true);
+        if (m_canvasViewPage) {
+            m_canvasViewPage->setProjectActionsEnabled(sessionClosable, true);
+        }
         if (m_screenCanvas) m_screenCanvas->setOverlayActionsEnabled(commandReady);
     }
 }
@@ -2470,7 +2506,7 @@ void MainWindow::onDisconnectProjectRequested() {
         return;
     }
 
-    // The v2 close transaction can finish earlier through its ACK. Its UI
+    // The protocol-v3 close transaction can finish earlier through its ACK. Its UI
     // deadline comes from the server policy announced at authentication, so
     // the client never carries a second protocol timeout constant.
     const int disconnectDeadlineMs = m_webSocketClient->serverPolicy()
@@ -2579,8 +2615,11 @@ void MainWindow::updateVolumeIndicator() {
 }
 
 void MainWindow::setRemoteClientState(const RemoteClientState& state, bool propagateLoss) {
-    // Update internal connection state
-    m_remoteClientConnected = (state.connectionStatus == RemoteClientState::Connected);
+    // Reconnecting represents a retained authenticated session in Grace. It
+    // is not command-ready, but it must not be mistaken for a closed session.
+    m_remoteClientConnected =
+        state.connectionStatus == RemoteClientState::Connected
+        || state.connectionStatus == RemoteClientState::Reconnecting;
     
     // Manage spinner based on state
     if (state.spinnerActive) {
@@ -2615,7 +2654,9 @@ void MainWindow::setRemoteClientState(const RemoteClientState& state, bool propa
         }
     }
 
-    refreshOverlayActionsState(m_remoteClientConnected, propagateLoss);
+    refreshOverlayActionsState(
+        state.connectionStatus == RemoteClientState::Connected,
+        propagateLoss);
 }
 
 void MainWindow::onUploadButtonClicked() {
@@ -3105,6 +3146,21 @@ void MainWindow::setupUI() {
     
     // Phase 1.2: Create CanvasViewPage
     m_canvasViewPage = new CanvasViewPage(this);
+    if (m_connectionLayout && m_connectToggleButton) {
+        const int actionIndex = m_connectionLayout->indexOf(m_connectToggleButton);
+        if (QPushButton* closeSessionButton =
+                m_canvasViewPage->getCloseSessionButton()) {
+            closeSessionButton->setParent(m_connectionBar);
+            closeSessionButton->hide();
+            m_connectionLayout->insertWidget(actionIndex, closeSessionButton);
+        }
+        if (QPushButton* deleteProjectButton =
+                m_canvasViewPage->getDeleteProjectButton()) {
+            deleteProjectButton->setParent(m_connectionBar);
+            deleteProjectButton->hide();
+            m_connectionLayout->insertWidget(actionIndex + 1, deleteProjectButton);
+        }
+    }
     m_stackedWidget->addWidget(m_canvasViewPage);
 
     // Notification history binds to the NotificationCenter after the toast
@@ -3427,6 +3483,14 @@ QWidget* MainWindow::getLocalClientInfoContainer() const {
 
 QPushButton* MainWindow::getBackButton() const {
     return m_backButton;
+}
+
+QPushButton* MainWindow::getCloseSessionButton() const {
+    return m_canvasViewPage ? m_canvasViewPage->getCloseSessionButton() : nullptr;
+}
+
+QPushButton* MainWindow::getDeleteProjectButton() const {
+    return m_canvasViewPage ? m_canvasViewPage->getDeleteProjectButton() : nullptr;
 }
 
 bool MainWindow::hasUnuploadedFilesForTarget(const QString& targetClientId) const {

@@ -53,6 +53,12 @@ public:
     // Loads the real process/QSettings sources. Safe to call before QApplication.
     bool initialize(const QStringList& arguments, QString* errorMessage = nullptr);
 
+    // Loads only compiled defaults, env files, process environment and CLI.
+    // This is the only startup entry point allowed before the runtime storage
+    // bootstrap has validated the profile-specific settings file.
+    bool initializePreApplication(const QStringList& arguments,
+                                  QString* errorMessage = nullptr);
+
     // Reloads the normal runtime sources with an explicitly selected settings
     // profile. Secondary development instances use this after their isolated
     // temporary profile has been allocated.

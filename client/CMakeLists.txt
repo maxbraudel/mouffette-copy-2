@@ -116,6 +116,7 @@ set(SOURCES
     src/frontend/ui/widgets/ClientListDelegate.cpp
     src/frontend/ui/widgets/SpinnerWidget.cpp
     src/frontend/ui/widgets/QtWaitingSpinner.cpp
+    src/frontend/ui/widgets/BootstrapWindow.cpp
     
     # UI - Layout
     src/frontend/ui/layout/ResponsiveLayoutManager.cpp
@@ -179,6 +180,7 @@ set(SOURCES
     # Runtime profile / instance coordination
     src/backend/runtime/RuntimeProfile.cpp
     src/backend/runtime/ApplicationInstanceManager.cpp
+    src/backend/runtime/RuntimeStorageBootstrap.cpp
 
     # Security
     src/backend/security/DeviceIdentityStore.cpp
@@ -293,6 +295,7 @@ set(HEADERS
     src/frontend/ui/widgets/ClientListDelegate.h
     src/frontend/ui/widgets/SpinnerWidget.h
     src/frontend/ui/widgets/QtWaitingSpinner.h
+    src/frontend/ui/widgets/BootstrapWindow.h
     
     # UI - Layout
     src/frontend/ui/layout/ResponsiveLayoutManager.h
@@ -368,6 +371,7 @@ set(HEADERS
     # Runtime profile / instance coordination
     src/backend/runtime/RuntimeProfile.h
     src/backend/runtime/ApplicationInstanceManager.h
+    src/backend/runtime/RuntimeStorageBootstrap.h
 
     # Security
     src/backend/security/DeviceIdentityStore.h
@@ -641,6 +645,33 @@ if(BUILD_TESTING)
     target_link_libraries(tst_ApplicationInstanceManager PRIVATE
         Qt6::Core Qt6::Network Qt6::Test)
     add_test(NAME ApplicationInstanceManager COMMAND tst_ApplicationInstanceManager)
+
+    add_executable(tst_RuntimeStorageBootstrap
+        tests/qt/tst_RuntimeStorageBootstrap.cpp
+        src/backend/runtime/RuntimeStorageBootstrap.cpp
+        src/backend/runtime/RuntimeStorageBootstrap.h
+        src/backend/runtime/RuntimeProfile.cpp
+        src/backend/runtime/RuntimeProfile.h
+        src/backend/security/DeviceIdentityStore.cpp
+        src/backend/security/DeviceIdentityStore.h
+        src/backend/config/AppConfig.cpp
+        src/backend/config/AppConfig.h
+        src/backend/domain/models/ClientInfo.cpp
+        src/backend/domain/models/ClientInfo.h
+        src/backend/domain/project/ProjectModel.cpp
+        src/backend/domain/project/ProjectModel.h
+        src/backend/domain/project/ProjectStore.cpp
+        src/backend/domain/project/ProjectStore.h
+    )
+    target_include_directories(tst_RuntimeStorageBootstrap PRIVATE src)
+    target_link_libraries(tst_RuntimeStorageBootstrap PRIVATE
+        Qt6::Core Qt6::Network Qt6::Test OpenSSL::Crypto)
+    if(APPLE)
+        target_link_libraries(tst_RuntimeStorageBootstrap PRIVATE "-framework Security")
+    elseif(WIN32)
+        target_link_libraries(tst_RuntimeStorageBootstrap PRIVATE Advapi32)
+    endif()
+    add_test(NAME RuntimeStorageBootstrap COMMAND tst_RuntimeStorageBootstrap)
 
     add_executable(tst_ClientInfoDisplay
         tests/qt/tst_ClientInfoDisplay.cpp

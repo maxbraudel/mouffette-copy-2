@@ -386,6 +386,11 @@ bool AppConfig::initialize(const QStringList& arguments, QString* errorMessage) 
     return load(options, errorMessage);
 }
 
+bool AppConfig::initializePreApplication(const QStringList& arguments,
+                                         QString* errorMessage) {
+    return initializeWithSettings(arguments, {}, errorMessage);
+}
+
 bool AppConfig::initializeWithSettings(const QStringList& arguments,
                                        const QVariantMap& settings,
                                        QString* errorMessage) {

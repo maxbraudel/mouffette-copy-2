@@ -56,7 +56,12 @@ class SceneRunRegistry {
     constructor(options = {}) {
         this.prepareTimeoutMs = options.prepareTimeoutMs || 15_000;
         this.activationLeadMs = options.activationLeadMs || 4_000;
-        this.startedAckTimeoutMs = options.startedAckTimeoutMs || 1_000;
+        // First-frame presentation includes real compositor scheduling. It is
+        // deliberately distinct from clock-estimation uncertainty: two local
+        // macOS/Qt processes can share a precise clock while their visible
+        // frame callbacks are hundreds of milliseconds apart under load.
+        this.startedAckTimeoutMs = options.startedAckTimeoutMs ?? 5_000;
+        this.maximumStartSkewMs = options.maximumStartSkewMs ?? 750;
         this.stopTimeoutMs = options.stopTimeoutMs || 3_000;
         this.maximumClockUncertaintyMs = options.maximumClockUncertaintyMs ?? 50;
         this.tombstoneTtlMs = options.tombstoneTtlMs || 60_000;
@@ -279,7 +284,7 @@ class SceneRunRegistry {
         const observedSkewMs = peerTimestamp === undefined
             ? null : Math.abs(presentedServerMonotonicMs - peerTimestamp);
         if (observedSkewMs !== null
-            && observedSkewMs > this.maximumClockUncertaintyMs) {
+            && observedSkewMs > this.maximumStartSkewMs) {
             run.startSkewMs = observedSkewMs;
             return {
                 ok: false,

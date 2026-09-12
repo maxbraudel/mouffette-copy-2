@@ -11,6 +11,8 @@ const DECLARATIONS = Object.freeze({
     MOUFFETTE_SCENE_PREPARE_TIMEOUT_MS: { type: 'int', default: 15000, min: 1000, max: 120000 },
     MOUFFETTE_SCENE_ACTIVATION_LEAD_MS: { type: 'int', default: 4000, min: 500, max: 10000 },
     MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS: { type: 'int', default: 50, min: 0, max: 250 },
+    MOUFFETTE_SCENE_STARTED_ACK_TIMEOUT_MS: { type: 'int', default: 5000, min: 1000, max: 15000 },
+    MOUFFETTE_SCENE_MAX_START_SKEW_MS: { type: 'int', default: 750, min: 50, max: 5000 },
     MOUFFETTE_UPLOAD_IDLE_TIMEOUT_MS: { type: 'int', default: 45000, min: 5000, max: 600000 },
     MOUFFETTE_UPLOAD_TARGET_ACK_TIMEOUT_MS: { type: 'int', default: 30000, min: 1000, max: 120000 },
     MOUFFETTE_REMOVAL_ACK_TIMEOUT_MS: { type: 'int', default: 30000, min: 1000, max: 120000 },
@@ -116,6 +118,10 @@ function loadServerConfig(options = {}) {
         >= values.MOUFFETTE_SCENE_ACTIVATION_LEAD_MS) {
         throw new Error('MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS must be smaller than activation lead');
     }
+    if (values.MOUFFETTE_SCENE_MAX_START_SKEW_MS
+        >= values.MOUFFETTE_SCENE_STARTED_ACK_TIMEOUT_MS) {
+        throw new Error('MOUFFETTE_SCENE_MAX_START_SKEW_MS must be smaller than the started acknowledgement timeout');
+    }
 
     return Object.freeze({
         host: values.MOUFFETTE_SERVER_HOST,
@@ -125,6 +131,8 @@ function loadServerConfig(options = {}) {
         scenePrepareTimeoutMs: values.MOUFFETTE_SCENE_PREPARE_TIMEOUT_MS,
         sceneActivationLeadMs: values.MOUFFETTE_SCENE_ACTIVATION_LEAD_MS,
         sceneMaxClockSkewMs: values.MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS,
+        sceneStartedAckTimeoutMs: values.MOUFFETTE_SCENE_STARTED_ACK_TIMEOUT_MS,
+        sceneMaxStartSkewMs: values.MOUFFETTE_SCENE_MAX_START_SKEW_MS,
         uploadIdleTimeoutMs: values.MOUFFETTE_UPLOAD_IDLE_TIMEOUT_MS,
         uploadTargetAckTimeoutMs: values.MOUFFETTE_UPLOAD_TARGET_ACK_TIMEOUT_MS,
         removalAckTimeoutMs: values.MOUFFETTE_REMOVAL_ACK_TIMEOUT_MS,

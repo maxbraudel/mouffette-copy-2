@@ -74,9 +74,10 @@ const checklist = Object.freeze([
         monotonicNow: () => monotonic,
         prepareTimeoutMs: 15_000,
         activationLeadMs: 4_000,
-        startedAckTimeoutMs: 1_000,
+        startedAckTimeoutMs: 5_000,
         stopTimeoutMs: 3_000,
         maximumClockUncertaintyMs: 50,
+        maximumStartSkewMs: 750,
     });
     const digest = computeSceneDigest(1, [asset], scene);
     const binding = {
@@ -101,17 +102,17 @@ const checklist = Object.freeze([
         'invalid_first_frame_timestamp');
     assert.equal(registry.markStarted('run-1', 'A', digest, true, 4_500).live, false,
         'a wall-clock rollback must not reject an on-time monotonic STARTED acknowledgement');
-    monotonic = 4_551;
+    monotonic = 5_251;
     const excessiveSkew = registry.markStarted(
-        'run-1', 'B', digest, true, 4_551);
+        'run-1', 'B', digest, true, 5_251);
     assert.equal(excessiveSkew.error, 'scene_start_skew_too_high');
-    assert.equal(excessiveSkew.startSkewMs, 51);
-    monotonic = 4_550;
-    const started = registry.markStarted('run-1', 'B', digest, true, 4_550);
+    assert.equal(excessiveSkew.startSkewMs, 751);
+    monotonic = 5_250;
+    const started = registry.markStarted('run-1', 'B', digest, true, 5_250);
     assert.equal(started.live, true);
-    assert.equal(started.startSkewMs, 50);
-    assert.equal(registry.markStarted('run-1', 'B', digest, true, 4_550).replay, true);
-    assert.equal(registry.markStarted('run-1', 'B', digest, true, 4_549).error,
+    assert.equal(started.startSkewMs, 750);
+    assert.equal(registry.markStarted('run-1', 'B', digest, true, 5_250).replay, true);
+    assert.equal(registry.markStarted('run-1', 'B', digest, true, 5_249).error,
         'conflicting_started_ack');
     assert.equal(registry.acceptSnapshot('run-1', 'A', digest, 1).ok, true);
     assert.equal(registry.acceptSnapshot('run-1', 'A', digest, 1).error,

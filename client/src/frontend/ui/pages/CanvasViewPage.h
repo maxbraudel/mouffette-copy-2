@@ -84,6 +84,9 @@ public:
      */
     QWidget* getRemoteClientInfoContainer() const { return m_remoteClientInfoContainer; }
 
+    QPushButton* getCloseSessionButton() const { return m_disconnectButton; }
+    QPushButton* getDeleteProjectButton() const { return m_deleteProjectButton; }
+
     /**
      * @brief Get the volume indicator label
      */

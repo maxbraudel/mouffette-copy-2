@@ -22,13 +22,19 @@ public:
     };
 
     explicit DeviceIdentityStore(QString fallbackDirectory = QString(),
-                                 bool preferNativeVault = true);
+                                 bool preferNativeVault = true,
+                                 QString runtimeNamespace = QString());
     ~DeviceIdentityStore();
 
     DeviceIdentityStore(const DeviceIdentityStore&) = delete;
     DeviceIdentityStore& operator=(const DeviceIdentityStore&) = delete;
 
     bool initialize(QString* errorMessage = nullptr);
+    // Validates the stored identity and, if it is corrupt, removes it and
+    // generates a fresh Ed25519 identity in the same runtime namespace.
+    bool validateOrReset(bool* wasReset = nullptr,
+                         QString* errorMessage = nullptr);
+    bool reset(QString* errorMessage = nullptr);
     bool isReady() const;
 
     QString installationId() const;
@@ -42,6 +48,7 @@ public:
     static QString installationIdForPublicKey(const QByteArray& publicKeyDer);
     static QString endpointIdForInstallation(const QString& installationId,
                                              const QString& instanceId);
+    static bool removeLegacyInstallationIdentity(QString* errorMessage = nullptr);
 
 private:
     class Impl;

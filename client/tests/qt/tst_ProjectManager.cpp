@@ -302,6 +302,20 @@ private slots:
         QVERIFY(replaced->clientSnapshot.screens.isEmpty());
         QCOMPARE(replaced->clientSnapshot.volumePercent, -1);
 
+        ClientInfo identityOnly(QStringLiteral("socket-identity"), QString(), QString());
+        identityOnly.setEndpointId(QStringLiteral("device-a"));
+        entries = manager.mergeDiscoveredClients({identityOnly}, 31);
+        QCOMPARE(entries.size(), 1);
+        QCOMPARE(entries.first().client.getMachineName(), QStringLiteral("New name"));
+        QCOMPARE(entries.first().client.getPlatform(), QStringLiteral("Linux"));
+        const ProjectRecord* presentationPreserved =
+            manager.projectForTarget(QStringLiteral("device-a"));
+        QVERIFY(presentationPreserved);
+        QCOMPARE(presentationPreserved->clientSnapshot.machineName,
+                 QStringLiteral("New name"));
+        QCOMPARE(presentationPreserved->clientSnapshot.platform,
+                 QStringLiteral("Linux"));
+
         entries = manager.mergeDiscoveredClients({}, 32);
         QCOMPARE(entries.size(), 1);
         QVERIFY(!entries.first().online);

@@ -486,7 +486,7 @@ RemoteCacheStore::~RemoteCacheStore() = default;
 QString RemoteCacheStore::defaultRootPath()
 {
     const QString base = RuntimeProfile::cacheLocation();
-    return normalizedPath(QDir(base).filePath(QStringLiteral("Mouffette/Uploads")));
+    return normalizedPath(QDir(base).filePath(QStringLiteral("Uploads")));
 }
 
 bool RemoteCacheStore::isValidEndpointId(const QString& value)

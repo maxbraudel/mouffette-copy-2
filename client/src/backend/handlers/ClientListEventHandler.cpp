@@ -2,6 +2,7 @@
 #include "MainWindow.h"
 #include "frontend/managers/ui/RemoteClientState.h"
 #include "backend/network/WebSocketClient.h"
+#include "backend/network/RemoteSessionCoordinator.h"
 #include "backend/domain/models/ClientInfo.h"
 #include "shared/rendering/ICanvasHost.h"
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
@@ -74,8 +75,12 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
         MainWindow::CanvasSession* activeSession = m_mainWindow->findCanvasSession(activeSessionIdentity);
         if (activeSession) {
             const ClientInfo* matchingDevice = nullptr;
-            for (const ClientInfo& candidate : clients) {
-                if (candidate.endpointId() == activeSessionIdentity) {
+            // Use the project-enriched list here. Discovery snapshots can be
+            // identity-only for one refresh; the durable project supplies the
+            // authenticated presentation fields without fabricating presence.
+            for (const ClientInfo& candidate : displayList) {
+                if (candidate.endpointId() == activeSessionIdentity
+                    && candidate.isOnline()) {
                     matchingDevice = &candidate;
                     break;
                 }
@@ -110,13 +115,28 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                     QString activeRemoteClientId = m_mainWindow->getActiveRemoteClientId();
                     if (activeRemoteClientId != activeSessionIdentity) {
                         m_mainWindow->setActiveRemoteClientId(activeSessionIdentity);
-                        m_mainWindow->setRemoteClientConnected(false);
                     }
                 }
             } else {
                 // Discovery loss does not delete the local project/canvas and
                 // does not itself purge uploads. The RemoteSession lease owns
                 // that terminal decision after its exact three-second limit.
+                RemoteSessionCoordinator* coordinator = m_webSocketClient
+                    ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
+                const RemoteSessionCoordinator::Binding binding = coordinator
+                    ? coordinator->outgoingForPeer(activeSessionIdentity)
+                    : RemoteSessionCoordinator::Binding();
+                const bool retainedActive = !binding.remoteSessionId.isEmpty()
+                    && binding.phase == QLatin1String("Active");
+                const bool retainedGrace = !binding.remoteSessionId.isEmpty()
+                    && binding.phase == QLatin1String("Grace");
+                if (retainedActive || retainedGrace) {
+                    // Presence lists are advisory while a server-authenticated
+                    // RemoteSession binding exists. A missing discovery entry
+                    // must therefore be a no-op: lease events alone own the
+                    // Connected/Reconnecting state and command gating.
+                    return;
+                }
                 activeSession->lastClientInfo.setOnline(false);
                 activeSession->lastClientInfo.setFromMemory(true);
                 m_mainWindow->setSelectedClient(activeSession->lastClientInfo);

@@ -18,8 +18,7 @@ ProjectStore::ProjectStore(QString filePath)
 
 QString ProjectStore::defaultFilePath()
 {
-    return QDir(RuntimeProfile::appDataLocation())
-        .filePath(QStringLiteral("projects-v2.json"));
+    return RuntimeProfile::projectsFilePath();
 }
 
 bool ProjectStore::load(QList<ProjectRecord>* projects)

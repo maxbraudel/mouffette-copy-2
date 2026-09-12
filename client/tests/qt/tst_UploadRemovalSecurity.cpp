@@ -49,6 +49,7 @@ private slots:
     void removeAllFailureKeepsMappings();
     void scopedRemovalFailureRollsBackTheWholeBatch();
     void idempotentRecoveryIsBoundToPersistentSender();
+    void scopeAwareRegistrySupportsConcurrentSameDigest();
     void interruptedUploadRemovesOnlyPartialStagingAndCanRetry();
     void v3UploadTeardownQuarantinesAndDropsMappings();
     void completedUploadAckIsReplayableAndInventoryBound();
@@ -68,10 +69,7 @@ private:
 };
 
 QString UploadRemovalSecurityTest::uploadRoot() const {
-    QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-    if (base.isEmpty()) base = QDir::tempPath();
-    return QFileInfo(QDir(base).filePath(QStringLiteral("Mouffette/Uploads")))
-        .absoluteFilePath();
+    return RemoteCacheStore::defaultRootPath();
 }
 
 void UploadRemovalSecurityTest::init() {
@@ -346,6 +344,15 @@ void UploadRemovalSecurityTest::idempotentRecoveryIsBoundToPersistentSender() {
     FileManager files;
     UploadManager uploads(&files);
     QSignalSpy replies(&uploads, &UploadManager::protocolV3UploadResponseReady);
+    QTemporaryDir localSourceDirectory;
+    QVERIFY(localSourceDirectory.isValid());
+    const QString localSourcePath = QDir(localSourceDirectory.path()).filePath(
+        QStringLiteral("same-content.png"));
+    QFile localSource(localSourcePath);
+    QVERIFY(localSource.open(QIODevice::WriteOnly | QIODevice::NewOnly));
+    QCOMPARE(localSource.write(bytes), bytes.size());
+    localSource.close();
+    QCOMPARE(files.getOrCreateFileId(localSourcePath), fileId);
 
     auto deliverUpload = [&](const QString& cacheOwner,
                              const QString& sessionId,
@@ -406,14 +413,16 @@ void UploadRemovalSecurityTest::idempotentRecoveryIsBoundToPersistentSender() {
 
     deliverUpload(senderId, remoteSessionId, firstUploadId,
                   QStringLiteral("asset_first"), QStringLiteral("media_first"));
-    const QString canonicalExistingPath = files.getFilePathForId(fileId);
+    const RemoteCacheStore::Scope firstScope{senderId, remoteSessionId, 1};
+    const QString canonicalExistingPath =
+        files.getReceivedFilePath(firstScope, fileId);
     QVERIFY(!canonicalExistingPath.isEmpty());
     QVERIFY(canonicalExistingPath.contains(
         senderId + QLatin1Char('/') + remoteSessionId + QStringLiteral("/validated/")));
 
     deliverUpload(senderId, remoteSessionId, retryUploadId,
                   QStringLiteral("asset_retry"), QStringLiteral("media_retry"));
-    QCOMPARE(files.getFilePathForId(fileId), canonicalExistingPath);
+    QCOMPARE(files.getReceivedFilePath(firstScope, fileId), canonicalExistingPath);
     const QString retryStaging = QDir(uploadRoot()).filePath(
         senderId + QLatin1Char('/') + remoteSessionId
         + QStringLiteral("/staging/asset_retry.png"));
@@ -425,11 +434,66 @@ void UploadRemovalSecurityTest::idempotentRecoveryIsBoundToPersistentSender() {
                   QStringLiteral("77777777-7777-4777-8777-777777777777"),
                   QStringLiteral("asset_foreign"),
                   QStringLiteral("media_foreign"));
-    QCOMPARE(files.getFilePathForId(fileId), canonicalExistingPath);
-    QVERIFY(!files.getIdeaIdsForFile(fileId).contains(QStringLiteral("foreign_session")));
+    const RemoteCacheStore::Scope foreignScope{
+        foreignSenderId, QStringLiteral("foreign_session"), 1};
+    const QString foreignPath = files.getReceivedFilePath(foreignScope, fileId);
+    QVERIFY(!foreignPath.isEmpty());
+    QVERIFY(foreignPath != canonicalExistingPath);
+    QCOMPARE(QFileInfo(files.getFilePathForId(fileId)).canonicalFilePath(),
+             QFileInfo(localSourcePath).canonicalFilePath());
+    QVERIFY(files.getIdeaIdsForFile(fileId).contains(QStringLiteral("foreign_session")));
     QVERIFY(!replies.isEmpty());
     QCOMPARE(replies.constLast().at(0).toJsonObject().value("type").toString(),
-             QStringLiteral("upload_rejected"));
+             QStringLiteral("upload_finished"));
+
+    const auto teardown = uploads.teardownRemoteSession(
+        senderId, remoteSessionId, 1,
+        QStringLiteral("88888888-8888-4888-8888-888888888888"));
+    QVERIFY(teardown.acknowledgementSafe());
+    QVERIFY(files.getReceivedFilePath(firstScope, fileId).isEmpty());
+    QCOMPARE(files.getReceivedFilePath(foreignScope, fileId), foreignPath);
+    QVERIFY(QFileInfo::exists(foreignPath));
+    QVERIFY(QFileInfo::exists(localSourcePath));
+}
+
+void UploadRemovalSecurityTest::scopeAwareRegistrySupportsConcurrentSameDigest()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const RemoteCacheStore::Scope first{
+        QStringLiteral("concurrent_sender_a"), QStringLiteral("concurrent_session_a"), 1};
+    const RemoteCacheStore::Scope second{
+        QStringLiteral("concurrent_sender_b"), QStringLiteral("concurrent_session_b"), 1};
+    const QString fileId(64, QLatin1Char('a'));
+    const QString firstPath = QDir(directory.path()).filePath(QStringLiteral("a/media.png"));
+    const QString secondPath = QDir(directory.path()).filePath(QStringLiteral("b/media.png"));
+    QVERIFY(QDir().mkpath(QFileInfo(firstPath).absolutePath()));
+    QVERIFY(QDir().mkpath(QFileInfo(secondPath).absolutePath()));
+    QFile firstFile(firstPath);
+    QVERIFY(firstFile.open(QIODevice::WriteOnly));
+    QCOMPARE(firstFile.write("same", 4), qint64(4));
+    firstFile.close();
+    QFile secondFile(secondPath);
+    QVERIFY(secondFile.open(QIODevice::WriteOnly));
+    QCOMPARE(secondFile.write("same", 4), qint64(4));
+    secondFile.close();
+
+    FileManager files;
+    QVERIFY(files.registerReceivedFilePath(first, fileId, firstPath));
+    QVERIFY(files.registerReceivedFilePath(second, fileId, secondPath));
+    QVERIFY(files.getReceivedFilePath(first, fileId)
+            != files.getReceivedFilePath(second, fileId));
+
+    const QString conflictingPath = QDir(directory.path()).filePath(
+        QStringLiteral("a/conflict.png"));
+    QFile conflict(conflictingPath);
+    QVERIFY(conflict.open(QIODevice::WriteOnly));
+    QCOMPARE(conflict.write("other", 5), qint64(5));
+    conflict.close();
+    QVERIFY(!files.registerReceivedFilePath(first, fileId, conflictingPath));
+    QCOMPARE(files.removeReceivedFileMappingsForScope(first), 1);
+    QVERIFY(files.getReceivedFilePath(first, fileId).isEmpty());
+    QVERIFY(QFileInfo::exists(files.getReceivedFilePath(second, fileId)));
 }
 
 void UploadRemovalSecurityTest::interruptedUploadRemovesOnlyPartialStagingAndCanRetry() {
@@ -586,7 +650,8 @@ void UploadRemovalSecurityTest::v3UploadTeardownQuarantinesAndDropsMappings() {
     };
     uploads.handleIncomingMessage(complete);
 
-    const QString validatedPath = files.getFilePathForId(digest);
+    const RemoteCacheStore::Scope scope{senderId, remoteSessionId, 1};
+    const QString validatedPath = files.getReceivedFilePath(scope, digest);
     QVERIFY(!validatedPath.isEmpty());
     QVERIFY(QFileInfo::exists(validatedPath));
     QCOMPARE(replies.constLast().at(0).toJsonObject().value("type").toString(),
@@ -596,7 +661,7 @@ void UploadRemovalSecurityTest::v3UploadTeardownQuarantinesAndDropsMappings() {
         senderId, remoteSessionId, 1, teardownId);
     QVERIFY(committed.acknowledgementSafe());
     QCOMPARE(uploads.lastTeardownRemovedFileCount(), 1);
-    QVERIFY(files.getFilePathForId(digest).isEmpty());
+    QVERIFY(files.getReceivedFilePath(scope, digest).isEmpty());
     QVERIFY(!QFileInfo::exists(validatedPath));
     QTRY_COMPARE_WITH_TIMEOUT(
         uploads.remoteCacheStore()->state({senderId, remoteSessionId, 1}),
@@ -609,7 +674,7 @@ void UploadRemovalSecurityTest::v3UploadTeardownQuarantinesAndDropsMappings() {
 
     // A late duplicate can neither recreate the live namespace nor its mapping.
     uploads.handleIncomingMessage(chunk);
-    QVERIFY(files.getFilePathForId(digest).isEmpty());
+    QVERIFY(files.getReceivedFilePath(scope, digest).isEmpty());
     QVERIFY(!QDir(QDir(uploadRoot()).filePath(senderId + QLatin1Char('/')
                                               + remoteSessionId)).exists());
 }
@@ -677,7 +742,8 @@ void UploadRemovalSecurityTest::completedUploadAckIsReplayableAndInventoryBound(
     complete.insert("assets", completionAssets);
     uploads.handleIncomingMessage(complete);
     QCOMPARE(countReplies(QStringLiteral("upload_finished")), 1);
-    const QString validatedPath = files.getFilePathForId(digest);
+    const RemoteCacheStore::Scope completionScope{senderId, remoteSessionId, 1};
+    const QString validatedPath = files.getReceivedFilePath(completionScope, digest);
     QVERIFY(!validatedPath.isEmpty());
     QVERIFY(QFileInfo::exists(validatedPath));
 
@@ -780,7 +846,8 @@ void UploadRemovalSecurityTest::receiverRejectsMp4WhoseMediaSamplesCannotDecode(
     QVERIFY(!replies.isEmpty());
     QCOMPARE(replies.constLast().at(0).toJsonObject().value("type").toString(),
              QStringLiteral("upload_rejected"));
-    QVERIFY(files.getFilePathForId(digest).isEmpty());
+    QVERIFY(files.getReceivedFilePath(
+        {senderId, remoteSessionId, 1}, digest).isEmpty());
     const QString sessionRoot = QDir(uploadRoot()).filePath(
         senderId + QLatin1Char('/') + remoteSessionId);
     // Rejecting one invalid asset removes its staging/validated copies, but it
@@ -826,8 +893,8 @@ void UploadRemovalSecurityTest::leaseExpiryBulkTeardownIncludesValidatedScopes()
     QVERIFY(secondFile.open(QIODevice::WriteOnly));
     QCOMPARE(secondFile.write("second", 6), qint64(6));
     secondFile.close();
-    files.registerReceivedFilePath(firstFileId, firstPath);
-    files.registerReceivedFilePath(secondFileId, secondPath);
+    QVERIFY(files.registerReceivedFilePath(first, firstFileId, firstPath));
+    QVERIFY(files.registerReceivedFilePath(second, secondFileId, secondPath));
 
     const UploadManager::BulkTeardownResult result =
         uploads.teardownAllIncomingRemoteSessions(
@@ -838,8 +905,8 @@ void UploadRemovalSecurityTest::leaseExpiryBulkTeardownIncludesValidatedScopes()
     QCOMPARE(result.removedFileMappings, 2);
     QVERIFY(result.quarantinedBytes >= 11);
     QVERIFY(result.allLogicallyCommitted());
-    QVERIFY(files.getFilePathForId(firstFileId).isEmpty());
-    QVERIFY(files.getFilePathForId(secondFileId).isEmpty());
+    QVERIFY(files.getReceivedFilePath(first, firstFileId).isEmpty());
+    QVERIFY(files.getReceivedFilePath(second, secondFileId).isEmpty());
     QVERIFY(!QFileInfo::exists(firstPath));
     QVERIFY(!QFileInfo::exists(secondPath));
 
@@ -900,7 +967,7 @@ void UploadRemovalSecurityTest::terminalSignalsWaitForRendererBarrierBeforeQuara
             return qMakePair(scope, QString());
         }
         file.close();
-        files.registerReceivedFilePath(QString(64, fileFill), path);
+        files.registerReceivedFilePath(scope, QString(64, fileFill), path);
         return qMakePair(scope, path);
     };
 
@@ -1013,6 +1080,7 @@ void UploadRemovalSecurityTest::duplicateUploadClickIsIgnoredBeforeExplicitCance
                 {"policyVersion", 1}, {"heartbeatIntervalMs", 750},
                 {"leaseTimeoutMs", 3000}, {"scenePrepareTimeoutMs", 15000},
                 {"sceneActivationLeadMs", 4000}, {"sceneMaxClockSkewMs", 50},
+                {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
                 {"uploadIdleTimeoutMs", 45000}, {"uploadTargetAckTimeoutMs", 30000},
                 {"removalAckTimeoutMs", 30000},
             };
@@ -1126,6 +1194,7 @@ void UploadRemovalSecurityTest::protocolV3RunsTwoOutgoingSessionsConcurrently() 
                     {"policyVersion", 1}, {"heartbeatIntervalMs", 750},
                     {"leaseTimeoutMs", 3000}, {"scenePrepareTimeoutMs", 15000},
                     {"sceneActivationLeadMs", 4000}, {"sceneMaxClockSkewMs", 50},
+                    {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
                     {"uploadIdleTimeoutMs", 45000},
                     {"uploadTargetAckTimeoutMs", 30000},
                     {"removalAckTimeoutMs", 30000},
@@ -1289,6 +1358,7 @@ void UploadRemovalSecurityTest::protocolV3TargetedRemovalIsExactAndIdempotent() 
                     {"policyVersion", 1}, {"heartbeatIntervalMs", 750},
                     {"leaseTimeoutMs", 3000}, {"scenePrepareTimeoutMs", 15000},
                     {"sceneActivationLeadMs", 4000}, {"sceneMaxClockSkewMs", 50},
+                    {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
                     {"uploadIdleTimeoutMs", 45000},
                     {"uploadTargetAckTimeoutMs", 30000},
                     {"removalAckTimeoutMs", 30000},
@@ -1372,7 +1442,7 @@ void UploadRemovalSecurityTest::protocolV3TargetedRemovalIsExactAndIdempotent() 
     QVERIFY(cachedFile.open(QIODevice::WriteOnly | QIODevice::NewOnly));
     QCOMPARE(cachedFile.write(QByteArray(assetSize, 'x')), assetSize);
     cachedFile.close();
-    files.registerReceivedFilePath(digest, validatedPath);
+    QVERIFY(files.registerReceivedFilePath(scope, digest, validatedPath));
     files.associateFileWithIdea(digest, remoteSessionId);
 
     auto command = [&](const QString& removalId) {
@@ -1402,7 +1472,7 @@ void UploadRemovalSecurityTest::protocolV3TargetedRemovalIsExactAndIdempotent() 
     QCOMPARE(rejection.value("result").toString(), QStringLiteral("cleanup_error"));
     QVERIFY(!rejection.value("cacheQuarantined").toBool(true));
     QVERIFY(QFileInfo::exists(validatedPath));
-    QCOMPARE(QFileInfo(files.getFilePathForId(digest)).canonicalFilePath(),
+    QCOMPARE(QFileInfo(files.getReceivedFilePath(scope, digest)).canonicalFilePath(),
              QFileInfo(validatedPath).canonicalFilePath());
 
     const QString removalId =
@@ -1416,7 +1486,7 @@ void UploadRemovalSecurityTest::protocolV3TargetedRemovalIsExactAndIdempotent() 
     QCOMPARE(committed.value("result").toString(), QStringLiteral("committed"));
     QVERIFY(committed.value("cacheQuarantined").toBool(false));
     QVERIFY(!QFileInfo::exists(validatedPath));
-    QVERIFY(files.getFilePathForId(digest).isEmpty());
+    QVERIFY(files.getReceivedFilePath(scope, digest).isEmpty());
     QVERIFY(uploads.remoteCacheStore()->acceptsCommands(scope));
 
     // The same immutable command replays the durable local tombstone and does

@@ -10,6 +10,8 @@
 #include <QSharedPointer>
 #include <QByteArray>
 
+#include "backend/network/RemoteCacheStore.h"
+
 // Phase 4.2: Forward declarations of specialized services
 class LocalFileRepository;
 class RemoteFileTracker;
@@ -57,6 +59,22 @@ public:
     // Remove a previously registered received file mapping on the target side (called when sender asks to delete a file)
     void removeReceivedFileMapping(const QString& fileId);
 
+    // Protocol-v3 received files live in a RemoteSession scope and must never
+    // share the local-source fileId namespace or another session's mapping.
+    QString getReceivedFilePath(const RemoteCacheStore::Scope& scope,
+                                const QString& fileId) const;
+    bool registerReceivedFilePath(const RemoteCacheStore::Scope& scope,
+                                  const QString& fileId,
+                                  const QString& absolutePath);
+    bool removeReceivedFileMapping(const RemoteCacheStore::Scope& scope,
+                                   const QString& fileId);
+    int removeReceivedFileMappingsForScope(const RemoteCacheStore::Scope& scope);
+    bool rebindReceivedFileScope(const RemoteCacheStore::Scope& oldScope,
+                                 const RemoteCacheStore::Scope& newScope);
+    QList<QString> getReceivedFileIds(const RemoteCacheStore::Scope& scope) const;
+    void releaseReceivedFileMemory(const RemoteCacheStore::Scope& scope,
+                                   const QString& fileId);
+
     // Ensure file bytes are resident in memory for low-latency playback.
     void preloadFileIntoMemory(const QString& fileId);
     // Retrieve a shared QByteArray for a file. Loads from disk on first access unless already cached.
@@ -97,6 +115,15 @@ public:
     static void setFileRemovalNotifier(std::function<void(const QString& fileId, const QList<QString>& clientIds, const QList<QString>& canvasSessionIds)> cb);
 
 private:
+    struct ReceivedScopeFiles {
+        RemoteCacheStore::Scope scope;
+        QHash<QString, QString> pathsByFileId;
+    };
+
+    static QString receivedScopeKey(const RemoteCacheStore::Scope& scope);
+    static QString receivedMemoryKey(const RemoteCacheStore::Scope& scope,
+                                     const QString& fileId);
+
     // Phase 4.2: Service references (initialized in constructor)
     LocalFileRepository* m_repository;
     RemoteFileTracker* m_tracker;
@@ -105,6 +132,7 @@ private:
     // Media associations (not moved to services - app-specific logic)
     QHash<QString, QList<QString>> m_fileIdToMediaIds; // fileId -> [mediaId1, mediaId2, ...]
     QHash<QString, QString> m_mediaIdToFileId;     // mediaId -> fileId
+    QHash<QString, ReceivedScopeFiles> m_receivedFilesByScope;
     
 };
 

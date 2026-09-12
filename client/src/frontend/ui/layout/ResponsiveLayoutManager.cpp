@@ -62,9 +62,19 @@ void ResponsiveLayoutManager::updateResponsiveButtonVisibility()
     
     const int windowWidth = m_mainWindow->width();
     const bool shouldButtonsBeVisible = windowWidth >= m_buttonVisibilityThreshold;
+    const bool onScreenView = isOnScreenView();
+
+    if (QPushButton* closeSessionButton =
+            m_mainWindow->getCloseSessionButton()) {
+        closeSessionButton->setVisible(onScreenView);
+    }
+    if (QPushButton* deleteProjectButton =
+            m_mainWindow->getDeleteProjectButton()) {
+        deleteProjectButton->setVisible(onScreenView);
+    }
     
     // Only apply responsive behavior when we're on the screen view page (remote client canvas)
-    if (!isOnScreenView()) {
+    if (!onScreenView) {
         // On client list page, always show buttons regardless of window size
         if (!m_buttonsVisible) {
             updateButtonVisibility(true);
@@ -165,11 +175,18 @@ void ResponsiveLayoutManager::updateButtonVisibility(bool visible)
     QPushButton* connectToggleButton = getConnectToggleButton();
     QWidget* historyControl = m_mainWindow->getHistoryControl();
     QPushButton* settingsButton = getSettingsButton();
+    QPushButton* closeSessionButton = m_mainWindow->getCloseSessionButton();
+    QPushButton* deleteProjectButton = m_mainWindow->getDeleteProjectButton();
     
     if (localClientInfoContainer) localClientInfoContainer->setVisible(visible);
     if (connectToggleButton) connectToggleButton->setVisible(visible);
     if (historyControl) historyControl->setVisible(visible);
     if (settingsButton) settingsButton->setVisible(visible);
+    // Session/project termination remains reachable at narrow widths; the
+    // less critical global controls above yield their space instead.
+    const bool showProjectActions = isOnScreenView();
+    if (closeSessionButton) closeSessionButton->setVisible(showProjectActions);
+    if (deleteProjectButton) deleteProjectButton->setVisible(showProjectActions);
 }
 
 bool ResponsiveLayoutManager::isOnScreenView() const

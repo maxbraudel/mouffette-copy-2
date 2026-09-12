@@ -13,6 +13,8 @@
 #include <QVariantList>
 #include <memory>
 
+#include "backend/network/RemoteCacheStore.h"
+
 class WebSocketClient;
 class FileManager;
 class QWidget;
@@ -255,6 +257,8 @@ private:
 	void sendFirstFramePresented(bool forceReplay = false);
 	void disconnectFirstFrameObservers();
 	void updatePrepareProgress();
+	QString receivedFilePath(const QString& fileId) const;
+	RemoteCacheStore::Scope receivedFileScope() const;
 
 
 	private:

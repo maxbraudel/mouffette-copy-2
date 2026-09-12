@@ -3,6 +3,45 @@
 #include <QPushButton>
 #include <QDebug>
 
+namespace {
+ClientInfo mergeClientPresentation(const ClientInfo& previous,
+                                   const ClientInfo& incoming)
+{
+    ClientInfo merged = incoming;
+    // Discovery can briefly deliver an identity-only entry while an endpoint
+    // snapshot is being refreshed. Never erase presentation/identity data
+    // already authenticated for the same persistent endpoint.
+    if (merged.getMachineName().trimmed().isEmpty()) {
+        merged.setMachineName(previous.getMachineName());
+    }
+    if (merged.getId().trimmed().isEmpty()) {
+        merged.setId(previous.getId());
+    }
+    if (merged.endpointId().trimmed().isEmpty()) {
+        merged.setEndpointId(previous.endpointId());
+        // setEndpointId also assigns the legacy id; retain the authenticated
+        // connection id when it differs from the persistent endpoint.
+        if (!previous.getId().trimmed().isEmpty()) {
+            merged.setId(previous.getId());
+        }
+    }
+    if (merged.getPlatform().trimmed().isEmpty()) {
+        merged.setPlatform(previous.getPlatform());
+    }
+    if (merged.installationId().trimmed().isEmpty()) {
+        merged.setInstallationId(previous.installationId());
+    }
+    if (merged.instanceId().trimmed().isEmpty()) {
+        merged.setInstanceId(previous.instanceId());
+        merged.setInstanceOrdinal(previous.instanceOrdinal());
+    }
+    if (merged.runtimeId().trimmed().isEmpty()) {
+        merged.setRuntimeId(previous.runtimeId());
+    }
+    return merged;
+}
+}
+
 SessionManager::SessionManager(QObject *parent)
     : QObject(parent)
 {
@@ -94,8 +133,17 @@ SessionManager::CanvasSession& SessionManager::getOrCreateSession(const QString&
 
     auto it = m_sessions.find(persistentClientId);
     if (it != m_sessions.end()) {
-        // Update existing session info
-        it.value().lastClientInfo = clientInfo;
+        // Update runtime availability without letting a transient partial
+        // discovery snapshot replace the known machine with "Unknown".
+        it.value().lastClientInfo =
+            mergeClientPresentation(it.value().lastClientInfo, clientInfo);
+        if (clientInfo.isOnline() && !clientInfo.getId().isEmpty()
+            && clientInfo.getId() != it.value().serverAssignedId) {
+            const QString oldServerId = it.value().serverAssignedId;
+            it.value().serverAssignedId = clientInfo.getId();
+            updateServerIdIndex(persistentClientId, oldServerId,
+                                it.value().serverAssignedId);
+        }
         emit sessionModified(persistentClientId);
         return it.value();
     }

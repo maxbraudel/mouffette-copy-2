@@ -110,6 +110,8 @@ public:
     QLabel* getConnectionStatusLabel() const { return m_connectionStatusLabel; }
     QPushButton* getConnectToggleButton() const { return m_connectToggleButton; }
     QPushButton* getSettingsButton() const { return m_settingsButton; }
+    QPushButton* getCloseSessionButton() const;
+    QPushButton* getDeleteProjectButton() const;
     QWidget* getHistoryControl() const { return m_historyControl; }
     int getInnerContentGap() const;
     

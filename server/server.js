@@ -123,7 +123,9 @@ class MouffetteServer {
         this.sceneRuns = new SceneRunRegistry({
             prepareTimeoutMs: this.config.scenePrepareTimeoutMs,
             activationLeadMs: this.config.sceneActivationLeadMs,
+            startedAckTimeoutMs: this.config.sceneStartedAckTimeoutMs ?? 5_000,
             maximumClockUncertaintyMs: this.config.sceneMaxClockSkewMs,
+            maximumStartSkewMs: this.config.sceneMaxStartSkewMs ?? 750,
             stopTimeoutMs: this.config.leaseTimeoutMs,
             maximumTombstones: this.MAX_REMOTE_SCENE_TOMBSTONES,
             epochNow: this.epochNow,
@@ -1406,6 +1408,8 @@ class MouffetteServer {
                 scenePrepareTimeoutMs: this.config.scenePrepareTimeoutMs,
                 sceneActivationLeadMs: this.config.sceneActivationLeadMs,
                 sceneMaxClockSkewMs: this.config.sceneMaxClockSkewMs,
+                sceneStartedAckTimeoutMs: this.sceneRuns.startedAckTimeoutMs,
+                sceneMaxStartSkewMs: this.sceneRuns.maximumStartSkewMs,
                 uploadIdleTimeoutMs: this.config.uploadIdleTimeoutMs,
                 uploadTargetAckTimeoutMs: this.config.uploadTargetAckTimeoutMs,
                 removalAckTimeoutMs: this.config.removalAckTimeoutMs,

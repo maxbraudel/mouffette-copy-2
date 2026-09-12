@@ -12,6 +12,15 @@ QString persistentFallback(const QString& leaf)
 {
     return QDir(QDir::homePath()).filePath(QStringLiteral(".mouffette/%1").arg(leaf));
 }
+
+QString defaultPersistentRoot()
+{
+    const QString platform =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    const QString base = platform.isEmpty()
+        ? persistentFallback(QStringLiteral("data")) : platform;
+    return QDir(base).filePath(QStringLiteral("runtimes/instance-1"));
+}
 }
 
 void RuntimeProfile::configure(const RuntimeProfileContext& context)
@@ -26,44 +35,48 @@ RuntimeProfileContext RuntimeProfile::context()
 
 QString RuntimeProfile::appDataLocation()
 {
-    if (g_context.isTemporary()) {
-        const QString path = QDir(g_context.temporaryRoot).filePath(QStringLiteral("data"));
-        QDir().mkpath(path);
-        return path;
-    }
-    const QString platform = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    return platform.isEmpty() ? persistentFallback(QStringLiteral("data")) : platform;
+    return profileRoot();
 }
 
 QString RuntimeProfile::cacheLocation()
 {
-    if (g_context.isTemporary()) {
-        const QString path = QDir(g_context.temporaryRoot).filePath(QStringLiteral("cache"));
-        QDir().mkpath(path);
-        return path;
-    }
-    const QString platform = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-    return platform.isEmpty() ? persistentFallback(QStringLiteral("cache")) : platform;
+    return QDir(profileRoot()).filePath(QStringLiteral("cache"));
 }
 
 QString RuntimeProfile::installationDataLocation()
 {
-    const QString platform =
-        QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-    const QString path = platform.isEmpty()
-        ? persistentFallback(QStringLiteral("installation")) : platform;
-    QDir().mkpath(path);
-    return path;
+    return identityLocation();
+}
+
+QString RuntimeProfile::profileRoot()
+{
+    if (!g_context.rootPath.isEmpty()) {
+        return QDir::cleanPath(g_context.rootPath);
+    }
+    if (!g_context.temporaryRoot.isEmpty()) {
+        return QDir::cleanPath(g_context.temporaryRoot);
+    }
+    return QDir::cleanPath(defaultPersistentRoot());
+}
+
+QString RuntimeProfile::settingsFilePath()
+{
+    return QDir(profileRoot()).filePath(QStringLiteral("settings/settings.ini"));
+}
+
+QString RuntimeProfile::projectsFilePath()
+{
+    return QDir(profileRoot()).filePath(QStringLiteral("projects/projects-v2.json"));
+}
+
+QString RuntimeProfile::identityLocation()
+{
+    return QDir(profileRoot()).filePath(QStringLiteral("identity"));
 }
 
 std::unique_ptr<QSettings> RuntimeProfile::createSettings()
 {
-    if (g_context.isTemporary()) {
-        const QString path = QDir(g_context.temporaryRoot).filePath(QStringLiteral("settings.ini"));
-        return std::make_unique<QSettings>(path, QSettings::IniFormat);
-    }
-    return std::make_unique<QSettings>(QStringLiteral("Mouffette"),
-                                       QStringLiteral(MOUFFETTE_SETTINGS_APPLICATION));
+    return std::make_unique<QSettings>(settingsFilePath(), QSettings::IniFormat);
 }
 
 QVariantMap RuntimeProfile::readSettings()

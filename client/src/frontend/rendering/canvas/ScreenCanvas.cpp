@@ -6528,13 +6528,14 @@ void ScreenCanvas::onScenePreparedReceived(const QJsonObject& envelope)
         const QJsonObject policy = m_wsClient->serverPolicy();
         const int activationLeadMs = policy
             .value(QStringLiteral("sceneActivationLeadMs")).toInt();
-        const int leaseTimeoutMs = policy
-            .value(QStringLiteral("leaseTimeoutMs")).toInt();
-        if (activationLeadMs <= 0 || leaseTimeoutMs <= 0) {
+        const int startedAckTimeoutMs = policy
+            .value(QStringLiteral("sceneStartedAckTimeoutMs")).toInt();
+        if (activationLeadMs <= 0 || startedAckTimeoutMs <= 0) {
             failPendingSceneRun(QStringLiteral("Invalid scene activation policy"), true);
             return;
         }
-        m_sceneLaunchTimeoutTimer->start(activationLeadMs + leaseTimeoutMs);
+        m_sceneLaunchTimeoutTimer->start(
+            activationLeadMs + startedAckTimeoutMs);
     }
     m_localSceneArmed = m_wsClient->sendSceneArmed(
         m_pendingRemoteSceneInstanceId, uncertainty);
