@@ -41,8 +41,8 @@ private slots:
     void parsesFalseBooleansAsFalse();
     void appliesProductionOverrideLastPerKey();
     void emptyProductionOverrideChangesNothing();
-    void rejectsPublicPlainWebSocketUrlAtomically();
-    void appliesTransportSecurityPolicyToRuntimeUrlEdits();
+    void acceptsPublicPlainWebSocketUrl();
+    void acceptsBothWebSocketSchemesForRuntimeUrlEdits();
     void rejectsInvalidHiddenDeadlineOrdering();
     void warnsAndIgnoresUnknownNamespacedEnvKey();
 };
@@ -206,27 +206,24 @@ void AppConfigTest::emptyProductionOverrideChangesNothing() {
                 .startsWith(QStringLiteral("embedded-env:")));
 }
 
-void AppConfigTest::rejectsPublicPlainWebSocketUrlAtomically() {
+void AppConfigTest::acceptsPublicPlainWebSocketUrl() {
     AppConfig config;
-    AppConfig::LoadOptions defaults = isolatedOptions(QString());
     QString error;
-    QVERIFY2(config.load(defaults, &error), qPrintable(error));
-    const QString previousUrl = config.serverUrl();
-
-    AppConfig::LoadOptions invalid = isolatedOptions(QString());
-    invalid.processEnvironment.insert(QStringLiteral("MOUFFETTE_SERVER_URL"),
+    AppConfig::LoadOptions options = isolatedOptions(QString());
+    options.processEnvironment.insert(QStringLiteral("MOUFFETTE_SERVER_URL"),
                                       QStringLiteral("ws://example.com:8080"));
-    QVERIFY(!config.load(invalid, &error));
-    QVERIFY(error.contains(QStringLiteral("wss://")));
-    QCOMPARE(config.serverUrl(), previousUrl);
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.serverUrl(), QStringLiteral("ws://example.com:8080"));
 }
 
-void AppConfigTest::appliesTransportSecurityPolicyToRuntimeUrlEdits() {
+void AppConfigTest::acceptsBothWebSocketSchemesForRuntimeUrlEdits() {
     QString error;
     QUrl normalized;
-    QVERIFY(!AppConfig::validateServerUrl(
-        QStringLiteral("ws://example.com:8080"), &normalized, &error));
-    QVERIFY(error.contains(QStringLiteral("wss://")));
+    QVERIFY2(AppConfig::validateServerUrl(
+        QStringLiteral("ws://example.com:8080"), &normalized, &error),
+        qPrintable(error));
+    QCOMPARE(normalized.toString(QUrl::FullyEncoded),
+             QStringLiteral("ws://example.com:8080"));
 
     error.clear();
     QVERIFY2(AppConfig::validateServerUrl(
@@ -241,14 +238,14 @@ void AppConfigTest::appliesTransportSecurityPolicyToRuntimeUrlEdits() {
         qPrintable(error));
 
     error.clear();
-    QVERIFY(!AppConfig::validateServerUrl(
-        QStringLiteral("ws://receiver:8080"), &normalized, &error));
-    QVERIFY(error.contains(QStringLiteral("wss://")));
+    QVERIFY2(AppConfig::validateServerUrl(
+        QStringLiteral("ws://receiver:8080"), &normalized, &error),
+        qPrintable(error));
 
     error.clear();
-    QVERIFY(!AppConfig::validateServerUrl(
-        QStringLiteral("ws://receiver.local:8080"), &normalized, &error));
-    QVERIFY(error.contains(QStringLiteral("wss://")));
+    QVERIFY2(AppConfig::validateServerUrl(
+        QStringLiteral("ws://receiver.local:8080"), &normalized, &error),
+        qPrintable(error));
 
     error.clear();
     QVERIFY2(AppConfig::validateServerUrl(

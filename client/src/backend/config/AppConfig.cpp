@@ -4,7 +4,6 @@
 
 #include <QFile>
 #include <QDebug>
-#include <QHostAddress>
 #include <QMap>
 #include <QRegularExpression>
 #include <QSettings>
@@ -116,35 +115,6 @@ bool parseInteger(const RawValue& raw,
     return true;
 }
 
-bool isPrivateWebSocketHost(const QString& inputHost) {
-    const QString host = inputHost.trimmed().toLower();
-    QHostAddress address;
-    if (address.setAddress(host)) {
-        if (address.isLoopback() || address.isLinkLocal()) {
-            return true;
-        }
-
-        bool isIpv4 = false;
-        const quint32 ipv4 = address.toIPv4Address(&isIpv4);
-        if (isIpv4) {
-            return (ipv4 & 0xff000000U) == 0x0a000000U
-                || (ipv4 & 0xfff00000U) == 0xac100000U
-                || (ipv4 & 0xffff0000U) == 0xc0a80000U;
-        }
-
-        const Q_IPV6ADDR ipv6 = address.toIPv6Address();
-        return (ipv6[0] & 0xfeU) == 0xfcU; // RFC 4193 unique-local fc00::/7
-    }
-
-    // Hostnames are deliberately not guessed to be private. A single-label or
-    // mDNS-looking name can resolve to a public address (and can change between
-    // validation and connection), so plain WebSocket is limited to literal
-    // private/link-local/loopback addresses and the DNS names reserved for the
-    // local loopback namespace.
-    return host == QStringLiteral("localhost")
-        || host.endsWith(QStringLiteral(".localhost"));
-}
-
 bool parseServerUrl(const RawValue& raw, QUrl& output, QString* error) {
     const QUrl url(raw.value.trimmed(), QUrl::StrictMode);
     const QString scheme = url.scheme().toLower();
@@ -156,10 +126,6 @@ bool parseServerUrl(const RawValue& raw, QUrl& output, QString* error) {
     const int port = url.port(-1);
     if (port == 0 || port > 65535) {
         return setError(error, QStringLiteral("MOUFFETTE_SERVER_URL from %1 has an invalid port")
-                                   .arg(raw.source));
-    }
-    if (scheme == QStringLiteral("ws") && !isPrivateWebSocketHost(url.host())) {
-        return setError(error, QStringLiteral("MOUFFETTE_SERVER_URL from %1 must use wss:// for a public host")
                                    .arg(raw.source));
     }
     output = url;

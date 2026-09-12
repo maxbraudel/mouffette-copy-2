@@ -70,8 +70,9 @@ public:
     // process environment or the user's native QSettings store.
     bool load(const LoadOptions& options, QString* errorMessage = nullptr);
 
-    // Applies the same transport-security policy to values edited at runtime
-    // as the startup configuration loader (ws:// only on local/private hosts).
+    // Applies the same URL validation to values edited at runtime as the
+    // startup configuration loader. Both ws:// and wss:// are accepted for
+    // every valid host.
     static bool validateServerUrl(const QString& value,
                                   QUrl* normalized = nullptr,
                                   QString* errorMessage = nullptr);
