@@ -75,9 +75,6 @@ public:
      */
     void setEnabled(bool enabled);
 
-    int authenticatedDeviceCount() const noexcept { return m_authenticatedDeviceCount; }
-    int liveSceneCount() const noexcept { return m_liveSceneCount; }
-
 signals:
     /**
      * @brief Emitted when a client is clicked
@@ -91,8 +88,6 @@ signals:
      * @param sceneRunId The immutable SceneRun identity
      */
     void ongoingSceneClicked(const QString& sceneRunId);
-
-    void summaryCountsChanged(int authenticatedDeviceCount, int liveSceneCount);
 
 private slots:
     /**
@@ -124,7 +119,7 @@ private:
     void updateClientItem(QListWidgetItem* item,
                           const ClientInfo& client,
                           qint64 nowMs);
-    void updateSectionTitles();
+    void refreshOngoingSceneDurations();
     QString peerDisplayName(const QString& endpointId) const;
 
     // Canonical Live-scene model (not owned)
@@ -132,7 +127,6 @@ private:
 
     // UI Components
     QVBoxLayout* m_layout;
-    QLabel* m_clientsLabel;
     QListWidget* m_clientListWidget;
     QLabel* m_ongoingScenesLabel;
     QListWidget* m_ongoingScenesList;
@@ -140,8 +134,6 @@ private:
 
     // Data
     QList<ClientInfo> m_availableClients;
-    int m_authenticatedDeviceCount = 0;
-    int m_liveSceneCount = 0;
 };
 
 #endif // CLIENTLISTPAGE_H

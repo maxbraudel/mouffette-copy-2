@@ -13,9 +13,13 @@
 #include <QDateTime>
 #include <QListWidgetItem>
 #include <QTimer>
-#include <algorithm>
 
 namespace {
+QString clientIdentity(const ClientInfo& client)
+{
+    return client.endpointId().isEmpty() ? client.getId() : client.endpointId();
+}
+
 QString formatDuration(qint64 elapsedMs)
 {
     const qint64 totalSeconds = qMax<qint64>(0, elapsedMs) / 1000;
@@ -39,7 +43,6 @@ ClientListPage::ClientListPage(SceneActivityModel* sceneActivityModel,
     : QWidget(parent),
       m_sceneActivityModel(sceneActivityModel),
       m_layout(nullptr),
-      m_clientsLabel(nullptr),
       m_clientListWidget(nullptr),
       m_ongoingScenesLabel(nullptr),
       m_ongoingScenesList(nullptr),
@@ -50,6 +53,9 @@ ClientListPage::ClientListPage(SceneActivityModel* sceneActivityModel,
         connect(m_sceneActivityModel, &SceneActivityModel::activitiesChanged,
                 this, &ClientListPage::refreshOngoingScenesList);
     }
+    // Project deadlines are presentation-only state. Keep their cadence local
+    // and precise instead of waiting for a server client-list snapshot.
+    m_countdownTimer->setTimerType(Qt::PreciseTimer);
     m_countdownTimer->setInterval(1000);
     connect(m_countdownTimer, &QTimer::timeout,
             this, &ClientListPage::refreshClientCountdowns);
@@ -61,10 +67,6 @@ void ClientListPage::setupUI() {
     m_layout = new QVBoxLayout(this);
     m_layout->setSpacing(gInnerContentGap);
     m_layout->setContentsMargins(0, 0, 0, 0);
-
-    m_clientsLabel = new QLabel(QStringLiteral("Clients · 0 authenticated"));
-    ThemeManager::instance()->applyTitleText(m_clientsLabel);
-    m_layout->addWidget(m_clientsLabel);
 
     // Client list widget - simple and flexible
     m_clientListWidget = new QListWidget();
@@ -83,7 +85,7 @@ void ClientListPage::setupUI() {
     m_layout->addWidget(m_clientListWidget);
 
     // Ongoing scenes section mirrors client list styling
-    m_ongoingScenesLabel = new QLabel(QStringLiteral("Ongoing Scenes · 0 live"));
+    m_ongoingScenesLabel = new QLabel(QStringLiteral("Ongoing Scenes"));
     ThemeManager::instance()->applyTitleText(m_ongoingScenesLabel);
     m_layout->addWidget(m_ongoingScenesLabel);
 
@@ -182,7 +184,6 @@ void ClientListPage::refreshOngoingScenesList() {
     if (m_ongoingScenesList->count() == 0) {
         ensureOngoingScenesPlaceholder();
     }
-    updateSectionTitles();
 }
 
 void ClientListPage::updateClientList(const QList<ClientInfo>& clients) {
@@ -197,7 +198,6 @@ void ClientListPage::updateClientList(const QList<ClientInfo>& clients) {
         : QString();
 
     m_availableClients = clients;
-    updateSectionTitles();
 
     m_clientListWidget->setUpdatesEnabled(false);
 
@@ -211,46 +211,51 @@ void ClientListPage::updateClientList(const QList<ClientInfo>& clients) {
 
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     if (clients.isEmpty()) {
-        m_clientListWidget->clear();
-        QListWidgetItem* item = new QListWidgetItem("No clients connected. Make sure other devices are running Mouffette and connected to the same server.");
-        item->setFlags(Qt::NoItemFlags);
-        item->setTextAlignment(Qt::AlignCenter);
-        QFont font = item->font();
-        font.setItalic(true);
-        font.setPointSize(16);
-        item->setFont(font);
-        item->setForeground(AppColors::gTextMuted);
-        m_clientListWidget->addItem(item);
-    } else {
-    const int existingCount = m_clientListWidget->count();
-    const int sharedCount = (existingCount < clients.size()) ? existingCount : static_cast<int>(clients.size());
-
-        for (int i = 0; i < sharedCount; ++i) {
+        // Do not destroy and recreate the placeholder for every discovery
+        // heartbeat. This keeps the view stable when nothing has changed.
+        for (int i = m_clientListWidget->count() - 1; i >= 0; --i) {
             QListWidgetItem* item = m_clientListWidget->item(i);
+            if (item && item->data(ClientListRoles::IsClientRow).toBool()) {
+                delete m_clientListWidget->takeItem(i);
+            }
+        }
+        ensureClientListPlaceholder();
+    } else {
+        // Reconcile rows by stable endpoint identity. Repeated discovery
+        // snapshots now reuse the existing QListWidgetItem instead of
+        // repurposing whichever row happens to share the same index.
+        for (int i = 0; i < clients.size(); ++i) {
             const ClientInfo& client = clients.at(i);
+            const QString expectedId = clientIdentity(client);
+            QListWidgetItem* item = nullptr;
+            int existingRow = -1;
+            for (int row = i; row < m_clientListWidget->count(); ++row) {
+                QListWidgetItem* candidate = m_clientListWidget->item(row);
+                if (candidate
+                    && candidate->data(ClientListRoles::ClientId).toString() == expectedId) {
+                    item = candidate;
+                    existingRow = row;
+                    break;
+                }
+            }
+            if (!item) {
+                item = new QListWidgetItem();
+                m_clientListWidget->insertItem(i, item);
+            } else if (existingRow != i) {
+                item = m_clientListWidget->takeItem(existingRow);
+                m_clientListWidget->insertItem(i, item);
+            }
             updateClientItem(item, client, nowMs);
         }
-
-        // Remove excess items if the new list is shorter
-        for (int i = existingCount - 1; i >= sharedCount; --i) {
-            delete m_clientListWidget->takeItem(i);
-        }
-
-        // Append new items if needed
-        for (int i = sharedCount; i < clients.size(); ++i) {
-            const ClientInfo& client = clients.at(i);
-            QListWidgetItem* item = new QListWidgetItem();
-            updateClientItem(item, client, nowMs);
-            m_clientListWidget->addItem(item);
+        while (m_clientListWidget->count() > clients.size()) {
+            delete m_clientListWidget->takeItem(m_clientListWidget->count() - 1);
         }
     }
 
     // Restore selection if the previously selected client still exists
     if (!clients.isEmpty() && !previouslySelectedId.isEmpty()) {
         for (int i = 0; i < clients.size(); ++i) {
-            const QString clientId = clients.at(i).endpointId().isEmpty()
-                ? clients.at(i).getId()
-                : clients.at(i).endpointId();
+            const QString clientId = clientIdentity(clients.at(i));
             if (clientId == previouslySelectedId) {
                 m_clientListWidget->setCurrentRow(i);
                 if (QListWidgetItem* restored = m_clientListWidget->item(i)) {
@@ -275,22 +280,23 @@ void ClientListPage::updateClientItem(QListWidgetItem* item,
         return;
     }
 
-    const QString clientId = client.endpointId().isEmpty()
-        ? client.getId()
-        : client.endpointId();
+    const QString clientId = clientIdentity(client);
     const QString secondary = client.getProjectSummaryText(nowMs);
     const QString accessible = secondary.isEmpty()
         ? client.getDisplayText()
         : QStringLiteral("%1\n%2").arg(client.getDisplayText(), secondary);
 
-    item->setText(accessible);
-    item->setData(ClientListRoles::ClientId, clientId);
-    item->setData(ClientListRoles::IsClientRow, true);
-    item->setData(ClientListRoles::PrimaryText, client.getIdentityDisplayText());
-    item->setData(ClientListRoles::AvailabilityStatus, client.availabilityBadgeText());
-    item->setData(ClientListRoles::SecondaryText, secondary);
-    item->setData(Qt::AccessibleTextRole, accessible);
-    item->setToolTip(accessible);
+    const auto setDataIfChanged = [item](int role, const QVariant& value) {
+        if (item->data(role) != value) item->setData(role, value);
+    };
+    if (item->text() != accessible) item->setText(accessible);
+    setDataIfChanged(ClientListRoles::ClientId, clientId);
+    setDataIfChanged(ClientListRoles::IsClientRow, true);
+    setDataIfChanged(ClientListRoles::PrimaryText, client.getIdentityDisplayText());
+    setDataIfChanged(ClientListRoles::AvailabilityStatus, client.availabilityBadgeText());
+    setDataIfChanged(ClientListRoles::SecondaryText, secondary);
+    setDataIfChanged(Qt::AccessibleTextRole, accessible);
+    if (item->toolTip() != accessible) item->setToolTip(accessible);
     // An offline durable project is still a normal editable row. Connectivity
     // only disables remote actions inside the canvas.
     item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
@@ -298,32 +304,21 @@ void ClientListPage::updateClientItem(QListWidgetItem* item,
 
 void ClientListPage::refreshClientCountdowns()
 {
-    refreshOngoingScenesList();
+    refreshOngoingSceneDurations();
     if (!m_clientListWidget || m_availableClients.isEmpty()) return;
 
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-    const QString selectedId = m_clientListWidget->currentItem()
-        ? m_clientListWidget->currentItem()->data(ClientListRoles::ClientId).toString()
-        : QString();
-    const int count = qMin(m_availableClients.size(), m_clientListWidget->count());
-    for (int i = 0; i < count; ++i) {
+    for (int i = 0; i < m_clientListWidget->count(); ++i) {
         QListWidgetItem* item = m_clientListWidget->item(i);
-        if (item && item->data(ClientListRoles::IsClientRow).toBool()) {
-            updateClientItem(item, m_availableClients.at(i), nowMs);
-        }
-    }
-
-    if (!selectedId.isEmpty()) {
-        for (int i = 0; i < count; ++i) {
-            QListWidgetItem* item = m_clientListWidget->item(i);
-            if (item && item->data(ClientListRoles::ClientId).toString() == selectedId) {
-                m_clientListWidget->setCurrentItem(item);
-                item->setSelected(true);
+        if (!item || !item->data(ClientListRoles::IsClientRow).toBool()) continue;
+        const QString clientId = item->data(ClientListRoles::ClientId).toString();
+        for (const ClientInfo& client : m_availableClients) {
+            if (clientIdentity(client) == clientId) {
+                updateClientItem(item, client, nowMs);
                 break;
             }
         }
     }
-    m_clientListWidget->viewport()->update();
 }
 
 void ClientListPage::setEnabled(bool enabled) {
@@ -334,10 +329,12 @@ void ClientListPage::setEnabled(bool enabled) {
 
 void ClientListPage::onClientItemClicked(QListWidgetItem* item) {
     if (!item) return;
-    int index = m_clientListWidget->row(item);
-    if (index >= 0 && index < m_availableClients.size()) {
-        ClientInfo client = m_availableClients[index];
-        emit clientClicked(client, index);
+    const QString clientId = item->data(ClientListRoles::ClientId).toString();
+    for (int index = 0; index < m_availableClients.size(); ++index) {
+        if (clientIdentity(m_availableClients.at(index)) == clientId) {
+            emit clientClicked(m_availableClients.at(index), index);
+            return;
+        }
     }
 }
 
@@ -351,25 +348,36 @@ void ClientListPage::onOngoingSceneItemClicked(QListWidgetItem* item) {
     }
 }
 
-void ClientListPage::updateSectionTitles()
+void ClientListPage::refreshOngoingSceneDurations()
 {
-    const int authenticated = static_cast<int>(std::count_if(
-        m_availableClients.cbegin(), m_availableClients.cend(),
-        [](const ClientInfo& client) { return client.isOnline(); }));
-    const int live = m_sceneActivityModel ? m_sceneActivityModel->liveCount() : 0;
-
-    if (m_clientsLabel) {
-        m_clientsLabel->setText(QStringLiteral("Clients · %1 authenticated")
-                                    .arg(authenticated));
-    }
-    if (m_ongoingScenesLabel) {
-        m_ongoingScenesLabel->setText(QStringLiteral("Ongoing Scenes · %1 live")
-                                          .arg(live));
-    }
-    if (authenticated != m_authenticatedDeviceCount || live != m_liveSceneCount) {
-        m_authenticatedDeviceCount = authenticated;
-        m_liveSceneCount = live;
-        emit summaryCountsChanged(authenticated, live);
+    if (!m_ongoingScenesList || !m_sceneActivityModel) return;
+    const QList<SceneActivityModel::Activity> activities =
+        m_sceneActivityModel->liveActivities();
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    for (int row = 0; row < m_ongoingScenesList->count(); ++row) {
+        QListWidgetItem* item = m_ongoingScenesList->item(row);
+        if (!item || !item->data(ClientListRoles::IsClientRow).toBool()) continue;
+        const QString runId = item->data(ClientListRoles::ClientId).toString();
+        for (const SceneActivityModel::Activity& activity : activities) {
+            if (activity.sceneRunId != runId) continue;
+            const QString startTime =
+                QDateTime::fromMSecsSinceEpoch(activity.startedAtEpochMs)
+                    .toString(QStringLiteral("HH:mm:ss"));
+            QString secondary = QStringLiteral("Started %1 · %2")
+                                    .arg(startTime,
+                                         formatDuration(nowMs - activity.startedAtEpochMs));
+            if (activity.degraded) secondary += QStringLiteral(" · Network degraded");
+            if (item->data(ClientListRoles::SecondaryText).toString() != secondary) {
+                item->setData(ClientListRoles::SecondaryText, secondary);
+                const QString primary =
+                    item->data(ClientListRoles::PrimaryText).toString();
+                const QString accessible = primary + QStringLiteral(". ") + secondary;
+                item->setText(primary + QLatin1Char('\n') + secondary);
+                item->setData(Qt::AccessibleTextRole, accessible);
+                item->setToolTip(primary + QLatin1Char('\n') + secondary);
+            }
+            break;
+        }
     }
 }
 

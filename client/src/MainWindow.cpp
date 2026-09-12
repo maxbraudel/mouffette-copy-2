@@ -1803,14 +1803,7 @@ void MainWindow::showClientListView() {
     removeVolumeIndicatorFromLayout();
     // Show top-bar page title and hide back button on client list
     if (m_pageTitleLabel) {
-        const int authenticatedCount = m_clientListPage
-            ? m_clientListPage->authenticatedDeviceCount() : 0;
-        const int liveCount = m_clientListPage
-            ? m_clientListPage->liveSceneCount() : 0;
-        m_pageTitleLabel->setText(
-            QStringLiteral("Clients · %1 authenticated · %2 live")
-                .arg(authenticatedCount)
-                .arg(liveCount));
+        m_pageTitleLabel->setText(QStringLiteral("Clients"));
         m_pageTitleLabel->show();
     }
     if (m_backButton) m_backButton->hide();
@@ -2662,13 +2655,9 @@ void MainWindow::showHistoryPage() {
 }
 
 void MainWindow::updateHistoryUnreadBadge(int unreadCount) {
-    if (!m_historyUnreadBadge || !m_historyButton) return;
+    if (!m_historyButton) return;
 
     const int normalizedCount = qMax(0, unreadCount);
-    m_historyUnreadBadge->setText(normalizedCount > 99
-                                      ? QStringLiteral("99+")
-                                      : QString::number(normalizedCount));
-    m_historyUnreadBadge->setVisible(normalizedCount > 0);
     m_historyButton->setAccessibleDescription(
         normalizedCount == 0
             ? QStringLiteral("No unread notifications")
@@ -3000,8 +2989,7 @@ void MainWindow::setupUI() {
     m_connectionLayout->setSpacing(8);
     
     // Contextual page title
-    m_pageTitleLabel = new QLabel(
-        QStringLiteral("Clients · 0 authenticated · 0 live"));
+    m_pageTitleLabel = new QLabel(QStringLiteral("Clients"));
     ThemeManager::instance()->applyTitleText(m_pageTitleLabel);
     // Match hostname styling: same font size, weight, and color
     m_pageTitleLabel->setStyleSheet(QString(
@@ -3051,8 +3039,8 @@ void MainWindow::setupUI() {
     m_settingsButton->setFixedWidth(settingsButtonWidth); // Use fixed width to prevent any changes
     connect(m_settingsButton, &QPushButton::clicked, this, &MainWindow::showSettingsDialog);
 
-    // History button and unread badge. The separate compact badge keeps the
-    // button label stable as the count changes.
+    // History remains a stable, uncluttered button. Unread state is exposed
+    // through its accessible description and tooltip, not a visual counter.
     m_historyControl = new QWidget(m_connectionBar);
     m_historyControl->setObjectName(QStringLiteral("historyControl"));
     m_historyControl->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
@@ -3070,19 +3058,6 @@ void MainWindow::setupUI() {
     connect(m_historyButton, &QPushButton::clicked,
             this, &MainWindow::showHistoryPage);
     historyControlLayout->addWidget(m_historyButton);
-
-    m_historyUnreadBadge = new QLabel(QStringLiteral("0"), m_historyControl);
-    m_historyUnreadBadge->setObjectName(QStringLiteral("historyUnreadBadge"));
-    m_historyUnreadBadge->setAlignment(Qt::AlignCenter);
-    m_historyUnreadBadge->setAttribute(Qt::WA_TransparentForMouseEvents);
-    m_historyUnreadBadge->setMinimumWidth(18);
-    m_historyUnreadBadge->setFixedHeight(18);
-    m_historyUnreadBadge->setStyleSheet(QString(
-        "QLabel { color: white; background-color: %1; border: none; "
-        "border-radius: 9px; padding: 0px 4px; font-size: 10px; font-weight: bold; }")
-        .arg(AppColors::colorToCss(AppColors::gStatusErrorText)));
-    m_historyUnreadBadge->hide();
-    historyControlLayout->addWidget(m_historyUnreadBadge);
 
     // [PHASE 6.1] Get local client info container from TopBarManager
     QWidget* localClientContainer = m_topBarManager ? m_topBarManager->getLocalClientInfoContainer() : nullptr;
@@ -3122,15 +3097,6 @@ void MainWindow::setupUI() {
     m_clientListPage = new ClientListPage(m_sceneActivityModel, this);
     connect(m_clientListPage, &ClientListPage::clientClicked, this, &MainWindow::onClientSelected);
     connect(m_clientListPage, &ClientListPage::ongoingSceneClicked, this, &MainWindow::onOngoingSceneSelected);
-    connect(m_clientListPage, &ClientListPage::summaryCountsChanged,
-            this, [this](int authenticatedCount, int liveCount) {
-        if (!m_pageTitleLabel || !m_stackedWidget
-            || m_stackedWidget->currentWidget() != m_clientListPage) return;
-        m_pageTitleLabel->setText(
-            QStringLiteral("Clients · %1 authenticated · %2 live")
-                .arg(authenticatedCount)
-                .arg(liveCount));
-    });
     m_stackedWidget->addWidget(m_clientListPage);
     
     // Show placeholder immediately (before any connection) so page isn't empty during CONNECTING state

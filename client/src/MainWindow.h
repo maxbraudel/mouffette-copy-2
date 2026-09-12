@@ -383,7 +383,6 @@ private:
     QPushButton* m_settingsButton;
     QWidget* m_historyControl = nullptr;
     QPushButton* m_historyButton = nullptr;
-    QLabel* m_historyUnreadBadge = nullptr;
     QPushButton* m_connectToggleButton;
     QLabel* m_connectionStatusLabel;
     
