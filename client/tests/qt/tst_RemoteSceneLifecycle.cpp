@@ -177,7 +177,7 @@ void RemoteSceneLifecycleTest::acknowledgedStopRestoresSelectedMediaWithoutReent
     QVERIFY(media->isSelected());
 
     // The local graph uses the same selection lock/restoration path as a
-    // committed remote SceneRun, without bypassing protocol-v2 authentication
+    // committed remote SceneRun, without bypassing protocol-v3 authentication
     // in this focused regression test.
     canvas.startHostSceneState(ScreenCanvas::HostSceneMode::Test);
     QVERIFY(canvas.isHostSceneActive());
@@ -232,14 +232,14 @@ void RemoteSceneLifecycleTest::liveRunCheckpointKeepsImmutableDraftAndStopRestor
     projects.stopAutomaticTimersForTesting();
     ClientInfo target(QStringLiteral("device-a"), QStringLiteral("Studio A"),
                       QStringLiteral("Linux"));
-    target.setClientId(QStringLiteral("device-a"));
+    target.setEndpointId(QStringLiteral("device-a"));
     QVERIFY(!projects.ensureProject(
         ClientSnapshot::fromClientInfo(target, 1'000),
         ProjectLifecycleState::Visible, 1'000).isEmpty());
     QVERIFY(projects.updateCanvasState(QStringLiteral("device-a"), draft, {}, 1'000));
     connect(&projects, &ProjectManager::projectCheckpointDue, &projects,
-            [&canvas, &projects](const QString& targetDeviceId) {
-        projects.updateCanvasState(targetDeviceId, canvas.serializeProjectState(), {}, 15'000);
+            [&canvas, &projects](const QString& targetEndpointId) {
+        projects.updateCanvasState(targetEndpointId, canvas.serializeProjectState(), {}, 15'000);
     });
 
     canvas.startHostSceneState(ScreenCanvas::HostSceneMode::Test);

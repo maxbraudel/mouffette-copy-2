@@ -148,7 +148,7 @@ void ClientListPage::refreshOngoingScenesList() {
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
 
     for (const SceneActivityModel::Activity& activity : activities) {
-        const QString peerName = peerDisplayName(activity.peerDeviceId);
+        const QString peerName = peerDisplayName(activity.peerEndpointId);
         const bool outgoing = activity.direction == SceneActivityModel::Direction::Outgoing;
         const QString primary = outgoing
             ? QStringLiteral("Sent to %1").arg(peerName)
@@ -248,9 +248,9 @@ void ClientListPage::updateClientList(const QList<ClientInfo>& clients) {
     // Restore selection if the previously selected client still exists
     if (!clients.isEmpty() && !previouslySelectedId.isEmpty()) {
         for (int i = 0; i < clients.size(); ++i) {
-            const QString clientId = clients.at(i).clientId().isEmpty()
+            const QString clientId = clients.at(i).endpointId().isEmpty()
                 ? clients.at(i).getId()
-                : clients.at(i).clientId();
+                : clients.at(i).endpointId();
             if (clientId == previouslySelectedId) {
                 m_clientListWidget->setCurrentRow(i);
                 if (QListWidgetItem* restored = m_clientListWidget->item(i)) {
@@ -275,9 +275,9 @@ void ClientListPage::updateClientItem(QListWidgetItem* item,
         return;
     }
 
-    const QString clientId = client.clientId().isEmpty()
+    const QString clientId = client.endpointId().isEmpty()
         ? client.getId()
-        : client.clientId();
+        : client.endpointId();
     const QString secondary = client.getProjectSummaryText(nowMs);
     const QString accessible = secondary.isEmpty()
         ? client.getDisplayText()
@@ -373,15 +373,15 @@ void ClientListPage::updateSectionTitles()
     }
 }
 
-QString ClientListPage::peerDisplayName(const QString& deviceId) const
+QString ClientListPage::peerDisplayName(const QString& endpointId) const
 {
     for (const ClientInfo& client : m_availableClients) {
-        if (client.clientId() != deviceId) continue;
+        if (client.endpointId() != endpointId) continue;
         const QString machineName = client.getMachineName().trimmed();
         if (!machineName.isEmpty()) return machineName;
         break;
     }
-    const QString abbreviated = deviceId.left(8);
+    const QString abbreviated = endpointId.left(8);
     return abbreviated.isEmpty()
         ? QStringLiteral("Unknown device")
         : QStringLiteral("Device %1").arg(abbreviated);

@@ -15,7 +15,7 @@ void TimerController::setupTimers() {
     // Periodic connection status refresh no longer needed (now event-driven); keep timer disabled
     statusUpdateTimer->stop();
 
-    // Device discovery in protocol v2 is snapshot based and has no watch
+    // Device discovery in protocol v3 is snapshot based and has no watch
     // subscription. Keep the server's view of our topology/volume fresh even
     // while this window is hidden (incoming receiver availability is separate
     // from local Project visibility).

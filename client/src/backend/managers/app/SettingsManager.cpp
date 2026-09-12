@@ -1,5 +1,6 @@
 #include "backend/managers/app/SettingsManager.h"
 #include "backend/config/AppConfig.h"
+#include "backend/runtime/RuntimeProfile.h"
 #include "MainWindow.h"
 #include "backend/network/WebSocketClient.h"
 #include "frontend/ui/theme/ThemeManager.h"
@@ -52,12 +53,12 @@ void SettingsManager::loadSettings() {
 }
 
 void SettingsManager::saveSettings() {
-    QSettings settings("Mouffette", "Client");
-    settings.setValue("serverUrl", m_serverUrlConfig.isEmpty()
+    const std::unique_ptr<QSettings> settings = RuntimeProfile::createSettings();
+    settings->setValue("serverUrl", m_serverUrlConfig.isEmpty()
                                       ? AppConfig::instance().serverUrl()
                                       : m_serverUrlConfig);
-    settings.setValue("autoUploadImportedMedia", m_autoUploadImportedMedia);
-    settings.sync();
+    settings->setValue("autoUploadImportedMedia", m_autoUploadImportedMedia);
+    settings->sync();
     
     qDebug() << "SettingsManager: Settings saved";
     emit settingsChanged();
@@ -73,9 +74,9 @@ void SettingsManager::setServerUrl(const QString& url) {
     const QString canonical = normalized.toString(QUrl::FullyEncoded);
     if (m_serverUrlConfig != canonical) {
         m_serverUrlConfig = canonical;
-        QSettings settings("Mouffette", "Client");
-        settings.setValue("serverUrl", m_serverUrlConfig);
-        settings.sync();
+        const std::unique_ptr<QSettings> settings = RuntimeProfile::createSettings();
+        settings->setValue("serverUrl", m_serverUrlConfig);
+        settings->sync();
         emit serverUrlChanged(canonical);
     }
 }
@@ -83,9 +84,9 @@ void SettingsManager::setServerUrl(const QString& url) {
 void SettingsManager::setAutoUploadImportedMedia(bool enabled) {
     if (m_autoUploadImportedMedia != enabled) {
         m_autoUploadImportedMedia = enabled;
-        QSettings settings("Mouffette", "Client");
-        settings.setValue("autoUploadImportedMedia", m_autoUploadImportedMedia);
-        settings.sync();
+        const std::unique_ptr<QSettings> settings = RuntimeProfile::createSettings();
+        settings->setValue("autoUploadImportedMedia", m_autoUploadImportedMedia);
+        settings->sync();
     }
 }
 

@@ -28,8 +28,8 @@
         {
           "file": "src/backend/handlers/UploadEventHandler.cpp",
           "mustContain": [
-            "requestRemoval\\(",
-            "requestUnload\\(",
+            "requestCancel\\(",
+            "reconcileRemoteFilesForSession\\(",
             "toggleUpload\\(",
             "associateFileWithIdea\\("
           ]
@@ -37,27 +37,27 @@
         {
           "file": "src/backend/network/WebSocketClient.h",
           "mustContain": [
-            "sendRemoveFile\\("
+            "sendUploadRemove\\("
           ]
         }
       ]
     },
     {
-      "id": "watch_unwatch_reconnect",
+      "id": "endpoint_discovery_reconnect",
       "rules": [
         {
           "file": "src/backend/handlers/ClientListEventHandler.cpp",
           "mustContain": [
-            "requestScreens\\(",
-            "toggleWatch\\("
+            "clientListReceived",
+            "candidate.endpointId\\(\\) == activeSessionIdentity"
           ]
         },
         {
-          "file": "src/frontend/handlers/WindowEventHandler.cpp",
+          "file": "src/backend/network/WebSocketClient.cpp",
           "mustContain": [
-            "isWatching\\(",
-            "toggleWatch\\(",
-            "requestScreens\\("
+            "resumeAllRemoteSessions\\(",
+            "reauthenticatedWithinLease",
+            "clientListReceived"
           ]
         }
       ]
@@ -68,20 +68,19 @@
         {
           "file": "src/backend/network/WebSocketClient.cpp",
           "mustContain": [
-            "sendRemoteSceneStart\\(",
-            "sendRemoteSceneStop\\(",
-            "msg\\[\\\"type\\\"\\] = \\\"remote_scene_stop\\\"",
-            "emit remoteSceneStartReceived\\(",
-            "emit remoteSceneStopReceived\\("
+            "sendScenePrepare\\(",
+            "sendSceneStop\\(",
+            "emit scenePrepareReceived\\(",
+            "emit sceneStopReceived\\("
           ]
         },
         {
           "file": "src/frontend/rendering/remote/RemoteSceneController.cpp",
           "mustContain": [
-            "onRemoteSceneStart\\(",
-            "onRemoteSceneStop\\(",
-            "sendRemoteSceneValidationResult\\(",
-            "sendRemoteSceneStopResult\\("
+            "onScenePrepareEnvelope\\(",
+            "onSceneStopEnvelope\\(",
+            "sendScenePrepared\\(",
+            "sendSceneStopped\\("
           ]
         }
       ]

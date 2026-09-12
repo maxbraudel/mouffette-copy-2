@@ -82,10 +82,10 @@ SceneRunCoordinator::SceneRunCoordinator(QObject* parent)
 {
 }
 
-void SceneRunCoordinator::setLocalDeviceId(const QString& deviceId)
+void SceneRunCoordinator::setLocalEndpointId(const QString& endpointId)
 {
-    m_localDeviceId = deviceId;
-    m_remoteSessions->setLocalDeviceId(deviceId);
+    m_localEndpointId = endpointId;
+    m_remoteSessions->setLocalEndpointId(endpointId);
 }
 
 void SceneRunCoordinator::setPrepareTimeoutMs(int timeoutMs)
@@ -132,10 +132,10 @@ bool SceneRunCoordinator::upsertSession(const QJsonObject& envelope,
         }
     } else if (type == QLatin1String("remote_session_terminating")) {
         const bool localIsParty =
-            envelope.value(QStringLiteral("targetDeviceId")).toString()
-                == m_localDeviceId
-            || envelope.value(QStringLiteral("ownerDeviceId")).toString()
-                == m_localDeviceId;
+            envelope.value(QStringLiteral("targetEndpointId")).toString()
+                == m_localEndpointId
+            || envelope.value(QStringLiteral("ownerEndpointId")).toString()
+                == m_localEndpointId;
         const bool recoveryTeardown = existing.remoteSessionId.isEmpty()
             && localIsParty
             && envelope.value(QStringLiteral("resumeToken")).toString().isEmpty()
@@ -190,9 +190,9 @@ void SceneRunCoordinator::clearSessions()
 }
 
 SceneRunCoordinator::SessionBinding SceneRunCoordinator::sessionForPeer(
-    const QString& peerDeviceId) const
+    const QString& peerEndpointId) const
 {
-    return m_remoteSessions->forPeer(peerDeviceId);
+    return m_remoteSessions->forPeer(peerEndpointId);
 }
 
 SceneRunCoordinator::SessionBinding SceneRunCoordinator::sessionById(
@@ -211,7 +211,7 @@ SceneRunCoordinator::Run SceneRunCoordinator::run(const QString& sceneRunId) con
     return m_runsById.value(sceneRunId);
 }
 
-bool SceneRunCoordinator::createOutgoingRun(const QString& peerDeviceId,
+bool SceneRunCoordinator::createOutgoingRun(const QString& peerEndpointId,
                                             quint64 revision,
                                             const QJsonArray& manifest,
                                             const QJsonObject& scene,
@@ -225,8 +225,8 @@ bool SceneRunCoordinator::createOutgoingRun(const QString& peerDeviceId,
         }
         return false;
     }
-    const SessionBinding binding = m_remoteSessions->outgoingForPeer(peerDeviceId);
-    if (!binding.active || m_localDeviceId != binding.ownerDeviceId) {
+    const SessionBinding binding = m_remoteSessions->outgoingForPeer(peerEndpointId);
+    if (!binding.active || m_localEndpointId != binding.ownerEndpointId) {
         if (errorMessage) *errorMessage = QStringLiteral("No active outgoing remote session for this device");
         return false;
     }
@@ -251,8 +251,8 @@ bool SceneRunCoordinator::createOutgoingRun(const QString& peerDeviceId,
     created.manifest = normalizedManifest;
     created.scene = normalizeJson(scene).toObject();
     created.digest = computeDigest(revision, created.manifest, created.scene);
-    created.ownerDeviceId = binding.ownerDeviceId;
-    created.targetDeviceId = binding.targetDeviceId;
+    created.ownerEndpointId = binding.ownerEndpointId;
+    created.targetEndpointId = binding.targetEndpointId;
     created.phase = Phase::Preparing;
     created.prepareDeadlineEpochMs = QDateTime::currentMSecsSinceEpoch() + m_prepareTimeoutMs;
     m_runsById.insert(created.sceneRunId, created);
@@ -280,10 +280,10 @@ bool SceneRunCoordinator::acceptInboundEnvelope(const QJsonObject& envelope,
     const QString digest = envelope.value(QStringLiteral("digest")).toString();
     const SessionBinding binding = sessionById(remoteSessionId);
     const QString type = envelope.value(QStringLiteral("type")).toString();
-    const QString ownerDeviceId =
-        envelope.value(QStringLiteral("ownerDeviceId")).toString();
-    const QString targetDeviceId =
-        envelope.value(QStringLiteral("targetDeviceId")).toString();
+    const QString ownerEndpointId =
+        envelope.value(QStringLiteral("ownerEndpointId")).toString();
+    const QString targetEndpointId =
+        envelope.value(QStringLiteral("targetEndpointId")).toString();
     if (type == QLatin1String("scene_prepare") && m_prepareTimeoutMs <= 0) {
         if (errorMessage) {
             *errorMessage = QStringLiteral(
@@ -295,8 +295,8 @@ bool SceneRunCoordinator::acceptInboundEnvelope(const QJsonObject& envelope,
         || type == QLatin1String("stopped");
     if ((!binding.active && !terminalDelivery) || !isOpaqueId(sceneRunId)
         || generation != binding.generation
-        || ownerDeviceId != binding.ownerDeviceId
-        || targetDeviceId != binding.targetDeviceId
+        || ownerEndpointId != binding.ownerEndpointId
+        || targetEndpointId != binding.targetEndpointId
         || revision < 1 || !isSha256(digest)) {
         if (errorMessage) *errorMessage = QStringLiteral("Stale or malformed scene envelope");
         return false;
@@ -322,8 +322,8 @@ bool SceneRunCoordinator::acceptInboundEnvelope(const QJsonObject& envelope,
         incoming.sceneRunId = sceneRunId;
         incoming.revision = revision;
         incoming.digest = digest;
-        incoming.ownerDeviceId = ownerDeviceId;
-        incoming.targetDeviceId = targetDeviceId;
+        incoming.ownerEndpointId = ownerEndpointId;
+        incoming.targetEndpointId = targetEndpointId;
         incoming.manifest = manifest;
         incoming.scene = scene;
         incoming.phase = Phase::Preparing;

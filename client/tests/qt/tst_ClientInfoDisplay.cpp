@@ -12,6 +12,7 @@ private slots:
     void offlinePresenceOverridesStaleSessionState();
     void formatsProjectCountdowns();
     void formatsCountdownBoundaries();
+    void appendsInstanceNumberOnlyForSecondaryProfiles();
 };
 
 void ClientInfoDisplayTest::normalizesEveryPublicAvailabilityBadge_data()
@@ -77,6 +78,20 @@ void ClientInfoDisplayTest::formatsCountdownBoundaries()
     QCOMPARE(ClientInfo::formatRemainingTime(1), QStringLiteral("0:01"));
     QCOMPARE(ClientInfo::formatRemainingTime(59'001), QStringLiteral("1:00"));
     QCOMPARE(ClientInfo::formatRemainingTime(300'000), QStringLiteral("5:00"));
+}
+
+void ClientInfoDisplayTest::appendsInstanceNumberOnlyForSecondaryProfiles()
+{
+    ClientInfo primary(QStringLiteral("endpoint-primary"),
+                       QStringLiteral("Studio"), QStringLiteral("macOS"));
+    primary.setInstanceOrdinal(1);
+    QVERIFY(!primary.getIdentityDisplayText().contains(QStringLiteral("Instance")));
+
+    ClientInfo secondary(QStringLiteral("endpoint-secondary"),
+                         QStringLiteral("Studio"), QStringLiteral("macOS"));
+    secondary.setInstanceOrdinal(3);
+    QVERIFY(secondary.getIdentityDisplayText().contains(
+        QStringLiteral("Studio — Instance 3")));
 }
 
 QTEST_APPLESS_MAIN(ClientInfoDisplayTest)

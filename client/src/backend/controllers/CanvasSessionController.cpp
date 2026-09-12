@@ -67,7 +67,7 @@ void* CanvasSessionController::findCanvasSessionByIdeaId(const QString& canvasSe
 // ============================================================================
 
 void* CanvasSessionController::ensureCanvasSession(const ClientInfo& client) {
-    QString persistentId = client.clientId();
+    QString persistentId = client.endpointId();
     if (persistentId.isEmpty()) {
         qWarning() << "CanvasSessionController::ensureCanvasSession: client has no persistentClientId, this should not happen";
         persistentId = client.getId();

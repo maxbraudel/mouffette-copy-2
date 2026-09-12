@@ -5,27 +5,27 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>MouffetteClient</string>
+    <string>@MOUFFETTE_EXECUTABLE_NAME@</string>
     <key>CFBundleIdentifier</key>
-    <string>com.mouffette.client</string>
+    <string>@MOUFFETTE_BUNDLE_IDENTIFIER@</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Mouffette</string>
+    <string>@MOUFFETTE_APPLICATION_NAME@</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>@PROJECT_VERSION@</string>
     <key>CFBundleVersion</key>
-    <string>1.0.0</string>
+    <string>@PROJECT_VERSION@</string>
     <key>LSMinimumSystemVersion</key>
-    <string>10.15</string>
+    <string>@CMAKE_OSX_DEPLOYMENT_TARGET@</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2025 Mouffette. All rights reserved.</string>
     <key>CFBundleDisplayName</key>
-    <string>Mouffette</string>
+    <string>@MOUFFETTE_APPLICATION_NAME@</string>
     <key>LSUIElement</key>
     <true/>
 </dict>

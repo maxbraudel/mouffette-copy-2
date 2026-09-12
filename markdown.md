@@ -60,7 +60,7 @@ largeur dispo pas augmentelr al argeur de l'overlay
 probleme broder raidus conteneur canvas
 
 
-Excellent ! maintenant je veux que tu travailels sur plusieurs problématiques de 
+* Excellent ! maintenant je veux que tu travailels sur plusieurs problématiques de 
 robustesse et bonnes pratiques/problèmes sturucturels critiques dans le système serveur et client actuel.
 verifier que lorsqu'on lance une scene distante, le lcient fiatl a dmeande.
 puis si tous les medias sont téléchargés, le client distant charge tout,

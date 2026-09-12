@@ -1,4 +1,5 @@
 #include "backend/network/RemoteCacheStore.h"
+#include "backend/runtime/RuntimeProfile.h"
 
 #include <QCryptographicHash>
 #include <QByteArrayView>
@@ -12,7 +13,6 @@
 #include <QJsonParseError>
 #include <QRegularExpression>
 #include <QSaveFile>
-#include <QStandardPaths>
 #include <QUuid>
 #include <QtConcurrentRun>
 
@@ -71,7 +71,7 @@ bool parseGeneration(const QJsonValue& value, quint64* output)
 QJsonObject scopeJson(const RemoteCacheStore::Scope& scope)
 {
     return {
-        {QStringLiteral("senderDeviceId"), scope.senderDeviceId},
+        {QStringLiteral("senderEndpointId"), scope.senderEndpointId},
         {QStringLiteral("remoteSessionId"), scope.remoteSessionId},
         {QStringLiteral("generation"), generationString(scope.generation)}
     };
@@ -83,11 +83,11 @@ bool parseScope(const QJsonObject& object, RemoteCacheStore::Scope* scope)
         return false;
     }
     RemoteCacheStore::Scope parsed;
-    parsed.senderDeviceId = object.value(QStringLiteral("senderDeviceId")).toString();
+    parsed.senderEndpointId = object.value(QStringLiteral("senderEndpointId")).toString();
     parsed.remoteSessionId = object.value(QStringLiteral("remoteSessionId")).toString();
     if (!parseGeneration(object.value(QStringLiteral("generation")),
                          &parsed.generation)
-        || !RemoteCacheStore::isValidDeviceId(parsed.senderDeviceId)
+        || !RemoteCacheStore::isValidEndpointId(parsed.senderEndpointId)
         || !RemoteCacheStore::isValidSessionId(parsed.remoteSessionId)) {
         return false;
     }
@@ -485,14 +485,11 @@ RemoteCacheStore::~RemoteCacheStore() = default;
 
 QString RemoteCacheStore::defaultRootPath()
 {
-    QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-    if (base.isEmpty()) {
-        base = QDir::homePath() + QStringLiteral("/.cache");
-    }
+    const QString base = RuntimeProfile::cacheLocation();
     return normalizedPath(QDir(base).filePath(QStringLiteral("Mouffette/Uploads")));
 }
 
-bool RemoteCacheStore::isValidDeviceId(const QString& value)
+bool RemoteCacheStore::isValidEndpointId(const QString& value)
 {
     return isSafeOpaqueIdentifier(value);
 }
@@ -524,8 +521,8 @@ void RemoteCacheStore::setError(const QString& code, QString* output) const
 
 bool RemoteCacheStore::validateScope(const Scope& scope, QString* errorCode) const
 {
-    if (!isValidDeviceId(scope.senderDeviceId)) {
-        setError(QStringLiteral("invalid_sender_device_id"), errorCode);
+    if (!isValidEndpointId(scope.senderEndpointId)) {
+        setError(QStringLiteral("invalid_sender_endpoint_id"), errorCode);
         return false;
     }
     if (!isValidSessionId(scope.remoteSessionId)) {
@@ -542,7 +539,7 @@ bool RemoteCacheStore::validateScope(const Scope& scope, QString* errorCode) con
 QString RemoteCacheStore::scopeKey(const Scope& scope) const
 {
     QCryptographicHash hash(QCryptographicHash::Sha256);
-    hash.addData(scope.senderDeviceId.toUtf8());
+    hash.addData(scope.senderEndpointId.toUtf8());
     hash.addData(QByteArrayView(kHashSeparator, 1));
     hash.addData(scope.remoteSessionId.toUtf8());
     return QString::fromLatin1(hash.result().toHex());
@@ -550,7 +547,7 @@ QString RemoteCacheStore::scopeKey(const Scope& scope) const
 
 QString RemoteCacheStore::scopeDirectory(const Scope& scope) const
 {
-    const QString senderDirectory = QDir(m_rootPath).filePath(scope.senderDeviceId);
+    const QString senderDirectory = QDir(m_rootPath).filePath(scope.senderEndpointId);
     return QDir(senderDirectory).filePath(scope.remoteSessionId);
 }
 
@@ -568,7 +565,7 @@ QString RemoteCacheStore::quarantineName(const Scope& scope,
                                          const QString& teardownId) const
 {
     QCryptographicHash hash(QCryptographicHash::Sha256);
-    hash.addData(scope.senderDeviceId.toUtf8());
+    hash.addData(scope.senderEndpointId.toUtf8());
     hash.addData(QByteArrayView(kHashSeparator, 1));
     hash.addData(scope.remoteSessionId.toUtf8());
     hash.addData(QByteArrayView(kHashSeparator, 1));
@@ -600,7 +597,7 @@ QString RemoteCacheStore::assetQuarantineName(const Scope& scope,
                                               const QString& removalId) const
 {
     QCryptographicHash hash(QCryptographicHash::Sha256);
-    hash.addData(scope.senderDeviceId.toUtf8());
+    hash.addData(scope.senderEndpointId.toUtf8());
     hash.addData(QByteArrayView(kHashSeparator, 1));
     hash.addData(scope.remoteSessionId.toUtf8());
     hash.addData(QByteArrayView(kHashSeparator, 1));
@@ -770,7 +767,7 @@ bool RemoteCacheStore::ensureSession(const Scope& scope, QString* errorCode)
         return false;
     }
 
-    const QString senderDirectory = QDir(m_rootPath).filePath(scope.senderDeviceId);
+    const QString senderDirectory = QDir(m_rootPath).filePath(scope.senderEndpointId);
     const QString sessionDirectory = scopeDirectory(scope);
     if (!isDirectChild(m_rootPath, senderDirectory)
         || !isDirectChild(senderDirectory, sessionDirectory)
@@ -789,7 +786,7 @@ bool RemoteCacheStore::ensureSession(const Scope& scope, QString* errorCode)
             setError(QStringLiteral("scope_metadata_invalid"), errorCode);
             return false;
         }
-        if (existingScope.senderDeviceId != scope.senderDeviceId
+        if (existingScope.senderEndpointId != scope.senderEndpointId
             || existingScope.remoteSessionId != scope.remoteSessionId
             || existingScope.generation > scope.generation) {
             setError(QStringLiteral("remote_session_generation_conflict"), errorCode);
@@ -966,7 +963,7 @@ RemoteCacheStore::removeValidatedAsset(const Scope& scope,
                 != QString::number(command.size)
             || replay.value(QStringLiteral("extension")).toString()
                 != command.extension
-            || replayScope.senderDeviceId != scope.senderDeviceId
+            || replayScope.senderEndpointId != scope.senderEndpointId
             || replayScope.remoteSessionId != scope.remoteSessionId
             || replayScope.generation > scope.generation) {
             result.outcome = CommitOutcome::Conflict;
@@ -1335,7 +1332,7 @@ bool RemoteCacheStore::beginTeardownInternal(const Scope& scope,
             || descriptor.value(QStringLiteral("schemaVersion")).toInt(-1)
                 != MetadataSchemaVersion
             || !parseScope(descriptor, &storedScope)
-            || storedScope.senderDeviceId != scope.senderDeviceId
+            || storedScope.senderEndpointId != scope.senderEndpointId
             || storedScope.remoteSessionId != scope.remoteSessionId
             || storedScope.generation > scope.generation) {
             setError(QStringLiteral("remote_session_generation_conflict"), errorCode);
@@ -1698,7 +1695,7 @@ RemoteCacheStore::CommitResult RemoteCacheStore::commitTeardown(
     result.outcome = CommitOutcome::Committed;
     result.quarantinedBytes = quarantinedBytes;
     result.cleanupPending = committed.state == SessionState::CleanupPending;
-    emit logicalCommitCompleted(scope.senderDeviceId,
+    emit logicalCommitCompleted(scope.senderEndpointId,
                                 scope.remoteSessionId,
                                 scope.generation,
                                 teardownId,
@@ -1712,7 +1709,7 @@ RemoteCacheStore::CommitResult RemoteCacheStore::commitTeardown(
 std::optional<RemoteCacheStore::Tombstone> RemoteCacheStore::tombstone(
     const Scope& scope) const
 {
-    if (!isValidDeviceId(scope.senderDeviceId)
+    if (!isValidEndpointId(scope.senderEndpointId)
         || !isValidSessionId(scope.remoteSessionId)) {
         return std::nullopt;
     }
@@ -1793,7 +1790,7 @@ bool RemoteCacheStore::acceptsCommands(const Scope& scope) const
 
 bool RemoteCacheStore::ownsPath(const Scope& scope, const QString& candidatePath) const
 {
-    if (!isValidDeviceId(scope.senderDeviceId)
+    if (!isValidEndpointId(scope.senderEndpointId)
         || !isValidSessionId(scope.remoteSessionId)
         || scope.generation == 0 || candidatePath.isEmpty()) {
         return false;
@@ -1862,7 +1859,7 @@ QList<RemoteCacheStore::Scope> RemoteCacheStore::liveScopes(
             recordFirstError(QStringLiteral("symlink_refused"));
             continue;
         }
-        if (!senderInfo.isDir() || !isValidDeviceId(senderName)) {
+        if (!senderInfo.isDir() || !isValidEndpointId(senderName)) {
             continue;
         }
 
@@ -1895,7 +1892,7 @@ QList<RemoteCacheStore::Scope> RemoteCacheStore::liveScopes(
                 || descriptor.value(QStringLiteral("schemaVersion")).toInt(-1)
                     != MetadataSchemaVersion
                 || !parseScope(descriptor, &scope)
-                || scope.senderDeviceId != senderName
+                || scope.senderEndpointId != senderName
                 || scope.remoteSessionId != sessionInfo.fileName()) {
                 recordFirstError(QStringLiteral("scope_metadata_invalid"));
                 continue;
@@ -2271,7 +2268,7 @@ bool RemoteCacheStore::quarantineAbandonedSessions(QString* errorCode)
             setError(QStringLiteral("symlink_refused"), errorCode);
             return false;
         }
-        if (!isValidDeviceId(senderName)) {
+        if (!isValidEndpointId(senderName)) {
             // Unknown legacy directories are handled by the one-time v2
             // migration.  Never traverse or interpret them as a live scope.
             continue;
@@ -2302,7 +2299,7 @@ bool RemoteCacheStore::quarantineAbandonedSessions(QString* errorCode)
                 || descriptor.value(QStringLiteral("schemaVersion")).toInt(-1)
                     != MetadataSchemaVersion
                 || !parseScope(descriptor, &scope)
-                || scope.senderDeviceId != senderName
+                || scope.senderEndpointId != senderName
                 || scope.remoteSessionId != sessionInfo.fileName()) {
                 setError(QStringLiteral("scope_metadata_invalid"), errorCode);
                 return false;
@@ -2502,13 +2499,13 @@ void RemoteCacheStore::finishPhysicalCleanup(const DeleteResult& result)
         return;
     }
     if (result.success) {
-        emit physicalCleanupCompleted(closedScope.senderDeviceId,
+        emit physicalCleanupCompleted(closedScope.senderEndpointId,
                                       closedScope.remoteSessionId,
                                       closedScope.generation,
                                       currentTeardownId,
                                       result.bytesRemoved);
     } else {
-        emit physicalCleanupFailed(closedScope.senderDeviceId,
+        emit physicalCleanupFailed(closedScope.senderEndpointId,
                                    closedScope.remoteSessionId,
                                    closedScope.generation,
                                    currentTeardownId,

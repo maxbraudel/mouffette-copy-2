@@ -1,4 +1,5 @@
 #include "backend/notifications/HistoryStore.h"
+#include "backend/runtime/RuntimeProfile.h"
 
 #include <QDir>
 #include <QFile>
@@ -8,7 +9,6 @@
 #include <QJsonParseError>
 #include <QSaveFile>
 #include <QSet>
-#include <QStandardPaths>
 #include <QUuid>
 #include <cmath>
 #include <utility>
@@ -151,11 +151,8 @@ HistoryStore::HistoryStore(QString filePath)
 
 QString HistoryStore::defaultFilePath()
 {
-    QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    if (base.isEmpty()) {
-        base = QDir::homePath() + QStringLiteral("/.mouffette");
-    }
-    return QDir(base).filePath(QStringLiteral("notification-history-v1.json"));
+    return QDir(RuntimeProfile::appDataLocation())
+        .filePath(QStringLiteral("notification-history-v1.json"));
 }
 
 bool HistoryStore::load(NotificationHistoryData* history)

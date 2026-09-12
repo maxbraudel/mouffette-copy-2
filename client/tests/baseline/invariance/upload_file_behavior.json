@@ -4,8 +4,8 @@
     {
       "file": "src/backend/handlers/UploadEventHandler.cpp",
       "mustContain": [
-        "requestRemoval\\(",
-        "requestUnload\\(",
+        "requestCancel\\(",
+        "reconcileRemoteFilesForSession\\(",
         "toggleUpload\\(",
         "associateFileWithIdea\\("
       ]
@@ -13,7 +13,7 @@
     {
       "file": "src/backend/network/WebSocketClient.h",
       "mustContain": [
-        "sendRemoveFile\\("
+        "sendUploadRemove\\("
       ]
     }
   ]

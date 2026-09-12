@@ -48,15 +48,11 @@ public:
     void setFromMemory(bool fromMemory) { m_fromMemory = fromMemory; }
     bool isOnline() const { return m_isOnline; }
     void setOnline(bool online) { m_isOnline = online; }
-    QString deviceId() const { return m_deviceId; }
+    QString installationId() const { return m_installationId; }
+    QString endpointId() const { return m_endpointId; }
+    QString instanceId() const { return m_instanceId; }
+    int instanceOrdinal() const { return m_instanceOrdinal; }
     QString runtimeId() const { return m_runtimeId; }
-    // Transitional C++ name used by the existing canvas model. It now always
-    // returns the protocol-v2 deviceId and is never serialized as clientId.
-    QString clientId() const { return m_deviceId; }
-    void setClientId(const QString& id) {
-        m_deviceId = id;
-        if (m_id.isEmpty()) m_id = id;
-    }
     QString availabilityStatus() const { return m_availabilityStatus; }
     QString projectId() const { return m_projectId; }
     bool hasProject() const { return m_hasProject; }
@@ -70,7 +66,10 @@ public:
     void setStatus(const QString& status) { m_status = status; }
     void setScreens(const QList<ScreenInfo>& screens) { m_screens = screens; }
     void setVolumePercent(int v) { m_volumePercent = v; }
-    void setDeviceId(const QString& id) { m_deviceId = id; m_id = id; }
+    void setInstallationId(const QString& id) { m_installationId = id; }
+    void setEndpointId(const QString& id) { m_endpointId = id; m_id = id; }
+    void setInstanceId(const QString& id) { m_instanceId = id; }
+    void setInstanceOrdinal(int ordinal) { m_instanceOrdinal = ordinal; }
     void setRuntimeId(const QString& id) { m_runtimeId = id; }
     void setAvailabilityStatus(const QString& status) { m_availabilityStatus = status; }
     void setProjectId(const QString& id) { m_projectId = id; }
@@ -99,7 +98,10 @@ private:
     int m_volumePercent = -1; // 0-100, -1 when unknown
     bool m_fromMemory = false;
     bool m_isOnline = true;
-    QString m_deviceId;
+    QString m_installationId;
+    QString m_endpointId;
+    QString m_instanceId;
+    int m_instanceOrdinal = 1;
     QString m_runtimeId;
     QString m_availabilityStatus = QStringLiteral("Unavailable");
     QString m_projectId;

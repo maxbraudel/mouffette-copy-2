@@ -17,10 +17,9 @@ This report documents the **client application codebase** (Qt/C++), with a focus
 - `CMakeLists.txt` — Main build definition; declares sources/headers, Qt modules, platform-specific files, and link settings.
 - `Info.plist` — macOS bundle metadata and app identity configuration.
 - `README.md` — Build/run and feature notes for the client.
-- `build.sh` — Unix shell build helper wrapping CMake workflow.
-- `build.ps1` — PowerShell build helper for Windows.
-- `run.sh` — Unix shell run helper.
-- `run.ps1` — PowerShell run helper for Windows.
+- `scripts/build-development.*` / `scripts/build-release.*` — explicit CMake build commands.
+- `scripts/run-development.*` / `scripts/run-release.*` — local build launchers.
+- `scripts/package-release.*` / `scripts/run-packaged-release.*` — standalone Release packaging and validation.
 - `update_includes_frontend_backend.sh` — Utility script to update include paths after frontend/backend refactors.
 
 ## Resources

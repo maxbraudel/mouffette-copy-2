@@ -64,7 +64,7 @@ function assertGeneration(value) {
  * Transactional owner of server-side remote-session caches.
  *
  * Only identifiers are accepted from callers. Active paths are derived as
- * Uploads/<senderDeviceId>/<remoteSessionId>; callers can never nominate a
+ * Uploads/<senderEndpointId>/<remoteSessionId>; callers can never nominate a
  * cleanup source or quarantine destination. A logical cleanup is durable once
  * the active directory has been atomically renamed and its tombstone written.
  */
@@ -175,14 +175,14 @@ class RemoteCacheStore extends EventEmitter {
                 const activeRecord = {
                     version: STATE_VERSION,
                     key: normalized.key,
-                    senderDeviceId: normalized.senderDeviceId,
+                    senderEndpointId: normalized.senderEndpointId,
                     remoteSessionId: normalized.remoteSessionId,
                     generation: normalized.generation,
                     updatedAt: this.now(),
                 };
                 await this.#writeActiveGeneration(activeRecord);
                 this.activeGenerations.set(normalized.key, activeRecord);
-                const senderPath = path.join(this.uploadsRoot, normalized.senderDeviceId);
+                const senderPath = path.join(this.uploadsRoot, normalized.senderEndpointId);
                 await this.#ensureChildDirectory(this.uploadsRoot, senderPath, true);
                 const cachePath = this.#activePath(normalized);
                 await this.#ensureChildDirectory(senderPath, cachePath, true);
@@ -398,14 +398,14 @@ class RemoteCacheStore extends EventEmitter {
         if (!binding || typeof binding !== 'object' || Array.isArray(binding)) {
             throw new RemoteCacheStoreError('invalid_cache_binding');
         }
-        const senderDeviceId = assertIdentifier(
-            binding.senderDeviceId, 'invalid_sender_device_id');
+        const senderEndpointId = assertIdentifier(
+            binding.senderEndpointId, 'invalid_sender_endpoint_id');
         const remoteSessionId = assertIdentifier(
             binding.remoteSessionId, 'invalid_remote_session_id');
         const normalized = {
-            senderDeviceId,
+            senderEndpointId,
             remoteSessionId,
-            key: this.#bindingKey(senderDeviceId, remoteSessionId),
+            key: this.#bindingKey(senderEndpointId, remoteSessionId),
         };
         if (requireGeneration) normalized.generation = assertGeneration(binding.generation);
         if (requireTeardown && binding.teardownId === undefined) {
@@ -417,9 +417,9 @@ class RemoteCacheStore extends EventEmitter {
         return normalized;
     }
 
-    #bindingKey(senderDeviceId, remoteSessionId) {
+    #bindingKey(senderEndpointId, remoteSessionId) {
         return crypto.createHash('sha256')
-            .update(senderDeviceId, 'utf8')
+            .update(senderEndpointId, 'utf8')
             .update('\0', 'utf8')
             .update(remoteSessionId, 'utf8')
             .digest('hex');
@@ -427,7 +427,7 @@ class RemoteCacheStore extends EventEmitter {
 
     #activePath(binding) {
         const candidate = path.join(
-            this.uploadsRoot, binding.senderDeviceId, binding.remoteSessionId);
+            this.uploadsRoot, binding.senderEndpointId, binding.remoteSessionId);
         this.#assertContained(this.uploadsRoot, candidate);
         return candidate;
     }
@@ -493,7 +493,7 @@ class RemoteCacheStore extends EventEmitter {
     }
 
     async #activeState(binding) {
-        const senderPath = path.join(this.uploadsRoot, binding.senderDeviceId);
+        const senderPath = path.join(this.uploadsRoot, binding.senderEndpointId);
         let senderStat;
         try {
             senderStat = await fsp.lstat(senderPath);
@@ -535,7 +535,7 @@ class RemoteCacheStore extends EventEmitter {
             version: STATE_VERSION,
             transactionId,
             key: binding.key,
-            senderDeviceId: binding.senderDeviceId,
+            senderEndpointId: binding.senderEndpointId,
             remoteSessionId: binding.remoteSessionId,
             generation: binding.generation,
             teardownId: binding.teardownId,
@@ -595,7 +595,7 @@ class RemoteCacheStore extends EventEmitter {
         const tombstone = {
             version: STATE_VERSION,
             key: transaction.key,
-            senderDeviceId: transaction.senderDeviceId,
+            senderEndpointId: transaction.senderEndpointId,
             remoteSessionId: transaction.remoteSessionId,
             generation: transaction.generation,
             teardownId: transaction.teardownId,
@@ -648,7 +648,7 @@ class RemoteCacheStore extends EventEmitter {
             version: STATE_VERSION,
             transactionId: tombstone.transactionId,
             key: tombstone.key,
-            senderDeviceId: tombstone.senderDeviceId,
+            senderEndpointId: tombstone.senderEndpointId,
             remoteSessionId: tombstone.remoteSessionId,
             generation: tombstone.generation,
             teardownId: tombstone.teardownId,
@@ -1029,7 +1029,7 @@ class RemoteCacheStore extends EventEmitter {
             replay,
             state: tombstone.state,
             logicalCommitted: true,
-            senderDeviceId: tombstone.senderDeviceId,
+            senderEndpointId: tombstone.senderEndpointId,
             remoteSessionId: tombstone.remoteSessionId,
             teardownId: tombstone.teardownId,
             cacheQuarantined: tombstone.cacheQuarantined,
@@ -1060,7 +1060,7 @@ class RemoteCacheStore extends EventEmitter {
             state: 'cleanup_error',
             errorCode: code,
             generation: binding && binding.generation,
-            senderDeviceId: binding && binding.senderDeviceId,
+            senderEndpointId: binding && binding.senderEndpointId,
             remoteSessionId: binding && binding.remoteSessionId,
             teardownId: binding && binding.teardownId,
         });
@@ -1078,7 +1078,7 @@ class RemoteCacheStore extends EventEmitter {
         if (!this.faultInjector) return;
         await this.faultInjector(point, {
             generation: binding.generation,
-            senderDeviceId: binding.senderDeviceId,
+            senderEndpointId: binding.senderEndpointId,
             remoteSessionId: binding.remoteSessionId,
         });
     }

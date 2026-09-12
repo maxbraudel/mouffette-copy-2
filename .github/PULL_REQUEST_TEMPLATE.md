@@ -21,7 +21,7 @@
 
 ## Validation
 
-- [ ] `./client/build.sh` passes
+- [ ] `cd client && ./scripts/build-development.sh` passes
 - [ ] Baseline checks pass (`node client/tests/baseline/run_baseline_checks.js`)
 - [ ] Phase-specific checks attached (logs or screenshots)
 - [ ] Legacy path sanity checked (if impacted)

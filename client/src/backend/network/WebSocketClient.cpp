@@ -217,6 +217,7 @@ bool containsLegacyWireField(const QJsonValue& value) {
     static const QSet<QString> forbidden = {
         QStringLiteral("clientId"), QStringLiteral("persistentClientId"),
         QStringLiteral("persistentId"), QStringLiteral("sessionId"),
+        QStringLiteral("deviceId"),
         QStringLiteral("canvasSessionId"), QStringLiteral("targetClientId"),
         QStringLiteral("targetPersistentClientId"),
         QStringLiteral("senderClientId"),
@@ -263,20 +264,23 @@ bool isRemovedWireType(const QString& type) {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// MOUFFETTE PROTOCOL V2 DEVICE IDENTITY
+// MOUFFETTE PROTOCOL V3 ENDPOINT IDENTITY
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
-// deviceId is SHA-256(SPKI); runtimeId lives for one process and
-// connectionGeneration changes for every authenticated transport.
+// installationId is SHA-256(SPKI), endpointId adds the application instance,
+// runtimeId lives for one process, and connectionGeneration changes for every
+// authenticated transport.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 WebSocketClient::WebSocketClient(QObject *parent)
-    : WebSocketClient(QString(), true, parent, {}) {}
+    : WebSocketClient(QString(), true, parent, {}, QStringLiteral("primary"), 1) {}
 
 WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
                                  bool preferNativeIdentityVault,
                                  QObject *parent,
-                                 SuspendInclusiveClock suspendInclusiveClock)
+                                 SuspendInclusiveClock suspendInclusiveClock,
+                                 QString instanceId,
+                                 int instanceOrdinal)
     : QObject(parent)
     , m_identityStore(std::make_unique<DeviceIdentityStore>(
           identityFallbackDirectory, preferNativeIdentityVault))
@@ -287,6 +291,8 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
     , m_leaseHealthTimer(new QTimer(this))
     , m_suspendInclusiveClock(std::move(suspendInclusiveClock))
     , m_runtimeId(QUuid::createUuid().toString(QUuid::WithoutBraces))
+    , m_instanceId(std::move(instanceId))
+    , m_instanceOrdinal(instanceOrdinal)
 {
     if (!m_suspendInclusiveClock) {
         m_suspendInclusiveClock = systemSuspendInclusiveMonotonicMs;
@@ -302,11 +308,15 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
         qCritical().noquote() << "Device identity initialization failed:"
                               << m_identityInitializationError;
     } else {
-        m_deviceId = m_identityStore->deviceId();
-        m_sceneRuns->setLocalDeviceId(m_deviceId);
+        m_installationId = m_identityStore->installationId();
+        m_endpointId = DeviceIdentityStore::endpointIdForInstallation(
+            m_installationId, m_instanceId);
+        m_sceneRuns->setLocalEndpointId(m_endpointId);
         qInfo() << "Device identity initialized using"
                 << m_identityStore->storageBackendName()
-                << "deviceId" << m_deviceId;
+                << "installationId" << m_installationId
+                << "endpointId" << m_endpointId
+                << "instanceId" << m_instanceId;
     }
     qDebug() << "WebSocketClient: Initialized runtimeId" << m_runtimeId;
 }
@@ -328,7 +338,7 @@ void WebSocketClient::onUploadTextMessageReceived(const QString& message) {
     const QString type = obj.value("type").toString();
     if (type == "upload_channel_ready") {
         quint64 generation = 0;
-        const QString readyDeviceId = obj.value("deviceId").toString();
+        const QString readyEndpointId = obj.value("endpointId").toString();
         m_uploadChannelAuthenticated =
             boundedInteger(obj.value(QStringLiteral("protocolVersion")),
                            ProtocolVersion, ProtocolVersion) == ProtocolVersion
@@ -338,14 +348,14 @@ void WebSocketClient::onUploadTextMessageReceived(const QString& message) {
                 obj.value(QStringLiteral("messageId")).toString())
             && readPositiveSafeJsonInteger(
                 obj.value(QStringLiteral("connectionGeneration")), &generation)
-            && !readyDeviceId.isEmpty() && readyDeviceId == m_deviceId
+            && !readyEndpointId.isEmpty() && readyEndpointId == m_endpointId
             && generation == m_connectionGeneration;
         if (!m_uploadChannelAuthenticated) {
             qWarning() << "Upload channel envelope does not match the authenticated control connection";
             closeUploadChannel();
             return;
         }
-        m_uploadClientId = readyDeviceId;
+        m_uploadClientId = readyEndpointId;
         qDebug() << "Upload channel authenticated for client:" << m_uploadClientId;
         return;
     }
@@ -686,9 +696,10 @@ void WebSocketClient::registerClient(const QString& machineName, const QString& 
     m_registeredMachineName = machineName;
     m_registeredPlatform = platform;
     QJsonObject message;
-    message["type"] = "device_snapshot";
+    message["type"] = "endpoint_snapshot";
     message["machineName"] = machineName;
     message["platform"] = platform;
+    message["instanceOrdinal"] = m_instanceOrdinal;
     message["volumePercent"] = volumePercent >= 0 && volumePercent <= 100
         ? QJsonValue(volumePercent) : QJsonValue(QJsonValue::Null);
 
@@ -701,7 +712,7 @@ void WebSocketClient::registerClient(const QString& machineName, const QString& 
     
     sendMessage(message);
     qDebug() << "Registering device:" << machineName << "(" << platform
-             << ") deviceId:" << m_deviceId << "runtimeId:" << m_runtimeId;
+             << ") endpointId:" << m_endpointId << "runtimeId:" << m_runtimeId;
 }
 
 bool WebSocketClient::sendUploadStart(const QString& remoteSessionId,
@@ -713,7 +724,7 @@ bool WebSocketClient::sendUploadStart(const QString& remoteSessionId,
     const SceneRunCoordinator::SessionBinding binding =
         m_sceneRuns->sessionById(remoteSessionId);
     if (!binding.active || binding.generation != generation
-        || binding.ownerDeviceId != m_deviceId) return false;
+        || binding.ownerEndpointId != m_endpointId) return false;
     m_canceledUploads.remove(uploadId);
 
     QJsonObject msg{
@@ -733,7 +744,7 @@ bool WebSocketClient::sendUploadResume(const QString& remoteSessionId,
     const SceneRunCoordinator::SessionBinding binding =
         m_sceneRuns->sessionById(remoteSessionId);
     if (!binding.active || binding.generation != generation
-        || binding.ownerDeviceId != m_deviceId) return false;
+        || binding.ownerEndpointId != m_endpointId) return false;
     return sendMessageUpload(QJsonObject{
         {QStringLiteral("type"), QStringLiteral("upload_resume")},
         {QStringLiteral("remoteSessionId"), remoteSessionId},
@@ -756,7 +767,7 @@ bool WebSocketClient::sendUploadChunk(const QString& remoteSessionId,
     const SceneRunCoordinator::SessionBinding binding =
         m_sceneRuns->sessionById(remoteSessionId);
     if (!binding.active || binding.generation != generation
-        || binding.ownerDeviceId != m_deviceId) return false;
+        || binding.ownerEndpointId != m_endpointId) return false;
     const QByteArray encoded = data.toBase64();
     // QByteArray::toBase64 emits the canonical RFC 4648 padded alphabet which
     // the server verifies by decode/re-encode equality.
@@ -784,7 +795,7 @@ bool WebSocketClient::sendUploadComplete(const QString& remoteSessionId,
     const SceneRunCoordinator::SessionBinding binding =
         m_sceneRuns->sessionById(remoteSessionId);
     if (!binding.active || binding.generation != generation
-        || binding.ownerDeviceId != m_deviceId) return false;
+        || binding.ownerEndpointId != m_endpointId) return false;
     QJsonObject msg{
         {QStringLiteral("type"), QStringLiteral("upload_complete")},
         {QStringLiteral("remoteSessionId"), remoteSessionId},
@@ -804,7 +815,7 @@ bool WebSocketClient::sendUploadAbort(const QString& remoteSessionId,
     const SceneRunCoordinator::SessionBinding binding =
         m_sceneRuns->sessionById(remoteSessionId);
     if (binding.remoteSessionId.isEmpty() || binding.generation != generation
-        || binding.ownerDeviceId != m_deviceId) return false;
+        || binding.ownerEndpointId != m_endpointId) return false;
     m_canceledUploads.insert(uploadId);
 
     QJsonObject msg{
@@ -840,7 +851,7 @@ bool WebSocketClient::sendUploadRemove(const QString& remoteSessionId,
     const SceneRunCoordinator::SessionBinding binding =
         m_sceneRuns->sessionById(remoteSessionId);
     if (!binding.active || binding.generation != generation
-        || binding.ownerDeviceId != m_deviceId) {
+        || binding.ownerEndpointId != m_endpointId) {
         return false;
     }
     QJsonObject message{
@@ -881,25 +892,20 @@ bool WebSocketClient::sendUploadProtocolResponse(const QJsonObject& response) {
     const SceneRunCoordinator::SessionBinding binding =
         m_sceneRuns->sessionById(remoteSessionId);
     if (binding.remoteSessionId.isEmpty() || binding.generation != generation
-        || binding.targetDeviceId != m_deviceId) return false;
-    message.remove(QStringLiteral("ownerDeviceId"));
-    message.remove(QStringLiteral("targetDeviceId"));
-    message.remove(QStringLiteral("senderClientId"));
-    message.remove(QStringLiteral("senderPersistentClientId"));
-    message.remove(QStringLiteral("targetClientId"));
-    message.remove(QStringLiteral("targetPersistentClientId"));
-    message.remove(QStringLiteral("canvasSessionId"));
+        || binding.targetEndpointId != m_endpointId) return false;
+    message.remove(QStringLiteral("ownerEndpointId"));
+    message.remove(QStringLiteral("targetEndpointId"));
     return sendControlMessage(message);
 }
 
-bool WebSocketClient::openRemoteSession(const QString& targetDeviceId,
+bool WebSocketClient::openRemoteSession(const QString& targetEndpointId,
                                         QString* requestId)
 {
-    if (!isConnected() || targetDeviceId.isEmpty() || targetDeviceId == m_deviceId) return false;
+    if (!isConnected() || targetEndpointId.isEmpty() || targetEndpointId == m_endpointId) return false;
     const QString correlationId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     QJsonObject message{
         {QStringLiteral("type"), QStringLiteral("remote_session_open")},
-        {QStringLiteral("targetDeviceId"), targetDeviceId},
+        {QStringLiteral("targetEndpointId"), targetEndpointId},
         {QStringLiteral("requestId"), correlationId}
     };
     if (!sendControlMessage(message)) return false;
@@ -943,8 +949,8 @@ bool WebSocketClient::closeRemoteSession(const QString& remoteSessionId,
     const SceneRunCoordinator::SessionBinding binding =
         m_sceneRuns->sessionById(remoteSessionId);
     if (binding.remoteSessionId.isEmpty()
-        || (binding.ownerDeviceId != m_deviceId
-            && binding.targetDeviceId != m_deviceId)) return false;
+        || (binding.ownerEndpointId != m_endpointId
+            && binding.targetEndpointId != m_endpointId)) return false;
     const QString correlationId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     QJsonObject message{
         {QStringLiteral("type"), QStringLiteral("remote_session_close")},
@@ -974,7 +980,7 @@ bool WebSocketClient::acknowledgeRemoteSessionTeardown(
     const SceneRunCoordinator::SessionBinding binding =
         m_sceneRuns->sessionById(remoteSessionId);
     if (binding.remoteSessionId.isEmpty()
-        || binding.targetDeviceId != m_deviceId
+        || binding.targetEndpointId != m_endpointId
         || (binding.phase != QLatin1String("Terminating")
             && binding.phase != QLatin1String("CleanupPending"))
         || binding.teardownId != teardownId
@@ -1019,7 +1025,7 @@ QJsonObject WebSocketClient::sceneMessage(const QString& sceneRunId,
     };
 }
 
-bool WebSocketClient::sendScenePrepare(const QString& targetDeviceId,
+bool WebSocketClient::sendScenePrepare(const QString& targetEndpointId,
                                        quint64 revision,
                                        const QJsonArray& manifest,
                                        const QJsonObject& scene,
@@ -1032,7 +1038,7 @@ bool WebSocketClient::sendScenePrepare(const QString& targetDeviceId,
         return false;
     }
     SceneRunCoordinator::Run run;
-    if (!m_sceneRuns->createOutgoingRun(targetDeviceId, revision, manifest, scene,
+    if (!m_sceneRuns->createOutgoingRun(targetEndpointId, revision, manifest, scene,
                                         &run, errorMessage)) {
         return false;
     }
@@ -1293,9 +1299,9 @@ bool WebSocketClient::handleAuthChallenge(const QJsonObject& message) {
         return false;
     }
 
-    const QByteArray payload = QStringLiteral("mouffette-v%1\n%2\n%3\n%4")
+    const QByteArray payload = QStringLiteral("mouffette-v%1\n%2\n%3\n%4\n%5")
         .arg(ProtocolVersion)
-        .arg(serverBootId, nonce, m_runtimeId)
+        .arg(serverBootId, nonce, m_runtimeId, m_instanceId)
         .toUtf8();
     QString signatureError;
     const QByteArray signature = m_identityStore->sign(payload, &signatureError);
@@ -1314,7 +1320,8 @@ bool WebSocketClient::handleAuthChallenge(const QJsonObject& message) {
     response["serverBootId"] = serverBootId;
     response["messageId"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
     response["runtimeId"] = m_runtimeId;
-    response["deviceId"] = m_deviceId;
+    response["instanceId"] = m_instanceId;
+    response["installationId"] = m_installationId;
     response["publicKey"] = base64UrlEncode(m_identityStore->publicKeyDer());
     response["signature"] = base64UrlEncode(signature);
     return sendRawControlMessage(response);
@@ -1365,7 +1372,9 @@ bool WebSocketClient::handleWelcome(const QJsonObject& message) {
         || message.value("serverBootId").toString() != m_pendingServerBootId
         || !isCanonicalUuid(
             message.value(QStringLiteral("connectionId")).toString())
-        || message.value("deviceId").toString() != m_deviceId
+        || message.value("installationId").toString() != m_installationId
+        || message.value("endpointId").toString() != m_endpointId
+        || message.value("instanceId").toString() != m_instanceId
         || message.value("runtimeId").toString() != m_runtimeId) {
         emit fatalError(QStringLiteral("Authenticated welcome does not match this connection"));
         abortConnectionAttempt();
@@ -1510,7 +1519,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         return;
     }
     if (!isCanonicalUuid(message.value(QStringLiteral("messageId")).toString())) {
-        qWarning() << "Rejected protocol-v2 message without a canonical messageId";
+        qWarning() << "Rejected protocol-v3 message without a canonical messageId";
         return;
     }
     if (isRemovedWireType(type) || containsLegacyWireField(message)) {
@@ -1584,13 +1593,13 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
                     &connectionGeneration);
             const bool correlated = validGenerations
                 && !binding.remoteSessionId.isEmpty()
-                && binding.ownerDeviceId == m_deviceId
+                && binding.ownerEndpointId == m_endpointId
                 && binding.generation == generation
                 && connectionGeneration == m_connectionGeneration
-                && message.value(QStringLiteral("ownerDeviceId")).toString()
-                    == binding.ownerDeviceId
-                && message.value(QStringLiteral("targetDeviceId")).toString()
-                    == binding.targetDeviceId
+                && message.value(QStringLiteral("ownerEndpointId")).toString()
+                    == binding.ownerEndpointId
+                && message.value(QStringLiteral("targetEndpointId")).toString()
+                    == binding.targetEndpointId
                 && isCanonicalUuid(
                     message.value(QStringLiteral("removalId")).toString())
                 && isUploadOpaqueId(
@@ -1624,17 +1633,21 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         // For other errors, emit signal so UI can show the error to user
         emit connectionError(err);
     }
-    else if (type == "device_snapshot_applied") {
+    else if (type == "endpoint_snapshot_applied") {
         QJsonObject clientInfoObj = message["snapshot"].toObject();
-        clientInfoObj.insert(QStringLiteral("id"), m_deviceId);
+        clientInfoObj.insert(QStringLiteral("id"), m_endpointId);
         clientInfoObj.insert(QStringLiteral("runtimeId"), m_runtimeId);
         ClientInfo clientInfo = ClientInfo::fromJson(clientInfoObj);
-        if (clientInfo.deviceId() != m_deviceId || clientInfo.runtimeId() != m_runtimeId) {
-            emit fatalError(QStringLiteral("Registration identity does not match authenticated device"));
+        if (clientInfo.installationId() != m_installationId
+            || clientInfo.endpointId() != m_endpointId
+            || clientInfo.instanceId() != m_instanceId
+            || clientInfo.instanceOrdinal() != m_instanceOrdinal
+            || clientInfo.runtimeId() != m_runtimeId) {
+            emit fatalError(QStringLiteral("Registration identity does not match authenticated endpoint"));
             abortConnectionAttempt();
             return;
         }
-        qDebug() << "Device snapshot applied for device" << m_deviceId
+        qDebug() << "Endpoint snapshot applied for endpoint" << m_endpointId
                  << "runtime" << m_runtimeId;
         emit registrationConfirmed(clientInfo);
         // Keep the optional high-throughput channel ready before the first
@@ -1700,12 +1713,12 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
             && !binding.remoteSessionId.isEmpty()
             && binding.generation == generation
             && removalTransportCorrelated
-            && message.value(QStringLiteral("ownerDeviceId")).toString()
-                == binding.ownerDeviceId
-            && message.value(QStringLiteral("targetDeviceId")).toString()
-                == binding.targetDeviceId;
+            && message.value(QStringLiteral("ownerEndpointId")).toString()
+                == binding.ownerEndpointId
+            && message.value(QStringLiteral("targetEndpointId")).toString()
+                == binding.targetEndpointId;
         if (!isUploadOpaqueId(uploadId) || (!correlated && !unboundStartRejection)) {
-            qWarning() << "Rejected stale or malformed protocol-v2 upload envelope";
+            qWarning() << "Rejected stale or malformed protocol-v3 upload envelope";
             return;
         }
         emit uploadMessageReceived(message);
@@ -1739,7 +1752,7 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
              || type == "stop" || type == "stopped") {
         QString validationError;
         if (!m_sceneRuns || !m_sceneRuns->acceptInboundEnvelope(message, &validationError)) {
-            qWarning() << "Rejected protocol-v2 scene message:" << validationError;
+            qWarning() << "Rejected protocol-v3 scene message:" << validationError;
             return;
         }
         if (type == "scene_prepare") emit scenePrepareReceived(message);
@@ -1790,7 +1803,7 @@ bool WebSocketClient::sendControlMessage(const QJsonObject& message) {
         return false;
     }
     if (containsLegacyWireField(message)) {
-        qWarning() << "Refusing protocol-v2 message containing a removed wire field";
+        qWarning() << "Refusing protocol-v3 message containing a removed wire field";
         return false;
     }
 

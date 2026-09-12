@@ -145,7 +145,7 @@ bool projectLifecycleStateFromString(const QString& value, ProjectLifecycleState
 
 bool ClientSnapshot::isValid() const
 {
-    return !deviceId.trimmed().isEmpty();
+    return !endpointId.trimmed().isEmpty();
 }
 
 QJsonObject ClientSnapshot::toJson() const
@@ -156,7 +156,10 @@ QJsonObject ClientSnapshot::toJson() const
     }
 
     QJsonObject json;
-    json.insert(QStringLiteral("deviceId"), deviceId);
+    json.insert(QStringLiteral("installationId"), installationId);
+    json.insert(QStringLiteral("endpointId"), endpointId);
+    json.insert(QStringLiteral("instanceId"), instanceId);
+    json.insert(QStringLiteral("instanceOrdinal"), instanceOrdinal);
     json.insert(QStringLiteral("machineName"), machineName);
     json.insert(QStringLiteral("platform"), platform);
     json.insert(QStringLiteral("status"), status);
@@ -174,7 +177,10 @@ bool ClientSnapshot::fromJson(const QJsonObject& json, ClientSnapshot* snapshot,
     }
 
     ClientSnapshot parsed;
-    parsed.deviceId = json.value(QStringLiteral("deviceId")).toString().trimmed();
+    parsed.installationId = json.value(QStringLiteral("installationId")).toString().trimmed();
+    parsed.endpointId = json.value(QStringLiteral("endpointId")).toString().trimmed();
+    parsed.instanceId = json.value(QStringLiteral("instanceId")).toString().trimmed();
+    parsed.instanceOrdinal = qMax(1, json.value(QStringLiteral("instanceOrdinal")).toInt(1));
     // Socket/connection identifiers are runtime-only and are intentionally
     // never restored into a durable Project.
     parsed.serverConnectionId.clear();
@@ -198,7 +204,7 @@ bool ClientSnapshot::fromJson(const QJsonObject& json, ClientSnapshot* snapshot,
     }
 
     if (!parsed.isValid()) {
-        setError(error, QStringLiteral("ClientSnapshot.deviceId is required"));
+        setError(error, QStringLiteral("ClientSnapshot.endpointId is required"));
         return false;
     }
     *snapshot = parsed;
@@ -208,7 +214,10 @@ bool ClientSnapshot::fromJson(const QJsonObject& json, ClientSnapshot* snapshot,
 ClientSnapshot ClientSnapshot::fromClientInfo(const ClientInfo& client, qint64 seenAtMs)
 {
     ClientSnapshot snapshot;
-    snapshot.deviceId = client.clientId().trimmed();
+    snapshot.installationId = client.installationId().trimmed();
+    snapshot.endpointId = client.endpointId().trimmed();
+    snapshot.instanceId = client.instanceId().trimmed();
+    snapshot.instanceOrdinal = qMax(1, client.instanceOrdinal());
     snapshot.serverConnectionId = client.getId();
     snapshot.machineName = client.getMachineName();
     snapshot.platform = client.getPlatform();
@@ -221,10 +230,13 @@ ClientSnapshot ClientSnapshot::fromClientInfo(const ClientInfo& client, qint64 s
 
 ClientInfo ClientSnapshot::toClientInfo(bool online) const
 {
-    ClientInfo client(serverConnectionId.isEmpty() ? deviceId : serverConnectionId,
+    ClientInfo client(serverConnectionId.isEmpty() ? endpointId : serverConnectionId,
                       machineName,
                       platform);
-    client.setClientId(deviceId);
+    client.setInstallationId(installationId);
+    client.setEndpointId(endpointId);
+    client.setInstanceId(instanceId);
+    client.setInstanceOrdinal(instanceOrdinal);
     client.setStatus(online ? status : QStringLiteral("offline"));
     client.setScreens(screens);
     client.setVolumePercent(volumePercent);
@@ -271,9 +283,9 @@ bool ProjectMediaReference::fromJson(const QJsonObject& json,
 bool ProjectRecord::isValid() const
 {
     return !projectId.trimmed().isEmpty()
-        && !targetDeviceId.trimmed().isEmpty()
+        && !targetEndpointId.trimmed().isEmpty()
         && clientSnapshot.isValid()
-        && clientSnapshot.deviceId == targetDeviceId
+        && clientSnapshot.endpointId == targetEndpointId
         && state != ProjectLifecycleState::Deleted
         && createdAtMs >= 0
         && updatedAtMs >= 0;
@@ -288,7 +300,7 @@ QJsonObject ProjectRecord::toJson() const
 
     QJsonObject json;
     json.insert(QStringLiteral("projectId"), projectId);
-    json.insert(QStringLiteral("targetDeviceId"), targetDeviceId);
+    json.insert(QStringLiteral("targetEndpointId"), targetEndpointId);
     json.insert(QStringLiteral("clientSnapshot"), clientSnapshot.toJson());
     json.insert(QStringLiteral("state"), projectLifecycleStateToString(state));
     json.insert(QStringLiteral("createdAtMs"), static_cast<double>(createdAtMs));
@@ -309,7 +321,7 @@ bool ProjectRecord::fromJson(const QJsonObject& json, ProjectRecord* project, QS
 
     ProjectRecord parsed;
     parsed.projectId = json.value(QStringLiteral("projectId")).toString().trimmed();
-    parsed.targetDeviceId = json.value(QStringLiteral("targetDeviceId")).toString().trimmed();
+    parsed.targetEndpointId = json.value(QStringLiteral("targetEndpointId")).toString().trimmed();
     parsed.createdAtMs = jsonInteger(json, "createdAtMs");
     parsed.updatedAtMs = jsonInteger(json, "updatedAtMs");
     parsed.hiddenAtMs = jsonInteger(json, "hiddenAtMs");

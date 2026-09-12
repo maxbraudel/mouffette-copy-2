@@ -2,17 +2,25 @@
   "id": "protocol_behavior",
   "rules": [
     {
-      "file": "src/backend/controllers/CanvasSessionController.cpp",
+      "file": "src/MainWindow.cpp",
       "mustContain": [
-        "sendCanvasCreated\\(",
-        "sendCanvasDeleted\\("
+        "openRemoteSession\\(",
+        "closeRemoteSession\\("
       ]
     },
     {
       "file": "src/backend/handlers/ScreenEventHandler.cpp",
       "mustContain": [
         "registerClient\\(",
-        "sendStateSnapshot\\("
+        "endpointId\\("
+      ]
+    },
+    {
+      "file": "src/backend/network/WebSocketClient.cpp",
+      "mustContain": [
+        "sendScenePrepare\\(",
+        "sendSceneStateSnapshot\\(",
+        "sendSceneStop\\("
       ]
     }
   ]

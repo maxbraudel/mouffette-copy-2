@@ -5,7 +5,7 @@ const crypto = require('node:crypto');
 const WebSocket = require('ws');
 const { MouffetteServer } = require('./server');
 const {
-    challengePayload, deviceIdForPublicKey,
+    challengePayload, installationIdForPublicKey, endpointIdForInstallation,
 } = require('./device_auth');
 const { computeSceneDigest, SceneRunRegistry } = require('./scene_run_registry');
 
@@ -47,8 +47,8 @@ function trackedSocket(url) {
     };
 }
 
-function assertV2Envelope(message, context) {
-    assert.equal(message.protocolVersion, 2);
+function assertV3Envelope(message, context) {
+    assert.equal(message.protocolVersion, 3);
     assert.equal(message.serverBootId, context.serverBootId);
     assert.equal(message.connectionGeneration, context.connectionGeneration);
     assert.match(message.messageId,
@@ -71,37 +71,42 @@ async function connectDevice(url, machineName) {
     const keyPair = crypto.generateKeyPairSync('ed25519');
     const publicKey = keyPair.publicKey.export({ type: 'spki', format: 'der' });
     const runtimeId = crypto.randomUUID();
-    const deviceId = deviceIdForPublicKey(publicKey);
+    const instanceId = 'primary';
+    const installationId = installationIdForPublicKey(publicKey);
+    const endpointId = endpointIdForInstallation(installationId, instanceId);
     peer.ws.send(JSON.stringify({
         type: 'auth_response',
-        protocolVersion: 2,
+        protocolVersion: 3,
         serverBootId: challenge.serverBootId,
         messageId: crypto.randomUUID(),
         runtimeId,
-        deviceId,
+        instanceId,
+        installationId,
         publicKey: publicKey.toString('base64url'),
         signature: crypto.sign(null,
-            challengePayload({ ...challenge, runtimeId }), keyPair.privateKey).toString('base64url'),
+            challengePayload({ ...challenge, runtimeId, instanceId }), keyPair.privateKey)
+            .toString('base64url'),
     }));
     const welcome = await peer.next(message => message.type === 'welcome');
     peer.context = {
-        deviceId,
+        endpointId,
         runtimeId,
         serverBootId: welcome.serverBootId,
         connectionGeneration: welcome.connectionGeneration,
     };
     peer.send = (type, body = {}) => peer.ws.send(JSON.stringify({
         type,
-        protocolVersion: 2,
+        protocolVersion: 3,
         serverBootId: peer.context.serverBootId,
         connectionGeneration: peer.context.connectionGeneration,
         messageId: crypto.randomUUID(),
         ...body,
     }));
-    peer.send('device_snapshot', {
-        machineName, platform: 'test', screens: [], volumePercent: null,
+    peer.send('endpoint_snapshot', {
+        machineName, platform: 'test', instanceOrdinal: 1,
+        screens: [], volumePercent: null,
     });
-    await peer.next(message => message.type === 'device_snapshot_applied');
+    await peer.next(message => message.type === 'endpoint_snapshot_applied');
     return peer;
 }
 
@@ -125,7 +130,7 @@ async function connectDevice(url, machineName) {
 
     try {
         owner.send('remote_session_open', {
-            targetDeviceId: target.context.deviceId,
+            targetEndpointId: target.context.endpointId,
             requestId: 'open-1',
         });
         const opened = await owner.next(message => message.type === 'remote_session_opened');
@@ -138,11 +143,11 @@ async function connectDevice(url, machineName) {
 
         owner.send('request_upload_channel');
         const token = await owner.next(message => message.type === 'upload_channel_token');
-        assertV2Envelope(token, owner.context);
+        assertV3Envelope(token, owner.context);
         uploadChannel = trackedSocket(`${url}?channel=upload&token=${encodeURIComponent(token.token)}`);
         await uploadChannel.opened();
         const ready = await uploadChannel.next(message => message.type === 'upload_channel_ready');
-        assertV2Envelope(ready, owner.context);
+        assertV3Envelope(ready, owner.context);
 
         const bytes = Buffer.alloc(128, 0x4d);
         const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
@@ -153,7 +158,7 @@ async function connectDevice(url, machineName) {
             mediaIds: ['media-integration-1'],
         };
         const uploadEnvelope = body => ({
-            protocolVersion: 2,
+            protocolVersion: 3,
             serverBootId: owner.context.serverBootId,
             messageId: crypto.randomUUID(),
             connectionGeneration: owner.context.connectionGeneration,
@@ -192,13 +197,13 @@ async function connectDevice(url, machineName) {
             'closing only the upload transport must preserve resumable state');
         owner.send('request_upload_channel');
         const replacementToken = await owner.next(message => message.type === 'upload_channel_token');
-        assertV2Envelope(replacementToken, owner.context);
+        assertV3Envelope(replacementToken, owner.context);
         uploadChannel = trackedSocket(
             `${url}?channel=upload&token=${encodeURIComponent(replacementToken.token)}`);
         await uploadChannel.opened();
         const replacementReady = await uploadChannel.next(
             message => message.type === 'upload_channel_ready');
-        assertV2Envelope(replacementReady, owner.context);
+        assertV3Envelope(replacementReady, owner.context);
         uploadChannel.ws.send(JSON.stringify(uploadEnvelope({
             type: 'upload_resume', uploadId,
         })));
@@ -323,7 +328,7 @@ async function connectDevice(url, machineName) {
             const output = peer.ws === owner.ws ? owner : target;
             // A representative post-auth message proves centralized envelopes.
             const clientList = await output.next(message => message.type === 'client_list');
-            assert.equal(clientList.protocolVersion, 2);
+            assert.equal(clientList.protocolVersion, 3);
             assert.equal(clientList.serverBootId, server.serverBootId);
             assert.equal(clientList.connectionGeneration,
                 output.context.connectionGeneration);
@@ -337,7 +342,7 @@ async function connectDevice(url, machineName) {
         await new Promise(resolve => server.wss.close(resolve));
     }
 })().then(() => {
-    console.log('upload transport v2 integration tests passed');
+    console.log('upload transport v3 integration tests passed');
 }).catch(error => {
     console.error(error);
     process.exitCode = 1;

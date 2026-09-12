@@ -15,7 +15,7 @@ Method: conservative evaluation from repository evidence only (missing evidence 
 
 | Phase | Gate status | Reason (strict) | Evidence |
 |---|---|---|---|
-| Phase -2 — structuring/hygiene | PASS | Boundary map and automated architecture checks are present and integrated in build flow. | `docs/ARCHITECTURE_BOUNDARIES.md`, `tools/check_architecture_boundaries.sh`, `tools/architecture_screen_canvas_allowlist.txt`, `build.sh` |
+| Phase -2 — structuring/hygiene | PASS | Boundary map and automated architecture checks are present and integrated in build flow. | `docs/ARCHITECTURE_BOUNDARIES.md`, `tools/check_architecture_boundaries.sh`, `tools/architecture_screen_canvas_allowlist.txt`, `scripts/build-development.sh` |
 | Phase -1 — characterization harness | PASS | Baseline fixtures/scripts exist and are actively used. | `tests/baseline/` + `tests/baseline/invariance/fallback_legacy_path.json` |
 | Phase -0.5 — operational controls | PASS | PR template is now placed at repo root and phase-label/process checks are enforced in CI workflow. | `../.github/PULL_REQUEST_TEMPLATE.md`, `../.github/workflows/quick-canvas-gates.yml`, `docs/RELEASE_CHANNELS.md`, `docs/RENDERER_INCIDENT_PROTOCOL.md` |
 | Phase 0 — freeze/flag/telemetry | PASS | Runtime flag + telemetry path resolution are implemented. | `src/backend/managers/app/SettingsManager.cpp`, `src/backend/managers/app/MigrationTelemetryManager.cpp` |

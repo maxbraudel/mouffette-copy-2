@@ -25,11 +25,11 @@ class RemoteSessionRegistry {
     }
 
     open(binding) {
-        const required = ['ownerDeviceId', 'targetDeviceId', 'ownerRuntimeId', 'targetRuntimeId'];
+        const required = ['ownerEndpointId', 'targetEndpointId', 'ownerRuntimeId', 'targetRuntimeId'];
         if (!binding || required.some(key => typeof binding[key] !== 'string' || !binding[key])) {
             return { ok: false, error: 'invalid_remote_session_binding' };
         }
-        if (binding.ownerDeviceId === binding.targetDeviceId) {
+        if (binding.ownerEndpointId === binding.targetEndpointId) {
             return { ok: false, error: 'self_target_not_allowed' };
         }
         const ownerConnectionGeneration = binding.ownerConnectionGeneration ?? 1;
@@ -40,7 +40,7 @@ class RemoteSessionRegistry {
             || targetConnectionGeneration <= 0) {
             return { ok: false, error: 'invalid_connection_generation' };
         }
-        const existingId = this.incomingByTarget.get(binding.targetDeviceId);
+        const existingId = this.incomingByTarget.get(binding.targetEndpointId);
         const existing = existingId && this.sessions.get(existingId);
         if (existing && existing.phase !== 'Closed') {
             return { ok: false, error: 'target_in_use', remoteSessionId: existing.remoteSessionId };
@@ -55,20 +55,20 @@ class RemoteSessionRegistry {
             generation: 1,
             ownerKnownGeneration: 1,
             targetKnownGeneration: 1,
-            ownerDeviceId: binding.ownerDeviceId,
-            targetDeviceId: binding.targetDeviceId,
+            ownerEndpointId: binding.ownerEndpointId,
+            targetEndpointId: binding.targetEndpointId,
             ownerRuntimeId: binding.ownerRuntimeId,
             targetRuntimeId: binding.targetRuntimeId,
             ownerConnectionGeneration,
             targetConnectionGeneration,
             lastContact: new Map([
-                [binding.ownerDeviceId, now],
-                [binding.targetDeviceId, now],
+                [binding.ownerEndpointId, now],
+                [binding.targetEndpointId, now],
             ]),
             graceDeadlineAt: null,
             graceDeadlineEpochMs: null,
-            graceDevices: new Set(),
-            degradedDevices: new Set(),
+            graceEndpoints: new Set(),
+            degradedEndpoints: new Set(),
             teardownId: null,
             teardownReason: null,
             sceneRunId: null,
@@ -77,11 +77,11 @@ class RemoteSessionRegistry {
             updatedAt: now,
         };
         this.sessions.set(remoteSessionId, session);
-        this.incomingByTarget.set(binding.targetDeviceId, remoteSessionId);
-        let outgoing = this.outgoingByOwner.get(binding.ownerDeviceId);
+        this.incomingByTarget.set(binding.targetEndpointId, remoteSessionId);
+        let outgoing = this.outgoingByOwner.get(binding.ownerEndpointId);
         if (!outgoing) {
             outgoing = new Set();
-            this.outgoingByOwner.set(binding.ownerDeviceId, outgoing);
+            this.outgoingByOwner.set(binding.ownerEndpointId, outgoing);
         }
         outgoing.add(remoteSessionId);
         return { ok: true, session };
@@ -95,15 +95,15 @@ class RemoteSessionRegistry {
         return this.tombstones.get(remoteSessionId) || null;
     }
 
-    activeIncomingFor(targetDeviceId) {
-        const id = this.incomingByTarget.get(targetDeviceId);
+    activeIncomingFor(targetEndpointId) {
+        const id = this.incomingByTarget.get(targetEndpointId);
         return id ? this.get(id) : null;
     }
 
-    sessionsForDevice(deviceId) {
+    sessionsForEndpoint(endpointId) {
         return Array.from(this.sessions.values()).filter(session =>
             session.phase !== 'Closed'
-            && (session.ownerDeviceId === deviceId || session.targetDeviceId === deviceId));
+            && (session.ownerEndpointId === endpointId || session.targetEndpointId === endpointId));
     }
 
     validateLease(remoteSessionId, now = this.now()) {
@@ -124,10 +124,10 @@ class RemoteSessionRegistry {
         return { ok: true, session };
     }
 
-    touch(remoteSessionId, deviceId, connectionGeneration, now = this.now()) {
+    touch(remoteSessionId, endpointId, connectionGeneration, now = this.now()) {
         const session = this.get(remoteSessionId);
         if (!session || TERMINAL_PHASES.has(session.phase)) return { ok: false, error: 'session_terminal' };
-        const role = this.#role(session, deviceId);
+        const role = this.#role(session, endpointId);
         if (!role) return { ok: false, error: 'not_a_session_party' };
         const expected = role === 'owner'
             ? session.ownerConnectionGeneration : session.targetConnectionGeneration;
@@ -135,7 +135,7 @@ class RemoteSessionRegistry {
         // Once departure placed this party in Grace, ordinary buffered or late
         // heartbeats must not move its fixed lease deadline. Only a signed
         // resume from the same runtime on a newer transport may recover it.
-        if (session.graceDevices.has(deviceId)) {
+        if (session.graceEndpoints.has(endpointId)) {
             return { ok: false, error: 'resume_required' };
         }
         // A valid heartbeat received at the exact deadline is already too
@@ -149,8 +149,8 @@ class RemoteSessionRegistry {
                 terminalTransition: terminated.ok && !terminated.replay,
             };
         }
-        session.lastContact.set(deviceId, now);
-        const recovered = session.degradedDevices.delete(deviceId);
+        session.lastContact.set(endpointId, now);
+        const recovered = session.degradedEndpoints.delete(endpointId);
         session.updatedAt = now;
         return { ok: true, session, healthChanged: recovered, degraded: false };
     }
@@ -160,33 +160,33 @@ class RemoteSessionRegistry {
         const threshold = Math.max(1, Math.min(this.leaseTimeoutMs - 1, thresholdMs));
         for (const session of this.sessions.values()) {
             if (TERMINAL_PHASES.has(session.phase)) continue;
-            for (const deviceId of [session.ownerDeviceId, session.targetDeviceId]) {
-                const lastContact = session.lastContact.get(deviceId) ?? session.createdAt;
+            for (const endpointId of [session.ownerEndpointId, session.targetEndpointId]) {
+                const lastContact = session.lastContact.get(endpointId) ?? session.createdAt;
                 const degraded = now - lastContact >= threshold;
-                const known = session.degradedDevices.has(deviceId);
+                const known = session.degradedEndpoints.has(endpointId);
                 if (degraded && !known) {
-                    session.degradedDevices.add(deviceId);
-                    transitions.push({ session, deviceId, degraded: true });
+                    session.degradedEndpoints.add(endpointId);
+                    transitions.push({ session, endpointId, degraded: true });
                 } else if (!degraded && known) {
-                    session.degradedDevices.delete(deviceId);
-                    transitions.push({ session, deviceId, degraded: false });
+                    session.degradedEndpoints.delete(endpointId);
+                    transitions.push({ session, endpointId, degraded: false });
                 }
             }
         }
         return transitions;
     }
 
-    markDisconnected(deviceId, now = this.now()) {
+    markDisconnected(endpointId, now = this.now()) {
         const changed = [];
-        for (const session of this.sessionsForDevice(deviceId)) {
+        for (const session of this.sessionsForEndpoint(endpointId)) {
             if (TERMINAL_PHASES.has(session.phase)) continue;
             if (this.#leaseExpired(session, now)) {
                 changed.push(this.terminate(session.remoteSessionId, 'lease_expired', now).session);
                 continue;
             }
             session.phase = 'Grace';
-            session.graceDevices.add(deviceId);
-            session.degradedDevices.add(deviceId);
+            session.graceEndpoints.add(endpointId);
+            session.degradedEndpoints.add(endpointId);
             this.#refreshGraceDeadline(session, now);
             session.updatedAt = now;
             changed.push(session);
@@ -194,7 +194,7 @@ class RemoteSessionRegistry {
         return changed;
     }
 
-    resume({ remoteSessionId, deviceId, runtimeId, resumeToken, generation,
+    resume({ remoteSessionId, endpointId, runtimeId, resumeToken, generation,
              connectionGeneration }, now = this.now()) {
         const session = this.get(remoteSessionId);
         if (!session || session.phase !== 'Grace') return { ok: false, error: 'session_not_resumable' };
@@ -207,9 +207,9 @@ class RemoteSessionRegistry {
                 terminalTransition: terminated.ok && !terminated.replay,
             };
         }
-        const role = this.#role(session, deviceId);
+        const role = this.#role(session, endpointId);
         if (!role) return { ok: false, error: 'not_a_session_party' };
-        if (!session.graceDevices.has(deviceId)) {
+        if (!session.graceEndpoints.has(endpointId)) {
             return { ok: false, error: 'party_not_in_grace' };
         }
         const expectedRuntime = role === 'owner' ? session.ownerRuntimeId : session.targetRuntimeId;
@@ -217,7 +217,7 @@ class RemoteSessionRegistry {
             return { ok: false, error: 'invalid_resume_proof' };
         }
         if (!Number.isSafeInteger(generation) || generation < 1
-            || generation !== this.knownGenerationFor(session, deviceId)) {
+            || generation !== this.knownGenerationFor(session, endpointId)) {
             return { ok: false, error: 'stale_remote_session_generation' };
         }
         if (!Number.isSafeInteger(connectionGeneration) || connectionGeneration <= 0) {
@@ -230,10 +230,10 @@ class RemoteSessionRegistry {
         }
         if (role === 'owner') session.ownerConnectionGeneration = connectionGeneration;
         else session.targetConnectionGeneration = connectionGeneration;
-        session.lastContact.set(deviceId, now);
-        session.graceDevices.delete(deviceId);
-        session.degradedDevices.delete(deviceId);
-        if (session.graceDevices.size === 0) {
+        session.lastContact.set(endpointId, now);
+        session.graceEndpoints.delete(endpointId);
+        session.degradedEndpoints.delete(endpointId);
+        if (session.graceEndpoints.size === 0) {
             session.phase = 'Active';
             session.graceDeadlineAt = null;
             session.graceDeadlineEpochMs = null;
@@ -247,30 +247,30 @@ class RemoteSessionRegistry {
         return { ok: true, session };
     }
 
-    knownGenerationFor(sessionOrId, deviceId) {
+    knownGenerationFor(sessionOrId, endpointId) {
         const session = typeof sessionOrId === 'string'
             ? (this.get(sessionOrId) || this.getTombstone(sessionOrId))
             : sessionOrId;
         if (!session) return null;
-        if (session.ownerDeviceId === deviceId) {
+        if (session.ownerEndpointId === endpointId) {
             return Number.isSafeInteger(session.ownerKnownGeneration)
                 ? session.ownerKnownGeneration : session.generation;
         }
-        if (session.targetDeviceId === deviceId) {
+        if (session.targetEndpointId === endpointId) {
             return Number.isSafeInteger(session.targetKnownGeneration)
                 ? session.targetKnownGeneration : session.generation;
         }
         return null;
     }
 
-    markGenerationDelivered(remoteSessionId, deviceId, generation) {
+    markGenerationDelivered(remoteSessionId, endpointId, generation) {
         const session = this.get(remoteSessionId);
         if (!session || generation !== session.generation) return false;
-        if (session.ownerDeviceId === deviceId) {
+        if (session.ownerEndpointId === endpointId) {
             session.ownerKnownGeneration = generation;
             return true;
         }
-        if (session.targetDeviceId === deviceId) {
+        if (session.targetEndpointId === endpointId) {
             session.targetKnownGeneration = generation;
             return true;
         }
@@ -290,8 +290,8 @@ class RemoteSessionRegistry {
         session.teardownReason = String(reason || 'closed').slice(0, 128);
         session.graceDeadlineAt = null;
         session.graceDeadlineEpochMs = null;
-        session.graceDevices.clear();
-        session.degradedDevices.clear();
+        session.graceEndpoints.clear();
+        session.degradedEndpoints.clear();
         session.updatedAt = now;
         return { ok: true, replay: false, session };
     }
@@ -308,19 +308,19 @@ class RemoteSessionRegistry {
         return { ok: true, session };
     }
 
-    acknowledgeCleanup(remoteSessionId, teardownId, targetDeviceId, result, now = this.now()) {
+    acknowledgeCleanup(remoteSessionId, teardownId, targetEndpointId, result, now = this.now()) {
         const session = this.get(remoteSessionId);
         if (!session) {
             const tombstone = this.tombstones.get(remoteSessionId);
             if (tombstone && tombstone.teardownId === teardownId
-                && tombstone.targetDeviceId === targetDeviceId
+                && tombstone.targetEndpointId === targetEndpointId
                 && this.#isCommittedCleanup(result)) {
                 return { ok: true, replay: true, session: tombstone };
             }
             return { ok: false, error: 'unknown_remote_session' };
         }
         if (typeof teardownId !== 'string' || !teardownId
-            || session.targetDeviceId !== targetDeviceId
+            || session.targetEndpointId !== targetEndpointId
             || session.teardownId !== teardownId
             || (session.phase !== 'Terminating' && session.phase !== 'CleanupPending')) {
             return { ok: false, error: 'invalid_teardown_ack' };
@@ -337,11 +337,11 @@ class RemoteSessionRegistry {
         session.cleanupResult = { ...result };
         delete session.cleanupError;
         session.updatedAt = now;
-        this.incomingByTarget.delete(session.targetDeviceId);
-        const outgoing = this.outgoingByOwner.get(session.ownerDeviceId);
+        this.incomingByTarget.delete(session.targetEndpointId);
+        const outgoing = this.outgoingByOwner.get(session.ownerEndpointId);
         if (outgoing) {
             outgoing.delete(remoteSessionId);
-            if (outgoing.size === 0) this.outgoingByOwner.delete(session.ownerDeviceId);
+            if (outgoing.size === 0) this.outgoingByOwner.delete(session.ownerEndpointId);
         }
         this.sessions.delete(remoteSessionId);
         this.tombstones.set(remoteSessionId, session);
@@ -360,23 +360,23 @@ class RemoteSessionRegistry {
         return expired;
     }
 
-    #role(session, deviceId) {
-        if (session.ownerDeviceId === deviceId) return 'owner';
-        if (session.targetDeviceId === deviceId) return 'target';
+    #role(session, endpointId) {
+        if (session.ownerEndpointId === endpointId) return 'owner';
+        if (session.targetEndpointId === endpointId) return 'target';
         return null;
     }
 
     #leaseExpired(session, now) {
-        return [session.ownerDeviceId, session.targetDeviceId].some(deviceId => {
-            const lastContact = session.lastContact.get(deviceId) ?? session.createdAt;
+        return [session.ownerEndpointId, session.targetEndpointId].some(endpointId => {
+            const lastContact = session.lastContact.get(endpointId) ?? session.createdAt;
             return now >= lastContact + this.leaseTimeoutMs;
         });
     }
 
     #refreshGraceDeadline(session, now = this.now()) {
         let deadline = null;
-        for (const deviceId of session.graceDevices) {
-            const lastContact = session.lastContact.get(deviceId) ?? session.createdAt;
+        for (const endpointId of session.graceEndpoints) {
+            const lastContact = session.lastContact.get(endpointId) ?? session.createdAt;
             const deviceDeadline = lastContact + this.leaseTimeoutMs;
             deadline = deadline === null ? deviceDeadline : Math.min(deadline, deviceDeadline);
         }

@@ -125,7 +125,7 @@ private:
                           const ClientInfo& client,
                           qint64 nowMs);
     void updateSectionTitles();
-    QString peerDisplayName(const QString& deviceId) const;
+    QString peerDisplayName(const QString& endpointId) const;
 
     // Canonical Live-scene model (not owned)
     SceneActivityModel* m_sceneActivityModel;

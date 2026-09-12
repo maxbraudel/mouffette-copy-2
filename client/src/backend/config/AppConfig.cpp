@@ -1,4 +1,6 @@
 #include "backend/config/AppConfig.h"
+#include "backend/runtime/RuntimeProfile.h"
+#include "AppBuildConfig.h"
 
 #include <QFile>
 #include <QDebug>
@@ -31,7 +33,7 @@ constexpr std::array<SettingSpec, 12> kSpecs{{
     {Key::AutoUploadImportedMedia, "MOUFFETTE_AUTO_UPLOAD_IMPORTED_MEDIA", "auto-upload-imported-media", "autoUploadImportedMedia", "false", true},
     {Key::UseQuickCanvasRenderer, "MOUFFETTE_USE_QUICK_CANVAS_RENDERER", "use-quick-canvas-renderer", "useQuickCanvasRenderer", "true", true},
     {Key::QtMediaBackend, "QT_MEDIA_BACKEND", "media-backend", nullptr, "ffmpeg", false},
-    {Key::InstanceSuffix, "MOUFFETTE_INSTANCE_SUFFIX", "instance-suffix", nullptr, "", false},
+    {Key::AllowMultipleInstances, "MOUFFETTE_ALLOW_MULTIPLE_INSTANCES", "allow-multiple-instances", nullptr, "false", true},
     {Key::CursorDebug, "MOUFFETTE_CURSOR_DEBUG", "cursor-debug", nullptr, "false", true},
     {Key::RuntimeDiagnostics, "MOUFFETTE_RUNTIME_DIAGNOSTICS", "runtime-diagnostics", nullptr, "false", true},
     {Key::MigrationTelemetry, "MOUFFETTE_MIGRATION_TELEMETRY", "migration-telemetry", nullptr, "false", true},
@@ -357,7 +359,7 @@ void AppConfig::resetToCompiledDefaults() {
     m_autoUploadImportedMedia = false;
     m_useQuickCanvasRenderer = true;
     m_qtMediaBackend = QStringLiteral("ffmpeg");
-    m_instanceSuffix.clear();
+    m_allowMultipleInstances = false;
     m_cursorDebug = false;
     m_runtimeDiagnostics = false;
     m_migrationTelemetry = false;
@@ -369,16 +371,30 @@ bool AppConfig::initialize(const QStringList& arguments, QString* errorMessage) 
     options.arguments = arguments;
     options.processEnvironment = QProcessEnvironment::systemEnvironment();
 
-    QSettings settings(QStringLiteral("Mouffette"), QStringLiteral("Client"));
+    const std::unique_ptr<QSettings> settings = RuntimeProfile::createSettings();
     for (const SettingSpec& spec : kSpecs) {
         if (!spec.settingsName) {
             continue;
         }
         const QString settingsName = QLatin1String(spec.settingsName);
-        if (settings.contains(settingsName)) {
-            options.settings.insert(settingsName, settings.value(settingsName));
+        if (settings->contains(settingsName)) {
+            options.settings.insert(settingsName, settings->value(settingsName));
         }
     }
+    options.applyProductionOverride =
+        QLatin1String(MOUFFETTE_BUILD_CHANNEL) == QStringLiteral("production");
+    return load(options, errorMessage);
+}
+
+bool AppConfig::initializeWithSettings(const QStringList& arguments,
+                                       const QVariantMap& settings,
+                                       QString* errorMessage) {
+    LoadOptions options;
+    options.arguments = arguments;
+    options.processEnvironment = QProcessEnvironment::systemEnvironment();
+    options.settings = settings;
+    options.applyProductionOverride =
+        QLatin1String(MOUFFETTE_BUILD_CHANNEL) == QStringLiteral("production");
     return load(options, errorMessage);
 }
 
@@ -466,6 +482,22 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
         };
     }
 
+    // Production policy is an explicit, key-wise final override. An empty
+    // file changes nothing; a key present here cannot be weakened by runtime
+    // settings, process variables or command-line flags.
+    if (options.applyProductionOverride && !options.productionEnvFilePath.isEmpty()) {
+        QMap<QString, QString> productionValues;
+        if (!readEnvFile(options.productionEnvFilePath, productionValues, errorMessage)) {
+            return false;
+        }
+        const QString source = QStringLiteral("production-override:%1")
+                                   .arg(options.productionEnvFilePath);
+        for (auto it = productionValues.cbegin(); it != productionValues.cend(); ++it) {
+            const SettingSpec* spec = specForEnvName(it.key());
+            rawValues[spec->key] = {it.value(), source};
+        }
+    }
+
     AppConfig candidate;
     candidate.m_loadedEnvFilePath = envFilePath;
     for (const auto& pair : rawValues) {
@@ -504,6 +536,9 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
         || !parseBoolean(rawValues.at(Key::UseQuickCanvasRenderer),
                          keyName(Key::UseQuickCanvasRenderer),
                          candidate.m_useQuickCanvasRenderer, errorMessage)
+        || !parseBoolean(rawValues.at(Key::AllowMultipleInstances),
+                         keyName(Key::AllowMultipleInstances),
+                         candidate.m_allowMultipleInstances, errorMessage)
         || !parseBoolean(rawValues.at(Key::CursorDebug), keyName(Key::CursorDebug),
                          candidate.m_cursorDebug, errorMessage)
         || !parseBoolean(rawValues.at(Key::RuntimeDiagnostics), keyName(Key::RuntimeDiagnostics),
@@ -520,13 +555,6 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
     if (!backendPattern.match(candidate.m_qtMediaBackend).hasMatch()) {
         return setError(errorMessage, QStringLiteral("QT_MEDIA_BACKEND from %1 is invalid")
                                           .arg(rawValues.at(Key::QtMediaBackend).source));
-    }
-
-    candidate.m_instanceSuffix = rawValues.at(Key::InstanceSuffix).value.trimmed();
-    static const QRegularExpression suffixPattern(QStringLiteral("^[A-Za-z0-9_.-]{0,64}$"));
-    if (!suffixPattern.match(candidate.m_instanceSuffix).hasMatch()) {
-        return setError(errorMessage, QStringLiteral("MOUFFETTE_INSTANCE_SUFFIX from %1 is invalid")
-                                          .arg(rawValues.at(Key::InstanceSuffix).source));
     }
 
     candidate.m_loaded = true;

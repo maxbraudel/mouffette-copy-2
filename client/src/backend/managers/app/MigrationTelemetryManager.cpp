@@ -39,19 +39,19 @@ void MigrationTelemetryManager::logRendererPathResolved(const QString& location,
     logTelemetry(payload);
 }
 
-void MigrationTelemetryManager::logCanvasLoadRequest(const QString& deviceId) {
+void MigrationTelemetryManager::logCanvasLoadRequest(const QString& endpointId) {
     QJsonObject payload;
     payload["event"] = "canvas_load_request";
-    payload["deviceId"] = deviceId;
+    payload["endpointId"] = endpointId;
     logTelemetry(payload);
 }
 
-void MigrationTelemetryManager::logCanvasLoadReady(const QString& deviceId,
+void MigrationTelemetryManager::logCanvasLoadReady(const QString& endpointId,
                                                    int screenCount,
                                                    qint64 latencyMs) {
     QJsonObject payload;
     payload["event"] = "canvas_load_ready";
-    payload["deviceId"] = deviceId;
+    payload["endpointId"] = endpointId;
     payload["screenCount"] = screenCount;
     payload["latencyMs"] = static_cast<qint64>(latencyMs);
     logTelemetry(payload);

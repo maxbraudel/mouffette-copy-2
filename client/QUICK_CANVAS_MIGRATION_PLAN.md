@@ -90,8 +90,8 @@ Therefore, a robust plan needs a **contract extraction phase** before renderer r
 
 The following invariants are mandatory throughout all phases:
 
-1. `WebSocketClient` message schema unchanged.
-2. Session identity semantics unchanged (`persistentClientId`, `canvasSessionId`, etc.).
+1. `WebSocketClient` protocol-v3 message schema unchanged.
+2. Endpoint/session identity semantics unchanged (`endpointId`, `remoteSessionId`, etc.).
 3. Upload correctness unchanged (start/progress/finish/cancel/unload/remove).
 4. Watch/reconnect semantics unchanged.
 5. Existing settings and user workflow unchanged.

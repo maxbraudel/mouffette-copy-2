@@ -39,13 +39,16 @@ ClientInfo::ClientInfo() : m_status("unknown"), m_fromMemory(false), m_isOnline(
 
 ClientInfo::ClientInfo(const QString& id, const QString& machineName, const QString& platform)
     : m_id(id), m_machineName(machineName), m_platform(platform), m_status("connected"),
-      m_fromMemory(false), m_isOnline(true), m_deviceId(id),
+      m_fromMemory(false), m_isOnline(true), m_endpointId(id),
       m_availabilityStatus(QStringLiteral("Available")) {
 }
 
 QJsonObject ClientInfo::toJson() const {
     QJsonObject obj;
-    obj["deviceId"] = m_deviceId;
+    obj["installationId"] = m_installationId;
+    obj["endpointId"] = m_endpointId;
+    obj["instanceId"] = m_instanceId;
+    obj["instanceOrdinal"] = m_instanceOrdinal;
     if (!m_runtimeId.isEmpty()) obj["runtimeId"] = m_runtimeId;
     obj["machineName"] = m_machineName;
     obj["platform"] = m_platform;
@@ -83,9 +86,12 @@ ScreenInfo::UIZone ScreenInfo::UIZone::fromJson(const QJsonObject &json) {
 
 ClientInfo ClientInfo::fromJson(const QJsonObject& json) {
     ClientInfo client;
-    client.m_deviceId = json.value("deviceId").toString();
+    client.m_installationId = json.value("installationId").toString();
+    client.m_endpointId = json.value("endpointId").toString();
+    client.m_instanceId = json.value("instanceId").toString();
+    client.m_instanceOrdinal = json.value("instanceOrdinal").toInt(1);
     client.m_runtimeId = json.value("runtimeId").toString();
-    client.m_id = client.m_deviceId;
+    client.m_id = client.m_endpointId;
     client.m_machineName = json["machineName"].toString();
     client.m_platform = json["platform"].toString();
     client.m_status = json["status"].toString();
@@ -115,9 +121,12 @@ QString ClientInfo::getIdentityDisplayText() const {
         platformIcon = "💻";
     }
 
-    const QString machineName = m_machineName.trimmed().isEmpty()
+    QString machineName = m_machineName.trimmed().isEmpty()
         ? QStringLiteral("Unnamed client")
         : m_machineName.trimmed();
+    if (m_instanceOrdinal >= 2) {
+        machineName += QStringLiteral(" — Instance %1").arg(m_instanceOrdinal);
+    }
     return QStringLiteral("%1 %2").arg(platformIcon, machineName);
 }
 

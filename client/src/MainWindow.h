@@ -31,6 +31,7 @@
 #include "backend/domain/models/ClientInfo.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include "backend/domain/session/SessionManager.h"
+#include "backend/runtime/RuntimeProfile.h"
 
 QT_BEGIN_NAMESPACE
 class QAction;
@@ -88,11 +89,13 @@ class MainWindow : public QMainWindow {
 
 public:
     MainWindow(QWidget *parent = nullptr);
+    MainWindow(const RuntimeProfileContext& runtimeProfile, QWidget* parent = nullptr);
     ~MainWindow();
     // Fallback used by QCoreApplication::aboutToQuit. Normal UI quits use the
     // asynchronous drain below; an externally initiated exit still performs
     // the same synchronous local teardown before Qt stops its event loop.
     void handleApplicationAboutToQuit();
+    void showAndActivate();
     
     // Accessor methods for ResponsiveLayoutManager
     QWidget* getRemoteClientInfoContainer() const;
@@ -307,7 +310,7 @@ private:
     // Legacy helper removed; ScreenCanvas renders screens directly
     // [Phase 7.1] setRemoteConnectionStatus, removeVolumeIndicatorFromLayout, addRemoteStatusToLayout moved to public
     // [Phase 8] refreshOverlayActionsState moved to public
-    // Legacy screen-watch/cursor protocol was removed in protocol v2.
+    // Legacy screen-watch/cursor protocol was removed in protocol v3.
     // Manage presence of the remote status (and its leading separator) in the top bar layout
     void removeRemoteStatusFromLayout();
     // [Phase 7.2] Session management methods moved to public for ScreenEventHandler
@@ -330,9 +333,9 @@ private:
     void updateApplicationSuspendedState(bool suspended);
     void updateHistoryVisibilityState();
     void updateHistoryUnreadBadge(int unreadCount);
-    void persistProjectCanvas(const QString& targetDeviceId);
+    void persistProjectCanvas(const QString& targetEndpointId);
     void restoreProjectCanvas(CanvasSession& session);
-    void terminateProjectRemoteSession(const QString& targetDeviceId, bool attemptRemote);
+    void terminateProjectRemoteSession(const QString& targetEndpointId, bool attemptRemote);
     void handleRemoteSessionReady(const QJsonObject& envelope, bool resumed);
     void handleRemoteSessionLeaseState(const QJsonObject& envelope);
     void handleRemoteSessionTerminating(const QJsonObject& envelope);
@@ -342,13 +345,13 @@ private:
     void finishTerminalIncomingCacheCleanupIfReady();
     void handleRemoteSessionClosed(const QJsonObject& envelope);
     void handleRemoteSessionError(const QJsonObject& envelope);
-    void updateRemoteClientAvailability(const QString& targetDeviceId,
+    void updateRemoteClientAvailability(const QString& targetEndpointId,
                                         const QString& status);
-    void clearRemoteSessionRuntimeState(const QString& targetDeviceId,
+    void clearRemoteSessionRuntimeState(const QString& targetEndpointId,
                                         bool connectionLost);
-    void finishDeferredProjectDeletion(const QString& targetDeviceId);
+    void finishDeferredProjectDeletion(const QString& targetEndpointId);
     void retryPendingTeardownAcks();
-    void removeRuntimeCanvasSession(const QString& targetDeviceId);
+    void removeRuntimeCanvasSession(const QString& targetEndpointId);
     void refreshProjectClientList();
     void setActiveProjectVisibleIfAppropriate();
     void prepareCleanShutdown();
@@ -356,7 +359,7 @@ private:
     void maybeFinishCleanShutdown();
     void finishCleanShutdown();
     QList<ProjectMediaReference> collectProjectMediaReferences(
-        const QString& targetDeviceId, ICanvasHost* canvas) const;
+        const QString& targetEndpointId, ICanvasHost* canvas) const;
     void removeInvalidMediaItems(const QList<ResizableMediaBase*>& mediaItems);
     void validateAllProjectSources();
 
@@ -520,7 +523,7 @@ private:
         qint64 quarantinedBytes = 0;
     };
     struct PendingRendererTeardown {
-        QString ownerDeviceId;
+        QString ownerEndpointId;
         QString teardownId;
         quint64 generation = 0;
     };

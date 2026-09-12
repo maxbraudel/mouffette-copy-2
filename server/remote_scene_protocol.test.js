@@ -18,17 +18,17 @@ function socket() {
     };
 }
 
-function addClient(server, connectionId, deviceId) {
+function addClient(server, connectionId, endpointId) {
     const ws = socket();
     server.clients.set(connectionId, {
         id: connectionId,
         sessionId: connectionId,
-        persistentId: deviceId,
-        deviceId,
-        runtimeId: `runtime-${deviceId}`,
+        persistentId: endpointId,
+        endpointId,
+        runtimeId: `runtime-${endpointId}`,
         connectionGeneration: 1,
         authenticated: true,
-        machineName: deviceId,
+        machineName: endpointId,
         ws,
     });
     return ws;
@@ -40,7 +40,7 @@ function messages(ws, type) {
 
 function envelope(session, extra = {}) {
     return {
-        protocolVersion: 2,
+        protocolVersion: 3,
         serverBootId: session.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: session.remoteSessionId,
@@ -81,7 +81,7 @@ const checklist = Object.freeze([
     const digest = computeSceneDigest(1, [asset], scene);
     const binding = {
         remoteSessionId: 'session-1', generation: 1, sceneRunId: 'run-1', revision: 1,
-        digest, manifest: [asset], scene, ownerDeviceId: 'A', targetDeviceId: 'B',
+        digest, manifest: [asset], scene, ownerEndpointId: 'A', targetEndpointId: 'B',
     };
     assert.equal(registry.prepare(binding).ok, true);
     assert.equal(registry.prepare(binding).replay, true);
@@ -198,7 +198,7 @@ const checklist = Object.freeze([
     const owner = addClient(server, 'grace-owner', 'A');
     addClient(server, 'grace-target', 'B');
     const session = server.remoteSessions.open({
-        ownerDeviceId: 'A', targetDeviceId: 'B',
+        ownerEndpointId: 'A', targetEndpointId: 'B',
         ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
@@ -208,7 +208,7 @@ const checklist = Object.freeze([
         generation: session.generation,
         sceneRunId: 'grace-scene-run', revision: 1, digest,
         manifest: [asset], scene,
-        ownerDeviceId: 'A', targetDeviceId: 'B',
+        ownerEndpointId: 'A', targetEndpointId: 'B',
     }).run;
     session.sceneRunId = run.sceneRunId;
 
@@ -224,7 +224,7 @@ const checklist = Object.freeze([
     server.clients.get('grace-owner').connectionGeneration = 2;
     const resumed = server.remoteSessions.resume({
         remoteSessionId: session.remoteSessionId,
-        deviceId: 'A', runtimeId: 'runtime-A',
+        endpointId: 'A', runtimeId: 'runtime-A',
         resumeToken: session.resumeToken,
         generation: session.generation,
         connectionGeneration: 2,
@@ -258,7 +258,7 @@ const checklist = Object.freeze([
     const owner = addClient(server, 'lease-owner', 'A');
     const target = addClient(server, 'lease-target', 'B');
     const session = server.remoteSessions.open({
-        ownerDeviceId: 'A', targetDeviceId: 'B',
+        ownerEndpointId: 'A', targetEndpointId: 'B',
         ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
@@ -267,7 +267,7 @@ const checklist = Object.freeze([
         asset.assetId,
         { ...asset, remoteSessionId: session.remoteSessionId,
             generation: session.generation,
-            ownerDeviceId: 'A', targetDeviceId: 'B', uploadId: 'lease-upload' },
+            ownerEndpointId: 'A', targetEndpointId: 'B', uploadId: 'lease-upload' },
     ]]));
     const digest = computeSceneDigest(1, [asset], scene);
 
@@ -285,7 +285,7 @@ const checklist = Object.freeze([
     }));
     assert.equal(session.phase, 'CleanupPending');
     assert.equal(server.sceneRuns.get('lease-scene-run').phase, SCENE_PHASES.STOPPING);
-    assert.equal(server.sceneRuns.get('lease-scene-run').preparedDevices.size, 0);
+    assert.equal(server.sceneRuns.get('lease-scene-run').preparedEndpoints.size, 0);
     assert.equal(messages(owner, 'error').at(-1).code, 'lease_expired');
     assert.equal(messages(target, 'remote_session_terminating').length, 1);
 }
@@ -321,7 +321,7 @@ for (const invalidCase of [
     const owner = addClient(server, `invalid-${invalidCase.suffix}-owner`, 'A');
     const target = addClient(server, `invalid-${invalidCase.suffix}-target`, 'B');
     const session = server.remoteSessions.open({
-        ownerDeviceId: 'A', targetDeviceId: 'B',
+        ownerEndpointId: 'A', targetEndpointId: 'B',
         ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
@@ -329,7 +329,7 @@ for (const invalidCase of [
     server.sessionAssets.set(session.remoteSessionId, new Map([[
         asset.assetId,
         { ...asset, remoteSessionId: session.remoteSessionId,
-            generation: session.generation, ownerDeviceId: 'A', targetDeviceId: 'B',
+            generation: session.generation, ownerEndpointId: 'A', targetEndpointId: 'B',
             uploadId: `validated-${invalidCase.suffix}` },
     ]]));
     const digest = computeSceneDigest(1, [asset], scene);
@@ -395,7 +395,7 @@ for (const invalidCase of [
     const target = addClient(server, targetId, 'B');
     const attacker = addClient(server, attackerId, 'C');
     const session = server.remoteSessions.open({
-        ownerDeviceId: 'A', targetDeviceId: 'B',
+        ownerEndpointId: 'A', targetEndpointId: 'B',
         ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
@@ -403,7 +403,7 @@ for (const invalidCase of [
     server.sessionAssets.set(session.remoteSessionId, new Map([[
         asset.assetId,
         { ...asset, remoteSessionId: session.remoteSessionId,
-            generation: session.generation, ownerDeviceId: 'A', targetDeviceId: 'B',
+            generation: session.generation, ownerEndpointId: 'A', targetEndpointId: 'B',
             uploadId: `validated-${invalidCase.suffix}` },
     ]]));
     const digest = computeSceneDigest(1, [asset], scene);
@@ -468,7 +468,7 @@ for (const invalidCase of [
     const target = addClient(server, 'target-connection', 'B');
     const attacker = addClient(server, 'attacker-connection', 'C');
     const session = server.remoteSessions.open({
-        ownerDeviceId: 'A', targetDeviceId: 'B',
+        ownerEndpointId: 'A', targetEndpointId: 'B',
         ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
@@ -476,7 +476,7 @@ for (const invalidCase of [
     server.sessionAssets.set(session.remoteSessionId, new Map([[
         asset.assetId,
         { ...asset, remoteSessionId: session.remoteSessionId, generation: session.generation,
-            ownerDeviceId: 'A', targetDeviceId: 'B', uploadId: 'upload-1' },
+            ownerEndpointId: 'A', targetEndpointId: 'B', uploadId: 'upload-1' },
     ]]));
     const digest = computeSceneDigest(1, [asset], scene);
     const prepare = envelope(session, {
@@ -488,8 +488,8 @@ for (const invalidCase of [
     assert.equal(messages(attacker, 'error').at(-1).code, 'not_a_session_party');
     server.handleMessage('owner-connection', structuredClone(prepare));
     assert.equal(messages(target, 'scene_prepare').length, 1);
-    assert.equal(messages(target, 'scene_prepare')[0].ownerDeviceId, 'A');
-    assert.equal(messages(target, 'scene_prepare')[0].targetDeviceId, 'B');
+    assert.equal(messages(target, 'scene_prepare')[0].ownerEndpointId, 'A');
+    assert.equal(messages(target, 'scene_prepare')[0].targetEndpointId, 'B');
     server.handleMessage('owner-connection', structuredClone(prepare));
     assert.equal(messages(target, 'scene_prepare').length, 1);
 
@@ -503,7 +503,7 @@ for (const invalidCase of [
         type: 'prepared', sceneRunId: 'run-wire-1', digest, success: true, checklist,
     }));
     assert.equal(server.sceneRuns.get('run-wire-1').phase, SCENE_PHASES.PREPARED);
-    assert.equal(messages(owner, 'prepare_progress').at(-1).reporterDeviceId, 'B');
+    assert.equal(messages(owner, 'prepare_progress').at(-1).reporterEndpointId, 'B');
 
     server.handleMessage('owner-connection', envelope(session, {
         type: 'armed', sceneRunId: 'run-wire-1', digest, clockUncertaintyMs: 10,
@@ -589,7 +589,7 @@ for (const invalidCase of [
     assert.equal(messages(owner, 'stopped').at(-1).success, true);
 
     server.handleMessage('owner-connection', {
-        protocolVersion: 2, serverBootId: server.serverBootId,
+        protocolVersion: 3, serverBootId: server.serverBootId,
         messageId: crypto.randomUUID(),
         type: 'remote_scene_start',
     });
@@ -602,7 +602,7 @@ for (const invalidCase of [
     const owner = addClient(server, 'owner-connection', 'A');
     addClient(server, 'target-connection', 'B');
     const session = server.remoteSessions.open({
-        ownerDeviceId: 'A', targetDeviceId: 'B',
+        ownerEndpointId: 'A', targetEndpointId: 'B',
         ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
@@ -610,7 +610,7 @@ for (const invalidCase of [
     server.sessionAssets.set(session.remoteSessionId, new Map([[
         asset.assetId,
         { ...asset, remoteSessionId: session.remoteSessionId, generation: 99,
-            ownerDeviceId: 'A', targetDeviceId: 'B' },
+            ownerEndpointId: 'A', targetEndpointId: 'B' },
     ]]));
     const digest = computeSceneDigest(1, [asset], scene);
     server.handleMessage('owner-connection', envelope(session, {
@@ -621,4 +621,4 @@ for (const invalidCase of [
     assert.equal(server.metrics.value('scene_prepare_failed_total'), 1);
 }
 
-console.log('scene protocol v2 tests passed');
+console.log('scene protocol v3 tests passed');

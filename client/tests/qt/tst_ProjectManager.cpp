@@ -8,13 +8,19 @@
 #include "backend/domain/project/ProjectStore.h"
 
 namespace {
-ClientInfo client(const QString& deviceId,
+ClientInfo client(const QString& endpointId,
                   const QString& connectionId,
                   const QString& name,
-                  int volume = 50)
+                  int volume = 50,
+                  int instanceOrdinal = 1)
 {
     ClientInfo result(connectionId, name, QStringLiteral("Linux"));
-    result.setClientId(deviceId);
+    result.setInstallationId(QStringLiteral("installation-") + endpointId);
+    result.setEndpointId(endpointId);
+    result.setInstanceId(instanceOrdinal == 1
+        ? QStringLiteral("primary")
+        : QStringLiteral("11111111-2222-4333-8444-555555555555"));
+    result.setInstanceOrdinal(instanceOrdinal);
     result.setVolumePercent(volume);
     ScreenInfo screen(7, 1920, 1080, -120, 0, true);
     ScreenInfo::UIZone zone;
@@ -28,12 +34,14 @@ ClientInfo client(const QString& deviceId,
     return result;
 }
 
-ClientSnapshot snapshot(const QString& deviceId,
+ClientSnapshot snapshot(const QString& endpointId,
                         const QString& connectionId,
                         const QString& name,
-                        qint64 seenAt = 0)
+                        qint64 seenAt = 0,
+                        int instanceOrdinal = 1)
 {
-    return ClientSnapshot::fromClientInfo(client(deviceId, connectionId, name), seenAt);
+    return ClientSnapshot::fromClientInfo(
+        client(endpointId, connectionId, name, 50, instanceOrdinal), seenAt);
 }
 }
 
@@ -58,7 +66,8 @@ private slots:
         QCOMPARE(writer.ensureProject(snapshot(QStringLiteral("device-a"),
                                                QStringLiteral("socket-1"),
                                                QStringLiteral("Studio A"),
-                                               1000),
+                                               1000,
+                                               2),
                                       ProjectLifecycleState::Visible,
                                       1000).isEmpty(), false);
 
@@ -91,6 +100,11 @@ private slots:
         QList<ProjectRecord> durable;
         QVERIFY(store.load(&durable));
         QCOMPARE(durable.size(), 1);
+        QCOMPARE(durable.first().clientSnapshot.installationId,
+                 QStringLiteral("installation-device-a"));
+        QCOMPARE(durable.first().clientSnapshot.instanceOrdinal, 2);
+        QCOMPARE(durable.first().clientSnapshot.toClientInfo(false).getIdentityDisplayText(),
+                 QStringLiteral("(linux) Studio A — Instance 2"));
         QVERIFY(!durable.first().clientSnapshot.toJson().contains(
             QStringLiteral("serverConnectionId")));
         QVERIFY(!durable.first().canvasState.contains(QStringLiteral("canvasSessionId")));
@@ -236,7 +250,7 @@ private slots:
                  qint64(310'000));
     }
 
-    void discoveryMergeKeepsOfflineProjectsAndRefreshesByDeviceId()
+    void discoveryMergeKeepsOfflineProjectsAndRefreshesByEndpointId()
     {
         QTemporaryDir temporary;
         ProjectStore store(temporary.filePath(QStringLiteral("projects.json")));
@@ -251,11 +265,11 @@ private slots:
             client(QStringLiteral("device-b"), QStringLiteral("socket-b"), QStringLiteral("Available B"), 20)
         }, 20);
         QCOMPARE(entries.size(), 2);
-        QCOMPARE(entries.at(0).deviceId, QStringLiteral("device-a"));
+        QCOMPARE(entries.at(0).endpointId, QStringLiteral("device-a"));
         QVERIFY(entries.at(0).online);
         QVERIFY(entries.at(0).hasProject);
         QCOMPARE(entries.at(0).client.getMachineName(), QStringLiteral("New name"));
-        QCOMPARE(entries.at(1).deviceId, QStringLiteral("device-b"));
+        QCOMPARE(entries.at(1).endpointId, QStringLiteral("device-b"));
         QVERIFY(entries.at(1).online);
         QVERIFY(!entries.at(1).hasProject);
 
@@ -264,7 +278,7 @@ private slots:
             client(QStringLiteral("device-b"), QStringLiteral("socket-b2"), QStringLiteral("Available B"), 21)
         }, 30);
         QCOMPARE(entries.size(), 2);
-        QCOMPARE(entries.at(1).deviceId, QStringLiteral("device-a"));
+        QCOMPARE(entries.at(1).endpointId, QStringLiteral("device-a"));
         QVERIFY(!entries.at(1).online);
         QVERIFY(entries.at(1).hasProject);
         QCOMPARE(entries.at(1).client.getMachineName(), QStringLiteral("New name"));
@@ -275,12 +289,12 @@ private slots:
         ClientInfo returnedWithoutDisplays(
             QStringLiteral("socket-empty"), QStringLiteral("New name"),
             QStringLiteral("Linux"));
-        returnedWithoutDisplays.setClientId(QStringLiteral("device-a"));
+        returnedWithoutDisplays.setEndpointId(QStringLiteral("device-a"));
         returnedWithoutDisplays.setScreens({});
         returnedWithoutDisplays.setVolumePercent(-1);
         entries = manager.mergeDiscoveredClients({returnedWithoutDisplays}, 31);
         QCOMPARE(entries.size(), 1); // B was discovery-only, so it vanishes.
-        QCOMPARE(entries.first().deviceId, QStringLiteral("device-a"));
+        QCOMPARE(entries.first().endpointId, QStringLiteral("device-a"));
         QVERIFY(entries.first().client.getScreens().isEmpty());
         QCOMPARE(entries.first().client.getVolumePercent(), -1);
         const ProjectRecord* replaced = manager.projectForTarget(QStringLiteral("device-a"));
@@ -301,7 +315,7 @@ private slots:
             client(QStringLiteral("device-b"), QStringLiteral("socket-b3"), QStringLiteral("Available B"))
         }, 35);
         QCOMPARE(entries.size(), 2);
-        QCOMPARE(entries.first().deviceId, QStringLiteral("device-a"));
+        QCOMPARE(entries.first().endpointId, QStringLiteral("device-a"));
         QVERIFY(entries.first().online);
         QVERIFY(!entries.first().hasProject);
         QCOMPARE(entries.first().client.availabilityBadgeText(), QStringLiteral("Available"));
@@ -312,7 +326,7 @@ private slots:
             client(QStringLiteral("device-c"), QStringLiteral("socket-c"), QStringLiteral("New name"))
         }, 36);
         QCOMPARE(entries.size(), 1);
-        QCOMPARE(entries.first().deviceId, QStringLiteral("device-c"));
+        QCOMPARE(entries.first().endpointId, QStringLiteral("device-c"));
         QVERIFY(!entries.first().hasProject);
 
         // Recreate the offline branch to prove deletion removes the row when
@@ -325,7 +339,7 @@ private slots:
             client(QStringLiteral("device-b"), QStringLiteral("socket-b4"), QStringLiteral("Available B"))
         }, 40);
         QCOMPARE(entries.size(), 1);
-        QCOMPARE(entries.first().deviceId, QStringLiteral("device-b"));
+        QCOMPARE(entries.first().endpointId, QStringLiteral("device-b"));
     }
 
     void crashCheckpointDoesNotGrantFreshRetentionWindow()
@@ -462,7 +476,7 @@ private slots:
             manager.projectForTarget(QStringLiteral("device-a"));
         QVERIFY(retained);
         QCOMPARE(retained->toJson(), beforeFailure.toJson());
-        QCOMPARE(manager.projectById(projectId)->targetDeviceId,
+        QCOMPARE(manager.projectById(projectId)->targetEndpointId,
                  QStringLiteral("device-a"));
 
         // Repair storage. The save failure must have rearmed the delayed

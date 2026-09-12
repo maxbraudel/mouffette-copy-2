@@ -92,7 +92,7 @@ class SceneRunRegistry {
             return { ok: false, error: 'scene_run_id_reused' };
         }
         const requiredStrings = [
-            'remoteSessionId', 'sceneRunId', 'ownerDeviceId', 'targetDeviceId', 'digest',
+            'remoteSessionId', 'sceneRunId', 'ownerEndpointId', 'targetEndpointId', 'digest',
         ];
         if (!binding || requiredStrings.some(key => typeof binding[key] !== 'string'
             || binding[key].length < 1)) {
@@ -114,16 +114,16 @@ class SceneRunRegistry {
             digest: binding.digest,
             manifest: binding.manifest,
             scene: binding.scene,
-            ownerDeviceId: binding.ownerDeviceId,
-            targetDeviceId: binding.targetDeviceId,
+            ownerEndpointId: binding.ownerEndpointId,
+            targetEndpointId: binding.targetEndpointId,
             phase: SCENE_PHASES.PREPARING,
-            preparedDevices: new Set(),
-            armedDevices: new Set(),
-            armedClockUncertaintyByDevice: new Map(),
-            startedDevices: new Set(),
-            presentedServerMonotonicByDevice: new Map(),
-            stoppedDevices: new Set(),
-            progressByDevice: new Map(),
+            preparedEndpoints: new Set(),
+            armedEndpoints: new Set(),
+            armedClockUncertaintyByEndpoint: new Map(),
+            startedEndpoints: new Set(),
+            presentedServerMonotonicByEndpoint: new Map(),
+            stoppedEndpoints: new Set(),
+            progressByEndpoint: new Map(),
             lastSnapshotSequence: 0,
             createdAt: now,
             updatedAt: now,
@@ -144,48 +144,48 @@ class SceneRunRegistry {
         return { ok: true, replay: false, run };
     }
 
-    recordProgress(sceneRunId, deviceId, progress) {
+    recordProgress(sceneRunId, endpointId, progress) {
         const run = this.get(sceneRunId);
         if (!run || run.phase !== SCENE_PHASES.PREPARING) {
             return { ok: false, error: 'scene_not_preparing' };
         }
-        if (!this.#isParty(run, deviceId)) return { ok: false, error: 'not_a_scene_party' };
-        run.progressByDevice.set(deviceId, progress);
+        if (!this.#isParty(run, endpointId)) return { ok: false, error: 'not_a_scene_party' };
+        run.progressByEndpoint.set(endpointId, progress);
         run.updatedAt = this.epochNow();
         return { ok: true, run };
     }
 
-    markPrepared(sceneRunId, deviceId, digest) {
+    markPrepared(sceneRunId, endpointId, digest) {
         const run = this.get(sceneRunId);
         if (!run) {
             return { ok: false, error: 'scene_not_preparing' };
         }
-        if (!this.#isParty(run, deviceId)) return { ok: false, error: 'not_a_scene_party' };
+        if (!this.#isParty(run, endpointId)) return { ok: false, error: 'not_a_scene_party' };
         if (digest !== run.digest) return { ok: false, error: 'scene_digest_mismatch' };
         if (![SCENE_PHASES.PREPARING, SCENE_PHASES.PREPARED].includes(run.phase)) {
-            if (run.preparedDevices.has(deviceId)
+            if (run.preparedEndpoints.has(endpointId)
                 && [SCENE_PHASES.ARMED, SCENE_PHASES.SCHEDULED, SCENE_PHASES.LIVE]
                     .includes(run.phase)) {
                 return { ok: true, replay: true, ready: true, run };
             }
             return { ok: false, error: 'scene_not_preparing' };
         }
-        const replay = run.preparedDevices.has(deviceId);
-        run.preparedDevices.add(deviceId);
-        if (run.preparedDevices.size === 2) run.phase = SCENE_PHASES.PREPARED;
+        const replay = run.preparedEndpoints.has(endpointId);
+        run.preparedEndpoints.add(endpointId);
+        if (run.preparedEndpoints.size === 2) run.phase = SCENE_PHASES.PREPARED;
         run.updatedAt = this.epochNow();
         return { ok: true, replay, ready: run.phase === SCENE_PHASES.PREPARED, run };
     }
 
-    arm(sceneRunId, deviceId, digest, clockUncertaintyMs) {
+    arm(sceneRunId, endpointId, digest, clockUncertaintyMs) {
         const run = this.get(sceneRunId);
         if (!run) {
             return { ok: false, error: 'scene_not_prepared' };
         }
-        if (!this.#isParty(run, deviceId)) return { ok: false, error: 'not_a_scene_party' };
+        if (!this.#isParty(run, endpointId)) return { ok: false, error: 'not_a_scene_party' };
         if (digest !== run.digest) return { ok: false, error: 'scene_digest_mismatch' };
         if (![SCENE_PHASES.PREPARED, SCENE_PHASES.ARMED].includes(run.phase)) {
-            if (run.armedDevices.has(deviceId)
+            if (run.armedEndpoints.has(endpointId)
                 && [SCENE_PHASES.SCHEDULED, SCENE_PHASES.LIVE].includes(run.phase)) {
                 return { ok: true, replay: true, scheduled: true, run };
             }
@@ -195,12 +195,12 @@ class SceneRunRegistry {
             || clockUncertaintyMs > this.maximumClockUncertaintyMs) {
             return { ok: false, error: 'clock_uncertainty_too_high' };
         }
-        const replay = run.armedDevices.has(deviceId);
-        run.armedDevices.add(deviceId);
-        run.armedClockUncertaintyByDevice.set(deviceId, clockUncertaintyMs);
+        const replay = run.armedEndpoints.has(endpointId);
+        run.armedEndpoints.add(endpointId);
+        run.armedClockUncertaintyByEndpoint.set(endpointId, clockUncertaintyMs);
         run.phase = SCENE_PHASES.ARMED;
         run.updatedAt = this.epochNow();
-        if (run.armedDevices.size === 2) {
+        if (run.armedEndpoints.size === 2) {
             const nowEpoch = this.epochNow();
             const nowMonotonic = this.monotonicNow();
             run.phase = SCENE_PHASES.SCHEDULED;
@@ -219,20 +219,20 @@ class SceneRunRegistry {
         };
     }
 
-    markStarted(sceneRunId, deviceId, digest, firstFramePresented,
+    markStarted(sceneRunId, endpointId, digest, firstFramePresented,
                 presentedServerMonotonicMs) {
         const run = this.get(sceneRunId);
         if (!run || ![SCENE_PHASES.SCHEDULED, SCENE_PHASES.LIVE].includes(run.phase)) {
             return { ok: false, error: 'scene_not_scheduled' };
         }
-        if (!this.#isParty(run, deviceId)) return { ok: false, error: 'not_a_scene_party' };
+        if (!this.#isParty(run, endpointId)) return { ok: false, error: 'not_a_scene_party' };
         if (digest !== run.digest) return { ok: false, error: 'scene_digest_mismatch' };
         if (firstFramePresented !== true) return { ok: false, error: 'first_frame_not_presented' };
         if (!Number.isSafeInteger(presentedServerMonotonicMs)
             || presentedServerMonotonicMs < 0) {
             return { ok: false, error: 'invalid_first_frame_timestamp' };
         }
-        const previousTimestamp = run.presentedServerMonotonicByDevice.get(deviceId);
+        const previousTimestamp = run.presentedServerMonotonicByEndpoint.get(endpointId);
         if (previousTimestamp !== undefined) {
             if (previousTimestamp !== presentedServerMonotonicMs) {
                 return { ok: false, error: 'conflicting_started_ack' };
@@ -248,7 +248,7 @@ class SceneRunRegistry {
 
         const now = this.epochNow();
         const nowMonotonic = this.monotonicNow();
-        const reporterUncertainty = run.armedClockUncertaintyByDevice.get(deviceId);
+        const reporterUncertainty = run.armedClockUncertaintyByEndpoint.get(endpointId);
         if (!Number.isFinite(reporterUncertainty)
             || reporterUncertainty < 0
             || reporterUncertainty > this.maximumClockUncertaintyMs) {
@@ -275,7 +275,7 @@ class SceneRunRegistry {
         }
 
         const peerTimestamp = Array.from(
-            run.presentedServerMonotonicByDevice.values())[0];
+            run.presentedServerMonotonicByEndpoint.values())[0];
         const observedSkewMs = peerTimestamp === undefined
             ? null : Math.abs(presentedServerMonotonicMs - peerTimestamp);
         if (observedSkewMs !== null
@@ -288,11 +288,11 @@ class SceneRunRegistry {
                 run,
             };
         }
-        const replay = run.startedDevices.has(deviceId);
-        run.startedDevices.add(deviceId);
-        run.presentedServerMonotonicByDevice.set(deviceId,
+        const replay = run.startedEndpoints.has(endpointId);
+        run.startedEndpoints.add(endpointId);
+        run.presentedServerMonotonicByEndpoint.set(endpointId,
             presentedServerMonotonicMs);
-        if (run.startedDevices.size === 2) {
+        if (run.startedEndpoints.size === 2) {
             run.startSkewMs = observedSkewMs;
             run.phase = SCENE_PHASES.LIVE;
         }
@@ -306,12 +306,12 @@ class SceneRunRegistry {
         };
     }
 
-    acceptSnapshot(sceneRunId, deviceId, digest, sequence) {
+    acceptSnapshot(sceneRunId, endpointId, digest, sequence) {
         const run = this.get(sceneRunId);
         if (!run || run.phase !== SCENE_PHASES.LIVE) {
             return { ok: false, error: 'scene_not_live' };
         }
-        if (deviceId !== run.ownerDeviceId) return { ok: false, error: 'not_scene_owner' };
+        if (endpointId !== run.ownerEndpointId) return { ok: false, error: 'not_scene_owner' };
         if (digest !== run.digest) return { ok: false, error: 'scene_digest_mismatch' };
         if (!Number.isSafeInteger(sequence) || sequence <= run.lastSnapshotSequence) {
             return { ok: false, error: 'stale_snapshot_sequence' };
@@ -345,7 +345,7 @@ class SceneRunRegistry {
         return { ok: true, replay: false, completed: false, run };
     }
 
-    acknowledgeStopped(sceneRunId, deviceId, success) {
+    acknowledgeStopped(sceneRunId, endpointId, success) {
         const run = this.get(sceneRunId);
         if (!run) {
             const tombstone = this.tombstones.get(sceneRunId);
@@ -356,12 +356,12 @@ class SceneRunRegistry {
         if (run.phase !== SCENE_PHASES.STOPPING) {
             return { ok: false, error: 'scene_not_stopping' };
         }
-        if (!this.#isParty(run, deviceId)) return { ok: false, error: 'not_a_scene_party' };
+        if (!this.#isParty(run, endpointId)) return { ok: false, error: 'not_a_scene_party' };
         if (success !== true) return { ok: false, error: 'scene_stop_failed', run };
-        const replay = run.stoppedDevices.has(deviceId);
-        run.stoppedDevices.add(deviceId);
+        const replay = run.stoppedEndpoints.has(endpointId);
+        run.stoppedEndpoints.add(endpointId);
         run.updatedAt = this.epochNow();
-        if (run.stoppedDevices.size < 2) {
+        if (run.stoppedEndpoints.size < 2) {
             return { ok: true, replay, completed: false, run };
         }
         const terminal = this.#finalize(run, run.failed
@@ -410,8 +410,8 @@ class SceneRunRegistry {
         return !!run && PRE_START_PHASES.has(run.phase);
     }
 
-    #isParty(run, deviceId) {
-        return run.ownerDeviceId === deviceId || run.targetDeviceId === deviceId;
+    #isParty(run, endpointId) {
+        return run.ownerEndpointId === endpointId || run.targetEndpointId === endpointId;
     }
 
     #finalize(run, phase, timing = {}) {

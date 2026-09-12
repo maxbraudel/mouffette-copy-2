@@ -25,11 +25,11 @@ RemoteSessionCoordinator::RemoteSessionCoordinator(QObject* parent)
 {
 }
 
-void RemoteSessionCoordinator::setLocalDeviceId(const QString& deviceId)
+void RemoteSessionCoordinator::setLocalEndpointId(const QString& endpointId)
 {
-    if (m_localDeviceId == deviceId) return;
+    if (m_localEndpointId == endpointId) return;
     clear();
-    m_localDeviceId = deviceId;
+    m_localEndpointId = endpointId;
 }
 
 bool RemoteSessionCoordinator::upsert(const QJsonObject& envelope,
@@ -47,8 +47,8 @@ bool RemoteSessionCoordinator::upsert(const QJsonObject& envelope,
             &binding.targetConnectionGeneration)) {
         return false;
     }
-    binding.ownerDeviceId = envelope.value(QStringLiteral("ownerDeviceId")).toString();
-    binding.targetDeviceId = envelope.value(QStringLiteral("targetDeviceId")).toString();
+    binding.ownerEndpointId = envelope.value(QStringLiteral("ownerEndpointId")).toString();
+    binding.targetEndpointId = envelope.value(QStringLiteral("targetEndpointId")).toString();
     binding.resumeToken = envelope.value(QStringLiteral("resumeToken")).toString();
     binding.teardownId = envelope.value(QStringLiteral("teardownId")).toString();
     binding.phase = envelope.value(QStringLiteral("phase")).toString();
@@ -61,19 +61,19 @@ bool RemoteSessionCoordinator::upsert(const QJsonObject& envelope,
         || binding.phase == QLatin1String("Closed");
     if (!isOpaqueId(binding.remoteSessionId)
         || m_closedSessionIds.contains(binding.remoteSessionId)
-        || !isDeviceId(binding.ownerDeviceId) || !isDeviceId(binding.targetDeviceId)
-        || binding.ownerDeviceId == binding.targetDeviceId
+        || !isEndpointId(binding.ownerEndpointId) || !isEndpointId(binding.targetEndpointId)
+        || binding.ownerEndpointId == binding.targetEndpointId
         || !isAllowedPhase(binding.phase)
         || (!binding.resumeToken.isEmpty() && !isOpaqueId(binding.resumeToken))
         || (!binding.teardownId.isEmpty() && !isOpaqueId(binding.teardownId))
         || (terminalPhase && binding.teardownId.isEmpty())
         || (terminalPhase && !binding.resumeToken.isEmpty())
         || (!terminalPhase && !binding.teardownId.isEmpty())
-        || (m_localDeviceId != binding.ownerDeviceId
-            && m_localDeviceId != binding.targetDeviceId)) return false;
+        || (m_localEndpointId != binding.ownerEndpointId
+            && m_localEndpointId != binding.targetEndpointId)) return false;
 
     const quint64 envelopeLocalConnectionGeneration =
-        m_localDeviceId == binding.ownerDeviceId
+        m_localEndpointId == binding.ownerEndpointId
         ? binding.ownerConnectionGeneration : binding.targetConnectionGeneration;
     if (localConnectionGeneration > 0
         && envelopeLocalConnectionGeneration != localConnectionGeneration) {
@@ -82,8 +82,8 @@ bool RemoteSessionCoordinator::upsert(const QJsonObject& envelope,
 
     const auto previous = m_byId.constFind(binding.remoteSessionId);
     if (previous != m_byId.cend()) {
-        if (previous->ownerDeviceId != binding.ownerDeviceId
-            || previous->targetDeviceId != binding.targetDeviceId
+        if (previous->ownerEndpointId != binding.ownerEndpointId
+            || previous->targetEndpointId != binding.targetEndpointId
             || previous->generation > binding.generation
             || (!previous->resumeToken.isEmpty() && !binding.resumeToken.isEmpty()
                 && previous->resumeToken != binding.resumeToken)) {
@@ -104,7 +104,7 @@ bool RemoteSessionCoordinator::upsert(const QJsonObject& envelope,
             // terminal replay only when the authenticated local side alone is
             // rebound to this transport; the remote transport, session
             // generation and (once known) teardown id remain immutable.
-            const bool localIsOwner = m_localDeviceId == binding.ownerDeviceId;
+            const bool localIsOwner = m_localEndpointId == binding.ownerEndpointId;
             const quint64 previousLocalTransport = localIsOwner
                 ? previous->ownerConnectionGeneration
                 : previous->targetConnectionGeneration;
@@ -161,9 +161,9 @@ bool RemoteSessionCoordinator::upsert(const QJsonObject& envelope,
         }
     }
 
-    const bool localIsOwner = m_localDeviceId == binding.ownerDeviceId;
-    const QString peer = m_localDeviceId == binding.ownerDeviceId
-        ? binding.targetDeviceId : binding.ownerDeviceId;
+    const bool localIsOwner = m_localEndpointId == binding.ownerEndpointId;
+    const QString peer = m_localEndpointId == binding.ownerEndpointId
+        ? binding.targetEndpointId : binding.ownerEndpointId;
     QHash<QString, QString>& directionalIndex = localIsOwner
         ? m_outgoingIdByPeer : m_incomingIdByPeer;
     const QString existingForPeer = directionalIndex.value(peer);
@@ -210,22 +210,22 @@ bool RemoteSessionCoordinator::canClose(
         return false;
     }
 
-    const QString ownerDeviceId =
-        envelope.value(QStringLiteral("ownerDeviceId")).toString();
-    const QString targetDeviceId =
-        envelope.value(QStringLiteral("targetDeviceId")).toString();
+    const QString ownerEndpointId =
+        envelope.value(QStringLiteral("ownerEndpointId")).toString();
+    const QString targetEndpointId =
+        envelope.value(QStringLiteral("targetEndpointId")).toString();
     const QString teardownId =
         envelope.value(QStringLiteral("teardownId")).toString();
-    if (!isOpaqueId(remoteSessionId) || !isDeviceId(ownerDeviceId)
-        || !isDeviceId(targetDeviceId) || ownerDeviceId == targetDeviceId
+    if (!isOpaqueId(remoteSessionId) || !isEndpointId(ownerEndpointId)
+        || !isEndpointId(targetEndpointId) || ownerEndpointId == targetEndpointId
         || !isOpaqueId(teardownId)
         || envelope.value(QStringLiteral("phase")).toString()
             != QLatin1String("Closed")
-        || (m_localDeviceId != ownerDeviceId
-            && m_localDeviceId != targetDeviceId)) {
+        || (m_localEndpointId != ownerEndpointId
+            && m_localEndpointId != targetEndpointId)) {
         return false;
     }
-    const bool localIsOwner = m_localDeviceId == ownerDeviceId;
+    const bool localIsOwner = m_localEndpointId == ownerEndpointId;
     const quint64 envelopeLocalConnectionGeneration = localIsOwner
         ? ownerConnectionGeneration : targetConnectionGeneration;
     if (localConnectionGeneration > 0
@@ -241,8 +241,8 @@ bool RemoteSessionCoordinator::canClose(
     }
 
     const Binding& binding = iterator.value();
-    if (ownerDeviceId != binding.ownerDeviceId
-        || targetDeviceId != binding.targetDeviceId
+    if (ownerEndpointId != binding.ownerEndpointId
+        || targetEndpointId != binding.targetEndpointId
         || generation != binding.generation) {
         return false;
     }
@@ -277,10 +277,10 @@ void RemoteSessionCoordinator::remove(const QString& remoteSessionId)
     if (isOpaqueId(remoteSessionId)) m_closedSessionIds.insert(remoteSessionId);
     const Binding binding = m_byId.take(remoteSessionId);
     if (binding.remoteSessionId.isEmpty()) return;
-    const QString peer = m_localDeviceId == binding.ownerDeviceId
-        ? binding.targetDeviceId : binding.ownerDeviceId;
+    const QString peer = m_localEndpointId == binding.ownerEndpointId
+        ? binding.targetEndpointId : binding.ownerEndpointId;
     QHash<QString, QString>& directionalIndex =
-        m_localDeviceId == binding.ownerDeviceId
+        m_localEndpointId == binding.ownerEndpointId
         ? m_outgoingIdByPeer : m_incomingIdByPeer;
     if (directionalIndex.value(peer) == remoteSessionId) {
         directionalIndex.remove(peer);
@@ -299,23 +299,23 @@ void RemoteSessionCoordinator::clear()
 }
 
 RemoteSessionCoordinator::Binding RemoteSessionCoordinator::forPeer(
-    const QString& peerDeviceId) const
+    const QString& peerEndpointId) const
 {
-    const Binding outgoing = outgoingForPeer(peerDeviceId);
+    const Binding outgoing = outgoingForPeer(peerEndpointId);
     return outgoing.remoteSessionId.isEmpty()
-        ? incomingForPeer(peerDeviceId) : outgoing;
+        ? incomingForPeer(peerEndpointId) : outgoing;
 }
 
 RemoteSessionCoordinator::Binding RemoteSessionCoordinator::outgoingForPeer(
-    const QString& peerDeviceId) const
+    const QString& peerEndpointId) const
 {
-    return byId(m_outgoingIdByPeer.value(peerDeviceId));
+    return byId(m_outgoingIdByPeer.value(peerEndpointId));
 }
 
 RemoteSessionCoordinator::Binding RemoteSessionCoordinator::incomingForPeer(
-    const QString& peerDeviceId) const
+    const QString& peerEndpointId) const
 {
-    return byId(m_incomingIdByPeer.value(peerDeviceId));
+    return byId(m_incomingIdByPeer.value(peerEndpointId));
 }
 
 RemoteSessionCoordinator::Binding RemoteSessionCoordinator::byId(
@@ -329,7 +329,7 @@ QList<RemoteSessionCoordinator::Binding> RemoteSessionCoordinator::all() const
     return m_byId.values();
 }
 
-bool RemoteSessionCoordinator::isDeviceId(const QString& value)
+bool RemoteSessionCoordinator::isEndpointId(const QString& value)
 {
     static const QRegularExpression expression(QStringLiteral("^[A-Za-z0-9_-]{43}$"));
     return expression.match(value).hasMatch();

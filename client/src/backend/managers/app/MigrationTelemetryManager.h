@@ -10,8 +10,8 @@ public:
                                         bool requestedQuickRenderer,
                                         const QString& appliedRenderer,
                                         const QString& reason);
-    static void logCanvasLoadRequest(const QString& deviceId);
-    static void logCanvasLoadReady(const QString& deviceId,
+    static void logCanvasLoadRequest(const QString& endpointId);
+    static void logCanvasLoadReady(const QString& endpointId,
                                    int screenCount,
                                    qint64 latencyMs);
 };

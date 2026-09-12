@@ -1,19 +1,19 @@
 {
-  "id": "reconnect_watch_behavior",
+  "id": "reconnect_endpoint_discovery_behavior",
   "rules": [
     {
       "file": "src/backend/handlers/ClientListEventHandler.cpp",
       "mustContain": [
-        "requestScreens\\(",
-        "toggleWatch\\("
+        "clientListReceived",
+        "candidate.endpointId\\(\\) == activeSessionIdentity"
       ]
     },
     {
-      "file": "src/frontend/handlers/WindowEventHandler.cpp",
+      "file": "src/backend/network/WebSocketClient.cpp",
       "mustContain": [
-        "isWatching\\(",
-        "toggleWatch\\(",
-        "requestScreens\\("
+        "resumeAllRemoteSessions\\(",
+        "reauthenticatedWithinLease",
+        "clientListReceived"
       ]
     }
   ]

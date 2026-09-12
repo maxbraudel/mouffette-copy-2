@@ -1,7 +1,6 @@
 #include <QApplication>
 #include <QFontDatabase>
 #include <QSystemTrayIcon>
-#include <QStandardPaths>
 #include <QDir>
 #include <QDebug>
 #include <QCoreApplication>
@@ -9,33 +8,34 @@
 #include <QMediaFormat>
 #include <QSettings>
 #include <cstdio>
+#include "AppBuildConfig.h"
 #include "backend/config/AppConfig.h"
 #include "backend/managers/system/SystemLifecycleMonitor.h"
+#include "backend/runtime/ApplicationInstanceManager.h"
+#include "backend/runtime/RuntimeProfile.h"
 #include "MainWindow.h"
 
 // ── Dev flags ────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace {
-// Protocol-v2 migration only. Live v2 caches are owned by RemoteSession
-// teardown and must never be swept merely because the UI process exits.
+// Protocol-v3 cutover only. Live v3 caches are owned by RemoteSession teardown;
+// this one-time cleanup removes only pre-v3 cache state.
 void cleanLegacyUploadsOnce() {
-    QSettings settings(QStringLiteral("Mouffette"), QStringLiteral("Client"));
-    if (settings.value(QStringLiteral("protocolV2LegacyUploadsCleaned"), false).toBool()) {
+    const std::unique_ptr<QSettings> settings = RuntimeProfile::createSettings();
+    if (settings->value(QStringLiteral("protocolV3LegacyUploadsCleaned"), false).toBool()) {
         return;
     }
-    QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-    if (base.isEmpty()) base = QDir::homePath() + "/.cache";
     const QString uploadsPath =
-        QDir(base).absoluteFilePath(QStringLiteral("Mouffette/Uploads"));
+        QDir(RuntimeProfile::cacheLocation()).absoluteFilePath(QStringLiteral("Mouffette/Uploads"));
     QDir dir(uploadsPath);
     if (dir.exists() && !dir.removeRecursively()) {
-        qWarning() << "Protocol-v2 migration could not remove the legacy upload cache";
+        qWarning() << "Protocol-v3 migration could not remove the legacy upload cache";
         return;
     }
-    settings.setValue(QStringLiteral("protocolV2LegacyUploadsCleaned"), true);
-    settings.sync();
-    qInfo() << "Protocol-v2 legacy upload cache migration complete";
+    settings->setValue(QStringLiteral("protocolV3LegacyUploadsCleaned"), true);
+    settings->sync();
+    qInfo() << "Protocol-v3 legacy upload cache cleanup complete";
 }
 
 void logRuntimeDiagnostics() {
@@ -91,10 +91,34 @@ int main(int argc, char *argv[]) {
     // If you previously hid the dock icon via MacDockHider, that feature has been removed.
     
     // Set application properties
-    app.setApplicationName("Mouffette");
-    app.setApplicationVersion("1.0.0");
+    app.setApplicationName(QStringLiteral(MOUFFETTE_APPLICATION_NAME));
+    app.setApplicationVersion(QStringLiteral(MOUFFETTE_VERSION_STRING));
     app.setOrganizationName("Mouffette");
     app.setOrganizationDomain("mouffette.app");
+
+    ApplicationInstanceManager instanceManager(
+        QStringLiteral(MOUFFETTE_BUNDLE_IDENTIFIER ":" MOUFFETTE_BUILD_CHANNEL),
+        AppConfig::instance().allowMultipleInstances());
+    QString instanceError;
+    const ApplicationInstanceManager::StartResult instanceResult =
+        instanceManager.start(&instanceError);
+    if (instanceResult == ApplicationInstanceManager::StartResult::ActivatedExisting) {
+        return 0;
+    }
+    if (instanceResult == ApplicationInstanceManager::StartResult::Failed) {
+        std::fprintf(stderr, "Mouffette instance error: %s\n",
+                     instanceError.toLocal8Bit().constData());
+        return 3;
+    }
+    const RuntimeProfileContext runtimeProfile = instanceManager.profile();
+    RuntimeProfile::configure(runtimeProfile);
+    if (runtimeProfile.isSecondary()
+        && !AppConfig::instance().initializeWithSettings(
+            arguments, RuntimeProfile::readSettings(), &configError)) {
+        std::fprintf(stderr, "Mouffette profile configuration error: %s\n",
+                     configError.toLocal8Bit().constData());
+        return 2;
+    }
     
     // Disable focus rectangle on all widgets (especially visible on Windows)
     app.setStyleSheet("* { outline: none; }");
@@ -105,7 +129,11 @@ int main(int argc, char *argv[]) {
     // Keep application alive when window is closed (so user can reopen via other means later)
     app.setQuitOnLastWindowClosed(false);
 
-    MainWindow window;
+    MainWindow window(runtimeProfile);
+    QObject::connect(&instanceManager,
+                     &ApplicationInstanceManager::activationRequested,
+                     &window,
+                     &MainWindow::showAndActivate);
     SystemLifecycleMonitor systemLifecycleMonitor;
     QObject::connect(&app, &QGuiApplication::applicationStateChanged, &window, &MainWindow::handleApplicationStateChanged);
     QObject::connect(&systemLifecycleMonitor,

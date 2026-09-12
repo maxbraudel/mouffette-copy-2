@@ -40,7 +40,7 @@ public slots:
      */
     void syncRegistration();
 
-    // Internal compatibility entry points. Protocol v2 does not expose
+    // Internal compatibility entry points. Protocol v3 does not expose
     // request/watch messages; both are intentionally disconnected.
     void onScreensInfoReceived(const ClientInfo& clientInfo);
     void onDataRequestReceived();

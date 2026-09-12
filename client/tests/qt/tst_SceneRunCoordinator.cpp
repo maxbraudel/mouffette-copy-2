@@ -19,8 +19,8 @@ QJsonObject sessionEnvelope(quint64 generation = 1,
         {QStringLiteral("generation"), static_cast<double>(generation)},
         {QStringLiteral("ownerConnectionGeneration"), static_cast<double>(generation)},
         {QStringLiteral("targetConnectionGeneration"), static_cast<double>(generation)},
-        {QStringLiteral("ownerDeviceId"), kOwner},
-        {QStringLiteral("targetDeviceId"), kTarget},
+        {QStringLiteral("ownerEndpointId"), kOwner},
+        {QStringLiteral("targetEndpointId"), kTarget},
         {QStringLiteral("resumeToken"), QStringLiteral("memory_only_token")},
         {QStringLiteral("phase"), phase}
     };
@@ -79,7 +79,7 @@ private slots:
     void sessionIdentityAndResumeTokenAreMemoryOnlyBindings()
     {
         RemoteSessionCoordinator sessions;
-        sessions.setLocalDeviceId(kOwner);
+        sessions.setLocalEndpointId(kOwner);
         QVERIFY(sessions.upsert(sessionEnvelope()));
         QCOMPARE(sessions.forPeer(kTarget).remoteSessionId,
                  QStringLiteral("remote_session_1"));
@@ -91,7 +91,7 @@ private slots:
                  QStringLiteral("memory_only_token"));
 
         QJsonObject impostor = sessionEnvelope();
-        impostor.insert(QStringLiteral("ownerDeviceId"), QString(64, QLatin1Char('f')));
+        impostor.insert(QStringLiteral("ownerEndpointId"), QString(64, QLatin1Char('f')));
         QVERIFY(!sessions.upsert(impostor));
 
         QJsonObject missingTransportBinding = sessionEnvelope();
@@ -102,35 +102,35 @@ private slots:
     void sessionEnumerationIncludesBothLocalRoles()
     {
         RemoteSessionCoordinator sessions;
-        sessions.setLocalDeviceId(kOwner);
+        sessions.setLocalEndpointId(kOwner);
         QVERIFY(sessions.upsert(sessionEnvelope()));
 
         QJsonObject incoming = sessionEnvelope(4);
         incoming.insert(QStringLiteral("remoteSessionId"),
                         QStringLiteral("remote_session_incoming"));
-        incoming.insert(QStringLiteral("ownerDeviceId"), kThird);
-        incoming.insert(QStringLiteral("targetDeviceId"), kOwner);
+        incoming.insert(QStringLiteral("ownerEndpointId"), kThird);
+        incoming.insert(QStringLiteral("targetEndpointId"), kOwner);
         QVERIFY(sessions.upsert(incoming));
 
         const QList<RemoteSessionCoordinator::Binding> all = sessions.all();
         QCOMPARE(all.size(), 2);
         QVERIFY(!sessions.forPeer(kTarget).remoteSessionId.isEmpty());
         const auto incomingBinding = sessions.forPeer(kThird);
-        QCOMPARE(incomingBinding.ownerDeviceId, kThird);
-        QCOMPARE(incomingBinding.targetDeviceId, kOwner);
+        QCOMPARE(incomingBinding.ownerEndpointId, kThird);
+        QCOMPARE(incomingBinding.targetEndpointId, kOwner);
     }
 
     void oppositeDirectionsToTheSamePeerRemainIndependent()
     {
         RemoteSessionCoordinator sessions;
-        sessions.setLocalDeviceId(kOwner);
+        sessions.setLocalEndpointId(kOwner);
         QVERIFY(sessions.upsert(sessionEnvelope(), 1));
 
         QJsonObject reverse = sessionEnvelope();
         reverse.insert(QStringLiteral("remoteSessionId"),
                        QStringLiteral("remote_session_reverse"));
-        reverse.insert(QStringLiteral("ownerDeviceId"), kTarget);
-        reverse.insert(QStringLiteral("targetDeviceId"), kOwner);
+        reverse.insert(QStringLiteral("ownerEndpointId"), kTarget);
+        reverse.insert(QStringLiteral("targetEndpointId"), kOwner);
         QVERIFY(sessions.upsert(reverse, 1));
 
         QCOMPARE(sessions.outgoingForPeer(kTarget).remoteSessionId,
@@ -144,7 +144,7 @@ private slots:
         QJsonObject secondIncoming = reverse;
         secondIncoming.insert(QStringLiteral("remoteSessionId"),
                               QStringLiteral("remote_session_second_incoming"));
-        secondIncoming.insert(QStringLiteral("ownerDeviceId"), kThird);
+        secondIncoming.insert(QStringLiteral("ownerEndpointId"), kThird);
         QVERIFY(!sessions.upsert(secondIncoming, 1));
         QCOMPARE(sessions.all().size(), 2);
 
@@ -158,7 +158,7 @@ private slots:
     {
         SceneRunCoordinator coordinator;
         coordinator.setPrepareTimeoutMs(15000);
-        coordinator.setLocalDeviceId(kOwner);
+        coordinator.setLocalEndpointId(kOwner);
         coordinator.upsertSession(sessionEnvelope());
         SceneRunCoordinator::Run run;
         QString error;
@@ -172,14 +172,14 @@ private slots:
             {QStringLiteral("sceneRunId"), run.sceneRunId},
             {QStringLiteral("revision"), static_cast<double>(run.revision)},
             {QStringLiteral("digest"), QString(64, QLatin1Char('b'))},
-            {QStringLiteral("ownerDeviceId"), kOwner},
-            {QStringLiteral("targetDeviceId"), kTarget},
+            {QStringLiteral("ownerEndpointId"), kOwner},
+            {QStringLiteral("targetEndpointId"), kTarget},
             {QStringLiteral("allPrepared"), true}
         };
         QVERIFY(!coordinator.acceptInboundEnvelope(prepared, &error));
         prepared.insert(QStringLiteral("digest"), run.digest);
         QJsonObject spoofedOwner = prepared;
-        spoofedOwner.insert(QStringLiteral("ownerDeviceId"), kThird);
+        spoofedOwner.insert(QStringLiteral("ownerEndpointId"), kThird);
         QVERIFY(!coordinator.acceptInboundEnvelope(spoofedOwner, &error));
         QCOMPARE(coordinator.run(run.sceneRunId).phase,
                  SceneRunCoordinator::Phase::Preparing);
@@ -195,7 +195,7 @@ private slots:
     void graceBindingIsResumableButRejectsNewSceneCommands()
     {
         SceneRunCoordinator coordinator;
-        coordinator.setLocalDeviceId(kOwner);
+        coordinator.setLocalEndpointId(kOwner);
         QVERIFY(coordinator.upsertSession(sessionEnvelope()));
         QVERIFY(coordinator.upsertSession(sessionEnvelope(
             1, QStringLiteral("Grace"),
@@ -216,7 +216,7 @@ private slots:
     void remoteSessionEnvelopeTransitionsAreStrictlyCorrelated()
     {
         SceneRunCoordinator coordinator;
-        coordinator.setLocalDeviceId(kOwner);
+        coordinator.setLocalEndpointId(kOwner);
         QVERIFY(coordinator.upsertSession(sessionEnvelope(), 1));
 
         // Exact duplicate delivery is idempotent.
@@ -228,9 +228,9 @@ private slots:
         QVERIFY(!coordinator.upsertSession(openedAsResume, 2));
 
         QJsonObject wrongParty = sessionEnvelope();
-        wrongParty.insert(QStringLiteral("targetDeviceId"), kThird);
+        wrongParty.insert(QStringLiteral("targetEndpointId"), kThird);
         QVERIFY(!coordinator.upsertSession(wrongParty, 1));
-        QCOMPARE(coordinator.sessionForPeer(kTarget).targetDeviceId, kTarget);
+        QCOMPARE(coordinator.sessionForPeer(kTarget).targetEndpointId, kTarget);
 
         QJsonObject conflictingTransport = sessionEnvelope();
         conflictingTransport.insert(QStringLiteral("targetConnectionGeneration"), 2);
@@ -267,7 +267,7 @@ private slots:
     void restartedTargetMayAcceptOnlyCorrelatedTerminalCatchup()
     {
         SceneRunCoordinator coordinator;
-        coordinator.setLocalDeviceId(kTarget);
+        coordinator.setLocalEndpointId(kTarget);
         QJsonObject catchup = sessionEnvelope(
             7, QStringLiteral("CleanupPending"),
             QStringLiteral("remote_session_terminating"));
@@ -293,7 +293,7 @@ private slots:
     void targetTerminalCatchupMayRebindOnlyItsAuthenticatedTransport()
     {
         SceneRunCoordinator coordinator;
-        coordinator.setLocalDeviceId(kTarget);
+        coordinator.setLocalEndpointId(kTarget);
         QVERIFY(coordinator.upsertSession(sessionEnvelope(), 1));
 
         QJsonObject terminating = sessionEnvelope(
@@ -324,7 +324,7 @@ private slots:
     void targetCanCatchUpDirectlyFromActiveToTerminal()
     {
         SceneRunCoordinator coordinator;
-        coordinator.setLocalDeviceId(kTarget);
+        coordinator.setLocalEndpointId(kTarget);
         QVERIFY(coordinator.upsertSession(sessionEnvelope(), 1));
 
         QJsonObject catchup = sessionEnvelope(
@@ -348,7 +348,7 @@ private slots:
     void ownerTerminalReplayAndClosedCatchupResolveWithoutResurrection()
     {
         SceneRunCoordinator replayed;
-        replayed.setLocalDeviceId(kOwner);
+        replayed.setLocalEndpointId(kOwner);
         QVERIFY(replayed.upsertSession(sessionEnvelope(), 1));
 
         QJsonObject terminal = sessionEnvelope(
@@ -375,18 +375,18 @@ private slots:
         QVERIFY(!replayed.upsertSession(terminal, 2));
 
         SceneRunCoordinator missedTerminal;
-        missedTerminal.setLocalDeviceId(kOwner);
+        missedTerminal.setLocalEndpointId(kOwner);
         QVERIFY(missedTerminal.upsertSession(sessionEnvelope(), 1));
         QVERIFY(missedTerminal.removeSession(closed, 2));
         QVERIFY(missedTerminal.sessionForPeer(kTarget).remoteSessionId.isEmpty());
 
         SceneRunCoordinator restartedOwner;
-        restartedOwner.setLocalDeviceId(kOwner);
+        restartedOwner.setLocalEndpointId(kOwner);
         QVERIFY(restartedOwner.removeSession(closed, 2));
         QVERIFY(!restartedOwner.removeSession(closed, 2));
 
         SceneRunCoordinator restartedTarget;
-        restartedTarget.setLocalDeviceId(kTarget);
+        restartedTarget.setLocalEndpointId(kTarget);
         QVERIFY(!restartedTarget.removeSession(closed, 1));
     }
 
@@ -394,7 +394,7 @@ private slots:
     {
         SceneRunCoordinator coordinator;
         coordinator.setPrepareTimeoutMs(15000);
-        coordinator.setLocalDeviceId(kOwner);
+        coordinator.setLocalEndpointId(kOwner);
 
         QJsonObject fractionalSession = sessionEnvelope();
         fractionalSession.insert(QStringLiteral("generation"), 1.5);
@@ -413,8 +413,8 @@ private slots:
             {QStringLiteral("sceneRunId"), run.sceneRunId},
             {QStringLiteral("revision"), 1},
             {QStringLiteral("digest"), run.digest},
-            {QStringLiteral("ownerDeviceId"), kOwner},
-            {QStringLiteral("targetDeviceId"), kTarget},
+            {QStringLiteral("ownerEndpointId"), kOwner},
+            {QStringLiteral("targetEndpointId"), kTarget},
             {QStringLiteral("allPrepared"), true}
         };
 
@@ -465,7 +465,7 @@ private slots:
     void remoteSessionCloseMustMatchTheCurrentBinding()
     {
         SceneRunCoordinator coordinator;
-        coordinator.setLocalDeviceId(kOwner);
+        coordinator.setLocalEndpointId(kOwner);
         QVERIFY(coordinator.upsertSession(sessionEnvelope(), 1));
 
         QJsonObject terminating = sessionEnvelope(
@@ -488,7 +488,7 @@ private slots:
         QVERIFY(!coordinator.sessionForPeer(kTarget).remoteSessionId.isEmpty());
 
         QJsonObject wrongParty = closed;
-        wrongParty.insert(QStringLiteral("targetDeviceId"), kThird);
+        wrongParty.insert(QStringLiteral("targetEndpointId"), kThird);
         QVERIFY(!coordinator.removeSession(wrongParty, 1));
         QVERIFY(!coordinator.sessionForPeer(kTarget).remoteSessionId.isEmpty());
 
@@ -510,7 +510,7 @@ private slots:
     void preparationFailsClosedUntilServerPolicyArrives()
     {
         SceneRunCoordinator coordinator;
-        coordinator.setLocalDeviceId(kOwner);
+        coordinator.setLocalEndpointId(kOwner);
         coordinator.upsertSession(sessionEnvelope());
         SceneRunCoordinator::Run run;
         QString error;
@@ -526,8 +526,8 @@ private slots:
             {QStringLiteral("revision"), 1},
             {QStringLiteral("digest"), SceneRunCoordinator::computeDigest(
                  1, SceneRunCoordinator::normalizeManifest(manifest()), scene())},
-            {QStringLiteral("ownerDeviceId"), kOwner},
-            {QStringLiteral("targetDeviceId"), kTarget},
+            {QStringLiteral("ownerEndpointId"), kOwner},
+            {QStringLiteral("targetEndpointId"), kTarget},
             {QStringLiteral("manifest"), manifest()},
             {QStringLiteral("scene"), scene()}
         };

@@ -19,19 +19,19 @@ QList<ClientInfo> ClientListBuilder::buildDisplayClientList(
 
     // Process connected clients and update their sessions
     for (ClientInfo client : connectedClients) {
-        QString persistentId = client.clientId();
+        QString persistentId = client.endpointId();
         if (persistentId.isEmpty()) {
             qWarning() << "ClientListBuilder::buildDisplayClientList: client has no persistentClientId";
             continue;
         }
-        client.setClientId(persistentId);
+        client.setEndpointId(persistentId);
         client.setOnline(true);
 
         // Find existing session for this client
         if (MainWindow::CanvasSession* session = mainWindow->findCanvasSession(persistentId)) {
             session->serverAssignedId = client.getId(); // Keep for local lookup
             session->lastClientInfo = client;
-            session->lastClientInfo.setClientId(persistentId);
+            session->lastClientInfo.setEndpointId(persistentId);
             session->lastClientInfo.setFromMemory(true);
             session->lastClientInfo.setOnline(true);
             session->remoteContentClearedOnDisconnect = false;
@@ -62,7 +62,7 @@ QList<ClientInfo> ClientListBuilder::buildDisplayClientList(
             if (identitiesSeen.contains(session->persistentClientId)) continue;
             
             ClientInfo info = session->lastClientInfo;
-            info.setClientId(session->persistentClientId);
+            info.setEndpointId(session->persistentClientId);
             if (!session->serverAssignedId.isEmpty()) {
                 info.setId(session->serverAssignedId);
             }

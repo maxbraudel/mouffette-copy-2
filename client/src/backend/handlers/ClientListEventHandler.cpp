@@ -75,7 +75,7 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
         if (activeSession) {
             const ClientInfo* matchingDevice = nullptr;
             for (const ClientInfo& candidate : clients) {
-                if (candidate.clientId() == activeSessionIdentity) {
+                if (candidate.endpointId() == activeSessionIdentity) {
                     matchingDevice = &candidate;
                     break;
                 }
@@ -89,7 +89,7 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                     return;
                 }
                 activeSession->lastClientInfo = *matchingDevice;
-                activeSession->lastClientInfo.setClientId(activeSessionIdentity);
+                activeSession->lastClientInfo.setEndpointId(activeSessionIdentity);
                 activeSession->lastClientInfo.setOnline(true);
                 activeSession->remoteContentClearedOnDisconnect = false;
                 m_mainWindow->setSelectedClient(activeSession->lastClientInfo);

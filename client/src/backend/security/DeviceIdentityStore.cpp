@@ -1,4 +1,5 @@
 #include "backend/security/DeviceIdentityStore.h"
+#include "backend/runtime/RuntimeProfile.h"
 
 #include <QCryptographicHash>
 #include <QDebug>
@@ -6,7 +7,6 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
-#include <QStandardPaths>
 
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -158,12 +158,12 @@ public:
     StorageBackend backend = StorageBackend::Uninitialized;
     KeyPtr key{nullptr, EVP_PKEY_free};
     QByteArray publicDer;
-    QString deviceId;
+    QString installationId;
 
     QString resolvedFallbackPath() const {
         QString directory = fallbackDirectory;
         if (directory.isEmpty()) {
-            directory = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+            directory = RuntimeProfile::installationDataLocation();
         }
         if (directory.isEmpty()) {
             return QString();
@@ -388,8 +388,8 @@ bool DeviceIdentityStore::initialize(QString* errorMessage) {
         d->key.reset();
         return false;
     }
-    d->deviceId = deviceIdForPublicKey(d->publicDer);
-    if (d->deviceId.isEmpty()) {
+    d->installationId = installationIdForPublicKey(d->publicDer);
+    if (d->installationId.isEmpty()) {
         if (errorMessage) *errorMessage = QStringLiteral("Cannot derive device identifier");
         d->key.reset();
         return false;
@@ -407,7 +407,7 @@ bool DeviceIdentityStore::initialize(QString* errorMessage) {
 }
 
 bool DeviceIdentityStore::isReady() const { return d->key != nullptr; }
-QString DeviceIdentityStore::deviceId() const { return d->deviceId; }
+QString DeviceIdentityStore::installationId() const { return d->installationId; }
 QByteArray DeviceIdentityStore::publicKeyDer() const { return d->publicDer; }
 
 QByteArray DeviceIdentityStore::sign(const QByteArray& payload, QString* errorMessage) const {
@@ -459,8 +459,17 @@ QString DeviceIdentityStore::storageBackendName() const {
 
 QString DeviceIdentityStore::fallbackFilePath() const { return d->resolvedFallbackPath(); }
 
-QString DeviceIdentityStore::deviceIdForPublicKey(const QByteArray& publicKeyDer) {
+QString DeviceIdentityStore::installationIdForPublicKey(const QByteArray& publicKeyDer) {
     if (publicKeyDer.isEmpty()) return {};
     return QString::fromLatin1(toBase64Url(
         QCryptographicHash::hash(publicKeyDer, QCryptographicHash::Sha256)));
+}
+
+QString DeviceIdentityStore::endpointIdForInstallation(const QString& installationId,
+                                                        const QString& instanceId) {
+    if (installationId.isEmpty() || instanceId.isEmpty()) return {};
+    const QByteArray material = QByteArrayLiteral("mouffette-endpoint-v1\n")
+        + installationId.toUtf8() + QByteArrayLiteral("\n") + instanceId.toUtf8();
+    return QString::fromLatin1(toBase64Url(
+        QCryptographicHash::hash(material, QCryptographicHash::Sha256)));
 }

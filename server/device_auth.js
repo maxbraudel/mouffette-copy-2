@@ -2,9 +2,10 @@
 
 const crypto = require('node:crypto');
 
-const PROTOCOL_VERSION = 2;
+const PROTOCOL_VERSION = 3;
 const CHALLENGE_TTL_MS = 10_000;
 const RUNTIME_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const INSTANCE_ID_PATTERN = /^(?:primary|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 function base64url(buffer) {
@@ -17,12 +18,20 @@ function decodeBase64url(value) {
     return base64url(decoded) === value ? decoded : null;
 }
 
-function deviceIdForPublicKey(publicKeyDer) {
+function installationIdForPublicKey(publicKeyDer) {
     return base64url(crypto.createHash('sha256').update(publicKeyDer).digest());
 }
 
-function challengePayload({ serverBootId, nonce, runtimeId }) {
-    return Buffer.from(`mouffette-v${PROTOCOL_VERSION}\n${serverBootId}\n${nonce}\n${runtimeId}`, 'utf8');
+function endpointIdForInstallation(installationId, instanceId) {
+    return base64url(crypto.createHash('sha256')
+        .update(`mouffette-endpoint-v1\n${installationId}\n${instanceId}`, 'utf8')
+        .digest());
+}
+
+function challengePayload({ serverBootId, nonce, runtimeId, instanceId }) {
+    return Buffer.from(
+        `mouffette-v${PROTOCOL_VERSION}\n${serverBootId}\n${nonce}\n${runtimeId}\n${instanceId}`,
+        'utf8');
 }
 
 function createChallenge(serverBootId, now = Date.now()) {
@@ -48,6 +57,10 @@ function verifyAuthResponse(challenge, response, now = Date.now()) {
         || !RUNTIME_ID_PATTERN.test(response.runtimeId)) {
         return { ok: false, error: 'invalid_runtime_id' };
     }
+    if (typeof response.instanceId !== 'string'
+        || !INSTANCE_ID_PATTERN.test(response.instanceId)) {
+        return { ok: false, error: 'invalid_instance_id' };
+    }
     try {
         const publicKeyDer = decodeBase64url(response.publicKey);
         const signature = decodeBase64url(response.signature);
@@ -65,15 +78,26 @@ function verifyAuthResponse(challenge, response, now = Date.now()) {
             return { ok: false, error: 'identity_key_must_be_ed25519' };
         }
         const valid = crypto.verify(null,
-            challengePayload({ ...challenge, runtimeId: response.runtimeId }),
+            challengePayload({ ...challenge,
+                runtimeId: response.runtimeId,
+                instanceId: response.instanceId }),
             publicKey,
             signature);
         if (!valid) return { ok: false, error: 'invalid_identity_signature' };
-        const deviceId = deviceIdForPublicKey(publicKeyDer);
-        if (typeof response.deviceId !== 'string' || response.deviceId !== deviceId) {
-            return { ok: false, error: 'device_id_mismatch' };
+        const installationId = installationIdForPublicKey(publicKeyDer);
+        if (typeof response.installationId !== 'string'
+            || response.installationId !== installationId) {
+            return { ok: false, error: 'installation_id_mismatch' };
         }
-        return { ok: true, deviceId, runtimeId: response.runtimeId, publicKeyDer };
+        const endpointId = endpointIdForInstallation(installationId, response.instanceId);
+        return {
+            ok: true,
+            installationId,
+            endpointId,
+            instanceId: response.instanceId,
+            runtimeId: response.runtimeId,
+            publicKeyDer,
+        };
     } catch (_) {
         return { ok: false, error: 'invalid_identity_material' };
     }
@@ -84,6 +108,7 @@ module.exports = {
     CHALLENGE_TTL_MS,
     challengePayload,
     createChallenge,
-    deviceIdForPublicKey,
+    installationIdForPublicKey,
+    endpointIdForInstallation,
     verifyAuthResponse,
 };

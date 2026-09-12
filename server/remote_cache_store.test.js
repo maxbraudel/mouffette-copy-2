@@ -14,7 +14,7 @@ const SESSION = '11111111-2222-4333-8444-555555555555';
 
 function binding(generation = 1) {
     return {
-        senderDeviceId: SENDER,
+        senderEndpointId: SENDER,
         remoteSessionId: SESSION,
         generation,
         teardownId: `teardown-${generation}`,
@@ -174,12 +174,12 @@ async function testTraversalAndSymlinksNeverEscapeRoot() {
     try {
         await store.initialize();
         assert.equal((await store.commitCleanup({
-            senderDeviceId: '../external',
+            senderEndpointId: '../external',
             remoteSessionId: SESSION,
             generation: 1,
-        })).errorCode, 'invalid_sender_device_id');
+        })).errorCode, 'invalid_sender_endpoint_id');
         assert.equal((await store.commitCleanup({
-            senderDeviceId: SENDER,
+            senderEndpointId: SENDER,
             remoteSessionId: '../../external',
             generation: 1,
         })).errorCode, 'invalid_remote_session_id');
@@ -214,7 +214,7 @@ async function testTraversalAndSymlinksNeverEscapeRoot() {
         await fsp.mkdir(secondSenderPath, { mode: 0o700 });
         await fsp.symlink(external, path.join(secondSenderPath, secondSession));
         const unsafeSessionLink = await store.commitCleanup({
-            senderDeviceId: secondSender,
+            senderEndpointId: secondSender,
             remoteSessionId: secondSession,
             generation: 1,
             teardownId: 'teardown-session-link',

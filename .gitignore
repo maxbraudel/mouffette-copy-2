@@ -4,6 +4,8 @@
 **/build_*/
 **/cmake-build-*/
 **/out/build/
+**/out/stage/
+**/out/packages/
 **/*_autogen/
 
 # User-specific CMake configuration; shared CMakePresets.json stays versioned

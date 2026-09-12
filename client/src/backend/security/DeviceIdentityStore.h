@@ -7,7 +7,7 @@
 #include <memory>
 
 /**
- * Stable, self-certifying installation identity used by protocol v2.
+ * Stable, self-certifying installation identity used by protocol v3.
  *
  * The private Ed25519 key is stored in the operating-system credential vault
  * when one is available.  A strictly owner-only file is the explicit fallback
@@ -31,7 +31,7 @@ public:
     bool initialize(QString* errorMessage = nullptr);
     bool isReady() const;
 
-    QString deviceId() const;
+    QString installationId() const;
     QByteArray publicKeyDer() const;
     QByteArray sign(const QByteArray& payload, QString* errorMessage = nullptr) const;
 
@@ -39,7 +39,9 @@ public:
     QString storageBackendName() const;
     QString fallbackFilePath() const;
 
-    static QString deviceIdForPublicKey(const QByteArray& publicKeyDer);
+    static QString installationIdForPublicKey(const QByteArray& publicKeyDer);
+    static QString endpointIdForInstallation(const QString& installationId,
+                                             const QString& instanceId);
 
 private:
     class Impl;

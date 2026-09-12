@@ -9,11 +9,11 @@ SceneActivityModel::SceneActivityModel(QObject* parent)
 {
 }
 
-void SceneActivityModel::setLocalDeviceId(const QString& deviceId)
+void SceneActivityModel::setLocalEndpointId(const QString& endpointId)
 {
-    if (m_localDeviceId == deviceId) return;
+    if (m_localEndpointId == endpointId) return;
     const int previousCount = m_activities.size();
-    m_localDeviceId = deviceId;
+    m_localEndpointId = endpointId;
 
     // Activities cannot be safely re-attributed across installation identities.
     // This normally only runs once, immediately after signed authentication.
@@ -23,15 +23,15 @@ void SceneActivityModel::setLocalDeviceId(const QString& deviceId)
 
 bool SceneActivityModel::upsertLive(const QString& sceneRunId,
                                     const QString& remoteSessionId,
-                                    const QString& ownerDeviceId,
-                                    const QString& targetDeviceId,
+                                    const QString& ownerEndpointId,
+                                    const QString& targetEndpointId,
                                     qint64 startedAtEpochMs,
                                     bool degraded)
 {
     if (sceneRunId.isEmpty() || remoteSessionId.isEmpty()
-        || ownerDeviceId.isEmpty() || targetDeviceId.isEmpty()
-        || ownerDeviceId == targetDeviceId || m_localDeviceId.isEmpty()
-        || (m_localDeviceId != ownerDeviceId && m_localDeviceId != targetDeviceId)) {
+        || ownerEndpointId.isEmpty() || targetEndpointId.isEmpty()
+        || ownerEndpointId == targetEndpointId || m_localEndpointId.isEmpty()
+        || (m_localEndpointId != ownerEndpointId && m_localEndpointId != targetEndpointId)) {
         return false;
     }
 
@@ -41,8 +41,8 @@ bool SceneActivityModel::upsertLive(const QString& sceneRunId,
         // refresh health only; it can never rebind the card to another session
         // or peer, nor rewrite its original start time.
         if (existing->remoteSessionId != remoteSessionId
-            || existing->ownerDeviceId != ownerDeviceId
-            || existing->targetDeviceId != targetDeviceId
+            || existing->ownerEndpointId != ownerEndpointId
+            || existing->targetEndpointId != targetEndpointId
             || (startedAtEpochMs > 0
                 && existing->startedAtEpochMs != startedAtEpochMs)) {
             return false;
@@ -57,12 +57,12 @@ bool SceneActivityModel::upsertLive(const QString& sceneRunId,
     Activity next;
     next.sceneRunId = sceneRunId;
     next.remoteSessionId = remoteSessionId;
-    next.ownerDeviceId = ownerDeviceId;
-    next.targetDeviceId = targetDeviceId;
-    next.direction = m_localDeviceId == ownerDeviceId
+    next.ownerEndpointId = ownerEndpointId;
+    next.targetEndpointId = targetEndpointId;
+    next.direction = m_localEndpointId == ownerEndpointId
         ? Direction::Outgoing : Direction::Incoming;
-    next.peerDeviceId = next.direction == Direction::Outgoing
-        ? targetDeviceId : ownerDeviceId;
+    next.peerEndpointId = next.direction == Direction::Outgoing
+        ? targetEndpointId : ownerEndpointId;
     next.startedAtEpochMs = startedAtEpochMs > 0
         ? startedAtEpochMs : QDateTime::currentMSecsSinceEpoch();
     next.degraded = degraded;

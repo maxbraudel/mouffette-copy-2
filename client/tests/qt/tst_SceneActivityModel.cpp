@@ -15,7 +15,7 @@ private slots:
 void SceneActivityModelTest::containsOnlyLiveRunsAndClassifiesDirection()
 {
     SceneActivityModel model;
-    model.setLocalDeviceId(QStringLiteral("local"));
+    model.setLocalEndpointId(QStringLiteral("local"));
 
     QVERIFY(model.upsertLive(QStringLiteral("run-out"), QStringLiteral("session-out"),
                              QStringLiteral("local"), QStringLiteral("target"), 2'000));
@@ -26,9 +26,9 @@ void SceneActivityModelTest::containsOnlyLiveRunsAndClassifiesDirection()
     const QList<SceneActivityModel::Activity> activities = model.liveActivities();
     QCOMPARE(activities.at(0).sceneRunId, QStringLiteral("run-out"));
     QCOMPARE(activities.at(0).direction, SceneActivityModel::Direction::Outgoing);
-    QCOMPARE(activities.at(0).peerDeviceId, QStringLiteral("target"));
+    QCOMPARE(activities.at(0).peerEndpointId, QStringLiteral("target"));
     QCOMPARE(activities.at(1).direction, SceneActivityModel::Direction::Incoming);
-    QCOMPARE(activities.at(1).peerDeviceId, QStringLiteral("owner"));
+    QCOMPARE(activities.at(1).peerEndpointId, QStringLiteral("owner"));
 
     QVERIFY(!model.upsertLive(QStringLiteral("foreign"), QStringLiteral("session"),
                               QStringLiteral("a"), QStringLiteral("b"), 3'000));
@@ -38,7 +38,7 @@ void SceneActivityModelTest::containsOnlyLiveRunsAndClassifiesDirection()
 void SceneActivityModelTest::tracksDegradedSessionsAndTerminalRemoval()
 {
     SceneActivityModel model;
-    model.setLocalDeviceId(QStringLiteral("local"));
+    model.setLocalEndpointId(QStringLiteral("local"));
     model.upsertLive(QStringLiteral("run-a"), QStringLiteral("session-a"),
                      QStringLiteral("local"), QStringLiteral("target-a"), 1'000);
     model.upsertLive(QStringLiteral("run-b"), QStringLiteral("session-b"),
@@ -59,7 +59,7 @@ void SceneActivityModelTest::tracksDegradedSessionsAndTerminalRemoval()
 void SceneActivityModelTest::liveIdentityAndStartTimeAreImmutable()
 {
     SceneActivityModel model;
-    model.setLocalDeviceId(QStringLiteral("local"));
+    model.setLocalEndpointId(QStringLiteral("local"));
     QVERIFY(model.upsertLive(QStringLiteral("run-a"), QStringLiteral("session-a"),
                              QStringLiteral("local"), QStringLiteral("target-a"), 1'000));
 

@@ -1,0 +1,139 @@
+name: client-native-build
+
+on:
+  pull_request:
+    paths:
+      - 'client/**'
+      - '.github/workflows/client-native-build.yml'
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'client/**'
+      - '.github/workflows/client-native-build.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: client-native-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS ${{ matrix.configuration }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - configuration: dev
+            preset: macos-debug
+            build_script: ./scripts/build-development.sh
+          - configuration: prod
+            preset: macos-release
+            build_script: ./scripts/build-release.sh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: brew install qt openssl@3 cmake ninja
+
+      - name: Build
+        working-directory: client
+        run: ${{ matrix.build_script }}
+
+      - name: Test
+        working-directory: client
+        run: ctest --preset ${{ matrix.preset }} --parallel
+
+      - name: Validate production package
+        if: matrix.configuration == 'prod'
+        working-directory: client
+        run: ./scripts/package-release.sh --skip-tests --no-notarize
+
+      - name: Upload macOS package
+        if: matrix.configuration == 'prod'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mouffette-macos-unsigned
+          path: |
+            client/out/packages/*.dmg
+            client/out/packages/*.sha256
+          if-no-files-found: error
+
+  windows:
+    name: Windows ${{ matrix.configuration }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - configuration: Dev
+            preset: windows-debug
+            build_script: .\scripts\build-development.ps1
+          - configuration: Prod
+            preset: windows-release
+            build_script: .\scripts\build-release.ps1
+
+    steps:
+      - name: Preserve LF line endings
+        shell: pwsh
+        run: git config --global core.autocrlf input
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install MSYS2 UCRT64 toolchain
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-qt6-base
+            mingw-w64-ucrt-x86_64-qt6-tools
+            mingw-w64-ucrt-x86_64-qt6-websockets
+            mingw-w64-ucrt-x86_64-qt6-declarative
+            mingw-w64-ucrt-x86_64-qt6-multimedia
+            mingw-w64-ucrt-x86_64-qt6-svg
+            mingw-w64-ucrt-x86_64-openssl
+
+      - name: Build
+        working-directory: client
+        shell: pwsh
+        env:
+          MOUFFETTE_MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: ${{ matrix.build_script }}
+
+      - name: Test
+        working-directory: client
+        shell: pwsh
+        env:
+          MOUFFETTE_MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          $env:Path = "$env:MOUFFETTE_MSYS2_ROOT\ucrt64\bin;$env:Path"
+          ctest --preset ${{ matrix.preset }} --parallel
+          if ($LASTEXITCODE -ne 0) { throw 'CTest failed.' }
+
+      - name: Validate production package
+        if: matrix.configuration == 'Prod'
+        working-directory: client
+        shell: pwsh
+        env:
+          MOUFFETTE_MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: .\scripts\package-release.ps1 -SkipTests
+
+      - name: Upload Windows package
+        if: matrix.configuration == 'Prod'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mouffette-windows-unsigned
+          path: |
+            client/out/packages/*.zip
+            client/out/packages/*.sha256
+          if-no-files-found: error

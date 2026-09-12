@@ -16,17 +16,17 @@ function socket() {
     };
 }
 
-function addClient(server, connectionId, deviceId) {
+function addClient(server, connectionId, endpointId) {
     const ws = socket();
     const client = {
         id: connectionId,
         sessionId: connectionId,
-        persistentId: deviceId,
-        deviceId,
-        runtimeId: `runtime-${deviceId}`,
+        persistentId: endpointId,
+        endpointId,
+        runtimeId: `runtime-${endpointId}`,
         connectionGeneration: 1,
         authenticated: true,
-        machineName: deviceId,
+        machineName: endpointId,
         ws,
     };
     server.clients.set(connectionId, client);
@@ -39,7 +39,7 @@ function setup() {
     const target = addClient(server, 'target-connection', 'B');
     const attacker = addClient(server, 'attacker-connection', 'C');
     const session = server.remoteSessions.open({
-        ownerDeviceId: 'A', targetDeviceId: 'B',
+        ownerEndpointId: 'A', targetEndpointId: 'B',
         ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
@@ -49,7 +49,7 @@ function setup() {
 
 function envelope(session, extra = {}) {
     return {
-        protocolVersion: 2,
+        protocolVersion: 3,
         serverBootId: session.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: session.remoteSessionId,
@@ -121,7 +121,7 @@ const uploadId = 'upload-1';
     const stored = context.server.sessionAssets.get(context.session.remoteSessionId)
         .get('asset-1');
     assert.equal(stored.generation, context.session.generation);
-    assert.equal(stored.ownerDeviceId, 'A');
+    assert.equal(stored.ownerEndpointId, 'A');
     assert.equal(messages(context.owner.ws, 'upload_finished').length, 1);
     context.server.handleMessage('owner-connection', envelope(context.session, {
         type: 'upload_start', uploadId, files: [file()],
@@ -229,7 +229,7 @@ const uploadId = 'upload-1';
         'a conflicting active upload replay must never reach the target');
 
     const otherSession = context.server.remoteSessions.open({
-        ownerDeviceId: 'A', targetDeviceId: 'C',
+        ownerEndpointId: 'A', targetEndpointId: 'C',
         ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-C',
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
@@ -387,10 +387,10 @@ const uploadId = 'upload-1';
 {
     const server = new MouffetteServer(0);
     const owner = addClient(server, 'owner-connection', 'A');
-    const targets = ['B', 'C', 'D'].map(deviceId =>
-        addClient(server, `target-${deviceId}`, deviceId));
+    const targets = ['B', 'C', 'D'].map(endpointId =>
+        addClient(server, `target-${endpointId}`, endpointId));
     const sessions = targets.map(({ client }) => server.remoteSessions.open({
-        ownerDeviceId: 'A', targetDeviceId: client.deviceId,
+        ownerEndpointId: 'A', targetEndpointId: client.endpointId,
         ownerRuntimeId: 'runtime-A', targetRuntimeId: client.runtimeId,
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session);
@@ -461,7 +461,7 @@ const uploadId = 'upload-1';
     const owner = addClient(server, 'owner-connection', 'A');
     const target = addClient(server, 'target-connection', 'B');
     const session = server.remoteSessions.open({
-        ownerDeviceId: 'A', targetDeviceId: 'B',
+        ownerEndpointId: 'A', targetEndpointId: 'B',
         ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
@@ -488,15 +488,15 @@ const uploadId = 'upload-1';
     assert.equal(rejection.code, 'lease_expired');
     assert.equal(rejection.remoteSessionId, session.remoteSessionId);
     assert.equal(rejection.generation, session.generation);
-    assert.equal(rejection.ownerDeviceId, owner.client.deviceId);
-    assert.equal(rejection.targetDeviceId, target.client.deviceId);
+    assert.equal(rejection.ownerEndpointId, owner.client.endpointId);
+    assert.equal(rejection.targetEndpointId, target.client.endpointId);
     const terminalAbort = messages(target.ws, 'upload_abort').at(-1);
     assert.equal(terminalAbort.connectionGeneration, 1,
         'server-generated upload aborts remain bound to the upload owner/source');
     assert.equal(terminalAbort.remoteSessionId, session.remoteSessionId);
     assert.equal(terminalAbort.generation, session.generation);
-    assert.equal(terminalAbort.ownerDeviceId, owner.client.deviceId);
-    assert.equal(terminalAbort.targetDeviceId, target.client.deviceId);
+    assert.equal(terminalAbort.ownerEndpointId, owner.client.endpointId);
+    assert.equal(terminalAbort.targetEndpointId, target.client.endpointId);
 }
 
 // A server-generated abort relayed owner -> target retains the owner's source
@@ -514,4 +514,4 @@ const uploadId = 'upload-1';
         'the recipient generation must not overwrite the upload owner/source generation');
 }
 
-console.log('upload protocol v2 tests passed');
+console.log('upload protocol v3 tests passed');

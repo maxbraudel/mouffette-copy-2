@@ -88,8 +88,8 @@ derives editing from its injected session. The remote renderer is passive.
 From `client`, configure with `BUILD_TESTING=ON`, then:
 
 ```sh
-cmake --build --preset qt6-debug --parallel 4
-ctest --test-dir out/build/qt6-debug --output-on-failure
+cmake --build --preset macos-debug --parallel 4
+ctest --preset macos-debug --output-on-failure
 node tests/baseline/run_phase4_visual_parity.js
 bash tools/check_architecture_boundaries.sh
 ```

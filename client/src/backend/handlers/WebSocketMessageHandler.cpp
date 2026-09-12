@@ -38,7 +38,7 @@ void WebSocketMessageHandler::onConnected()
         && !uploadManager->retryReceiverAdvertisementCleanup()) {
         // Authentication alone must not advertise a receiver whose previous
         // server-boot cache could not be quarantined. In particular, do not
-        // send device_snapshot: the server will keep this installation out of
+        // send endpoint_snapshot: the server will keep this installation out of
         // discovery and therefore unavailable as a target.
         m_mainWindow->setLocalNetworkStatus("Cleanup error");
         m_mainWindow->setUIEnabled(false);
@@ -53,14 +53,14 @@ void WebSocketMessageHandler::onConnected()
     
     // CRITICAL FIX: Set SessionManager's local client ID for directional sessions
     if (m_mainWindow->getSessionManager() && m_mainWindow->getWebSocketClient()) {
-        QString myClientId = m_mainWindow->getWebSocketClient()->deviceId();
+        QString myClientId = m_mainWindow->getWebSocketClient()->endpointId();
         m_mainWindow->getSessionManager()->setMyClientId(myClientId);
         qDebug() << "SessionManager: Set local client ID to" << myClientId;
     }
     
     // CRITICAL FIX: Set UploadManager's local client ID for directional incoming sessions
     if (uploadManager && m_mainWindow->getWebSocketClient()) {
-        QString myClientId = m_mainWindow->getWebSocketClient()->deviceId();
+        QString myClientId = m_mainWindow->getWebSocketClient()->endpointId();
         uploadManager->setMyClientId(myClientId);
         qDebug() << "UploadManager: Set local client ID to" << myClientId;
     }
@@ -72,7 +72,7 @@ void WebSocketMessageHandler::onConnected()
     // durable canvas visible while discovery and RemoteSession state reconcile.
     if (m_mainWindow->getNavigationManager() && m_mainWindow->getNavigationManager()->isOnScreenView()) {
         const ClientInfo& selectedClient = m_mainWindow->getSelectedClient();
-        const QString selId = selectedClient.clientId();
+        const QString selId = selectedClient.endpointId();
         if (!selId.isEmpty()) {
             // Indicate we're attempting to reach the remote again
             m_mainWindow->setRemoteConnectionStatus("CONNECTING...");

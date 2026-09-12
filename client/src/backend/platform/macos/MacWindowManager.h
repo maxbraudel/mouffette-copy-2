@@ -15,6 +15,8 @@ public:
     static void setWindowAsGlobalOverlay(QWidget* widget, bool clickThrough = true);
     // Order out (hide) a window from the screen and window server
     static void orderOutWindow(QWidget* widget);
+    // Restore focus to the primary application window after an IPC activation.
+    static void activateApplicationWindow(QWidget* widget);
 };
 
 #endif // MACWINDOWMANAGER_H

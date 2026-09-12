@@ -35,9 +35,12 @@ class AppConfigTest final : public QObject {
 
 private slots:
     void loadsEmbeddedDefaults();
+    void compiledDefaultDisablesMultipleInstances();
     void appliesDocumentedPrecedence();
     void commandLineEnvFileReplacesProcessSelection();
     void parsesFalseBooleansAsFalse();
+    void appliesProductionOverrideLastPerKey();
+    void emptyProductionOverrideChangesNothing();
     void rejectsPublicPlainWebSocketUrlAtomically();
     void appliesTransportSecurityPolicyToRuntimeUrlEdits();
     void rejectsInvalidHiddenDeadlineOrdering();
@@ -57,9 +60,21 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     QCOMPARE(config.projectHiddenRetentionMs(), qint64(300000));
     QCOMPARE(config.uploadConcurrency(), 2);
     QVERIFY(config.useQuickCanvasRenderer());
+    QVERIFY(config.allowMultipleInstances());
     QVERIFY(!config.cursorDebug());
     QCOMPARE(config.loadedEnvFilePath(), QStringLiteral(":/config/client.env"));
     QVERIFY(config.provenance(AppConfig::Key::ServerUrl).startsWith(QStringLiteral("embedded-env:")));
+}
+
+void AppConfigTest::compiledDefaultDisablesMultipleInstances() {
+    AppConfig config;
+    AppConfig::LoadOptions options = isolatedOptions(QString());
+
+    QString error;
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QVERIFY(!config.allowMultipleInstances());
+    QCOMPARE(config.provenance(AppConfig::Key::AllowMultipleInstances),
+             QStringLiteral("compiled-default"));
 }
 
 void AppConfigTest::appliesDocumentedPrecedence() {
@@ -124,6 +139,7 @@ void AppConfigTest::parsesFalseBooleansAsFalse() {
     QVERIFY(directory.isValid());
     const QString envPath = writeEnvFile(directory, QStringLiteral("false.env"),
         "MOUFFETTE_CURSOR_DEBUG=false\n"
+        "MOUFFETTE_ALLOW_MULTIPLE_INSTANCES=false\n"
         "MOUFFETTE_RUNTIME_DIAGNOSTICS=0\n"
         "MOUFFETTE_MIGRATION_TELEMETRY=off\n"
         "MOUFFETTE_CANVAS_PROFILING=no\n");
@@ -134,9 +150,60 @@ void AppConfigTest::parsesFalseBooleansAsFalse() {
     QString error;
     QVERIFY2(config.load(options, &error), qPrintable(error));
     QVERIFY(!config.cursorDebug());
+    QVERIFY(!config.allowMultipleInstances());
     QVERIFY(!config.runtimeDiagnostics());
     QVERIFY(!config.migrationTelemetry());
     QVERIFY(!config.canvasProfiling());
+}
+
+void AppConfigTest::appliesProductionOverrideLastPerKey() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString basePath = writeEnvFile(directory, QStringLiteral("base.env"),
+        "MOUFFETTE_ALLOW_MULTIPLE_INSTANCES=true\n"
+        "MOUFFETTE_CURSOR_DEBUG=false\n");
+    const QString productionPath = writeEnvFile(directory, QStringLiteral("production.env"),
+        "MOUFFETTE_ALLOW_MULTIPLE_INSTANCES=false\n");
+    QVERIFY(!basePath.isEmpty());
+    QVERIFY(!productionPath.isEmpty());
+
+    AppConfig::LoadOptions options = isolatedOptions(basePath);
+    options.applyProductionOverride = true;
+    options.productionEnvFilePath = productionPath;
+    options.processEnvironment.insert(QStringLiteral("MOUFFETTE_ALLOW_MULTIPLE_INSTANCES"),
+                                      QStringLiteral("true"));
+    options.settings.insert(QStringLiteral("allowMultipleInstances"), true);
+    options.processEnvironment.insert(QStringLiteral("MOUFFETTE_CURSOR_DEBUG"),
+                                      QStringLiteral("true"));
+    options.arguments << QStringLiteral("--allow-multiple-instances=true");
+
+    AppConfig config;
+    QString error;
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QVERIFY(!config.allowMultipleInstances());
+    QVERIFY(config.cursorDebug());
+    QCOMPARE(config.provenance(AppConfig::Key::AllowMultipleInstances),
+             QStringLiteral("production-override:%1").arg(productionPath));
+}
+
+void AppConfigTest::emptyProductionOverrideChangesNothing() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString basePath = writeEnvFile(directory, QStringLiteral("base.env"),
+        "MOUFFETTE_ALLOW_MULTIPLE_INSTANCES=true\n");
+    const QString productionPath = writeEnvFile(directory, QStringLiteral("production.env"),
+        "# intentionally empty\n");
+
+    AppConfig::LoadOptions options = isolatedOptions(basePath);
+    options.applyProductionOverride = true;
+    options.productionEnvFilePath = productionPath;
+
+    AppConfig config;
+    QString error;
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QVERIFY(config.allowMultipleInstances());
+    QVERIFY(config.provenance(AppConfig::Key::AllowMultipleInstances)
+                .startsWith(QStringLiteral("embedded-env:")));
 }
 
 void AppConfigTest::rejectsPublicPlainWebSocketUrlAtomically() {

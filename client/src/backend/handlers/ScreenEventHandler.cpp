@@ -97,7 +97,7 @@ void ScreenEventHandler::syncRegistration()
 
     QString machineName = m_mainWindow->getMachineName();
     QString platform = m_mainWindow->getPlatformName();
-    // Protocol v2 publishes one complete authoritative device snapshot. Screen
+    // Protocol v3 publishes one complete authoritative device snapshot. Screen
     // and volume discovery is independent from projects and remote sessions;
     // there is deliberately no request/watch subscription protocol anymore.
     QList<ScreenInfo> screens = m_mainWindow->getLocalScreenInfo();
@@ -205,9 +205,9 @@ void ScreenEventHandler::onScreensInfoReceived(const ClientInfo& clientInfo)
 {
     if (!m_mainWindow) return;
 
-    QString persistentId = clientInfo.clientId();
+    QString persistentId = clientInfo.endpointId();
     if (persistentId.isEmpty()) {
-        qWarning() << "ScreenEventHandler::onScreensInfoReceived: client has no authenticated deviceId";
+        qWarning() << "ScreenEventHandler::onScreensInfoReceived: client has no authenticated endpointId";
         return;
     }
 
@@ -225,7 +225,7 @@ void ScreenEventHandler::onScreensInfoReceived(const ClientInfo& clientInfo)
             session->serverAssignedId = clientInfo.getId();
         }
         session->lastClientInfo = clientInfo;
-        session->lastClientInfo.setClientId(persistentId);
+        session->lastClientInfo.setEndpointId(persistentId);
         session->lastClientInfo.setFromMemory(true);
         session->lastClientInfo.setOnline(true);
     }
@@ -243,7 +243,7 @@ void ScreenEventHandler::onScreensInfoReceived(const ClientInfo& clientInfo)
     m_mainWindow->recordCanvasLoadReady(session->persistentClientId, screens.size());
 
     if (session->canvas) {
-        // A project is keyed exclusively by the authenticated installation
+        // A project is keyed exclusively by the authenticated endpoint
         // identity. Socket ids are transport details and must never become
         // durable canvas targets.
         session->canvas->setRemoteSceneTarget(
@@ -260,7 +260,7 @@ void ScreenEventHandler::onScreensInfoReceived(const ClientInfo& clientInfo)
     session->lastClientInfo.setScreens(screens);
 
     // Replace the cached device snapshot wholesale whenever that exact
-    // deviceId advertises fresh state. This preserves screens, UI zones and
+    // endpointId advertises fresh state. This preserves screens, UI zones and
     // volume when the transport later disappears without ever reconciling by
     // display name.
     if (ProjectManager* projects = m_mainWindow->getProjectManager();
@@ -406,7 +406,7 @@ void ScreenEventHandler::onDataRequestReceived()
     }
 #endif
 
-    // This entry point is no longer connected in protocol v2. If invoked by
+    // This entry point is no longer connected in protocol v3. If invoked by
     // in-process compatibility code, publish the same complete authoritative
     // snapshot as the regular timer instead of a partial legacy state message.
     syncRegistration();

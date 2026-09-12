@@ -4,7 +4,8 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const WebSocket = require('ws');
 const {
-    challengePayload, createChallenge, deviceIdForPublicKey, verifyAuthResponse,
+    challengePayload, createChallenge, installationIdForPublicKey,
+    endpointIdForInstallation, verifyAuthResponse,
 } = require('./device_auth');
 const { RemoteSessionRegistry } = require('./remote_session_registry');
 const { MouffetteServer } = require('./server');
@@ -15,24 +16,29 @@ const { MouffetteServer } = require('./server');
     const challenge = createChallenge(serverBootId, 1000);
     const keys = crypto.generateKeyPairSync('ed25519');
     const publicKeyDer = keys.publicKey.export({ type: 'spki', format: 'der' });
+    const installationId = installationIdForPublicKey(publicKeyDer);
+    const instanceId = 'primary';
     const signature = crypto.sign(null,
-        challengePayload({ ...challenge, runtimeId }), keys.privateKey);
+        challengePayload({ ...challenge, runtimeId, instanceId }), keys.privateKey);
     const response = {
-        protocolVersion: 2,
+        protocolVersion: 3,
         serverBootId,
         runtimeId,
+        instanceId,
         publicKey: publicKeyDer.toString('base64url'),
-        deviceId: deviceIdForPublicKey(publicKeyDer),
+        installationId,
         signature: signature.toString('base64url'),
     };
     const verified = verifyAuthResponse(challenge, response, 1500);
     assert.equal(verified.ok, true);
-    assert.equal(verified.deviceId, response.deviceId);
+    assert.equal(verified.installationId, installationId);
+    assert.equal(verified.endpointId,
+        endpointIdForInstallation(installationId, instanceId));
     assert.equal(verifyAuthResponse(challenge, { ...response, runtimeId: crypto.randomUUID() }, 1500).ok, false);
     assert.equal(verifyAuthResponse(challenge, {
         ...response,
-        deviceId: deviceIdForPublicKey(Buffer.from('another-key')),
-    }, 1500).error, 'device_id_mismatch');
+        installationId: installationIdForPublicKey(Buffer.from('another-key')),
+    }, 1500).error, 'installation_id_mismatch');
     const forgedSignature = Buffer.from(signature);
     forgedSignature[0] ^= 0xff;
     assert.equal(verifyAuthResponse(challenge, {
@@ -61,8 +67,8 @@ const committedCleanup = (extra = {}) => ({
 });
 
 const binding = (owner = 'A', target = 'B') => ({
-    ownerDeviceId: owner,
-    targetDeviceId: target,
+    ownerEndpointId: owner,
+    targetEndpointId: target,
     ownerRuntimeId: `runtime-${owner}`,
     targetRuntimeId: `runtime-${target}`,
     ownerConnectionGeneration: 1,
@@ -79,18 +85,19 @@ function testSocket() {
     };
 }
 
-function addAuthenticatedClient(server, connectionId, deviceId,
+function addAuthenticatedClient(server, connectionId, endpointId,
                                 connectionGeneration = 1) {
     const ws = testSocket();
     server.clients.set(connectionId, {
         id: connectionId,
-        sessionId: connectionId,
-        persistentId: deviceId,
-        deviceId,
-        runtimeId: `runtime-${deviceId}`,
+        installationId: `installation-${endpointId}`,
+        endpointId,
+        instanceId: 'primary',
+        instanceOrdinal: 1,
+        runtimeId: `runtime-${endpointId}`,
         connectionGeneration,
         authenticated: true,
-        machineName: deviceId,
+        machineName: endpointId,
         platform: 'test',
         screens: [],
         ws,
@@ -99,15 +106,16 @@ function addAuthenticatedClient(server, connectionId, deviceId,
 }
 
 function addAuthenticationCandidate(server, connectionId, keyPair, runtimeId,
-                                    issuedAt) {
+                                    issuedAt, instanceId = 'primary') {
     const ws = testSocket();
     const publicKeyDer = keyPair.publicKey.export({ type: 'spki', format: 'der' });
     const challenge = createChallenge(server.serverBootId, issuedAt);
+    const installationId = installationIdForPublicKey(publicKeyDer);
     const client = {
         id: connectionId,
-        sessionId: null,
-        persistentId: null,
-        deviceId: null,
+        installationId: null,
+        endpointId: null,
+        instanceId: null,
         runtimeId: null,
         connectionGeneration: 1,
         authenticated: false,
@@ -119,16 +127,43 @@ function addAuthenticationCandidate(server, connectionId, keyPair, runtimeId,
     };
     server.clients.set(connectionId, client);
     const response = {
-        protocolVersion: 2,
+        protocolVersion: 3,
         serverBootId: server.serverBootId,
         runtimeId,
-        deviceId: deviceIdForPublicKey(publicKeyDer),
+        instanceId,
+        installationId,
         publicKey: publicKeyDer.toString('base64url'),
         signature: crypto.sign(null,
-            challengePayload({ ...challenge, runtimeId }), keyPair.privateKey)
+            challengePayload({ ...challenge, runtimeId, instanceId }), keyPair.privateKey)
             .toString('base64url'),
     };
-    return { client, ws, response, deviceId: response.deviceId };
+    return {
+        client, ws, response,
+        endpointId: endpointIdForInstallation(installationId, instanceId),
+    };
+}
+
+// One installation may expose several independently addressable endpoints.
+// Only an exact endpoint duplicate is subject to the active lease exclusion.
+{
+    const server = new MouffetteServer({ port: 0, metricLogger: () => {} });
+    const keys = crypto.generateKeyPairSync('ed25519');
+    const now = Date.now();
+    const primary = addAuthenticationCandidate(
+        server, 'same-install-primary', keys, crypto.randomUUID(), now);
+    const secondary = addAuthenticationCandidate(
+        server, 'same-install-secondary', keys, crypto.randomUUID(), now,
+        crypto.randomUUID());
+
+    server.handleAuthResponse('same-install-primary', primary.response, now + 1);
+    server.handleAuthResponse('same-install-secondary', secondary.response, now + 2);
+
+    assert.equal(primary.client.authenticated, true);
+    assert.equal(secondary.client.authenticated, true);
+    assert.equal(primary.client.installationId, secondary.client.installationId);
+    assert.notEqual(primary.client.endpointId, secondary.client.endpointId);
+    assert.equal(primary.client.instanceId, 'primary');
+    assert.notEqual(secondary.client.instanceId, 'primary');
 }
 
 function serverSessionContext(prefix) {
@@ -204,7 +239,7 @@ function messages(socket, type) {
     const earlyCandidate = addAuthenticationCandidate(
         earlyServer, 'candidate-early', keyPair, newRuntimeId, base);
     const earlyOldSocket = addAuthenticatedClient(
-        earlyServer, 'old-early', earlyCandidate.deviceId);
+        earlyServer, 'old-early', earlyCandidate.endpointId);
     const earlyOld = earlyServer.clients.get('old-early');
     earlyOld.runtimeId = oldRuntimeId;
     earlyOld.lastHeartbeatAt = base;
@@ -212,7 +247,7 @@ function messages(socket, type) {
         'candidate-early', earlyCandidate.response, base + 2_999);
     assert.equal(earlyCandidate.client.authenticated, false);
     assert.equal(messages(earlyCandidate.ws, 'error').at(-1).code,
-        'device_already_connected');
+        'endpoint_already_connected');
     assert.equal(earlyServer.clients.get('old-early'), earlyOld);
     assert.equal(earlyOldSocket.readyState, WebSocket.OPEN);
 
@@ -228,14 +263,14 @@ function messages(socket, type) {
         boundaryServer, 'candidate-boundary', keyPair, newRuntimeId, base);
     addAuthenticatedClient(boundaryServer, 'owner-boundary', 'owner-device');
     const oldSocket = addAuthenticatedClient(
-        boundaryServer, 'old-boundary', boundaryCandidate.deviceId);
+        boundaryServer, 'old-boundary', boundaryCandidate.endpointId);
     const oldClient = boundaryServer.clients.get('old-boundary');
     oldClient.runtimeId = oldRuntimeId;
     oldClient.lastHeartbeatAt = base;
-    boundaryServer.connectionGenerationByDevice.set(boundaryCandidate.deviceId, 1);
+    boundaryServer.connectionGenerationByEndpoint.set(boundaryCandidate.endpointId, 1);
     const session = boundaryServer.remoteSessions.open({
-        ownerDeviceId: 'owner-device',
-        targetDeviceId: boundaryCandidate.deviceId,
+        ownerEndpointId: 'owner-device',
+        targetEndpointId: boundaryCandidate.endpointId,
         ownerRuntimeId: 'runtime-owner',
         targetRuntimeId: oldRuntimeId,
         ownerConnectionGeneration: 1,
@@ -253,9 +288,9 @@ function messages(socket, type) {
     assert.equal(session.generation, 1,
         'a process restart after lease expiry is terminal, never a resume');
 
-    boundaryServer.handleDeviceSnapshot('candidate-boundary', {
+    boundaryServer.handleEndpointSnapshot('candidate-boundary', {
         connectionGeneration: 2,
-        machineName: 'Restarted target', platform: 'test', screens: [],
+        machineName: 'Restarted target', platform: 'test', instanceOrdinal: 1, screens: [],
         volumePercent: 50,
     });
     assert.equal(session.targetConnectionGeneration, 1,
@@ -282,9 +317,9 @@ function messages(socket, type) {
     boundaryCandidate.client.connectionGeneration = 3;
     const closedBeforeReplay = messages(
         boundaryCandidate.ws, 'remote_session_closed').length;
-    boundaryServer.handleDeviceSnapshot('candidate-boundary', {
+    boundaryServer.handleEndpointSnapshot('candidate-boundary', {
         connectionGeneration: 3,
-        machineName: 'Restarted target again', platform: 'test', screens: [],
+        machineName: 'Restarted target again', platform: 'test', instanceOrdinal: 1, screens: [],
         volumePercent: 50,
     });
     assert.equal(messages(boundaryCandidate.ws, 'remote_session_closed').length,
@@ -371,7 +406,7 @@ function messages(socket, type) {
     const early = createOpenServer();
     early.setMonotonic(12_999);
     early.server.handleRemoteSessionOpen('open-owner', {
-        targetDeviceId: 'open-B', connectionGeneration: 1,
+        targetEndpointId: 'open-B', connectionGeneration: 1,
         requestId: 'open-before-boundary',
     });
     assert.equal(early.server.remoteSessions.sessions.size, 1);
@@ -380,7 +415,7 @@ function messages(socket, type) {
     const boundary = createOpenServer();
     boundary.setMonotonic(13_000);
     boundary.server.handleRemoteSessionOpen('open-owner', {
-        targetDeviceId: 'open-B', connectionGeneration: 1,
+        targetEndpointId: 'open-B', connectionGeneration: 1,
         requestId: 'open-at-boundary',
     });
     assert.equal(boundary.server.remoteSessions.sessions.size, 0);
@@ -408,7 +443,7 @@ function messages(socket, type) {
         client.lastHeartbeatMonotonicAt = monotonic;
     }
     const oldSession = server.remoteSessions.open({
-        ownerDeviceId: 'old-A', targetDeviceId: 'busy-B',
+        ownerEndpointId: 'old-A', targetEndpointId: 'busy-B',
         ownerRuntimeId: 'runtime-old-A', targetRuntimeId: 'runtime-busy-B',
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
@@ -418,7 +453,7 @@ function messages(socket, type) {
     server.clients.get('next-owner').lastHeartbeatMonotonicAt = monotonic;
     oldSession.lastContact.set('busy-B', monotonic);
     server.handleRemoteSessionOpen('next-owner', {
-        targetDeviceId: 'busy-B', connectionGeneration: 1,
+        targetEndpointId: 'busy-B', connectionGeneration: 1,
         requestId: 'open-after-old-controller-expired',
     });
     assert.equal(oldSession.phase, 'CleanupPending');
@@ -436,7 +471,7 @@ function messages(socket, type) {
         context.server, 'controller-connection', 'C');
 
     context.server.handleRemoteSessionOpen('controller-connection', {
-        targetDeviceId: 'B',
+        targetEndpointId: 'B',
         connectionGeneration: 1,
         requestId: 'open-in-use',
         resumeToken: 'must-not-be-reflected',
@@ -445,7 +480,7 @@ function messages(socket, type) {
     assert.equal(inUse.scope, 'remote_session');
     assert.equal(inUse.code, 'target_in_use');
     assert.equal(inUse.requestId, 'open-in-use');
-    assert.equal(inUse.targetDeviceId, 'B');
+    assert.equal(inUse.targetEndpointId, 'B');
     assert.equal(typeof inUse.messageId, 'string');
     assert.equal(Object.hasOwn(inUse, 'resumeToken'), false);
     assert.equal(Object.hasOwn(inUse, 'teardownId'), false);
@@ -453,7 +488,7 @@ function messages(socket, type) {
         'a RemoteSession refusal must not reconnect the healthy transport');
 
     context.server.handleRemoteSessionOpen('owner-connection', {
-        targetDeviceId: 'offline-device',
+        targetEndpointId: 'offline-device',
         connectionGeneration: 1,
         requestId: 'open-offline',
     });
@@ -461,7 +496,7 @@ function messages(socket, type) {
     assert.equal(offline.scope, 'remote_session');
     assert.equal(offline.code, 'target_offline');
     assert.equal(offline.requestId, 'open-offline');
-    assert.equal(offline.targetDeviceId, 'offline-device');
+    assert.equal(offline.targetEndpointId, 'offline-device');
     assert.equal(context.ownerSocket.readyState, WebSocket.OPEN,
         'an offline target is a scoped request failure, not transport loss');
 
@@ -485,7 +520,7 @@ function messages(socket, type) {
     const ownerSocket = addAuthenticatedClient(server, 'bounded-owner', 'bounded-A');
     const targetSocket = addAuthenticatedClient(server, 'bounded-target', 'bounded-B');
     server.handleRemoteSessionOpen('bounded-owner', {
-        targetDeviceId: 'bounded-B', connectionGeneration: 1,
+        targetEndpointId: 'bounded-B', connectionGeneration: 1,
         requestId: `secret\n${'x'.repeat(1024)}`,
     });
     const opened = messages(ownerSocket, 'remote_session_opened').at(-1);
@@ -578,12 +613,12 @@ function messages(socket, type) {
 
     context.server.sendClientList('owner-connection');
     const ownerTarget = messages(context.ownerSocket, 'client_list')
-        .at(-1).clients.find(client => client.deviceId === 'B');
+        .at(-1).clients.find(client => client.endpointId === 'B');
     assert.equal(ownerTarget.remoteSessionState, 'Disconnecting');
 
     context.server.sendClientList('observer-connection');
     const observerTarget = messages(observerSocket, 'client_list')
-        .at(-1).clients.find(client => client.deviceId === 'B');
+        .at(-1).clients.find(client => client.endpointId === 'B');
     assert.equal(observerTarget.remoteSessionState, 'Unavailable');
 }
 
@@ -607,29 +642,29 @@ function messages(socket, type) {
     clock = 21_002;
     registry.markDisconnected('B', clock);
     assert.equal(opened.session.phase, 'Grace');
-    assert.deepEqual([...opened.session.graceDevices].sort(), ['A', 'B']);
+    assert.deepEqual([...opened.session.graceEndpoints].sort(), ['A', 'B']);
     assert.equal(opened.session.graceDeadlineAt, 24_000);
 
     clock = 23_999;
     const ownerResume = registry.resume({
         remoteSessionId: opened.session.remoteSessionId,
-        deviceId: 'A', runtimeId: 'runtime-A',
+        endpointId: 'A', runtimeId: 'runtime-A',
         resumeToken: opened.session.resumeToken, generation: 1,
         connectionGeneration: 2,
     }, clock);
     assert.equal(ownerResume.ok, true, '2999ms remains resumable');
     assert.equal(opened.session.phase, 'Grace');
-    assert.deepEqual([...opened.session.graceDevices], ['B']);
+    assert.deepEqual([...opened.session.graceEndpoints], ['B']);
     assert.equal(registry.resume({
         remoteSessionId: opened.session.remoteSessionId,
-        deviceId: 'A', runtimeId: 'runtime-A',
+        endpointId: 'A', runtimeId: 'runtime-A',
         resumeToken: opened.session.resumeToken, generation: 2,
         connectionGeneration: 3,
     }, clock).error, 'party_not_in_grace', 'one party cannot replay resume');
 
     const targetResume = registry.resume({
         remoteSessionId: opened.session.remoteSessionId,
-        deviceId: 'B', runtimeId: 'runtime-B',
+        endpointId: 'B', runtimeId: 'runtime-B',
         resumeToken: opened.session.resumeToken, generation: 1,
         connectionGeneration: 2,
     }, clock);
@@ -644,14 +679,14 @@ function messages(socket, type) {
     registry.markDisconnected('A', clock);
     assert.equal(registry.resume({
         remoteSessionId: opened.session.remoteSessionId,
-        deviceId: 'A', runtimeId: 'runtime-A',
+        endpointId: 'A', runtimeId: 'runtime-A',
         resumeToken: opened.session.resumeToken, generation: 2,
         connectionGeneration: 3,
     }, clock).error, 'stale_remote_session_generation',
     'a synchronized role cannot roll its RemoteSession generation back');
     assert.equal(registry.resume({
         remoteSessionId: opened.session.remoteSessionId,
-        deviceId: 'A', runtimeId: 'runtime-A',
+        endpointId: 'A', runtimeId: 'runtime-A',
         resumeToken: opened.session.resumeToken, generation: 3,
         connectionGeneration: 3,
     }, clock).ok, true);
@@ -678,18 +713,18 @@ function messages(socket, type) {
         'late activity must never push the Grace deadline');
     assert.equal(registry.resume({
         remoteSessionId: opened.session.remoteSessionId,
-        deviceId: 'A', runtimeId: 'new-process',
+        endpointId: 'A', runtimeId: 'new-process',
         resumeToken: opened.session.resumeToken, generation: 1,
         connectionGeneration: 2,
     }, clock).error, 'invalid_resume_proof');
     assert.equal(registry.resume({
         remoteSessionId: opened.session.remoteSessionId,
-        deviceId: 'A', runtimeId: 'runtime-A',
+        endpointId: 'A', runtimeId: 'runtime-A',
         resumeToken: 'wrong-token', generation: 1, connectionGeneration: 2,
     }, clock).error, 'invalid_resume_proof');
     assert.equal(registry.resume({
         remoteSessionId: opened.session.remoteSessionId,
-        deviceId: 'A', runtimeId: 'runtime-A',
+        endpointId: 'A', runtimeId: 'runtime-A',
         resumeToken: opened.session.resumeToken, generation: 1,
         connectionGeneration: 1,
     }, clock).error, 'stale_connection_generation');
@@ -697,7 +732,7 @@ function messages(socket, type) {
     clock = 33_000;
     const expiredResume = registry.resume({
         remoteSessionId: opened.session.remoteSessionId,
-        deviceId: 'A', runtimeId: 'runtime-A',
+        endpointId: 'A', runtimeId: 'runtime-A',
         resumeToken: opened.session.resumeToken, generation: 1,
         connectionGeneration: 2,
     }, clock);
@@ -830,7 +865,7 @@ function messages(socket, type) {
         'session_terminal');
     assert.equal(registry.resume({
         remoteSessionId: opened.session.remoteSessionId,
-        deviceId: 'A', runtimeId: 'runtime-A',
+        endpointId: 'A', runtimeId: 'runtime-A',
         resumeToken: opened.session.resumeToken, generation: 1,
         connectionGeneration: 2,
     }, clock).error, 'session_not_resumable');
@@ -898,7 +933,7 @@ function messages(socket, type) {
     const context = serverSessionContext('server-resume');
     const now = Date.now();
     context.session.phase = 'Grace';
-    context.session.graceDevices.add('A');
+    context.session.graceEndpoints.add('A');
     context.session.graceDeadlineAt = now;
     context.session.lastContact.set('A', now - 3000);
     context.session.lastContact.set('B', now);
@@ -1041,9 +1076,9 @@ function messages(socket, type) {
 
     const ownerClient = context.server.clients.get('owner-connection');
     ownerClient.connectionGeneration = 2;
-    context.server.handleDeviceSnapshot('owner-connection', {
+    context.server.handleEndpointSnapshot('owner-connection', {
         connectionGeneration: 2,
-        machineName: 'Owner rebound', platform: 'test', screens: [],
+        machineName: 'Owner rebound', platform: 'test', instanceOrdinal: 1, screens: [],
         volumePercent: 50,
     });
     const ownerTerminal = messages(
@@ -1056,9 +1091,9 @@ function messages(socket, type) {
 
     const targetClient = context.server.clients.get('target-connection');
     targetClient.connectionGeneration = 2;
-    context.server.handleDeviceSnapshot('target-connection', {
+    context.server.handleEndpointSnapshot('target-connection', {
         connectionGeneration: 2,
-        machineName: 'Target rebound', platform: 'test', screens: [],
+        machineName: 'Target rebound', platform: 'test', instanceOrdinal: 1, screens: [],
         volumePercent: 50,
     });
     const targetTerminal = messages(
@@ -1089,9 +1124,9 @@ function messages(socket, type) {
 
     ownerClient.connectionGeneration = 3;
     const closedCount = messages(context.ownerSocket, 'remote_session_closed').length;
-    context.server.handleDeviceSnapshot('owner-connection', {
+    context.server.handleEndpointSnapshot('owner-connection', {
         connectionGeneration: 3,
-        machineName: 'Owner rebound again', platform: 'test', screens: [],
+        machineName: 'Owner rebound again', platform: 'test', instanceOrdinal: 1, screens: [],
         volumePercent: 50,
     });
     assert.equal(messages(context.ownerSocket, 'remote_session_closed').length,
@@ -1109,9 +1144,9 @@ function messages(socket, type) {
         context.ownerSocket, 'remote_session_terminating').length;
     const closedCountBeforeForeignRuntime = messages(
         context.ownerSocket, 'remote_session_closed').length;
-    context.server.handleDeviceSnapshot('owner-connection', {
+    context.server.handleEndpointSnapshot('owner-connection', {
         connectionGeneration: 4,
-        machineName: 'Different owner process', platform: 'test', screens: [],
+        machineName: 'Different owner process', platform: 'test', instanceOrdinal: 1, screens: [],
         volumePercent: 50,
     });
     assert.equal(messages(context.ownerSocket, 'remote_session_terminating').length,
@@ -1235,7 +1270,7 @@ function messages(socket, type) {
     });
     const replay = secondBoot.resume({
         remoteSessionId: opened.session.remoteSessionId,
-        deviceId: 'A', runtimeId: 'runtime-A',
+        endpointId: 'A', runtimeId: 'runtime-A',
         resumeToken: opened.session.resumeToken, generation: 1,
         connectionGeneration: 2,
     }, clock);

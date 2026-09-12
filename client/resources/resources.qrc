@@ -1,6 +1,7 @@
 <RCC>
     <qresource prefix="/config">
         <file alias="client.env">../.env</file>
+        <file alias="client.production.env">../.env.production</file>
     </qresource>
     <qresource prefix="/icons">
     <file>mouffette.png</file>

@@ -13,10 +13,24 @@ class DeviceIdentityStoreTest : public QObject {
 
 private slots:
     void identityIsStableAndOwnerOnly();
+    void endpointIdentityIsInstanceScoped();
     void signatureVerifiesAndRejectsTampering();
     void corruptStoredIdentityIsNotSilentlyRotated();
     void storedIdentityWithTrailingDataIsRejected();
 };
+
+void DeviceIdentityStoreTest::endpointIdentityIsInstanceScoped() {
+    const QString installationId(43, QLatin1Char('i'));
+    const QString primary = DeviceIdentityStore::endpointIdForInstallation(
+        installationId, QStringLiteral("primary"));
+    const QString secondary = DeviceIdentityStore::endpointIdForInstallation(
+        installationId, QStringLiteral("123e4567-e89b-42d3-a456-426614174000"));
+    QCOMPARE(primary.size(), 43);
+    QCOMPARE(secondary.size(), 43);
+    QVERIFY(primary != secondary);
+    QCOMPARE(primary, DeviceIdentityStore::endpointIdForInstallation(
+                          installationId, QStringLiteral("primary")));
+}
 
 void DeviceIdentityStoreTest::identityIsStableAndOwnerOnly() {
     QTemporaryDir directory;
@@ -26,7 +40,7 @@ void DeviceIdentityStoreTest::identityIsStableAndOwnerOnly() {
     QString error;
     QVERIFY2(first.initialize(&error), qPrintable(error));
     QCOMPARE(first.storageBackend(), DeviceIdentityStore::StorageBackend::OwnerOnlyFile);
-    QCOMPARE(first.deviceId().size(), 43);
+    QCOMPARE(first.installationId().size(), 43);
     QVERIFY(!first.publicKeyDer().isEmpty());
 
     const QFileInfo stored(first.fallbackFilePath());
@@ -39,7 +53,7 @@ void DeviceIdentityStoreTest::identityIsStableAndOwnerOnly() {
 
     DeviceIdentityStore restored(directory.path(), false);
     QVERIFY2(restored.initialize(&error), qPrintable(error));
-    QCOMPARE(restored.deviceId(), first.deviceId());
+    QCOMPARE(restored.installationId(), first.installationId());
     QCOMPARE(restored.publicKeyDer(), first.publicKeyDer());
 }
 
@@ -50,7 +64,7 @@ void DeviceIdentityStoreTest::signatureVerifiesAndRejectsTampering() {
     QString error;
     QVERIFY2(identity.initialize(&error), qPrintable(error));
 
-    const QByteArray payload("mouffette-v2\nboot\nnonce\nruntime");
+    const QByteArray payload("mouffette-v3\nboot\nnonce\nruntime\nprimary");
     const QByteArray signature = identity.sign(payload, &error);
     QCOMPARE(signature.size(), 64);
 

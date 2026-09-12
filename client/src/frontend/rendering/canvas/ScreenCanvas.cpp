@@ -1612,7 +1612,7 @@ void ScreenCanvas::initInfoOverlay() {
                 if (m_wsClient) {
                     QJsonObject sceneObj = serializeSceneState();
                     sceneObj.remove(QStringLiteral("canvasSessionId"));
-                    // Protocol v2 binds every non-text item to the immutable
+                    // Protocol v3 binds every non-text item to the immutable
                     // manifest by assetId. The current file identity is the
                     // content SHA-256, so it is also the stable assetId.
                     QJsonArray normalizedMedia = sceneObj.value(QStringLiteral("media")).toArray();
@@ -5385,7 +5385,7 @@ void ScreenCanvas::sendRemoteVideoStateSync() {
 
     QJsonObject snapshot;
     QJsonObject immutableScene = serializeSceneState();
-    // Project-local identity is never part of protocol v2.  Keep state
+    // Project-local identity is never part of protocol v3.  Keep state
     // snapshots on the same sanitized scene schema used for the immutable
     // scene_prepare digest.
     immutableScene.remove(QStringLiteral("canvasSessionId"));
@@ -6432,7 +6432,7 @@ bool ScreenCanvas::matchesPendingSceneEnvelope(const QJsonObject& envelope) cons
             == m_pendingRemoteSceneInstanceId
         && envelope.value(QStringLiteral("digest")).toString()
             == m_pendingRemoteSceneDigest
-        && envelope.value(QStringLiteral("targetDeviceId")).toString()
+        && envelope.value(QStringLiteral("targetEndpointId")).toString()
             == m_remoteSceneTargetClientId;
 }
 
@@ -6680,7 +6680,7 @@ void ScreenCanvas::onSceneStoppedReceived(const QJsonObject& envelope)
     if (runId.isEmpty() || (runId != m_pendingRemoteSceneInstanceId
                             && runId != m_stoppingRemoteSceneInstanceId
                             && (!m_wsClient || !m_wsClient->sceneRunCoordinator()
-                                || m_wsClient->sceneRunCoordinator()->run(runId).targetDeviceId
+                                || m_wsClient->sceneRunCoordinator()->run(runId).targetEndpointId
                                     != m_remoteSceneTargetClientId))) return;
     const bool wasStopping = m_sceneStopping;
     if (m_sceneStopTimeoutTimer) m_sceneStopTimeoutTimer->stop();
@@ -6724,14 +6724,14 @@ void ScreenCanvas::onRemoteSessionResumed(const QJsonObject& envelope)
     const SceneRunCoordinator::Run run =
         m_wsClient->sceneRunCoordinator()->run(m_pendingRemoteSceneInstanceId);
     if (run.remoteSessionId != envelope.value(QStringLiteral("remoteSessionId")).toString()
-        || run.ownerDeviceId != m_wsClient->deviceId() || !m_hostSceneActive) return;
+        || run.ownerEndpointId != m_wsClient->endpointId() || !m_hostSceneActive) return;
     sendRemoteVideoStateSync();
 }
 
 void ScreenCanvas::onRemoteSceneLaunchTimeout() {
     if (!m_sceneLaunching) return; // Ignore if not in launching state
 
-    qWarning() << "Protocol-v2 scene launch handshake timed out";
+    qWarning() << "Protocol-v3 scene launch handshake timed out";
     failPendingSceneRun(QStringLiteral("Remote scene launch handshake timed out"), true);
 }
 
@@ -6789,7 +6789,7 @@ void ScreenCanvas::updateRemoteSceneTargetFromClientList(const QList<ClientInfo>
     // metadata only and must never be used to attach a project to another B.
     if (m_remoteSceneTargetClientId.isEmpty()) return;
     for (const ClientInfo& client : clients) {
-        if (client.clientId() == m_remoteSceneTargetClientId) {
+        if (client.endpointId() == m_remoteSceneTargetClientId) {
             m_remoteSceneTargetMachineName = client.getMachineName();
             return;
         }

@@ -400,7 +400,7 @@ private:
     ResizableMediaBase* m_hoveredMediaItem = nullptr;
 
 private slots:
-    // Correlated protocol-v2 SceneRun feedback handlers.
+    // Correlated protocol-v3 SceneRun feedback handlers.
     void onScenePrepareProgressReceived(const QJsonObject& envelope);
     void onScenePreparedReceived(const QJsonObject& envelope);
     void onSceneArmedReceived(const QJsonObject& envelope);

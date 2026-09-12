@@ -1,5 +1,7 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.25)
 project(MouffetteClient VERSION 1.0.0)
+
+include(GNUInstallDirs)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,6 +19,40 @@ endif()
 
 # On Windows, allow building as a console app to see logs in the terminal
 option(CONSOLE_OUTPUT "Build with console subsystem on Windows for visible qDebug logs" OFF)
+
+set(MOUFFETTE_CHANNEL "development" CACHE STRING
+    "Application channel: development or production")
+set_property(CACHE MOUFFETTE_CHANNEL PROPERTY STRINGS development production)
+if(NOT MOUFFETTE_CHANNEL MATCHES "^(development|production)$")
+    message(FATAL_ERROR "MOUFFETTE_CHANNEL must be 'development' or 'production'")
+endif()
+
+if(MOUFFETTE_CHANNEL STREQUAL "production")
+    set(MOUFFETTE_BUNDLE_IDENTIFIER "com.mouffette.client")
+else()
+    set(MOUFFETTE_BUNDLE_IDENTIFIER "com.mouffette.client.dev")
+endif()
+# The primary profile deliberately retains the pre-v3 application and
+# QSettings identities in both channels. Development/production coordination
+# remains separate through MOUFFETTE_BUILD_CHANNEL, not through data paths.
+set(MOUFFETTE_APPLICATION_NAME "Mouffette")
+set(MOUFFETTE_SETTINGS_APPLICATION "Client")
+set(MOUFFETTE_EXECUTABLE_NAME "Mouffette")
+
+configure_file(
+    cmake/AppBuildConfig.h.in
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/AppBuildConfig.h"
+    @ONLY)
+# AppConfig.cpp is intentionally reused by focused test executables, so the
+# generated build identity must be visible to every target in this directory.
+include_directories("${CMAKE_CURRENT_BINARY_DIR}/generated")
+
+if(APPLE)
+    configure_file(
+        Info.plist
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/Info.plist"
+        @ONLY)
+endif()
 
 # Enable Objective-C++ on macOS
 if(APPLE)
@@ -117,7 +153,7 @@ set(SOURCES
     src/frontend/rendering/remote/RemoteSceneController.cpp
     src/frontend/rendering/remote/RemoteVideoFrameItem.cpp
 
-    # Protocol v2 scene lifecycle
+    # Protocol v3 scene lifecycle
     src/backend/network/RemoteSessionCoordinator.cpp
     src/backend/network/SceneRunCoordinator.cpp
     
@@ -139,6 +175,10 @@ set(SOURCES
     
     # Configuration
     src/backend/config/AppConfig.cpp
+
+    # Runtime profile / instance coordination
+    src/backend/runtime/RuntimeProfile.cpp
+    src/backend/runtime/ApplicationInstanceManager.cpp
 
     # Security
     src/backend/security/DeviceIdentityStore.cpp
@@ -302,7 +342,7 @@ set(HEADERS
     src/frontend/rendering/remote/RemoteSceneController.h
     src/frontend/rendering/remote/RemoteVideoFrameItem.h
 
-    # Protocol v2 scene lifecycle
+    # Protocol v3 scene lifecycle
     src/backend/network/RemoteSessionCoordinator.h
     src/backend/network/SceneRunCoordinator.h
     
@@ -324,6 +364,10 @@ set(HEADERS
     
     # Configuration
     src/backend/config/AppConfig.h
+
+    # Runtime profile / instance coordination
+    src/backend/runtime/RuntimeProfile.h
+    src/backend/runtime/ApplicationInstanceManager.h
 
     # Security
     src/backend/security/DeviceIdentityStore.h
@@ -417,6 +461,17 @@ set(RESOURCE_FILES
 
 # Create executable
 add_executable(MouffetteClient ${SOURCES} ${HEADERS} ${UI_FILES} ${RESOURCE_FILES})
+set_target_properties(MouffetteClient PROPERTIES
+    OUTPUT_NAME "${MOUFFETTE_EXECUTABLE_NAME}")
+
+if(WIN32)
+    configure_file(
+        cmake/MouffetteVersion.rc.in
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/MouffetteVersion.rc"
+        @ONLY)
+    target_sources(MouffetteClient PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/MouffetteVersion.rc")
+endif()
 
 # Link Qt libraries
 target_link_libraries(MouffetteClient 
@@ -438,7 +493,9 @@ target_link_libraries(MouffetteClient
 )
 
 # Include directories
-target_include_directories(MouffetteClient PRIVATE src)
+target_include_directories(MouffetteClient PRIVATE
+    src
+    "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 # Platform-specific settings
 if(WIN32)
@@ -469,7 +526,11 @@ endif()
 if(APPLE)
     set_target_properties(MouffetteClient PROPERTIES
         MACOSX_BUNDLE TRUE
-        MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/Info.plist
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_BINARY_DIR}/generated/Info.plist"
+        MACOSX_BUNDLE_BUNDLE_NAME "${MOUFFETTE_APPLICATION_NAME}"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "${MOUFFETTE_BUNDLE_IDENTIFIER}"
     )
     # Link with macOS frameworks used by native integrations
     target_link_libraries(MouffetteClient "-framework AppKit" "-framework AVFoundation" "-framework CoreMedia" "-framework CoreGraphics" "-framework Security")
@@ -480,6 +541,33 @@ if(APPLE)
     set_source_files_properties(src/backend/managers/system/SystemLifecycleMonitor_mac.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
 endif()
 
+# The install tree is the only input accepted by the packaging scripts. Runtime
+# deployment happens in that disposable tree, never in the compiler output.
+install(TARGETS MouffetteClient
+    BUNDLE DESTINATION .
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+
+if(WIN32)
+    qt_generate_deploy_app_script(
+        TARGET MouffetteClient
+        OUTPUT_SCRIPT MOUFFETTE_DEPLOY_SCRIPT
+        NO_TRANSLATIONS
+        NO_UNSUPPORTED_PLATFORM_ERROR)
+    install(SCRIPT "${MOUFFETTE_DEPLOY_SCRIPT}")
+endif()
+
+if(WIN32)
+    set(CPACK_PACKAGE_NAME "Mouffette")
+    set(CPACK_PACKAGE_VENDOR "Mouffette")
+    set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Mouffette desktop client")
+    set(CPACK_PACKAGE_FILE_NAME
+        "Mouffette-${PROJECT_VERSION}-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
+    # A portable ZIP has no external installer-tool dependency.
+    set(CPACK_GENERATOR "ZIP")
+    include(CPack)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
@@ -488,6 +576,8 @@ if(BUILD_TESTING)
         tests/qt/tst_DeviceIdentityStore.cpp
         src/backend/security/DeviceIdentityStore.cpp
         src/backend/security/DeviceIdentityStore.h
+        src/backend/runtime/RuntimeProfile.cpp
+        src/backend/runtime/RuntimeProfile.h
     )
     target_include_directories(tst_DeviceIdentityStore PRIVATE src)
     target_link_libraries(tst_DeviceIdentityStore PRIVATE Qt6::Core Qt6::Test OpenSSL::Crypto)
@@ -514,6 +604,8 @@ if(BUILD_TESTING)
         src/backend/domain/models/ClientInfo.h
         src/backend/config/AppConfig.cpp
         src/backend/config/AppConfig.h
+        src/backend/runtime/RuntimeProfile.cpp
+        src/backend/runtime/RuntimeProfile.h
         resources/resources.qrc
     )
     target_include_directories(tst_ConnectionManager PRIVATE src)
@@ -530,11 +622,25 @@ if(BUILD_TESTING)
         tests/qt/tst_AppConfig.cpp
         src/backend/config/AppConfig.cpp
         src/backend/config/AppConfig.h
+        src/backend/runtime/RuntimeProfile.cpp
+        src/backend/runtime/RuntimeProfile.h
         resources/resources.qrc
     )
     target_include_directories(tst_AppConfig PRIVATE src)
     target_link_libraries(tst_AppConfig PRIVATE Qt6::Core Qt6::Network Qt6::Test)
     add_test(NAME AppConfig COMMAND tst_AppConfig)
+
+    add_executable(tst_ApplicationInstanceManager
+        tests/qt/tst_ApplicationInstanceManager.cpp
+        src/backend/runtime/ApplicationInstanceManager.cpp
+        src/backend/runtime/ApplicationInstanceManager.h
+        src/backend/runtime/RuntimeProfile.cpp
+        src/backend/runtime/RuntimeProfile.h
+    )
+    target_include_directories(tst_ApplicationInstanceManager PRIVATE src)
+    target_link_libraries(tst_ApplicationInstanceManager PRIVATE
+        Qt6::Core Qt6::Network Qt6::Test)
+    add_test(NAME ApplicationInstanceManager COMMAND tst_ApplicationInstanceManager)
 
     add_executable(tst_ClientInfoDisplay
         tests/qt/tst_ClientInfoDisplay.cpp
@@ -757,6 +863,8 @@ if(BUILD_TESTING)
         src/backend/domain/project/ProjectStore.h
         src/backend/domain/project/ProjectManager.cpp
         src/backend/domain/project/ProjectManager.h
+        src/backend/runtime/RuntimeProfile.cpp
+        src/backend/runtime/RuntimeProfile.h
     )
     target_include_directories(tst_ProjectManager PRIVATE src)
     target_link_libraries(tst_ProjectManager PRIVATE Qt6::Core Qt6::Test)
@@ -768,6 +876,8 @@ if(BUILD_TESTING)
         src/backend/notifications/HistoryStore.h
         src/backend/notifications/NotificationCenter.cpp
         src/backend/notifications/NotificationCenter.h
+        src/backend/runtime/RuntimeProfile.cpp
+        src/backend/runtime/RuntimeProfile.h
     )
     target_include_directories(tst_NotificationCenter PRIVATE src)
     target_link_libraries(tst_NotificationCenter PRIVATE Qt6::Core Qt6::Test)
@@ -795,6 +905,8 @@ if(BUILD_TESTING)
         tests/qt/tst_RemoteCacheStore.cpp
         src/backend/network/RemoteCacheStore.cpp
         src/backend/network/RemoteCacheStore.h
+        src/backend/runtime/RuntimeProfile.cpp
+        src/backend/runtime/RuntimeProfile.h
     )
     target_include_directories(tst_RemoteCacheStore PRIVATE src)
     target_link_libraries(tst_RemoteCacheStore PRIVATE

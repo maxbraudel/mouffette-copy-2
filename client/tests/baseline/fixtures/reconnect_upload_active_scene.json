@@ -5,9 +5,9 @@
     "clock": "fixed"
   },
   "session": {
-    "persistentClientId": "sender_A",
-    "targetPersistentClientId": "target_B",
-    "canvasSessionId": "sender_A_TO_target_B_canvas_fixture",
+    "ownerEndpointId": "endpoint_A",
+    "targetEndpointId": "endpoint_B",
+    "remoteSessionId": "remote_session_fixture_001",
     "connectionState": "reconnecting"
   },
   "upload": {

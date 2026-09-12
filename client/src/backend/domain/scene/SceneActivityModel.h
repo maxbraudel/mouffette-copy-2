@@ -20,9 +20,9 @@ public:
     struct Activity {
         QString sceneRunId;
         QString remoteSessionId;
-        QString ownerDeviceId;
-        QString targetDeviceId;
-        QString peerDeviceId;
+        QString ownerEndpointId;
+        QString targetEndpointId;
+        QString peerEndpointId;
         Direction direction = Direction::Outgoing;
         qint64 startedAtEpochMs = 0;
         bool degraded = false;
@@ -30,13 +30,13 @@ public:
 
     explicit SceneActivityModel(QObject* parent = nullptr);
 
-    void setLocalDeviceId(const QString& deviceId);
-    QString localDeviceId() const { return m_localDeviceId; }
+    void setLocalEndpointId(const QString& endpointId);
+    QString localEndpointId() const { return m_localEndpointId; }
 
     bool upsertLive(const QString& sceneRunId,
                     const QString& remoteSessionId,
-                    const QString& ownerDeviceId,
-                    const QString& targetDeviceId,
+                    const QString& ownerEndpointId,
+                    const QString& targetEndpointId,
                     qint64 startedAtEpochMs,
                     bool degraded = false);
     bool remove(const QString& sceneRunId);
@@ -56,7 +56,7 @@ signals:
 private:
     void publishChange(int previousCount);
 
-    QString m_localDeviceId;
+    QString m_localEndpointId;
     QHash<QString, Activity> m_activities;
 };
 

@@ -6,7 +6,7 @@
 #
 # Run this once whenever you want to regenerate the atlas (e.g. after changing
 # the stroke parameters or expanding the character set).  Then rebuild the app
-# normally with ./build.sh — the new .gba will be bundled automatically.
+# normally with ./scripts/build-development.sh — the new .gba will be bundled automatically.
 #
 # Usage:  ./scripts/gen_impact_atlas.sh [--ref-size 1000]
 
@@ -81,7 +81,7 @@ if [ -f "$OUTPUT_FILE" ]; then
     SIZE_KB=$(du -k "$OUTPUT_FILE" | cut -f1)
     echo "✅ Atlas written: $OUTPUT_FILE (${SIZE_KB} KB)"
     echo ""
-    echo "Now rebuild the app with ./build.sh to bundle the new atlas."
+    echo "Now rebuild the app with ./scripts/build-development.sh to bundle the new atlas."
 else
     echo "❌ Generator ran but output file not found."
     exit 1

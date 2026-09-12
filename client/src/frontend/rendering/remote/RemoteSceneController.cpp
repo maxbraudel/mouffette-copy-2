@@ -361,7 +361,7 @@ bool RemoteSceneController::matchesSceneEnvelope(const QJsonObject& envelope) co
 void RemoteSceneController::onScenePrepareEnvelope(const QJsonObject& envelope)
 {
     if (!m_enabled || !m_ws
-        || envelope.value(QStringLiteral("targetDeviceId")).toString() != m_ws->deviceId()) return;
+        || envelope.value(QStringLiteral("targetEndpointId")).toString() != m_ws->endpointId()) return;
     const QString runId = envelope.value(QStringLiteral("sceneRunId")).toString();
 	qint64 generation = -1;
 	qint64 revision = -1;
@@ -448,7 +448,7 @@ void RemoteSceneController::onScenePrepareEnvelope(const QJsonObject& envelope)
         item.insert(QStringLiteral("ready"), false);
         m_prepareChecklist.replace(index, item);
     }
-    onRemoteSceneStart(envelope.value(QStringLiteral("ownerDeviceId")).toString(), scene);
+    onRemoteSceneStart(envelope.value(QStringLiteral("ownerEndpointId")).toString(), scene);
 
     if (m_pendingSceneInstanceId != runId) {
         if (m_deferredSceneStart.valid) return;

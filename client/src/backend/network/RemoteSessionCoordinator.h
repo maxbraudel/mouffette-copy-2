@@ -19,8 +19,8 @@ public:
         quint64 generation = 0;
         quint64 ownerConnectionGeneration = 0;
         quint64 targetConnectionGeneration = 0;
-        QString ownerDeviceId;
-        QString targetDeviceId;
+        QString ownerEndpointId;
+        QString targetEndpointId;
         QString resumeToken;
         QString teardownId;
         QString phase;
@@ -29,8 +29,8 @@ public:
 
     explicit RemoteSessionCoordinator(QObject* parent = nullptr);
 
-    void setLocalDeviceId(const QString& deviceId);
-    QString localDeviceId() const { return m_localDeviceId; }
+    void setLocalEndpointId(const QString& endpointId);
+    QString localEndpointId() const { return m_localEndpointId; }
     bool upsert(const QJsonObject& envelope,
                 quint64 localConnectionGeneration = 0);
     bool canClose(const QJsonObject& envelope,
@@ -41,11 +41,11 @@ public:
     // A device can simultaneously be the target of our outgoing session and
     // the owner of its own incoming session. Keep those role indexes separate
     // so the reverse direction cannot evict or alias the first binding.
-    Binding outgoingForPeer(const QString& peerDeviceId) const;
-    Binding incomingForPeer(const QString& peerDeviceId) const;
+    Binding outgoingForPeer(const QString& peerEndpointId) const;
+    Binding incomingForPeer(const QString& peerEndpointId) const;
     // Compatibility lookup for role-agnostic observers. Outgoing is selected
     // deterministically when both directions exist.
-    Binding forPeer(const QString& peerDeviceId) const;
+    Binding forPeer(const QString& peerEndpointId) const;
     Binding byId(const QString& remoteSessionId) const;
     QList<Binding> all() const;
 
@@ -55,13 +55,13 @@ signals:
     void sessionRemoved(const QString& remoteSessionId);
 
 private:
-    static bool isDeviceId(const QString& value);
+    static bool isEndpointId(const QString& value);
     static bool isOpaqueId(const QString& value);
     static bool isAllowedPhase(const QString& phase);
     static bool isAllowedSameGenerationTransition(const QString& from,
                                                   const QString& to);
 
-    QString m_localDeviceId;
+    QString m_localEndpointId;
     QHash<QString, Binding> m_byId;
     QHash<QString, QString> m_outgoingIdByPeer;
     QHash<QString, QString> m_incomingIdByPeer;

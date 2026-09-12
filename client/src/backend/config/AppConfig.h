@@ -13,7 +13,8 @@
  * Typed, source-aware runtime configuration for the desktop client.
  *
  * Precedence is deliberately fixed:
- *   compiled defaults < .env file < QSettings < process environment < CLI.
+ *   compiled defaults < .env file < QSettings < process environment < CLI
+ *   < production override.
  *
  * The bundled .env is the normal file layer. MOUFFETTE_ENV_FILE or
  * --env-file can replace that layer completely, which is useful for packaged
@@ -29,7 +30,7 @@ public:
         AutoUploadImportedMedia,
         UseQuickCanvasRenderer,
         QtMediaBackend,
-        InstanceSuffix,
+        AllowMultipleInstances,
         CursorDebug,
         RuntimeDiagnostics,
         MigrationTelemetry,
@@ -41,6 +42,8 @@ public:
         QProcessEnvironment processEnvironment;
         QVariantMap settings;
         QString defaultEnvFilePath = QStringLiteral(":/config/client.env");
+        QString productionEnvFilePath = QStringLiteral(":/config/client.production.env");
+        bool applyProductionOverride = false;
     };
 
     AppConfig();
@@ -49,6 +52,13 @@ public:
 
     // Loads the real process/QSettings sources. Safe to call before QApplication.
     bool initialize(const QStringList& arguments, QString* errorMessage = nullptr);
+
+    // Reloads the normal runtime sources with an explicitly selected settings
+    // profile. Secondary development instances use this after their isolated
+    // temporary profile has been allocated.
+    bool initializeWithSettings(const QStringList& arguments,
+                                const QVariantMap& settings,
+                                QString* errorMessage = nullptr);
 
     // Public to keep precedence and validation testable without mutating the
     // process environment or the user's native QSettings store.
@@ -74,7 +84,7 @@ public:
     bool autoUploadImportedMedia() const { return m_autoUploadImportedMedia; }
     bool useQuickCanvasRenderer() const { return m_useQuickCanvasRenderer; }
     QString qtMediaBackend() const { return m_qtMediaBackend; }
-    QString instanceSuffix() const { return m_instanceSuffix; }
+    bool allowMultipleInstances() const { return m_allowMultipleInstances; }
     bool cursorDebug() const { return m_cursorDebug; }
     bool runtimeDiagnostics() const { return m_runtimeDiagnostics; }
     bool migrationTelemetry() const { return m_migrationTelemetry; }
@@ -94,7 +104,7 @@ private:
     bool m_autoUploadImportedMedia = false;
     bool m_useQuickCanvasRenderer = true;
     QString m_qtMediaBackend = QStringLiteral("ffmpeg");
-    QString m_instanceSuffix;
+    bool m_allowMultipleInstances = false;
     bool m_cursorDebug = false;
     bool m_runtimeDiagnostics = false;
     bool m_migrationTelemetry = false;

@@ -129,7 +129,7 @@ public:
     // Removes one immutable validated asset while keeping the RemoteSession
     // and every other uploaded asset alive. This is the canonical path used
     // when the last local reference to a source disappears.
-    bool requestAssetRemoval(const QString& targetDeviceId,
+    bool requestAssetRemoval(const QString& targetEndpointId,
                              const QString& localFileId,
                              const QString& reason = QStringLiteral("source_removed"));
 
@@ -141,7 +141,7 @@ public:
     // an in-flight receiver, drops FileManager handles/mappings, then commits
     // the atomic quarantine.  Replays return AlreadyCommitted.
     RemoteCacheStore::CommitResult teardownRemoteSession(
-        const QString& senderDeviceId,
+        const QString& senderEndpointId,
         const QString& remoteSessionId,
         quint64 generation,
         const QString& teardownId);
@@ -177,9 +177,9 @@ signals:
     void uploadFinished(const QString& uploadId);
     void uploadCancelled(const QString& uploadId);
     void uploadRejected(const QString& uploadId, const QString& reason);
-    void assetRemovalCommitted(const QString& targetDeviceId,
+    void assetRemovalCommitted(const QString& targetEndpointId,
                                const QStringList& localFileIds);
-    void assetRemovalFailed(const QString& targetDeviceId,
+    void assetRemovalFailed(const QString& targetEndpointId,
                             const QString& remoteSessionId,
                             const QStringList& localFileIds,
                             const QString& reason);
@@ -191,14 +191,14 @@ signals:
     void fileUploadFinished(const QString& fileId);
     // Complete v2 target replies. The transport layer must add its standard
     // protocolVersion/serverBootId/messageId/connectionGeneration envelope.
-    void protocolV2UploadResponseReady(const QJsonObject& response);
-    void remoteSessionCacheCommitted(const QString& senderDeviceId,
+    void protocolV3UploadResponseReady(const QJsonObject& response);
+    void remoteSessionCacheCommitted(const QString& senderEndpointId,
                                      const QString& remoteSessionId,
                                      quint64 generation,
                                      const QString& teardownId,
                                      int removedFileMappings,
                                      qint64 quarantinedBytes);
-    void remoteSessionCacheCleanupError(const QString& senderDeviceId,
+    void remoteSessionCacheCleanupError(const QString& senderEndpointId,
                                         const QString& remoteSessionId,
                                         quint64 generation,
                                         const QString& teardownId,
@@ -211,7 +211,7 @@ signals:
     void terminalIncomingCleanupRequired(const QString& reasonCode);
 
 public slots:
-    // Canonical protocol-v2 entry point. Both owner responses and target
+    // Canonical protocol-v3 entry point. Both owner responses and target
     // requests arrive here with their immutable RemoteSession correlation.
     void handleUploadProtocolMessage(const QJsonObject& message);
     // Handle network connection loss while uploading/finalizing
@@ -219,7 +219,7 @@ public slots:
 
 private:
     struct OutgoingAsset {
-        QString assetId;       // content SHA-256 used by protocol v2
+        QString assetId;       // content SHA-256 used by protocol v3
         QString sha256;
         QString path;
         QString name;
@@ -230,7 +230,7 @@ private:
     };
 
     struct CommittedRemoteAsset {
-        QString targetDeviceId;
+        QString targetEndpointId;
         QString remoteSessionId;
         quint64 generation = 0;
         QString uploadId;
@@ -249,7 +249,7 @@ private:
     };
 
     struct IncomingUploadCompletionTombstone {
-        QString senderDeviceId;
+        QString senderEndpointId;
         QString remoteSessionId;
         quint64 generation = 0;
         quint64 sourceConnectionGeneration = 0;
@@ -264,7 +264,7 @@ private:
     // compatibility; every additional queued/active transfer owns this fully
     // independent context.  All protocol routing is by uploadId + session.
     struct ParallelOutgoingTransfer {
-        QString targetDeviceId;
+        QString targetEndpointId;
         QString remoteSessionId;
         QString uploadId;
         quint64 generation = 0;
@@ -302,7 +302,7 @@ private:
     void startUpload(const QVector<UploadFileInfo>& files);
     ParallelOutgoingTransfer* parallelForUpload(const QString& uploadId) const;
     ParallelOutgoingTransfer* parallelForSession(const QString& remoteSessionId) const;
-    ParallelOutgoingTransfer* parallelForTarget(const QString& targetDeviceId) const;
+    ParallelOutgoingTransfer* parallelForTarget(const QString& targetEndpointId) const;
     void initializeParallelTimers(ParallelOutgoingTransfer* transfer);
     void setParallelState(ParallelOutgoingTransfer* transfer, OutgoingState state);
     void startParallelScheduled(ParallelOutgoingTransfer* transfer);
@@ -380,7 +380,7 @@ private:
     void suspendIncomingForResume();
     QJsonArray incomingAssetOffsets() const;
     void rememberIncomingUploadCompletion(
-        const QString& senderDeviceId,
+        const QString& senderEndpointId,
         const QString& remoteSessionId,
         quint64 generation,
         quint64 sourceConnectionGeneration,
@@ -388,25 +388,25 @@ private:
         const QJsonArray& assets);
     bool replayIncomingUploadCompletion(
         const QJsonObject& message,
-        const QString& senderDeviceId,
+        const QString& senderEndpointId,
         const QString& remoteSessionId,
         quint64 generation,
         quint64 sourceConnectionGeneration);
     void pruneIncomingUploadCompletions(qint64 nowEpochMs);
     void forgetIncomingUploadCompletions(const QString& remoteSessionId);
-    void emitIncomingV2Response(const QString& type,
-                                const QString& senderDeviceId,
+    void emitIncomingV3Response(const QString& type,
+                                const QString& senderEndpointId,
                                 const QString& remoteSessionId,
                                 quint64 generation,
                                 const QString& uploadId,
                                 const QJsonObject& extra = QJsonObject());
     int detachReceivedMappingsForScope(const RemoteCacheStore::Scope& scope);
-    void rememberCommittedAssets(const QString& targetDeviceId,
+    void rememberCommittedAssets(const QString& targetEndpointId,
                                  const QString& remoteSessionId,
                                  quint64 generation,
                                  const QString& uploadId,
                                  const QVector<OutgoingAsset>& assets);
-    bool findCommittedAsset(const QString& targetDeviceId,
+    bool findCommittedAsset(const QString& targetEndpointId,
                             const QString& localFileId,
                             CommittedRemoteAsset* asset) const;
     void forgetCommittedAsset(const CommittedRemoteAsset& asset);
@@ -479,7 +479,7 @@ private:
     QHash<QString, QString> m_parallelUploadBySession;
     QSet<QString> m_remoteInventoryTargets;
     QHash<QString, QHash<QString, CommittedRemoteAsset>>
-        m_committedAssetsByTarget; // targetDeviceId -> assetId -> metadata
+        m_committedAssetsByTarget; // targetEndpointId -> assetId -> metadata
     QHash<QString, PendingAssetRemoval> m_pendingAssetRemovals; // removalId -> request
 
     // Phase 4.3: FileManager injected (not singleton)

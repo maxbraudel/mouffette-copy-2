@@ -1,6 +1,6 @@
 # Mouffette Server
 
-Node.js WebSocket coordinator for Mouffette protocol v2.
+Node.js WebSocket coordinator for Mouffette protocol v3.
 
 ## Run and test
 
@@ -16,16 +16,18 @@ override it. Invalid critical values fail startup.
 ## Protocol envelope
 
 The server sends `auth_challenge` first. The client signs
-`mouffette-v2\n<serverBootId>\n<nonce>\n<runtimeId>` with its Ed25519 installation
-key and returns the SPKI public key and signature as base64url. The SHA-256 of
-the SPKI key is the stable `deviceId`.
+`mouffette-v3\n<serverBootId>\n<nonce>\n<runtimeId>\n<instanceId>` with its
+Ed25519 installation key and returns the SPKI public key and signature as
+base64url. The SHA-256 of the SPKI key is the stable `installationId`; the
+server domain-separates and hashes `installationId + instanceId` to derive and
+verify the targetable `endpointId`.
 
 Every subsequent message uses:
 
 ```json
 {
   "type": "message_type",
-  "protocolVersion": 2,
+  "protocolVersion": 3,
   "serverBootId": "uuid-from-welcome",
   "messageId": "unique-uuid",
   "connectionGeneration": 1
@@ -38,7 +40,7 @@ never authoritative.
 
 ## Remote sessions
 
-An owner opens `remote_session_open` with `targetDeviceId`. The server returns a
+An owner opens `remote_session_open` with `targetEndpointId`. The server returns a
 `remoteSessionId`, generation, and same-runtime resume token. A target has one
 incoming session at most. Heartbeats maintain a strict 3-second lease; a resume
 at or after the deadline is terminal. Session teardown remains pending until the
@@ -60,7 +62,7 @@ accepted; both endpoints remain responsible for decoding and content checks.
 `upload_chunk` contains `assetId`, contiguous byte `offset`, chunk `size`, file
 `sha256`, and base64 data. Target `upload_progress` reports a durable contiguous
 offset for each asset. `upload_resume` rewinds the relay to that durable offset.
-The server permits two concurrent outgoing uploads per device and one per remote
+The server permits two concurrent outgoing uploads per endpoint and one per remote
 session. Only an exact target `upload_finished` acknowledgement enters the
 session asset inventory.
 
@@ -80,7 +82,7 @@ the server emits `commit` for its monotonic time 4 seconds in the future. Both
 endpoints confirm the first presented frame with `started` within one second of
 that deadline. A run becomes live only after both confirmations.
 
-The remaining v2 scene messages are `prepare_progress`, `state_snapshot`, `stop`, and
+The remaining v3 scene messages are `prepare_progress`, `state_snapshot`, `stop`, and
 `stopped`. The server derives both endpoints from the session, bounds payloads,
 rejects stale generations, and preserves terminal tombstones for idempotent
 retries. Legacy `remote_scene_*` message routes do not exist.

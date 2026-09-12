@@ -9,7 +9,7 @@
 
 #include "backend/network/RemoteSessionCoordinator.h"
 
-// Protocol-v2 scene state which is deliberately independent from a canvas.
+// Protocol-v3 scene state which is deliberately independent from a canvas.
 // Remote sessions own transport/cache lifetime; a SceneRun only owns one
 // immutable render revision inside such a session.
 class SceneRunCoordinator final : public QObject
@@ -38,8 +38,8 @@ public:
         QString sceneRunId;
         quint64 revision = 0;
         QString digest;
-        QString ownerDeviceId;
-        QString targetDeviceId;
+        QString ownerEndpointId;
+        QString targetEndpointId;
         QJsonArray manifest;
         QJsonObject scene;
         Phase phase = Phase::Draft;
@@ -51,7 +51,7 @@ public:
 
     explicit SceneRunCoordinator(QObject* parent = nullptr);
 
-    void setLocalDeviceId(const QString& deviceId);
+    void setLocalEndpointId(const QString& endpointId);
     void setPrepareTimeoutMs(int timeoutMs);
     bool upsertSession(const QJsonObject& sessionEnvelope,
                        quint64 localConnectionGeneration = 0);
@@ -59,13 +59,13 @@ public:
                        quint64 localConnectionGeneration = 0);
     void clearSessions();
 
-    SessionBinding sessionForPeer(const QString& peerDeviceId) const;
+    SessionBinding sessionForPeer(const QString& peerEndpointId) const;
     SessionBinding sessionById(const QString& remoteSessionId) const;
     QList<SessionBinding> sessions() const;
     RemoteSessionCoordinator* remoteSessions() const { return m_remoteSessions; }
     Run run(const QString& sceneRunId) const;
 
-    bool createOutgoingRun(const QString& peerDeviceId,
+    bool createOutgoingRun(const QString& peerEndpointId,
                            quint64 revision,
                            const QJsonArray& manifest,
                            const QJsonObject& scene,
@@ -93,7 +93,7 @@ private:
     static Phase phaseFromWire(const QString& value, Phase fallback);
     static bool isLegalTransition(Phase from, Phase to);
 
-    QString m_localDeviceId;
+    QString m_localEndpointId;
     // Supplied only by welcome.policy; there is intentionally no duplicated
     // client-side protocol timeout default.
     int m_prepareTimeoutMs = 0;

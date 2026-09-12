@@ -19,12 +19,15 @@ QString projectLifecycleStateToString(ProjectLifecycleState state);
 bool projectLifecycleStateFromString(const QString& value, ProjectLifecycleState* state);
 
 /**
- * Durable copy of the last state advertised by a remote installation.
- * The websocket/server id is informational only; targetDeviceId remains the
- * sole key used to reconcile a returning device.
+ * Durable copy of the last state advertised by a remote endpoint.
+ * The websocket/server id is informational only; endpointId remains the sole
+ * key used to reconcile a returning endpoint.
  */
 struct ClientSnapshot {
-    QString deviceId;
+    QString installationId;
+    QString endpointId;
+    QString instanceId;
+    int instanceOrdinal = 1;
     QString serverConnectionId;
     QString machineName;
     QString platform;
@@ -59,7 +62,7 @@ struct ProjectMediaReference {
 
 struct ProjectRecord {
     QString projectId;
-    QString targetDeviceId;
+    QString targetEndpointId;
     ClientSnapshot clientSnapshot;
     ProjectLifecycleState state = ProjectLifecycleState::Hidden;
     qint64 createdAtMs = -1;
@@ -81,7 +84,7 @@ struct ProjectRecord {
 
 struct ProjectClientEntry {
     ClientInfo client;
-    QString deviceId;
+    QString endpointId;
     QString projectId;
     bool hasProject = false;
     bool online = false;

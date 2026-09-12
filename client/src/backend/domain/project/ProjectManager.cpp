@@ -133,10 +133,10 @@ bool ProjectManager::load()
         if (current >= project.hiddenAtMs + m_timing.remoteSessionHiddenTimeoutMs) {
             // Sessions are never restored, so no teardown signal is necessary
             // for an already elapsed pre-restart deadline.
-            m_sessionDeadlineNotified.insert(project.targetDeviceId);
+            m_sessionDeadlineNotified.insert(project.targetEndpointId);
         }
-        m_targetByProjectId.insert(project.projectId, project.targetDeviceId);
-        m_projectsByTarget.insert(project.targetDeviceId, project);
+        m_targetByProjectId.insert(project.projectId, project.targetEndpointId);
+        m_projectsByTarget.insert(project.targetEndpointId, project);
     }
 
     if (normalized && !flush()) {
@@ -198,20 +198,20 @@ void ProjectManager::scheduleSave()
     }
 }
 
-bool ProjectManager::hasProjectForTarget(const QString& targetDeviceId) const
+bool ProjectManager::hasProjectForTarget(const QString& targetEndpointId) const
 {
-    return m_projectsByTarget.contains(targetDeviceId);
+    return m_projectsByTarget.contains(targetEndpointId);
 }
 
-ProjectRecord* ProjectManager::mutableProjectForTarget(const QString& targetDeviceId)
+ProjectRecord* ProjectManager::mutableProjectForTarget(const QString& targetEndpointId)
 {
-    auto it = m_projectsByTarget.find(targetDeviceId);
+    auto it = m_projectsByTarget.find(targetEndpointId);
     return it == m_projectsByTarget.end() ? nullptr : &it.value();
 }
 
-const ProjectRecord* ProjectManager::projectForTarget(const QString& targetDeviceId) const
+const ProjectRecord* ProjectManager::projectForTarget(const QString& targetEndpointId) const
 {
-    auto it = m_projectsByTarget.constFind(targetDeviceId);
+    auto it = m_projectsByTarget.constFind(targetEndpointId);
     return it == m_projectsByTarget.constEnd() ? nullptr : &it.value();
 }
 
@@ -228,11 +228,11 @@ QString ProjectManager::ensureProject(const ClientSnapshot& snapshot,
         return {};
     }
     const qint64 current = atMs >= 0 ? atMs : nowMs();
-    if (ProjectRecord* existing = mutableProjectForTarget(snapshot.deviceId)) {
+    if (ProjectRecord* existing = mutableProjectForTarget(snapshot.endpointId)) {
         if (existing->state == ProjectLifecycleState::Hidden
             && existing->hiddenAtMs >= 0
             && current >= existing->hiddenAtMs + m_timing.projectHiddenRetentionMs) {
-            if (!removeProjectInternal(snapshot.deviceId)) {
+            if (!removeProjectInternal(snapshot.endpointId)) {
                 return {};
             }
             existing = nullptr;
@@ -249,29 +249,29 @@ QString ProjectManager::ensureProject(const ClientSnapshot& snapshot,
                                   + m_timing.remoteSessionHiddenTimeoutMs;
             if (becomingVisible) {
                 if (restoredAfterSessionDeadline
-                    && !m_sessionDeadlineNotified.contains(snapshot.deviceId)) {
-                    m_sessionDeadlineNotified.insert(snapshot.deviceId);
+                    && !m_sessionDeadlineNotified.contains(snapshot.endpointId)) {
+                    m_sessionDeadlineNotified.insert(snapshot.endpointId);
                     emit remoteSessionCloseDue(
-                        existing->projectId, existing->targetDeviceId);
+                        existing->projectId, existing->targetEndpointId);
                 }
                 existing->state = ProjectLifecycleState::Visible;
                 existing->hiddenAtMs = -1;
                 existing->lastCheckpointAtMs = current;
-                m_sessionDeadlineNotified.remove(snapshot.deviceId);
+                m_sessionDeadlineNotified.remove(snapshot.endpointId);
             }
             existing->clientSnapshot = snapshot;
             existing->updatedAtMs = current;
             scheduleSave();
             if (becomingVisible) {
                 emit projectVisibilityChanged(existing->projectId,
-                                              existing->targetDeviceId,
+                                              existing->targetEndpointId,
                                               existing->state);
                 if (restoredAfterSessionDeadline) {
                     emit projectRestoredAfterSessionDeadline(
-                        existing->projectId, existing->targetDeviceId);
+                        existing->projectId, existing->targetEndpointId);
                 }
             }
-            emit projectUpdated(existing->projectId, existing->targetDeviceId);
+            emit projectUpdated(existing->projectId, existing->targetEndpointId);
             emit projectsChanged();
             return existing->projectId;
         }
@@ -279,7 +279,7 @@ QString ProjectManager::ensureProject(const ClientSnapshot& snapshot,
 
     ProjectRecord project;
     project.projectId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    project.targetDeviceId = snapshot.deviceId;
+    project.targetEndpointId = snapshot.endpointId;
     project.clientSnapshot = snapshot;
     project.state = initialState;
     project.createdAtMs = current;
@@ -287,25 +287,25 @@ QString ProjectManager::ensureProject(const ClientSnapshot& snapshot,
     project.lastCheckpointAtMs = current;
     project.hiddenAtMs = initialState == ProjectLifecycleState::Hidden ? current : -1;
 
-    m_targetByProjectId.insert(project.projectId, project.targetDeviceId);
-    m_projectsByTarget.insert(project.targetDeviceId, project);
+    m_targetByProjectId.insert(project.projectId, project.targetEndpointId);
+    m_projectsByTarget.insert(project.targetEndpointId, project);
     scheduleSave();
-    emit projectCreated(project.projectId, project.targetDeviceId);
+    emit projectCreated(project.projectId, project.targetEndpointId);
     emit projectsChanged();
     return project.projectId;
 }
 
-bool ProjectManager::setVisible(const QString& targetDeviceId, qint64 atMs)
+bool ProjectManager::setVisible(const QString& targetEndpointId, qint64 atMs)
 {
     const qint64 current = atMs >= 0 ? atMs : nowMs();
-    ProjectRecord* project = mutableProjectForTarget(targetDeviceId);
+    ProjectRecord* project = mutableProjectForTarget(targetEndpointId);
     if (!project) {
         return false;
     }
     if (project->state == ProjectLifecycleState::Hidden
         && project->hiddenAtMs >= 0
         && current >= project->hiddenAtMs + m_timing.projectHiddenRetentionMs) {
-        removeProjectInternal(targetDeviceId);
+        removeProjectInternal(targetEndpointId);
         return false;
     }
     if (project->state == ProjectLifecycleState::Visible) {
@@ -316,29 +316,29 @@ bool ProjectManager::setVisible(const QString& targetDeviceId, qint64 atMs)
         && current >= project->hiddenAtMs
                           + m_timing.remoteSessionHiddenTimeoutMs;
     if (restoredAfterSessionDeadline
-        && !m_sessionDeadlineNotified.contains(targetDeviceId)) {
-        m_sessionDeadlineNotified.insert(targetDeviceId);
-        emit remoteSessionCloseDue(project->projectId, targetDeviceId);
+        && !m_sessionDeadlineNotified.contains(targetEndpointId)) {
+        m_sessionDeadlineNotified.insert(targetEndpointId);
+        emit remoteSessionCloseDue(project->projectId, targetEndpointId);
     }
     project->state = ProjectLifecycleState::Visible;
     project->hiddenAtMs = -1;
     project->lastCheckpointAtMs = current;
     project->updatedAtMs = current;
-    m_sessionDeadlineNotified.remove(targetDeviceId);
+    m_sessionDeadlineNotified.remove(targetEndpointId);
     scheduleSave();
-    emit projectVisibilityChanged(project->projectId, targetDeviceId, project->state);
+    emit projectVisibilityChanged(project->projectId, targetEndpointId, project->state);
     if (restoredAfterSessionDeadline) {
         emit projectRestoredAfterSessionDeadline(project->projectId,
-                                                  targetDeviceId);
+                                                  targetEndpointId);
     }
-    emit projectUpdated(project->projectId, targetDeviceId);
+    emit projectUpdated(project->projectId, targetEndpointId);
     emit projectsChanged();
     return true;
 }
 
-bool ProjectManager::setHidden(const QString& targetDeviceId, qint64 atMs)
+bool ProjectManager::setHidden(const QString& targetEndpointId, qint64 atMs)
 {
-    ProjectRecord* project = mutableProjectForTarget(targetDeviceId);
+    ProjectRecord* project = mutableProjectForTarget(targetEndpointId);
     if (!project) {
         return false;
     }
@@ -353,10 +353,10 @@ bool ProjectManager::setHidden(const QString& targetDeviceId, qint64 atMs)
     project->state = ProjectLifecycleState::Hidden;
     project->hiddenAtMs = current;
     project->updatedAtMs = current;
-    m_sessionDeadlineNotified.remove(targetDeviceId);
+    m_sessionDeadlineNotified.remove(targetEndpointId);
     scheduleSave();
-    emit projectVisibilityChanged(project->projectId, targetDeviceId, project->state);
-    emit projectUpdated(project->projectId, targetDeviceId);
+    emit projectVisibilityChanged(project->projectId, targetEndpointId, project->state);
+    emit projectUpdated(project->projectId, targetEndpointId);
     emit projectsChanged();
     return true;
 }
@@ -370,9 +370,9 @@ void ProjectManager::markAllHidden(qint64 atMs)
     }
 }
 
-bool ProjectManager::removeProjectInternal(const QString& targetDeviceId)
+bool ProjectManager::removeProjectInternal(const QString& targetEndpointId)
 {
-    const auto it = m_projectsByTarget.constFind(targetDeviceId);
+    const auto it = m_projectsByTarget.constFind(targetEndpointId);
     if (it == m_projectsByTarget.constEnd()) {
         return false;
     }
@@ -386,32 +386,32 @@ bool ProjectManager::removeProjectInternal(const QString& targetDeviceId)
     // deleted project to persistenceError observers.
     QList<ProjectRecord> prospective = sortedProjects();
     prospective.erase(std::remove_if(prospective.begin(), prospective.end(),
-                                     [&targetDeviceId](const ProjectRecord& project) {
-        return project.targetDeviceId == targetDeviceId;
+                                     [&targetEndpointId](const ProjectRecord& project) {
+        return project.targetEndpointId == targetEndpointId;
     }), prospective.end());
     if (!persistProjects(prospective)) {
         return false;
     }
 
-    m_projectsByTarget.remove(targetDeviceId);
+    m_projectsByTarget.remove(targetEndpointId);
     m_targetByProjectId.remove(snapshot.projectId);
-    m_sessionDeadlineNotified.remove(targetDeviceId);
-    emit projectDeleted(snapshot.projectId, targetDeviceId);
+    m_sessionDeadlineNotified.remove(targetEndpointId);
+    emit projectDeleted(snapshot.projectId, targetEndpointId);
     emit projectsChanged();
     return true;
 }
 
-bool ProjectManager::deleteProject(const QString& targetDeviceId)
+bool ProjectManager::deleteProject(const QString& targetEndpointId)
 {
-    return removeProjectInternal(targetDeviceId);
+    return removeProjectInternal(targetEndpointId);
 }
 
-bool ProjectManager::updateCanvasState(const QString& targetDeviceId,
+bool ProjectManager::updateCanvasState(const QString& targetEndpointId,
                                        const QJsonObject& canvasState,
                                        const QList<ProjectMediaReference>& references,
                                        qint64 atMs)
 {
-    ProjectRecord* project = mutableProjectForTarget(targetDeviceId);
+    ProjectRecord* project = mutableProjectForTarget(targetEndpointId);
     if (!project) {
         return false;
     }
@@ -419,14 +419,14 @@ bool ProjectManager::updateCanvasState(const QString& targetDeviceId,
     project->mediaReferences = references;
     project->updatedAtMs = atMs >= 0 ? atMs : nowMs();
     scheduleSave();
-    emit projectUpdated(project->projectId, targetDeviceId);
+    emit projectUpdated(project->projectId, targetEndpointId);
     emit projectsChanged();
     return true;
 }
 
 bool ProjectManager::updateClientSnapshot(const ClientSnapshot& snapshot, qint64 atMs)
 {
-    ProjectRecord* project = mutableProjectForTarget(snapshot.deviceId);
+    ProjectRecord* project = mutableProjectForTarget(snapshot.endpointId);
     if (!project || !snapshot.isValid()) {
         return false;
     }
@@ -436,22 +436,22 @@ bool ProjectManager::updateClientSnapshot(const ClientSnapshot& snapshot, qint64
     project->clientSnapshot = snapshot;
     project->updatedAtMs = atMs >= 0 ? atMs : nowMs();
     scheduleSave();
-    emit projectUpdated(project->projectId, project->targetDeviceId);
+    emit projectUpdated(project->projectId, project->targetEndpointId);
     emit projectsChanged();
     return true;
 }
 
-qint64 ProjectManager::remoteSessionCloseAtMs(const QString& targetDeviceId) const
+qint64 ProjectManager::remoteSessionCloseAtMs(const QString& targetEndpointId) const
 {
-    const ProjectRecord* project = projectForTarget(targetDeviceId);
+    const ProjectRecord* project = projectForTarget(targetEndpointId);
     return project && project->state == ProjectLifecycleState::Hidden && project->hiddenAtMs >= 0
         ? project->hiddenAtMs + m_timing.remoteSessionHiddenTimeoutMs
         : -1;
 }
 
-qint64 ProjectManager::projectDeleteAtMs(const QString& targetDeviceId) const
+qint64 ProjectManager::projectDeleteAtMs(const QString& targetEndpointId) const
 {
-    const ProjectRecord* project = projectForTarget(targetDeviceId);
+    const ProjectRecord* project = projectForTarget(targetEndpointId);
     return project && project->state == ProjectLifecycleState::Hidden && project->hiddenAtMs >= 0
         ? project->hiddenAtMs + m_timing.projectHiddenRetentionMs
         : -1;
@@ -517,47 +517,47 @@ QList<ProjectClientEntry> ProjectManager::mergeDiscoveredClients(const QList<Cli
     QSet<QString> seen;
     bool snapshotChanged = false;
     for (ClientInfo client : discovered) {
-        const QString deviceId = client.clientId().trimmed();
-        if (deviceId.isEmpty() || seen.contains(deviceId)) {
+        const QString endpointId = client.endpointId().trimmed();
+        if (endpointId.isEmpty() || seen.contains(endpointId)) {
             continue;
         }
-        seen.insert(deviceId);
+        seen.insert(endpointId);
         client.setOnline(true);
 
         ProjectClientEntry entry;
         entry.client = client;
-        entry.deviceId = deviceId;
+        entry.endpointId = endpointId;
         entry.online = true;
-        if (ProjectRecord* project = mutableProjectForTarget(deviceId)) {
+        if (ProjectRecord* project = mutableProjectForTarget(endpointId)) {
             const ClientSnapshot fresh = ClientSnapshot::fromClientInfo(client, current);
             if (!snapshotContentEquals(project->clientSnapshot, fresh)) {
                 project->clientSnapshot = fresh;
                 project->updatedAtMs = current;
                 snapshotChanged = true;
-                emit projectUpdated(project->projectId, deviceId);
+                emit projectUpdated(project->projectId, endpointId);
             }
             entry.hasProject = true;
             entry.projectId = project->projectId;
             entry.projectState = project->state;
-            entry.remoteSessionCloseAtMs = remoteSessionCloseAtMs(deviceId);
-            entry.projectDeleteAtMs = projectDeleteAtMs(deviceId);
+            entry.remoteSessionCloseAtMs = remoteSessionCloseAtMs(endpointId);
+            entry.projectDeleteAtMs = projectDeleteAtMs(endpointId);
         }
         result.append(entry);
     }
 
     for (const ProjectRecord& project : sortedProjects()) {
-        if (seen.contains(project.targetDeviceId)) {
+        if (seen.contains(project.targetEndpointId)) {
             continue;
         }
         ProjectClientEntry entry;
         entry.client = project.clientSnapshot.toClientInfo(false);
-        entry.deviceId = project.targetDeviceId;
+        entry.endpointId = project.targetEndpointId;
         entry.projectId = project.projectId;
         entry.hasProject = true;
         entry.online = false;
         entry.projectState = project.state;
-        entry.remoteSessionCloseAtMs = remoteSessionCloseAtMs(project.targetDeviceId);
-        entry.projectDeleteAtMs = projectDeleteAtMs(project.targetDeviceId);
+        entry.remoteSessionCloseAtMs = remoteSessionCloseAtMs(project.targetEndpointId);
+        entry.projectDeleteAtMs = projectDeleteAtMs(project.targetEndpointId);
         result.append(entry);
     }
 

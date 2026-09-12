@@ -12,7 +12,7 @@
 /**
  * Durable, session-scoped storage for media received from another device.
  *
- * A cache scope is always Uploads/<senderDeviceId>/<remoteSessionId>.  The
+ * A cache scope is always Uploads/<senderEndpointId>/<remoteSessionId>.  The
  * caller never supplies a filesystem path: every component is validated and
  * resolved below the configured root.  Closing a scope is a two-phase,
  * idempotent operation:
@@ -31,14 +31,14 @@ public:
     static constexpr int MetadataSchemaVersion = 1;
 
     struct Scope {
-        QString senderDeviceId;
+        QString senderEndpointId;
         QString remoteSessionId;
         // RemoteSession generation, not either peer's transport generation.
         quint64 generation = 0;
 
         bool operator==(const Scope& other) const
         {
-            return senderDeviceId == other.senderDeviceId
+            return senderEndpointId == other.senderEndpointId
                 && remoteSessionId == other.remoteSessionId
                 && generation == other.generation;
         }
@@ -130,7 +130,7 @@ public:
     QString rootPath() const { return m_rootPath; }
     QString lastErrorCode() const { return m_lastErrorCode; }
 
-    static bool isValidDeviceId(const QString& value);
+    static bool isValidEndpointId(const QString& value);
     static bool isValidSessionId(const QString& value);
     static bool isValidTeardownId(const QString& value);
     static bool isValidAssetId(const QString& value);
@@ -200,17 +200,17 @@ public:
     bool receiverAdvertisementSafe(QString* errorCode = nullptr) const;
 
 signals:
-    void logicalCommitCompleted(const QString& senderDeviceId,
+    void logicalCommitCompleted(const QString& senderEndpointId,
                                 const QString& remoteSessionId,
                                 quint64 generation,
                                 const QString& teardownId,
                                 qint64 quarantinedBytes);
-    void physicalCleanupCompleted(const QString& senderDeviceId,
+    void physicalCleanupCompleted(const QString& senderEndpointId,
                                   const QString& remoteSessionId,
                                   quint64 generation,
                                   const QString& teardownId,
                                   qint64 bytesRemoved);
-    void physicalCleanupFailed(const QString& senderDeviceId,
+    void physicalCleanupFailed(const QString& senderEndpointId,
                                const QString& remoteSessionId,
                                quint64 generation,
                                const QString& teardownId,

@@ -55,7 +55,7 @@ private:
     LocalFileRepository(const LocalFileRepository&) = delete;
     LocalFileRepository& operator=(const LocalFileRepository&) = delete;
     
-    // Generate the protocol-v2 content identity. Returns empty on read failure.
+    // Generate the protocol-v3 content identity. Returns empty on read failure.
     QString generateFileId(const QString& filePath) const;
     
     QHash<QString, QString> m_fileIdToPath;  // fileId → absolute file path

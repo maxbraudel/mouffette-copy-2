@@ -101,7 +101,7 @@ QString assetQuarantineEntry(
         hash.addData(part);
         hash.addData(QByteArrayView("\0", 1));
     };
-    addPart(removalScope.senderDeviceId.toUtf8());
+    addPart(removalScope.senderEndpointId.toUtf8());
     addPart(removalScope.remoteSessionId.toUtf8());
     addPart(QString::number(removalScope.generation).toLatin1());
     addPart(descriptor.assetId.toUtf8());
@@ -118,7 +118,7 @@ QJsonObject assetRemovalIntent(
     QJsonObject object{
         {QStringLiteral("schemaVersion"),
          RemoteCacheStore::MetadataSchemaVersion},
-        {QStringLiteral("senderDeviceId"), removalScope.senderDeviceId},
+        {QStringLiteral("senderEndpointId"), removalScope.senderEndpointId},
         {QStringLiteral("remoteSessionId"), removalScope.remoteSessionId},
         {QStringLiteral("generation"),
          QString::number(removalScope.generation)},
@@ -160,14 +160,14 @@ void RemoteCacheStoreTest::strictIdentifiersAndGenerationBinding()
 
     // SHA-256 base64url device IDs may legitimately begin with '-' or '_'.
     RemoteCacheStore::Scope base64UrlScope = scope();
-    base64UrlScope.senderDeviceId = QStringLiteral("-base64urlDeviceId");
+    base64UrlScope.senderEndpointId = QStringLiteral("-base64urlEndpointId");
     base64UrlScope.remoteSessionId = QStringLiteral("session_base64url");
     QVERIFY2(store.ensureSession(base64UrlScope, &error), qPrintable(error));
 
     RemoteCacheStore::Scope invalid = scope();
-    invalid.senderDeviceId = QStringLiteral("../device");
+    invalid.senderEndpointId = QStringLiteral("../device");
     QVERIFY(!store.ensureSession(invalid, &error));
-    QCOMPARE(error, QStringLiteral("invalid_sender_device_id"));
+    QCOMPARE(error, QStringLiteral("invalid_sender_endpoint_id"));
 
     invalid = scope();
     invalid.remoteSessionId = QStringLiteral("../../escape");
@@ -338,8 +338,8 @@ void RemoteCacheStoreTest::targetedAssetRemovalKeepsSessionOpenAndReplays()
             QStringLiteral(".remote-cache-state/asset-removals")));
     QVERIFY(!removalTombstone.isEmpty());
     const QJsonObject persisted = readObject(removalTombstone);
-    QCOMPARE(persisted.value(QStringLiteral("senderDeviceId")).toString(),
-             scope().senderDeviceId);
+    QCOMPARE(persisted.value(QStringLiteral("senderEndpointId")).toString(),
+             scope().senderEndpointId);
     QCOMPARE(persisted.value(QStringLiteral("remoteSessionId")).toString(),
              scope().remoteSessionId);
     QCOMPARE(persisted.value(QStringLiteral("generation")).toString(),
@@ -418,7 +418,7 @@ void RemoteCacheStoreTest::targetedAssetRemovalKeepsSessionOpenAndReplays()
     QVERIFY(!conflict.acknowledgementSafe());
 
     RemoteCacheStore::Scope conflictingScope = resumedScope;
-    conflictingScope.senderDeviceId = QString(64, QLatin1Char('f'));
+    conflictingScope.senderEndpointId = QString(64, QLatin1Char('f'));
     const RemoteCacheStore::AssetRemovalResult scopeConflict =
         store.removeValidatedAsset(conflictingScope, removal);
     QCOMPARE(scopeConflict.outcome, RemoteCacheStore::CommitOutcome::Conflict);
@@ -534,8 +534,8 @@ void RemoteCacheStoreTest::startupRecoversAssetRemovalIntent()
     QVERIFY(QFileInfo::exists(tombstonePath));
 
     const QJsonObject tombstone = readObject(tombstonePath);
-    QCOMPARE(tombstone.value(QStringLiteral("senderDeviceId")).toString(),
-             scope().senderDeviceId);
+    QCOMPARE(tombstone.value(QStringLiteral("senderEndpointId")).toString(),
+             scope().senderEndpointId);
     QCOMPARE(tombstone.value(QStringLiteral("remoteSessionId")).toString(),
              scope().remoteSessionId);
     QCOMPARE(tombstone.value(QStringLiteral("generation")).toString(),

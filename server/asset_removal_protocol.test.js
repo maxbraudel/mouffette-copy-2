@@ -16,17 +16,17 @@ function socket() {
     };
 }
 
-function addClient(server, connectionId, deviceId) {
+function addClient(server, connectionId, endpointId) {
     const ws = socket();
     server.clients.set(connectionId, {
         id: connectionId,
         sessionId: connectionId,
-        persistentId: deviceId,
-        deviceId,
-        runtimeId: `runtime-${deviceId}`,
+        persistentId: endpointId,
+        endpointId,
+        runtimeId: `runtime-${endpointId}`,
         connectionGeneration: 1,
         authenticated: true,
-        machineName: deviceId,
+        machineName: endpointId,
         ws,
     });
     return ws;
@@ -38,7 +38,7 @@ function setup() {
     const target = addClient(server, 'target-connection', 'B');
     const attacker = addClient(server, 'attacker-connection', 'C');
     const session = server.remoteSessions.open({
-        ownerDeviceId: 'A', targetDeviceId: 'B',
+        ownerEndpointId: 'A', targetEndpointId: 'B',
         ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
         ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
     }).session;
@@ -48,7 +48,7 @@ function setup() {
         extension: 'png', fileId: 'a'.repeat(64), sha256: 'a'.repeat(64),
         name: 'asset-1.png', mediaIds: ['media-1'], size: 128,
         remoteSessionId: session.remoteSessionId, generation: session.generation,
-        ownerDeviceId: 'A', targetDeviceId: 'B', validatedAt: Date.now(),
+        ownerEndpointId: 'A', targetEndpointId: 'B', validatedAt: Date.now(),
     };
     server.sessionAssets.set(session.remoteSessionId,
         new Map([[asset.assetId, asset]]));
@@ -56,7 +56,7 @@ function setup() {
         uploadId: asset.uploadId,
         remoteSessionId: session.remoteSessionId,
         generation: session.generation,
-        ownerDeviceId: 'A', targetDeviceId: 'B',
+        ownerEndpointId: 'A', targetEndpointId: 'B',
         manifestDigest: 'b'.repeat(64), status: 'finished',
         payload: { type: 'upload_finished' }, expiresAt: Date.now() + 60_000,
     });
@@ -65,7 +65,7 @@ function setup() {
 
 function envelope(context, extra = {}) {
     return {
-        protocolVersion: 2,
+        protocolVersion: 3,
         serverBootId: context.server.serverBootId,
         messageId: crypto.randomUUID(),
         remoteSessionId: context.session.remoteSessionId,
@@ -193,8 +193,8 @@ function messages(ws, type) {
     assert.equal(correlatedError.offset, request.offset);
     assert.equal(correlatedError.size, request.size);
     assert.equal(correlatedError.sha256, 'c'.repeat(64));
-    assert.equal(correlatedError.ownerDeviceId, 'A');
-    assert.equal(correlatedError.targetDeviceId, 'B');
+    assert.equal(correlatedError.ownerEndpointId, 'A');
+    assert.equal(correlatedError.targetEndpointId, 'B');
     assert.equal(messages(context.target, 'upload_remove').length, 0);
 
     for (const mutation of [
@@ -259,7 +259,7 @@ function messages(ws, type) {
         remoteSessionId: context.session.remoteSessionId,
         generation: context.session.generation,
         sceneRunId: 'run-removal-1', revision: 1, digest, manifest, scene,
-        ownerDeviceId: 'A', targetDeviceId: 'B',
+        ownerEndpointId: 'A', targetEndpointId: 'B',
     });
     context.session.sceneRunId = 'run-removal-1';
     const request = removalRequest(context);
@@ -329,7 +329,7 @@ function messages(ws, type) {
         remoteSessionId: context.session.remoteSessionId,
         generation: context.session.generation,
         sceneRunId: 'run-removal-timeout', revision: 1, digest, manifest, scene,
-        ownerDeviceId: 'A', targetDeviceId: 'B',
+        ownerEndpointId: 'A', targetEndpointId: 'B',
     });
     context.session.sceneRunId = 'run-removal-timeout';
     const request = removalRequest(context);
@@ -361,7 +361,7 @@ function messages(ws, type) {
     assert.equal(pending.deadlineAt, fixedDeadline);
     assert.equal(messages(context.target, 'upload_remove').at(-1).replay, true);
 
-    context.server.sweepAssetRemovalsV2(fixedDeadline);
+    context.server.sweepAssetRemovalsV3(fixedDeadline);
     assert.equal(context.server.pendingAssetRemovals.has(request.removalId), false);
     assert.equal(context.server.sessionAssets.get(context.session.remoteSessionId)
         .has(context.asset.assetId), true);
@@ -370,4 +370,4 @@ function messages(ws, type) {
     assert.equal(messages(context.target, 'remote_session_terminating').length, 1);
 }
 
-console.log('asset removal protocol v2 tests passed');
+console.log('asset removal protocol v3 tests passed');

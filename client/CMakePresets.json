@@ -7,34 +7,146 @@
   },
   "configurePresets": [
     {
-      "name": "qt6-debug",
-      "displayName": "Mouffette Qt 6 Debug (out-of-source)",
+      "name": "base",
+      "hidden": true,
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/out/build/qt6-debug",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTING": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "MOUFFETTE_REQUIRE_EXPLICIT_QT_ROOT": "ON",
         "MOUFFETTE_QT_ROOT": "$env{MOUFFETTE_QT_ROOT}"
       }
     },
     {
-      "name": "qt6-release",
-      "inherits": "qt6-debug",
-      "displayName": "Mouffette Qt 6 Release (out-of-source)",
-      "binaryDir": "${sourceDir}/out/build/qt6-release",
+      "name": "macos-base",
+      "hidden": true,
+      "inherits": "base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "$env{MOUFFETTE_MACOS_DEPLOYMENT_TARGET}"
+      }
+    },
+    {
+      "name": "windows-base",
+      "hidden": true,
+      "inherits": "base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "macos-debug",
+      "displayName": "Mouffette macOS Development (Debug)",
+      "inherits": "macos-base",
+      "binaryDir": "${sourceDir}/out/build/macos-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "MOUFFETTE_CHANNEL": "development"
+      }
+    },
+    {
+      "name": "macos-release",
+      "displayName": "Mouffette macOS Production (Release)",
+      "inherits": "macos-base",
+      "binaryDir": "${sourceDir}/out/build/macos-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "MOUFFETTE_CHANNEL": "production"
+      }
+    },
+    {
+      "name": "windows-debug",
+      "displayName": "Mouffette Windows Development (Debug)",
+      "inherits": "windows-base",
+      "binaryDir": "${sourceDir}/out/build/windows-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CONSOLE_OUTPUT": "ON",
+        "MOUFFETTE_CHANNEL": "development"
+      }
+    },
+    {
+      "name": "windows-release",
+      "displayName": "Mouffette Windows Production (Release)",
+      "inherits": "windows-base",
+      "binaryDir": "${sourceDir}/out/build/windows-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CONSOLE_OUTPUT": "OFF",
+        "MOUFFETTE_CHANNEL": "production"
       }
     }
   ],
   "buildPresets": [
     {
-      "name": "qt6-debug",
-      "configurePreset": "qt6-debug"
+      "name": "macos-debug",
+      "configurePreset": "macos-debug",
+      "jobs": 0
     },
     {
-      "name": "qt6-release",
-      "configurePreset": "qt6-release"
+      "name": "macos-release",
+      "configurePreset": "macos-release",
+      "jobs": 0
+    },
+    {
+      "name": "windows-debug",
+      "configurePreset": "windows-debug",
+      "jobs": 0
+    },
+    {
+      "name": "windows-release",
+      "configurePreset": "windows-release",
+      "jobs": 0
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "macos-debug",
+      "configurePreset": "macos-debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "macos-release",
+      "configurePreset": "macos-release",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "windows-debug",
+      "configurePreset": "windows-debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "windows-release",
+      "configurePreset": "windows-release",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    }
+  ],
+  "packagePresets": [
+    {
+      "name": "windows-release",
+      "configurePreset": "windows-release",
+      "generators": ["ZIP"]
+    }
+  ],
+  "workflowPresets": [
+    {
+      "name": "windows-release",
+      "steps": [
+        { "type": "configure", "name": "windows-release" },
+        { "type": "build", "name": "windows-release" },
+        { "type": "test", "name": "windows-release" },
+        { "type": "package", "name": "windows-release" }
+      ]
     }
   ]
 }

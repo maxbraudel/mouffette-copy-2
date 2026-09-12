@@ -1,4 +1,5 @@
 #include "backend/domain/project/ProjectStore.h"
+#include "backend/runtime/RuntimeProfile.h"
 
 #include <QDir>
 #include <QFile>
@@ -8,7 +9,6 @@
 #include <QJsonParseError>
 #include <QSaveFile>
 #include <QSet>
-#include <QStandardPaths>
 #include <utility>
 
 ProjectStore::ProjectStore(QString filePath)
@@ -18,11 +18,8 @@ ProjectStore::ProjectStore(QString filePath)
 
 QString ProjectStore::defaultFilePath()
 {
-    QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    if (base.isEmpty()) {
-        base = QDir::homePath() + QStringLiteral("/.mouffette");
-    }
-    return QDir(base).filePath(QStringLiteral("projects-v1.json"));
+    return QDir(RuntimeProfile::appDataLocation())
+        .filePath(QStringLiteral("projects-v2.json"));
 }
 
 bool ProjectStore::load(QList<ProjectRecord>* projects)
@@ -62,7 +59,7 @@ bool ProjectStore::load(QList<ProjectRecord>* projects)
     }
 
     QSet<QString> projectIds;
-    QSet<QString> targetDeviceIds;
+    QSet<QString> targetEndpointIds;
     QList<ProjectRecord> parsed;
     for (const QJsonValue& value : recordsValue.toArray()) {
         ProjectRecord project;
@@ -71,12 +68,12 @@ bool ProjectStore::load(QList<ProjectRecord>* projects)
             m_lastError = QStringLiteral("Invalid project record: %1").arg(error);
             return false;
         }
-        if (projectIds.contains(project.projectId) || targetDeviceIds.contains(project.targetDeviceId)) {
+        if (projectIds.contains(project.projectId) || targetEndpointIds.contains(project.targetEndpointId)) {
             m_lastError = QStringLiteral("Project store contains duplicate project or target identifiers");
             return false;
         }
         projectIds.insert(project.projectId);
-        targetDeviceIds.insert(project.targetDeviceId);
+        targetEndpointIds.insert(project.targetEndpointId);
         parsed.append(project);
     }
 
@@ -88,17 +85,17 @@ bool ProjectStore::save(const QList<ProjectRecord>& projects)
 {
     m_lastError.clear();
     QSet<QString> projectIds;
-    QSet<QString> targetDeviceIds;
+    QSet<QString> targetEndpointIds;
     QJsonArray records;
     for (const ProjectRecord& project : projects) {
         if (!project.isValid()
             || projectIds.contains(project.projectId)
-            || targetDeviceIds.contains(project.targetDeviceId)) {
+            || targetEndpointIds.contains(project.targetEndpointId)) {
             m_lastError = QStringLiteral("Refusing to persist invalid or duplicate project data");
             return false;
         }
         projectIds.insert(project.projectId);
-        targetDeviceIds.insert(project.targetDeviceId);
+        targetEndpointIds.insert(project.targetEndpointId);
         records.append(project.toJson());
     }
 
