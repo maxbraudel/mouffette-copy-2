@@ -311,7 +311,10 @@ void CanvasViewPage::updateClientNameDisplay(const ClientInfo& client) {
     QString platform = client.getPlatform().trimmed();
 
     if (name.isEmpty()) {
-        name = tr("Unknown Machine");
+        const QString endpointId = client.endpointId().trimmed();
+        name = endpointId.isEmpty()
+            ? tr("Client")
+            : tr("Device %1").arg(endpointId.left(8));
     }
 
     QString text = name;

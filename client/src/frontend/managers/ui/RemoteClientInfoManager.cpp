@@ -134,7 +134,10 @@ void RemoteClientInfoManager::updateClientNameDisplay(const ClientInfo& client) 
     QString platform = client.getPlatform().trimmed();
 
     if (name.isEmpty()) {
-        name = QObject::tr("Unknown Machine");
+        const QString endpointId = client.endpointId().trimmed();
+        name = endpointId.isEmpty()
+            ? QObject::tr("Client")
+            : QObject::tr("Device %1").arg(endpointId.left(8));
     }
 
     QString text = name;

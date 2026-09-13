@@ -1610,11 +1610,40 @@ void MainWindow::handleNativeSystemSuspendedChanged(bool suspended) {
 
 void MainWindow::showScreenView(const ClientInfo& client) {
     if (!m_navigationManager) return;
-    const QString targetEndpointId = client.endpointId().trimmed();
+
+    // ClientListPage can be rebuilt synchronously by ProjectManager signals
+    // below.  Own the selection before any such re-entrant work so the canvas
+    // session can never be initialized from an invalidated list element.
+    ClientInfo selectedClient = client;
+    const QString targetEndpointId = selectedClient.endpointId().trimmed();
     if (targetEndpointId.isEmpty()) {
         TOAST_ERROR(QStringLiteral("This client has no authenticated device identity"), 4000);
         return;
     }
+
+    // Online discovery entries are required to have a machine name.  If an
+    // older durable snapshot is incomplete, recover presentation only from an
+    // exact authenticated endpoint match; otherwise refuse to enter a canvas
+    // whose identity cannot be displayed.
+    if (selectedClient.getMachineName().trimmed().isEmpty()) {
+        for (const ClientInfo& discovered : m_discoveredClients) {
+            if (discovered.endpointId() == targetEndpointId
+                && !discovered.getMachineName().trimmed().isEmpty()) {
+                selectedClient.setMachineName(discovered.getMachineName());
+                selectedClient.setPlatform(discovered.getPlatform());
+                selectedClient.setInstallationId(discovered.installationId());
+                selectedClient.setInstanceId(discovered.instanceId());
+                selectedClient.setInstanceOrdinal(discovered.instanceOrdinal());
+                selectedClient.setRuntimeId(discovered.runtimeId());
+                break;
+            }
+        }
+    }
+    if (selectedClient.getMachineName().trimmed().isEmpty()) {
+        TOAST_ERROR(QStringLiteral("This client's identity is incomplete. Refresh the client list and try again."), 4000);
+        return;
+    }
+
     const bool explicitProjectEntry = !m_navigationManager->isOnScreenView()
         || m_activeSessionIdentity != targetEndpointId;
     if (explicitProjectEntry) {
@@ -1624,6 +1653,8 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     }
     const bool hadRuntimeCanvas =
         m_sessionManager && m_sessionManager->hasSession(targetEndpointId);
+    const bool hadDurableProject =
+        m_projectManager && m_projectManager->hasProjectForTarget(targetEndpointId);
     bool hasDurableViewport = false;
     if (m_projectManager) {
         if (const ProjectRecord* existing =
@@ -1643,15 +1674,15 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     if (m_projectManager) {
         if (!m_projectManager->hasProjectForTarget(targetEndpointId)) {
             if (m_projectManager->ensureProject(
-                    ClientSnapshot::fromClientInfo(client, QDateTime::currentMSecsSinceEpoch()),
+                    ClientSnapshot::fromClientInfo(selectedClient, QDateTime::currentMSecsSinceEpoch()),
                     ProjectLifecycleState::Visible).isEmpty()) {
                 TOAST_ERROR(QStringLiteral("The project could not be created"), 4000);
                 return;
             }
         } else {
-            if (client.isOnline()) {
+            if (selectedClient.isOnline()) {
                 m_projectManager->updateClientSnapshot(
-                    ClientSnapshot::fromClientInfo(client, QDateTime::currentMSecsSinceEpoch()));
+                    ClientSnapshot::fromClientInfo(selectedClient, QDateTime::currentMSecsSinceEpoch()));
             }
             if (!m_projectManager->setVisible(targetEndpointId)) {
                 TOAST_WARNING(QStringLiteral("This project has expired"), 3500);
@@ -1661,8 +1692,12 @@ void MainWindow::showScreenView(const ClientInfo& client) {
         }
     }
 
-    CanvasSession& session = ensureCanvasSession(client);
+    CanvasSession& session = ensureCanvasSession(selectedClient);
     restoreProjectCanvas(session);
+    // Only a canvas/project that existed before this click is cached content.
+    // Screens copied from the discovery row describe target topology, not a
+    // completed RemoteSession connection and must not suppress the loader.
+    const bool hadCachedProjectContent = hadRuntimeCanvas || hadDurableProject;
     if (session.canvas) {
         // The authenticated device snapshot is authoritative for topology.
         // setScreens updates only screen backdrops; persisted media keep their
@@ -1671,9 +1706,11 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     }
     markCanvasLoadRequest(session.persistentClientId);
     const bool sessionHasActiveScreens = session.canvas && session.canvas->hasActiveScreens();
-    const bool sessionHasStoredScreens = !session.lastClientInfo.getScreens().isEmpty();
-    const bool hasRenderableCachedContent = sessionHasActiveScreens;
-    const bool hasCachedContent = hasRenderableCachedContent || sessionHasStoredScreens;
+    const bool hasRenderableCachedContent = hadCachedProjectContent
+        && sessionHasActiveScreens;
+    const bool hasCachedContent = hasRenderableCachedContent
+        || (hadCachedProjectContent
+            && !session.lastClientInfo.getScreens().isEmpty());
     switchToCanvasSession(session.persistentClientId);
     m_activeRemoteClientId = session.persistentClientId;
     m_selectedClient = session.lastClientInfo;
@@ -1710,6 +1747,11 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     if (hasRenderableCachedContent) {
         m_canvasContentEverLoaded = true;
     }
+
+    // Populate the identity while the page is still hidden.  Even if a nested
+    // event loop paints during navigation, the canvas header can never flash a
+    // placeholder or the previously selected machine.
+    updateClientNameDisplay(effectiveClient);
 
     if (!alreadyOnThisClient) {
         // New client selection: reset reveal flag so first incoming screens will fade in once
@@ -1749,7 +1791,6 @@ void MainWindow::showScreenView(const ClientInfo& client) {
     if (m_inlineSpinner) {
         m_inlineSpinner->hide();
     }
-    updateClientNameDisplay(effectiveClient);
     // While refreshing, start from a clean layout then reapply cached state if available
     removeVolumeIndicatorFromLayout();
     removeRemoteStatusFromLayout();
@@ -2032,6 +2073,23 @@ void MainWindow::handleRemoteSessionReady(const QJsonObject& envelope,
         if (m_canvasViewPage) m_canvasViewPage->setProjectActionsEnabled(true, true);
         if (m_screenCanvas) m_screenCanvas->setOverlayActionsEnabled(true);
         if (m_uploadManager) m_uploadManager->setTargetClientId(peerEndpointId);
+
+        // The discovery snapshot may already have supplied the target screen
+        // topology, but it is this authenticated event that makes the initial
+        // canvas connection ready.  Keep the full loader visible until here.
+        CanvasSession* session = m_sessionManager
+            ? m_sessionManager->findSession(peerEndpointId) : nullptr;
+        if (session && session->canvas && session->canvas->hasActiveScreens()
+            && !m_canvasRevealedForCurrentClient) {
+            if (m_navigationManager) m_navigationManager->revealCanvas();
+            session->canvas->requestDeferredInitialRecenter(53);
+            if (!m_preserveViewportOnReconnect) {
+                session->canvas->recenterWithMargin(53);
+            }
+            m_preserveViewportOnReconnect = false;
+            m_canvasRevealedForCurrentClient = true;
+            m_canvasContentEverLoaded = true;
+        }
     }
 }
 
@@ -2399,6 +2457,11 @@ void MainWindow::handleRemoteSessionError(const QJsonObject& envelope) {
             setRemoteConnectionStatus(status.toUpper(), false);
             m_canvasViewPage->setProjectActionsEnabled(false, true);
             if (m_screenCanvas) m_screenCanvas->setOverlayActionsEnabled(false);
+
+            // A rejected open is terminal for this attempt.  Do not leave an
+            // indeterminate spinner running forever; reveal the known local
+            // project/topology with remote actions disabled.
+            if (m_navigationManager) m_navigationManager->revealCanvas();
         }
     }
     if (m_toastSystem) {

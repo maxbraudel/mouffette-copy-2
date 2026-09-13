@@ -741,6 +741,18 @@ if(BUILD_TESTING)
     target_link_libraries(tst_ClientInfoDisplay PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME ClientInfoDisplay COMMAND tst_ClientInfoDisplay)
 
+    add_executable(tst_ClientConnectionFlow
+        tests/qt/tst_ClientConnectionFlow.cpp
+        "$<FILTER:$<TARGET_OBJECTS:MouffetteClient>,EXCLUDE,/src/main[.]cpp[.](o|obj)$>"
+    )
+    target_include_directories(tst_ClientConnectionFlow PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
+    target_compile_definitions(tst_ClientConnectionFlow PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>")
+    target_link_libraries(tst_ClientConnectionFlow PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
+    add_test(NAME ClientConnectionFlow COMMAND tst_ClientConnectionFlow)
+
     add_executable(tst_SystemLifecycleMonitor
         tests/qt/tst_SystemLifecycleMonitor.cpp
         src/backend/managers/system/SystemLifecycleMonitor.cpp
@@ -888,7 +900,7 @@ if(BUILD_TESTING)
     add_test(NAME SceneRunCoordinator COMMAND tst_SceneRunCoordinator)
     # Native window focus/grabs are part of these tests. Do not race other GUI
     # suites when CI invokes ctest with parallel jobs.
-    set_tests_properties(TextOutlineMotion CanvasInteraction CanvasInteractionScaled CanvasSelectionBackend VideoPlaybackBackend UploadRemovalSecurity RemoteSceneControllerLifecycle RemoteSceneLifecycle
+    set_tests_properties(TextOutlineMotion CanvasInteraction CanvasInteractionScaled CanvasSelectionBackend ClientConnectionFlow VideoPlaybackBackend UploadRemovalSecurity RemoteSceneControllerLifecycle RemoteSceneLifecycle
         PROPERTIES RUN_SERIAL TRUE)
 
     # Reference implementation retained for before/after profiling only. The

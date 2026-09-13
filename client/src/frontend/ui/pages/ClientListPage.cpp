@@ -332,7 +332,12 @@ void ClientListPage::onClientItemClicked(QListWidgetItem* item) {
     const QString clientId = item->data(ClientListRoles::ClientId).toString();
     for (int index = 0; index < m_availableClients.size(); ++index) {
         if (clientIdentity(m_availableClients.at(index)) == clientId) {
-            emit clientClicked(m_availableClients.at(index), index);
+            // A direct receiver can synchronously rebuild this page (project
+            // creation does exactly that).  Never expose a reference into
+            // m_availableClients across the signal: updateClientList() would
+            // invalidate it while the receiver is still using it.
+            const ClientInfo selectedClient = m_availableClients.at(index);
+            emit clientClicked(selectedClient, index);
             return;
         }
     }

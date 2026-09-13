@@ -109,6 +109,30 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                         activeSession->lastClientInfo.getScreens());
                 }
                 navigationManager->refreshActiveClientPreservingCanvas(activeSession->lastClientInfo);
+
+                // remote_session_opened and the refreshed topology normally
+                // arrive in that order. If the ready event carried no usable
+                // screens yet, complete the same readiness barrier here once
+                // discovery supplies them; a discovery refresh by itself is
+                // still never enough to reveal the canvas.
+                RemoteSessionCoordinator* coordinator = m_webSocketClient
+                    ? m_webSocketClient->remoteSessionCoordinator() : nullptr;
+                const RemoteSessionCoordinator::Binding binding = coordinator
+                    ? coordinator->outgoingForPeer(activeSessionIdentity)
+                    : RemoteSessionCoordinator::Binding();
+                if (binding.phase == QLatin1String("Active")
+                    && activeSession->canvas
+                    && activeSession->canvas->hasActiveScreens()
+                    && !m_mainWindow->isCanvasRevealedForCurrentClient()) {
+                    navigationManager->revealCanvas();
+                    activeSession->canvas->requestDeferredInitialRecenter(53);
+                    if (!m_mainWindow->shouldPreserveViewportOnReconnect()) {
+                        activeSession->canvas->recenterWithMargin(53);
+                    }
+                    m_mainWindow->setPreserveViewportOnReconnect(false);
+                    m_mainWindow->setCanvasRevealedForCurrentClient(true);
+                    m_mainWindow->setCanvasContentEverLoaded(true);
+                }
                 m_mainWindow->updateClientNameDisplay(activeSession->lastClientInfo);
                 const bool isActiveSelection = (activeSession->persistentClientId == activeSessionIdentity);
                 if (isActiveSelection) {

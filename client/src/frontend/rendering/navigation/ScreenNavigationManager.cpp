@@ -65,13 +65,21 @@ void ScreenNavigationManager::showScreenView(const ClientInfo& client, bool hasC
             m_w.inlineSpinner->start();
         }
     } else {
-        // No cached content: fall back to full-screen loader behavior
+        // No cached content: the canvas must never appear as an empty page
+        // while the RemoteSession open is in flight.  Show the blocking
+        // loader immediately and keep it up until revealCanvas() is called by
+        // an authoritative ready event.
         if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(0.0);
         if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(0); // spinner page
         if (m_w.volumeOpacity) m_w.volumeOpacity->setOpacity(0.0);
 
         if (isOnline && !id.isEmpty()) {
-            startSpinnerDelayed();
+            if (m_loaderDelayTimer && m_loaderDelayTimer->isActive()) {
+                m_loaderDelayTimer->stop();
+            }
+            if (m_w.spinnerFade) m_w.spinnerFade->stop();
+            if (m_w.loadingSpinner) m_w.loadingSpinner->start();
+            if (m_w.spinnerOpacity) m_w.spinnerOpacity->setOpacity(1.0);
         } else {
             // Offline or unknown id: show whatever cached scene remains immediately
             if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(1);
@@ -95,10 +103,9 @@ void ScreenNavigationManager::refreshActiveClientPreservingCanvas(const ClientIn
 
     m_currentClientId = id;
 
-    // Ensure full-screen spinner is stopped and canvas remains visible
-    stopSpinner();
-    if (m_w.canvasStack) m_w.canvasStack->setCurrentIndex(1);
-    if (m_w.canvasOpacity) m_w.canvasOpacity->setOpacity(1.0);
+    // Discovery is presentation data, not proof that the RemoteSession is
+    // ready.  Preserve the current canvas/loading page exactly as-is; only an
+    // authoritative ready event may call revealCanvas().
 
     emit screenViewEntered(id);
 }
