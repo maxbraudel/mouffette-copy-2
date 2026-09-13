@@ -175,15 +175,22 @@ void CanvasMedia::setUploadUploaded()
 void CanvasMedia::setSettings(const MediaSettingsState& settings)
 {
     m_settings = settings;
+    qreal opacity = 1.0;
     if (settings.opacityOverrideEnabled) {
         bool ok = false;
         const qreal percent = settings.opacityText.trimmed().toDouble(&ok);
-        if (ok) setContentOpacity(percent / 100.0);
+        if (ok && std::isfinite(percent)) opacity = percent / 100.0;
     }
-    if (isVideo() && settings.volumeOverrideEnabled) {
-        bool ok = false;
-        const qreal percent = settings.volumeText.trimmed().toDouble(&ok);
-        if (ok) setVolume(percent / 100.0);
+    setContentOpacity(opacity);
+
+    if (isVideo()) {
+        qreal volume = 1.0;
+        if (settings.volumeOverrideEnabled) {
+            bool ok = false;
+            const qreal percent = settings.volumeText.trimmed().toDouble(&ok);
+            if (ok && std::isfinite(percent)) volume = percent / 100.0;
+        }
+        setVolume(volume);
     }
     notifyChanged();
 }
@@ -191,14 +198,58 @@ void CanvasMedia::setSettings(const MediaSettingsState& settings)
 #define CANVAS_MEDIA_SETTER(TypeName, Method, Field) \
 void CanvasMedia::Method(TypeName value) { if (Field == value) return; Field = value; notifyChanged(); }
 
-CANVAS_MEDIA_SETTER(bool, setFontWeightOverrideEnabled, m_fontWeightOverride)
 CANVAS_MEDIA_SETTER(bool, setUnderline, m_underline)
-CANVAS_MEDIA_SETTER(bool, setTextColorOverrideEnabled, m_textColorOverride)
 CANVAS_MEDIA_SETTER(bool, setHighlightEnabled, m_highlightEnabled)
-CANVAS_MEDIA_SETTER(bool, setOutlineWidthOverrideEnabled, m_outlineWidthOverride)
-CANVAS_MEDIA_SETTER(bool, setOutlineColorOverrideEnabled, m_outlineColorOverride)
 
 #undef CANVAS_MEDIA_SETTER
+
+int CanvasMedia::renderedFontWeight() const
+{
+    return m_fontWeightOverride ? m_fontWeight : 400;
+}
+
+QColor CanvasMedia::renderedTextColor() const
+{
+    return m_textColorOverride ? m_textColor : QColor(Qt::white);
+}
+
+qreal CanvasMedia::renderedOutlineWidthPercent() const
+{
+    return m_outlineWidthOverride ? m_outlineWidthPercent : 0.0;
+}
+
+QColor CanvasMedia::renderedOutlineColor() const
+{
+    return m_outlineColorOverride ? m_outlineColor : QColor(Qt::black);
+}
+
+void CanvasMedia::setFontWeightOverrideEnabled(bool enabled)
+{
+    if (m_fontWeightOverride == enabled) return;
+    m_fontWeightOverride = enabled;
+    notifyTextMetricsChanged();
+}
+
+void CanvasMedia::setTextColorOverrideEnabled(bool enabled)
+{
+    if (m_textColorOverride == enabled) return;
+    m_textColorOverride = enabled;
+    notifyChanged();
+}
+
+void CanvasMedia::setOutlineWidthOverrideEnabled(bool enabled)
+{
+    if (m_outlineWidthOverride == enabled) return;
+    m_outlineWidthOverride = enabled;
+    notifyTextMetricsChanged();
+}
+
+void CanvasMedia::setOutlineColorOverrideEnabled(bool enabled)
+{
+    if (m_outlineColorOverride == enabled) return;
+    m_outlineColorOverride = enabled;
+    notifyChanged();
+}
 
 void CanvasMedia::setText(const QString& text)
 {
@@ -294,14 +345,14 @@ bool CanvasMedia::updateFitToTextGeometry()
     state.text = m_text;
     state.fontFamily = m_fontFamily;
     state.fontPixelSize = m_fontPixelSize;
-    state.fontWeight = m_fontWeight;
+    state.fontWeight = renderedFontWeight();
     state.italic = m_italic;
     state.underline = m_underline;
     state.uppercase = m_uppercase;
     state.fitToTextEnabled = true;
-    state.outlineWidthPercent = m_outlineWidthPercent;
+    state.outlineWidthPercent = renderedOutlineWidthPercent();
     state.outlineWidthPixels = TextRenderMetrics::outlinePixels(
-        m_outlineWidthPercent, m_fontPixelSize);
+        state.outlineWidthPercent, m_fontPixelSize);
 
     QSize fitted = TextRenderMetrics::fittedTextSize(state);
     if (qAbs(fitted.width() - m_baseSize.width()) <= 1
@@ -478,16 +529,16 @@ QVariantMap CanvasMedia::toModelMap(qreal unit) const
         {QStringLiteral("fitToTextEnabled"), m_fitToText},
         {QStringLiteral("textFontFamily"), m_fontFamily},
         {QStringLiteral("textFontPixelSize"), m_fontPixelSize},
-        {QStringLiteral("textFontWeight"), m_fontWeight},
+        {QStringLiteral("textFontWeight"), renderedFontWeight()},
         {QStringLiteral("textItalic"), m_italic},
         {QStringLiteral("textUnderline"), m_underline},
         {QStringLiteral("textUppercase"), m_uppercase},
-        {QStringLiteral("textColor"), m_textColor.name(QColor::HexArgb)},
-        {QStringLiteral("textOutlineWidthPercent"), m_outlineWidthPercent},
+        {QStringLiteral("textColor"), renderedTextColor().name(QColor::HexArgb)},
+        {QStringLiteral("textOutlineWidthPercent"), renderedOutlineWidthPercent()},
         {QStringLiteral("textOutlineWidthPx"),
-             TextRenderMetrics::outlinePixels(m_outlineWidthPercent,
+             TextRenderMetrics::outlinePixels(renderedOutlineWidthPercent(),
                                                m_fontPixelSize)},
-        {QStringLiteral("textOutlineColor"), m_outlineColor.name(QColor::HexArgb)},
+        {QStringLiteral("textOutlineColor"), renderedOutlineColor().name(QColor::HexArgb)},
         {QStringLiteral("textHighlightEnabled"), m_highlightEnabled},
         {QStringLiteral("textHighlightColor"), m_highlightColor.name(QColor::HexArgb)}
     };

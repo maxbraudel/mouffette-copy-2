@@ -736,6 +736,10 @@ void MediaOverlayTest::mediaSettingsPanelRestoresLegacyTabsAndBindings()
         harness.get(), QStringLiteral("opacityCheck"));
     auto* opacityField = findVisualItem(
         harness.get(), QStringLiteral("opacityField"));
+    auto* textBorderWidthCheck = findVisualItem(
+        harness.get(), QStringLiteral("textBorderWidthCheck"));
+    auto* textBorderWidthField = findVisualItem(
+        harness.get(), QStringLiteral("textBorderWidthField"));
     auto* elementAudioSection = findVisualItem(
         harness.get(), QStringLiteral("elementAudioSection"));
     QVERIFY(textSection);
@@ -744,6 +748,8 @@ void MediaOverlayTest::mediaSettingsPanelRestoresLegacyTabsAndBindings()
     QVERIFY(!elementAudioSection->isVisible());
     QVERIFY(opacityCheck);
     QVERIFY(opacityField);
+    QVERIFY(textBorderWidthCheck);
+    QVERIFY(textBorderWidthField);
     QTRY_COMPARE(scrollBar->opacity(), 0.0);
     QVERIFY(!opacityField->property("cursorVisible").isValid());
     QCOMPARE(opacityCheck->property("checkedColor").value<QColor>(),
@@ -782,6 +788,37 @@ void MediaOverlayTest::mediaSettingsPanelRestoresLegacyTabsAndBindings()
     QTest::keyClick(&window, Qt::Key_0);
     QTest::keyClick(&window, Qt::Key_Return);
     QTRY_COMPARE(media->settings().opacityText, QStringLiteral("100"));
+
+    const QPoint borderCheckCenter = textBorderWidthCheck->mapToScene(
+        QPointF(textBorderWidthCheck->width() / 2.0,
+                textBorderWidthCheck->height() / 2.0)).toPoint();
+    const QPoint borderFieldCenter = textBorderWidthField->mapToScene(
+        QPointF(textBorderWidthField->width() / 2.0,
+                textBorderWidthField->height() / 2.0)).toPoint();
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+                      borderCheckCenter);
+    QTRY_VERIFY(media->outlineWidthOverrideEnabled());
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+                      borderFieldCenter);
+    QTest::keyClick(&window, Qt::Key_1);
+    QTest::keyClick(&window, Qt::Key_0);
+    QTest::keyClick(&window, Qt::Key_0);
+    QTest::keyClick(&window, Qt::Key_Return);
+    QTRY_COMPARE(media->outlineWidthPercent(), 100.0);
+    QCOMPARE(media->toModelMap().value(
+                 QStringLiteral("textOutlineWidthPercent")).toDouble(),
+             100.0);
+
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+                      borderCheckCenter);
+    QTRY_VERIFY(!media->outlineWidthOverrideEnabled());
+    QCOMPARE(media->outlineWidthPercent(), 100.0);
+    QTRY_COMPARE(textBorderWidthField->property("draftText").toString(),
+                 QStringLiteral("100"));
+    QCOMPARE(media->toModelMap().value(
+                 QStringLiteral("textOutlineWidthPercent")).toDouble(),
+             0.0);
+    QCOMPARE(host->document()->selectedMedia(), media);
 
     session.setSettingsVisible(false);
     QTRY_VERIFY(!panel->isVisible());

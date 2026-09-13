@@ -1,10 +1,12 @@
 #include <QApplication>
 #include <QFile>
+#include <QJsonArray>
 #include <QTemporaryDir>
 #include <QtTest>
 
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
+#include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 
 class RemoteSceneLifecycleTest final : public QObject
@@ -88,9 +90,135 @@ private slots:
         QCOMPARE(copy->settings().displayDelayText, QStringLiteral("1.375"));
         QCOMPARE(copy->settings().fadeInText, QStringLiteral("0.45"));
         QCOMPARE(copy->settings().opacityText, QStringLiteral("72.5"));
+        QVERIFY(copy->textColorOverrideEnabled());
+        QVERIFY(copy->outlineWidthOverrideEnabled());
+        QCOMPARE(copy->textColor(), QColor(QStringLiteral("#ff55aa")));
+        QCOMPARE(copy->outlineWidthPercent(), 8.5);
         QCOMPARE(restored->document()->cameraScale(), 1.7);
         QCOMPARE(restored->document()->cameraPanX(), 32.0);
         QCOMPARE(restored->document()->cameraPanY(), -14.0);
+    }
+
+    void disabledOverridesKeepRawValuesAndPublishNeutralRendering()
+    {
+        std::unique_ptr<QuickCanvasHost> source(QuickCanvasHost::create());
+        QVERIFY(source);
+        CanvasMedia* text = source->document()->addText(
+            QPointF(100, 100), QStringLiteral("Overrides"));
+        QVERIFY(text);
+        text->setFitToTextEnabled(false);
+        text->setFontWeight(900);
+        text->setTextColor(QColor(QStringLiteral("#8044aa22")));
+        text->setOutlineWidthPercent(100.0);
+        text->setOutlineColor(QColor(QStringLiteral("#ff22ccdd")));
+
+        MediaSettingsState settings = text->settings();
+        settings.opacityOverrideEnabled = false;
+        settings.opacityText = QStringLiteral("23.5");
+        text->setSettings(settings);
+
+        QCOMPARE(text->fontWeight(), 900);
+        QCOMPARE(text->textColor(), QColor(QStringLiteral("#8044aa22")));
+        QCOMPARE(text->outlineWidthPercent(), 100.0);
+        QCOMPARE(text->outlineColor(), QColor(QStringLiteral("#ff22ccdd")));
+        QCOMPARE(text->contentOpacity(), 1.0);
+
+        const QVariantMap disabledProjection = text->toModelMap();
+        QCOMPARE(disabledProjection.value(
+                     QStringLiteral("textFontWeight")).toInt(), 400);
+        QCOMPARE(QColor(disabledProjection.value(
+                     QStringLiteral("textColor")).toString()),
+                 QColor(Qt::white));
+        QCOMPARE(disabledProjection.value(
+                     QStringLiteral("textOutlineWidthPercent")).toDouble(),
+                 0.0);
+        QCOMPARE(QColor(disabledProjection.value(
+                     QStringLiteral("textOutlineColor")).toString()),
+                 QColor(Qt::black));
+
+        const QJsonObject project = source->serializeProjectState();
+        const QJsonObject serializedText =
+            project.value(QStringLiteral("media")).toArray().first().toObject();
+        QCOMPARE(serializedText.value(QStringLiteral("contentOpacity")).toDouble(),
+                 1.0);
+        QCOMPARE(serializedText.value(QStringLiteral("fontWeight")).toInt(), 400);
+        QCOMPARE(serializedText.value(
+                     QStringLiteral("textBorderWidthPercent")).toDouble(),
+                 0.0);
+        const QJsonObject rawTextSettings = serializedText.value(
+            QStringLiteral("projectTextSettings")).toObject();
+        QCOMPARE(rawTextSettings.value(QStringLiteral("fontWeight")).toInt(), 900);
+        QCOMPARE(rawTextSettings.value(
+                     QStringLiteral("textBorderWidthPercent")).toDouble(),
+                 100.0);
+        QVERIFY(!rawTextSettings.value(
+                     QStringLiteral("fontWeightOverrideEnabled")).toBool(true));
+        QVERIFY(!rawTextSettings.value(
+                     QStringLiteral("textBorderWidthOverrideEnabled")).toBool(true));
+
+        std::unique_ptr<QuickCanvasHost> restored(QuickCanvasHost::create());
+        QVERIFY(restored);
+        QVERIFY(restored->restoreProjectState(project, {}));
+        CanvasMedia* copy = restored->enumerateMediaItems().first();
+        QVERIFY(copy);
+        QVERIFY(!copy->fontWeightOverrideEnabled());
+        QVERIFY(!copy->textColorOverrideEnabled());
+        QVERIFY(!copy->outlineWidthOverrideEnabled());
+        QVERIFY(!copy->outlineColorOverrideEnabled());
+        QCOMPARE(copy->fontWeight(), 900);
+        QCOMPARE(copy->textColor(), QColor(QStringLiteral("#8044aa22")));
+        QCOMPARE(copy->outlineWidthPercent(), 100.0);
+        QCOMPARE(copy->outlineColor(), QColor(QStringLiteral("#ff22ccdd")));
+        QCOMPARE(copy->settings().opacityText, QStringLiteral("23.5"));
+        QCOMPARE(copy->contentOpacity(), 1.0);
+
+        copy->setFontWeightOverrideEnabled(true);
+        copy->setTextColorOverrideEnabled(true);
+        copy->setOutlineWidthOverrideEnabled(true);
+        copy->setOutlineColorOverrideEnabled(true);
+        settings = copy->settings();
+        settings.opacityOverrideEnabled = true;
+        copy->setSettings(settings);
+        const QVariantMap enabledProjection = copy->toModelMap();
+        QCOMPARE(enabledProjection.value(
+                     QStringLiteral("textFontWeight")).toInt(), 900);
+        QCOMPARE(QColor(enabledProjection.value(
+                     QStringLiteral("textColor")).toString()),
+                 QColor(QStringLiteral("#8044aa22")));
+        QCOMPARE(enabledProjection.value(
+                     QStringLiteral("textOutlineWidthPercent")).toDouble(),
+                 100.0);
+        QCOMPARE(QColor(enabledProjection.value(
+                     QStringLiteral("textOutlineColor")).toString()),
+                 QColor(QStringLiteral("#ff22ccdd")));
+        QVERIFY(qAbs(copy->contentOpacity() - 0.235) < 0.0001);
+
+        CanvasMedia video(CanvasMedia::Type::Video, QSize(320, 180));
+        video.initializeVideoRuntime();
+        MediaSettingsState videoSettings = video.settings();
+        videoSettings.volumeOverrideEnabled = true;
+        videoSettings.volumeText = QStringLiteral("37");
+        video.setSettings(videoSettings);
+        QVERIFY(qAbs(video.volume() - 0.37) < 0.0001);
+        videoSettings.volumeOverrideEnabled = false;
+        video.setSettings(videoSettings);
+        QCOMPARE(video.settings().volumeText, QStringLiteral("37"));
+        QVERIFY(qAbs(video.volume() - 1.0) < 0.0001);
+        videoSettings.volumeOverrideEnabled = true;
+        video.setSettings(videoSettings);
+        QVERIFY(qAbs(video.volume() - 0.37) < 0.0001);
+
+        std::unique_ptr<QuickCanvasHost> volumeHost(QuickCanvasHost::create());
+        QVERIFY(volumeHost);
+        CanvasMedia* controlledVideo = volumeHost->document()->addPreparedFile(
+            QStringLiteral("/tmp/mouffette-volume-setting-test.mp4"),
+            QSize(320, 180), true, QPointF());
+        QVERIFY(controlledVideo);
+        volumeHost->controller()->handleOverlayVolumeChange(
+            controlledVideo->mediaId(), 0.42);
+        QVERIFY(controlledVideo->settings().volumeOverrideEnabled);
+        QCOMPARE(controlledVideo->settings().volumeText, QStringLiteral("42"));
+        QVERIFY(qAbs(controlledVideo->volume() - 0.42) < 0.0001);
     }
 
     void missingFileIsRejectedDuringRestore()

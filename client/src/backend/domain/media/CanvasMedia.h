@@ -79,6 +79,7 @@ public:
     int fontPixelSize() const { return m_fontPixelSize; }
     void setFontPixelSize(int size);
     int fontWeight() const { return m_fontWeight; }
+    int renderedFontWeight() const;
     void setFontWeight(int weight);
     bool fontWeightOverrideEnabled() const { return m_fontWeightOverride; }
     void setFontWeightOverrideEnabled(bool enabled);
@@ -89,6 +90,7 @@ public:
     bool uppercase() const { return m_uppercase; }
     void setUppercase(bool uppercase);
     QColor textColor() const { return m_textColor; }
+    QColor renderedTextColor() const;
     void setTextColor(const QColor& color);
     bool textColorOverrideEnabled() const { return m_textColorOverride; }
     void setTextColorOverrideEnabled(bool enabled);
@@ -97,10 +99,12 @@ public:
     QColor highlightColor() const { return m_highlightColor; }
     void setHighlightColor(const QColor& color);
     qreal outlineWidthPercent() const { return m_outlineWidthPercent; }
+    qreal renderedOutlineWidthPercent() const;
     void setOutlineWidthPercent(qreal width);
     bool outlineWidthOverrideEnabled() const { return m_outlineWidthOverride; }
     void setOutlineWidthOverrideEnabled(bool enabled);
     QColor outlineColor() const { return m_outlineColor; }
+    QColor renderedOutlineColor() const;
     void setOutlineColor(const QColor& color);
     bool outlineColorOverrideEnabled() const { return m_outlineColorOverride; }
     void setOutlineColorOverrideEnabled(bool enabled);

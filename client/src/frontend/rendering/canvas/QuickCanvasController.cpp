@@ -1331,7 +1331,13 @@ void QuickCanvasController::handleOverlayMuteToggle(const QString& id)
 void QuickCanvasController::handleOverlayVolumeChange(const QString& id, qreal value)
 {
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
-        media && media->isVideo() && !editsLocked()) media->setVolume(value);
+        media && media->isVideo() && !editsLocked()) {
+        const int percent = qRound(std::clamp<qreal>(value, 0.0, 1.0) * 100.0);
+        MediaSettingsState settings = media->settings();
+        settings.volumeOverrideEnabled = true;
+        settings.volumeText = QString::number(percent);
+        media->setSettings(settings);
+    }
     emit mediaVolumeChangeRequested(id, value);
 }
 
