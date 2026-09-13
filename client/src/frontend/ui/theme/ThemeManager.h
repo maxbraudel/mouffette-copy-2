@@ -104,6 +104,14 @@ public:
      * @return Newly created and styled button
      */
     static QPushButton* createPrimaryButton(const QString& text, QWidget* parent = nullptr);
+
+    /**
+     * Immediately acknowledge an action before synchronous preparation or a
+     * remote state transition can update the button's final presentation.
+     */
+    static void showImmediateActionFeedback(
+        QPushButton* button,
+        const QString& disabledStyle = QString());
     
     /**
      * @brief Apply status box style with custom colors

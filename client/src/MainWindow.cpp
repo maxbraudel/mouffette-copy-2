@@ -2494,11 +2494,15 @@ void MainWindow::onDisconnectProjectRequested() {
     if (targetEndpointId.isEmpty()) {
         return;
     }
-    persistProjectCanvas(targetEndpointId);
+
+    // Lock the action before persistence or remote teardown performs work.
     if (m_canvasViewPage) {
         m_canvasViewPage->setDisconnecting(true);
         m_canvasViewPage->setProjectActionsEnabled(false, false);
+        ThemeManager::showImmediateActionFeedback(
+            m_canvasViewPage->getCloseSessionButton());
     }
+    persistProjectCanvas(targetEndpointId);
     m_disconnectPendingTargets.insert(targetEndpointId);
     terminateProjectRemoteSession(targetEndpointId, true);
 
@@ -2666,9 +2670,26 @@ void MainWindow::setRemoteClientState(const RemoteClientState& state, bool propa
 }
 
 void MainWindow::onUploadButtonClicked() {
+    // File discovery and content identity refresh are synchronous and can take
+    // a perceptible moment. Acknowledge the click before that work starts;
+    // UploadManager's Preparing/Uploading/Removing state takes over below.
+    QPushButton* actionButton = m_uploadButton;
+    if (actionButton) {
+        const QString disabledStyle = m_uploadButtonInOverlay && m_screenCanvas
+            ? m_screenCanvas->overlayDisabledButtonStyle()
+            : QString();
+        ThemeManager::showImmediateActionFeedback(actionButton, disabledStyle);
+    }
+
     // [PHASE 7.4] Delegate to UploadEventHandler
     if (m_uploadEventHandler) {
         m_uploadEventHandler->onUploadButtonClicked();
+    }
+
+    // Re-project the authoritative local state even when validation rejected
+    // the action and UploadManager consequently emitted no state change.
+    if (actionButton == m_uploadButton && m_uploadButtonStyleManager) {
+        m_uploadButtonStyleManager->applyUploadButtonStyle(actionButton);
     }
 }
 

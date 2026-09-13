@@ -81,6 +81,22 @@ QPushButton* ThemeManager::createPrimaryButton(const QString& text, QWidget* par
     return button;
 }
 
+void ThemeManager::showImmediateActionFeedback(
+    QPushButton* button,
+    const QString& disabledStyle)
+{
+    if (!button) return;
+
+    button->setEnabled(false);
+    if (!disabledStyle.isEmpty()) {
+        button->setStyleSheet(disabledStyle);
+    }
+
+    // repaint() is intentional here: update() would wait until synchronous
+    // preparation (file hashing, scene snapshotting, etc.) has completed.
+    button->repaint();
+}
+
 void ThemeManager::applyPrimaryButton(QPushButton* button)
 {
     if (!button) return;

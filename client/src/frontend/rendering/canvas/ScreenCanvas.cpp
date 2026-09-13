@@ -7,6 +7,7 @@
 #include "backend/domain/session/SessionManager.h" // Phase 3: For DEFAULT_IDEA_ID constant
 #include <QTimer>
 #include "frontend/ui/theme/AppColors.h"
+#include "frontend/ui/theme/ThemeManager.h"
 #include "backend/files/Theme.h"
 #include "backend/domain/media/MediaItems.h"
 #include "backend/domain/media/MediaFilePolicy.h"
@@ -1574,17 +1575,28 @@ void ScreenCanvas::initInfoOverlay() {
             // Ignore clicks while launch/stop handshake in progress
             if (m_sceneLaunching || m_sceneStopping) return;
 
+            // Give immediate, synchronous feedback before scene validation,
+            // draft capture, serialization, or a network request can run.
+            ThemeManager::showImmediateActionFeedback(
+                m_launchSceneButton, overlayDisabledButtonStyle());
+
             if (!m_sceneLaunched) {
                 // Early error detection: check prerequisites before starting
                 if (!m_wsClient) {
+                    updateLaunchSceneButtonStyle();
+                    updateLaunchTestSceneButtonStyle();
                     TOAST_ERROR("Cannot launch scene: Not connected to server", 3000);
                     return;
                 }
                 if (!m_wsClient->isConnected()) {
+                    updateLaunchSceneButtonStyle();
+                    updateLaunchTestSceneButtonStyle();
                     TOAST_ERROR("Cannot launch scene: Connection lost", 3000);
                     return;
                 }
                 if (m_remoteSceneTargetClientId.isEmpty()) {
+                    updateLaunchSceneButtonStyle();
+                    updateLaunchTestSceneButtonStyle();
                     TOAST_ERROR("Cannot launch scene: No target client selected", 3000);
                     return;
                 }
@@ -1600,6 +1612,8 @@ void ScreenCanvas::initInfoOverlay() {
                     }
                 }
                 if (!hasMedia) {
+                    updateLaunchSceneButtonStyle();
+                    updateLaunchTestSceneButtonStyle();
                     TOAST_ERROR("Cannot launch scene: No media items in scene", 3000);
                     return;
                 }
@@ -1739,6 +1753,9 @@ void ScreenCanvas::initInfoOverlay() {
 
         // Wire Launch Test Scene toggle behavior (Test mode = local only)
         connect(m_launchTestSceneButton, &QPushButton::clicked, this, [this]() {
+            ThemeManager::showImmediateActionFeedback(
+                m_launchTestSceneButton, overlayDisabledButtonStyle());
+
             bool newState = !m_testSceneLaunched;
             if (newState) {
                 if (m_sceneLaunched) {
