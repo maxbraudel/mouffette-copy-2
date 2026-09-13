@@ -329,6 +329,36 @@ const uploadId = 'upload-1';
     });
 }
 
+// Completion is a commit barrier: relaying the final chunk is insufficient.
+// Keep an older sender's request pending until B reports every byte durable.
+{
+    const context = setup();
+    const prematureUploadId = 'completion-before-durable-ack';
+    const transport = startUpload(context, prematureUploadId);
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_ready', uploadId: prematureUploadId, assets: [assetState()],
+    }));
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_chunk', uploadId: prematureUploadId,
+        assetId: 'asset-1', offset: 0, size: 128,
+        sha256: 'a'.repeat(64), data: Buffer.alloc(128, 0x44).toString('base64'),
+    }), transport);
+    context.server.handleMessage('owner-connection', envelope(context.session, {
+        type: 'upload_complete', uploadId: prematureUploadId,
+        assets: [assetState(file(), 128)],
+    }), transport);
+    assert.equal(messages(context.target.ws, 'upload_complete').length, 0);
+    assert.equal(context.server.uploads.get(prematureUploadId).completionRequested, true);
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_progress', uploadId: prematureUploadId,
+        assets: [assetState(file(), 128)],
+    }));
+    assert.equal(messages(context.target.ws, 'upload_complete').length, 1);
+    assert.equal(context.server.uploads.get(prematureUploadId)
+        .awaitingTargetValidation, true);
+    assert.equal(context.server.uploads.get(prematureUploadId).completionRequested, false);
+}
+
 // Even after the first valid completion entered target validation, a duplicate
 // completion may only replay the same immutable inventory.
 {
@@ -343,6 +373,10 @@ const uploadId = 'upload-1';
         assetId: 'asset-1', offset: 0, size: 128, sha256: 'a'.repeat(64),
         data: Buffer.alloc(128, 0x43).toString('base64'),
     }), transport);
+    context.server.handleMessage('target-connection', envelope(context.session, {
+        type: 'upload_progress', uploadId: 'conflicting-complete-replay',
+        assets: [assetState(file(), 128)],
+    }));
     context.server.handleMessage('owner-connection', envelope(context.session, {
         type: 'upload_complete', uploadId: 'conflicting-complete-replay',
         assets: [assetState(file(), 128)],

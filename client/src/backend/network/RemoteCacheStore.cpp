@@ -1,4 +1,5 @@
 #include "backend/network/RemoteCacheStore.h"
+#include "backend/files/PathSafety.h"
 #include "backend/runtime/RuntimeProfile.h"
 
 #include <QCryptographicHash>
@@ -106,14 +107,15 @@ bool parseScope(const QJsonObject& object, RemoteCacheStore::Scope* scope)
 
 QString normalizedPath(const QString& path)
 {
-    return QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+    return PathSafety::normalizedAbsolutePath(path);
 }
 
 bool isDirectChild(const QString& parentPath, const QString& childPath)
 {
     const QString parent = normalizedPath(parentPath);
     const QString child = normalizedPath(childPath);
-    return QFileInfo(child).absolutePath() == parent && child != parent;
+    return PathSafety::samePath(QFileInfo(child).absolutePath(), parent)
+        && !PathSafety::samePath(child, parent);
 }
 
 bool syncDirectory(const QString& path)
@@ -1871,11 +1873,8 @@ bool RemoteCacheStore::ownsPath(const Scope& scope, const QString& candidatePath
     }
     const QString liveScope = normalizedPath(scopeDirectory(scope));
     const QString candidate = normalizedPath(candidatePath);
-    QString prefix = liveScope;
-    if (!prefix.endsWith(QDir::separator())) {
-        prefix += QDir::separator();
-    }
-    if (!candidate.startsWith(prefix) || QFileInfo(liveScope).isSymLink()) {
+    if (!PathSafety::isDescendant(candidate, liveScope)
+        || QFileInfo(liveScope).isSymLink()) {
         return false;
     }
     QJsonObject descriptor;
@@ -1890,9 +1889,10 @@ bool RemoteCacheStore::ownsPath(const Scope& scope, const QString& candidatePath
         return false;
     }
     // Reject a symlink at any existing component below the live scope.
-    QString relative = QDir(liveScope).relativeFilePath(candidate);
+    const QString relative = QDir::fromNativeSeparators(
+        QDir(liveScope).relativeFilePath(candidate));
     QString current = liveScope;
-    for (const QString& component : relative.split(QDir::separator(), Qt::SkipEmptyParts)) {
+    for (const QString& component : relative.split(QLatin1Char('/'), Qt::SkipEmptyParts)) {
         current = QDir(current).filePath(component);
         const QFileInfo info(current);
         if (info.isSymLink()) {

@@ -413,6 +413,7 @@ set(HEADERS
     src/backend/files/LocalFileRepository.h
     src/backend/files/FileMemoryCache.h
     src/backend/files/FileWatcher.h
+    src/backend/files/PathSafety.h
     src/backend/files/Theme.h
     
     # Backend Handlers
@@ -936,6 +937,7 @@ if(BUILD_TESTING)
         tests/qt/tst_RemoteCacheStore.cpp
         src/backend/network/RemoteCacheStore.cpp
         src/backend/network/RemoteCacheStore.h
+        src/backend/files/PathSafety.h
         src/backend/runtime/RuntimeProfile.cpp
         src/backend/runtime/RuntimeProfile.h
     )

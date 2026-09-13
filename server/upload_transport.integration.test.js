@@ -224,6 +224,12 @@ async function connectDevice(url, machineName) {
         })));
         await target.next(message => message.type === 'upload_chunk'
             && message.offset === 64);
+        target.send('upload_progress', {
+            ...session, uploadId,
+            assets: [{ assetId: asset.assetId, offset: 128, size: 128, sha256 }],
+        });
+        await owner.next(message => message.type === 'upload_progress'
+            && message.uploadId === uploadId && message.durableBytes === 128);
         uploadChannel.ws.send(JSON.stringify(uploadEnvelope({
             type: 'upload_complete', uploadId,
             assets: [{ assetId: asset.assetId, offset: 128, size: 128, sha256 }],
@@ -256,7 +262,7 @@ async function connectDevice(url, machineName) {
             message.type === 'upload_resume_ready' && message.uploadId === uploadId);
         assert.equal(resumeReadyAfterPromotion.replay, true);
         assert.deepEqual(resumeReadyAfterPromotion.assets,
-            [{ assetId: asset.assetId, offset: 64, size: 128, sha256 }]);
+            [{ assetId: asset.assetId, offset: 128, size: 128, sha256 }]);
         target.send('upload_finished', {
             ...session, uploadId,
             assets: [{ assetId: asset.assetId, offset: 128, size: 128, sha256 }],

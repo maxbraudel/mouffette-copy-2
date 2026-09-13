@@ -3038,6 +3038,7 @@ class MouffetteServer {
             durableBytes: 0,
             awaitingTargetReady: true,
             awaitingTargetValidation: false,
+            completionRequested: false,
             transportSocket,
             startTime: now,
             lastActivity: now,
@@ -3073,6 +3074,7 @@ class MouffetteServer {
         upload.transportDisconnectedAt = null;
         upload.awaitingTargetReady = true;
         upload.awaitingTargetValidation = false;
+        upload.completionRequested = false;
         upload.relayedBytes = 0;
         upload.durableBytes = 0;
         for (const asset of upload.assetStates.values()) {
@@ -3201,6 +3203,29 @@ class MouffetteServer {
                 totalSize: upload.totalSize,
                 assets: this.uploadOffsetsV3(upload),
             }));
+        if (upload.completionRequested && this.uploadIsFullyDurableV3(upload)) {
+            this.beginUploadTargetValidationV3(upload);
+        }
+    }
+
+    uploadIsFullyDurableV3(upload) {
+        return upload.durableBytes === upload.totalSize
+            && Array.from(upload.assetStates.values()).every(asset =>
+                asset.durableOffset === asset.size);
+    }
+
+    beginUploadTargetValidationV3(upload) {
+        if (!upload || upload.awaitingTargetValidation
+            || !this.uploadIsFullyDurableV3(upload)) return;
+        upload.completionRequested = false;
+        upload.awaitingTargetValidation = true;
+        upload.awaitingTargetValidationSince = Date.now();
+        upload.lastActivity = upload.awaitingTargetValidationSince;
+        this.sendToEndpoint(upload.targetEndpointId,
+            this.uploadPayloadV3(upload, 'upload_complete', {
+                connectionGeneration: upload.ownerConnectionGeneration,
+                assets: this.uploadCompletionInventoryV3(upload),
+            }));
     }
 
     handleUploadCompleteV3(senderId, message, transportSocket = null) {
@@ -3222,17 +3247,19 @@ class MouffetteServer {
         }
         if (upload.awaitingTargetValidation) return;
         if (upload.relayedBytes !== upload.totalSize
-            || Array.from(upload.assetStates.values()).some(asset => asset.nextOffset !== asset.size)) {
+            || Array.from(upload.assetStates.values()).some(asset =>
+                asset.nextOffset !== asset.size)) {
             return this.rejectTrackedUploadV3(upload, 'upload_incomplete');
         }
-        upload.awaitingTargetValidation = true;
-        upload.awaitingTargetValidationSince = Date.now();
-        upload.lastActivity = upload.awaitingTargetValidationSince;
-        this.sendToEndpoint(upload.targetEndpointId,
-            this.uploadPayloadV3(upload, 'upload_complete', {
-                connectionGeneration: validated.client.connectionGeneration,
-                assets: this.uploadCompletionInventoryV3(upload),
-            }));
+        if (!this.uploadIsFullyDurableV3(upload)) {
+            // Version-skew tolerant barrier: an older owner may request
+            // completion as soon as its send queue drains. Preserve that exact
+            // request and release it only after B reports every byte durable.
+            upload.completionRequested = true;
+            upload.lastActivity = Date.now();
+            return;
+        }
+        this.beginUploadTargetValidationV3(upload);
     }
 
     handleUploadFinishedV3(targetId, message) {

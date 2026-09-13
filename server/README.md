@@ -62,6 +62,8 @@ accepted; both endpoints remain responsible for decoding and content checks.
 `upload_chunk` contains `assetId`, contiguous byte `offset`, chunk `size`, file
 `sha256`, and base64 data. Target `upload_progress` reports a durable contiguous
 offset for each asset. `upload_resume` rewinds the relay to that durable offset.
+`upload_complete` enters final validation only after every asset's durable offset
+equals its declared size; bytes merely queued or relayed stay behind this barrier.
 The server permits two concurrent outgoing uploads per endpoint and one per remote
 session. Only an exact target `upload_finished` acknowledgement enters the
 session asset inventory.

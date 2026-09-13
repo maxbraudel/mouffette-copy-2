@@ -205,6 +205,9 @@ void RemoteCacheStoreTest::strictIdentifiersAndGenerationBinding()
     QVERIFY(QFileInfo(firstStagingPath).completeBaseName().size() <= 24);
     QVERIFY(!firstStagingPath.contains(QStringLiteral("upload_first")));
     QVERIFY(!firstStagingPath.contains(kAsset));
+    QVERIFY(store.ownsPath(scope(), firstStagingPath));
+    QVERIFY(!store.ownsPath(
+        scope(), store.rootPath() + QStringLiteral("-sibling/asset.mp4")));
     QVERIFY(store.stagingAssetPath(
         scope(), QStringLiteral("../upload"), kAsset,
         QStringLiteral("mp4"), &error).isEmpty());

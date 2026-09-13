@@ -4,6 +4,7 @@
 #include "backend/config/AppConfig.h"
 #include "backend/runtime/RuntimeProfile.h"
 #include "backend/files/FileManager.h"
+#include "backend/files/PathSafety.h"
 #include "backend/domain/media/MediaFilePolicy.h"
 #include "backend/domain/session/SessionManager.h"  // Phase 3: For DEFAULT_IDEA_ID constant
 #include <QGraphicsScene>
@@ -233,10 +234,7 @@ QString incomingUploadsRoot() {
 }
 
 bool pathIsInsideDirectory(const QString& path, const QString& directory) {
-    const QString cleanPath = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
-    QString cleanDirectory = QDir::cleanPath(QFileInfo(directory).absoluteFilePath());
-    if (!cleanDirectory.endsWith(QDir::separator())) cleanDirectory += QDir::separator();
-    return cleanPath.startsWith(cleanDirectory) && cleanPath != cleanDirectory;
+    return PathSafety::isDescendant(path, directory);
 }
 
 void removeEmptyUploadParentsForFile(const QString& filePath) {
@@ -1728,8 +1726,26 @@ void UploadManager::pumpParallel(ParallelOutgoingTransfer* transfer) {
                 >= kMaxUnacknowledgedRemoteBytes) return;
 
         if (transfer->fileIndex >= transfer->assets.size()) {
-            if (transfer->sentBytes != transfer->totalBytes
-                || !m_ws->sendUploadComplete(
+            if (transfer->sentBytes != transfer->totalBytes) {
+                failParallel(transfer, QStringLiteral(
+                    "Source files were not read completely"));
+                return;
+            }
+            const bool allBytesDurable =
+                transfer->remoteAcknowledgedBytes == transfer->totalBytes
+                && std::all_of(
+                    transfer->assets.cbegin(), transfer->assets.cend(),
+                    [transfer](const OutgoingAsset& asset) {
+                        return transfer->durableOffsets.value(asset.assetId, -1)
+                            == asset.size;
+                    });
+            if (!allBytesDurable) {
+                // Completion is a commit request, not a send-queue marker.
+                // Wait until the target has fsynced every byte and the server
+                // has echoed that durable inventory back to this sender.
+                return;
+            }
+            if (!m_ws->sendUploadComplete(
                     transfer->remoteSessionId, transfer->generation,
                     transfer->uploadId, parallelAssetStates(transfer, true))) {
                 failParallel(transfer, QStringLiteral(
@@ -2495,6 +2511,19 @@ void UploadManager::pumpOutgoingUpload() {
         if (m_outgoingFileIndex >= m_outgoingAssets.size()) {
             if (m_sentBytes != m_totalBytes) {
                 failOutgoingUpload(QStringLiteral("Source files were not read completely"));
+                return;
+            }
+            const bool allBytesDurable =
+                m_remoteAcknowledgedBytes == m_totalBytes
+                && std::all_of(
+                    m_outgoingAssets.cbegin(), m_outgoingAssets.cend(),
+                    [this](const OutgoingAsset& asset) {
+                        return m_outgoingDurableOffsets.value(asset.assetId, -1)
+                            == asset.size;
+                    });
+            if (!allBytesDurable) {
+                // upload_progress will schedule the next pump after the target
+                // has durably committed the final outstanding bytes.
                 return;
             }
             if (!m_ws->sendUploadComplete(m_outgoingRemoteSessionId,
@@ -4481,11 +4510,60 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             const qint64 receivedSize = m_incoming.receivedByFile.value(assetId, -1);
             const QString path = m_incoming.filePaths.value(assetId);
             const QFileInfo info(path);
-            if (expectedSize < 1 || receivedSize != expectedSize
-                || !info.exists() || !info.isFile() || info.isSymLink()
-                || info.size() != expectedSize || !m_remoteCacheStore->ownsPath(scope, path)
-                || sha256ForFile(path) != expectedDigest) {
-                completionError = QStringLiteral("Upload is incomplete or its size does not match the manifest");
+            if (expectedSize < 1 || receivedSize != expectedSize) {
+                qWarning().noquote()
+                    << "UploadManager: incomplete durable inventory"
+                    << "asset=" << assetId.left(12)
+                    << "expected=" << expectedSize
+                    << "received=" << receivedSize;
+                completionError = QStringLiteral(
+                    "Upload is incomplete: the remote client durably received %1 of %2 bytes")
+                                      .arg(receivedSize)
+                                      .arg(expectedSize);
+                break;
+            }
+            if (!info.exists() || !info.isFile() || info.isSymLink()) {
+                qWarning().noquote()
+                    << "UploadManager: staging file unavailable at finalization"
+                    << "asset=" << assetId.left(12)
+                    << "path=" << QDir::toNativeSeparators(path);
+                completionError = QStringLiteral(
+                    "Remote upload staging file is unavailable during finalization");
+                break;
+            }
+            if (info.size() != expectedSize) {
+                qWarning().noquote()
+                    << "UploadManager: staging size mismatch"
+                    << "asset=" << assetId.left(12)
+                    << "expected=" << expectedSize
+                    << "onDisk=" << info.size();
+                completionError = QStringLiteral(
+                    "Remote upload size mismatch: expected %1 bytes, found %2")
+                                      .arg(expectedSize)
+                                      .arg(info.size());
+                break;
+            }
+            if (!m_remoteCacheStore->ownsPath(scope, path)) {
+                qWarning().noquote()
+                    << "UploadManager: cache ownership verification failed"
+                    << "asset=" << assetId.left(12)
+                    << "path=" << QDir::toNativeSeparators(path);
+                completionError = QStringLiteral(
+                    "Remote upload cache ownership verification failed during finalization");
+                break;
+            }
+            const QString actualDigest = sha256ForFile(path);
+            if (actualDigest != expectedDigest) {
+                qWarning().noquote()
+                    << "UploadManager: staging checksum mismatch"
+                    << "asset=" << assetId.left(12)
+                    << "expected=" << expectedDigest.left(12)
+                    << "actual=" << actualDigest.left(12);
+                completionError = actualDigest.isEmpty()
+                    ? QStringLiteral(
+                          "Remote client could not read the completed upload for verification")
+                    : QStringLiteral(
+                          "Remote upload checksum does not match the source manifest");
                 break;
             }
             if (!MediaFilePolicy::isAcceptedLocalFile(path)) {
