@@ -987,6 +987,62 @@ bool UploadManager::requestAssetRemoval(const QString& targetEndpointId,
     return true;
 }
 
+bool UploadManager::requestUnload(
+    const QString& targetEndpointId,
+    const QSet<QString>& knownLocalFileIds) {
+    if (!m_ws || !m_fileManager || targetEndpointId.isEmpty()) {
+        return false;
+    }
+
+    if (parallelForTarget(targetEndpointId)
+        || (m_uploadTargetClientId == targetEndpointId
+            && m_outgoingState != OutgoingState::Idle)) {
+        qInfo() << "UploadManager: Cannot unload while a transfer is active for"
+                << targetEndpointId;
+        return false;
+    }
+
+    for (auto it = m_pendingAssetRemovals.cbegin();
+         it != m_pendingAssetRemovals.cend(); ++it) {
+        if (it->asset.targetEndpointId == targetEndpointId) {
+            qInfo() << "UploadManager: Unload already pending for"
+                    << targetEndpointId;
+            return false;
+        }
+    }
+
+    // Use both projections. SessionManager knows what the canvas believes is
+    // remote, while this inventory contains the immutable tuples accepted by
+    // protocol v3. Their union makes unload self-healing if one UI update was
+    // delayed, without ever inventing a server-side asset identity.
+    QSet<QString> localFileIds = knownLocalFileIds;
+    const auto inventory = m_committedAssetsByTarget.constFind(targetEndpointId);
+    if (inventory != m_committedAssetsByTarget.cend()) {
+        for (auto asset = inventory->cbegin(); asset != inventory->cend(); ++asset) {
+            for (const QString& localFileId : asset->localFileIds) {
+                if (!localFileId.isEmpty()) localFileIds.insert(localFileId);
+            }
+        }
+    }
+    if (localFileIds.isEmpty()) {
+        qWarning() << "UploadManager: Cannot unload without validated remote inventory for"
+                   << targetEndpointId;
+        return false;
+    }
+
+    // requestAssetRemoval() deduplicates aliases that resolve to the same
+    // immutable remote asset. The final alias sends the authenticated removal
+    // command; distinct assets may safely wait for their ACKs in parallel.
+    const QList<QString> orderedFileIds = localFileIds.values();
+    for (const QString& localFileId : orderedFileIds) {
+        if (!requestAssetRemoval(targetEndpointId, localFileId,
+                                 QStringLiteral("user_unload"))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool UploadManager::sendPendingAssetRemoval(PendingAssetRemoval& pending) {
     if (!m_ws || pending.removalId.isEmpty()) return false;
     RemoteSessionCoordinator* sessions = m_ws->remoteSessionCoordinator();

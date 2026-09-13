@@ -126,6 +126,12 @@ public:
     // Starts a new/incremental upload. Cancellation is an explicit guarded action.
     bool toggleUpload(const QVector<UploadFileInfo>& files);
     void requestCancel();
+    // Explicit user action: remove every validated asset owned by this
+    // RemoteSession while keeping the session itself alive. The caller's
+    // known IDs are merged with the manager's authoritative inventory so an
+    // out-of-date UI projection cannot leave remote files behind.
+    bool requestUnload(const QString& targetEndpointId,
+                       const QSet<QString>& knownLocalFileIds = {});
     // Removes one immutable validated asset while keeping the RemoteSession
     // and every other uploaded asset alive. This is the canonical path used
     // when the last local reference to a source disappears.

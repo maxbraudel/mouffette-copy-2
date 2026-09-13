@@ -1406,6 +1406,50 @@ void UploadRemovalSecurityTest::uploadCompletionWaitsForDurableAck()
         clientMessages.cbegin(), clientMessages.cend(), [](const QJsonObject& message) {
             return message.value("type").toString() == QLatin1String("upload_complete");
         }), 1000);
+
+    QSignalSpy uploadFinished(&uploads, &UploadManager::uploadFinished);
+    QJsonObject finished{{"type", "upload_finished"}, {"uploadId", uploadId}};
+    finished.insert("assets", QJsonArray{fullState});
+    sendServerMessage(finished);
+    QTRY_COMPARE_WITH_TIMEOUT(uploadFinished.count(), 1, 1000);
+    QVERIFY(uploads.hasActiveUpload());
+    QVERIFY(files.isFileUploadedToClient(fileId, targetEndpointId));
+
+    // The explicit Unload action must use the manager's authoritative v3
+    // inventory even if the UI-side set is empty, then remain pending until
+    // the target confirms durable quarantine of the exact asset.
+    QSignalSpy removalCommitted(&uploads, &UploadManager::assetRemovalCommitted);
+    QVERIFY(uploads.requestUnload(targetEndpointId));
+    QTRY_VERIFY_WITH_TIMEOUT(std::any_of(
+        clientMessages.cbegin(), clientMessages.cend(), [](const QJsonObject& message) {
+            return message.value("type").toString() == QLatin1String("upload_remove");
+        }), 1000);
+    QVERIFY(uploads.isRemoving());
+    const auto removalIt = std::find_if(
+        clientMessages.crbegin(), clientMessages.crend(), [](const QJsonObject& message) {
+            return message.value("type").toString() == QLatin1String("upload_remove");
+        });
+    QVERIFY(removalIt != clientMessages.crend());
+    const QJsonObject removal = *removalIt;
+    QJsonObject removed{
+        {"type", "upload_removed"},
+        {"removalId", removal.value("removalId")},
+        {"uploadId", removal.value("uploadId")},
+        {"assetId", removal.value("assetId")},
+        {"offset", removal.value("offset")},
+        {"size", removal.value("size")},
+        {"sha256", removal.value("sha256")},
+        {"fileId", fileId},
+        {"extension", "png"},
+        {"success", true},
+        {"result", "committed"},
+        {"cacheQuarantined", true},
+    };
+    sendServerMessage(removed);
+    QTRY_COMPARE_WITH_TIMEOUT(removalCommitted.count(), 1, 1000);
+    QVERIFY(!uploads.isRemoving());
+    QVERIFY(!uploads.hasActiveUpload());
+    QVERIFY(!files.isFileUploadedToClient(fileId, targetEndpointId));
     socket.disconnect();
 }
 

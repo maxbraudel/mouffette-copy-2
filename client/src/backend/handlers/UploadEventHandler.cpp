@@ -170,29 +170,20 @@ void UploadEventHandler::onUploadButtonClicked()
 
     if (files.isEmpty()) {
         if (hasRemoteFiles) {
-            bool promotedAny = false;
-            for (ResizableMediaBase* media : canvas->enumerateMediaItems()) {
-                if (!media) {
-                    continue;
-                }
-                const QString fileId = media->fileId();
-                if (fileId.isEmpty()) continue;
-                if (!fileManager->isFileUploadedToClient(fileId, targetClientId)) {
-                    fileManager->markFileUploadedToClient(fileId, targetClientId);
-                    media->setUploadUploaded();
-                    promotedAny = true;
-                }
+            // This is the Unload half of the button state machine. Protocol v3
+            // no longer has the legacy unscoped remove-all command, so remove
+            // the session's exact validated assets through their authenticated
+            // inventory tuples and wait for each target acknowledgement.
+            uploadManager->setActiveSessionIdentity(session->persistentClientId);
+            QSet<QString> knownRemoteFileIds = session->knownRemoteFileIds;
+            knownRemoteFileIds.unite(currentFileIds);
+            if (uploadManager->requestUnload(targetClientId,
+                                             knownRemoteFileIds)) {
+                TOAST_INFO(QString("Removing remote media from %1…")
+                               .arg(clientLabel));
+            } else if (!uploadManager->isRemoving()) {
+                TOAST_ERROR("Remote media could not be unloaded safely", 5000);
             }
-            if (promotedAny) {
-                emit uploadManager->uiStateChanged();
-                TOAST_SUCCESS("All media already synchronized with remote client");
-                return;
-            }
-
-            // Validated files belong to the RemoteSession. Reusing the Upload
-            // button is a no-op: source invalidation and session teardown own
-            // their separate, transactionally correlated removal paths.
-            TOAST_INFO("All media already synchronized with remote client");
         } else {
             TOAST_INFO("No new media to upload");
             qDebug() << "Upload skipped: aucun média local nouveau (popup supprimée).";

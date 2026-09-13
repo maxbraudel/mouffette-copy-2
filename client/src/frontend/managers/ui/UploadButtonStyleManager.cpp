@@ -80,9 +80,9 @@ void UploadButtonStyleManager::applyUploadButtonStyle(QPushButton* uploadButton)
                 uploadButton->setStyleSheet(remoteSceneLaunched ? generateOverlayDisabledStyle() : generateOverlayIdleStyle());
                 uploadButton->setFont(defaultFont);
             } else {
-                uploadButton->setText("Uploaded");
-                uploadButton->setEnabled(false);
-                uploadButton->setStyleSheet(generateOverlayDisabledStyle());
+                uploadButton->setText("Unload");
+                uploadButton->setEnabled(!remoteSceneLaunched);
+                uploadButton->setStyleSheet(remoteSceneLaunched ? generateOverlayDisabledStyle() : generateOverlayUnloadStyle());
                 uploadButton->setFont(defaultFont);
             }
         } else {
@@ -161,11 +161,11 @@ void UploadButtonStyleManager::applyUploadButtonStyle(QPushButton* uploadButton)
             uploadButton->setMaximumWidth(ThemeManager::instance()->getUploadButtonMaxWidth());
             uploadButton->setFont(defaultFont);
         } else {
-            uploadButton->setCheckable(false);
-            uploadButton->setChecked(false);
-            uploadButton->setEnabled(false);
-            uploadButton->setText("Uploaded");
-            uploadButton->setStyleSheet(generateRegularGreyStyle());
+            uploadButton->setCheckable(true);
+            uploadButton->setChecked(true);
+            uploadButton->setEnabled(true);
+            uploadButton->setText("Remove all files");
+            uploadButton->setStyleSheet(generateRegularGreenStyle());
             uploadButton->setFixedHeight(gDynamicBoxHeight);
             uploadButton->setMaximumWidth(ThemeManager::instance()->getUploadButtonMaxWidth());
             uploadButton->setFont(defaultFont);
@@ -252,6 +252,31 @@ QString UploadButtonStyleManager::generateOverlayUploadingStyle() const {
           AppColors::colorToCss(AppColors::gButtonPrimaryPressed));
 }
 
+QString UploadButtonStyleManager::generateOverlayUnloadStyle() const {
+    const QString canvasFontCss = AppColors::canvasButtonFontCss();
+    return QString(
+        "QPushButton { "
+        "    padding: 0px 20px; "
+        "    %1 "
+        "    color: %2; "
+        "    background: %3; "
+        "    border: none; "
+        "    border-radius: 0px; "
+        "    text-align: center; "
+        "} "
+        "QPushButton:hover { "
+        "    color: %2; "
+        "    background: rgba(76, 175, 80, 56); "
+        "} "
+        "QPushButton:pressed { "
+        "    color: %2; "
+        "    background: rgba(76, 175, 80, 77); "
+        "}"
+    ).arg(canvasFontCss,
+          AppColors::colorToCss(AppColors::gMediaUploadedColor),
+          AppColors::colorToCss(AppColors::gStatusConnectedBg));
+}
+
 QString UploadButtonStyleManager::generateOverlayDisabledStyle() const {
     return ScreenCanvas::overlayDisabledButtonStyle();
 }
@@ -268,6 +293,13 @@ QString UploadButtonStyleManager::generateRegularBlueStyle() const {
         "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; background-color: %4; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
         "QPushButton:checked { background-color: %5; }"
     ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx).arg(AppColors::colorToCss(AppColors::gButtonBlueBg)).arg(AppColors::colorToCss(AppColors::gButtonBluePressed));
+}
+
+QString UploadButtonStyleManager::generateRegularGreenStyle() const {
+    return QString(
+        "QPushButton { padding: 0px 12px; font-weight: bold; font-size: %3px; background-color: %4; color: white; border-radius: %1px; min-height: %2px; max-height: %2px; } "
+        "QPushButton:checked { background-color: %5; }"
+    ).arg(gDynamicBoxBorderRadius).arg(gDynamicBoxHeight).arg(gDynamicBoxFontPx).arg(AppColors::colorToCss(AppColors::gButtonGreenBg)).arg(AppColors::colorToCss(AppColors::gButtonGreenPressed));
 }
 
 // State detection helpers

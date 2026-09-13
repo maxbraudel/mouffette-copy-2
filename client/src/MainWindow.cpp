@@ -747,6 +747,12 @@ MainWindow::MainWindow(const RuntimeProfileContext& runtimeProfile, QWidget* par
         for (const QString& fileId : localFileIds) {
             session->knownRemoteFileIds.remove(fileId);
             session->expectedIdeaFileIds.remove(fileId);
+            if (!session->canvas) continue;
+            for (ResizableMediaBase* media : session->canvas->enumerateMediaItems()) {
+                if (media && media->fileId() == fileId) {
+                    media->setUploadNotUploaded();
+                }
+            }
         }
         session->upload.remoteFilesPresent =
             !session->knownRemoteFileIds.isEmpty();
