@@ -1,30 +1,40 @@
 import QtQuick
-import QtQuick.Layouts
-import Mouffette.App
-import "../components"
+import "../.." as CanvasControls
 
-RowLayout {
+Row {
     id: root
     required property var session
     spacing: 8
 
-    AppButton {
+    CanvasControls.OverlayButton {
         objectName: "canvasSettingsButton"
-        text: "⚙"
-        checked: root.session && root.session.settingsVisible
+        iconSource: "qrc:/icons/icons/settings.svg"
+        accessibleName: "Settings"
+        isToggle: true
+        toggled: root.session && root.session.settingsVisible
         enabled: root.session && root.session.actionsEnabled
         onClicked: root.session.settingsVisible = !root.session.settingsVisible
     }
-    RowLayout {
+    Row {
         spacing: 0
-        AppButton {
-            text: "↖"
-            checked: !root.session || root.session.activeTool === "selection"
+        CanvasControls.OverlayButton {
+            objectName: "canvasSelectionToolButton"
+            iconSource: "qrc:/icons/icons/tools/selection-tool.svg"
+            accessibleName: "Selection tool"
+            isToggle: true
+            toggled: !root.session || root.session.activeTool === "selection"
+            segmentRole: "leading"
+            enabled: root.session && root.session.actionsEnabled
             onClicked: root.session.setActiveTool("selection")
         }
-        AppButton {
-            text: "T"
-            checked: root.session && root.session.activeTool === "text"
+        CanvasControls.OverlayButton {
+            objectName: "canvasTextToolButton"
+            iconSource: "qrc:/icons/icons/tools/text-tool.svg"
+            accessibleName: "Text tool"
+            isToggle: true
+            toggled: root.session && root.session.activeTool === "text"
+            segmentRole: "trailing"
+            enabled: root.session && root.session.actionsEnabled
             onClicked: root.session.setActiveTool("text")
         }
     }

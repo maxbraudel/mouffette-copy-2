@@ -22,6 +22,8 @@ private slots:
     void segmentedStatusKeepsSingleTopBorder();
     void mediaPanelVisibilityAnchorInteractionAndScroll();
     void mediaCountTracksRealCanvasInsertions();
+    void overlayButtonHoverIsImmediate();
+    void canvasToolbarUsesOverlaySwitchAndSegmentedTools();
     void toastMatchesLegacyBottomLeftDoubleBackground();
     void themeTracksApplicationPalette();
 };
@@ -235,6 +237,70 @@ Item {
     root->setParentItem(window.contentItem());
     return root;
 }
+
+QQuickItem* createOverlayButton(QQmlEngine& engine, QQuickWindow& window,
+                                QString* error)
+{
+    QQmlComponent component(
+        &engine,
+        QUrl(QStringLiteral(
+            "qrc:/qt/qml/Mouffette/App/resources/qml/OverlayButton.qml")));
+    if (component.isError()) {
+        if (error) *error = component.errorString();
+        return nullptr;
+    }
+    QObject* object = component.create();
+    auto* item = qobject_cast<QQuickItem*>(object);
+    if (!item) {
+        if (error) *error = component.errorString();
+        delete object;
+        return nullptr;
+    }
+    item->setPosition(QPointF(20, 20));
+    item->setSize(QSizeF(36, 36));
+    item->setParentItem(window.contentItem());
+    return item;
+}
+
+QQuickItem* createCanvasToolbarHarness(QQmlEngine& engine,
+                                       QQuickWindow& window, QString* error)
+{
+    static const QByteArray qml = R"QML(
+import QtQuick
+import "../canvas"
+
+Item {
+    QtObject {
+        id: fakeSession
+        property bool settingsVisible: false
+        property bool actionsEnabled: true
+        property string activeTool: "selection"
+        function setActiveTool(tool) { activeTool = tool }
+    }
+    CanvasToolbar {
+        objectName: "canvasToolbar"
+        session: fakeSession
+    }
+}
+)QML";
+    QQmlComponent component(&engine);
+    component.setData(qml, QUrl(QStringLiteral(
+        "qrc:/qt/qml/Mouffette/App/resources/qml/app/pages/CanvasToolbarHarness.qml")));
+    QObject* object = component.create();
+    if (!object) {
+        if (error) *error = component.errorString();
+        return nullptr;
+    }
+    auto* root = qobject_cast<QQuickItem*>(object);
+    if (!root) {
+        if (error) *error = QStringLiteral("canvas toolbar harness root is not an item");
+        delete object;
+        return nullptr;
+    }
+    root->setSize(window.size());
+    root->setParentItem(window.contentItem());
+    return root;
+}
 }
 
 void MediaOverlayTest::segmentedStatusFillReachesBothEdges_data()
@@ -399,6 +465,64 @@ void MediaOverlayTest::mediaCountTracksRealCanvasInsertions()
     QTRY_VERIFY(panel->isVisible());
     QCOMPARE(qRound(panel->x() + panel->width()), window.width() - 10);
     QCOMPARE(qRound(panel->y() + panel->height()), window.height() - 10);
+}
+
+void MediaOverlayTest::overlayButtonHoverIsImmediate()
+{
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(100, 80);
+    QString error;
+    std::unique_ptr<QQuickItem> button(createOverlayButton(engine, window, &error));
+    QVERIFY2(button, qPrintable(error));
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    const QColor normal = button->property("currentBackgroundColor").value<QColor>();
+    QTest::mouseMove(&window, QPoint(38, 38));
+    QTRY_VERIFY(button->property("hovered").toBool());
+    const QColor hovered = button->property("currentBackgroundColor").value<QColor>();
+    QVERIFY(hovered != normal);
+
+    QTest::mousePress(&window, Qt::LeftButton, Qt::NoModifier, QPoint(38, 38));
+    QCOMPARE(button->property("currentBackgroundColor").value<QColor>(),
+             QColor(52, 87, 128, 242));
+    QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier, QPoint(38, 38));
+    QCOMPARE(button->property("currentBackgroundColor").value<QColor>(), hovered);
+}
+
+void MediaOverlayTest::canvasToolbarUsesOverlaySwitchAndSegmentedTools()
+{
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(240, 100);
+    QString error;
+    std::unique_ptr<QQuickItem> harness(
+        createCanvasToolbarHarness(engine, window, &error));
+    QVERIFY2(harness, qPrintable(error));
+    auto* settings = findVisualItem(harness.get(), QStringLiteral("canvasSettingsButton"));
+    auto* selection = findVisualItem(harness.get(), QStringLiteral("canvasSelectionToolButton"));
+    auto* text = findVisualItem(harness.get(), QStringLiteral("canvasTextToolButton"));
+    QVERIFY(settings);
+    QVERIFY(selection);
+    QVERIFY(text);
+
+    QCOMPARE(settings->width(), 36.0);
+    QCOMPARE(settings->height(), 36.0);
+    QVERIFY(settings->property("isToggle").toBool());
+    QVERIFY(selection->property("toggled").toBool());
+    QVERIFY(!text->property("toggled").toBool());
+    QCOMPARE(selection->property("segmentRole").toString(), QStringLiteral("leading"));
+    QCOMPARE(text->property("segmentRole").toString(), QStringLiteral("trailing"));
+    QCOMPARE(selection->x() + selection->width(), text->x());
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    const QPoint textCenter = text->mapToScene(
+        QPointF(text->width() / 2.0, text->height() / 2.0)).toPoint();
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, textCenter);
+    QTRY_VERIFY(text->property("toggled").toBool());
+    QVERIFY(!selection->property("toggled").toBool());
 }
 
 void MediaOverlayTest::toastMatchesLegacyBottomLeftDoubleBackground()

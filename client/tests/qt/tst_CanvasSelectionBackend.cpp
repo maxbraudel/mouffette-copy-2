@@ -166,8 +166,42 @@ private slots:
             Q_ARG(bool, false), Q_ARG(bool, true)));
         QVERIFY(QMetaObject::invokeMethod(&fixture.controller,
             "handleMediaResizeEnded", Qt::DirectConnection, Q_ARG(QString, id)));
-        QCOMPARE(media->scale(), 1.0);
-        QCOMPARE(media->baseSize(), QSize(900, 650));
+        QCOMPARE(media->scale(), 2.0);
+        QCOMPARE(media->baseSize(), QSize(450, 325));
+        QCOMPARE(media->sceneRect().size(), QSizeF(900, 650));
+    }
+
+    void altResizeDisablesFitAndPreservesExistingTextScale()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        CanvasMedia* media = fixture.document.addText(
+            {300, 200}, QStringLiteral("Scaled text"));
+        QVERIFY(media);
+        QVERIFY(media->fitToTextEnabled());
+        media->setScale(2.25);
+        const qreal scaleBefore = media->scale();
+        const QRectF rectBefore = media->sceneRect();
+        const QString id = media->mediaId();
+
+        QVERIFY(QMetaObject::invokeMethod(&fixture.controller,
+            "handleMediaResizeRequested", Qt::DirectConnection,
+            Q_ARG(QString, id), Q_ARG(QString, QStringLiteral("right-mid")),
+            Q_ARG(double, rectBefore.right() + 180.0),
+            Q_ARG(double, rectBefore.center().y()),
+            Q_ARG(bool, false), Q_ARG(bool, true)));
+
+        QVERIFY(!media->fitToTextEnabled());
+        QCOMPARE(fixture.controller.liveAltResizeScale(), scaleBefore);
+        QCOMPARE(fixture.controller.liveAltResizeWidth(),
+                 (rectBefore.width() + 180.0) / scaleBefore);
+
+        QVERIFY(QMetaObject::invokeMethod(&fixture.controller,
+            "handleMediaResizeEnded", Qt::DirectConnection, Q_ARG(QString, id)));
+        QCOMPARE(media->scale(), scaleBefore);
+        QCOMPARE(media->sceneRect().height(), rectBefore.height());
+        QVERIFY(qAbs(media->sceneRect().width()
+                     - (rectBefore.width() + 180.0)) <= scaleBefore / 2.0);
     }
 
     void snapAndDropImportUseDocumentCoordinates()

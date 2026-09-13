@@ -98,7 +98,7 @@ public:
     qreal liveAltResizeY() const { return m_liveAltResizeRect.y(); }
     qreal liveAltResizeWidth() const { return m_liveAltResizeRect.width(); }
     qreal liveAltResizeHeight() const { return m_liveAltResizeRect.height(); }
-    qreal liveAltResizeScale() const { return 1.0; }
+    qreal liveAltResizeScale() const { return m_liveAltResizeScale; }
     bool editsLocked() const;
     void refreshMediaProjection();
     void selectMedia(const QString& mediaId, bool additive = false);
@@ -206,6 +206,7 @@ private:
     bool m_lastMoveSnapped = false;
     QString m_resizeMediaId;
     QRectF m_resizeOriginalRect;
+    qreal m_resizeOriginalScale = 1.0;
     QRectF m_pendingResizeRect;
     bool m_pendingResizeAlt = false;
     QString m_dropPath;
@@ -236,4 +237,5 @@ private:
     bool m_liveAltResizeActive = false;
     QString m_liveAltResizeMediaId;
     QRectF m_liveAltResizeRect;
+    qreal m_liveAltResizeScale = 1.0;
 };

@@ -505,15 +505,26 @@ void QuickCanvasController::handleMediaResizeRequested(
     if (m_resizeMediaId != mediaId) {
         m_resizeMediaId = mediaId;
         m_resizeOriginalRect = media->sceneRect();
+        m_resizeOriginalScale = std::max<qreal>(0.0001, media->scale());
     }
     m_pendingResizeAlt = altPressed;
     m_pendingResizeRect = resizedRect(m_resizeOriginalRect, handleId, {x, y},
                                       !altPressed);
     if (altPressed) {
+        // Free resize changes the text container. Fitted geometry is no longer
+        // authoritative, but the existing uniform scale remains the user's
+        // chosen text size and must never be baked back to 1.0.
+        if (media->isText() && media->fitToTextEnabled()) {
+            media->setFitToTextEnabled(false);
+        }
         m_liveResizeActive = false;
         m_liveAltResizeActive = true;
         m_liveAltResizeMediaId = mediaId;
-        m_liveAltResizeRect = m_pendingResizeRect;
+        m_liveAltResizeRect = QRectF(
+            m_pendingResizeRect.topLeft(),
+            QSizeF(m_pendingResizeRect.width() / m_resizeOriginalScale,
+                   m_pendingResizeRect.height() / m_resizeOriginalScale));
+        m_liveAltResizeScale = m_resizeOriginalScale;
     } else {
         const qreal scale = m_pendingResizeRect.width()
             / std::max<qreal>(1.0, media->baseSize().width());
@@ -532,8 +543,12 @@ void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId)
     if (media && mediaId == m_resizeMediaId && !m_pendingResizeRect.isEmpty()) {
         media->setPosition(m_pendingResizeRect.topLeft());
         if (m_pendingResizeAlt) {
-            media->setBaseSize(m_pendingResizeRect.size().toSize());
-            media->setScale(1.0);
+            media->setBaseSize(QSize(
+                std::max(1, qRound(m_pendingResizeRect.width()
+                                   / m_resizeOriginalScale)),
+                std::max(1, qRound(m_pendingResizeRect.height()
+                                   / m_resizeOriginalScale))));
+            media->setScale(m_resizeOriginalScale);
         } else {
             media->setScale(m_pendingResizeRect.width()
                             / std::max<qreal>(1.0, media->baseSize().width()));
@@ -552,8 +567,10 @@ void QuickCanvasController::clearLiveResize()
     m_liveAltResizeActive = false;
     m_liveAltResizeMediaId.clear();
     m_liveAltResizeRect = {};
+    m_liveAltResizeScale = 1.0;
     m_resizeMediaId.clear();
     m_resizeOriginalRect = {};
+    m_resizeOriginalScale = 1.0;
     m_pendingResizeRect = {};
     m_pendingResizeAlt = false;
     emit presentationChanged();

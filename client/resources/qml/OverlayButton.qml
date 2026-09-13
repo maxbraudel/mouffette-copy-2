@@ -7,6 +7,7 @@ Item {
     property string iconSource: ""
     property bool   isToggle:    false
     property bool   toggled:     false
+    property string accessibleName: ""
     // Use Item.enabled; shadowing it leaves native input eligibility divergent.
     // "solo" | "leading" | "middle" | "trailing"
     // Controls which corners are rounded, matching legacy SegmentRole behavior.
@@ -18,6 +19,11 @@ Item {
     implicitHeight: 36
 
     readonly property real _r: 6
+    readonly property bool hovered: pressArea.containsMouse
+    readonly property color currentBackgroundColor: _bgColor
+
+    Accessible.role: Accessible.Button
+    Accessible.name: accessibleName
 
     // Which sides are flat (square corners)
     readonly property bool _flatLeft:  segmentRole === "trailing" || segmentRole === "middle"
@@ -29,6 +35,8 @@ Item {
             return "#61323232"
         if ((root.isToggle && root.toggled) || pressArea.containsPress)
             return "#F2345780"
+        if (pressArea.containsMouse)
+            return "#F236404C"
         return "#F2323232"
     }
 
@@ -52,7 +60,6 @@ Item {
             color:  root._bgColor
             border.color: "#FF646464"
             border.width: 1
-            Behavior on color { ColorAnimation { duration: 80 } }
         }
     }
 
