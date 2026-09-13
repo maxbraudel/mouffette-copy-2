@@ -27,6 +27,7 @@ CanvasMedia* MediaSettingsViewModel::media() const
 }
 
 bool MediaSettingsViewModel::available() const { return media() != nullptr; }
+QString MediaSettingsViewModel::mediaId() const { return media() ? media()->mediaId() : QString(); }
 QString MediaSettingsViewModel::mediaName() const { return media() ? media()->displayName() : QString(); }
 bool MediaSettingsViewModel::video() const { return media() && media()->isVideo(); }
 bool MediaSettingsViewModel::textMedia() const { return media() && media()->isText(); }

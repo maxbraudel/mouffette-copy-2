@@ -11,6 +11,7 @@
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 #include "frontend/qml/CanvasSessionViewModel.h"
 #include "backend/domain/canvas/CanvasDocument.h"
+#include "backend/domain/media/CanvasMedia.h"
 
 class MediaOverlayTest final : public QObject
 {
@@ -24,6 +25,7 @@ private slots:
     void mediaCountTracksRealCanvasInsertions();
     void overlayButtonHoverIsImmediate();
     void canvasToolbarUsesOverlaySwitchAndSegmentedTools();
+    void mediaSettingsPanelRestoresLegacyTabsAndBindings();
     void toastMatchesLegacyBottomLeftDoubleBackground();
     void themeTracksApplicationPalette();
 };
@@ -301,6 +303,62 @@ Item {
     root->setParentItem(window.contentItem());
     return root;
 }
+
+QQuickItem* createMediaSettingsHarness(QQmlEngine& engine,
+                                       QQuickWindow& window,
+                                       QObject* session, QString* error)
+{
+    static const QByteArray qml = R"QML(
+import QtQuick
+import "../canvas"
+
+Item {
+    id: host
+    required property var externalSession
+    property int canvasPrimaryPressCount: 0
+
+    Item {
+        anchors.fill: parent
+
+        PointHandler {
+            target: null
+            acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+            acceptedButtons: Qt.LeftButton
+            onActiveChanged: {
+                if (active)
+                    host.canvasPrimaryPressCount += 1
+            }
+        }
+    }
+
+    SceneElementPanel {
+        objectName: "realMediaSettingsPanel"
+        x: 10
+        y: 52
+        maximumHeight: Math.max(0, host.height - y - 10)
+        session: host.externalSession
+    }
+}
+)QML";
+    QQmlComponent component(&engine);
+    component.setData(qml, QUrl(QStringLiteral(
+        "qrc:/qt/qml/Mouffette/App/resources/qml/app/pages/MediaSettingsHarness.qml")));
+    QObject* object = component.createWithInitialProperties({
+        {QStringLiteral("externalSession"), QVariant::fromValue(session)}});
+    if (!object) {
+        if (error) *error = component.errorString();
+        return nullptr;
+    }
+    auto* root = qobject_cast<QQuickItem*>(object);
+    if (!root) {
+        if (error) *error = QStringLiteral("media settings harness root is not an item");
+        delete object;
+        return nullptr;
+    }
+    root->setSize(window.size());
+    root->setParentItem(window.contentItem());
+    return root;
+}
 }
 
 void MediaOverlayTest::segmentedStatusFillReachesBothEdges_data()
@@ -523,6 +581,210 @@ void MediaOverlayTest::canvasToolbarUsesOverlaySwitchAndSegmentedTools()
     QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, textCenter);
     QTRY_VERIFY(text->property("toggled").toBool());
     QVERIFY(!selection->property("toggled").toBool());
+}
+
+void MediaOverlayTest::mediaSettingsPanelRestoresLegacyTabsAndBindings()
+{
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(640, 480);
+    QString error;
+    std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+    QVERIFY2(host, qPrintable(error));
+    CanvasSessionViewModel session(
+        QStringLiteral("media-settings-session"), host.get(), [] {}, nullptr,
+        [] { return false; }, [] { return true; });
+    std::unique_ptr<QQuickItem> harness(
+        createMediaSettingsHarness(engine, window, &session, &error));
+    QVERIFY2(harness, qPrintable(error));
+
+    auto* panel = findVisualItem(
+        harness.get(), QStringLiteral("realMediaSettingsPanel"));
+    auto* sceneTab = findVisualItem(
+        harness.get(), QStringLiteral("sceneSettingsTab"));
+    auto* elementTab = findVisualItem(
+        harness.get(), QStringLiteral("elementSettingsTab"));
+    auto* scenePage = findVisualItem(
+        harness.get(), QStringLiteral("sceneSettingsPage"));
+    auto* elementPage = findVisualItem(
+        harness.get(), QStringLiteral("elementSettingsPage"));
+    QVERIFY(panel);
+    QVERIFY(sceneTab);
+    QVERIFY(elementTab);
+    QVERIFY(scenePage);
+    QVERIFY(elementPage);
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    harness->setSize(window.size());
+    session.setSettingsVisible(true);
+    QCoreApplication::processEvents();
+    QVERIFY(!panel->isVisible());
+
+    CanvasMedia* media = host->document()->addText(
+        QPointF(100, 100), QStringLiteral("Settings test"));
+    QVERIFY(media);
+    QTRY_VERIFY(panel->isVisible());
+    QCOMPARE(panel->width(), 221.0);
+    QCOMPARE(panel->x(), 10.0);
+    QCOMPARE(panel->y(), 52.0);
+    QVERIFY(panel->height() > 41.0);
+    QVERIFY(panel->height() <= 418.0);
+    QCOMPARE(panel->property("activeTab").toInt(), 0);
+    QVERIFY(scenePage->isVisible());
+    QVERIFY(!elementPage->isVisible());
+    auto* contentFlick = findVisualItem(
+        harness.get(), QStringLiteral("settingsContentFlick"));
+    auto* scrollBar = findVisualItem(
+        harness.get(), QStringLiteral("settingsOverlayScrollBar"));
+    QVERIFY(contentFlick);
+    QVERIFY(scrollBar);
+    QTRY_VERIFY(!contentFlick->property("overflowing").toBool());
+    QVERIFY(qAbs(contentFlick->property("contentHeight").toReal()
+                 - contentFlick->height()) <= 0.5);
+    QVERIFY(!scrollBar->isVisible());
+
+    const QStringList restoredControls{
+        QStringLiteral("displayAutomaticallyCheck"),
+        QStringLiteral("displayDelayCheck"),
+        QStringLiteral("hideDelayCheck"),
+        QStringLiteral("hideWhenVideoEndsCheck"),
+        QStringLiteral("unmuteAutomaticallyCheck"),
+        QStringLiteral("unmuteDelayCheck"),
+        QStringLiteral("muteDelayCheck"),
+        QStringLiteral("muteWhenVideoEndsCheck"),
+        QStringLiteral("playAutomaticallyCheck"),
+        QStringLiteral("playDelayCheck"),
+        QStringLiteral("pauseDelayCheck"),
+        QStringLiteral("repeatCheck"),
+        QStringLiteral("imageFadeInCheck"),
+        QStringLiteral("imageFadeOutCheck"),
+        QStringLiteral("opacityCheck"),
+        QStringLiteral("volumeCheck"),
+        QStringLiteral("audioFadeInCheck"),
+        QStringLiteral("audioFadeOutCheck"),
+        QStringLiteral("textColorCheck"),
+        QStringLiteral("highlightCheck"),
+        QStringLiteral("textBorderWidthCheck"),
+        QStringLiteral("textBorderColorCheck"),
+        QStringLiteral("fontWeightCheck"),
+        QStringLiteral("underlineCheck"),
+        QStringLiteral("italicCheck"),
+        QStringLiteral("uppercaseCheck")};
+    for (const QString& objectName : restoredControls) {
+        QVERIFY2(findVisualItem(harness.get(), objectName),
+                 qPrintable(QStringLiteral("missing restored setting: %1")
+                                .arg(objectName)));
+    }
+
+    auto* displayAutomaticallyCheck = findVisualItem(
+        harness.get(), QStringLiteral("displayAutomaticallyCheck"));
+    auto* displayDelayCheck = findVisualItem(
+        harness.get(), QStringLiteral("displayDelayCheck"));
+    auto* displayDelayField = findVisualItem(
+        harness.get(), QStringLiteral("displayDelayField"));
+    QVERIFY(displayAutomaticallyCheck);
+    QVERIFY(displayDelayCheck);
+    QVERIFY(displayDelayField);
+    QVERIFY(displayDelayCheck->isEnabled());
+    QTest::mouseClick(
+        &window, Qt::LeftButton, Qt::NoModifier,
+        displayDelayCheck->mapToScene(
+            QPointF(displayDelayCheck->width() / 2.0,
+                    displayDelayCheck->height() / 2.0)).toPoint());
+    QTRY_VERIFY(media->settings().displayDelayEnabled);
+    QTest::mouseClick(
+        &window, Qt::LeftButton, Qt::NoModifier,
+        displayAutomaticallyCheck->mapToScene(
+            QPointF(displayAutomaticallyCheck->width() / 2.0,
+                    displayAutomaticallyCheck->height() / 2.0)).toPoint());
+    QTRY_VERIFY(!media->settings().displayAutomatically);
+    QTRY_VERIFY(!media->settings().displayDelayEnabled);
+    QTRY_VERIFY(!displayDelayCheck->isEnabled());
+
+    const int canvasPressesBeforeDisabledInput =
+        harness->property("canvasPrimaryPressCount").toInt();
+    QTest::mouseClick(
+        &window, Qt::LeftButton, Qt::NoModifier,
+        displayDelayField->mapToScene(
+            QPointF(displayDelayField->width() / 2.0,
+                    displayDelayField->height() / 2.0)).toPoint());
+    QCOMPARE(harness->property("canvasPrimaryPressCount").toInt(),
+             canvasPressesBeforeDisabledInput);
+    QVERIFY(!displayDelayField->hasActiveFocus());
+    QCOMPARE(host->document()->selectedMedia(), media);
+
+    const QPoint elementTabCenter = elementTab->mapToScene(
+        QPointF(elementTab->width() / 2.0,
+                elementTab->height() / 2.0)).toPoint();
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+                      elementTabCenter);
+    QTRY_COMPARE(panel->property("activeTab").toInt(), 1);
+    QVERIFY(!scenePage->isVisible());
+    QVERIFY(elementPage->isVisible());
+
+    window.resize(640, 800);
+    harness->setSize(window.size());
+    QTRY_VERIFY(!contentFlick->property("overflowing").toBool());
+    QVERIFY(qAbs(contentFlick->property("contentHeight").toReal()
+                 - contentFlick->height()) <= 0.5);
+    QVERIFY(!scrollBar->isVisible());
+
+    auto* textSection = findVisualItem(
+        harness.get(), QStringLiteral("textSettingsSection"));
+    auto* opacityCheck = findVisualItem(
+        harness.get(), QStringLiteral("opacityCheck"));
+    auto* opacityField = findVisualItem(
+        harness.get(), QStringLiteral("opacityField"));
+    auto* elementAudioSection = findVisualItem(
+        harness.get(), QStringLiteral("elementAudioSection"));
+    QVERIFY(textSection);
+    QVERIFY(textSection->isVisible());
+    QVERIFY(elementAudioSection);
+    QVERIFY(!elementAudioSection->isVisible());
+    QVERIFY(opacityCheck);
+    QVERIFY(opacityField);
+    QTRY_COMPARE(scrollBar->opacity(), 0.0);
+    QVERIFY(!opacityField->property("cursorVisible").isValid());
+    QCOMPARE(opacityCheck->property("checkedColor").value<QColor>(),
+             QColor(QStringLiteral("#4a90e2")));
+
+    const QPoint opacityCenter = opacityCheck->mapToScene(
+        QPointF(opacityCheck->width() / 2.0,
+                opacityCheck->height() / 2.0)).toPoint();
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+                      opacityCenter);
+    QTRY_VERIFY(media->settings().opacityOverrideEnabled);
+
+    const QPoint opacityFieldCenter = opacityField->mapToScene(
+        QPointF(opacityField->width() / 2.0,
+                opacityField->height() / 2.0)).toPoint();
+    const int canvasPressesBeforeInput =
+        harness->property("canvasPrimaryPressCount").toInt();
+    QCOMPARE(canvasPressesBeforeInput, 0);
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+                      opacityFieldCenter);
+    QCOMPARE(harness->property("canvasPrimaryPressCount").toInt(),
+             canvasPressesBeforeInput);
+    QCOMPARE(host->document()->selectedMedia(), media);
+    QTest::keyClick(&window, Qt::Key_7);
+    QTest::keyClick(&window, Qt::Key_5);
+    QCOMPARE(opacityField->property("draftText").toString(),
+             QStringLiteral("75"));
+    QCOMPARE(media->settings().opacityText, QStringLiteral("100"));
+    QTest::keyClick(&window, Qt::Key_Return);
+    QTRY_COMPARE(media->settings().opacityText, QStringLiteral("75"));
+
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
+                      opacityFieldCenter);
+    QTest::keyClick(&window, Qt::Key_2);
+    QTest::keyClick(&window, Qt::Key_5);
+    QTest::keyClick(&window, Qt::Key_0);
+    QTest::keyClick(&window, Qt::Key_Return);
+    QTRY_COMPARE(media->settings().opacityText, QStringLiteral("100"));
+
+    session.setSettingsVisible(false);
+    QTRY_VERIFY(!panel->isVisible());
 }
 
 void MediaOverlayTest::toastMatchesLegacyBottomLeftDoubleBackground()

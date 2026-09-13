@@ -37,16 +37,16 @@ AppPanel {
         session: root.session
     }
 
-    Loader {
+    SceneElementPanel {
+        id: sceneElementPanel
+        objectName: "canvasSceneElementPanel"
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.leftMargin: 10
         anchors.topMargin: 52
         z: 100001
-        active: root.session !== null && root.session !== undefined
-        sourceComponent: SceneElementPanel {
-            session: root.session
-        }
+        maximumHeight: Math.max(0, root.height - y - 10)
+        session: root.session
     }
 
     MediaListPanel {

@@ -11,6 +11,7 @@ class MediaSettingsViewModel final : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(bool available READ available NOTIFY changed)
+    Q_PROPERTY(QString mediaId READ mediaId NOTIFY changed)
     Q_PROPERTY(QString mediaName READ mediaName NOTIFY changed)
     Q_PROPERTY(bool video READ video NOTIFY changed)
     Q_PROPERTY(bool textMedia READ textMedia NOTIFY changed)
@@ -67,6 +68,7 @@ public:
     void setController(QuickCanvasController* controller);
 
     bool available() const;
+    QString mediaId() const;
     QString mediaName() const;
     bool video() const;
     bool textMedia() const;

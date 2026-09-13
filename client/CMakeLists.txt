@@ -112,7 +112,7 @@ if(APPLE)
 endif()
 
 # Find Qt6
-find_package(Qt6 6.11 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia Concurrent Quick QuickControls2 Qml ShaderTools GuiPrivate QuickPrivate)
+find_package(Qt6 6.11 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia Concurrent Quick QuickControls2 QuickDialogs2 Qml ShaderTools GuiPrivate QuickPrivate)
 qt_policy(SET QTP0004 NEW)
 find_package(OpenSSL 1.1.1 REQUIRED COMPONENTS Crypto)
 if(NOT TARGET Qt6::QWebpPlugin)
@@ -526,6 +526,7 @@ target_link_libraries(MouffetteClient PRIVATE
     Qt6::Concurrent
     Qt6::Quick
     Qt6::QuickControls2
+    Qt6::QuickDialogs2
     Qt6::Qml
     Qt6::GuiPrivate
     Qt6::QuickPrivate
