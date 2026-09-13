@@ -204,6 +204,143 @@ private slots:
                      - (rectBefore.width() + 180.0)) <= scaleBefore / 2.0);
     }
 
+    void moveSnapFitsACompleteTargetBoxAndReleasesCleanly()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        CanvasMedia* moving = fixture.document.addText({0, 0});
+        CanvasMedia* target = fixture.document.addText({0, 0});
+        QVERIFY(moving && target);
+        for (CanvasMedia* media : {moving, target}) {
+            media->setFitToTextEnabled(false);
+            media->setBaseSize({400, 200});
+        }
+        moving->setPosition({50, 50});
+        target->setPosition({500, 300});
+
+        fixture.controller.handleMediaMoveStarted(
+            moving->mediaId(), 50, 50, true);
+        fixture.controller.handleMediaMoveUpdated(
+            moving->mediaId(), 504, 306, true);
+        QCOMPARE(fixture.controller.liveSnapDragX(), 500.0);
+        QCOMPARE(fixture.controller.liveSnapDragY(), 300.0);
+        QCOMPARE(fixture.controller.snapGuidesModel().size(), 4);
+
+        fixture.controller.handleMediaMoveUpdated(
+            moving->mediaId(), 105, 105, true);
+        QCOMPARE(fixture.controller.liveSnapDragX(), 100.0);
+        QCOMPARE(fixture.controller.liveSnapDragY(), 100.0);
+        QCOMPARE(fixture.controller.snapGuidesModel().size(), 2);
+
+        // Staying in Shift mode but leaving every capture zone must unfreeze
+        // the former target immediately.
+        fixture.controller.handleMediaMoveUpdated(
+            moving->mediaId(), 540, 350, true);
+        QVERIFY(fixture.controller.liveSnapDragMediaId().isEmpty());
+        QVERIFY(fixture.controller.snapGuidesModel().isEmpty());
+        fixture.controller.handleMediaMoveEnded(
+            moving->mediaId(), 540, 350, true);
+        QCOMPARE(moving->position(), QPointF(540, 350));
+    }
+
+    void uniformResizeSnapsInsideMatchingTarget()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        CanvasMedia* moving = fixture.document.addText({0, 0});
+        CanvasMedia* target = fixture.document.addText({0, 0});
+        QVERIFY(moving && target);
+        moving->setFitToTextEnabled(false);
+        moving->setBaseSize({400, 200});
+        moving->setPosition({100, 100});
+        target->setFitToTextEnabled(false);
+        target->setBaseSize({800, 400});
+        target->setPosition({100, 100});
+
+        fixture.controller.handleMediaResizeRequested(
+            moving->mediaId(), QStringLiteral("bottom-right"),
+            894, 496, true, false);
+        QCOMPARE(fixture.controller.liveResizeX(), 100.0);
+        QCOMPARE(fixture.controller.liveResizeY(), 100.0);
+        QCOMPARE(fixture.controller.liveResizeScale(), 2.0);
+        QCOMPARE(fixture.controller.snapGuidesModel().size(), 4);
+        fixture.controller.handleMediaResizeEnded(moving->mediaId());
+
+        QCOMPARE(moving->sceneRect(), target->sceneRect());
+        QVERIFY(fixture.controller.snapGuidesModel().isEmpty());
+    }
+
+    void uniformAxisResizeUsesZoomStableHysteresis()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        fixture.document.setScreens({ScreenInfo(0, 1000, 700, 0, 0, true)});
+        CanvasMedia* moving = fixture.document.addText({0, 0});
+        QVERIFY(moving);
+        moving->setFitToTextEnabled(false);
+        moving->setBaseSize({400, 200});
+        moving->setPosition({100, 100});
+
+        fixture.controller.handleMediaResizeRequested(
+            moving->mediaId(), QStringLiteral("right-mid"),
+            996, 200, true, false);
+        QCOMPARE(fixture.controller.liveResizeScale(), 2.25);
+        QVERIFY(!fixture.controller.snapGuidesModel().isEmpty());
+
+        // The 10 px acquisition radius has a 14 px release radius, preventing
+        // one-frame chatter at the boundary.
+        fixture.controller.handleMediaResizeRequested(
+            moving->mediaId(), QStringLiteral("right-mid"),
+            1012, 200, true, false);
+        QCOMPARE(fixture.controller.liveResizeScale(), 2.25);
+        fixture.controller.handleMediaResizeRequested(
+            moving->mediaId(), QStringLiteral("right-mid"),
+            1016, 200, true, false);
+        QVERIFY(qAbs(fixture.controller.liveResizeScale() - 2.29) < 0.0001);
+        QVERIFY(fixture.controller.snapGuidesModel().isEmpty());
+        fixture.controller.handleMediaResizeEnded(moving->mediaId());
+    }
+
+    void altResizeSnapsArbitraryDimensionsAndAxisEdges()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        CanvasMedia* moving = fixture.document.addText({0, 0});
+        CanvasMedia* target = fixture.document.addText({0, 0});
+        QVERIFY(moving && target);
+        moving->setFitToTextEnabled(false);
+        moving->setBaseSize({400, 200});
+        moving->setPosition({100, 100});
+        target->setFitToTextEnabled(false);
+        target->setBaseSize({700, 500});
+        target->setPosition({100, 100});
+
+        fixture.controller.handleMediaResizeRequested(
+            moving->mediaId(), QStringLiteral("bottom-right"),
+            795, 596, true, true);
+        QCOMPARE(fixture.controller.liveAltResizeX(), 100.0);
+        QCOMPARE(fixture.controller.liveAltResizeY(), 100.0);
+        QCOMPARE(fixture.controller.liveAltResizeWidth(), 700.0);
+        QCOMPARE(fixture.controller.liveAltResizeHeight(), 500.0);
+        QCOMPARE(fixture.controller.snapGuidesModel().size(), 4);
+        fixture.controller.handleMediaResizeEnded(moving->mediaId());
+        QCOMPARE(moving->sceneRect(), target->sceneRect());
+
+        moving->setBaseSize({400, 200});
+        moving->setPosition({100, 100});
+        target->setBaseSize({300, 300});
+        target->setPosition({1000, 50});
+        fixture.controller.handleMediaResizeRequested(
+            moving->mediaId(), QStringLiteral("right-mid"),
+            994, 200, true, true);
+        QCOMPARE(fixture.controller.liveAltResizeX(), 100.0);
+        QCOMPARE(fixture.controller.liveAltResizeWidth(), 900.0);
+        QCOMPARE(fixture.controller.liveAltResizeHeight(), 200.0);
+        QVERIFY(!fixture.controller.snapGuidesModel().isEmpty());
+        fixture.controller.handleMediaResizeEnded(moving->mediaId());
+        QCOMPARE(moving->sceneRect(), QRectF(100, 100, 900, 200));
+    }
+
     void snapAndDropImportUseDocumentCoordinates()
     {
         Fixture fixture;

@@ -17,8 +17,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace {
+constexpr qreal kSnapDistancePx = 10.0;
+constexpr qreal kCornerSnapDistancePx = 20.0;
+constexpr qreal kSnapReleaseFactor = 1.4;
+constexpr qreal kSnapEpsilon = 1e-5;
+
 QVariantMap guide(qreal x1, qreal y1, qreal x2, qreal y2)
 {
     return {{QStringLiteral("x1"), x1}, {QStringLiteral("y1"), y1},
@@ -35,6 +41,136 @@ QRectF allScreenBounds(const CanvasDocument* document)
         first = false;
     }
     return bounds;
+}
+
+struct ResizeHandleAxes {
+    bool left = false;
+    bool right = false;
+    bool top = false;
+    bool bottom = false;
+
+    bool movesX() const { return left || right; }
+    bool movesY() const { return top || bottom; }
+    bool corner() const { return movesX() && movesY(); }
+};
+
+ResizeHandleAxes resizeHandleAxes(const QString& handle)
+{
+    return {handle.contains(QLatin1String("left")),
+            handle.contains(QLatin1String("right")),
+            handle.contains(QLatin1String("top")),
+            handle.contains(QLatin1String("bottom"))};
+}
+
+QPointF movingHandlePoint(const QRectF& rect, const ResizeHandleAxes& axes)
+{
+    return {axes.left ? rect.left() : (axes.right ? rect.right() : rect.center().x()),
+            axes.top ? rect.top() : (axes.bottom ? rect.bottom() : rect.center().y())};
+}
+
+QPointF fixedHandlePoint(const QRectF& rect, const ResizeHandleAxes& axes)
+{
+    return {axes.left ? rect.right() : (axes.right ? rect.left() : rect.center().x()),
+            axes.top ? rect.bottom() : (axes.bottom ? rect.top() : rect.center().y())};
+}
+
+QRectF uniformRectFromFixedPoint(const QRectF& original,
+                                 const ResizeHandleAxes& axes,
+                                 qreal scale)
+{
+    const QPointF fixed = fixedHandlePoint(original, axes);
+    const qreal width = std::max<qreal>(1.0, original.width() * scale);
+    const qreal height = std::max<qreal>(1.0, original.height() * scale);
+    const qreal x = axes.left ? fixed.x() - width
+                              : (axes.right ? fixed.x() : fixed.x() - width / 2.0);
+    const qreal y = axes.top ? fixed.y() - height
+                             : (axes.bottom ? fixed.y() : fixed.y() - height / 2.0);
+    return {x, y, width, height};
+}
+
+QRectF uniformRectFromMovingCorner(const QRectF& original,
+                                   const ResizeHandleAxes& axes,
+                                   const QPointF& movingCorner,
+                                   qreal scale)
+{
+    const qreal width = std::max<qreal>(1.0, original.width() * scale);
+    const qreal height = std::max<qreal>(1.0, original.height() * scale);
+    return {axes.left ? movingCorner.x() : movingCorner.x() - width,
+            axes.top ? movingCorner.y() : movingCorner.y() - height,
+            width, height};
+}
+
+template<typename T>
+void sortAndDeduplicate(QVector<T>* values)
+{
+    if (!values) return;
+    std::sort(values->begin(), values->end());
+    values->erase(std::unique(values->begin(), values->end(), [](const T& a, const T& b) {
+        return std::abs(a - b) <= kSnapEpsilon;
+    }), values->end());
+}
+
+void sortAndDeduplicatePoints(QVector<QPointF>* values)
+{
+    if (!values) return;
+    std::sort(values->begin(), values->end(), [](const QPointF& a, const QPointF& b) {
+        return a.x() != b.x() ? a.x() < b.x() : a.y() < b.y();
+    });
+    values->erase(std::unique(values->begin(), values->end(), [](const QPointF& a,
+                                                                  const QPointF& b) {
+        return std::abs(a.x() - b.x()) <= kSnapEpsilon
+            && std::abs(a.y() - b.y()) <= kSnapEpsilon;
+    }), values->end());
+}
+
+bool nearestSnapValue(qreal proposed, const QVector<qreal>& targets,
+                      qreal threshold, qreal* snappedValue,
+                      qreal* snappedDistance = nullptr)
+{
+    qreal bestDistance = threshold + kSnapEpsilon;
+    qreal bestValue = proposed;
+    bool found = false;
+    for (qreal target : targets) {
+        const qreal distance = std::abs(target - proposed);
+        if (distance < bestDistance - kSnapEpsilon) {
+            bestDistance = distance;
+            bestValue = target;
+            found = true;
+        }
+    }
+    if (found && bestDistance <= threshold + kSnapEpsilon) {
+        if (snappedValue) *snappedValue = bestValue;
+        if (snappedDistance) *snappedDistance = bestDistance;
+        return true;
+    }
+    return false;
+}
+
+bool containsGuideAt(const QVariantList& guides, bool vertical, qreal position)
+{
+    for (const QVariant& value : guides) {
+        const QVariantMap existing = value.toMap();
+        const qreal x1 = existing.value(QStringLiteral("x1")).toReal();
+        const qreal y1 = existing.value(QStringLiteral("y1")).toReal();
+        const qreal x2 = existing.value(QStringLiteral("x2")).toReal();
+        const qreal y2 = existing.value(QStringLiteral("y2")).toReal();
+        if (vertical && std::abs(x1 - x2) <= kSnapEpsilon
+            && std::abs(x1 - position) <= kSnapEpsilon) return true;
+        if (!vertical && std::abs(y1 - y2) <= kSnapEpsilon
+            && std::abs(y1 - position) <= kSnapEpsilon) return true;
+    }
+    return false;
+}
+
+void appendGuide(QVariantList* guides, const QRectF& bounds,
+                 bool vertical, qreal position)
+{
+    if (!guides || containsGuideAt(*guides, vertical, position)) return;
+    if (vertical) {
+        guides->append(guide(position, bounds.top(), position, bounds.bottom()));
+    } else {
+        guides->append(guide(bounds.left(), position, bounds.right(), position));
+    }
 }
 }
 
@@ -356,7 +492,64 @@ void QuickCanvasController::handleMediaMoveStarted(const QString& mediaId,
 {
     m_dragMediaId = mediaId;
     m_lastMoveSnapped = false;
+    m_liveSnapDragMediaId.clear();
+    if (CanvasMedia* media = m_document ? m_document->mediaById(mediaId) : nullptr) {
+        rebuildSnapTargets(media);
+    } else {
+        clearSnapTargets();
+    }
     publishSnapGuides({});
+}
+
+void QuickCanvasController::rebuildSnapTargets(CanvasMedia* activeMedia)
+{
+    clearSnapTargets();
+    if (!m_document || !activeMedia) return;
+
+    for (const QRectF& screen : m_document->screenRects().values()) {
+        if (screen.isValid() && !screen.isEmpty()) m_snapTargetRects.append(screen);
+    }
+    for (CanvasMedia* media : m_document->media()) {
+        if (!media || media == activeMedia) continue;
+        const QRectF rect = media->sceneRect();
+        if (rect.isValid() && !rect.isEmpty()) m_snapTargetRects.append(rect);
+    }
+
+    std::sort(m_snapTargetRects.begin(), m_snapTargetRects.end(),
+              [](const QRectF& a, const QRectF& b) {
+        if (a.left() != b.left()) return a.left() < b.left();
+        if (a.top() != b.top()) return a.top() < b.top();
+        if (a.width() != b.width()) return a.width() < b.width();
+        return a.height() < b.height();
+    });
+
+    for (const QRectF& rect : m_snapTargetRects) {
+        m_snapEdgesX.append(rect.left());
+        m_snapEdgesX.append(rect.right());
+        m_snapEdgesY.append(rect.top());
+        m_snapEdgesY.append(rect.bottom());
+        m_snapCentersX.append(rect.center().x());
+        m_snapCentersY.append(rect.center().y());
+        m_snapCorners.append(rect.topLeft());
+        m_snapCorners.append(rect.topRight());
+        m_snapCorners.append(rect.bottomLeft());
+        m_snapCorners.append(rect.bottomRight());
+    }
+    sortAndDeduplicate(&m_snapEdgesX);
+    sortAndDeduplicate(&m_snapEdgesY);
+    sortAndDeduplicate(&m_snapCentersX);
+    sortAndDeduplicate(&m_snapCentersY);
+    sortAndDeduplicatePoints(&m_snapCorners);
+}
+
+void QuickCanvasController::clearSnapTargets()
+{
+    m_snapTargetRects.clear();
+    m_snapEdgesX.clear();
+    m_snapEdgesY.clear();
+    m_snapCentersX.clear();
+    m_snapCentersY.clear();
+    m_snapCorners.clear();
 }
 
 QPointF QuickCanvasController::snappedPosition(CanvasMedia* media,
@@ -364,48 +557,157 @@ QPointF QuickCanvasController::snappedPosition(CanvasMedia* media,
                                                QVariantList* guides) const
 {
     if (!media || !m_document) return proposed;
-    const qreal threshold = 8.0 / currentViewScale();
+    const qreal viewScale = std::max<qreal>(0.0001, currentViewScale());
+    const qreal edgeThreshold = kSnapDistancePx / viewScale;
+    const qreal cornerThreshold = kCornerSnapDistancePx / viewScale;
     const QSizeF size(media->sceneRect().size());
-    qreal bestDx = threshold + 1.0;
-    qreal bestDy = threshold + 1.0;
-    qreal outX = proposed.x();
-    qreal outY = proposed.y();
+    const QRectF proposedRect(proposed, size);
+    QRectF bounds = allScreenBounds(m_document).united(proposedRect);
+    for (const QRectF& target : m_snapTargetRects) bounds = bounds.united(target);
+    bounds = bounds.adjusted(-1000.0 / viewScale, -1000.0 / viewScale,
+                              1000.0 / viewScale, 1000.0 / viewScale);
+
+    // Matching dimensions and position form an atomic full-box snap. Iterating
+    // real rectangles is linear and avoids the old combinatorial edge-pair scan.
+    const qreal sizeTolerance = std::max<qreal>(0.75, edgeThreshold * 0.15);
+    const QRectF* bestBox = nullptr;
+    qreal bestBoxError = std::numeric_limits<qreal>::max();
+    for (const QRectF& target : m_snapTargetRects) {
+        if (std::abs(target.width() - size.width()) > sizeTolerance
+            || std::abs(target.height() - size.height()) > sizeTolerance) continue;
+        const qreal dx = target.left() - proposedRect.left();
+        const qreal dy = target.top() - proposedRect.top();
+        if (std::abs(dx) > edgeThreshold || std::abs(dy) > edgeThreshold) continue;
+        const qreal error = std::hypot(dx, dy);
+        if (error < bestBoxError) {
+            bestBoxError = error;
+            bestBox = &target;
+        }
+    }
+    if (bestBox) {
+        appendGuide(guides, bounds, true, bestBox->left());
+        appendGuide(guides, bounds, true, bestBox->right());
+        appendGuide(guides, bounds, false, bestBox->top());
+        appendGuide(guides, bounds, false, bestBox->bottom());
+        return bestBox->topLeft();
+    }
+
+    // Corners are intentionally considered before independent borders. This
+    // prevents a near-corner gesture from being captured by only one axis.
+    const QPointF movingCorners[] = {proposedRect.topLeft(), proposedRect.topRight(),
+                                     proposedRect.bottomLeft(), proposedRect.bottomRight()};
+    bool cornerFound = false;
+    qreal bestCornerError = std::numeric_limits<qreal>::max();
+    QPointF bestCornerDelta;
+    for (const QPointF& movingCorner : movingCorners) {
+        for (const QPointF& targetCorner : m_snapCorners) {
+            const qreal dx = targetCorner.x() - movingCorner.x();
+            const qreal dy = targetCorner.y() - movingCorner.y();
+            if (std::abs(dx) > cornerThreshold || std::abs(dy) > cornerThreshold) continue;
+            const qreal error = std::hypot(dx, dy);
+            if (error < bestCornerError) {
+                bestCornerError = error;
+                bestCornerDelta = {dx, dy};
+                cornerFound = true;
+            }
+        }
+    }
+    if (cornerFound) {
+        const QRectF snappedRect(proposed + bestCornerDelta, size);
+        const qreal xValues[] = {snappedRect.left(), snappedRect.center().x(),
+                                 snappedRect.right()};
+        const qreal yValues[] = {snappedRect.top(), snappedRect.center().y(),
+                                 snappedRect.bottom()};
+        for (qreal source : xValues) {
+            for (qreal target : m_snapEdgesX) {
+                if (std::abs(source - target) <= kSnapEpsilon)
+                    appendGuide(guides, bounds, true, target);
+            }
+            for (qreal target : m_snapCentersX) {
+                if (std::abs(source - target) <= kSnapEpsilon)
+                    appendGuide(guides, bounds, true, target);
+            }
+        }
+        for (qreal source : yValues) {
+            for (qreal target : m_snapEdgesY) {
+                if (std::abs(source - target) <= kSnapEpsilon)
+                    appendGuide(guides, bounds, false, target);
+            }
+            for (qreal target : m_snapCentersY) {
+                if (std::abs(source - target) <= kSnapEpsilon)
+                    appendGuide(guides, bounds, false, target);
+            }
+        }
+        return snappedRect.topLeft();
+    }
+
+    qreal bestDx = edgeThreshold + 1.0;
+    qreal bestDy = edgeThreshold + 1.0;
     qreal guideX = 0.0;
     qreal guideY = 0.0;
-    QList<QRectF> targets = m_document->screenRects().values();
-    for (CanvasMedia* other : m_document->media()) {
-        if (other != media) targets.append(other->sceneRect());
-    }
-    for (const QRectF& target : targets) {
-        const qreal sourceX[] = {proposed.x(), proposed.x() + size.width() / 2.0,
-                                 proposed.x() + size.width()};
-        const qreal targetX[] = {target.left(), target.center().x(), target.right()};
-        for (qreal sx : sourceX) for (qreal tx : targetX) {
-            const qreal delta = tx - sx;
-            if (std::abs(delta) < std::abs(bestDx)) {
-                bestDx = delta; outX = proposed.x() + delta; guideX = tx;
+    const qreal sourceX[] = {proposedRect.left(), proposedRect.center().x(),
+                             proposedRect.right()};
+    const qreal sourceY[] = {proposedRect.top(), proposedRect.center().y(),
+                             proposedRect.bottom()};
+    auto considerX = [&](qreal target) {
+        for (qreal source : sourceX) {
+            const qreal delta = target - source;
+            if (std::abs(delta) < std::abs(bestDx) - kSnapEpsilon) {
+                bestDx = delta;
+                guideX = target;
             }
         }
-        const qreal sourceY[] = {proposed.y(), proposed.y() + size.height() / 2.0,
-                                 proposed.y() + size.height()};
-        const qreal targetY[] = {target.top(), target.center().y(), target.bottom()};
-        for (qreal sy : sourceY) for (qreal ty : targetY) {
-            const qreal delta = ty - sy;
-            if (std::abs(delta) < std::abs(bestDy)) {
-                bestDy = delta; outY = proposed.y() + delta; guideY = ty;
+    };
+    auto considerY = [&](qreal target) {
+        for (qreal source : sourceY) {
+            const qreal delta = target - source;
+            if (std::abs(delta) < std::abs(bestDy) - kSnapEpsilon) {
+                bestDy = delta;
+                guideY = target;
             }
         }
+    };
+    for (qreal target : m_snapEdgesX) considerX(target);
+    for (qreal target : m_snapCentersX) considerX(target);
+    for (qreal target : m_snapEdgesY) considerY(target);
+    for (qreal target : m_snapCentersY) considerY(target);
+
+    const bool snapX = std::abs(bestDx) <= edgeThreshold;
+    const bool snapY = std::abs(bestDy) <= edgeThreshold;
+    const QRectF snappedRect(
+        {proposed.x() + (snapX ? bestDx : 0.0),
+         proposed.y() + (snapY ? bestDy : 0.0)}, size);
+    if (snapX) {
+        const qreal snappedSourceX[] = {snappedRect.left(), snappedRect.center().x(),
+                                        snappedRect.right()};
+        for (qreal source : snappedSourceX) {
+            for (qreal target : m_snapEdgesX) {
+                if (std::abs(source - target) <= kSnapEpsilon)
+                    appendGuide(guides, bounds, true, target);
+            }
+            for (qreal target : m_snapCentersX) {
+                if (std::abs(source - target) <= kSnapEpsilon)
+                    appendGuide(guides, bounds, true, target);
+            }
+        }
+        appendGuide(guides, bounds, true, guideX);
     }
-    const QRectF bounds = allScreenBounds(m_document).adjusted(-10000, -10000, 10000, 10000);
-    if (std::abs(bestDx) <= threshold && guides) {
-        guides->append(guide(guideX, bounds.top(), guideX, bounds.bottom()));
+    if (snapY) {
+        const qreal snappedSourceY[] = {snappedRect.top(), snappedRect.center().y(),
+                                        snappedRect.bottom()};
+        for (qreal source : snappedSourceY) {
+            for (qreal target : m_snapEdgesY) {
+                if (std::abs(source - target) <= kSnapEpsilon)
+                    appendGuide(guides, bounds, false, target);
+            }
+            for (qreal target : m_snapCentersY) {
+                if (std::abs(source - target) <= kSnapEpsilon)
+                    appendGuide(guides, bounds, false, target);
+            }
+        }
+        appendGuide(guides, bounds, false, guideY);
     }
-    if (std::abs(bestDy) <= threshold && guides) {
-        guides->append(guide(bounds.left(), guideY, bounds.right(), guideY));
-    }
-    if (std::abs(bestDx) > threshold) outX = proposed.x();
-    if (std::abs(bestDy) > threshold) outY = proposed.y();
-    return {outX, outY};
+    return snappedRect.topLeft();
 }
 
 void QuickCanvasController::handleMediaMoveUpdated(const QString& mediaId,
@@ -413,6 +715,10 @@ void QuickCanvasController::handleMediaMoveUpdated(const QString& mediaId,
 {
     CanvasMedia* media = m_document ? m_document->mediaById(mediaId) : nullptr;
     if (!media || editsLocked()) return;
+    if (m_dragMediaId != mediaId) {
+        m_dragMediaId = mediaId;
+        rebuildSnapTargets(media);
+    }
     if (!snap) {
         m_lastMoveSnapped = false;
         m_liveSnapDragMediaId.clear();
@@ -427,6 +733,10 @@ void QuickCanvasController::handleMediaMoveUpdated(const QString& mediaId,
         m_liveSnapDragX = m_lastSnappedPosition.x();
         m_liveSnapDragY = m_lastSnappedPosition.y();
         emit presentationChanged();
+    } else {
+        // Leaving a target while Shift remains pressed must immediately release
+        // the previous frozen live position.
+        m_liveSnapDragMediaId.clear();
     }
     publishSnapGuides(guides);
 }
@@ -442,6 +752,7 @@ void QuickCanvasController::handleMediaMoveEnded(const QString& mediaId,
     m_dragMediaId.clear();
     m_lastMoveSnapped = false;
     m_liveSnapDragMediaId.clear();
+    clearSnapTargets();
     publishSnapGuides({});
     publishMedia();
 }
@@ -483,8 +794,16 @@ QRectF QuickCanvasController::resizedRect(const QRectF& original,
         const qreal ratio = original.width() / original.height();
         qreal width = rect.width();
         qreal height = rect.height();
-        if (moveLeft || moveRight) height = width / ratio;
-        else width = height * ratio;
+        if ((moveLeft || moveRight) && (moveTop || moveBottom)) {
+            const qreal scale = std::max(width / original.width(),
+                                         height / original.height());
+            width = std::max<qreal>(1.0, original.width() * scale);
+            height = std::max<qreal>(1.0, original.height() * scale);
+        } else if (moveLeft || moveRight) {
+            height = width / ratio;
+        } else {
+            width = height * ratio;
+        }
         QPointF origin = fixed;
         if (moveLeft) origin.rx() -= width;
         if (moveTop) origin.ry() -= height;
@@ -495,21 +814,375 @@ QRectF QuickCanvasController::resizedRect(const QRectF& original,
     return rect;
 }
 
+void QuickCanvasController::resetResizeSnapState()
+{
+    m_resizeSnapBoxActive = false;
+    m_resizeSnapBox = {};
+    m_resizeSnapCornerActive = false;
+    m_resizeSnapCorner = {};
+    m_resizeSnapXActive = false;
+    m_resizeSnapX = 0.0;
+    m_resizeSnapYActive = false;
+    m_resizeSnapY = 0.0;
+}
+
+void QuickCanvasController::appendAlignedResizeGuides(
+    const QRectF& rect, bool snappedX, bool snappedY, QVariantList* guides) const
+{
+    if (!guides || (!snappedX && !snappedY)) return;
+
+    // When the result exactly occupies a target, expose the whole box rather
+    // than only the edge which caused the capture.
+    bool showX = snappedX;
+    bool showY = snappedY;
+    for (const QRectF& target : m_snapTargetRects) {
+        if (std::abs(rect.left() - target.left()) <= kSnapEpsilon
+            && std::abs(rect.right() - target.right()) <= kSnapEpsilon
+            && std::abs(rect.top() - target.top()) <= kSnapEpsilon
+            && std::abs(rect.bottom() - target.bottom()) <= kSnapEpsilon) {
+            showX = true;
+            showY = true;
+            break;
+        }
+    }
+
+    const qreal viewScale = std::max<qreal>(0.0001, currentViewScale());
+    QRectF bounds = allScreenBounds(m_document).united(rect);
+    for (const QRectF& target : m_snapTargetRects) bounds = bounds.united(target);
+    bounds = bounds.adjusted(-1000.0 / viewScale, -1000.0 / viewScale,
+                              1000.0 / viewScale, 1000.0 / viewScale);
+
+    if (showX) {
+        const qreal sourceValues[] = {rect.left(), rect.right()};
+        for (qreal source : sourceValues) {
+            for (qreal target : m_snapEdgesX) {
+                if (std::abs(source - target) <= kSnapEpsilon)
+                    appendGuide(guides, bounds, true, target);
+            }
+        }
+    }
+    if (showY) {
+        const qreal sourceValues[] = {rect.top(), rect.bottom()};
+        for (qreal source : sourceValues) {
+            for (qreal target : m_snapEdgesY) {
+                if (std::abs(source - target) <= kSnapEpsilon)
+                    appendGuide(guides, bounds, false, target);
+            }
+        }
+    }
+}
+
+QRectF QuickCanvasController::snappedResizeRect(
+    const QRectF& proposed, const QRectF& original, const QString& handle,
+    bool altPressed, QVariantList* guides)
+{
+    const ResizeHandleAxes axes = resizeHandleAxes(handle);
+    if ((!axes.movesX() && !axes.movesY()) || original.isEmpty()
+        || m_snapTargetRects.isEmpty()) return proposed;
+
+    const qreal viewScale = std::max<qreal>(0.0001, currentViewScale());
+    const qreal edgeThreshold = kSnapDistancePx / viewScale;
+    const qreal edgeRelease = edgeThreshold * kSnapReleaseFactor;
+    const qreal cornerThreshold = kCornerSnapDistancePx / viewScale;
+    const qreal cornerRelease = cornerThreshold * kSnapReleaseFactor;
+    const qreal sizeTolerance = std::max<qreal>(0.75, edgeThreshold * 0.15);
+    const QPointF proposedMoving = movingHandlePoint(proposed, axes);
+
+    auto boxStillCaptured = [&](const QRectF& box, qreal releaseDistance) {
+        const QPointF boxMoving = movingHandlePoint(box, axes);
+        if (axes.movesX()
+            && std::abs(proposedMoving.x() - boxMoving.x()) > releaseDistance) return false;
+        if (axes.movesY()
+            && std::abs(proposedMoving.y() - boxMoving.y()) > releaseDistance) return false;
+        return true;
+    };
+
+    if (m_resizeSnapBoxActive) {
+        if (boxStillCaptured(m_resizeSnapBox, cornerRelease)) {
+            appendAlignedResizeGuides(m_resizeSnapBox, true, true, guides);
+            return m_resizeSnapBox;
+        }
+        m_resizeSnapBoxActive = false;
+        m_resizeSnapBox = {};
+    }
+
+    // Full-box fitting works for free corner resize and for every uniform
+    // handle when the target shares the media's aspect ratio.
+    const QRectF* bestBox = nullptr;
+    qreal bestBoxError = std::numeric_limits<qreal>::max();
+    for (const QRectF& target : m_snapTargetRects) {
+        bool compatible = false;
+        if (altPressed) {
+            compatible = axes.corner()
+                || (axes.movesX()
+                    && std::abs(proposed.top() - target.top()) <= sizeTolerance
+                    && std::abs(proposed.bottom() - target.bottom()) <= sizeTolerance)
+                || (axes.movesY()
+                    && std::abs(proposed.left() - target.left()) <= sizeTolerance
+                    && std::abs(proposed.right() - target.right()) <= sizeTolerance);
+        } else {
+            const qreal widthScale = target.width()
+                / std::max<qreal>(1.0, original.width());
+            const qreal heightScale = target.height()
+                / std::max<qreal>(1.0, original.height());
+            compatible = std::abs(widthScale - heightScale)
+                * std::max(original.width(), original.height()) <= sizeTolerance;
+        }
+        if (!compatible) continue;
+        if (std::abs(proposed.left() - target.left()) > edgeThreshold
+            || std::abs(proposed.right() - target.right()) > edgeThreshold
+            || std::abs(proposed.top() - target.top()) > edgeThreshold
+            || std::abs(proposed.bottom() - target.bottom()) > edgeThreshold) continue;
+        const qreal error = std::hypot(proposed.left() - target.left(),
+                                       proposed.top() - target.top())
+            + std::hypot(proposed.right() - target.right(),
+                         proposed.bottom() - target.bottom());
+        if (error < bestBoxError) {
+            bestBoxError = error;
+            bestBox = &target;
+        }
+    }
+    if (bestBox) {
+        m_resizeSnapBoxActive = true;
+        m_resizeSnapBox = *bestBox;
+        m_resizeSnapCornerActive = false;
+        m_resizeSnapXActive = false;
+        m_resizeSnapYActive = false;
+        appendAlignedResizeGuides(*bestBox, true, true, guides);
+        return *bestBox;
+    }
+
+    auto resolveAxisLock = [](qreal rawValue, const QVector<qreal>& targets,
+                              qreal acquireDistance, qreal releaseDistance,
+                              bool* active, qreal* lockedValue,
+                              qreal* distance) {
+        if (*active) {
+            const qreal lockedDistance = std::abs(rawValue - *lockedValue);
+            if (lockedDistance <= releaseDistance) {
+                if (distance) *distance = lockedDistance;
+                return true;
+            }
+            *active = false;
+        }
+        qreal candidate = rawValue;
+        qreal candidateDistance = 0.0;
+        if (!nearestSnapValue(rawValue, targets, acquireDistance,
+                              &candidate, &candidateDistance)) return false;
+        *active = true;
+        *lockedValue = candidate;
+        if (distance) *distance = candidateDistance;
+        return true;
+    };
+
+    if (altPressed) {
+        QRectF result = proposed;
+        if (axes.corner()) {
+            bool useCorner = false;
+            if (m_resizeSnapCornerActive) {
+                const qreal dx = std::abs(proposedMoving.x() - m_resizeSnapCorner.x());
+                const qreal dy = std::abs(proposedMoving.y() - m_resizeSnapCorner.y());
+                useCorner = dx <= cornerRelease && dy <= cornerRelease;
+                if (!useCorner) m_resizeSnapCornerActive = false;
+            }
+            if (!m_resizeSnapCornerActive) {
+                qreal bestError = std::numeric_limits<qreal>::max();
+                QPointF bestTarget;
+                for (const QPointF& target : m_snapCorners) {
+                    const qreal dx = std::abs(proposedMoving.x() - target.x());
+                    const qreal dy = std::abs(proposedMoving.y() - target.y());
+                    if (dx > cornerThreshold || dy > cornerThreshold) continue;
+                    const qreal error = std::hypot(dx, dy);
+                    if (error < bestError) {
+                        bestError = error;
+                        bestTarget = target;
+                    }
+                }
+                if (bestError < std::numeric_limits<qreal>::max()) {
+                    m_resizeSnapCornerActive = true;
+                    m_resizeSnapCorner = bestTarget;
+                    useCorner = true;
+                }
+            }
+            if (useCorner) {
+                if (axes.left) result.setLeft(m_resizeSnapCorner.x());
+                else result.setRight(m_resizeSnapCorner.x());
+                if (axes.top) result.setTop(m_resizeSnapCorner.y());
+                else result.setBottom(m_resizeSnapCorner.y());
+                m_resizeSnapXActive = false;
+                m_resizeSnapYActive = false;
+                appendAlignedResizeGuides(result, true, true, guides);
+                return result;
+            }
+        } else {
+            m_resizeSnapCornerActive = false;
+        }
+
+        bool snappedX = false;
+        bool snappedY = false;
+        if (axes.movesX()) {
+            snappedX = resolveAxisLock(proposedMoving.x(), m_snapEdgesX,
+                                        edgeThreshold, edgeRelease,
+                                        &m_resizeSnapXActive, &m_resizeSnapX, nullptr);
+            if (snappedX) {
+                if (axes.left) result.setLeft(m_resizeSnapX);
+                else result.setRight(m_resizeSnapX);
+            }
+        } else {
+            m_resizeSnapXActive = false;
+        }
+        if (axes.movesY()) {
+            snappedY = resolveAxisLock(proposedMoving.y(), m_snapEdgesY,
+                                        edgeThreshold, edgeRelease,
+                                        &m_resizeSnapYActive, &m_resizeSnapY, nullptr);
+            if (snappedY) {
+                if (axes.top) result.setTop(m_resizeSnapY);
+                else result.setBottom(m_resizeSnapY);
+            }
+        } else {
+            m_resizeSnapYActive = false;
+        }
+        appendAlignedResizeGuides(result, snappedX, snappedY, guides);
+        return result;
+    }
+
+    // Uniform corner snapping preserves the historical priority and lock: a
+    // captured target corner owns both axes until the pointer exits its larger
+    // release zone.
+    const QPointF fixed = fixedHandlePoint(original, axes);
+    const qreal minimumScale = std::max(1.0 / std::max<qreal>(1.0, original.width()),
+                                        1.0 / std::max<qreal>(1.0, original.height()));
+    if (axes.corner()) {
+        bool useCorner = false;
+        if (m_resizeSnapCornerActive) {
+            const qreal dx = std::abs(proposedMoving.x() - m_resizeSnapCorner.x());
+            const qreal dy = std::abs(proposedMoving.y() - m_resizeSnapCorner.y());
+            useCorner = dx <= cornerRelease && dy <= cornerRelease;
+            if (!useCorner) m_resizeSnapCornerActive = false;
+        }
+        if (!m_resizeSnapCornerActive) {
+            qreal bestError = std::numeric_limits<qreal>::max();
+            QPointF bestTarget;
+            for (const QPointF& target : m_snapCorners) {
+                const qreal dx = std::abs(proposedMoving.x() - target.x());
+                const qreal dy = std::abs(proposedMoving.y() - target.y());
+                if (dx > cornerThreshold || dy > cornerThreshold) continue;
+                const qreal error = std::hypot(dx, dy);
+                if (error < bestError) {
+                    bestError = error;
+                    bestTarget = target;
+                }
+            }
+            if (bestError < std::numeric_limits<qreal>::max()) {
+                m_resizeSnapCornerActive = true;
+                m_resizeSnapCorner = bestTarget;
+                useCorner = true;
+            }
+        }
+        if (useCorner) {
+            const qreal scale = std::max({minimumScale,
+                std::abs(m_resizeSnapCorner.x() - fixed.x())
+                    / std::max<qreal>(1.0, original.width()),
+                std::abs(m_resizeSnapCorner.y() - fixed.y())
+                    / std::max<qreal>(1.0, original.height())});
+            const QRectF result = uniformRectFromMovingCorner(
+                original, axes, m_resizeSnapCorner, scale);
+            m_resizeSnapXActive = false;
+            m_resizeSnapYActive = false;
+            appendAlignedResizeGuides(result, true, true, guides);
+            return result;
+        }
+    } else {
+        m_resizeSnapCornerActive = false;
+    }
+
+    bool snappedX = false;
+    bool snappedY = false;
+    if (axes.corner() && m_resizeSnapXActive) {
+        snappedX = resolveAxisLock(proposedMoving.x(), m_snapEdgesX,
+                                    edgeThreshold, edgeRelease,
+                                    &m_resizeSnapXActive, &m_resizeSnapX, nullptr);
+    } else if (axes.corner() && m_resizeSnapYActive) {
+        snappedY = resolveAxisLock(proposedMoving.y(), m_snapEdgesY,
+                                    edgeThreshold, edgeRelease,
+                                    &m_resizeSnapYActive, &m_resizeSnapY, nullptr);
+    }
+    if (axes.corner() && !snappedX && !snappedY) {
+        qreal candidateX = proposedMoving.x();
+        qreal candidateY = proposedMoving.y();
+        qreal distanceX = 0.0;
+        qreal distanceY = 0.0;
+        const bool hasX = nearestSnapValue(proposedMoving.x(), m_snapEdgesX,
+                                           edgeThreshold, &candidateX, &distanceX);
+        const bool hasY = nearestSnapValue(proposedMoving.y(), m_snapEdgesY,
+                                           edgeThreshold, &candidateY, &distanceY);
+        if (hasX && (!hasY || distanceX <= distanceY)) {
+            m_resizeSnapXActive = true;
+            m_resizeSnapX = candidateX;
+            snappedX = true;
+        } else if (hasY) {
+            m_resizeSnapYActive = true;
+            m_resizeSnapY = candidateY;
+            snappedY = true;
+        }
+    } else if (!axes.corner() && axes.movesX()) {
+        snappedX = resolveAxisLock(proposedMoving.x(), m_snapEdgesX,
+                                    edgeThreshold, edgeRelease,
+                                    &m_resizeSnapXActive, &m_resizeSnapX, nullptr);
+        m_resizeSnapYActive = false;
+    } else if (!axes.corner() && axes.movesY()) {
+        snappedY = resolveAxisLock(proposedMoving.y(), m_snapEdgesY,
+                                    edgeThreshold, edgeRelease,
+                                    &m_resizeSnapYActive, &m_resizeSnapY, nullptr);
+        m_resizeSnapXActive = false;
+    }
+
+    qreal scale = 1.0;
+    if (snappedX) {
+        scale = std::max(minimumScale,
+                         std::abs(m_resizeSnapX - fixed.x())
+                             / std::max<qreal>(1.0, original.width()));
+    } else if (snappedY) {
+        scale = std::max(minimumScale,
+                         std::abs(m_resizeSnapY - fixed.y())
+                             / std::max<qreal>(1.0, original.height()));
+    } else {
+        return proposed;
+    }
+    const QRectF result = uniformRectFromFixedPoint(original, axes, scale);
+    appendAlignedResizeGuides(result, snappedX, snappedY, guides);
+    return result;
+}
+
 void QuickCanvasController::handleMediaResizeRequested(
     const QString& mediaId, const QString& handleId, qreal x, qreal y,
     bool snap, bool altPressed)
 {
-    Q_UNUSED(snap)
     CanvasMedia* media = m_document ? m_document->mediaById(mediaId) : nullptr;
     if (!media || editsLocked()) return;
     if (m_resizeMediaId != mediaId) {
         m_resizeMediaId = mediaId;
+        m_resizeHandleId = handleId;
         m_resizeOriginalRect = media->sceneRect();
         m_resizeOriginalScale = std::max<qreal>(0.0001, media->scale());
+        m_resizeSnapModeAlt = altPressed;
+        resetResizeSnapState();
+        rebuildSnapTargets(media);
+    } else if (m_resizeHandleId != handleId || m_resizeSnapModeAlt != altPressed) {
+        m_resizeHandleId = handleId;
+        m_resizeSnapModeAlt = altPressed;
+        resetResizeSnapState();
     }
     m_pendingResizeAlt = altPressed;
     m_pendingResizeRect = resizedRect(m_resizeOriginalRect, handleId, {x, y},
                                       !altPressed);
+    QVariantList guides;
+    if (snap) {
+        m_pendingResizeRect = snappedResizeRect(m_pendingResizeRect,
+                                                m_resizeOriginalRect,
+                                                handleId, altPressed, &guides);
+    } else {
+        resetResizeSnapState();
+    }
     if (altPressed) {
         // Free resize changes the text container. Fitted geometry is no longer
         // authoritative, but the existing uniform scale remains the user's
@@ -534,7 +1207,7 @@ void QuickCanvasController::handleMediaResizeRequested(
         m_liveResizeRect = m_pendingResizeRect;
         m_liveResizeScale = scale;
     }
-    emit presentationChanged();
+    publishSnapGuides(guides);
 }
 
 void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId)
@@ -569,10 +1242,15 @@ void QuickCanvasController::clearLiveResize()
     m_liveAltResizeRect = {};
     m_liveAltResizeScale = 1.0;
     m_resizeMediaId.clear();
+    m_resizeHandleId.clear();
     m_resizeOriginalRect = {};
     m_resizeOriginalScale = 1.0;
     m_pendingResizeRect = {};
     m_pendingResizeAlt = false;
+    m_resizeSnapModeAlt = false;
+    resetResizeSnapState();
+    clearSnapTargets();
+    m_snapGuidesModel.clear();
     emit presentationChanged();
 }
 

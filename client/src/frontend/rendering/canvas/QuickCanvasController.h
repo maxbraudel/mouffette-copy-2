@@ -10,6 +10,7 @@
 #include <QSize>
 #include <QVariantList>
 #include <QVariantMap>
+#include <QVector>
 
 class CanvasMedia;
 class MediaListModel;
@@ -188,6 +189,14 @@ private:
     QPointF mapViewPointToScene(const QPointF& viewPoint) const;
     QPointF snappedPosition(CanvasMedia* media, const QPointF& proposed,
                             QVariantList* guides) const;
+    QRectF snappedResizeRect(const QRectF& proposed, const QRectF& original,
+                             const QString& handle, bool altPressed,
+                             QVariantList* guides);
+    void rebuildSnapTargets(CanvasMedia* activeMedia);
+    void clearSnapTargets();
+    void resetResizeSnapState();
+    void appendAlignedResizeGuides(const QRectF& rect, bool snappedX,
+                                   bool snappedY, QVariantList* guides) const;
     static QRectF resizedRect(const QRectF& original, const QString& handle,
                               const QPointF& movingPoint, bool uniform);
     void clearLiveResize();
@@ -205,10 +214,26 @@ private:
     QPointF m_lastSnappedPosition;
     bool m_lastMoveSnapped = false;
     QString m_resizeMediaId;
+    QString m_resizeHandleId;
     QRectF m_resizeOriginalRect;
     qreal m_resizeOriginalScale = 1.0;
     QRectF m_pendingResizeRect;
     bool m_pendingResizeAlt = false;
+    QVector<QRectF> m_snapTargetRects;
+    QVector<qreal> m_snapEdgesX;
+    QVector<qreal> m_snapEdgesY;
+    QVector<qreal> m_snapCentersX;
+    QVector<qreal> m_snapCentersY;
+    QVector<QPointF> m_snapCorners;
+    bool m_resizeSnapModeAlt = false;
+    bool m_resizeSnapBoxActive = false;
+    QRectF m_resizeSnapBox;
+    bool m_resizeSnapCornerActive = false;
+    QPointF m_resizeSnapCorner;
+    bool m_resizeSnapXActive = false;
+    qreal m_resizeSnapX = 0.0;
+    bool m_resizeSnapYActive = false;
+    qreal m_resizeSnapY = 0.0;
     QString m_dropPath;
     QSize m_dropNativeSize;
     bool m_dropVideo = false;
