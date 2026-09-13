@@ -1,6 +1,7 @@
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/SceneRunCoordinator.h"
 #include "backend/security/DeviceIdentityStore.h"
+#include "MediaFormatContract.h"
 #include <QJsonArray>
 #include <QDebug>
 #include <QUrlQuery>
@@ -95,14 +96,6 @@ bool isUploadSha256(const QString& value) {
     return pattern.match(value).hasMatch();
 }
 
-bool isAllowedUploadExtension(const QString& value) {
-    static const QSet<QString> extensions = {
-        QStringLiteral("png"), QStringLiteral("jpg"), QStringLiteral("jpeg"),
-        QStringLiteral("webp"), QStringLiteral("avif"), QStringLiteral("mp4")
-    };
-    return extensions.contains(value);
-}
-
 bool isSafeJsonInteger(double value, double minimum, double maximum) {
     return std::isfinite(value) && std::floor(value) == value
         && value >= minimum && value <= maximum;
@@ -158,7 +151,8 @@ bool isValidUploadManifest(const QJsonArray& files) {
             || !isUploadSha256(fileId) || fileId != digest
             || name.isEmpty() || name.size() > 255
             || name.contains(QLatin1Char('/')) || name.contains(QLatin1Char('\\'))
-            || extension != extension.toLower() || !isAllowedUploadExtension(extension)
+            || extension != extension.toLower()
+            || !MediaFormatContract::isCanonicalMediaExtension(extension)
             || filenameExtension != extension
             || !isSafeJsonInteger(size, 1.0, 16.0 * 1024 * 1024 * 1024)
             || ids.isEmpty() || ids.size() > 4096

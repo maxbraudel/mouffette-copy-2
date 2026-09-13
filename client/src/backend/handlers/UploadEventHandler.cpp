@@ -80,7 +80,7 @@ void UploadEventHandler::onUploadButtonClicked()
     QList<ResizableMediaBase*> mediaItemsToRemove;
     QSet<QString> processedFileIds;
     QSet<QString> currentFileIds;
-    QStringList unsupportedMediaNames;
+    QStringList rejectedMedia;
 
     FileManager* fileManager = m_mainWindow->getFileManager();
     const QList<ResizableMediaBase*> mediaItems = canvas->enumerateMediaItems();
@@ -98,12 +98,17 @@ void UploadEventHandler::onUploadButtonClicked()
             continue;
         }
 
-        const MediaFilePolicy::Kind mediaKind = MediaFilePolicy::classifyLocalFile(fi.absoluteFilePath());
+        const MediaFilePolicy::ValidationResult validation =
+            MediaFilePolicy::validateLocalFile(fi.absoluteFilePath());
+        const MediaFilePolicy::Kind mediaKind = validation.kind;
         const bool accepted = media->isVideoMedia()
             ? mediaKind == MediaFilePolicy::Kind::Mp4Video
             : mediaKind == MediaFilePolicy::Kind::Image;
         if (!accepted) {
-            unsupportedMediaNames.append(fi.fileName());
+            rejectedMedia.append(QStringLiteral("%1 — %2")
+                                     .arg(fi.fileName(),
+                                          MediaFilePolicy::validationErrorDescription(
+                                              validation)));
             continue;
         }
 
@@ -160,9 +165,9 @@ void UploadEventHandler::onUploadButtonClicked()
         TOAST_WARNING(QString("%1 media item(s) removed - source files not found").arg(mediaItemsToRemove.size()));
     }
 
-    if (!unsupportedMediaNames.isEmpty()) {
-        TOAST_ERROR(QString("Upload blocked: only MP4 video files are supported (%1)")
-                        .arg(unsupportedMediaNames.join(QStringLiteral(", "))), 5000);
+    if (!rejectedMedia.isEmpty()) {
+        TOAST_ERROR(QStringLiteral("Upload blocked: %1")
+                        .arg(rejectedMedia.join(QStringLiteral("; "))), 5000);
         return;
     }
 

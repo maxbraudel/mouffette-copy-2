@@ -54,6 +54,7 @@ private slots:
     void interruptedUploadRemovesOnlyPartialStagingAndCanRetry();
     void v3UploadTeardownQuarantinesAndDropsMappings();
     void completedUploadAckIsReplayableAndInventoryBound();
+    void receiverAcceptsRealWebpUpload();
     void receiverRejectsMp4WhoseMediaSamplesCannotDecode();
     void leaseExpiryBulkTeardownIncludesValidatedScopes();
     void terminalSignalsWaitForRendererBarrierBeforeQuarantine();
@@ -856,6 +857,67 @@ void UploadRemovalSecurityTest::completedUploadAckIsReplayableAndInventoryBound(
     QCOMPARE(countReplies(QStringLiteral("upload_finished")), 3);
     QCOMPARE(replies.constLast().at(0).toJsonObject().value("type").toString(),
              QStringLiteral("upload_rejected"));
+}
+
+void UploadRemovalSecurityTest::receiverAcceptsRealWebpUpload()
+{
+    QFile source(QString::fromUtf8(TEST_WEBP_FILE));
+    QVERIFY2(source.open(QIODevice::ReadOnly), qPrintable(source.errorString()));
+    const QByteArray bytes = source.readAll();
+    QVERIFY(!bytes.isEmpty());
+    const QString digest = QString::fromLatin1(
+        QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+
+    const QString senderId(43, QLatin1Char('W'));
+    const QString remoteSessionId =
+        QStringLiteral("34343434-5656-4789-8abc-def012345678");
+    const QString uploadId = QStringLiteral("upload-real-webp");
+    const QString assetId = QStringLiteral("asset-real-webp");
+    const QJsonObject binding{
+        {"protocolVersion", 3}, {"connectionGeneration", 5}, {"generation", 1},
+        {"ownerEndpointId", senderId}, {"remoteSessionId", remoteSessionId},
+        {"uploadId", uploadId},
+    };
+
+    FileManager files;
+    UploadManager uploads(&files);
+    QSignalSpy replies(&uploads, &UploadManager::protocolV3UploadResponseReady);
+
+    QJsonObject start = binding;
+    start.insert("type", "upload_start");
+    start.insert("files", QJsonArray{QJsonObject{
+        {"assetId", assetId}, {"fileId", digest}, {"sha256", digest},
+        {"name", "image-1920.webp"}, {"extension", "webp"},
+        {"size", static_cast<double>(bytes.size())},
+        {"mediaIds", QJsonArray{QStringLiteral("media-real-webp")}},
+    }});
+    uploads.handleIncomingMessage(start);
+
+    QJsonObject chunk = binding;
+    chunk.insert("type", "upload_chunk");
+    chunk.insert("assetId", assetId);
+    chunk.insert("offset", 0);
+    chunk.insert("size", static_cast<double>(bytes.size()));
+    chunk.insert("sha256", digest);
+    chunk.insert("data", QString::fromLatin1(bytes.toBase64()));
+    uploads.handleIncomingMessage(chunk);
+
+    QJsonObject complete = binding;
+    complete.insert("type", "upload_complete");
+    complete.insert("assets", QJsonArray{QJsonObject{
+        {"assetId", assetId}, {"offset", static_cast<double>(bytes.size())},
+        {"size", static_cast<double>(bytes.size())}, {"sha256", digest},
+    }});
+    uploads.handleIncomingMessage(complete);
+
+    QVERIFY(!replies.isEmpty());
+    QCOMPARE(replies.constLast().at(0).toJsonObject().value("type").toString(),
+             QStringLiteral("upload_finished"));
+    const QString validatedPath = files.getReceivedFilePath(
+        {senderId, remoteSessionId, 1}, digest);
+    QVERIFY(!validatedPath.isEmpty());
+    QCOMPARE(QFileInfo(validatedPath).suffix(), QStringLiteral("webp"));
+    QVERIFY(QFileInfo::exists(validatedPath));
 }
 
 void UploadRemovalSecurityTest::receiverRejectsMp4WhoseMediaSamplesCannotDecode()

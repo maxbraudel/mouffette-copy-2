@@ -50,6 +50,11 @@ if (-not (Test-Path $windeployqt)) { throw "windeployqt6 not found: $windeployqt
     --dir (Split-Path -Parent $clientExe) $clientExe | Out-Host
 if ($LASTEXITCODE -ne 0) { throw 'windeployqt QML deployment failed.' }
 
+$webpPlugin = Join-Path (Split-Path -Parent $clientExe) 'imageformats\qwebp.dll'
+if (-not (Test-Path $webpPlugin)) {
+    throw "Packaged application is missing the required Qt WebP plugin: $webpPlugin"
+}
+
 if ($env:MOUFFETTE_WINDOWS_CERTIFICATE) {
     $signTool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
     if (-not $signTool) { throw 'signtool.exe was not found in PATH.' }

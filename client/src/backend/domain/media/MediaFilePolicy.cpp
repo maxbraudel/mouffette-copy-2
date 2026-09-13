@@ -1,4 +1,5 @@
 #include "backend/domain/media/MediaFilePolicy.h"
+#include "MediaFormatContract.h"
 
 #include <QAbstractEventDispatcher>
 #include <QCoreApplication>
@@ -539,14 +540,6 @@ bool contentLooksLikeVideo(const QString& path) {
         .name().startsWith(QLatin1String("video/"));
 }
 
-bool isAllowedImageExtension(const QString& extension) {
-    static const QSet<QString> extensions = {
-        QStringLiteral("png"), QStringLiteral("jpg"), QStringLiteral("jpeg"),
-        QStringLiteral("webp"), QStringLiteral("avif")
-    };
-    return extensions.contains(extension);
-}
-
 bool imageFormatMatchesExtension(const QByteArray& format, const QString& extension) {
     const QByteArray normalizedFormat = format.trimmed().toLower();
     if (extension == QLatin1String("jpg") || extension == QLatin1String("jpeg")) {
@@ -752,7 +745,7 @@ ValidationResult validateLocalFile(const QString& path, quint64 preparedImageByt
         return result;
     }
 
-    if (!isAllowedImageExtension(extension)) {
+    if (!MediaFormatContract::isAllowedImageExtension(extension)) {
         result.errorCode = QStringLiteral("unsupported_image_extension");
         return result;
     }
@@ -817,6 +810,56 @@ ValidationResult validateLocalFile(const QString& path, quint64 preparedImageByt
     result.imageSize = size;
     result.decodedRgbaBytes = decodedRgbaBytes;
     return result;
+}
+
+QString validationErrorDescription(const ValidationResult& validation)
+{
+    const QString& code = validation.errorCode;
+    if (code == QLatin1String("file_unreadable")) {
+        return QStringLiteral("the source file is missing or unreadable");
+    }
+    if (code == QLatin1String("video_codec_not_supported")) {
+        return QStringLiteral("the MP4 video codec is not supported");
+    }
+    if (code == QLatin1String("invalid_mp4_video")) {
+        return QStringLiteral("the file is not a valid MP4 video");
+    }
+    if (code == QLatin1String("video_decode_timeout")) {
+        return QStringLiteral("the MP4 decoder timed out");
+    }
+    if (code == QLatin1String("video_decode_failed")) {
+        return QStringLiteral("the MP4 video could not be decoded");
+    }
+    if (code == QLatin1String("mp4_only")) {
+        return QStringLiteral("only MP4 is accepted for video");
+    }
+    if (code == QLatin1String("unsupported_image_extension")) {
+        return QStringLiteral("the image extension is not accepted");
+    }
+    if (code == QLatin1String("animated_image_not_supported")) {
+        return QStringLiteral("animated images are not supported");
+    }
+    if (code == QLatin1String("invalid_image_content")) {
+        return QStringLiteral("the image format is unavailable or its content is invalid");
+    }
+    if (code == QLatin1String("image_extension_mismatch")) {
+        return QStringLiteral("the image content does not match its extension");
+    }
+    if (code == QLatin1String("invalid_image_dimensions")) {
+        return QStringLiteral("the image dimensions are invalid");
+    }
+    if (code == QLatin1String("image_pixel_limit_exceeded")) {
+        return QStringLiteral("the image exceeds the 64-megapixel limit");
+    }
+    if (code == QLatin1String("decoded_rgba_budget_exceeded")) {
+        return QStringLiteral("the decoded image memory limit would be exceeded");
+    }
+    if (code == QLatin1String("image_decode_failed")) {
+        return QStringLiteral("the image is truncated or could not be decoded");
+    }
+    return code.isEmpty()
+        ? QStringLiteral("the media type does not match its canvas item")
+        : QStringLiteral("media validation failed (%1)").arg(code);
 }
 
 PreparationValidationResult validatePreparationAssets(

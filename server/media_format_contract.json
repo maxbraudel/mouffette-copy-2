@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "imageExtensions": ["png", "jpg", "jpeg", "webp", "avif"],
+  "videoExtensions": ["mp4"]
+}

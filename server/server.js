@@ -5,6 +5,7 @@ const { loadServerConfig } = require('./config');
 const { PROTOCOL_VERSION, createChallenge, verifyAuthResponse } = require('./device_auth');
 const { RemoteSessionRegistry } = require('./remote_session_registry');
 const { ProtocolMetrics } = require('./protocol_metrics');
+const { isAllowedMediaExtension } = require('./media_format_contract');
 const {
     SCENE_PHASES, SceneRunRegistry, computeSceneDigest, isPlainObject,
 } = require('./scene_run_registry');
@@ -15,7 +16,6 @@ const CANONICAL_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab]
 const CANVAS_SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,512}$/;
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
-const ALLOWED_MEDIA_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'avif', 'mp4']);
 // Protocol v3 is a hard cut-over. These names are deliberately rejected at
 // the envelope boundary rather than translated into their v3 counterparts.
 const LEGACY_MESSAGE_TYPES = new Set([
@@ -634,7 +634,7 @@ class MouffetteServer {
                 || !Number.isSafeInteger(entry.size) || entry.size < 1
                 || entry.size > this.MAX_UPLOAD_FILE_BYTES
                 || typeof entry.extension !== 'string'
-                || !ALLOWED_MEDIA_EXTENSIONS.has(entry.extension.toLowerCase())) return null;
+                || !isAllowedMediaExtension(entry.extension)) return null;
             const mediaIds = Array.isArray(entry.mediaIds) ? entry.mediaIds.slice() : [];
             if (mediaIds.length > 4096 || mediaIds.some(id => !this.isValidOpaqueId(id))
                 || new Set(mediaIds).size !== mediaIds.length) return null;
@@ -2377,7 +2377,7 @@ class MouffetteServer {
                 || typeof file.name !== 'string' || file.name.length < 1 || file.name.length > 255
                 || /[\\/\x00-\x1f\x7f]/.test(file.name)
                 || typeof file.extension !== 'string'
-                || !ALLOWED_MEDIA_EXTENSIONS.has(file.extension.toLowerCase())
+                || !isAllowedMediaExtension(file.extension)
                 || !Number.isSafeInteger(file.size) || file.size < 1
                 || file.size > this.MAX_UPLOAD_FILE_BYTES
                 || !Array.isArray(file.mediaIds) || file.mediaIds.length < 1

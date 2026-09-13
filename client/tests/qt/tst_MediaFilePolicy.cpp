@@ -152,6 +152,10 @@ QString fixturePath() {
     return QString::fromUtf8(TEST_VIDEO_FILE);
 }
 
+QString webpFixturePath() {
+    return QString::fromUtf8(TEST_WEBP_FILE);
+}
+
 } // namespace
 
 class MediaFilePolicyTest final : public QObject {
@@ -420,6 +424,19 @@ private slots:
         QVERIFY(image.save(imagePath));
         QCOMPARE(MediaFilePolicy::classifyLocalFile(imagePath), MediaFilePolicy::Kind::Image);
         QVERIFY(MediaFilePolicy::isAcceptedLocalFile(imagePath));
+    }
+
+    void acceptsRealWebpFixtureWithoutOptionalSkip() {
+        const QString fixture = webpFixturePath();
+        QVERIFY2(QFile::exists(fixture),
+                 qPrintable(QStringLiteral("Required WebP fixture is missing: %1")
+                                .arg(fixture)));
+
+        const auto validation = MediaFilePolicy::validateLocalFile(fixture);
+        QCOMPARE(validation.kind, MediaFilePolicy::Kind::Image);
+        QCOMPARE(validation.imageSize, QSize(1920, 1080));
+        QCOMPARE(validation.errorCode, QString());
+        QVERIFY(MediaFilePolicy::isAcceptedLocalFile(fixture));
     }
 
     void acceptsAllowedImageExtensionsCaseInsensitively_data() {

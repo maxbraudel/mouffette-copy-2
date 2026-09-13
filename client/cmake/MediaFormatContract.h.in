@@ -1,0 +1,57 @@
+#pragma once
+
+// Generated from server/media_format_contract.json. Do not maintain another
+// extension allowlist in client code: every import, upload and scene protocol
+// boundary consumes this contract.
+
+#include <QSet>
+#include <QString>
+
+namespace MediaFormatContract {
+
+inline QString normalizedExtension(QString extension)
+{
+    extension = extension.trimmed().toLower();
+    while (extension.startsWith(QLatin1Char('.'))) {
+        extension.remove(0, 1);
+    }
+    return extension;
+}
+
+inline const QSet<QString>& imageExtensions()
+{
+    static const QSet<QString> extensions = {
+@MOUFFETTE_IMAGE_EXTENSION_LITERALS@    };
+    return extensions;
+}
+
+inline const QSet<QString>& videoExtensions()
+{
+    static const QSet<QString> extensions = {
+@MOUFFETTE_VIDEO_EXTENSION_LITERALS@    };
+    return extensions;
+}
+
+inline const QSet<QString>& mediaExtensions()
+{
+    static const QSet<QString> extensions = [] {
+        QSet<QString> result = imageExtensions();
+        result.unite(videoExtensions());
+        return result;
+    }();
+    return extensions;
+}
+
+inline bool isAllowedImageExtension(const QString& extension)
+{
+    return imageExtensions().contains(normalizedExtension(extension));
+}
+
+// Wire payloads must already be normalized and must never gain permissive
+// filename conveniences such as whitespace trimming or a leading dot.
+inline bool isCanonicalMediaExtension(const QString& extension)
+{
+    return mediaExtensions().contains(extension);
+}
+
+} // namespace MediaFormatContract

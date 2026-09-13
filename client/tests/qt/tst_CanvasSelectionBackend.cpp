@@ -628,6 +628,50 @@ private slots:
         QCOMPARE(quick->cursor().shape(), Qt::ArrowCursor);
     }
 
+    void realWebpDragIsAcceptedAndPreparedForCanvasImport()
+    {
+        const QString path = QString::fromUtf8(TEST_WEBP_FILE);
+        QVERIFY2(QFileInfo::exists(path),
+                 qPrintable(QStringLiteral("Required WebP fixture is missing: %1")
+                                .arg(path)));
+
+        auto* quick = qobject_cast<QQuickWidget*>(m_canvas->controller.widget());
+        QVERIFY(quick);
+        m_canvas->host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&m_canvas->host));
+
+        QMimeData mime;
+        mime.setUrls({QUrl::fromLocalFile(path)});
+        QSignalSpy prepared(&m_canvas->controller,
+                            &QuickCanvasController::preparedLocalFileDropRequested);
+        connect(&m_canvas->controller,
+                &QuickCanvasController::preparedLocalFileDropRequested,
+                &m_canvas->controller,
+                [this](const QString&, const QSize&, const QImage&, const QPointF&) {
+                    m_canvas->controller.beginDropPreviewHandoff(
+                        QStringLiteral("prepared-webp"));
+                });
+
+        const QPoint dropPoint(500, 350);
+        QDragEnterEvent enter(dropPoint, Qt::CopyAction, &mime,
+                              Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(quick, &enter);
+        QVERIFY2(enter.isAccepted(), "The canvas refused the allowed WebP fixture");
+        QTRY_VERIFY_WITH_TIMEOUT(
+            mapProperty(m_canvas->root, "dropPreviewModel")
+                .value("frameReady").toBool(),
+            3000);
+
+        QDropEvent drop(QPointF(dropPoint), Qt::CopyAction, &mime,
+                        Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(quick, &drop);
+        QVERIFY(drop.isAccepted());
+        QTRY_COMPARE(prepared.size(), 1);
+        QCOMPARE(prepared.first().at(0).toString(), QFileInfo(path).canonicalFilePath());
+        QCOMPARE(prepared.first().at(1).toSize(), QSize(1920, 1080));
+        QVERIFY(!prepared.first().at(2).value<QImage>().isNull());
+    }
+
     void localVideoDragPublishesExactGeometryBeforeDrop()
     {
         const QString path = QString::fromUtf8(TEST_VIDEO_FILE);

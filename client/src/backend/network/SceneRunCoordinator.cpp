@@ -1,4 +1,5 @@
 #include "backend/network/SceneRunCoordinator.h"
+#include "MediaFormatContract.h"
 
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -455,9 +456,7 @@ QJsonArray SceneRunCoordinator::normalizeManifest(const QJsonArray& manifest,
         if (!isOpaqueId(assetId) || assetIds.contains(assetId)
             || !isSha256(fileId) || fileId != sha256
             || !validSize
-            || !QStringList{QStringLiteral("png"), QStringLiteral("jpg"),
-                            QStringLiteral("jpeg"), QStringLiteral("webp"),
-                            QStringLiteral("avif"), QStringLiteral("mp4")}.contains(extension)) {
+            || !MediaFormatContract::isCanonicalMediaExtension(extension)) {
             if (errorMessage) *errorMessage = QStringLiteral("Invalid scene asset manifest");
             return {};
         }

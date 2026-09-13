@@ -43,6 +43,58 @@ configure_file(
     cmake/AppBuildConfig.h.in
     "${CMAKE_CURRENT_BINARY_DIR}/generated/AppBuildConfig.h"
     @ONLY)
+
+# One machine-readable protocol contract owns the extensions accepted by the
+# server and every client-side boundary. Generate the Qt representation at
+# configure time so the desktop application cannot silently drift from it.
+set(MOUFFETTE_MEDIA_FORMAT_CONTRACT_FILE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../server/media_format_contract.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${MOUFFETTE_MEDIA_FORMAT_CONTRACT_FILE}")
+file(READ "${MOUFFETTE_MEDIA_FORMAT_CONTRACT_FILE}"
+    MOUFFETTE_MEDIA_FORMAT_CONTRACT_JSON)
+string(JSON MOUFFETTE_MEDIA_FORMAT_SCHEMA_VERSION GET
+    "${MOUFFETTE_MEDIA_FORMAT_CONTRACT_JSON}" schemaVersion)
+if(NOT MOUFFETTE_MEDIA_FORMAT_SCHEMA_VERSION EQUAL 1)
+    message(FATAL_ERROR "Unsupported media format contract schema")
+endif()
+
+set(MOUFFETTE_ALL_MEDIA_EXTENSIONS "")
+foreach(_group IN ITEMS imageExtensions videoExtensions)
+    string(JSON _extension_count LENGTH
+        "${MOUFFETTE_MEDIA_FORMAT_CONTRACT_JSON}" "${_group}")
+    if(_extension_count LESS 1)
+        message(FATAL_ERROR "Media format contract ${_group} must not be empty")
+    endif()
+    math(EXPR _last_extension_index "${_extension_count} - 1")
+    set(_extension_literals "")
+    foreach(_extension_index RANGE 0 ${_last_extension_index})
+        string(JSON _extension GET "${MOUFFETTE_MEDIA_FORMAT_CONTRACT_JSON}"
+            "${_group}" ${_extension_index})
+        string(LENGTH "${_extension}" _extension_length)
+        if(NOT _extension MATCHES "^[a-z0-9]+$"
+            OR _extension_length GREATER 16)
+            message(FATAL_ERROR
+                "Media format contract ${_group} contains invalid extension '${_extension}'")
+        endif()
+        if(_extension IN_LIST MOUFFETTE_ALL_MEDIA_EXTENSIONS)
+            message(FATAL_ERROR
+                "Media format contract contains duplicate extension '${_extension}'")
+        endif()
+        list(APPEND MOUFFETTE_ALL_MEDIA_EXTENSIONS "${_extension}")
+        string(APPEND _extension_literals
+            "        QStringLiteral(\"${_extension}\"),\n")
+    endforeach()
+    if(_group STREQUAL "imageExtensions")
+        set(MOUFFETTE_IMAGE_EXTENSION_LITERALS "${_extension_literals}")
+    else()
+        set(MOUFFETTE_VIDEO_EXTENSION_LITERALS "${_extension_literals}")
+    endif()
+endforeach()
+configure_file(
+    cmake/MediaFormatContract.h.in
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/MediaFormatContract.h"
+    @ONLY)
 # AppConfig.cpp is intentionally reused by focused test executables, so the
 # generated build identity must be visible to every target in this directory.
 include_directories("${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -62,6 +114,12 @@ endif()
 # Find Qt6
 find_package(Qt6 6.11 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia MultimediaWidgets Svg SvgWidgets Concurrent Quick QuickWidgets Qml ShaderTools GuiPrivate QuickPrivate)
 find_package(OpenSSL 1.1.1 REQUIRED COMPONENTS Crypto)
+if(NOT TARGET Qt6::QWebpPlugin)
+    message(FATAL_ERROR
+        "Mouffette advertises WebP as an accepted canvas/upload format, but the "
+        "selected Qt installation has no QWebp image plugin. Install the matching "
+        "Qt Image Formats package before building.")
+endif()
 if(UNIX AND NOT APPLE)
     # systemd-logind is the native source for sleep and session-lock events.
     # Keep it optional so non-systemd Linux targets still build with a no-op
@@ -760,7 +818,8 @@ if(BUILD_TESTING)
         "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
     target_compile_definitions(tst_CanvasSelectionBackend PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>"
-        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../video-1080p.mp4")
+        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../video-1080p.mp4"
+        TEST_WEBP_FILE="${CMAKE_SOURCE_DIR}/../image-1920.webp")
     target_link_libraries(tst_CanvasSelectionBackend PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
     add_test(NAME CanvasSelectionBackend COMMAND tst_CanvasSelectionBackend)
@@ -785,7 +844,8 @@ if(BUILD_TESTING)
     target_include_directories(tst_UploadRemovalSecurity PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
     target_compile_definitions(tst_UploadRemovalSecurity PRIVATE
-        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>")
+        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>"
+        TEST_WEBP_FILE="${CMAKE_SOURCE_DIR}/../image-1920.webp")
     target_link_libraries(tst_UploadRemovalSecurity PRIVATE
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
     add_test(NAME UploadRemovalSecurity COMMAND tst_UploadRemovalSecurity)
@@ -862,7 +922,8 @@ if(BUILD_TESTING)
     )
     target_include_directories(tst_MediaFilePolicy PRIVATE src)
     target_compile_definitions(tst_MediaFilePolicy PRIVATE
-        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../video-1080p.mp4")
+        TEST_VIDEO_FILE="${CMAKE_SOURCE_DIR}/../video-1080p.mp4"
+        TEST_WEBP_FILE="${CMAKE_SOURCE_DIR}/../image-1920.webp")
     target_link_libraries(tst_MediaFilePolicy PRIVATE
         Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Test)
     add_test(NAME MediaFilePolicy COMMAND tst_MediaFilePolicy)

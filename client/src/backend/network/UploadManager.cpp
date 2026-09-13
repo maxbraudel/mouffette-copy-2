@@ -6,6 +6,7 @@
 #include "backend/files/FileManager.h"
 #include "backend/files/PathSafety.h"
 #include "backend/domain/media/MediaFilePolicy.h"
+#include "MediaFormatContract.h"
 #include "backend/domain/session/SessionManager.h"  // Phase 3: For DEFAULT_IDEA_ID constant
 #include <QGraphicsScene>
 #include <QGraphicsItem>
@@ -87,14 +88,6 @@ QString senderCacheNamespace(const QJsonObject& message) {
 
 bool isValidOpaqueId(const QString& value) {
     return isValidPeerId(value);
-}
-
-bool isAllowedMediaExtension(const QString& extension) {
-    static const QSet<QString> allowed = {
-        QStringLiteral("png"), QStringLiteral("jpg"), QStringLiteral("jpeg"),
-        QStringLiteral("webp"), QStringLiteral("avif"), QStringLiteral("mp4")
-    };
-    return allowed.contains(extension.toLower());
 }
 
 bool isValidCanvasSessionId(const QString& value) {
@@ -1322,7 +1315,7 @@ void UploadManager::startUpload(const QVector<UploadFileInfo>& files) {
             || !isValidOpaqueId(file.mediaId)
             || !info.exists() || !info.isFile() || info.isSymLink()
             || info.size() != file.size || !isSafeDisplayName(name)
-            || !isAllowedMediaExtension(extension)
+            || !MediaFormatContract::isCanonicalMediaExtension(extension)
             || QFileInfo(name).suffix().compare(extension, Qt::CaseInsensitive) != 0
             || !MediaFilePolicy::isAcceptedLocalFile(file.path)) {
             qWarning() << "UploadManager: refusing unsupported media file"
@@ -3688,7 +3681,7 @@ void UploadManager::handleIncomingAssetRemoval(const QJsonObject& message) {
         || !parseManifestSize(message.value(QStringLiteral("size")), size)
         || offset != size || !isValidFileId(sha256) || fileId != sha256
         || extension != extension.toLower()
-        || !isAllowedMediaExtension(extension)) {
+        || !MediaFormatContract::isCanonicalMediaExtension(extension)) {
         reject(QStringLiteral("invalid_asset_removal"));
         return;
     }
@@ -4115,7 +4108,7 @@ void UploadManager::handleIncomingMessage(const QJsonObject& message) {
             }
             if (!isSafeDisplayName(file.name)
                 || !normalizeAndValidateExtension(fileObject.value("extension").toString(), file.extension)
-                || !isAllowedMediaExtension(file.extension)
+                || !MediaFormatContract::isCanonicalMediaExtension(file.extension)
                 || QFileInfo(file.name).suffix().compare(file.extension, Qt::CaseInsensitive) != 0) {
                 manifestError = QStringLiteral("Upload manifest contains an invalid filename or extension");
                 break;

@@ -492,14 +492,20 @@ bool QuickCanvasController::eventFilter(QObject* watched, QEvent* event) {
             }
             QString localPath;
             bool isVideo = false;
+            QString rejectionReason;
             if (dragEnter
-                && acceptedSingleLocalMedia(dragEnter->mimeData(), &localPath, &isVideo)) {
+                && acceptedSingleLocalMedia(dragEnter->mimeData(), &localPath,
+                                            &isVideo, &rejectionReason)) {
                 startLocalDragPreview(localPath, isVideo,
                     mapViewPointToScene(dragEnter->position()));
                 dragEnter->acceptProposedAction();
                 return true;
             }
             clearLocalDragPreview(false);
+            if (!rejectionReason.isEmpty()) {
+                TOAST_WARNING(QStringLiteral("Import refused: %1")
+                                  .arg(rejectionReason));
+            }
             if (dragEnter) dragEnter->ignore();
             return true;
         }
@@ -565,7 +571,9 @@ bool QuickCanvasController::eventFilter(QObject* watched, QEvent* event) {
 
 bool QuickCanvasController::acceptedSingleLocalMedia(const QMimeData* mimeData,
                                                      QString* localPath,
-                                                     bool* isVideo) const {
+                                                     bool* isVideo,
+                                                     QString* rejectionReason) const {
+    if (rejectionReason) rejectionReason->clear();
     if (!mimeData || !mimeData->hasUrls()) {
         return false;
     }
@@ -575,9 +583,16 @@ bool QuickCanvasController::acceptedSingleLocalMedia(const QMimeData* mimeData,
     }
 
     const QString path = urls.first().toLocalFile();
-    const MediaFilePolicy::Kind kind = MediaFilePolicy::classifyLocalFile(path);
+    const MediaFilePolicy::ValidationResult validation =
+        MediaFilePolicy::validateLocalFile(path);
+    const MediaFilePolicy::Kind kind = validation.kind;
     if (kind != MediaFilePolicy::Kind::Image
         && kind != MediaFilePolicy::Kind::Mp4Video) {
+        if (rejectionReason) {
+            *rejectionReason = QStringLiteral("%1 — %2")
+                .arg(QFileInfo(path).fileName(),
+                     MediaFilePolicy::validationErrorDescription(validation));
+        }
         return false;
     }
 

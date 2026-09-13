@@ -152,7 +152,8 @@ private:
     void scheduleInitialFitIfNeeded(int marginPx = 53);
     bool tryInitialFitNow(int marginPx = 53);
     void buildResizeSnapCaches(ResizableMediaBase* resizingItem);
-    bool acceptedSingleLocalMedia(const QMimeData* mimeData, QString* localPath, bool* isVideo) const;
+    bool acceptedSingleLocalMedia(const QMimeData* mimeData, QString* localPath,
+                                  bool* isVideo, QString* rejectionReason = nullptr) const;
     void startLocalDragPreview(const QString& localPath, bool isVideo, const QPointF& sceneCenter);
     void updateLocalDragPreviewCenter(const QPointF& sceneCenter);
     void publishLocalDragPreview(bool visible);

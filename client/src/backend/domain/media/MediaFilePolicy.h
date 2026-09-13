@@ -57,6 +57,10 @@ Kind classifyLocalFile(const QString& path);
 ValidationResult validateLocalFile(const QString& path,
                                    quint64 preparedImageBytes = 0);
 
+// Stable user-facing explanation for a validation failure. Callers should use
+// this instead of inventing UI messages from the extension or media kind.
+QString validationErrorDescription(const ValidationResult& validation);
+
 // Validates an entire immutable scene revision in order and reserves decoded
 // RGBA bytes cumulatively.  Both the sending and receiving renderers use this
 // function before constructing a render graph, so the 1 GiB budget cannot be
