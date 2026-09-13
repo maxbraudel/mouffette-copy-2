@@ -102,12 +102,51 @@ private slots:
         QCOMPARE(fixture.document.selectedMediaIds(), QStringList{survivorId});
     }
 
+    void fitToTextIsDefaultTracksContentAndToggleRefits()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        const QPointF creationPoint(420, 310);
+        CanvasMedia* media = fixture.document.addText(
+            creationPoint, QStringLiteral("Text"));
+        QVERIFY(media);
+        QVERIFY(media->fitToTextEnabled());
+        QVERIFY(media->baseSize().width() < 400);
+        QVERIFY(media->baseSize().height() < 200);
+        QVERIFY(qAbs(media->sceneRect().center().x() - creationPoint.x()) < 0.01);
+        QVERIFY(qAbs(media->sceneRect().center().y() - creationPoint.y()) < 0.01);
+
+        const QSize initialSize = media->baseSize();
+        const QPointF anchoredCenter = media->sceneRect().center();
+        media->setText(QStringLiteral("A much longer fitted text value"));
+        QVERIFY(media->baseSize().width() > initialSize.width());
+        QVERIFY(qAbs(media->sceneRect().center().x() - anchoredCenter.x()) < 0.01);
+        QVERIFY(qAbs(media->sceneRect().center().y() - anchoredCenter.y()) < 0.01);
+
+        QVERIFY(QMetaObject::invokeMethod(&fixture.controller,
+            "handleOverlayFitToTextToggle", Qt::DirectConnection,
+            Q_ARG(QString, media->mediaId())));
+        QVERIFY(!media->fitToTextEnabled());
+        media->setBaseSize(QSize(310, 170));
+        media->setText(QStringLiteral("X"));
+        QCOMPARE(media->baseSize(), QSize(310, 170));
+
+        QVERIFY(QMetaObject::invokeMethod(&fixture.controller,
+            "handleOverlayFitToTextToggle", Qt::DirectConnection,
+            Q_ARG(QString, media->mediaId())));
+        QVERIFY(media->fitToTextEnabled());
+        QVERIFY(media->baseSize().width() < 310);
+        QVERIFY(media->baseSize().height() < 170);
+    }
+
     void uniformAndFreeResizeCommitToDocument()
     {
         Fixture fixture;
         QVERIFY(fixture.initialize());
         CanvasMedia* media = fixture.document.addText({100, 100});
+        media->setFitToTextEnabled(false);
         media->setBaseSize({400, 200});
+        media->setPosition({100, 100});
         const QString id = media->mediaId();
 
         QVERIFY(QMetaObject::invokeMethod(&fixture.controller,

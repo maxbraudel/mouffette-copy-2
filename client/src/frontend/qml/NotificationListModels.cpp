@@ -4,6 +4,10 @@
 #include <QTimer>
 #include <QUuid>
 
+namespace {
+constexpr int kToastAnimationDurationMs = 300;
+}
+
 HistoryListModel::HistoryListModel(QObject* parent)
     : QAbstractListModel(parent)
 {
@@ -102,6 +106,7 @@ QVariant ToastListModel::data(const QModelIndex& index, int role) const
     case ToastIdRole: return toast.id;
     case SeverityKindRole: return toast.severityKind;
     case MessageRole: return toast.message;
+    case DismissingRole: return toast.dismissing;
     default: return {};
     }
 }
@@ -111,7 +116,8 @@ QHash<int, QByteArray> ToastListModel::roleNames() const
     return {
         { ToastIdRole, QByteArrayLiteral("toastId") },
         { SeverityKindRole, QByteArrayLiteral("severityKind") },
-        { MessageRole, QByteArrayLiteral("message") }
+        { MessageRole, QByteArrayLiteral("message") },
+        { DismissingRole, QByteArrayLiteral("dismissing") }
     };
 }
 
@@ -147,9 +153,25 @@ void ToastListModel::appendToast(const QString& message,
     endInsertRows();
 
     const int lifetime = durationMs > 0 ? durationMs : 4000;
-    QTimer::singleShot(lifetime, this, [this, id = toast.id]() {
-        removeToast(id);
+    // The legacy timer started after its 300 ms entrance animation.
+    QTimer::singleShot(lifetime + kToastAnimationDurationMs,
+                       this, [this, id = toast.id]() {
+        beginDismissToast(id);
     });
+}
+
+void ToastListModel::beginDismissToast(const QString& id)
+{
+    for (int row = 0; row < m_rows.size(); ++row) {
+        Toast& toast = m_rows[row];
+        if (toast.id != id || toast.dismissing) continue;
+        toast.dismissing = true;
+        const QModelIndex item = index(row);
+        emit dataChanged(item, item, {DismissingRole});
+        QTimer::singleShot(kToastAnimationDurationMs, this,
+                           [this, id]() { removeToast(id); });
+        return;
+    }
 }
 
 void ToastListModel::removeToast(const QString& id)

@@ -44,7 +44,8 @@ public:
     enum Role {
         ToastIdRole = Qt::UserRole + 1,
         SeverityKindRole,
-        MessageRole
+        MessageRole,
+        DismissingRole
     };
 
     explicit ToastListModel(QObject* parent = nullptr);
@@ -58,10 +59,12 @@ private:
         QString id;
         QString message;
         int severityKind = 3;
+        bool dismissing = false;
     };
 
     void appendToast(const QString& message, NotificationSeverity severity,
                      int durationMs);
+    void beginDismissToast(const QString& id);
     void removeToast(const QString& id);
     static int severityKind(NotificationSeverity severity);
 

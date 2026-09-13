@@ -42,6 +42,7 @@ Rectangle {
     readonly property int screenCount: screensModel.length
     readonly property var canvasController: sessionViewModel
                                             ? sessionViewModel.canvasController : null
+    readonly property var hostingWindow: root.Window.window
     property bool remoteActive: canvasController
                                 ? canvasController.remoteActive : false
     property var screensModel: canvasController
@@ -160,11 +161,11 @@ Rectangle {
 
     onCanvasControllerChanged: {
         synchronizeTransientState()
-        if (canvasController && window)
-            canvasController.registerWindow(window)
+        if (canvasController && hostingWindow)
+            canvasController.registerWindow(hostingWindow)
     }
-    onWindowChanged: if (canvasController && window)
-                         canvasController.registerWindow(window)
+    onHostingWindowChanged: if (canvasController && hostingWindow)
+                                canvasController.registerWindow(hostingWindow)
     onViewScaleChanged: if (canvasController)
                             canvasController.updateCamera(viewScale, panX, panY)
     onPanXChanged: if (canvasController)

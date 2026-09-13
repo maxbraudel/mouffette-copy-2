@@ -1,4 +1,5 @@
 #include "backend/domain/media/CanvasMedia.h"
+#include "backend/domain/media/TextRenderState.h"
 
 #include <QAudioOutput>
 #include <QFileInfo>
@@ -190,26 +191,62 @@ void CanvasMedia::setSettings(const MediaSettingsState& settings)
 #define CANVAS_MEDIA_SETTER(TypeName, Method, Field) \
 void CanvasMedia::Method(TypeName value) { if (Field == value) return; Field = value; notifyChanged(); }
 
-CANVAS_MEDIA_SETTER(const QString&, setText, m_text)
-CANVAS_MEDIA_SETTER(const QString&, setFontFamily, m_fontFamily)
 CANVAS_MEDIA_SETTER(bool, setFontWeightOverrideEnabled, m_fontWeightOverride)
-CANVAS_MEDIA_SETTER(bool, setItalic, m_italic)
 CANVAS_MEDIA_SETTER(bool, setUnderline, m_underline)
-CANVAS_MEDIA_SETTER(bool, setUppercase, m_uppercase)
 CANVAS_MEDIA_SETTER(bool, setTextColorOverrideEnabled, m_textColorOverride)
 CANVAS_MEDIA_SETTER(bool, setHighlightEnabled, m_highlightEnabled)
 CANVAS_MEDIA_SETTER(bool, setOutlineWidthOverrideEnabled, m_outlineWidthOverride)
 CANVAS_MEDIA_SETTER(bool, setOutlineColorOverrideEnabled, m_outlineColorOverride)
-CANVAS_MEDIA_SETTER(bool, setFitToTextEnabled, m_fitToText)
 
 #undef CANVAS_MEDIA_SETTER
+
+void CanvasMedia::setText(const QString& text)
+{
+    if (m_text == text) return;
+    m_text = text;
+    notifyTextMetricsChanged();
+}
+
+void CanvasMedia::setFontFamily(const QString& family)
+{
+    if (m_fontFamily == family) return;
+    m_fontFamily = family;
+    notifyTextMetricsChanged();
+}
+
+void CanvasMedia::setItalic(bool italic)
+{
+    if (m_italic == italic) return;
+    m_italic = italic;
+    notifyTextMetricsChanged();
+}
+
+void CanvasMedia::setUppercase(bool uppercase)
+{
+    if (m_uppercase == uppercase) return;
+    m_uppercase = uppercase;
+    notifyTextMetricsChanged();
+}
+
+void CanvasMedia::setFitToTextEnabled(bool enabled)
+{
+    if (m_fitToText == enabled) return;
+    m_fitToText = enabled;
+    if (enabled) updateFitToTextGeometry();
+    notifyChanged();
+}
+
+void CanvasMedia::fitTextToContent()
+{
+    if (updateFitToTextGeometry()) notifyChanged();
+}
 
 void CanvasMedia::setFontPixelSize(int size)
 {
     size = qBound(1, size, 2048);
     if (m_fontPixelSize == size) return;
     m_fontPixelSize = size;
-    notifyChanged();
+    notifyTextMetricsChanged();
 }
 
 void CanvasMedia::setFontWeight(int weight)
@@ -217,7 +254,7 @@ void CanvasMedia::setFontWeight(int weight)
     weight = qBound(1, weight, 1000);
     if (m_fontWeight == weight) return;
     m_fontWeight = weight;
-    notifyChanged();
+    notifyTextMetricsChanged();
 }
 
 void CanvasMedia::setTextColor(const QColor& color)
@@ -240,7 +277,51 @@ void CanvasMedia::setOutlineWidthPercent(qreal width)
     width = qBound<qreal>(0.0, width, 100.0);
     if (qFuzzyCompare(1.0 + m_outlineWidthPercent, 1.0 + width)) return;
     m_outlineWidthPercent = width;
+    notifyTextMetricsChanged();
+}
+
+void CanvasMedia::notifyTextMetricsChanged()
+{
+    if (m_fitToText) updateFitToTextGeometry();
     notifyChanged();
+}
+
+bool CanvasMedia::updateFitToTextGeometry()
+{
+    if (!isText() || !m_fitToText) return false;
+
+    TextRenderState state;
+    state.text = m_text;
+    state.fontFamily = m_fontFamily;
+    state.fontPixelSize = m_fontPixelSize;
+    state.fontWeight = m_fontWeight;
+    state.italic = m_italic;
+    state.underline = m_underline;
+    state.uppercase = m_uppercase;
+    state.fitToTextEnabled = true;
+    state.outlineWidthPercent = m_outlineWidthPercent;
+    state.outlineWidthPixels = TextRenderMetrics::outlinePixels(
+        m_outlineWidthPercent, m_fontPixelSize);
+
+    QSize fitted = TextRenderMetrics::fittedTextSize(state);
+    if (qAbs(fitted.width() - m_baseSize.width()) <= 1
+        && qAbs(fitted.height() - m_baseSize.height()) <= 1) {
+        fitted = m_baseSize;
+    }
+    if (fitted == m_baseSize) return false;
+
+    const qreal anchorX = m_horizontalAlignment == QLatin1String("left")
+        ? 0.0 : (m_horizontalAlignment == QLatin1String("right") ? 1.0 : 0.5);
+    const qreal anchorY = m_verticalAlignment == QLatin1String("top")
+        ? 0.0 : (m_verticalAlignment == QLatin1String("bottom") ? 1.0 : 0.5);
+    const QPointF anchorBefore(
+        m_position.x() + m_baseSize.width() * m_scale * anchorX,
+        m_position.y() + m_baseSize.height() * m_scale * anchorY);
+    m_baseSize = fitted;
+    m_position = QPointF(
+        anchorBefore.x() - m_baseSize.width() * m_scale * anchorX,
+        anchorBefore.y() - m_baseSize.height() * m_scale * anchorY);
+    return true;
 }
 
 void CanvasMedia::setOutlineColor(const QColor& color)
@@ -404,7 +485,8 @@ QVariantMap CanvasMedia::toModelMap(qreal unit) const
         {QStringLiteral("textColor"), m_textColor.name(QColor::HexArgb)},
         {QStringLiteral("textOutlineWidthPercent"), m_outlineWidthPercent},
         {QStringLiteral("textOutlineWidthPx"),
-             std::max<qreal>(0.0, m_outlineWidthPercent * m_fontPixelSize / 100.0)},
+             TextRenderMetrics::outlinePixels(m_outlineWidthPercent,
+                                               m_fontPixelSize)},
         {QStringLiteral("textOutlineColor"), m_outlineColor.name(QColor::HexArgb)},
         {QStringLiteral("textHighlightEnabled"), m_highlightEnabled},
         {QStringLiteral("textHighlightColor"), m_highlightColor.name(QColor::HexArgb)}

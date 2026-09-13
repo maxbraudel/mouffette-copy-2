@@ -8,6 +8,9 @@
 #include <QtTest>
 
 #include "frontend/rendering/canvas/MediaListModel.h"
+#include "frontend/rendering/canvas/QuickCanvasHost.h"
+#include "frontend/qml/CanvasSessionViewModel.h"
+#include "backend/domain/canvas/CanvasDocument.h"
 
 class MediaOverlayTest final : public QObject
 {
@@ -18,6 +21,8 @@ private slots:
     void segmentedStatusFillReachesBothEdges();
     void segmentedStatusKeepsSingleTopBorder();
     void mediaPanelVisibilityAnchorInteractionAndScroll();
+    void mediaCountTracksRealCanvasInsertions();
+    void toastMatchesLegacyBottomLeftDoubleBackground();
     void themeTracksApplicationPalette();
 };
 
@@ -139,6 +144,90 @@ Item {
     auto* root = qobject_cast<QQuickItem*>(object);
     if (!root) {
         if (error) *error = QStringLiteral("media panel harness root is not an item");
+        delete object;
+        return nullptr;
+    }
+    root->setSize(window.size());
+    root->setParentItem(window.contentItem());
+    return root;
+}
+
+QQuickItem* createToastHarness(QQmlEngine& engine, QQuickWindow& window,
+                               QString* error)
+{
+    static const QByteArray qml = R"QML(
+import QtQuick
+import "../components"
+
+Item {
+    ListModel {
+        id: toastRows
+        ListElement {
+            severityKind: 0
+            message: "Connected"
+            dismissing: false
+        }
+    }
+    QtObject {
+        id: fakeController
+        property var toastModel: toastRows
+    }
+    ToastStack {
+        objectName: "toastStack"
+        controller: fakeController
+    }
+}
+)QML";
+    QQmlComponent component(&engine);
+    component.setData(qml, QUrl(QStringLiteral(
+        "qrc:/qt/qml/Mouffette/App/resources/qml/app/pages/ToastHarness.qml")));
+    QObject* object = component.create();
+    if (!object) {
+        if (error) *error = component.errorString();
+        return nullptr;
+    }
+    auto* root = qobject_cast<QQuickItem*>(object);
+    if (!root) {
+        if (error) *error = QStringLiteral("toast harness root is not an item");
+        delete object;
+        return nullptr;
+    }
+    root->setSize(window.size());
+    root->setParentItem(window.contentItem());
+    return root;
+}
+
+QQuickItem* createRealMediaPanelHarness(QQmlEngine& engine,
+                                        QQuickWindow& window,
+                                        QObject* session, QString* error)
+{
+    static const QByteArray qml = R"QML(
+import QtQuick
+import "../canvas"
+
+Item {
+    required property var externalSession
+    MediaListPanel {
+        objectName: "realMediaListPanel"
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: 10
+        session: parent.externalSession
+    }
+}
+)QML";
+    QQmlComponent component(&engine);
+    component.setData(qml, QUrl(QStringLiteral(
+        "qrc:/qt/qml/Mouffette/App/resources/qml/app/pages/RealMediaPanelHarness.qml")));
+    QObject* object = component.createWithInitialProperties({
+        {QStringLiteral("externalSession"), QVariant::fromValue<QObject*>(session)}});
+    if (!object) {
+        if (error) *error = component.errorString();
+        return nullptr;
+    }
+    auto* root = qobject_cast<QQuickItem*>(object);
+    if (!root) {
+        if (error) *error = QStringLiteral("real media panel harness root is not an item");
         delete object;
         return nullptr;
     }
@@ -277,6 +366,74 @@ void MediaOverlayTest::mediaPanelVisibilityAnchorInteractionAndScroll()
     QVERIFY(list->property("contentY").toReal() > 0.0);
     QCOMPARE(qRound(panel->x() + panel->width()), window.width() - 10);
     QCOMPARE(qRound(panel->y() + panel->height()), window.height() - 10);
+}
+
+void MediaOverlayTest::mediaCountTracksRealCanvasInsertions()
+{
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(640, 480);
+    QString error;
+    std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+    QVERIFY2(host, qPrintable(error));
+    CanvasSessionViewModel session(
+        QStringLiteral("media-count-session"), host.get(), [] {}, nullptr,
+        [] { return false; }, [] { return true; });
+    QSignalSpy countChanged(&session, &CanvasSessionViewModel::mediaCountChanged);
+    std::unique_ptr<QQuickItem> harness(
+        createRealMediaPanelHarness(engine, window, &session, &error));
+    QVERIFY2(harness, qPrintable(error));
+    auto* panel = findVisualItem(
+        harness.get(), QStringLiteral("realMediaListPanel"));
+    QVERIFY(panel);
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    harness->setSize(window.size());
+    QCoreApplication::processEvents();
+    QCOMPARE(session.mediaCount(), 0);
+    QVERIFY(!panel->isVisible());
+    QVERIFY(host->document()->addText(QPointF(100, 100)));
+    QCOMPARE(session.mediaCount(), 1);
+    QVERIFY(countChanged.count() >= 1);
+    QTRY_VERIFY(panel->isVisible());
+    QCOMPARE(qRound(panel->x() + panel->width()), window.width() - 10);
+    QCOMPARE(qRound(panel->y() + panel->height()), window.height() - 10);
+}
+
+void MediaOverlayTest::toastMatchesLegacyBottomLeftDoubleBackground()
+{
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.setColor(Qt::magenta);
+    window.resize(640, 480);
+    QString error;
+    std::unique_ptr<QQuickItem> harness(
+        createToastHarness(engine, window, &error));
+    QVERIFY2(harness, qPrintable(error));
+
+    auto* base = findVisualItem(harness.get(), QStringLiteral("toastBase_0"));
+    auto* tint = findVisualItem(harness.get(), QStringLiteral("toastTint_0"));
+    auto* textItem = findVisualItem(harness.get(), QStringLiteral("toastText_0"));
+    QVERIFY(base);
+    QVERIFY(tint);
+    QVERIFY(textItem);
+
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QTRY_VERIFY(base->opacity() > 0.99);
+    const QPointF origin = base->mapToItem(window.contentItem(), QPointF());
+    QCOMPARE(qRound(origin.x()), 40);
+    QCOMPARE(qRound(origin.y() + base->height()), 440);
+
+    const QColor baseColor = base->property("color").value<QColor>();
+    const QColor tintColor = tint->property("color").value<QColor>();
+    const QColor textColor = textItem->property("color").value<QColor>();
+    QCOMPARE(baseColor, QGuiApplication::palette().color(QPalette::Active,
+                                                         QPalette::Base));
+    QCOMPARE(baseColor.alpha(), 255);
+    QCOMPARE(tintColor.alpha(), 38);
+    QCOMPARE(textColor, QColor(QStringLiteral("#4c9b50")));
 }
 
 void MediaOverlayTest::themeTracksApplicationPalette()

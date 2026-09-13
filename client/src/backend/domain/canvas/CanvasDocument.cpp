@@ -75,7 +75,9 @@ CanvasMedia* CanvasDocument::addText(const QPointF& position,
     if (m_editsLocked) return nullptr;
     auto* media = new CanvasMedia(CanvasMedia::Type::Text, QSize(400, 200));
     media->setText(text.isEmpty() ? QStringLiteral("Text") : text);
-    media->setPosition(position);
+    media->fitTextToContent();
+    media->setPosition(position - QPointF(media->sceneRect().width() * 0.5,
+                                          media->sceneRect().height() * 0.5));
     media->setZ(nextZ());
     adoptMedia(media);
     select(media->mediaId());
@@ -493,6 +495,9 @@ bool CanvasDocument::restoreProjectState(
         CanvasMedia* media = nullptr;
         if (type == QLatin1String("text")) {
             media = new CanvasMedia(CanvasMedia::Type::Text, base);
+            // Restore atomically. Fit mode is re-enabled only after all text
+            // metrics, alignment and persisted geometry have been applied.
+            media->setFitToTextEnabled(false);
             media->setText(source.value(QStringLiteral("text")).toString(QStringLiteral("Text")));
         } else {
             const QString path = sourcePathByMediaId.value(id);
@@ -575,9 +580,15 @@ bool CanvasDocument::restoreProjectState(
             media->setOutlineColor(QColor(source.value(QStringLiteral("textBorderColor")).toString(QStringLiteral("#FF000000"))));
             media->setHighlightEnabled(source.value(QStringLiteral("textHighlightEnabled")).toBool(false));
             media->setHighlightColor(QColor(source.value(QStringLiteral("textHighlightColor")).toString(QStringLiteral("#80FFFF00"))));
-            media->setFitToTextEnabled(source.value(QStringLiteral("textFitToTextEnabled")).toBool(true));
             media->setHorizontalAlignment(source.value(QStringLiteral("horizontalAlignment")).toString());
             media->setVerticalAlignment(source.value(QStringLiteral("verticalAlignment")).toString());
+            media->setFitToTextEnabled(source.value(QStringLiteral("textFitToTextEnabled")).toBool(true));
+            // Persisted project geometry remains authoritative on restore.
+            // Fit mode resumes for the next text/style edit, but loading must
+            // never silently move or resize an existing project element.
+            media->setBaseSize(base);
+            media->setPosition({source.value(QStringLiteral("x")).toDouble(),
+                                source.value(QStringLiteral("y")).toDouble()});
         } else if (media->isVideo()) {
             media->setMuted(source.value(QStringLiteral("muted")).toBool(false));
             media->setVolume(source.value(QStringLiteral("volume")).toDouble(1.0));

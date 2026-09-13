@@ -18,7 +18,6 @@ CanvasSessionViewModel::CanvasSessionViewModel(QString sessionId,
                                                QObject* parent)
     : QObject(parent)
     , m_sessionId(std::move(sessionId))
-    , m_canvas(canvas)
     , m_uploadAction(std::move(uploadAction))
     , m_uploadManager(uploadManager)
     , m_remoteFilesPresent(std::move(remoteFilesPresent))

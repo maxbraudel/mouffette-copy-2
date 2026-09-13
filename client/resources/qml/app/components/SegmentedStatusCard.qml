@@ -27,6 +27,13 @@ Item {
                                                : statusKind === SegmentedStatusCard.Warning
                                                  ? Theme.warningBackground : Theme.errorBackground
 
+    TextMetrics {
+        id: auxiliaryMetrics
+        text: root.auxiliaryText
+        font.pixelSize: Theme.titleFontSize
+        font.bold: true
+    }
+
     implicitWidth: segments.implicitWidth
     implicitHeight: Theme.controlHeight
     height: Theme.controlHeight
@@ -99,7 +106,7 @@ Item {
             id: auxiliarySegment
             visible: root.auxiliaryVisible
             height: root.height
-            width: visible ? Math.max(40, auxiliaryLabel.implicitWidth + Theme.segmentPadding * 2) : 0
+            width: visible ? Math.max(40, auxiliaryMetrics.advanceWidth + Theme.segmentPadding * 2) : 0
             color: "transparent"
             topRightRadius: Theme.controlRadius
             bottomRightRadius: Theme.controlRadius

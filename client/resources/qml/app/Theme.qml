@@ -68,4 +68,11 @@ QtObject {
     readonly property int segmentPadding: 6
     readonly property int overlayRadius: 8
     readonly property int overlayButtonHeight: 40
+    readonly property int toastMarginLeft: 40
+    readonly property int toastMarginBottom: 40
+    readonly property int toastSpacing: 10
+    readonly property int toastRadius: 8
+    readonly property int toastAnimationDuration: 300
+    readonly property int toastSlideDistance: 20
+    readonly property int toastTextSize: 13
 }

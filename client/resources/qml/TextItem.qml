@@ -5,7 +5,7 @@ BaseMediaItem {
     property string textContent: ""
     property string horizontalAlignment: "center"
     property string verticalAlignment: "center"
-    property bool fitToTextEnabled: false
+    property bool fitToTextEnabled: true
     property string fontFamily: "Impact"
     property int fontPixelSize: 22
     property int fontWeight: 400

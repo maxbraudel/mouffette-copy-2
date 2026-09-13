@@ -2,6 +2,7 @@
 
 #include <QColor>
 #include <QFont>
+#include <QSize>
 #include <QString>
 
 // Canonical, renderer-agnostic text state. Values are expressed in the same
@@ -35,5 +36,6 @@ int effectiveFontPixelSize(const QFont& font, qreal uniformScale = 1.0);
 qreal outlinePixels(qreal widthPercent, int effectiveFontPixelSize);
 qreal outlinePixels(const QFont& font, qreal widthPercent, qreal uniformScale = 1.0);
 qreal outlineSafetyPadding(qreal outlineWidthPixels);
+QSize fittedTextSize(const TextRenderState& state);
 
 } // namespace TextRenderMetrics

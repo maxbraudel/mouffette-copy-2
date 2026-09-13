@@ -68,6 +68,8 @@ private slots:
         settings.opacityText = QStringLiteral("72.5");
         text->setSettings(settings);
         source->document()->setCamera(1.7, 32, -14);
+        const QPointF expectedPosition = text->position();
+        const QSize expectedBaseSize = text->baseSize();
 
         const QJsonObject state = source->serializeProjectState();
         std::unique_ptr<QuickCanvasHost> restored(QuickCanvasHost::create());
@@ -80,8 +82,8 @@ private slots:
         QVERIFY(copy && copy->isText());
         QCOMPARE(copy->mediaId(), text->mediaId());
         QCOMPARE(copy->text(), QStringLiteral("Round trip"));
-        QCOMPARE(copy->position(), QPointF(120, 80));
-        QCOMPARE(copy->baseSize(), QSize(640, 220));
+        QCOMPARE(copy->position(), expectedPosition);
+        QCOMPARE(copy->baseSize(), expectedBaseSize);
         QCOMPARE(copy->scale(), 1.25);
         QCOMPARE(copy->settings().displayDelayText, QStringLiteral("1.375"));
         QCOMPARE(copy->settings().fadeInText, QStringLiteral("0.45"));

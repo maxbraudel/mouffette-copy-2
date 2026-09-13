@@ -106,6 +106,7 @@ public:
     void setOutlineColorOverrideEnabled(bool enabled);
     bool fitToTextEnabled() const { return m_fitToText; }
     void setFitToTextEnabled(bool enabled);
+    void fitTextToContent();
     QString horizontalAlignment() const { return m_horizontalAlignment; }
     void setHorizontalAlignment(const QString& alignment);
     QString verticalAlignment() const { return m_verticalAlignment; }
@@ -139,6 +140,8 @@ signals:
 
 private:
     void notifyChanged();
+    bool updateFitToTextGeometry();
+    void notifyTextMetricsChanged();
 
     Type m_type;
     QString m_mediaId;
