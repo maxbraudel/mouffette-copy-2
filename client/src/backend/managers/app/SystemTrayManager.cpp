@@ -28,7 +28,17 @@ void SystemTrayManager::setup() {
     m_trayIcon->setIcon(trayIconIcon);
     
     // Connect tray icon activation to forward the signal
-    connect(m_trayIcon, &QSystemTrayIcon::activated, this, &SystemTrayManager::activated);
+    connect(m_trayIcon, &QSystemTrayIcon::activated, this,
+            [this](QSystemTrayIcon::ActivationReason reason) {
+        ActivationReason mapped = ActivationReason::Unknown;
+        switch (reason) {
+        case QSystemTrayIcon::Trigger: mapped = ActivationReason::Trigger; break;
+        case QSystemTrayIcon::DoubleClick: mapped = ActivationReason::DoubleClick; break;
+        case QSystemTrayIcon::Context: mapped = ActivationReason::Context; break;
+        default: break;
+        }
+        emit activated(mapped);
+    });
     
     // Show the tray icon
     m_trayIcon->show();

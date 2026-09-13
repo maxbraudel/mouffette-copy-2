@@ -1,5 +1,4 @@
-import QtQuick 2.15
-
+import QtQuick
 // Reusable overlay icon button matching the legacy OverlayButtonElement style.
 // Blocks pointer events from reaching the canvas DragHandler/PointHandler beneath it.
 Item {

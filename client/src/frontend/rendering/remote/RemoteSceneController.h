@@ -17,11 +17,10 @@
 
 class WebSocketClient;
 class FileManager;
-class QWidget;
 class QMediaPlayer;
 class QVideoSink;
 class QAudioOutput;
-class QQuickWidget;
+class QQuickWindow;
 class QVariantAnimation;
 class MediaListModel;
 class RemoteVideoFrameSource;
@@ -41,7 +40,7 @@ public:
 
 signals:
 	// Emitted only after every tracked player, sink, audio output, frame source,
-	// timer, animation, QQuickWidget/model and native top-level window from the
+	// timer, animation, QML model and native top-level QQuickWindow from the
 	// retired graph has actually been destroyed. An empty id denotes a normal
 	// SceneRun stop rather than a RemoteSession teardown.
 	void teardownSettled(const QString& remoteSessionId, bool success);
@@ -81,13 +80,12 @@ private slots:
 
 private:
 	struct ScreenWindow {
-		QWidget* window = nullptr;
-		QQuickWidget* quickWidget = nullptr;
-		MediaListModel* mediaModel = nullptr;
+		QPointer<QQuickWindow> window;
+		QPointer<MediaListModel> mediaModel;
 		QVariantList mediaEntries;
 		QMetaObject::Connection firstFrameConnection;
 		int firstFramePassesRemaining = 0;
-		// Immutable source topology for the SceneRun. The QWidget geometry below
+		// Immutable source topology for the SceneRun. The QWindow geometry below
 		// is the local physical mapping and must never be replaced by a resumed
 		// owner's coordinates.
 		QJsonObject sourceScreenDefinition;
@@ -205,7 +203,7 @@ private:
 		bool valid = false;
 	};
 
-	QWidget* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);
+	QQuickWindow* ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary);
 	void resetWindowForNewScene(ScreenWindow& sw, int screenId, int x, int y, int w, int h, bool primary);
 	void buildWindows(const QJsonArray& screensArray);
 	void buildMedia(const QJsonArray& mediaArray);

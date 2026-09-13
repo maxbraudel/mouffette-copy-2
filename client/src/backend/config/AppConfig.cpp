@@ -24,13 +24,12 @@ struct SettingSpec {
     bool boolean;
 };
 
-constexpr std::array<SettingSpec, 12> kSpecs{{
+constexpr std::array<SettingSpec, 11> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectHiddenRetentionMs, "MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS", "project-hidden-retention-ms", nullptr, "300000", false},
     {Key::UploadConcurrency, "MOUFFETTE_UPLOAD_CONCURRENCY", "upload-concurrency", nullptr, "2", false},
     {Key::AutoUploadImportedMedia, "MOUFFETTE_AUTO_UPLOAD_IMPORTED_MEDIA", "auto-upload-imported-media", "autoUploadImportedMedia", "false", true},
-    {Key::UseQuickCanvasRenderer, "MOUFFETTE_USE_QUICK_CANVAS_RENDERER", "use-quick-canvas-renderer", "useQuickCanvasRenderer", "true", true},
     {Key::QtMediaBackend, "QT_MEDIA_BACKEND", "media-backend", nullptr, "ffmpeg", false},
     {Key::AllowMultipleInstances, "MOUFFETTE_ALLOW_MULTIPLE_INSTANCES", "allow-multiple-instances", nullptr, "false", true},
     {Key::CursorDebug, "MOUFFETTE_CURSOR_DEBUG", "cursor-debug", nullptr, "false", true},
@@ -323,7 +322,6 @@ void AppConfig::resetToCompiledDefaults() {
     m_projectHiddenRetentionMs = 300000;
     m_uploadConcurrency = 2;
     m_autoUploadImportedMedia = false;
-    m_useQuickCanvasRenderer = true;
     m_qtMediaBackend = QStringLiteral("ffmpeg");
     m_allowMultipleInstances = false;
     m_cursorDebug = false;
@@ -504,9 +502,6 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
     if (!parseBoolean(rawValues.at(Key::AutoUploadImportedMedia),
                       keyName(Key::AutoUploadImportedMedia),
                       candidate.m_autoUploadImportedMedia, errorMessage)
-        || !parseBoolean(rawValues.at(Key::UseQuickCanvasRenderer),
-                         keyName(Key::UseQuickCanvasRenderer),
-                         candidate.m_useQuickCanvasRenderer, errorMessage)
         || !parseBoolean(rawValues.at(Key::AllowMultipleInstances),
                          keyName(Key::AllowMultipleInstances),
                          candidate.m_allowMultipleInstances, errorMessage)

@@ -6,7 +6,7 @@
 #include <QSet>
 
 // Forward declarations
-class MainWindow;
+class ApplicationRuntime;
 class ClientInfo;
 class QFont;
 class QuickCanvasHost;
@@ -20,7 +20,7 @@ class QuickCanvasHost;
  * - Upload state management per session
  * - Session cleanup and rotation
  * 
- * Note: This controller works with MainWindow::CanvasSession which is
+ * Note: This controller works with ApplicationRuntime::CanvasSession which is
  * a nested type. We use void* in the interface to avoid circular dependencies,
  * and cast to the proper type in the implementation.
  */
@@ -29,7 +29,7 @@ class CanvasSessionController : public QObject
     Q_OBJECT
 
 public:
-    explicit CanvasSessionController(MainWindow* mainWindow, QObject* parent = nullptr);
+    explicit CanvasSessionController(ApplicationRuntime* mainWindow, QObject* parent = nullptr);
     ~CanvasSessionController() override = default;
 
     // Session lookup methods - return void* to avoid exposing nested type in header
@@ -53,7 +53,7 @@ public:
     void* sessionForUploadId(const QString& uploadId);
 
 private:
-    MainWindow* m_mainWindow;
+    ApplicationRuntime* m_mainWindow;
     QuickCanvasHost* m_prewarmedQuickCanvasHost = nullptr;
     QString m_lastQuickInitError;
 };

@@ -1,8 +1,8 @@
 #include "backend/controllers/TimerController.h"
-#include "MainWindow.h"
+#include "backend/runtime/ApplicationRuntime.h"
 #include "backend/network/WebSocketClient.h"
 
-TimerController::TimerController(MainWindow* mainWindow, QObject* parent)
+TimerController::TimerController(ApplicationRuntime* mainWindow, QObject* parent)
     : QObject(parent)
     , m_mainWindow(mainWindow)
 {

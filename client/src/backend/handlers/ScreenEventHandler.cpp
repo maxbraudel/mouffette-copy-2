@@ -1,21 +1,16 @@
 #include "backend/handlers/ScreenEventHandler.h"
-#include "MainWindow.h"
+#include "backend/runtime/ApplicationRuntime.h"
 #include "frontend/managers/ui/RemoteClientState.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/managers/system/SystemMonitor.h"
 #include "shared/rendering/ICanvasHost.h"
-#include "frontend/rendering/canvas/LegacyCanvasHost.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
-#include "frontend/ui/pages/CanvasViewPage.h"
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
 #include "backend/network/UploadManager.h"
 #include "backend/files/FileManager.h"
 #include "backend/domain/session/SessionManager.h"
 #include "backend/domain/project/ProjectManager.h"
-#include "frontend/managers/ui/RemoteClientInfoManager.h"
-#include "backend/managers/app/MigrationTelemetryManager.h"
 #include <QDebug>
-#include <QStackedWidget>
 #include <QGuiApplication>
 #include <QScreen>
 #include <QDateTime>
@@ -72,7 +67,7 @@ static BOOL CALLBACK ScreenEventEnumMonProc(HMONITOR hMon, HDC, LPRECT, LPARAM l
 } // namespace
 #endif
 
-ScreenEventHandler::ScreenEventHandler(MainWindow* mainWindow, QObject* parent)
+ScreenEventHandler::ScreenEventHandler(ApplicationRuntime* mainWindow, QObject* parent)
     : QObject(parent)
     , m_mainWindow(mainWindow)
     , m_webSocketClient(nullptr)
@@ -211,7 +206,7 @@ void ScreenEventHandler::onScreensInfoReceived(const ClientInfo& clientInfo)
         return;
     }
 
-    MainWindow::CanvasSession* session = m_mainWindow->findCanvasSession(persistentId);
+    ApplicationRuntime::CanvasSession* session = m_mainWindow->findCanvasSession(persistentId);
     if (!session && !clientInfo.getId().isEmpty()) {
         session = m_mainWindow->findCanvasSessionByServerClientId(clientInfo.getId());
     }
@@ -274,18 +269,12 @@ void ScreenEventHandler::onScreensInfoReceived(const ClientInfo& clientInfo)
         if (!m_mainWindow->isCanvasRevealedForCurrentClient() && hasScreens) {
             if (m_mainWindow->getNavigationManager()) {
                 m_mainWindow->getNavigationManager()->revealCanvas();
-            } else if (m_mainWindow->getCanvasViewPage()) {
-                QStackedWidget* canvasStack = m_mainWindow->getCanvasViewPage()->getCanvasStack();
-                if (canvasStack) {
-                    canvasStack->setCurrentIndex(1);
-                }
             }
 
             session->canvas->requestDeferredInitialRecenter(53);
             if (!m_mainWindow->shouldPreserveViewportOnReconnect()) {
                 session->canvas->recenterWithMargin(53);
             }
-            session->canvas->setFocus(Qt::OtherFocusReason);
 
             m_mainWindow->setPreserveViewportOnReconnect(false);
             m_mainWindow->setCanvasRevealedForCurrentClient(true);

@@ -1,5 +1,4 @@
-import QtQuick 2.15
-
+import QtQuick
 // The one visual delegate shared by the interactive authoring canvas and the
 // passive remote renderer. Geometry, interaction and screen clipping remain
 // responsibilities of the respective parent roots.

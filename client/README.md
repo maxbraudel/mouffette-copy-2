@@ -124,7 +124,7 @@ configuration precedence, multi-instance behavior and packaging options. The
 [build and release operations guide](docs/BUILD_AND_RELEASE.md) contains the
 complete release contract and validation checklist.
 
-## Features (Phase 1)
+## Features
 
 - ✅ WebSocket connection to Mouffette server
 - ✅ Client registration with machine name and screen info
@@ -145,22 +145,25 @@ complete release contract and validation checklist.
 4. **Access Interface**: 
    - **macOS**: Click the blue icon in the menu bar
    - **Windows**: Click the icon in the system tray (taskbar area)
-   - **Tray Menu**: Right-click for quick options (Show/Hide, Quit)
 5. **View Clients**: Open the main window to see other connected Mouffette clients
-6. **Notifications**: Get tray notifications when clients connect/disconnect
+6. **Notifications**: View connection and operation notifications in the QML interface
 
 ### System Tray Features
 - **Auto-start**: Connects to server automatically on launch
 - **Background operation**: Runs silently in the background
-- **Tray notifications**: Shows connection status and new client alerts
 - **Quick access**: Click tray icon to show/hide main window
-- **Context menu**: Right-click tray icon for menu options
 
 ## Architecture
 
-Canvas selection has one authority in the C++ scene. QML consumes its selection
+The complete application interface is Qt Quick/QML. One
+`QQmlApplicationEngine` loads the `ApplicationWindow`; C++ exposes typed
+controllers, list models, and commands without locating or manipulating QML
+controls. `QApplication` remains only for the native tray icon.
+
+Canvas selection has one authority in `CanvasDocument`. QML consumes its
 projection; one per-canvas edit session and one pointer coordinator own their
-respective lifecycles. See [the input ownership contract and Qt regression tests](docs/QUICK_CANVAS_INPUT_COORDINATOR.md).
+respective lifecycles. See [the architecture report](CLIENT_ARCHITECTURE_REPORT.md)
+and [the input ownership contract](docs/QUICK_CANVAS_INPUT_COORDINATOR.md).
 
 The text outline renderer uses the existing `TextEdit` document, cached glyph
 masks and Qt's image-node/texture-atlas renderer. Its Qt-private document access
@@ -169,24 +172,25 @@ build and package it with the same Qt version. See
 [the rendering investigation and validation notes](docs/text-outline-rendering.md).
 
 The client is built with:
-- **Qt6**: Cross-platform UI framework
+- **Qt 6.11 / Qt Quick**: Cross-platform UI and rendering framework
 - **WebSocket**: Real-time communication with server
 - **CMake**: Build system
 - **C++17**: Modern C++ features
 
 ### Key Components
 
-- `MainWindow`: Main UI and application logic
+- `ApplicationController`: Non-visual presentation composition root
+- `ApplicationRuntime`: Business, session, upload and system orchestration
+- `CanvasDocument`: Renderer-independent canvas state
+- `CanvasRoot.qml`: Local canvas presentation and interaction surface
 - `WebSocketClient`: Handles all server communication
 - `ClientInfo`: Data structures for client information
 - `ScreenInfo`: Represents display/monitor information
 
-## Architecture Guardrails (Phase -2)
+## Architecture guardrails
 
-To protect migration boundaries before the Quick renderer swap:
-
-- Backend must not include Quick/QML types.
-- Orchestration paths (`backend/controllers`, `backend/handlers`, `backend/managers`) must not add new concrete canvas-renderer includes.
+The shipped application has no Widget/QGraphics UI, no `QQuickWidget`, no QSS,
+and no alternate renderer. The only Widgets exception is the native tray.
 
 Run boundary checks:
 
@@ -194,19 +198,8 @@ Run boundary checks:
 ./tools/check_architecture_boundaries.sh
 ```
 
-Boundary ownership/rules documentation:
-
-- `docs/ARCHITECTURE_BOUNDARIES.md`
-- `tools/architecture_screen_canvas_allowlist.txt` (temporary legacy exceptions to shrink over migration)
-
-## Next Steps (Phase 2)
-
-The next phase will add:
-- Media file selection and preview
-- Drag & drop interface for screen positioning
-- Real-time media streaming
-- Media display on recipient screens
-- Context menus for media options
+Boundary ownership and rules are documented in
+[`docs/ARCHITECTURE_BOUNDARIES.md`](docs/ARCHITECTURE_BOUNDARIES.md).
 
 ## Troubleshooting
 

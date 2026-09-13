@@ -6,13 +6,13 @@
 #include <QString>
 #include "backend/domain/models/ClientInfo.h"
 
-class MainWindow;
+class ApplicationRuntime;
 class SessionManager;
 
 /**
  * @brief Builds the display client list by merging connected clients with offline session history
  * 
- * [Phase 16] Extracted from MainWindow::buildDisplayClientList() to reduce MainWindow size
+ * [Phase 16] Extracted from ApplicationRuntime::buildDisplayClientList() to reduce ApplicationRuntime size
  * This class handles the logic of building a unified client list that includes:
  * - Currently connected clients (online)
  * - Previously connected clients from session history (offline)
@@ -22,7 +22,7 @@ class ClientListBuilder
 public:
     /**
      * @brief Build a display list combining connected clients and offline sessions
-     * @param mainWindow The MainWindow instance (for session access)
+     * @param mainWindow The ApplicationRuntime instance (for session access)
      * @param connectedClients List of currently connected clients from server
      * @return Unified list of clients to display in the UI
      * 
@@ -32,7 +32,7 @@ public:
      * 3. Appends offline clients from session history
      */
     static QList<ClientInfo> buildDisplayClientList(
-        MainWindow* mainWindow,
+        ApplicationRuntime* mainWindow,
         const QList<ClientInfo>& connectedClients
     );
 };

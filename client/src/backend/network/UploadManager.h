@@ -54,7 +54,7 @@ struct IncomingUploadSession {
     bool suspendedForResume = false;
 };
 
-// Dedicated component that encapsulates upload/unload logic previously in MainWindow.
+// Dedicated component that encapsulates upload/unload logic previously in ApplicationRuntime.
 // Responsibilities:
 //  - Build manifest from scene media items
 //  - Stream chunks (sequential for now) and report progress
@@ -153,7 +153,7 @@ public:
         const QString& teardownId);
     // Terminal transport events must stop writers immediately but may not
     // rename/delete their cache while a renderer still owns those files.
-    // MainWindow calls completeTerminalIncomingCleanup() only after every
+    // ApplicationRuntime calls completeTerminalIncomingCleanup() only after every
     // correlated RemoteSceneController::teardownSettled barrier has fired.
     void beginTerminalIncomingCleanup(const QString& reasonCode);
     BulkTeardownResult completeTerminalIncomingCleanup(

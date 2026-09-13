@@ -1,5 +1,4 @@
-import QtQuick 2.15
-
+import QtQuick
 // One editing owner per interactive canvas. Selection remains owned by the
 // backend; this object consumes its projection and never changes selection.
 QtObject {

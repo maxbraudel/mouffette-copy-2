@@ -2,7 +2,7 @@
   "id": "protocol_behavior",
   "rules": [
     {
-      "file": "src/MainWindow.cpp",
+      "file": "src/backend/runtime/ApplicationRuntime.cpp",
       "mustContain": [
         "openRemoteSession\\(",
         "closeRemoteSession\\("

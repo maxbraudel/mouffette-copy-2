@@ -160,7 +160,7 @@ private slots:
             text += phrase;
         text.truncate(12000);
 
-        // Resource lifetime mirrors QQuickWidget: the render target must outlive
+        // The render target must outlive
         // the window/control scene graph, which is invalidated before teardown.
         std::unique_ptr<QRhiTexture> texture;
         std::unique_ptr<QRhiRenderBuffer> depthStencil;

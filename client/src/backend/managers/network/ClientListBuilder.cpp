@@ -1,11 +1,11 @@
 #include "backend/managers/network/ClientListBuilder.h"
-#include "MainWindow.h"
+#include "backend/runtime/ApplicationRuntime.h"
 #include "backend/domain/session/SessionManager.h"
 #include "shared/rendering/ICanvasHost.h"
 #include <QDebug>
 
 QList<ClientInfo> ClientListBuilder::buildDisplayClientList(
-    MainWindow* mainWindow,
+    ApplicationRuntime* mainWindow,
     const QList<ClientInfo>& connectedClients)
 {
     if (!mainWindow) return QList<ClientInfo>();
@@ -28,7 +28,7 @@ QList<ClientInfo> ClientListBuilder::buildDisplayClientList(
         client.setOnline(true);
 
         // Find existing session for this client
-        if (MainWindow::CanvasSession* session = mainWindow->findCanvasSession(persistentId)) {
+        if (ApplicationRuntime::CanvasSession* session = mainWindow->findCanvasSession(persistentId)) {
             session->serverAssignedId = client.getId(); // Keep for local lookup
             session->lastClientInfo = client;
             session->lastClientInfo.setEndpointId(persistentId);
@@ -57,7 +57,7 @@ QList<ClientInfo> ClientListBuilder::buildDisplayClientList(
     // Add offline clients from session history
     SessionManager* sessionManager = mainWindow->getSessionManager();
     if (sessionManager) {
-        for (MainWindow::CanvasSession* session : sessionManager->getAllSessions()) {
+        for (ApplicationRuntime::CanvasSession* session : sessionManager->getAllSessions()) {
             // Skip if already seen as online
             if (identitiesSeen.contains(session->persistentClientId)) continue;
             

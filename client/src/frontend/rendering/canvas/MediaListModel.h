@@ -48,7 +48,13 @@ public:
 
     // Role enum
     enum Roles {
-        ModelDataRole = Qt::UserRole + 1
+        ModelDataRole = Qt::UserRole + 1,
+        MediaIdRole,
+        DisplayNameRole,
+        MediaTypeRole,
+        SourcePathRole,
+        UploadStateRole,
+        ContentVisibleRole
     };
 
 private:

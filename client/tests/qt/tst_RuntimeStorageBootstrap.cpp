@@ -135,6 +135,8 @@ void RuntimeStorageBootstrapTest::normalBootPreservesDurableStateAndPurgesCache(
     const auto result = bootstrap.run();
     QVERIFY(result.succeeded());
     QVERIFY(!result.hadReset());
+    QVERIFY(!RuntimeProfile::readSettings().contains(
+        QStringLiteral("useQuickCanvasRenderer")));
     QVERIFY(!QFileInfo::exists(cached));
     QCOMPARE(RuntimeProfile::readSettings().value(QStringLiteral("serverUrl")).toString(),
              QStringLiteral("ws://127.0.0.1:9000"));

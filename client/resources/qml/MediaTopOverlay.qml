@@ -1,5 +1,4 @@
-import QtQuick 2.15
-
+import QtQuick
 // Top overlay panel attached above a selected media item.
 //   Row 1: media name pill (full width, adaptive with ellipsis)
 //   Row 2: show/hide | bring-forward | bring-backward | delete

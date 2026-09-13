@@ -1,5 +1,4 @@
-import QtQuick 2.15
-
+import QtQuick
 // Renders the selection border and resize handles as a scene-space overlay.
 // Move drag is handled natively by each media item's DragHandler in contentRoot.
 // This component only handles resize (8 handles) and provides visual chrome.

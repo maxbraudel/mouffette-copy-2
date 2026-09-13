@@ -1,5 +1,4 @@
-import QtQuick 2.15
-
+import QtQuick
 // Shared loading surface for every raster media representation. Geometry is
 // owned by the caller; this component only guarantees that an exact-size grey
 // placeholder exists before the decoded pixels become available.

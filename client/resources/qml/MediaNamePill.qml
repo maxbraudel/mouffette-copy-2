@@ -1,5 +1,4 @@
-import QtQuick 2.15
-
+import QtQuick
 // Reused by the selected-media overlay and by the pre-drop preview so the
 // filename does not move or restyle during the handoff.
 Rectangle {

@@ -5,13 +5,11 @@
 #include <QHash>
 #include <QSet>
 #include <QString>
-#include <QFont>
 #include <QList>
 #include "backend/domain/models/ClientInfo.h"
 
 class ICanvasHost;
-class QPushButton;
-class ResizableMediaBase;
+class CanvasMedia;
 
 // Phase 3: canvasSessionId is MANDATORY - use default value instead of empty string
 inline const QString DEFAULT_IDEA_ID = QStringLiteral("default");
@@ -24,19 +22,19 @@ inline const QString DEFAULT_IDEA_ID = QStringLiteral("default");
  * - Session creation and deletion
  * - Session state tracking (online status, remote content, file tracking)
  * 
- * Extracted from MainWindow to improve testability and separation of concerns.
+ * Extracted from ApplicationRuntime to improve testability and separation of concerns.
  * 
  * MIGRATION STATUS (Phase 4.1 - ✅ COMPLETE):
  * - [✅] Class created with core data structure
  * - [✅] Lookup functions implemented (findSession, findByIdeaId, findByServerClientId)
  * - [✅] CRUD operations (getOrCreate, delete, clear)
  * - [✅] Bulk operations (markOffline, clearRemoteContent)
- * - [✅] MainWindow integration (m_canvasSessions fully migrated)
+ * - [✅] ApplicationRuntime integration (m_canvasSessions fully migrated)
  * - [✅] All iteration loops migrated to getAllSessions()
  * - [✅] IdeaId generation integrated into SessionManager
  * 
  * RESULTS:
- * - Removed QHash<QString, CanvasSession> m_canvasSessions from MainWindow
+ * - Removed QHash<QString, CanvasSession> m_canvasSessions from ApplicationRuntime
  * - All session access now goes through SessionManager
  * - ~150 lines of duplicate session management code eliminated
  * - Single source of truth for session data
@@ -52,9 +50,6 @@ public:
         QString serverAssignedId;   // temporary server session ID (for local lookup only, send persistentClientId to server)
         QString canvasSessionId;
         ICanvasHost* canvas = nullptr;
-        QPushButton* uploadButton = nullptr;
-        bool uploadButtonInOverlay = false;
-        QFont uploadButtonDefaultFont;
         ClientInfo lastClientInfo;
         bool connectionsInitialized = false;
         bool remoteContentClearedOnDisconnect = false;
@@ -63,7 +58,7 @@ public:
         struct UploadTracking {
             // Removed mediaIdsBeingUploaded - redundant with fileIds tracking
             // Removed mediaIdByFileId - can be derived from FileManager
-            QHash<QString, QList<ResizableMediaBase*>> itemsByFileId;
+            QHash<QString, QList<CanvasMedia*>> itemsByFileId;
             QStringList currentUploadFileOrder;
             QSet<QString> serverCompletedFileIds;
             QHash<QString, int> perFileProgress;

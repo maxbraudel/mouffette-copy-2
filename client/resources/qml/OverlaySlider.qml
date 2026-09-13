@@ -1,5 +1,4 @@
-import QtQuick 2.15
-
+import QtQuick
 // Horizontal slider matching the legacy OverlaySliderElement style.
 // Track + fill + draggable thumb. Value range [0, 1].
 // Blocks pointer events from reaching canvas handlers beneath it.

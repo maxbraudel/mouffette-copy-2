@@ -18,6 +18,14 @@ class SystemTrayManager : public QObject {
     Q_OBJECT
     
 public:
+    enum class ActivationReason {
+        Unknown,
+        Trigger,
+        DoubleClick,
+        Context
+    };
+    Q_ENUM(ActivationReason)
+
     explicit SystemTrayManager(QObject* parent = nullptr);
     ~SystemTrayManager() override;
     
@@ -56,7 +64,7 @@ signals:
      * @brief Emitted when tray icon is activated (clicked)
      * @param reason The activation reason (Trigger, DoubleClick, Context, etc.)
      */
-    void activated(QSystemTrayIcon::ActivationReason reason);
+    void activated(SystemTrayManager::ActivationReason reason);
     
 private:
     QSystemTrayIcon* m_trayIcon = nullptr;

@@ -1,41 +1,11 @@
 #include "backend/domain/media/TextRenderState.h"
 
-#include "backend/domain/media/TextMediaItem.h"
-
 #include <QFontInfo>
 #include <QGuiApplication>
 #include <QScreen>
 
 #include <algorithm>
 #include <cmath>
-
-namespace {
-
-QString horizontalAlignmentToString(TextMediaItem::HorizontalAlignment alignment) {
-    switch (alignment) {
-    case TextMediaItem::HorizontalAlignment::Left:
-        return QStringLiteral("left");
-    case TextMediaItem::HorizontalAlignment::Right:
-        return QStringLiteral("right");
-    case TextMediaItem::HorizontalAlignment::Center:
-        return QStringLiteral("center");
-    }
-    return QStringLiteral("center");
-}
-
-QString verticalAlignmentToString(TextMediaItem::VerticalAlignment alignment) {
-    switch (alignment) {
-    case TextMediaItem::VerticalAlignment::Top:
-        return QStringLiteral("top");
-    case TextMediaItem::VerticalAlignment::Bottom:
-        return QStringLiteral("bottom");
-    case TextMediaItem::VerticalAlignment::Center:
-        return QStringLiteral("center");
-    }
-    return QStringLiteral("center");
-}
-
-} // namespace
 
 namespace TextRenderMetrics {
 
@@ -92,36 +62,6 @@ qreal outlineSafetyPadding(qreal outlineWidthPixels) {
     }
     // One device-independent pixel covers antialiasing at the outer edge.
     return std::ceil(outlineWidthPixels) + 1.0;
-}
-
-TextRenderState fromMediaItem(const TextMediaItem& item) {
-    TextRenderState state;
-    const QFont font = item.font();
-    const QFontInfo resolvedFont(font);
-    state.text = item.text();
-    // QFont::family() is the requested family. QFontInfo reports the face Qt
-    // actually selected, which is the only family that can keep TextEdit and
-    // QRawFont glyph metrics aligned when the requested face is unavailable.
-    state.fontFamily = resolvedFont.family().isEmpty()
-        ? font.family() : resolvedFont.family();
-    if (state.fontFamily.isEmpty()) {
-        state.fontFamily = QStringLiteral("Impact");
-    }
-    state.fontPixelSize = effectiveFontPixelSize(font, item.uniformScaleFactor());
-    state.fontWeight = std::clamp(item.textFontWeightValue(), 100, 900);
-    state.italic = item.italicEnabled();
-    state.underline = item.underlineEnabled();
-    state.uppercase = item.uppercaseEnabled();
-    state.horizontalAlignment = horizontalAlignmentToString(item.horizontalAlignment());
-    state.verticalAlignment = verticalAlignmentToString(item.verticalAlignment());
-    state.fitToTextEnabled = item.fitToTextEnabled();
-    state.textColor = item.textColor();
-    state.outlineWidthPercent = item.textBorderWidth();
-    state.outlineWidthPixels = outlinePixels(state.outlineWidthPercent, state.fontPixelSize);
-    state.outlineColor = item.textBorderColor();
-    state.highlightEnabled = item.highlightEnabled();
-    state.highlightColor = item.highlightColor();
-    return state;
 }
 
 } // namespace TextRenderMetrics

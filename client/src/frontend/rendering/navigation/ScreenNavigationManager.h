@@ -5,69 +5,44 @@
 #include <QPointer>
 #include <QString>
 
-class QStackedWidget; class QWidget; class QPushButton; class QTimer; class QGraphicsOpacityEffect; class QPropertyAnimation; class ICanvasHost; class SpinnerWidget; class ClientInfo;
+class ClientInfo;
+class ICanvasHost;
 
-// Manages navigation between client list and screen view and associated loading/animation UX.
-class ScreenNavigationManager : public QObject {
+// Non-visual navigation state shared by the runtime and Qt Quick shell.
+// Presentation and transitions live in QML; this object only records the
+// current destination and whether the active canvas is waiting for data.
+class ScreenNavigationManager final : public QObject
+{
     Q_OBJECT
+
 public:
     explicit ScreenNavigationManager(QObject* parent = nullptr);
 
-    struct Widgets {
-        QStackedWidget* stack = nullptr;
-        QWidget* clientListPage = nullptr;
-        QWidget* screenViewPage = nullptr;
-        QPushButton* backButton = nullptr;
-        QStackedWidget* canvasStack = nullptr; // index 0: spinner, 1: canvas
-        SpinnerWidget* loadingSpinner = nullptr;
-        QGraphicsOpacityEffect* spinnerOpacity = nullptr;
-        QPropertyAnimation* spinnerFade = nullptr;
-        QGraphicsOpacityEffect* canvasOpacity = nullptr;
-        QPropertyAnimation* canvasFade = nullptr;
-        QGraphicsOpacityEffect* volumeOpacity = nullptr;
-        QPropertyAnimation* volumeFade = nullptr;
-        ICanvasHost* screenCanvas = nullptr;
-        SpinnerWidget* inlineSpinner = nullptr; // Small spinner for reconnection
-        bool* canvasContentEverLoaded = nullptr; // Pointer to flag tracking if content was loaded
-    };
-
-    void setWidgets(const Widgets& w); // must be called before usage
-    void setDurations(int loaderDelayMs, int loaderFadeMs, int canvasFadeMs);
     void setActiveCanvas(ICanvasHost* canvas);
-
     void showScreenView(const ClientInfo& client, bool hasCachedContent = false);
-    void refreshActiveClientPreservingCanvas(const ClientInfo& client); // update client id without UI reset
+    void refreshActiveClientPreservingCanvas(const ClientInfo& client);
     void showClientList();
-    // Called when screens data has arrived and we can display the canvas
     void revealCanvas();
-    // Immediately switch the canvas area to a loading state (spinner visible,
-    // canvas and volume overlays hidden). Intended for connection loss while
-    // on the screen view so the UI reflects the disconnected state.
     void enterLoadingStateImmediate();
 
-    bool isOnScreenView() const;
+    bool isOnScreenView() const { return m_onScreenView; }
+    bool isLoading() const { return m_loading; }
+    bool canvasVisible() const { return m_canvasVisible; }
     QString currentClientId() const { return m_currentClientId; }
 
 signals:
     void screenViewEntered(const QString& clientId);
     void clientListEntered();
-
-private slots:
-    void onLoaderDelayTimeout();
+    void presentationChanged();
 
 private:
-    void ensureLoaderTimer();
-    void startSpinnerDelayed();
-    void stopSpinner();
-    void fadeInCanvas();
+    void setPresentation(bool loading, bool canvasVisible);
 
-    Widgets m_w;
+    QPointer<ICanvasHost> m_activeCanvas;
     QString m_currentClientId;
-    QTimer* m_loaderDelayTimer = nullptr;
-    int m_loaderDelayMs = 1000;
-    int m_loaderFadeDurationMs = 500;
-    int m_canvasFadeDurationMs = 50;
-    bool m_usingInlineLoader = false;
+    bool m_onScreenView = false;
+    bool m_loading = false;
+    bool m_canvasVisible = false;
 };
 
 #endif // SCREENNAVIGATIONMANAGER_H

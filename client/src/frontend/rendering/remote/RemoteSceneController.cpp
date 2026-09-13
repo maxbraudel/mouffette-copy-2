@@ -5,28 +5,26 @@
 #include "backend/domain/media/MediaFilePolicy.h"
 #include "frontend/rendering/canvas/CanvasQmlTypes.h"
 #include "frontend/rendering/canvas/MediaListModel.h"
+#include "frontend/qml/QmlRuntime.h"
 #include "frontend/rendering/remote/RemoteVideoFrameItem.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include <QJsonArray>
 #include <QScreen>
 #include <QGuiApplication>
-#include <QHBoxLayout>
 #include <QFileInfo>
 #include <QFile>
 #include <QDebug>
 #include <QVideoFrame>
 #include <QVariantAnimation>
 #include <QEasingCurve>
-#include <QWidget>
 #include <QAudioOutput>
 #include <QMediaPlayer>
 #include <QVideoSink>
 #include <QMetaObject>
 #include <QUrl>
 #include <QThread>
-#include <QQuickWidget>
 #include <QQuickWindow>
-#include <QQmlContext>
+#include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QPointer>
@@ -526,9 +524,7 @@ bool RemoteSceneController::remoteRenderGraphsReady() const
     if (m_screenWindows.isEmpty()) return false;
     for (auto it = m_screenWindows.cbegin(); it != m_screenWindows.cend(); ++it) {
         const ScreenWindow& window = it.value();
-        if (!window.window || !window.quickWidget || !window.mediaModel
-            || window.quickWidget->status() != QQuickWidget::Ready
-            || !window.quickWidget->rootObject()) {
+        if (!window.window || !window.mediaModel) {
             return false;
         }
     }
@@ -1721,8 +1717,7 @@ void RemoteSceneController::onRemoteSceneStart(const QString& senderClientId, co
     }
     for (auto it = m_screenWindows.cbegin(); it != m_screenWindows.cend(); ++it) {
         const ScreenWindow& window = it.value();
-        if (!window.quickWidget || window.quickWidget->status() != QQuickWidget::Ready
-            || !window.quickWidget->rootObject() || !window.mediaModel) {
+        if (!window.window || !window.mediaModel) {
             failWithMessage(QStringLiteral("Qt Quick remote renderer failed to initialize"));
             ++m_sceneEpoch;
             clearScene();
@@ -2192,7 +2187,7 @@ void RemoteSceneController::clearScene() {
             continue;
         }
 
-        QWidget* window = sw.window;
+        QQuickWindow* window = sw.window;
         sw.sceneEpoch = 0;
 
         QObject::disconnect(window, nullptr, nullptr, nullptr);
@@ -2202,28 +2197,19 @@ void RemoteSceneController::clearScene() {
         MacWindowManager::orderOutWindow(window);
 #endif
 
-        // Do not synchronously reset the QML model or source here. VideoItem
+        // Do not synchronously reset the QML model here. VideoItem
         // may have Qt.callLater work queued from component creation; destroying
         // its context in the middle of this network callback makes that work run
-        // against an invalid QML object. The hidden window owns the quick widget
-        // and model, so one deleteLater() on the window retires the entire tree
-        // safely at the normal event-loop boundary.
+        // against an invalid QML object. The QQuickWindow owns its visual tree
+        // and model, so one deleteLater() retires the complete graph safely at
+        // the normal event-loop boundary.
         sw.mediaModel = nullptr;
         sw.mediaEntries.clear();
-		QWindow* nativeWindow = window->windowHandle();
-        QQuickWindow* quickWindow = nullptr;
-        if (sw.quickWidget) {
-            quickWindow = sw.quickWidget->quickWindow();
-            QObject::disconnect(sw.quickWidget, nullptr, nullptr, nullptr);
-            sw.quickWidget = nullptr;
-        }
 
         // Register the destruction observers after all wildcard disconnects;
         // otherwise QObject::disconnect(sender, nullptr, nullptr, nullptr)
         // would silently remove the barrier itself.
         trackTeardownObjectTree(window);
-		trackTeardownObjectTree(nativeWindow);
-        trackTeardownObjectTree(quickWindow);
 
         window->close();
         window->lower();
@@ -2264,9 +2250,9 @@ void RemoteSceneController::trackTeardownObject(QObject* object)
 
 void RemoteSceneController::trackTeardownObjectTree(QObject* root)
 {
-    if (!root) return;
-    const QList<QObject*> descendants = root->findChildren<QObject*>();
-    for (QObject* child : descendants) trackTeardownObject(child);
+    // The QQuickWindow owns its complete QML object tree. A queued barrier
+    // after the top-level destruction is sufficient and avoids inspecting
+    // visual children from C++.
     trackTeardownObject(root);
 }
 
@@ -2787,7 +2773,7 @@ void RemoteSceneController::activateScene() {
 	for (auto it = m_screenWindows.cbegin();
 		 activationGraphReady && it != m_screenWindows.cend(); ++it) {
 		activationGraphReady = it->sceneEpoch == activationEpoch
-			&& it->quickWidget && it->quickWidget->quickWindow();
+			&& it->window;
 	}
 	if (!activationGraphReady) {
 		const qint64 timestamp = m_ws ? m_ws->estimatedServerMonotonicMs() : -1;
@@ -2811,7 +2797,7 @@ void RemoteSceneController::activateScene() {
     m_screensAwaitingFirstFrame.clear();
     for (auto it = m_screenWindows.begin(); it != m_screenWindows.end(); ++it) {
         ScreenWindow& sw = it.value();
-		QQuickWindow* renderWindow = sw.quickWidget->quickWindow();
+		QQuickWindow* renderWindow = sw.window;
 
 		// Install the render observer only after show(). Any preparation frame
 		// emitted while the window was hidden is therefore outside this
@@ -2820,11 +2806,8 @@ void RemoteSceneController::activateScene() {
 
         const int screenId = it.key();
         m_screensAwaitingFirstFrame.insert(screenId);
-		// QQuickWidget redirects Qt Quick through QQuickRenderControl into an
-		// offscreen texture. frameSwapped() is not guaranteed for redirected
-		// output (notably with Direct3D on Windows), while afterFrameEnd() is.
-		// The surrounding native-window exposure check prevents a hidden
-		// preparation pass from satisfying the barrier.
+		// Observe the real QQuickWindow scene graph. The surrounding exposure
+		// check prevents a hidden preparation pass from satisfying the barrier.
 		sw.firstFramePassesRemaining = 1;
         QObject::disconnect(sw.firstFrameConnection);
         sw.firstFrameConnection = connect(
@@ -2833,34 +2816,26 @@ void RemoteSceneController::activateScene() {
 				if (activationEpoch != m_sceneEpoch || !m_sceneActivated) {
                     return;
                 }
-                auto windowIt = m_screenWindows.find(screenId);
+				auto windowIt = m_screenWindows.find(screenId);
 				if (windowIt == m_screenWindows.end()
 					|| windowIt->sceneEpoch != activationEpoch
-					|| !windowIt->window || !windowIt->quickWidget) {
+					|| !windowIt->window) {
 					return;
 				}
 
 				ScreenWindow& presentedWindow = windowIt.value();
-				QWindow* nativeWindow = presentedWindow.window->windowHandle();
 				if (!presentedWindow.window->isVisible()
-					|| !presentedWindow.quickWidget->isVisible()
-					|| !nativeWindow || !nativeWindow->isExposed()) {
+					|| !presentedWindow.window->isExposed()) {
 					// A hidden/off-screen render pass is not a presented frame. Keep
 					// the barrier armed and request another compositor cycle.
-					presentedWindow.quickWidget->update();
-					if (QQuickWindow* quickWindow = presentedWindow.quickWidget->quickWindow()) {
-						quickWindow->update();
-					}
+					presentedWindow.window->update();
 					return;
                 }
 
 				if (presentedWindow.firstFramePassesRemaining > 0) {
 					--presentedWindow.firstFramePassesRemaining;
 					if (presentedWindow.firstFramePassesRemaining > 0) {
-						presentedWindow.quickWidget->update();
-						if (QQuickWindow* quickWindow = presentedWindow.quickWidget->quickWindow()) {
-							quickWindow->update();
-						}
+						presentedWindow.window->update();
 						return;
 					}
 					m_screensAwaitingFirstFrame.remove(screenId);
@@ -2875,7 +2850,6 @@ void RemoteSceneController::activateScene() {
                 }
 			}, Qt::QueuedConnection);
 
-        sw.quickWidget->update();
 		renderWindow->update();
 #ifdef Q_OS_MAC
         QTimer::singleShot(0, this, [this, activationEpoch, screenId]() {
@@ -3082,7 +3056,7 @@ void RemoteSceneController::seekToConfiguredStart(const std::shared_ptr<RemoteMe
 }
 
 void RemoteSceneController::resetWindowForNewScene(ScreenWindow& sw, int screenId, int x, int y, int w, int h, bool primary) {
-    if (!sw.window || !sw.quickWidget || !sw.mediaModel) return;
+    if (!sw.window || !sw.mediaModel) return;
 
     QObject::disconnect(sw.firstFrameConnection);
     sw.firstFrameConnection = {};
@@ -3096,63 +3070,51 @@ void RemoteSceneController::resetWindowForNewScene(ScreenWindow& sw, int screenI
 
     sw.window->hide();
     sw.window->setGeometry(x, y, w, h);
-    sw.window->setWindowTitle(primary ? "Remote Scene (Primary)" : "Remote Scene");
+    sw.window->setTitle(primary ? "Remote Scene (Primary)" : "Remote Scene");
     sw.mediaEntries.clear();
     sw.mediaModel->clearAll();
-    sw.quickWidget->resize(w, h);
+    sw.window->update();
 
 #ifdef Q_OS_MAC
     MacWindowManager::setWindowAsGlobalOverlay(sw.window, /*clickThrough*/ true);
 #endif
 }
 
-QWidget* RemoteSceneController::ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary) {
+QQuickWindow* RemoteSceneController::ensureScreenWindow(int screenId, int x, int y, int w, int h, bool primary) {
     ScreenWindow& sw = m_screenWindows[screenId];
 
     if (!sw.window) {
         registerCanvasQmlTypes();
-        sw.window = new QWidget();
-        
-        // Force native window on macOS to avoid accessibility crashes (QTBUG-95134)
-        
-        sw.window->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-        sw.window->setWindowFlag(Qt::FramelessWindowHint, true);
-        sw.window->setWindowFlag(Qt::WindowStaysOnTopHint, true);
-#ifdef Q_OS_WIN
-        sw.window->setWindowFlag(Qt::Tool, true);
-        sw.window->setWindowFlag(Qt::WindowDoesNotAcceptFocus, true);
-        sw.window->setAttribute(Qt::WA_ShowWithoutActivating, true);
-#endif
-        sw.window->setAttribute(Qt::WA_TranslucentBackground, true);
-        sw.window->setAttribute(Qt::WA_NoSystemBackground, true);
-        sw.window->setAttribute(Qt::WA_OpaquePaintEvent, false);
-        sw.window->setObjectName(QString("RemoteScreenWindow_%1").arg(screenId));
-
-        sw.quickWidget = new QQuickWidget(sw.window);
-        sw.quickWidget->setResizeMode(QQuickWidget::SizeRootObjectToView);
-        sw.quickWidget->setClearColor(Qt::transparent);
-        sw.quickWidget->setAttribute(Qt::WA_AlwaysStackOnTop, true);
-        sw.quickWidget->setAttribute(Qt::WA_TranslucentBackground, true);
-        sw.quickWidget->setAttribute(Qt::WA_NoSystemBackground, true);
-        sw.quickWidget->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-        sw.mediaModel = new MediaListModel(sw.quickWidget);
-        sw.quickWidget->setSource(QUrl(QStringLiteral("qrc:/qml/RemoteSceneRoot.qml")));
-
-        if (sw.quickWidget->status() == QQuickWidget::Error || !sw.quickWidget->rootObject()) {
+        QQmlComponent component(QmlRuntime::engine(),
+                                QUrl(QStringLiteral("qrc:/qt/qml/Mouffette/App/resources/qml/RemoteSceneWindow.qml")));
+        auto* mediaModel = new MediaListModel(this);
+        QObject* created = component.createWithInitialProperties({
+            {QStringLiteral("mediaListModel"),
+             QVariant::fromValue<QObject*>(mediaModel)}});
+        QQuickWindow* window = qobject_cast<QQuickWindow*>(created);
+        if (!window) {
             qCritical() << "RemoteSceneController: Qt Quick remote renderer failed to initialize for screen" << screenId;
-            for (const QQmlError& error : sw.quickWidget->errors()) {
+            for (const QQmlError& error : component.errors()) {
                 qCritical().noquote() << error.toString();
             }
-        } else {
-            sw.quickWidget->rootObject()->setProperty("mediaListModel", QVariant::fromValue(sw.mediaModel));
-            connect(sw.quickWidget->rootObject(), SIGNAL(spanReady(QString,QString)),
-                    this, SLOT(onRemoteSpanReady(QString,QString)));
+            delete created;
+            delete mediaModel;
+            return nullptr;
         }
 
-        auto* layout = new QHBoxLayout(sw.window);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->setSpacing(0);
-        layout->addWidget(sw.quickWidget);
+        sw.window = window;
+        sw.window->setObjectName(QString("RemoteScreenWindow_%1").arg(screenId));
+        sw.window->setFlags(Qt::FramelessWindowHint
+                            | Qt::WindowStaysOnTopHint
+                            | Qt::Tool
+                            | Qt::WindowDoesNotAcceptFocus
+                            | Qt::WindowTransparentForInput);
+        sw.window->setColor(Qt::transparent);
+        mediaModel->setParent(sw.window);
+        sw.mediaModel = mediaModel;
+        connect(sw.window, SIGNAL(spanReady(QString,QString)),
+                this, SLOT(onRemoteSpanReady(QString,QString)));
+
     }
 
     resetWindowForNewScene(sw, screenId, x, y, w, h, primary);
@@ -3198,7 +3160,8 @@ void RemoteSceneController::publishMediaSpan(const std::shared_ptr<RemoteMediaIt
                                              RemoteMediaItem::Span& span) {
     if (!item) return;
     auto windowIt = m_screenWindows.find(span.screenId);
-    if (windowIt == m_screenWindows.end() || !windowIt->quickWidget || !windowIt->mediaModel) {
+    if (windowIt == m_screenWindows.end() || !windowIt->window
+        || !windowIt->mediaModel) {
         qWarning() << "RemoteSceneController: no Qt Quick surface for span" << span.spanId;
         return;
     }

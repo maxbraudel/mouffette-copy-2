@@ -351,7 +351,7 @@ void TextOutlineItem::updatePolish()
     QRectF visibleBounds = clipRect();
     if (flags().testFlag(ItemObservesViewport) && window()) {
         // An intermediate clipped item need not itself observe the viewport.
-        // Intersect the window too, including offscreen QQuickWidget targets.
+        // Intersect the active Qt Quick window as well.
         visibleBounds &= mapRectFromItem(window()->contentItem(),
                                         window()->contentItem()->boundingRect());
     }

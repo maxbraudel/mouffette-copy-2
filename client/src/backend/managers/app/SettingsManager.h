@@ -4,27 +4,14 @@
 #include <QObject>
 #include <QString>
 
-class MainWindow;
-class WebSocketClient;
-
-/**
- * [PHASE 12] SettingsManager
- * Manages application settings persistence and the settings dialog.
- * Handles:
- * - Server URL configuration
- * - Auto-upload preferences
- * - Settings dialog UI
- */
+/** Non-visual application settings and persistence service. */
 class SettingsManager : public QObject {
     Q_OBJECT
 
 public:
-    explicit SettingsManager(MainWindow* mainWindow, WebSocketClient* webSocketClient, QObject* parent = nullptr);
+    explicit SettingsManager(QObject* parent = nullptr);
     ~SettingsManager() = default;
 
-    // Settings dialog
-    void showSettingsDialog();
-    
     // Settings persistence
     void loadSettings();
     void saveSettings();
@@ -32,8 +19,6 @@ public:
     // Getters
     QString getServerUrl() const { return m_serverUrlConfig; }
     bool getAutoUploadImportedMedia() const { return m_autoUploadImportedMedia; }
-    bool getUseQuickCanvasRenderer() const { return m_useQuickCanvasRenderer; }
-    QString getQuickCanvasFlagSource() const { return m_quickCanvasFlagSource; }
     
     // Setters
     void setServerUrl(const QString& url);
@@ -44,14 +29,9 @@ signals:
     void serverUrlChanged(const QString& newUrl);
 
 private:
-    MainWindow* m_mainWindow;
-    WebSocketClient* m_webSocketClient;
-    
     // Settings values
     QString m_serverUrlConfig;
     bool m_autoUploadImportedMedia;
-    bool m_useQuickCanvasRenderer;
-    QString m_quickCanvasFlagSource;
 };
 
 #endif // SETTINGSMANAGER_H

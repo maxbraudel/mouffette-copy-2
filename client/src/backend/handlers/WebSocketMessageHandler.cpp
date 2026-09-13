@@ -1,14 +1,13 @@
 #include "WebSocketMessageHandler.h"
-#include "MainWindow.h"
+#include "backend/runtime/ApplicationRuntime.h"
 #include "frontend/managers/ui/RemoteClientState.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/UploadManager.h"
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
-#include "frontend/ui/pages/ClientListPage.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include <QDebug>
 
-WebSocketMessageHandler::WebSocketMessageHandler(MainWindow* mainWindow, QObject* parent)
+WebSocketMessageHandler::WebSocketMessageHandler(ApplicationRuntime* mainWindow, QObject* parent)
     : QObject(parent)
     , m_mainWindow(mainWindow)
 {
@@ -32,7 +31,6 @@ void WebSocketMessageHandler::onConnected()
 {
     if (!m_mainWindow) return;
 
-    m_mainWindow->setUIEnabled(true);
     UploadManager* uploadManager = m_mainWindow->getUploadManager();
     if (uploadManager && !uploadManager->receiverReadyForAdvertisement()
         && !uploadManager->retryReceiverAdvertisementCleanup()) {
@@ -41,7 +39,6 @@ void WebSocketMessageHandler::onConnected()
         // send endpoint_snapshot: the server will keep this installation out of
         // discovery and therefore unavailable as a target.
         m_mainWindow->setLocalNetworkStatus("Cleanup error");
-        m_mainWindow->setUIEnabled(false);
         TOAST_ERROR(
             QStringLiteral("Remote cache cleanup failed (%1). This device remains unavailable.")
                 .arg(uploadManager->receiverCleanupError()),
@@ -76,7 +73,6 @@ void WebSocketMessageHandler::onConnected()
         if (!selId.isEmpty()) {
             // Indicate we're attempting to reach the remote again
             m_mainWindow->setRemoteConnectionStatus("CONNECTING...");
-            m_mainWindow->addRemoteStatusToLayout();
         }
     }
     

@@ -1,5 +1,5 @@
 #include "ClientListEventHandler.h"
-#include "MainWindow.h"
+#include "backend/runtime/ApplicationRuntime.h"
 #include "frontend/managers/ui/RemoteClientState.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/RemoteSessionCoordinator.h"
@@ -7,10 +7,9 @@
 #include "shared/rendering/ICanvasHost.h"
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
 #include "backend/network/UploadManager.h"
-#include "frontend/ui/pages/ClientListPage.h"
 #include <QDebug>
 
-ClientListEventHandler::ClientListEventHandler(MainWindow* mainWindow, WebSocketClient* webSocketClient, QObject* parent)
+ClientListEventHandler::ClientListEventHandler(ApplicationRuntime* mainWindow, WebSocketClient* webSocketClient, QObject* parent)
     : QObject(parent)
     , m_mainWindow(mainWindow)
     , m_webSocketClient(webSocketClient)
@@ -29,9 +28,9 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
     qDebug() << "Received client list with" << clients.size() << "clients";
     
     // Update remote scene target ID if the target machine reconnected with a new ID
-    ICanvasHost* screenCanvas = m_mainWindow->getScreenCanvas();
-    if (screenCanvas) {
-        screenCanvas->updateRemoteSceneTargetFromClientList(clients);
+    ICanvasHost* activeCanvas = m_mainWindow->getActiveCanvas();
+    if (activeCanvas) {
+        activeCanvas->updateRemoteSceneTargetFromClientList(clients);
     }
     
     QList<ClientInfo> displayList = m_mainWindow->buildDisplayClientList(clients);
@@ -39,15 +38,9 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
     int previousConnectedCount = m_mainWindow->getLastConnectedClientCount();
     m_mainWindow->setLastConnectedClientCount(clients.size());
 
-    // Phase 1.1: Update ClientListPage
-    ClientListPage* clientListPage = m_mainWindow->getClientListPage();
-    if (clientListPage) {
-        clientListPage->updateClientList(displayList);
-    }
-
     QString activeSessionIdentity = m_mainWindow->getActiveSessionIdentity();
     if (!activeSessionIdentity.isEmpty()) {
-        MainWindow::CanvasSession* activeSession = m_mainWindow->findCanvasSession(activeSessionIdentity);
+        ApplicationRuntime::CanvasSession* activeSession = m_mainWindow->findCanvasSession(activeSessionIdentity);
         if (activeSession) {
             m_mainWindow->setSelectedClient(activeSession->lastClientInfo);
             if (activeSession->canvas && !activeSession->serverAssignedId.isEmpty()) {
@@ -72,7 +65,7 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
     // device's project to another device which happens to share that name.
     ScreenNavigationManager* navigationManager = m_mainWindow->getNavigationManager();
     if (navigationManager && navigationManager->isOnScreenView() && !activeSessionIdentity.isEmpty()) {
-        MainWindow::CanvasSession* activeSession = m_mainWindow->findCanvasSession(activeSessionIdentity);
+        ApplicationRuntime::CanvasSession* activeSession = m_mainWindow->findCanvasSession(activeSessionIdentity);
         if (activeSession) {
             const ClientInfo* matchingDevice = nullptr;
             // Use the project-enriched list here. Discovery snapshots can be
@@ -102,7 +95,7 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                     activeSession->canvas->setRemoteSceneTarget(
                         activeSessionIdentity,
                         activeSession->lastClientInfo.getMachineName());
-                    // Replace only the remote topology. ScreenCanvas rebuilds
+                    // Replace only the remote topology. The document host rebuilds
                     // its screen backdrops without remapping media, whose
                     // project coordinates remain absolute.
                     activeSession->canvas->setScreens(

@@ -1,5 +1,5 @@
 #include "backend/files/FileWatcher.h"
-#include "backend/domain/media/MediaItems.h"
+#include "backend/domain/media/CanvasMedia.h"
 #include <QFileInfo>
 #include <QDir>
 #include <QDebug>
@@ -23,7 +23,7 @@ FileWatcher::~FileWatcher() {
     clearAll();
 }
 
-void FileWatcher::watchMediaItem(ResizableMediaBase* mediaItem) {
+void FileWatcher::watchMediaItem(CanvasMedia* mediaItem) {
     if (!mediaItem) return;
 
     const QFileInfo sourceInfo(mediaItem->sourcePath());
@@ -51,11 +51,11 @@ void FileWatcher::watchMediaItem(ResizableMediaBase* mediaItem) {
     qDebug() << "FileWatcher: watching source for mediaId=" << mediaItem->mediaId();
 }
 
-QString FileWatcher::watchedFilePath(ResizableMediaBase* mediaItem) const {
+QString FileWatcher::watchedFilePath(CanvasMedia* mediaItem) const {
     return m_mediaToFile.value(mediaItem);
 }
 
-void FileWatcher::unwatchMediaItem(ResizableMediaBase* mediaItem) {
+void FileWatcher::unwatchMediaItem(CanvasMedia* mediaItem) {
     if (!mediaItem) return;
     
     // Safety check: verify mediaId is valid before proceeding
@@ -95,10 +95,10 @@ void FileWatcher::clearAll() {
 }
 
 void FileWatcher::checkAllFiles() {
-    QList<ResizableMediaBase*> itemsToRemove;
+    QList<CanvasMedia*> itemsToRemove;
     
     for (auto it = m_mediaToFile.begin(); it != m_mediaToFile.end(); ++it) {
-        ResizableMediaBase* mediaItem = it.key();
+        CanvasMedia* mediaItem = it.key();
         const QString& filePath = it.value();
         
         if (!isFileAccessible(filePath)) {
@@ -145,7 +145,7 @@ void FileWatcher::onDirectoryChanged(const QString& dirPath) {
 void FileWatcher::performDelayedCheck() {
     if (m_filesToCheck.isEmpty()) return;
     
-    QList<ResizableMediaBase*> itemsToRemove;
+    QList<CanvasMedia*> itemsToRemove;
     
     // Check each file that was flagged for checking
     for (const QString& filePath : m_filesToCheck) {
@@ -154,7 +154,7 @@ void FileWatcher::performDelayedCheck() {
             // File is no longer accessible, mark all associated media items for removal
             if (m_fileToMedia.contains(filePath)) {
                 const auto& mediaItems = m_fileToMedia.value(filePath);
-                for (ResizableMediaBase* mediaItem : mediaItems) {
+                for (CanvasMedia* mediaItem : mediaItems) {
                     // Safety check: ensure mediaItem pointer is valid and not already queued
                     if (mediaItem && !itemsToRemove.contains(mediaItem)) {
                         // Additional safety: check if mediaId is valid (non-empty and not corrupted)
@@ -181,7 +181,7 @@ void FileWatcher::performDelayedCheck() {
     }
 }
 
-void FileWatcher::addFileToWatch(const QString& filePath, ResizableMediaBase* mediaItem) {
+void FileWatcher::addFileToWatch(const QString& filePath, CanvasMedia* mediaItem) {
     // Add media item to the file's set
     m_fileToMedia[filePath].insert(mediaItem);
     
@@ -206,7 +206,7 @@ void FileWatcher::addFileToWatch(const QString& filePath, ResizableMediaBase* me
     }
 }
 
-void FileWatcher::removeFileFromWatch(const QString& filePath, ResizableMediaBase* mediaItem) {
+void FileWatcher::removeFileFromWatch(const QString& filePath, CanvasMedia* mediaItem) {
     if (!m_fileToMedia.contains(filePath)) return;
     
     // Remove media item from the file's set

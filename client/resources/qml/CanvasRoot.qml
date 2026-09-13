@@ -1,6 +1,5 @@
-import QtQuick 2.15
-import QtQuick.Window 2.15
-
+import QtQuick
+import QtQuick.Window
 Rectangle {
     id: root
     color: "#10131a"
@@ -40,19 +39,31 @@ Rectangle {
     signal overlayHorizontalAlignRequested(string mediaId, string alignment)
     signal overlayVerticalAlignRequested(string mediaId, string alignment)
 
-    property int screenCount: 0
-    property bool remoteActive: false
-    property var screensModel: []
-    property var uiZonesModel: []
-    property var mediaModel: []
+    readonly property int screenCount: screensModel.length
+    readonly property var canvasController: sessionViewModel
+                                            ? sessionViewModel.canvasController : null
+    property bool remoteActive: canvasController
+                                ? canvasController.remoteActive : false
+    property var screensModel: canvasController
+                               ? canvasController.screensModel : []
+    property var uiZonesModel: canvasController
+                               ? canvasController.uiZonesModel : []
+    property var mediaModel: canvasController
+                             ? canvasController.mediaSnapshot : []
     // Stable C++ QAbstractListModel — the Repeater binds here so delegates are
     // Not recreated on move/resize commits: only dataChanged fires per row.
     // The mediaModel JS-array above supplies metadata to chrome and overlays;
     // pointer picking uses the actual live delegates, not that snapshot.
-    property var mediaListModel: null
+    property var mediaListModel: canvasController
+                                 ? canvasController.mediaModel : null
+    // Presentation view model supplied by CanvasPage. It owns validation and
+    // document commands; the QML surface only supplies local pointer geometry.
+    property var sessionViewModel: null
     property var dropPreviewModel: ({ "visible": false })
-    property var dropPreviewFrameSource: null
-    property var selectionChromeModel: []
+    property var dropPreviewFrameSource: canvasController
+                                         ? canvasController.dropPreviewFrameSource : null
+    property var selectionChromeModel: canvasController
+                                       ? canvasController.selectionChromeModel : []
     property var snapGuidesModel: []
     // Live drag tracking — updated every frame during a move drag, purely in QML
     property string liveDragMediaId: ""
@@ -65,10 +76,14 @@ Rectangle {
     readonly property bool liveSnapDragActive: liveSnapDragMediaId !== ""
     property real   liveSnapDragX:       0.0
     property real   liveSnapDragY:       0.0
-    property bool textToolActive: false
-    property bool remoteCursorVisible: false
-    property real remoteCursorX: 0
-    property real remoteCursorY: 0
+    property bool textToolActive: canvasController
+                                  ? canvasController.textToolActive : false
+    property bool remoteCursorVisible: canvasController
+                                       ? canvasController.remoteCursorVisible : false
+    property real remoteCursorX: canvasController
+                                 ? canvasController.remoteCursorX : 0
+    property real remoteCursorY: canvasController
+                                 ? canvasController.remoteCursorY : 0
     property int remoteCursorDiameter: 30
     property color remoteCursorFill: "#FFFFFFFF"
     property color remoteCursorBorder: "#E6000000"
@@ -114,8 +129,113 @@ Rectangle {
     // Video state dictionary: keys are mediaId strings, values are state maps.
     // Published every 50 ms by QuickCanvasController for ALL video items
     // (not just the selected one), so overlays remain live after deselection.
-    property var videoStateModel: ({})
+    property var videoStateModel: canvasController
+                                  ? canvasController.videoStateModel : ({})
     focus: true
+
+    function synchronizeTransientState() {
+        if (!canvasController)
+            return
+        viewScale = canvasController.viewScale
+        panX = canvasController.panX
+        panY = canvasController.panY
+        dropPreviewModel = canvasController.dropPreviewModel
+        snapGuidesModel = canvasController.snapGuidesModel
+        liveSnapDragMediaId = canvasController.liveSnapDragMediaId
+        liveSnapDragX = canvasController.liveSnapDragX
+        liveSnapDragY = canvasController.liveSnapDragY
+        liveResizeActive = canvasController.liveResizeActive
+        liveResizeMediaId = canvasController.liveResizeMediaId
+        liveResizeX = canvasController.liveResizeX
+        liveResizeY = canvasController.liveResizeY
+        liveResizeScale = canvasController.liveResizeScale
+        liveAltResizeActive = canvasController.liveAltResizeActive
+        liveAltResizeMediaId = canvasController.liveAltResizeMediaId
+        liveAltResizeX = canvasController.liveAltResizeX
+        liveAltResizeY = canvasController.liveAltResizeY
+        liveAltResizeWidth = canvasController.liveAltResizeWidth
+        liveAltResizeHeight = canvasController.liveAltResizeHeight
+        liveAltResizeScale = canvasController.liveAltResizeScale
+    }
+
+    onCanvasControllerChanged: {
+        synchronizeTransientState()
+        if (canvasController && window)
+            canvasController.registerWindow(window)
+    }
+    onWindowChanged: if (canvasController && window)
+                         canvasController.registerWindow(window)
+    onViewScaleChanged: if (canvasController)
+                            canvasController.updateCamera(viewScale, panX, panY)
+    onPanXChanged: if (canvasController)
+                       canvasController.updateCamera(viewScale, panX, panY)
+    onPanYChanged: if (canvasController)
+                       canvasController.updateCamera(viewScale, panX, panY)
+
+    Connections {
+        target: root.canvasController
+        function onPresentationChanged() { root.synchronizeTransientState() }
+    }
+
+    onMediaSelectRequested: (mediaId, additive) => canvasController?.handleMediaSelectRequested(mediaId, additive)
+    onClearSelectionRequested: () => canvasController?.handleClearSelectionRequested()
+    onMediaMoveStarted: (mediaId, x, y, snap) => canvasController?.handleMediaMoveStarted(mediaId, x, y, snap)
+    onMediaMoveUpdated: (mediaId, x, y, snap) => canvasController?.handleMediaMoveUpdated(mediaId, x, y, snap)
+    onMediaMoveEnded: (mediaId, x, y, snap) => canvasController?.handleMediaMoveEnded(mediaId, x, y, snap)
+    onMediaResizeRequested: (mediaId, handleId, x, y, snap, altPressed) => canvasController?.handleMediaResizeRequested(mediaId, handleId, x, y, snap, altPressed)
+    onMediaResizeEnded: mediaId => canvasController?.handleMediaResizeEnded(mediaId)
+    onTextCommitRequested: (mediaId, text) => canvasController?.handleTextCommitRequested(mediaId, text)
+    onTextLiveUpdateRequested: (mediaId, text) => canvasController?.handleTextLiveUpdateRequested(mediaId, text)
+    onTextCreateRequested: (x, y) => canvasController?.handleTextCreateRequested(x, y)
+    onDropPreviewContentReady: mediaId => canvasController?.handleDropPreviewContentReady(mediaId)
+    onOverlayVisibilityToggleRequested: (mediaId, visible) => canvasController?.handleOverlayVisibilityToggle(mediaId, visible)
+    onOverlayBringForwardRequested: mediaId => canvasController?.handleOverlayBringForward(mediaId)
+    onOverlayBringBackwardRequested: mediaId => canvasController?.handleOverlayBringBackward(mediaId)
+    onOverlayDeleteRequested: mediaId => canvasController?.handleOverlayDelete(mediaId)
+    onOverlayPlayPauseRequested: mediaId => canvasController?.handleOverlayPlayPause(mediaId)
+    onOverlayStopRequested: mediaId => canvasController?.handleOverlayStop(mediaId)
+    onOverlayRepeatToggleRequested: mediaId => canvasController?.handleOverlayRepeatToggle(mediaId)
+    onOverlayMuteToggleRequested: mediaId => canvasController?.handleOverlayMuteToggle(mediaId)
+    onOverlayVolumeChangeRequested: (mediaId, value) => canvasController?.handleOverlayVolumeChange(mediaId, value)
+    onOverlaySeekBeginRequested: (mediaId, ratio) => canvasController?.handleOverlaySeekBegin(mediaId, ratio)
+    onOverlaySeekUpdateRequested: (mediaId, ratio) => canvasController?.handleOverlaySeekUpdate(mediaId, ratio)
+    onOverlaySeekEndRequested: (mediaId, ratio) => canvasController?.handleOverlaySeekEnd(mediaId, ratio)
+    onOverlayFitToTextToggleRequested: mediaId => canvasController?.handleOverlayFitToTextToggle(mediaId)
+    onOverlayHorizontalAlignRequested: (mediaId, alignment) => canvasController?.handleOverlayHorizontalAlign(mediaId, alignment)
+    onOverlayVerticalAlignRequested: (mediaId, alignment) => canvasController?.handleOverlayVerticalAlign(mediaId, alignment)
+
+    DropArea {
+        anchors.fill: parent
+        z: 200000
+
+        onEntered: function(drag) {
+            if (root.sessionViewModel
+                    && root.sessionViewModel.beginFileDrag(drag.urls,
+                                                           drag.x, drag.y)) {
+                drag.accept(Qt.CopyAction)
+            } else {
+                drag.accepted = false
+            }
+        }
+        onPositionChanged: function(drag) {
+            if (root.sessionViewModel
+                    && root.sessionViewModel.updateFileDrag(drag.x, drag.y)) {
+                drag.accept(Qt.CopyAction)
+            } else {
+                drag.accepted = false
+            }
+        }
+        onDropped: function(drop) {
+            if (root.sessionViewModel
+                    && root.sessionViewModel.commitFileDrop(drop.x, drop.y)) {
+                drop.acceptProposedAction()
+            } else {
+                drop.accepted = false
+            }
+        }
+        onExited: if (root.sessionViewModel) root.sessionViewModel.cancelFileDrag()
+    }
+
     Keys.onReleased: function(event) {
         if (event.key === Qt.Key_Shift) {
             // Clear guides only when no active snapped interaction is alive.

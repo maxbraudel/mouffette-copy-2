@@ -112,7 +112,8 @@ if(APPLE)
 endif()
 
 # Find Qt6
-find_package(Qt6 6.11 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia MultimediaWidgets Svg SvgWidgets Concurrent Quick QuickWidgets Qml ShaderTools GuiPrivate QuickPrivate)
+find_package(Qt6 6.11 REQUIRED COMPONENTS Core Widgets Network WebSockets Multimedia Concurrent Quick QuickControls2 Qml ShaderTools GuiPrivate QuickPrivate)
+qt_policy(SET QTP0004 NEW)
 find_package(OpenSSL 1.1.1 REQUIRED COMPONENTS Crypto)
 if(NOT TARGET Qt6::QWebpPlugin)
     message(FATAL_ERROR
@@ -148,7 +149,7 @@ endif()
 
 # Enable Qt MOC
 set(CMAKE_AUTOMOC ON)
-set(CMAKE_AUTOUIC ON)
+set(CMAKE_AUTOUIC OFF)
 set(CMAKE_AUTORCC ON)
 
 # Source files - Frontend/Backend Architecture
@@ -157,53 +158,30 @@ set(SOURCES
     # CORE
     # ═══════════════════════════════════════════════════════
     src/main.cpp
-    src/MainWindow.cpp
+    src/backend/runtime/ApplicationRuntime.cpp
+
+    # Qt Quick application shell and presentation models
+    src/frontend/qml/ApplicationController.cpp
+    src/frontend/qml/CanvasSessionViewModel.cpp
+    src/frontend/qml/ClientListModel.cpp
+    src/frontend/qml/NotificationListModels.cpp
+    src/frontend/qml/MediaSettingsViewModel.cpp
+    src/frontend/qml/QmlRuntime.cpp
+    src/frontend/qml/SceneActivityListModel.cpp
     
     # ═══════════════════════════════════════════════════════
     # FRONTEND - User Interface & Rendering
     # ═══════════════════════════════════════════════════════
     
-    # UI - Pages
-    src/frontend/ui/pages/ClientListPage.cpp
-    src/frontend/ui/pages/CanvasViewPage.cpp
-    src/frontend/ui/pages/HistoryPage.cpp
-    
-    # UI - Widgets
-    src/frontend/ui/widgets/RoundedContainer.cpp
-    src/frontend/ui/widgets/ClippedContainer.cpp
-    src/frontend/ui/widgets/ClientListDelegate.cpp
-    src/frontend/ui/widgets/SpinnerWidget.cpp
-    src/frontend/ui/widgets/QtWaitingSpinner.cpp
-    src/frontend/ui/widgets/BootstrapWindow.cpp
-    
-    # UI - Layout
-    src/frontend/ui/layout/ResponsiveLayoutManager.cpp
+    # The application shell, pages, dialogs, controls and toast surfaces are QML.
     
     # UI - Notifications
     src/frontend/ui/notifications/ToastNotificationSystem.cpp
     
-    # UI - Theme
-    src/frontend/ui/theme/ThemeManager.cpp
-    src/frontend/ui/theme/AppColors.cpp
-    
     # Rendering - Canvas
-    src/frontend/rendering/canvas/ScreenCanvas.cpp
-    src/frontend/rendering/canvas/LegacyCanvasHost.cpp
-    src/frontend/rendering/canvas/LegacySceneMirror.cpp
     src/frontend/rendering/canvas/QuickCanvasHost.cpp
     src/frontend/rendering/canvas/QuickCanvasController.cpp
-    src/frontend/rendering/canvas/GestureCommands.cpp
-    src/frontend/rendering/canvas/PointerSession.cpp
-    src/frontend/rendering/canvas/ModelPublisher.cpp
-    src/frontend/rendering/canvas/SnapStore.cpp
-    src/frontend/rendering/canvas/SnapEngine.cpp
-    src/frontend/rendering/canvas/SnapGuidePublisher.cpp
-    src/frontend/rendering/canvas/DragSnapEngine.cpp
-    src/frontend/rendering/canvas/QuickDragSnapSession.cpp
-    src/frontend/rendering/canvas/CanvasSceneStore.cpp
-    src/frontend/rendering/canvas/QuickCanvasViewAdapter.cpp
     src/frontend/rendering/canvas/MediaListModel.cpp
-    src/frontend/rendering/canvas/OverlayPanels.cpp
     src/frontend/rendering/canvas/TextOutlineItem.cpp
     src/frontend/rendering/canvas/TextEditHelper.cpp
     src/frontend/rendering/canvas/CanvasQmlTypes.cpp
@@ -220,13 +198,7 @@ set(SOURCES
     src/frontend/rendering/navigation/ScreenNavigationManager.cpp
     
     # Frontend Handlers
-    src/frontend/handlers/WindowEventHandler.cpp
     src/frontend/handlers/UploadSignalConnector.cpp
-    
-    # Frontend Managers
-    src/frontend/managers/ui/TopBarManager.cpp
-    src/frontend/managers/ui/RemoteClientInfoManager.cpp
-    src/frontend/managers/ui/UploadButtonStyleManager.cpp
     
     # ═══════════════════════════════════════════════════════
     # BACKEND - Business Logic & Data
@@ -262,15 +234,11 @@ set(SOURCES
     src/backend/notifications/NotificationCenter.cpp
     
     # Domain - Media
-    src/backend/domain/media/MediaItems.cpp
+    src/backend/domain/canvas/CanvasDocument.cpp
+    src/backend/domain/media/CanvasMedia.cpp
+    src/backend/domain/media/MediaSettingsState.cpp
     src/backend/domain/media/MediaFilePolicy.cpp
-    src/backend/domain/media/MediaRuntimeHooks.cpp
     src/backend/domain/media/TextRenderState.cpp
-    src/backend/domain/media/TextMediaItem.cpp
-
-    # UI - Overlays (Canvas)
-    src/frontend/ui/overlays/canvas/CanvasGlobalOverlayHost.cpp
-    src/frontend/ui/overlays/canvas/CanvasMediaSettingsPanel.cpp
     
     # Network
     src/backend/network/WebSocketClient.cpp
@@ -284,7 +252,6 @@ set(SOURCES
     src/backend/files/LocalFileRepository.cpp
     src/backend/files/FileMemoryCache.cpp
     src/backend/files/FileWatcher.cpp
-    src/backend/files/Theme.cpp
     
     # Backend Handlers
     src/backend/handlers/WebSocketMessageHandler.cpp
@@ -295,7 +262,6 @@ set(SOURCES
     # Backend Managers - App
     src/backend/managers/app/SettingsManager.cpp
     src/backend/managers/app/SystemTrayManager.cpp
-    src/backend/managers/app/MenuBarManager.cpp
     src/backend/managers/app/MigrationTelemetryManager.cpp
     
     # Backend Managers - Network
@@ -336,68 +302,37 @@ set(HEADERS
     # ═══════════════════════════════════════════════════════
     # CORE
     # ═══════════════════════════════════════════════════════
-    src/MainWindow.h
+    src/backend/runtime/ApplicationRuntime.h
+
+    # Qt Quick application shell and presentation models
+    src/frontend/qml/ApplicationController.h
+    src/frontend/qml/CanvasSessionViewModel.h
+    src/frontend/qml/ClientListModel.h
+    src/frontend/qml/NotificationListModels.h
+    src/frontend/qml/MediaSettingsViewModel.h
+    src/frontend/qml/QmlRuntime.h
+    src/frontend/qml/SceneActivityListModel.h
     
     # ═══════════════════════════════════════════════════════
     # FRONTEND - User Interface & Rendering
     # ═══════════════════════════════════════════════════════
     
-    # UI - Pages
-    src/frontend/ui/pages/ClientListPage.h
-    src/frontend/ui/pages/CanvasViewPage.h
-    src/frontend/ui/pages/HistoryPage.h
-    
-    # UI - Widgets
-    src/frontend/ui/widgets/RoundedContainer.h
-    src/frontend/ui/widgets/ClippedContainer.h
-    src/frontend/ui/widgets/ClientListDelegate.h
-    src/frontend/ui/widgets/SpinnerWidget.h
-    src/frontend/ui/widgets/QtWaitingSpinner.h
-    src/frontend/ui/widgets/BootstrapWindow.h
-    
-    # UI - Layout
-    src/frontend/ui/layout/ResponsiveLayoutManager.h
+    # QML owns all shell/page/control headers. The remaining widget header is
+    # part of the temporary canvas document bridge only.
     
     # UI - Notifications
     src/frontend/ui/notifications/ToastNotificationSystem.h
 
-    # UI - Overlays (Canvas)
-    src/frontend/ui/overlays/canvas/CanvasGlobalOverlayHost.h
-    src/frontend/ui/overlays/canvas/CanvasMediaSettingsPanel.h
-    
-    # UI - Theme
-    src/frontend/ui/theme/StyleConfig.h
-    src/frontend/ui/theme/ThemeManager.h
-    src/frontend/ui/theme/AppColors.h
-    
     # Rendering - Canvas
-    src/frontend/rendering/canvas/ScreenCanvas.h
-    src/frontend/rendering/canvas/LegacyCanvasHost.h
-    src/frontend/rendering/canvas/LegacySceneMirror.h
     src/frontend/rendering/canvas/QuickCanvasHost.h
     src/frontend/rendering/canvas/QuickCanvasController.h
-    src/frontend/rendering/canvas/GestureCommands.h
-    src/frontend/rendering/canvas/PointerSession.h
-    src/frontend/rendering/canvas/ModelPublisher.h
-    src/frontend/rendering/canvas/SnapStore.h
-    src/frontend/rendering/canvas/SnapEngine.h
-    src/frontend/rendering/canvas/SnapGuidePublisher.h
-    src/frontend/rendering/canvas/DragSnapEngine.h
-    src/frontend/rendering/canvas/QuickDragSnapSession.h
-    src/frontend/rendering/canvas/CanvasSceneStore.h
-    src/frontend/rendering/canvas/QuickCanvasViewAdapter.h
     src/frontend/rendering/canvas/MediaListModel.h
-    src/frontend/rendering/canvas/OverlayPanels.h
     src/frontend/rendering/canvas/TextOutlineItem.h
     src/frontend/rendering/canvas/TextEditHelper.h
     src/frontend/rendering/canvas/CanvasQmlTypes.h
-    src/frontend/rendering/canvas/RoundedRectItem.h
-    src/frontend/rendering/canvas/SegmentedButtonItem.h
 
     # Shared - Rendering Contracts
     src/shared/rendering/ICanvasHost.h
-    src/shared/rendering/IMediaSceneAdapter.h
-    src/shared/rendering/IOverlayProjection.h
     
     # Rendering - Remote
     src/frontend/rendering/remote/RemoteSceneController.h
@@ -411,13 +346,7 @@ set(HEADERS
     src/frontend/rendering/navigation/ScreenNavigationManager.h
     
     # Frontend Handlers
-    src/frontend/handlers/WindowEventHandler.h
     src/frontend/handlers/UploadSignalConnector.h
-    
-    # Frontend Managers
-    src/frontend/managers/ui/TopBarManager.h
-    src/frontend/managers/ui/RemoteClientInfoManager.h
-    src/frontend/managers/ui/UploadButtonStyleManager.h
     
     # ═══════════════════════════════════════════════════════
     # BACKEND - Business Logic & Data
@@ -453,11 +382,11 @@ set(HEADERS
     src/backend/notifications/NotificationCenter.h
     
     # Domain - Media
-    src/backend/domain/media/MediaItems.h
+    src/backend/domain/canvas/CanvasDocument.h
+    src/backend/domain/media/CanvasMedia.h
+    src/backend/domain/media/MediaSettingsState.h
     src/backend/domain/media/MediaFilePolicy.h
-    src/backend/domain/media/MediaRuntimeHooks.h
     src/backend/domain/media/TextRenderState.h
-    src/backend/domain/media/TextMediaItem.h
     
     # Network
     src/backend/network/WebSocketClient.h
@@ -472,7 +401,6 @@ set(HEADERS
     src/backend/files/FileMemoryCache.h
     src/backend/files/FileWatcher.h
     src/backend/files/PathSafety.h
-    src/backend/files/Theme.h
     
     # Backend Handlers
     src/backend/handlers/WebSocketMessageHandler.h
@@ -483,7 +411,6 @@ set(HEADERS
     # Backend Managers - App
     src/backend/managers/app/SettingsManager.h
     src/backend/managers/app/SystemTrayManager.h
-    src/backend/managers/app/MenuBarManager.h
     src/backend/managers/app/MigrationTelemetryManager.h
     
     # Backend Managers - Network
@@ -512,20 +439,73 @@ if(WIN32)
     list(APPEND HEADERS src/backend/platform/windows/WindowsVideoThumbnailer.h)
 endif()
 
-# UI files
-set(UI_FILES
-    ui/MainWindow.ui
-)
-
 # Resource files
 set(RESOURCE_FILES
     resources/resources.qrc
 )
 
 # Create executable
-add_executable(MouffetteClient ${SOURCES} ${HEADERS} ${UI_FILES} ${RESOURCE_FILES})
+add_executable(MouffetteClient ${SOURCES} ${HEADERS} ${RESOURCE_FILES})
 set_target_properties(MouffetteClient PROPERTIES
     OUTPUT_NAME "${MOUFFETTE_EXECUTABLE_NAME}")
+
+set_source_files_properties(
+    resources/qml/app/Theme.qml
+    PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+
+qt_add_qml_module(MouffetteClient
+    URI Mouffette.App
+    VERSION 1.0
+    RESOURCE_PREFIX /qt/qml
+    NO_GENERATE_QMLTYPES
+    QML_FILES
+        resources/qml/app/Theme.qml
+        resources/qml/app/Main.qml
+        resources/qml/app/components/AppButton.qml
+        resources/qml/app/components/AppCheckBox.qml
+        resources/qml/app/components/AppDialog.qml
+        resources/qml/app/components/AppPanel.qml
+        resources/qml/app/components/AppSpinner.qml
+        resources/qml/app/components/AppTextField.qml
+        resources/qml/app/components/SegmentedStatusCard.qml
+        resources/qml/app/components/ToastStack.qml
+        resources/qml/app/pages/ClientListPanel.qml
+        resources/qml/app/pages/ClientsPage.qml
+        resources/qml/app/pages/CanvasPage.qml
+        resources/qml/app/pages/HistoryPage.qml
+        resources/qml/app/canvas/CanvasToolbar.qml
+        resources/qml/app/canvas/MediaListPanel.qml
+        resources/qml/app/canvas/OverlayActionButton.qml
+        resources/qml/app/canvas/SceneElementPanel.qml
+        resources/qml/app/dialogs/BootstrapWindow.qml
+        resources/qml/app/dialogs/SettingsDialog.qml
+        resources/qml/BaseMediaItem.qml
+        resources/qml/CanvasRoot.qml
+        resources/qml/CanvasViewport.qml
+        resources/qml/ImageItem.qml
+        resources/qml/InputLayer.qml
+        resources/qml/MediaDropPreview.qml
+        resources/qml/MediaInteractionHandlers.qml
+        resources/qml/MediaLayer.qml
+        resources/qml/MediaNamePill.qml
+        resources/qml/MediaSurface.qml
+        resources/qml/MediaTextOverlay.qml
+        resources/qml/MediaTopOverlay.qml
+        resources/qml/MediaVideoOverlay.qml
+        resources/qml/MediaVisual.qml
+        resources/qml/OverlayButton.qml
+        resources/qml/OverlaySlider.qml
+        resources/qml/RemoteCursor.qml
+        resources/qml/RemoteSceneRoot.qml
+        resources/qml/RemoteSceneWindow.qml
+        resources/qml/ScreenItem.qml
+        resources/qml/SelectionChrome.qml
+        resources/qml/SelectionLayer.qml
+        resources/qml/SnapGuides.qml
+        resources/qml/TextEditSession.qml
+        resources/qml/TextItem.qml
+        resources/qml/UiZone.qml
+        resources/qml/VideoItem.qml)
 
 if(WIN32)
     configure_file(
@@ -537,18 +517,15 @@ if(WIN32)
 endif()
 
 # Link Qt libraries
-target_link_libraries(MouffetteClient 
+target_link_libraries(MouffetteClient PRIVATE
     Qt6::Core 
     Qt6::Widgets 
     Qt6::Network 
     Qt6::WebSockets
     Qt6::Multimedia
-    Qt6::MultimediaWidgets
-    Qt6::Svg
-    Qt6::SvgWidgets
     Qt6::Concurrent
     Qt6::Quick
-    Qt6::QuickWidgets
+    Qt6::QuickControls2
     Qt6::Qml
     Qt6::GuiPrivate
     Qt6::QuickPrivate
@@ -569,7 +546,7 @@ if(WIN32)
         message(STATUS "Building MouffetteClient with console subsystem (logs visible in terminal)")
     endif()
     # Link Core Audio COM interfaces used for volume detection
-    target_link_libraries(MouffetteClient
+    target_link_libraries(MouffetteClient PRIVATE
         ole32
         uuid
         windowscodecs
@@ -583,7 +560,7 @@ if(WIN32)
 endif()
 
 if(UNIX AND NOT APPLE AND TARGET Qt6::DBus)
-    target_link_libraries(MouffetteClient Qt6::DBus)
+    target_link_libraries(MouffetteClient PRIVATE Qt6::DBus)
 endif()
 
 if(APPLE)
@@ -596,7 +573,7 @@ if(APPLE)
         MACOSX_BUNDLE_GUI_IDENTIFIER "${MOUFFETTE_BUNDLE_IDENTIFIER}"
     )
     # Link with macOS frameworks used by native integrations
-    target_link_libraries(MouffetteClient "-framework AppKit" "-framework AVFoundation" "-framework CoreMedia" "-framework CoreGraphics" "-framework Security")
+    target_link_libraries(MouffetteClient PRIVATE "-framework AppKit" "-framework AVFoundation" "-framework CoreMedia" "-framework CoreGraphics" "-framework Security")
     
     # Set Objective-C++ properties for .mm files (updated paths for backend/platform)
     set_source_files_properties(src/backend/platform/macos/MacVideoThumbnailer.mm PROPERTIES COMPILE_FLAGS "-x objective-c++")
@@ -888,6 +865,20 @@ if(BUILD_TESTING)
         "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
     add_test(NAME RemoteSceneLifecycle COMMAND tst_RemoteSceneLifecycle)
 
+    add_executable(tst_MediaOverlay
+        tests/qt/tst_MediaOverlay.cpp
+        "$<FILTER:$<TARGET_OBJECTS:MouffetteClient>,EXCLUDE,/src/main[.]cpp[.](o|obj)$>"
+    )
+    target_include_directories(tst_MediaOverlay PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,INCLUDE_DIRECTORIES>")
+    target_compile_definitions(tst_MediaOverlay PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,COMPILE_DEFINITIONS>")
+    target_link_libraries(tst_MediaOverlay PRIVATE
+        "$<TARGET_PROPERTY:MouffetteClient,LINK_LIBRARIES>" Qt6::Test)
+    add_test(NAME MediaOverlay COMMAND tst_MediaOverlay)
+    add_test(NAME MediaOverlayScaled COMMAND tst_MediaOverlay)
+    set_tests_properties(MediaOverlayScaled PROPERTIES ENVIRONMENT "QT_SCALE_FACTOR=2")
+
     add_executable(tst_SceneRunCoordinator
         tests/qt/tst_SceneRunCoordinator.cpp
         src/backend/network/SceneRunCoordinator.cpp
@@ -900,7 +891,7 @@ if(BUILD_TESTING)
     add_test(NAME SceneRunCoordinator COMMAND tst_SceneRunCoordinator)
     # Native window focus/grabs are part of these tests. Do not race other GUI
     # suites when CI invokes ctest with parallel jobs.
-    set_tests_properties(TextOutlineMotion CanvasInteraction CanvasInteractionScaled CanvasSelectionBackend ClientConnectionFlow VideoPlaybackBackend UploadRemovalSecurity RemoteSceneControllerLifecycle RemoteSceneLifecycle
+    set_tests_properties(TextOutlineMotion CanvasInteraction CanvasInteractionScaled CanvasSelectionBackend ClientConnectionFlow VideoPlaybackBackend UploadRemovalSecurity RemoteSceneControllerLifecycle RemoteSceneLifecycle MediaOverlay MediaOverlayScaled
         PROPERTIES RUN_SERIAL TRUE)
 
     # Reference implementation retained for before/after profiling only. The
@@ -917,15 +908,6 @@ if(BUILD_TESTING)
     target_link_libraries(tst_TextGlyphPath PRIVATE Qt6::Core Qt6::Gui Qt6::Quick Qt6::Test)
     add_test(NAME TextGlyphPath COMMAND tst_TextGlyphPath)
     set_tests_properties(TextGlyphPath PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
-
-    add_executable(tst_MediaRuntimeContext
-        tests/qt/tst_MediaRuntimeContext.cpp
-        src/backend/domain/media/MediaRuntimeHooks.cpp
-        src/backend/domain/media/MediaRuntimeHooks.h
-    )
-    target_include_directories(tst_MediaRuntimeContext PRIVATE src)
-    target_link_libraries(tst_MediaRuntimeContext PRIVATE Qt6::Core Qt6::Test)
-    add_test(NAME MediaRuntimeContext COMMAND tst_MediaRuntimeContext)
 
     add_executable(tst_MediaFilePolicy
         tests/qt/tst_MediaFilePolicy.cpp
@@ -1018,4 +1000,9 @@ if(BUILD_TESTING)
     target_link_libraries(tst_RemoteCacheStore PRIVATE
         Qt6::Core Qt6::Concurrent Qt6::Test)
     add_test(NAME RemoteCacheStore COMMAND tst_RemoteCacheStore)
+
+    add_test(NAME QmlArchitectureGate
+        COMMAND ${CMAKE_COMMAND}
+            -DSOURCE_ROOT=${CMAKE_SOURCE_DIR}
+            -P ${CMAKE_SOURCE_DIR}/tests/cmake/verify_qml_architecture.cmake)
 endif()

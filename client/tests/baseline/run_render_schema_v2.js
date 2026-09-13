@@ -8,16 +8,16 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 const assert = (value, message) => { if (!value) throw new Error(message); };
 
 function main() {
-  const sender = read('src/frontend/rendering/canvas/ScreenCanvas.cpp');
+  const sender = read('src/backend/domain/canvas/CanvasDocument.cpp');
   const receiver = read('src/frontend/rendering/remote/RemoteSceneController.cpp');
   const remoteQml = read('resources/qml/RemoteSceneRoot.qml');
 
-  assert(sender.includes('root["renderSchemaVersion"] = 2'), 'schema v2 marker missing');
+  assert(sender.includes('QStringLiteral("renderSchemaVersion"), 2'), 'schema v2 marker missing');
   for (const field of ['fontPixelSize', 'fontUnderline', 'fontUppercase', 'textOutlineWidthPx', 'z', 'visible']) {
-    assert(sender.includes(`m["${field}"]`), `sender field missing: ${field}`);
+    assert(sender.includes(`QStringLiteral("${field}")`), `sender field missing: ${field}`);
   }
   for (const legacy of ['fontSize', 'fontBold', 'textBorderWidthPercent', 'uniformScale']) {
-    assert(sender.includes(`m["${legacy}"]`), `legacy sender field removed: ${legacy}`);
+    assert(sender.includes(`QStringLiteral("${legacy}")`), `compatibility field removed: ${legacy}`);
   }
   assert(receiver.includes('m.value("fontPixelSize").toInt(0)'), 'v2 pixel size is not read');
   assert(receiver.includes('TextRenderMetrics::effectiveFontPixelSize'), 'v1 font fallback is missing');

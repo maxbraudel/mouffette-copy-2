@@ -3,7 +3,7 @@
 
 #include <QObject>
 
-class MainWindow;
+class ApplicationRuntime;
 
 /**
  * @brief Handler for upload-related events and logic
@@ -20,7 +20,7 @@ class UploadEventHandler : public QObject
     Q_OBJECT
 
 public:
-    explicit UploadEventHandler(MainWindow* mainWindow, QObject* parent = nullptr);
+    explicit UploadEventHandler(ApplicationRuntime* mainWindow, QObject* parent = nullptr);
 
 public slots:
     /**
@@ -42,7 +42,7 @@ public slots:
     void updateIndividualProgressFromServer(int globalPercent, int filesCompleted, int totalFiles);
 
 private:
-    MainWindow* m_mainWindow;
+    ApplicationRuntime* m_mainWindow;
 };
 
 #endif // UPLOADEVENTHANDLER_H

@@ -162,7 +162,8 @@ and a history of more than 128 MiB of distinct masks evicted to the 64 MiB
 budget. Pixel thresholds were retained when replacing curve rendering.
 
 Performance measurements use `QQuickRenderControl` with a real Metal/QRhi
-offscreen render target, like the rendering mechanism behind `QQuickWidget`.
+offscreen render target. This is test infrastructure; the application itself
+renders through direct Qt Quick windows.
 The timer includes insertion, polish, synchronization, rendering and GPU
 completion; it does not include screenshot readback or window presentation.
 Pending Qt/platform events are dispatched between timed edits, as in the real

@@ -5,7 +5,7 @@
 #include <QList>
 #include <QString>
 
-class MainWindow;
+class ApplicationRuntime;
 class WebSocketClient;
 class ClientInfo;
 
@@ -24,7 +24,7 @@ class ClientListEventHandler : public QObject
     Q_OBJECT
 
 public:
-    explicit ClientListEventHandler(MainWindow* mainWindow, WebSocketClient* webSocketClient, QObject* parent = nullptr);
+    explicit ClientListEventHandler(ApplicationRuntime* mainWindow, WebSocketClient* webSocketClient, QObject* parent = nullptr);
     
     void setupConnections(WebSocketClient* client);
 
@@ -38,7 +38,7 @@ public slots:
     void onClientListReceived(const QList<ClientInfo>& clients);
 
 private:
-    MainWindow* m_mainWindow;
+    ApplicationRuntime* m_mainWindow;
     WebSocketClient* m_webSocketClient;
 };
 

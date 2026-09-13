@@ -59,7 +59,6 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     QCOMPARE(config.remoteSessionHiddenTimeoutMs(), qint64(60000));
     QCOMPARE(config.projectHiddenRetentionMs(), qint64(300000));
     QCOMPARE(config.uploadConcurrency(), 2);
-    QVERIFY(config.useQuickCanvasRenderer());
     QVERIFY(config.allowMultipleInstances());
     QVERIFY(!config.cursorDebug());
     QCOMPARE(config.loadedEnvFilePath(), QStringLiteral(":/config/client.env"));
@@ -82,32 +81,24 @@ void AppConfigTest::appliesDocumentedPrecedence() {
     QVERIFY(directory.isValid());
     const QString envPath = writeEnvFile(directory, QStringLiteral("client.env"),
         "MOUFFETTE_SERVER_URL=ws://10.0.0.5:8081\n"
-        "MOUFFETTE_AUTO_UPLOAD_IMPORTED_MEDIA=false\n"
-        "MOUFFETTE_USE_QUICK_CANVAS_RENDERER=false\n");
+        "MOUFFETTE_AUTO_UPLOAD_IMPORTED_MEDIA=false\n");
     QVERIFY(!envPath.isEmpty());
 
     AppConfig::LoadOptions options = isolatedOptions(envPath);
     options.settings.insert(QStringLiteral("serverUrl"), QStringLiteral("ws://192.168.1.5:8082"));
     options.settings.insert(QStringLiteral("autoUploadImportedMedia"), true);
-    options.settings.insert(QStringLiteral("useQuickCanvasRenderer"), true);
     options.processEnvironment.insert(QStringLiteral("MOUFFETTE_SERVER_URL"),
                                       QStringLiteral("ws://172.16.1.5:8083"));
     options.processEnvironment.insert(QStringLiteral("MOUFFETTE_AUTO_UPLOAD_IMPORTED_MEDIA"),
                                       QStringLiteral("false"));
-    options.processEnvironment.insert(QStringLiteral("MOUFFETTE_USE_QUICK_CANVAS_RENDERER"),
-                                      QStringLiteral("false"));
-    options.arguments << QStringLiteral("--server-url=wss://example.com:443")
-                      << QStringLiteral("--use-quick-canvas-renderer=true");
+    options.arguments << QStringLiteral("--server-url=wss://example.com:443");
 
     AppConfig config;
     QString error;
     QVERIFY2(config.load(options, &error), qPrintable(error));
     QCOMPARE(config.serverUrl(), QStringLiteral("wss://example.com:443"));
-    QVERIFY(config.useQuickCanvasRenderer());
     QVERIFY(!config.autoUploadImportedMedia());
     QCOMPARE(config.provenance(AppConfig::Key::ServerUrl), QStringLiteral("cli:--server-url"));
-    QCOMPARE(config.provenance(AppConfig::Key::UseQuickCanvasRenderer),
-             QStringLiteral("cli:--use-quick-canvas-renderer"));
     QCOMPARE(config.provenance(AppConfig::Key::AutoUploadImportedMedia),
              QStringLiteral("process:MOUFFETTE_AUTO_UPLOAD_IMPORTED_MEDIA"));
 }

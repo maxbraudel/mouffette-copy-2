@@ -1,7 +1,6 @@
-import QtQuick 2.15
+import QtQuick
 import QtMultimedia
-import Mouffette.Canvas 1.0
-
+import Mouffette.Canvas
 BaseMediaItem {
     id: root
 

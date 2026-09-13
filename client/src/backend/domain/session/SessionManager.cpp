@@ -1,6 +1,5 @@
 #include "backend/domain/session/SessionManager.h"
 #include <QUuid>
-#include <QPushButton>
 #include <QDebug>
 
 namespace {
@@ -198,8 +197,7 @@ void SessionManager::deleteSession(const QString& persistentClientId) {
     // PHASE 1: Remove from secondary indexes
     removeFromIndexes(persistentClientId);
     
-    // Note: Canvas and uploadButton cleanup is handled by MainWindow
-    // (ownership may be with layouts/parent widgets)
+    // Canvas lifetime is coordinated by ApplicationRuntime.
     
     m_sessions.erase(it);
     emit sessionDeleted(persistentClientId);

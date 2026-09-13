@@ -1,25 +1,33 @@
 {
-  "id": "mandatory_quick_path",
+  "id": "qml_only_application_path",
   "rules": [
     {
       "file": "src/backend/controllers/CanvasSessionController.cpp",
       "mustContain": [
-        "const bool quickRequested = true",
-        "mandatory_quick_init_failed",
+        "QuickCanvasHost::create",
         "mandatory Qt Quick canvas unavailable"
       ]
     },
     {
       "file": "src/frontend/rendering/canvas/QuickCanvasController.cpp",
       "mustContain": [
-        "QQuickWidget::Ready",
-        "Qt Quick canvas root object was not created"
+        "registerWindow",
+        "mediaSnapshot",
+        "presentationChanged"
       ]
     },
     {
       "file": "src/frontend/rendering/remote/RemoteSceneController.cpp",
       "mustContain": [
-        "Qt Quick remote renderer failed to initialize"
+        "RemoteSceneWindow.qml",
+        "createWithInitialProperties"
+      ]
+    },
+    {
+      "file": "CMakeLists.txt",
+      "mustContain": [
+        "qt_add_qml_module",
+        "QmlArchitectureGate"
       ]
     }
   ]

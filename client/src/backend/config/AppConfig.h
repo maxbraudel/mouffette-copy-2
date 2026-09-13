@@ -28,7 +28,6 @@ public:
         ProjectHiddenRetentionMs,
         UploadConcurrency,
         AutoUploadImportedMedia,
-        UseQuickCanvasRenderer,
         QtMediaBackend,
         AllowMultipleInstances,
         CursorDebug,
@@ -89,7 +88,6 @@ public:
     qint64 projectHiddenRetentionMs() const { return m_projectHiddenRetentionMs; }
     int uploadConcurrency() const { return m_uploadConcurrency; }
     bool autoUploadImportedMedia() const { return m_autoUploadImportedMedia; }
-    bool useQuickCanvasRenderer() const { return m_useQuickCanvasRenderer; }
     QString qtMediaBackend() const { return m_qtMediaBackend; }
     bool allowMultipleInstances() const { return m_allowMultipleInstances; }
     bool cursorDebug() const { return m_cursorDebug; }
@@ -109,7 +107,6 @@ private:
     qint64 m_projectHiddenRetentionMs = 300000;
     int m_uploadConcurrency = 2;
     bool m_autoUploadImportedMedia = false;
-    bool m_useQuickCanvasRenderer = true;
     QString m_qtMediaBackend = QStringLiteral("ffmpeg");
     bool m_allowMultipleInstances = false;
     bool m_cursorDebug = false;

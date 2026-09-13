@@ -1,6 +1,5 @@
-import QtQuick 2.15
-import Mouffette.Canvas 1.0
-
+import QtQuick
+import Mouffette.Canvas
 Item {
     id: root
     objectName: "mediaDropPreview"

@@ -1,19 +1,18 @@
 #include "UploadEventHandler.h"
-#include "MainWindow.h"
+#include "backend/runtime/ApplicationRuntime.h"
 #include "backend/network/UploadManager.h"
 #include "backend/files/FileManager.h"
 #include "backend/files/FileWatcher.h"
 #include "shared/rendering/ICanvasHost.h"
 #include "backend/network/WebSocketClient.h"
-#include "backend/domain/media/MediaItems.h"
+#include "backend/domain/media/CanvasMedia.h"
 #include "backend/domain/media/MediaFilePolicy.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 #include "backend/domain/session/SessionManager.h"
 #include <QFileInfo>
-#include <QTimer>
 #include <QDebug>
 
-UploadEventHandler::UploadEventHandler(MainWindow* mainWindow, QObject* parent)
+UploadEventHandler::UploadEventHandler(ApplicationRuntime* mainWindow, QObject* parent)
     : QObject(parent)
     , m_mainWindow(mainWindow)
 {
@@ -24,7 +23,7 @@ void UploadEventHandler::onUploadButtonClicked()
     UploadManager* uploadManager = m_mainWindow->getUploadManager();
     if (!uploadManager) return;
 
-    MainWindow::CanvasSession* session = m_mainWindow->findCanvasSession(m_mainWindow->getActiveSessionIdentity());
+    ApplicationRuntime::CanvasSession* session = m_mainWindow->findCanvasSession(m_mainWindow->getActiveSessionIdentity());
     if (!session || !session->canvas) return;
 
     ICanvasHost* canvas = session->canvas;
@@ -77,17 +76,17 @@ void UploadEventHandler::onUploadButtonClicked()
     upload.receivingFilesToastShown = false;
 
     QVector<UploadFileInfo> files;
-    QList<ResizableMediaBase*> mediaItemsToRemove;
+    QList<CanvasMedia*> mediaItemsToRemove;
     QSet<QString> processedFileIds;
     QSet<QString> currentFileIds;
     QStringList rejectedMedia;
 
     FileManager* fileManager = m_mainWindow->getFileManager();
-    const QList<ResizableMediaBase*> mediaItems = canvas->enumerateMediaItems();
-    for (ResizableMediaBase* media : mediaItems) {
+    const QList<CanvasMedia*> mediaItems = canvas->enumerateMediaItems();
+    for (CanvasMedia* media : mediaItems) {
         if (!media) continue;
 
-        if (media->isTextMedia()) continue;
+        if (media->isText()) continue;
 
         const QString path = media->sourcePath();
         if (path.isEmpty()) continue;
@@ -101,7 +100,7 @@ void UploadEventHandler::onUploadButtonClicked()
         const MediaFilePolicy::ValidationResult validation =
             MediaFilePolicy::validateLocalFile(fi.absoluteFilePath());
         const MediaFilePolicy::Kind mediaKind = validation.kind;
-        const bool accepted = media->isVideoMedia()
+        const bool accepted = media->isVideo()
             ? mediaKind == MediaFilePolicy::Kind::Mp4Video
             : mediaKind == MediaFilePolicy::Kind::Image;
         if (!accepted) {
@@ -118,7 +117,7 @@ void UploadEventHandler::onUploadButtonClicked()
         // and leave stale bytes on the remote client.
         const QString fileId = fileManager->getOrCreateFileId(fi.absoluteFilePath());
         if (fileId.isEmpty()) {
-            qWarning() << "MainWindow: Media item has no fileId, skipping:" << media->mediaId();
+            qWarning() << "ApplicationRuntime: Media item has no fileId, skipping:" << media->mediaId();
             continue;
         }
         if (media->fileId() != fileId) {
@@ -149,19 +148,16 @@ void UploadEventHandler::onUploadButtonClicked()
     }
 
     FileWatcher* fileWatcher = m_mainWindow->getFileWatcher();
-    for (ResizableMediaBase* mediaItem : mediaItemsToRemove) {
+    for (CanvasMedia* mediaItem : mediaItemsToRemove) {
         if (fileWatcher) {
             fileWatcher->unwatchMediaItem(mediaItem);
         }
-        QTimer::singleShot(0, [itemPtr = mediaItem]() {
-            itemPtr->prepareForDeletion();
-            if (itemPtr->scene()) itemPtr->scene()->removeItem(itemPtr);
-            delete itemPtr;
-        });
+        // Use the canonical removal path so the overlay and selection state
+        // update after the item has actually left the scene.
+        canvas->deleteMediaItemCanonical(mediaItem);
     }
 
     if (!mediaItemsToRemove.isEmpty()) {
-        canvas->refreshInfoOverlay();
         TOAST_WARNING(QString("%1 media item(s) removed - source files not found").arg(mediaItemsToRemove.size()));
     }
 
@@ -218,7 +214,7 @@ void UploadEventHandler::onUploadButtonClicked()
             m_mainWindow->setUploadSessionByUploadId(upload.activeUploadId, session->persistentClientId);
         }
 
-        for (ResizableMediaBase* media : canvas->enumerateMediaItems()) {
+        for (CanvasMedia* media : canvas->enumerateMediaItems()) {
             if (!media) continue;
             const QString fileId = fileManager->getFileIdForMedia(media->mediaId());
             if (!fileId.isEmpty() && fileIdsBeingUploaded.contains(fileId)) {
@@ -249,8 +245,8 @@ void UploadEventHandler::updateIndividualProgressFromServer(int globalPercent, i
 
     for (const QString& fileId : session->upload.currentUploadFileOrder) {
         if (session->upload.serverCompletedFileIds.contains(fileId)) continue;
-        const QList<ResizableMediaBase*> items = session->upload.itemsByFileId.value(fileId);
-        for (ResizableMediaBase* item : items) {
+        const QList<CanvasMedia*> items = session->upload.itemsByFileId.value(fileId);
+        for (CanvasMedia* item : items) {
             if (item) item->setUploadUploaded();
         }
         session->upload.serverCompletedFileIds.insert(fileId);

@@ -4,8 +4,6 @@
 #include <QFont>
 #include <QString>
 
-class TextMediaItem;
-
 // Canonical, renderer-agnostic text state. Values are expressed in the same
 // logical pixels consumed by the Qt Quick TextItem before the outer media
 // transform is applied.
@@ -37,6 +35,5 @@ int effectiveFontPixelSize(const QFont& font, qreal uniformScale = 1.0);
 qreal outlinePixels(qreal widthPercent, int effectiveFontPixelSize);
 qreal outlinePixels(const QFont& font, qreal widthPercent, qreal uniformScale = 1.0);
 qreal outlineSafetyPadding(qreal outlineWidthPixels);
-TextRenderState fromMediaItem(const TextMediaItem& item);
 
 } // namespace TextRenderMetrics

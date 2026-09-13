@@ -3,7 +3,7 @@
 
 #include <QObject>
 
-class MainWindow;
+class ApplicationRuntime;
 class WebSocketClient;
 
 /**
@@ -15,14 +15,14 @@ class WebSocketClient;
  * - Manage state synchronization with server
  * - Coordinate reconnection logic
  * 
- * This handler extracts WebSocket event processing logic from MainWindow
+ * This handler extracts WebSocket event processing logic from ApplicationRuntime
  */
 class WebSocketMessageHandler : public QObject
 {
     Q_OBJECT
 
 public:
-    explicit WebSocketMessageHandler(MainWindow* mainWindow, QObject* parent = nullptr);
+    explicit WebSocketMessageHandler(ApplicationRuntime* mainWindow, QObject* parent = nullptr);
     ~WebSocketMessageHandler() override = default;
 
     /**
@@ -50,7 +50,7 @@ signals:
     void connectionStateChanged(bool connected);
 
 private:
-    MainWindow* m_mainWindow = nullptr;
+    ApplicationRuntime* m_mainWindow = nullptr;
 };
 
 #endif // WEBSOCKETMESSAGEHANDLER_H

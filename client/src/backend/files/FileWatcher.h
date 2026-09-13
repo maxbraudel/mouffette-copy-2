@@ -8,7 +8,7 @@
 #include <QString>
 #include <QTimer>
 
-class ResizableMediaBase;
+class CanvasMedia;
 
 // FileWatcher monitors source files of media items and automatically removes
 // media items from the canvas when their source files are deleted or become inaccessible.
@@ -20,15 +20,15 @@ public:
     ~FileWatcher() override;
     
     // Add a media item to watch - will monitor its source file path
-    void watchMediaItem(ResizableMediaBase* mediaItem);
+    void watchMediaItem(CanvasMedia* mediaItem);
     
     // Remove a media item from watching (called when item is deleted)
-    void unwatchMediaItem(ResizableMediaBase* mediaItem);
+    void unwatchMediaItem(CanvasMedia* mediaItem);
 
     // Returns the canonical path captured while the source still existed.
     // This remains usable in the deletion callback, where QFileInfo can no
     // longer resolve a symlink target.
-    QString watchedFilePath(ResizableMediaBase* mediaItem) const;
+    QString watchedFilePath(CanvasMedia* mediaItem) const;
     
     // Clear all watched items
     void clearAll();
@@ -39,7 +39,7 @@ public:
 signals:
     // Emitted when a watched file is deleted or becomes inaccessible
     // Contains the list of media items that should be removed
-    void filesDeleted(const QList<ResizableMediaBase*>& mediaItems);
+    void filesDeleted(const QList<CanvasMedia*>& mediaItems);
 
 private slots:
     void onFileDeleted(const QString& filePath);
@@ -47,17 +47,17 @@ private slots:
     void performDelayedCheck();
 
 private:
-    void addFileToWatch(const QString& filePath, ResizableMediaBase* mediaItem);
-    void removeFileFromWatch(const QString& filePath, ResizableMediaBase* mediaItem);
+    void addFileToWatch(const QString& filePath, CanvasMedia* mediaItem);
+    void removeFileFromWatch(const QString& filePath, CanvasMedia* mediaItem);
     bool isFileAccessible(const QString& filePath) const;
     
     QFileSystemWatcher* m_watcher;
     
     // Map from file path to set of media items using that file
-    QHash<QString, QSet<ResizableMediaBase*>> m_fileToMedia;
+    QHash<QString, QSet<CanvasMedia*>> m_fileToMedia;
     
     // Map from media item to its watched file path (for reverse lookup)
-    QHash<ResizableMediaBase*, QString> m_mediaToFile;
+    QHash<CanvasMedia*, QString> m_mediaToFile;
     
     // Timer to batch file deletion checks (avoid too many rapid signals)
     QTimer* m_delayedCheckTimer;

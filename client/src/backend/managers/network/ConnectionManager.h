@@ -17,7 +17,7 @@ class ClientInfo;
  * - Lease-aware fast reconnection followed by indefinite capped backoff
  * - Connection status tracking
  * 
- * This removes ~200 lines of connection logic from MainWindow.
+ * This removes ~200 lines of connection logic from ApplicationRuntime.
  */
 class ConnectionManager : public QObject {
     Q_OBJECT

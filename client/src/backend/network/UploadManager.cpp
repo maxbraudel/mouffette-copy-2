@@ -8,8 +8,6 @@
 #include "backend/domain/media/MediaFilePolicy.h"
 #include "MediaFormatContract.h"
 #include "backend/domain/session/SessionManager.h"  // Phase 3: For DEFAULT_IDEA_ID constant
-#include <QGraphicsScene>
-#include <QGraphicsItem>
 #include <QFileInfo>
 #include <QCryptographicHash>
 #include <QJsonObject>
@@ -2704,7 +2702,7 @@ void UploadManager::pumpOutgoingUpload() {
     }
 }
 
-// collectSceneFiles removed; files now gathered by caller (MainWindow)
+// collectSceneFiles removed; files now gathered by caller (ApplicationRuntime)
 
 void UploadManager::resetToInitial() {
     if (!m_currentUploadId.isEmpty()) releaseSchedulerSlot(false);
@@ -3062,7 +3060,7 @@ int UploadManager::detachReceivedMappingsForScope(
 void UploadManager::beginTerminalIncomingCleanup(const QString& reasonCode)
 {
     // This is only the command/writer barrier. Render-facing mappings and the
-    // live cache namespace deliberately remain intact until MainWindow has
+    // live cache namespace deliberately remain intact until ApplicationRuntime has
     // observed RemoteSceneController::teardownSettled for every incoming
     // RemoteSession that existed at the terminal edge.
     m_terminalIncomingCleanupAwaitingRenderer = true;
@@ -4032,7 +4030,7 @@ void UploadManager::cleanupIncomingCacheForConnectionLoss() {
     suspendIncomingForResume();
 }
 
-// Incoming side (target) - replicate subset of MainWindow logic for assembling files
+// Incoming side (target) - replicate subset of ApplicationRuntime logic for assembling files
 void UploadManager::handleIncomingMessage(const QJsonObject& message) {
     const QString type = message.value("type").toString();
     if (type == "upload_start") {

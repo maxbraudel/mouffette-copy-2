@@ -4,7 +4,7 @@
 #include <QObject>
 #include "backend/domain/models/ClientInfo.h"
 
-class MainWindow;
+class ApplicationRuntime;
 class WebSocketClient;
 class SystemMonitor;
 
@@ -17,14 +17,14 @@ class SystemMonitor;
  * - Handle data request events from server
  * - Coordinate screen info collection with SystemMonitor
  * 
- * This handler extracts screen event processing logic from MainWindow
+ * This handler extracts screen event processing logic from ApplicationRuntime
  */
 class ScreenEventHandler : public QObject
 {
     Q_OBJECT
 
 public:
-    explicit ScreenEventHandler(MainWindow* mainWindow, QObject* parent = nullptr);
+    explicit ScreenEventHandler(ApplicationRuntime* mainWindow, QObject* parent = nullptr);
     ~ScreenEventHandler() override = default;
 
     /**
@@ -46,7 +46,7 @@ public slots:
     void onDataRequestReceived();
 
 private:
-    MainWindow* m_mainWindow = nullptr;
+    ApplicationRuntime* m_mainWindow = nullptr;
     WebSocketClient* m_webSocketClient = nullptr;
 };
 

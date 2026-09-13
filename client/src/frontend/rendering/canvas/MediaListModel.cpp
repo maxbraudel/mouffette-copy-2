@@ -22,6 +22,17 @@ QVariant MediaListModel::data(const QModelIndex& index, int role) const
         return {};
     if (role == ModelDataRole)
         return m_rows[index.row()].data;
+    static const QHash<int, QString> keys {
+        { MediaIdRole, QStringLiteral("mediaId") },
+        { DisplayNameRole, QStringLiteral("displayName") },
+        { MediaTypeRole, QStringLiteral("mediaType") },
+        { SourcePathRole, QStringLiteral("sourcePath") },
+        { UploadStateRole, QStringLiteral("uploadState") },
+        { ContentVisibleRole, QStringLiteral("contentVisible") }
+    };
+    const auto key = keys.constFind(role);
+    if (key != keys.cend())
+        return m_rows[index.row()].data.value(*key);
     return {};
 }
 
@@ -30,7 +41,15 @@ QHash<int, QByteArray> MediaListModel::roleNames() const
     // Named "modelData" so that QML delegates can write:
     //   property var media: modelData
     // and have it behave identically to the old JS-array modelData.
-    return { { ModelDataRole, QByteArrayLiteral("modelData") } };
+    return {
+        { ModelDataRole, QByteArrayLiteral("modelData") },
+        { MediaIdRole, QByteArrayLiteral("mediaId") },
+        { DisplayNameRole, QByteArrayLiteral("displayName") },
+        { MediaTypeRole, QByteArrayLiteral("mediaType") },
+        { SourcePathRole, QByteArrayLiteral("sourcePath") },
+        { UploadStateRole, QByteArrayLiteral("uploadState") },
+        { ContentVisibleRole, QByteArrayLiteral("contentVisible") }
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +133,7 @@ void MediaListModel::updateFromList(const QVariantList& newList)
             if (m_rows[newIdx].data != nr.data) {
                 m_rows[newIdx].data = nr.data;
                 const QModelIndex idx = index(newIdx);
-                emit dataChanged(idx, idx, { ModelDataRole });
+                emit dataChanged(idx, idx);
             }
 
         } else {
@@ -130,7 +149,7 @@ void MediaListModel::updateFromList(const QVariantList& newList)
             if (m_rows[newIdx].data != nr.data) {
                 m_rows[newIdx].data = nr.data;
                 const QModelIndex idx = index(newIdx);
-                emit dataChanged(idx, idx, { ModelDataRole });
+                emit dataChanged(idx, idx);
             }
         }
     }

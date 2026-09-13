@@ -138,7 +138,6 @@ bool resetSettingsToDefaults()
     QSettings settings(info.absoluteFilePath(), QSettings::IniFormat);
     settings.setValue(QStringLiteral("serverUrl"), QStringLiteral("ws://localhost:8080"));
     settings.setValue(QStringLiteral("autoUploadImportedMedia"), false);
-    settings.setValue(QStringLiteral("useQuickCanvasRenderer"), true);
     settings.sync();
     return settings.status() == QSettings::NoError;
 }
@@ -150,26 +149,38 @@ bool settingsAreValid()
     if (!info.isFile() || info.isSymLink() || info.size() > 1024 * 1024) return false;
     QSettings settings(info.absoluteFilePath(), QSettings::IniFormat);
     if (settings.status() != QSettings::NoError) return false;
+    // One-way storage compatibility for profiles created before Qt Quick
+    // became the sole renderer. The obsolete value is accepted only long
+    // enough to remove it; it no longer controls any runtime path.
+    const QString obsoleteRendererKey = QStringLiteral("useQuickCanvas")
+        + QStringLiteral("Renderer");
     const QSet<QString> allowed{
         QStringLiteral("serverUrl"), QStringLiteral("autoUploadImportedMedia"),
-        QStringLiteral("useQuickCanvasRenderer")};
+        obsoleteRendererKey};
     const QStringList keys = settings.allKeys();
     for (const QString& key : keys) {
         if (!allowed.contains(key)) return false;
     }
     if (!settings.contains(QStringLiteral("serverUrl"))
-        || !settings.contains(QStringLiteral("autoUploadImportedMedia"))
-        || !settings.contains(QStringLiteral("useQuickCanvasRenderer"))) {
+        || !settings.contains(QStringLiteral("autoUploadImportedMedia"))) {
         return false;
     }
     const QVariant serverUrl = settings.value(QStringLiteral("serverUrl"));
     const QVariant autoUpload = settings.value(QStringLiteral("autoUploadImportedMedia"));
-    const QVariant quickCanvas = settings.value(QStringLiteral("useQuickCanvasRenderer"));
+    if (settings.contains(obsoleteRendererKey)
+        && settings.value(obsoleteRendererKey).metaType().id() != QMetaType::Bool) {
+        return false;
+    }
     QString ignored;
-    return serverUrl.metaType().id() == QMetaType::QString
+    const bool valid = serverUrl.metaType().id() == QMetaType::QString
         && autoUpload.metaType().id() == QMetaType::Bool
-        && quickCanvas.metaType().id() == QMetaType::Bool
         && AppConfig::validateServerUrl(serverUrl.toString(), nullptr, &ignored);
+    if (valid && settings.contains(obsoleteRendererKey)) {
+        settings.remove(obsoleteRendererKey);
+        settings.sync();
+        return settings.status() == QSettings::NoError;
+    }
+    return valid;
 }
 
 bool resetProjectsToEmpty()

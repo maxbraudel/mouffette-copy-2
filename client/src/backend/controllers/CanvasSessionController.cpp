@@ -1,38 +1,21 @@
 #include "CanvasSessionController.h"
-#include "MainWindow.h"
+#include "backend/runtime/ApplicationRuntime.h"
 #include "backend/domain/models/ClientInfo.h"
 #include "shared/rendering/ICanvasHost.h"
-#include "frontend/rendering/canvas/LegacySceneMirror.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
-#include "frontend/rendering/canvas/ScreenCanvas.h"
+#include "backend/domain/canvas/CanvasDocument.h"
+#include "backend/domain/media/CanvasMedia.h"
 #include "backend/domain/session/SessionManager.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/UploadManager.h"
 #include "backend/files/FileManager.h"
 #include "backend/files/FileWatcher.h"
-#include "backend/managers/app/MigrationTelemetryManager.h"
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
-#include "frontend/ui/pages/ClientListPage.h"
-#include "frontend/ui/pages/CanvasViewPage.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
-#include "backend/domain/media/MediaItems.h"
-#include <QStackedWidget>
-#include <QGraphicsScene>
-#include <QPushButton>
 #include <QTimer>
 #include <QDebug>
 
-namespace {
-LegacySceneMirror* createExplicitLegacyMirror(QWidget* parentWidget) {
-    if (!parentWidget) {
-        return nullptr;
-    }
-    ScreenCanvas* mediaCanvas = new ScreenCanvas(parentWidget);
-    return new LegacySceneMirror(mediaCanvas, parentWidget);
-}
-}
-
-CanvasSessionController::CanvasSessionController(MainWindow* mainWindow, QObject* parent)
+CanvasSessionController::CanvasSessionController(ApplicationRuntime* mainWindow, QObject* parent)
     : QObject(parent)
     , m_mainWindow(mainWindow)
 {
@@ -75,37 +58,19 @@ void* CanvasSessionController::ensureCanvasSession(const ClientInfo& client) {
     
     // Check if session already exists
     // Use SessionManager (creates canvasSessionId automatically)
-    MainWindow::CanvasSession& session = m_mainWindow->getSessionManager()->getOrCreateSession(persistentId, client);
+    ApplicationRuntime::CanvasSession& session = m_mainWindow->getSessionManager()->getOrCreateSession(persistentId, client);
     
     // Initialize canvas if needed (UI-specific responsibility)
     if (!session.canvas) {
-        QStackedWidget* canvasHostStack = m_mainWindow->getCanvasViewPage() ? m_mainWindow->getCanvasViewPage()->getCanvasHostStack() : nullptr;
-        if (!canvasHostStack) {
-            qWarning() << "Cannot create canvas: CanvasViewPage not initialized";
-            return &session;
-        }
-
-        const bool quickRequested = true;
-        QString appliedRenderer = QStringLiteral("quick_canvas_shell");
-        QString reason;
-
         if (m_prewarmedQuickCanvasHost) {
             session.canvas = m_prewarmedQuickCanvasHost;
             m_prewarmedQuickCanvasHost = nullptr;
-            reason = QStringLiteral("mandatory_quick_prewarmed_shell");
         } else {
             QString quickError;
-            LegacySceneMirror* legacyBridge = createExplicitLegacyMirror(canvasHostStack);
-            session.canvas = QuickCanvasHost::create(canvasHostStack, legacyBridge, &quickError);
-            if (!session.canvas && legacyBridge) {
-                delete legacyBridge;
-            }
+            session.canvas = QuickCanvasHost::create(&quickError);
             if (session.canvas) {
-                reason = QStringLiteral("mandatory_quick_explicit_model_bridge");
                 m_lastQuickInitError.clear();
             } else {
-                appliedRenderer = QStringLiteral("quick_canvas_initialization_error");
-                reason = QStringLiteral("mandatory_quick_init_failed");
                 m_lastQuickInitError = quickError.isEmpty()
                     ? QStringLiteral("Qt Quick canvas failed to initialize") : quickError;
                 qCritical() << "CanvasSessionController: mandatory Qt Quick canvas unavailable."
@@ -116,12 +81,6 @@ void* CanvasSessionController::ensureCanvasSession(const ClientInfo& client) {
             }
         }
 
-        MigrationTelemetryManager::logRendererPathResolved(
-            QStringLiteral("CanvasSessionController::ensureCanvasSession"),
-            quickRequested,
-            appliedRenderer,
-            reason);
-
         if (!session.canvas) {
             return &session;
         }
@@ -129,9 +88,6 @@ void* CanvasSessionController::ensureCanvasSession(const ClientInfo& client) {
         session.canvas->setActiveIdeaId(session.canvasSessionId); // Use canvasSessionId from SessionManager
         session.connectionsInitialized = false;
         configureCanvasSession(&session);
-        if (canvasHostStack->indexOf(session.canvas->asWidget()) == -1) {
-            canvasHostStack->addWidget(session.canvas->asWidget());
-        }
     }
     
     // Update remote target
@@ -144,10 +100,6 @@ void* CanvasSessionController::ensureCanvasSession(const ClientInfo& client) {
         session.remoteContentClearedOnDisconnect = false;
     }
     
-    // Refresh ongoing scenes via ClientListPage
-    if (m_mainWindow->getClientListPage()) {
-        m_mainWindow->getClientListPage()->refreshOngoingScenesList();
-    }
     return &session;
 }
 
@@ -156,18 +108,9 @@ void CanvasSessionController::prewarmQuickCanvasHost() {
         return;
     }
 
-    QStackedWidget* canvasHostStack = m_mainWindow->getCanvasViewPage() ? m_mainWindow->getCanvasViewPage()->getCanvasHostStack() : nullptr;
-    if (!canvasHostStack) {
-        return;
-    }
-
     QString quickError;
-    LegacySceneMirror* legacyBridge = createExplicitLegacyMirror(canvasHostStack);
-    QuickCanvasHost* prewarmedHost = QuickCanvasHost::create(canvasHostStack, legacyBridge, &quickError);
+    QuickCanvasHost* prewarmedHost = QuickCanvasHost::create(&quickError);
     if (!prewarmedHost) {
-        if (legacyBridge) {
-            delete legacyBridge;
-        }
         m_lastQuickInitError = quickError;
         if (!quickError.isEmpty()) {
             qWarning() << "CanvasSessionController: Quick prewarm failed:" << quickError;
@@ -179,41 +122,21 @@ void CanvasSessionController::prewarmQuickCanvasHost() {
 
     m_lastQuickInitError.clear();
     m_prewarmedQuickCanvasHost = prewarmedHost;
-    if (canvasHostStack->indexOf(prewarmedHost->asWidget()) == -1) {
-        canvasHostStack->addWidget(prewarmedHost->asWidget());
-    }
     prewarmedHost->setOverlayActionsEnabled(false);
 }
 
 void CanvasSessionController::configureCanvasSession(void* sessionPtr) {
-    MainWindow::CanvasSession* session = static_cast<MainWindow::CanvasSession*>(sessionPtr);
+    ApplicationRuntime::CanvasSession* session = static_cast<ApplicationRuntime::CanvasSession*>(sessionPtr);
     if (!session || !session->canvas) return;
 
     session->canvas->setActiveIdeaId(session->canvasSessionId);
     session->canvas->setWebSocketClient(m_mainWindow->getWebSocketClient());
     session->canvas->setUploadManager(m_mainWindow->getUploadManager());
     session->canvas->setFileManager(m_mainWindow->getFileManager());
-    session->canvas->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    if (dynamic_cast<QuickCanvasHost*>(session->canvas) != nullptr) {
-        session->canvas->setViewportUpdateMode(QGraphicsView::BoundingRectViewportUpdate);
-    } else {
-        session->canvas->setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
-    }
-    session->canvas->setFocusPolicy(Qt::StrongFocus);
-    session->canvas->installEventFilter(m_mainWindow);
-
-    // Connect to MainWindow signal via direct call (onRemoteSceneLaunchStateChanged is private)
+    // Connect to ApplicationRuntime signal via direct call (onRemoteSceneLaunchStateChanged is private)
     connect(session->canvas, &ICanvasHost::remoteSceneLaunchStateChanged, m_mainWindow,
-            &MainWindow::onRemoteSceneLaunchStateChanged,
+            &ApplicationRuntime::onRemoteSceneLaunchStateChanged,
             Qt::UniqueConnection);
-
-    if (session->canvas->viewportWidget()) {
-        QWidget* viewport = session->canvas->viewportWidget();
-        viewport->setAttribute(Qt::WA_StyledBackground, true);
-        viewport->setAutoFillBackground(true);
-        viewport->setStyleSheet("background: palette(base); border: none; border-radius: 5px;");
-        viewport->installEventFilter(m_mainWindow);
-    }
 
     if (!session->connectionsInitialized) {
         auto* projectAutosaveTimer = new QTimer(session->canvas);
@@ -227,21 +150,20 @@ void CanvasSessionController::configureCanvasSession(void* sessionPtr) {
                 m_mainWindow->persistProjectCanvas(persistentId);
             }
         });
-        if (session->canvas->scene()) {
-            connect(session->canvas->scene(), &QGraphicsScene::changed,
-                    projectAutosaveTimer,
-                    [projectAutosaveTimer](const QList<QRectF>&) {
-                projectAutosaveTimer->start();
-            });
+        if (session->canvas->document()) {
+            connect(session->canvas->document(), &CanvasDocument::documentChanged,
+                    projectAutosaveTimer, [projectAutosaveTimer] {
+                        projectAutosaveTimer->start();
+                    });
         }
         connect(session->canvas, &ICanvasHost::mediaItemAdded, m_mainWindow,
-                [this, persistentId=session->persistentClientId](ResizableMediaBase* mediaItem) {
+                [this, persistentId=session->persistentClientId](CanvasMedia* mediaItem) {
                     if (m_mainWindow->getFileWatcher() && mediaItem && !mediaItem->sourcePath().isEmpty()) {
                         m_mainWindow->getFileWatcher()->watchMediaItem(mediaItem);
                         qDebug() << "CanvasSessionController: source watch added for mediaId"
                                  << mediaItem->mediaId();
                     }
-                    MainWindow::CanvasSession* sess = m_mainWindow->getSessionManager()->findSession(persistentId);
+                    ApplicationRuntime::CanvasSession* sess = m_mainWindow->getSessionManager()->findSession(persistentId);
                     if (sess) {
                         sess->lastClientInfo.setFromMemory(true);
                     }
@@ -256,7 +178,7 @@ void CanvasSessionController::configureCanvasSession(void* sessionPtr) {
                 });
         
         connect(session->canvas, &ICanvasHost::mediaItemRemoved, m_mainWindow,
-                [this, persistentId=session->persistentClientId](ResizableMediaBase* mediaItem) {
+                [this, persistentId=session->persistentClientId](CanvasMedia* mediaItem) {
                     if (m_mainWindow->getFileWatcher() && mediaItem) {
                         m_mainWindow->getFileWatcher()->unwatchMediaItem(mediaItem);
                     }
@@ -275,19 +197,6 @@ void CanvasSessionController::configureCanvasSession(void* sessionPtr) {
                 });
     }
 
-    if (QPushButton* overlayBtn = session->canvas->getUploadButton()) {
-        if (session->uploadButton != overlayBtn) {
-            connect(overlayBtn, &QPushButton::clicked, m_mainWindow, &MainWindow::onUploadButtonClicked, Qt::UniqueConnection);
-        }
-        session->uploadButton = overlayBtn;
-        session->uploadButtonInOverlay = true;
-        session->uploadButtonDefaultFont = overlayBtn->font();
-    } else {
-        session->uploadButton = nullptr;
-        session->uploadButtonInOverlay = false;
-        session->uploadButtonDefaultFont = QFont();
-    }
-
     session->connectionsInitialized = true;
 }
 
@@ -296,7 +205,7 @@ void CanvasSessionController::switchToCanvasSession(const QString& persistentCli
     // Unload only happens when explicitly requested via button or when remote disconnects
     
     void* sessionPtr = findCanvasSession(persistentClientId);
-    MainWindow::CanvasSession* session = static_cast<MainWindow::CanvasSession*>(sessionPtr);
+    ApplicationRuntime::CanvasSession* session = static_cast<ApplicationRuntime::CanvasSession*>(sessionPtr);
     if (!session || !session->canvas) return;
 
     m_mainWindow->setActiveSessionIdentity(persistentClientId);
@@ -305,15 +214,6 @@ void CanvasSessionController::switchToCanvasSession(const QString& persistentCli
         m_mainWindow->getNavigationManager()->setActiveCanvas(session->canvas);
     }
 
-    QStackedWidget* canvasHostStack = m_mainWindow->getCanvasViewPage() ? m_mainWindow->getCanvasViewPage()->getCanvasHostStack() : nullptr;
-    if (canvasHostStack) {
-        if (canvasHostStack->indexOf(session->canvas->asWidget()) == -1) {
-            canvasHostStack->addWidget(session->canvas->asWidget());
-        }
-        canvasHostStack->setCurrentWidget(session->canvas->asWidget());
-    }
-
-    session->canvas->setFocus(Qt::OtherFocusReason);
     // Use persistentClientId for server communication
     if (!session->persistentClientId.isEmpty()) {
         session->canvas->setRemoteSceneTarget(session->persistentClientId, session->lastClientInfo.getMachineName());
@@ -330,7 +230,7 @@ void CanvasSessionController::switchToCanvasSession(const QString& persistentCli
 }
 
 void CanvasSessionController::rotateSessionIdea(void* sessionPtr) {
-    MainWindow::CanvasSession* session = static_cast<MainWindow::CanvasSession*>(sessionPtr);
+    ApplicationRuntime::CanvasSession* session = static_cast<ApplicationRuntime::CanvasSession*>(sessionPtr);
     if (!session) return;
     
     const QString oldIdeaId = session->canvasSessionId;
@@ -356,21 +256,16 @@ void CanvasSessionController::rotateSessionIdea(void* sessionPtr) {
 // ============================================================================
 
 void CanvasSessionController::updateUploadButtonForSession(void* sessionPtr) {
-    MainWindow::CanvasSession* session = static_cast<MainWindow::CanvasSession*>(sessionPtr);
+    ApplicationRuntime::CanvasSession* session = static_cast<ApplicationRuntime::CanvasSession*>(sessionPtr);
     if (!session) return;
     
-    m_mainWindow->setUploadButton(session->uploadButton);
-    m_mainWindow->setUploadButtonInOverlay(session->uploadButtonInOverlay);
-    if (session->uploadButtonDefaultFont != QFont()) {
-        m_mainWindow->setUploadButtonDefaultFont(session->uploadButtonDefaultFont);
-    }
     if (m_mainWindow->getUploadManager()) {
         emit m_mainWindow->getUploadManager()->uiStateChanged();
     }
 }
 
 void CanvasSessionController::clearUploadTracking(void* sessionPtr) {
-    MainWindow::CanvasSession* session = static_cast<MainWindow::CanvasSession*>(sessionPtr);
+    ApplicationRuntime::CanvasSession* session = static_cast<ApplicationRuntime::CanvasSession*>(sessionPtr);
     if (!session) return;
     
     session->upload.itemsByFileId.clear();

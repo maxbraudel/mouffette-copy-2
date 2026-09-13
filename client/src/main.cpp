@@ -4,6 +4,8 @@
 #include <QDebug>
 #include <QCoreApplication>
 #include <QQuickWindow>
+#include <QQmlApplicationEngine>
+#include <QQuickStyle>
 #include <QMediaFormat>
 #include <cstdio>
 #include "AppBuildConfig.h"
@@ -12,8 +14,9 @@
 #include "backend/runtime/ApplicationInstanceManager.h"
 #include "backend/runtime/RuntimeProfile.h"
 #include "backend/runtime/RuntimeStorageBootstrap.h"
-#include "frontend/ui/widgets/BootstrapWindow.h"
-#include "MainWindow.h"
+#include "frontend/qml/ApplicationController.h"
+#include "frontend/qml/QmlRuntime.h"
+#include "frontend/rendering/canvas/CanvasQmlTypes.h"
 
 // ── Dev flags ────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
@@ -94,58 +97,47 @@ int main(int argc, char *argv[]) {
     const RuntimeProfileContext runtimeProfile = instanceManager.profile();
     RuntimeProfile::configure(runtimeProfile);
 
-    BootstrapWindow bootstrapWindow;
-    RuntimeStorageBootstrap storageBootstrap(runtimeProfile);
-    while (true) {
-        RuntimeStorageBootstrap::Result bootstrapResult = storageBootstrap.run(
-            [&bootstrapWindow](RuntimeStorageBootstrap::Stage stage) {
-                bootstrapWindow.setStage(stage);
-            });
-        if (!bootstrapResult.succeeded()) {
-            if (bootstrapWindow.waitForRetry(bootstrapResult)) continue;
-            return 4;
-        }
-        if (!AppConfig::instance().initializeWithSettings(
-                arguments, RuntimeProfile::readSettings(), &configError)) {
-            RuntimeStorageBootstrap::Result configFailure;
-            configFailure.status = RuntimeStorageBootstrap::Status::RecoverableFailure;
-            configFailure.code = QStringLiteral("runtime_configuration_invalid");
-            configFailure.cause = QStringLiteral("Runtime configuration is invalid: %1")
-                                      .arg(configError);
-            if (bootstrapWindow.waitForRetry(configFailure)) continue;
-            return 2;
-        }
-        if (bootstrapResult.hadReset()
-            && !bootstrapWindow.acknowledgeReset(bootstrapResult)) {
-            return 0;
-        }
-        bootstrapWindow.accept();
-        break;
-    }
-    
-    // Disable focus rectangle on all widgets (especially visible on Windows)
-    app.setStyleSheet("* { outline: none; }");
-    
     logRuntimeDiagnostics();
 
     // Keep application alive when window is closed (so user can reopen via other means later)
     app.setQuitOnLastWindowClosed(false);
 
-    MainWindow window(runtimeProfile);
+    QQuickStyle::setStyle(QStringLiteral("Basic"));
+    registerCanvasQmlTypes();
+
+    QQmlApplicationEngine engine;
+    QmlRuntime::setEngine(&engine);
+    // The controller is deliberately constructed after the engine. It is then
+    // destroyed first, allowing all controller-owned QQuickWindows to retire
+    // before their shared QQmlEngine.
+    ApplicationController controller(runtimeProfile, arguments);
+    engine.setInitialProperties({
+        { QStringLiteral("controller"), QVariant::fromValue(&controller) }
+    });
+    QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed,
+                     &app, []() { QCoreApplication::exit(5); },
+                     Qt::QueuedConnection);
+    engine.loadFromModule(QStringLiteral("Mouffette.App"),
+                          QStringLiteral("Main"));
+    if (engine.rootObjects().isEmpty()) {
+        return 5;
+    }
+
     QObject::connect(&instanceManager,
                      &ApplicationInstanceManager::activationRequested,
-                     &window,
-                     &MainWindow::showAndActivate);
+                     &controller,
+                     &ApplicationController::raiseRequested);
     SystemLifecycleMonitor systemLifecycleMonitor;
-    QObject::connect(&app, &QGuiApplication::applicationStateChanged, &window, &MainWindow::handleApplicationStateChanged);
+    QObject::connect(&app, &QGuiApplication::applicationStateChanged,
+                     &controller, &ApplicationController::handleApplicationStateChanged);
     QObject::connect(&systemLifecycleMonitor,
                      &SystemLifecycleMonitor::systemSuspendedChanged,
-                     &window,
-                     &MainWindow::handleNativeSystemSuspendedChanged);
+                     &controller,
+                     &ApplicationController::handleNativeSystemSuspendedChanged);
     systemLifecycleMonitor.startNativeMonitoring();
     QObject::connect(&app, &QCoreApplication::aboutToQuit,
-                     &window, &MainWindow::handleApplicationAboutToQuit,
+                     &controller, &ApplicationController::handleApplicationAboutToQuit,
                      Qt::DirectConnection);
-    window.show(); // Explicitly show main window since tray UX removed
+    controller.start();
     return app.exec();
 }
