@@ -1,8 +1,13 @@
 #include <QtTest>
+#include <QTemporaryDir>
 
+#include "backend/runtime/ApplicationRuntime.h"
+#include "backend/runtime/RuntimeProfile.h"
+#include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/models/ClientInfo.h"
 #include "frontend/qml/ClientListModel.h"
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
+#include "shared/rendering/ICanvasHost.h"
 
 namespace {
 ClientInfo onlineClient(const QString& endpointId, const QString& machineName)
@@ -64,6 +69,38 @@ private slots:
         navigation.showClientList();
         QVERIFY(!navigation.isOnScreenView());
         QVERIFY(!navigation.canvasVisible());
+    }
+
+    void clickingClientCreatesAndActivatesRealCanvasSession()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+
+        RuntimeProfileContext context;
+        context.ordinal = 2;
+        context.instanceId = QStringLiteral("client-connection-flow");
+        context.profileId = QStringLiteral("client-connection-flow");
+        context.rootPath = root.path();
+        context.temporaryRoot = root.path();
+        context.persistent = false;
+        RuntimeProfile::configure(context);
+
+        ApplicationRuntime runtime(context);
+        const ClientInfo client = onlineClient(
+            QStringLiteral("endpoint-real-canvas"), QStringLiteral("Windows B"));
+        runtime.buildDisplayClientList({client});
+
+        QSignalSpy activeSessionChanged(
+            &runtime, &ApplicationRuntime::activeSessionChanged);
+        runtime.activateClient(client.endpointId());
+
+        QCOMPARE(runtime.getActiveSessionIdentity(), client.endpointId());
+        QVERIFY(runtime.getActiveCanvas());
+        QVERIFY(runtime.getActiveCanvas()->document());
+        QVERIFY(!runtime.getActiveCanvas()->document()->canvasSessionId().isEmpty());
+        QVERIFY(activeSessionChanged.count() >= 1);
+
+        runtime.handleApplicationAboutToQuit();
     }
 };
 

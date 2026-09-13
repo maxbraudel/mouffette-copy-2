@@ -648,7 +648,6 @@ void QuickCanvasHost::publishActionState()
     emit remoteSceneLaunchStateChanged(m_sceneLaunched,
                                        m_targetClientId,
                                        m_targetMachineName);
-    if (m_uploadManager) emit m_uploadManager->uiStateChanged();
 }
 
 void QuickCanvasHost::sendVideoSnapshot()
