@@ -29,6 +29,11 @@ un SHA-256.
 - Les deux scripts de build acceptent `--clean` et `--target <cible>` sur
   macOS, ou `-Clean` et `-Target <cible>` sur Windows. `-ConsoleLogs` est aussi
   disponible sur Windows.
+- Sur Windows, les builds utilisent directement `ucrt64\bin\cmake.exe` sous
+  `MOUFFETTE_MSYS2_ROOT` (par défaut `C:\msys64`), y compris pour le contrôle
+  d'architecture. Si CMake manque, installer `mingw-w64-ucrt-x86_64-cmake`
+  depuis le terminal MSYS2 UCRT64 avec
+  `pacman -S --needed mingw-w64-ucrt-x86_64-cmake`.
 - `package-release` exécute explicitement `build-release`, puis tous les tests.
   `--skip-tests`/`-SkipTests` est réservé au diagnostic local.
 - Sur macOS, `--require-signing` impose
