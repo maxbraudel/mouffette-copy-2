@@ -117,6 +117,7 @@ Rectangle {
                                           ? inputLayer.inputCoordinator.ownerId
                                           : ""
     property int activeMediaDragCount: 0
+    property string pendingInputReconcileReason: ""
     // True while any text media item is in text-edit mode. Used to disable canvas
     // pan so parent DragHandlers don't interfere with TextEdit cursor placement.
     readonly property bool anyMediaEditing: textEditSession.activeEditor !== null
@@ -663,12 +664,33 @@ Rectangle {
         // observing that publication must not reset the transaction mid-call.
     }
 
+    function scheduleInputCoordinatorReconcile(reason) {
+        // Model/selection notifications can arrive synchronously from inside a
+        // PointerHandler's onActiveChanged callback. Readonly QML bindings such
+        // as moveHandlerActive are updated only after that callback unwinds;
+        // reconciling inline would mistake a newly-started native grab for a
+        // stale one and cancel every media move before its first update.
+        pendingInputReconcileReason = reason || "model-publication"
+        inputReconcileTimer.restart()
+    }
+
+    Timer {
+        id: inputReconcileTimer
+        interval: 0
+        repeat: false
+        onTriggered: {
+            var reason = root.pendingInputReconcileReason
+            root.pendingInputReconcileReason = ""
+            root.reconcileInputCoordinatorState(reason)
+        }
+    }
+
     onMediaModelChanged: {
-        reconcileInputCoordinatorState("media-model-changed")
+        scheduleInputCoordinatorReconcile("media-model-changed")
     }
 
     onSelectionChromeModelChanged: {
-        reconcileInputCoordinatorState("selection-model-changed")
+        scheduleInputCoordinatorReconcile("selection-model-changed")
     }
 
     function mediaSourceUrl(path) {
@@ -1019,6 +1041,10 @@ Rectangle {
                         target: mediaContentLoader
                         function onHandoffContentReadyChanged() {
                             mediaDelegate.reportDropHandoffReady()
+                        }
+                        function onHandoffCoveredChanged() {
+                            if (mediaContentLoader.handoffCovered)
+                                Qt.callLater(mediaDelegate.reportDropHandoffReady)
                         }
                     }
 

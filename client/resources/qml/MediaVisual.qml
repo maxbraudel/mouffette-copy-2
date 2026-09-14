@@ -86,6 +86,9 @@ Item {
             selected: root.selected
             handoffCovered: root.handoffCovered
             handoffFrameSource: root.handoffFrameSource
+            posterFrameSource: root.media
+                               ? (root.media.videoPosterFrameSource || null)
+                               : null
             cppMediaPlayer: root.media ? (root.media.videoPlayerPtr || null) : null
             cppVideoSink: root.media ? (root.media.videoSinkPtr || null) : null
             remoteFrameSource: root.media ? (root.media.remoteFrameSource || null) : null

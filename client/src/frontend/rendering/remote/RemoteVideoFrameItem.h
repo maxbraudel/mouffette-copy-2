@@ -17,7 +17,7 @@ public:
     const QImage& frame() const { return m_frame; }
 
     void setFrame(const QImage& frame);
-    void clear();
+    Q_INVOKABLE void clear();
 
 signals:
     void frameChanged();

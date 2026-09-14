@@ -53,6 +53,8 @@ QuickCanvasHost::QuickCanvasHost(CanvasDocument* document,
     Q_ASSERT(m_controller);
     m_document->setParent(this);
     m_controller->setParent(this);
+    connect(m_controller, &QuickCanvasController::textToolActiveChanged,
+            this, &QuickCanvasHost::toolChanged);
     connect(m_document, &CanvasDocument::mediaAdded,
             this, &QuickCanvasHost::mediaItemAdded);
     connect(m_document, &CanvasDocument::mediaAboutToBeRemoved,
@@ -315,18 +317,23 @@ void QuickCanvasHost::setProjectEditingEnabled(bool enabled)
 {
     if (m_projectEditingEnabled == enabled) return;
     m_projectEditingEnabled = enabled;
-    if (!enabled && m_tool == Tool::Text) setCurrentTool(Tool::Selection);
     if (m_controller) m_controller->setProjectEditingEnabled(enabled);
     publishActionState();
+}
+
+ICanvasHost::Tool QuickCanvasHost::currentTool() const
+{
+    // Text creation returns to selection inside the controller. Read that same
+    // state so the toolbar and later tool requests cannot retain a stale tool.
+    return m_controller && m_controller->textToolActive()
+        ? Tool::Text : Tool::Selection;
 }
 
 void QuickCanvasHost::setCurrentTool(Tool tool)
 {
     if (tool == Tool::Text && !m_projectEditingEnabled) return;
-    if (m_tool == tool || m_document->editsLocked()) return;
-    m_tool = tool;
+    if (currentTool() == tool || m_document->editsLocked()) return;
     if (m_controller) m_controller->setTextToolActive(tool == Tool::Text);
-    emit toolChanged();
 }
 
 bool QuickCanvasHost::remoteSceneActionEnabled() const

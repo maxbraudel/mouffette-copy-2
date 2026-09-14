@@ -174,13 +174,43 @@ private slots:
                                  || video->player()->mediaStatus()
                                      == QMediaPlayer::BufferedMedia,
                                  8000);
-        video->togglePlayPause();
-        QTRY_VERIFY_WITH_TIMEOUT(video->isPlaying(), 5000);
-        QTRY_VERIFY_WITH_TIMEOUT(video->positionMs() > 100, 5000);
         QTRY_VERIFY_WITH_TIMEOUT(
             !controller.dropPreviewModel()
                  .value(QStringLiteral("visible")).toBool(),
             5000);
+        QVERIFY(!video->isPlaying());
+
+        RemoteVideoFrameSource* posterSource = nullptr;
+        for (const QVariant& value : controller.mediaSnapshot()) {
+            const QVariantMap media = value.toMap();
+            if (media.value(QStringLiteral("mediaId")).toString()
+                == video->mediaId()) {
+                posterSource = qobject_cast<RemoteVideoFrameSource*>(
+                    media.value(QStringLiteral("videoPosterFrameSource"))
+                        .value<QObject*>());
+                break;
+            }
+        }
+        QVERIFY(posterSource && posterSource->hasFrame());
+
+        const QPointF originalPosition = video->position();
+        controller.handleMediaMoveStarted(video->mediaId(),
+                                          originalPosition.x(),
+                                          originalPosition.y(), false);
+        controller.handleMediaMoveUpdated(video->mediaId(),
+                                          originalPosition.x() + 80,
+                                          originalPosition.y() + 40, false);
+        controller.handleMediaMoveEnded(video->mediaId(),
+                                        originalPosition.x() + 80,
+                                        originalPosition.y() + 40, false);
+        QCOMPARE(video->position(), originalPosition + QPointF(80, 40));
+        QVERIFY(!controller.dropPreviewModel()
+                     .value(QStringLiteral("visible")).toBool());
+
+        video->togglePlayPause();
+        QTRY_VERIFY_WITH_TIMEOUT(video->isPlaying(), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(video->positionMs() > 100, 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!posterSource->hasFrame(), 5000);
         video->togglePlayPause();
         QTRY_VERIFY_WITH_TIMEOUT(!video->isPlaying(), 3000);
     }

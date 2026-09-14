@@ -308,17 +308,44 @@ void QuickCanvasController::publishAll()
 void QuickCanvasController::publishMedia()
 {
     QVariantList list;
+    QSet<QString> activeMediaIds;
     if (m_document) {
         QList<CanvasMedia*> media = m_document->media();
         std::sort(media.begin(), media.end(), [](CanvasMedia* a, CanvasMedia* b) {
             return a && b ? a->mediaId() < b->mediaId() : a < b;
         });
         for (CanvasMedia* item : media) {
-            if (item) list.append(item->toModelMap());
+            if (!item) continue;
+            activeMediaIds.insert(item->mediaId());
+            QVariantMap projection = item->toModelMap();
+            if (item->isVideo()) {
+                const auto poster = m_videoPosterSources.constFind(item->mediaId());
+                if (poster != m_videoPosterSources.cend() && *poster) {
+                    projection.insert(
+                        QStringLiteral("videoPosterFrameSource"),
+                        QVariant::fromValue<QObject*>(poster->data()));
+                }
+            }
+            list.append(projection);
         }
     }
+    for (auto poster = m_videoPosterSources.begin();
+         poster != m_videoPosterSources.end();) {
+        if (activeMediaIds.contains(poster.key())) {
+            ++poster;
+            continue;
+        }
+        if (poster.value()) poster.value()->deleteLater();
+        poster = m_videoPosterSources.erase(poster);
+    }
     m_mediaListModel->updateFromList(list);
-    m_mediaSnapshot = list;
+    // Move/snap, camera and video ticks must not invalidate the document and
+    // selection bindings while a native pointer gesture is being activated.
+    // Publish those snapshots only when their contents actually change.
+    if (m_mediaSnapshot != list) {
+        m_mediaSnapshot = list;
+        emit mediaSnapshotChanged();
+    }
     publishSelection();
     emit presentationChanged();
 }
@@ -336,8 +363,10 @@ void QuickCanvasController::publishSelection()
                                 {QStringLiteral("width"), rect.width()},
                                 {QStringLiteral("height"), rect.height()}});
     }
-    m_selectionChromeModel = list;
-    emit presentationChanged();
+    if (m_selectionChromeModel != list) {
+        m_selectionChromeModel = list;
+        emit selectionChromeModelChanged();
+    }
 }
 
 void QuickCanvasController::publishScreens()
@@ -472,6 +501,7 @@ void QuickCanvasController::setTextToolActive(bool active)
 {
     if (m_textToolActive == active) return;
     m_textToolActive = active;
+    emit textToolActiveChanged();
     emit presentationChanged();
 }
 
@@ -1542,6 +1572,14 @@ bool QuickCanvasController::commitLocalFileDrop(qreal viewX, qreal viewY)
     CanvasMedia* media = m_document->addPreparedFile(
         m_dropPath, m_dropNativeSize, m_dropVideo, topLeft);
     if (!media) return false;
+    if (m_dropVideo && !m_dropFrame.isNull()) {
+        auto* poster = new RemoteVideoFrameSource(this);
+        poster->setFrame(m_dropFrame);
+        m_videoPosterSources.insert(media->mediaId(), poster);
+        // addPreparedFile() publishes before its new id is available here.
+        // Republish once to attach the poster owned by the final media.
+        publishMedia();
+    }
     publishDropPreview(true, media->mediaId());
     return true;
 }

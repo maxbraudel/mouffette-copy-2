@@ -16,6 +16,7 @@ BaseMediaItem {
     property bool videoFirstFramePrimed: false
     property bool handoffCovered: false
     property var handoffFrameSource: null
+    property var posterFrameSource: null
     readonly property bool remoteFrameMode: remoteFrameSource !== null
     readonly property bool hasHandoffPoster: handoffPoster.hasFrame
     readonly property bool showFallbackOverlay: !hasLiveFrame && !hasHandoffPoster
@@ -27,7 +28,7 @@ BaseMediaItem {
     // Only its sink notification may release a drag/drop handoff.
     readonly property bool handoffContentReady: remoteFrameMode
                                                 ? remoteFrameSurface.hasFrame
-                                                : localFrameSeen
+                                                : (hasHandoffPoster || localFrameSeen)
     property bool localFrameSeen: false
     contentReady: hasLiveFrame
 
@@ -101,7 +102,7 @@ BaseMediaItem {
             id: handoffPoster
             anchors.fill: parent
             z: 0
-            frameSource: root.handoffFrameSource
+            frameSource: root.posterFrameSource || root.handoffFrameSource
         }
 
         VideoOutput {
@@ -134,6 +135,13 @@ BaseMediaItem {
 
     onCppVideoSinkChanged: {
         Qt.callLater(bindPlayerToOutput)
+    }
+
+    onLocalFrameSeenChanged: {
+        if (localFrameSeen && posterFrameSource
+                && typeof posterFrameSource.clear === "function") {
+            posterFrameSource.clear()
+        }
     }
 
     onVisibleChanged: {

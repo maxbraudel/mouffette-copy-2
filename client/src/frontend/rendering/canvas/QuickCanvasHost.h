@@ -50,7 +50,7 @@ public:
     void handleRemoteConnectionLost() override;
     void stopScenesForSourceInvalidation() override;
 
-    Tool currentTool() const override { return m_tool; }
+    Tool currentTool() const override;
     void setCurrentTool(Tool tool) override;
     bool remoteSceneLaunching() const override { return m_sceneLaunching; }
     bool remoteSceneStopping() const override { return m_sceneStopping; }
@@ -98,7 +98,6 @@ private:
     FileManager* m_fileManager = nullptr;
     QString m_targetClientId;
     QString m_targetMachineName;
-    Tool m_tool = Tool::Selection;
     bool m_actionsEnabled = false;
     bool m_projectEditingEnabled = false;
     bool m_contentAvailable = true;

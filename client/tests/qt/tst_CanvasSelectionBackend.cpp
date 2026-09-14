@@ -1,6 +1,10 @@
 #include <QApplication>
+#include <QFile>
 #include <QImage>
+#include <QQmlComponent>
+#include <QQmlEngine>
 #include <QQuickItem>
+#include <QQuickStyle>
 #include <QQuickView>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -9,8 +13,24 @@
 #include "backend/domain/media/CanvasMedia.h"
 #include "frontend/rendering/canvas/MediaListModel.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
+#include "frontend/rendering/canvas/QuickCanvasHost.h"
+#include "frontend/qml/CanvasSessionViewModel.h"
 
 namespace {
+QQuickItem* findQuickItemWithProperty(QQuickItem* root, const char* propertyName,
+                                      const QVariant& value)
+{
+    if (!root) return nullptr;
+    if (root->property(propertyName) == value) return root;
+    for (QQuickItem* child : root->childItems()) {
+        if (QQuickItem* match = findQuickItemWithProperty(
+                child, propertyName, value)) {
+            return match;
+        }
+    }
+    return nullptr;
+}
+
 struct Fixture {
     CanvasDocument document;
     QuickCanvasController controller{&document};
@@ -57,6 +77,12 @@ class CanvasSelectionBackendTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void initTestCase()
+    {
+        // The complete page must use the same controls as production main().
+        QQuickStyle::setStyle(QStringLiteral("Basic"));
+    }
+
     void documentSelectionIsTheSingleAuthority()
     {
         Fixture fixture;
@@ -379,6 +405,236 @@ private slots:
         QVERIFY(imported && !imported->isText());
         QCOMPARE(imported->baseSize(), QSize(80, 60));
         QCOMPARE(imported->sceneRect().center(), QPointF(520, 320));
+    }
+
+    void imageDropPreviewIsRetiredBeforeTheMediaMoves()
+    {
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString imagePath = directory.filePath(QStringLiteral("handoff.png"));
+        QImage image(160, 90, QImage::Format_ARGB32_Premultiplied);
+        image.fill(QColor("#27a8e0"));
+        QVERIFY(image.save(imagePath));
+
+        QVERIFY(fixture.controller.beginLocalFileDrag(
+            {QUrl::fromLocalFile(imagePath)}, 500, 300));
+        QVERIFY(fixture.controller.dropPreviewModel()
+                    .value(QStringLiteral("visible")).toBool());
+        QVERIFY(fixture.controller.commitLocalFileDrop(500, 300));
+        CanvasMedia* imported = fixture.document.selectedMedia();
+        QVERIFY(imported && !imported->isVideo() && !imported->isText());
+        QTRY_VERIFY_WITH_TIMEOUT(
+            !fixture.controller.dropPreviewModel()
+                 .value(QStringLiteral("visible")).toBool(),
+            5000);
+
+        const QPointF originalPosition = imported->position();
+        fixture.controller.handleMediaMoveStarted(
+            imported->mediaId(), originalPosition.x(), originalPosition.y(), false);
+        fixture.controller.handleMediaMoveUpdated(
+            imported->mediaId(), originalPosition.x() + 50,
+            originalPosition.y() + 25, false);
+        fixture.controller.handleMediaMoveEnded(
+            imported->mediaId(), originalPosition.x() + 50,
+            originalPosition.y() + 25, false);
+        QCOMPARE(imported->position(), originalPosition + QPointF(50, 25));
+        QVERIFY(!fixture.controller.dropPreviewModel()
+                     .value(QStringLiteral("visible")).toBool());
+    }
+
+    void realMouseDragMovesProductionMedia_data()
+    {
+        QTest::addColumn<QString>("mediaType");
+        QTest::newRow("text") << QStringLiteral("text");
+        QTest::newRow("image") << QStringLiteral("image");
+        QTest::newRow("video") << QStringLiteral("video");
+    }
+
+    void realMouseDragMovesProductionMedia()
+    {
+        QFETCH(QString, mediaType);
+        Fixture fixture;
+        QVERIFY(fixture.initialize());
+        fixture.view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fixture.view));
+
+        CanvasMedia* media = nullptr;
+        if (mediaType == QLatin1String("text")) {
+            media = fixture.document.addText(
+                {300, 250}, QStringLiteral("Drag me"));
+        } else {
+            const bool isVideo = mediaType == QLatin1String("video");
+            const QString sourcePath = isVideo
+                ? QString::fromUtf8(TEST_VIDEO_FILE)
+                : QString::fromUtf8(TEST_WEBP_FILE);
+            QVERIFY2(QFile::exists(sourcePath), qPrintable(sourcePath));
+            media = fixture.document.addPreparedFile(
+                sourcePath, {240, 140}, isVideo, {180, 160});
+        }
+        QVERIFY(media);
+        if (media->isText()) media->setFitToTextEnabled(false);
+        media->setBaseSize({240, 140});
+        media->setPosition({180, 160});
+
+        QQuickItem* root = qobject_cast<QQuickItem*>(fixture.view.rootObject());
+        QVERIFY(root);
+        QQuickItem* delegate = nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT(
+            (delegate = findQuickItemWithProperty(
+                 root, "currentMediaId", media->mediaId())) != nullptr,
+            3000);
+
+        const QPoint start = delegate->mapToScene(
+            QPointF(delegate->width() * 0.5, delegate->height() * 0.5)).toPoint();
+        const QPoint end = start + QPoint(90, 55);
+        const QPointF originalPosition = media->position();
+        QSignalSpy started(root, SIGNAL(mediaMoveStarted(QString,double,double,bool)));
+        QSignalSpy updated(root, SIGNAL(mediaMoveUpdated(QString,double,double,bool)));
+        QSignalSpy ended(root, SIGNAL(mediaMoveEnded(QString,double,double,bool)));
+
+        QTest::mouseMove(&fixture.view, start);
+        QTest::mousePress(&fixture.view, Qt::LeftButton, Qt::NoModifier, start);
+        for (int step = 1; step <= 5; ++step) {
+            QTest::mouseMove(&fixture.view,
+                             start + (end - start) * step / 5,
+                             10);
+            QCoreApplication::processEvents();
+        }
+        QTest::mouseRelease(&fixture.view, Qt::LeftButton,
+                            Qt::NoModifier, end);
+        QCoreApplication::processEvents();
+
+        QCOMPARE(started.count(), 1);
+        QVERIFY(updated.count() > 0);
+        QCOMPARE(ended.count(), 1);
+        QCOMPARE(media->position(), originalPosition + QPointF(90, 55));
+    }
+
+    void fullPageDragSurvivesPublicationAndResize_data()
+    {
+        realMouseDragMovesProductionMedia_data();
+    }
+
+    void fullPageDragSurvivesPublicationAndResize()
+    {
+        QFETCH(QString, mediaType);
+        QString error;
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+        QVERIFY2(host, qPrintable(error));
+        host->setProjectEditingEnabled(true);
+        CanvasSessionViewModel session(QStringLiteral("drag-session"), host.get(),
+            [] {}, nullptr, [] { return false; }, [] { return true; },
+            [] { return true; });
+        session.setLoading(false);
+
+        QQmlEngine engine;
+        QQuickWindow window;
+        window.resize(1100, 800);
+        QQmlComponent component(&engine, QUrl(QStringLiteral(
+            "qrc:/qt/qml/Mouffette/App/resources/qml/app/pages/CanvasPage.qml")));
+        QTRY_VERIFY_WITH_TIMEOUT(!component.isLoading(), 3000);
+        std::unique_ptr<QObject> pageObject(component.createWithInitialProperties({
+            {QStringLiteral("controller"), QVariantMap{
+                {QStringLiteral("activeWorkspace"), QVariant::fromValue(&session)},
+                {QStringLiteral("canCreateProject"), false},
+                {QStringLiteral("canLaunchSession"), false},
+                {QStringLiteral("connectionEnabled"), false}}}}));
+        auto* page = qobject_cast<QQuickItem*>(pageObject.get());
+        QVERIFY2(page, qPrintable(component.errorString()));
+        page->setParentItem(window.contentItem());
+        page->setPosition({37, 29});
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        page->setSize(QSizeF(window.width() - 74, window.height() - 58));
+        auto* root = findQuickItemWithProperty(page, "canvasController",
+            QVariant::fromValue<QObject*>(host->controller()));
+        QVERIFY(root);
+        host->controller()->updateCamera(0.75, 250, 100);
+
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        if (mediaType == QLatin1String("text")) {
+            session.setActiveTool(QStringLiteral("text"));
+            const QPoint createPoint = root->mapToScene({480, 300}).toPoint();
+            QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, createPoint);
+            QTRY_COMPARE(host->document()->media().size(), 1);
+            QCOMPARE(session.activeTool(), QStringLiteral("selection"));
+        } else {
+            QString path;
+            if (mediaType == QLatin1String("video")) {
+                path = qEnvironmentVariable("MOUFFETTE_TEST_VIDEO_FILE");
+                if (path.isEmpty()) path = QString::fromUtf8(TEST_VIDEO_FILE);
+                if (!QFile::exists(path)) QSKIP("Optional video fixture is missing");
+            } else {
+                path = directory.filePath(QStringLiteral("drag.png"));
+                QImage image(240, 140, QImage::Format_RGB32);
+                image.fill(Qt::cyan);
+                QVERIFY(image.save(path));
+            }
+            QVERIFY(session.beginFileDrag({QUrl::fromLocalFile(path)}, 480, 300));
+            QVERIFY(session.commitFileDrop(480, 300));
+            QTRY_VERIFY_WITH_TIMEOUT(!host->controller()->dropPreviewModel()
+                .value(QStringLiteral("visible")).toBool(), 5000);
+        }
+        CanvasMedia* media = host->document()->selectedMedia();
+        QVERIFY(media);
+        if (media->isText()) media->setFitToTextEnabled(false);
+        media->setBaseSize({240, 140});
+        media->setPosition({300, 240});
+        session.setSettingsVisible(true);
+        QQuickItem* delegate = nullptr;
+        QTRY_VERIFY((delegate = findQuickItemWithProperty(
+            root, "currentMediaId", media->mediaId())) != nullptr);
+        QSignalSpy started(root, SIGNAL(mediaMoveStarted(QString,double,double,bool)));
+        QSignalSpy ended(root, SIGNAL(mediaMoveEnded(QString,double,double,bool)));
+
+        // Check the live position before release, across multiple watchdog ticks
+        // and synchronous document/selection publications from the real backend.
+        for (int gesture = 0; gesture < 2; ++gesture) {
+            host->document()->clearSelection();
+            const QPointF originalPosition = media->position();
+            const QPoint start = delegate->mapToScene(
+                {delegate->width() / 2, delegate->height() / 2}).toPoint();
+            const QPoint delta(72, 45);
+            QTest::mouseMove(&window, start);
+            QTest::mousePress(&window, Qt::LeftButton, Qt::NoModifier, start);
+            // Let Qt cross its native drag threshold before checking tracking.
+            QTest::mouseMove(&window, start + QPoint(8, 8));
+            for (int step = 1; step <= 3; ++step) {
+                QTest::mouseMove(&window, start + delta * step / 3);
+                // A real settings change republishes modelData during the grab.
+                media->setContentOpacity(step % 2 ? 0.8 : 1.0);
+                QTest::qWait(150);
+                QCOMPARE(ended.count(), gesture);
+                QVERIFY(delegate->property("localDragging").toBool());
+                QCOMPARE(delegate->position(), originalPosition
+                    + QPointF(delta * step / 3) / 0.75);
+            }
+            QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier, start + delta);
+            QTRY_COMPARE(ended.count(), gesture + 1);
+            QCOMPARE(started.count(), gesture + 1);
+            QCOMPARE(media->position(), originalPosition + QPointF(delta) / 0.75);
+            QCOMPARE(root->property("activeMediaDragCount").toInt(), 0);
+            QCOMPARE(root->property("interactionMode").toString(), QStringLiteral("idle"));
+
+            if (gesture == 0) {
+                const QSizeF originalSize = media->sceneRect().size();
+                const QPoint corner = delegate->mapToScene(
+                    {delegate->width(), delegate->height()}).toPoint();
+                QTest::mouseMove(&window, corner);
+                QTest::mousePress(&window, Qt::LeftButton, Qt::NoModifier, corner);
+                QTest::mouseMove(&window, corner + QPoint(10, 8), 20);
+                QTest::mouseMove(&window, corner + QPoint(30, 20), 20);
+                QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier,
+                    corner + QPoint(30, 20));
+                QTRY_VERIFY(media->sceneRect().width() > originalSize.width());
+            }
+        }
     }
 };
 

@@ -3,6 +3,7 @@
 #include "backend/domain/canvas/CanvasDocument.h"
 
 #include <QImage>
+#include <QHash>
 #include <QObject>
 #include <QPointer>
 #include <QPointF>
@@ -25,8 +26,8 @@ class QuickCanvasController final : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(QObject* mediaModel READ mediaModel CONSTANT)
-    Q_PROPERTY(QVariantList mediaSnapshot READ mediaSnapshot NOTIFY presentationChanged)
-    Q_PROPERTY(QVariantList selectionChromeModel READ selectionChromeModel NOTIFY presentationChanged)
+    Q_PROPERTY(QVariantList mediaSnapshot READ mediaSnapshot NOTIFY mediaSnapshotChanged)
+    Q_PROPERTY(QVariantList selectionChromeModel READ selectionChromeModel NOTIFY selectionChromeModelChanged)
     Q_PROPERTY(QVariantList screensModel READ screensModel NOTIFY presentationChanged)
     Q_PROPERTY(QVariantList uiZonesModel READ uiZonesModel NOTIFY presentationChanged)
     Q_PROPERTY(QVariantList snapGuidesModel READ snapGuidesModel NOTIFY presentationChanged)
@@ -124,6 +125,9 @@ public:
 
 signals:
     void presentationChanged();
+    void mediaSnapshotChanged();
+    void selectionChromeModelChanged();
+    void textToolActiveChanged();
     void selectedMediaChanged();
     void mediaVisibilityToggleRequested(const QString& mediaId, bool visible);
     void mediaBringForwardRequested(const QString& mediaId);
@@ -242,6 +246,7 @@ private:
     bool m_dropVideo = false;
     QPointF m_dropCenter;
     QImage m_dropFrame;
+    QHash<QString, QPointer<RemoteVideoFrameSource>> m_videoPosterSources;
     QVariantList m_mediaSnapshot;
     QVariantList m_selectionChromeModel;
     QVariantList m_screensModel;
