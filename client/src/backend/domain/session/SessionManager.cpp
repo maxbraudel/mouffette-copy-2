@@ -1,6 +1,8 @@
 #include "backend/domain/session/SessionManager.h"
+#include <QDateTime>
 #include <QUuid>
 #include <QDebug>
+#include <utility>
 
 namespace {
 ClientInfo mergeClientPresentation(const ClientInfo& previous,
@@ -44,6 +46,10 @@ ClientInfo mergeClientPresentation(const ClientInfo& previous,
 SessionManager::SessionManager(QObject *parent)
     : QObject(parent)
 {
+    m_deadlineTimer.setInterval(250);
+    connect(&m_deadlineTimer, &QTimer::timeout,
+            this, [this]() { processDeadlines(); });
+    m_deadlineTimer.start();
 }
 
 SessionManager::~SessionManager()
@@ -231,6 +237,122 @@ QList<const SessionManager::CanvasSession*> SessionManager::getAllSessions() con
         result.append(&it.value());
     }
     return result;
+}
+
+void SessionManager::setRemoteSessionHiddenTimeoutMs(qint64 timeoutMs)
+{
+    m_remoteSessionHiddenTimeoutMs =
+        qBound<qint64>(qint64(1000), timeoutMs, qint64(86400000));
+}
+
+SessionManager::RemoteSessionState SessionManager::remoteSessionState(
+    const QString& persistentClientId) const
+{
+    const CanvasSession* workspace = findSession(persistentClientId);
+    return workspace ? workspace->remoteSessionState
+                     : RemoteSessionState::Absent;
+}
+
+bool SessionManager::setRemoteSessionState(const QString& persistentClientId,
+                                           RemoteSessionState state)
+{
+    CanvasSession* workspace = findSession(persistentClientId);
+    if (!workspace || workspace->remoteSessionState == state) return workspace;
+    workspace->remoteSessionState = state;
+    if (state == RemoteSessionState::Absent
+        || state == RemoteSessionState::Closing) {
+        workspace->sessionHiddenAtMs = -1;
+    } else if (!workspace->workspaceVisible
+               && workspace->sessionHiddenAtMs < 0) {
+        workspace->sessionHiddenAtMs = m_nowProvider
+            ? m_nowProvider() : QDateTime::currentMSecsSinceEpoch();
+    }
+    emit remoteSessionStateChanged(persistentClientId, state);
+    emit sessionModified(persistentClientId);
+    return true;
+}
+
+bool SessionManager::setWorkspaceVisible(const QString& persistentClientId,
+                                         qint64 atMs)
+{
+    Q_UNUSED(atMs);
+    CanvasSession* workspace = findSession(persistentClientId);
+    if (!workspace) return false;
+    workspace->workspaceVisible = true;
+    workspace->sessionHiddenAtMs = -1;
+    emit sessionModified(persistentClientId);
+    return true;
+}
+
+bool SessionManager::setWorkspaceHidden(const QString& persistentClientId,
+                                        qint64 atMs)
+{
+    CanvasSession* workspace = findSession(persistentClientId);
+    if (!workspace) return false;
+    workspace->workspaceVisible = false;
+    const bool hasLease = workspace->remoteSessionState == RemoteSessionState::Opening
+        || workspace->remoteSessionState == RemoteSessionState::Active
+        || workspace->remoteSessionState == RemoteSessionState::Grace;
+    if (hasLease && workspace->sessionHiddenAtMs < 0) {
+        workspace->sessionHiddenAtMs = atMs >= 0
+            ? atMs
+            : (m_nowProvider ? m_nowProvider()
+                             : QDateTime::currentMSecsSinceEpoch());
+    }
+    emit sessionModified(persistentClientId);
+    return true;
+}
+
+void SessionManager::markAllWorkspacesHidden(qint64 atMs)
+{
+    const QStringList targets = m_sessions.keys();
+    const qint64 current = atMs >= 0
+        ? atMs
+        : (m_nowProvider ? m_nowProvider()
+                         : QDateTime::currentMSecsSinceEpoch());
+    for (const QString& target : targets) setWorkspaceHidden(target, current);
+}
+
+qint64 SessionManager::remoteSessionCloseAtMs(
+    const QString& persistentClientId) const
+{
+    const CanvasSession* workspace = findSession(persistentClientId);
+    if (!workspace || workspace->sessionHiddenAtMs < 0) return -1;
+    const bool hasLease = workspace->remoteSessionState == RemoteSessionState::Opening
+        || workspace->remoteSessionState == RemoteSessionState::Active
+        || workspace->remoteSessionState == RemoteSessionState::Grace;
+    return hasLease
+        ? workspace->sessionHiddenAtMs + m_remoteSessionHiddenTimeoutMs : -1;
+}
+
+void SessionManager::processDeadlines(qint64 atMs)
+{
+    const qint64 current = atMs >= 0
+        ? atMs
+        : (m_nowProvider ? m_nowProvider()
+                         : QDateTime::currentMSecsSinceEpoch());
+    const QStringList targets = m_sessions.keys();
+    for (const QString& target : targets) {
+        CanvasSession* workspace = findSession(target);
+        if (!workspace) continue;
+        const qint64 deadline = remoteSessionCloseAtMs(target);
+        if (deadline < 0 || current < deadline) continue;
+        workspace->remoteSessionState = RemoteSessionState::Closing;
+        workspace->sessionHiddenAtMs = -1;
+        emit remoteSessionStateChanged(target, RemoteSessionState::Closing);
+        emit sessionModified(target);
+        emit remoteSessionCloseDue(target);
+    }
+}
+
+void SessionManager::setNowProviderForTesting(std::function<qint64()> provider)
+{
+    m_nowProvider = std::move(provider);
+}
+
+void SessionManager::stopAutomaticTimersForTesting()
+{
+    m_deadlineTimer.stop();
 }
 
 // Bulk operations

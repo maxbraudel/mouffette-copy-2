@@ -45,6 +45,8 @@ public:
     void hideRemoteCursor() override;
     void setOverlayActionsEnabled(bool enabled) override;
     bool overlayActionsEnabled() const override { return m_actionsEnabled; }
+    void setProjectEditingEnabled(bool enabled) override;
+    bool projectEditingEnabled() const override { return m_projectEditingEnabled; }
     void handleRemoteConnectionLost() override;
     void stopScenesForSourceInvalidation() override;
 
@@ -98,6 +100,7 @@ private:
     QString m_targetMachineName;
     Tool m_tool = Tool::Selection;
     bool m_actionsEnabled = false;
+    bool m_projectEditingEnabled = false;
     bool m_contentAvailable = true;
     bool m_sceneLaunching = false;
     bool m_sceneStopping = false;

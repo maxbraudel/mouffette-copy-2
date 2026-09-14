@@ -13,6 +13,8 @@
 #include <limits>
 
 namespace {
+constexpr int kProjectTextSettingsSchemaVersion = 1;
+
 QString secondsText(int milliseconds)
 {
     return QString::number(qMax(0, milliseconds) / 1000.0, 'f', 3);
@@ -436,6 +438,9 @@ QJsonObject CanvasDocument::serializeProjectState() const
 {
     QJsonObject root = serializeSceneState();
     root.remove(QStringLiteral("canvasSessionId"));
+    // Screen topology has an explicit ProjectRecord field. Keeping a second
+    // copy in the document made session-only discovery leak into persistence.
+    root.remove(QStringLiteral("screens"));
     QJsonArray media = root.value(QStringLiteral("media")).toArray();
     for (qsizetype index = 0; index < media.size(); ++index) {
         QJsonObject item = media.at(index).toObject();
@@ -445,7 +450,8 @@ QJsonObject CanvasDocument::serializeProjectState() const
                         MediaSettingsSerialization::toProjectJson(source->settings()));
             if (source->isText()) {
                 item.insert(QStringLiteral("projectTextSettings"), QJsonObject{
-                    {QStringLiteral("schemaVersion"), 1},
+                    {QStringLiteral("schemaVersion"),
+                         kProjectTextSettingsSchemaVersion},
                     {QStringLiteral("textColorOverrideEnabled"),
                          source->textColorOverrideEnabled()},
                     {QStringLiteral("textColor"),
@@ -593,7 +599,8 @@ bool CanvasDocument::restoreProjectState(
             const QJsonObject projectText =
                 source.value(QStringLiteral("projectTextSettings")).toObject();
             const bool hasProjectTextSettings =
-                projectText.value(QStringLiteral("schemaVersion")).toInt(-1) == 1
+                projectText.value(QStringLiteral("schemaVersion")).toInt(-1)
+                    == kProjectTextSettingsSchemaVersion
                 && projectText.value(QStringLiteral("textColorOverrideEnabled")).isBool()
                 && projectText.value(QStringLiteral("textColor")).isString()
                 && projectText.value(QStringLiteral("textBorderWidthOverrideEnabled")).isBool()

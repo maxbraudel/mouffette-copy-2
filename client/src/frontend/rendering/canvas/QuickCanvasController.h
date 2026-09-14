@@ -78,6 +78,8 @@ public:
     QVariantMap dropPreviewModel() const { return m_dropPreviewModel; }
     QObject* dropPreviewFrameSource() const;
     bool remoteActive() const { return m_shellActive; }
+    bool projectEditingEnabled() const { return m_projectEditingEnabled; }
+    void setProjectEditingEnabled(bool enabled);
     bool textToolActive() const { return m_textToolActive; }
     qreal viewScale() const { return m_viewScale; }
     qreal panX() const { return m_panX; }
@@ -208,6 +210,7 @@ private:
     QTimer* m_videoStateTimer = nullptr;
     bool m_textToolActive = false;
     bool m_shellActive = false;
+    bool m_projectEditingEnabled = false;
     bool m_initialFitDone = false;
     QString m_lastSelectedId;
     QString m_dragMediaId;

@@ -18,29 +18,18 @@ enum class ProjectLifecycleState {
 QString projectLifecycleStateToString(ProjectLifecycleState state);
 bool projectLifecycleStateFromString(const QString& value, ProjectLifecycleState* state);
 
-/**
- * Durable copy of the last state advertised by a remote endpoint.
- * The websocket/server id is informational only; endpointId remains the sole
- * key used to reconcile a returning endpoint.
- */
-struct ClientSnapshot {
-    QString installationId;
+/** Stable descriptive reference to the endpoint owning this project. */
+struct ProjectTargetReference {
     QString endpointId;
-    QString instanceId;
-    int instanceOrdinal = 1;
-    QString serverConnectionId;
     QString machineName;
     QString platform;
-    QString status;
-    QList<ScreenInfo> screens;
-    int volumePercent = -1;
-    qint64 lastSeenAtMs = -1;
 
     bool isValid() const;
     QJsonObject toJson() const;
-    static bool fromJson(const QJsonObject& json, ClientSnapshot* snapshot, QString* error = nullptr);
+    static bool fromJson(const QJsonObject& json, ProjectTargetReference* target,
+                         QString* error = nullptr);
 
-    static ClientSnapshot fromClientInfo(const ClientInfo& client, qint64 seenAtMs);
+    static ProjectTargetReference fromClientInfo(const ClientInfo& client);
     ClientInfo toClientInfo(bool online) const;
 };
 
@@ -63,7 +52,8 @@ struct ProjectMediaReference {
 struct ProjectRecord {
     QString projectId;
     QString targetEndpointId;
-    ClientSnapshot clientSnapshot;
+    ProjectTargetReference target;
+    QList<ScreenInfo> savedScreens;
     ProjectLifecycleState state = ProjectLifecycleState::Hidden;
     qint64 createdAtMs = -1;
     qint64 updatedAtMs = -1;
@@ -89,7 +79,6 @@ struct ProjectClientEntry {
     bool hasProject = false;
     bool online = false;
     ProjectLifecycleState projectState = ProjectLifecycleState::Deleted;
-    qint64 remoteSessionCloseAtMs = -1;
     qint64 projectDeleteAtMs = -1;
 };
 

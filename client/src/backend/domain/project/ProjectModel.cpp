@@ -143,103 +143,59 @@ bool projectLifecycleStateFromString(const QString& value, ProjectLifecycleState
     return false;
 }
 
-bool ClientSnapshot::isValid() const
+bool ProjectTargetReference::isValid() const
 {
     return !endpointId.trimmed().isEmpty();
 }
 
-QJsonObject ClientSnapshot::toJson() const
+QJsonObject ProjectTargetReference::toJson() const
 {
-    QJsonArray serializedScreens;
-    for (const ScreenInfo& screen : screens) {
-        serializedScreens.append(screen.toJson());
-    }
-
-    QJsonObject json;
-    json.insert(QStringLiteral("installationId"), installationId);
-    json.insert(QStringLiteral("endpointId"), endpointId);
-    json.insert(QStringLiteral("instanceId"), instanceId);
-    json.insert(QStringLiteral("instanceOrdinal"), instanceOrdinal);
-    json.insert(QStringLiteral("machineName"), machineName);
-    json.insert(QStringLiteral("platform"), platform);
-    json.insert(QStringLiteral("status"), status);
-    json.insert(QStringLiteral("volumePercent"), volumePercent);
-    json.insert(QStringLiteral("lastSeenAtMs"), static_cast<double>(lastSeenAtMs));
-    json.insert(QStringLiteral("screens"), serializedScreens);
-    return json;
+    return {
+        {QStringLiteral("endpointId"), endpointId},
+        {QStringLiteral("machineName"), machineName},
+        {QStringLiteral("platform"), platform}
+    };
 }
 
-bool ClientSnapshot::fromJson(const QJsonObject& json, ClientSnapshot* snapshot, QString* error)
+bool ProjectTargetReference::fromJson(const QJsonObject& json,
+                                      ProjectTargetReference* target,
+                                      QString* error)
 {
-    if (!snapshot) {
-        setError(error, QStringLiteral("Missing ClientSnapshot output"));
+    if (!target) {
+        setError(error, QStringLiteral("Missing ProjectTargetReference output"));
         return false;
     }
 
-    ClientSnapshot parsed;
-    parsed.installationId = json.value(QStringLiteral("installationId")).toString().trimmed();
+    ProjectTargetReference parsed;
     parsed.endpointId = json.value(QStringLiteral("endpointId")).toString().trimmed();
-    parsed.instanceId = json.value(QStringLiteral("instanceId")).toString().trimmed();
-    parsed.instanceOrdinal = qMax(1, json.value(QStringLiteral("instanceOrdinal")).toInt(1));
-    // Socket/connection identifiers are runtime-only and are intentionally
-    // never restored into a durable Project.
-    parsed.serverConnectionId.clear();
     parsed.machineName = json.value(QStringLiteral("machineName")).toString();
     parsed.platform = json.value(QStringLiteral("platform")).toString();
-    parsed.status = json.value(QStringLiteral("status")).toString();
-    parsed.volumePercent = json.value(QStringLiteral("volumePercent")).toInt(-1);
-    parsed.lastSeenAtMs = jsonInteger(json, "lastSeenAtMs");
-
-    const QJsonValue screensValue = json.value(QStringLiteral("screens"));
-    if (!screensValue.isUndefined() && !screensValue.isArray()) {
-        setError(error, QStringLiteral("ClientSnapshot.screens must be an array"));
-        return false;
-    }
-    for (const QJsonValue& value : screensValue.toArray()) {
-        if (!value.isObject()) {
-            setError(error, QStringLiteral("ClientSnapshot contains an invalid screen"));
-            return false;
-        }
-        parsed.screens.append(ScreenInfo::fromJson(value.toObject()));
-    }
 
     if (!parsed.isValid()) {
-        setError(error, QStringLiteral("ClientSnapshot.endpointId is required"));
+        setError(error, QStringLiteral("ProjectTargetReference.endpointId is required"));
         return false;
     }
-    *snapshot = parsed;
+    *target = parsed;
     return true;
 }
 
-ClientSnapshot ClientSnapshot::fromClientInfo(const ClientInfo& client, qint64 seenAtMs)
+ProjectTargetReference ProjectTargetReference::fromClientInfo(const ClientInfo& client)
 {
-    ClientSnapshot snapshot;
-    snapshot.installationId = client.installationId().trimmed();
-    snapshot.endpointId = client.endpointId().trimmed();
-    snapshot.instanceId = client.instanceId().trimmed();
-    snapshot.instanceOrdinal = qMax(1, client.instanceOrdinal());
-    snapshot.serverConnectionId = client.getId();
-    snapshot.machineName = client.getMachineName();
-    snapshot.platform = client.getPlatform();
-    snapshot.status = client.getStatus();
-    snapshot.screens = client.getScreens();
-    snapshot.volumePercent = client.getVolumePercent();
-    snapshot.lastSeenAtMs = seenAtMs;
-    return snapshot;
+    ProjectTargetReference target;
+    target.endpointId = client.endpointId().trimmed();
+    target.machineName = client.getMachineName();
+    target.platform = client.getPlatform();
+    return target;
 }
 
-ClientInfo ClientSnapshot::toClientInfo(bool online) const
+ClientInfo ProjectTargetReference::toClientInfo(bool online) const
 {
-    ClientInfo client(serverConnectionId.isEmpty() ? endpointId : serverConnectionId,
-                      machineName,
-                      platform);
-    client.setInstallationId(installationId);
+    ClientInfo client(endpointId, machineName, platform);
     client.setEndpointId(endpointId);
-    client.setInstanceId(instanceId);
-    client.setInstanceOrdinal(instanceOrdinal);
-    client.setStatus(online ? status : QStringLiteral("offline"));
-    client.setScreens(screens);
-    client.setVolumePercent(volumePercent);
+    client.setStatus(online ? QStringLiteral("Available")
+                            : QStringLiteral("Offline"));
+    client.setAvailabilityStatus(client.getStatus());
+    client.setVolumePercent(-1);
     client.setOnline(online);
     client.setFromMemory(!online);
     return client;
@@ -284,8 +240,8 @@ bool ProjectRecord::isValid() const
 {
     return !projectId.trimmed().isEmpty()
         && !targetEndpointId.trimmed().isEmpty()
-        && clientSnapshot.isValid()
-        && clientSnapshot.endpointId == targetEndpointId
+        && target.isValid()
+        && target.endpointId == targetEndpointId
         && state != ProjectLifecycleState::Deleted
         && createdAtMs >= 0
         && updatedAtMs >= 0;
@@ -301,7 +257,12 @@ QJsonObject ProjectRecord::toJson() const
     QJsonObject json;
     json.insert(QStringLiteral("projectId"), projectId);
     json.insert(QStringLiteral("targetEndpointId"), targetEndpointId);
-    json.insert(QStringLiteral("clientSnapshot"), clientSnapshot.toJson());
+    json.insert(QStringLiteral("target"), target.toJson());
+    QJsonArray screens;
+    for (const ScreenInfo& screen : savedScreens) {
+        screens.append(screen.toJson());
+    }
+    json.insert(QStringLiteral("savedScreens"), screens);
     json.insert(QStringLiteral("state"), projectLifecycleStateToString(state));
     json.insert(QStringLiteral("createdAtMs"), static_cast<double>(createdAtMs));
     json.insert(QStringLiteral("updatedAtMs"), static_cast<double>(updatedAtMs));
@@ -330,11 +291,22 @@ bool ProjectRecord::fromJson(const QJsonObject& json, ProjectRecord* project, QS
         setError(error, QStringLiteral("Project contains an invalid lifecycle state"));
         return false;
     }
-    if (!json.value(QStringLiteral("clientSnapshot")).isObject()
-        || !ClientSnapshot::fromJson(json.value(QStringLiteral("clientSnapshot")).toObject(),
-                                     &parsed.clientSnapshot,
-                                     error)) {
+    if (!json.value(QStringLiteral("target")).isObject()
+        || !ProjectTargetReference::fromJson(
+            json.value(QStringLiteral("target")).toObject(), &parsed.target, error)) {
         return false;
+    }
+    const QJsonValue screensValue = json.value(QStringLiteral("savedScreens"));
+    if (!screensValue.isArray()) {
+        setError(error, QStringLiteral("Project.savedScreens must be an array"));
+        return false;
+    }
+    for (const QJsonValue& value : screensValue.toArray()) {
+        if (!value.isObject()) {
+            setError(error, QStringLiteral("Project contains an invalid saved screen"));
+            return false;
+        }
+        parsed.savedScreens.append(ScreenInfo::fromJson(value.toObject()));
     }
     if (!json.value(QStringLiteral("canvasState")).isUndefined()
         && !json.value(QStringLiteral("canvasState")).isObject()) {
@@ -366,5 +338,12 @@ bool ProjectRecord::fromJson(const QJsonObject& json, ProjectRecord* project, QS
 
 QJsonObject ProjectRecord::canvasStateForRestore() const
 {
-    return prepareRestoredValue(sanitizeDurableValue(canvasState)).toObject();
+    QJsonObject restored =
+        prepareRestoredValue(sanitizeDurableValue(canvasState)).toObject();
+    QJsonArray screens;
+    for (const ScreenInfo& screen : savedScreens) {
+        screens.append(screen.toJson());
+    }
+    restored.insert(QStringLiteral("screens"), screens);
+    return restored;
 }

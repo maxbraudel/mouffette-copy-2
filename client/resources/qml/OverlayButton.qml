@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 // Reusable overlay icon button matching the legacy OverlayButtonElement style.
 // Blocks pointer events from reaching the canvas DragHandler/PointHandler beneath it.
 Item {
@@ -8,6 +9,7 @@ Item {
     property bool   isToggle:    false
     property bool   toggled:     false
     property string accessibleName: ""
+    property string unavailableReason: ""
     // Use Item.enabled; shadowing it leaves native input eligibility divergent.
     // "solo" | "leading" | "middle" | "trailing"
     // Controls which corners are rounded, matching legacy SegmentRole behavior.
@@ -24,6 +26,10 @@ Item {
 
     Accessible.role: Accessible.Button
     Accessible.name: accessibleName
+    Accessible.description: root.enabled ? "" : unavailableReason
+
+    ToolTip.visible: hovered && !enabled && unavailableReason.length > 0
+    ToolTip.text: unavailableReason
 
     // Which sides are flat (square corners)
     readonly property bool _flatLeft:  segmentRole === "trailing" || segmentRole === "middle"

@@ -212,8 +212,16 @@ void ScreenEventHandler::onScreensInfoReceived(const ClientInfo& clientInfo)
     }
 
     if (!session) {
-        session = &m_mainWindow->ensureCanvasSession(clientInfo);
-    } else {
+        // Discovery is descriptive only. A screen snapshot must never create
+        // a workspace, project, canvas or RemoteSession implicitly.
+        return;
+    }
+    const SessionManager::RemoteSessionState remoteState = session->remoteSessionState;
+    if (remoteState == SessionManager::RemoteSessionState::Absent
+        || remoteState == SessionManager::RemoteSessionState::Closing) {
+        return;
+    }
+    {
         if (m_mainWindow->getSessionManager()) {
             m_mainWindow->getSessionManager()->updateSessionServerId(persistentId, clientInfo.getId());
         } else {
@@ -260,12 +268,15 @@ void ScreenEventHandler::onScreensInfoReceived(const ClientInfo& clientInfo)
     // display name.
     if (ProjectManager* projects = m_mainWindow->getProjectManager();
         projects && projects->hasProjectForTarget(persistentId)) {
-        projects->updateClientSnapshot(
-            ClientSnapshot::fromClientInfo(
-                session->lastClientInfo, QDateTime::currentMSecsSinceEpoch()));
+        projects->updateTargetReference(
+            ProjectTargetReference::fromClientInfo(session->lastClientInfo),
+            QDateTime::currentMSecsSinceEpoch());
+        projects->updateSavedScreens(
+            persistentId, screens, QDateTime::currentMSecsSinceEpoch());
     }
 
-    if (isActiveSession && session->canvas) {
+    if (isActiveSession && session->canvas
+        && remoteState == SessionManager::RemoteSessionState::Active) {
         if (!m_mainWindow->isCanvasRevealedForCurrentClient() && hasScreens) {
             if (m_mainWindow->getNavigationManager()) {
                 m_mainWindow->getNavigationManager()->revealCanvas();

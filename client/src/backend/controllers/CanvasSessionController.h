@@ -12,34 +12,34 @@ class QFont;
 class QuickCanvasHost;
 
 /**
- * @brief Controller for managing canvas sessions lifecycle and state
+ * @brief Controller for managing per-client workspaces and their canvases
  * 
  * Handles:
- * - Session creation and lookup
- * - Session configuration and switching
- * - Upload state management per session
- * - Session cleanup and rotation
+ * - Workspace creation and lookup
+ * - Canvas configuration and switching
+ * - Runtime upload correlation per workspace
+ * - Ephemeral document identity rotation
  * 
- * Note: This controller works with ApplicationRuntime::CanvasSession which is
+ * Note: This controller works with ApplicationRuntime::ClientWorkspace which is
  * a nested type. We use void* in the interface to avoid circular dependencies,
  * and cast to the proper type in the implementation.
  */
-class CanvasSessionController : public QObject
+class ClientWorkspaceController : public QObject
 {
     Q_OBJECT
 
 public:
-    explicit CanvasSessionController(ApplicationRuntime* mainWindow, QObject* parent = nullptr);
-    ~CanvasSessionController() override = default;
+    explicit ClientWorkspaceController(ApplicationRuntime* mainWindow, QObject* parent = nullptr);
+    ~ClientWorkspaceController() override = default;
 
-    // Session lookup methods - return void* to avoid exposing nested type in header
+    // Workspace lookup methods - return void* to avoid exposing nested type in header
     void* findCanvasSession(const QString& persistentClientId);
     const void* findCanvasSession(const QString& persistentClientId) const;
     void* findCanvasSessionByServerClientId(const QString& serverClientId);
     const void* findCanvasSessionByServerClientId(const QString& serverClientId) const;
     void* findCanvasSessionByIdeaId(const QString& canvasSessionId);
 
-    // Session lifecycle
+    // Workspace/canvas lifecycle
     void* ensureCanvasSession(const ClientInfo& client);
     void prewarmQuickCanvasHost();
     void configureCanvasSession(void* session);
@@ -57,5 +57,9 @@ private:
     QuickCanvasHost* m_prewarmedQuickCanvasHost = nullptr;
     QString m_lastQuickInitError;
 };
+
+// Transitional source compatibility for extensions compiled against the old
+// name. Runtime code uses ClientWorkspaceController exclusively.
+using CanvasSessionController = ClientWorkspaceController;
 
 #endif // CANVASSESSIONCONTROLLER_H

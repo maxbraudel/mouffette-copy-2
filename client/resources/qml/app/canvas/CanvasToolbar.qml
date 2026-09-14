@@ -12,7 +12,9 @@ Row {
         accessibleName: "Settings"
         isToggle: true
         toggled: root.session && root.session.settingsVisible
-        enabled: root.session && root.session.actionsEnabled
+        visible: root.session && root.session.hasProject
+        enabled: root.session && root.session.mediaEditingEnabled
+        unavailableReason: root.session ? root.session.mediaEditingUnavailableReason : "Canvas is unavailable"
         onClicked: root.session.settingsVisible = !root.session.settingsVisible
     }
     Row {
@@ -24,7 +26,8 @@ Row {
             isToggle: true
             toggled: !root.session || root.session.activeTool === "selection"
             segmentRole: "leading"
-            enabled: root.session && root.session.actionsEnabled
+            enabled: root.session !== null && root.session !== undefined
+            unavailableReason: root.session ? root.session.canvasNavigationUnavailableReason : "Canvas is unavailable"
             onClicked: root.session.setActiveTool("selection")
         }
         CanvasControls.OverlayButton {
@@ -34,7 +37,9 @@ Row {
             isToggle: true
             toggled: root.session && root.session.activeTool === "text"
             segmentRole: "trailing"
-            enabled: root.session && root.session.actionsEnabled
+            visible: root.session && root.session.hasProject
+            enabled: root.session && root.session.textCreation
+            unavailableReason: root.session ? root.session.textCreationUnavailableReason : "Canvas is unavailable"
             onClicked: root.session.setActiveTool("text")
         }
     }

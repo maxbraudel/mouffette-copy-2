@@ -18,6 +18,7 @@ private slots:
     {
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
         QVERIFY(host);
+        host->setProjectEditingEnabled(true);
         CanvasMedia* media = host->document()->addText(
             QPointF(40, 60), QStringLiteral("Scene title"));
         QVERIFY(media);
@@ -208,10 +209,13 @@ private slots:
         video.setSettings(videoSettings);
         QVERIFY(qAbs(video.volume() - 0.37) < 0.0001);
 
+        QTemporaryDir volumeDirectory;
+        QVERIFY(volumeDirectory.isValid());
         std::unique_ptr<QuickCanvasHost> volumeHost(QuickCanvasHost::create());
         QVERIFY(volumeHost);
+        volumeHost->setProjectEditingEnabled(true);
         CanvasMedia* controlledVideo = volumeHost->document()->addPreparedFile(
-            QStringLiteral("/tmp/mouffette-volume-setting-test.mp4"),
+            volumeDirectory.filePath(QStringLiteral("volume-setting-test.mp4")),
             QSize(320, 180), true, QPointF());
         QVERIFY(controlledVideo);
         volumeHost->controller()->handleOverlayVolumeChange(

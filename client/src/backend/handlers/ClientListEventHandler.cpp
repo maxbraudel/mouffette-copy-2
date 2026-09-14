@@ -3,6 +3,7 @@
 #include "frontend/managers/ui/RemoteClientState.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/network/RemoteSessionCoordinator.h"
+#include "backend/domain/project/ProjectManager.h"
 #include "backend/domain/models/ClientInfo.h"
 #include "shared/rendering/ICanvasHost.h"
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
@@ -91,6 +92,13 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                 activeSession->lastClientInfo.setOnline(true);
                 activeSession->remoteContentClearedOnDisconnect = false;
                 m_mainWindow->setSelectedClient(activeSession->lastClientInfo);
+                const bool explicitRemoteSession =
+                    activeSession->remoteSessionState
+                        == SessionManager::RemoteSessionState::Opening
+                    || activeSession->remoteSessionState
+                        == SessionManager::RemoteSessionState::Active
+                    || activeSession->remoteSessionState
+                        == SessionManager::RemoteSessionState::Grace;
                 if (activeSession->canvas && !activeSession->serverAssignedId.isEmpty()) {
                     activeSession->canvas->setRemoteSceneTarget(
                         activeSessionIdentity,
@@ -98,8 +106,18 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                     // Replace only the remote topology. The document host rebuilds
                     // its screen backdrops without remapping media, whose
                     // project coordinates remain absolute.
-                    activeSession->canvas->setScreens(
-                        activeSession->lastClientInfo.getScreens());
+                    if (explicitRemoteSession) {
+                        activeSession->canvas->setScreens(
+                            activeSession->lastClientInfo.getScreens());
+                        if (ProjectManager* projects =
+                                m_mainWindow->getProjectManager();
+                            projects && projects->hasProjectForTarget(
+                                activeSessionIdentity)) {
+                            projects->updateSavedScreens(
+                                activeSessionIdentity,
+                                activeSession->lastClientInfo.getScreens());
+                        }
+                    }
                 }
                 navigationManager->refreshActiveClientPreservingCanvas(activeSession->lastClientInfo);
 
@@ -164,8 +182,8 @@ void ClientListEventHandler::onClientListReceived(const QList<ClientInfo>& clien
                 }
                 RemoteClientState state = RemoteClientState::disconnected();
                 state.clientInfo = activeSession->lastClientInfo;
-                state.volumeVisible = activeSession->lastClientInfo.getVolumePercent() >= 0;
-                state.volumePercent = activeSession->lastClientInfo.getVolumePercent();
+                state.volumeVisible = false;
+                state.volumePercent = -1;
                 m_mainWindow->setRemoteClientState(state, /*propagateLoss*/ false);
             }
         }

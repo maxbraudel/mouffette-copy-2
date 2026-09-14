@@ -24,10 +24,11 @@ struct SettingSpec {
     bool boolean;
 };
 
-constexpr std::array<SettingSpec, 11> kSpecs{{
+constexpr std::array<SettingSpec, 12> kSpecs{{
     {Key::ServerUrl, "MOUFFETTE_SERVER_URL", "server-url", "serverUrl", "ws://localhost:8080", false},
     {Key::RemoteSessionHiddenTimeoutMs, "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS", "remote-session-hidden-timeout-ms", nullptr, "60000", false},
     {Key::ProjectHiddenRetentionMs, "MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS", "project-hidden-retention-ms", nullptr, "300000", false},
+    {Key::IncomingSessionOrphanTimeoutMs, "MOUFFETTE_INCOMING_SESSION_ORPHAN_TIMEOUT_MS", "incoming-session-orphan-timeout-ms", nullptr, "3000", false},
     {Key::UploadConcurrency, "MOUFFETTE_UPLOAD_CONCURRENCY", "upload-concurrency", nullptr, "2", false},
     {Key::AutoUploadImportedMedia, "MOUFFETTE_AUTO_UPLOAD_IMPORTED_MEDIA", "auto-upload-imported-media", "autoUploadImportedMedia", "false", true},
     {Key::QtMediaBackend, "QT_MEDIA_BACKEND", "media-backend", nullptr, "ffmpeg", false},
@@ -320,6 +321,7 @@ void AppConfig::resetToCompiledDefaults() {
     m_serverUrl = QUrl(QStringLiteral("ws://localhost:8080"));
     m_remoteSessionHiddenTimeoutMs = 60000;
     m_projectHiddenRetentionMs = 300000;
+    m_incomingSessionOrphanTimeoutMs = 3000;
     m_uploadConcurrency = 2;
     m_autoUploadImportedMedia = false;
     m_qtMediaBackend = QStringLiteral("ffmpeg");
@@ -490,6 +492,11 @@ bool AppConfig::load(const LoadOptions& options, QString* errorMessage) {
         return setError(errorMessage,
                         QStringLiteral("MOUFFETTE_PROJECT_HIDDEN_RETENTION_MS must be greater than "
                                        "MOUFFETTE_REMOTE_SESSION_HIDDEN_TIMEOUT_MS"));
+    }
+    if (!parseInteger(rawValues.at(Key::IncomingSessionOrphanTimeoutMs),
+                      keyName(Key::IncomingSessionOrphanTimeoutMs), 1000, 86400000,
+                      candidate.m_incomingSessionOrphanTimeoutMs, errorMessage)) {
+        return false;
     }
 
     qint64 uploadConcurrency = 0;

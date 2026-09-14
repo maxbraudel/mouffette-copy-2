@@ -26,6 +26,7 @@ public:
         ServerUrl,
         RemoteSessionHiddenTimeoutMs,
         ProjectHiddenRetentionMs,
+        IncomingSessionOrphanTimeoutMs,
         UploadConcurrency,
         AutoUploadImportedMedia,
         QtMediaBackend,
@@ -86,6 +87,7 @@ public:
     QUrl serverUrlValue() const { return m_serverUrl; }
     qint64 remoteSessionHiddenTimeoutMs() const { return m_remoteSessionHiddenTimeoutMs; }
     qint64 projectHiddenRetentionMs() const { return m_projectHiddenRetentionMs; }
+    qint64 incomingSessionOrphanTimeoutMs() const { return m_incomingSessionOrphanTimeoutMs; }
     int uploadConcurrency() const { return m_uploadConcurrency; }
     bool autoUploadImportedMedia() const { return m_autoUploadImportedMedia; }
     QString qtMediaBackend() const { return m_qtMediaBackend; }
@@ -105,6 +107,7 @@ private:
     QUrl m_serverUrl;
     qint64 m_remoteSessionHiddenTimeoutMs = 60000;
     qint64 m_projectHiddenRetentionMs = 300000;
+    qint64 m_incomingSessionOrphanTimeoutMs = 3000;
     int m_uploadConcurrency = 2;
     bool m_autoUploadImportedMedia = false;
     QString m_qtMediaBackend = QStringLiteral("ffmpeg");

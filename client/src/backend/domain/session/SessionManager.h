@@ -6,6 +6,8 @@
 #include <QSet>
 #include <QString>
 #include <QList>
+#include <QTimer>
+#include <functional>
 #include "backend/domain/models/ClientInfo.h"
 
 class ICanvasHost;
@@ -45,7 +47,10 @@ class SessionManager : public QObject {
     Q_OBJECT
 
 public:
-    struct CanvasSession {
+    enum class RemoteSessionState { Absent, Opening, Active, Grace, Closing };
+    Q_ENUM(RemoteSessionState)
+
+    struct ClientWorkspace {
         QString persistentClientId; // stable client ID persisted across sessions
         QString serverAssignedId;   // temporary server session ID (for local lookup only, send persistentClientId to server)
         QString canvasSessionId;
@@ -53,6 +58,9 @@ public:
         ClientInfo lastClientInfo;
         bool connectionsInitialized = false;
         bool remoteContentClearedOnDisconnect = false;
+        RemoteSessionState remoteSessionState = RemoteSessionState::Absent;
+        qint64 sessionHiddenAtMs = -1;
+        bool workspaceVisible = false;
         QSet<QString> expectedIdeaFileIds; // latest scene files present on canvas
         QSet<QString> knownRemoteFileIds;   // files we believe reside on the remote for current idea
         struct UploadTracking {
@@ -67,6 +75,7 @@ public:
             bool remoteFilesPresent = false;
         } upload;
     };
+    using CanvasSession = ClientWorkspace;
 
     explicit SessionManager(QObject *parent = nullptr);
     ~SessionManager();
@@ -102,6 +111,21 @@ public:
     QList<const CanvasSession*> getAllSessions() const;
     int sessionCount() const { return m_sessions.size(); }
 
+    void setRemoteSessionHiddenTimeoutMs(qint64 timeoutMs);
+    qint64 remoteSessionHiddenTimeoutMs() const { return m_remoteSessionHiddenTimeoutMs; }
+    RemoteSessionState remoteSessionState(const QString& persistentClientId) const;
+    bool setRemoteSessionState(const QString& persistentClientId,
+                               RemoteSessionState state);
+    bool setWorkspaceVisible(const QString& persistentClientId,
+                             qint64 nowMs = -1);
+    bool setWorkspaceHidden(const QString& persistentClientId,
+                            qint64 nowMs = -1);
+    void markAllWorkspacesHidden(qint64 nowMs = -1);
+    qint64 remoteSessionCloseAtMs(const QString& persistentClientId) const;
+    void processDeadlines(qint64 nowMs = -1);
+    void setNowProviderForTesting(std::function<qint64()> provider);
+    void stopAutomaticTimersForTesting();
+
     // Bulk operations
     void markAllSessionsOffline();
     void clearRemoteContentForOfflineSessions();
@@ -114,6 +138,9 @@ signals:
     void sessionCreated(const QString& persistentClientId);
     void sessionDeleted(const QString& persistentClientId);
     void sessionModified(const QString& persistentClientId);
+    void remoteSessionStateChanged(const QString& persistentClientId,
+                                   RemoteSessionState state);
+    void remoteSessionCloseDue(const QString& persistentClientId);
 
 private:
     // PHASE 1: Secondary indexes for O(1) lookups
@@ -122,6 +149,9 @@ private:
     QHash<QString, QString> m_serverIdToClientId;     // serverSessionId → persistentClientId (secondary index)
     
     QString m_myClientId; // Local client ID (who prepares the scenes)
+    qint64 m_remoteSessionHiddenTimeoutMs = 60'000;
+    QTimer m_deadlineTimer;
+    std::function<qint64()> m_nowProvider;
     
     // Index maintenance helpers
     void updateIdeaIdIndex(const QString& persistentClientId, const QString& oldIdeaId, const QString& newIdeaId);

@@ -15,6 +15,7 @@ CanvasSessionViewModel::CanvasSessionViewModel(QString sessionId,
                                                UploadManager* uploadManager,
                                                std::function<bool()> remoteFilesPresent,
                                                std::function<bool()> hasUnuploadedFiles,
+                                               std::function<bool()> hasProject,
                                                QObject* parent)
     : QObject(parent)
     , m_sessionId(std::move(sessionId))
@@ -22,6 +23,7 @@ CanvasSessionViewModel::CanvasSessionViewModel(QString sessionId,
     , m_uploadManager(uploadManager)
     , m_remoteFilesPresent(std::move(remoteFilesPresent))
     , m_hasUnuploadedFiles(std::move(hasUnuploadedFiles))
+    , m_hasProject(std::move(hasProject))
     , m_mediaSettings(new MediaSettingsViewModel(this))
 {
     if (m_uploadManager) {
@@ -59,9 +61,49 @@ QObject* CanvasSessionViewModel::canvasController() const
     return host ? host->controller() : nullptr;
 }
 
-bool CanvasSessionViewModel::actionsEnabled() const
+bool CanvasSessionViewModel::remoteCommandsEnabled() const
 {
     return m_canvas && m_canvas->overlayActionsEnabled();
+}
+
+bool CanvasSessionViewModel::hasProject() const
+{
+    return m_hasProject && m_hasProject();
+}
+
+bool CanvasSessionViewModel::mediaEditingEnabled() const
+{
+    return hasProject() && m_canvas && m_canvas->projectEditingEnabled();
+}
+
+bool CanvasSessionViewModel::canvasNavigation() const
+{
+    return m_canvas != nullptr;
+}
+
+bool CanvasSessionViewModel::mediaSync() const
+{
+    return hasProject() && remoteCommandsEnabled();
+}
+
+QString CanvasSessionViewModel::canvasNavigationUnavailableReason() const
+{
+    return m_canvas ? QString() : QStringLiteral("Canvas is unavailable");
+}
+
+QString CanvasSessionViewModel::mediaEditingUnavailableReason() const
+{
+    if (!hasProject()) return QStringLiteral("Create a project first");
+    if (!m_canvas) return QStringLiteral("Canvas is unavailable");
+    return m_canvas->projectEditingEnabled()
+        ? QString() : QStringLiteral("Project editing is unavailable");
+}
+
+QString CanvasSessionViewModel::mediaSyncUnavailableReason() const
+{
+    if (!hasProject()) return QStringLiteral("Create a project first");
+    return remoteCommandsEnabled()
+        ? QString() : QStringLiteral("Launch a remote session first");
 }
 
 QString CanvasSessionViewModel::activeTool() const
@@ -72,6 +114,7 @@ QString CanvasSessionViewModel::activeTool() const
 
 void CanvasSessionViewModel::setSettingsVisible(bool visible)
 {
+    if (visible && !mediaEditingEnabled()) return;
     if (m_settingsVisible == visible) return;
     m_settingsVisible = visible;
     emit settingsVisibleChanged();
@@ -107,6 +150,20 @@ bool CanvasSessionViewModel::remoteSceneActionEnabled() const
     return canvas && canvas->remoteSceneActionEnabled();
 }
 
+QString CanvasSessionViewModel::remoteSceneUnavailableReason() const
+{
+    if (!hasProject()) return QStringLiteral("Create a project first");
+    if (!m_canvas || m_canvas->enumerateMediaItems().isEmpty()) {
+        return QStringLiteral("Add media to the project first");
+    }
+    if (!m_canvas->hasActiveScreens()) return QStringLiteral("No target screens available");
+    if (!remoteCommandsEnabled()) return QStringLiteral("Launch a remote session first");
+    if (m_uploadManager && m_uploadManager->isBusy()) {
+        return QStringLiteral("A media transfer is in progress");
+    }
+    return {};
+}
+
 QString CanvasSessionViewModel::testSceneActionText() const
 {
     return testSceneActionState() == SceneActionState::Active
@@ -127,6 +184,16 @@ bool CanvasSessionViewModel::testSceneActionEnabled() const
 {
     const ICanvasHost* canvas = m_canvas;
     return canvas && canvas->testSceneActionEnabled();
+}
+
+QString CanvasSessionViewModel::testSceneUnavailableReason() const
+{
+    if (!hasProject()) return QStringLiteral("Create a project first");
+    if (!m_canvas || m_canvas->enumerateMediaItems().isEmpty()) {
+        return QStringLiteral("Add media to the project first");
+    }
+    if (m_canvas->remoteSceneLaunched()) return QStringLiteral("Stop the remote scene first");
+    return {};
 }
 
 QString CanvasSessionViewModel::uploadActionText() const
@@ -151,7 +218,9 @@ QString CanvasSessionViewModel::uploadActionText() const
 
 CanvasSessionViewModel::UploadState CanvasSessionViewModel::uploadState() const
 {
-    if (!m_uploadManager || !actionsEnabled()) return UploadState::Unavailable;
+    if (!hasProject() || !m_uploadManager || !remoteCommandsEnabled()) {
+        return UploadState::Unavailable;
+    }
     const bool activeForSession = m_uploadManager->hasActiveUpload()
         && m_uploadManager->activeUploadTargetClientId() == m_sessionId;
     if (activeForSession) {
@@ -170,6 +239,9 @@ CanvasSessionViewModel::UploadState CanvasSessionViewModel::uploadState() const
     const bool hasRemote = m_remoteFilesPresent && m_remoteFilesPresent();
     const bool hasUnuploaded = m_hasUnuploadedFiles && m_hasUnuploadedFiles();
     if (hasRemote && !hasUnuploaded) return UploadState::Uploaded;
+    if (!m_canvas || m_canvas->enumerateMediaItems().isEmpty()) {
+        return UploadState::Unavailable;
+    }
     if (const ICanvasHost* canvas = m_canvas;
         canvas && (canvas->remoteSceneLaunched()
                    || canvas->remoteSceneLaunching()
@@ -184,6 +256,17 @@ bool CanvasSessionViewModel::uploadActionEnabled() const
     const UploadState state = uploadState();
     return state == UploadState::Ready || state == UploadState::Uploaded
         || state == UploadState::Preparing || state == UploadState::Uploading;
+}
+
+QString CanvasSessionViewModel::uploadUnavailableReason() const
+{
+    if (!hasProject()) return QStringLiteral("Create a project first");
+    if (!m_canvas || m_canvas->enumerateMediaItems().isEmpty()) {
+        return QStringLiteral("Add media to the project first");
+    }
+    if (!remoteCommandsEnabled()) return QStringLiteral("Launch a remote session first");
+    if (m_canvas->remoteSceneLaunched()) return QStringLiteral("Stop the remote scene first");
+    return {};
 }
 
 int CanvasSessionViewModel::uploadActionTone() const
@@ -241,6 +324,15 @@ void CanvasSessionViewModel::setLoading(bool loading)
     emit loadingChanged();
 }
 
+void CanvasSessionViewModel::refreshCapabilities()
+{
+    if (!hasProject() && m_settingsVisible) {
+        m_settingsVisible = false;
+        emit settingsVisibleChanged();
+    }
+    emit actionStateChanged();
+}
+
 void CanvasSessionViewModel::selectMedia(const QString& mediaId, bool additive)
 {
     auto* host = qobject_cast<QuickCanvasHost*>(m_canvas.data());
@@ -253,21 +345,21 @@ bool CanvasSessionViewModel::beginFileDrag(const QVariantList& urls,
                                            qreal x, qreal y)
 {
     auto* host = qobject_cast<QuickCanvasHost*>(m_canvas.data());
-    return host && host->controller()
+    return mediaEditingEnabled() && host && host->controller()
         && host->controller()->beginLocalFileDrag(urls, x, y);
 }
 
 bool CanvasSessionViewModel::updateFileDrag(qreal x, qreal y)
 {
     auto* host = qobject_cast<QuickCanvasHost*>(m_canvas.data());
-    return host && host->controller()
+    return mediaEditingEnabled() && host && host->controller()
         && host->controller()->updateLocalFileDrag(x, y);
 }
 
 bool CanvasSessionViewModel::commitFileDrop(qreal x, qreal y)
 {
     auto* host = qobject_cast<QuickCanvasHost*>(m_canvas.data());
-    return host && host->controller()
+    return mediaEditingEnabled() && host && host->controller()
         && host->controller()->commitLocalFileDrop(x, y);
 }
 
@@ -280,23 +372,28 @@ void CanvasSessionViewModel::cancelFileDrag()
 void CanvasSessionViewModel::setActiveTool(const QString& tool)
 {
     if (!m_canvas) return;
+    if (tool == QLatin1String("text") && !mediaEditingEnabled()) return;
     m_canvas->setCurrentTool(tool == QLatin1String("text")
         ? ICanvasHost::Tool::Text : ICanvasHost::Tool::Selection);
 }
 
 void CanvasSessionViewModel::toggleRemoteScene()
 {
-    if (m_canvas) m_canvas->triggerRemoteSceneAction();
+    if (remoteSceneActionEnabled() && m_canvas) {
+        m_canvas->triggerRemoteSceneAction();
+    }
 }
 
 void CanvasSessionViewModel::toggleTestScene()
 {
-    if (m_canvas) m_canvas->triggerTestSceneAction();
+    if (testSceneActionEnabled() && m_canvas) {
+        m_canvas->triggerTestSceneAction();
+    }
 }
 
 void CanvasSessionViewModel::triggerUploadAction()
 {
-    if (m_uploadAction) m_uploadAction();
+    if (uploadActionEnabled() && m_uploadAction) m_uploadAction();
 }
 
 MediaListModel* CanvasSessionViewModel::typedMediaModel() const

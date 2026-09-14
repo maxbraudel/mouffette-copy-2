@@ -227,6 +227,7 @@ set(SOURCES
     src/backend/domain/scene/SceneActivityModel.cpp
     
     # Domain - Session
+    src/backend/domain/session/IncomingSessionOrphanWatchdog.cpp
     src/backend/domain/session/SessionManager.cpp
 
     # Notifications
@@ -376,6 +377,7 @@ set(HEADERS
     
     # Domain - Session
     src/backend/domain/session/SessionManager.h
+    src/backend/domain/session/IncomingSessionOrphanWatchdog.h
 
     # Notifications
     src/backend/notifications/HistoryStore.h
@@ -951,6 +953,10 @@ if(BUILD_TESTING)
         src/backend/domain/project/ProjectStore.h
         src/backend/domain/project/ProjectManager.cpp
         src/backend/domain/project/ProjectManager.h
+        src/backend/domain/session/SessionManager.cpp
+        src/backend/domain/session/SessionManager.h
+        src/backend/domain/session/IncomingSessionOrphanWatchdog.cpp
+        src/backend/domain/session/IncomingSessionOrphanWatchdog.h
         src/backend/runtime/RuntimeProfile.cpp
         src/backend/runtime/RuntimeProfile.h
     )

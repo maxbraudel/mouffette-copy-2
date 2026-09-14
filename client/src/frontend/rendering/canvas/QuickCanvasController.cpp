@@ -434,6 +434,23 @@ void QuickCanvasController::setTextToolActive(bool active)
     emit presentationChanged();
 }
 
+void QuickCanvasController::setProjectEditingEnabled(bool enabled)
+{
+    if (m_projectEditingEnabled == enabled) return;
+    m_projectEditingEnabled = enabled;
+    if (enabled) return;
+
+    // Revocation is synchronous: discard every provisional edit so a delayed
+    // QML release event cannot commit it after the project has been deleted.
+    cancelLocalFileDrag();
+    m_dragMediaId.clear();
+    m_lastMoveSnapped = false;
+    m_liveSnapDragMediaId.clear();
+    clearLiveResize();
+    setTextToolActive(false);
+    publishSnapGuides({});
+}
+
 qreal QuickCanvasController::currentViewScale() const
 {
     return m_viewScale > 0.0001 ? m_viewScale : 1.0;
@@ -490,6 +507,7 @@ void QuickCanvasController::handleClearSelectionRequested()
 void QuickCanvasController::handleMediaMoveStarted(const QString& mediaId,
                                                     qreal, qreal, bool)
 {
+    if (!m_projectEditingEnabled || editsLocked()) return;
     m_dragMediaId = mediaId;
     m_lastMoveSnapped = false;
     m_liveSnapDragMediaId.clear();
@@ -713,6 +731,7 @@ QPointF QuickCanvasController::snappedPosition(CanvasMedia* media,
 void QuickCanvasController::handleMediaMoveUpdated(const QString& mediaId,
                                                     qreal x, qreal y, bool snap)
 {
+    if (!m_projectEditingEnabled) return;
     CanvasMedia* media = m_document ? m_document->mediaById(mediaId) : nullptr;
     if (!media || editsLocked()) return;
     if (m_dragMediaId != mediaId) {
@@ -744,6 +763,14 @@ void QuickCanvasController::handleMediaMoveUpdated(const QString& mediaId,
 void QuickCanvasController::handleMediaMoveEnded(const QString& mediaId,
                                                   qreal x, qreal y, bool snap)
 {
+    if (!m_projectEditingEnabled) {
+        m_dragMediaId.clear();
+        m_lastMoveSnapped = false;
+        m_liveSnapDragMediaId.clear();
+        clearSnapTargets();
+        publishSnapGuides({});
+        return;
+    }
     CanvasMedia* media = m_document ? m_document->mediaById(mediaId) : nullptr;
     if (media && !editsLocked()) {
         media->setPosition(snap && m_lastMoveSnapped
@@ -1157,6 +1184,7 @@ void QuickCanvasController::handleMediaResizeRequested(
     const QString& mediaId, const QString& handleId, qreal x, qreal y,
     bool snap, bool altPressed)
 {
+    if (!m_projectEditingEnabled) return;
     CanvasMedia* media = m_document ? m_document->mediaById(mediaId) : nullptr;
     if (!media || editsLocked()) return;
     if (m_resizeMediaId != mediaId) {
@@ -1212,6 +1240,10 @@ void QuickCanvasController::handleMediaResizeRequested(
 
 void QuickCanvasController::handleMediaResizeEnded(const QString& mediaId)
 {
+    if (!m_projectEditingEnabled) {
+        clearLiveResize();
+        return;
+    }
     CanvasMedia* media = m_document ? m_document->mediaById(mediaId) : nullptr;
     if (media && mediaId == m_resizeMediaId && !m_pendingResizeRect.isEmpty()) {
         media->setPosition(m_pendingResizeRect.topLeft());
@@ -1263,19 +1295,21 @@ void QuickCanvasController::handleTextCommitRequested(const QString& mediaId,
 void QuickCanvasController::handleTextLiveUpdateRequested(const QString& mediaId,
                                                            const QString& text)
 {
+    if (!m_projectEditingEnabled) return;
     CanvasMedia* media = m_document ? m_document->mediaById(mediaId) : nullptr;
     if (media && media->isText() && !editsLocked()) media->setText(text);
 }
 
 void QuickCanvasController::handleTextCreateRequested(qreal viewX, qreal viewY)
 {
-    if (!m_document || editsLocked()) return;
+    if (!m_projectEditingEnabled || !m_document || editsLocked()) return;
     m_document->addText(mapViewPointToScene({viewX, viewY}));
     setTextToolActive(false);
 }
 
 void QuickCanvasController::handleOverlayVisibilityToggle(const QString& id, bool visible)
 {
+    if (!m_projectEditingEnabled) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
         media && !editsLocked()) media->setContentVisible(visible);
     emit mediaVisibilityToggleRequested(id, visible);
@@ -1283,23 +1317,28 @@ void QuickCanvasController::handleOverlayVisibilityToggle(const QString& id, boo
 
 void QuickCanvasController::handleOverlayBringForward(const QString& id)
 {
+    if (!m_projectEditingEnabled) return;
     if (m_document) m_document->moveForward(id);
     emit mediaBringForwardRequested(id);
 }
 
 void QuickCanvasController::handleOverlayBringBackward(const QString& id)
 {
+    if (!m_projectEditingEnabled) return;
     if (m_document) m_document->moveBackward(id);
     emit mediaBringBackwardRequested(id);
 }
 
 void QuickCanvasController::handleOverlayDelete(const QString& id)
 {
-    if (m_document && m_document->removeMedia(id)) emit mediaDeleteRequested(id);
+    if (m_projectEditingEnabled && m_document && m_document->removeMedia(id)) {
+        emit mediaDeleteRequested(id);
+    }
 }
 
 void QuickCanvasController::handleOverlayPlayPause(const QString& id)
 {
+    if (!m_projectEditingEnabled) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
         media && media->isVideo() && !editsLocked()) media->togglePlayPause();
     emit mediaPlayPauseRequested(id);
@@ -1307,6 +1346,7 @@ void QuickCanvasController::handleOverlayPlayPause(const QString& id)
 
 void QuickCanvasController::handleOverlayStop(const QString& id)
 {
+    if (!m_projectEditingEnabled) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
         media && media->isVideo() && !editsLocked()) media->stopToBeginning();
     emit mediaStopRequested(id);
@@ -1314,6 +1354,7 @@ void QuickCanvasController::handleOverlayStop(const QString& id)
 
 void QuickCanvasController::handleOverlayRepeatToggle(const QString& id)
 {
+    if (!m_projectEditingEnabled) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
         media && media->isVideo() && !editsLocked()) {
         media->setRepeatEnabled(!media->repeatEnabled());
@@ -1323,6 +1364,7 @@ void QuickCanvasController::handleOverlayRepeatToggle(const QString& id)
 
 void QuickCanvasController::handleOverlayMuteToggle(const QString& id)
 {
+    if (!m_projectEditingEnabled) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
         media && media->isVideo() && !editsLocked()) media->setMuted(!media->muted());
     emit mediaMuteToggleRequested(id);
@@ -1330,6 +1372,7 @@ void QuickCanvasController::handleOverlayMuteToggle(const QString& id)
 
 void QuickCanvasController::handleOverlayVolumeChange(const QString& id, qreal value)
 {
+    if (!m_projectEditingEnabled) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
         media && media->isVideo() && !editsLocked()) {
         const int percent = qRound(std::clamp<qreal>(value, 0.0, 1.0) * 100.0);
@@ -1343,23 +1386,27 @@ void QuickCanvasController::handleOverlayVolumeChange(const QString& id, qreal v
 
 void QuickCanvasController::handleOverlaySeekBegin(const QString& id, qreal ratio)
 {
+    if (!m_projectEditingEnabled) return;
     handleOverlaySeekUpdate(id, ratio);
 }
 
 void QuickCanvasController::handleOverlaySeekUpdate(const QString& id, qreal ratio)
 {
+    if (!m_projectEditingEnabled) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
         media && media->isVideo() && !editsLocked()) media->seekToRatio(ratio);
 }
 
 void QuickCanvasController::handleOverlaySeekEnd(const QString& id, qreal ratio)
 {
+    if (!m_projectEditingEnabled) return;
     handleOverlaySeekUpdate(id, ratio);
     emit mediaSeekRequested(id, ratio);
 }
 
 void QuickCanvasController::handleOverlayFitToTextToggle(const QString& id)
 {
+    if (!m_projectEditingEnabled) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
         media && media->isText() && !editsLocked()) {
         media->setFitToTextEnabled(!media->fitToTextEnabled());
@@ -1370,6 +1417,7 @@ void QuickCanvasController::handleOverlayFitToTextToggle(const QString& id)
 void QuickCanvasController::handleOverlayHorizontalAlign(
     const QString& id, const QString& alignment)
 {
+    if (!m_projectEditingEnabled) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
         media && media->isText() && !editsLocked()) {
         media->setHorizontalAlignment(alignment);
@@ -1380,6 +1428,7 @@ void QuickCanvasController::handleOverlayHorizontalAlign(
 void QuickCanvasController::handleOverlayVerticalAlign(
     const QString& id, const QString& alignment)
 {
+    if (!m_projectEditingEnabled) return;
     if (CanvasMedia* media = m_document ? m_document->mediaById(id) : nullptr;
         media && media->isText() && !editsLocked()) {
         media->setVerticalAlignment(alignment);
@@ -1391,7 +1440,7 @@ bool QuickCanvasController::beginLocalFileDrag(const QVariantList& urls,
                                                qreal viewX, qreal viewY)
 {
     cancelLocalFileDrag();
-    if (editsLocked() || urls.size() != 1) return false;
+    if (!m_projectEditingEnabled || editsLocked() || urls.size() != 1) return false;
     const QUrl url = urls.first().canConvert<QUrl>()
         ? urls.first().toUrl() : QUrl(urls.first().toString());
     if (!url.isLocalFile()) return false;
@@ -1429,7 +1478,7 @@ bool QuickCanvasController::beginLocalFileDrag(const QVariantList& urls,
 
 bool QuickCanvasController::updateLocalFileDrag(qreal viewX, qreal viewY)
 {
-    if (m_dropPath.isEmpty() || editsLocked()) return false;
+    if (!m_projectEditingEnabled || m_dropPath.isEmpty() || editsLocked()) return false;
     m_dropCenter = mapViewPointToScene({viewX, viewY});
     publishDropPreview(true);
     return true;
@@ -1437,7 +1486,8 @@ bool QuickCanvasController::updateLocalFileDrag(qreal viewX, qreal viewY)
 
 bool QuickCanvasController::commitLocalFileDrop(qreal viewX, qreal viewY)
 {
-    if (m_dropPath.isEmpty() || !m_document || editsLocked()) return false;
+    if (!m_projectEditingEnabled || m_dropPath.isEmpty()
+        || !m_document || editsLocked()) return false;
     m_dropCenter = mapViewPointToScene({viewX, viewY});
     const QPointF topLeft = m_dropCenter
         - QPointF(m_dropNativeSize.width() / 2.0,

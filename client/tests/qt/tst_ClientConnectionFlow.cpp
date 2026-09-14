@@ -5,6 +5,7 @@
 #include "backend/runtime/RuntimeProfile.h"
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/models/ClientInfo.h"
+#include "backend/domain/project/ProjectManager.h"
 #include "frontend/qml/ClientListModel.h"
 #include "frontend/rendering/navigation/ScreenNavigationManager.h"
 #include "shared/rendering/ICanvasHost.h"
@@ -71,7 +72,7 @@ private slots:
         QVERIFY(!navigation.canvasVisible());
     }
 
-    void clickingClientCreatesAndActivatesRealCanvasSession()
+    void clickingClientOpensEmptyWorkspaceUntilProjectIsExplicitlyCreated()
     {
         QTemporaryDir root;
         QVERIFY(root.isValid());
@@ -95,10 +96,25 @@ private slots:
         runtime.activateClient(client.endpointId());
 
         QCOMPARE(runtime.getActiveSessionIdentity(), client.endpointId());
+        QVERIFY(!runtime.getActiveCanvas());
+        QVERIFY(!runtime.activeProjectExists());
+        QVERIFY(!runtime.activeRemoteSessionExists());
+        QVERIFY(runtime.findCanvasSession(client.endpointId()));
+        QVERIFY(!runtime.findCanvasSession(client.endpointId())->canvas);
+        QVERIFY(activeSessionChanged.count() >= 1);
+
+        runtime.createActiveProject();
+        QVERIFY(runtime.activeProjectExists());
+        QVERIFY(!runtime.activeRemoteSessionExists());
         QVERIFY(runtime.getActiveCanvas());
         QVERIFY(runtime.getActiveCanvas()->document());
         QVERIFY(!runtime.getActiveCanvas()->document()->canvasSessionId().isEmpty());
-        QVERIFY(activeSessionChanged.count() >= 1);
+        QVERIFY(runtime.getActiveCanvas()->document()->screens().isEmpty());
+        const auto* project = runtime.getProjectManager()->projectForTarget(
+            client.endpointId());
+        QVERIFY(project);
+        QCOMPARE(runtime.getActiveCanvas()->document()->canvasSessionId(),
+                 project->projectId);
 
         runtime.handleApplicationAboutToQuit();
     }

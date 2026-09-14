@@ -3057,7 +3057,9 @@ int UploadManager::detachReceivedMappingsForScope(
     return m_fileManager->removeReceivedFileMappingsForScope(scope);
 }
 
-void UploadManager::beginTerminalIncomingCleanup(const QString& reasonCode)
+void UploadManager::beginTerminalIncomingCleanup(
+    const QString& reasonCode,
+    const QSet<QString>& remoteSessionIds)
 {
     // This is only the command/writer barrier. Render-facing mappings and the
     // live cache namespace deliberately remain intact until ApplicationRuntime has
@@ -3069,12 +3071,17 @@ void UploadManager::beginTerminalIncomingCleanup(const QString& reasonCode)
         ? QStringLiteral("terminal_session") : reasonCode.trimmed();
     m_receiverCleanupError = QStringLiteral("renderer_teardown_pending");
     m_incomingUploadCompletionTombstones.clear();
-    suspendIncomingForResume();
+    if (remoteSessionIds.isEmpty()
+        || remoteSessionIds.contains(m_incoming.remoteSessionId)) {
+        suspendIncomingForResume();
+    }
     emit receiverAdvertisementReadinessChanged(false, m_receiverCleanupError);
 }
 
 UploadManager::BulkTeardownResult
-UploadManager::completeTerminalIncomingCleanup(const QString& reasonCode)
+UploadManager::completeTerminalIncomingCleanup(
+    const QString& reasonCode,
+    const QSet<QString>& remoteSessionIds)
 {
     // Contract: the application calls this only from the renderer settlement
     // barrier. Clearing the guard first makes a failed logical commit eligible
@@ -3085,7 +3092,8 @@ UploadManager::completeTerminalIncomingCleanup(const QString& reasonCode)
     }
 
     const BulkTeardownResult result =
-        teardownAllIncomingRemoteSessions(m_receiverCleanupReason);
+        teardownAllIncomingRemoteSessions(m_receiverCleanupReason,
+                                          remoteSessionIds);
     QString logicalCleanupError;
     const bool logicallySafe = m_remoteCacheStore && m_remoteCacheReady
         && m_remoteCacheStore->receiverAdvertisementSafe(&logicalCleanupError);
@@ -3102,7 +3110,9 @@ UploadManager::completeTerminalIncomingCleanup(const QString& reasonCode)
 }
 
 UploadManager::BulkTeardownResult
-UploadManager::teardownAllIncomingRemoteSessions(const QString& reasonCode)
+UploadManager::teardownAllIncomingRemoteSessions(
+    const QString& reasonCode,
+    const QSet<QString>& remoteSessionIds)
 {
     BulkTeardownResult summary;
     m_lastTeardownRemovedFileCount = 0;
@@ -3119,9 +3129,19 @@ UploadManager::teardownAllIncomingRemoteSessions(const QString& reasonCode)
         summary.errorCode = enumerationError;
         summary.cleanupErrorScopes = 1;
     }
-    summary.discoveredScopes = scopes.size();
+    summary.discoveredScopes = remoteSessionIds.isEmpty()
+        ? scopes.size()
+        : std::count_if(
+              scopes.cbegin(), scopes.cend(),
+              [&remoteSessionIds](const RemoteCacheStore::Scope& scope) {
+                  return remoteSessionIds.contains(scope.remoteSessionId);
+              });
 
     for (const RemoteCacheStore::Scope& scope : scopes) {
+        if (!remoteSessionIds.isEmpty()
+            && !remoteSessionIds.contains(scope.remoteSessionId)) {
+            continue;
+        }
         const QString teardownId =
             QUuid::createUuid().toString(QUuid::WithoutBraces).toLower();
         QString beginError;

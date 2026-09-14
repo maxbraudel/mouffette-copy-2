@@ -3,6 +3,7 @@
 #include "backend/runtime/ApplicationRuntime.h"
 #include "backend/config/AppConfig.h"
 #include "backend/domain/scene/SceneActivityModel.h"
+#include "backend/domain/project/ProjectManager.h"
 #include "backend/managers/app/SettingsManager.h"
 #include "backend/notifications/NotificationCenter.h"
 #include "backend/runtime/RuntimeProfile.h"
@@ -117,6 +118,26 @@ bool ApplicationController::closingSession() const
 bool ApplicationController::canDeleteProject() const
 {
     return m_runtime && m_runtime->canDeleteActiveProject();
+}
+
+bool ApplicationController::hasProject() const
+{
+    return m_runtime && m_runtime->activeProjectExists();
+}
+
+bool ApplicationController::hasRemoteSession() const
+{
+    return m_runtime && m_runtime->activeRemoteSessionExists();
+}
+
+bool ApplicationController::canCreateProject() const
+{
+    return m_runtime && m_runtime->canCreateActiveProject();
+}
+
+bool ApplicationController::canLaunchSession() const
+{
+    return m_runtime && m_runtime->canLaunchActiveSession();
 }
 
 QString ApplicationController::settingsServerUrl() const
@@ -321,6 +342,16 @@ void ApplicationController::closeSession()
     if (m_runtime) m_runtime->closeActiveSession();
 }
 
+void ApplicationController::createProject()
+{
+    if (m_runtime) m_runtime->createActiveProject();
+}
+
+void ApplicationController::launchSession()
+{
+    if (m_runtime) m_runtime->launchActiveSession();
+}
+
 void ApplicationController::requestDeleteProject()
 {
     showDialog(DialogKind::DeleteProject, QStringLiteral("Delete project?"),
@@ -342,7 +373,6 @@ void ApplicationController::acceptDialog()
     if (!m_runtime) return;
     if (accepted == DialogKind::DeleteProject) {
         m_runtime->deleteActiveProjectConfirmed();
-        setApplicationPage(ApplicationPage::Clients);
         refreshActiveCanvasSession();
     } else if (accepted == DialogKind::ClearHistory) {
         if (NotificationCenter* center = m_runtime->getNotificationCenter()) {
@@ -432,11 +462,21 @@ void ApplicationController::refreshActiveCanvasSession()
     }
     const QString id = m_runtime->getActiveSessionIdentity();
     ApplicationRuntime::CanvasSession* session = m_runtime->findCanvasSession(id);
-    if (!session) return;
+    if (!session || !session->canvas) {
+        if (ClientWorkspaceViewModel* cached = m_canvasSessions.value(id)) {
+            cached->setCanvas(nullptr);
+            cached->refreshCapabilities();
+        }
+        if (m_activeCanvasSession) {
+            m_activeCanvasSession = nullptr;
+            emit activeCanvasSessionChanged();
+        }
+        return;
+    }
 
-    CanvasSessionViewModel* viewModel = m_canvasSessions.value(id);
+    ClientWorkspaceViewModel* viewModel = m_canvasSessions.value(id);
     if (!viewModel) {
-        viewModel = new CanvasSessionViewModel(
+        viewModel = new ClientWorkspaceViewModel(
             id, session->canvas,
             [backend = m_runtime.get()]() {
                 if (backend) backend->onUploadButtonClicked();
@@ -448,10 +488,15 @@ void ApplicationController::refreshActiveCanvasSession()
             },
             [backend = m_runtime.get(), id]() {
                 return backend && backend->hasUnuploadedFilesForTarget(id);
+            },
+            [backend = m_runtime.get(), id]() {
+                return backend && backend->getProjectManager()
+                    && backend->getProjectManager()->hasProjectForTarget(id);
             }, this);
         m_canvasSessions.insert(id, viewModel);
     } else {
         viewModel->setCanvas(session->canvas);
+        viewModel->refreshCapabilities();
     }
     if (m_activeCanvasSession != viewModel) {
         m_activeCanvasSession = viewModel;

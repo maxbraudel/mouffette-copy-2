@@ -7,9 +7,15 @@ AbstractButton {
 
     enum Tone { Normal, Uploading, Uploaded, Remote, Test }
     property int tone: OverlayActionButton.Normal
+    property string unavailableReason: ""
 
     implicitHeight: Theme.overlayButtonHeight
     hoverEnabled: true
+    Accessible.role: Accessible.Button
+    Accessible.name: text
+    Accessible.description: control.enabled ? "" : unavailableReason
+    ToolTip.visible: hovered && !enabled && unavailableReason.length > 0
+    ToolTip.text: unavailableReason
     contentItem: Text {
         text: control.text
         color: control.tone === OverlayActionButton.Uploaded ? Theme.mediaUploaded

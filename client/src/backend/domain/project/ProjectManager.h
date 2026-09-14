@@ -21,7 +21,6 @@ class ProjectManager final : public QObject {
 
 public:
     struct TimingPolicy {
-        qint64 remoteSessionHiddenTimeoutMs = 60'000;
         qint64 projectHiddenRetentionMs = 300'000;
         int autosaveDelayMs = 300;
         int checkpointIntervalMs = 15'000;
@@ -45,7 +44,7 @@ public:
     const ProjectRecord* projectForTarget(const QString& targetEndpointId) const;
     const ProjectRecord* projectById(const QString& projectId) const;
 
-    QString ensureProject(const ClientSnapshot& snapshot,
+    QString ensureProject(const ProjectTargetReference& target,
                           ProjectLifecycleState initialState = ProjectLifecycleState::Visible,
                           qint64 nowMs = -1);
     bool setVisible(const QString& targetEndpointId, qint64 nowMs = -1);
@@ -56,10 +55,14 @@ public:
     bool updateCanvasState(const QString& targetEndpointId,
                            const QJsonObject& canvasState,
                            const QList<ProjectMediaReference>& references = {},
+                           const QList<ScreenInfo>& savedScreens = {},
                            qint64 nowMs = -1);
-    bool updateClientSnapshot(const ClientSnapshot& snapshot, qint64 nowMs = -1);
+    bool updateTargetReference(const ProjectTargetReference& target,
+                               qint64 nowMs = -1);
+    bool updateSavedScreens(const QString& targetEndpointId,
+                            const QList<ScreenInfo>& screens,
+                            qint64 nowMs = -1);
 
-    qint64 remoteSessionCloseAtMs(const QString& targetEndpointId) const;
     qint64 projectDeleteAtMs(const QString& targetEndpointId) const;
 
     // Deterministic entry point for tests and wake/resume handling. Deadlines
@@ -82,9 +85,6 @@ signals:
                                   const QString& targetEndpointId,
                                   ProjectLifecycleState state);
     void projectCheckpointDue(const QString& targetEndpointId);
-    void remoteSessionCloseDue(const QString& projectId, const QString& targetEndpointId);
-    void projectRestoredAfterSessionDeadline(const QString& projectId,
-                                             const QString& targetEndpointId);
     void projectAboutToDelete(const ProjectRecord& project);
     void projectDeleted(const QString& projectId, const QString& targetEndpointId);
     void projectsChanged();
@@ -104,7 +104,6 @@ private:
     TimingPolicy m_timing;
     QHash<QString, ProjectRecord> m_projectsByTarget;
     QHash<QString, QString> m_targetByProjectId;
-    QSet<QString> m_sessionDeadlineNotified;
     QTimer m_autosaveTimer;
     QTimer m_checkpointTimer;
     QTimer m_deadlineTimer;

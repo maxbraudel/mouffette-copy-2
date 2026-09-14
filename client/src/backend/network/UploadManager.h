@@ -155,15 +155,19 @@ public:
     // rename/delete their cache while a renderer still owns those files.
     // ApplicationRuntime calls completeTerminalIncomingCleanup() only after every
     // correlated RemoteSceneController::teardownSettled barrier has fired.
-    void beginTerminalIncomingCleanup(const QString& reasonCode);
+    void beginTerminalIncomingCleanup(
+        const QString& reasonCode,
+        const QSet<QString>& remoteSessionIds = {});
     BulkTeardownResult completeTerminalIncomingCleanup(
-        const QString& reasonCode);
+        const QString& reasonCode,
+        const QSet<QString>& remoteSessionIds = {});
     // Terminal local events (lease expiry/server restart) have no server
     // teardownId. Every live on-disk receiver scope is therefore committed
     // under a provisional tombstone which can later adopt the authenticated
     // server teardown identity without reopening the cache.
     BulkTeardownResult teardownAllIncomingRemoteSessions(
-        const QString& reasonCode);
+        const QString& reasonCode,
+        const QSet<QString>& remoteSessionIds = {});
     bool receiverReadyForAdvertisement() const
     {
         return m_remoteCacheReady && m_receiverAdvertisementReady;

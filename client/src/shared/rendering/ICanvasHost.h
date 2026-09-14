@@ -49,6 +49,8 @@ public:
     virtual void hideRemoteCursor() = 0;
     virtual void setOverlayActionsEnabled(bool enabled) = 0;
     virtual bool overlayActionsEnabled() const = 0;
+    virtual void setProjectEditingEnabled(bool enabled) = 0;
+    virtual bool projectEditingEnabled() const = 0;
     virtual void handleRemoteConnectionLost() = 0;
     virtual void stopScenesForSourceInvalidation() = 0;
 

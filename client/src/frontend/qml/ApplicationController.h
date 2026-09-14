@@ -11,6 +11,7 @@
 #include "backend/runtime/RuntimeStorageBootstrap.h"
 
 class CanvasSessionViewModel;
+class ClientWorkspaceViewModel;
 class ClientListModel;
 class HistoryListModel;
 class ApplicationRuntime;
@@ -33,6 +34,7 @@ class ApplicationController final : public QObject
     Q_PROPERTY(QObject* sceneActivitiesModel READ sceneActivitiesModel CONSTANT)
     Q_PROPERTY(QObject* historyModel READ historyModel CONSTANT)
     Q_PROPERTY(QObject* toastModel READ toastModel CONSTANT)
+    Q_PROPERTY(QObject* activeWorkspace READ activeWorkspace NOTIFY activeCanvasSessionChanged)
     Q_PROPERTY(QObject* activeCanvasSession READ activeCanvasSession NOTIFY activeCanvasSessionChanged)
 
     Q_PROPERTY(bool connectionEnabled READ connectionEnabled NOTIFY presentationChanged)
@@ -47,6 +49,10 @@ class ApplicationController final : public QObject
     Q_PROPERTY(bool canCloseSession READ canCloseSession NOTIFY presentationChanged)
     Q_PROPERTY(bool closingSession READ closingSession NOTIFY presentationChanged)
     Q_PROPERTY(bool canDeleteProject READ canDeleteProject NOTIFY presentationChanged)
+    Q_PROPERTY(bool hasProject READ hasProject NOTIFY presentationChanged)
+    Q_PROPERTY(bool hasRemoteSession READ hasRemoteSession NOTIFY presentationChanged)
+    Q_PROPERTY(bool canCreateProject READ canCreateProject NOTIFY presentationChanged)
+    Q_PROPERTY(bool canLaunchSession READ canLaunchSession NOTIFY presentationChanged)
 
     Q_PROPERTY(QString settingsServerUrl READ settingsServerUrl NOTIFY settingsChanged)
     Q_PROPERTY(bool settingsAutoUpload READ settingsAutoUpload NOTIFY settingsChanged)
@@ -83,6 +89,7 @@ public:
     QObject* sceneActivitiesModel() const;
     QObject* historyModel() const;
     QObject* toastModel() const;
+    QObject* activeWorkspace() const { return activeCanvasSession(); }
     QObject* activeCanvasSession() const;
 
     bool connectionEnabled() const;
@@ -97,6 +104,10 @@ public:
     bool canCloseSession() const;
     bool closingSession() const;
     bool canDeleteProject() const;
+    bool hasProject() const;
+    bool hasRemoteSession() const;
+    bool canCreateProject() const;
+    bool canLaunchSession() const;
 
     QString settingsServerUrl() const;
     bool settingsAutoUpload() const;
@@ -117,6 +128,8 @@ public:
     Q_INVOKABLE void showHistory();
     Q_INVOKABLE void toggleConnection();
     Q_INVOKABLE void closeSession();
+    Q_INVOKABLE void createProject();
+    Q_INVOKABLE void launchSession();
     Q_INVOKABLE void requestDeleteProject();
     Q_INVOKABLE void requestClearHistory();
     Q_INVOKABLE void acceptDialog();
@@ -185,8 +198,8 @@ private:
     SceneActivityListModel* m_sceneActivitiesModel = nullptr;
     HistoryListModel* m_historyModel = nullptr;
     ToastListModel* m_toastModel = nullptr;
-    QHash<QString, CanvasSessionViewModel*> m_canvasSessions;
-    QPointer<CanvasSessionViewModel> m_activeCanvasSession;
+    QHash<QString, ClientWorkspaceViewModel*> m_canvasSessions;
+    QPointer<ClientWorkspaceViewModel> m_activeCanvasSession;
 };
 
 #endif // APPLICATIONCONTROLLER_H

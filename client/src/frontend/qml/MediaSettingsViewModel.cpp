@@ -26,7 +26,11 @@ CanvasMedia* MediaSettingsViewModel::media() const
     return m_controller ? m_controller->selectedMediaItem() : nullptr;
 }
 
-bool MediaSettingsViewModel::available() const { return media() != nullptr; }
+bool MediaSettingsViewModel::available() const
+{
+    return m_controller && m_controller->projectEditingEnabled()
+        && media() != nullptr;
+}
 QString MediaSettingsViewModel::mediaId() const { return media() ? media()->mediaId() : QString(); }
 QString MediaSettingsViewModel::mediaName() const { return media() ? media()->displayName() : QString(); }
 bool MediaSettingsViewModel::video() const { return media() && media()->isVideo(); }
@@ -163,7 +167,8 @@ void MediaSettingsViewModel::updateSettings(
     const std::function<void(CanvasMedia*)>& update)
 {
     CanvasMedia* item = media();
-    if (!item || !m_controller || m_controller->editsLocked()) return;
+    if (!item || !m_controller || !m_controller->projectEditingEnabled()
+        || m_controller->editsLocked()) return;
     update(item);
     m_controller->refreshMediaProjection();
     emit changed();

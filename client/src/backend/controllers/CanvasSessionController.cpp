@@ -15,44 +15,44 @@
 #include <QTimer>
 #include <QDebug>
 
-CanvasSessionController::CanvasSessionController(ApplicationRuntime* mainWindow, QObject* parent)
+ClientWorkspaceController::ClientWorkspaceController(ApplicationRuntime* mainWindow, QObject* parent)
     : QObject(parent)
     , m_mainWindow(mainWindow)
 {
 }
 
 // ============================================================================
-// Session Lookup Methods
+// Workspace Lookup Methods
 // ============================================================================
 
-void* CanvasSessionController::findCanvasSession(const QString& persistentClientId) {
+void* ClientWorkspaceController::findCanvasSession(const QString& persistentClientId) {
     return m_mainWindow->getSessionManager()->findSession(persistentClientId);
 }
 
-const void* CanvasSessionController::findCanvasSession(const QString& persistentClientId) const {
+const void* ClientWorkspaceController::findCanvasSession(const QString& persistentClientId) const {
     return m_mainWindow->getSessionManager()->findSession(persistentClientId);
 }
 
-void* CanvasSessionController::findCanvasSessionByServerClientId(const QString& serverClientId) {
+void* ClientWorkspaceController::findCanvasSessionByServerClientId(const QString& serverClientId) {
     return m_mainWindow->getSessionManager()->findSessionByServerClientId(serverClientId);
 }
 
-const void* CanvasSessionController::findCanvasSessionByServerClientId(const QString& serverClientId) const {
+const void* ClientWorkspaceController::findCanvasSessionByServerClientId(const QString& serverClientId) const {
     return m_mainWindow->getSessionManager()->findSessionByServerClientId(serverClientId);
 }
 
-void* CanvasSessionController::findCanvasSessionByIdeaId(const QString& canvasSessionId) {
+void* ClientWorkspaceController::findCanvasSessionByIdeaId(const QString& canvasSessionId) {
     return m_mainWindow->getSessionManager()->findSessionByIdeaId(canvasSessionId);
 }
 
 // ============================================================================
-// Session Lifecycle
+// Workspace Lifecycle
 // ============================================================================
 
-void* CanvasSessionController::ensureCanvasSession(const ClientInfo& client) {
+void* ClientWorkspaceController::ensureCanvasSession(const ClientInfo& client) {
     QString persistentId = client.endpointId();
     if (persistentId.isEmpty()) {
-        qWarning() << "CanvasSessionController::ensureCanvasSession: client has no persistentClientId, this should not happen";
+        qWarning() << "ClientWorkspaceController::ensureCanvasSession: client has no persistentClientId, this should not happen";
         persistentId = client.getId();
     }
     
@@ -73,7 +73,7 @@ void* CanvasSessionController::ensureCanvasSession(const ClientInfo& client) {
             } else {
                 m_lastQuickInitError = quickError.isEmpty()
                     ? QStringLiteral("Qt Quick canvas failed to initialize") : quickError;
-                qCritical() << "CanvasSessionController: mandatory Qt Quick canvas unavailable."
+                qCritical() << "ClientWorkspaceController: mandatory Qt Quick canvas unavailable."
                             << "error=" << m_lastQuickInitError;
                 TOAST_ERROR(QStringLiteral("Canvas initialization failed: %1")
                                 .arg(m_lastQuickInitError),
@@ -103,7 +103,7 @@ void* CanvasSessionController::ensureCanvasSession(const ClientInfo& client) {
     return &session;
 }
 
-void CanvasSessionController::prewarmQuickCanvasHost() {
+void ClientWorkspaceController::prewarmQuickCanvasHost() {
     if (!m_mainWindow || m_prewarmedQuickCanvasHost) {
         return;
     }
@@ -113,9 +113,9 @@ void CanvasSessionController::prewarmQuickCanvasHost() {
     if (!prewarmedHost) {
         m_lastQuickInitError = quickError;
         if (!quickError.isEmpty()) {
-            qWarning() << "CanvasSessionController: Quick prewarm failed:" << quickError;
+            qWarning() << "ClientWorkspaceController: Quick prewarm failed:" << quickError;
         } else {
-            qWarning() << "CanvasSessionController: Quick prewarm failed with unknown error";
+            qWarning() << "ClientWorkspaceController: Quick prewarm failed with unknown error";
         }
         return;
     }
@@ -125,7 +125,7 @@ void CanvasSessionController::prewarmQuickCanvasHost() {
     prewarmedHost->setOverlayActionsEnabled(false);
 }
 
-void CanvasSessionController::configureCanvasSession(void* sessionPtr) {
+void ClientWorkspaceController::configureCanvasSession(void* sessionPtr) {
     ApplicationRuntime::CanvasSession* session = static_cast<ApplicationRuntime::CanvasSession*>(sessionPtr);
     if (!session || !session->canvas) return;
 
@@ -160,7 +160,7 @@ void CanvasSessionController::configureCanvasSession(void* sessionPtr) {
                 [this, persistentId=session->persistentClientId](CanvasMedia* mediaItem) {
                     if (m_mainWindow->getFileWatcher() && mediaItem && !mediaItem->sourcePath().isEmpty()) {
                         m_mainWindow->getFileWatcher()->watchMediaItem(mediaItem);
-                        qDebug() << "CanvasSessionController: source watch added for mediaId"
+                        qDebug() << "ClientWorkspaceController: source watch added for mediaId"
                                  << mediaItem->mediaId();
                     }
                     ApplicationRuntime::CanvasSession* sess = m_mainWindow->getSessionManager()->findSession(persistentId);
@@ -200,7 +200,7 @@ void CanvasSessionController::configureCanvasSession(void* sessionPtr) {
     session->connectionsInitialized = true;
 }
 
-void CanvasSessionController::switchToCanvasSession(const QString& persistentClientId) {
+void ClientWorkspaceController::switchToCanvasSession(const QString& persistentClientId) {
     // Navigation between clients should NOT trigger unload - uploads persist per session
     // Unload only happens when explicitly requested via button or when remote disconnects
     
@@ -219,17 +219,13 @@ void CanvasSessionController::switchToCanvasSession(const QString& persistentCli
         session->canvas->setRemoteSceneTarget(session->persistentClientId, session->lastClientInfo.getMachineName());
     }
 
-    // Set upload manager target to restore per-session upload state
-    if (m_mainWindow->getUploadManager()) {
-        m_mainWindow->getUploadManager()->setTargetClientId(session->persistentClientId);
-        m_mainWindow->getUploadManager()->setActiveIdeaId(session->canvasSessionId);
-    }
+    // Project editing and remote commands are independent capabilities. The
+    // runtime applies both after the visual workspace has been selected.
+    m_mainWindow->updateWorkspaceCapabilities(persistentClientId);
     updateUploadButtonForSession(session);
-
-    m_mainWindow->refreshOverlayActionsState(session->lastClientInfo.isOnline());
 }
 
-void CanvasSessionController::rotateSessionIdea(void* sessionPtr) {
+void ClientWorkspaceController::rotateSessionIdea(void* sessionPtr) {
     ApplicationRuntime::CanvasSession* session = static_cast<ApplicationRuntime::CanvasSession*>(sessionPtr);
     if (!session) return;
     
@@ -255,7 +251,7 @@ void CanvasSessionController::rotateSessionIdea(void* sessionPtr) {
 // Upload Management
 // ============================================================================
 
-void CanvasSessionController::updateUploadButtonForSession(void* sessionPtr) {
+void ClientWorkspaceController::updateUploadButtonForSession(void* sessionPtr) {
     ApplicationRuntime::CanvasSession* session = static_cast<ApplicationRuntime::CanvasSession*>(sessionPtr);
     if (!session) return;
     
@@ -264,7 +260,7 @@ void CanvasSessionController::updateUploadButtonForSession(void* sessionPtr) {
     }
 }
 
-void CanvasSessionController::clearUploadTracking(void* sessionPtr) {
+void ClientWorkspaceController::clearUploadTracking(void* sessionPtr) {
     ApplicationRuntime::CanvasSession* session = static_cast<ApplicationRuntime::CanvasSession*>(sessionPtr);
     if (!session) return;
     
@@ -285,7 +281,7 @@ void CanvasSessionController::clearUploadTracking(void* sessionPtr) {
     }
 }
 
-void* CanvasSessionController::sessionForActiveUpload() {
+void* ClientWorkspaceController::sessionForActiveUpload() {
     if (!m_mainWindow->getActiveUploadSessionIdentity().isEmpty()) {
         if (void* sessionPtr = findCanvasSession(m_mainWindow->getActiveUploadSessionIdentity())) {
             return sessionPtr;
@@ -302,7 +298,7 @@ void* CanvasSessionController::sessionForActiveUpload() {
     return nullptr;
 }
 
-void* CanvasSessionController::sessionForUploadId(const QString& uploadId) {
+void* ClientWorkspaceController::sessionForUploadId(const QString& uploadId) {
     if (!uploadId.isEmpty()) {
         const QString identity = m_mainWindow->getUploadSessionByUploadId(uploadId);
         if (!identity.isEmpty()) {

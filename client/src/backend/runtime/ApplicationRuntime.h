@@ -13,13 +13,14 @@
 #include "backend/runtime/RuntimeProfile.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 
-class CanvasSessionController;
+class ClientWorkspaceController;
 class ClientListBuilder;
 class ClientListEventHandler;
 class ConnectionManager;
 class FileManager;
 class FileWatcher;
 class ICanvasHost;
+class IncomingSessionOrphanWatchdog;
 class NotificationCenter;
 class ProjectManager;
 class CanvasMedia;
@@ -45,7 +46,7 @@ struct RemoteClientState;
 class ApplicationRuntime final : public QObject
 {
     Q_OBJECT
-    friend class CanvasSessionController;
+    friend class ClientWorkspaceController;
     friend class TimerController;
 
 public:
@@ -53,7 +54,8 @@ public:
                                 QObject* parent = nullptr);
     ~ApplicationRuntime() override;
 
-    using CanvasSession = SessionManager::CanvasSession;
+    using ClientWorkspace = SessionManager::ClientWorkspace;
+    using CanvasSession = ClientWorkspace;
 
     void handleApplicationAboutToQuit();
     ScreenNavigationManager* getNavigationManager() const { return m_navigationManager; }
@@ -143,6 +145,10 @@ public:
     bool remoteBusy() const { return m_remoteBusy; }
     bool canCloseActiveSession() const;
     bool canDeleteActiveProject() const;
+    bool canCreateActiveProject() const;
+    bool canLaunchActiveSession() const;
+    bool activeProjectExists() const;
+    bool activeRemoteSessionExists() const;
     bool closingActiveSession() const { return m_closingActiveSession; }
     void setQmlWindowVisible(bool visible);
 
@@ -152,6 +158,8 @@ public:
     void navigateToHistory();
     void toggleConnectionEnabled();
     void closeActiveSession();
+    void createActiveProject();
+    void launchActiveSession();
     void deleteActiveProjectConfirmed();
 
     bool getAutoUploadImportedMedia() const;
@@ -224,7 +232,12 @@ private:
                                         const QString& status);
     void clearRemoteSessionRuntimeState(const QString& targetEndpointId,
                                         bool connectionLost);
-    void finishDeferredProjectDeletion(const QString& targetEndpointId);
+    void clearDeletedProjectFromWorkspace(const QString& targetEndpointId);
+    void destroyWorkspaceCanvasIfUnused(const QString& targetEndpointId);
+    void updateWorkspaceCapabilities(const QString& targetEndpointId);
+    void armIncomingSessionOrphanWatchdog();
+    void cancelIncomingSessionOrphanWatchdogIfResumed(
+        const QJsonObject& envelope);
     void retryPendingTeardownAcks();
     void removeRuntimeCanvasSession(const QString& targetEndpointId);
     void refreshProjectClientList();
@@ -254,7 +267,7 @@ private:
     ScreenEventHandler* m_screenEventHandler = nullptr;
     UploadEventHandler* m_uploadEventHandler = nullptr;
     ClientListEventHandler* m_clientListEventHandler = nullptr;
-    CanvasSessionController* m_canvasSessionController = nullptr;
+    ClientWorkspaceController* m_canvasSessionController = nullptr;
     TimerController* m_timerController = nullptr;
     UploadSignalConnector* m_uploadSignalConnector = nullptr;
     UploadManager* m_uploadManager = nullptr;
@@ -265,6 +278,8 @@ private:
 
     QTimer* m_statusUpdateTimer = nullptr;
     QTimer* m_displaySyncTimer = nullptr;
+    IncomingSessionOrphanWatchdog* m_incomingSessionOrphanWatchdog = nullptr;
+    QSet<QString> m_incomingOrphanSessionIds;
     int m_lastConnectedClientCount = 0;
     QString m_activeSessionIdentity;
     ClientInfo m_thisClient;
@@ -297,9 +312,6 @@ private:
     QHash<QString, QString> m_remoteSessionOpenTargetByRequestId;
     QSet<QString> m_remoteSessionOpenPendingTargets;
     QSet<QString> m_remoteSessionOpenSuppressedTargets;
-    QSet<QString> m_reopenAfterSessionCloseTargets;
-    QSet<QString> m_disconnectPendingTargets;
-    QSet<QString> m_deleteAfterSessionCloseTargets;
     QSet<QString> m_locallyTerminatingRemoteSessions;
 
     struct PendingTeardownAck {
@@ -319,6 +331,7 @@ private:
     QHash<QString, PendingRendererTeardown> m_pendingRendererTeardowns;
     QHash<QString, PendingTeardownAck> m_pendingTeardownAcks;
     QSet<QString> m_terminalRendererPendingSessionIds;
+    QSet<QString> m_terminalIncomingSessionFilter;
     QString m_terminalIncomingCleanupReason;
     bool m_terminalIncomingCleanupActive = false;
     bool m_terminalIncomingCacheTeardownStarted = false;

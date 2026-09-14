@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QFile>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QSettings>
 #include <QTemporaryDir>
@@ -51,6 +52,7 @@ private slots:
     void manifestCases();
     void normalBootPreservesDurableStateAndPurgesCache();
     void corruptComponentsAreResetIndependently();
+    void versionTwoProjectStoreIsResetInIsolation();
     void mismatchedStorageNeverTouchesExternalSource();
     void runtimesHaveIndependentSettingsCachesAndIdentities();
     void unsafeRuntimeRootFailsClosed();
@@ -179,6 +181,57 @@ void RuntimeStorageBootstrapTest::corruptComponentsAreResetIndependently()
     DeviceIdentityStore repaired(RuntimeProfile::identityLocation(), false, context.profileId);
     QVERIFY2(repaired.initialize(&error), qPrintable(error));
     QVERIFY(repaired.isReady());
+}
+
+void RuntimeStorageBootstrapTest::versionTwoProjectStoreIsResetInIsolation()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const RuntimeProfileContext context = temporaryContext(directory.path());
+    RuntimeStorageBootstrap bootstrap(context);
+    QVERIFY(bootstrap.run().succeeded());
+
+    QSettings settings(RuntimeProfile::settingsFilePath(), QSettings::IniFormat);
+    settings.setValue(QStringLiteral("serverUrl"),
+                      QStringLiteral("ws://127.0.0.1:9191"));
+    settings.setValue(QStringLiteral("autoUploadImportedMedia"), true);
+    settings.sync();
+    DeviceIdentityStore identity(RuntimeProfile::identityLocation(), false,
+                                 context.profileId);
+    QString error;
+    QVERIFY2(identity.initialize(&error), qPrintable(error));
+    const QString installationId = identity.installationId();
+    const QString historyPath = QDir(context.rootPath).filePath(
+        QStringLiteral("data/history-v2.json"));
+    const QString securityCachePath = QDir(context.rootPath).filePath(
+        QStringLiteral("data/security-cache.json"));
+    QVERIFY(writeBytes(historyPath, QByteArrayLiteral("history")));
+    QVERIFY(writeBytes(securityCachePath, QByteArrayLiteral("security")));
+    QVERIFY(writeBytes(RuntimeProfile::projectsFilePath(),
+                       QJsonDocument(QJsonObject{
+                           {QStringLiteral("schemaVersion"), 2},
+                           {QStringLiteral("projects"), QJsonArray{}}})
+                           .toJson(QJsonDocument::Compact)));
+
+    const auto result = bootstrap.run();
+    QVERIFY(result.succeeded());
+    QCOMPARE(result.resetCategories,
+             QStringList{QStringLiteral("projects")});
+    QCOMPARE(RuntimeProfile::readSettings()
+                 .value(QStringLiteral("serverUrl")).toString(),
+             QStringLiteral("ws://127.0.0.1:9191"));
+    DeviceIdentityStore restored(RuntimeProfile::identityLocation(), false,
+                                 context.profileId);
+    QVERIFY2(restored.initialize(&error), qPrintable(error));
+    QCOMPARE(restored.installationId(), installationId);
+    QVERIFY(QFileInfo::exists(historyPath));
+    QVERIFY(QFileInfo::exists(securityCachePath));
+
+    QFile projects(RuntimeProfile::projectsFilePath());
+    QVERIFY(projects.open(QIODevice::ReadOnly));
+    const QJsonObject root = QJsonDocument::fromJson(projects.readAll()).object();
+    QCOMPARE(root.value(QStringLiteral("schemaVersion")).toInt(), 3);
+    QVERIFY(root.value(QStringLiteral("projects")).toArray().isEmpty());
 }
 
 void RuntimeStorageBootstrapTest::mismatchedStorageNeverTouchesExternalSource()

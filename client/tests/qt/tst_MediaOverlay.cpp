@@ -5,11 +5,14 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QScopeGuard>
+#include <QTemporaryDir>
 #include <QtTest>
 
 #include "frontend/rendering/canvas/MediaListModel.h"
+#include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 #include "frontend/qml/CanvasSessionViewModel.h"
+#include "frontend/qml/MediaSettingsViewModel.h"
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
 
@@ -23,6 +26,7 @@ private slots:
     void segmentedStatusKeepsSingleTopBorder();
     void mediaPanelVisibilityAnchorInteractionAndScroll();
     void mediaCountTracksRealCanvasInsertions();
+    void typedCapabilitiesGuardDirectCppInvocations();
     void overlayButtonHoverIsImmediate();
     void canvasToolbarUsesOverlaySwitchAndSegmentedTools();
     void mediaSettingsPanelRestoresLegacyTabsAndBindings();
@@ -111,15 +115,19 @@ Item {
 
     QtObject {
         id: fakeSession
+        property bool hasProject: true
         property var mediaModel: host.externalModel
         property int mediaCount: host.testMediaCount
         property string remoteSceneActionText: "Launch Remote Scene"
         property bool remoteSceneActionEnabled: true
+        property string remoteSceneUnavailableReason: ""
         property string testSceneActionText: "Launch Test Scene"
         property bool testSceneActionEnabled: true
+        property string testSceneUnavailableReason: ""
         property string uploadActionText: "Upload"
         property int uploadActionTone: 0
         property bool uploadActionEnabled: true
+        property string uploadUnavailableReason: ""
         function selectMedia(mediaId, additive) { host.selectionCalls += 1 }
         function toggleRemoteScene() {}
         function toggleTestScene() {}
@@ -275,7 +283,13 @@ Item {
     QtObject {
         id: fakeSession
         property bool settingsVisible: false
-        property bool actionsEnabled: true
+        property bool hasProject: true
+        property bool mediaEditingEnabled: true
+        property bool canvasNavigation: true
+        property bool textCreation: true
+        property string canvasNavigationUnavailableReason: ""
+        property string mediaEditingUnavailableReason: ""
+        property string textCreationUnavailableReason: ""
         property string activeTool: "selection"
         function setActiveTool(tool) { activeTool = tool }
     }
@@ -445,7 +459,8 @@ void MediaOverlayTest::mediaPanelVisibilityAnchorInteractionAndScroll()
     QVERIFY(QTest::qWaitForWindowExposed(&window));
     harness->setSize(window.size());
     QCoreApplication::processEvents();
-    QVERIFY(!panel->isVisible());
+    QVERIFY(panel->isVisible());
+    QVERIFY(!list->isVisible());
 
     QVariantList rows;
     rows.append(QVariantMap{{QStringLiteral("mediaId"), QStringLiteral("media-0")},
@@ -500,9 +515,10 @@ void MediaOverlayTest::mediaCountTracksRealCanvasInsertions()
     QString error;
     std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
     QVERIFY2(host, qPrintable(error));
+    host->setProjectEditingEnabled(true);
     CanvasSessionViewModel session(
         QStringLiteral("media-count-session"), host.get(), [] {}, nullptr,
-        [] { return false; }, [] { return true; });
+        [] { return false; }, [] { return true; }, [] { return true; });
     QSignalSpy countChanged(&session, &CanvasSessionViewModel::mediaCountChanged);
     std::unique_ptr<QQuickItem> harness(
         createRealMediaPanelHarness(engine, window, &session, &error));
@@ -516,13 +532,100 @@ void MediaOverlayTest::mediaCountTracksRealCanvasInsertions()
     harness->setSize(window.size());
     QCoreApplication::processEvents();
     QCOMPARE(session.mediaCount(), 0);
-    QVERIFY(!panel->isVisible());
+    QVERIFY(panel->isVisible());
     QVERIFY(host->document()->addText(QPointF(100, 100)));
     QCOMPARE(session.mediaCount(), 1);
     QVERIFY(countChanged.count() >= 1);
     QTRY_VERIFY(panel->isVisible());
     QCOMPARE(qRound(panel->x() + panel->width()), window.width() - 10);
     QCOMPARE(qRound(panel->y() + panel->height()), window.height() - 10);
+}
+
+void MediaOverlayTest::typedCapabilitiesGuardDirectCppInvocations()
+{
+    QString error;
+    std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+    QVERIFY2(host, qPrintable(error));
+    bool projectExists = false;
+    int uploadInvocations = 0;
+    ClientWorkspaceViewModel workspace(
+        QStringLiteral("capability-workspace"), host.get(),
+        [&uploadInvocations] { ++uploadInvocations; }, nullptr,
+        [] { return false; }, [] { return true; },
+        [&projectExists] { return projectExists; });
+
+    QVERIFY(workspace.canvasNavigation());
+    QVERIFY(!workspace.mediaEditingEnabled());
+    QVERIFY(!workspace.textCreation());
+    QVERIFY(!workspace.fileDrop());
+    QVERIFY(!workspace.localTest());
+    QVERIFY(!workspace.mediaSync());
+    QVERIFY(!workspace.remoteScene());
+    QCOMPARE(workspace.mediaEditingUnavailableReason(),
+             QStringLiteral("Create a project first"));
+    QCOMPARE(workspace.textCreationUnavailableReason(),
+             QStringLiteral("Create a project first"));
+    QCOMPARE(workspace.fileDropUnavailableReason(),
+             QStringLiteral("Create a project first"));
+    QCOMPARE(workspace.mediaSyncUnavailableReason(),
+             QStringLiteral("Create a project first"));
+
+    workspace.setActiveTool(QStringLiteral("text"));
+    QCOMPARE(host->currentTool(), ICanvasHost::Tool::Selection);
+    host->controller()->handleTextCreateRequested(10, 10);
+    QVERIFY(host->document()->media().isEmpty());
+
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString imagePath = temporary.filePath(QStringLiteral("drop.png"));
+    QImage image(8, 8, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::red);
+    QVERIFY(image.save(imagePath));
+    const QVariantList urls{QUrl::fromLocalFile(imagePath)};
+    QVERIFY(!workspace.beginFileDrag(urls, 20, 20));
+    QVERIFY(!host->controller()->beginLocalFileDrag(urls, 20, 20));
+    workspace.toggleRemoteScene();
+    workspace.toggleTestScene();
+    workspace.triggerUploadAction();
+    QCOMPARE(uploadInvocations, 0);
+    QVERIFY(!host->remoteSceneLaunched());
+    QVERIFY(!host->testSceneLaunched());
+
+    projectExists = true;
+    host->setProjectEditingEnabled(true);
+    workspace.refreshCapabilities();
+    QVERIFY(workspace.mediaEditingEnabled());
+    QVERIFY(workspace.textCreation());
+    QVERIFY(workspace.fileDrop());
+    QVERIFY(!workspace.mediaSync());
+    QCOMPARE(workspace.mediaSyncUnavailableReason(),
+             QStringLiteral("Launch a remote session first"));
+
+    host->controller()->handleTextCreateRequested(10, 10);
+    QCOMPARE(host->document()->media().size(), 1);
+    CanvasMedia* media = host->document()->media().first();
+    QVERIFY(media);
+    host->controller()->selectMedia(media->mediaId());
+    auto* settings = qobject_cast<MediaSettingsViewModel*>(
+        workspace.mediaSettings());
+    QVERIFY(settings);
+    QVERIFY(settings->available());
+    settings->setOpacityText(QStringLiteral("75"));
+    QCOMPARE(media->settings().opacityText, QStringLiteral("75"));
+    QVERIFY(workspace.localTest());
+
+    host->setOverlayActionsEnabled(true);
+    workspace.refreshCapabilities();
+    QVERIFY(workspace.mediaSync());
+
+    projectExists = false;
+    host->setProjectEditingEnabled(false);
+    workspace.refreshCapabilities();
+    QVERIFY(!settings->available());
+    settings->setOpacityText(QStringLiteral("25"));
+    QCOMPARE(media->settings().opacityText, QStringLiteral("75"));
+    host->controller()->handleOverlayDelete(media->mediaId());
+    QCOMPARE(host->document()->media().size(), 1);
 }
 
 void MediaOverlayTest::overlayButtonHoverIsImmediate()
@@ -591,9 +694,10 @@ void MediaOverlayTest::mediaSettingsPanelRestoresLegacyTabsAndBindings()
     QString error;
     std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
     QVERIFY2(host, qPrintable(error));
+    host->setProjectEditingEnabled(true);
     CanvasSessionViewModel session(
         QStringLiteral("media-settings-session"), host.get(), [] {}, nullptr,
-        [] { return false; }, [] { return true; });
+        [] { return false; }, [] { return true; }, [] { return true; });
     std::unique_ptr<QQuickItem> harness(
         createMediaSettingsHarness(engine, window, &session, &error));
     QVERIFY2(harness, qPrintable(error));
@@ -789,17 +893,10 @@ void MediaOverlayTest::mediaSettingsPanelRestoresLegacyTabsAndBindings()
     QTest::keyClick(&window, Qt::Key_Return);
     QTRY_COMPARE(media->settings().opacityText, QStringLiteral("100"));
 
-    const QPoint borderCheckCenter = textBorderWidthCheck->mapToScene(
-        QPointF(textBorderWidthCheck->width() / 2.0,
-                textBorderWidthCheck->height() / 2.0)).toPoint();
-    const QPoint borderFieldCenter = textBorderWidthField->mapToScene(
-        QPointF(textBorderWidthField->width() / 2.0,
-                textBorderWidthField->height() / 2.0)).toPoint();
-    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
-                      borderCheckCenter);
+    QVERIFY(QMetaObject::invokeMethod(textBorderWidthCheck, "click"));
     QTRY_VERIFY(media->outlineWidthOverrideEnabled());
-    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
-                      borderFieldCenter);
+    QVERIFY(QMetaObject::invokeMethod(textBorderWidthField, "activate"));
+    QTRY_VERIFY(textBorderWidthField->hasActiveFocus());
     QTest::keyClick(&window, Qt::Key_1);
     QTest::keyClick(&window, Qt::Key_0);
     QTest::keyClick(&window, Qt::Key_0);
@@ -809,8 +906,7 @@ void MediaOverlayTest::mediaSettingsPanelRestoresLegacyTabsAndBindings()
                  QStringLiteral("textOutlineWidthPercent")).toDouble(),
              100.0);
 
-    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier,
-                      borderCheckCenter);
+    QVERIFY(QMetaObject::invokeMethod(textBorderWidthCheck, "click"));
     QTRY_VERIFY(!media->outlineWidthOverrideEnabled());
     QCOMPARE(media->outlineWidthPercent(), 100.0);
     QTRY_COMPARE(textBorderWidthField->property("draftText").toString(),

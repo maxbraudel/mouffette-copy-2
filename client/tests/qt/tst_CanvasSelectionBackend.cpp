@@ -20,6 +20,7 @@ struct Fixture {
     {
         QString error;
         if (!controller.initialize(&error)) return false;
+        controller.setProjectEditingEnabled(true);
         view.resize(1000, 700);
         view.setResizeMode(QQuickView::SizeRootObjectToView);
         view.setSource(QUrl(QStringLiteral(

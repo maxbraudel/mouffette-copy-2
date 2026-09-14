@@ -44,6 +44,7 @@ private slots:
     void acceptsPublicPlainWebSocketUrl();
     void acceptsBothWebSocketSchemesForRuntimeUrlEdits();
     void rejectsInvalidHiddenDeadlineOrdering();
+    void validatesIncomingSessionOrphanTimeoutFromCli();
     void warnsAndIgnoresUnknownNamespacedEnvKey();
 };
 
@@ -58,6 +59,7 @@ void AppConfigTest::loadsEmbeddedDefaults() {
     QCOMPARE(config.serverUrl(), QStringLiteral("ws://localhost:8080"));
     QCOMPARE(config.remoteSessionHiddenTimeoutMs(), qint64(60000));
     QCOMPARE(config.projectHiddenRetentionMs(), qint64(300000));
+    QCOMPARE(config.incomingSessionOrphanTimeoutMs(), qint64(3000));
     QCOMPARE(config.uploadConcurrency(), 2);
     QVERIFY(config.allowMultipleInstances());
     QVERIFY(!config.cursorDebug());
@@ -255,6 +257,24 @@ void AppConfigTest::rejectsInvalidHiddenDeadlineOrdering() {
     QString error;
     QVERIFY(!config.load(options, &error));
     QVERIFY(error.contains(QStringLiteral("must be greater")));
+}
+
+void AppConfigTest::validatesIncomingSessionOrphanTimeoutFromCli() {
+    AppConfig::LoadOptions options = isolatedOptions(QString());
+    options.arguments << QStringLiteral("--incoming-session-orphan-timeout-ms=4250");
+
+    AppConfig config;
+    QString error;
+    QVERIFY2(config.load(options, &error), qPrintable(error));
+    QCOMPARE(config.incomingSessionOrphanTimeoutMs(), qint64(4250));
+    QCOMPARE(config.provenance(AppConfig::Key::IncomingSessionOrphanTimeoutMs),
+             QStringLiteral("cli:--incoming-session-orphan-timeout-ms"));
+
+    options.arguments = {QStringLiteral("tst_AppConfig"),
+                         QStringLiteral("--incoming-session-orphan-timeout-ms=999")};
+    error.clear();
+    QVERIFY(!config.load(options, &error));
+    QVERIFY(error.contains(QStringLiteral("MOUFFETTE_INCOMING_SESSION_ORPHAN_TIMEOUT_MS")));
 }
 
 void AppConfigTest::warnsAndIgnoresUnknownNamespacedEnvKey() {

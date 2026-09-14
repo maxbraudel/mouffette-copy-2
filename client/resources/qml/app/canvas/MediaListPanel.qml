@@ -12,12 +12,12 @@ Rectangle {
     readonly property int mediaRowHeight: 54
     readonly property int actionAreaHeight: Theme.overlayButtonHeight * 3
 
-    visible: mediaCount > 0
+    visible: session && session.hasProject
     enabled: visible
     width: Math.min(420, Math.max(220, implicitWidth))
     height: Math.min(parent ? Math.max(0, parent.height - 20)
-                            : mediaCount * mediaRowHeight + actionAreaHeight,
-                     mediaCount * mediaRowHeight + actionAreaHeight)
+                            : Math.max(1, mediaCount) * mediaRowHeight + actionAreaHeight,
+                     (mediaCount > 0 ? mediaCount * mediaRowHeight : 0) + actionAreaHeight)
     radius: Theme.overlayRadius
     color: Theme.overlayBackground
     border.width: 1
@@ -33,6 +33,7 @@ Rectangle {
             objectName: "mediaList"
             width: parent.width
             height: Math.max(0, root.height - root.actionAreaHeight)
+            visible: root.mediaCount > 0
             model: root.mediaModel
             clip: true
             boundsBehavior: Flickable.StopAtBounds
@@ -97,6 +98,7 @@ Rectangle {
                 text: root.session ? root.session.remoteSceneActionText : "Launch Remote Scene"
                 tone: OverlayActionButton.Remote
                 enabled: root.session && root.session.remoteSceneActionEnabled
+                unavailableReason: root.session ? root.session.remoteSceneUnavailableReason : ""
                 onClicked: root.session.toggleRemoteScene()
             }
             OverlayActionButton {
@@ -105,6 +107,7 @@ Rectangle {
                 text: root.session ? root.session.testSceneActionText : "Launch Test Scene"
                 tone: OverlayActionButton.Test
                 enabled: root.session && root.session.testSceneActionEnabled
+                unavailableReason: root.session ? root.session.testSceneUnavailableReason : ""
                 onClicked: root.session.toggleTestScene()
             }
             OverlayActionButton {
@@ -113,6 +116,7 @@ Rectangle {
                 text: root.session ? root.session.uploadActionText : "Upload"
                 tone: root.session ? root.session.uploadActionTone : OverlayActionButton.Normal
                 enabled: root.session && root.session.uploadActionEnabled
+                unavailableReason: root.session ? root.session.uploadUnavailableReason : ""
                 onClicked: root.session.triggerUploadAction()
             }
         }

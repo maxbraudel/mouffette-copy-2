@@ -253,7 +253,9 @@ void QuickCanvasHost::updateRemoteSceneTargetFromClientList(
 void QuickCanvasHost::setScreens(const QList<ScreenInfo>& screens)
 {
     m_document->setScreens(screens);
-    if (m_controller) m_controller->ensureInitialFit();
+    // A topology replacement never owns the camera. Initial fitting is an
+    // explicit workspace transition; subsequent screen changes must preserve
+    // the project's absolute coordinates and viewport exactly.
     publishActionState();
 }
 
@@ -309,8 +311,18 @@ void QuickCanvasHost::setOverlayActionsEnabled(bool enabled)
     publishActionState();
 }
 
+void QuickCanvasHost::setProjectEditingEnabled(bool enabled)
+{
+    if (m_projectEditingEnabled == enabled) return;
+    m_projectEditingEnabled = enabled;
+    if (!enabled && m_tool == Tool::Text) setCurrentTool(Tool::Selection);
+    if (m_controller) m_controller->setProjectEditingEnabled(enabled);
+    publishActionState();
+}
+
 void QuickCanvasHost::setCurrentTool(Tool tool)
 {
+    if (tool == Tool::Text && !m_projectEditingEnabled) return;
     if (m_tool == tool || m_document->editsLocked()) return;
     m_tool = tool;
     if (m_controller) m_controller->setTextToolActive(tool == Tool::Text);
@@ -321,7 +333,7 @@ bool QuickCanvasHost::remoteSceneActionEnabled() const
 {
     if (m_sceneLaunching || m_sceneStopping) return false;
     if (m_sceneLaunched) return true;
-    return m_actionsEnabled && m_contentAvailable && m_webSocket
+    return m_projectEditingEnabled && m_actionsEnabled && m_contentAvailable && m_webSocket
         && m_webSocket->isConnected() && !m_targetClientId.isEmpty()
         && m_document->hasActiveScreens() && !m_document->media().isEmpty()
         && (!m_uploadManager || !m_uploadManager->isBusy());
@@ -330,7 +342,7 @@ bool QuickCanvasHost::remoteSceneActionEnabled() const
 bool QuickCanvasHost::testSceneActionEnabled() const
 {
     return m_testSceneLaunched
-        || (m_actionsEnabled && !m_sceneLaunching && !m_sceneStopping
+        || (m_projectEditingEnabled && !m_sceneLaunching && !m_sceneStopping
             && !m_sceneLaunched && !m_document->media().isEmpty());
 }
 

@@ -7,6 +7,7 @@ AbstractButton {
 
     property bool primary: false
     property bool destructive: false
+    property string unavailableReason: ""
 
     implicitWidth: Math.max(Theme.controlMinWidth, label.implicitWidth + 24)
     implicitHeight: Theme.controlHeight
@@ -15,6 +16,9 @@ AbstractButton {
 
     Accessible.role: Accessible.Button
     Accessible.name: text
+    Accessible.description: control.enabled ? "" : unavailableReason
+    ToolTip.visible: hovered && !enabled && unavailableReason.length > 0
+    ToolTip.text: unavailableReason
 
     contentItem: Text {
         id: label
