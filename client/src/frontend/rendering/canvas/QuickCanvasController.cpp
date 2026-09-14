@@ -8,6 +8,12 @@
 #include "frontend/rendering/remote/RemoteVideoFrameItem.h"
 #include "frontend/ui/notifications/ToastNotificationSystem.h"
 
+#ifdef Q_OS_MACOS
+#include "backend/platform/macos/MacVideoThumbnailer.h"
+#elif defined(Q_OS_WIN)
+#include "backend/platform/windows/WindowsVideoThumbnailer.h"
+#endif
+
 #include <QFileInfo>
 #include <QImageReader>
 #include <QMetaObject>
@@ -24,6 +30,41 @@ constexpr qreal kSnapDistancePx = 10.0;
 constexpr qreal kCornerSnapDistancePx = 20.0;
 constexpr qreal kSnapReleaseFactor = 1.4;
 constexpr qreal kSnapEpsilon = 1e-5;
+
+QImage limitedPreviewImage(QImage image)
+{
+    constexpr int maximumEdge = 2048;
+    if (image.isNull()
+        || (image.width() <= maximumEdge && image.height() <= maximumEdge)) {
+        return image;
+    }
+    return image.scaled(QSize(maximumEdge, maximumEdge),
+                        Qt::KeepAspectRatio, Qt::SmoothTransformation);
+}
+
+QSize nativeVideoDimensions(const QString& path)
+{
+#ifdef Q_OS_MACOS
+    return MacVideoThumbnailer::videoDimensions(path);
+#elif defined(Q_OS_WIN)
+    return WindowsVideoThumbnailer::videoDimensions(path);
+#else
+    Q_UNUSED(path);
+    return {};
+#endif
+}
+
+QImage nativeVideoFirstFrame(const QString& path)
+{
+#ifdef Q_OS_MACOS
+    return limitedPreviewImage(MacVideoThumbnailer::firstFrame(path));
+#elif defined(Q_OS_WIN)
+    return limitedPreviewImage(WindowsVideoThumbnailer::firstFrame(path));
+#else
+    Q_UNUSED(path);
+    return {};
+#endif
+}
 
 QVariantMap guide(qreal x1, qreal y1, qreal x2, qreal y2)
 {
@@ -1457,9 +1498,15 @@ bool QuickCanvasController::beginLocalFileDrag(const QVariantList& urls,
     m_dropVideo = validation.kind == MediaFilePolicy::Kind::Mp4Video;
     m_dropCenter = mapViewPointToScene({viewX, viewY});
     if (m_dropVideo) {
-        m_dropNativeSize = QSize(1920, 1080);
-        m_dropFrame = QImage(640, 360, QImage::Format_RGB32);
-        m_dropFrame.fill(Qt::black);
+        // Validation has already decoded one frame with the same Qt/FFmpeg
+        // backend used for playback. Reuse it: immediately opening the file a
+        // second time through Media Foundation is timing-dependent on Windows.
+        m_dropNativeSize = validation.videoSize;
+        m_dropFrame = limitedPreviewImage(validation.videoFirstFrame);
+        if (m_dropNativeSize.isEmpty() || m_dropFrame.isNull()) {
+            m_dropNativeSize = nativeVideoDimensions(path);
+            m_dropFrame = nativeVideoFirstFrame(path);
+        }
     } else {
         QImageReader reader(path);
         reader.setAutoTransform(true);

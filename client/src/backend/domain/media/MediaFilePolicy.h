@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QImage>
 #include <QList>
 #include <QSize>
 #include <QString>
@@ -16,6 +17,8 @@ enum class Kind {
 struct ValidationResult {
     Kind kind = Kind::Unsupported;
     QSize imageSize;
+    QSize videoSize;
+    QImage videoFirstFrame;
     quint64 decodedRgbaBytes = 0;
     QString errorCode;
 

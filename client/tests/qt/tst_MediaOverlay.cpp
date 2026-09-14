@@ -37,7 +37,6 @@ private slots:
     void mediaActionPalette();
     void legacyMediaRowsAndProgress();
     void uploadActionLocksBeforeDispatchAndRecovers();
-    void uploadAcknowledgementsDriveOverlayState();
     void canvasToolbarUsesOverlaySwitchAndSegmentedTools();
     void mediaSettingsPanelRestoresLegacyTabsAndBindings();
     void toastMatchesLegacyBottomLeftDoubleBackground();

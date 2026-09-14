@@ -60,6 +60,12 @@ enum class VideoFrameProbeResult {
     TimedOut
 };
 
+struct VideoFrameProbe {
+    VideoFrameProbeResult result = VideoFrameProbeResult::Failed;
+    QSize frameSize;
+    QImage firstFrame;
+};
+
 // QMediaFormat only reports advertised codec capability.  It cannot prove
 // that this concrete sample table and mdat payload can be consumed.  Use the
 // same Qt Multimedia pipeline as rendering (QT_MEDIA_BACKEND=ffmpeg in the
@@ -67,16 +73,18 @@ enum class VideoFrameProbeResult {
 // is stack-owned, the source is detached before returning, and the nested loop
 // has a hard deadline so corrupt media cannot leave a decoder or file handle
 // alive indefinitely.
-VideoFrameProbeResult decodeFirstMp4Frame(const QString& path)
+VideoFrameProbe decodeFirstMp4Frame(const QString& path)
 {
     if (!QCoreApplication::instance()
         || !QAbstractEventDispatcher::instance(QThread::currentThread())) {
-        return VideoFrameProbeResult::Failed;
+        return {};
     }
 
     bool decoded = false;
     bool failed = false;
     bool timedOut = false;
+    QSize frameSize;
+    QImage firstFrame;
     QEventLoop eventLoop;
     QTimer deadline;
     deadline.setSingleShot(true);
@@ -88,6 +96,8 @@ VideoFrameProbeResult decodeFirstMp4Frame(const QString& path)
     QObject::connect(&sink, &QVideoSink::videoFrameChanged, &eventLoop,
                      [&](const QVideoFrame& frame) {
         if (!frame.isValid()) return;
+        firstFrame = frame.toImage();
+        frameSize = firstFrame.isNull() ? frame.size() : firstFrame.size();
         decoded = true;
         eventLoop.quit();
     });
@@ -128,9 +138,11 @@ VideoFrameProbeResult decodeFirstMp4Frame(const QString& path)
     player.stop();
     player.setVideoOutput(nullptr);
     player.setSource(QUrl());
-    if (decoded) return VideoFrameProbeResult::Decoded;
-    return timedOut ? VideoFrameProbeResult::TimedOut
-                    : VideoFrameProbeResult::Failed;
+    if (decoded) {
+        return {VideoFrameProbeResult::Decoded, frameSize, firstFrame};
+    }
+    return {timedOut ? VideoFrameProbeResult::TimedOut
+                     : VideoFrameProbeResult::Failed, {}, {}};
 }
 
 bool readExactly(QFile& file, quint64 offset, qsizetype size, QByteArray& bytes) {
@@ -727,15 +739,17 @@ ValidationResult validateLocalFile(const QString& path, quint64 preparedImageByt
             return result;
         }
 
-        const VideoFrameProbeResult frameProbe =
+        const VideoFrameProbe frameProbe =
             decodeFirstMp4Frame(info.canonicalFilePath());
-        if (frameProbe != VideoFrameProbeResult::Decoded) {
-            result.errorCode = frameProbe == VideoFrameProbeResult::TimedOut
+        if (frameProbe.result != VideoFrameProbeResult::Decoded) {
+            result.errorCode = frameProbe.result == VideoFrameProbeResult::TimedOut
                 ? QStringLiteral("video_decode_timeout")
                 : QStringLiteral("video_decode_failed");
             return result;
         }
         result.kind = Kind::Mp4Video;
+        result.videoSize = frameProbe.frameSize;
+        result.videoFirstFrame = frameProbe.firstFrame;
         return result;
     }
 

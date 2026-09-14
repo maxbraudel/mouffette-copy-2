@@ -117,10 +117,22 @@ QImage decodeExactFirstFrame(const QString& path) {
     reader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
 
     UINT32 nativeRotation = MFVideoRotationFormat_0;
+    UINT32 nativeWidth = 0;
+    UINT32 nativeHeight = 0;
+    UINT32 parNumerator = 1;
+    UINT32 parDenominator = 1;
     ComPtr<IMFMediaType> nativeType;
     if (SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
                                               &nativeType))) {
         nativeType->GetUINT32(MF_MT_VIDEO_ROTATION, &nativeRotation);
+        MFGetAttributeSize(nativeType.Get(), MF_MT_FRAME_SIZE,
+                           &nativeWidth, &nativeHeight);
+        if (FAILED(MFGetAttributeRatio(nativeType.Get(), MF_MT_PIXEL_ASPECT_RATIO,
+                                       &parNumerator, &parDenominator))
+            || parNumerator == 0 || parDenominator == 0) {
+            parNumerator = 1;
+            parDenominator = 1;
+        }
     }
 
     ComPtr<IMFMediaType> requestedType;
@@ -193,6 +205,22 @@ QImage decodeExactFirstFrame(const QString& path) {
         }
         buffer->Unlock();
         if (SUCCEEDED(copyResult)) {
+            // Media Foundation may expose the decoder's macroblock-aligned
+            // buffer (for example 1920x1088 for visible 1920x1080 video).
+            // Never leak those padding rows into the canvas geometry/poster.
+            if (nativeWidth > 0 && nativeHeight > 0
+                && (nativeWidth < width || nativeHeight < height)) {
+                image = image.copy(0, 0,
+                                   qMin<int>(nativeWidth, image.width()),
+                                   qMin<int>(nativeHeight, image.height()));
+            }
+            if (parNumerator != parDenominator && parDenominator > 0) {
+                const int displayWidth = qMax(1, qRound(image.width()
+                    * static_cast<double>(parNumerator) / parDenominator));
+                image = image.scaled(displayWidth, image.height(),
+                                     Qt::IgnoreAspectRatio,
+                                     Qt::SmoothTransformation);
+            }
             if (nativeRotation == MFVideoRotationFormat_90
                 || nativeRotation == MFVideoRotationFormat_180
                 || nativeRotation == MFVideoRotationFormat_270) {
