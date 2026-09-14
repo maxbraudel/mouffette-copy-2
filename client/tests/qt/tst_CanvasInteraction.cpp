@@ -9,6 +9,7 @@
 #include <QQmlEngine>
 #include <QQuickWindow>
 #include <QPointer>
+#include <QRectF>
 #include <QRegularExpression>
 #include <QSignalSpy>
 #include <QStyleHints>
@@ -33,6 +34,12 @@ public:
     int textCreateCount = 0;
     int clearRequestCount = 0;
     QString error;
+    bool emulateResizePublication = false;
+    int resizePublicationCount = 0;
+    QString pendingResizeId;
+    QRectF originalResizeRect;
+    QRectF pendingResizeRect;
+    qreal resizeBaseWidth = 0.0;
 
     bool initialize()
     {
@@ -54,6 +61,9 @@ public:
         connect(root, SIGNAL(textCommitRequested(QString,QString)), this, SLOT(commit(QString,QString)));
         connect(root, SIGNAL(textLiveUpdateRequested(QString,QString)), this, SLOT(liveText(QString,QString)));
         connect(root, SIGNAL(mediaMoveEnded(QString,double,double,bool)), this, SLOT(move(QString,double,double,bool)));
+        connect(root, SIGNAL(mediaResizeRequested(QString,QString,double,double,bool,bool)),
+                this, SLOT(captureResize(QString,QString,double,double,bool,bool)));
+        connect(root, SIGNAL(mediaResizeEnded(QString)), this, SLOT(publishResize(QString)));
         connect(root, SIGNAL(textCreateRequested(double,double)), this, SLOT(createText(double,double)));
         window.show();
         if (!QTest::qWaitForWindowExposed(&window)) return false;
@@ -209,6 +219,70 @@ public slots:
             if (entry.value("mediaId") == id) { entry["x"] = x; entry["y"] = y; value = entry; found = true; }
         }
         if (found) publish();
+    }
+    void captureResize(const QString& id, const QString& handle,
+                       double x, double y, bool, bool altPressed)
+    {
+        if (!emulateResizePublication) return;
+        if (handle != QStringLiteral("bottom-right") || altPressed) {
+            error = QStringLiteral("Unexpected resize variant in test backend");
+            return;
+        }
+
+        const QVariantMap item = entry(id);
+        if (item.isEmpty()) {
+            error = QStringLiteral("Resize requested for absent media %1").arg(id);
+            return;
+        }
+        if (pendingResizeId.isEmpty()) {
+            pendingResizeId = id;
+            resizeBaseWidth = item.value("width").toDouble();
+            const qreal scale = item.value("scale").toDouble();
+            originalResizeRect = QRectF(item.value("x").toDouble(),
+                                        item.value("y").toDouble(),
+                                        resizeBaseWidth * scale,
+                                        item.value("height").toDouble() * scale);
+        }
+        if (pendingResizeId != id) {
+            error = QStringLiteral("Concurrent resize in test backend");
+            return;
+        }
+
+        const qreal widthFactor = (x - originalResizeRect.left())
+                                / qMax<qreal>(1.0, originalResizeRect.width());
+        const qreal heightFactor = (y - originalResizeRect.top())
+                                 / qMax<qreal>(1.0, originalResizeRect.height());
+        const qreal factor = qMax<qreal>(1.0 / qMax(originalResizeRect.width(),
+                                                    originalResizeRect.height()),
+                                         qMax(widthFactor, heightFactor));
+        pendingResizeRect = QRectF(originalResizeRect.topLeft(),
+                                   originalResizeRect.size() * factor);
+        root->setProperty("liveResizeActive", true);
+        root->setProperty("liveResizeMediaId", id);
+        root->setProperty("liveResizeX", pendingResizeRect.x());
+        root->setProperty("liveResizeY", pendingResizeRect.y());
+        root->setProperty("liveResizeScale", pendingResizeRect.width() / resizeBaseWidth);
+    }
+    void publishResize(const QString& id)
+    {
+        if (!emulateResizePublication) return;
+        if (id != pendingResizeId || pendingResizeRect.isEmpty()) {
+            error = QStringLiteral("Resize ended without pending geometry for %1").arg(id);
+            return;
+        }
+
+        const QRectF committed = pendingResizeRect;
+        const qreal baseWidth = resizeBaseWidth;
+        pendingResizeId.clear();
+        originalResizeRect = {};
+        pendingResizeRect = {};
+        resizeBaseWidth = 0.0;
+        root->setProperty("liveResizeActive", false);
+        root->setProperty("liveResizeMediaId", QString());
+        root->setProperty("liveResizeScale", 1.0);
+        ++resizePublicationCount;
+        change(id, {{"x", committed.x()}, {"y", committed.y()},
+                    {"scale", committed.width() / baseWidth}});
     }
     void createText(double viewX, double viewY)
     {
@@ -491,6 +565,9 @@ private slots:
         QCoreApplication::processEvents();
         QTest::mouseMove(&scene.window, {400, 340});
         QCoreApplication::processEvents();
+        // More than two watchdog ticks: a real held resize must not be
+        // mistaken for the orphaned state repaired by the recovery path.
+        QTest::qWait(260);
         const QString activeMode = scene.root->property("interactionMode").toString();
         const QString activeOwner = scene.root->property("interactionOwnerId").toString();
         QTest::mouseMove(&scene.window, {420, 355});
@@ -513,6 +590,128 @@ private slots:
         scene.clear();
         scene.click({240, 230});
         QCOMPARE(scene.selected, QStringList {"a"});
+    }
+
+    void orphanedInactiveResizeIsRecoveredBeforeMediaInput()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", "text", 100, 150);
+        scene.click({240, 230});
+        auto* coordinator = scene.root->findChild<QObject*>("canvasInputCoordinator");
+        auto* chrome = scene.root->findChild<QQuickItem*>("canvasSelectionChrome");
+        QVERIFY(coordinator);
+        QVERIFY(chrome);
+        QSignalSpy ended(scene.root, SIGNAL(mediaResizeEnded(QString)));
+
+        // Reproduce a native ungrab whose QML active=false callback was lost:
+        // the logical resize/interacting latches survive, but no DragHandler
+        // actually owns a point anymore.
+        coordinator->setProperty("primaryGestureActive", true);
+        coordinator->setProperty("primaryOwnerKind", "handle");
+        coordinator->setProperty("primaryOwnerMediaId", "a");
+        coordinator->setProperty("mode", "resize");
+        coordinator->setProperty("ownerId", "a");
+        chrome->setProperty("activeResizeMediaId", "a");
+        chrome->setProperty("activeResizeHandleId", "bottom-right");
+        chrome->setProperty("interacting", true);
+        QVERIFY(!chrome->property("resizeHandlerActive").toBool());
+
+        QTRY_COMPARE_WITH_TIMEOUT(scene.root->property("interactionMode").toString(),
+                                  QString("idle"), 600);
+        QTRY_VERIFY_WITH_TIMEOUT(!chrome->property("interacting").toBool(), 600);
+        QVERIFY(!coordinator->property("primaryGestureActive").toBool());
+        QCOMPARE(ended.size(), 1);
+
+        scene.drag({240, 230}, {300, 270});
+        QCOMPARE(scene.entry("a").value("x").toDouble(), 160.0);
+        QCOMPARE(scene.entry("a").value("y").toDouble(), 190.0);
+        scene.doubleClick({300, 270});
+        QTRY_VERIFY(scene.visual("a")->property("editing").toBool());
+    }
+
+    void resizedTextCanMoveAndEditAfterGeometryPublication()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.emulateResizePublication = true;
+        scene.add("a", "text", 100, 150);
+        scene.click({240, 230});
+
+        // Resize publication is synchronous from mediaResizeEnded, matching
+        // QuickCanvasController's re-entrant model update.
+        scene.drag({380, 320}, {440, 365});
+        QVERIFY2(scene.error.isEmpty(), qPrintable(scene.error));
+        QCOMPARE(scene.resizePublicationCount, 1);
+        const double resizedScale = scene.entry("a").value("scale").toDouble();
+        QVERIFY(resizedScale > 1.2);
+        QCOMPARE(scene.root->property("interactionMode").toString(), QString("idle"));
+
+        scene.drag({240, 230}, {300, 270});
+        QCOMPARE(scene.entry("a").value("x").toDouble(), 160.0);
+        QCOMPARE(scene.entry("a").value("y").toDouble(), 190.0);
+        QCOMPARE(scene.entry("a").value("scale").toDouble(), resizedScale);
+        scene.doubleClick({300, 270});
+        QTRY_VERIFY(scene.visual("a")->property("editing").toBool());
+    }
+
+    void tinySelectedTextKeepsEditableDraggableCenter()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("tiny", "text", 100, 150);
+        scene.change("tiny", {{"width", 32.0}, {"height", 24.0}});
+        const QPoint center(116, 162);
+        scene.click(center);
+        QCOMPARE(scene.selected, QStringList {"tiny"});
+
+        QSignalSpy resized(scene.root, SIGNAL(mediaResizeRequested(QString,QString,double,double,bool,bool)));
+        QSignalSpy moved(scene.root, SIGNAL(mediaMoveStarted(QString,double,double,bool)));
+        scene.drag(center, {136, 177});
+        QCOMPARE(moved.size(), 1);
+        QCOMPARE(resized.size(), 0);
+        QCOMPARE(scene.entry("tiny").value("x").toDouble(), 120.0);
+        QCOMPARE(scene.entry("tiny").value("y").toDouble(), 165.0);
+
+        scene.doubleClick({136, 177});
+        QTRY_VERIFY(scene.visual("tiny")->property("editing").toBool());
+    }
+
+    void hidingWindowDuringResizeReleasesCanvas()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", "text", 100, 150);
+        scene.click({240, 230});
+        auto* chrome = scene.root->findChild<QQuickItem*>("canvasSelectionChrome");
+        QVERIFY(chrome);
+
+        QTest::mousePress(&scene.window, Qt::LeftButton, Qt::NoModifier, {380, 320});
+        QCoreApplication::processEvents();
+        QTest::mouseMove(&scene.window, {420, 350});
+        QCoreApplication::processEvents();
+        QCOMPARE(scene.root->property("interactionMode").toString(), QString("resize"));
+        QVERIFY(chrome->property("interacting").toBool());
+
+        // Window deactivation/hide is a common way for the native release to
+        // be consumed outside the QQuickWindow.
+        scene.window.hide();
+        QCoreApplication::processEvents();
+        QTRY_COMPARE_WITH_TIMEOUT(scene.root->property("interactionMode").toString(),
+                                  QString("idle"), 600);
+        QVERIFY(!chrome->property("interacting").toBool());
+
+        scene.window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&scene.window));
+        scene.root->setSize(scene.window.size());
+        QTest::mouseRelease(&scene.window, Qt::LeftButton, Qt::NoModifier, {420, 350});
+        QCoreApplication::processEvents();
+
+        scene.drag({240, 230}, {280, 260});
+        QCOMPARE(scene.entry("a").value("x").toDouble(), 140.0);
+        QCOMPARE(scene.entry("a").value("y").toDouble(), 180.0);
+        scene.doubleClick({280, 260});
+        QTRY_VERIFY(scene.visual("a")->property("editing").toBool());
     }
 
     void emptyCanvasClearsSelectionExactlyOnce()

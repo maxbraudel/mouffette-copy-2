@@ -13,6 +13,7 @@ Item {
 
     QtObject {
         id: coordinator
+        objectName: "canvasInputCoordinator"
 
         property string mode: "idle"
         property string ownerId: ""
@@ -117,16 +118,17 @@ Item {
         }
 
         function releaseMediaOwnership(mediaId) {
-            // Removing an old delegate must not reset another item's newer
-            // interaction (for example after a model change in a callback).
+            // The logical mode and the native press have different lifetimes.
+            // A delegate or resize session can disappear while the global
+            // PointHandler still owns the physical press; keep that ownership
+            // until the router observes release/cancel so another handler
+            // cannot steal the remainder of the same gesture.
             if (!mediaId)
                 return
             if (ownerId === mediaId) {
                 mode = "idle"
                 ownerId = ""
             }
-            if (primaryOwnerMediaId === mediaId)
-                resetPrimaryOwner()
         }
 
         function ownerAllowsCanvasPan(active) {

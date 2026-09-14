@@ -15,6 +15,12 @@ Item {
     property int handleSize: 10
     property int handleHitboxSize: 24
     property bool interacting: false
+    // `interacting` is application state; DragHandler.active is the native
+    // pointer lease. CanvasRoot compares both so a lost ungrab cannot leave
+    // the whole canvas permanently blocked after a resize.
+    readonly property bool resizeHandlerActive: globalResizeDrag.active
+    readonly property bool resizeLeftButtonPressed:
+        (globalResizeDrag.centroid.pressedButtons & Qt.LeftButton) !== 0
     property var handleDefs: [
         { ux: 0.0, uy: 0.0, handleId: "top-left" },
         { ux: 0.5, uy: 0.0, handleId: "top-mid" },
@@ -173,7 +179,18 @@ Item {
                 var handleDef = handleDefs[i]
                 var cx = rect.x + handleDef.ux * rect.width
                 var cy = rect.y + handleDef.uy * rect.height
-                if (Math.abs(viewX - cx) <= radius && Math.abs(viewY - cy) <= radius) {
+                // Keep the full hit target outside the item, while capping its
+                // inward reach to one quarter of a small item. The eight
+                // handles therefore never consume its central body: even a
+                // tiny selected text remains draggable and editable.
+                var innerRadiusX = Math.min(radius, rect.width * 0.25)
+                var innerRadiusY = Math.min(radius, rect.height * 0.25)
+                var leftRadius = handleDef.ux === 0.0 ? radius : innerRadiusX
+                var rightRadius = handleDef.ux === 1.0 ? radius : innerRadiusX
+                var topRadius = handleDef.uy === 0.0 ? radius : innerRadiusY
+                var bottomRadius = handleDef.uy === 1.0 ? radius : innerRadiusY
+                if (viewX >= cx - leftRadius && viewX <= cx + rightRadius
+                        && viewY >= cy - topRadius && viewY <= cy + bottomRadius) {
                     return {
                         mediaId: geom.mediaId,
                         handleId: handleDef.handleId,
@@ -226,7 +243,11 @@ Item {
         // hover must not enable a full-canvas drag handler after deselection.
         containmentMask: QtObject {
             function contains(p: point): bool {
-                return root.hitTestHandle(p.x, p.y) !== null
+                var hit = root.hitTestHandle(p.x, p.y)
+                return hit !== null
+                    && !!root.inputCoordinator
+                    && root.inputCoordinator.canStartResize(
+                        globalResizeDrag.active, hit.mediaId)
             }
         }
     }
@@ -239,8 +260,11 @@ Item {
         acceptedButtons: Qt.LeftButton
         cursorShape: root.effectiveResizeCursorShape
         grabPermissions: PointerHandler.CanTakeOverFromAnything
-        enabled: globalResizeDrag.active
-                 || (!!root.inputCoordinator && root.inputCoordinator.isIdle())
+        // Keep observation stable for the whole native gesture. Binding
+        // enabled to `active || coordinator.isIdle()` could disable the
+        // handler on release while the coordinator was still in resize mode,
+        // before onActiveChanged(false) had cleared that mode.
+        enabled: !!root.inputCoordinator
         dragThreshold: 0
 
         onActiveChanged: {
@@ -279,7 +303,14 @@ Item {
         }
 
         onCanceled: {
-            root.finishResizeSession(false)
+            root.finishResizeSession(true)
+        }
+
+        onGrabChanged: function(transition, point) {
+            if (transition === PointerDevice.CancelGrabExclusive)
+                root.finishResizeSession(true)
+            else if (transition === PointerDevice.UngrabExclusive)
+                root.finishResizeSession(false)
         }
 
         onTranslationChanged: {

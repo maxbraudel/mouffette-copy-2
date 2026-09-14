@@ -88,7 +88,8 @@ Item {
         onTapped: function(eventPoint) {
             if (tapCount !== 2 || !activeCoordinator || !delegateItem)
                 return
-            if (!activeCoordinator.canActivateMediaAtScenePoint(delegateItem.currentMediaId,
+            var mediaId = delegateItem.currentMediaId
+            if (!activeCoordinator.canActivateMediaAtScenePoint(mediaId,
                                                                  eventPoint.scenePosition.x,
                                                                  eventPoint.scenePosition.y))
                 return
@@ -96,7 +97,19 @@ Item {
             if (!item || typeof item.fireDoubleClick !== "function")
                 return
             var additive = (eventPoint.modifiers & Qt.ShiftModifier) !== 0
-            item.fireDoubleClick(additive)
+            // Selection publication crosses the C++ document projection. Make
+            // it explicit, then enter the editor on the following event turn so
+            // TextEditSession always observes the selected media.
+            if (rootController
+                    && typeof rootController.requestMediaSelection === "function")
+                rootController.requestMediaSelection(mediaId, additive)
+            Qt.callLater(function() {
+                if (!delegateItem || delegateItem.currentMediaId !== mediaId)
+                    return
+                var currentItem = mediaContentItem
+                if (currentItem && typeof currentItem.fireDoubleClick === "function")
+                    currentItem.fireDoubleClick(additive)
+            })
         }
     }
 

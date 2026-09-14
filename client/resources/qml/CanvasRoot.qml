@@ -178,6 +178,52 @@ Rectangle {
         function onPresentationChanged() { root.synchronizeTransientState() }
     }
 
+    function abandonResizeInteraction(reason) {
+        if (!inputLayer || !inputLayer.inputCoordinator)
+            return
+
+        var coordinator = inputLayer.inputCoordinator
+        if (selectionChrome
+                && (selectionChrome.interacting
+                    || selectionChrome.activeResizeMediaId !== ""))
+            selectionChrome.finishResizeSession(true)
+        if (coordinator.mode === "resize")
+            coordinator.forceReset((reason || "lifecycle") + ":stale-resize")
+        else if (coordinator.primaryGestureActive)
+            coordinator.endPrimaryGesture()
+    }
+
+    // A window/app transition can consume the mouse release before Qt sends it
+    // back to the canvas. Close the resize locally at that lifecycle boundary;
+    // a later native ungrab is harmless because the finalizer is idempotent.
+    Connections {
+        target: root.hostingWindow
+        ignoreUnknownSignals: true
+
+        function onActiveChanged() {
+            if (root.hostingWindow && !root.hostingWindow.active)
+                root.abandonResizeInteraction("window-deactivated")
+        }
+
+        function onVisibilityChanged() {
+            if (!root.hostingWindow)
+                return
+            var visibility = root.hostingWindow.visibility
+            if (visibility === Window.Hidden || visibility === Window.Minimized)
+                root.abandonResizeInteraction("window-hidden")
+        }
+    }
+
+    Connections {
+        target: Qt.application
+        ignoreUnknownSignals: true
+
+        function onStateChanged() {
+            if (Qt.application.state !== Qt.ApplicationActive)
+                root.abandonResizeInteraction("application-suspended")
+        }
+    }
+
     onMediaSelectRequested: (mediaId, additive) => canvasController?.handleMediaSelectRequested(mediaId, additive)
     onClearSelectionRequested: () => canvasController?.handleClearSelectionRequested()
     onMediaMoveStarted: (mediaId, x, y, snap) => canvasController?.handleMediaMoveStarted(mediaId, x, y, snap)
@@ -463,6 +509,24 @@ Rectangle {
         var mode = coordinator.mode
         var owner = coordinator.ownerId || ""
 
+        // Repair the physical press lease independently from the logical mode.
+        // A native cancel can leave the store behind even when no move/resize
+        // session remains.
+        if (coordinator.primaryGestureActive && !primaryGestureRouter.active)
+            coordinator.endPrimaryGesture()
+
+        // `interacting` alone is not proof that Qt still owns the pointer. A
+        // resize whose exclusive grab vanished must be committed/closed once,
+        // otherwise every media DragHandler stays disabled indefinitely.
+        if (selectionChrome
+                && (selectionChrome.interacting
+                    || selectionChrome.activeResizeMediaId !== "")
+                && !selectionChrome.resizeHandlerActive) {
+            selectionChrome.finishResizeSession(true)
+            mode = coordinator.mode
+            owner = coordinator.ownerId || ""
+        }
+
         if (mode === "idle")
             return
 
@@ -478,13 +542,22 @@ Rectangle {
         }
 
         if (mode === "resize") {
-            if (!selectionChrome || !selectionChrome.interacting || owner === "" || !mediaModelContainsId(owner)) {
+            var resizeHealthy = !!selectionChrome
+                && selectionChrome.interacting
+                && selectionChrome.resizeHandlerActive
+                && selectionChrome.resizeLeftButtonPressed
+                && owner !== ""
+                && selectionChrome.activeResizeMediaId === owner
+                && mediaModelContainsId(owner)
+            if (!resizeHealthy) {
                 // The global handle survives deletion of its media delegate.
                 // Close its session (and backend resize) before releasing the
                 // pointer, instead of leaving hidden chrome state behind.
-                if (selectionChrome && owner !== "" && selectionChrome.activeResizeMediaId === owner)
+                if (selectionChrome
+                        && (selectionChrome.interacting
+                            || selectionChrome.activeResizeMediaId !== ""))
                     selectionChrome.finishResizeSession(true)
-                else
+                if (coordinator.mode === "resize")
                     coordinator.forceReset(reason + ":stale-resize")
             }
             return
@@ -945,6 +1018,7 @@ Rectangle {
 
             SelectionChrome {
                 id: selectionChrome
+                objectName: "canvasSelectionChrome"
                 anchors.fill: parent
                 contentItem: viewport.contentRootItem
                 viewportItem: viewport
