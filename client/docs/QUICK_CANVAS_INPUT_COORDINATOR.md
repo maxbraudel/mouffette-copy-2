@@ -28,8 +28,10 @@ release/cancellation, including presses which enter or leave text editing.
 2. Finish an editor when the press targets another item, a handle or the background.
 3. `beginPrimaryGesture()` chooses **handle > media > canvas** once.
 4. The same decision controls background deselection and media ownership.
-5. A media press selects once; exceeding the drag threshold starts a move using
-   the original press anchor. A double tap may open the selected text's editor.
+5. A media press selects once; the single viewport-level move handler exceeds
+   the drag threshold and starts a move using the original press anchor. Image,
+   video and text renderers never participate in move ownership. A double tap
+   may open the selected text's editor.
 6. Release/cancellation clears the primary owner. Native drag handlers close
    their own granted mode; cleanup of an old item must not reset a newer owner.
 

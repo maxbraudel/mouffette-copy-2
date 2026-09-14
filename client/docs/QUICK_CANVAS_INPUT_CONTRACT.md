@@ -23,6 +23,8 @@ Ownership is established at gesture start and remains stable until gesture end/c
 - Media selection is triggered on primary press.
 - Drag start does not re-select when the same gesture already started on that media.
 - Selection changes are published through selection chrome model updates.
+- One viewport-level move handler owns all media types; renderer delegates never
+  own the native move grab.
 
 ## Drag Anchor Contract
 

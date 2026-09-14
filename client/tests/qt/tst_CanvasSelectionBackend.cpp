@@ -504,6 +504,12 @@ private slots:
                              start + (end - start) * step / 5,
                              10);
             QCoreApplication::processEvents();
+            if (step == 1) {
+                QTRY_VERIFY(root->property("mediaMoveHandlerActive").toBool());
+                QCOMPARE(root->property("activeMoveMediaId").toString(),
+                         media->mediaId());
+                QVERIFY(delegate->property("moveHandlerActive").toBool());
+            }
         }
         QTest::mouseRelease(&fixture.view, Qt::LeftButton,
                             Qt::NoModifier, end);

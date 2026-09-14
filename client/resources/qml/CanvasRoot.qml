@@ -117,6 +117,8 @@ Rectangle {
                                           ? inputLayer.inputCoordinator.ownerId
                                           : ""
     property int activeMediaDragCount: 0
+    readonly property bool mediaMoveHandlerActive: globalMediaDrag.active
+    readonly property string activeMoveMediaId: globalMediaDrag.activeMoveMediaId
     property string pendingInputReconcileReason: ""
     // True while any text media item is in text-edit mode. Used to disable canvas
     // pan so parent DragHandlers don't interfere with TextEdit cursor placement.
@@ -347,67 +349,7 @@ Rectangle {
     }
 
     function finishActiveMoveInteraction(reason) {
-        if (!inputLayer || !inputLayer.inputCoordinator)
-            return false
-
-        var coordinator = inputLayer.inputCoordinator
-        var mediaId = coordinator.mode === "move"
-            ? (coordinator.ownerId || "") : ""
-        if (!mediaId)
-            mediaId = liveDragMediaId
-        if (!mediaId) {
-            var hadMoveState = coordinator.mode === "move"
-                || activeMediaDragCount > 0 || liveDragMediaId !== ""
-            if (!hadMoveState)
-                return false
-            activeMediaDragCount = 0
-            liveDragMediaId = ""
-            liveDragViewOffsetX = 0.0
-            liveDragViewOffsetY = 0.0
-            if (coordinator.mode === "move")
-                coordinator.endMove("")
-            return true
-        }
-
-        var delegateItem = mediaDelegateById(mediaId)
-        var finalized = false
-        if (delegateItem && typeof delegateItem.finishMoveInteraction === "function")
-            finalized = delegateItem.finishMoveInteraction(mediaId)
-
-        // Normalize the root latches even if a delegate disappeared part-way
-        // through cancellation. If its finalizer was unavailable, still tell
-        // the backend to close its drag transaction using the last known
-        // document position.
-        var finalX = delegateItem ? delegateItem.effectiveLocalX : 0.0
-        var finalY = delegateItem ? delegateItem.effectiveLocalY : 0.0
-        if (!finalized && !delegateItem) {
-            for (var i = 0; i < mediaModel.length; ++i) {
-                var entry = mediaModel[i]
-                if (entry && entry.mediaId === mediaId) {
-                    finalX = entry.x || 0.0
-                    finalY = entry.y || 0.0
-                    break
-                }
-            }
-        }
-
-        activeMediaDragCount = 0
-        liveDragMediaId = ""
-        liveDragViewOffsetX = 0.0
-        liveDragViewOffsetY = 0.0
-        if (coordinator.mode === "move") {
-            if (coordinator.ownerId === "" || coordinator.ownerId === mediaId)
-                coordinator.endMove(mediaId)
-            else
-                coordinator.forceReset((reason || "recovery") + ":stale-move")
-        }
-
-        // The delegate finalizer already published after releasing all of its
-        // own latches. In the fallback path, publish only now: model updates
-        // re-enter the watchdog synchronously.
-        if (!finalized)
-            root.mediaMoveEnded(mediaId, finalX, finalY, false)
-        return true
+        return globalMediaDrag.finishMoveSession(reason || "recovery")
     }
 
     function canStartCanvasPan(panActive) {
@@ -623,8 +565,8 @@ Rectangle {
                     && liveDragMediaId === owner
                     && mediaModelContainsId(owner)
                     && !!moveDelegate
-                    && moveDelegate.moveHandlerActive
-                    && moveDelegate.activeMoveMediaId === owner
+                    && globalMediaDrag.active
+                    && globalMediaDrag.activeMoveMediaId === owner
             if (!moveHealthy) {
                 finishActiveMoveInteraction(reason)
             }
@@ -851,8 +793,8 @@ Rectangle {
                 anchors.fill: parent
 
                 // Each media item is a native QML Item with its own local x/y/scale.
-                // A DragHandler lives here (inside contentRoot, which has scale:viewScale)
-                // so DragHandler translation is already in scene coordinates — no C++ per frame.
+                // The viewport-level globalMediaDrag owns movement so image,
+                // video and text delegates all follow the same input path.
                 Repeater {
                     id: mediaRepeater
                     // Use the stable C++ QAbstractListModel so that move/resize
@@ -875,11 +817,13 @@ Rectangle {
                     readonly property real effectiveScale: usesLiveAltResize ? root.liveAltResizeScale
                                                          : (usesLiveResize ? root.liveResizeScale : localScale)
                     readonly property string currentMediaId: media ? (media.mediaId || "") : ""
-                    readonly property bool moveHandlerActive: mediaInteraction.active
-                    readonly property string activeMoveMediaId: mediaInteraction.activeMoveMediaId
+                    readonly property bool moveHandlerActive: root.mediaMoveHandlerActive
+                                                              && root.activeMoveMediaId === currentMediaId
+                    readonly property string activeMoveMediaId: moveHandlerActive
+                                                                 ? root.activeMoveMediaId : ""
 
-                    function finishMoveInteraction(expectedMediaId) {
-                        return mediaInteraction.finishMoveSession(expectedMediaId || currentMediaId)
+                    function scheduleSnapFreezeCleanup() {
+                        snapFreezeCleanupTimer.restart()
                     }
 
                     // Derived from selectionChromeModel — NOT from media.selected.
@@ -942,8 +886,8 @@ Rectangle {
                     }
 
                     Component.onDestruction: {
-                        if (mediaInteraction)
-                            mediaInteraction.releaseOrphanedDrag()
+                        if (root.activeMoveMediaId === currentMediaId)
+                            root.finishActiveMoveInteraction("delegate-destroyed")
                     }
 
                     readonly property bool usesLiveResize: root.liveResizeActive
@@ -989,15 +933,8 @@ Rectangle {
                         z: 10
                         rootController: root
                         coordinatorRef: inputLayer ? inputLayer.inputCoordinator : null
-                        textToolActive: root.textToolActive
-                        selectionInteracting: selectionChrome ? selectionChrome.interacting : false
-                        selectionHandlePriorityActive: inputLayer ? inputLayer.selectionHandlePriorityActive : false
-                        contentRootRef: viewport ? viewport.contentRootItem : null
                         delegateItem: mediaDelegate
                         mediaContentItem: mediaContentLoader.item
-                        onRequestSnapFreezeCleanup: {
-                            snapFreezeCleanupTimer.restart()
-                        }
                     }
 
                     MediaVisual {
@@ -1171,6 +1108,198 @@ Rectangle {
             liveDragMediaId: root.liveDragMediaId
             onTextCreateRequested: function(viewX, viewY) {
                 root.textCreateRequested(viewX, viewY)
+            }
+
+            // A single native handler owns every media move. Keeping the grab
+            // above renderer delegates makes movement independent from Image,
+            // VideoOutput, poster-frame and TextEdit subtree lifecycles.
+            Item {
+                id: mediaMoveInputSurface
+                anchors.fill: parent
+
+                containmentMask: QtObject {
+                    function contains(p: point): bool {
+                        if (!inputLayer.inputCoordinator || root.textToolActive
+                                || selectionChrome.interacting)
+                            return false
+                        if (selectionChrome.hitTestHandle(p.x, p.y))
+                            return false
+                        var mediaId = root.mediaIdAtPoint(p.x, p.y)
+                        if (!mediaId)
+                            return false
+                        var editor = textEditSession.activeEditor
+                        return !editor || editor.mediaId !== mediaId
+                    }
+                }
+            }
+
+            DragHandler {
+                id: globalMediaDrag
+                parent: mediaMoveInputSurface
+                target: null
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                acceptedButtons: Qt.LeftButton
+                grabPermissions: PointerHandler.CanTakeOverFromAnything
+                enabled: true
+                dragThreshold: 4
+
+                property real pressMediaX: 0.0
+                property real pressMediaY: 0.0
+                property real pressPointerContentX: 0.0
+                property real pressPointerContentY: 0.0
+                property real pressPointerViewX: 0.0
+                property real pressPointerViewY: 0.0
+                property real lastLocalX: 0.0
+                property real lastLocalY: 0.0
+                property bool lastSnapRequested: false
+                property string activeMoveMediaId: ""
+
+                function resetMoveState() {
+                    pressMediaX = 0.0
+                    pressMediaY = 0.0
+                    pressPointerContentX = 0.0
+                    pressPointerContentY = 0.0
+                    pressPointerViewX = 0.0
+                    pressPointerViewY = 0.0
+                    lastLocalX = 0.0
+                    lastLocalY = 0.0
+                    lastSnapRequested = false
+                }
+
+                function modelPosition(mediaId) {
+                    for (var i = 0; i < root.mediaModel.length; ++i) {
+                        var entry = root.mediaModel[i]
+                        if (entry && entry.mediaId === mediaId)
+                            return Qt.point(entry.x || 0.0, entry.y || 0.0)
+                    }
+                    return Qt.point(lastLocalX, lastLocalY)
+                }
+
+                function finishMoveSession(reason) {
+                    var coordinator = inputLayer.inputCoordinator
+                    var mediaId = activeMoveMediaId
+                    if (!mediaId && coordinator && coordinator.mode === "move")
+                        mediaId = coordinator.ownerId || ""
+                    if (!mediaId)
+                        mediaId = root.liveDragMediaId
+
+                    var hadMoveState = mediaId !== ""
+                        || root.activeMediaDragCount > 0
+                        || root.liveDragMediaId !== ""
+                        || (coordinator && coordinator.mode === "move")
+                    if (!hadMoveState) {
+                        resetMoveState()
+                        return false
+                    }
+
+                    var delegateItem = root.mediaDelegateById(mediaId)
+                    var fallback = modelPosition(mediaId)
+                    var finalX = delegateItem ? delegateItem.effectiveLocalX : fallback.x
+                    var finalY = delegateItem ? delegateItem.effectiveLocalY : fallback.y
+                    var snapAtEnd = lastSnapRequested
+                    var needsSnapCleanup = root.liveSnapDragActive
+                        && root.liveSnapDragMediaId === mediaId
+
+                    // Clear every QML latch before publishing the synchronous
+                    // backend commit. Model notifications may re-enter the
+                    // watchdog from inside mediaMoveEnded().
+                    activeMoveMediaId = ""
+                    if (delegateItem)
+                        delegateItem.localDragging = false
+                    root.activeMediaDragCount = 0
+                    root.liveDragMediaId = ""
+                    root.liveDragViewOffsetX = 0.0
+                    root.liveDragViewOffsetY = 0.0
+
+                    if (coordinator && coordinator.mode === "move") {
+                        if (coordinator.ownerId === "" || coordinator.ownerId === mediaId)
+                            coordinator.endMove(mediaId)
+                        else
+                            coordinator.forceReset((reason || "recovery") + ":stale-move")
+                    }
+
+                    if (mediaId)
+                        root.mediaMoveEnded(mediaId, finalX, finalY, snapAtEnd)
+                    if (needsSnapCleanup && delegateItem)
+                        delegateItem.scheduleSnapFreezeCleanup()
+                    resetMoveState()
+                    return true
+                }
+
+                onActiveChanged: {
+                    if (!active) {
+                        finishMoveSession("native-release")
+                        return
+                    }
+
+                    var coordinator = inputLayer.inputCoordinator
+                    if (!coordinator || selectionChrome.interacting) {
+                        activeMoveMediaId = ""
+                        return
+                    }
+                    var mediaId = coordinator.primaryOwnerMediaId || ""
+                    var delegateItem = root.mediaDelegateById(mediaId)
+                    if (!delegateItem || !coordinator.tryBeginMove(mediaId)) {
+                        activeMoveMediaId = ""
+                        return
+                    }
+
+                    var pressPoint = globalMediaDrag.centroid.scenePressPosition
+                    var pressContent = viewport.contentRootItem.mapFromItem(
+                        null, pressPoint.x, pressPoint.y)
+                    activeMoveMediaId = mediaId
+                    pressPointerContentX = pressContent.x
+                    pressPointerContentY = pressContent.y
+                    pressPointerViewX = pressPoint.x
+                    pressPointerViewY = pressPoint.y
+                    pressMediaX = delegateItem.localX
+                    pressMediaY = delegateItem.localY
+                    lastLocalX = delegateItem.localX
+                    lastLocalY = delegateItem.localY
+                    lastSnapRequested = (globalMediaDrag.centroid.modifiers
+                                         & Qt.ShiftModifier) !== 0
+
+                    delegateItem.localDragging = true
+                    root.activeMediaDragCount = 1
+                    root.liveDragMediaId = mediaId
+                    root.mediaMoveStarted(mediaId, delegateItem.localX,
+                                          delegateItem.localY,
+                                          lastSnapRequested)
+                }
+
+                onTranslationChanged: {
+                    if (!active || !activeMoveMediaId)
+                        return
+                    var delegateItem = root.mediaDelegateById(activeMoveMediaId)
+                    if (!delegateItem) {
+                        finishMoveSession("delegate-missing")
+                        return
+                    }
+
+                    var currentPoint = globalMediaDrag.centroid.scenePosition
+                    var currentContent = viewport.contentRootItem.mapFromItem(
+                        null, currentPoint.x, currentPoint.y)
+                    delegateItem.localX = pressMediaX
+                        + currentContent.x - pressPointerContentX
+                    delegateItem.localY = pressMediaY
+                        + currentContent.y - pressPointerContentY
+                    lastSnapRequested = (globalMediaDrag.centroid.modifiers
+                                         & Qt.ShiftModifier) !== 0
+                    root.mediaMoveUpdated(activeMoveMediaId,
+                                          delegateItem.localX,
+                                          delegateItem.localY,
+                                          lastSnapRequested)
+                    if (delegateItem.usesSnapDrag) {
+                        delegateItem.localX = root.liveSnapDragX
+                        delegateItem.localY = root.liveSnapDragY
+                    }
+                    lastLocalX = delegateItem.effectiveLocalX
+                    lastLocalY = delegateItem.effectiveLocalY
+                    root.liveDragViewOffsetX = currentPoint.x - pressPointerViewX
+                    root.liveDragViewOffsetY = currentPoint.y - pressPointerViewY
+                }
+
+                onCanceled: finishMoveSession("native-cancel")
             }
 
             PointHandler {
