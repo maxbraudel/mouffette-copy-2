@@ -426,6 +426,58 @@ private slots:
         QCOMPARE(editor->text(), original + "x");
     }
 
+    void doubleClickPlacesCaretNearestPointer_data()
+    {
+        QTest::addColumn<qreal>("viewScale");
+        QTest::addColumn<qreal>("panX");
+        QTest::addColumn<qreal>("panY");
+        QTest::addColumn<QString>("text");
+        QTest::addColumn<int>("targetPosition");
+        QTest::newRow("identity-single-line")
+            << qreal(1.0) << qreal(0.0) << qreal(0.0)
+            << QStringLiteral("ABCDEFGHIJKLMN") << 5;
+        QTest::newRow("zoomed-panned-multiline")
+            << qreal(1.6) << qreal(35.0) << qreal(-20.0)
+            << QStringLiteral("FIRST LINE\nSECOND LINE\nTHIRD LINE") << 17;
+    }
+
+    void doubleClickPlacesCaretNearestPointer()
+    {
+        QFETCH(qreal, viewScale);
+        QFETCH(qreal, panX);
+        QFETCH(qreal, panY);
+        QFETCH(QString, text);
+        QFETCH(int, targetPosition);
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", "text", 100, 150);
+        scene.change("a", {{"textContent", text},
+                           {"textHorizontalAlignment", "left"},
+                           {"textVerticalAlignment", "top"},
+                           {"fitToTextEnabled", false}});
+        scene.root->setProperty("viewScale", viewScale);
+        scene.root->setProperty("panX", panX);
+        scene.root->setProperty("panY", panY);
+        QCoreApplication::processEvents();
+
+        auto* visual = scene.visual("a");
+        QVERIFY(visual);
+        auto* editor = visual->findChild<QQuickTextEdit*>();
+        QVERIFY(editor);
+        const QRectF targetCursor = editor->positionToRectangle(targetPosition);
+        const QPointF editorPoint(targetCursor.x(), targetCursor.center().y());
+        const int expectedPosition = editor->positionAt(editorPoint.x(), editorPoint.y());
+        QVERIFY(expectedPosition > 0);
+        QVERIFY(expectedPosition < editor->length());
+        const QPoint clickPoint = editor->mapToScene(editorPoint).toPoint();
+        QVERIFY(QRect(QPoint(), scene.window.size()).contains(clickPoint));
+
+        scene.doubleClick(clickPoint);
+        QTRY_VERIFY(visual->property("editing").toBool());
+        QCOMPARE(editor->cursorPosition(), expectedPosition);
+        QVERIFY(editor->cursorPosition() != editor->length());
+    }
+
     void textToolCreationCanBeReselectedAndEdited()
     {
         CanvasFixture scene;

@@ -58,7 +58,13 @@ BaseMediaItem {
 
     function currentText() { return textDisplayNode.text }
 
-    onPrimaryDoubleClicked: function(mediaId, additive) {
+    function placeCursorAtScenePoint(sceneX, sceneY) {
+        var localPoint = textDisplayNode.mapFromItem(null, sceneX, sceneY)
+        var position = textDisplayNode.positionAt(localPoint.x, localPoint.y)
+        textDisplayNode.select(position, position)
+    }
+
+    onPrimaryDoubleClicked: function(mediaId, additive, hasScenePosition, sceneX, sceneY) {
         if (!root.textEditable)
             return
         root.selectRequested(mediaId, additive)
@@ -66,6 +72,8 @@ BaseMediaItem {
             root.editingSession.begin(root)
         else
             root.standaloneEditing = true
+        if (root.editing && hasScenePosition)
+            root.placeCursorAtScenePoint(sceneX, sceneY)
     }
 
     onEditingChanged: {

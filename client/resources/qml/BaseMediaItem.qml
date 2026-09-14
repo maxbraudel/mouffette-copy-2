@@ -18,13 +18,21 @@ Item {
 
     signal selectRequested(string mediaId, bool additive)
     signal primaryPressed(string mediaId, bool additive)
-    signal primaryDoubleClicked(string mediaId, bool additive)
+    signal primaryDoubleClicked(string mediaId, bool additive,
+                                bool hasScenePosition, real sceneX, real sceneY)
 
     // Called by the parent delegate's TapHandler (which sits at a higher level
     // in the scene graph and receives events before child MouseAreas).
-    function fireDoubleClick(additive) {
-        if (root.doubleClickEnabled)
-            root.primaryDoubleClicked(root.mediaId, !!additive)
+    function fireDoubleClick(additive, sceneX, sceneY) {
+        if (!root.doubleClickEnabled)
+            return
+        var hasScenePosition = typeof sceneX === "number"
+            && typeof sceneY === "number"
+            && isFinite(sceneX) && isFinite(sceneY)
+        root.primaryDoubleClicked(root.mediaId, !!additive,
+                                  hasScenePosition,
+                                  hasScenePosition ? sceneX : 0.0,
+                                  hasScenePosition ? sceneY : 0.0)
     }
 
     x: mediaX

@@ -187,7 +187,10 @@ private slots:
         QVERIFY(!initial.isEmpty());
 
         // The parent canvas forwards actual double-clicks through this method.
-        QVERIFY(QMetaObject::invokeMethod(item, "fireDoubleClick", Q_ARG(QVariant, false)));
+        QVERIFY(QMetaObject::invokeMethod(item, "fireDoubleClick",
+                                          Q_ARG(QVariant, false),
+                                          Q_ARG(QVariant, QVariant()),
+                                          Q_ARG(QVariant, QVariant())));
         QVERIFY(item->property("editing").toBool());
         QVERIFY(edit->isEnabled());
         QVERIFY(!edit->isReadOnly());

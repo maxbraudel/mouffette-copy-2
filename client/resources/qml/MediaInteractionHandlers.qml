@@ -137,9 +137,9 @@ Item {
             if (tapCount !== 2 || !activeCoordinator || !delegateItem)
                 return
             var mediaId = delegateItem.currentMediaId
-            if (!activeCoordinator.canActivateMediaAtScenePoint(mediaId,
-                                                                 eventPoint.scenePosition.x,
-                                                                 eventPoint.scenePosition.y))
+            var sceneX = eventPoint.scenePosition.x
+            var sceneY = eventPoint.scenePosition.y
+            if (!activeCoordinator.canActivateMediaAtScenePoint(mediaId, sceneX, sceneY))
                 return
             var item = mediaContentItem
             if (!item || typeof item.fireDoubleClick !== "function")
@@ -156,7 +156,7 @@ Item {
                     return
                 var currentItem = mediaContentItem
                 if (currentItem && typeof currentItem.fireDoubleClick === "function")
-                    currentItem.fireDoubleClick(additive)
+                    currentItem.fireDoubleClick(additive, sceneX, sceneY)
             })
         }
     }
