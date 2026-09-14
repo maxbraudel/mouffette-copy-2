@@ -78,13 +78,22 @@ SHA-256(canonical JSON { manifest, revision, scene })
 ```
 
 Every manifest asset must be present in the exact session generation inventory.
+If an asset is missing, the owner receives a correlated
+`scene_asset_not_validated` error before a run is created. Once the run is
+registered and the preparation request has reached the target, the server sends
+the owner an aggregate `prepare_progress` acknowledgement with
+`stage: "accepted"`; the owner waits for this barrier before reporting its own
+progress or readiness.
+
 Both endpoints then send `prepared` with a complete checklist and `armed` with
 clock uncertainty no greater than the advertised policy. After both are armed,
-the server emits `commit` for its monotonic time 4 seconds in the future. Both
-endpoints confirm the first presented frame with `started` within five seconds
-of that deadline. Clock-estimation uncertainty remains capped independently at
-50 ms; real compositor presentation may differ by up to 750 ms before the run
-is considered unsafe. A run becomes live only after both confirmations.
+the server emits `commit` for its monotonic time 500 ms in the future by default
+(`MOUFFETTE_SCENE_ACTIVATION_LEAD_MS` remains configurable up to 10 seconds).
+Both endpoints confirm the first presented frame with `started` within five
+seconds of that deadline. Clock-estimation uncertainty remains capped
+independently at 50 ms; real compositor presentation may differ by up to 750 ms
+before the run is considered unsafe. A run becomes live only after both
+confirmations.
 
 The remaining v3 scene messages are `prepare_progress`, `state_snapshot`, `stop`, and
 `stopped`. The server derives both endpoints from the session, bounds payloads,

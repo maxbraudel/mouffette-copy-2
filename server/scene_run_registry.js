@@ -55,7 +55,7 @@ function computeSceneDigest(revision, manifest, scene) {
 class SceneRunRegistry {
     constructor(options = {}) {
         this.prepareTimeoutMs = options.prepareTimeoutMs || 15_000;
-        this.activationLeadMs = options.activationLeadMs || 4_000;
+        this.activationLeadMs = options.activationLeadMs ?? 500;
         // First-frame presentation includes real compositor scheduling. It is
         // deliberately distinct from clock-estimation uncertainty: two local
         // macOS/Qt processes can share a precise clock while their visible

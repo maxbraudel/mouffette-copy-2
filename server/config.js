@@ -9,7 +9,7 @@ const DECLARATIONS = Object.freeze({
     MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS: { type: 'int', default: 750, min: 250, max: 5000 },
     MOUFFETTE_PEER_LEASE_TIMEOUT_MS: { type: 'int', default: 3000, min: 1000, max: 30000 },
     MOUFFETTE_SCENE_PREPARE_TIMEOUT_MS: { type: 'int', default: 15000, min: 1000, max: 120000 },
-    MOUFFETTE_SCENE_ACTIVATION_LEAD_MS: { type: 'int', default: 4000, min: 500, max: 10000 },
+    MOUFFETTE_SCENE_ACTIVATION_LEAD_MS: { type: 'int', default: 500, min: 500, max: 10000 },
     MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS: { type: 'int', default: 50, min: 0, max: 250 },
     MOUFFETTE_SCENE_STARTED_ACK_TIMEOUT_MS: { type: 'int', default: 5000, min: 1000, max: 15000 },
     MOUFFETTE_SCENE_MAX_START_SKEW_MS: { type: 'int', default: 750, min: 50, max: 5000 },
@@ -109,10 +109,6 @@ function loadServerConfig(options = {}) {
     if (values.MOUFFETTE_PEER_LEASE_TIMEOUT_MS
         < values.MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS * 4) {
         throw new Error('MOUFFETTE_PEER_LEASE_TIMEOUT_MS must be at least 4x the heartbeat interval');
-    }
-    if (values.MOUFFETTE_SCENE_ACTIVATION_LEAD_MS
-        <= values.MOUFFETTE_PEER_LEASE_TIMEOUT_MS) {
-        throw new Error('MOUFFETTE_SCENE_ACTIVATION_LEAD_MS must be greater than the peer lease');
     }
     if (values.MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS
         >= values.MOUFFETTE_SCENE_ACTIVATION_LEAD_MS) {

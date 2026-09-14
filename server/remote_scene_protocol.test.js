@@ -462,7 +462,6 @@ for (const invalidCase of [
         epochNow: () => wireEpoch,
         monotonicNow: () => wireMonotonic,
         prepareTimeoutMs: 15_000,
-        activationLeadMs: 4_000,
         maximumClockUncertaintyMs: 50,
     });
     const owner = addClient(server, 'owner-connection', 'A');
@@ -491,8 +490,16 @@ for (const invalidCase of [
     assert.equal(messages(target, 'scene_prepare').length, 1);
     assert.equal(messages(target, 'scene_prepare')[0].ownerEndpointId, 'A');
     assert.equal(messages(target, 'scene_prepare')[0].targetEndpointId, 'B');
+    const accepted = messages(owner, 'prepare_progress').at(-1);
+    assert.equal(accepted.aggregate, true);
+    assert.equal(accepted.stage, 'accepted');
+    assert.equal(accepted.replay, undefined);
     server.handleMessage('owner-connection', structuredClone(prepare));
     assert.equal(messages(target, 'scene_prepare').length, 1);
+    const replayedAcceptance = messages(owner, 'prepare_progress').at(-1);
+    assert.equal(replayedAcceptance.aggregate, true);
+    assert.equal(replayedAcceptance.stage, 'accepted');
+    assert.equal(replayedAcceptance.replay, true);
 
     server.handleMessage('owner-connection', envelope(session, {
         type: 'prepared', sceneRunId: 'run-wire-1', digest, success: true, checklist,
@@ -512,10 +519,10 @@ for (const invalidCase of [
     server.handleMessage('target-connection', envelope(session, {
         type: 'armed', sceneRunId: 'run-wire-1', digest, clockUncertaintyMs: 10,
     }));
-    assert.equal(messages(owner, 'commit').at(-1).activationLeadMs, 4000);
+    assert.equal(messages(owner, 'commit').at(-1).activationLeadMs, 500);
     assert.equal(messages(target, 'commit').length, 1);
-    wireEpoch += 4_000;
-    wireMonotonic += 4_000;
+    wireEpoch += 500;
+    wireMonotonic += 500;
 
     server.handleMessage('owner-connection', envelope(session, {
         type: 'started', sceneRunId: 'run-wire-1', digest, firstFramePresented: true,
@@ -601,7 +608,7 @@ for (const invalidCase of [
 {
     const server = new MouffetteServer(0);
     const owner = addClient(server, 'owner-connection', 'A');
-    addClient(server, 'target-connection', 'B');
+    const target = addClient(server, 'target-connection', 'B');
     const session = server.remoteSessions.open({
         ownerEndpointId: 'A', targetEndpointId: 'B',
         ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
@@ -618,8 +625,51 @@ for (const invalidCase of [
         type: 'scene_prepare', sceneRunId: 'run-invalid-1', revision: 1,
         digest, manifest: [asset], scene,
     }));
-    assert.equal(messages(owner, 'error').at(-1).code, 'scene_asset_not_validated');
+    const inventoryError = messages(owner, 'error').at(-1);
+    assert.equal(inventoryError.code, 'scene_asset_not_validated');
+    assert.equal(inventoryError.message,
+        'At least one media file in this scene has not been uploaded to the remote client. Upload all media before launching the scene.');
+    assert.equal(inventoryError.remoteSessionId, session.remoteSessionId);
+    assert.equal(inventoryError.generation, session.generation);
+    assert.equal(inventoryError.sceneRunId, 'run-invalid-1');
+    assert.equal(inventoryError.digest, digest);
+    assert.equal(messages(target, 'scene_prepare').length, 0);
+    assert.equal(server.sceneRuns.get('run-invalid-1'), null);
     assert.equal(server.metrics.value('scene_prepare_failed_total'), 1);
+}
+
+// If the owner cannot receive the acceptance barrier, the target must not keep
+// a preparation graph alive waiting for an owner that never became accepted.
+{
+    const server = new MouffetteServer(0);
+    const owner = addClient(server, 'ack-owner-connection', 'A');
+    const target = addClient(server, 'ack-target-connection', 'B');
+    const session = server.remoteSessions.open({
+        ownerEndpointId: 'A', targetEndpointId: 'B',
+        ownerRuntimeId: 'runtime-A', targetRuntimeId: 'runtime-B',
+        ownerConnectionGeneration: 1, targetConnectionGeneration: 1,
+    }).session;
+    session.serverBootId = server.serverBootId;
+    server.sessionAssets.set(session.remoteSessionId, new Map([[
+        asset.assetId,
+        { ...asset, remoteSessionId: session.remoteSessionId,
+            generation: session.generation,
+            ownerEndpointId: 'A', targetEndpointId: 'B', uploadId: 'ack-upload' },
+    ]]));
+    const digest = computeSceneDigest(1, [asset], scene);
+    owner.readyState = WebSocket.CLOSED;
+    server.handleMessage('ack-owner-connection', envelope(session, {
+        type: 'scene_prepare', sceneRunId: 'run-ack-failure', revision: 1,
+        digest, manifest: [asset], scene,
+    }));
+
+    const run = server.sceneRuns.get('run-ack-failure');
+    assert.equal(messages(target, 'scene_prepare').length, 1);
+    assert.equal(run.phase, SCENE_PHASES.STOPPING);
+    assert.equal(run.failed, true);
+    assert.equal(run.stopReason, 'scene_prepare_ack_delivery_failed');
+    assert.equal(messages(target, 'stop').at(-1).reason,
+        'scene_prepare_ack_delivery_failed');
 }
 
 console.log('scene protocol v3 tests passed');

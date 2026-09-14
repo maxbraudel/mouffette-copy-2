@@ -2,6 +2,7 @@
 
 #include "shared/rendering/ICanvasHost.h"
 
+#include <QJsonArray>
 #include <QMetaObject>
 #include <QPointer>
 #include <QTimer>
@@ -81,6 +82,7 @@ private:
     QJsonArray localPreparationChecklist(const QJsonObject& scene,
                                          bool* ready,
                                          QString* errorMessage) const;
+    void reportLocalScenePrepared();
     void beginScenePresentation(bool remote);
     void stopScenePresentation();
     void startPresentationBarrier();
@@ -105,11 +107,15 @@ private:
     bool m_sceneStopping = false;
     bool m_sceneLaunched = false;
     bool m_testSceneLaunched = false;
+    bool m_sceneAccepted = false;
+    bool m_localPreparedReported = false;
     bool m_sceneArmed = false;
+    bool m_sceneCommitScheduled = false;
     bool m_firstFrameReported = false;
     quint64 m_sceneRevision = 0;
     QString m_sceneRunId;
     QString m_sceneDigest;
+    QJsonArray m_localPrepareChecklist;
     QList<DraftMediaState> m_draftState;
     QObject* m_sceneContext = nullptr;
     QTimer m_sceneTimeout;

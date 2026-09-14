@@ -34,6 +34,8 @@ assert.equal(config.port, 9090);
 assert.equal(config.cursorDebug, false);
 assert.equal(config.sceneStartedAckTimeoutMs, 5000);
 assert.equal(config.sceneMaxStartSkewMs, 750);
+assert.equal(config.sceneActivationLeadMs, 4000,
+    'an explicit legacy activation lead remains supported');
 assert.ok(config.warnings.some((warning) => warning.includes('UNKNOWN_KEY')));
 
 process.env.MOUFFETTE_MISSPELLED_OPTION = 'true';
@@ -41,6 +43,14 @@ const processWarningConfig = loadServerConfig({ envFile });
 assert.ok(processWarningConfig.warnings.some(
     (warning) => warning.includes('MOUFFETTE_MISSPELLED_OPTION')));
 delete process.env.MOUFFETTE_MISSPELLED_OPTION;
+
+fs.writeFileSync(envFile, [
+    'MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS=750',
+    'MOUFFETTE_PEER_LEASE_TIMEOUT_MS=3000',
+].join('\n'));
+const defaultActivationLeadConfig = loadServerConfig({ envFile });
+assert.equal(defaultActivationLeadConfig.sceneActivationLeadMs, 500,
+    'the activation lead defaults to 500 ms even though the peer lease is longer');
 
 fs.writeFileSync(envFile, 'MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS=1000\nMOUFFETTE_PEER_LEASE_TIMEOUT_MS=3000\n');
 assert.throws(() => loadServerConfig({ envFile }), /at least 4x/);

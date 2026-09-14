@@ -16,6 +16,7 @@
 #include <QMap>
 #include <QQuickWindow>
 #include <QRegularExpression>
+#include <QStringList>
 
 #include <algorithm>
 
@@ -71,14 +72,30 @@ QuickCanvasHost::QuickCanvasHost(CanvasDocument* document,
             stopScenePresentation();
             m_sceneStopping = false;
             m_sceneLaunched = false;
+            m_sceneAccepted = false;
+            m_localPreparedReported = false;
+            m_sceneArmed = false;
+            m_sceneCommitScheduled = false;
             const QString runId = m_sceneRunId;
             m_sceneRunId.clear();
+            m_sceneDigest.clear();
+            m_localPrepareChecklist = {};
             publishActionState();
             sceneToast(NotificationSeverity::Warning,
                        QStringLiteral("Remote stop acknowledgement timed out; scene stopped locally"),
                        runId, 5000);
         } else if (m_sceneLaunching) {
-            failScene(QStringLiteral("Remote scene launch handshake timed out"), true);
+            const QString message = !m_sceneAccepted
+                ? QStringLiteral("The server did not accept the remote scene request in time")
+                : (!m_sceneArmed
+                    ? QStringLiteral("The remote client did not finish preparing the scene in time")
+                    : (!m_sceneCommitScheduled
+                        ? QStringLiteral("The remote clients did not complete launch synchronization in time")
+                        : QStringLiteral("The remote scene did not present its first frame in time")));
+            // An unaccepted request has no authoritative server-side SceneRun.
+            // Let the server's own preparation deadline discard a lost ACK
+            // instead of generating an "unknown scene run" error.
+            failScene(message, m_sceneAccepted);
         }
     });
     m_videoSnapshotTimer.setInterval(1000);
@@ -131,9 +148,22 @@ void QuickCanvasHost::setWebSocketClient(WebSocketClient* client)
 void QuickCanvasHost::connectWebSocketSignals()
 {
     if (!m_webSocket) return;
+    connect(m_webSocket, &WebSocketClient::scenePrepareProgressReceived, this,
+            [this](const QJsonObject& envelope) {
+        if (!matchesScene(envelope) || !m_sceneLaunching || m_sceneAccepted
+            || !envelope.value(QStringLiteral("aggregate")).toBool(false)
+            || envelope.value(QStringLiteral("stage")).toString()
+                != QLatin1String("accepted")) {
+            return;
+        }
+        m_sceneAccepted = true;
+        reportLocalScenePrepared();
+    });
     connect(m_webSocket, &WebSocketClient::scenePreparedReceived, this,
             [this](const QJsonObject& envelope) {
         if (!matchesScene(envelope) || !m_sceneLaunching
+            || !m_localPreparedReported
+            || m_sceneArmed
             || !envelope.value(QStringLiteral("allPrepared")).toBool(false)) return;
         const qint64 uncertainty = m_webSocket->sceneClockUncertaintyMs();
         const qint64 allowed = m_webSocket->serverPolicy()
@@ -147,16 +177,38 @@ void QuickCanvasHost::connectWebSocketSignals()
     });
     connect(m_webSocket, &WebSocketClient::sceneCommitReceived, this,
             [this](const QJsonObject& envelope) {
-        if (!matchesScene(envelope) || !m_sceneLaunching || !m_sceneArmed) return;
+        if (!matchesScene(envelope) || !m_sceneLaunching || !m_sceneArmed
+            || m_sceneCommitScheduled) return;
         const qint64 start = envelope.value(QStringLiteral("startServerMonotonicMs"))
                                  .toInteger(-1);
         const qint64 now = m_webSocket->estimatedServerMonotonicMs();
-        if (start < 0 || now < 0) {
+        const QJsonObject policy = m_webSocket->serverPolicy();
+        const qint64 activationLead = policy
+            .value(QStringLiteral("sceneActivationLeadMs")).toInteger(-1);
+        const qint64 maximumClockSkew = policy
+            .value(QStringLiteral("sceneMaxClockSkewMs")).toInteger(-1);
+        const qint64 startedTimeout = policy
+            .value(QStringLiteral("sceneStartedAckTimeoutMs")).toInteger(-1);
+        const qint64 delay = start - now;
+        if (start < 0 || now < 0 || activationLead < 1
+            || maximumClockSkew < 0 || startedTimeout < 1
+            || delay < -maximumClockSkew
+            || delay > activationLead + maximumClockSkew) {
             failScene(QStringLiteral("Invalid synchronized launch commitment"), true);
             return;
         }
-        QTimer::singleShot(int(std::max<qint64>(0, start - now)), this, [this]() {
-            if (!m_sceneLaunching) return;
+        m_sceneCommitScheduled = true;
+        const QString scheduledRunId = m_sceneRunId;
+        const QString scheduledDigest = m_sceneDigest;
+        const qint64 boundedDelay = std::max<qint64>(0, delay);
+        // Preparation may consume almost its full deadline. Once COMMIT is
+        // authoritative, replace it with a deadline scoped to presentation.
+        m_sceneTimeout.start(int(boundedDelay + startedTimeout + 1000));
+        QTimer::singleShot(int(boundedDelay), this,
+                           [this, scheduledRunId, scheduledDigest]() {
+            if (!m_sceneLaunching || !m_sceneCommitScheduled
+                || m_sceneRunId != scheduledRunId
+                || m_sceneDigest != scheduledDigest) return;
             beginScenePresentation(true);
             startPresentationBarrier();
         });
@@ -168,6 +220,8 @@ void QuickCanvasHost::connectWebSocketSignals()
         m_sceneTimeout.stop();
         m_sceneLaunching = false;
         m_sceneLaunched = true;
+        m_sceneCommitScheduled = false;
+        m_localPrepareChecklist = {};
         m_videoSnapshotTimer.start();
         publishActionState();
         sceneToast(NotificationSeverity::Success,
@@ -182,6 +236,7 @@ void QuickCanvasHost::connectWebSocketSignals()
         m_sceneLaunched = false;
         m_sceneStopping = true;
         m_webSocket->sendSceneStopped(m_sceneRunId, true);
+        m_sceneTimeout.start(kStopTimeoutMs);
         publishActionState();
     });
     connect(m_webSocket, &WebSocketClient::sceneStoppedReceived, this,
@@ -193,9 +248,13 @@ void QuickCanvasHost::connectWebSocketSignals()
         m_sceneLaunching = false;
         m_sceneLaunched = false;
         m_sceneStopping = false;
+        m_sceneAccepted = false;
+        m_localPreparedReported = false;
         m_sceneArmed = false;
+        m_sceneCommitScheduled = false;
         m_sceneRunId.clear();
         m_sceneDigest.clear();
+        m_localPrepareChecklist = {};
         publishActionState();
         sceneToast(NotificationSeverity::Success,
                    QStringLiteral("Remote scene stopped successfully"),
@@ -203,7 +262,7 @@ void QuickCanvasHost::connectWebSocketSignals()
     });
     connect(m_webSocket, &WebSocketClient::sceneErrorReceived, this,
             [this](const QJsonObject& envelope) {
-        if (envelope.value(QStringLiteral("sceneRunId")).toString() == m_sceneRunId) {
+        if (matchesScene(envelope)) {
             failScene(envelope.value(QStringLiteral("message")).toString(
                           QStringLiteral("Remote scene protocol error")), false);
         }
@@ -340,6 +399,7 @@ bool QuickCanvasHost::remoteSceneActionEnabled() const
 {
     if (m_sceneLaunching || m_sceneStopping) return false;
     if (m_sceneLaunched) return true;
+    if (m_testSceneLaunched || m_sceneContext) return false;
     return m_projectEditingEnabled && m_actionsEnabled && m_contentAvailable && m_webSocket
         && m_webSocket->isConnected() && !m_targetClientId.isEmpty()
         && m_document->hasActiveScreens() && !m_document->media().isEmpty()
@@ -348,9 +408,10 @@ bool QuickCanvasHost::remoteSceneActionEnabled() const
 
 bool QuickCanvasHost::testSceneActionEnabled() const
 {
-    return m_testSceneLaunched
-        || (m_projectEditingEnabled && !m_sceneLaunching && !m_sceneStopping
-            && !m_sceneLaunched && !m_document->media().isEmpty());
+    if (m_sceneLaunching || m_sceneStopping || m_sceneLaunched) return false;
+    if (m_testSceneLaunched) return true;
+    return m_projectEditingEnabled && !m_sceneContext
+        && !m_document->media().isEmpty();
 }
 
 QJsonArray QuickCanvasHost::buildSceneManifest(const QJsonObject& scene,
@@ -358,7 +419,7 @@ QJsonArray QuickCanvasHost::buildSceneManifest(const QJsonObject& scene,
 {
     static const QRegularExpression sha256(QStringLiteral("^[a-f0-9]{64}$"));
     QMap<QString, QJsonObject> assets;
-    QList<MediaFilePolicy::PreparationAsset> preparation;
+    QMap<QString, QString> missingUploads;
     QMap<QString, QString> paths;
     for (const QJsonValue& value : scene.value(QStringLiteral("media")).toArray()) {
         const QJsonObject item = value.toObject();
@@ -375,9 +436,11 @@ QJsonArray QuickCanvasHost::buildSceneManifest(const QJsonObject& scene,
                 "A scene asset is missing, changed, or was not uploaded with a SHA-256 identity");
             return {};
         }
-        const auto expected = type == QLatin1String("video")
-            ? MediaFilePolicy::Kind::Mp4Video : MediaFilePolicy::Kind::Image;
-        preparation.append({mediaId, path, expected});
+        if (!m_fileManager->isFileUploadedToClient(fileId, m_targetClientId)) {
+            QString fileName = item.value(QStringLiteral("fileName")).toString().trimmed();
+            if (fileName.isEmpty()) fileName = mediaId;
+            missingUploads.insert(fileId, fileName.left(120));
+        }
         QJsonObject asset = assets.value(fileId);
         QJsonArray ids = asset.value(QStringLiteral("mediaIds")).toArray();
         ids.append(mediaId);
@@ -390,10 +453,30 @@ QJsonArray QuickCanvasHost::buildSceneManifest(const QJsonObject& scene,
         assets.insert(fileId, asset);
         paths.insert(fileId, path);
     }
-    const auto checked = MediaFilePolicy::validatePreparationAssets(preparation);
-    if (!checked.accepted) {
-        if (errorMessage) *errorMessage = QStringLiteral("Scene asset validation failed (%1)")
-            .arg(checked.errorCode);
+    if (!missingUploads.isEmpty()) {
+        QStringList names;
+        for (auto it = missingUploads.cbegin(); it != missingUploads.cend(); ++it) {
+            if (names.size() == 3) break;
+            names.append(QStringLiteral("\"%1\"").arg(it.value()));
+        }
+        if (missingUploads.size() > names.size()) {
+            names.append(QStringLiteral("and %1 more")
+                             .arg(missingUploads.size() - names.size()));
+        }
+        const QString target = m_targetMachineName.trimmed().isEmpty()
+            ? QStringLiteral("the remote client")
+            : QStringLiteral("remote client \"%1\"").arg(m_targetMachineName.left(120));
+        if (errorMessage) {
+            *errorMessage = missingUploads.size() == 1
+                ? QStringLiteral(
+                    "Cannot launch the remote scene: %1 has not been uploaded to %2. "
+                    "Upload it and try again.")
+                      .arg(names.constFirst(), target)
+                : QStringLiteral(
+                    "Cannot launch the remote scene: %1 media files have not been uploaded "
+                    "to %2 (%3). Upload them and try again.")
+                      .arg(missingUploads.size()).arg(target, names.join(QStringLiteral(", ")));
+        }
         return {};
     }
     for (auto it = paths.cbegin(); it != paths.cend(); ++it) {
@@ -460,6 +543,27 @@ QJsonArray QuickCanvasHost::localPreparationChecklist(
     return checklist;
 }
 
+void QuickCanvasHost::reportLocalScenePrepared()
+{
+    if (!m_webSocket || !m_sceneLaunching || !m_sceneAccepted
+        || m_localPreparedReported || m_localPrepareChecklist.isEmpty()) {
+        return;
+    }
+    m_localPreparedReported = true;
+    const auto readyCount = std::count_if(
+        m_localPrepareChecklist.cbegin(), m_localPrepareChecklist.cend(),
+        [](const QJsonValue& value) {
+            return value.toObject().value(QStringLiteral("ready")).toBool();
+        });
+    const int percent = int(readyCount * 100 / m_localPrepareChecklist.size());
+    if (!m_webSocket->sendScenePrepareProgress(
+            m_sceneRunId, percent, m_localPrepareChecklist)
+        || !m_webSocket->sendScenePrepared(
+            m_sceneRunId, true, m_localPrepareChecklist)) {
+        failScene(QStringLiteral("Could not acknowledge local scene preparation"), true);
+    }
+}
+
 void QuickCanvasHost::triggerRemoteSceneAction()
 {
     if (m_sceneLaunched) {
@@ -492,31 +596,35 @@ void QuickCanvasHost::triggerRemoteSceneAction()
         sceneToast(NotificationSeverity::Error, error, {}, 5000);
         return;
     }
+    bool ready = false;
+    QString prepareError;
+    const QJsonArray checklist = localPreparationChecklist(scene, &ready, &prepareError);
+    if (!ready) {
+        sceneToast(NotificationSeverity::Error,
+                   prepareError.isEmpty()
+                       ? QStringLiteral("The local scene is not ready")
+                       : prepareError,
+                   {}, 5000);
+        return;
+    }
     m_sceneLaunching = true;
+    m_sceneAccepted = false;
+    m_localPreparedReported = false;
     m_sceneArmed = false;
+    m_sceneCommitScheduled = false;
     m_firstFrameReported = false;
+    m_localPrepareChecklist = checklist;
+    m_sceneRunId.clear();
+    m_sceneDigest.clear();
+    // The transmitted scene is immutable. Lock the draft immediately so the
+    // owner cannot diverge from the target while either side is preparing.
+    m_document->setEditsLocked(true);
     publishActionState();
     if (!m_webSocket->sendScenePrepare(m_targetClientId, ++m_sceneRevision,
                                        manifest, scene, &m_sceneRunId,
                                        &m_sceneDigest, &error)) {
         failScene(error.isEmpty() ? QStringLiteral("No active remote session") : error,
                   false);
-        return;
-    }
-    bool ready = false;
-    QString prepareError;
-    const QJsonArray checklist = localPreparationChecklist(scene, &ready, &prepareError);
-    const auto readyCount = std::count_if(checklist.cbegin(), checklist.cend(),
-        [](const QJsonValue& value) {
-            return value.toObject().value(QStringLiteral("ready")).toBool();
-        });
-    const int percent = checklist.isEmpty() ? 0 : int(readyCount * 100 / checklist.size());
-    m_webSocket->sendScenePrepareProgress(m_sceneRunId, percent, checklist);
-    m_webSocket->sendScenePrepared(m_sceneRunId, ready, checklist,
-        ready ? QString() : QStringLiteral("local_scene_prepare_failed"),
-        prepareError);
-    if (!ready) {
-        failScene(prepareError, true);
         return;
     }
     const int timeout = m_webSocket->serverPolicy()
@@ -529,6 +637,7 @@ void QuickCanvasHost::triggerRemoteSceneAction()
 
 void QuickCanvasHost::triggerTestSceneAction()
 {
+    if (m_sceneLaunching || m_sceneStopping || m_sceneLaunched) return;
     if (m_testSceneLaunched) {
         stopScenePresentation();
         m_testSceneLaunched = false;
@@ -656,9 +765,13 @@ void QuickCanvasHost::failScene(const QString& message, bool notifyServer)
     m_sceneLaunching = false;
     m_sceneStopping = false;
     m_sceneLaunched = false;
+    m_sceneAccepted = false;
+    m_localPreparedReported = false;
     m_sceneArmed = false;
+    m_sceneCommitScheduled = false;
     m_sceneRunId.clear();
     m_sceneDigest.clear();
+    m_localPrepareChecklist = {};
     publishActionState();
     sceneToast(NotificationSeverity::Error,
                QStringLiteral("Scene launch failed: %1").arg(message),
@@ -672,9 +785,13 @@ void QuickCanvasHost::handleRemoteConnectionLost()
     m_sceneLaunching = false;
     m_sceneStopping = false;
     m_sceneLaunched = false;
+    m_sceneAccepted = false;
+    m_localPreparedReported = false;
     m_sceneArmed = false;
+    m_sceneCommitScheduled = false;
     m_sceneRunId.clear();
     m_sceneDigest.clear();
+    m_localPrepareChecklist = {};
     setOverlayActionsEnabled(false);
 }
 

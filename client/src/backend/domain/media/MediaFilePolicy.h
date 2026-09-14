@@ -65,9 +65,11 @@ ValidationResult validateLocalFile(const QString& path,
 QString validationErrorDescription(const ValidationResult& validation);
 
 // Validates an entire immutable scene revision in order and reserves decoded
-// RGBA bytes cumulatively.  Both the sending and receiving renderers use this
-// function before constructing a render graph, so the 1 GiB budget cannot be
-// bypassed by splitting images across several manifest entries.
+// RGBA bytes cumulatively. The receiving renderer uses this function before
+// constructing a render graph, so the 1 GiB budget cannot be bypassed by
+// splitting images across several manifest entries. The sender relies on the
+// upload validation receipt plus the immutable SHA-256 identity instead of
+// decoding every asset again for each launch.
 PreparationValidationResult validatePreparationAssets(
     const QList<PreparationAsset>& assets,
     quint64 preparedImageBytes = 0);

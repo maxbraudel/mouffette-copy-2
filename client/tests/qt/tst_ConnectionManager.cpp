@@ -158,7 +158,7 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
                     {"heartbeatIntervalMs", 250},
                     {"leaseTimeoutMs", 1000},
                     {"scenePrepareTimeoutMs", 15000},
-                    {"sceneActivationLeadMs", 4000},
+                    {"sceneActivationLeadMs", 500},
                     {"sceneMaxClockSkewMs", 50},
                     {"sceneStartedAckTimeoutMs", 5000},
                     {"sceneMaxStartSkewMs", 750},

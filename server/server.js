@@ -547,7 +547,7 @@ class MouffetteServer {
         };
     }
 
-    sendSceneError(clientId, code, message, run = null) {
+    sendSceneError(clientId, code, message, run = null, correlation = null) {
         const payload = {
             type: 'error',
             protocolVersion: this.protocolVersion,
@@ -557,11 +557,20 @@ class MouffetteServer {
             code,
             message: String(message || code).slice(0, 512),
         };
-        if (run) {
-            payload.remoteSessionId = run.remoteSessionId;
-            payload.generation = run.generation;
-            payload.sceneRunId = run.sceneRunId;
-            payload.digest = run.digest;
+        const source = run || correlation;
+        if (source) {
+            if (this.isValidOpaqueId(source.remoteSessionId)) {
+                payload.remoteSessionId = source.remoteSessionId;
+            }
+            if (Number.isSafeInteger(source.generation) && source.generation > 0) {
+                payload.generation = source.generation;
+            }
+            if (this.isValidOpaqueId(source.sceneRunId)) {
+                payload.sceneRunId = source.sceneRunId;
+            }
+            if (SHA256_PATTERN.test(source.digest || '')) {
+                payload.digest = source.digest;
+            }
         }
         if (run && code === 'clock_uncertainty_too_high') {
             this.metrics.incrementOnce('scene_clock_uncertainty_rejected_total',
@@ -572,7 +581,27 @@ class MouffetteServer {
             || code.includes('digest') || code.includes('asset'))) {
             this.metrics.incrementOnce('scene_prepare_failed_total', run.sceneRunId);
         }
-        this.sendToEndpoint(this.getEndpointId(clientId), payload);
+        return this.sendToEndpoint(this.getEndpointId(clientId), payload);
+    }
+
+    scenePrepareCorrelation(message, session = null) {
+        const correlation = {};
+        const remoteSessionId = session ? session.remoteSessionId
+            : message && message.remoteSessionId;
+        const generation = session ? session.generation : message && message.generation;
+        if (this.isValidOpaqueId(remoteSessionId)) {
+            correlation.remoteSessionId = remoteSessionId;
+        }
+        if (Number.isSafeInteger(generation) && generation > 0) {
+            correlation.generation = generation;
+        }
+        if (this.isValidOpaqueId(message && message.sceneRunId)) {
+            correlation.sceneRunId = message.sceneRunId;
+        }
+        if (SHA256_PATTERN.test(message && message.digest || '')) {
+            correlation.digest = message.digest;
+        }
+        return correlation;
     }
 
     countScenePreparationFailure(message) {
@@ -691,18 +720,22 @@ class MouffetteServer {
     }
 
     handleScenePrepare(clientId, message) {
+        let correlation = this.scenePrepareCorrelation(message);
+        const reject = (code, detail) => this.sendSceneError(
+            clientId, code, detail, null, correlation);
         const validated = this.validateSessionMessage(clientId, message, { ownerOnly: true });
-        if (!validated.ok) return this.sendSceneError(clientId, validated.error, validated.error);
+        if (!validated.ok) return reject(validated.error, validated.error);
         const { client, session } = validated;
+        correlation = this.scenePrepareCorrelation(message, session);
         if (Array.from(this.pendingAssetRemovals.values()).some(removal =>
             removal.remoteSessionId === session.remoteSessionId)) {
             this.countScenePreparationFailure(message);
-            return this.sendSceneError(clientId, 'asset_removal_pending',
+            return reject('asset_removal_pending',
                 'A remote asset removal must settle before scene preparation');
         }
         if (session.activeUploadIds.size > 0) {
             this.countScenePreparationFailure(message);
-            return this.sendSceneError(clientId, 'uploads_still_active',
+            return reject('uploads_still_active',
                 'Every upload must be validated before scene preparation');
         }
         const manifest = this.normalizeSceneManifest(message.manifest);
@@ -715,23 +748,23 @@ class MouffetteServer {
             || !this.validateSceneMediaBindings(scene, manifest)
             || !this.serializedJsonWithinLimit(scene, this.MAX_REMOTE_SCENE_BYTES)) {
             this.countScenePreparationFailure(message);
-            return this.sendSceneError(clientId, 'invalid_scene_manifest', 'Invalid scene revision, manifest, or payload');
+            return reject('invalid_scene_manifest', 'Invalid scene revision, manifest, or payload');
         }
         if (!this.requiredSceneChecklist({ manifest, scene })) {
             this.countScenePreparationFailure(message);
-            return this.sendSceneError(clientId, 'invalid_scene_manifest',
+            return reject('invalid_scene_manifest',
                 'Scene requires more preparation checks than the protocol permits');
         }
         const digest = computeSceneDigest(message.revision, manifest, scene);
         if (message.digest !== digest) {
             this.countScenePreparationFailure(message);
-            return this.sendSceneError(clientId, 'scene_digest_mismatch', 'Scene digest does not match the canonical payload');
+            return reject('scene_digest_mismatch', 'Scene digest does not match the canonical payload');
         }
         const inventory = this.validateSceneInventory(session, manifest);
         if (!inventory.ok) {
             this.countScenePreparationFailure(message);
-            return this.sendSceneError(clientId, 'scene_asset_not_validated',
-                `Asset ${inventory.assetId} is not validated for this session generation`);
+            return reject('scene_asset_not_validated',
+                'At least one media file in this scene has not been uploaded to the remote client. Upload all media before launching the scene.');
         }
         const prepared = this.sceneRuns.prepare({
             remoteSessionId: session.remoteSessionId,
@@ -746,16 +779,21 @@ class MouffetteServer {
         });
         if (!prepared.ok) {
             this.countScenePreparationFailure(message);
-            return this.sendSceneError(clientId, prepared.error, prepared.error);
+            return reject(prepared.error, prepared.error);
         }
         const run = prepared.run;
         session.sceneRunId = run.sceneRunId;
         if (prepared.replay) {
-            this.sendToEndpoint(client.endpointId, this.scenePayload(run, 'prepare_progress', {
-                aggregate: true,
-                replay: true,
-                percent: run.phase === SCENE_PHASES.PREPARING ? 0 : 100,
-            }));
+            const delivered = this.sendToEndpoint(client.endpointId,
+                this.scenePayload(run, 'prepare_progress', {
+                    aggregate: true,
+                    replay: true,
+                    percent: run.phase === SCENE_PHASES.PREPARING ? 0 : 100,
+                    stage: 'accepted',
+                }));
+            if (!delivered) {
+                this.initiateSceneStop(run, 'scene_prepare_ack_delivery_failed', true);
+            }
             return;
         }
         const delivered = this.sendToEndpoint(session.targetEndpointId,
@@ -765,11 +803,15 @@ class MouffetteServer {
             return this.sendSceneError(clientId, 'scene_target_unavailable',
                 'Scene target is unavailable', run);
         }
-        this.sendToEndpoint(client.endpointId, this.scenePayload(run, 'prepare_progress', {
-            aggregate: true,
-            percent: 0,
-            stage: 'accepted',
-        }));
+        const acceptedDelivered = this.sendToEndpoint(client.endpointId,
+            this.scenePayload(run, 'prepare_progress', {
+                aggregate: true,
+                percent: 0,
+                stage: 'accepted',
+            }));
+        if (!acceptedDelivered) {
+            this.initiateSceneStop(run, 'scene_prepare_ack_delivery_failed', true);
+        }
     }
 
     safeChecklistId(value, fallback) {

@@ -1355,7 +1355,6 @@ bool WebSocketClient::validateServerPolicy(const QJsonObject& policy,
         values.insert(QString::fromLatin1(rule.name), value);
     }
     if (values.value("leaseTimeoutMs") < values.value("heartbeatIntervalMs") * 4
-        || values.value("sceneActivationLeadMs") <= values.value("leaseTimeoutMs")
         || values.value("sceneMaxClockSkewMs") >= values.value("sceneActivationLeadMs")
         || values.value("sceneMaxStartSkewMs")
             >= values.value("sceneStartedAckTimeoutMs")) {
