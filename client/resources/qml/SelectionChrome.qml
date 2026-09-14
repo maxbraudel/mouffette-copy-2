@@ -19,8 +19,6 @@ Item {
     // pointer lease. CanvasRoot compares both so a lost ungrab cannot leave
     // the whole canvas permanently blocked after a resize.
     readonly property bool resizeHandlerActive: globalResizeDrag.active
-    readonly property bool resizeLeftButtonPressed:
-        (globalResizeDrag.centroid.pressedButtons & Qt.LeftButton) !== 0
     property var handleDefs: [
         { ux: 0.0, uy: 0.0, handleId: "top-left" },
         { ux: 0.5, uy: 0.0, handleId: "top-mid" },
@@ -69,7 +67,7 @@ Item {
             return
         if (inputCoordinator) {
             if (abandonPointer)
-                inputCoordinator.releaseMediaOwnership(mediaId)
+                inputCoordinator.releaseMediaOwnership(mediaId, "resize")
             else if (inputCoordinator.mode === "resize" && inputCoordinator.ownerId === mediaId)
                 inputCoordinator.endResize(mediaId)
         }

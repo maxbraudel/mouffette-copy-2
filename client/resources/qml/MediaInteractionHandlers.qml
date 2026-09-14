@@ -50,22 +50,57 @@ Item {
         return contentRootRef.mapFromItem(null, sceneX, sceneY)
     }
 
-    function releaseOrphanedDrag() {
+    function resetMovePressAnchor() {
+        mediaDrag.pressAnchorValid = false
+        mediaDrag.pressPointerSceneX = 0.0
+        mediaDrag.pressPointerSceneY = 0.0
+        mediaDrag.pressPointerViewX = 0.0
+        mediaDrag.pressPointerViewY = 0.0
+    }
+
+    function finishMoveSession(expectedMediaId) {
         if (!mediaDrag || !delegateItem || !rootController)
-            return
-        if (!mediaDrag.active && mediaDrag.activeMoveMediaId === "" && !delegateItem.localDragging)
-            return
+            return false
 
         var orphanMediaId = mediaDrag.activeMoveMediaId
-        if (!orphanMediaId || orphanMediaId.length === 0)
-            orphanMediaId = delegateItem.currentMediaId
+        if (!orphanMediaId)
+            orphanMediaId = expectedMediaId || ""
+        var ownsSharedState = orphanMediaId !== ""
+            && (mediaDrag.activeMoveMediaId !== ""
+                || mediaDrag.countedAsActive
+                || delegateItem.localDragging
+                || rootController.liveDragMediaId === orphanMediaId
+                || (activeCoordinator
+                    && activeCoordinator.mode === "move"
+                    && activeCoordinator.ownerId === orphanMediaId))
+        if (!ownsSharedState) {
+            resetMovePressAnchor()
+            return false
+        }
+
+        var finalX = delegateItem.effectiveLocalX
+        var finalY = delegateItem.effectiveLocalY
+        var snapAtEnd = (mediaDrag.centroid.modifiers & Qt.ShiftModifier) !== 0
+        var needsSnapCleanup = rootController.liveSnapDragActive
+            && rootController.liveSnapDragMediaId === orphanMediaId
+
+        // Clear local ownership before the synchronous backend publication.
+        // activeChanged, canceled, destruction and the root watchdog may all
+        // converge here; only the first caller is allowed to finish the move.
+        mediaDrag.activeMoveMediaId = ""
 
         if (mediaDrag.countedAsActive) {
             rootController.activeMediaDragCount = Math.max(0, rootController.activeMediaDragCount - 1)
             mediaDrag.countedAsActive = false
+        } else if (rootController.liveDragMediaId === orphanMediaId
+                   && rootController.activeMediaDragCount > 0) {
+            // Recovery can observe the native active flag changing after the
+            // per-handler counter callback was skipped.
+            rootController.activeMediaDragCount = Math.max(0, rootController.activeMediaDragCount - 1)
         }
 
         delegateItem.localDragging = false
+        resetMovePressAnchor()
         if (rootController.liveDragMediaId === orphanMediaId) {
             rootController.liveDragMediaId = ""
             rootController.liveDragViewOffsetX = 0.0
@@ -73,8 +108,21 @@ Item {
         }
 
         if (activeCoordinator) {
-            activeCoordinator.releaseMediaOwnership(orphanMediaId)
+            if (activeCoordinator.mode === "move"
+                    && activeCoordinator.ownerId === orphanMediaId)
+                activeCoordinator.endMove(orphanMediaId)
+            else
+                activeCoordinator.releaseMediaOwnership(orphanMediaId, "move")
         }
+
+        rootController.mediaMoveEnded(orphanMediaId, finalX, finalY, snapAtEnd)
+        if (needsSnapCleanup)
+            requestSnapFreezeCleanup()
+        return true
+    }
+
+    function releaseOrphanedDrag() {
+        finishMoveSession(delegateItem ? delegateItem.currentMediaId : "")
     }
 
     TapHandler {
@@ -240,42 +288,7 @@ Item {
                                                 delegateItem.localY,
                                                 snapAtStart)
             } else {
-                var finalMediaId = activeMoveMediaId
-                // A handler that did not acquire a move session owns no shared
-                // drag state. Native cancellation may notify us more than once.
-                if (finalMediaId === "") {
-                    pressAnchorValid = false
-                    return
-                }
-                if (countedAsActive) {
-                    rootController.activeMediaDragCount = Math.max(0, rootController.activeMediaDragCount - 1)
-                    countedAsActive = false
-                }
-                delegateItem.localDragging = false
-                pressAnchorValid = false
-                pressPointerSceneX = 0.0
-                pressPointerSceneY = 0.0
-                pressPointerViewX = 0.0
-                pressPointerViewY = 0.0
-                rootController.liveDragViewOffsetX = 0.0
-                rootController.liveDragViewOffsetY = 0.0
-                if (activeCoordinator) {
-                    activeCoordinator.endMove(finalMediaId)
-                }
-                rootController.liveDragMediaId = ""
-                activeMoveMediaId = ""
-
-                if (finalMediaId !== "") {
-                    var snapAtEnd = (mediaDrag.centroid.modifiers & Qt.ShiftModifier) !== 0
-                    rootController.mediaMoveEnded(finalMediaId,
-                                                  delegateItem.effectiveLocalX,
-                                                  delegateItem.effectiveLocalY,
-                                                  snapAtEnd)
-                }
-                if (typeof rootController !== "undefined" && rootController.liveSnapDragActive
-                        && rootController.liveSnapDragMediaId === finalMediaId) {
-                    requestSnapFreezeCleanup()
-                }
+                interaction.finishMoveSession("")
             }
         }
 
@@ -308,29 +321,7 @@ Item {
         }
 
         onCanceled: {
-            if (activeMoveMediaId === "" || !delegateItem || !rootController)
-                return
-            if (countedAsActive) {
-                rootController.activeMediaDragCount = Math.max(0, rootController.activeMediaDragCount - 1)
-                countedAsActive = false
-            }
-            delegateItem.localDragging = false
-            pressAnchorValid = false
-            pressPointerSceneX = 0.0
-            pressPointerSceneY = 0.0
-            pressPointerViewX = 0.0
-            pressPointerViewY = 0.0
-            rootController.liveDragMediaId = ""
-            rootController.liveDragViewOffsetX = 0.0
-            rootController.liveDragViewOffsetY = 0.0
-            if (rootController.liveSnapDragActive
-                    && rootController.liveSnapDragMediaId === activeMoveMediaId) {
-                requestSnapFreezeCleanup()
-            }
-            if (activeCoordinator) {
-                activeCoordinator.endMove(activeMoveMediaId)
-            }
-            activeMoveMediaId = ""
+            interaction.finishMoveSession("")
         }
     }
 }

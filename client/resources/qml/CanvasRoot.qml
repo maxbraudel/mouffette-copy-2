@@ -178,11 +178,16 @@ Rectangle {
         function onPresentationChanged() { root.synchronizeTransientState() }
     }
 
-    function abandonResizeInteraction(reason) {
+    function abandonPointerInteractions(reason) {
         if (!inputLayer || !inputLayer.inputCoordinator)
             return
 
+        // Qt normally cancels native grabs at these lifecycle boundaries. The
+        // logical finalizers below are the fallback when that callback is lost
+        // or arrives after the document has already republished its model.
         var coordinator = inputLayer.inputCoordinator
+        if (coordinator.mode === "move" || liveDragMediaId !== "")
+            finishActiveMoveInteraction(reason || "lifecycle")
         if (selectionChrome
                 && (selectionChrome.interacting
                     || selectionChrome.activeResizeMediaId !== ""))
@@ -194,15 +199,16 @@ Rectangle {
     }
 
     // A window/app transition can consume the mouse release before Qt sends it
-    // back to the canvas. Close the resize locally at that lifecycle boundary;
-    // a later native ungrab is harmless because the finalizer is idempotent.
+    // back to the canvas. Close the active transaction locally at that
+    // lifecycle boundary; a later native ungrab is harmless because both
+    // finalizers are idempotent.
     Connections {
         target: root.hostingWindow
         ignoreUnknownSignals: true
 
         function onActiveChanged() {
             if (root.hostingWindow && !root.hostingWindow.active)
-                root.abandonResizeInteraction("window-deactivated")
+                root.abandonPointerInteractions("window-deactivated")
         }
 
         function onVisibilityChanged() {
@@ -210,7 +216,7 @@ Rectangle {
                 return
             var visibility = root.hostingWindow.visibility
             if (visibility === Window.Hidden || visibility === Window.Minimized)
-                root.abandonResizeInteraction("window-hidden")
+                root.abandonPointerInteractions("window-hidden")
         }
     }
 
@@ -220,7 +226,7 @@ Rectangle {
 
         function onStateChanged() {
             if (Qt.application.state !== Qt.ApplicationActive)
-                root.abandonResizeInteraction("application-suspended")
+                root.abandonPointerInteractions("application-suspended")
         }
     }
 
@@ -326,6 +332,81 @@ Rectangle {
             }
         }
         return hitId
+    }
+
+    function mediaDelegateById(mediaId) {
+        if (!mediaId)
+            return null
+        for (var i = 0; i < mediaRepeater.count; ++i) {
+            var candidate = mediaRepeater.itemAt(i)
+            if (candidate && candidate.currentMediaId === mediaId)
+                return candidate
+        }
+        return null
+    }
+
+    function finishActiveMoveInteraction(reason) {
+        if (!inputLayer || !inputLayer.inputCoordinator)
+            return false
+
+        var coordinator = inputLayer.inputCoordinator
+        var mediaId = coordinator.mode === "move"
+            ? (coordinator.ownerId || "") : ""
+        if (!mediaId)
+            mediaId = liveDragMediaId
+        if (!mediaId) {
+            var hadMoveState = coordinator.mode === "move"
+                || activeMediaDragCount > 0 || liveDragMediaId !== ""
+            if (!hadMoveState)
+                return false
+            activeMediaDragCount = 0
+            liveDragMediaId = ""
+            liveDragViewOffsetX = 0.0
+            liveDragViewOffsetY = 0.0
+            if (coordinator.mode === "move")
+                coordinator.endMove("")
+            return true
+        }
+
+        var delegateItem = mediaDelegateById(mediaId)
+        var finalized = false
+        if (delegateItem && typeof delegateItem.finishMoveInteraction === "function")
+            finalized = delegateItem.finishMoveInteraction(mediaId)
+
+        // Normalize the root latches even if a delegate disappeared part-way
+        // through cancellation. If its finalizer was unavailable, still tell
+        // the backend to close its drag transaction using the last known
+        // document position.
+        var finalX = delegateItem ? delegateItem.effectiveLocalX : 0.0
+        var finalY = delegateItem ? delegateItem.effectiveLocalY : 0.0
+        if (!finalized && !delegateItem) {
+            for (var i = 0; i < mediaModel.length; ++i) {
+                var entry = mediaModel[i]
+                if (entry && entry.mediaId === mediaId) {
+                    finalX = entry.x || 0.0
+                    finalY = entry.y || 0.0
+                    break
+                }
+            }
+        }
+
+        activeMediaDragCount = 0
+        liveDragMediaId = ""
+        liveDragViewOffsetX = 0.0
+        liveDragViewOffsetY = 0.0
+        if (coordinator.mode === "move") {
+            if (coordinator.ownerId === "" || coordinator.ownerId === mediaId)
+                coordinator.endMove(mediaId)
+            else
+                coordinator.forceReset((reason || "recovery") + ":stale-move")
+        }
+
+        // The delegate finalizer already published after releasing all of its
+        // own latches. In the fallback path, publish only now: model updates
+        // re-enter the watchdog synchronously.
+        if (!finalized)
+            root.mediaMoveEnded(mediaId, finalX, finalY, false)
+        return true
     }
 
     function canStartCanvasPan(panActive) {
@@ -527,16 +608,24 @@ Rectangle {
             owner = coordinator.ownerId || ""
         }
 
-        if (mode === "idle")
+        if (mode === "idle") {
+            if (activeMediaDragCount > 0 || liveDragMediaId !== "")
+                finishActiveMoveInteraction(reason)
             return
+        }
 
         if (mode === "move") {
-            if (activeMediaDragCount <= 0
-                    || liveDragMediaId === ""
-                    || owner === ""
-                    || liveDragMediaId !== owner
-                    || !mediaModelContainsId(owner)) {
-                coordinator.forceReset(reason + ":stale-move")
+            var moveDelegate = mediaDelegateById(owner)
+            var moveHealthy = activeMediaDragCount > 0
+                    && liveDragMediaId !== ""
+                    && owner !== ""
+                    && liveDragMediaId === owner
+                    && mediaModelContainsId(owner)
+                    && !!moveDelegate
+                    && moveDelegate.moveHandlerActive
+                    && moveDelegate.activeMoveMediaId === owner
+            if (!moveHealthy) {
+                finishActiveMoveInteraction(reason)
             }
             return
         }
@@ -545,7 +634,6 @@ Rectangle {
             var resizeHealthy = !!selectionChrome
                 && selectionChrome.interacting
                 && selectionChrome.resizeHandlerActive
-                && selectionChrome.resizeLeftButtonPressed
                 && owner !== ""
                 && selectionChrome.activeResizeMediaId === owner
                 && mediaModelContainsId(owner)
@@ -765,6 +853,13 @@ Rectangle {
                     readonly property real effectiveScale: usesLiveAltResize ? root.liveAltResizeScale
                                                          : (usesLiveResize ? root.liveResizeScale : localScale)
                     readonly property string currentMediaId: media ? (media.mediaId || "") : ""
+                    readonly property bool moveHandlerActive: mediaInteraction.active
+                    readonly property string activeMoveMediaId: mediaInteraction.activeMoveMediaId
+
+                    function finishMoveInteraction(expectedMediaId) {
+                        return mediaInteraction.finishMoveSession(expectedMediaId || currentMediaId)
+                    }
+
                     // Derived from selectionChromeModel — NOT from media.selected.
                     // This avoids mediaModel churn (and delegate destruction) on selection changes.
                     readonly property bool isSelected: {

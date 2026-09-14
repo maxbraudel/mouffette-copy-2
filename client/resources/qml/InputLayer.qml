@@ -117,7 +117,7 @@ Item {
             return isIdle() && canObserveMediaAtScenePoint(mediaId, sceneX, sceneY)
         }
 
-        function releaseMediaOwnership(mediaId) {
+        function releaseMediaOwnership(mediaId, expectedMode) {
             // The logical mode and the native press have different lifetimes.
             // A delegate or resize session can disappear while the global
             // PointHandler still owns the physical press; keep that ownership
@@ -125,7 +125,8 @@ Item {
             // cannot steal the remainder of the same gesture.
             if (!mediaId)
                 return
-            if (ownerId === mediaId) {
+            if (ownerId === mediaId
+                    && (!expectedMode || mode === expectedMode)) {
                 mode = "idle"
                 ownerId = ""
             }

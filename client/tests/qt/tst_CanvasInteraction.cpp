@@ -2,6 +2,7 @@
 #include "frontend/rendering/canvas/MediaListModel.h"
 #include "frontend/rendering/canvas/TextOutlineItem.h"
 
+#include <QEvent>
 #include <QFontDatabase>
 #include <QGuiApplication>
 #include <QMouseEvent>
@@ -160,6 +161,19 @@ public:
             auto* item = pending.takeLast();
             if (item->property("mediaId").toString() == id
                 && item->metaObject()->indexOfProperty("editing") >= 0) return item;
+            pending.append(item->childItems());
+        }
+        return nullptr;
+    }
+
+    QQuickItem* mediaDelegate(const QString& id) const
+    {
+        QList<QQuickItem*> pending {root};
+        while (!pending.isEmpty()) {
+            auto* item = pending.takeLast();
+            if (item->property("currentMediaId").toString() == id
+                && item->metaObject()->indexOfProperty("moveHandlerActive") >= 0)
+                return item;
             pending.append(item->childItems());
         }
         return nullptr;
@@ -565,9 +579,10 @@ private slots:
         QCoreApplication::processEvents();
         QTest::mouseMove(&scene.window, {400, 340});
         QCoreApplication::processEvents();
-        // More than two watchdog ticks: a real held resize must not be
-        // mistaken for the orphaned state repaired by the recovery path.
-        QTest::qWait(260);
+        // Exercise the watchdog while the real handler owns the gesture: it
+        // must distinguish this from the injected orphaned-resize test.
+        QVERIFY(QMetaObject::invokeMethod(scene.root, "reconcileInputCoordinatorState",
+                                          Q_ARG(QVariant, QStringLiteral("test-active-resize"))));
         const QString activeMode = scene.root->property("interactionMode").toString();
         const QString activeOwner = scene.root->property("interactionOwnerId").toString();
         QTest::mouseMove(&scene.window, {420, 355});
@@ -620,6 +635,37 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(scene.root->property("interactionMode").toString(),
                                   QString("idle"), 600);
         QTRY_VERIFY_WITH_TIMEOUT(!chrome->property("interacting").toBool(), 600);
+        QVERIFY(!coordinator->property("primaryGestureActive").toBool());
+        QCOMPARE(ended.size(), 1);
+
+        scene.drag({240, 230}, {300, 270});
+        QCOMPARE(scene.entry("a").value("x").toDouble(), 160.0);
+        QCOMPARE(scene.entry("a").value("y").toDouble(), 190.0);
+        scene.doubleClick({300, 270});
+        QTRY_VERIFY(scene.visual("a")->property("editing").toBool());
+    }
+
+    void orphanedInactiveMoveIsRecoveredBeforeMediaInput()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", "text", 100, 150);
+        auto* coordinator = scene.root->findChild<QObject*>("canvasInputCoordinator");
+        QVERIFY(coordinator);
+        QSignalSpy ended(scene.root, SIGNAL(mediaMoveEnded(QString,double,double,bool)));
+
+        coordinator->setProperty("primaryGestureActive", true);
+        coordinator->setProperty("primaryOwnerKind", "media");
+        coordinator->setProperty("primaryOwnerMediaId", "a");
+        coordinator->setProperty("mode", "move");
+        coordinator->setProperty("ownerId", "a");
+        scene.root->setProperty("activeMediaDragCount", 1);
+        scene.root->setProperty("liveDragMediaId", "a");
+
+        QTRY_COMPARE_WITH_TIMEOUT(scene.root->property("interactionMode").toString(),
+                                  QString("idle"), 600);
+        QCOMPARE(scene.root->property("activeMediaDragCount").toInt(), 0);
+        QVERIFY(scene.root->property("liveDragMediaId").toString().isEmpty());
         QVERIFY(!coordinator->property("primaryGestureActive").toBool());
         QCOMPARE(ended.size(), 1);
 
@@ -711,6 +757,124 @@ private slots:
         QCOMPARE(scene.entry("a").value("x").toDouble(), 140.0);
         QCOMPARE(scene.entry("a").value("y").toDouble(), 180.0);
         scene.doubleClick({280, 260});
+        QTRY_VERIFY(scene.visual("a")->property("editing").toBool());
+    }
+
+    void windowDeactivateCancelsNativeResizeGrab()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", "text", 100, 150);
+        scene.click({240, 230});
+        auto* chrome = scene.root->findChild<QQuickItem*>("canvasSelectionChrome");
+        QVERIFY(chrome);
+        QSignalSpy ended(scene.root, SIGNAL(mediaResizeEnded(QString)));
+
+        QTest::mousePress(&scene.window, Qt::LeftButton, Qt::NoModifier, {380, 320});
+        QCoreApplication::processEvents();
+        QTest::mouseMove(&scene.window, {420, 350});
+        QCoreApplication::processEvents();
+        QCOMPARE(scene.root->property("interactionMode").toString(), QString("resize"));
+        QVERIFY(chrome->property("resizeHandlerActive").toBool());
+
+        // Exercise Qt's native cancellation path directly, independently of
+        // the QML window-visibility fallback.
+        QEvent deactivate(QEvent::WindowDeactivate);
+        QCoreApplication::sendEvent(&scene.window, &deactivate);
+        QCoreApplication::processEvents();
+        QVERIFY(!chrome->property("resizeHandlerActive").toBool());
+        QVERIFY(!chrome->property("interacting").toBool());
+        QCOMPARE(scene.root->property("interactionMode").toString(), QString("idle"));
+        QCOMPARE(ended.size(), 1);
+
+        // Reset QTest's synthetic device after Qt has canceled the grab.
+        QTest::mouseRelease(&scene.window, Qt::LeftButton, Qt::NoModifier, {420, 350});
+        QCoreApplication::processEvents();
+        QCOMPARE(ended.size(), 1);
+
+        scene.drag({240, 230}, {280, 260});
+        QCOMPARE(scene.entry("a").value("x").toDouble(), 140.0);
+        QCOMPARE(scene.entry("a").value("y").toDouble(), 180.0);
+        scene.doubleClick({280, 260});
+        QTRY_VERIFY(scene.visual("a")->property("editing").toBool());
+    }
+
+    void hidingWindowDuringMoveReleasesCanvas()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", "text", 100, 150);
+        QSignalSpy started(scene.root, SIGNAL(mediaMoveStarted(QString,double,double,bool)));
+        QSignalSpy ended(scene.root, SIGNAL(mediaMoveEnded(QString,double,double,bool)));
+
+        QTest::mousePress(&scene.window, Qt::LeftButton, Qt::NoModifier, {240, 230});
+        QCoreApplication::processEvents();
+        QTest::mouseMove(&scene.window, {280, 250});
+        QCoreApplication::processEvents();
+        QCOMPARE(scene.root->property("interactionMode").toString(), QString("move"));
+        QCOMPARE(started.size(), 1);
+
+        scene.window.hide();
+        QCoreApplication::processEvents();
+        QTRY_COMPARE_WITH_TIMEOUT(scene.root->property("interactionMode").toString(),
+                                  QString("idle"), 600);
+        QCOMPARE(scene.root->property("activeMediaDragCount").toInt(), 0);
+        QVERIFY(scene.root->property("liveDragMediaId").toString().isEmpty());
+        QCOMPARE(ended.size(), 1);
+
+        // Reset the synthetic device while the window is hidden. Real window
+        // systems cancel the pointing sequence at this boundary; QTest keeps
+        // its injected button state until an explicit release.
+        QTest::mouseRelease(&scene.window, Qt::LeftButton, Qt::NoModifier, {280, 250});
+        QCoreApplication::processEvents();
+        scene.window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&scene.window));
+        scene.root->setSize(scene.window.size());
+
+        scene.drag({240, 230}, {300, 270});
+        QCOMPARE(started.size(), 2);
+        QCOMPARE(ended.size(), 2);
+        QVERIFY(scene.entry("a").value("x").toDouble() > 140.0);
+        QVERIFY(scene.entry("a").value("y").toDouble() > 170.0);
+        scene.doubleClick({300, 270});
+        QTRY_VERIFY(scene.visual("a")->property("editing").toBool());
+    }
+
+    void explicitLifecycleAbandonFinishesMoveSynchronously()
+    {
+        CanvasFixture scene;
+        QVERIFY2(scene.initialize(), qPrintable(scene.error));
+        scene.add("a", "text", 100, 150);
+        auto* delegate = scene.mediaDelegate("a");
+        QVERIFY(delegate);
+        QSignalSpy ended(scene.root, SIGNAL(mediaMoveEnded(QString,double,double,bool)));
+
+        QTest::mousePress(&scene.window, Qt::LeftButton, Qt::NoModifier, {240, 230});
+        QCoreApplication::processEvents();
+        QTest::mouseMove(&scene.window, {280, 250});
+        QCoreApplication::processEvents();
+        QCOMPARE(scene.root->property("interactionMode").toString(), QString("move"));
+        QVERIFY(delegate->property("moveHandlerActive").toBool());
+
+        QVERIFY(QMetaObject::invokeMethod(scene.root, "abandonPointerInteractions",
+                                          Q_ARG(QVariant, QStringLiteral("test"))));
+        // These assertions intentionally precede processEvents(): the logical
+        // transaction must finish synchronously rather than wait for Qt's
+        // native ungrab notification or the watchdog.
+        QCOMPARE(scene.root->property("interactionMode").toString(), QString("idle"));
+        QCOMPARE(scene.root->property("activeMediaDragCount").toInt(), 0);
+        QVERIFY(scene.root->property("liveDragMediaId").toString().isEmpty());
+        QCOMPARE(ended.size(), 1);
+
+        // QTest retains its injected button state until an explicit release.
+        QTest::mouseRelease(&scene.window, Qt::LeftButton, Qt::NoModifier, {280, 250});
+        QCoreApplication::processEvents();
+        QTRY_VERIFY(!delegate->property("moveHandlerActive").toBool());
+        QCOMPARE(ended.size(), 1);
+
+        scene.drag({240, 230}, {300, 270});
+        QCOMPARE(ended.size(), 2);
+        scene.doubleClick({300, 270});
         QTRY_VERIFY(scene.visual("a")->property("editing").toBool());
     }
 
