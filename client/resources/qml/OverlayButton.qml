@@ -28,9 +28,6 @@ Item {
     Accessible.name: accessibleName
     Accessible.description: root.enabled ? "" : unavailableReason
 
-    ToolTip.visible: hovered && !enabled && unavailableReason.length > 0
-    ToolTip.text: unavailableReason
-
     // Which sides are flat (square corners)
     readonly property bool _flatLeft:  segmentRole === "trailing" || segmentRole === "middle"
     readonly property bool _flatRight: segmentRole === "leading"  || segmentRole === "middle"

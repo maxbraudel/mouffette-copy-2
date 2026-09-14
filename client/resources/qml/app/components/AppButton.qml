@@ -17,8 +17,6 @@ AbstractButton {
     Accessible.role: Accessible.Button
     Accessible.name: text
     Accessible.description: control.enabled ? "" : unavailableReason
-    ToolTip.visible: hovered && !enabled && unavailableReason.length > 0
-    ToolTip.text: unavailableReason
 
     contentItem: Text {
         id: label
