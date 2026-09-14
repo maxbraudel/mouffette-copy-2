@@ -54,7 +54,8 @@ public:
         MediaTypeRole,
         SourcePathRole,
         UploadStateRole,
-        ContentVisibleRole
+        ContentVisibleRole,
+        ZRole
     };
 
 private:

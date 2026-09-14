@@ -88,7 +88,7 @@ AppPanel {
         objectName: "mediaListPanel"
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        anchors.margins: 10
+        anchors.margins: 16
         z: 100000
         session: root.session
     }

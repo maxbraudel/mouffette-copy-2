@@ -151,6 +151,7 @@ private:
     QString m_mediaId;
     QString m_fileId;
     QString m_sourcePath;
+    qint64 m_sourceSizeBytes = -1;
     QSize m_baseSize;
     QPointF m_position;
     qreal m_scale = 1.0;

@@ -28,7 +28,8 @@ QVariant MediaListModel::data(const QModelIndex& index, int role) const
         { MediaTypeRole, QStringLiteral("mediaType") },
         { SourcePathRole, QStringLiteral("sourcePath") },
         { UploadStateRole, QStringLiteral("uploadState") },
-        { ContentVisibleRole, QStringLiteral("contentVisible") }
+        { ContentVisibleRole, QStringLiteral("contentVisible") },
+        { ZRole, QStringLiteral("z") }
     };
     const auto key = keys.constFind(role);
     if (key != keys.cend())
@@ -48,7 +49,8 @@ QHash<int, QByteArray> MediaListModel::roleNames() const
         { MediaTypeRole, QByteArrayLiteral("mediaType") },
         { SourcePathRole, QByteArrayLiteral("sourcePath") },
         { UploadStateRole, QByteArrayLiteral("uploadState") },
-        { ContentVisibleRole, QByteArrayLiteral("contentVisible") }
+        { ContentVisibleRole, QByteArrayLiteral("contentVisible") },
+        { ZRole, QByteArrayLiteral("z") }
     };
 }
 

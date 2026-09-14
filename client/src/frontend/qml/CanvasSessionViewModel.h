@@ -9,6 +9,7 @@ class ICanvasHost;
 class MediaListModel;
 class MediaSettingsViewModel;
 class UploadManager;
+class QSortFilterProxyModel;
 
 class CanvasSessionViewModel : public QObject
 {
@@ -21,6 +22,7 @@ class CanvasSessionViewModel : public QObject
     Q_PROPERTY(QObject* canvasController READ canvasController NOTIFY mediaModelChanged)
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
     Q_PROPERTY(bool hasProject READ hasProject NOTIFY actionStateChanged)
+    Q_PROPERTY(bool actionPending READ actionPending NOTIFY actionStateChanged)
     Q_PROPERTY(bool mediaEditingEnabled READ mediaEditingEnabled NOTIFY actionStateChanged)
     Q_PROPERTY(bool canvasNavigation READ canvasNavigation NOTIFY actionStateChanged)
     Q_PROPERTY(bool mediaEditing READ mediaEditingEnabled NOTIFY actionStateChanged)
@@ -40,10 +42,12 @@ class CanvasSessionViewModel : public QObject
     Q_PROPERTY(QString remoteSceneActionText READ remoteSceneActionText NOTIFY actionStateChanged)
     Q_PROPERTY(SceneActionState remoteSceneActionState READ remoteSceneActionState NOTIFY actionStateChanged)
     Q_PROPERTY(bool remoteSceneActionEnabled READ remoteSceneActionEnabled NOTIFY actionStateChanged)
+    Q_PROPERTY(int remoteSceneActionTone READ remoteSceneActionTone NOTIFY actionStateChanged)
     Q_PROPERTY(QString remoteSceneUnavailableReason READ remoteSceneUnavailableReason NOTIFY actionStateChanged)
     Q_PROPERTY(QString testSceneActionText READ testSceneActionText NOTIFY actionStateChanged)
     Q_PROPERTY(SceneActionState testSceneActionState READ testSceneActionState NOTIFY actionStateChanged)
     Q_PROPERTY(bool testSceneActionEnabled READ testSceneActionEnabled NOTIFY actionStateChanged)
+    Q_PROPERTY(int testSceneActionTone READ testSceneActionTone NOTIFY actionStateChanged)
     Q_PROPERTY(QString testSceneUnavailableReason READ testSceneUnavailableReason NOTIFY actionStateChanged)
     Q_PROPERTY(QString uploadActionText READ uploadActionText NOTIFY actionStateChanged)
     Q_PROPERTY(UploadState uploadState READ uploadState NOTIFY actionStateChanged)
@@ -83,6 +87,7 @@ public:
     QObject* canvasController() const;
     bool loading() const { return m_loading; }
     bool hasProject() const;
+    bool actionPending() const { return m_actionPending; }
     bool mediaEditingEnabled() const;
     bool canvasNavigation() const;
     bool textCreation() const { return mediaEditingEnabled(); }
@@ -108,10 +113,12 @@ public:
     QString remoteSceneActionText() const;
     SceneActionState remoteSceneActionState() const;
     bool remoteSceneActionEnabled() const;
+    int remoteSceneActionTone() const;
     QString remoteSceneUnavailableReason() const;
     QString testSceneActionText() const;
     SceneActionState testSceneActionState() const;
     bool testSceneActionEnabled() const;
+    int testSceneActionTone() const;
     QString testSceneUnavailableReason() const;
     QString uploadActionText() const;
     UploadState uploadState() const;
@@ -144,6 +151,10 @@ signals:
 private:
     MediaListModel* typedMediaModel() const;
     bool remoteCommandsEnabled() const;
+    void dispatchAction(std::function<void()> action);
+    bool uploadBelongsToSession() const;
+    // Shared order with OverlayActionButton.Tone, covered by rendered-state tests.
+    enum ActionTone { NormalTone, UploadingTone, UploadedTone, RemoteTone, TestTone };
 
     QString m_sessionId;
     QPointer<ICanvasHost> m_canvas;
@@ -153,8 +164,10 @@ private:
     std::function<bool()> m_hasUnuploadedFiles;
     std::function<bool()> m_hasProject;
     bool m_loading = true;
+    bool m_actionPending = false;
     bool m_settingsVisible = false;
     MediaSettingsViewModel* m_mediaSettings = nullptr;
+    QSortFilterProxyModel* m_overlayMediaModel = nullptr;
     int m_uploadPercent = 0;
     int m_uploadFilesCompleted = 0;
     int m_uploadFilesTotal = 0;

@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Effects
 import Mouffette.App
-import "../components"
 
 Rectangle {
     id: root
@@ -9,116 +9,267 @@ Rectangle {
     required property var session
     readonly property var mediaModel: session ? session.mediaModel : null
     readonly property int mediaCount: session ? session.mediaCount : 0
-    readonly property int mediaRowHeight: 54
-    readonly property int actionAreaHeight: Theme.overlayButtonHeight * 3
+    readonly property int actionAreaHeight: (Theme.overlayButtonHeight + 1) * 3
+    readonly property bool sceneLocked: session && session.remoteSceneActionTone !== OverlayActionButton.Normal
+    property real mediaNaturalWidth: 0
 
-    visible: session && session.hasProject
-    enabled: visible
-    width: Math.min(420, Math.max(220, implicitWidth))
-    height: Math.min(parent ? Math.max(0, parent.height - 20)
-                            : Math.max(1, mediaCount) * mediaRowHeight + actionAreaHeight,
-                     (mediaCount > 0 ? mediaCount * mediaRowHeight : 0) + actionAreaHeight)
+    function measureMediaWidth() {
+        var measured = 0
+        for (var i = 0; i < mediaRows.count; ++i) {
+            var row = mediaRows.itemAt(i)
+            if (row) measured = Math.max(measured, row.implicitWidth)
+        }
+        mediaNaturalWidth = measured
+    }
+
+    function humanSize(bytes) {
+        if (bytes === undefined || bytes < 0) return "n/a"
+        var units = ["B", "KB", "MB", "GB"]
+        var unit = 0
+        while (bytes >= 1024 && unit < 3) { bytes /= 1024; ++unit }
+        return bytes.toFixed(unit === 0 ? 0 : bytes < 10 ? 2 : 1) + " " + units[unit]
+    }
+
+    visible: session && session.hasProject && mediaCount > 0
+    implicitWidth: Math.max(200, mediaNaturalWidth, remoteButton.implicitWidth,
+                            testButton.implicitWidth, uploadButton.implicitWidth)
+    width: Math.min(implicitWidth, 420, parent ? Math.max(0, parent.width * 0.5) : 420)
+    implicitHeight: mediaColumn.height + actionAreaHeight
+    height: Math.min(implicitHeight, parent ? Math.max(0, parent.height - 32) : implicitHeight)
     radius: Theme.overlayRadius
     color: Theme.overlayBackground
-    border.width: 1
-    border.color: Theme.overlayBorder
-    clip: true
 
-    Column {
+    // Keep disabled controls and separators from forwarding presses or wheel
+    // events to the canvas. The interactive children sit above this shield.
+    MouseArea {
         anchors.fill: parent
-        spacing: 0
+        acceptedButtons: Qt.AllButtons
+        onWheel: wheel => { wheel.accepted = true }
+    }
 
-        ListView {
+    Item {
+        id: panelContent
+        anchors.fill: parent
+        layer.enabled: true
+        layer.effect: MultiEffect {
+            maskEnabled: true
+            maskSource: roundedMask
+        }
+
+        Flickable {
             id: list
             objectName: "mediaList"
+            readonly property int count: mediaRows.count
             width: parent.width
             height: Math.max(0, root.height - root.actionAreaHeight)
-            visible: root.mediaCount > 0
-            model: root.mediaModel
+            contentWidth: width
+            contentHeight: mediaColumn.height
             clip: true
             boundsBehavior: Flickable.StopAtBounds
-            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+            flickableDirection: Flickable.VerticalFlick
+            onContentYChanged: scrollbarHide.restart()
 
-            delegate: ItemDelegate {
-                id: row
-                objectName: "mediaRow_" + index
-                required property int index
-                required property string mediaId
-                required property string displayName
-                required property string mediaType
-                required property string uploadState
-                required property var modelData
+            Column {
+                id: mediaColumn
                 width: list.width
-                height: root.mediaRowHeight
+                spacing: 0
+
+                Repeater {
+                    id: mediaRows
+                    model: root.mediaModel
+                    onItemAdded: Qt.callLater(root.measureMediaWidth)
+                    onItemRemoved: Qt.callLater(root.measureMediaWidth)
+
+                    delegate: ItemDelegate {
+                        id: row
+                        objectName: "mediaRow_" + index
+                        required property int index
+                        required property string mediaId
+                        required property string displayName
+                        required property string mediaType
+                        required property string uploadState
+                        required property var modelData
+                        readonly property bool textMedia: mediaType === "text"
+                        readonly property bool selected: !!modelData.selected
+                        readonly property string dimensions: Math.round(modelData.width || 0)
+                            + " x " + Math.round(modelData.height || 0) + " px"
+                        readonly property string detailsText: dimensions
+                            + (textMedia ? "" : "  ·  " + root.humanSize(modelData.sourceSizeBytes))
+                        implicitWidth: Math.max(nameMetrics.advanceWidth, detailsMetrics.advanceWidth) + 40
+                        width: mediaColumn.width
+                        height: details.implicitHeight + 16 + (index > 0 ? 1 : 0)
+                        padding: 0
+                        leftPadding: 20
+                        rightPadding: 20
+                        topPadding: 8 + (index > 0 ? 1 : 0)
+                        bottomPadding: 8
+                        hoverEnabled: true
+                        onImplicitWidthChanged: Qt.callLater(root.measureMediaWidth)
+                        onClicked: {
+                            if (!root.sceneLocked) root.session.selectMedia(mediaId, false)
+                        }
+                        Accessible.name: displayName
+                        Accessible.description: (textMedia ? "" : uploadState + ", ") + detailsText
+                        background: Rectangle {
+                            color: root.sceneLocked ? Qt.rgba(1, 1, 1, 0.03)
+                                 : row.selected ? Qt.rgba(1, 1, 1, 0.10)
+                                 : row.hovered ? Qt.rgba(1, 1, 1, 0.05) : "transparent"
+                        }
+                        Rectangle {
+                            width: parent.width
+                            height: 1
+                            visible: row.index > 0
+                            color: Theme.overlayBorder
+                        }
+                        TextMetrics { id: nameMetrics; text: row.displayName; font: nameLabel.font }
+                        TextMetrics { id: detailsMetrics; text: row.detailsText; font: detailLabel.font }
+                        contentItem: Column {
+                            id: details
+                            spacing: 3
+                            Text {
+                                id: nameLabel
+                                objectName: "mediaName_" + row.index
+                                width: parent.width
+                                height: Math.max(18, Math.ceil(implicitHeight) + 2)
+                                text: row.displayName
+                                textFormat: Text.PlainText
+                                color: "white"
+                                font.pixelSize: 14
+                                font.weight: Font.Medium
+                                verticalAlignment: Text.AlignVCenter
+                                elide: Text.ElideRight
+                            }
+                            Item {
+                                width: parent.width
+                                height: 20
+                                visible: !row.textMedia
+                                Text {
+                                    objectName: "mediaStatus_" + row.index
+                                    anchors.fill: parent
+                                    text: row.uploadState === "uploaded" ? "Uploaded" : "Not uploaded"
+                                    visible: row.uploadState !== "uploading"
+                                    color: row.uploadState === "uploaded" ? Theme.mediaUploaded : Theme.mediaNotUploaded
+                                    font.pixelSize: 14
+                                    font.weight: Font.Medium
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                                Rectangle {
+                                    objectName: "mediaProgress_" + row.index
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: parent.width
+                                    height: 10
+                                    visible: row.uploadState === "uploading"
+                                    color: Theme.mediaProgressBackground
+                                    Rectangle {
+                                        objectName: "mediaProgressFill_" + row.index
+                                        height: parent.height
+                                        width: parent.width * Math.max(0, Math.min(100, row.modelData.uploadProgress || 0)) / 100
+                                        color: Theme.mediaProgress
+                                    }
+                                }
+                            }
+                            Text {
+                                id: detailLabel
+                                objectName: "mediaDetails_" + row.index
+                                width: parent.width
+                                height: Math.max(18, Math.ceil(implicitHeight) + 2)
+                                text: row.detailsText
+                                textFormat: Text.PlainText
+                                color: Theme.overlaySecondaryText
+                                font.pixelSize: 14
+                                font.weight: Font.Medium
+                                verticalAlignment: Text.AlignVCenter
+                                elide: Text.ElideRight
+                            }
+                        }
+                    }
+                }
+            }
+
+            ScrollBar.vertical: ScrollBar {
+                id: scrollbar
+                objectName: "mediaScrollBar"
+                parent: panelContent
+                x: root.width - width - 6
+                y: 6
+                width: 8
+                height: Math.max(0, list.height - 12)
+                padding: 0
+                minimumSize: height > 0 ? Math.min(1, 24 / height) : 1
+                policy: ScrollBar.AlwaysOn
+                visible: list.contentHeight > list.height && (scrollbarHide.running || pressed)
                 hoverEnabled: true
-                background: Rectangle {
-                    color: row.hovered ? Qt.rgba(1, 1, 1, 0.05) : "transparent"
+                contentItem: Rectangle {
+                    radius: 4
+                    color: Qt.rgba(1, 1, 1, scrollbar.pressed ? 0.7 : scrollbar.hovered ? 0.55 : 0.35)
                 }
-                contentItem: Column {
-                    id: details
-                    leftPadding: 20
-                    rightPadding: 20
-                    spacing: 3
-                    Text {
-                        width: row.width - 40
-                        text: row.displayName
-                        color: Theme.overlayText
-                        font.bold: true
-                        elide: Text.ElideRight
-                    }
-                    Text {
-                        width: row.width - 40
-                        text: row.mediaType
-                        visible: text.length > 0
-                        color: Theme.overlayText
-                        opacity: 0.75
-                        elide: Text.ElideRight
-                    }
-                    ProgressBar {
-                        width: row.width - 40
-                        visible: row.uploadState === "uploading"
-                        from: 0
-                        to: 100
-                        value: modelData.uploadProgress || 0
-                    }
-                }
-                onClicked: root.session.selectMedia(row.mediaId, false)
+                background: Item {}
+                onPressedChanged: scrollbarHide.restart()
             }
         }
 
         Column {
             id: actions
+            y: Math.max(0, root.height - height)
             width: parent.width
             height: root.actionAreaHeight
             spacing: 0
 
+            Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
             OverlayActionButton {
+                id: remoteButton
+                objectName: "remoteSceneAction"
                 width: actions.width
-                height: Theme.overlayButtonHeight
                 text: root.session ? root.session.remoteSceneActionText : "Launch Remote Scene"
-                tone: OverlayActionButton.Remote
+                tone: root.session ? root.session.remoteSceneActionTone : OverlayActionButton.Normal
+                busy: tone === OverlayActionButton.Uploading && !root.session.actionPending
                 enabled: root.session && root.session.remoteSceneActionEnabled
                 unavailableReason: root.session ? root.session.remoteSceneUnavailableReason : ""
                 onClicked: root.session.toggleRemoteScene()
             }
+            Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
             OverlayActionButton {
+                id: testButton
+                objectName: "testSceneAction"
                 width: actions.width
-                height: Theme.overlayButtonHeight
                 text: root.session ? root.session.testSceneActionText : "Launch Test Scene"
-                tone: OverlayActionButton.Test
+                tone: root.session ? root.session.testSceneActionTone : OverlayActionButton.Normal
                 enabled: root.session && root.session.testSceneActionEnabled
                 unavailableReason: root.session ? root.session.testSceneUnavailableReason : ""
                 onClicked: root.session.toggleTestScene()
             }
+            Rectangle { width: parent.width; height: 1; color: Theme.overlayBorder }
             OverlayActionButton {
+                id: uploadButton
+                objectName: "uploadAction"
                 width: actions.width
-                height: Theme.overlayButtonHeight
                 text: root.session ? root.session.uploadActionText : "Upload"
                 tone: root.session ? root.session.uploadActionTone : OverlayActionButton.Normal
+                busy: tone === OverlayActionButton.Uploading && !root.session.actionPending
+                monospace: busy && enabled
                 enabled: root.session && root.session.uploadActionEnabled
                 unavailableReason: root.session ? root.session.uploadUnavailableReason : ""
+                bottomRadius: Theme.overlayRadius
                 onClicked: root.session.triggerUploadAction()
             }
         }
     }
+
+    Rectangle {
+        id: roundedMask
+        anchors.fill: parent
+        radius: root.radius
+        color: "white"
+        visible: false
+        layer.enabled: true
+    }
+    Rectangle {
+        objectName: "mediaPanelBorder"
+        anchors.fill: parent
+        color: "transparent"
+        radius: root.radius
+        border.width: 1
+        border.color: Theme.overlayBorder
+    }
+    Timer { id: scrollbarHide; interval: 500 }
 }

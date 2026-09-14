@@ -7,9 +7,38 @@ AbstractButton {
 
     enum Tone { Normal, Uploading, Uploaded, Remote, Test }
     property int tone: OverlayActionButton.Normal
+    // Busy acknowledgements keep their blue fill even though input is locked.
+    property bool busy: false
+    property bool monospace: false
+    property real bottomRadius: 0
     property string unavailableReason: ""
+    readonly property bool dimmed: !enabled && !busy
+    readonly property color foregroundColor: dimmed ? Theme.overlayDisabledText
+        : tone === OverlayActionButton.Uploading ? Theme.brandBlue
+        : tone === OverlayActionButton.Uploaded ? Theme.mediaUploaded
+        : tone === OverlayActionButton.Remote || tone === OverlayActionButton.Test
+          ? Theme.overlaySceneText
+        : enabled && (hovered || down) ? "white" : Theme.overlayText
+    readonly property color backgroundColor: {
+        if (dimmed) return Theme.overlayDisabledBackground
+        if (tone === OverlayActionButton.Uploading)
+            return enabled && down ? Theme.primaryPressed
+                 : enabled && hovered ? Theme.primaryHover : Theme.primaryBackground
+        if (tone === OverlayActionButton.Uploaded)
+            return down ? Theme.overlayUploadedPressed
+                 : hovered ? Theme.overlayUploadedHover : Theme.connectedBackground
+        if (tone === OverlayActionButton.Remote || tone === OverlayActionButton.Test)
+            return down ? Theme.overlayScenePressed
+                 : hovered ? Theme.overlaySceneHover : Theme.overlaySceneBackground
+        return down ? Qt.rgba(1, 1, 1, 0.10)
+             : hovered ? Qt.rgba(1, 1, 1, 0.05) : "transparent"
+    }
 
+    implicitWidth: label.implicitWidth + 40
     implicitHeight: Theme.overlayButtonHeight
+    padding: 0
+    leftPadding: 20
+    rightPadding: 20
     hoverEnabled: true
     Accessible.role: Accessible.Button
     Accessible.name: text
@@ -17,11 +46,13 @@ AbstractButton {
     ToolTip.visible: hovered && !enabled && unavailableReason.length > 0
     ToolTip.text: unavailableReason
     contentItem: Text {
+        id: label
         text: control.text
-        color: control.tone === OverlayActionButton.Uploaded ? Theme.mediaUploaded
-             : control.tone === OverlayActionButton.Uploading ? Theme.brandBlue
-             : control.tone === OverlayActionButton.Remote || control.tone === OverlayActionButton.Test
-               ? "#ff96ff" : Theme.overlayText
+        textFormat: Text.PlainText
+        color: control.foregroundColor
+        font.family: control.monospace
+                     ? (Qt.platform.os === "osx" ? "Menlo" : "Courier New")
+                     : control.font.family
         font.pixelSize: 14
         font.bold: true
         horizontalAlignment: Text.AlignHCenter
@@ -29,13 +60,8 @@ AbstractButton {
         elide: Text.ElideRight
     }
     background: Rectangle {
-        color: !control.enabled ? Qt.rgba(Theme.overlayBackground.r,
-                                         Theme.overlayBackground.g,
-                                         Theme.overlayBackground.b, 0.35)
-             : control.down ? Qt.rgba(1, 1, 1, 0.10)
-             : control.hovered ? Qt.rgba(1, 1, 1, 0.05)
-             : control.tone === OverlayActionButton.Uploading ? Theme.primaryBackground
-             : control.tone === OverlayActionButton.Uploaded ? Theme.connectedBackground
-             : "transparent"
+        color: control.backgroundColor
+        bottomLeftRadius: control.bottomRadius
+        bottomRightRadius: control.bottomRadius
     }
 }

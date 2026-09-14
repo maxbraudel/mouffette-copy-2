@@ -8,6 +8,8 @@
 #include "shared/rendering/ICanvasHost.h"
 
 #include <QAbstractItemModel>
+#include <QSortFilterProxyModel>
+#include <QTimer>
 
 CanvasSessionViewModel::CanvasSessionViewModel(QString sessionId,
                                                ICanvasHost* canvas,
@@ -25,12 +27,21 @@ CanvasSessionViewModel::CanvasSessionViewModel(QString sessionId,
     , m_hasUnuploadedFiles(std::move(hasUnuploadedFiles))
     , m_hasProject(std::move(hasProject))
     , m_mediaSettings(new MediaSettingsViewModel(this))
+    , m_overlayMediaModel(new QSortFilterProxyModel(this))
 {
+    m_overlayMediaModel->setSortRole(MediaListModel::ZRole);
+    m_overlayMediaModel->sort(0, Qt::DescendingOrder);
     if (m_uploadManager) {
-        connect(m_uploadManager, &UploadManager::uiStateChanged,
-                this, &CanvasSessionViewModel::actionStateChanged);
+        connect(m_uploadManager, &UploadManager::uiStateChanged, this, [this] {
+            if (!uploadBelongsToSession() || !m_uploadManager->isBusy()
+                || uploadState() == UploadState::Preparing) {
+                m_uploadPercent = m_uploadFilesCompleted = m_uploadFilesTotal = 0;
+            }
+            emit actionStateChanged();
+        });
         connect(m_uploadManager, &UploadManager::uploadProgress, this,
                 [this](int percent, int completed, int total) {
+            if (!uploadBelongsToSession()) return;
             m_uploadPercent = percent;
             m_uploadFilesCompleted = completed;
             m_uploadFilesTotal = total;
@@ -42,7 +53,7 @@ CanvasSessionViewModel::CanvasSessionViewModel(QString sessionId,
 
 QObject* CanvasSessionViewModel::mediaModel() const
 {
-    return typedMediaModel();
+    return m_overlayMediaModel;
 }
 
 int CanvasSessionViewModel::mediaCount() const
@@ -147,7 +158,17 @@ CanvasSessionViewModel::remoteSceneActionState() const
 bool CanvasSessionViewModel::remoteSceneActionEnabled() const
 {
     const ICanvasHost* canvas = m_canvas;
-    return canvas && canvas->remoteSceneActionEnabled();
+    return !m_actionPending && canvas && canvas->remoteSceneActionEnabled();
+}
+
+int CanvasSessionViewModel::remoteSceneActionTone() const
+{
+    switch (remoteSceneActionState()) {
+    case SceneActionState::Starting:
+    case SceneActionState::Stopping: return UploadingTone;
+    case SceneActionState::Active: return RemoteTone;
+    default: return NormalTone;
+    }
 }
 
 QString CanvasSessionViewModel::remoteSceneUnavailableReason() const
@@ -183,7 +204,12 @@ CanvasSessionViewModel::testSceneActionState() const
 bool CanvasSessionViewModel::testSceneActionEnabled() const
 {
     const ICanvasHost* canvas = m_canvas;
-    return canvas && canvas->testSceneActionEnabled();
+    return !m_actionPending && canvas && canvas->testSceneActionEnabled();
+}
+
+int CanvasSessionViewModel::testSceneActionTone() const
+{
+    return testSceneActionState() == SceneActionState::Active ? TestTone : NormalTone;
 }
 
 QString CanvasSessionViewModel::testSceneUnavailableReason() const
@@ -221,24 +247,24 @@ CanvasSessionViewModel::UploadState CanvasSessionViewModel::uploadState() const
     if (!hasProject() || !m_uploadManager || !remoteCommandsEnabled()) {
         return UploadState::Unavailable;
     }
-    const bool activeForSession = m_uploadManager->hasActiveUpload()
-        && m_uploadManager->activeUploadTargetClientId() == m_sessionId;
+    const bool activeForSession = uploadBelongsToSession();
     if (activeForSession) {
         if (m_uploadManager->isCancelling()) return UploadState::Cancelling;
         if (m_uploadManager->isFinalizing()) return UploadState::Finalizing;
-        if (m_uploadManager->outgoingState()
-            == UploadManager::OutgoingState::AwaitingTargetReady) {
+        const auto state = m_uploadManager->outgoingState();
+        if (state == UploadManager::OutgoingState::AwaitingTargetReady
+            || state == UploadManager::OutgoingState::Queued
+            || state == UploadManager::OutgoingState::Suspended) {
             return UploadState::Preparing;
         }
         if (m_uploadManager->isUploading()) return UploadState::Uploading;
     }
-    if (m_uploadManager->isRemoving()
-        && m_uploadManager->targetClientId() == m_sessionId) {
+    if (m_uploadManager->isRemoving() && activeForSession) {
         return UploadState::Removing;
     }
+    if (m_uploadManager->isBusy()) return UploadState::Unavailable;
     const bool hasRemote = m_remoteFilesPresent && m_remoteFilesPresent();
     const bool hasUnuploaded = m_hasUnuploadedFiles && m_hasUnuploadedFiles();
-    if (hasRemote && !hasUnuploaded) return UploadState::Uploaded;
     if (!m_canvas || m_canvas->enumerateMediaItems().isEmpty()) {
         return UploadState::Unavailable;
     }
@@ -248,14 +274,22 @@ CanvasSessionViewModel::UploadState CanvasSessionViewModel::uploadState() const
                    || canvas->remoteSceneStopping())) {
         return UploadState::Unavailable;
     }
+    if (hasRemote && !hasUnuploaded) return UploadState::Uploaded;
     return UploadState::Ready;
+}
+
+bool CanvasSessionViewModel::uploadBelongsToSession() const
+{
+    // Workspace IDs are persistent identities; transport endpoint IDs change
+    // on reconnect and must never be compared to a workspace ID.
+    return m_uploadManager && m_uploadManager->activeSessionIdentity() == m_sessionId;
 }
 
 bool CanvasSessionViewModel::uploadActionEnabled() const
 {
     const UploadState state = uploadState();
-    return state == UploadState::Ready || state == UploadState::Uploaded
-        || state == UploadState::Preparing || state == UploadState::Uploading;
+    return !m_actionPending && (state == UploadState::Ready
+        || state == UploadState::Uploaded || state == UploadState::Uploading);
 }
 
 QString CanvasSessionViewModel::uploadUnavailableReason() const
@@ -272,13 +306,12 @@ QString CanvasSessionViewModel::uploadUnavailableReason() const
 int CanvasSessionViewModel::uploadActionTone() const
 {
     switch (uploadState()) {
-    case UploadState::Uploaded: return 2;
+    case UploadState::Uploaded: return UploadedTone;
     case UploadState::Preparing:
     case UploadState::Uploading:
     case UploadState::Finalizing:
-    case UploadState::Cancelling: return 3;
-    case UploadState::Ready: return 1;
-    default: return 0;
+    case UploadState::Cancelling: return UploadingTone;
+    default: return NormalTone;
     }
 }
 
@@ -292,6 +325,7 @@ void CanvasSessionViewModel::setCanvas(ICanvasHost* canvas)
         disconnect(previous, nullptr, this, nullptr);
     }
     m_canvas = canvas;
+    m_overlayMediaModel->setSourceModel(typedMediaModel());
     if (m_canvas) {
         connect(m_canvas, &ICanvasHost::actionStateChanged,
                 this, &CanvasSessionViewModel::actionStateChanged,
@@ -380,20 +414,43 @@ void CanvasSessionViewModel::setActiveTool(const QString& tool)
 void CanvasSessionViewModel::toggleRemoteScene()
 {
     if (remoteSceneActionEnabled() && m_canvas) {
-        m_canvas->triggerRemoteSceneAction();
+        dispatchAction([this] {
+            if (m_canvas && hasProject() && m_canvas->remoteSceneActionEnabled())
+                m_canvas->triggerRemoteSceneAction();
+        });
     }
 }
 
 void CanvasSessionViewModel::toggleTestScene()
 {
     if (testSceneActionEnabled() && m_canvas) {
-        m_canvas->triggerTestSceneAction();
+        dispatchAction([this] {
+            if (m_canvas && hasProject() && m_canvas->testSceneActionEnabled())
+                m_canvas->triggerTestSceneAction();
+        });
     }
 }
 
 void CanvasSessionViewModel::triggerUploadAction()
 {
-    if (uploadActionEnabled() && m_uploadAction) m_uploadAction();
+    if (!uploadActionEnabled() || !m_uploadAction) return;
+    const UploadState requestedState = uploadState();
+    dispatchAction([this, requestedState] {
+        if (uploadState() == requestedState && m_uploadAction) m_uploadAction();
+    });
+}
+
+void CanvasSessionViewModel::dispatchAction(std::function<void()> action)
+{
+    // Lock synchronously, before validation or network work. Even a local
+    // rejection must publish the settled state and release the client lock.
+    m_actionPending = true;
+    emit actionStateChanged();
+    QTimer::singleShot(0, this, [this, action = std::move(action)] {
+        action();
+        m_actionPending = false;
+        emit actionStateChanged();
+    });
 }
 
 MediaListModel* CanvasSessionViewModel::typedMediaModel() const

@@ -60,6 +60,16 @@ QtObject {
     readonly property color mediaUploaded: "#2ecc71"
     readonly property color mediaNotUploaded: "#f39c12"
     readonly property color mediaProgress: "#2d8cff"
+    readonly property color mediaProgressBackground: Qt.rgba(1, 1, 1, 38 / 255)
+    readonly property color overlaySecondaryText: Qt.rgba(1, 1, 1, 217 / 255)
+    readonly property color overlayDisabledText: Qt.rgba(1, 1, 1, 0.4)
+    readonly property color overlayDisabledBackground: Qt.rgba(1, 1, 1, 0.04)
+    readonly property color overlaySceneText: "#ff96ff"
+    readonly property color overlaySceneBackground: Qt.rgba(1, 0, 1, 38 / 255)
+    readonly property color overlaySceneHover: Qt.rgba(1, 0, 1, 56 / 255)
+    readonly property color overlayScenePressed: Qt.rgba(1, 0, 1, 77 / 255)
+    readonly property color overlayUploadedHover: Qt.rgba(76 / 255, 175 / 255, 80 / 255, 56 / 255)
+    readonly property color overlayUploadedPressed: Qt.rgba(76 / 255, 175 / 255, 80 / 255, 77 / 255)
 
     readonly property int windowMargin: 20
     readonly property int innerGap: 20

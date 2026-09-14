@@ -58,6 +58,8 @@ void CanvasMedia::setFileId(const QString& id)
 {
     if (m_fileId == id) return;
     m_fileId = id;
+    const QFileInfo source(m_sourcePath);
+    m_sourceSizeBytes = source.isFile() ? source.size() : -1;
     notifyChanged();
 }
 
@@ -65,6 +67,8 @@ void CanvasMedia::setSourcePath(const QString& path)
 {
     if (m_sourcePath == path) return;
     m_sourcePath = path;
+    const QFileInfo source(path);
+    m_sourceSizeBytes = source.isFile() ? source.size() : -1;
     if (m_player) m_player->setSource(QUrl::fromLocalFile(path));
     notifyChanged();
 }
@@ -513,6 +517,8 @@ QVariantMap CanvasMedia::toModelMap(qreal unit) const
         {QStringLiteral("height"), m_baseSize.height() * safeUnit},
         {QStringLiteral("scale"), m_scale},
         {QStringLiteral("z"), m_z},
+        {QStringLiteral("selected"), m_selected},
+        {QStringLiteral("sourceSizeBytes"), m_sourceSizeBytes},
         {QStringLiteral("sourcePath"), m_sourcePath},
         {QStringLiteral("sourceUrl"), m_sourcePath.isEmpty()
              ? QString() : QUrl::fromLocalFile(m_sourcePath).toString()},

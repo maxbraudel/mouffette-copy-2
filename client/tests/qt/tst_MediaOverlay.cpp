@@ -1,4 +1,6 @@
 #include <QColor>
+#include <QDir>
+#include <QFileInfo>
 #include <QImage>
 #include <QQmlComponent>
 #include <QQmlEngine>
@@ -15,6 +17,8 @@
 #include "frontend/qml/MediaSettingsViewModel.h"
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
+#include "backend/files/FileManager.h"
+#include "backend/network/UploadManager.h"
 
 class MediaOverlayTest final : public QObject
 {
@@ -29,6 +33,11 @@ private slots:
     void mediaCountTracksRealCanvasInsertions();
     void typedCapabilitiesGuardDirectCppInvocations();
     void overlayButtonHoverIsImmediate();
+    void mediaActionPalette_data();
+    void mediaActionPalette();
+    void legacyMediaRowsAndProgress();
+    void uploadActionLocksBeforeDispatchAndRecovers();
+    void uploadAcknowledgementsDriveOverlayState();
     void canvasToolbarUsesOverlaySwitchAndSegmentedTools();
     void mediaSettingsPanelRestoresLegacyTabsAndBindings();
     void toastMatchesLegacyBottomLeftDoubleBackground();
@@ -113,10 +122,19 @@ Item {
     required property var externalModel
     property int testMediaCount: 0
     property int selectionCalls: 0
+    property alias session: fakeSession
+    property int canvasPresses: 0
+    MouseArea {
+        anchors.fill: parent
+        onPressed: host.canvasPresses += 1
+    }
 
     QtObject {
         id: fakeSession
         property bool hasProject: true
+        property bool actionPending: false
+        property int remoteSceneActionTone: 0
+        property int testSceneActionTone: 0
         property var mediaModel: host.externalModel
         property int mediaCount: host.testMediaCount
         property string remoteSceneActionText: "Launch Remote Scene"
@@ -139,7 +157,7 @@ Item {
         objectName: "mediaListPanel"
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        anchors.margins: 10
+        anchors.margins: 16
         session: fakeSession
     }
 }
@@ -224,7 +242,7 @@ Item {
         objectName: "realMediaListPanel"
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        anchors.margins: 10
+        anchors.margins: 16
         session: parent.externalSession
     }
 }
@@ -482,7 +500,7 @@ void MediaOverlayTest::mediaPanelVisibilityAnchorInteractionAndScroll()
     QVERIFY(QTest::qWaitForWindowExposed(&window));
     harness->setSize(window.size());
     QCoreApplication::processEvents();
-    QVERIFY(panel->isVisible());
+    QVERIFY(!panel->isVisible());
     QVERIFY(!list->isVisible());
 
     QVariantList rows;
@@ -496,8 +514,8 @@ void MediaOverlayTest::mediaPanelVisibilityAnchorInteractionAndScroll()
     QCoreApplication::processEvents();
 
     QVERIFY(panel->isVisible());
-    QCOMPARE(qRound(panel->x() + panel->width()), window.width() - 10);
-    QCOMPARE(qRound(panel->y() + panel->height()), window.height() - 10);
+    QCOMPARE(qRound(panel->x() + panel->width()), window.width() - 16);
+    QCOMPARE(qRound(panel->y() + panel->height()), window.height() - 16);
 
     QTRY_COMPARE(list->property("count").toInt(), 1);
     QTRY_VERIFY(findVisualItem(harness.get(), QStringLiteral("mediaRow_0")));
@@ -526,8 +544,8 @@ void MediaOverlayTest::mediaPanelVisibilityAnchorInteractionAndScroll()
     list->setProperty("contentY", 100.0);
     QCoreApplication::processEvents();
     QVERIFY(list->property("contentY").toReal() > 0.0);
-    QCOMPARE(qRound(panel->x() + panel->width()), window.width() - 10);
-    QCOMPARE(qRound(panel->y() + panel->height()), window.height() - 10);
+    QCOMPARE(qRound(panel->x() + panel->width()), window.width() - 16);
+    QCOMPARE(qRound(panel->y() + panel->height()), window.height() - 16);
 }
 
 void MediaOverlayTest::mediaCountTracksRealCanvasInsertions()
@@ -555,13 +573,13 @@ void MediaOverlayTest::mediaCountTracksRealCanvasInsertions()
     harness->setSize(window.size());
     QCoreApplication::processEvents();
     QCOMPARE(session.mediaCount(), 0);
-    QVERIFY(panel->isVisible());
+    QVERIFY(!panel->isVisible());
     QVERIFY(host->document()->addText(QPointF(100, 100)));
     QCOMPARE(session.mediaCount(), 1);
     QVERIFY(countChanged.count() >= 1);
     QTRY_VERIFY(panel->isVisible());
-    QCOMPARE(qRound(panel->x() + panel->width()), window.width() - 10);
-    QCOMPARE(qRound(panel->y() + panel->height()), window.height() - 10);
+    QCOMPARE(qRound(panel->x() + panel->width()), window.width() - 16);
+    QCOMPARE(qRound(panel->y() + panel->height()), window.height() - 16);
 }
 
 void MediaOverlayTest::typedCapabilitiesGuardDirectCppInvocations()
@@ -649,6 +667,215 @@ void MediaOverlayTest::typedCapabilitiesGuardDirectCppInvocations()
     QCOMPARE(media->settings().opacityText, QStringLiteral("75"));
     host->controller()->handleOverlayDelete(media->mediaId());
     QCOMPARE(host->document()->media().size(), 1);
+}
+
+void MediaOverlayTest::mediaActionPalette_data()
+{
+    QTest::addColumn<int>("tone");
+    QTest::addColumn<bool>("enabled");
+    QTest::addColumn<bool>("busy");
+    QTest::addColumn<QColor>("foreground");
+    QTest::addColumn<QColor>("idle");
+    QTest::addColumn<QColor>("hover");
+    QTest::addColumn<QColor>("pressed");
+    QTest::newRow("idle") << 0 << true << false << QColor(255, 255, 255, 230)
+        << QColor(Qt::transparent) << QColor(255, 255, 255, 13) << QColor(255, 255, 255, 26);
+    QTest::newRow("uploading") << 1 << true << true << QColor("#4a90e2")
+        << QColor(74, 144, 226, 38) << QColor(74, 144, 226, 56) << QColor(74, 144, 226, 77);
+    QTest::newRow("awaiting-ack") << 1 << false << true << QColor("#4a90e2")
+        << QColor(74, 144, 226, 38) << QColor(74, 144, 226, 38) << QColor(74, 144, 226, 38);
+    QTest::newRow("unload") << 2 << true << false << QColor("#2ecc71")
+        << QColor(76, 175, 80, 38) << QColor(76, 175, 80, 56) << QColor(76, 175, 80, 77);
+    for (int scene : {3, 4}) {
+        QTest::newRow(scene == 3 ? "remote-active" : "test-active")
+            << scene << true << false << QColor("#ff96ff")
+            << QColor(255, 0, 255, 38) << QColor(255, 0, 255, 56) << QColor(255, 0, 255, 77);
+    }
+    for (int disabledTone : {0, 1, 2, 3, 4}) {
+        QTest::newRow(qPrintable(QStringLiteral("disabled-%1").arg(disabledTone)))
+            << disabledTone << false << false << QColor(255, 255, 255, 102)
+            << QColor(255, 255, 255, 10) << QColor(255, 255, 255, 10) << QColor(255, 255, 255, 10);
+    }
+}
+
+void MediaOverlayTest::mediaActionPalette()
+{
+    QFETCH(int, tone);
+    QFETCH(bool, enabled);
+    QFETCH(bool, busy);
+    QFETCH(QColor, foreground);
+    QFETCH(QColor, idle);
+    QFETCH(QColor, hover);
+    QFETCH(QColor, pressed);
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(360, 120);
+    window.setColor(Qt::white);
+    QQmlComponent component(&engine, QUrl(QStringLiteral(
+        "qrc:/qt/qml/Mouffette/App/resources/qml/app/canvas/OverlayActionButton.qml")));
+    std::unique_ptr<QQuickItem> button(qobject_cast<QQuickItem*>(component.create()));
+    QVERIFY2(button, qPrintable(component.errorString()));
+    button->setParentItem(window.contentItem());
+    button->setPosition({20, 20});
+    button->setSize({300, 40});
+    button->setProperty("text", QStringLiteral("Media action"));
+    button->setProperty("tone", tone);
+    button->setProperty("busy", busy);
+    button->setEnabled(enabled);
+    QSignalSpy clicked(button.get(), SIGNAL(clicked()));
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QTest::mouseMove(&window, {5, 5});
+    QCOMPARE(button->property("foregroundColor").value<QColor>(), foreground);
+    auto verifyFill = [&](const QColor& fill) {
+        const QImage frame = window.grabWindow();
+        return !frame.isNull() && nearColor(imagePixel(frame, window.size(), {25, 25}), overWhite(fill));
+    };
+    QTRY_VERIFY(verifyFill(idle));
+    QTest::mouseMove(&window, {100, 40});
+    QTRY_VERIFY(verifyFill(hover));
+    QTest::mousePress(&window, Qt::LeftButton, Qt::NoModifier, {100, 40});
+    QTRY_VERIFY(verifyFill(pressed));
+    QTest::mouseRelease(&window, Qt::LeftButton, Qt::NoModifier, {100, 40});
+    QCOMPARE(clicked.count(), enabled ? 1 : 0);
+}
+
+void MediaOverlayTest::legacyMediaRowsAndProgress()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString path = temporary.filePath(QStringLiteral("Photo de vacances.png"));
+    QImage source(1920, 1080, QImage::Format_ARGB32_Premultiplied);
+    source.fill(Qt::darkCyan);
+    QVERIFY(source.save(path));
+    QString error;
+    std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+    QVERIFY2(host, qPrintable(error));
+    host->setProjectEditingEnabled(true);
+    CanvasMedia* photo = host->document()->addPreparedFile(path, source.size(), false, {0, 0});
+    CanvasMedia* text = host->document()->addText({0, 0}, QStringLiteral("Titre de la scène"));
+    QVERIFY(photo);
+    QVERIFY(text);
+    photo->setZ(10);
+    CanvasSessionViewModel session(QStringLiteral("rows"), host.get(), [] {}, nullptr,
+                                  [] { return false; }, [] { return true; }, [] { return true; });
+    QQmlEngine engine;
+    QQuickWindow window;
+    window.resize(900, 600);
+    window.setColor(QColor("#1e1e1e"));
+    std::unique_ptr<QQuickItem> harness(createRealMediaPanelHarness(engine, window, &session, &error));
+    QVERIFY2(harness, qPrintable(error));
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto* panel = findVisualItem(harness.get(), QStringLiteral("realMediaListPanel"));
+    QVERIFY(panel);
+    QTRY_VERIFY(findVisualItem(panel, QStringLiteral("mediaRow_1")));
+    auto* row = findVisualItem(panel, QStringLiteral("mediaRow_0"));
+    auto* textRow = findVisualItem(panel, QStringLiteral("mediaRow_1"));
+    QCOMPARE(row->property("mediaId").toString(), photo->mediaId());
+    QCOMPARE(textRow->property("mediaId").toString(), text->mediaId());
+    QVERIFY(row->height() > textRow->height());
+    auto* name = findVisualItem(panel, QStringLiteral("mediaName_0"));
+    auto* details = findVisualItem(panel, QStringLiteral("mediaDetails_0"));
+    auto* status = findVisualItem(panel, QStringLiteral("mediaStatus_0"));
+    auto* progress = findVisualItem(panel, QStringLiteral("mediaProgress_0"));
+    auto* fill = findVisualItem(panel, QStringLiteral("mediaProgressFill_0"));
+    QVERIFY(name && details && status && progress && fill);
+    QCOMPARE(name->property("text").toString(), QFileInfo(path).fileName());
+    QVERIFY(details->property("text").toString().startsWith(QStringLiteral("1920 x 1080 px  ·  ")));
+    QVERIFY(!details->property("text").toString().endsWith(QStringLiteral("n/a")));
+    QCOMPARE(status->property("text").toString(), QStringLiteral("Not uploaded"));
+    QVERIFY(!findVisualItem(panel, QStringLiteral("mediaStatus_1"))->isVisible());
+    QVERIFY(!textRow->property("detailsText").toString().contains(QStringLiteral(" · ")));
+    const qreal originalHeight = row->height();
+    photo->setUploadUploading(37);
+    QTRY_VERIFY(progress->isVisible());
+    QVERIFY(!status->isVisible());
+    QCOMPARE(progress->height(), 10.0);
+    QCOMPARE(progress->width(), row->width() - 40);
+    QCOMPARE(fill->width(), progress->width() * 0.37);
+    QCOMPARE(fill->property("color").value<QColor>(), QColor("#2d8cff"));
+    QCOMPARE(row->height(), originalHeight);
+    // The border is painted over the fill; rounded corners reveal the canvas.
+    const QImage frame = window.grabWindow();
+    QVERIFY(!frame.isNull());
+    const QPointF origin = panel->mapToScene({0, 0});
+    QVERIFY(nearColor(imagePixel(frame, window.size(), origin), window.color()));
+    const QString artifactDir = qEnvironmentVariable("MOUFFETTE_OVERLAY_ARTIFACT_DIR");
+    if (!artifactDir.isEmpty()) {
+        QVERIFY(QDir().mkpath(artifactDir));
+        QVERIFY(frame.save(QDir(artifactDir).filePath(QStringLiteral("media-overlay-uploading.png"))));
+    }
+    photo->setUploadUploaded();
+    QTRY_VERIFY(status->isVisible());
+    QVERIFY(!progress->isVisible());
+    QCOMPARE(status->property("text").toString(), QStringLiteral("Uploaded"));
+    QCOMPARE(status->property("color").value<QColor>(), QColor("#2ecc71"));
+    QCOMPARE(row->height(), originalHeight);
+    host->document()->select(photo->mediaId());
+    QTRY_VERIFY(row->property("selected").toBool());
+    const QPoint clickPoint = textRow->mapToScene({textRow->width() / 2, textRow->height() / 2}).toPoint();
+    QTest::mouseClick(&window, Qt::LeftButton, Qt::NoModifier, clickPoint);
+    QTRY_COMPARE(host->document()->selectedMedia(), text);
+    QVERIFY(!row->property("selected").toBool());
+    text->setZ(20);
+    QTRY_COMPARE(findVisualItem(panel, QStringLiteral("mediaRow_0"))->property("mediaId").toString(), text->mediaId());
+    text->setText(QString(80, QLatin1Char('W')));
+    QTRY_COMPARE(panel->width(), 420.0);
+    harness->setWidth(600);
+    QTRY_COMPARE(panel->width(), 300.0);
+    photo->setUploadNotUploaded();
+    host->document()->clear();
+    QTRY_VERIFY(!panel->isVisible());
+}
+
+void MediaOverlayTest::uploadActionLocksBeforeDispatchAndRecovers()
+{
+    QTemporaryDir temporary;
+    FileManager files;
+    UploadManager uploads(&files, nullptr, temporary.filePath(QStringLiteral("Uploads")));
+    QString error;
+    std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create(&error));
+    QVERIFY2(host, qPrintable(error));
+    host->setProjectEditingEnabled(true);
+    host->setOverlayActionsEnabled(true);
+    QVERIFY(host->document()->addText({0, 0}));
+    bool remoteFiles = false;
+    bool acceptAction = false;
+    bool hasProject = true;
+    bool sawLock = false;
+    int calls = 0;
+    CanvasSessionViewModel* workspace = nullptr;
+    CanvasSessionViewModel session(QStringLiteral("persistent-workspace"), host.get(), [&] {
+        ++calls;
+        sawLock = workspace->actionPending() && !workspace->uploadActionEnabled()
+            && !workspace->testSceneActionEnabled();
+        workspace->triggerUploadAction(); // Reentrant input cannot send twice.
+        if (acceptAction) remoteFiles = !remoteFiles;
+    }, &uploads, [&] { return remoteFiles; }, [&] { return !remoteFiles; }, [&] { return hasProject; });
+    workspace = &session;
+    QCOMPARE(session.uploadActionTone(), 0);
+    for (int expectedCalls = 1; expectedCalls <= 4; ++expectedCalls) {
+        acceptAction = expectedCalls % 2 == 0;
+        const QString before = session.uploadActionText();
+        session.triggerUploadAction();
+        QVERIFY(session.actionPending());
+        QVERIFY(!session.uploadActionEnabled());
+        QCOMPARE(calls, expectedCalls - 1);
+        session.triggerUploadAction();
+        QTRY_VERIFY(!session.actionPending());
+        QCOMPARE(calls, expectedCalls);
+        QVERIFY(sawLock);
+        QVERIFY(session.uploadActionEnabled());
+        if (!acceptAction) QCOMPARE(session.uploadActionText(), before);
+        QCOMPARE(session.uploadActionText(), remoteFiles ? QStringLiteral("Unload") : QStringLiteral("Upload"));
+        QCOMPARE(session.uploadActionTone(), remoteFiles ? 2 : 0);
+    }
+    session.triggerUploadAction();
+    hasProject = false; // A queued request must recheck capabilities.
+    QTRY_VERIFY(!session.actionPending());
+    QCOMPARE(calls, 4);
+    QVERIFY(!session.uploadActionEnabled());
 }
 
 void MediaOverlayTest::overlayButtonHoverIsImmediate()
