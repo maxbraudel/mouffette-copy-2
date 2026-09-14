@@ -38,6 +38,7 @@ AppPanel {
             readonly property string badgeValue: badgeText
             readonly property int badgeKindValue: badgeKind
             readonly property bool canActivate: selectable
+            readonly property bool availableBadge: badgeValue.trim().toUpperCase() === "AVAILABLE"
 
             width: list.width
             height: secondaryValue.length > 0 ? 66 : 48
@@ -77,7 +78,8 @@ AppPanel {
                     width: Math.max(54, badgeLabel.implicitWidth + 18)
                     height: 22
                     radius: height / 2
-                    color: row.badgeKindValue === 0 ? Theme.connectedBackground
+                    color: row.availableBadge ? Theme.buttonBackground
+                           : row.badgeKindValue === 0 ? Theme.connectedBackground
                            : row.badgeKindValue === 1 ? Theme.warningBackground
                                                      : Theme.errorBackground
 
@@ -85,7 +87,8 @@ AppPanel {
                         id: badgeLabel
                         anchors.centerIn: parent
                         text: row.badgeValue
-                        color: row.badgeKindValue === 0 ? Theme.connectedText
+                        color: row.availableBadge ? Theme.availableText
+                               : row.badgeKindValue === 0 ? Theme.connectedText
                                : row.badgeKindValue === 1 ? Theme.warningText
                                                          : Theme.errorText
                         font.pixelSize: 12

@@ -36,6 +36,10 @@ QtObject {
 
     readonly property color connectedText: "#4c9b50"
     readonly property color connectedBackground: Qt.rgba(76 / 255, 175 / 255, 80 / 255, 38 / 255)
+    readonly property color availableText: Qt.rgba(activePalette.text.r,
+                                                   activePalette.text.g,
+                                                   activePalette.text.b,
+                                                   0.55)
     readonly property color warningText: "#ffa000"
     readonly property color warningBackground: Qt.rgba(255 / 255, 152 / 255, 0, 38 / 255)
     readonly property color errorText: "#ff5753"

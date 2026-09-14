@@ -17,12 +17,17 @@ Item {
     property bool auxiliaryVisible: auxiliaryText.length > 0
     property bool busy: false
     property int statusWidth: 120
+    readonly property bool availableStatus: statusText.trim().toUpperCase() === "AVAILABLE"
 
-    readonly property color statusForeground: statusKind === SegmentedStatusCard.Connected
+    readonly property color statusForeground: availableStatus
+                                               ? Theme.availableText
+                                               : statusKind === SegmentedStatusCard.Connected
                                                ? Theme.connectedText
                                                : statusKind === SegmentedStatusCard.Warning
                                                  ? Theme.warningText : Theme.errorText
-    readonly property color statusBackground: statusKind === SegmentedStatusCard.Connected
+    readonly property color statusBackground: availableStatus
+                                               ? Theme.buttonBackground
+                                               : statusKind === SegmentedStatusCard.Connected
                                                ? Theme.connectedBackground
                                                : statusKind === SegmentedStatusCard.Warning
                                                  ? Theme.warningBackground : Theme.errorBackground

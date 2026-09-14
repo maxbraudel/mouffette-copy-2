@@ -23,6 +23,7 @@ class MediaOverlayTest final : public QObject
 private slots:
     void segmentedStatusFillReachesBothEdges_data();
     void segmentedStatusFillReachesBothEdges();
+    void availableStatusUsesNeutralGreyPalette();
     void segmentedStatusKeepsSingleTopBorder();
     void mediaPanelVisibilityAnchorInteractionAndScroll();
     void mediaCountTracksRealCanvasInsertions();
@@ -411,6 +412,26 @@ void MediaOverlayTest::segmentedStatusFillReachesBothEdges()
     QVERIFY2(nearColor(imagePixel(image, window.size(),
                                  QPointF(x, origin.y() + status->height() - 3.0)), expected),
              "The colored status fill must reach the bottom edge behind the border");
+}
+
+void MediaOverlayTest::availableStatusUsesNeutralGreyPalette()
+{
+    QQmlEngine engine;
+    QQuickWindow window;
+    std::unique_ptr<QQuickItem> card(createStatusCard(engine, window));
+    QVERIFY(card);
+
+    card->setProperty("statusText", QStringLiteral("Available"));
+    QCOMPARE(card->property("availableStatus").toBool(), true);
+
+    const QColor foreground = card->property("statusForeground").value<QColor>();
+    const QColor background = card->property("statusBackground").value<QColor>();
+    QVERIFY(foreground.alphaF() > 0.5);
+    QVERIFY(foreground.alphaF() < 0.6);
+    QVERIFY(qAbs(foreground.red() - foreground.green()) <= 8);
+    QVERIFY(qAbs(foreground.green() - foreground.blue()) <= 8);
+    QVERIFY(qAbs(background.red() - background.green()) <= 8);
+    QVERIFY(qAbs(background.green() - background.blue()) <= 8);
 }
 
 void MediaOverlayTest::segmentedStatusKeepsSingleTopBorder()
