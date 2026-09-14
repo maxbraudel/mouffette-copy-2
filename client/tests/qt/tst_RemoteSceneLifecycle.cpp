@@ -1,11 +1,18 @@
 #include <QApplication>
 #include <QFile>
 #include <QJsonArray>
+#include <QJsonDocument>
+#include <QQuickWindow>
 #include <QTemporaryDir>
+#include <QUuid>
+#include <QWebSocketServer>
 #include <QtTest>
 
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
+#include "backend/files/FileManager.h"
+#include "backend/network/WebSocketClient.h"
+#include "backend/security/DeviceIdentityStore.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
 
@@ -14,6 +21,153 @@ class RemoteSceneLifecycleTest final : public QObject
     Q_OBJECT
 
 private slots:
+    void remoteLaunchPreparesLocalMedia_data()
+    {
+        QTest::addColumn<bool>("includeImage");
+        QTest::addColumn<bool>("missingSource");
+        QTest::newRow("text-only") << false << false;
+        QTest::newRow("text-and-image") << true << false;
+        QTest::newRow("missing-local-image-source") << true << true;
+    }
+
+    void remoteLaunchPreparesLocalMedia()
+    {
+        QFETCH(bool, includeImage);
+        QFETCH(bool, missingSource);
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        QWebSocketServer server(QStringLiteral("scene-preparation-test"),
+                                QWebSocketServer::NonSecureMode);
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QString bootId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        const QString targetId(43, QLatin1Char('B'));
+        QJsonObject prepared;
+        QJsonObject progress;
+        bool stopReceived = false;
+        auto send = [&](QWebSocket* peer, QJsonObject message) {
+            message.insert(QStringLiteral("protocolVersion"), 3);
+            message.insert(QStringLiteral("serverBootId"), bootId);
+            message.insert(QStringLiteral("messageId"),
+                           QUuid::createUuid().toString(QUuid::WithoutBraces));
+            peer->sendTextMessage(QString::fromUtf8(
+                QJsonDocument(message).toJson(QJsonDocument::Compact)));
+        };
+        connect(&server, &QWebSocketServer::newConnection, this, [&]() {
+            QWebSocket* peer = server.nextPendingConnection();
+            QVERIFY(peer);
+            peer->setParent(&server);
+            send(peer, {{"type", "auth_challenge"}, {"issuedAt", 1},
+                        {"nonce", QString::fromLatin1(QByteArray(32, 'n').toBase64(
+                            QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals))}});
+            connect(peer, &QWebSocket::textMessageReceived, &server,
+                    [&, peer](const QString& encoded) {
+                const QJsonObject message = QJsonDocument::fromJson(encoded.toUtf8()).object();
+                const QString type = message.value("type").toString();
+                if (type == QLatin1String("auth_response")) {
+                    const QString ownerId = DeviceIdentityStore::endpointIdForInstallation(
+                        message.value("installationId").toString(),
+                        message.value("instanceId").toString());
+                    send(peer, {
+                        {"type", "welcome"},
+                        {"connectionId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                        {"installationId", message.value("installationId")},
+                        {"endpointId", ownerId},
+                        {"instanceId", message.value("instanceId")},
+                        {"runtimeId", message.value("runtimeId")},
+                        {"connectionGeneration", 1}, {"serverMonotonicMs", 10},
+                        {"policy", QJsonObject{
+                            {"policyVersion", 1}, {"heartbeatIntervalMs", 250},
+                            {"leaseTimeoutMs", 1000}, {"scenePrepareTimeoutMs", 15000},
+                            {"sceneActivationLeadMs", 4000}, {"sceneMaxClockSkewMs", 50},
+                            {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
+                            {"uploadIdleTimeoutMs", 45000}, {"uploadTargetAckTimeoutMs", 30000},
+                            {"removalAckTimeoutMs", 30000}}}
+                    });
+                    send(peer, {
+                        {"type", "remote_session_opened"},
+                        {"remoteSessionId", "preparation-session"}, {"generation", 1},
+                        {"ownerEndpointId", ownerId}, {"targetEndpointId", targetId},
+                        {"ownerConnectionGeneration", 1}, {"targetConnectionGeneration", 1},
+                        {"resumeToken", "test-resume-token"}, {"phase", "Active"}
+                    });
+                } else if (type == QLatin1String("heartbeat")) {
+                    send(peer, {{"type", "heartbeat_ack"}, {"connectionGeneration", 1},
+                                {"sequence", message.value("sequence")},
+                                {"clientMonotonicMs", message.value("clientMonotonicMs")},
+                                {"serverMonotonicMs", message.value("clientMonotonicMs")},
+                                {"serverEpochMs", 1}});
+                } else if (type == QLatin1String("prepared")) {
+                    prepared = message;
+                } else if (type == QLatin1String("prepare_progress")) {
+                    progress = message;
+                } else if (type == QLatin1String("stop")) {
+                    stopReceived = true;
+                }
+            });
+        });
+
+        WebSocketClient client(directory.path(), false);
+        QSignalSpy sessionOpened(&client, &WebSocketClient::remoteSessionOpened);
+        client.connectToServer(QStringLiteral("ws://127.0.0.1:%1").arg(server.serverPort()));
+        QTRY_COMPARE_WITH_TIMEOUT(sessionOpened.count(), 1, 3000);
+
+        FileManager files;
+        QQuickWindow window;
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->controller()->registerWindow(&window);
+        host->setFileManager(&files);
+        host->setWebSocketClient(&client);
+        host->setRemoteSceneTarget(targetId, QStringLiteral("Client B"));
+        host->setScreens({ScreenInfo(0, 1920, 1080, 0, 0, true)});
+        host->setProjectEditingEnabled(true);
+        host->setOverlayActionsEnabled(true);
+        QVERIFY(host->document()->addText(QPointF(40, 60), QStringLiteral("Scene title")));
+        if (includeImage) {
+            const QString path = directory.filePath(QStringLiteral("asset.png"));
+            QImage image(32, 24, QImage::Format_ARGB32_Premultiplied);
+            image.fill(Qt::blue);
+            QVERIFY(image.save(path));
+            CanvasMedia* media = host->document()->addPreparedFile(
+                path, image.size(), false, QPointF(4, 5));
+            QVERIFY(media);
+            if (missingSource) {
+                // The uploaded asset is valid, but the canvas runtime lost its source.
+                media->setSourcePath(directory.filePath(QStringLiteral("missing.png")));
+            }
+        }
+        QVERIFY(host->remoteSceneActionEnabled());
+        host->triggerRemoteSceneAction();
+        QTRY_VERIFY_WITH_TIMEOUT(!prepared.isEmpty(), 3000);
+        QCOMPARE(prepared.value("success").toBool(), !missingSource);
+        QCOMPARE(host->remoteSceneLaunching(), !missingSource);
+
+        const QJsonArray checklist = prepared.value("checklist").toArray();
+        QCOMPARE(checklist.size(), includeImage ? 6 : 3);
+        int readyCount = 0;
+        for (const QJsonValue& value : checklist) {
+            const QJsonObject item = value.toObject();
+            // Protocol v3 rejects any extra keys, including mediaId.
+            QCOMPARE(item.keys(), (QStringList{"itemId", "ready", "stage"}));
+            if (item.value("ready").toBool()) ++readyCount;
+        }
+        QVERIFY(checklist.first().toObject().value("ready").toBool());
+        QTRY_VERIFY(!progress.isEmpty());
+        QCOMPARE(progress.value("checklist").toArray(), checklist);
+        QCOMPARE(progress.value("percent").toInt(), readyCount * 100 / checklist.size());
+        if (missingSource) {
+            QVERIFY(readyCount < checklist.size());
+            QVERIFY(prepared.value("message").toString().contains(QStringLiteral("missing.png")));
+            QTRY_VERIFY(stopReceived);
+            QVERIFY(!host->document()->editsLocked());
+        } else {
+            QCOMPARE(readyCount, checklist.size());
+            QVERIFY(!stopReceived);
+        }
+        host->handleRemoteConnectionLost();
+        client.disconnect();
+    }
+
     void testSceneRestoresImmutableDraftState()
     {
         std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());

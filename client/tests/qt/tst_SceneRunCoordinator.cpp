@@ -550,6 +550,32 @@ private slots:
         QVERIFY(stages.contains(QStringLiteral("image_decoded")));
         QVERIFY(stages.contains(QStringLiteral("image_texture_ready")));
     }
+
+    void checklistKeepsRuntimeIdentityOutOfWireSchema()
+    {
+        QJsonObject input = scene();
+        QJsonArray media = input.value(QStringLiteral("media")).toArray();
+        QJsonObject item = media.first().toObject();
+        const QString mediaId = QStringLiteral("media_with_underscores");
+        item.insert(QStringLiteral("mediaId"), mediaId);
+        media.replace(0, item);
+        input.insert(QStringLiteral("media"), media);
+
+        QHash<QString, QString> mediaIds{{QStringLiteral("obsolete"), QStringLiteral("old")}};
+        const QJsonArray checklist = SceneRunCoordinator::createLocalChecklist(input, &mediaIds);
+        QCOMPARE(checklist, SceneRunCoordinator::createLocalChecklist(input));
+        QCOMPARE(mediaIds.size(), 3);
+        for (const QJsonValue& value : checklist) {
+            const QJsonObject entry = value.toObject();
+            QCOMPARE(entry.keys(), (QStringList{"itemId", "ready", "stage"}));
+            const QString itemId = entry.value(QStringLiteral("itemId")).toString();
+            if (entry.value(QStringLiteral("stage")) == QLatin1String("screen_render_graph_ready")) {
+                QVERIFY(!mediaIds.contains(itemId));
+            } else {
+                QCOMPARE(mediaIds.value(itemId), mediaId);
+            }
+        }
+    }
 };
 
 QTEST_APPLESS_MAIN(SceneRunCoordinatorTest)

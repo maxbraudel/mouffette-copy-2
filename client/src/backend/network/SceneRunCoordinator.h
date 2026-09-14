@@ -81,7 +81,11 @@ public:
     static QString computeDigest(quint64 revision,
                                  const QJsonArray& normalizedManifest,
                                  const QJsonObject& scene);
-    static QJsonArray createLocalChecklist(const QJsonObject& scene);
+    // Keep local runtime identities separate from the strict wire checklist,
+    // which only permits itemId, stage and ready. Screen entries have no media.
+    static QJsonArray createLocalChecklist(
+        const QJsonObject& scene,
+        QHash<QString, QString>* mediaIdsByItemId = nullptr);
     static QString phaseName(Phase phase);
 
 signals:

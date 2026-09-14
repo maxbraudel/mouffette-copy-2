@@ -504,8 +504,10 @@ QString SceneRunCoordinator::computeDigest(quint64 revision,
         canonicalJson(material), QCryptographicHash::Sha256).toHex());
 }
 
-QJsonArray SceneRunCoordinator::createLocalChecklist(const QJsonObject& scene)
+QJsonArray SceneRunCoordinator::createLocalChecklist(
+    const QJsonObject& scene, QHash<QString, QString>* mediaIdsByItemId)
 {
+    if (mediaIdsByItemId) mediaIdsByItemId->clear();
     QJsonArray checklist;
     const QJsonArray screens = scene.value(QStringLiteral("screens")).toArray();
     for (qsizetype index = 0; index < screens.size() && checklist.size() < kMaximumChecklistItems; ++index) {
@@ -526,9 +528,12 @@ QJsonArray SceneRunCoordinator::createLocalChecklist(const QJsonObject& scene)
             QStringLiteral("media_%1").arg(index));
         auto appendStage = [&](const QString& suffix, const QString& stage) {
             if (checklist.size() >= kMaximumChecklistItems) return;
+            const QString itemId = safeChecklistId(base + QLatin1Char('_') + suffix, base);
+            if (mediaIdsByItemId) {
+                mediaIdsByItemId->insert(itemId, item.value(QStringLiteral("mediaId")).toString());
+            }
             checklist.append(QJsonObject{
-                {QStringLiteral("itemId"), safeChecklistId(base + QLatin1Char('_') + suffix,
-                                                            base)},
+                {QStringLiteral("itemId"), itemId},
                 {QStringLiteral("stage"), stage},
                 {QStringLiteral("ready"), true}
             });

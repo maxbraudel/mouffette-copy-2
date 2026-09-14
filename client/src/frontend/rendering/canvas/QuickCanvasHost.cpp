@@ -404,29 +404,52 @@ QJsonArray QuickCanvasHost::buildSceneManifest(const QJsonObject& scene,
 QJsonArray QuickCanvasHost::localPreparationChecklist(
     const QJsonObject& scene, bool* ready, QString* errorMessage) const
 {
-    QJsonArray checklist = SceneRunCoordinator::createLocalChecklist(scene);
+    QHash<QString, QString> mediaIdsByItemId;
+    QJsonArray checklist = SceneRunCoordinator::createLocalChecklist(scene, &mediaIdsByItemId);
     bool allReady = true;
+    QString firstError;
     for (qsizetype i = 0; i < checklist.size(); ++i) {
         QJsonObject entry = checklist.at(i).toObject();
-        const QString mediaId = entry.value(QStringLiteral("mediaId")).toString();
+        const QString itemId = entry.value(QStringLiteral("itemId")).toString();
         const QString stage = entry.value(QStringLiteral("stage")).toString();
-        CanvasMedia* media = m_document->mediaById(mediaId);
-        bool itemReady = media != nullptr;
-        if (itemReady && stage == QLatin1String("source_validated")
-            && !media->isText()) {
-            itemReady = QFileInfo::exists(media->sourcePath());
+        QString failure;
+        if (stage == QLatin1String("screen_render_graph_ready")) {
+            if (!m_controller || !m_controller->renderWindow()) {
+                failure = QStringLiteral("The local canvas render window is not ready");
+            }
+        } else {
+            const QString mediaId = mediaIdsByItemId.value(itemId);
+            CanvasMedia* media = m_document->mediaById(mediaId);
+            if (!media) {
+                failure = QStringLiteral("Scene media %1 is no longer available").arg(mediaId);
+            } else if (stage == QLatin1String("file_validated") && !media->isText()) {
+                const QFileInfo source(media->sourcePath());
+                if (!source.exists() || !source.isFile() || source.isSymLink()
+                    || source.size() < 1) {
+                    failure = QStringLiteral("The local source for \"%1\" is missing or invalid")
+                        .arg(media->displayName());
+                }
+            } else if (media->isVideo()) {
+                if (!media->player()) {
+                    failure = QStringLiteral("The video player for \"%1\" is not initialized")
+                        .arg(media->displayName());
+                } else if (media->player()->error() != QMediaPlayer::NoError) {
+                    failure = QStringLiteral("Could not prepare video \"%1\": %2")
+                        .arg(media->displayName(), media->player()->errorString());
+                }
+            }
         }
-        if (itemReady && stage.startsWith(QLatin1String("video"))) {
-            itemReady = media->player() && media->player()->error() == QMediaPlayer::NoError;
-        }
+        const bool itemReady = failure.isEmpty();
         entry.insert(QStringLiteral("ready"), itemReady);
         checklist.replace(i, entry);
         allReady = allReady && itemReady;
+        if (!itemReady) {
+            if (firstError.isEmpty()) firstError = failure;
+            qWarning() << "Local scene preparation failed:" << itemId << stage << failure;
+        }
     }
     if (ready) *ready = allReady;
-    if (!allReady && errorMessage) {
-        *errorMessage = QStringLiteral("A local media runtime could not be prepared");
-    }
+    if (errorMessage) *errorMessage = firstError;
     return checklist;
 }
 
@@ -476,7 +499,12 @@ void QuickCanvasHost::triggerRemoteSceneAction()
     bool ready = false;
     QString prepareError;
     const QJsonArray checklist = localPreparationChecklist(scene, &ready, &prepareError);
-    m_webSocket->sendScenePrepareProgress(m_sceneRunId, ready ? 100 : 0, checklist);
+    const auto readyCount = std::count_if(checklist.cbegin(), checklist.cend(),
+        [](const QJsonValue& value) {
+            return value.toObject().value(QStringLiteral("ready")).toBool();
+        });
+    const int percent = checklist.isEmpty() ? 0 : int(readyCount * 100 / checklist.size());
+    m_webSocket->sendScenePrepareProgress(m_sceneRunId, percent, checklist);
     m_webSocket->sendScenePrepared(m_sceneRunId, ready, checklist,
         ready ? QString() : QStringLiteral("local_scene_prepare_failed"),
         prepareError);
