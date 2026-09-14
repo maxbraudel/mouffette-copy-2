@@ -18,6 +18,7 @@ Row {
         onClicked: root.session.settingsVisible = !root.session.settingsVisible
     }
     Row {
+        visible: root.session && root.session.hasProject
         spacing: 0
         CanvasControls.OverlayButton {
             objectName: "canvasSelectionToolButton"

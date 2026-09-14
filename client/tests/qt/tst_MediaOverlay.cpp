@@ -281,6 +281,8 @@ import QtQuick
 import "../canvas"
 
 Item {
+    property alias fakeSessionHasProject: fakeSession.hasProject
+
     QtObject {
         id: fakeSession
         property bool settingsVisible: false
@@ -697,6 +699,15 @@ void MediaOverlayTest::canvasToolbarUsesOverlaySwitchAndSegmentedTools()
     QCOMPARE(selection->property("segmentRole").toString(), QStringLiteral("leading"));
     QCOMPARE(text->property("segmentRole").toString(), QStringLiteral("trailing"));
     QCOMPARE(selection->x() + selection->width(), text->x());
+
+    harness->setProperty("fakeSessionHasProject", false);
+    QTRY_VERIFY(!text->isVisible());
+    QTRY_VERIFY(!selection->isVisible());
+    QVERIFY(selection->property("toggled").toBool());
+
+    harness->setProperty("fakeSessionHasProject", true);
+    QTRY_VERIFY(text->isVisible());
+    QTRY_VERIFY(selection->isVisible());
 
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
