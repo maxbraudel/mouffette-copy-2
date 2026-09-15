@@ -231,6 +231,11 @@ RemoteSceneController::RemoteSceneController(FileManager* fileManager, WebSocket
                 this, &RemoteSceneController::onRemoteSessionResumedEnvelope);
         connect(m_ws, &WebSocketClient::heartbeatSampleReceived,
                 this, [this](quint64, qint64, qint64, qint64) {
+                    // PREPARED can precede the first sufficiently precise
+                    // sample (especially just after authentication/resume).
+                    // ARMED is idempotent, so retry the pending barrier when
+                    // the synchronization burst publishes each new sample.
+                    tryArmPreparedScene();
                     // A compositor frame may land while the latest network
                     // sample is temporarily outside policy. Keep the observed
                     // presentation time and retry as soon as clock quality
@@ -340,6 +345,9 @@ void RemoteSceneController::resetSceneSynchronization() {
     m_mediaReadyCount = 0;
     m_sceneActivationRequested = false;
     m_sceneActivated = false;
+	m_sceneAllPrepared = false;
+	m_sceneCommitReceived = false;
+	m_committedActivationLeadMs = 0;
 	m_firstFrameReported = false;
 	m_firstFramePresentedServerMonotonicMs = -1;
 	m_firstFramePresentedLocalSteadyMs = -1;
@@ -447,7 +455,10 @@ void RemoteSceneController::onScenePrepareEnvelope(const QJsonObject& envelope)
 	m_pendingSceneRevision = static_cast<quint64>(revision);
     m_pendingSceneDigest = envelope.value(QStringLiteral("digest")).toString();
     m_scenePreparedReported = false;
+    m_sceneAllPrepared = false;
     m_sceneArmedReported = false;
+    m_sceneCommitReceived = false;
+    m_committedActivationLeadMs = 0;
     m_firstFrameReported = false;
 	m_firstFramePresentedServerMonotonicMs = -1;
 	m_firstFramePresentedLocalSteadyMs = -1;
@@ -455,6 +466,9 @@ void RemoteSceneController::onScenePrepareEnvelope(const QJsonObject& envelope)
     QJsonObject scene = incomingScene;
     scene.insert(QStringLiteral("sceneInstanceId"), runId);
     m_prepareChecklist = SceneRunCoordinator::createLocalChecklist(scene);
+    // Clock acquisition is independent from renderer preparation. Starting a
+    // bounded probe burst now normally makes the mapping ready by PREPARED.
+    m_ws->requestSceneClockSynchronization();
     for (qsizetype index = 0; index < m_prepareChecklist.size(); ++index) {
         QJsonObject item = m_prepareChecklist.at(index).toObject();
         item.insert(QStringLiteral("ready"), false);
@@ -513,16 +527,9 @@ void RemoteSceneController::onScenePreparedEnvelope(const QJsonObject& envelope)
 {
     if (!matchesSceneEnvelope(envelope) || !m_scenePreparedReported
         || !envelope.value(QStringLiteral("allPrepared")).toBool(false)
-        || m_sceneArmedReported || !m_ws) return;
-    const qint64 uncertainty = m_ws->sceneClockUncertaintyMs();
-	qint64 maximum = -1;
-	if (!readBoundedInt64(m_ws->serverPolicy(), "sceneMaxClockSkewMs",
-						0, kMaxSafeJsonInteger, maximum)
-		|| uncertainty < 0 || uncertainty > maximum) {
-        sendPrepareResult(false, QStringLiteral("Clock synchronization uncertainty exceeds policy"));
-        return;
-    }
-    m_sceneArmedReported = m_ws->sendSceneArmed(m_pendingSceneInstanceId, uncertainty);
+        || !m_ws) return;
+    m_sceneAllPrepared = true;
+    tryArmPreparedScene();
 }
 
 void RemoteSceneController::onSceneCommitEnvelope(const QJsonObject& envelope)
@@ -533,17 +540,21 @@ void RemoteSceneController::onSceneCommitEnvelope(const QJsonObject& envelope)
 	qint64 startEpochMs = -1;
 	qint64 policyMaximum = -1;
 	qint64 activationLeadMs = -1;
+	qint64 policyActivationLeadMs = -1;
 	if (!readBoundedInt64(envelope, "startServerMonotonicMs",
 						0, kMaxSafeJsonInteger, startServerMonotonicMs)
 		|| !readBoundedInt64(envelope, "maximumClockUncertaintyMs",
 						0, kMaxSafeJsonInteger, maximum)
 		|| !readBoundedInt64(envelope, "startEpochMs",
 						1, kMaxSafeJsonInteger, startEpochMs)
+		|| !readBoundedInt64(envelope, "activationLeadMs",
+						1, std::numeric_limits<int>::max(), activationLeadMs)
 		|| !readBoundedInt64(m_ws->serverPolicy(), "sceneMaxClockSkewMs",
 						0, kMaxSafeJsonInteger, policyMaximum)
 		|| !readBoundedInt64(m_ws->serverPolicy(), "sceneActivationLeadMs",
-						1, std::numeric_limits<int>::max(), activationLeadMs)
-		|| maximum != policyMaximum) {
+						1, std::numeric_limits<int>::max(), policyActivationLeadMs)
+		|| maximum != policyMaximum
+		|| activationLeadMs > policyActivationLeadMs) {
 		sendPrepareResult(false, QStringLiteral("Invalid synchronized scene commitment"));
 		return;
 	}
@@ -560,6 +571,8 @@ void RemoteSceneController::onSceneCommitEnvelope(const QJsonObject& envelope)
         sendPrepareResult(false, QStringLiteral("Scene commitment missed its activation window"));
         return;
     }
+    m_sceneCommitReceived = true;
+    m_committedActivationLeadMs = activationLeadMs;
     onRemoteSceneActivate(
         m_pendingSenderClientId,
         m_pendingSceneInstanceId,
@@ -1085,6 +1098,14 @@ void RemoteSceneController::onRemoteSessionResumedEnvelope(const QJsonObject& en
 		return;
 	}
 	m_pendingSessionGeneration = static_cast<quint64>(generation);
+	if (m_sceneAllPrepared && !m_sceneCommitReceived) {
+		// The previous socket may have disappeared after ARMED was merely queued
+		// locally. Re-establish the clock map and replay the idempotent command on
+		// the rebound RemoteSession generation.
+		m_sceneArmedReported = false;
+		if (m_ws) m_ws->requestSceneClockSynchronization();
+		tryArmPreparedScene();
+	}
 	// A frame can genuinely reach the compositor while the transport is in its
 	// lease grace period. Re-send that exact observation after resumption; never
 	// manufacture a new presentation time merely because the socket returned.
@@ -1109,6 +1130,33 @@ void RemoteSceneController::sendPrepareResult(bool success, const QString& detai
             m_pendingSceneInstanceId, false, m_prepareChecklist,
             QStringLiteral("scene_prepare_failed"), detail);
     }
+}
+
+void RemoteSceneController::tryArmPreparedScene()
+{
+	if (!m_ws || !m_scenePreparedReported || !m_sceneAllPrepared
+		|| m_sceneArmedReported || m_sceneCommitReceived
+		|| m_pendingSceneInstanceId.isEmpty()) {
+		return;
+	}
+
+	qint64 maximum = -1;
+	const qint64 uncertainty = m_ws->sceneClockUncertaintyMs();
+	if (!readBoundedInt64(m_ws->serverPolicy(), "sceneMaxClockSkewMs",
+						0, kMaxSafeJsonInteger, maximum)
+		|| uncertainty < 0 || uncertainty > maximum) {
+		// Clock quality is expected to be transient during startup/resume. Keep
+		// the prepared renderer graph intact and let the authoritative SceneRun
+		// preparation deadline bound these coalesced synchronization bursts.
+		m_ws->requestSceneClockSynchronization();
+		return;
+	}
+
+	m_sceneArmedReported = m_ws->sendSceneArmed(
+		m_pendingSceneInstanceId, uncertainty);
+	if (!m_sceneArmedReported) {
+		m_ws->requestSceneClockSynchronization();
+	}
 }
 
 void RemoteSceneController::updatePrepareProgress()
@@ -1859,13 +1907,16 @@ void RemoteSceneController::onRemoteSceneActivate(const QString& senderClientId,
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     const qint64 absoluteRemainingMs = activationEpochMs - nowMs;
     const QJsonObject policy = m_ws ? m_ws->serverPolicy() : QJsonObject();
-    const qint64 activationLeadMs = policy
+    const qint64 policyActivationLeadMs = policy
         .value(QStringLiteral("sceneActivationLeadMs")).toInt();
     const qint64 maximumClockSkewMs = policy
         .value(QStringLiteral("sceneMaxClockSkewMs")).toInt(-1);
     const qint64 startedAckTimeoutMs = policy
         .value(QStringLiteral("sceneStartedAckTimeoutMs")).toInt();
-    if (activationLeadMs <= 0 || maximumClockSkewMs < 0
+    const qint64 activationLeadMs = m_committedActivationLeadMs > 0
+        ? m_committedActivationLeadMs : policyActivationLeadMs;
+    if (policyActivationLeadMs <= 0 || maximumClockSkewMs < 0
+        || activationLeadMs <= 0 || activationLeadMs > policyActivationLeadMs
         || startedAckTimeoutMs <= 0) {
         sendPrepareResult(false, QStringLiteral("Invalid scene activation policy"));
         ++m_sceneEpoch;
@@ -2537,23 +2588,11 @@ void RemoteSceneController::startSceneActivationIfReady() {
     if (m_totalMediaToPrime > 0 && m_mediaReadyCount < m_totalMediaToPrime) return;
 
     // PREPARE is complete. Keep all windows hidden and every automation timer
-    // stopped until the host sends ACTIVATE with a shared wall-clock epoch.
+    // stopped until the server sends COMMIT with a shared monotonic deadline.
+    // Do not replace the server's scenePrepareTimeout here: the peer may still
+    // be decoding, or both peers may be acquiring a precise clock sample. The
+    // COMMIT handler installs the shorter presentation deadline once it exists.
     m_sceneActivationRequested = true;
-    if (m_sceneReadyTimeout && m_ws) {
-        const QJsonObject policy = m_ws ? m_ws->serverPolicy() : QJsonObject();
-        const int activationLeadMs = policy
-            .value(QStringLiteral("sceneActivationLeadMs")).toInt();
-        const int startedAckTimeoutMs = policy
-            .value(QStringLiteral("sceneStartedAckTimeoutMs")).toInt();
-        if (activationLeadMs <= 0 || startedAckTimeoutMs <= 0) {
-            sendPrepareResult(false, QStringLiteral("Invalid scene activation policy"));
-            ++m_sceneEpoch;
-            clearScene();
-            return;
-        }
-        m_sceneReadyTimeout->start(
-            activationLeadMs + startedAckTimeoutMs);
-    }
     if (m_ws && !m_pendingSenderClientId.isEmpty() && !m_pendingSceneInstanceId.isEmpty()) {
         sendPrepareResult(true);
     }

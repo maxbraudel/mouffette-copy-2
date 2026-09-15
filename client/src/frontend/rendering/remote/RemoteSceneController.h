@@ -245,6 +245,7 @@ private:
 	bool allSpansReady(const std::shared_ptr<RemoteMediaItem>& item) const;
 	bool matchesSceneEnvelope(const QJsonObject& envelope) const;
 	void sendPrepareResult(bool success, const QString& message = QString());
+	void tryArmPreparedScene();
 	void sendFirstFramePresented(bool forceReplay = false);
 	void disconnectFirstFrameObservers();
 	void updatePrepareProgress();
@@ -268,7 +269,9 @@ private:
 	quint64 m_pendingSceneRevision = 0;
 	QJsonArray m_prepareChecklist;
 	bool m_scenePreparedReported = false;
+	bool m_sceneAllPrepared = false;
 	bool m_sceneArmedReported = false;
+	bool m_sceneCommitReceived = false;
 	bool m_firstFrameReported = false;
 	qint64 m_firstFramePresentedServerMonotonicMs = -1;
 	qint64 m_firstFramePresentedLocalSteadyMs = -1;
@@ -283,6 +286,7 @@ private:
 	int m_mediaReadyCount = 0;
 	bool m_sceneActivationRequested = false;
 	bool m_sceneActivated = false;
+	qint64 m_committedActivationLeadMs = 0;
 	qint64 m_activationEpochMs = 0;
 	bool m_activationClockPlausible = false;
 	qint64 m_lastVideoSyncSequence = 0;

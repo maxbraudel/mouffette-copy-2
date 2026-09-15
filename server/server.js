@@ -1214,7 +1214,7 @@ class MouffetteServer {
             allArmed: true,
             startEpochMs: run.startEpochMs,
             startServerMonotonicMs: run.startServerMonotonicMs,
-            activationLeadMs: this.config.sceneActivationLeadMs,
+            activationLeadMs: run.activationLeadMs,
             maximumClockUncertaintyMs: this.config.sceneMaxClockSkewMs,
         });
         const ownerDelivered = this.sendToEndpoint(run.ownerEndpointId, commit);
@@ -1532,7 +1532,9 @@ class MouffetteServer {
                 this.handleSceneStopped(clientId, message);
                 break;
             case 'heartbeat':
-                this.handleHeartbeat(clientId, message);
+                this.handleHeartbeat(clientId, message, {
+                    monotonicMs: receivedAt,
+                });
                 break;
             case 'remote_session_open':
                 this.handleRemoteSessionOpen(clientId, message);
@@ -1691,7 +1693,10 @@ class MouffetteServer {
                 heartbeatIntervalMs: this.config.heartbeatIntervalMs,
                 leaseTimeoutMs: this.config.leaseTimeoutMs,
                 scenePrepareTimeoutMs: this.config.scenePrepareTimeoutMs,
-                sceneActivationLeadMs: this.config.sceneActivationLeadMs,
+                // Advertise the largest adaptive lead an actual COMMIT may
+                // carry. Older clients already interpret this policy field as
+                // an upper bound, which keeps rolling upgrades compatible.
+                sceneActivationLeadMs: this.sceneRuns.activationLeadCeilingMs(),
                 sceneMaxClockSkewMs: this.config.sceneMaxClockSkewMs,
                 sceneStartedAckTimeoutMs: this.sceneRuns.startedAckTimeoutMs,
                 sceneStopTimeoutMs: this.config.sceneStopTimeoutMs,
@@ -1700,7 +1705,10 @@ class MouffetteServer {
                 uploadTargetAckTimeoutMs: this.config.uploadTargetAckTimeoutMs,
                 removalAckTimeoutMs: this.config.removalAckTimeoutMs,
             },
-            serverMonotonicMs: Number(process.hrtime.bigint() / 1_000_000n),
+            // Authentication, leases, SceneRuns and clock synchronization must
+            // all live in the same monotonic domain. In production this is
+            // process.hrtime; tests and embedders may inject an equivalent.
+            serverMonotonicMs: monotonicNow,
         }));
     }
 
@@ -1745,6 +1753,12 @@ class MouffetteServer {
                 this.sendToEndpoint(session.targetEndpointId, payload);
             }
         }
+        // Take t2 only after all heartbeat/session work, immediately before
+        // serialization. This lets the client remove relay queue/processing
+        // time from (t3 - t0) instead of misclassifying it as WAN latency.
+        const transmitMonotonicNow = typeof timing === 'number' ? timing
+            : timing && Number.isFinite(timing.transmitMonotonicMs)
+                ? timing.transmitMonotonicMs : this.monotonicNow();
         client.ws.send(JSON.stringify({
             type: 'heartbeat_ack',
             protocolVersion: this.protocolVersion,
@@ -1753,7 +1767,12 @@ class MouffetteServer {
             connectionGeneration: client.connectionGeneration,
             sequence: message.sequence,
             clientMonotonicMs: message.clientMonotonicMs,
-            serverMonotonicMs: Number(process.hrtime.bigint() / 1_000_000n),
+            // Keep serverMonotonicMs as the transmit-time compatibility field.
+            // The explicit pair lets clients subtract relay processing time
+            // from RTT and compute a proper four-timestamp/NTP estimate.
+            serverMonotonicMs: transmitMonotonicNow,
+            serverReceiveMonotonicMs: monotonicNow,
+            serverTransmitMonotonicMs: transmitMonotonicNow,
             serverEpochMs: epochNow,
         }));
     }

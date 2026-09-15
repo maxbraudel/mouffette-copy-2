@@ -18,7 +18,9 @@ const DECLARATIONS = Object.freeze({
     MOUFFETTE_REMOTE_SESSION_TEARDOWN_RETRY_MAX_MS: { type: 'int', default: 5000, min: 100, max: 300000 },
     MOUFFETTE_SCENE_PREPARE_TIMEOUT_MS: { type: 'int', default: 15000, min: 1000, max: 120000 },
     MOUFFETTE_SCENE_ACTIVATION_LEAD_MS: { type: 'int', default: 500, min: 500, max: 10000 },
-    MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS: { type: 'int', default: 50, min: 0, max: 250 },
+    // 250 ms accepts a measured RTT up to 500 ms (uncertainty is RTT/2),
+    // while the cross-client error budget remains bounded by start skew below.
+    MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS: { type: 'int', default: 250, min: 0, max: 250 },
     MOUFFETTE_SCENE_STARTED_ACK_TIMEOUT_MS: { type: 'int', default: 5000, min: 1000, max: 15000 },
     MOUFFETTE_SCENE_MAX_START_SKEW_MS: { type: 'int', default: 750, min: 50, max: 5000 },
     MOUFFETTE_SCENE_STOP_TIMEOUT_MS: { type: 'int', default: 3000, min: 250, max: 120000 },
@@ -155,6 +157,10 @@ function loadServerConfig(options = {}) {
     if (values.MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS
         >= values.MOUFFETTE_SCENE_ACTIVATION_LEAD_MS) {
         throw new Error('MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS must be smaller than activation lead');
+    }
+    if (values.MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS * 2
+        > values.MOUFFETTE_SCENE_MAX_START_SKEW_MS) {
+        throw new Error('Twice MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS must not exceed MOUFFETTE_SCENE_MAX_START_SKEW_MS');
     }
     if (values.MOUFFETTE_SCENE_MAX_START_SKEW_MS
         >= values.MOUFFETTE_SCENE_STARTED_ACK_TIMEOUT_MS) {

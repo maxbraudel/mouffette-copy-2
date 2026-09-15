@@ -11,10 +11,12 @@
 #include "backend/domain/canvas/CanvasDocument.h"
 #include "backend/domain/media/CanvasMedia.h"
 #include "backend/files/FileManager.h"
+#include "backend/network/SceneRunCoordinator.h"
 #include "backend/network/WebSocketClient.h"
 #include "backend/security/DeviceIdentityStore.h"
 #include "frontend/rendering/canvas/QuickCanvasController.h"
 #include "frontend/rendering/canvas/QuickCanvasHost.h"
+#include "frontend/rendering/remote/RemoteSceneController.h"
 
 class RemoteSceneLifecycleTest final : public QObject
 {
@@ -404,6 +406,284 @@ private slots:
         host->handleRemoteConnectionLost();
         QVERIFY(!host->remoteSceneLaunching());
         QVERIFY(!host->document()->editsLocked());
+        client.disconnect();
+    }
+
+    void ownerWaitsForAClockSampleAfterAllPrepared()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        QWebSocketServer server(QStringLiteral("scene-clock-retry-test"),
+                                QWebSocketServer::NonSecureMode);
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QString bootId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        const QString targetId(43, QLatin1Char('B'));
+        QString ownerId;
+        bool allPreparedSent = false;
+        bool armedBeforeClockReply = false;
+        int clockRepliesAfterBarrier = 0;
+        int armedCount = 0;
+        int stopCount = 0;
+        auto send = [&](QWebSocket* peer, QJsonObject message) {
+            message.insert(QStringLiteral("protocolVersion"), 4);
+            message.insert(QStringLiteral("serverBootId"), bootId);
+            message.insert(QStringLiteral("messageId"),
+                           QUuid::createUuid().toString(QUuid::WithoutBraces));
+            peer->sendTextMessage(QString::fromUtf8(
+                QJsonDocument(message).toJson(QJsonDocument::Compact)));
+        };
+        connect(&server, &QWebSocketServer::newConnection, this, [&]() {
+            QWebSocket* peer = server.nextPendingConnection();
+            QVERIFY(peer);
+            peer->setParent(&server);
+            send(peer, {{"type", "auth_challenge"}, {"issuedAt", 1},
+                        {"nonce", QString::fromLatin1(QByteArray(32, 'n').toBase64(
+                            QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals))}});
+            connect(peer, &QWebSocket::textMessageReceived, &server,
+                    [&, peer](const QString& encoded) {
+                const QJsonObject message = QJsonDocument::fromJson(encoded.toUtf8()).object();
+                const QString type = message.value(QStringLiteral("type")).toString();
+                if (type == QLatin1String("auth_response")) {
+                    ownerId = DeviceIdentityStore::endpointIdForInstallation(
+                        message.value(QStringLiteral("installationId")).toString(),
+                        message.value(QStringLiteral("instanceId")).toString());
+                    send(peer, {
+                        {"type", "welcome"},
+                        {"connectionId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                        {"installationId", message.value("installationId")},
+                        {"endpointId", ownerId},
+                        {"instanceId", message.value("instanceId")},
+                        {"runtimeId", message.value("runtimeId")},
+                        {"connectionGeneration", 1}, {"serverMonotonicMs", 10},
+                        {"policy", QJsonObject{
+                            {"policyVersion", 1}, {"heartbeatIntervalMs", 250},
+                            {"leaseTimeoutMs", 10000}, {"scenePrepareTimeoutMs", 5000},
+                            {"sceneActivationLeadMs", 1000}, {"sceneMaxClockSkewMs", 50},
+                            {"sceneStartedAckTimeoutMs", 5000}, {"sceneMaxStartSkewMs", 750},
+                            {"sceneStopTimeoutMs", 5000},
+                            {"uploadIdleTimeoutMs", 45000}, {"uploadTargetAckTimeoutMs", 30000},
+                            {"removalAckTimeoutMs", 30000}}}
+                    });
+                    send(peer, {
+                        {"type", "remote_session_opened"},
+                        {"remoteSessionId", "clock-retry-session"}, {"generation", 1},
+                        {"ownerEndpointId", ownerId}, {"targetEndpointId", targetId},
+                        {"ownerConnectionGeneration", 1}, {"targetConnectionGeneration", 1},
+                        {"resumeToken", "clock-retry-token"}, {"phase", "Active"},
+                        {"snapshotSequence", 1},
+                        {"snapshot", QJsonObject{
+                            {"screens", QJsonArray{}}, {"systemUI", QJsonArray{}},
+                            {"volumePercent", QJsonValue::Null}, {"revision", 1},
+                            {"capturedAtEpochMs", 1}}}
+                    });
+                } else if (type == QLatin1String("heartbeat")) {
+                    // Deliberately leave the clock unmapped until PREPARED is
+                    // complete. The launch must wait, not tear down the run.
+                    if (!allPreparedSent) return;
+                    ++clockRepliesAfterBarrier;
+                    send(peer, {{"type", "heartbeat_ack"}, {"connectionGeneration", 1},
+                                {"sequence", message.value("sequence")},
+                                {"clientMonotonicMs", message.value("clientMonotonicMs")},
+                                {"serverMonotonicMs", message.value("clientMonotonicMs")},
+                                {"serverEpochMs", 1}});
+                } else if (type == QLatin1String("scene_prepare")) {
+                    send(peer, {
+                        {"type", "prepare_progress"},
+                        {"remoteSessionId", message.value("remoteSessionId")},
+                        {"generation", message.value("generation")},
+                        {"sceneRunId", message.value("sceneRunId")},
+                        {"revision", message.value("revision")},
+                        {"digest", message.value("digest")},
+                        {"ownerEndpointId", ownerId},
+                        {"targetEndpointId", targetId},
+                        {"aggregate", true}, {"percent", 0}, {"stage", "accepted"}
+                    });
+                } else if (type == QLatin1String("prepared")
+                           && message.value(QStringLiteral("success")).toBool()) {
+                    allPreparedSent = true;
+                    send(peer, {
+                        {"type", "prepared"},
+                        {"remoteSessionId", message.value("remoteSessionId")},
+                        {"generation", message.value("generation")},
+                        {"sceneRunId", message.value("sceneRunId")},
+                        {"revision", message.value("revision")},
+                        {"digest", message.value("digest")},
+                        {"ownerEndpointId", ownerId},
+                        {"targetEndpointId", targetId},
+                        {"success", true}, {"allPrepared", true},
+                        {"checklist", message.value("checklist")}
+                    });
+                } else if (type == QLatin1String("armed")) {
+                    armedBeforeClockReply = clockRepliesAfterBarrier == 0;
+                    ++armedCount;
+                } else if (type == QLatin1String("stop")) {
+                    ++stopCount;
+                }
+            });
+        });
+
+        WebSocketClient client(directory.path(), false);
+        QSignalSpy sessionOpened(&client, &WebSocketClient::remoteSessionOpened);
+        client.connectToServer(QStringLiteral("ws://127.0.0.1:%1").arg(server.serverPort()));
+        QTRY_COMPARE_WITH_TIMEOUT(sessionOpened.count(), 1, 3000);
+
+        FileManager files;
+        QQuickWindow window;
+        std::unique_ptr<QuickCanvasHost> host(QuickCanvasHost::create());
+        QVERIFY(host);
+        host->controller()->registerWindow(&window);
+        host->setFileManager(&files);
+        host->setWebSocketClient(&client);
+        host->setRemoteSceneTarget(targetId, QStringLiteral("Client B"));
+        host->setScreens({ScreenInfo(0, 1920, 1080, 0, 0, true)});
+        host->setProjectEditingEnabled(true);
+        host->setOverlayActionsEnabled(true);
+        QVERIFY(host->document()->addText(QPointF(40, 60), QStringLiteral("Scene title")));
+
+        host->triggerRemoteSceneAction();
+        QTRY_VERIFY_WITH_TIMEOUT(allPreparedSent, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(armedCount, 1, 3000);
+        QVERIFY(!armedBeforeClockReply);
+        QVERIFY(clockRepliesAfterBarrier > 0);
+        QCOMPARE(stopCount, 0);
+        QVERIFY(host->remoteSceneLaunching());
+
+        host->handleRemoteConnectionLost();
+        client.disconnect();
+    }
+
+    void targetKeepsThePrepareDeadlineUntilCommit()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        QWebSocketServer server(QStringLiteral("target-prepare-deadline-test"),
+                                QWebSocketServer::NonSecureMode);
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QString bootId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        const QString ownerId(43, QLatin1Char('A'));
+        QString targetId;
+        QWebSocket* peer = nullptr;
+        int successfulPreparedCount = 0;
+        int failedPreparedCount = 0;
+        int stoppedCount = 0;
+        auto send = [&](QWebSocket* socket, QJsonObject message) {
+            message.insert(QStringLiteral("protocolVersion"), 4);
+            message.insert(QStringLiteral("serverBootId"), bootId);
+            message.insert(QStringLiteral("messageId"),
+                           QUuid::createUuid().toString(QUuid::WithoutBraces));
+            socket->sendTextMessage(QString::fromUtf8(
+                QJsonDocument(message).toJson(QJsonDocument::Compact)));
+        };
+        connect(&server, &QWebSocketServer::newConnection, this, [&]() {
+            peer = server.nextPendingConnection();
+            QVERIFY(peer);
+            peer->setParent(&server);
+            send(peer, {{"type", "auth_challenge"}, {"issuedAt", 1},
+                        {"nonce", QString::fromLatin1(QByteArray(32, 'n').toBase64(
+                            QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals))}});
+            connect(peer, &QWebSocket::textMessageReceived, &server,
+                    [&, socket = peer](const QString& encoded) {
+                const QJsonObject message = QJsonDocument::fromJson(encoded.toUtf8()).object();
+                const QString type = message.value(QStringLiteral("type")).toString();
+                if (type == QLatin1String("auth_response")) {
+                    targetId = DeviceIdentityStore::endpointIdForInstallation(
+                        message.value(QStringLiteral("installationId")).toString(),
+                        message.value(QStringLiteral("instanceId")).toString());
+                    send(socket, {
+                        {"type", "welcome"},
+                        {"connectionId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
+                        {"installationId", message.value("installationId")},
+                        {"endpointId", targetId},
+                        {"instanceId", message.value("instanceId")},
+                        {"runtimeId", message.value("runtimeId")},
+                        {"connectionGeneration", 1}, {"serverMonotonicMs", 10},
+                        {"policy", QJsonObject{
+                            {"policyVersion", 1}, {"heartbeatIntervalMs", 250},
+                            {"leaseTimeoutMs", 10000}, {"scenePrepareTimeoutMs", 8000},
+                            {"sceneActivationLeadMs", 500}, {"sceneMaxClockSkewMs", 50},
+                            {"sceneStartedAckTimeoutMs", 1000}, {"sceneMaxStartSkewMs", 750},
+                            {"sceneStopTimeoutMs", 5000},
+                            {"uploadIdleTimeoutMs", 45000}, {"uploadTargetAckTimeoutMs", 30000},
+                            {"removalAckTimeoutMs", 30000}}}
+                    });
+                    send(socket, {
+                        {"type", "remote_session_opened"},
+                        {"remoteSessionId", "target-deadline-session"}, {"generation", 1},
+                        {"ownerEndpointId", ownerId}, {"targetEndpointId", targetId},
+                        {"ownerConnectionGeneration", 1}, {"targetConnectionGeneration", 1},
+                        {"resumeToken", "target-deadline-token"}, {"phase", "Active"}
+                    });
+                } else if (type == QLatin1String("heartbeat")) {
+                    send(socket, {{"type", "heartbeat_ack"}, {"connectionGeneration", 1},
+                                  {"sequence", message.value("sequence")},
+                                  {"clientMonotonicMs", message.value("clientMonotonicMs")},
+                                  {"serverMonotonicMs", message.value("clientMonotonicMs")},
+                                  {"serverEpochMs", 1}});
+                } else if (type == QLatin1String("prepared")) {
+                    if (message.value(QStringLiteral("success")).toBool()) {
+                        ++successfulPreparedCount;
+                    } else {
+                        ++failedPreparedCount;
+                    }
+                } else if (type == QLatin1String("stopped")) {
+                    ++stoppedCount;
+                }
+            });
+        });
+
+        WebSocketClient client(directory.path(), false);
+        FileManager files;
+        RemoteSceneController controller(&files, &client);
+        QSignalSpy sessionOpened(&client, &WebSocketClient::remoteSessionOpened);
+        client.connectToServer(QStringLiteral("ws://127.0.0.1:%1").arg(server.serverPort()));
+        QTRY_COMPARE_WITH_TIMEOUT(sessionOpened.count(), 1, 3000);
+        QVERIFY(peer);
+
+        std::unique_ptr<QuickCanvasHost> sceneSource(QuickCanvasHost::create());
+        QVERIFY(sceneSource);
+        sceneSource->setScreens({ScreenInfo(0, 1920, 1080, 0, 0, true)});
+        QVERIFY(sceneSource->document()->addText(
+            QPointF(40, 60), QStringLiteral("Prepared target")));
+        const QJsonObject scene = sceneSource->document()->serializeSceneState();
+        const QJsonArray manifest;
+        const QString runId = QStringLiteral("target-prepare-deadline-run");
+        const QString digest = SceneRunCoordinator::computeDigest(1, manifest, scene);
+        const QJsonObject correlation{
+            {"remoteSessionId", "target-deadline-session"}, {"generation", 1},
+            {"sceneRunId", runId}, {"revision", 1}, {"digest", digest},
+            {"ownerEndpointId", ownerId}, {"targetEndpointId", targetId}
+        };
+        QJsonObject prepare = correlation;
+        prepare.insert(QStringLiteral("type"), QStringLiteral("scene_prepare"));
+        prepare.insert(QStringLiteral("manifest"), manifest);
+        prepare.insert(QStringLiteral("scene"), scene);
+        send(peer, prepare);
+
+        QTRY_COMPARE_WITH_TIMEOUT(successfulPreparedCount, 1, 3000);
+        QCOMPARE(failedPreparedCount, 0);
+
+        // The former implementation replaced the 8 s PREPARE deadline here
+        // with activationLead + startedAck (500 + 1000 ms), even though no
+        // COMMIT existed. Staying prepared beyond that interval is the
+        // regression boundary.
+        QTest::qWait(1800);
+        QCOMPARE(successfulPreparedCount, 1);
+        QCOMPARE(failedPreparedCount, 0);
+        bool remoteWindowPresent = false;
+        for (QWindow* candidate : QGuiApplication::topLevelWindows()) {
+            if (candidate && candidate->objectName()
+                == QLatin1String("RemoteScreenWindow_0")) {
+                remoteWindowPresent = true;
+                break;
+            }
+        }
+        QVERIFY(remoteWindowPresent);
+
+        QJsonObject stop = correlation;
+        stop.insert(QStringLiteral("type"), QStringLiteral("stop"));
+        stop.insert(QStringLiteral("reason"), QStringLiteral("test_cleanup"));
+        send(peer, stop);
+        QTRY_COMPARE_WITH_TIMEOUT(stoppedCount, 1, 3000);
         client.disconnect();
     }
 

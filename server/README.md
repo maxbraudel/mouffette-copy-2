@@ -111,14 +111,23 @@ the owner an aggregate `prepare_progress` acknowledgement with
 progress or readiness.
 
 Both endpoints then send `prepared` with a complete checklist and `armed` with
-clock uncertainty no greater than the advertised policy. After both are armed,
-the server emits `commit` for its monotonic time 500 ms in the future by default
-(`MOUFFETTE_SCENE_ACTIVATION_LEAD_MS` remains configurable up to 10 seconds).
-Both endpoints confirm the first presented frame with `started` within five
-seconds of that deadline. Clock-estimation uncertainty remains capped
-independently at 50 ms; real compositor presentation may differ by up to 750 ms
-before the run is considered unsafe. A run becomes live only after both
-confirmations.
+clock uncertainty no greater than the advertised policy. Uncertainty is the
+NTP-style network bound (roughly half the best recent RTT), not a comparison of
+the machines' wall clocks; timezone and manual clock settings are irrelevant.
+The default 250 ms bound therefore supports an RTT up to roughly 500 ms. The
+configuration enforces that the two endpoints' combined clock-error budget fits
+inside `MOUFFETTE_SCENE_MAX_START_SKEW_MS`.
+
+After both endpoints are armed, the server schedules `commit` on its monotonic
+clock. `MOUFFETTE_SCENE_ACTIVATION_LEAD_MS` is the base presentation margin
+(500 ms by default); the run adds twice the largest uncertainty reported by its
+two endpoints so the COMMIT itself has time to cross the network, capped at the
+protocol's 10-second maximum. The welcome policy advertises that maximum
+possible lead for compatibility with older clients, while each COMMIT carries
+its exact effective lead. Both endpoints confirm the first presented frame with
+`started` within five seconds of that deadline. Real compositor presentation
+may differ by up to 750 ms before the run is considered unsafe. A run becomes
+live only after both confirmations.
 
 The remaining v4 scene messages are `prepare_progress`, `state_snapshot`, `stop`, and
 `stopped`. The server derives both endpoints from the session, bounds payloads,

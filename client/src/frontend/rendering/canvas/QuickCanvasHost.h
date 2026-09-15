@@ -83,6 +83,7 @@ private:
                                          bool* ready,
                                          QString* errorMessage) const;
     void reportLocalScenePrepared();
+    void tryArmRemoteScene();
     void beginScenePresentation(bool remote);
     void stopScenePresentation();
     void startPresentationBarrier();
@@ -109,6 +110,7 @@ private:
     bool m_testSceneLaunched = false;
     bool m_sceneAccepted = false;
     bool m_localPreparedReported = false;
+    bool m_sceneAllPrepared = false;
     bool m_sceneArmed = false;
     bool m_sceneCommitScheduled = false;
     bool m_firstFrameReported = false;

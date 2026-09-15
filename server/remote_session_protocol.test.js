@@ -1006,6 +1006,17 @@ function messages(socket, type) {
     assert.equal(context.beginCommits(), 1);
     assert.equal(messages(context.ownerSocket, 'heartbeat_ack').length, 2,
         'the authenticated transport itself remains usable after session expiry');
+    for (const acknowledgement of messages(context.ownerSocket, 'heartbeat_ack')) {
+        assert.equal(Number.isSafeInteger(
+            acknowledgement.serverReceiveMonotonicMs), true);
+        assert.equal(Number.isSafeInteger(
+            acknowledgement.serverTransmitMonotonicMs), true);
+        assert.ok(acknowledgement.serverTransmitMonotonicMs
+            >= acknowledgement.serverReceiveMonotonicMs);
+        assert.equal(acknowledgement.serverMonotonicMs,
+            acknowledgement.serverTransmitMonotonicMs,
+            'the compatibility timestamp is the NTP transmit timestamp');
+    }
 }
 
 // Server integration: an exact-boundary resume failure follows the same

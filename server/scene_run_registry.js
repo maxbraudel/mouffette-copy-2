@@ -56,6 +56,7 @@ class SceneRunRegistry {
     constructor(options = {}) {
         this.prepareTimeoutMs = options.prepareTimeoutMs || 15_000;
         this.activationLeadMs = options.activationLeadMs ?? 500;
+        this.maximumActivationLeadMs = options.maximumActivationLeadMs ?? 10_000;
         // First-frame presentation includes real compositor scheduling. It is
         // deliberately distinct from clock-estimation uncertainty: two local
         // macOS/Qt processes can share a precise clock while their visible
@@ -73,6 +74,11 @@ class SceneRunRegistry {
         this.runToSession = new Map(); // sceneRunId -> remoteSessionId
         this.runByTarget = new Map(); // targetEndpointId -> remoteSessionId
         this.tombstones = new Map(); // sceneRunId -> terminal summary
+    }
+
+    activationLeadCeilingMs() {
+        return Math.min(this.maximumActivationLeadMs,
+            this.activationLeadMs + 2 * this.maximumClockUncertaintyMs);
     }
 
     getForSession(remoteSessionId) {
@@ -141,6 +147,7 @@ class SceneRunRegistry {
             prepareDeadlineServerMonotonicMs: nowMonotonic + this.prepareTimeoutMs,
             startEpochMs: null,
             startServerMonotonicMs: null,
+            activationLeadMs: null,
             startedDeadlineAt: null,
             startedDeadlineServerMonotonicMs: null,
             startSkewMs: null,
@@ -214,9 +221,16 @@ class SceneRunRegistry {
         if (run.armedEndpoints.size === 2) {
             const nowEpoch = this.epochNow();
             const nowMonotonic = this.monotonicNow();
+            const maximumReportedUncertaintyMs = Math.max(
+                ...run.armedClockUncertaintyByEndpoint.values());
+            // clockUncertaintyMs is half the measured network RTT. Reserve up
+            // to one complete RTT for the COMMIT to reach either endpoint,
+            // then preserve the configured base lead as presentation margin.
+            run.activationLeadMs = Math.min(this.maximumActivationLeadMs,
+                this.activationLeadMs + 2 * maximumReportedUncertaintyMs);
             run.phase = SCENE_PHASES.SCHEDULED;
-            run.startEpochMs = nowEpoch + this.activationLeadMs;
-            run.startServerMonotonicMs = nowMonotonic + this.activationLeadMs;
+            run.startEpochMs = nowEpoch + run.activationLeadMs;
+            run.startServerMonotonicMs = nowMonotonic + run.activationLeadMs;
             run.startedDeadlineAt = run.startEpochMs + this.startedAckTimeoutMs;
             run.startedDeadlineServerMonotonicMs =
                 run.startServerMonotonicMs + this.startedAckTimeoutMs;

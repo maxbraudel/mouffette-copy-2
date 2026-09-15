@@ -80,5 +80,15 @@ assert.throws(() => loadServerConfig({ envFile }), (error) => {
     return true;
 });
 
+fs.writeFileSync(envFile, [
+    'MOUFFETTE_PEER_HEARTBEAT_INTERVAL_MS=750',
+    'MOUFFETTE_PEER_LEASE_TIMEOUT_MS=3000',
+    'MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS=250',
+    'MOUFFETTE_SCENE_MAX_START_SKEW_MS=400',
+].join('\n'));
+assert.throws(() => loadServerConfig({ envFile }),
+    /Twice MOUFFETTE_SCENE_MAX_CLOCK_SKEW_MS/,
+    'the two endpoint clock-error bounds must fit inside the start-skew budget');
+
 fs.rmSync(temporary, { recursive: true, force: true });
 console.log('server config tests passed');

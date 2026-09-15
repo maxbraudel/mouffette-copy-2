@@ -29,6 +29,10 @@
 #endif
 
 namespace {
+constexpr int kClockSyncBurstProbeCount = 5;
+constexpr int kClockSyncBurstIntervalMs = 100;
+constexpr int kClockSyncBurstCooldownMs = 1000;
+
 qint64 systemSuspendInclusiveMonotonicMs()
 {
 #if defined(Q_OS_MACOS)
@@ -282,6 +286,7 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
     , m_webSocket(nullptr)
     , m_connectionStatus("Disconnected")
     , m_heartbeatTimer(new QTimer(this))
+    , m_clockSyncBurstTimer(new QTimer(this))
     , m_leaseHealthTimer(new QTimer(this))
     , m_suspendInclusiveClock(std::move(suspendInclusiveClock))
     , m_runtimeId(QUuid::createUuid().toString(QUuid::WithoutBraces))
@@ -294,6 +299,19 @@ WebSocketClient::WebSocketClient(const QString& identityFallbackDirectory,
     m_processClock.start();
     m_heartbeatTimer->setSingleShot(false);
     connect(m_heartbeatTimer, &QTimer::timeout, this, &WebSocketClient::sendHeartbeat);
+    m_clockSyncBurstTimer->setInterval(kClockSyncBurstIntervalMs);
+    m_clockSyncBurstTimer->setSingleShot(false);
+    connect(m_clockSyncBurstTimer, &QTimer::timeout, this, [this]() {
+        if (!isConnected() || m_clockSyncBurstRemaining <= 0) {
+            m_clockSyncBurstTimer->stop();
+            m_clockSyncBurstRemaining = 0;
+            return;
+        }
+        sendHeartbeat();
+        if (--m_clockSyncBurstRemaining <= 0) {
+            m_clockSyncBurstTimer->stop();
+        }
+    });
     m_leaseHealthTimer->setInterval(
         AppConfig::instance().leaseHealthCheckIntervalMs());
     m_leaseHealthTimer->setSingleShot(false);
@@ -410,6 +428,9 @@ void WebSocketClient::connectToServer(const QString& serverUrl) {
     m_authenticated = false;
     m_endpointDraining = false;
     m_heartbeatTimer->stop();
+    m_clockSyncBurstTimer->stop();
+    m_clockSyncBurstRemaining = 0;
+    m_lastClockSyncBurstStartedAtMs = -1;
     m_pendingServerBootId.clear();
     m_heartbeatSentAt.clear();
     m_clockSamples.clear();
@@ -464,6 +485,8 @@ void WebSocketClient::disconnect() {
     expireLease();
     m_authenticated = false;
     m_heartbeatTimer->stop();
+    m_clockSyncBurstTimer->stop();
+    m_clockSyncBurstRemaining = 0;
     if (m_webSocket) {
         if (m_webSocket->state() == QAbstractSocket::ConnectedState || m_webSocket->state() == QAbstractSocket::ConnectingState) {
             m_webSocket->close();
@@ -1259,6 +1282,26 @@ qint64 WebSocketClient::estimatedServerMonotonicMs() const
     return m_processClock.isValid() ? m_processClock.elapsed() + m_serverMonotonicOffsetMs : -1;
 }
 
+bool WebSocketClient::requestSceneClockSynchronization()
+{
+    if (!isConnected() || !m_processClock.isValid()) return false;
+    if (m_clockSyncBurstTimer->isActive()) return true;
+
+    const qint64 now = m_processClock.elapsed();
+    if (m_lastClockSyncBurstStartedAtMs >= 0
+        && now - m_lastClockSyncBurstStartedAtMs < kClockSyncBurstCooldownMs) {
+        return true;
+    }
+
+    m_lastClockSyncBurstStartedAtMs = now;
+    m_clockSyncBurstRemaining = kClockSyncBurstProbeCount - 1;
+    sendHeartbeat();
+    if (m_clockSyncBurstRemaining > 0 && isConnected()) {
+        m_clockSyncBurstTimer->start();
+    }
+    return true;
+}
+
 RemoteSessionCoordinator* WebSocketClient::remoteSessionCoordinator() const
 {
     return m_sceneRuns ? m_sceneRuns->remoteSessions() : nullptr;
@@ -1279,6 +1322,8 @@ void WebSocketClient::onDisconnected() {
     closeUploadChannel();
     m_authenticated = false;
     m_heartbeatTimer->stop();
+    m_clockSyncBurstTimer->stop();
+    m_clockSyncBurstRemaining = 0;
     setConnectionStatus("Disconnected");
     if (!m_disconnectSignalEmitted) {
         m_disconnectSignalEmitted = true;
@@ -1474,6 +1519,8 @@ bool WebSocketClient::validateServerPolicy(const QJsonObject& policy,
     }
     if (values.value("leaseTimeoutMs") < values.value("heartbeatIntervalMs") * 4
         || values.value("sceneMaxClockSkewMs") >= values.value("sceneActivationLeadMs")
+        || values.value("sceneMaxClockSkewMs") * 2
+            > values.value("sceneMaxStartSkewMs")
         || values.value("sceneMaxStartSkewMs")
             >= values.value("sceneStartedAckTimeoutMs")) {
         if (errorMessage) *errorMessage = QStringLiteral("Server policy invariants are invalid");
@@ -1599,6 +1646,8 @@ void WebSocketClient::expireLease() {
     if (!m_hasEstablishedLease || m_leaseExpired) return;
     m_leaseExpired = true;
     m_heartbeatTimer->stop();
+    m_clockSyncBurstTimer->stop();
+    m_clockSyncBurstRemaining = 0;
     if (!m_degraded) {
         m_degraded = true;
         emit transportHealthChanged(true);
@@ -1681,9 +1730,35 @@ void WebSocketClient::handleMessage(const QJsonObject& message) {
         const qint64 receivedAt = m_processClock.elapsed();
         if (sentAt >= 0 && echoedAt == sentAt && serverAt >= 0 && receivedAt >= sentAt) {
             const qint64 rtt = receivedAt - sentAt;
-            const qint64 midpoint = sentAt + rtt / 2;
-            const qint64 offset = serverAt - midpoint;
-            const qint64 uncertainty = (rtt + 1) / 2;
+            qint64 offset = serverAt - (sentAt + rtt / 2);
+            qint64 uncertainty = (rtt + 1) / 2;
+
+            // Protocol-v4 servers include both their receive and transmit
+            // timestamps. Removing server-side processing time from the RTT is
+            // the standard four-timestamp/NTP estimate and prevents a busy
+            // relay from looking like network/clock uncertainty. Keep the
+            // legacy single timestamp fallback for rolling upgrades.
+            const qint64 serverReceivedAt = boundedInteger(
+                message.value(QStringLiteral("serverReceiveMonotonicMs")), 0,
+                9007199254740991LL);
+            const qint64 serverTransmittedAt = boundedInteger(
+                message.value(QStringLiteral("serverTransmitMonotonicMs")), 0,
+                9007199254740991LL);
+            if (serverReceivedAt >= 0 && serverTransmittedAt >= serverReceivedAt) {
+                const qint64 serverProcessingMs =
+                    serverTransmittedAt - serverReceivedAt;
+                // Millisecond quantization can make the measured server span
+                // exceed the client RTT by one tick. Larger contradictions are
+                // malformed and deliberately fall back to the conservative
+                // legacy estimate.
+                if (serverProcessingMs <= rtt + 1) {
+                    const qint64 networkRoundTripMs =
+                        std::max<qint64>(0, rtt - serverProcessingMs);
+                    offset = ((serverReceivedAt - sentAt)
+                              + (serverTransmittedAt - receivedAt)) / 2;
+                    uncertainty = (networkRoundTripMs + 1) / 2;
+                }
+            }
 
             // NTP-style clock filtering: queueing and scheduling spikes make
             // a single RTT sample worse, never more authoritative. Retain a

@@ -177,6 +177,10 @@ public:
 
     qint64 sceneClockUncertaintyMs() const { return m_clockUncertaintyMs; }
     qint64 estimatedServerMonotonicMs() const;
+    // Starts a short, coalesced burst of heartbeat probes. Scene preparation
+    // uses this when the passive heartbeat sample is absent or too noisy; the
+    // regular heartbeat cadence remains responsible for lease health.
+    bool requestSceneClockSynchronization();
 
     // Client-side cancel safeguard: mark an uploadId as cancelled to ignore any further chunk sends
     void cancelUploadId(const QString& uploadId) { m_canceledUploads.insert(uploadId); }
@@ -306,6 +310,7 @@ private:
     quint64 m_targetSnapshotRevision = 0;
     QHash<QString, quint64> m_targetSnapshotSequenceBySession;
     QTimer* m_heartbeatTimer;
+    QTimer* m_clockSyncBurstTimer;
     QTimer* m_leaseHealthTimer;
     QElapsedTimer m_processClock;
     SuspendInclusiveClock m_suspendInclusiveClock;
@@ -313,6 +318,8 @@ private:
     QHash<quint64, qint64> m_heartbeatSentAt;
     QVector<ClockSample> m_clockSamples;
     quint64 m_heartbeatSequence = 0;
+    int m_clockSyncBurstRemaining = 0;
+    qint64 m_lastClockSyncBurstStartedAtMs = -1;
     qint64 m_serverMonotonicOffsetMs = 0;
     qint64 m_clockUncertaintyMs = std::numeric_limits<qint64>::max();
     // Protocol timing is unavailable until an authenticated welcome supplies

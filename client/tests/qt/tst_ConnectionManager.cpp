@@ -105,11 +105,15 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
     bool signatureVerified = false;
     bool heartbeatReceived = false;
     bool delayNextHeartbeat = false;
-    QWebSocket* peer = nullptr;
+    int processNextHeartbeatOnServerMs = 0;
+    int heartbeatCount = 0;
+    int authenticationCount = 0;
+    qint64 serverMonotonicOffsetMs = 4'000'000'000'000LL;
+    qint64 serverEpochMs = 1;
 
     connect(&server, &QWebSocketServer::newConnection, this, [&]() {
-        peer = server.nextPendingConnection();
-        QVERIFY(peer != nullptr);
+        QWebSocket* const connection = server.nextPendingConnection();
+        QVERIFY(connection != nullptr);
         QJsonObject challenge{
             {"type", "auth_challenge"},
             {"protocolVersion", 4},
@@ -118,14 +122,15 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
             {"nonce", nonce},
             {"issuedAt", 1},
         };
-        peer->sendTextMessage(QString::fromUtf8(
+        connection->sendTextMessage(QString::fromUtf8(
             QJsonDocument(challenge).toJson(QJsonDocument::Compact)));
 
-        connect(peer, &QWebSocket::textMessageReceived, this,
-                [&](const QString& encoded) {
+        connect(connection, &QWebSocket::textMessageReceived, this,
+                [&, connection](const QString& encoded) {
             const QJsonObject message = QJsonDocument::fromJson(encoded.toUtf8()).object();
             const QString type = message.value("type").toString();
             if (type == QStringLiteral("auth_response")) {
+                const int connectionGeneration = ++authenticationCount;
                 QCOMPARE(message.value("protocolVersion").toInt(), 4);
                 QCOMPARE(message.value("serverBootId").toString(), bootId);
                 const QByteArray publicDer = QByteArray::fromBase64(
@@ -159,8 +164,8 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
 
                 const QJsonObject policy{
                     {"policyVersion", 1},
-                    {"heartbeatIntervalMs", 250},
-                    {"leaseTimeoutMs", 1000},
+                    {"heartbeatIntervalMs", 750},
+                    {"leaseTimeoutMs", 3000},
                     {"scenePrepareTimeoutMs", 15000},
                     {"sceneActivationLeadMs", 500},
                     {"sceneMaxClockSkewMs", 50},
@@ -181,38 +186,63 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
                     {"endpointId", endpointId},
                     {"instanceId", message.value("instanceId")},
                     {"runtimeId", message.value("runtimeId")},
-                    {"connectionGeneration", 1},
+                    {"connectionGeneration", connectionGeneration},
                     {"policy", policy},
                     {"serverMonotonicMs", 10},
                 };
-                peer->sendTextMessage(QString::fromUtf8(
+                connection->sendTextMessage(QString::fromUtf8(
                     QJsonDocument(welcome).toJson(QJsonDocument::Compact)));
             } else if (type == QStringLiteral("heartbeat")) {
                 QCOMPARE(message.value("protocolVersion").toInt(), 4);
                 QCOMPARE(message.value("serverBootId").toString(), bootId);
-                QCOMPARE(message.value("connectionGeneration").toInt(), 1);
                 heartbeatReceived = true;
+                ++heartbeatCount;
                 QJsonObject ack{
                     {"type", "heartbeat_ack"},
                     {"protocolVersion", 4},
                     {"serverBootId", bootId},
                     {"messageId", QUuid::createUuid().toString(QUuid::WithoutBraces)},
-                    {"connectionGeneration", 1},
+                    {"connectionGeneration", message.value("connectionGeneration")},
                     {"sequence", message.value("sequence")},
                     {"clientMonotonicMs", message.value("clientMonotonicMs")},
-                    {"serverMonotonicMs", message.value("clientMonotonicMs").toDouble() + 5},
-                    {"serverEpochMs", 1},
+                    {"serverMonotonicMs", message.value("clientMonotonicMs").toDouble()
+                                                  + serverMonotonicOffsetMs},
+                    {"serverEpochMs", static_cast<double>(serverEpochMs)},
                 };
+                if (processNextHeartbeatOnServerMs > 0) {
+                    const int processingMs = processNextHeartbeatOnServerMs;
+                    processNextHeartbeatOnServerMs = 0;
+                    const qint64 clientSentAt =
+                        message.value("clientMonotonicMs").toInteger();
+                    const qint64 serverReceivedAt =
+                        clientSentAt + serverMonotonicOffsetMs;
+                    const qint64 serverTransmittedAt =
+                        serverReceivedAt + qMax(0, processingMs - 100);
+                    ack.insert("serverMonotonicMs",
+                               static_cast<double>(serverTransmittedAt));
+                    ack.insert("serverReceiveMonotonicMs",
+                               static_cast<double>(serverReceivedAt));
+                    ack.insert("serverTransmitMonotonicMs",
+                               static_cast<double>(serverTransmittedAt));
+                    const QString processedAck = QString::fromUtf8(
+                        QJsonDocument(ack).toJson(QJsonDocument::Compact));
+                    QPointer<QWebSocket> guardedPeer(connection);
+                    QTimer::singleShot(processingMs, this,
+                                       [guardedPeer, processedAck]() {
+                        if (guardedPeer) guardedPeer->sendTextMessage(processedAck);
+                    });
+                    return;
+                }
                 const QString encodedAck = QString::fromUtf8(
                     QJsonDocument(ack).toJson(QJsonDocument::Compact));
                 if (delayNextHeartbeat) {
                     delayNextHeartbeat = false;
-                    QPointer<QWebSocket> guardedPeer(peer);
+                    QPointer<QWebSocket> guardedPeer(connection);
                     QTimer::singleShot(160, this, [guardedPeer, encodedAck]() {
                         if (guardedPeer) guardedPeer->sendTextMessage(encodedAck);
                     });
                 } else {
-                    peer->sendTextMessage(encodedAck);
+                    connection->sendTextMessage(encodedAck);
                 }
             }
         });
@@ -228,6 +258,9 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
     QTRY_VERIFY_WITH_TIMEOUT(heartbeatSpy.count() >= 1, 2000);
     const qint64 preciseUncertainty = client.sceneClockUncertaintyMs();
     QVERIFY(preciseUncertainty >= 0);
+    const QList<QVariant> preciseSample = heartbeatSpy.last();
+    const qint64 preciseOffset = preciseSample.at(2).toLongLong();
+    QVERIFY(qAbs(preciseOffset - serverMonotonicOffsetMs) <= preciseUncertainty);
 
     // A delayed heartbeat is a queueing outlier, not evidence that the
     // previously established clock mapping became less precise. Scene launch
@@ -240,8 +273,67 @@ void ConnectionManagerTest::signedHandshakeAndHeartbeat() {
         return false;
     }(), 2000);
     QVERIFY(client.sceneClockUncertaintyMs() <= preciseUncertainty);
+
+    // Civil time, local timezone and monotonic time are separate domains.
+    // Even a nonsensical wall-clock jump in the heartbeat metadata must not
+    // perturb the server-monotonic mapping used to schedule a scene.
+    serverEpochMs = 8'000'000'000'000'000LL;
+    const int samplesBeforeEpochJump = heartbeatSpy.count();
+    processNextHeartbeatOnServerMs = 500;
+    QTRY_VERIFY_WITH_TIMEOUT([&]() {
+        for (int index = samplesBeforeEpochJump;
+            index < heartbeatSpy.count(); ++index) {
+            const QList<QVariant> sample = heartbeatSpy.at(index);
+            // A busy relay is not network uncertainty: the four-timestamp
+            // sample subtracts its measured processing interval from RTT.
+            const qint64 rttMs = sample.at(1).toLongLong();
+            const qint64 uncertaintyMs = sample.at(3).toLongLong();
+            if (rttMs >= 400
+                && uncertaintyMs * 2 <= rttMs - 300) return true;
+        }
+        return false;
+    }(), 2500);
+    const QList<QVariant> postEpochJumpSample = heartbeatSpy.last();
+    const qint64 postEpochJumpOffset = postEpochJumpSample.at(2).toLongLong();
+    const qint64 postEpochJumpUncertainty = postEpochJumpSample.at(3).toLongLong();
+    QVERIFY(qAbs(postEpochJumpOffset - serverMonotonicOffsetMs)
+            <= postEpochJumpUncertainty);
+
+    // A replacement transport must never inherit an old clock mapping. Its
+    // first (delayed) probe models a cold start over a 120+ ms RTT path; the
+    // following low-delay sample must then recover scene-launch quality.
+    const int samplesBeforeReconnect = heartbeatSpy.count();
+    QVector<qint64> reconnectSelectedUncertainties;
+    const QMetaObject::Connection reconnectSampleConnection = connect(
+        &client, &WebSocketClient::heartbeatSampleReceived, this,
+        [&](quint64, qint64, qint64, qint64) {
+            if (heartbeatSpy.count() > samplesBeforeReconnect) {
+                reconnectSelectedUncertainties.append(client.sceneClockUncertaintyMs());
+            }
+        });
+    delayNextHeartbeat = true;
+    serverMonotonicOffsetMs = 5'000'000'000'000LL;
+    client.connectToServer(QStringLiteral("ws://127.0.0.1:%1").arg(server.serverPort()));
+    QVERIFY(client.sceneClockUncertaintyMs() > 50);
+    QTRY_COMPARE_WITH_TIMEOUT(connectedSpy.count(), 2, 2000);
+    QCOMPARE(authenticationCount, 2);
+    QVERIFY(client.sceneClockUncertaintyMs() > 50);
+    QTRY_VERIFY_WITH_TIMEOUT(!reconnectSelectedUncertainties.isEmpty(), 2000);
+    QVERIFY(reconnectSelectedUncertainties.first() > 50);
+
+    const int probesBeforeRequestedBurst = heartbeatCount;
+    QVERIFY(client.requestSceneClockSynchronization());
+    // This must be the explicit probe, not the 750 ms passive heartbeat.
+    QTRY_VERIFY_WITH_TIMEOUT(heartbeatCount > probesBeforeRequestedBurst, 200);
+    QTRY_VERIFY_WITH_TIMEOUT(client.sceneClockUncertaintyMs() <= 50, 2000);
+    QVERIFY(reconnectSelectedUncertainties.last() <= 50);
+    const QList<QVariant> recoveredSample = heartbeatSpy.last();
+    const qint64 recoveredOffset = recoveredSample.at(2).toLongLong();
+    const qint64 recoveredUncertainty = recoveredSample.at(3).toLongLong();
+    QVERIFY(qAbs(recoveredOffset - serverMonotonicOffsetMs) <= recoveredUncertainty);
+    QCOMPARE(client.connectionGeneration(), quint64(2));
+    disconnect(reconnectSampleConnection);
     QCOMPARE(client.serverBootId(), bootId);
-    QCOMPARE(client.connectionGeneration(), quint64(1));
     QVERIFY(client.hasUnexpiredLease());
     client.disconnect();
 }

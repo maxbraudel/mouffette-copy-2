@@ -115,27 +115,28 @@ const checklist = Object.freeze([
         'clock_uncertainty_too_high');
     assert.equal(registry.arm('run-1', 'A', digest, 10).scheduled, false);
     const committed = registry.arm('run-1', 'B', digest, 10);
-    assert.equal(committed.run.startEpochMs, 14_000);
-    assert.equal(committed.run.startServerMonotonicMs, 4_500);
-    assert.equal(registry.markStarted('run-1', 'A', digest, true, 4_500).error,
+    assert.equal(committed.run.activationLeadMs, 4_020);
+    assert.equal(committed.run.startEpochMs, 14_020);
+    assert.equal(committed.run.startServerMonotonicMs, 4_520);
+    assert.equal(registry.markStarted('run-1', 'A', digest, true, 4_520).error,
         'first_frame_presented_before_commit');
     epoch = -1_000_000;
-    monotonic = 4_500;
+    monotonic = 4_520;
     assert.equal(registry.markStarted('run-1', 'A', digest, true).error,
         'invalid_first_frame_timestamp');
-    assert.equal(registry.markStarted('run-1', 'A', digest, true, 4_500).live, false,
+    assert.equal(registry.markStarted('run-1', 'A', digest, true, 4_520).live, false,
         'a wall-clock rollback must not reject an on-time monotonic STARTED acknowledgement');
-    monotonic = 5_251;
+    monotonic = 5_271;
     const excessiveSkew = registry.markStarted(
-        'run-1', 'B', digest, true, 5_251);
+        'run-1', 'B', digest, true, 5_271);
     assert.equal(excessiveSkew.error, 'scene_start_skew_too_high');
     assert.equal(excessiveSkew.startSkewMs, 751);
-    monotonic = 5_250;
-    const started = registry.markStarted('run-1', 'B', digest, true, 5_250);
+    monotonic = 5_270;
+    const started = registry.markStarted('run-1', 'B', digest, true, 5_270);
     assert.equal(started.live, true);
     assert.equal(started.startSkewMs, 750);
-    assert.equal(registry.markStarted('run-1', 'B', digest, true, 5_250).replay, true);
-    assert.equal(registry.markStarted('run-1', 'B', digest, true, 5_249).error,
+    assert.equal(registry.markStarted('run-1', 'B', digest, true, 5_270).replay, true);
+    assert.equal(registry.markStarted('run-1', 'B', digest, true, 5_269).error,
         'conflicting_started_ack');
     assert.equal(registry.acceptSnapshot('run-1', 'A', digest, 1).ok, true);
     assert.equal(registry.acceptSnapshot('run-1', 'A', digest, 1).error,
@@ -205,6 +206,34 @@ const checklist = Object.freeze([
     const stoppedByMonotonicDeadline = registry.tick(epoch, monotonic)[0];
     assert.equal(stoppedByMonotonicDeadline.code, 'scene_stop_timeout');
     assert.equal(stoppedByMonotonicDeadline.run.phase, SCENE_PHASES.STOPPED);
+}
+
+// WAN clock quality expands only this run's delivery lead. The welcome policy
+// advertises the worst-case ceiling, while the exact COMMIT remains adaptive.
+{
+    let monotonic = 20_000;
+    const registry = new SceneRunRegistry({
+        epochNow: () => 30_000,
+        monotonicNow: () => monotonic,
+        activationLeadMs: 500,
+        maximumClockUncertaintyMs: 250,
+        maximumStartSkewMs: 750,
+    });
+    const digest = computeSceneDigest(1, [asset], scene);
+    const binding = {
+        remoteSessionId: 'session-wan-lead', generation: 1,
+        sceneRunId: 'run-wan-lead', revision: 1, digest,
+        manifest: [asset], scene, ownerEndpointId: 'A', targetEndpointId: 'B',
+    };
+    assert.equal(registry.activationLeadCeilingMs(), 1_000);
+    assert.equal(registry.prepare(binding).ok, true);
+    assert.equal(registry.markPrepared(binding.sceneRunId, 'A', digest).ready, false);
+    assert.equal(registry.markPrepared(binding.sceneRunId, 'B', digest).ready, true);
+    assert.equal(registry.arm(binding.sceneRunId, 'A', digest, 60).scheduled, false);
+    const committed = registry.arm(binding.sceneRunId, 'B', digest, 180);
+    assert.equal(committed.run.activationLeadMs, 860,
+        'base lead plus a complete worst reported RTT is reserved');
+    assert.equal(committed.run.startServerMonotonicMs, 20_860);
 }
 
 // A transport departure only puts the RemoteSession in Grace. A prepared or
@@ -549,10 +578,10 @@ for (const invalidCase of [
     server.handleMessage('target-connection', envelope(session, {
         type: 'armed', sceneRunId: 'run-wire-1', digest, clockUncertaintyMs: 10,
     }));
-    assert.equal(messages(owner, 'commit').at(-1).activationLeadMs, 500);
+    assert.equal(messages(owner, 'commit').at(-1).activationLeadMs, 520);
     assert.equal(messages(target, 'commit').length, 1);
-    wireEpoch += 500;
-    wireMonotonic += 500;
+    wireEpoch += 520;
+    wireMonotonic += 520;
 
     server.handleMessage('owner-connection', envelope(session, {
         type: 'started', sceneRunId: 'run-wire-1', digest, firstFramePresented: true,
@@ -581,7 +610,8 @@ for (const invalidCase of [
         'invalid_state_snapshot_timestamp');
     server.handleMessage('owner-connection', envelope(session, {
         type: 'state_snapshot', sceneRunId: 'run-wire-1', digest, sequence: 2,
-        sampledServerMonotonicMs: wireMonotonic + 51,
+        sampledServerMonotonicMs:
+            wireMonotonic + server.config.sceneMaxClockSkewMs + 1,
         snapshot: { videos: [] },
     }));
     assert.equal(messages(owner, 'error').at(-1).code,
